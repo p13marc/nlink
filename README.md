@@ -118,6 +118,22 @@ ip rule del --priority 1000
 ip monitor all
 ip monitor link address --timestamp
 ip monitor -j  # JSON output
+
+# Network namespaces
+ip netns list
+ip netns add myns
+ip netns exec myns ip link show
+ip netns del myns
+ip netns identify $$  # Identify namespace of a PID
+ip netns pids myns    # List PIDs in a namespace
+ip netns monitor      # Watch namespace creation/deletion
+
+# Tunnels (GRE, IPIP, SIT, VTI)
+ip tunnel show
+ip tunnel add gre1 --mode gre --remote 10.0.0.1 --local 10.0.0.2 --ttl 64
+ip tunnel add tun0 --mode ipip --remote 192.168.1.1 --local 192.168.1.2
+ip tunnel change gre1 --remote 10.0.0.3
+ip tunnel del gre1
 ```
 
 ### tc
@@ -207,10 +223,8 @@ This is an early-stage project. Currently implemented:
 - [x] TC filter types: u32 (match ip/ip6/tcp/udp/icmp), flower, basic, fw
 - [x] TC actions: gact (pass/drop/pipe), mirred (mirror/redirect), police (rate limiting)
 
-Planned:
-
-- [ ] Network namespace support (ip netns)
-- [ ] Tunnel management (ip tunnel)
+- [x] Network namespace support (ip netns list, add, del, exec, identify, pids, monitor, set, attach)
+- [x] Tunnel management (ip tunnel show, add, del, change) for GRE, IPIP, SIT, VTI
 
 ## License
 
