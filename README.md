@@ -204,11 +204,11 @@ This is an early-stage project. Currently implemented:
 - [x] TC class operations with HTB parameters (rate, ceil, burst, prio, quantum)
 - [x] TC monitor for qdisc/class/filter events
 - [x] TC filter operations (show, add, del)
+- [x] TC filter types: u32 (match ip/ip6/tcp/udp/icmp), flower, basic, fw
+- [x] TC actions: gact (pass/drop/pipe), mirred (mirror/redirect), police (rate limiting)
 
 Planned:
 
-- [ ] TC filter types (u32, flower, basic, fw)
-- [ ] TC actions (mirred, police, gact)
 - [ ] Network namespace support (ip netns)
 - [ ] Tunnel management (ip tunnel)
 
