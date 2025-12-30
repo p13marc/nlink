@@ -105,6 +105,19 @@ ip neigh show
 # Add/remove neighbors
 ip neigh add 192.168.1.2 --lladdr 00:11:22:33:44:55 -d eth0
 ip neigh del 192.168.1.2 -d eth0
+
+# Show policy routing rules
+ip rule show
+
+# Add/remove rules
+ip rule add --from 10.0.0.0/8 --table 100 --priority 1000
+ip rule add --fwmark 0x100 --table 200
+ip rule del --priority 1000
+
+# Monitor netlink events (link, address, route, neighbor changes)
+ip monitor all
+ip monitor link address --timestamp
+ip monitor -j  # JSON output
 ```
 
 ### tc
@@ -114,12 +127,29 @@ Traffic control (qdisc, class, filter):
 ```bash
 # List qdiscs
 tc qdisc show
+tc qdisc show dev eth0
+
+# Add qdiscs with type-specific options
+tc qdisc add dev eth0 --parent root htb default 10 r2q 10
+tc qdisc add dev eth0 --parent root fq_codel limit 10000 target 5ms interval 100ms ecn
+tc qdisc add dev eth0 --parent root tbf rate 1mbit burst 32kb limit 100kb
+tc qdisc add dev eth0 --parent root prio bands 3
+tc qdisc add dev eth0 --parent root sfq perturb 10 limit 127
+
+# Replace/change qdiscs
+tc qdisc replace dev eth0 --parent root fq_codel limit 5000
+tc qdisc change dev eth0 --parent root fq_codel target 10ms
+
+# Delete qdiscs
+tc qdisc del dev eth0 --parent root
 
 # List classes
 tc class show
+tc class show dev eth0
 
 # List filters
 tc filter show
+tc filter show dev eth0
 ```
 
 ## Building
@@ -148,14 +178,19 @@ This is an early-stage project. Currently implemented:
 - [x] Address operations (show, add, del)
 - [x] Route operations (show, add, del, replace)
 - [x] Neighbor operations (show, add, del, replace)
-- [x] TC qdisc/class/filter operations (show, add, del)
+- [x] Policy routing rules (ip rule show, add, del, flush)
+- [x] Event monitoring (ip monitor) for link, address, route, neighbor changes
+- [x] TC qdisc operations (show, add, del, replace, change)
+- [x] TC qdisc types: fq_codel, htb, tbf, prio, sfq (with full parameter support)
+- [x] TC class/filter operations (show, add, del)
 
 Planned:
 
-- [ ] Full TC qdisc implementations (htb, fq_codel, cake, etc.)
-- [ ] Network namespace support
-- [ ] Event monitoring (ip monitor)
-- [ ] Policy routing rules (ip rule)
+- [ ] TC class parameters for htb (rate, ceil, burst, prio)
+- [ ] TC filter types (u32, flower, basic, fw)
+- [ ] TC actions (mirred, police, gact)
+- [ ] Network namespace support (ip netns)
+- [ ] Tunnel management (ip tunnel)
 
 ## License
 

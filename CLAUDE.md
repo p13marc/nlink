@@ -26,8 +26,8 @@ cargo test -p rip-netlink      # Test specific crate
 ### Core Libraries (the main deliverables)
 
 **rip-netlink** (`crates/rip-netlink/`) - Async netlink protocol implementation:
-- `socket.rs` - Low-level async socket using `netlink-sys` + tokio `AsyncFd`
-- `connection.rs` - High-level request/response/dump handling
+- `socket.rs` - Low-level async socket using `netlink-sys` + tokio `AsyncFd`, includes multicast group constants for event monitoring
+- `connection.rs` - High-level request/response/dump handling, multicast subscription for monitoring
 - `builder.rs` - Message construction with `MessageBuilder`, supports nested attributes
 - `message.rs` - Netlink header parsing, `MessageIter` for multi-message responses
 - `attr.rs` - Attribute (TLV) parsing with `AttrIter`, type extraction helpers in `get` module
@@ -36,7 +36,8 @@ cargo test -p rip-netlink      # Test specific crate
   - `addr.rs` - Address info (IFA_* attributes)
   - `route.rs` - Routing (RTA_* attributes)
   - `neigh.rs` - Neighbor/ARP (NDA_* attributes)
-  - `tc.rs` - Traffic control (TCA_* attributes, qdisc/filter/action constants)
+  - `rule.rs` - Policy routing rules (FRA_* attributes, FibRuleHdr)
+  - `tc.rs` - Traffic control (TCA_* attributes, qdisc structs for htb/tbf/fq_codel/prio/sfq)
 
 **rip-lib** (`crates/rip-lib/`) - Shared utilities:
 - `addr.rs` - IP/MAC address parsing and formatting
@@ -48,8 +49,17 @@ cargo test -p rip-netlink      # Test specific crate
 
 ### Proof-of-Concept Binaries
 
-- `bins/ip/` - Network configuration (`ip link`, `ip addr`, `ip route`, `ip neigh`)
-- `bins/tc/` - Traffic control (`tc qdisc`, `tc class`, `tc filter`)
+- `bins/ip/` - Network configuration:
+  - `ip link` - Interface management (show, add, del, set) with 15+ link types
+  - `ip addr` - Address management (show, add, del)
+  - `ip route` - Routing table management (show, add, del, replace)
+  - `ip neigh` - Neighbor/ARP cache (show, add, del, replace)
+  - `ip rule` - Policy routing rules (show, add, del, flush)
+  - `ip monitor` - Real-time netlink event streaming (link, addr, route, neigh)
+- `bins/tc/` - Traffic control:
+  - `tc qdisc` - Qdisc management with htb, fq_codel, tbf, prio, sfq support
+  - `tc class` - Class management (show, add, del)
+  - `tc filter` - Filter management (show, add, del)
 
 ## Netlink Message Flow
 
@@ -79,4 +89,42 @@ for (attr_type, attr_data) in AttrIter::new(attrs_data) {
 let mut builder = dump_request(NlMsgType::RTM_GETLINK);
 builder.append(&IfInfoMsg::new());
 let responses = conn.dump(builder).await?;
+```
+
+**Monitoring events:**
+```rust
+use rip_netlink::rtnetlink_groups::*;
+
+let mut conn = Connection::new(Protocol::Route)?;
+conn.subscribe(RTNLGRP_LINK)?;
+conn.subscribe(RTNLGRP_IPV4_IFADDR)?;
+
+loop {
+    let data = conn.recv_event().await?;
+    for result in MessageIter::new(&data) {
+        let (header, payload) = result?;
+        // Handle RTM_NEWLINK, RTM_DELLINK, RTM_NEWADDR, etc.
+    }
+}
+```
+
+**Adding TC qdisc with options:**
+```rust
+use rip_netlink::types::tc::qdisc::htb::*;
+
+let tcmsg = TcMsg::new()
+    .with_ifindex(ifindex)
+    .with_parent(tc_handle::ROOT)
+    .with_handle(tc_handle::make(1, 0));
+
+let mut builder = create_request(NlMsgType::RTM_NEWQDISC);
+builder.append(&tcmsg);
+builder.append_attr_str(TcaAttr::Kind as u16, "htb");
+
+let options_token = builder.nest_start(TcaAttr::Options as u16);
+let glob = TcHtbGlob::new().with_default(0x10);
+builder.append_attr(TCA_HTB_INIT, glob.as_bytes());
+builder.nest_end(options_token);
+
+conn.request_ack(builder).await?;
 ```
