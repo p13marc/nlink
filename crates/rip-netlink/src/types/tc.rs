@@ -114,6 +114,16 @@ impl From<u16> for TcaAttr {
     }
 }
 
+/// Action table attribute (for RTM_*ACTION messages).
+pub const TCA_ACT_TAB: u16 = 1;
+
+/// Root action attributes (for action dump).
+pub const TCA_ROOT_UNSPEC: u16 = 0;
+pub const TCA_ROOT_TAB: u16 = 1;
+pub const TCA_ROOT_FLAGS: u16 = 2;
+pub const TCA_ROOT_COUNT: u16 = 3;
+pub const TCA_ROOT_TIME_DELTA: u16 = 4;
+
 /// Special handle values.
 pub mod tc_handle {
     /// Root qdisc.
@@ -931,19 +941,238 @@ pub mod action {
     pub const TCA_ACT_USED_HW_STATS: u16 = 9;
     pub const TCA_ACT_IN_HW_COUNT: u16 = 10;
 
+    /// Action binding constants.
+    pub const TCA_ACT_BIND: i32 = 1;
+    pub const TCA_ACT_NOBIND: i32 = 0;
+
+    /// Action results (TC_ACT_*).
+    pub const TC_ACT_UNSPEC: i32 = -1;
+    pub const TC_ACT_OK: i32 = 0;
+    pub const TC_ACT_RECLASSIFY: i32 = 1;
+    pub const TC_ACT_SHOT: i32 = 2;
+    pub const TC_ACT_PIPE: i32 = 3;
+    pub const TC_ACT_STOLEN: i32 = 4;
+    pub const TC_ACT_QUEUED: i32 = 5;
+    pub const TC_ACT_REPEAT: i32 = 6;
+    pub const TC_ACT_REDIRECT: i32 = 7;
+    pub const TC_ACT_TRAP: i32 = 8;
+
+    /// Parse action result from string.
+    pub fn parse_action_result(s: &str) -> Option<i32> {
+        match s.to_lowercase().as_str() {
+            "ok" | "pass" => Some(TC_ACT_OK),
+            "shot" | "drop" => Some(TC_ACT_SHOT),
+            "reclassify" => Some(TC_ACT_RECLASSIFY),
+            "pipe" => Some(TC_ACT_PIPE),
+            "stolen" => Some(TC_ACT_STOLEN),
+            "queued" => Some(TC_ACT_QUEUED),
+            "repeat" => Some(TC_ACT_REPEAT),
+            "redirect" => Some(TC_ACT_REDIRECT),
+            "trap" => Some(TC_ACT_TRAP),
+            "continue" => Some(TC_ACT_PIPE), // alias
+            _ => None,
+        }
+    }
+
+    /// Format action result to string.
+    pub fn format_action_result(action: i32) -> &'static str {
+        match action {
+            TC_ACT_UNSPEC => "unspec",
+            TC_ACT_OK => "pass",
+            TC_ACT_SHOT => "drop",
+            TC_ACT_RECLASSIFY => "reclassify",
+            TC_ACT_PIPE => "pipe",
+            TC_ACT_STOLEN => "stolen",
+            TC_ACT_QUEUED => "queued",
+            TC_ACT_REPEAT => "repeat",
+            TC_ACT_REDIRECT => "redirect",
+            TC_ACT_TRAP => "trap",
+            _ => "unknown",
+        }
+    }
+
+    /// Common action header (tc_gen macro in kernel).
+    /// This is the base structure for all action parameters.
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct TcGen {
+        pub index: u32,
+        pub capab: u32,
+        pub action: i32,
+        pub refcnt: i32,
+        pub bindcnt: i32,
+    }
+
+    impl TcGen {
+        pub fn new(action: i32) -> Self {
+            Self {
+                index: 0,
+                capab: 0,
+                action,
+                refcnt: 0,
+                bindcnt: 0,
+            }
+        }
+
+        pub fn as_bytes(&self) -> &[u8] {
+            unsafe {
+                std::slice::from_raw_parts(
+                    self as *const Self as *const u8,
+                    std::mem::size_of::<Self>(),
+                )
+            }
+        }
+    }
+
     /// Mirred action attributes.
     pub mod mirred {
         pub const TCA_MIRRED_UNSPEC: u16 = 0;
         pub const TCA_MIRRED_TM: u16 = 1;
         pub const TCA_MIRRED_PARMS: u16 = 2;
+        pub const TCA_MIRRED_PAD: u16 = 3;
+        pub const TCA_MIRRED_BLOCKID: u16 = 4;
+
+        /// Mirred action types.
+        pub const TCA_EGRESS_REDIR: i32 = 1;
+        pub const TCA_EGRESS_MIRROR: i32 = 2;
+        pub const TCA_INGRESS_REDIR: i32 = 3;
+        pub const TCA_INGRESS_MIRROR: i32 = 4;
+
+        /// Parse mirred action type from string.
+        pub fn parse_mirred_action(s: &str) -> Option<i32> {
+            match s.to_lowercase().as_str() {
+                "egress_redir" | "redirect" => Some(TCA_EGRESS_REDIR),
+                "egress_mirror" | "mirror" => Some(TCA_EGRESS_MIRROR),
+                "ingress_redir" => Some(TCA_INGRESS_REDIR),
+                "ingress_mirror" => Some(TCA_INGRESS_MIRROR),
+                _ => None,
+            }
+        }
+
+        /// Format mirred action type to string.
+        pub fn format_mirred_action(eaction: i32) -> &'static str {
+            match eaction {
+                TCA_EGRESS_REDIR => "egress redirect",
+                TCA_EGRESS_MIRROR => "egress mirror",
+                TCA_INGRESS_REDIR => "ingress redirect",
+                TCA_INGRESS_MIRROR => "ingress mirror",
+                _ => "unknown",
+            }
+        }
+
+        /// Mirred action parameters (struct tc_mirred).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcMirred {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+            /// Mirred-specific: egress/ingress mirror/redirect.
+            pub eaction: i32,
+            /// Target interface index.
+            pub ifindex: u32,
+        }
+
+        impl TcMirred {
+            pub fn new(eaction: i32, ifindex: u32, action: i32) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                    eaction,
+                    ifindex,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
     }
 
-    /// Gact action attributes.
+    /// Gact (generic action) attributes.
     pub mod gact {
         pub const TCA_GACT_UNSPEC: u16 = 0;
         pub const TCA_GACT_TM: u16 = 1;
         pub const TCA_GACT_PARMS: u16 = 2;
         pub const TCA_GACT_PROB: u16 = 3;
+        pub const TCA_GACT_PAD: u16 = 4;
+
+        /// Probability distribution types.
+        pub const PGACT_NONE: u16 = 0;
+        pub const PGACT_NETRAND: u16 = 1;
+        pub const PGACT_DETERM: u16 = 2;
+
+        /// Gact action parameters (struct tc_gact).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcGact {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+        }
+
+        impl TcGact {
+            pub fn new(action: i32) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+
+        /// Gact probability parameters (struct tc_gact_p).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcGactP {
+            pub ptype: u16,
+            pub pval: u16,
+            pub paction: i32,
+        }
+
+        impl TcGactP {
+            pub fn new(ptype: u16, pval: u16, paction: i32) -> Self {
+                Self {
+                    ptype,
+                    pval,
+                    paction,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
     }
 
     /// Police action attributes.
@@ -960,5 +1189,51 @@ pub mod action {
         pub const TCA_POLICE_PEAKRATE64: u16 = 9;
         pub const TCA_POLICE_PKTRATE64: u16 = 10;
         pub const TCA_POLICE_PKTBURST64: u16 = 11;
+
+        use crate::types::tc::qdisc::TcRateSpec;
+
+        /// Police action parameters (struct tc_police).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy)]
+        pub struct TcPolice {
+            pub index: u32,
+            pub action: i32,
+            pub limit: u32,
+            pub burst: u32,
+            pub mtu: u32,
+            pub rate: TcRateSpec,
+            pub peakrate: TcRateSpec,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+            pub capab: u32,
+        }
+
+        impl Default for TcPolice {
+            fn default() -> Self {
+                Self {
+                    index: 0,
+                    action: super::TC_ACT_OK,
+                    limit: 0,
+                    burst: 0,
+                    mtu: 0,
+                    rate: TcRateSpec::default(),
+                    peakrate: TcRateSpec::default(),
+                    refcnt: 0,
+                    bindcnt: 0,
+                    capab: 0,
+                }
+            }
+        }
+
+        impl TcPolice {
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
     }
 }
