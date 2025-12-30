@@ -290,6 +290,61 @@ pub mod qdisc {
         pub const TCA_HTB_RATE64: u16 = 6;
         pub const TCA_HTB_CEIL64: u16 = 7;
         pub const TCA_HTB_OFFLOAD: u16 = 8;
+
+        /// HTB global parameters (struct tc_htb_glob).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcHtbGlob {
+            pub version: u32,
+            pub rate2quantum: u32,
+            pub defcls: u32,
+            pub debug: u32,
+            pub direct_pkts: u32,
+        }
+
+        impl TcHtbGlob {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn new() -> Self {
+                Self {
+                    version: 3,
+                    rate2quantum: 10,
+                    defcls: 0,
+                    debug: 0,
+                    direct_pkts: 0,
+                }
+            }
+
+            pub fn with_default(mut self, defcls: u32) -> Self {
+                self.defcls = defcls;
+                self
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+
+        /// HTB class parameters (struct tc_htb_opt).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcHtbOpt {
+            pub rate: super::TcRateSpec,
+            pub ceil: super::TcRateSpec,
+            pub buffer: u32,
+            pub cbuffer: u32,
+            pub quantum: u32,
+            pub level: u32,
+            pub prio: u32,
+        }
+
+        impl TcHtbOpt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
     }
 
     /// FQ_CODEL qdisc-specific attributes.
@@ -316,12 +371,124 @@ pub mod qdisc {
         pub const TCA_TBF_PRATE64: u16 = 5;
         pub const TCA_TBF_BURST: u16 = 6;
         pub const TCA_TBF_PBURST: u16 = 7;
+
+        /// TBF parameters (struct tc_tbf_qopt).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcTbfQopt {
+            pub rate: super::TcRateSpec,
+            pub peakrate: super::TcRateSpec,
+            pub limit: u32,
+            pub buffer: u32,
+            pub mtu: u32,
+        }
+
+        impl TcTbfQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
     }
 
     /// PRIO qdisc-specific attributes.
     pub mod prio {
         pub const TCA_PRIO_UNSPEC: u16 = 0;
         pub const TCA_PRIO_MQ: u16 = 1;
+
+        /// PRIO parameters (struct tc_prio_qopt).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy)]
+        pub struct TcPrioQopt {
+            pub bands: i32,
+            pub priomap: [u8; 16],
+        }
+
+        impl Default for TcPrioQopt {
+            fn default() -> Self {
+                Self {
+                    bands: 3,
+                    // Default priomap: { 1, 2, 2, 2, 1, 2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1 }
+                    priomap: [1, 2, 2, 2, 1, 2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+                }
+            }
+        }
+
+        impl TcPrioQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+    }
+
+    /// SFQ qdisc-specific attributes.
+    pub mod sfq {
+        /// SFQ parameters (struct tc_sfq_qopt_v1).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcSfqQoptV1 {
+            pub v0: TcSfqQopt,
+            pub depth: u32,
+            pub headdrop: u32,
+            pub limit: u32,
+            pub qth_min: u32,
+            pub qth_max: u32,
+            pub wlog: u8,
+            pub plog: u8,
+            pub scell_log: u8,
+            pub flags: u8,
+            pub max_p: u32,
+            // ... additional fields omitted for simplicity
+        }
+
+        /// SFQ basic parameters (struct tc_sfq_qopt).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcSfqQopt {
+            pub quantum: u32,
+            pub perturb_period: i32,
+            pub limit: u32,
+            pub divisor: u32,
+            pub flows: u32,
+        }
+
+        impl TcSfqQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+    }
+
+    /// Rate specification (struct tc_ratespec).
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct TcRateSpec {
+        pub cell_log: u8,
+        pub linklayer: u8,
+        pub overhead: u16,
+        pub cell_align: i16,
+        pub mpu: u16,
+        pub rate: u32,
+    }
+
+    impl TcRateSpec {
+        pub const SIZE: usize = std::mem::size_of::<Self>();
+
+        pub fn new(rate: u32) -> Self {
+            Self {
+                rate,
+                ..Default::default()
+            }
+        }
+
+        pub fn as_bytes(&self) -> &[u8] {
+            unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+        }
     }
 }
 
