@@ -635,78 +635,586 @@ fn add_filter_options(
     kind: &str,
     params: &[String],
 ) -> Result<()> {
-    use rip_netlink::types::tc::filter::*;
-
     match kind {
-        "u32" => {
-            let mut i = 0;
-            while i < params.len() {
-                match params[i].as_str() {
-                    "classid" | "flowid" if i + 1 < params.len() => {
-                        let classid = tc_handle::parse(&params[i + 1]).ok_or_else(|| {
-                            rip_netlink::Error::InvalidMessage("invalid classid".into())
-                        })?;
-                        builder.append_attr_u32(u32::TCA_U32_CLASSID, classid);
-                        i += 2;
-                    }
-                    "match" if i + 4 < params.len() => {
-                        // Simple match parsing - skip for now, complex structure
-                        i += 5;
-                    }
-                    _ => i += 1,
-                }
-            }
-        }
-        "flower" => {
-            let mut i = 0;
-            while i < params.len() {
-                match params[i].as_str() {
-                    "classid" | "flowid" if i + 1 < params.len() => {
-                        let classid = tc_handle::parse(&params[i + 1]).ok_or_else(|| {
-                            rip_netlink::Error::InvalidMessage("invalid classid".into())
-                        })?;
-                        builder.append_attr_u32(flower::TCA_FLOWER_CLASSID, classid);
-                        i += 2;
-                    }
-                    "ip_proto" if i + 1 < params.len() => {
-                        let proto = match params[i + 1].as_str() {
-                            "tcp" => 6u8,
-                            "udp" => 17u8,
-                            "icmp" => 1u8,
-                            "icmpv6" => 58u8,
-                            _ => params[i + 1].parse().unwrap_or(0),
-                        };
-                        builder.append_attr_u8(flower::TCA_FLOWER_KEY_IP_PROTO, proto);
-                        i += 2;
-                    }
-                    "dst_port" if i + 1 < params.len() => {
-                        let port: u16 = params[i + 1].parse().map_err(|_| {
-                            rip_netlink::Error::InvalidMessage("invalid port".into())
-                        })?;
-                        // Use TCP dest port by default
-                        builder.append_attr_u16_be(flower::TCA_FLOWER_KEY_TCP_DST, port);
-                        i += 2;
-                    }
-                    "src_port" if i + 1 < params.len() => {
-                        let port: u16 = params[i + 1].parse().map_err(|_| {
-                            rip_netlink::Error::InvalidMessage("invalid port".into())
-                        })?;
-                        builder.append_attr_u16_be(flower::TCA_FLOWER_KEY_TCP_SRC, port);
-                        i += 2;
-                    }
-                    _ => i += 1,
-                }
-            }
-        }
+        "u32" => add_u32_filter_options(builder, params)?,
+        "flower" => add_flower_filter_options(builder, params)?,
         "basic" | "matchall" => {
-            // These filters use actions primarily
-            let _ = (builder, params);
+            // These filters use actions primarily - classid only
+            add_basic_filter_options(builder, params)?;
         }
+        "fw" => add_fw_filter_options(builder, params)?,
         _ => {
             // Unknown filter type
-            let _ = (builder, params);
         }
     }
 
+    Ok(())
+}
+
+/// Add u32 filter options.
+///
+/// Supports:
+/// - match ip src ADDR - match source IP
+/// - match ip dst ADDR - match destination IP
+/// - match ip sport PORT - match source port
+/// - match ip dport PORT - match destination port
+/// - match ip protocol N - match IP protocol
+/// - match u32 VAL MASK at OFF - match 32-bit value
+/// - match u16 VAL MASK at OFF - match 16-bit value
+/// - match u8 VAL MASK at OFF - match 8-bit value
+/// - classid/flowid HANDLE - target class
+fn add_u32_filter_options(
+    builder: &mut rip_netlink::MessageBuilder,
+    params: &[String],
+) -> Result<()> {
+    use rip_netlink::types::tc::filter::u32::*;
+
+    let mut sel = TcU32Sel::new();
+    let mut has_classid = false;
+
+    let mut i = 0;
+    while i < params.len() {
+        match params[i].as_str() {
+            "classid" | "flowid" if i + 1 < params.len() => {
+                let classid = tc_handle::parse(&params[i + 1])
+                    .ok_or_else(|| rip_netlink::Error::InvalidMessage("invalid classid".into()))?;
+                builder.append_attr_u32(TCA_U32_CLASSID, classid);
+                sel.set_terminal();
+                has_classid = true;
+                i += 2;
+            }
+            "match" if i + 1 < params.len() => {
+                i += 1;
+                // Parse match type
+                match params[i].as_str() {
+                    "ip" if i + 2 < params.len() => {
+                        i += 1;
+                        i = parse_ip_match(&mut sel, params, i)?;
+                    }
+                    "ip6" if i + 2 < params.len() => {
+                        i += 1;
+                        i = parse_ip6_match(&mut sel, params, i)?;
+                    }
+                    "tcp" | "udp" if i + 2 < params.len() => {
+                        let proto = params[i].as_str();
+                        i += 1;
+                        i = parse_l4_match(&mut sel, params, i, proto)?;
+                    }
+                    "u32" if i + 3 < params.len() => {
+                        i += 1;
+                        let val = parse_hex_or_dec(&params[i])?;
+                        i += 1;
+                        let mask = parse_hex_or_dec(&params[i])?;
+                        i += 1;
+                        let off = parse_offset(params, &mut i)?;
+                        sel.add_key(pack_key32(val, mask, off));
+                    }
+                    "u16" if i + 3 < params.len() => {
+                        i += 1;
+                        let val = parse_hex_or_dec(&params[i])? as u16;
+                        i += 1;
+                        let mask = parse_hex_or_dec(&params[i])? as u16;
+                        i += 1;
+                        let off = parse_offset(params, &mut i)?;
+                        sel.add_key(pack_key16(val, mask, off));
+                    }
+                    "u8" if i + 3 < params.len() => {
+                        i += 1;
+                        let val = parse_hex_or_dec(&params[i])? as u8;
+                        i += 1;
+                        let mask = parse_hex_or_dec(&params[i])? as u8;
+                        i += 1;
+                        let off = parse_offset(params, &mut i)?;
+                        sel.add_key(pack_key8(val, mask, off));
+                    }
+                    _ => {
+                        return Err(rip_netlink::Error::InvalidMessage(format!(
+                            "unknown match type: {}",
+                            params[i]
+                        )));
+                    }
+                }
+            }
+            "divisor" if i + 1 < params.len() => {
+                let divisor: u32 = params[i + 1]
+                    .parse()
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid divisor".into()))?;
+                builder.append_attr_u32(TCA_U32_DIVISOR, divisor);
+                i += 2;
+            }
+            "link" if i + 1 < params.len() => {
+                let link = parse_u32_handle(&params[i + 1])?;
+                builder.append_attr_u32(TCA_U32_LINK, link);
+                i += 2;
+            }
+            "ht" if i + 1 < params.len() => {
+                let ht = parse_u32_handle(&params[i + 1])?;
+                builder.append_attr_u32(TCA_U32_HASH, ht);
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    // Add selector if we have any keys
+    if sel.hdr.nkeys > 0 || has_classid {
+        builder.append_attr(TCA_U32_SEL, &sel.to_bytes());
+    }
+
+    Ok(())
+}
+
+/// Parse an IP match (src, dst, sport, dport, protocol, tos).
+fn parse_ip_match(
+    sel: &mut rip_netlink::types::tc::filter::u32::TcU32Sel,
+    params: &[String],
+    mut i: usize,
+) -> Result<usize> {
+    use rip_netlink::types::tc::filter::u32::*;
+
+    match params[i].as_str() {
+        "src" if i + 1 < params.len() => {
+            i += 1;
+            let (addr, mask) = parse_ip_prefix(&params[i])?;
+            sel.add_key(TcU32Key::new(addr.to_be(), mask.to_be(), 12));
+            i += 1;
+        }
+        "dst" if i + 1 < params.len() => {
+            i += 1;
+            let (addr, mask) = parse_ip_prefix(&params[i])?;
+            sel.add_key(TcU32Key::new(addr.to_be(), mask.to_be(), 16));
+            i += 1;
+        }
+        "sport" if i + 1 < params.len() => {
+            i += 1;
+            let port: u16 = params[i]
+                .parse()
+                .map_err(|_| rip_netlink::Error::InvalidMessage("invalid port".into()))?;
+            sel.add_key(pack_key16(port, 0xffff, 20));
+            i += 1;
+        }
+        "dport" if i + 1 < params.len() => {
+            i += 1;
+            let port: u16 = params[i]
+                .parse()
+                .map_err(|_| rip_netlink::Error::InvalidMessage("invalid port".into()))?;
+            sel.add_key(pack_key16(port, 0xffff, 22));
+            i += 1;
+        }
+        "protocol" if i + 1 < params.len() => {
+            i += 1;
+            let proto: u8 = match params[i].as_str() {
+                "tcp" => 6,
+                "udp" => 17,
+                "icmp" => 1,
+                "gre" => 47,
+                _ => params[i]
+                    .parse()
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid protocol".into()))?,
+            };
+            sel.add_key(pack_key8(proto, 0xff, 9));
+            i += 1;
+        }
+        "tos" | "dsfield" if i + 1 < params.len() => {
+            i += 1;
+            let tos = parse_hex_or_dec(&params[i])? as u8;
+            i += 1;
+            let mask = if i < params.len() && !is_u32_keyword(&params[i]) {
+                let m = parse_hex_or_dec(&params[i])? as u8;
+                i += 1;
+                m
+            } else {
+                0xff
+            };
+            sel.add_key(pack_key8(tos, mask, 1));
+        }
+        _ => {
+            return Err(rip_netlink::Error::InvalidMessage(format!(
+                "unknown ip match: {}",
+                params[i]
+            )));
+        }
+    }
+    Ok(i)
+}
+
+/// Parse an IPv6 match.
+fn parse_ip6_match(
+    sel: &mut rip_netlink::types::tc::filter::u32::TcU32Sel,
+    params: &[String],
+    mut i: usize,
+) -> Result<usize> {
+    use rip_netlink::types::tc::filter::u32::*;
+
+    match params[i].as_str() {
+        "src" if i + 1 < params.len() => {
+            i += 1;
+            let keys = parse_ipv6_prefix(&params[i], 8)?;
+            for key in keys {
+                sel.add_key(key);
+            }
+            i += 1;
+        }
+        "dst" if i + 1 < params.len() => {
+            i += 1;
+            let keys = parse_ipv6_prefix(&params[i], 24)?;
+            for key in keys {
+                sel.add_key(key);
+            }
+            i += 1;
+        }
+        "sport" if i + 1 < params.len() => {
+            i += 1;
+            let port: u16 = params[i]
+                .parse()
+                .map_err(|_| rip_netlink::Error::InvalidMessage("invalid port".into()))?;
+            sel.add_key(pack_key16(port, 0xffff, 40));
+            i += 1;
+        }
+        "dport" if i + 1 < params.len() => {
+            i += 1;
+            let port: u16 = params[i]
+                .parse()
+                .map_err(|_| rip_netlink::Error::InvalidMessage("invalid port".into()))?;
+            sel.add_key(pack_key16(port, 0xffff, 42));
+            i += 1;
+        }
+        _ => {
+            return Err(rip_netlink::Error::InvalidMessage(format!(
+                "unknown ip6 match: {}",
+                params[i]
+            )));
+        }
+    }
+    Ok(i)
+}
+
+/// Parse a TCP/UDP match (src, dst ports relative to L4 header).
+fn parse_l4_match(
+    sel: &mut rip_netlink::types::tc::filter::u32::TcU32Sel,
+    params: &[String],
+    mut i: usize,
+    _proto: &str,
+) -> Result<usize> {
+    use rip_netlink::types::tc::filter::u32::*;
+
+    match params[i].as_str() {
+        "src" if i + 1 < params.len() => {
+            i += 1;
+            let port: u16 = params[i]
+                .parse()
+                .map_err(|_| rip_netlink::Error::InvalidMessage("invalid port".into()))?;
+            // Use nexthdr+ offset for L4 matching
+            sel.add_key(TcU32Key::with_nexthdr(
+                ((port as u32) << 16).to_be(),
+                0xffff0000u32.to_be(),
+                0,
+            ));
+            i += 1;
+        }
+        "dst" if i + 1 < params.len() => {
+            i += 1;
+            let port: u16 = params[i]
+                .parse()
+                .map_err(|_| rip_netlink::Error::InvalidMessage("invalid port".into()))?;
+            sel.add_key(TcU32Key::with_nexthdr(
+                (port as u32).to_be(),
+                0x0000ffffu32.to_be(),
+                0,
+            ));
+            i += 1;
+        }
+        _ => {
+            return Err(rip_netlink::Error::InvalidMessage(format!(
+                "unknown tcp/udp match: {}",
+                params[i]
+            )));
+        }
+    }
+    Ok(i)
+}
+
+/// Parse hex or decimal number.
+fn parse_hex_or_dec(s: &str) -> Result<u32> {
+    if let Some(hex) = s.strip_prefix("0x") {
+        u32::from_str_radix(hex, 16)
+    } else if let Some(hex) = s.strip_prefix("0X") {
+        u32::from_str_radix(hex, 16)
+    } else {
+        s.parse()
+    }
+    .map_err(|_| rip_netlink::Error::InvalidMessage(format!("invalid number: {}", s)))
+}
+
+/// Parse "at OFFSET" from params.
+fn parse_offset(params: &[String], i: &mut usize) -> Result<i32> {
+    if *i < params.len() && params[*i] == "at" {
+        *i += 1;
+        if *i < params.len() {
+            let off: i32 = params[*i]
+                .parse()
+                .map_err(|_| rip_netlink::Error::InvalidMessage("invalid offset".into()))?;
+            *i += 1;
+            return Ok(off);
+        }
+    }
+    Err(rip_netlink::Error::InvalidMessage(
+        "expected 'at OFFSET'".into(),
+    ))
+}
+
+/// Parse u32 filter handle (htid:hash:node format).
+fn parse_u32_handle(s: &str) -> Result<u32> {
+    if let Some(hex) = s.strip_prefix("0x") {
+        return u32::from_str_radix(hex, 16)
+            .map_err(|_| rip_netlink::Error::InvalidMessage("invalid handle".into()));
+    }
+
+    let parts: Vec<&str> = s.split(':').collect();
+    match parts.len() {
+        1 => {
+            let htid = u32::from_str_radix(parts[0], 16)
+                .map_err(|_| rip_netlink::Error::InvalidMessage("invalid handle".into()))?;
+            Ok(htid << 20)
+        }
+        2 => {
+            let htid = if parts[0].is_empty() {
+                0
+            } else {
+                u32::from_str_radix(parts[0], 16)
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid handle".into()))?
+            };
+            let hash = if parts[1].is_empty() {
+                0
+            } else {
+                u32::from_str_radix(parts[1], 16)
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid handle".into()))?
+            };
+            Ok((htid << 20) | (hash << 12))
+        }
+        3 => {
+            let htid = if parts[0].is_empty() {
+                0
+            } else {
+                u32::from_str_radix(parts[0], 16)
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid handle".into()))?
+            };
+            let hash = if parts[1].is_empty() {
+                0
+            } else {
+                u32::from_str_radix(parts[1], 16)
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid handle".into()))?
+            };
+            let node = if parts[2].is_empty() {
+                0
+            } else {
+                u32::from_str_radix(parts[2], 16)
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid handle".into()))?
+            };
+            Ok((htid << 20) | (hash << 12) | node)
+        }
+        _ => Err(rip_netlink::Error::InvalidMessage(
+            "invalid handle format".into(),
+        )),
+    }
+}
+
+/// Parse IP address with optional prefix length.
+fn parse_ip_prefix(s: &str) -> Result<(u32, u32)> {
+    let (addr_str, prefix_len) = if let Some((a, p)) = s.split_once('/') {
+        let plen: u8 = p
+            .parse()
+            .map_err(|_| rip_netlink::Error::InvalidMessage("invalid prefix length".into()))?;
+        (a, plen)
+    } else {
+        (s, 32)
+    };
+
+    let addr: std::net::Ipv4Addr = addr_str
+        .parse()
+        .map_err(|_| rip_netlink::Error::InvalidMessage("invalid IP address".into()))?;
+
+    let mask = if prefix_len == 0 {
+        0
+    } else {
+        0xffffffffu32 << (32 - prefix_len)
+    };
+
+    Ok((u32::from(addr), mask))
+}
+
+/// Parse IPv6 address with prefix, returns multiple keys.
+fn parse_ipv6_prefix(
+    s: &str,
+    base_off: i32,
+) -> Result<Vec<rip_netlink::types::tc::filter::u32::TcU32Key>> {
+    use rip_netlink::types::tc::filter::u32::TcU32Key;
+
+    let (addr_str, prefix_len) = if let Some((a, p)) = s.split_once('/') {
+        let plen: u8 = p
+            .parse()
+            .map_err(|_| rip_netlink::Error::InvalidMessage("invalid prefix length".into()))?;
+        (a, plen as u32)
+    } else {
+        (s, 128)
+    };
+
+    let addr: std::net::Ipv6Addr = addr_str
+        .parse()
+        .map_err(|_| rip_netlink::Error::InvalidMessage("invalid IPv6 address".into()))?;
+
+    let octets = addr.octets();
+    let mut keys = Vec::new();
+
+    let mut remaining = prefix_len;
+    for i in 0..4 {
+        if remaining == 0 {
+            break;
+        }
+        let word_offset = base_off + (i * 4) as i32;
+        let word = u32::from_be_bytes([
+            octets[i * 4],
+            octets[i * 4 + 1],
+            octets[i * 4 + 2],
+            octets[i * 4 + 3],
+        ]);
+
+        let bits = remaining.min(32);
+        let mask = if bits == 32 {
+            0xffffffff
+        } else {
+            0xffffffffu32 << (32 - bits)
+        };
+
+        keys.push(TcU32Key::new(word.to_be(), mask.to_be(), word_offset));
+        remaining = remaining.saturating_sub(32);
+    }
+
+    Ok(keys)
+}
+
+/// Check if string is a u32 keyword.
+fn is_u32_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "match" | "classid" | "flowid" | "divisor" | "link" | "ht" | "at"
+    )
+}
+
+/// Add flower filter options.
+fn add_flower_filter_options(
+    builder: &mut rip_netlink::MessageBuilder,
+    params: &[String],
+) -> Result<()> {
+    use rip_netlink::types::tc::filter::flower::*;
+
+    let mut i = 0;
+    while i < params.len() {
+        match params[i].as_str() {
+            "classid" | "flowid" if i + 1 < params.len() => {
+                let classid = tc_handle::parse(&params[i + 1])
+                    .ok_or_else(|| rip_netlink::Error::InvalidMessage("invalid classid".into()))?;
+                builder.append_attr_u32(TCA_FLOWER_CLASSID, classid);
+                i += 2;
+            }
+            "ip_proto" if i + 1 < params.len() => {
+                let proto = match params[i + 1].as_str() {
+                    "tcp" => 6u8,
+                    "udp" => 17u8,
+                    "icmp" => 1u8,
+                    "icmpv6" => 58u8,
+                    _ => params[i + 1].parse().unwrap_or(0),
+                };
+                builder.append_attr_u8(TCA_FLOWER_KEY_IP_PROTO, proto);
+                i += 2;
+            }
+            "dst_port" if i + 1 < params.len() => {
+                let port: u16 = params[i + 1]
+                    .parse()
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid port".into()))?;
+                builder.append_attr_u16_be(TCA_FLOWER_KEY_TCP_DST, port);
+                i += 2;
+            }
+            "src_port" if i + 1 < params.len() => {
+                let port: u16 = params[i + 1]
+                    .parse()
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid port".into()))?;
+                builder.append_attr_u16_be(TCA_FLOWER_KEY_TCP_SRC, port);
+                i += 2;
+            }
+            "dst_ip" if i + 1 < params.len() => {
+                let (addr, mask) = parse_ip_prefix(&params[i + 1])?;
+                builder.append_attr(TCA_FLOWER_KEY_IPV4_DST, &addr.to_be_bytes());
+                builder.append_attr(TCA_FLOWER_KEY_IPV4_DST_MASK, &mask.to_be_bytes());
+                i += 2;
+            }
+            "src_ip" if i + 1 < params.len() => {
+                let (addr, mask) = parse_ip_prefix(&params[i + 1])?;
+                builder.append_attr(TCA_FLOWER_KEY_IPV4_SRC, &addr.to_be_bytes());
+                builder.append_attr(TCA_FLOWER_KEY_IPV4_SRC_MASK, &mask.to_be_bytes());
+                i += 2;
+            }
+            "eth_type" if i + 1 < params.len() => {
+                let eth_type: u16 = match params[i + 1].as_str() {
+                    "ip" | "ipv4" => 0x0800,
+                    "ipv6" => 0x86dd,
+                    "arp" => 0x0806,
+                    _ => parse_hex_or_dec(&params[i + 1])? as u16,
+                };
+                builder.append_attr_u16_be(TCA_FLOWER_KEY_ETH_TYPE, eth_type);
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    Ok(())
+}
+
+/// Add basic/matchall filter options.
+fn add_basic_filter_options(
+    builder: &mut rip_netlink::MessageBuilder,
+    params: &[String],
+) -> Result<()> {
+    // Basic filter primarily uses classid
+    let mut i = 0;
+    while i < params.len() {
+        match params[i].as_str() {
+            "classid" | "flowid" if i + 1 < params.len() => {
+                let classid = tc_handle::parse(&params[i + 1])
+                    .ok_or_else(|| rip_netlink::Error::InvalidMessage("invalid classid".into()))?;
+                // Basic filter uses a different attribute
+                builder.append_attr_u32(1, classid); // TCA_BASIC_CLASSID
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Add fw (firewall mark) filter options.
+fn add_fw_filter_options(
+    builder: &mut rip_netlink::MessageBuilder,
+    params: &[String],
+) -> Result<()> {
+    // fw filter matches on fwmark set by iptables/nftables
+    let mut i = 0;
+    while i < params.len() {
+        match params[i].as_str() {
+            "classid" | "flowid" if i + 1 < params.len() => {
+                let classid = tc_handle::parse(&params[i + 1])
+                    .ok_or_else(|| rip_netlink::Error::InvalidMessage("invalid classid".into()))?;
+                builder.append_attr_u32(1, classid); // TCA_FW_CLASSID
+                i += 2;
+            }
+            "mask" if i + 1 < params.len() => {
+                let mask = parse_hex_or_dec(&params[i + 1])?;
+                builder.append_attr_u32(2, mask); // TCA_FW_MASK
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
     Ok(())
 }

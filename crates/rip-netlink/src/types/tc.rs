@@ -698,7 +698,7 @@ pub mod qdisc {
 
 /// Common filter attributes.
 pub mod filter {
-    /// U32 filter attributes.
+    /// U32 filter attributes and structures.
     pub mod u32 {
         pub const TCA_U32_UNSPEC: u16 = 0;
         pub const TCA_U32_CLASSID: u16 = 1;
@@ -712,6 +712,180 @@ pub mod filter {
         pub const TCA_U32_PCNT: u16 = 9;
         pub const TCA_U32_MARK: u16 = 10;
         pub const TCA_U32_FLAGS: u16 = 11;
+
+        /// U32 selector flags.
+        pub const TC_U32_TERMINAL: u8 = 1;
+        pub const TC_U32_OFFSET: u8 = 2;
+        pub const TC_U32_VAROFFSET: u8 = 4;
+        pub const TC_U32_EAT: u8 = 8;
+
+        /// U32 key (struct tc_u32_key).
+        /// Matches a 32-bit value at a specific offset.
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcU32Key {
+            /// Mask to apply (big-endian).
+            pub mask: u32,
+            /// Value to match (big-endian).
+            pub val: u32,
+            /// Byte offset from header start.
+            pub off: i32,
+            /// Offset mask for variable offset (-1 for nexthdr+).
+            pub offmask: i32,
+        }
+
+        impl TcU32Key {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            /// Create a new key with value, mask, and offset.
+            pub fn new(val: u32, mask: u32, off: i32) -> Self {
+                Self {
+                    mask,
+                    val: val & mask,
+                    off,
+                    offmask: 0,
+                }
+            }
+
+            /// Create a key for matching at nexthdr+ offset.
+            pub fn with_nexthdr(val: u32, mask: u32, off: i32) -> Self {
+                Self {
+                    mask,
+                    val: val & mask,
+                    off,
+                    offmask: -1,
+                }
+            }
+        }
+
+        /// U32 selector header (struct tc_u32_sel without keys).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcU32SelHdr {
+            /// Flags (TC_U32_TERMINAL, etc.).
+            pub flags: u8,
+            /// Shift for variable offset.
+            pub offshift: u8,
+            /// Number of keys.
+            pub nkeys: u8,
+            /// Padding.
+            pub _pad: u8,
+            /// Mask for variable offset (big-endian).
+            pub offmask: u16,
+            /// Fixed offset to add.
+            pub off: u16,
+            /// Offset to variable offset field.
+            pub offoff: i16,
+            /// Hash key offset.
+            pub hoff: i16,
+            /// Hash mask (big-endian).
+            pub hmask: u32,
+        }
+
+        impl TcU32SelHdr {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+
+        /// U32 selector builder - builds the full selector with keys.
+        #[derive(Debug, Clone, Default)]
+        pub struct TcU32Sel {
+            pub hdr: TcU32SelHdr,
+            pub keys: Vec<TcU32Key>,
+        }
+
+        impl TcU32Sel {
+            pub fn new() -> Self {
+                Self::default()
+            }
+
+            /// Add a key to the selector.
+            pub fn add_key(&mut self, key: TcU32Key) {
+                self.keys.push(key);
+                self.hdr.nkeys = self.keys.len() as u8;
+            }
+
+            /// Set terminal flag (packet will be classified).
+            pub fn set_terminal(&mut self) {
+                self.hdr.flags |= TC_U32_TERMINAL;
+            }
+
+            /// Convert to bytes for netlink message.
+            pub fn to_bytes(&self) -> Vec<u8> {
+                let mut buf =
+                    Vec::with_capacity(TcU32SelHdr::SIZE + self.keys.len() * TcU32Key::SIZE);
+                buf.extend_from_slice(self.hdr.as_bytes());
+                for key in &self.keys {
+                    let key_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            key as *const TcU32Key as *const u8,
+                            TcU32Key::SIZE,
+                        )
+                    };
+                    buf.extend_from_slice(key_bytes);
+                }
+                buf
+            }
+        }
+
+        /// U32 mark structure (struct tc_u32_mark).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcU32Mark {
+            pub val: u32,
+            pub mask: u32,
+            pub success: u32,
+        }
+
+        impl TcU32Mark {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn new(val: u32, mask: u32) -> Self {
+                Self {
+                    val,
+                    mask,
+                    success: 0,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+
+        /// Helper to pack a 32-bit key at an offset.
+        pub fn pack_key32(val: u32, mask: u32, off: i32) -> TcU32Key {
+            TcU32Key::new(val.to_be(), mask.to_be(), off)
+        }
+
+        /// Helper to pack a 16-bit key at an offset.
+        pub fn pack_key16(val: u16, mask: u16, off: i32) -> TcU32Key {
+            // 16-bit values are positioned within a 32-bit word
+            let (val32, mask32) = if (off & 3) == 0 {
+                // Upper 16 bits
+                ((val as u32) << 16, (mask as u32) << 16)
+            } else {
+                // Lower 16 bits
+                (val as u32, mask as u32)
+            };
+            TcU32Key::new(val32.to_be(), mask32.to_be(), off & !3)
+        }
+
+        /// Helper to pack an 8-bit key at an offset.
+        pub fn pack_key8(val: u8, mask: u8, off: i32) -> TcU32Key {
+            let shift = match off & 3 {
+                0 => 24,
+                1 => 16,
+                2 => 8,
+                _ => 0,
+            };
+            let val32 = (val as u32) << shift;
+            let mask32 = (mask as u32) << shift;
+            TcU32Key::new(val32.to_be(), mask32.to_be(), off & !3)
+        }
     }
 
     /// Flower filter attributes.
