@@ -1,0 +1,18 @@
+[package]
+name = "rip-tc"
+description = "Traffic control tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tc"
+path = "src/main.rs"
+
+[dependencies]
+rip-netlink = { workspace = true }
+rip-lib = { workspace = true }
+rip-output = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }

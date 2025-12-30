@@ -1,0 +1,114 @@
+//! ip command - network interface and routing configuration.
+
+mod commands;
+
+use clap::{Parser, Subcommand};
+use rip_netlink::{Connection, Protocol};
+use rip_output::OutputFormat;
+
+#[derive(Parser)]
+#[command(name = "ip", version, about = "Network configuration tool")]
+struct Cli {
+    /// Use IPv4 only.
+    #[arg(short = '4')]
+    ipv4: bool,
+
+    /// Use IPv6 only.
+    #[arg(short = '6')]
+    ipv6: bool,
+
+    /// Output JSON.
+    #[arg(short = 'j', long)]
+    json: bool,
+
+    /// Pretty print JSON.
+    #[arg(short = 'p', long)]
+    pretty: bool,
+
+    /// Show statistics.
+    #[arg(short = 's', long)]
+    stats: bool,
+
+    /// Show details.
+    #[arg(short = 'd', long)]
+    details: bool,
+
+    /// Don't resolve names.
+    #[arg(short = 'n', long)]
+    numeric: bool,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Manage network interfaces.
+    #[command(visible_alias = "l")]
+    Link(commands::link::LinkCmd),
+
+    /// Manage IP addresses.
+    #[command(visible_alias = "a", visible_alias = "addr")]
+    Address(commands::address::AddressCmd),
+
+    /// Manage routing table.
+    #[command(visible_alias = "r")]
+    Route(commands::route::RouteCmd),
+
+    /// Manage ARP/NDP cache.
+    #[command(visible_alias = "n", visible_alias = "neigh")]
+    Neighbor(commands::neighbor::NeighborCmd),
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::WARN.into()),
+        )
+        .init();
+
+    let cli = Cli::parse();
+
+    // Determine output format
+    let format = if cli.json {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Text
+    };
+
+    let opts = rip_output::OutputOptions {
+        stats: cli.stats,
+        details: cli.details,
+        color: atty::is(atty::Stream::Stdout),
+        numeric: cli.numeric,
+        pretty: cli.pretty,
+    };
+
+    // Determine address family filter
+    let family = match (cli.ipv4, cli.ipv6) {
+        (true, false) => Some(2),  // AF_INET
+        (false, true) => Some(10), // AF_INET6
+        _ => None,
+    };
+
+    // Create netlink connection
+    let conn = Connection::new(Protocol::Route)?;
+
+    // Execute command
+    let result = match cli.command {
+        Command::Link(cmd) => cmd.run(&conn, format, &opts).await,
+        Command::Address(cmd) => cmd.run(&conn, format, &opts, family).await,
+        Command::Route(cmd) => cmd.run(&conn, format, &opts, family).await,
+        Command::Neighbor(cmd) => cmd.run(&conn, format, &opts, family).await,
+    };
+
+    if let Err(e) = result {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
