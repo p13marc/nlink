@@ -43,6 +43,44 @@ enum RouteAction {
         /// Route metric/priority.
         #[arg(long)]
         metric: Option<u32>,
+
+        /// Preferred source address.
+        #[arg(long)]
+        src: Option<String>,
+
+        /// Route scope (global, link, host).
+        #[arg(long)]
+        scope: Option<String>,
+
+        /// MTU for route.
+        #[arg(long)]
+        mtu: Option<u32>,
+    },
+
+    /// Replace a route (add or update).
+    Replace {
+        /// Destination prefix (e.g., 10.0.0.0/8 or default).
+        destination: String,
+
+        /// Gateway address.
+        #[arg(long, short)]
+        via: Option<String>,
+
+        /// Output device.
+        #[arg(long, short)]
+        dev: Option<String>,
+
+        /// Routing table.
+        #[arg(long, default_value = "main")]
+        table: String,
+
+        /// Route metric/priority.
+        #[arg(long)]
+        metric: Option<u32>,
+
+        /// Preferred source address.
+        #[arg(long)]
+        src: Option<String>,
     },
 
     /// Delete a route.
@@ -80,6 +118,9 @@ impl RouteCmd {
                 dev,
                 table,
                 metric,
+                src,
+                scope,
+                mtu,
             } => {
                 Self::add(
                     conn,
@@ -88,6 +129,32 @@ impl RouteCmd {
                     dev.as_deref(),
                     &table,
                     metric,
+                    src.as_deref(),
+                    scope.as_deref(),
+                    mtu,
+                    false,
+                )
+                .await
+            }
+            RouteAction::Replace {
+                destination,
+                via,
+                dev,
+                table,
+                metric,
+                src,
+            } => {
+                Self::add(
+                    conn,
+                    &destination,
+                    via.as_deref(),
+                    dev.as_deref(),
+                    &table,
+                    metric,
+                    src.as_deref(),
+                    None,
+                    None,
+                    true,
                 )
                 .await
             }
@@ -159,6 +226,7 @@ impl RouteCmd {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn add(
         conn: &Connection,
         destination: &str,
@@ -166,9 +234,13 @@ impl RouteCmd {
         dev: Option<&str>,
         table: &str,
         metric: Option<u32>,
+        src: Option<&str>,
+        scope: Option<&str>,
+        mtu: Option<u32>,
+        replace: bool,
     ) -> Result<()> {
         use rip_lib::addr::parse_prefix;
-        use rip_netlink::connection::ack_request;
+        use rip_netlink::connection::{ack_request, replace_request};
 
         let table_id = rip_lib::names::table_id(table).unwrap_or(254);
 
@@ -188,15 +260,28 @@ impl RouteCmd {
             (Some(addr), prefix, family)
         };
 
+        // Parse scope
+        let scope_val = if let Some(s) = scope {
+            RouteScope::from_name(s).map(|sc| sc as u8).unwrap_or(0)
+        } else if via.is_some() {
+            0 // RT_SCOPE_UNIVERSE
+        } else {
+            253 // RT_SCOPE_LINK
+        };
+
         let rtmsg = RtMsg::new()
             .with_family(family)
             .with_dst_len(dst_len)
             .with_table(if table_id <= 255 { table_id as u8 } else { 0 })
             .with_protocol(4) // RTPROT_STATIC
-            .with_scope(if via.is_some() { 0 } else { 253 }) // universe or link
+            .with_scope(scope_val)
             .with_type(1); // RTN_UNICAST
 
-        let mut builder = ack_request(NlMsgType::RTM_NEWROUTE);
+        let mut builder = if replace {
+            replace_request(NlMsgType::RTM_NEWROUTE)
+        } else {
+            ack_request(NlMsgType::RTM_NEWROUTE)
+        };
         builder.append(&rtmsg);
 
         // Add destination
@@ -234,6 +319,21 @@ impl RouteCmd {
             builder.append_attr_u32(RtaAttr::Oif as u16, ifindex);
         }
 
+        // Add preferred source
+        if let Some(src_str) = src {
+            let src_addr: std::net::IpAddr = src_str.parse().map_err(|_| {
+                rip_netlink::Error::InvalidMessage(format!("invalid source: {}", src_str))
+            })?;
+            match src_addr {
+                std::net::IpAddr::V4(v4) => {
+                    builder.append_attr(RtaAttr::Prefsrc as u16, &v4.octets());
+                }
+                std::net::IpAddr::V6(v6) => {
+                    builder.append_attr(RtaAttr::Prefsrc as u16, &v6.octets());
+                }
+            }
+        }
+
         // Add table if > 255
         if table_id > 255 {
             builder.append_attr_u32(RtaAttr::Table as u16, table_id);
@@ -242,6 +342,14 @@ impl RouteCmd {
         // Add metric
         if let Some(m) = metric {
             builder.append_attr_u32(RtaAttr::Priority as u16, m);
+        }
+
+        // Add MTU via RTA_METRICS
+        if let Some(mtu_val) = mtu {
+            let metrics = builder.nest_start(RtaAttr::Metrics as u16);
+            // RTAX_MTU = 2
+            builder.append_attr_u32(2, mtu_val);
+            builder.nest_end(metrics);
         }
 
         conn.request_ack(builder).await?;

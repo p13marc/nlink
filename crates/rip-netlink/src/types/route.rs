@@ -344,6 +344,18 @@ impl RouteScope {
             Self::Nowhere => "nowhere",
         }
     }
+
+    /// Parse scope from name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "global" | "universe" => Some(Self::Universe),
+            "site" => Some(Self::Site),
+            "link" => Some(Self::Link),
+            "host" => Some(Self::Host),
+            "nowhere" => Some(Self::Nowhere),
+            _ => None,
+        }
+    }
 }
 
 /// Route table IDs.
