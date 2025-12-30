@@ -38,6 +38,28 @@ enum NeighborAction {
         /// Create permanent entry.
         #[arg(long)]
         permanent: bool,
+
+        /// NUD state (reachable, stale, delay, probe, failed, noarp).
+        #[arg(long)]
+        state: Option<String>,
+    },
+
+    /// Replace or add a neighbor entry.
+    Replace {
+        /// IP address.
+        address: String,
+
+        /// Link-layer address (MAC).
+        #[arg(long)]
+        lladdr: String,
+
+        /// Device name.
+        #[arg(long, short)]
+        dev: String,
+
+        /// Create permanent entry.
+        #[arg(long)]
+        permanent: bool,
     },
 
     /// Delete a neighbor entry.
@@ -74,7 +96,25 @@ impl NeighborCmd {
                 lladdr,
                 dev,
                 permanent,
-            } => Self::add(conn, &address, &lladdr, &dev, permanent).await,
+                state,
+            } => {
+                Self::add(
+                    conn,
+                    &address,
+                    &lladdr,
+                    &dev,
+                    permanent,
+                    state.as_deref(),
+                    false,
+                )
+                .await
+            }
+            NeighborAction::Replace {
+                address,
+                lladdr,
+                dev,
+                permanent,
+            } => Self::add(conn, &address, &lladdr, &dev, permanent, None, true).await,
             NeighborAction::Del { address, dev } => Self::del(conn, &address, &dev).await,
             NeighborAction::Flush { dev } => Self::flush(conn, dev.as_deref(), family).await,
         }
@@ -145,15 +185,18 @@ impl NeighborCmd {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn add(
         conn: &Connection,
         address: &str,
         lladdr: &str,
         dev: &str,
         permanent: bool,
+        state_name: Option<&str>,
+        replace: bool,
     ) -> Result<()> {
         use rip_lib::addr::{parse_addr, parse_mac};
-        use rip_netlink::connection::ack_request;
+        use rip_netlink::connection::{ack_request, replace_request};
 
         let addr = parse_addr(address)
             .map_err(|e| rip_netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
@@ -166,8 +209,21 @@ impl NeighborCmd {
         })?;
 
         let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
+
+        // Parse NUD state
         let state = if permanent {
             nud::PERMANENT
+        } else if let Some(s) = state_name {
+            match s.to_lowercase().as_str() {
+                "reachable" => nud::REACHABLE,
+                "stale" => nud::STALE,
+                "delay" => nud::DELAY,
+                "probe" => nud::PROBE,
+                "failed" => nud::FAILED,
+                "noarp" => nud::NOARP,
+                "permanent" => nud::PERMANENT,
+                _ => nud::REACHABLE,
+            }
         } else {
             nud::REACHABLE
         };
@@ -181,7 +237,11 @@ impl NeighborCmd {
             ..Default::default()
         };
 
-        let mut builder = ack_request(NlMsgType::RTM_NEWNEIGH);
+        let mut builder = if replace {
+            replace_request(NlMsgType::RTM_NEWNEIGH)
+        } else {
+            ack_request(NlMsgType::RTM_NEWNEIGH)
+        };
         builder.append(&ndmsg);
 
         // Add destination address
