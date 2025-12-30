@@ -10,6 +10,7 @@ mod commands;
 
 use commands::class::ClassCmd;
 use commands::filter::FilterCmd;
+use commands::monitor::MonitorCmd;
 use commands::qdisc::QdiscCmd;
 
 #[derive(Parser)]
@@ -58,6 +59,10 @@ enum Command {
     /// Manage traffic filters
     #[command(visible_alias = "f")]
     Filter(FilterCmd),
+
+    /// Monitor TC events in real-time
+    #[command(visible_alias = "m")]
+    Monitor(MonitorCmd),
 }
 
 #[tokio::main]
@@ -85,5 +90,6 @@ async fn main() -> Result<()> {
         Command::Qdisc(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Class(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Filter(cmd) => cmd.run(&conn, format, &opts).await,
+        Command::Monitor(cmd) => cmd.run(format, &opts).await,
     }
 }
