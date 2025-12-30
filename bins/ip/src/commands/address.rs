@@ -34,6 +34,18 @@ enum AddressAction {
         /// Address label.
         #[arg(long)]
         label: Option<String>,
+
+        /// Broadcast address.
+        #[arg(long)]
+        broadcast: Option<String>,
+
+        /// Scope (global, site, link, host).
+        #[arg(long)]
+        scope: Option<String>,
+
+        /// Peer address (for point-to-point).
+        #[arg(long)]
+        peer: Option<String>,
     },
 
     /// Delete an address.
@@ -69,7 +81,21 @@ impl AddressCmd {
                 address,
                 dev,
                 label,
-            } => Self::add(conn, &address, &dev, label.as_deref()).await,
+                broadcast,
+                scope,
+                peer,
+            } => {
+                Self::add(
+                    conn,
+                    &address,
+                    &dev,
+                    label.as_deref(),
+                    broadcast.as_deref(),
+                    scope.as_deref(),
+                    peer.as_deref(),
+                )
+                .await
+            }
             AddressAction::Del { address, dev } => Self::del(conn, &address, &dev).await,
             AddressAction::Flush { dev } => Self::flush(conn, dev.as_deref(), family).await,
         }
@@ -149,7 +175,16 @@ impl AddressCmd {
         Ok(())
     }
 
-    async fn add(conn: &Connection, address: &str, dev: &str, label: Option<&str>) -> Result<()> {
+    #[allow(clippy::too_many_arguments)]
+    async fn add(
+        conn: &Connection,
+        address: &str,
+        dev: &str,
+        label: Option<&str>,
+        broadcast: Option<&str>,
+        scope: Option<&str>,
+        peer: Option<&str>,
+    ) -> Result<()> {
         use rip_lib::addr::parse_prefix;
         use rip_netlink::connection::ack_request;
 
@@ -162,24 +197,63 @@ impl AddressCmd {
 
         let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
 
+        // Parse scope
+        let scope_val = if let Some(s) = scope {
+            Scope::from_name(s)
+                .map(|sc| sc as u8)
+                .unwrap_or_else(|| s.parse().unwrap_or(0))
+        } else {
+            0 // RT_SCOPE_UNIVERSE
+        };
+
         let ifaddr = IfAddrMsg::new()
             .with_family(family)
             .with_prefixlen(prefix)
             .with_index(ifindex)
-            .with_scope(0); // RT_SCOPE_UNIVERSE
+            .with_scope(scope_val);
 
         let mut builder = ack_request(NlMsgType::RTM_NEWADDR);
         builder.append(&ifaddr);
 
-        // Add address attribute
+        // Add local address (the address we're adding)
         match addr {
             std::net::IpAddr::V4(v4) => {
                 builder.append_attr(IfaAttr::Local as u16, &v4.octets());
-                builder.append_attr(IfaAttr::Address as u16, &v4.octets());
             }
             std::net::IpAddr::V6(v6) => {
                 builder.append_attr(IfaAttr::Local as u16, &v6.octets());
-                builder.append_attr(IfaAttr::Address as u16, &v6.octets());
+            }
+        }
+
+        // Add peer address (for point-to-point) or same as local for broadcast
+        if let Some(peer_str) = peer {
+            let peer_addr: std::net::IpAddr = peer_str.parse().map_err(|_| {
+                rip_netlink::Error::InvalidMessage(format!("invalid peer address: {}", peer_str))
+            })?;
+            match peer_addr {
+                std::net::IpAddr::V4(v4) => {
+                    builder.append_attr(IfaAttr::Address as u16, &v4.octets());
+                }
+                std::net::IpAddr::V6(v6) => {
+                    builder.append_attr(IfaAttr::Address as u16, &v6.octets());
+                }
+            }
+        } else {
+            // For non-point-to-point, IFA_ADDRESS is the same as IFA_LOCAL
+            match addr {
+                std::net::IpAddr::V4(v4) => {
+                    builder.append_attr(IfaAttr::Address as u16, &v4.octets());
+                }
+                std::net::IpAddr::V6(v6) => {
+                    builder.append_attr(IfaAttr::Address as u16, &v6.octets());
+                }
+            }
+        }
+
+        // Add broadcast if specified (IPv4 only)
+        if let Some(brd_str) = broadcast {
+            if let Ok(brd_addr) = brd_str.parse::<std::net::Ipv4Addr>() {
+                builder.append_attr(IfaAttr::Broadcast as u16, &brd_addr.octets());
             }
         }
 
