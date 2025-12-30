@@ -71,14 +71,40 @@ Network interface and routing management:
 # List interfaces
 ip link show
 
+# Create interfaces (each type is a subcommand with specific options)
+ip link add dummy test0
+ip link add veth veth0 --peer veth1
+ip link add bridge br0 --stp --vlan-filtering
+ip link add bond bond0 --mode 802.3ad --miimon 100
+ip link add vlan eth0.100 --link eth0 --id 100
+ip link add vxlan vxlan0 --vni 100 --remote 10.0.0.1 --dstport 4789
+
+# Delete interfaces
+ip link del test0
+
+# Modify interfaces
+ip link set eth0 --up --mtu 9000
+
 # Show addresses
 ip addr show
+
+# Add/remove addresses
+ip addr add 192.168.1.1/24 -d eth0
+ip addr del 192.168.1.1/24 -d eth0
 
 # Show routes
 ip route show
 
+# Add/remove routes
+ip route add 10.0.0.0/8 --via 192.168.1.1
+ip route del 10.0.0.0/8
+
 # Show neighbors
 ip neigh show
+
+# Add/remove neighbors
+ip neigh add 192.168.1.2 --lladdr 00:11:22:33:44:55 -d eth0
+ip neigh del 192.168.1.2 -d eth0
 ```
 
 ### tc
@@ -117,21 +143,19 @@ This is an early-stage project. Currently implemented:
 
 - [x] Core netlink socket and connection handling
 - [x] Message building with nested attributes
-- [x] Link operations (show)
-- [x] Address operations (show)
-- [x] Route operations (show)
-- [x] Neighbor operations (show)
+- [x] Link operations (show, add, del, set)
+- [x] Link types: dummy, veth, bridge, bond, vlan, vxlan, macvlan, ipvlan, vrf, gre, ipip, sit, wireguard
+- [x] Address operations (show, add, del)
+- [x] Route operations (show, add, del, replace)
+- [x] Neighbor operations (show, add, del, replace)
 - [x] TC qdisc/class/filter operations (show, add, del)
 
 Planned:
 
-- [ ] Link add/del/set operations
-- [ ] Address add/del operations
-- [ ] Route add/del operations
-- [ ] Link type plugins (vlan, bridge, bond, vxlan, etc.)
 - [ ] Full TC qdisc implementations (htb, fq_codel, cake, etc.)
 - [ ] Network namespace support
-- [ ] Event monitoring
+- [ ] Event monitoring (ip monitor)
+- [ ] Policy routing rules (ip rule)
 
 ## License
 
