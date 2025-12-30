@@ -70,6 +70,10 @@ enum Command {
     /// Monitor netlink events.
     #[command(visible_alias = "m", visible_alias = "mon")]
     Monitor(commands::monitor::MonitorCmd),
+
+    /// Manage IP tunnels (GRE, IPIP, SIT, VTI).
+    #[command(visible_alias = "t", visible_alias = "tun")]
+    Tunnel(commands::tunnel::TunnelCmd),
 }
 
 #[tokio::main]
@@ -118,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Rule(cmd) => cmd.run(&conn, format, &opts, family).await,
         Command::Netns(cmd) => cmd.run(format, &opts).await,
         Command::Monitor(cmd) => cmd.run(format, &opts).await,
+        Command::Tunnel(cmd) => cmd.run(&conn, format, &opts).await,
     };
 
     if let Err(e) = result {
