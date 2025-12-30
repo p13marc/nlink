@@ -58,6 +58,10 @@ enum Command {
     /// Manage ARP/NDP cache.
     #[command(visible_alias = "n", visible_alias = "neigh")]
     Neighbor(commands::neighbor::NeighborCmd),
+
+    /// Monitor netlink events.
+    #[command(visible_alias = "m", visible_alias = "mon")]
+    Monitor(commands::monitor::MonitorCmd),
 }
 
 #[tokio::main]
@@ -103,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Address(cmd) => cmd.run(&conn, format, &opts, family).await,
         Command::Route(cmd) => cmd.run(&conn, format, &opts, family).await,
         Command::Neighbor(cmd) => cmd.run(&conn, format, &opts, family).await,
+        Command::Monitor(cmd) => cmd.run(format, &opts).await,
     };
 
     if let Err(e) = result {

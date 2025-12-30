@@ -16,4 +16,4 @@ pub use builder::{MessageBuilder, NestToken};
 pub use connection::Connection;
 pub use error::{Error, Result};
 pub use message::{MessageIter, NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
-pub use socket::{NetlinkSocket, Protocol};
+pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};
