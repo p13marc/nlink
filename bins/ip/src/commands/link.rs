@@ -22,6 +22,70 @@ enum LinkAction {
         dev: Option<String>,
     },
 
+    /// Add a virtual link.
+    Add {
+        /// Interface name.
+        name: String,
+
+        /// Link type (dummy, veth, bridge, bond, vlan, vxlan, macvlan, etc.)
+        #[arg(long = "type", value_name = "TYPE")]
+        link_type: String,
+
+        /// Parent device (for vlan, macvlan, etc.)
+        #[arg(long)]
+        link: Option<String>,
+
+        /// VLAN ID (for vlan type).
+        #[arg(long)]
+        vlan_id: Option<u16>,
+
+        /// VNI (for vxlan type).
+        #[arg(long)]
+        vni: Option<u32>,
+
+        /// Remote address (for vxlan type).
+        #[arg(long)]
+        remote: Option<String>,
+
+        /// Local address (for vxlan type).
+        #[arg(long)]
+        local: Option<String>,
+
+        /// Destination port (for vxlan type).
+        #[arg(long)]
+        dstport: Option<u16>,
+
+        /// Peer name (for veth type).
+        #[arg(long)]
+        peer: Option<String>,
+
+        /// MTU.
+        #[arg(long)]
+        mtu: Option<u32>,
+
+        /// TX queue length.
+        #[arg(long)]
+        txqlen: Option<u32>,
+
+        /// MAC address.
+        #[arg(long)]
+        address: Option<String>,
+
+        /// Number of TX queues.
+        #[arg(long)]
+        numtxqueues: Option<u32>,
+
+        /// Number of RX queues.
+        #[arg(long)]
+        numrxqueues: Option<u32>,
+    },
+
+    /// Delete a link.
+    Del {
+        /// Interface name.
+        dev: String,
+    },
+
     /// Set link attributes.
     Set {
         /// Interface name.
@@ -42,6 +106,22 @@ enum LinkAction {
         /// Set interface name.
         #[arg(long)]
         name: Option<String>,
+
+        /// Set TX queue length.
+        #[arg(long)]
+        txqlen: Option<u32>,
+
+        /// Set MAC address.
+        #[arg(long)]
+        address: Option<String>,
+
+        /// Set master device.
+        #[arg(long)]
+        master: Option<String>,
+
+        /// Remove from master device.
+        #[arg(long)]
+        nomaster: bool,
     },
 }
 
@@ -54,13 +134,58 @@ impl LinkCmd {
     ) -> Result<()> {
         match self.action.unwrap_or(LinkAction::Show { dev: None }) {
             LinkAction::Show { dev } => Self::show(conn, dev.as_deref(), format, opts).await,
+            LinkAction::Add {
+                name,
+                link_type,
+                link,
+                vlan_id,
+                vni,
+                remote,
+                local,
+                dstport,
+                peer,
+                mtu,
+                txqlen,
+                address,
+                numtxqueues,
+                numrxqueues,
+            } => {
+                Self::add(
+                    conn,
+                    &name,
+                    &link_type,
+                    link.as_deref(),
+                    vlan_id,
+                    vni,
+                    remote.as_deref(),
+                    local.as_deref(),
+                    dstport,
+                    peer.as_deref(),
+                    mtu,
+                    txqlen,
+                    address.as_deref(),
+                    numtxqueues,
+                    numrxqueues,
+                )
+                .await
+            }
+            LinkAction::Del { dev } => Self::del(conn, &dev).await,
             LinkAction::Set {
                 dev,
                 up,
                 down,
                 mtu,
                 name,
-            } => Self::set(conn, &dev, up, down, mtu, name).await,
+                txqlen,
+                address,
+                master,
+                nomaster,
+            } => {
+                Self::set(
+                    conn, &dev, up, down, mtu, name, txqlen, address, master, nomaster,
+                )
+                .await
+            }
         }
     }
 
@@ -113,6 +238,155 @@ impl LinkCmd {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn add(
+        conn: &Connection,
+        name: &str,
+        link_type: &str,
+        link: Option<&str>,
+        vlan_id: Option<u16>,
+        vni: Option<u32>,
+        remote: Option<&str>,
+        local: Option<&str>,
+        dstport: Option<u16>,
+        peer: Option<&str>,
+        mtu: Option<u32>,
+        txqlen: Option<u32>,
+        address: Option<&str>,
+        numtxqueues: Option<u32>,
+        numrxqueues: Option<u32>,
+    ) -> Result<()> {
+        use rip_lib::ifname::name_to_index;
+        use rip_netlink::connection::create_request;
+
+        let ifinfo = IfInfoMsg::new();
+
+        let mut builder = create_request(NlMsgType::RTM_NEWLINK);
+        builder.append(&ifinfo);
+
+        // Interface name
+        builder.append_attr_str(IflaAttr::Ifname as u16, name);
+
+        // Parent link (for vlan, macvlan, etc.)
+        if let Some(link_name) = link {
+            let link_idx = name_to_index(link_name).map_err(|e| {
+                rip_netlink::Error::InvalidMessage(format!("link device not found: {}", e))
+            })?;
+            builder.append_attr_u32(IflaAttr::Link as u16, link_idx);
+        }
+
+        // MTU
+        if let Some(mtu_val) = mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu_val);
+        }
+
+        // TX queue length
+        if let Some(qlen) = txqlen {
+            builder.append_attr_u32(IflaAttr::TxqLen as u16, qlen);
+        }
+
+        // MAC address
+        if let Some(addr_str) = address {
+            let mac = rip_lib::addr::parse_mac(addr_str).map_err(|e| {
+                rip_netlink::Error::InvalidMessage(format!("invalid MAC address: {}", e))
+            })?;
+            builder.append_attr(IflaAttr::Address as u16, &mac);
+        }
+
+        // Number of queues
+        if let Some(n) = numtxqueues {
+            builder.append_attr_u32(IflaAttr::NumTxQueues as u16, n);
+        }
+        if let Some(n) = numrxqueues {
+            builder.append_attr_u32(IflaAttr::NumRxQueues as u16, n);
+        }
+
+        // IFLA_LINKINFO nested attribute
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, link_type);
+
+        // Type-specific data in IFLA_INFO_DATA
+        match link_type {
+            "vlan" => {
+                if let Some(id) = vlan_id {
+                    let data = builder.nest_start(IflaInfo::Data as u16);
+                    // IFLA_VLAN_ID = 1
+                    builder.append_attr_u16(1, id);
+                    builder.nest_end(data);
+                }
+            }
+            "vxlan" => {
+                let data = builder.nest_start(IflaInfo::Data as u16);
+                // IFLA_VXLAN_ID = 1
+                if let Some(id) = vni {
+                    builder.append_attr_u32(1, id);
+                }
+                // IFLA_VXLAN_GROUP = 2 (for remote)
+                if let Some(addr) = remote {
+                    if let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
+                        builder.append_attr(2, &ip.octets());
+                    }
+                }
+                // IFLA_VXLAN_LOCAL = 4
+                if let Some(addr) = local {
+                    if let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
+                        builder.append_attr(4, &ip.octets());
+                    }
+                }
+                // IFLA_VXLAN_PORT = 15
+                if let Some(port) = dstport {
+                    builder.append_attr_u16_be(15, port);
+                }
+                builder.nest_end(data);
+            }
+            "veth" => {
+                if let Some(peer_name) = peer {
+                    let data = builder.nest_start(IflaInfo::Data as u16);
+                    // VETH_INFO_PEER = 1
+                    let peer_nest = builder.nest_start(1);
+                    // Peer ifinfomsg
+                    let peer_ifinfo = IfInfoMsg::new();
+                    builder.append(&peer_ifinfo);
+                    // Peer name
+                    builder.append_attr_str(IflaAttr::Ifname as u16, peer_name);
+                    builder.nest_end(peer_nest);
+                    builder.nest_end(data);
+                }
+            }
+            "bridge" | "bond" | "dummy" | "macvlan" | "macvtap" => {
+                // These types don't require additional data for basic creation
+            }
+            _ => {
+                // Unknown type - just set the kind and let kernel handle it
+            }
+        }
+
+        builder.nest_end(linkinfo);
+
+        conn.request_ack(builder).await?;
+
+        Ok(())
+    }
+
+    async fn del(conn: &Connection, dev: &str) -> Result<()> {
+        use rip_lib::ifname::name_to_index;
+        use rip_netlink::connection::ack_request;
+
+        let ifindex = name_to_index(dev).map_err(|e| {
+            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
+        })?;
+
+        let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
+
+        let mut builder = ack_request(NlMsgType::RTM_DELLINK);
+        builder.append(&ifinfo);
+
+        conn.request_ack(builder).await?;
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn set(
         conn: &Connection,
         dev: &str,
@@ -120,6 +394,10 @@ impl LinkCmd {
         down: bool,
         mtu: Option<u32>,
         name: Option<String>,
+        txqlen: Option<u32>,
+        address: Option<String>,
+        master: Option<String>,
+        nomaster: bool,
     ) -> Result<()> {
         use rip_lib::ifname::name_to_index;
         use rip_netlink::connection::ack_request;
@@ -151,6 +429,29 @@ impl LinkCmd {
         // Add new name if specified
         if let Some(new_name) = name {
             builder.append_attr_str(IflaAttr::Ifname as u16, &new_name);
+        }
+
+        // Add TX queue length if specified
+        if let Some(qlen) = txqlen {
+            builder.append_attr_u32(IflaAttr::TxqLen as u16, qlen);
+        }
+
+        // Add MAC address if specified
+        if let Some(addr_str) = address {
+            let mac = rip_lib::addr::parse_mac(&addr_str).map_err(|e| {
+                rip_netlink::Error::InvalidMessage(format!("invalid MAC address: {}", e))
+            })?;
+            builder.append_attr(IflaAttr::Address as u16, &mac);
+        }
+
+        // Set or clear master
+        if let Some(master_name) = master {
+            let master_idx = name_to_index(&master_name).map_err(|e| {
+                rip_netlink::Error::InvalidMessage(format!("master device not found: {}", e))
+            })?;
+            builder.append_attr_u32(IflaAttr::Master as u16, master_idx);
+        } else if nomaster {
+            builder.append_attr_u32(IflaAttr::Master as u16, 0);
         }
 
         conn.request_ack(builder).await?;
