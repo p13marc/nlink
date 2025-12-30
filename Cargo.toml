@@ -37,6 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Utilities
 bytes = "1"
+libc = "0.2"
 
 # Workspace crates
 rip-netlink = { path = "crates/rip-netlink" }

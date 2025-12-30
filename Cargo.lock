@@ -344,6 +344,7 @@ dependencies = [
  "anyhow",
  "atty",
  "clap",
+ "libc",
  "rip-lib",
  "rip-netlink",
  "rip-output",

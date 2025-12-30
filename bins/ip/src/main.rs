@@ -63,6 +63,10 @@ enum Command {
     #[command(visible_alias = "ru")]
     Rule(commands::rule::RuleCmd),
 
+    /// Manage network namespaces.
+    #[command(visible_alias = "ns")]
+    Netns(commands::netns::NetnsCmd),
+
     /// Monitor netlink events.
     #[command(visible_alias = "m", visible_alias = "mon")]
     Monitor(commands::monitor::MonitorCmd),
@@ -112,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Route(cmd) => cmd.run(&conn, format, &opts, family).await,
         Command::Neighbor(cmd) => cmd.run(&conn, format, &opts, family).await,
         Command::Rule(cmd) => cmd.run(&conn, format, &opts, family).await,
+        Command::Netns(cmd) => cmd.run(format, &opts).await,
         Command::Monitor(cmd) => cmd.run(format, &opts).await,
     };
 

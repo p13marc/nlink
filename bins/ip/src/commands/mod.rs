@@ -5,5 +5,6 @@ pub mod link;
 mod link_add;
 pub mod monitor;
 pub mod neighbor;
+pub mod netns;
 pub mod route;
 pub mod rule;
