@@ -599,17 +599,236 @@ fn add_class_options(
     params: &[String],
 ) -> Result<()> {
     match kind {
-        "htb" => {
-            // HTB class requires rate parameter
-            // This is complex because it needs tc_htb_opt structure
-            // For now, just acknowledge the params exist
-            let _ = (builder, params);
-        }
+        "htb" => add_htb_class_options(builder, params)?,
         _ => {
-            // Unknown class type
-            let _ = (builder, params);
+            // Unknown class type - just ignore parameters
         }
     }
 
     Ok(())
+}
+
+/// Add HTB class options.
+///
+/// Supports:
+/// - rate RATE (required) - guaranteed rate
+/// - ceil RATE - maximum rate (defaults to rate)
+/// - burst SIZE - burst size (computed if not specified)
+/// - cburst SIZE - ceil burst size (computed if not specified)
+/// - prio N - priority (0-7, lower = higher priority)
+/// - quantum SIZE - quantum for DRR (computed from r2q if not specified)
+/// - mtu SIZE - MTU for rate calculations (default 1600)
+/// - mpu SIZE - minimum packet unit
+/// - overhead SIZE - per-packet overhead
+fn add_htb_class_options(
+    builder: &mut rip_netlink::MessageBuilder,
+    params: &[String],
+) -> Result<()> {
+    use rip_netlink::types::tc::qdisc::TcRateSpec;
+    use rip_netlink::types::tc::qdisc::htb::*;
+
+    let mut rate64: u64 = 0;
+    let mut ceil64: u64 = 0;
+    let mut burst: u32 = 0;
+    let mut cburst: u32 = 0;
+    let mut prio: u32 = 0;
+    let mut quantum: u32 = 0;
+    let mut mtu: u32 = 1600;
+    let mut mpu: u16 = 0;
+    let mut overhead: u16 = 0;
+
+    let mut i = 0;
+    while i < params.len() {
+        match params[i].as_str() {
+            "rate" if i + 1 < params.len() => {
+                rate64 = rip_lib::parse::get_rate(&params[i + 1])
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid rate".into()))?;
+                i += 2;
+            }
+            "ceil" if i + 1 < params.len() => {
+                ceil64 = rip_lib::parse::get_rate(&params[i + 1])
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid ceil".into()))?;
+                i += 2;
+            }
+            "burst" | "buffer" | "maxburst" if i + 1 < params.len() => {
+                burst = rip_lib::parse::get_size(&params[i + 1])
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid burst".into()))?
+                    as u32;
+                i += 2;
+            }
+            "cburst" | "cbuffer" | "cmaxburst" if i + 1 < params.len() => {
+                cburst = rip_lib::parse::get_size(&params[i + 1])
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid cburst".into()))?
+                    as u32;
+                i += 2;
+            }
+            "prio" if i + 1 < params.len() => {
+                prio = params[i + 1]
+                    .parse()
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid prio".into()))?;
+                i += 2;
+            }
+            "quantum" if i + 1 < params.len() => {
+                quantum = rip_lib::parse::get_size(&params[i + 1])
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid quantum".into()))?
+                    as u32;
+                i += 2;
+            }
+            "mtu" if i + 1 < params.len() => {
+                mtu = params[i + 1]
+                    .parse()
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid mtu".into()))?;
+                i += 2;
+            }
+            "mpu" if i + 1 < params.len() => {
+                mpu = params[i + 1]
+                    .parse()
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid mpu".into()))?;
+                i += 2;
+            }
+            "overhead" if i + 1 < params.len() => {
+                overhead = params[i + 1]
+                    .parse()
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid overhead".into()))?;
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    // Rate is required
+    if rate64 == 0 {
+        return Err(rip_netlink::Error::InvalidMessage(
+            "htb class: rate is required".into(),
+        ));
+    }
+
+    // Default ceil to rate if not specified
+    if ceil64 == 0 {
+        ceil64 = rate64;
+    }
+
+    // Get HZ for time calculations (typically 100 or 1000 on Linux)
+    // We use 1000 as a reasonable default
+    let hz: u64 = 1000;
+
+    // Compute burst from rate if not specified
+    // burst = rate / hz + mtu (ensures at least one packet can be sent)
+    if burst == 0 {
+        burst = (rate64 / hz + mtu as u64) as u32;
+    }
+
+    // Compute cburst from ceil if not specified
+    if cburst == 0 {
+        cburst = (ceil64 / hz + mtu as u64) as u32;
+    }
+
+    // Calculate buffer time (in ticks): buffer = burst * TIME_UNITS_PER_SEC / rate
+    // TIME_UNITS_PER_SEC is typically 1,000,000 (microseconds)
+    let buffer = if rate64 > 0 {
+        ((burst as u64 * 1_000_000) / rate64) as u32
+    } else {
+        burst
+    };
+
+    let cbuffer = if ceil64 > 0 {
+        ((cburst as u64 * 1_000_000) / ceil64) as u32
+    } else {
+        cburst
+    };
+
+    // Build the tc_htb_opt structure
+    let mut opt = TcHtbOpt::default();
+
+    // Set rate - if > 4GB, use ~0U as marker
+    opt.rate = TcRateSpec {
+        rate: if rate64 >= (1u64 << 32) {
+            u32::MAX
+        } else {
+            rate64 as u32
+        },
+        mpu,
+        overhead,
+        ..Default::default()
+    };
+
+    // Set ceil
+    opt.ceil = TcRateSpec {
+        rate: if ceil64 >= (1u64 << 32) {
+            u32::MAX
+        } else {
+            ceil64 as u32
+        },
+        mpu,
+        overhead,
+        ..Default::default()
+    };
+
+    opt.buffer = buffer;
+    opt.cbuffer = cbuffer;
+    opt.quantum = quantum;
+    opt.prio = prio;
+    // level is set by kernel
+
+    // Add 64-bit rate if needed
+    if rate64 >= (1u64 << 32) {
+        builder.append_attr(TCA_HTB_RATE64, &rate64.to_ne_bytes());
+    }
+
+    if ceil64 >= (1u64 << 32) {
+        builder.append_attr(TCA_HTB_CEIL64, &ceil64.to_ne_bytes());
+    }
+
+    // Add the main parameters structure
+    builder.append_attr(TCA_HTB_PARMS, opt.as_bytes());
+
+    // Add rate tables (rtab and ctab)
+    // These are 256-entry tables for fast rate calculations
+    // Each entry is the time to transmit a packet of that size
+    // For simplicity, we compute basic linear tables
+    let rtab = compute_rate_table(rate64, mtu);
+    let ctab = compute_rate_table(ceil64, mtu);
+
+    builder.append_attr(TCA_HTB_RTAB, &rtab);
+    builder.append_attr(TCA_HTB_CTAB, &ctab);
+
+    Ok(())
+}
+
+/// Compute a rate table for HTB.
+///
+/// The rate table contains 256 entries, each representing the time (in ticks)
+/// to transmit a packet of a given size. The size is determined by cell_log.
+fn compute_rate_table(rate: u64, mtu: u32) -> [u8; 1024] {
+    let mut table = [0u8; 1024];
+
+    if rate == 0 {
+        return table;
+    }
+
+    // Compute cell_log - log2 of cell size
+    // cell_log determines how we map packet sizes to table entries
+    // For simplicity, use cell_log = 3 (cell size = 8 bytes)
+    let cell_log: u32 = 3;
+    let cell_size = 1u32 << cell_log;
+
+    // TIME_UNITS_PER_SEC is 1,000,000 (microseconds)
+    let time_units_per_sec: u64 = 1_000_000;
+
+    for i in 0..256 {
+        // Size for this entry
+        let size = ((i + 1) as u32) * cell_size;
+        let size = size.min(mtu);
+
+        // Time to transmit this size at the given rate
+        // time = size * TIME_UNITS_PER_SEC / rate
+        let time = (size as u64 * time_units_per_sec) / rate;
+        let time = time.min(u32::MAX as u64) as u32;
+
+        // Store as little-endian u32
+        let offset = i * 4;
+        table[offset..offset + 4].copy_from_slice(&time.to_ne_bytes());
+    }
+
+    table
 }
