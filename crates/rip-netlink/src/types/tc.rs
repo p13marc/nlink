@@ -464,6 +464,210 @@ pub mod qdisc {
         }
     }
 
+    /// Netem qdisc-specific attributes.
+    pub mod netem {
+        pub const TCA_NETEM_UNSPEC: u16 = 0;
+        pub const TCA_NETEM_CORR: u16 = 1;
+        pub const TCA_NETEM_DELAY_DIST: u16 = 2;
+        pub const TCA_NETEM_REORDER: u16 = 3;
+        pub const TCA_NETEM_CORRUPT: u16 = 4;
+        pub const TCA_NETEM_LOSS: u16 = 5;
+        pub const TCA_NETEM_RATE: u16 = 6;
+        pub const TCA_NETEM_ECN: u16 = 7;
+        pub const TCA_NETEM_RATE64: u16 = 8;
+        pub const TCA_NETEM_PAD: u16 = 9;
+        pub const TCA_NETEM_LATENCY64: u16 = 10;
+        pub const TCA_NETEM_JITTER64: u16 = 11;
+        pub const TCA_NETEM_SLOT: u16 = 12;
+        pub const TCA_NETEM_SLOT_DIST: u16 = 13;
+        pub const TCA_NETEM_PRNG_SEED: u16 = 14;
+
+        /// Netem loss model types.
+        pub const NETEM_LOSS_UNSPEC: u16 = 0;
+        pub const NETEM_LOSS_GI: u16 = 1; // General Intuitive - 4 state model
+        pub const NETEM_LOSS_GE: u16 = 2; // Gilbert Elliot model
+
+        /// Netem basic options (struct tc_netem_qopt).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcNetemQopt {
+            /// Added delay in microseconds.
+            pub latency: u32,
+            /// FIFO limit (packets).
+            pub limit: u32,
+            /// Random packet loss (0=none, ~0=100%).
+            pub loss: u32,
+            /// Re-ordering gap (0 for none).
+            pub gap: u32,
+            /// Random packet duplication (0=none, ~0=100%).
+            pub duplicate: u32,
+            /// Random jitter in latency (microseconds).
+            pub jitter: u32,
+        }
+
+        impl TcNetemQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn new() -> Self {
+                Self {
+                    limit: 1000,
+                    ..Default::default()
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+
+        /// Netem correlation structure (struct tc_netem_corr).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcNetemCorr {
+            /// Delay correlation.
+            pub delay_corr: u32,
+            /// Packet loss correlation.
+            pub loss_corr: u32,
+            /// Duplicate correlation.
+            pub dup_corr: u32,
+        }
+
+        impl TcNetemCorr {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+
+        /// Netem reorder structure (struct tc_netem_reorder).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcNetemReorder {
+            pub probability: u32,
+            pub correlation: u32,
+        }
+
+        impl TcNetemReorder {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+
+        /// Netem corrupt structure (struct tc_netem_corrupt).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcNetemCorrupt {
+            pub probability: u32,
+            pub correlation: u32,
+        }
+
+        impl TcNetemCorrupt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+
+        /// Netem rate structure (struct tc_netem_rate).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcNetemRate {
+            /// Rate in bytes/s.
+            pub rate: u32,
+            /// Packet overhead.
+            pub packet_overhead: i32,
+            /// Cell size.
+            pub cell_size: u32,
+            /// Cell overhead.
+            pub cell_overhead: i32,
+        }
+
+        impl TcNetemRate {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+
+        /// Netem slot structure (struct tc_netem_slot).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcNetemSlot {
+            /// Minimum delay in nanoseconds.
+            pub min_delay: i64,
+            /// Maximum delay in nanoseconds.
+            pub max_delay: i64,
+            /// Maximum packets per slot.
+            pub max_packets: i32,
+            /// Maximum bytes per slot.
+            pub max_bytes: i32,
+            /// Distribution delay in nanoseconds.
+            pub dist_delay: i64,
+            /// Distribution jitter in nanoseconds.
+            pub dist_jitter: i64,
+        }
+
+        impl TcNetemSlot {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+
+        /// Gilbert-Intuitive loss model (4 state) (struct tc_netem_gimodel).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcNetemGiModel {
+            pub p13: u32,
+            pub p31: u32,
+            pub p32: u32,
+            pub p14: u32,
+            pub p23: u32,
+        }
+
+        impl TcNetemGiModel {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+
+        /// Gilbert-Elliot loss model (struct tc_netem_gemodel).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcNetemGeModel {
+            pub p: u32,
+            pub r: u32,
+            pub h: u32,
+            pub k1: u32,
+        }
+
+        impl TcNetemGeModel {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+
+        /// Convert percentage (0.0-100.0) to netem probability (0 to u32::MAX).
+        pub fn percent_to_prob(percent: f64) -> u32 {
+            ((percent / 100.0) * (u32::MAX as f64)) as u32
+        }
+
+        /// Convert netem probability to percentage.
+        pub fn prob_to_percent(prob: u32) -> f64 {
+            (prob as f64 / u32::MAX as f64) * 100.0
+        }
+    }
+
     /// Rate specification (struct tc_ratespec).
     #[repr(C)]
     #[derive(Debug, Clone, Copy, Default)]
