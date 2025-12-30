@@ -140,12 +140,30 @@ tc qdisc add dev eth0 --parent root sfq perturb 10 limit 127
 tc qdisc replace dev eth0 --parent root fq_codel limit 5000
 tc qdisc change dev eth0 --parent root fq_codel target 10ms
 
+# Netem - network emulation (delay, loss, reorder, corrupt, duplicate)
+tc qdisc add dev eth0 --parent root netem delay 100ms 10ms 25%
+tc qdisc add dev eth0 --parent root netem loss 1% 25%
+tc qdisc add dev eth0 --parent root netem duplicate 1%
+tc qdisc add dev eth0 --parent root netem corrupt 0.1%
+tc qdisc add dev eth0 --parent root netem reorder 25% 50% gap 5
+tc qdisc add dev eth0 --parent root netem rate 1mbit
+tc qdisc add dev eth0 --parent root netem delay 100ms loss 1% duplicate 0.5%
+
 # Delete qdiscs
 tc qdisc del dev eth0 --parent root
 
 # List classes
 tc class show
 tc class show dev eth0
+
+# Add HTB classes with rate limiting
+tc class add dev eth0 --parent 1: --classid 1:10 htb rate 10mbit ceil 100mbit prio 1
+tc class add dev eth0 --parent 1: --classid 1:20 htb rate 5mbit ceil 50mbit burst 15k
+
+# Monitor TC events
+tc monitor all
+tc monitor qdisc class --timestamp
+tc monitor -j  # JSON output
 
 # List filters
 tc filter show
@@ -181,14 +199,14 @@ This is an early-stage project. Currently implemented:
 - [x] Policy routing rules (ip rule show, add, del, flush)
 - [x] Event monitoring (ip monitor) for link, address, route, neighbor changes
 - [x] TC qdisc operations (show, add, del, replace, change)
-- [x] TC qdisc types: fq_codel, htb, tbf, prio, sfq (with full parameter support)
-- [x] TC class/filter operations (show, add, del)
+- [x] TC qdisc types: fq_codel, htb, tbf, prio, sfq, netem (with full parameter support)
+- [x] TC netem qdisc (delay, loss, reorder, corrupt, duplicate, rate limiting)
+- [x] TC class operations with HTB parameters (rate, ceil, burst, prio, quantum)
+- [x] TC monitor for qdisc/class/filter events
+- [x] TC filter operations (show, add, del)
 
 Planned:
 
-- [ ] TC monitor for qdisc/class/filter events
-- [ ] TC netem qdisc (delay, loss, reorder, corrupt, duplicate)
-- [ ] TC class parameters for htb (rate, ceil, burst, prio)
 - [ ] TC filter types (u32, flower, basic, fw)
 - [ ] TC actions (mirred, police, gact)
 - [ ] Network namespace support (ip netns)

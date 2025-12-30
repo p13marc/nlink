@@ -37,7 +37,7 @@ cargo test -p rip-netlink      # Test specific crate
   - `route.rs` - Routing (RTA_* attributes)
   - `neigh.rs` - Neighbor/ARP (NDA_* attributes)
   - `rule.rs` - Policy routing rules (FRA_* attributes, FibRuleHdr)
-  - `tc.rs` - Traffic control (TCA_* attributes, qdisc structs for htb/tbf/fq_codel/prio/sfq)
+  - `tc.rs` - Traffic control (TCA_* attributes, qdisc structs for htb/tbf/fq_codel/prio/sfq/netem)
 
 **rip-lib** (`crates/rip-lib/`) - Shared utilities:
 - `addr.rs` - IP/MAC address parsing and formatting
@@ -57,9 +57,10 @@ cargo test -p rip-netlink      # Test specific crate
   - `ip rule` - Policy routing rules (show, add, del, flush)
   - `ip monitor` - Real-time netlink event streaming (link, addr, route, neigh)
 - `bins/tc/` - Traffic control:
-  - `tc qdisc` - Qdisc management with htb, fq_codel, tbf, prio, sfq support
-  - `tc class` - Class management (show, add, del)
+  - `tc qdisc` - Qdisc management with htb, fq_codel, tbf, prio, sfq, netem support
+  - `tc class` - Class management with HTB parameters (rate, ceil, burst, prio, quantum)
   - `tc filter` - Filter management (show, add, del)
+  - `tc monitor` - Real-time TC event streaming (qdisc, class, filter changes)
 
 ## Netlink Message Flow
 
