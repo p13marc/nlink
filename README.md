@@ -186,6 +186,8 @@ This is an early-stage project. Currently implemented:
 
 Planned:
 
+- [ ] TC monitor for qdisc/class/filter events
+- [ ] TC netem qdisc (delay, loss, reorder, corrupt, duplicate)
 - [ ] TC class parameters for htb (rate, ceil, burst, prio)
 - [ ] TC filter types (u32, flower, basic, fw)
 - [ ] TC actions (mirred, police, gact)
