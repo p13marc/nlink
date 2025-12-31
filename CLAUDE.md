@@ -52,10 +52,15 @@ cargo test -p rip-netlink      # Test specific crate
 - `bins/ip/` - Network configuration:
   - `ip link` - Interface management (show, add, del, set) with 15+ link types
   - `ip addr` - Address management (show, add, del)
-  - `ip route` - Routing table management (show, add, del, replace)
-  - `ip neigh` - Neighbor/ARP cache (show, add, del, replace)
+  - `ip route` - Routing table management (show, add, del, replace, get)
+  - `ip neigh` - Neighbor/ARP cache (show, add, del, replace, flush)
   - `ip rule` - Policy routing rules (show, add, del, flush)
   - `ip monitor` - Real-time netlink event streaming (link, addr, route, neigh)
+  - `ip netns` - Network namespace management (list, add, del, exec, identify, pids, monitor)
+  - `ip tunnel` - Tunnel management (show, add, del, change) for GRE, IPIP, SIT, VTI
+  - `ip maddress` - Multicast address display
+  - `ip vrf` - VRF management (show, exec, identify, pids)
+  - `ip xfrm` - IPSec state/policy management (show, count, flush)
 - `bins/tc/` - Traffic control:
   - `tc qdisc` - Qdisc management with htb, fq_codel, tbf, prio, sfq, netem support
   - `tc class` - Class management with HTB parameters (rate, ceil, burst, prio, quantum)

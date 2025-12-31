@@ -114,10 +114,32 @@ ip rule add --from 10.0.0.0/8 --table 100 --priority 1000
 ip rule add --fwmark 0x100 --table 200
 ip rule del --priority 1000
 
+# Query route for a destination
+ip route get 8.8.8.8
+
+# Flush neighbor entries
+ip neigh flush dev eth0
+
 # Monitor netlink events (link, address, route, neighbor changes)
 ip monitor all
 ip monitor link address --timestamp
 ip monitor -j  # JSON output
+
+# Multicast addresses
+ip maddress show
+ip maddress show dev eth0
+
+# VRF (Virtual Routing and Forwarding)
+ip vrf show
+ip vrf exec vrf0 ping 10.0.0.1
+ip vrf identify $$
+ip vrf pids vrf0
+
+# XFRM (IPSec)
+ip xfrm state show
+ip xfrm state count
+ip xfrm policy show
+ip xfrm policy count
 
 # Network namespaces
 ip netns list
@@ -225,6 +247,11 @@ This is an early-stage project. Currently implemented:
 
 - [x] Network namespace support (ip netns list, add, del, exec, identify, pids, monitor, set, attach)
 - [x] Tunnel management (ip tunnel show, add, del, change) for GRE, IPIP, SIT, VTI
+- [x] Route lookup (ip route get)
+- [x] Neighbor flush (ip neigh flush)
+- [x] Multicast addresses (ip maddress show)
+- [x] VRF management (ip vrf show, exec, identify, pids)
+- [x] XFRM/IPSec framework (ip xfrm state/policy show, count)
 
 ## License
 
