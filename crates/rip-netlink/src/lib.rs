@@ -48,6 +48,7 @@ pub mod message;
 pub mod messages;
 pub mod parse;
 mod socket;
+pub mod tc_options;
 pub mod types;
 
 pub use attr::{AttrIter, NlAttr};
