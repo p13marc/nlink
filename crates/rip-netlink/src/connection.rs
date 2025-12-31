@@ -3,8 +3,9 @@
 use crate::builder::MessageBuilder;
 use crate::error::{Error, Result};
 use crate::message::{
-    MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_MULTI, NLM_F_REQUEST, NlMsgError, NlMsgHdr, NlMsgType,
+    MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgError, NlMsgHdr,
 };
+use crate::parse::FromNetlink;
 use crate::socket::{NetlinkSocket, Protocol};
 
 /// High-level netlink connection.
@@ -159,6 +160,55 @@ impl Connection {
     /// Receive the next event message (for monitoring).
     pub async fn recv_event(&self) -> Result<Vec<u8>> {
         self.socket.recv_msg().await
+    }
+
+    // ========================================================================
+    // Strongly-typed API
+    // ========================================================================
+
+    /// Send a dump request and parse all responses into typed messages.
+    ///
+    /// This is a convenience method that combines `dump()` with parsing.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use rip_netlink::messages::AddressMessage;
+    /// use rip_netlink::message::NlMsgType;
+    ///
+    /// let addresses: Vec<AddressMessage> = conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
+    /// for addr in addresses {
+    ///     println!("{}: {:?}", addr.ifindex(), addr.address);
+    /// }
+    /// ```
+    pub async fn dump_typed<T: FromNetlink>(&self, msg_type: u16) -> Result<Vec<T>> {
+        let builder = dump_request(msg_type);
+        let responses = self.dump(builder).await?;
+
+        let mut parsed = Vec::with_capacity(responses.len());
+        for response in responses {
+            if response.len() < NLMSG_HDRLEN {
+                continue;
+            }
+            let payload = &response[NLMSG_HDRLEN..];
+            if let Ok(msg) = T::from_bytes(payload) {
+                parsed.push(msg);
+            }
+        }
+
+        Ok(parsed)
+    }
+
+    /// Parse a single response into a typed message.
+    pub fn parse_response<T: FromNetlink>(&self, response: &[u8]) -> Result<T> {
+        if response.len() < NLMSG_HDRLEN {
+            return Err(Error::Truncated {
+                expected: NLMSG_HDRLEN,
+                actual: response.len(),
+            });
+        }
+        let payload = &response[NLMSG_HDRLEN..];
+        T::from_bytes(payload)
     }
 }
 
