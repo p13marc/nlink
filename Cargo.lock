@@ -474,6 +474,7 @@ dependencies = [
  "bytes",
  "libc",
  "netlink-sys",
+ "rip-lib",
  "serde_json",
  "thiserror",
  "tokio",
