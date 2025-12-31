@@ -7,7 +7,9 @@ use rip_netlink::parse::FromNetlink;
 use rip_netlink::rtnetlink_groups::*;
 use rip_netlink::types::tc::tc_handle;
 use rip_netlink::{Connection, Protocol, Result};
-use rip_output::{OutputFormat, OutputOptions};
+use rip_output::{
+    MonitorConfig, OutputFormat, OutputOptions, print_monitor_start, write_timestamp,
+};
 use std::io::{self, Write};
 
 /// Event types that can be monitored.
@@ -38,14 +40,22 @@ impl MonitorCmd {
     pub async fn run(&self, format: OutputFormat, opts: &OutputOptions) -> Result<()> {
         let mut conn = Connection::new(Protocol::Route)?;
 
+        // Build monitor config
+        let config = MonitorConfig::new()
+            .with_timestamp(self.timestamp)
+            .with_format(format)
+            .with_opts(*opts);
+
         // Subscribe to TC multicast group
         conn.subscribe(RTNLGRP_TC)?;
 
         let mut stdout = io::stdout().lock();
 
-        if format == OutputFormat::Text {
-            writeln!(stdout, "Monitoring TC events (Ctrl+C to stop)...")?;
-        }
+        print_monitor_start(
+            &mut stdout,
+            &config,
+            "Monitoring TC events (Ctrl+C to stop)...",
+        )?;
 
         // Event loop
         loop {
@@ -82,12 +92,7 @@ impl MonitorCmd {
                     Err(_) => continue,
                 };
 
-                if self.timestamp {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default();
-                    write!(stdout, "[{}.{:03}] ", now.as_secs(), now.subsec_millis())?;
-                }
+                write_timestamp(&mut stdout, &config)?;
 
                 match format {
                     OutputFormat::Text => {
@@ -125,9 +130,10 @@ fn print_event_text(
     write!(out, "{} {} ", action, object)?;
 
     if let Some(kind) = tc_msg.kind()
-        && !kind.is_empty() {
-            write!(out, "{} ", kind)?;
-        }
+        && !kind.is_empty()
+    {
+        write!(out, "{} ", kind)?;
+    }
 
     write!(out, "{} ", tc_handle::format(tc_msg.handle()))?;
     write!(out, "dev {} ", dev)?;

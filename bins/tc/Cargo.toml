@@ -13,6 +13,7 @@ path = "src/main.rs"
 rip-netlink = { workspace = true }
 rip-lib = { workspace = true }
 rip-output = { workspace = true }
+rip-tclib = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

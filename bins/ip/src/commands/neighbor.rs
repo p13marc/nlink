@@ -8,7 +8,7 @@ use rip_netlink::messages::NeighborMessage;
 use rip_netlink::parse::FromNetlink;
 use rip_netlink::types::neigh::{NdMsg, NdaAttr, nud, nud_state_name};
 use rip_netlink::{Connection, Result, connection::dump_request};
-use rip_output::{OutputFormat, OutputOptions};
+use rip_output::{OutputFormat, OutputOptions, print_items};
 use std::io::{self, Write};
 use std::net::IpAddr;
 
@@ -141,9 +141,7 @@ impl NeighborCmd {
 
         // Get device index if filtering by name
         let filter_index = if let Some(dev_name) = dev {
-            Some(rip_lib::ifname::name_to_index(dev_name).map_err(|e| {
-                rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-            })?)
+            Some(rip_lib::get_ifindex(dev_name).map_err(rip_netlink::Error::InvalidMessage)? as u32)
         } else {
             None
         };
@@ -159,36 +157,21 @@ impl NeighborCmd {
             if let Ok(neigh) = NeighborMessage::from_bytes(payload) {
                 // Filter by device if specified
                 if let Some(idx) = filter_index
-                    && neigh.ifindex() != idx {
-                        continue;
-                    }
+                    && neigh.ifindex() != idx
+                {
+                    continue;
+                }
                 // Filter by family if specified
                 if let Some(fam) = family
-                    && neigh.family() != fam {
-                        continue;
-                    }
+                    && neigh.family() != fam
+                {
+                    continue;
+                }
                 neighbors.push(neigh);
             }
         }
 
-        let mut stdout = io::stdout().lock();
-
-        match format {
-            OutputFormat::Text => {
-                for neigh in &neighbors {
-                    print_neigh_text(&mut stdout, neigh, opts)?;
-                }
-            }
-            OutputFormat::Json => {
-                let json: Vec<_> = neighbors.iter().map(neigh_to_json).collect();
-                if opts.pretty {
-                    serde_json::to_writer_pretty(&mut stdout, &json)?;
-                } else {
-                    serde_json::to_writer(&mut stdout, &json)?;
-                }
-                writeln!(stdout)?;
-            }
-        }
+        print_items(&neighbors, format, opts, neigh_to_json, print_neigh_text)?;
 
         Ok(())
     }
@@ -212,9 +195,7 @@ impl NeighborCmd {
         let mac = parse_mac(lladdr)
             .map_err(|e| rip_netlink::Error::InvalidMessage(format!("invalid MAC: {}", e)))?;
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)? as u32;
 
         let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
 
@@ -277,9 +258,7 @@ impl NeighborCmd {
         let addr = parse_addr(address)
             .map_err(|e| rip_netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)? as u32;
 
         let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
 
@@ -346,8 +325,8 @@ fn neigh_to_json(neigh: &NeighborMessage) -> serde_json::Value {
 }
 
 /// Print neighbor in text format.
-fn print_neigh_text<W: Write>(
-    w: &mut W,
+fn print_neigh_text(
+    w: &mut io::StdoutLock<'_>,
     neigh: &NeighborMessage,
     _opts: &OutputOptions,
 ) -> io::Result<()> {

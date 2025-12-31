@@ -5,7 +5,7 @@ use rip_netlink::message::NlMsgType;
 use rip_netlink::messages::TcMessage;
 use rip_netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
 use rip_netlink::{Connection, Result};
-use rip_output::{OutputFormat, OutputOptions};
+use rip_output::{OutputFormat, OutputOptions, print_items};
 use std::io::{self, Write};
 
 #[derive(Args)]
@@ -197,9 +197,7 @@ impl ClassCmd {
             ));
         }
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })? as i32;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)?;
 
         let parent_filter = parent.and_then(tc_handle::parse);
         let classid_filter = classid.and_then(tc_handle::parse);
@@ -237,24 +235,7 @@ impl ClassCmd {
             })
             .collect();
 
-        let mut stdout = io::stdout().lock();
-
-        match format {
-            OutputFormat::Text => {
-                for class in &classes {
-                    print_class_text(&mut stdout, class, opts)?;
-                }
-            }
-            OutputFormat::Json => {
-                let json: Vec<_> = classes.iter().map(class_to_json).collect();
-                if opts.pretty {
-                    serde_json::to_writer_pretty(&mut stdout, &json)?;
-                } else {
-                    serde_json::to_writer(&mut stdout, &json)?;
-                }
-                writeln!(stdout)?;
-            }
-        }
+        print_items(&classes, format, opts, class_to_json, print_class_text)?;
 
         Ok(())
     }
@@ -269,9 +250,7 @@ impl ClassCmd {
     ) -> Result<()> {
         use rip_netlink::connection::create_request;
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)?;
 
         let parent_handle = tc_handle::parse(parent).ok_or_else(|| {
             rip_netlink::Error::InvalidMessage(format!("invalid parent handle: {}", parent))
@@ -307,9 +286,7 @@ impl ClassCmd {
     async fn del(conn: &Connection, dev: &str, parent: &str, classid: &str) -> Result<()> {
         use rip_netlink::connection::ack_request;
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)?;
 
         let parent_handle = tc_handle::parse(parent).ok_or_else(|| {
             rip_netlink::Error::InvalidMessage(format!("invalid parent handle: {}", parent))
@@ -342,9 +319,7 @@ impl ClassCmd {
     ) -> Result<()> {
         use rip_netlink::connection::ack_request;
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)?;
 
         let parent_handle = tc_handle::parse(parent).ok_or_else(|| {
             rip_netlink::Error::InvalidMessage(format!("invalid parent handle: {}", parent))
@@ -387,9 +362,7 @@ impl ClassCmd {
     ) -> Result<()> {
         use rip_netlink::connection::replace_request;
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)?;
 
         let parent_handle = tc_handle::parse(parent).ok_or_else(|| {
             rip_netlink::Error::InvalidMessage(format!("invalid parent handle: {}", parent))
@@ -425,8 +398,7 @@ impl ClassCmd {
 
 /// Convert a TcMessage to JSON representation for class.
 fn class_to_json(class: &TcMessage) -> serde_json::Value {
-    let dev = rip_lib::ifname::index_to_name(class.ifindex() as u32)
-        .unwrap_or_else(|_| format!("if{}", class.ifindex()));
+    let dev = rip_lib::get_ifname_or_index(class.ifindex());
 
     serde_json::json!({
         "dev": dev,
@@ -443,13 +415,12 @@ fn class_to_json(class: &TcMessage) -> serde_json::Value {
 }
 
 /// Print class in text format.
-fn print_class_text<W: Write>(
-    w: &mut W,
+fn print_class_text(
+    w: &mut io::StdoutLock<'_>,
     class: &TcMessage,
     opts: &OutputOptions,
 ) -> io::Result<()> {
-    let dev = rip_lib::ifname::index_to_name(class.ifindex() as u32)
-        .unwrap_or_else(|_| format!("if{}", class.ifindex()));
+    let dev = rip_lib::get_ifname_or_index(class.ifindex());
 
     write!(
         w,

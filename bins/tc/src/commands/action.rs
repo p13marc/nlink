@@ -7,7 +7,6 @@
 //! - police: Rate limiting with token bucket
 
 use clap::{Args, Subcommand};
-use rip_lib::ifname::name_to_index;
 use rip_lib::parse::get_rate;
 use rip_netlink::attr::AttrIter;
 use rip_netlink::connection::dump_request;
@@ -442,12 +441,9 @@ fn add_mirred_options(builder: &mut MessageBuilder, params: &[String]) -> Result
             "dev" => {
                 i += 1;
                 if i < params.len() {
-                    ifindex = name_to_index(&params[i]).map_err(|_| {
-                        rip_netlink::Error::InvalidMessage(format!(
-                            "device not found: {}",
-                            params[i]
-                        ))
-                    })?;
+                    ifindex = rip_lib::get_ifindex(&params[i])
+                        .map(|idx| idx as u32)
+                        .map_err(rip_netlink::Error::InvalidMessage)?;
                 }
             }
             "index" => {
@@ -465,9 +461,9 @@ fn add_mirred_options(builder: &mut MessageBuilder, params: &[String]) -> Result
             _ => {
                 // Try to parse as device name if no dev keyword
                 if ifindex == 0
-                    && let Ok(idx) = name_to_index(&params[i])
+                    && let Ok(idx) = rip_lib::get_ifindex(&params[i])
                 {
-                    ifindex = idx;
+                    ifindex = idx as u32;
                 }
             }
         }

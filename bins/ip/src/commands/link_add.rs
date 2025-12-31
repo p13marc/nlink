@@ -375,9 +375,8 @@ fn build_parent_link(builder: &mut MessageBuilder, link_type: &LinkAddType) -> R
     };
 
     if let Some(name) = link_name {
-        let idx = rip_lib::ifname::name_to_index(name).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("parent device not found: {}", e))
-        })?;
+        let idx =
+            rip_lib::get_ifindex(name).map_err(rip_netlink::Error::InvalidMessage)? as u32;
         builder.append_attr_u32(IflaAttr::Link as u16, idx);
     }
 
@@ -592,9 +591,10 @@ fn build_type_specific_data(builder: &mut MessageBuilder, link_type: &LinkAddTyp
             }
             // IFLA_GRE_LOCAL = 1
             if let Some(addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
-                    builder.append_attr(1, &ip.octets());
-                }
+                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
+            {
+                builder.append_attr(1, &ip.octets());
+            }
             // IFLA_GRE_TTL = 4
             if let Some(t) = ttl {
                 builder.append_attr_u8(4, *t);
@@ -624,9 +624,10 @@ fn build_type_specific_data(builder: &mut MessageBuilder, link_type: &LinkAddTyp
             }
             // IFLA_IPTUN_LOCAL = 1
             if let Some(addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
-                    builder.append_attr(1, &ip.octets());
-                }
+                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
+            {
+                builder.append_attr(1, &ip.octets());
+            }
             // IFLA_IPTUN_TTL = 4
             if let Some(t) = ttl {
                 builder.append_attr_u8(4, *t);

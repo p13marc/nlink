@@ -7,7 +7,7 @@ use rip_netlink::message::NlMsgType;
 use rip_netlink::messages::LinkMessage;
 use rip_netlink::types::link::{IfInfoMsg, IflaAttr, iff};
 use rip_netlink::{Connection, Result, connection::ack_request};
-use rip_output::{OutputFormat, OutputOptions};
+use rip_output::{OutputFormat, OutputOptions, print_items};
 use std::io::{self, Write};
 
 use super::link_add::{LinkAddType, add_link};
@@ -128,34 +128,13 @@ impl LinkCmd {
             })
             .collect();
 
-        let mut stdout = io::stdout().lock();
-
-        match format {
-            OutputFormat::Text => {
-                for link in &links {
-                    print_link_text(&mut stdout, link, opts)?;
-                }
-            }
-            OutputFormat::Json => {
-                let json: Vec<_> = links.iter().map(link_to_json).collect();
-                if opts.pretty {
-                    serde_json::to_writer_pretty(&mut stdout, &json)?;
-                } else {
-                    serde_json::to_writer(&mut stdout, &json)?;
-                }
-                writeln!(stdout)?;
-            }
-        }
+        print_items(&links, format, opts, link_to_json, print_link_text)?;
 
         Ok(())
     }
 
     async fn del(conn: &Connection, dev: &str) -> Result<()> {
-        use rip_lib::ifname::name_to_index;
-
-        let ifindex = name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)? as u32;
 
         let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
@@ -180,11 +159,7 @@ impl LinkCmd {
         master: Option<String>,
         nomaster: bool,
     ) -> Result<()> {
-        use rip_lib::ifname::name_to_index;
-
-        let ifindex = name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)? as u32;
 
         let mut ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
@@ -225,9 +200,8 @@ impl LinkCmd {
 
         // Set or clear master
         if let Some(master_name) = master {
-            let master_idx = name_to_index(&master_name).map_err(|e| {
-                rip_netlink::Error::InvalidMessage(format!("master device not found: {}", e))
-            })?;
+            let master_idx = rip_lib::get_ifindex(&master_name)
+                .map_err(rip_netlink::Error::InvalidMessage)? as u32;
             builder.append_attr_u32(IflaAttr::Master as u16, master_idx);
         } else if nomaster {
             builder.append_attr_u32(IflaAttr::Master as u16, 0);
@@ -258,9 +232,10 @@ fn link_to_json(link: &LinkMessage) -> serde_json::Value {
         obj["master"] = serde_json::json!(master);
     }
     if let Some(ref info) = link.link_info
-        && let Some(ref kind) = info.kind {
-            obj["link_kind"] = serde_json::json!(kind);
-        }
+        && let Some(ref kind) = info.kind
+    {
+        obj["link_kind"] = serde_json::json!(kind);
+    }
     if let Some(txqlen) = link.txqlen {
         obj["txqlen"] = serde_json::json!(txqlen);
     }
@@ -292,8 +267,8 @@ fn link_type_name(ifi_type: u16) -> &'static str {
 }
 
 /// Print link in text format.
-fn print_link_text<W: Write>(
-    w: &mut W,
+fn print_link_text(
+    w: &mut io::StdoutLock<'_>,
     link: &LinkMessage,
     _opts: &OutputOptions,
 ) -> io::Result<()> {
@@ -302,9 +277,10 @@ fn print_link_text<W: Write>(
     // Build flags string, adding NO-CARRIER if carrier is false
     let mut flags = rip_lib::names::format_link_flags(link.flags());
     if let Some(false) = link.carrier
-        && !link.is_loopback() {
-            flags = format!("NO-CARRIER,{}", flags);
-        }
+        && !link.is_loopback()
+    {
+        flags = format!("NO-CARRIER,{}", flags);
+    }
 
     let mtu = link.mtu.unwrap_or(0);
     let qdisc = link.qdisc.as_deref().unwrap_or("noqueue");
@@ -331,9 +307,10 @@ fn print_link_text<W: Write>(
     }
 
     if let Some(master) = link.master
-        && let Ok(master_name) = rip_lib::ifname::index_to_name(master) {
-            write!(w, " master {}", master_name)?;
-        }
+        && let Ok(master_name) = rip_lib::ifname::index_to_name(master)
+    {
+        write!(w, " master {}", master_name)?;
+    }
 
     writeln!(w)?;
 
@@ -343,13 +320,14 @@ fn print_link_text<W: Write>(
         write!(w, " {}", addr)?;
     }
     if let Some(ref brd) = link.broadcast
-        && brd.len() == 6 {
-            write!(
-                w,
-                " brd {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                brd[0], brd[1], brd[2], brd[3], brd[4], brd[5]
-            )?;
-        }
+        && brd.len() == 6
+    {
+        write!(
+            w,
+            " brd {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            brd[0], brd[1], brd[2], brd[3], brd[4], brd[5]
+        )?;
+    }
     // Show permanent address if different from current
     if let Some(ref perm) = link.perm_address {
         let perm_mac = if perm.len() == 6 {
@@ -361,18 +339,20 @@ fn print_link_text<W: Write>(
             None
         };
         if perm_mac.as_ref() != link.mac_address().as_ref()
-            && let Some(ref perm_str) = perm_mac {
-                write!(w, " permaddr {}", perm_str)?;
-            }
+            && let Some(ref perm_str) = perm_mac
+        {
+            write!(w, " permaddr {}", perm_str)?;
+        }
     }
     writeln!(w)?;
 
     // Show link kind if present
     if let Some(ref info) = link.link_info
         && let Some(ref kind) = info.kind
-            && !kind.is_empty() {
-                // This would be shown in more detailed output
-            }
+        && !kind.is_empty()
+    {
+        // This would be shown in more detailed output
+    }
 
     Ok(())
 }

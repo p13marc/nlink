@@ -400,8 +400,18 @@ dependencies = [
  "rip-lib",
  "rip-netlink",
  "rip-output",
+ "rip-tclib",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "rip-tclib"
+version = "0.1.0"
+dependencies = [
+ "rip-lib",
+ "rip-netlink",
+ "thiserror",
 ]
 
 [[package]]

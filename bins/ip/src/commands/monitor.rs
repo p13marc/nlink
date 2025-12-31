@@ -10,7 +10,9 @@ use rip_netlink::rtnetlink_groups::*;
 use rip_netlink::types::link::iff;
 use rip_netlink::types::neigh::nud_state_name;
 use rip_netlink::{Connection, Protocol, Result};
-use rip_output::{OutputFormat, OutputOptions};
+use rip_output::{
+    MonitorConfig, OutputFormat, OutputOptions, print_monitor_start, write_timestamp,
+};
 use std::io::{self, Write};
 
 /// Event types that can be monitored.
@@ -42,6 +44,12 @@ pub struct MonitorCmd {
 impl MonitorCmd {
     pub async fn run(&self, format: OutputFormat, opts: &OutputOptions) -> Result<()> {
         let mut conn = Connection::new(Protocol::Route)?;
+
+        // Build monitor config
+        let config = MonitorConfig::new()
+            .with_timestamp(self.timestamp)
+            .with_format(format)
+            .with_opts(*opts);
 
         // Determine which groups to subscribe to
         let monitor_link = self
@@ -79,9 +87,11 @@ impl MonitorCmd {
 
         let mut stdout = io::stdout().lock();
 
-        if format == OutputFormat::Text {
-            writeln!(stdout, "Monitoring netlink events (Ctrl+C to stop)...")?;
-        }
+        print_monitor_start(
+            &mut stdout,
+            &config,
+            "Monitoring netlink events (Ctrl+C to stop)...",
+        )?;
 
         // Event loop
         loop {
@@ -95,12 +105,7 @@ impl MonitorCmd {
                     continue;
                 }
 
-                if self.timestamp {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default();
-                    write!(stdout, "[{}.{:03}] ", now.as_secs(), now.subsec_millis())?;
-                }
+                write_timestamp(&mut stdout, &config)?;
 
                 match format {
                     OutputFormat::Text => {
@@ -149,8 +154,7 @@ impl MonitorCmd {
                         "ADDR DEL"
                     };
                     if let Some(address) = addr.primary_address() {
-                        let ifname = rip_lib::ifname::index_to_name(addr.ifindex())
-                            .unwrap_or_else(|_| format!("if{}", addr.ifindex()));
+                        let ifname = rip_lib::get_ifname_or_index(addr.ifindex() as i32);
                         writeln!(
                             out,
                             "{}: {}/{} dev {}",
@@ -181,10 +185,10 @@ impl MonitorCmd {
                         write!(out, " via {}", gw)?;
                     }
 
-                    if let Some(oif) = route.oif
-                        && let Ok(name) = rip_lib::ifname::index_to_name(oif) {
-                            write!(out, " dev {}", name)?;
-                        }
+                    if let Some(oif) = route.oif {
+                        let name = rip_lib::get_ifname_or_index(oif as i32);
+                        write!(out, " dev {}", name)?;
+                    }
 
                     writeln!(out)?;
                 }
@@ -198,8 +202,7 @@ impl MonitorCmd {
                     };
 
                     if let Some(ref dst) = neigh.destination {
-                        let ifname = rip_lib::ifname::index_to_name(neigh.ifindex())
-                            .unwrap_or_else(|_| format!("if{}", neigh.ifindex()));
+                        let ifname = rip_lib::get_ifname_or_index(neigh.ifindex() as i32);
 
                         write!(out, "{}: {} dev {}", action, dst, ifname)?;
 

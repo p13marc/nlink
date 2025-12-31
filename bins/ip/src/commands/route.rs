@@ -7,7 +7,7 @@ use rip_netlink::message::NlMsgType;
 use rip_netlink::messages::RouteMessage;
 use rip_netlink::types::route::{RouteProtocol, RouteScope, RtMsg, RtaAttr};
 use rip_netlink::{Connection, Result, connection::dump_request};
-use rip_output::{OutputFormat, OutputOptions};
+use rip_output::{OutputFormat, OutputOptions, print_items};
 use std::io::{self, Write};
 use std::net::IpAddr;
 
@@ -209,31 +209,15 @@ impl RouteCmd {
                 }
                 // Filter by family
                 if let Some(fam) = family
-                    && route.family() != fam {
-                        continue;
-                    }
+                    && route.family() != fam
+                {
+                    continue;
+                }
                 routes.push(route);
             }
         }
 
-        let mut stdout = io::stdout().lock();
-
-        match format {
-            OutputFormat::Text => {
-                for route in &routes {
-                    print_route_text(&mut stdout, route, opts)?;
-                }
-            }
-            OutputFormat::Json => {
-                let json: Vec<_> = routes.iter().map(route_to_json).collect();
-                if opts.pretty {
-                    serde_json::to_writer_pretty(&mut stdout, &json)?;
-                } else {
-                    serde_json::to_writer(&mut stdout, &json)?;
-                }
-                writeln!(stdout)?;
-            }
-        }
+        print_items(&routes, format, opts, route_to_json, print_route_text)?;
 
         Ok(())
     }
@@ -325,9 +309,8 @@ impl RouteCmd {
 
         // Add output interface
         if let Some(dev_name) = dev {
-            let ifindex = rip_lib::ifname::name_to_index(dev_name).map_err(|e| {
-                rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-            })?;
+            let ifindex =
+                rip_lib::get_ifindex(dev_name).map_err(rip_netlink::Error::InvalidMessage)? as u32;
             builder.append_attr_u32(RtaAttr::Oif as u16, ifindex);
         }
 
@@ -449,7 +432,7 @@ fn route_to_json(route: &RouteMessage) -> serde_json::Value {
     }
 
     if let Some(oif) = route.oif {
-        let dev = rip_lib::ifname::index_to_name(oif).unwrap_or_else(|_| format!("if{}", oif));
+        let dev = rip_lib::get_ifname_or_index(oif as i32);
         obj["dev"] = serde_json::json!(dev);
     }
 
@@ -465,8 +448,8 @@ fn route_to_json(route: &RouteMessage) -> serde_json::Value {
 }
 
 /// Print route in text format.
-fn print_route_text<W: Write>(
-    w: &mut W,
+fn print_route_text(
+    w: &mut io::StdoutLock<'_>,
     route: &RouteMessage,
     _opts: &OutputOptions,
 ) -> io::Result<()> {
@@ -484,7 +467,7 @@ fn print_route_text<W: Write>(
 
     // Device
     if let Some(oif) = route.oif {
-        let dev = rip_lib::ifname::index_to_name(oif).unwrap_or_else(|_| format!("if{}", oif));
+        let dev = rip_lib::get_ifname_or_index(oif as i32);
         write!(w, " dev {}", dev)?;
     }
 

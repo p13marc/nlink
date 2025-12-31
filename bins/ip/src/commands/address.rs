@@ -112,16 +112,12 @@ impl AddressCmd {
         family: Option<u8>,
     ) -> Result<()> {
         // Use the strongly-typed API to get all addresses
-        let all_addresses: Vec<AddressMessage> =conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
+        let all_addresses: Vec<AddressMessage> = conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
 
         // Get device index if filtering by name
-        let filter_index = if let Some(dev_name) = dev {
-            Some(rip_lib::ifname::name_to_index(dev_name).map_err(|e| {
-                rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-            })?)
-        } else {
-            None
-        };
+        let filter_index = rip_lib::get_ifindex_opt(dev)
+            .map(|opt| opt.map(|i| i as u32))
+            .map_err(rip_netlink::Error::InvalidMessage)?;
 
         // Filter addresses
         let addresses: Vec<_> = all_addresses
@@ -129,14 +125,16 @@ impl AddressCmd {
             .filter(|addr| {
                 // Filter by device if specified
                 if let Some(idx) = filter_index
-                    && addr.ifindex() != idx {
-                        return false;
-                    }
+                    && addr.ifindex() != idx
+                {
+                    return false;
+                }
                 // Filter by family if specified
                 if let Some(fam) = family
-                    && addr.family() != fam {
-                        return false;
-                    }
+                    && addr.family() != fam
+                {
+                    return false;
+                }
                 true
             })
             .collect();
@@ -151,8 +149,7 @@ impl AddressCmd {
                     if addr.ifindex() != current_index {
                         current_index = addr.ifindex();
                         // Print interface header
-                        let ifname = rip_lib::ifname::index_to_name(addr.ifindex())
-                            .unwrap_or_else(|_| format!("if{}", addr.ifindex()));
+                        let ifname = rip_lib::get_ifname_or_index(addr.ifindex() as i32);
                         writeln!(stdout, "{}: {}:", addr.ifindex(), ifname)?;
                     }
                     print_addr_text(&mut stdout, addr, opts)?;
@@ -187,9 +184,7 @@ impl AddressCmd {
         let (addr, prefix) = parse_prefix(address)
             .map_err(|e| rip_netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)? as u32;
 
         // Parse scope
         let scope_val = if let Some(s) = scope {
@@ -216,9 +211,10 @@ impl AddressCmd {
 
         // Add broadcast if specified (IPv4 only)
         if let Some(brd_str) = broadcast
-            && let Ok(brd_addr) = brd_str.parse::<std::net::Ipv4Addr>() {
-                builder = builder.broadcast(IpAddr::V4(brd_addr));
-            }
+            && let Ok(brd_addr) = brd_str.parse::<std::net::Ipv4Addr>()
+        {
+            builder = builder.broadcast(IpAddr::V4(brd_addr));
+        }
 
         // Add label if specified
         if let Some(lbl) = label {
@@ -273,9 +269,10 @@ impl AddressCmd {
 
         // Add broadcast if specified
         if let Some(ref brd) = msg.broadcast
-            && let IpAddr::V4(v4) = brd {
-                nl_builder.append_attr(IfaAttr::Broadcast as u16, &v4.octets());
-            }
+            && let IpAddr::V4(v4) = brd
+        {
+            nl_builder.append_attr(IfaAttr::Broadcast as u16, &v4.octets());
+        }
 
         // Add label if specified
         if let Some(ref lbl) = msg.label {
@@ -293,9 +290,7 @@ impl AddressCmd {
         let (addr, prefix) = parse_prefix(address)
             .map_err(|e| rip_netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)? as u32;
 
         let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
 
@@ -324,29 +319,27 @@ impl AddressCmd {
 
     async fn flush(conn: &Connection, dev: Option<&str>, family: Option<u8>) -> Result<()> {
         // Get all addresses using the typed API
-        let all_addresses: Vec<AddressMessage> =conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
+        let all_addresses: Vec<AddressMessage> = conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
 
         // Get device index if filtering by name
-        let filter_index = if let Some(dev_name) = dev {
-            Some(rip_lib::ifname::name_to_index(dev_name).map_err(|e| {
-                rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-            })?)
-        } else {
-            None
-        };
+        let filter_index = rip_lib::get_ifindex_opt(dev)
+            .map(|opt| opt.map(|i| i as u32))
+            .map_err(rip_netlink::Error::InvalidMessage)?;
 
         // Filter and delete addresses
         for addr in all_addresses {
             // Skip if device filter doesn't match
             if let Some(idx) = filter_index
-                && addr.ifindex() != idx {
-                    continue;
-                }
+                && addr.ifindex() != idx
+            {
+                continue;
+            }
             // Skip if family filter doesn't match
             if let Some(fam) = family
-                && addr.family() != fam {
-                    continue;
-                }
+                && addr.family() != fam
+            {
+                continue;
+            }
 
             // Delete this address
             let ifaddr = IfAddrMsg::new()
@@ -388,8 +381,7 @@ impl AddressCmd {
 
 /// Convert AddressMessage to JSON.
 fn addr_to_json(addr: &AddressMessage) -> serde_json::Value {
-    let ifname = rip_lib::ifname::index_to_name(addr.ifindex())
-        .unwrap_or_else(|_| format!("if{}", addr.ifindex()));
+    let ifname = rip_lib::get_ifname_or_index(addr.ifindex() as i32);
 
     let mut obj = serde_json::json!({
         "ifindex": addr.ifindex(),
@@ -451,9 +443,10 @@ fn print_addr_text<W: Write>(
 
     // Show peer if different from local
     if let (Some(local), Some(address)) = (&addr.local, &addr.address)
-        && local != address {
-            write!(w, " peer {}", address)?;
-        }
+        && local != address
+    {
+        write!(w, " peer {}", address)?;
+    }
 
     // Show broadcast for IPv4
     if let Some(ref brd) = addr.broadcast {

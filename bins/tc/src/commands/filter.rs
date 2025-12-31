@@ -5,7 +5,7 @@ use rip_netlink::message::NlMsgType;
 use rip_netlink::messages::TcMessage;
 use rip_netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
 use rip_netlink::{Connection, Result};
-use rip_output::{OutputFormat, OutputOptions};
+use rip_output::{OutputFormat, OutputOptions, print_items};
 use std::io::{self, Write};
 
 #[derive(Args)]
@@ -221,9 +221,7 @@ impl FilterCmd {
             ));
         }
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })? as i32;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)?;
 
         let parent_handle = tc_handle::parse(parent).ok_or_else(|| {
             rip_netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
@@ -262,24 +260,7 @@ impl FilterCmd {
             })
             .collect();
 
-        let mut stdout = io::stdout().lock();
-
-        match format {
-            OutputFormat::Text => {
-                for filter in &filters {
-                    print_filter_text(&mut stdout, filter, opts)?;
-                }
-            }
-            OutputFormat::Json => {
-                let json: Vec<_> = filters.iter().map(filter_to_json).collect();
-                if opts.pretty {
-                    serde_json::to_writer_pretty(&mut stdout, &json)?;
-                } else {
-                    serde_json::to_writer(&mut stdout, &json)?;
-                }
-                writeln!(stdout)?;
-            }
-        }
+        print_items(&filters, format, opts, filter_to_json, print_filter_text)?;
 
         Ok(())
     }
@@ -295,9 +276,7 @@ impl FilterCmd {
     ) -> Result<()> {
         use rip_netlink::connection::create_request;
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)?;
 
         let parent_handle = tc_handle::parse(parent).ok_or_else(|| {
             rip_netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
@@ -347,9 +326,7 @@ impl FilterCmd {
     ) -> Result<()> {
         use rip_netlink::connection::ack_request;
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)?;
 
         let parent_handle = tc_handle::parse(parent).ok_or_else(|| {
             rip_netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
@@ -396,9 +373,7 @@ impl FilterCmd {
     ) -> Result<()> {
         use rip_netlink::connection::replace_request;
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)?;
 
         let parent_handle = tc_handle::parse(parent).ok_or_else(|| {
             rip_netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
@@ -447,9 +422,7 @@ impl FilterCmd {
     ) -> Result<()> {
         use rip_netlink::connection::ack_request;
 
-        let ifindex = rip_lib::ifname::name_to_index(dev).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("interface not found: {}", e))
-        })?;
+        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)?;
 
         let parent_handle = tc_handle::parse(parent).ok_or_else(|| {
             rip_netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
@@ -490,8 +463,7 @@ impl FilterCmd {
 
 /// Convert a TcMessage to JSON representation for filter.
 fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
-    let dev = rip_lib::ifname::index_to_name(filter.ifindex() as u32)
-        .unwrap_or_else(|_| format!("if{}", filter.ifindex()));
+    let dev = rip_lib::get_ifname_or_index(filter.ifindex());
 
     let mut obj = serde_json::json!({
         "dev": dev,
@@ -513,13 +485,12 @@ fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
 }
 
 /// Print filter in text format.
-fn print_filter_text<W: Write>(
-    w: &mut W,
+fn print_filter_text(
+    w: &mut io::StdoutLock<'_>,
     filter: &TcMessage,
     _opts: &OutputOptions,
 ) -> io::Result<()> {
-    let dev = rip_lib::ifname::index_to_name(filter.ifindex() as u32)
-        .unwrap_or_else(|_| format!("if{}", filter.ifindex()));
+    let dev = rip_lib::get_ifname_or_index(filter.ifindex());
 
     write!(
         w,

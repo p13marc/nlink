@@ -396,9 +396,9 @@ impl TunnelCmd {
 
     async fn delete_tunnel(&self, conn: &Connection, name: &str) -> Result<()> {
         // Get interface index
-        let ifindex = rip_lib::ifname::name_to_index(name).map_err(|_| {
+        let ifindex = rip_lib::get_ifindex(name).map_err(|_| {
             rip_netlink::Error::InvalidMessage(format!("tunnel '{}' not found", name))
-        })?;
+        })? as u32;
 
         // Build delete message
         let mut builder = MessageBuilder::new(
@@ -426,9 +426,9 @@ impl TunnelCmd {
         key: Option<u32>,
     ) -> Result<()> {
         // Get interface index
-        let ifindex = rip_lib::ifname::name_to_index(name).map_err(|_| {
+        let ifindex = rip_lib::get_ifindex(name).map_err(|_| {
             rip_netlink::Error::InvalidMessage(format!("tunnel '{}' not found", name))
-        })?;
+        })? as u32;
 
         // Build change message
         let mut builder = MessageBuilder::new(

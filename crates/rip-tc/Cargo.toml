@@ -1,0 +1,11 @@
+[package]
+name = "rip-tclib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Traffic control utilities for rip"
+
+[dependencies]
+rip-netlink = { workspace = true }
+rip-lib = { workspace = true }
+thiserror = { workspace = true }
