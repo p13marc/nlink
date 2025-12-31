@@ -19,8 +19,10 @@ mod address;
 mod link;
 mod neighbor;
 mod route;
+mod tc;
 
 pub use address::*;
 pub use link::*;
 pub use neighbor::*;
 pub use route::*;
+pub use tc::*;

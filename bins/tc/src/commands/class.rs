@@ -1,10 +1,9 @@
 //! tc class command implementation.
 
 use clap::{Args, Subcommand};
-use rip_netlink::attr::{AttrIter, get};
-use rip_netlink::connection::dump_request;
-use rip_netlink::message::{NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
-use rip_netlink::types::tc::{TcMsg, TcaAttr, TcaStats, tc_handle};
+use rip_netlink::message::NlMsgType;
+use rip_netlink::messages::TcMessage;
+use rip_netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
 use rip_netlink::{Connection, Result};
 use rip_output::{OutputFormat, OutputOptions};
 use std::io::{self, Write};
@@ -186,7 +185,7 @@ impl ClassCmd {
     async fn show(
         conn: &Connection,
         dev: &str,
-        _kind: Option<&str>,
+        kind_filter: Option<&str>,
         parent: Option<&str>,
         classid: Option<&str>,
         format: OutputFormat,
@@ -205,34 +204,40 @@ impl ClassCmd {
         let parent_filter = parent.and_then(tc_handle::parse);
         let classid_filter = classid.and_then(tc_handle::parse);
 
-        // Build request
-        let mut builder = dump_request(NlMsgType::RTM_GETTCLASS);
-        let tcmsg = TcMsg::new().with_ifindex(ifindex);
-        builder.append(&tcmsg);
+        // Fetch all classes using typed API
+        let all_classes: Vec<TcMessage> = conn.dump_typed(NlMsgType::RTM_GETTCLASS).await?;
 
-        // Send and receive
-        let responses = conn.dump(builder).await?;
-
-        let mut stdout = io::stdout().lock();
-        let mut classes = Vec::new();
-
-        for response in &responses {
-            if let Some(class) = parse_class_message(response)? {
+        // Filter classes
+        let classes: Vec<_> = all_classes
+            .into_iter()
+            .filter(|c| {
+                // Filter by interface
+                if c.ifindex() != ifindex {
+                    return false;
+                }
+                // Filter by kind if specified
+                if let Some(k) = kind_filter {
+                    if c.kind() != Some(k) {
+                        return false;
+                    }
+                }
                 // Filter by parent if specified
                 if let Some(p) = parent_filter {
-                    if class.parent != p {
-                        continue;
+                    if c.parent() != p {
+                        return false;
                     }
                 }
                 // Filter by classid if specified
-                if let Some(c) = classid_filter {
-                    if class.handle != c {
-                        continue;
+                if let Some(cid) = classid_filter {
+                    if c.handle() != cid {
+                        return false;
                     }
                 }
-                classes.push(class);
-            }
-        }
+                true
+            })
+            .collect();
+
+        let mut stdout = io::stdout().lock();
 
         match format {
             OutputFormat::Text => {
@@ -241,7 +246,7 @@ impl ClassCmd {
                 }
             }
             OutputFormat::Json => {
-                let json: Vec<_> = classes.iter().map(|c| c.to_json()).collect();
+                let json: Vec<_> = classes.iter().map(|c| class_to_json(c)).collect();
                 if opts.pretty {
                     serde_json::to_writer_pretty(&mut stdout, &json)?;
                 } else {
@@ -418,164 +423,46 @@ impl ClassCmd {
     }
 }
 
-/// Parsed class information.
-#[derive(Debug)]
-struct ClassInfo {
-    ifindex: i32,
-    handle: u32,
-    parent: u32,
-    kind: String,
-    bytes: u64,
-    packets: u32,
-    drops: u32,
-    overlimits: u32,
-    qlen: u32,
-    backlog: u32,
+/// Convert a TcMessage to JSON representation for class.
+fn class_to_json(class: &TcMessage) -> serde_json::Value {
+    let dev = rip_lib::ifname::index_to_name(class.ifindex() as u32)
+        .unwrap_or_else(|_| format!("if{}", class.ifindex()));
+
+    serde_json::json!({
+        "dev": dev,
+        "kind": class.kind().unwrap_or(""),
+        "class": tc_handle::format(class.handle()),
+        "parent": tc_handle::format(class.parent()),
+        "bytes": class.bytes(),
+        "packets": class.packets(),
+        "drops": class.drops(),
+        "overlimits": class.overlimits(),
+        "qlen": class.qlen(),
+        "backlog": class.backlog(),
+    })
 }
 
-impl ClassInfo {
-    fn to_json(&self) -> serde_json::Value {
-        let dev = rip_lib::ifname::index_to_name(self.ifindex as u32)
-            .unwrap_or_else(|_| format!("if{}", self.ifindex));
-
-        serde_json::json!({
-            "dev": dev,
-            "kind": self.kind,
-            "class": tc_handle::format(self.handle),
-            "parent": tc_handle::format(self.parent),
-            "bytes": self.bytes,
-            "packets": self.packets,
-            "drops": self.drops,
-            "overlimits": self.overlimits,
-            "qlen": self.qlen,
-            "backlog": self.backlog,
-        })
-    }
-}
-
-fn parse_class_message(data: &[u8]) -> Result<Option<ClassInfo>> {
-    if data.len() < NLMSG_HDRLEN + TcMsg::SIZE {
-        return Ok(None);
-    }
-
-    let header = NlMsgHdr::from_bytes(data)?;
-
-    // Skip non-class messages
-    if header.nlmsg_type != NlMsgType::RTM_NEWTCLASS {
-        return Ok(None);
-    }
-
-    let payload = &data[NLMSG_HDRLEN..];
-    let tcmsg = TcMsg::from_bytes(payload)?;
-    let attrs_data = &payload[TcMsg::SIZE..];
-
-    let mut kind = String::new();
-    let mut bytes = 0u64;
-    let mut packets = 0u32;
-    let mut drops = 0u32;
-    let mut overlimits = 0u32;
-    let mut qlen = 0u32;
-    let mut backlog = 0u32;
-
-    for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-        match TcaAttr::from(attr_type) {
-            TcaAttr::Kind => {
-                kind = get::string(attr_data).unwrap_or("").to_string();
-            }
-            TcaAttr::Stats2 => {
-                // Parse nested stats
-                for (stat_type, stat_data) in AttrIter::new(attr_data) {
-                    match TcaStats::from(stat_type) {
-                        TcaStats::Basic => {
-                            if stat_data.len() >= 12 {
-                                bytes = u64::from_ne_bytes([
-                                    stat_data[0],
-                                    stat_data[1],
-                                    stat_data[2],
-                                    stat_data[3],
-                                    stat_data[4],
-                                    stat_data[5],
-                                    stat_data[6],
-                                    stat_data[7],
-                                ]);
-                                packets = u32::from_ne_bytes([
-                                    stat_data[8],
-                                    stat_data[9],
-                                    stat_data[10],
-                                    stat_data[11],
-                                ]);
-                            }
-                        }
-                        TcaStats::Queue => {
-                            if stat_data.len() >= 20 {
-                                qlen = u32::from_ne_bytes([
-                                    stat_data[0],
-                                    stat_data[1],
-                                    stat_data[2],
-                                    stat_data[3],
-                                ]);
-                                backlog = u32::from_ne_bytes([
-                                    stat_data[4],
-                                    stat_data[5],
-                                    stat_data[6],
-                                    stat_data[7],
-                                ]);
-                                drops = u32::from_ne_bytes([
-                                    stat_data[8],
-                                    stat_data[9],
-                                    stat_data[10],
-                                    stat_data[11],
-                                ]);
-                                overlimits = u32::from_ne_bytes([
-                                    stat_data[16],
-                                    stat_data[17],
-                                    stat_data[18],
-                                    stat_data[19],
-                                ]);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(Some(ClassInfo {
-        ifindex: tcmsg.tcm_ifindex,
-        handle: tcmsg.tcm_handle,
-        parent: tcmsg.tcm_parent,
-        kind,
-        bytes,
-        packets,
-        drops,
-        overlimits,
-        qlen,
-        backlog,
-    }))
-}
-
+/// Print class in text format.
 fn print_class_text<W: Write>(
     w: &mut W,
-    class: &ClassInfo,
+    class: &TcMessage,
     opts: &OutputOptions,
 ) -> io::Result<()> {
-    let dev = rip_lib::ifname::index_to_name(class.ifindex as u32)
-        .unwrap_or_else(|_| format!("if{}", class.ifindex));
+    let dev = rip_lib::ifname::index_to_name(class.ifindex() as u32)
+        .unwrap_or_else(|_| format!("if{}", class.ifindex()));
 
     write!(
         w,
         "class {} {} dev {} ",
-        class.kind,
-        tc_handle::format(class.handle),
+        class.kind().unwrap_or(""),
+        tc_handle::format(class.handle()),
         dev
     )?;
 
-    if class.parent == tc_handle::ROOT {
+    if class.parent() == tc_handle::ROOT {
         write!(w, "root ")?;
-    } else if class.parent != 0 {
-        write!(w, "parent {} ", tc_handle::format(class.parent))?;
+    } else if class.parent() != 0 {
+        write!(w, "parent {} ", tc_handle::format(class.parent()))?;
     }
 
     writeln!(w)?;
@@ -584,9 +471,12 @@ fn print_class_text<W: Write>(
         writeln!(
             w,
             " Sent {} bytes {} pkt (dropped {}, overlimits {})",
-            class.bytes, class.packets, class.drops, class.overlimits
+            class.bytes(),
+            class.packets(),
+            class.drops(),
+            class.overlimits()
         )?;
-        writeln!(w, " backlog {}b {}p", class.backlog, class.qlen)?;
+        writeln!(w, " backlog {}b {}p", class.backlog(), class.qlen())?;
     }
 
     Ok(())

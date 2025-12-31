@@ -1,10 +1,9 @@
 //! tc qdisc command implementation.
 
 use clap::{Args, Subcommand};
-use rip_netlink::attr::{AttrIter, get};
-use rip_netlink::connection::dump_request;
-use rip_netlink::message::{NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
-use rip_netlink::types::tc::{TcMsg, TcaAttr, TcaStats, tc_handle};
+use rip_netlink::message::NlMsgType;
+use rip_netlink::messages::TcMessage;
+use rip_netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
 use rip_netlink::{Connection, Result};
 use rip_output::{OutputFormat, OutputOptions};
 use std::io::{self, Write};
@@ -180,28 +179,22 @@ impl QdiscCmd {
             None
         };
 
-        // Build request
-        let mut builder = dump_request(NlMsgType::RTM_GETQDISC);
-        let tcmsg = TcMsg::new();
-        builder.append(&tcmsg);
+        // Fetch all qdiscs using typed API
+        let all_qdiscs: Vec<TcMessage> = conn.dump_typed(NlMsgType::RTM_GETQDISC).await?;
 
-        // Send and receive
-        let responses = conn.dump(builder).await?;
+        // Filter by device if specified
+        let qdiscs: Vec<_> = all_qdiscs
+            .into_iter()
+            .filter(|q| {
+                if let Some(idx) = filter_index {
+                    q.ifindex() == idx
+                } else {
+                    true
+                }
+            })
+            .collect();
 
         let mut stdout = io::stdout().lock();
-        let mut qdiscs = Vec::new();
-
-        for response in &responses {
-            if let Some(qdisc) = parse_qdisc_message(response)? {
-                // Filter by device if specified
-                if let Some(idx) = filter_index {
-                    if qdisc.ifindex != idx {
-                        continue;
-                    }
-                }
-                qdiscs.push(qdisc);
-            }
-        }
 
         match format {
             OutputFormat::Text => {
@@ -210,7 +203,7 @@ impl QdiscCmd {
                 }
             }
             OutputFormat::Json => {
-                let json: Vec<_> = qdiscs.iter().map(|q| q.to_json()).collect();
+                let json: Vec<_> = qdiscs.iter().map(|q| qdisc_to_json(q)).collect();
                 if opts.pretty {
                     serde_json::to_writer_pretty(&mut stdout, &json)?;
                 } else {
@@ -403,176 +396,49 @@ impl QdiscCmd {
     }
 }
 
-/// Parsed qdisc information.
-#[derive(Debug)]
-struct QdiscInfo {
-    ifindex: i32,
-    handle: u32,
-    parent: u32,
-    kind: String,
-    bytes: u64,
-    packets: u32,
-    drops: u32,
-    overlimits: u32,
-    requeues: u32,
-    qlen: u32,
-    backlog: u32,
+/// Convert a TcMessage to JSON representation.
+fn qdisc_to_json(qdisc: &TcMessage) -> serde_json::Value {
+    let dev = rip_lib::ifname::index_to_name(qdisc.ifindex() as u32)
+        .unwrap_or_else(|_| format!("if{}", qdisc.ifindex()));
+
+    serde_json::json!({
+        "dev": dev,
+        "kind": qdisc.kind().unwrap_or(""),
+        "handle": tc_handle::format(qdisc.handle()),
+        "parent": tc_handle::format(qdisc.parent()),
+        "bytes": qdisc.bytes(),
+        "packets": qdisc.packets(),
+        "drops": qdisc.drops(),
+        "overlimits": qdisc.overlimits(),
+        "requeues": qdisc.requeues(),
+        "qlen": qdisc.qlen(),
+        "backlog": qdisc.backlog(),
+    })
 }
 
-impl QdiscInfo {
-    fn to_json(&self) -> serde_json::Value {
-        let dev = rip_lib::ifname::index_to_name(self.ifindex as u32)
-            .unwrap_or_else(|_| format!("if{}", self.ifindex));
-
-        serde_json::json!({
-            "dev": dev,
-            "kind": self.kind,
-            "handle": tc_handle::format(self.handle),
-            "parent": tc_handle::format(self.parent),
-            "bytes": self.bytes,
-            "packets": self.packets,
-            "drops": self.drops,
-            "overlimits": self.overlimits,
-            "requeues": self.requeues,
-            "qlen": self.qlen,
-            "backlog": self.backlog,
-        })
-    }
-}
-
-fn parse_qdisc_message(data: &[u8]) -> Result<Option<QdiscInfo>> {
-    if data.len() < NLMSG_HDRLEN + TcMsg::SIZE {
-        return Ok(None);
-    }
-
-    let header = NlMsgHdr::from_bytes(data)?;
-
-    // Skip non-qdisc messages
-    if header.nlmsg_type != NlMsgType::RTM_NEWQDISC {
-        return Ok(None);
-    }
-
-    let payload = &data[NLMSG_HDRLEN..];
-    let tcmsg = TcMsg::from_bytes(payload)?;
-    let attrs_data = &payload[TcMsg::SIZE..];
-
-    let mut kind = String::new();
-    let mut bytes = 0u64;
-    let mut packets = 0u32;
-    let mut drops = 0u32;
-    let mut overlimits = 0u32;
-    let mut requeues = 0u32;
-    let mut qlen = 0u32;
-    let mut backlog = 0u32;
-
-    for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-        match TcaAttr::from(attr_type) {
-            TcaAttr::Kind => {
-                kind = get::string(attr_data).unwrap_or("").to_string();
-            }
-            TcaAttr::Stats2 => {
-                // Parse nested stats
-                for (stat_type, stat_data) in AttrIter::new(attr_data) {
-                    match TcaStats::from(stat_type) {
-                        TcaStats::Basic => {
-                            if stat_data.len() >= 12 {
-                                bytes = u64::from_ne_bytes([
-                                    stat_data[0],
-                                    stat_data[1],
-                                    stat_data[2],
-                                    stat_data[3],
-                                    stat_data[4],
-                                    stat_data[5],
-                                    stat_data[6],
-                                    stat_data[7],
-                                ]);
-                                packets = u32::from_ne_bytes([
-                                    stat_data[8],
-                                    stat_data[9],
-                                    stat_data[10],
-                                    stat_data[11],
-                                ]);
-                            }
-                        }
-                        TcaStats::Queue => {
-                            if stat_data.len() >= 20 {
-                                qlen = u32::from_ne_bytes([
-                                    stat_data[0],
-                                    stat_data[1],
-                                    stat_data[2],
-                                    stat_data[3],
-                                ]);
-                                backlog = u32::from_ne_bytes([
-                                    stat_data[4],
-                                    stat_data[5],
-                                    stat_data[6],
-                                    stat_data[7],
-                                ]);
-                                drops = u32::from_ne_bytes([
-                                    stat_data[8],
-                                    stat_data[9],
-                                    stat_data[10],
-                                    stat_data[11],
-                                ]);
-                                requeues = u32::from_ne_bytes([
-                                    stat_data[12],
-                                    stat_data[13],
-                                    stat_data[14],
-                                    stat_data[15],
-                                ]);
-                                overlimits = u32::from_ne_bytes([
-                                    stat_data[16],
-                                    stat_data[17],
-                                    stat_data[18],
-                                    stat_data[19],
-                                ]);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(Some(QdiscInfo {
-        ifindex: tcmsg.tcm_ifindex,
-        handle: tcmsg.tcm_handle,
-        parent: tcmsg.tcm_parent,
-        kind,
-        bytes,
-        packets,
-        drops,
-        overlimits,
-        requeues,
-        qlen,
-        backlog,
-    }))
-}
-
+/// Print qdisc in text format.
 fn print_qdisc_text<W: Write>(
     w: &mut W,
-    qdisc: &QdiscInfo,
+    qdisc: &TcMessage,
     opts: &OutputOptions,
 ) -> io::Result<()> {
-    let dev = rip_lib::ifname::index_to_name(qdisc.ifindex as u32)
-        .unwrap_or_else(|_| format!("if{}", qdisc.ifindex));
+    let dev = rip_lib::ifname::index_to_name(qdisc.ifindex() as u32)
+        .unwrap_or_else(|_| format!("if{}", qdisc.ifindex()));
 
     write!(
         w,
         "qdisc {} {} dev {} ",
-        qdisc.kind,
-        tc_handle::format(qdisc.handle),
+        qdisc.kind().unwrap_or(""),
+        tc_handle::format(qdisc.handle()),
         dev
     )?;
 
-    if qdisc.parent == tc_handle::ROOT {
+    if qdisc.parent() == tc_handle::ROOT {
         write!(w, "root ")?;
-    } else if qdisc.parent == tc_handle::INGRESS {
+    } else if qdisc.parent() == tc_handle::INGRESS {
         write!(w, "ingress ")?;
-    } else if qdisc.parent != 0 {
-        write!(w, "parent {} ", tc_handle::format(qdisc.parent))?;
+    } else if qdisc.parent() != 0 {
+        write!(w, "parent {} ", tc_handle::format(qdisc.parent()))?;
     }
 
     write!(w, "refcnt 2")?; // placeholder
@@ -583,9 +449,13 @@ fn print_qdisc_text<W: Write>(
         writeln!(
             w,
             " Sent {} bytes {} pkt (dropped {}, overlimits {} requeues {})",
-            qdisc.bytes, qdisc.packets, qdisc.drops, qdisc.overlimits, qdisc.requeues
+            qdisc.bytes(),
+            qdisc.packets(),
+            qdisc.drops(),
+            qdisc.overlimits(),
+            qdisc.requeues()
         )?;
-        writeln!(w, " backlog {}b {}p", qdisc.backlog, qdisc.qlen)?;
+        writeln!(w, " backlog {}b {}p", qdisc.backlog(), qdisc.qlen())?;
     }
 
     Ok(())

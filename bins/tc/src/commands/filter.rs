@@ -1,9 +1,8 @@
 //! tc filter command implementation.
 
 use clap::{Args, Subcommand};
-use rip_netlink::attr::{AttrIter, get};
-use rip_netlink::connection::dump_request;
-use rip_netlink::message::{NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
+use rip_netlink::message::NlMsgType;
+use rip_netlink::messages::TcMessage;
 use rip_netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
 use rip_netlink::{Connection, Result};
 use rip_output::{OutputFormat, OutputOptions};
@@ -211,8 +210,8 @@ impl FilterCmd {
         conn: &Connection,
         dev: &str,
         parent: &str,
-        _protocol: Option<&str>,
-        _prio: Option<u16>,
+        protocol_filter: Option<&str>,
+        prio_filter: Option<u16>,
         format: OutputFormat,
         opts: &OutputOptions,
     ) -> Result<()> {
@@ -230,24 +229,40 @@ impl FilterCmd {
             rip_netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
         })?;
 
-        // Build request
-        let mut builder = dump_request(NlMsgType::RTM_GETTFILTER);
-        let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex)
-            .with_parent(parent_handle);
-        builder.append(&tcmsg);
+        let proto_filter = protocol_filter.map(|p| parse_protocol(p)).transpose()?;
 
-        // Send and receive
-        let responses = conn.dump(builder).await?;
+        // Fetch all filters using typed API
+        let all_filters: Vec<TcMessage> = conn.dump_typed(NlMsgType::RTM_GETTFILTER).await?;
+
+        // Filter results
+        let filters: Vec<_> = all_filters
+            .into_iter()
+            .filter(|f| {
+                // Filter by interface
+                if f.ifindex() != ifindex {
+                    return false;
+                }
+                // Filter by parent
+                if f.parent() != parent_handle {
+                    return false;
+                }
+                // Filter by protocol if specified
+                if let Some(proto) = proto_filter {
+                    if f.protocol() != proto {
+                        return false;
+                    }
+                }
+                // Filter by priority if specified
+                if let Some(prio) = prio_filter {
+                    if f.priority() != prio {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
 
         let mut stdout = io::stdout().lock();
-        let mut filters = Vec::new();
-
-        for response in &responses {
-            if let Some(filter) = parse_filter_message(response)? {
-                filters.push(filter);
-            }
-        }
 
         match format {
             OutputFormat::Text => {
@@ -256,7 +271,7 @@ impl FilterCmd {
                 }
             }
             OutputFormat::Json => {
-                let json: Vec<_> = filters.iter().map(|f| f.to_json()).collect();
+                let json: Vec<_> = filters.iter().map(|f| filter_to_json(f)).collect();
                 if opts.pretty {
                     serde_json::to_writer_pretty(&mut stdout, &json)?;
                 } else {
@@ -473,112 +488,54 @@ impl FilterCmd {
     }
 }
 
-/// Parsed filter information.
-#[derive(Debug)]
-struct FilterInfo {
-    ifindex: i32,
-    handle: u32,
-    parent: u32,
-    protocol: u16,
-    priority: u16,
-    kind: String,
-    chain: Option<u32>,
+/// Convert a TcMessage to JSON representation for filter.
+fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
+    let dev = rip_lib::ifname::index_to_name(filter.ifindex() as u32)
+        .unwrap_or_else(|_| format!("if{}", filter.ifindex()));
+
+    let mut obj = serde_json::json!({
+        "dev": dev,
+        "kind": filter.kind().unwrap_or(""),
+        "parent": tc_handle::format(filter.parent()),
+        "protocol": format_protocol(filter.protocol()),
+        "pref": filter.priority(),
+    });
+
+    if filter.handle() != 0 {
+        obj["handle"] = serde_json::json!(format!("{:x}", filter.handle()));
+    }
+
+    if let Some(chain) = filter.chain {
+        obj["chain"] = serde_json::json!(chain);
+    }
+
+    obj
 }
 
-impl FilterInfo {
-    fn to_json(&self) -> serde_json::Value {
-        let dev = rip_lib::ifname::index_to_name(self.ifindex as u32)
-            .unwrap_or_else(|_| format!("if{}", self.ifindex));
-
-        let mut obj = serde_json::json!({
-            "dev": dev,
-            "kind": self.kind,
-            "parent": tc_handle::format(self.parent),
-            "protocol": format_protocol(self.protocol),
-            "pref": self.priority,
-        });
-
-        if self.handle != 0 {
-            obj["handle"] = serde_json::json!(format!("{:x}", self.handle));
-        }
-
-        if let Some(chain) = self.chain {
-            obj["chain"] = serde_json::json!(chain);
-        }
-
-        obj
-    }
-}
-
-fn parse_filter_message(data: &[u8]) -> Result<Option<FilterInfo>> {
-    if data.len() < NLMSG_HDRLEN + TcMsg::SIZE {
-        return Ok(None);
-    }
-
-    let header = NlMsgHdr::from_bytes(data)?;
-
-    // Skip non-filter messages
-    if header.nlmsg_type != NlMsgType::RTM_NEWTFILTER {
-        return Ok(None);
-    }
-
-    let payload = &data[NLMSG_HDRLEN..];
-    let tcmsg = TcMsg::from_bytes(payload)?;
-    let attrs_data = &payload[TcMsg::SIZE..];
-
-    // Extract protocol and priority from tcm_info
-    let protocol = (tcmsg.tcm_info >> 16) as u16;
-    let priority = (tcmsg.tcm_info & 0xFFFF) as u16;
-
-    let mut kind = String::new();
-    let mut chain = None;
-
-    for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-        match TcaAttr::from(attr_type) {
-            TcaAttr::Kind => {
-                kind = get::string(attr_data).unwrap_or("").to_string();
-            }
-            TcaAttr::Chain => {
-                chain = Some(get::u32_ne(attr_data).unwrap_or(0));
-            }
-            _ => {}
-        }
-    }
-
-    Ok(Some(FilterInfo {
-        ifindex: tcmsg.tcm_ifindex,
-        handle: tcmsg.tcm_handle,
-        parent: tcmsg.tcm_parent,
-        protocol,
-        priority,
-        kind,
-        chain,
-    }))
-}
-
+/// Print filter in text format.
 fn print_filter_text<W: Write>(
     w: &mut W,
-    filter: &FilterInfo,
+    filter: &TcMessage,
     _opts: &OutputOptions,
 ) -> io::Result<()> {
-    let dev = rip_lib::ifname::index_to_name(filter.ifindex as u32)
-        .unwrap_or_else(|_| format!("if{}", filter.ifindex));
+    let dev = rip_lib::ifname::index_to_name(filter.ifindex() as u32)
+        .unwrap_or_else(|_| format!("if{}", filter.ifindex()));
 
     write!(
         w,
         "filter parent {} protocol {} pref {} {} ",
-        tc_handle::format(filter.parent),
-        format_protocol(filter.protocol),
-        filter.priority,
-        filter.kind
+        tc_handle::format(filter.parent()),
+        format_protocol(filter.protocol()),
+        filter.priority(),
+        filter.kind().unwrap_or("")
     )?;
 
     if let Some(chain) = filter.chain {
         write!(w, "chain {} ", chain)?;
     }
 
-    if filter.handle != 0 {
-        write!(w, "handle {:x} ", filter.handle)?;
+    if filter.handle() != 0 {
+        write!(w, "handle {:x} ", filter.handle())?;
     }
 
     write!(w, "dev {}", dev)?;

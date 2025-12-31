@@ -1,10 +1,11 @@
 //! tc monitor - watch for traffic control events.
 
 use clap::{Args, ValueEnum};
-use rip_netlink::attr::{AttrIter, get};
 use rip_netlink::message::{MessageIter, NlMsgType};
+use rip_netlink::messages::TcMessage;
+use rip_netlink::parse::FromNetlink;
 use rip_netlink::rtnetlink_groups::*;
-use rip_netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
+use rip_netlink::types::tc::tc_handle;
 use rip_netlink::{Connection, Protocol, Result};
 use rip_output::{OutputFormat, OutputOptions};
 use std::io::{self, Write};
@@ -75,6 +76,12 @@ impl MonitorCmd {
                     continue;
                 }
 
+                // Parse TC message using typed API
+                let tc_msg = match TcMessage::from_bytes(payload) {
+                    Ok(msg) => msg,
+                    Err(_) => continue,
+                };
+
                 if self.timestamp {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -84,130 +91,110 @@ impl MonitorCmd {
 
                 match format {
                     OutputFormat::Text => {
-                        self.print_event_text(&mut stdout, header.nlmsg_type, payload, opts)?;
+                        print_event_text(&mut stdout, header.nlmsg_type, &tc_msg, opts)?;
                     }
                     OutputFormat::Json => {
-                        self.print_event_json(&mut stdout, header.nlmsg_type, payload)?;
+                        print_event_json(&mut stdout, header.nlmsg_type, &tc_msg)?;
                     }
                 }
             }
         }
     }
+}
 
-    fn print_event_text(
-        &self,
-        out: &mut impl Write,
-        msg_type: u16,
-        payload: &[u8],
-        opts: &OutputOptions,
-    ) -> Result<()> {
-        let tcmsg = TcMsg::from_bytes(payload)?;
-        let attrs_data = &payload[TcMsg::SIZE..];
+/// Print TC event in text format.
+fn print_event_text(
+    out: &mut impl Write,
+    msg_type: u16,
+    tc_msg: &TcMessage,
+    opts: &OutputOptions,
+) -> Result<()> {
+    let dev = rip_lib::ifname::index_to_name(tc_msg.ifindex() as u32)
+        .unwrap_or_else(|_| format!("if{}", tc_msg.ifindex()));
 
-        let mut kind = String::new();
-        for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-            if TcaAttr::from(attr_type) == TcaAttr::Kind {
-                kind = get::string(attr_data).unwrap_or("").to_string();
-                break;
-            }
-        }
+    let (action, object) = match msg_type {
+        NlMsgType::RTM_NEWQDISC => ("added", "qdisc"),
+        NlMsgType::RTM_DELQDISC => ("deleted", "qdisc"),
+        NlMsgType::RTM_NEWTCLASS => ("added", "class"),
+        NlMsgType::RTM_DELTCLASS => ("deleted", "class"),
+        NlMsgType::RTM_NEWTFILTER => ("added", "filter"),
+        NlMsgType::RTM_DELTFILTER => ("deleted", "filter"),
+        _ => ("unknown", "unknown"),
+    };
 
-        let dev = rip_lib::ifname::index_to_name(tcmsg.tcm_ifindex as u32)
-            .unwrap_or_else(|_| format!("if{}", tcmsg.tcm_ifindex));
+    write!(out, "{} {} ", action, object)?;
 
-        let (action, object) = match msg_type {
-            NlMsgType::RTM_NEWQDISC => ("added", "qdisc"),
-            NlMsgType::RTM_DELQDISC => ("deleted", "qdisc"),
-            NlMsgType::RTM_NEWTCLASS => ("added", "class"),
-            NlMsgType::RTM_DELTCLASS => ("deleted", "class"),
-            NlMsgType::RTM_NEWTFILTER => ("added", "filter"),
-            NlMsgType::RTM_DELTFILTER => ("deleted", "filter"),
-            _ => ("unknown", "unknown"),
-        };
-
-        write!(out, "{} {} ", action, object)?;
-
+    if let Some(kind) = tc_msg.kind() {
         if !kind.is_empty() {
             write!(out, "{} ", kind)?;
         }
-
-        write!(out, "{} ", tc_handle::format(tcmsg.tcm_handle))?;
-        write!(out, "dev {} ", dev)?;
-
-        if tcmsg.tcm_parent == tc_handle::ROOT {
-            write!(out, "root")?;
-        } else if tcmsg.tcm_parent == tc_handle::INGRESS {
-            write!(out, "ingress")?;
-        } else if tcmsg.tcm_parent != 0 {
-            write!(out, "parent {}", tc_handle::format(tcmsg.tcm_parent))?;
-        }
-
-        writeln!(out)?;
-
-        if opts.details {
-            // Show additional details from attributes
-            for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-                match TcaAttr::from(attr_type) {
-                    TcaAttr::Options => {
-                        writeln!(out, "  options: {} bytes", attr_data.len())?;
-                    }
-                    TcaAttr::Stats2 => {
-                        writeln!(out, "  stats: {} bytes", attr_data.len())?;
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        out.flush()?;
-        Ok(())
     }
 
-    fn print_event_json(&self, out: &mut impl Write, msg_type: u16, payload: &[u8]) -> Result<()> {
-        let tcmsg = TcMsg::from_bytes(payload)?;
-        let attrs_data = &payload[TcMsg::SIZE..];
+    write!(out, "{} ", tc_handle::format(tc_msg.handle()))?;
+    write!(out, "dev {} ", dev)?;
 
-        let mut kind = String::new();
-        for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-            if TcaAttr::from(attr_type) == TcaAttr::Kind {
-                kind = get::string(attr_data).unwrap_or("").to_string();
-                break;
-            }
-        }
-
-        let dev = rip_lib::ifname::index_to_name(tcmsg.tcm_ifindex as u32)
-            .unwrap_or_else(|_| format!("if{}", tcmsg.tcm_ifindex));
-
-        let (action, object) = match msg_type {
-            NlMsgType::RTM_NEWQDISC => ("add", "qdisc"),
-            NlMsgType::RTM_DELQDISC => ("del", "qdisc"),
-            NlMsgType::RTM_NEWTCLASS => ("add", "class"),
-            NlMsgType::RTM_DELTCLASS => ("del", "class"),
-            NlMsgType::RTM_NEWTFILTER => ("add", "filter"),
-            NlMsgType::RTM_DELTFILTER => ("del", "filter"),
-            _ => ("unknown", "unknown"),
-        };
-
-        let parent = if tcmsg.tcm_parent == tc_handle::ROOT {
-            "root".to_string()
-        } else if tcmsg.tcm_parent == tc_handle::INGRESS {
-            "ingress".to_string()
-        } else {
-            tc_handle::format(tcmsg.tcm_parent)
-        };
-
-        let event = serde_json::json!({
-            "event": object,
-            "action": action,
-            "kind": kind,
-            "handle": tc_handle::format(tcmsg.tcm_handle),
-            "dev": dev,
-            "parent": parent,
-            "ifindex": tcmsg.tcm_ifindex,
-        });
-
-        writeln!(out, "{}", serde_json::to_string(&event)?)?;
-        out.flush()?;
-        Ok(())
+    if tc_msg.parent() == tc_handle::ROOT {
+        write!(out, "root")?;
+    } else if tc_msg.parent() == tc_handle::INGRESS {
+        write!(out, "ingress")?;
+    } else if tc_msg.parent() != 0 {
+        write!(out, "parent {}", tc_handle::format(tc_msg.parent()))?;
     }
+
+    writeln!(out)?;
+
+    if opts.details {
+        // Show additional details
+        if tc_msg.options.is_some() {
+            writeln!(
+                out,
+                "  options: {} bytes",
+                tc_msg.options.as_ref().map_or(0, |o| o.len())
+            )?;
+        }
+        if tc_msg.stats_basic.is_some() || tc_msg.stats_queue.is_some() {
+            writeln!(out, "  stats: present")?;
+        }
+    }
+
+    out.flush()?;
+    Ok(())
+}
+
+/// Print TC event in JSON format.
+fn print_event_json(out: &mut impl Write, msg_type: u16, tc_msg: &TcMessage) -> Result<()> {
+    let dev = rip_lib::ifname::index_to_name(tc_msg.ifindex() as u32)
+        .unwrap_or_else(|_| format!("if{}", tc_msg.ifindex()));
+
+    let (action, object) = match msg_type {
+        NlMsgType::RTM_NEWQDISC => ("add", "qdisc"),
+        NlMsgType::RTM_DELQDISC => ("del", "qdisc"),
+        NlMsgType::RTM_NEWTCLASS => ("add", "class"),
+        NlMsgType::RTM_DELTCLASS => ("del", "class"),
+        NlMsgType::RTM_NEWTFILTER => ("add", "filter"),
+        NlMsgType::RTM_DELTFILTER => ("del", "filter"),
+        _ => ("unknown", "unknown"),
+    };
+
+    let parent = if tc_msg.parent() == tc_handle::ROOT {
+        "root".to_string()
+    } else if tc_msg.parent() == tc_handle::INGRESS {
+        "ingress".to_string()
+    } else {
+        tc_handle::format(tc_msg.parent())
+    };
+
+    let event = serde_json::json!({
+        "event": object,
+        "action": action,
+        "kind": tc_msg.kind().unwrap_or(""),
+        "handle": tc_handle::format(tc_msg.handle()),
+        "dev": dev,
+        "parent": parent,
+        "ifindex": tc_msg.ifindex(),
+    });
+
+    writeln!(out, "{}", serde_json::to_string(&event)?)?;
+    out.flush()?;
+    Ok(())
 }
