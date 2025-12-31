@@ -388,6 +388,8 @@ dependencies = [
 name = "rip-output"
 version = "0.1.0"
 dependencies = [
+ "rip-lib",
+ "rip-netlink",
  "serde",
  "serde_json",
 ]

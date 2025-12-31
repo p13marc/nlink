@@ -2,6 +2,7 @@
 
 mod json;
 pub mod monitor;
+mod printable;
 mod text;
 
 pub use json::JsonOutput;

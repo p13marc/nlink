@@ -8,3 +8,5 @@ license.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+rip-netlink = { path = "../rip-netlink" }
+rip-lib = { path = "../rip-lib" }
