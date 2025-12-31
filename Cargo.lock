@@ -516,6 +516,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rip-ss"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "atty",
+ "clap",
+ "libc",
+ "rip-lib",
+ "rip-output",
+ "rip-sockdiag",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rip-tc"
 version = "0.1.0"
 dependencies = [

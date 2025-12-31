@@ -9,6 +9,7 @@ members = [
     "crates/rip-sockdiag",
     "bins/ip",
     "bins/tc",
+    "bins/ss",
 ]
 
 [workspace.package]

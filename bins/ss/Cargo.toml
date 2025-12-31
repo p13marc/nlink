@@ -1,0 +1,23 @@
+[package]
+name = "rip-ss"
+description = "ss command - socket statistics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ss"
+path = "src/main.rs"
+
+[dependencies]
+rip-sockdiag = { workspace = true }
+rip-lib = { workspace = true }
+rip-output = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+anyhow = "1"
+atty = "0.2"

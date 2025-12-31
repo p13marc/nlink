@@ -23,8 +23,10 @@ use tokio::io::unix::AsyncFd;
 const NETLINK_SOCK_DIAG: i32 = 4;
 const NLMSG_DONE: u16 = 3;
 const NLMSG_ERROR: u16 = 2;
-const NLM_F_REQUEST: u16 = 1;
-const NLM_F_DUMP: u16 = 0x300;
+const NLM_F_REQUEST: u16 = 0x01;
+const NLM_F_ROOT: u16 = 0x100;
+const NLM_F_MATCH: u16 = 0x200;
+const NLM_F_DUMP: u16 = NLM_F_ROOT | NLM_F_MATCH;
 
 // Socket diagnostics constants
 const SOCK_DIAG_BY_FAMILY: u16 = 20;
@@ -200,10 +202,8 @@ impl SockDiag {
         let mut buf = Vec::with_capacity(256);
 
         // Netlink header (16 bytes)
-        let msg_type = match filter.protocol {
-            Protocol::Tcp | Protocol::Mptcp | Protocol::Dccp => TCPDIAG_GETSOCK,
-            _ => SOCK_DIAG_BY_FAMILY,
-        };
+        // Use SOCK_DIAG_BY_FAMILY for all protocols (modern interface)
+        let msg_type = SOCK_DIAG_BY_FAMILY;
 
         // Will fill in length later
         buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len
