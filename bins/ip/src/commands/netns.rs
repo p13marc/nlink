@@ -5,15 +5,39 @@
 
 use clap::{Args, Subcommand};
 use rip_netlink::Result;
-use rip_output::{OutputFormat, OutputOptions};
+use rip_output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Network namespace runtime directory.
 const NETNS_RUN_DIR: &str = "/var/run/netns";
+
+/// Namespace information for display.
+#[derive(Debug)]
+struct NamespaceInfo {
+    name: String,
+    nsid: Option<i32>,
+}
+
+impl Printable for NamespaceInfo {
+    fn print_text<W: Write>(&self, w: &mut W, _opts: &OutputOptions) -> io::Result<()> {
+        if let Some(nsid) = self.nsid {
+            writeln!(w, "{} (id: {})", self.name, nsid)
+        } else {
+            writeln!(w, "{}", self.name)
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "nsid": self.nsid,
+        })
+    }
+}
 
 #[derive(Args)]
 pub struct NetnsCmd {
@@ -107,7 +131,7 @@ impl NetnsCmd {
 }
 
 /// List all network namespaces.
-fn list_namespaces(format: OutputFormat, _opts: &OutputOptions) -> Result<()> {
+fn list_namespaces(format: OutputFormat, opts: &OutputOptions) -> Result<()> {
     let dir = match fs::read_dir(NETNS_RUN_DIR) {
         Ok(d) => d,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -119,7 +143,7 @@ fn list_namespaces(format: OutputFormat, _opts: &OutputOptions) -> Result<()> {
         }
     };
 
-    let mut namespaces: Vec<String> = Vec::new();
+    let mut namespaces: Vec<NamespaceInfo> = Vec::new();
 
     for entry in dir {
         let entry = entry.map_err(rip_netlink::Error::Io)?;
@@ -127,30 +151,15 @@ fn list_namespaces(format: OutputFormat, _opts: &OutputOptions) -> Result<()> {
         if name == "." || name == ".." {
             continue;
         }
-        namespaces.push(name);
+        namespaces.push(NamespaceInfo {
+            nsid: get_namespace_id(&name),
+            name,
+        });
     }
 
-    namespaces.sort();
+    namespaces.sort_by(|a, b| a.name.cmp(&b.name));
 
-    match format {
-        OutputFormat::Json => {
-            let json: Vec<_> = namespaces
-                .iter()
-                .map(|n| serde_json::json!({"name": n}))
-                .collect();
-            println!("{}", serde_json::to_string(&json).unwrap_or_default());
-        }
-        OutputFormat::Text => {
-            for ns in &namespaces {
-                // Try to get the nsid
-                if let Some(nsid) = get_namespace_id(ns) {
-                    println!("{} (id: {})", ns, nsid);
-                } else {
-                    println!("{}", ns);
-                }
-            }
-        }
-    }
+    print_all(&namespaces, format, opts)?;
 
     Ok(())
 }

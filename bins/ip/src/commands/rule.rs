@@ -7,8 +7,8 @@ use rip_netlink::types::rule::{
     FibRuleAction, FibRuleHdr, FibRulePortRange, FibRuleUidRange, FraAttr,
 };
 use rip_netlink::{Connection, Result, connection::dump_request};
-use rip_output::{OutputFormat, OutputOptions};
-use std::io::{self, Write};
+use rip_output::{OutputFormat, OutputOptions, Printable, print_all};
+use std::io::Write;
 
 #[derive(Args)]
 pub struct RuleCmd {
@@ -185,16 +185,16 @@ impl RuleCmd {
         // Send and receive
         let responses = conn.dump(builder).await?;
 
-        let mut stdout = io::stdout().lock();
         let mut rules = Vec::new();
 
         for response in &responses {
             if let Some(rule) = parse_rule_message(response)? {
                 // Filter by family if specified
                 if let Some(fam) = family
-                    && rule.family != fam {
-                        continue;
-                    }
+                    && rule.family != fam
+                {
+                    continue;
+                }
                 rules.push(rule);
             }
         }
@@ -202,22 +202,7 @@ impl RuleCmd {
         // Sort by priority
         rules.sort_by_key(|r| r.priority);
 
-        match format {
-            OutputFormat::Text => {
-                for rule in &rules {
-                    print_rule_text(&mut stdout, rule, opts)?;
-                }
-            }
-            OutputFormat::Json => {
-                let json: Vec<_> = rules.iter().map(|r| r.to_json()).collect();
-                if opts.pretty {
-                    serde_json::to_writer_pretty(&mut stdout, &json)?;
-                } else {
-                    serde_json::to_writer(&mut stdout, &json)?;
-                }
-                writeln!(stdout)?;
-            }
-        }
+        print_all(&rules, format, opts)?;
 
         Ok(())
     }
@@ -578,7 +563,105 @@ struct RuleInfo {
     uid_range: Option<FibRuleUidRange>,
 }
 
-impl RuleInfo {
+impl Printable for RuleInfo {
+    fn print_text<W: Write>(&self, w: &mut W, _opts: &OutputOptions) -> std::io::Result<()> {
+        // Priority
+        write!(w, "{}:\t", self.priority)?;
+
+        // Source
+        if let Some(ref src) = self.source {
+            write!(w, "from {}/{} ", src, self.src_len)?;
+        } else {
+            write!(w, "from all ")?;
+        }
+
+        // Destination
+        if let Some(ref dst) = self.destination {
+            write!(w, "to {}/{} ", dst, self.dst_len)?;
+        }
+
+        // Input interface
+        if let Some(ref iif) = self.iif {
+            write!(w, "iif {} ", iif)?;
+        }
+
+        // Output interface
+        if let Some(ref oif) = self.oif {
+            write!(w, "oif {} ", oif)?;
+        }
+
+        // Fwmark
+        if let Some(mark) = self.fwmark {
+            if let Some(mask) = self.fwmask {
+                if mask != 0xffffffff {
+                    write!(w, "fwmark {:#x}/{:#x} ", mark, mask)?;
+                } else {
+                    write!(w, "fwmark {:#x} ", mark)?;
+                }
+            } else {
+                write!(w, "fwmark {:#x} ", mark)?;
+            }
+        }
+
+        // IP protocol
+        if let Some(proto) = self.ipproto {
+            write!(w, "ipproto {} ", ip_proto_name(proto))?;
+        }
+
+        // Source port
+        if let Some(ref range) = self.sport {
+            if range.start == range.end {
+                write!(w, "sport {} ", range.start)?;
+            } else {
+                write!(w, "sport {}-{} ", range.start, range.end)?;
+            }
+        }
+
+        // Destination port
+        if let Some(ref range) = self.dport {
+            if range.start == range.end {
+                write!(w, "dport {} ", range.start)?;
+            } else {
+                write!(w, "dport {}-{} ", range.start, range.end)?;
+            }
+        }
+
+        // UID range
+        if let Some(ref uid) = self.uid_range {
+            if uid.start == uid.end {
+                write!(w, "uidrange {} ", uid.start)?;
+            } else {
+                write!(w, "uidrange {}-{} ", uid.start, uid.end)?;
+            }
+        }
+
+        // Action
+        match self.action {
+            FibRuleAction::ToTbl => {
+                write!(w, "lookup {}", rip_lib::names::table_name(self.table))?;
+            }
+            FibRuleAction::Blackhole => {
+                write!(w, "blackhole")?;
+            }
+            FibRuleAction::Unreachable => {
+                write!(w, "unreachable")?;
+            }
+            FibRuleAction::Prohibit => {
+                write!(w, "prohibit")?;
+            }
+            FibRuleAction::Goto => {
+                write!(w, "goto")?;
+            }
+            FibRuleAction::Nop => {
+                write!(w, "nop")?;
+            }
+            _ => {}
+        }
+
+        writeln!(w)?;
+        Ok(())
+    }
+
     fn to_json(&self) -> serde_json::Value {
         let mut obj = serde_json::json!({
             "priority": self.priority,
@@ -728,105 +811,6 @@ fn parse_rule_message(data: &[u8]) -> Result<Option<RuleInfo>> {
         dport,
         uid_range,
     }))
-}
-
-fn print_rule_text<W: Write>(w: &mut W, rule: &RuleInfo, _opts: &OutputOptions) -> io::Result<()> {
-    // Priority
-    write!(w, "{}:\t", rule.priority)?;
-
-    // Source
-    if let Some(ref src) = rule.source {
-        write!(w, "from {}/{} ", src, rule.src_len)?;
-    } else {
-        write!(w, "from all ")?;
-    }
-
-    // Destination
-    if let Some(ref dst) = rule.destination {
-        write!(w, "to {}/{} ", dst, rule.dst_len)?;
-    }
-
-    // Input interface
-    if let Some(ref iif) = rule.iif {
-        write!(w, "iif {} ", iif)?;
-    }
-
-    // Output interface
-    if let Some(ref oif) = rule.oif {
-        write!(w, "oif {} ", oif)?;
-    }
-
-    // Fwmark
-    if let Some(mark) = rule.fwmark {
-        if let Some(mask) = rule.fwmask {
-            if mask != 0xffffffff {
-                write!(w, "fwmark {:#x}/{:#x} ", mark, mask)?;
-            } else {
-                write!(w, "fwmark {:#x} ", mark)?;
-            }
-        } else {
-            write!(w, "fwmark {:#x} ", mark)?;
-        }
-    }
-
-    // IP protocol
-    if let Some(proto) = rule.ipproto {
-        write!(w, "ipproto {} ", ip_proto_name(proto))?;
-    }
-
-    // Source port
-    if let Some(ref range) = rule.sport {
-        if range.start == range.end {
-            write!(w, "sport {} ", range.start)?;
-        } else {
-            write!(w, "sport {}-{} ", range.start, range.end)?;
-        }
-    }
-
-    // Destination port
-    if let Some(ref range) = rule.dport {
-        if range.start == range.end {
-            write!(w, "dport {} ", range.start)?;
-        } else {
-            write!(w, "dport {}-{} ", range.start, range.end)?;
-        }
-    }
-
-    // UID range
-    if let Some(ref uid) = rule.uid_range {
-        if uid.start == uid.end {
-            write!(w, "uidrange {} ", uid.start)?;
-        } else {
-            write!(w, "uidrange {}-{} ", uid.start, uid.end)?;
-        }
-    }
-
-    // Action
-    match rule.action {
-        FibRuleAction::ToTbl => {
-            write!(w, "lookup {}", rip_lib::names::table_name(rule.table))?;
-        }
-        FibRuleAction::Blackhole => {
-            write!(w, "blackhole")?;
-        }
-        FibRuleAction::Unreachable => {
-            write!(w, "unreachable")?;
-        }
-        FibRuleAction::Prohibit => {
-            write!(w, "prohibit")?;
-        }
-        FibRuleAction::Goto => {
-            write!(w, "goto")?; // Would need the target priority
-        }
-        FibRuleAction::Nop => {
-            write!(w, "nop")?;
-        }
-        _ => {}
-    }
-
-    writeln!(w)?;
-
-    Ok(())
 }
 
 /// Parse fwmark/mask string like "0x100" or "0x100/0xff00".

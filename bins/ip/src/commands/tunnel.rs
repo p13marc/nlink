@@ -12,8 +12,8 @@ use rip_netlink::connection::dump_request;
 use rip_netlink::message::{NLMSG_HDRLEN, NlMsgType};
 use rip_netlink::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
 use rip_netlink::{Connection, MessageBuilder, Result};
-use rip_output::{OutputFormat, OutputOptions};
-use std::io::{self, Write};
+use rip_output::{OutputFormat, OutputOptions, Printable, print_all};
+use std::io::Write;
 use std::net::Ipv4Addr;
 
 /// IFLA_GRE_* attribute constants
@@ -241,20 +241,7 @@ impl TunnelCmd {
             }
         }
 
-        let mut stdout = io::stdout().lock();
-
-        match format {
-            OutputFormat::Json => {
-                let json: Vec<_> = tunnels.iter().map(|t| t.to_json()).collect();
-                serde_json::to_writer(&mut stdout, &json)?;
-                writeln!(stdout)?;
-            }
-            OutputFormat::Text => {
-                for tunnel in &tunnels {
-                    print_tunnel_text(&mut stdout, tunnel)?;
-                }
-            }
-        }
+        print_all(&tunnels, format, &OutputOptions::default())?;
 
         Ok(())
     }
@@ -492,7 +479,43 @@ struct TunnelInfo {
     ifindex: i32,
 }
 
-impl TunnelInfo {
+impl Printable for TunnelInfo {
+    fn print_text<W: Write>(&self, w: &mut W, _opts: &OutputOptions) -> std::io::Result<()> {
+        write!(w, "{}: {}/ip", self.name, self.mode)?;
+
+        write!(
+            w,
+            " remote {}",
+            self.remote
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "any".to_string())
+        )?;
+
+        write!(
+            w,
+            " local {}",
+            self.local
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "any".to_string())
+        )?;
+
+        if let Some(ttl) = self.ttl {
+            if ttl > 0 {
+                write!(w, " ttl {}", ttl)?;
+            } else {
+                write!(w, " ttl inherit")?;
+            }
+        }
+
+        if let Some(key) = self.key {
+            write!(w, " key {}", key)?;
+        }
+
+        writeln!(w)?;
+
+        Ok(())
+    }
+
     fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "name": self.name,
@@ -647,43 +670,4 @@ fn parse_tunnel_data(
             }
         }
     }
-}
-
-/// Print tunnel info in text format.
-fn print_tunnel_text(w: &mut impl Write, tunnel: &TunnelInfo) -> Result<()> {
-    write!(w, "{}: {}/ip", tunnel.name, tunnel.mode)?;
-
-    write!(
-        w,
-        " remote {}",
-        tunnel
-            .remote
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| "any".to_string())
-    )?;
-
-    write!(
-        w,
-        " local {}",
-        tunnel
-            .local
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| "any".to_string())
-    )?;
-
-    if let Some(ttl) = tunnel.ttl {
-        if ttl > 0 {
-            write!(w, " ttl {}", ttl)?;
-        } else {
-            write!(w, " ttl inherit")?;
-        }
-    }
-
-    if let Some(key) = tunnel.key {
-        write!(w, " key {}", key)?;
-    }
-
-    writeln!(w)?;
-
-    Ok(())
 }
