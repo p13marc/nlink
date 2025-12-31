@@ -11,3 +11,4 @@ pub mod route;
 pub mod rule;
 pub mod tunnel;
 pub mod vrf;
+pub mod xfrm;

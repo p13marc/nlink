@@ -81,6 +81,9 @@ enum Command {
 
     /// Manage VRF (Virtual Routing and Forwarding) devices.
     Vrf(commands::vrf::VrfCmd),
+
+    /// Manage XFRM (IPSec) state and policy.
+    Xfrm(commands::xfrm::XfrmCmd),
 }
 
 #[tokio::main]
@@ -132,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Tunnel(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Maddress(cmd) => cmd.run(format, &opts, family).await,
         Command::Vrf(cmd) => cmd.run(&conn, format, &opts).await,
+        Command::Xfrm(cmd) => cmd.run(format, &opts).await,
     };
 
     if let Err(e) = result {
