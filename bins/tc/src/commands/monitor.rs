@@ -4,13 +4,13 @@
 //! and the generic monitor infrastructure from rip-output.
 
 use clap::{Args, ValueEnum};
-use rip_netlink::message::NlMsgType;
-use rip_netlink::messages::TcMessage;
-use rip_netlink::parse::FromNetlink;
-use rip_netlink::rtnetlink_groups::*;
-use rip_netlink::types::tc::tc_handle;
-use rip_netlink::{Connection, Protocol, Result};
-use rip_output::{
+use rip::netlink::message::NlMsgType;
+use rip::netlink::messages::TcMessage;
+use rip::netlink::parse::FromNetlink;
+use rip::netlink::rtnetlink_groups::*;
+use rip::netlink::types::tc::tc_handle;
+use rip::netlink::{Connection, Protocol, Result};
+use rip::output::{
     MonitorConfig, OutputFormat, OutputOptions, TcEvent, print_monitor_start, run_monitor_loop,
 };
 
@@ -113,7 +113,7 @@ fn parse_tc_event(
     // Parse TC message
     let tc_msg = TcMessage::from_bytes(payload).ok()?;
 
-    let dev = rip_lib::ifname::index_to_name(tc_msg.ifindex() as u32)
+    let dev = rip::util::ifname::index_to_name(tc_msg.ifindex() as u32)
         .unwrap_or_else(|_| format!("if{}", tc_msg.ifindex()));
 
     let parent = if tc_msg.parent() == tc_handle::ROOT {

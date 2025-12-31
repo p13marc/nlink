@@ -3,12 +3,12 @@
 //! This module uses the strongly-typed NeighborMessage API from rip-netlink.
 
 use clap::{Args, Subcommand};
-use rip_netlink::message::{NLMSG_HDRLEN, NlMsgType};
-use rip_netlink::messages::NeighborMessage;
-use rip_netlink::parse::FromNetlink;
-use rip_netlink::types::neigh::{NdMsg, NdaAttr, nud};
-use rip_netlink::{Connection, Result, connection::dump_request};
-use rip_output::{OutputFormat, OutputOptions, print_all};
+use rip::netlink::message::{NLMSG_HDRLEN, NlMsgType};
+use rip::netlink::messages::NeighborMessage;
+use rip::netlink::parse::FromNetlink;
+use rip::netlink::types::neigh::{NdMsg, NdaAttr, nud};
+use rip::netlink::{Connection, Result, connection::dump_request};
+use rip::output::{OutputFormat, OutputOptions, print_all};
 use std::net::IpAddr;
 
 #[derive(Args)]
@@ -140,7 +140,7 @@ impl NeighborCmd {
 
         // Get device index if filtering by name
         let filter_index = if let Some(dev_name) = dev {
-            Some(rip_lib::get_ifindex(dev_name).map_err(rip_netlink::Error::InvalidMessage)? as u32)
+            Some(rip::util::get_ifindex(dev_name).map_err(rip::netlink::Error::InvalidMessage)? as u32)
         } else {
             None
         };
@@ -185,16 +185,16 @@ impl NeighborCmd {
         state_name: Option<&str>,
         replace: bool,
     ) -> Result<()> {
-        use rip_lib::addr::{parse_addr, parse_mac};
-        use rip_netlink::connection::{ack_request, replace_request};
+        use rip::util::addr::{parse_addr, parse_mac};
+        use rip::netlink::connection::{ack_request, replace_request};
 
         let addr = parse_addr(address)
-            .map_err(|e| rip_netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
+            .map_err(|e| rip::netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
 
         let mac = parse_mac(lladdr)
-            .map_err(|e| rip_netlink::Error::InvalidMessage(format!("invalid MAC: {}", e)))?;
+            .map_err(|e| rip::netlink::Error::InvalidMessage(format!("invalid MAC: {}", e)))?;
 
-        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)? as u32;
+        let ifindex = rip::util::get_ifindex(dev).map_err(rip::netlink::Error::InvalidMessage)? as u32;
 
         let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
 
@@ -251,13 +251,13 @@ impl NeighborCmd {
     }
 
     async fn del(conn: &Connection, address: &str, dev: &str) -> Result<()> {
-        use rip_lib::addr::parse_addr;
-        use rip_netlink::connection::ack_request;
+        use rip::util::addr::parse_addr;
+        use rip::netlink::connection::ack_request;
 
         let addr = parse_addr(address)
-            .map_err(|e| rip_netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
+            .map_err(|e| rip::netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
 
-        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)? as u32;
+        let ifindex = rip::util::get_ifindex(dev).map_err(rip::netlink::Error::InvalidMessage)? as u32;
 
         let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
 
@@ -286,7 +286,7 @@ impl NeighborCmd {
     }
 
     async fn flush(conn: &Connection, dev: Option<&str>, family: Option<u8>) -> Result<()> {
-        use rip_netlink::connection::ack_request;
+        use rip::netlink::connection::ack_request;
 
         // First, get all neighbor entries
         let mut builder = dump_request(NlMsgType::RTM_GETNEIGH);
@@ -297,7 +297,7 @@ impl NeighborCmd {
 
         // Get device index if filtering by name
         let filter_index = if let Some(dev_name) = dev {
-            Some(rip_lib::get_ifindex(dev_name).map_err(rip_netlink::Error::InvalidMessage)? as u32)
+            Some(rip::util::get_ifindex(dev_name).map_err(rip::netlink::Error::InvalidMessage)? as u32)
         } else {
             None
         };

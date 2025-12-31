@@ -4,16 +4,14 @@ description = "Traffic control tool"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "tc"
 path = "src/main.rs"
 
 [dependencies]
-rip-netlink = { workspace = true }
-rip-lib = { workspace = true }
-rip-output = { workspace = true }
-rip-tclib = { workspace = true }
+rip = { workspace = true, features = ["tc", "output"] }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

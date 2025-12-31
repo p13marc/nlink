@@ -1,13 +1,13 @@
 //! ip rule command implementation.
 
 use clap::{Args, Subcommand};
-use rip_netlink::attr::{AttrIter, get};
-use rip_netlink::message::{NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
-use rip_netlink::types::rule::{
+use rip::netlink::attr::{AttrIter, get};
+use rip::netlink::message::{NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
+use rip::netlink::types::rule::{
     FibRuleAction, FibRuleHdr, FibRulePortRange, FibRuleUidRange, FraAttr,
 };
-use rip_netlink::{Connection, Result, connection::dump_request};
-use rip_output::{OutputFormat, OutputOptions, Printable, print_all};
+use rip::netlink::{Connection, Result, connection::dump_request};
+use rip::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::io::Write;
 
 #[derive(Args)]
@@ -223,8 +223,8 @@ impl RuleCmd {
         sport: Option<&str>,
         dport: Option<&str>,
     ) -> Result<()> {
-        use rip_lib::addr::parse_prefix;
-        use rip_netlink::connection::ack_request;
+        use rip::util::addr::parse_prefix;
+        use rip::netlink::connection::ack_request;
 
         // Determine action
         let action = match action_type.to_lowercase().as_str() {
@@ -234,7 +234,7 @@ impl RuleCmd {
             "prohibit" => FibRuleAction::Prohibit,
             "nop" => FibRuleAction::Nop,
             _ => {
-                return Err(rip_netlink::Error::InvalidMessage(format!(
+                return Err(rip::netlink::Error::InvalidMessage(format!(
                     "unknown action: {}",
                     action_type
                 )));
@@ -247,7 +247,7 @@ impl RuleCmd {
                 (None, 0)
             } else {
                 let (addr, len) = parse_prefix(s).map_err(|e| {
-                    rip_netlink::Error::InvalidMessage(format!("invalid source: {}", e))
+                    rip::netlink::Error::InvalidMessage(format!("invalid source: {}", e))
                 })?;
                 (Some(addr), len)
             }
@@ -260,7 +260,7 @@ impl RuleCmd {
                 (None, 0)
             } else {
                 let (addr, len) = parse_prefix(d).map_err(|e| {
-                    rip_netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
+                    rip::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
                 })?;
                 (Some(addr), len)
             }
@@ -280,7 +280,7 @@ impl RuleCmd {
 
         // Parse table
         let table_id = table
-            .map(|t| rip_lib::names::table_id(t).unwrap_or(254))
+            .map(|t| rip::util::names::table_id(t).unwrap_or(254))
             .unwrap_or(254);
 
         let mut hdr = FibRuleHdr::new().with_family(actual_family);
@@ -392,8 +392,8 @@ impl RuleCmd {
         fwmark: Option<&str>,
         table: Option<&str>,
     ) -> Result<()> {
-        use rip_lib::addr::parse_prefix;
-        use rip_netlink::connection::ack_request;
+        use rip::util::addr::parse_prefix;
+        use rip::netlink::connection::ack_request;
 
         // Parse source/destination prefixes
         let (src_addr, src_len) = if let Some(s) = from {
@@ -401,7 +401,7 @@ impl RuleCmd {
                 (None, 0)
             } else {
                 let (addr, len) = parse_prefix(s).map_err(|e| {
-                    rip_netlink::Error::InvalidMessage(format!("invalid source: {}", e))
+                    rip::netlink::Error::InvalidMessage(format!("invalid source: {}", e))
                 })?;
                 (Some(addr), len)
             }
@@ -414,7 +414,7 @@ impl RuleCmd {
                 (None, 0)
             } else {
                 let (addr, len) = parse_prefix(d).map_err(|e| {
-                    rip_netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
+                    rip::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
                 })?;
                 (Some(addr), len)
             }
@@ -434,7 +434,7 @@ impl RuleCmd {
 
         // Parse table
         let table_id = table
-            .map(|t| rip_lib::names::table_id(t).unwrap_or(254))
+            .map(|t| rip::util::names::table_id(t).unwrap_or(254))
             .unwrap_or(0);
 
         let mut hdr = FibRuleHdr::new().with_family(actual_family);
@@ -524,7 +524,7 @@ impl RuleCmd {
 
         // Delete each rule
         for rule in rules {
-            use rip_netlink::connection::ack_request;
+            use rip::netlink::connection::ack_request;
 
             let mut hdr = FibRuleHdr::new().with_family(rule.family);
             hdr.src_len = rule.src_len;
@@ -638,7 +638,7 @@ impl Printable for RuleInfo {
         // Action
         match self.action {
             FibRuleAction::ToTbl => {
-                write!(w, "lookup {}", rip_lib::names::table_name(self.table))?;
+                write!(w, "lookup {}", rip::util::names::table_name(self.table))?;
             }
             FibRuleAction::Blackhole => {
                 write!(w, "blackhole")?;
@@ -679,7 +679,7 @@ impl Printable for RuleInfo {
         }
 
         if self.action == FibRuleAction::ToTbl {
-            obj["table"] = serde_json::json!(rip_lib::names::table_name(self.table));
+            obj["table"] = serde_json::json!(rip::util::names::table_name(self.table));
         }
 
         if let Some(ref iif) = self.iif {
@@ -760,10 +760,10 @@ fn parse_rule_message(data: &[u8]) -> Result<Option<RuleInfo>> {
                 table = get::u32_ne(attr_data).unwrap_or(table);
             }
             FraAttr::Src => {
-                source = rip_lib::addr::format_addr_bytes(attr_data, hdr.family);
+                source = rip::util::addr::format_addr_bytes(attr_data, hdr.family);
             }
             FraAttr::Dst => {
-                destination = rip_lib::addr::format_addr_bytes(attr_data, hdr.family);
+                destination = rip::util::addr::format_addr_bytes(attr_data, hdr.family);
             }
             FraAttr::Iifname => {
                 iif = get::string(attr_data).ok().map(String::from);
@@ -833,7 +833,7 @@ fn parse_u32(s: &str) -> Result<u32> {
     } else {
         s.parse()
     }
-    .map_err(|_| rip_netlink::Error::InvalidMessage(format!("invalid number: {}", s)))
+    .map_err(|_| rip::netlink::Error::InvalidMessage(format!("invalid number: {}", s)))
 }
 
 /// Parse port or port range like "80" or "80-443".
@@ -842,17 +842,17 @@ fn parse_port_range(s: &str) -> Result<(u16, u16)> {
         let start: u16 = start_str
             .trim()
             .parse()
-            .map_err(|_| rip_netlink::Error::InvalidMessage(format!("invalid port: {}", s)))?;
+            .map_err(|_| rip::netlink::Error::InvalidMessage(format!("invalid port: {}", s)))?;
         let end: u16 = end_str
             .trim()
             .parse()
-            .map_err(|_| rip_netlink::Error::InvalidMessage(format!("invalid port: {}", s)))?;
+            .map_err(|_| rip::netlink::Error::InvalidMessage(format!("invalid port: {}", s)))?;
         Ok((start, end))
     } else {
         let port: u16 = s
             .trim()
             .parse()
-            .map_err(|_| rip_netlink::Error::InvalidMessage(format!("invalid port: {}", s)))?;
+            .map_err(|_| rip::netlink::Error::InvalidMessage(format!("invalid port: {}", s)))?;
         Ok((port, port))
     }
 }
@@ -870,7 +870,7 @@ fn parse_ip_proto(s: &str) -> Result<u8> {
         "sctp" => Ok(132),
         _ => s
             .parse()
-            .map_err(|_| rip_netlink::Error::InvalidMessage(format!("unknown protocol: {}", s))),
+            .map_err(|_| rip::netlink::Error::InvalidMessage(format!("unknown protocol: {}", s))),
     }
 }
 

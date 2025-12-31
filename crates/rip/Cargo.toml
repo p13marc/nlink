@@ -1,0 +1,43 @@
+[package]
+name = "rip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Async netlink library for Linux network configuration"
+keywords = ["netlink", "linux", "networking", "async", "iproute2"]
+categories = ["network-programming", "os::linux-apis", "asynchronous"]
+
+[features]
+default = []
+# Socket diagnostics (NETLINK_SOCK_DIAG)
+sockdiag = ["dep:serde"]
+# TUN/TAP device management
+tuntap = []
+# TUN/TAP async support
+tuntap-async = ["tuntap"]
+# Traffic control utilities
+tc = []
+# Output formatting (JSON/text)
+output = ["dep:serde"]
+# All features
+full = ["sockdiag", "tuntap", "tuntap-async", "tc", "output"]
+# Enable integration tests (require root or network namespace)
+integration = []
+
+[dependencies]
+# Core dependencies (always needed)
+tokio = { workspace = true }
+netlink-sys = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+libc = { workspace = true }
+winnow = { workspace = true }
+serde_json = { workspace = true }
+
+# Optional dependencies
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -4,15 +4,14 @@ description = "ss command - socket statistics"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "ss"
 path = "src/main.rs"
 
 [dependencies]
-rip-sockdiag = { workspace = true }
-rip-lib = { workspace = true }
-rip-output = { workspace = true }
+rip = { workspace = true, features = ["sockdiag", "output"] }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

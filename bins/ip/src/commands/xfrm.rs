@@ -4,8 +4,8 @@
 //! Manages Security Associations (SAs) and Security Policies (SPs).
 
 use clap::{Args, Subcommand};
-use rip_netlink::Result;
-use rip_output::{OutputFormat, OutputOptions, Printable, print_all};
+use rip::netlink::Result;
+use rip::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::fs;
 use std::io::Write;
 use std::net::IpAddr;

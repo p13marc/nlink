@@ -1,12 +1,12 @@
 //! tc class command implementation.
 
 use clap::{Args, Subcommand};
-use rip_netlink::message::NlMsgType;
-use rip_netlink::messages::TcMessage;
-use rip_netlink::types::tc::tc_handle;
-use rip_netlink::{Connection, Result};
-use rip_output::{OutputFormat, OutputOptions, print_all};
-use rip_tclib::builders::class as class_builder;
+use rip::netlink::message::NlMsgType;
+use rip::netlink::messages::TcMessage;
+use rip::netlink::types::tc::tc_handle;
+use rip::netlink::{Connection, Result};
+use rip::output::{OutputFormat, OutputOptions, print_all};
+use rip::tc::builders::class as class_builder;
 
 #[derive(Args)]
 pub struct ClassCmd {
@@ -192,12 +192,12 @@ impl ClassCmd {
         opts: &OutputOptions,
     ) -> Result<()> {
         if dev.is_empty() {
-            return Err(rip_netlink::Error::InvalidMessage(
+            return Err(rip::netlink::Error::InvalidMessage(
                 "device name required".into(),
             ));
         }
 
-        let ifindex = rip_lib::get_ifindex(dev).map_err(rip_netlink::Error::InvalidMessage)?;
+        let ifindex = rip::util::get_ifindex(dev).map_err(rip::netlink::Error::InvalidMessage)?;
 
         let parent_filter = parent.and_then(tc_handle::parse);
         let classid_filter = classid.and_then(tc_handle::parse);

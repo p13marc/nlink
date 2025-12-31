@@ -1,13 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/rip-netlink",
-    "crates/rip-netlink-derive",
-    "crates/rip-lib",
-    "crates/rip-output",
-    "crates/rip-tc",
-    "crates/rip-sockdiag",
-    "crates/rip-tuntap",
+    "crates/rip",
     "bins/ip",
     "bins/tc",
     "bins/ss",
@@ -53,10 +47,4 @@ quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
 
 # Workspace crates
-rip-netlink = { path = "crates/rip-netlink" }
-rip-netlink-derive = { path = "crates/rip-netlink-derive" }
-rip-lib = { path = "crates/rip-lib" }
-rip-output = { path = "crates/rip-output" }
-rip-tclib = { path = "crates/rip-tc" }
-rip-sockdiag = { path = "crates/rip-sockdiag" }
-rip-tuntap = { path = "crates/rip-tuntap" }
+rip = { path = "crates/rip" }

@@ -4,12 +4,12 @@
 //! VRFs provide network isolation by creating separate routing domains.
 
 use clap::{Args, Subcommand};
-use rip_netlink::attr::AttrIter;
-use rip_netlink::connection::dump_request;
-use rip_netlink::message::{NLMSG_HDRLEN, NlMsgType};
-use rip_netlink::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
-use rip_netlink::{Connection, Result};
-use rip_output::{OutputFormat, OutputOptions, Printable, print_all};
+use rip::netlink::attr::AttrIter;
+use rip::netlink::connection::dump_request;
+use rip::netlink::message::{NLMSG_HDRLEN, NlMsgType};
+use rip::netlink::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
+use rip::netlink::{Connection, Result};
+use rip::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::io::Write;
 
 /// IFLA_VRF_TABLE attribute constant.
@@ -137,7 +137,7 @@ impl VrfCmd {
         use std::process::Command;
 
         if command.is_empty() {
-            return Err(rip_netlink::Error::InvalidMessage(
+            return Err(rip::netlink::Error::InvalidMessage(
                 "no command specified".to_string(),
             ));
         }
@@ -157,7 +157,7 @@ impl VrfCmd {
             .env("VRF", name)
             .exec();
 
-        Err(rip_netlink::Error::InvalidMessage(format!(
+        Err(rip::netlink::Error::InvalidMessage(format!(
             "failed to execute: {}",
             err
         )))
@@ -184,7 +184,7 @@ impl VrfCmd {
                 println!();
                 Ok(())
             }
-            Err(e) => Err(rip_netlink::Error::InvalidMessage(format!(
+            Err(e) => Err(rip::netlink::Error::InvalidMessage(format!(
                 "cannot read cgroup for process {}: {}",
                 pid, e
             ))),

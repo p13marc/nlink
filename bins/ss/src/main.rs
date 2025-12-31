@@ -6,8 +6,8 @@
 mod output;
 
 use clap::Parser;
-use rip_output::OutputFormat;
-use rip_sockdiag::{InetFilter, Protocol, SockDiag, SocketFilter, TcpState, UnixFilter};
+use rip::output::OutputFormat;
+use rip::sockdiag::{InetFilter, Protocol, SockDiag, SocketFilter, TcpState, UnixFilter};
 
 #[derive(Parser)]
 #[command(name = "ss", version, about = "Socket statistics utility")]
@@ -174,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
 
         let sockets = diag
             .query(&SocketFilter {
-                kind: rip_sockdiag::filter::FilterKind::Inet(filter),
+                kind: rip::sockdiag::filter::FilterKind::Inet(filter),
             })
             .await?;
         all_results.extend(sockets);
@@ -195,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
 
         let sockets = diag
             .query(&SocketFilter {
-                kind: rip_sockdiag::filter::FilterKind::Inet(filter),
+                kind: rip::sockdiag::filter::FilterKind::Inet(filter),
             })
             .await?;
         all_results.extend(sockets);
@@ -212,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
 
         let sockets = diag
             .query(&SocketFilter {
-                kind: rip_sockdiag::filter::FilterKind::Inet(filter),
+                kind: rip::sockdiag::filter::FilterKind::Inet(filter),
             })
             .await?;
         all_results.extend(sockets);
@@ -229,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
 
         let sockets = diag
             .query(&SocketFilter {
-                kind: rip_sockdiag::filter::FilterKind::Inet(filter),
+                kind: rip::sockdiag::filter::FilterKind::Inet(filter),
             })
             .await?;
         all_results.extend(sockets);
@@ -246,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
 
         let sockets = diag
             .query(&SocketFilter {
-                kind: rip_sockdiag::filter::FilterKind::Inet(filter),
+                kind: rip::sockdiag::filter::FilterKind::Inet(filter),
             })
             .await?;
         all_results.extend(sockets);
@@ -267,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
 
         let sockets = diag
             .query(&SocketFilter {
-                kind: rip_sockdiag::filter::FilterKind::Unix(filter),
+                kind: rip::sockdiag::filter::FilterKind::Unix(filter),
             })
             .await?;
         all_results.extend(sockets);
@@ -289,9 +289,9 @@ async fn main() -> anyhow::Result<()> {
 fn apply_inet_filters(cli: &Cli, filter: &mut InetFilter) {
     // Apply family filter
     if cli.ipv4 {
-        filter.family = Some(rip_sockdiag::AddressFamily::Inet);
+        filter.family = Some(rip::sockdiag::AddressFamily::Inet);
     } else if cli.ipv6 {
-        filter.family = Some(rip_sockdiag::AddressFamily::Inet6);
+        filter.family = Some(rip::sockdiag::AddressFamily::Inet6);
     }
 
     // Apply port filters

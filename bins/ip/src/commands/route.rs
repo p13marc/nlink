@@ -3,11 +3,11 @@
 //! This module uses the strongly-typed RouteMessage API from rip-netlink.
 
 use clap::{Args, Subcommand};
-use rip_netlink::message::NlMsgType;
-use rip_netlink::messages::RouteMessage;
-use rip_netlink::types::route::{RouteScope, RtMsg, RtaAttr};
-use rip_netlink::{Connection, Result, connection::dump_request};
-use rip_output::{OutputFormat, OutputOptions, print_all};
+use rip::netlink::message::NlMsgType;
+use rip::netlink::messages::RouteMessage;
+use rip::netlink::types::route::{RouteScope, RtMsg, RtaAttr};
+use rip::netlink::{Connection, Result, connection::dump_request};
+use rip::output::{OutputFormat, OutputOptions, print_all};
 use std::net::IpAddr;
 
 #[derive(Args)]
@@ -172,7 +172,7 @@ impl RouteCmd {
         opts: &OutputOptions,
         family: Option<u8>,
     ) -> Result<()> {
-        let table_id = rip_lib::names::table_id(table).unwrap_or(254); // main
+        let table_id = rip::util::names::table_id(table).unwrap_or(254); // main
 
         // Use the strongly-typed API to get all routes
         // Note: We need to build a custom request with family/table filter
@@ -193,8 +193,8 @@ impl RouteCmd {
         // Parse responses into typed RouteMessage
         let mut routes = Vec::new();
         for response in &responses {
-            use rip_netlink::message::NLMSG_HDRLEN;
-            use rip_netlink::parse::FromNetlink;
+            use rip::netlink::message::NLMSG_HDRLEN;
+            use rip::netlink::parse::FromNetlink;
 
             if response.len() < NLMSG_HDRLEN + RtMsg::SIZE {
                 continue;
@@ -234,10 +234,10 @@ impl RouteCmd {
         mtu: Option<u32>,
         replace: bool,
     ) -> Result<()> {
-        use rip_lib::addr::parse_prefix;
-        use rip_netlink::connection::{ack_request, replace_request};
+        use rip::util::addr::parse_prefix;
+        use rip::netlink::connection::{ack_request, replace_request};
 
-        let table_id = rip_lib::names::table_id(table).unwrap_or(254);
+        let table_id = rip::util::names::table_id(table).unwrap_or(254);
 
         // Parse destination
         let (dst_addr, dst_len, family) = if destination == "default" {
@@ -249,7 +249,7 @@ impl RouteCmd {
             )
         } else {
             let (addr, prefix) = parse_prefix(destination).map_err(|e| {
-                rip_netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
+                rip::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
             })?;
             let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
             (Some(addr), prefix, family)
@@ -294,7 +294,7 @@ impl RouteCmd {
         // Add gateway
         if let Some(gw) = via {
             let gw_addr: IpAddr = gw.parse().map_err(|_| {
-                rip_netlink::Error::InvalidMessage(format!("invalid gateway: {}", gw))
+                rip::netlink::Error::InvalidMessage(format!("invalid gateway: {}", gw))
             })?;
             match gw_addr {
                 IpAddr::V4(v4) => {
@@ -309,14 +309,14 @@ impl RouteCmd {
         // Add output interface
         if let Some(dev_name) = dev {
             let ifindex =
-                rip_lib::get_ifindex(dev_name).map_err(rip_netlink::Error::InvalidMessage)? as u32;
+                rip::util::get_ifindex(dev_name).map_err(rip::netlink::Error::InvalidMessage)? as u32;
             builder.append_attr_u32(RtaAttr::Oif as u16, ifindex);
         }
 
         // Add preferred source
         if let Some(src_str) = src {
             let src_addr: IpAddr = src_str.parse().map_err(|_| {
-                rip_netlink::Error::InvalidMessage(format!("invalid source: {}", src_str))
+                rip::netlink::Error::InvalidMessage(format!("invalid source: {}", src_str))
             })?;
             match src_addr {
                 IpAddr::V4(v4) => {
@@ -352,17 +352,17 @@ impl RouteCmd {
     }
 
     async fn del(conn: &Connection, destination: &str, table: &str) -> Result<()> {
-        use rip_lib::addr::parse_prefix;
-        use rip_netlink::connection::ack_request;
+        use rip::util::addr::parse_prefix;
+        use rip::netlink::connection::ack_request;
 
-        let table_id = rip_lib::names::table_id(table).unwrap_or(254);
+        let table_id = rip::util::names::table_id(table).unwrap_or(254);
 
         // Parse destination
         let (dst_addr, dst_len, family) = if destination == "default" {
             (None, 0u8, 2u8) // Assume IPv4 for default
         } else {
             let (addr, prefix) = parse_prefix(destination).map_err(|e| {
-                rip_netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
+                rip::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
             })?;
             let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
             (Some(addr), prefix, family)
@@ -404,13 +404,13 @@ impl RouteCmd {
         format: OutputFormat,
         opts: &OutputOptions,
     ) -> Result<()> {
-        use rip_netlink::connection::ack_request;
-        use rip_netlink::message::NLMSG_HDRLEN;
-        use rip_netlink::parse::FromNetlink;
+        use rip::netlink::connection::ack_request;
+        use rip::netlink::message::NLMSG_HDRLEN;
+        use rip::netlink::parse::FromNetlink;
 
         // Parse destination address
         let dst_addr: IpAddr = destination.parse().map_err(|_| {
-            rip_netlink::Error::InvalidMessage(format!("invalid destination: {}", destination))
+            rip::netlink::Error::InvalidMessage(format!("invalid destination: {}", destination))
         })?;
 
         let family = if dst_addr.is_ipv4() { 2u8 } else { 10u8 };
@@ -436,14 +436,14 @@ impl RouteCmd {
 
         // Parse response
         if response.len() < NLMSG_HDRLEN + RtMsg::SIZE {
-            return Err(rip_netlink::Error::InvalidMessage(
+            return Err(rip::netlink::Error::InvalidMessage(
                 "invalid response from kernel".into(),
             ));
         }
 
         let payload = &response[NLMSG_HDRLEN..];
         let route = RouteMessage::from_bytes(payload).map_err(|e| {
-            rip_netlink::Error::InvalidMessage(format!("failed to parse route: {}", e))
+            rip::netlink::Error::InvalidMessage(format!("failed to parse route: {}", e))
         })?;
 
         print_all(&[route], format, opts)?;

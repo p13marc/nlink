@@ -442,6 +442,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
+name = "rip"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "libc",
+ "netlink-sys",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "winnow",
+]
+
+[[package]]
 name = "rip-ip"
 version = "0.1.0"
 dependencies = [
@@ -451,68 +466,11 @@ dependencies = [
  "clap",
  "libc",
  "predicates",
- "rip-lib",
- "rip-netlink",
- "rip-output",
+ "rip",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "rip-lib"
-version = "0.1.0"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
-name = "rip-netlink"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "libc",
- "netlink-sys",
- "rip-lib",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "winnow",
-]
-
-[[package]]
-name = "rip-netlink-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "rip-output"
-version = "0.1.0"
-dependencies = [
- "rip-lib",
- "rip-netlink",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rip-sockdiag"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "libc",
- "netlink-sys",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -523,9 +481,7 @@ dependencies = [
  "atty",
  "clap",
  "libc",
- "rip-lib",
- "rip-output",
- "rip-sockdiag",
+ "rip",
  "serde_json",
  "tokio",
  "tracing",
@@ -539,31 +495,9 @@ dependencies = [
  "assert_cmd",
  "clap",
  "predicates",
- "rip-lib",
- "rip-netlink",
- "rip-output",
- "rip-tclib",
+ "rip",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "rip-tclib"
-version = "0.1.0"
-dependencies = [
- "rip-lib",
- "rip-netlink",
- "thiserror",
-]
-
-[[package]]
-name = "rip-tuntap"
-version = "0.1.0"
-dependencies = [
- "libc",
- "thiserror",
- "tokio",
- "tracing",
 ]
 
 [[package]]
