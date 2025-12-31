@@ -79,7 +79,59 @@ cargo test -p rip-netlink      # Test specific crate
 
 ## Key Patterns
 
-**Parsing netlink responses:**
+**High-level queries (preferred for library use):**
+```rust
+let conn = Connection::new(Protocol::Route)?;
+
+// Query interfaces
+let links = conn.get_links().await?;
+let eth0 = conn.get_link_by_name("eth0").await?;
+
+// Query addresses
+let addrs = conn.get_addresses().await?;
+let eth0_addrs = conn.get_addresses_for("eth0").await?;
+
+// Query routes
+let routes = conn.get_routes().await?;
+
+// Query TC
+let qdiscs = conn.get_qdiscs().await?;
+let classes = conn.get_classes_for("eth0").await?;
+```
+
+**Parsing TC options:**
+```rust
+use rip_netlink::tc_options::{parse_qdisc_options, QdiscOptions};
+
+for qdisc in &qdiscs {
+    if let Some(opts) = parse_qdisc_options(qdisc) {
+        match opts {
+            QdiscOptions::FqCodel(fq) => println!("target={}us", fq.target_us),
+            QdiscOptions::Htb(htb) => println!("default={:x}", htb.default_class),
+            _ => {}
+        }
+    }
+}
+```
+
+**Statistics tracking:**
+```rust
+use rip_netlink::stats::{StatsSnapshot, StatsTracker};
+
+let mut tracker = StatsTracker::new();
+loop {
+    let links = conn.get_links().await?;
+    let snapshot = StatsSnapshot::from_links(&links);
+    if let Some(rates) = tracker.update(snapshot) {
+        for (idx, r) in &rates.links {
+            println!("idx {}: {:.2} Mbps", idx, r.total_bps() / 1_000_000.0);
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+}
+```
+
+**Parsing netlink responses (low-level):**
 ```rust
 for (attr_type, attr_data) in AttrIter::new(attrs_data) {
     match IflaAttr::from(attr_type) {
@@ -97,9 +149,29 @@ builder.append(&IfInfoMsg::new());
 let responses = conn.dump(builder).await?;
 ```
 
-**Monitoring events:**
+**Monitoring events (high-level API - preferred):**
 ```rust
-use rip_netlink::rtnetlink_groups::*;
+use rip_netlink::events::{EventStream, NetworkEvent};
+
+let mut stream = EventStream::builder()
+    .links(true)
+    .addresses(true)
+    .tc(true)
+    .build()?;
+
+while let Some(event) = stream.next().await? {
+    match event {
+        NetworkEvent::NewLink(link) => println!("Link: {}", link.name.unwrap_or_default()),
+        NetworkEvent::NewAddress(addr) => println!("Addr: {:?}", addr.address),
+        NetworkEvent::NewQdisc(tc) => println!("Qdisc: {}", tc.kind().unwrap_or("?")),
+        _ => {}
+    }
+}
+```
+
+**Monitoring events (low-level API):**
+```rust
+use rip_netlink::socket::rtnetlink_groups::*;
 
 let mut conn = Connection::new(Protocol::Route)?;
 conn.subscribe(RTNLGRP_LINK)?;

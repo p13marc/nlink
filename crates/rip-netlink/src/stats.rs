@@ -6,25 +6,35 @@
 //! # Example
 //!
 //! ```ignore
-//! use rip_netlink::stats::{LinkStats, StatsSnapshot};
+//! use rip_netlink::stats::{StatsSnapshot, StatsTracker};
 //! use std::time::Duration;
 //!
-//! // Take a snapshot
+//! // Option 1: Manual rate calculation between snapshots
 //! let links = conn.get_links().await?;
 //! let snapshot1 = StatsSnapshot::from_links(&links);
 //!
-//! // Wait some time...
 //! tokio::time::sleep(Duration::from_secs(1)).await;
 //!
-//! // Take another snapshot
 //! let links = conn.get_links().await?;
 //! let snapshot2 = StatsSnapshot::from_links(&links);
 //!
-//! // Compute delta
-//! let delta = snapshot2.delta(&snapshot1, Duration::from_secs(1));
-//! for (ifindex, stats) in &delta.links {
-//!     println!("Interface {}: {} bytes/sec RX, {} bytes/sec TX",
-//!         ifindex, stats.rx_bytes_per_sec, stats.tx_bytes_per_sec);
+//! let rates = snapshot2.rates(&snapshot1, Duration::from_secs(1));
+//! for (ifindex, link_rates) in &rates.links {
+//!     println!("Interface {}: {:.2} Mbps RX, {:.2} Mbps TX",
+//!         ifindex,
+//!         link_rates.rx_bps() / 1_000_000.0,
+//!         link_rates.tx_bps() / 1_000_000.0);
+//! }
+//!
+//! // Option 2: Use StatsTracker for continuous monitoring
+//! let mut tracker = StatsTracker::new();
+//! loop {
+//!     let links = conn.get_links().await?;
+//!     let snapshot = StatsSnapshot::from_links(&links);
+//!     if let Some(rates) = tracker.update(snapshot) {
+//!         println!("Total: {:.2} Mbps", rates.total_bytes_per_sec() * 8.0 / 1_000_000.0);
+//!     }
+//!     tokio::time::sleep(Duration::from_secs(1)).await;
 //! }
 //! ```
 
