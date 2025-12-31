@@ -124,6 +124,12 @@ impl RouteMessage {
 }
 
 impl FromNetlink for RouteMessage {
+    fn write_dump_header(buf: &mut Vec<u8>) {
+        // RTM_GETROUTE requires an RtMsg header
+        let header = RtMsg::new();
+        buf.extend_from_slice(header.as_bytes());
+    }
+
     fn parse(input: &mut &[u8]) -> PResult<Self> {
         // Parse fixed header (12 bytes)
         if input.len() < RtMsg::SIZE {

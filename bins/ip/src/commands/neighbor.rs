@@ -1,12 +1,16 @@
 //! ip neighbor command implementation.
+//!
+//! This module uses the strongly-typed NeighborMessage API from rip-netlink.
 
 use clap::{Args, Subcommand};
-use rip_netlink::attr::{AttrIter, get};
-use rip_netlink::message::{NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
+use rip_netlink::message::{NLMSG_HDRLEN, NlMsgType};
+use rip_netlink::messages::NeighborMessage;
+use rip_netlink::parse::FromNetlink;
 use rip_netlink::types::neigh::{NdMsg, NdaAttr, nud, nud_state_name};
-use rip_netlink::{Connection, MessageBuilder, Result, connection::dump_request};
+use rip_netlink::{Connection, Result, connection::dump_request};
 use rip_output::{OutputFormat, OutputOptions};
 use std::io::{self, Write};
+use std::net::IpAddr;
 
 #[derive(Args)]
 pub struct NeighborCmd {
@@ -127,16 +131,13 @@ impl NeighborCmd {
         opts: &OutputOptions,
         family: Option<u8>,
     ) -> Result<()> {
-        // Build request
+        // Build request with family filter
         let mut builder = dump_request(NlMsgType::RTM_GETNEIGH);
         let ndmsg = NdMsg::new().with_family(family.unwrap_or(0));
         builder.append(&ndmsg);
 
         // Send and receive
         let responses = conn.dump(builder).await?;
-
-        let mut stdout = io::stdout().lock();
-        let mut neighbors = Vec::new();
 
         // Get device index if filtering by name
         let filter_index = if let Some(dev_name) = dev {
@@ -147,23 +148,32 @@ impl NeighborCmd {
             None
         };
 
+        // Parse responses into typed NeighborMessage
+        let mut neighbors = Vec::new();
         for response in &responses {
-            if let Some(neigh) = parse_neigh_message(response)? {
+            if response.len() < NLMSG_HDRLEN + NdMsg::SIZE {
+                continue;
+            }
+
+            let payload = &response[NLMSG_HDRLEN..];
+            if let Ok(neigh) = NeighborMessage::from_bytes(payload) {
                 // Filter by device if specified
                 if let Some(idx) = filter_index {
-                    if neigh.ifindex != idx as i32 {
+                    if neigh.ifindex() != idx {
                         continue;
                     }
                 }
                 // Filter by family if specified
                 if let Some(fam) = family {
-                    if neigh.family != fam {
+                    if neigh.family() != fam {
                         continue;
                     }
                 }
                 neighbors.push(neigh);
             }
         }
+
+        let mut stdout = io::stdout().lock();
 
         match format {
             OutputFormat::Text => {
@@ -172,7 +182,7 @@ impl NeighborCmd {
                 }
             }
             OutputFormat::Json => {
-                let json: Vec<_> = neighbors.iter().map(|n| n.to_json()).collect();
+                let json: Vec<_> = neighbors.iter().map(neigh_to_json).collect();
                 if opts.pretty {
                     serde_json::to_writer_pretty(&mut stdout, &json)?;
                 } else {
@@ -246,10 +256,10 @@ impl NeighborCmd {
 
         // Add destination address
         match addr {
-            std::net::IpAddr::V4(v4) => {
+            IpAddr::V4(v4) => {
                 builder.append_attr(NdaAttr::Dst as u16, &v4.octets());
             }
-            std::net::IpAddr::V6(v6) => {
+            IpAddr::V6(v6) => {
                 builder.append_attr(NdaAttr::Dst as u16, &v6.octets());
             }
         }
@@ -286,10 +296,10 @@ impl NeighborCmd {
 
         // Add destination address
         match addr {
-            std::net::IpAddr::V4(v4) => {
+            IpAddr::V4(v4) => {
                 builder.append_attr(NdaAttr::Dst as u16, &v4.octets());
             }
-            std::net::IpAddr::V6(v6) => {
+            IpAddr::V6(v6) => {
                 builder.append_attr(NdaAttr::Dst as u16, &v6.octets());
             }
         }
@@ -307,105 +317,66 @@ impl NeighborCmd {
     }
 }
 
-/// Parsed neighbor information.
-#[derive(Debug)]
-struct NeighInfo {
-    ifindex: i32,
-    family: u8,
-    state: u16,
-    flags: u8,
-    dst: Option<String>,
-    lladdr: Option<String>,
+/// Convert NeighborMessage to JSON.
+fn neigh_to_json(neigh: &NeighborMessage) -> serde_json::Value {
+    let dev = rip_lib::ifname::index_to_name(neigh.ifindex())
+        .unwrap_or_else(|_| format!("if{}", neigh.ifindex()));
+
+    let mut obj = serde_json::json!({
+        "ifindex": neigh.ifindex(),
+        "dev": dev,
+        "state": nud_state_name(neigh.header.ndm_state),
+    });
+
+    if let Some(ref dst) = neigh.destination {
+        obj["dst"] = serde_json::json!(dst.to_string());
+    }
+
+    if let Some(ref mac) = neigh.mac_address() {
+        obj["lladdr"] = serde_json::json!(mac);
+    }
+
+    if neigh.is_router() {
+        obj["router"] = serde_json::json!(true);
+    }
+
+    if neigh.is_proxy() {
+        obj["proxy"] = serde_json::json!(true);
+    }
+
+    obj
 }
 
-impl NeighInfo {
-    fn to_json(&self) -> serde_json::Value {
-        let dev = rip_lib::ifname::index_to_name(self.ifindex as u32)
-            .unwrap_or_else(|_| format!("if{}", self.ifindex));
-
-        let mut obj = serde_json::json!({
-            "ifindex": self.ifindex,
-            "dev": dev,
-            "state": nud_state_name(self.state),
-        });
-
-        if let Some(ref dst) = self.dst {
-            obj["dst"] = serde_json::json!(dst);
-        }
-
-        if let Some(ref lladdr) = self.lladdr {
-            obj["lladdr"] = serde_json::json!(lladdr);
-        }
-
-        obj
-    }
-}
-
-fn parse_neigh_message(data: &[u8]) -> Result<Option<NeighInfo>> {
-    if data.len() < NLMSG_HDRLEN + NdMsg::SIZE {
-        return Ok(None);
-    }
-
-    let header = NlMsgHdr::from_bytes(data)?;
-
-    // Skip non-neighbor messages
-    if header.nlmsg_type != NlMsgType::RTM_NEWNEIGH {
-        return Ok(None);
-    }
-
-    let payload = &data[NLMSG_HDRLEN..];
-    let ndmsg = NdMsg::from_bytes(payload)?;
-    let attrs_data = &payload[NdMsg::SIZE..];
-
-    let mut dst = None;
-    let mut lladdr = None;
-
-    for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-        match NdaAttr::from(attr_type) {
-            NdaAttr::Dst => {
-                dst = rip_lib::addr::format_addr_bytes(attr_data, ndmsg.ndm_family);
-            }
-            NdaAttr::Lladdr => {
-                lladdr = Some(rip_lib::addr::format_mac(attr_data));
-            }
-            _ => {}
-        }
-    }
-
-    Ok(Some(NeighInfo {
-        ifindex: ndmsg.ndm_ifindex,
-        family: ndmsg.ndm_family,
-        state: ndmsg.ndm_state,
-        flags: ndmsg.ndm_flags,
-        dst,
-        lladdr,
-    }))
-}
-
+/// Print neighbor in text format.
 fn print_neigh_text<W: Write>(
     w: &mut W,
-    neigh: &NeighInfo,
+    neigh: &NeighborMessage,
     _opts: &OutputOptions,
 ) -> io::Result<()> {
     // Destination
-    if let Some(ref dst) = neigh.dst {
+    if let Some(ref dst) = neigh.destination {
         write!(w, "{}", dst)?;
     } else {
         write!(w, "?")?;
     }
 
     // Device
-    let dev = rip_lib::ifname::index_to_name(neigh.ifindex as u32)
-        .unwrap_or_else(|_| format!("if{}", neigh.ifindex));
+    let dev = rip_lib::ifname::index_to_name(neigh.ifindex())
+        .unwrap_or_else(|_| format!("if{}", neigh.ifindex()));
     write!(w, " dev {}", dev)?;
 
     // Link-layer address
-    if let Some(ref lladdr) = neigh.lladdr {
+    if let Some(ref lladdr) = neigh.mac_address() {
         write!(w, " lladdr {}", lladdr)?;
     }
 
+    // Router flag for IPv6
+    if neigh.is_router() {
+        write!(w, " router")?;
+    }
+
     // State
-    write!(w, " {}", nud_state_name(neigh.state))?;
+    write!(w, " {}", nud_state_name(neigh.header.ndm_state))?;
 
     writeln!(w)?;
 

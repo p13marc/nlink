@@ -169,6 +169,8 @@ impl Connection {
     /// Send a dump request and parse all responses into typed messages.
     ///
     /// This is a convenience method that combines `dump()` with parsing.
+    /// The type T must implement `FromNetlink::write_dump_header` to provide
+    /// the required message header (e.g., IfInfoMsg for links, IfAddrMsg for addresses).
     ///
     /// # Example
     ///
@@ -182,7 +184,13 @@ impl Connection {
     /// }
     /// ```
     pub async fn dump_typed<T: FromNetlink>(&self, msg_type: u16) -> Result<Vec<T>> {
-        let builder = dump_request(msg_type);
+        let mut builder = dump_request(msg_type);
+
+        // Get the header from the type and append it to the request
+        let mut header_buf = Vec::new();
+        T::write_dump_header(&mut header_buf);
+        builder.append_bytes(&header_buf);
+
         let responses = self.dump(builder).await?;
 
         let mut parsed = Vec::with_capacity(responses.len());

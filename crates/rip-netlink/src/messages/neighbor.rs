@@ -142,6 +142,12 @@ impl NeighborMessage {
 }
 
 impl FromNetlink for NeighborMessage {
+    fn write_dump_header(buf: &mut Vec<u8>) {
+        // RTM_GETNEIGH requires an NdMsg header
+        let header = NdMsg::new();
+        buf.extend_from_slice(header.as_bytes());
+    }
+
     fn parse(input: &mut &[u8]) -> PResult<Self> {
         // Parse fixed header (12 bytes)
         if input.len() < NdMsg::SIZE {

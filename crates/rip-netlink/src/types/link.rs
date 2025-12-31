@@ -324,10 +324,19 @@ pub struct LinkStats64 {
 }
 
 impl LinkStats64 {
-    /// Parse from bytes.
-    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
+    /// Parse from bytes by copying (avoids alignment issues).
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() >= std::mem::size_of::<Self>() {
-            Some(unsafe { &*(data.as_ptr() as *const Self) })
+            let mut stats = Self::default();
+            // SAFETY: We're copying bytes into a repr(C) struct with proper size
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    &mut stats as *mut Self as *mut u8,
+                    std::mem::size_of::<Self>(),
+                );
+            }
+            Some(stats)
         } else {
             None
         }

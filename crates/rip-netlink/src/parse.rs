@@ -45,6 +45,11 @@ pub trait FromNetlink: Sized {
             .parse(data)
             .map_err(|e| Error::Parse(format!("{}", e)))
     }
+
+    /// Write the header required for dump requests.
+    /// This is appended to the netlink message after the nlmsghdr.
+    /// Default implementation writes nothing (for messages that don't need a header).
+    fn write_dump_header(_buf: &mut Vec<u8>) {}
 }
 
 /// Trait for types that can be serialized to netlink wire format.

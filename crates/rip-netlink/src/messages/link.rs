@@ -179,6 +179,12 @@ impl LinkMessage {
 }
 
 impl FromNetlink for LinkMessage {
+    fn write_dump_header(buf: &mut Vec<u8>) {
+        // RTM_GETLINK requires an IfInfoMsg header
+        let header = IfInfoMsg::new();
+        buf.extend_from_slice(header.as_bytes());
+    }
+
     fn parse(input: &mut &[u8]) -> PResult<Self> {
         // Parse fixed header (16 bytes)
         if input.len() < IfInfoMsg::SIZE {

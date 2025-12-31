@@ -122,6 +122,12 @@ impl AddressMessage {
 }
 
 impl FromNetlink for AddressMessage {
+    fn write_dump_header(buf: &mut Vec<u8>) {
+        // RTM_GETADDR requires an IfAddrMsg header
+        let header = IfAddrMsg::new();
+        buf.extend_from_slice(header.as_bytes());
+    }
+
     fn parse(input: &mut &[u8]) -> PResult<Self> {
         // Parse fixed header (8 bytes)
         if input.len() < IfAddrMsg::SIZE {
