@@ -6,6 +6,7 @@ members = [
     "crates/rip-lib",
     "crates/rip-output",
     "crates/rip-tc",
+    "crates/rip-sockdiag",
     "bins/ip",
     "bins/tc",
 ]
@@ -55,3 +56,4 @@ rip-netlink-derive = { path = "crates/rip-netlink-derive" }
 rip-lib = { path = "crates/rip-lib" }
 rip-output = { path = "crates/rip-output" }
 rip-tclib = { path = "crates/rip-tc" }
+rip-sockdiag = { path = "crates/rip-sockdiag" }

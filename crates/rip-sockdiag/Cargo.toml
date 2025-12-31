@@ -1,0 +1,24 @@
+[package]
+name = "rip-sockdiag"
+description = "Socket diagnostics (NETLINK_SOCK_DIAG) library for querying socket information"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enable integration tests (require root or network namespace)
+integration = []
+
+[dependencies]
+tokio = { workspace = true }
+netlink-sys = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

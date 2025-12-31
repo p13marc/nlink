@@ -502,6 +502,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rip-sockdiag"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "libc",
+ "netlink-sys",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rip-tc"
 version = "0.1.0"
 dependencies = [
