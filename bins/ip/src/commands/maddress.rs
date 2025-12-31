@@ -99,18 +99,17 @@ impl MaddressCmd {
         let filter_dev = dev.map(|s| s.to_string());
 
         // Read link-layer multicast from /proc/net/dev_mcast
-        if family.is_none() || family == Some(libc::AF_PACKET as u8) {
-            if let Ok(content) = fs::read_to_string("/proc/net/dev_mcast") {
+        if (family.is_none() || family == Some(libc::AF_PACKET as u8))
+            && let Ok(content) = fs::read_to_string("/proc/net/dev_mcast") {
                 for line in content.lines() {
                     // Format: ifindex ifname refcount global_use address
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 5 {
                         let ifname = parts[1].to_string();
-                        if let Some(ref f) = filter_dev {
-                            if &ifname != f {
+                        if let Some(ref f) = filter_dev
+                            && &ifname != f {
                                 continue;
                             }
-                        }
                         let addr = parts[4].to_string();
                         let formatted = format_mac_from_hex(&addr);
 
@@ -129,11 +128,10 @@ impl MaddressCmd {
                     }
                 }
             }
-        }
 
         // Read IPv4 multicast from /proc/net/igmp
-        if family.is_none() || family == Some(libc::AF_INET as u8) {
-            if let Ok(content) = fs::read_to_string("/proc/net/igmp") {
+        if (family.is_none() || family == Some(libc::AF_INET as u8))
+            && let Ok(content) = fs::read_to_string("/proc/net/igmp") {
                 let mut current_if: Option<String> = None;
                 for line in content.lines() {
                     let line = line.trim();
@@ -151,12 +149,11 @@ impl MaddressCmd {
                     if let Ok(_idx) = parts[0].parse::<u32>() {
                         if parts.len() >= 2 {
                             let ifname = parts[1].trim_end_matches(':').to_string();
-                            if let Some(ref f) = filter_dev {
-                                if &ifname != f {
+                            if let Some(ref f) = filter_dev
+                                && &ifname != f {
                                     current_if = None;
                                     continue;
                                 }
-                            }
                             current_if = Some(ifname);
                         }
                     } else if let Some(ref ifname) = current_if {
@@ -179,21 +176,19 @@ impl MaddressCmd {
                     }
                 }
             }
-        }
 
         // Read IPv6 multicast from /proc/net/igmp6
-        if family.is_none() || family == Some(libc::AF_INET6 as u8) {
-            if let Ok(content) = fs::read_to_string("/proc/net/igmp6") {
+        if (family.is_none() || family == Some(libc::AF_INET6 as u8))
+            && let Ok(content) = fs::read_to_string("/proc/net/igmp6") {
                 for line in content.lines() {
                     // Format: ifindex ifname address refcount flags timer
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 3 {
                         let ifname = parts[1].to_string();
-                        if let Some(ref f) = filter_dev {
-                            if &ifname != f {
+                        if let Some(ref f) = filter_dev
+                            && &ifname != f {
                                 continue;
                             }
-                        }
                         if let Some(addr) = parse_ipv6_hex(parts[2]) {
                             let entry =
                                 interfaces
@@ -212,7 +207,6 @@ impl MaddressCmd {
                     }
                 }
             }
-        }
 
         // Sort by interface index
         let mut mcast_list: Vec<McastInfo> = interfaces.into_values().collect();
@@ -232,11 +226,10 @@ fn get_interface_indices() -> Result<HashMap<String, u32>> {
         for entry in entries.flatten() {
             let ifname = entry.file_name().to_string_lossy().to_string();
             let index_path = entry.path().join("ifindex");
-            if let Ok(content) = fs::read_to_string(&index_path) {
-                if let Ok(idx) = content.trim().parse::<u32>() {
+            if let Ok(content) = fs::read_to_string(&index_path)
+                && let Ok(idx) = content.trim().parse::<u32>() {
                     indices.insert(ifname, idx);
                 }
-            }
         }
     }
 
@@ -270,11 +263,10 @@ fn parse_ipv6_hex(hex: &str) -> Option<Ipv6Addr> {
     }
     let mut octets = [0u8; 16];
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        if let Ok(s) = std::str::from_utf8(chunk) {
-            if let Ok(b) = u8::from_str_radix(s, 16) {
+        if let Ok(s) = std::str::from_utf8(chunk)
+            && let Ok(b) = u8::from_str_radix(s, 16) {
                 octets[i] = b;
             }
-        }
     }
     Some(Ipv6Addr::from(octets))
 }
