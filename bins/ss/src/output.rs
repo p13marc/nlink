@@ -223,8 +223,8 @@ fn print_inet_socket(
     }
 
     // Memory info
-    if opts.memory {
-        if let Some(ref mem) = sock.mem_info {
+    if opts.memory
+        && let Some(ref mem) = sock.mem_info {
             writeln!(
                 handle,
                 "\t skmem:(r{},rb{},t{},tb{},f{},w{},o{},bl{},d{})",
@@ -239,11 +239,10 @@ fn print_inet_socket(
                 mem.drops
             )?;
         }
-    }
 
     // TCP info
-    if opts.info {
-        if let Some(ref info) = sock.tcp_info {
+    if opts.info
+        && let Some(ref info) = sock.tcp_info {
             let mut parts = Vec::new();
 
             if let Some(ref cong) = sock.congestion {
@@ -311,7 +310,6 @@ fn print_inet_socket(
 
             writeln!(handle, "\t {}", parts.join(" "))?;
         }
-    }
 
     Ok(())
 }

@@ -170,7 +170,10 @@ impl SockDiag {
 
     async fn query_inet(&mut self, filter: &InetFilter) -> Result<Vec<SocketInfo>> {
         let sockets = self.query_inet_typed(filter).await?;
-        Ok(sockets.into_iter().map(SocketInfo::Inet).collect())
+        Ok(sockets
+            .into_iter()
+            .map(|s| SocketInfo::Inet(Box::new(s)))
+            .collect())
     }
 
     async fn query_inet_typed(&mut self, filter: &InetFilter) -> Result<Vec<InetSocket>> {

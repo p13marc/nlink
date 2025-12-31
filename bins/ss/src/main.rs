@@ -144,8 +144,7 @@ async fn main() -> anyhow::Result<()> {
     let mut diag = SockDiag::new().await?;
 
     // Determine which socket types to query
-    let query_tcp =
-        cli.tcp || (!cli.tcp && !cli.udp && !cli.unix && !cli.raw && !cli.sctp && !cli.mptcp);
+    let query_tcp = cli.tcp || (!cli.udp && !cli.unix && !cli.raw && !cli.sctp && !cli.mptcp);
     let query_udp = cli.udp;
     let query_unix = cli.unix;
     let query_raw = cli.raw;
@@ -304,15 +303,15 @@ fn apply_inet_filters(cli: &Cli, filter: &mut InetFilter) {
     }
 
     // Apply address filters
-    if let Some(ref addr) = cli.src {
-        if let Ok(ip) = addr.parse() {
-            filter.local_addr = Some(ip);
-        }
+    if let Some(ref addr) = cli.src
+        && let Ok(ip) = addr.parse()
+    {
+        filter.local_addr = Some(ip);
     }
-    if let Some(ref addr) = cli.dst {
-        if let Ok(ip) = addr.parse() {
-            filter.remote_addr = Some(ip);
-        }
+    if let Some(ref addr) = cli.dst
+        && let Ok(ip) = addr.parse()
+    {
+        filter.remote_addr = Some(ip);
     }
 
     // Apply extension requests

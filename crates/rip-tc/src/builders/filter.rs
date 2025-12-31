@@ -942,14 +942,14 @@ fn parse_ipv6_prefix_flower(s: &str) -> Result<([u8; 16], [u8; 16])> {
         .map_err(|_| rip_netlink::Error::InvalidMessage("invalid IPv6 address".into()))?;
 
     let mut mask = [0u8; 16];
-    for i in 0..16 {
+    for (i, byte) in mask.iter_mut().enumerate() {
         let bits = if (i * 8) < prefix_len as usize {
             let remaining = prefix_len as usize - (i * 8);
             if remaining >= 8 { 8 } else { remaining }
         } else {
             0
         };
-        mask[i] = if bits == 8 { 0xff } else { 0xff << (8 - bits) };
+        *byte = if bits == 8 { 0xff } else { 0xff << (8 - bits) };
     }
 
     Ok((addr.octets(), mask))

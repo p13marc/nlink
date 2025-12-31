@@ -104,7 +104,7 @@ impl TunTapFlags {
     }
 
     /// Convert to ifreq flags.
-    fn to_flags(&self) -> libc::c_short {
+    fn as_flags(&self) -> libc::c_short {
         let mut flags: libc::c_short = 0;
         if self.no_pi {
             flags |= IFF_NO_PI;
@@ -230,13 +230,13 @@ impl TunTapBuilder {
         let mode = self.mode.ok_or(Error::NoModeSpecified)?;
 
         // Validate name length
-        if let Some(ref name) = self.name {
-            if name.len() > libc::IFNAMSIZ - 1 {
-                return Err(Error::NameTooLong {
-                    name: name.clone(),
-                    len: name.len(),
-                });
-            }
+        if let Some(ref name) = self.name
+            && name.len() > libc::IFNAMSIZ - 1
+        {
+            return Err(Error::NameTooLong {
+                name: name.clone(),
+                len: name.len(),
+            });
         }
 
         // Open the TUN device
@@ -249,7 +249,7 @@ impl TunTapBuilder {
 
         // Build ifreq
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
-        ifr.ifr_ifru.ifru_flags = mode.flag() | self.flags.to_flags();
+        ifr.ifr_ifru.ifru_flags = mode.flag() | self.flags.as_flags();
 
         // Set name if provided
         if let Some(ref name) = self.name {
@@ -574,6 +574,7 @@ pub struct TunTapInfo {
     pub flags: u32,
 }
 
+#[allow(dead_code)]
 impl TunTapInfo {
     /// Check if the device has no protocol info.
     pub fn no_pi(&self) -> bool {

@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SocketInfo {
     /// TCP/UDP/SCTP socket over IPv4/IPv6.
-    Inet(InetSocket),
+    Inet(Box<InetSocket>),
     /// Unix domain socket.
     Unix(UnixSocket),
     /// Netlink socket.
@@ -48,6 +48,14 @@ impl SocketInfo {
             SocketInfo::Unix(s) => s.uid,
             SocketInfo::Netlink(s) => Some(s.portid),
             SocketInfo::Packet(s) => Some(s.uid),
+        }
+    }
+
+    /// Get the Inet socket if this is an Inet variant.
+    pub fn as_inet(&self) -> Option<&InetSocket> {
+        match self {
+            SocketInfo::Inet(s) => Some(s),
+            _ => None,
         }
     }
 }
