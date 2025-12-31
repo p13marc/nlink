@@ -17,11 +17,33 @@
 //! // Serialize back to bytes
 //! let bytes = msg.to_bytes()?;
 //! ```
+//!
+//! # Event Monitoring
+//!
+//! The `events` module provides a high-level API for monitoring network changes:
+//!
+//! ```ignore
+//! use rip_netlink::events::{EventStream, NetworkEvent};
+//!
+//! let mut stream = EventStream::builder()
+//!     .links(true)
+//!     .addresses(true)
+//!     .build()?;
+//!
+//! while let Some(event) = stream.next().await? {
+//!     match event {
+//!         NetworkEvent::NewLink(link) => println!("New link: {:?}", link.name),
+//!         NetworkEvent::NewAddress(addr) => println!("New address: {:?}", addr.address),
+//!         _ => {}
+//!     }
+//! }
+//! ```
 
 pub mod attr;
 mod builder;
 pub mod connection;
 mod error;
+pub mod events;
 pub mod message;
 pub mod messages;
 pub mod parse;
