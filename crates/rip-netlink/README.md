@@ -163,6 +163,61 @@ loop {
 }
 ```
 
+### Modifying Traffic Control (Qdiscs)
+
+```rust
+use rip_netlink::tc::{NetemConfig, FqCodelConfig, TbfConfig};
+use std::time::Duration;
+
+// Add netem qdisc for network emulation
+let netem = NetemConfig::new()
+    .delay(Duration::from_millis(100))     // 100ms delay
+    .jitter(Duration::from_millis(10))     // ±10ms jitter
+    .loss(1.0)                              // 1% packet loss
+    .duplicate(0.1)                         // 0.1% duplicate
+    .corrupt(0.01)                          // 0.01% corruption
+    .build();
+
+conn.add_qdisc("eth0", netem).await?;
+
+// Add fq_codel for smart queuing
+let fq_codel = FqCodelConfig::new()
+    .target(Duration::from_micros(5000))   // 5ms target
+    .interval(Duration::from_millis(100))  // 100ms interval
+    .limit(10240)                          // Queue limit
+    .ecn(true)                             // Enable ECN
+    .build();
+
+conn.add_qdisc("eth0", fq_codel).await?;
+
+// Add token bucket filter for rate limiting
+let tbf = TbfConfig::new()
+    .rate(10_000_000)                      // 10 Mbps
+    .burst(32_000)                         // 32KB burst
+    .limit(100_000)                        // 100KB queue
+    .build();
+
+conn.add_qdisc("eth0", tbf).await?;
+
+// Replace an existing qdisc
+let updated_netem = NetemConfig::new()
+    .delay(Duration::from_millis(50))      // Reduce delay
+    .build();
+
+conn.replace_qdisc("eth0", updated_netem).await?;
+
+// Delete a qdisc
+conn.del_qdisc("eth0", "root").await?;
+```
+
+Available qdisc configurations:
+- **NetemConfig** - Network emulation (delay, jitter, loss, duplicate, corrupt, reorder, rate)
+- **FqCodelConfig** - Fair Queue CoDel (target, interval, limit, flows, quantum, ecn)
+- **TbfConfig** - Token Bucket Filter (rate, burst, limit, mtu, peakrate)
+- **HtbQdiscConfig** - Hierarchical Token Bucket (default_class, r2q, direct_qlen)
+- **PrioConfig** - Priority scheduler (bands, priomap)
+- **SfqConfig** - Stochastic Fairness Queuing (perturb, limit, quantum)
+
 ## Modules
 
 | Module | Description |
@@ -170,6 +225,7 @@ loop {
 | `connection` | High-level `Connection` type with query methods |
 | `events` | `EventStream` for monitoring network changes |
 | `messages` | Strongly-typed message types (`LinkMessage`, `AddressMessage`, etc.) |
+| `tc` | Typed qdisc configuration builders and modification methods |
 | `tc_options` | Typed parsing of qdisc options (fq_codel, htb, tbf, netem, etc.) |
 | `stats` | Statistics tracking and rate calculation |
 | `types` | Low-level netlink structures and constants |
