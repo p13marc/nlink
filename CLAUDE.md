@@ -4,83 +4,79 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Rip is a Rust library for Linux network configuration via netlink. The primary goal is to provide well-designed Rust crates for programmatic network management. The binaries (`ip`, `tc`) serve as proof-of-concept demonstrations.
+Rip is a Rust library for Linux network configuration via netlink. The primary goal is to provide a well-designed Rust crate for programmatic network management. The binaries (`ip`, `tc`, `ss`) serve as proof-of-concept demonstrations.
 
 **Key design decisions:**
 - Custom netlink implementation - no dependency on rtnetlink/netlink-packet-* crates
 - Async/tokio native using AsyncFd
 - Library-first architecture - binaries are thin wrappers
+- Single publishable crate with feature flags
 - Rust edition 2024
 
 ## Build Commands
 
 ```bash
 cargo build                    # Build all crates and binaries
-cargo build -p rip-netlink     # Build specific crate
+cargo build -p rip             # Build the library
+cargo build -p rip-ip          # Build ip binary
 cargo test                     # Run all tests
-cargo test -p rip-netlink      # Test specific crate
+cargo test -p rip              # Test the library
 ```
 
 ## Architecture
 
-### Core Libraries (the main deliverables)
+### Library Crate
 
-**rip-netlink** (`crates/rip-netlink/`) - Async netlink protocol implementation:
-- `socket.rs` - Low-level async socket using `netlink-sys` + tokio `AsyncFd`, includes multicast group constants for event monitoring
-- `connection.rs` - High-level request/response/dump handling, multicast subscription for monitoring
-- `builder.rs` - Message construction with `MessageBuilder`, supports nested attributes
-- `message.rs` - Netlink header parsing, `MessageIter` for multi-message responses
-- `attr.rs` - Attribute (TLV) parsing with `AttrIter`, type extraction helpers in `get` module
-- `types/` - RTNetlink message structures:
-  - `link.rs` - Interface info (IFLA_* attributes, IFF_* flags)
-  - `addr.rs` - Address info (IFA_* attributes)
-  - `route.rs` - Routing (RTA_* attributes)
-  - `neigh.rs` - Neighbor/ARP (NDA_* attributes)
-  - `rule.rs` - Policy routing rules (FRA_* attributes, FibRuleHdr)
-  - `tc.rs` - Traffic control (TCA_* attributes, qdisc structs for htb/tbf/fq_codel/prio/sfq/netem)
+**rip** (`crates/rip/`) - Single publishable crate with feature-gated modules:
 
-**rip-lib** (`crates/rip-lib/`) - Shared utilities:
-- `addr.rs` - IP/MAC address parsing and formatting
-- `ifname.rs` - Interface name/index conversion via ioctl
-- `names.rs` - Protocol/scope/table name resolution
-- `parse.rs` - Rate/size/time string parsing (e.g., "1mbit", "100ms")
+```
+crates/rip/src/
+  lib.rs              # Main entry point, re-exports
+  netlink/            # Core netlink (always available)
+    connection.rs     # High-level request/response/dump handling
+    socket.rs         # Low-level async socket using netlink-sys + tokio AsyncFd
+    builder.rs        # Message construction with MessageBuilder
+    message.rs        # Netlink header parsing, MessageIter
+    attr.rs           # Attribute (TLV) parsing with AttrIter
+    events.rs         # High-level event monitoring (EventStream, NetworkEvent)
+    stats.rs          # Statistics tracking (StatsSnapshot, StatsTracker)
+    tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, etc.)
+    tc_options.rs     # TC options parsing
+    messages/         # Strongly-typed message structs
+    types/            # RTNetlink message structures (link, addr, route, neigh, rule, tc)
+  util/               # Shared utilities (always available)
+    addr.rs           # IP/MAC address parsing and formatting
+    ifname.rs         # Interface name/index conversion
+    names.rs          # Protocol/scope/table name resolution
+    parse.rs          # Rate/size/time string parsing
+  sockdiag/           # Socket diagnostics (feature: sockdiag)
+  tuntap/             # TUN/TAP device management (feature: tuntap)
+  tc/                 # Traffic control utilities (feature: tc)
+  output/             # Output formatting (feature: output)
+```
 
-**rip-output** (`crates/rip-output/`) - Output formatting for text and JSON
+### Feature Flags
 
-### Proof-of-Concept Binaries
+| Feature | Description |
+|---------|-------------|
+| `sockdiag` | Socket diagnostics via NETLINK_SOCK_DIAG |
+| `tuntap` | TUN/TAP device management |
+| `tc` | Traffic control utilities (qdisc builders, handle parsing) |
+| `output` | JSON/text output formatting |
+| `full` | All features enabled |
 
-- `bins/ip/` - Network configuration:
-  - `ip link` - Interface management (show, add, del, set) with 15+ link types
-  - `ip addr` - Address management (show, add, del)
-  - `ip route` - Routing table management (show, add, del, replace, get)
-  - `ip neigh` - Neighbor/ARP cache (show, add, del, replace, flush)
-  - `ip rule` - Policy routing rules (show, add, del, flush)
-  - `ip monitor` - Real-time netlink event streaming (link, addr, route, neigh)
-  - `ip netns` - Network namespace management (list, add, del, exec, identify, pids, monitor)
-  - `ip tunnel` - Tunnel management (show, add, del, change) for GRE, IPIP, SIT, VTI
-  - `ip maddress` - Multicast address display
-  - `ip vrf` - VRF management (show, exec, identify, pids)
-  - `ip xfrm` - IPSec state/policy management (show, count, flush)
-- `bins/tc/` - Traffic control:
-  - `tc qdisc` - Qdisc management with htb, fq_codel, tbf, prio, sfq, netem support
-  - `tc class` - Class management with HTB parameters (rate, ceil, burst, prio, quantum)
-  - `tc filter` - Filter management (show, add, del)
-  - `tc monitor` - Real-time TC event streaming (qdisc, class, filter changes)
+### Binaries
 
-## Netlink Message Flow
-
-1. Create `Connection` for `Protocol::Route`
-2. Build request with `MessageBuilder::new(msg_type, flags)`
-3. Append message struct (e.g., `IfInfoMsg`) with `builder.append(&msg)`
-4. Add attributes with `builder.append_attr*()` methods
-5. For nested attributes: `nest_start()` / `nest_end()`
-6. Send via `conn.dump()` (for GET) or `conn.request_ack()` (for ADD/DEL)
-7. Parse responses with `MessageIter` and `AttrIter`
+- `bins/ip/` - Network configuration (depends on `rip` with `output` feature)
+- `bins/tc/` - Traffic control (depends on `rip` with `tc`, `output` features)
+- `bins/ss/` - Socket statistics (depends on `rip` with `sockdiag`, `output` features)
 
 ## Key Patterns
 
 **High-level queries (preferred for library use):**
 ```rust
+use rip::netlink::{Connection, Protocol};
+
 let conn = Connection::new(Protocol::Route)?;
 
 // Query interfaces
@@ -101,7 +97,7 @@ let classes = conn.get_classes_for("eth0").await?;
 
 **Parsing TC options:**
 ```rust
-use rip_netlink::tc_options::{parse_qdisc_options, QdiscOptions};
+use rip::netlink::tc_options::{parse_qdisc_options, QdiscOptions};
 
 for qdisc in &qdiscs {
     if let Some(opts) = parse_qdisc_options(qdisc) {
@@ -116,7 +112,7 @@ for qdisc in &qdiscs {
 
 **Statistics tracking:**
 ```rust
-use rip_netlink::stats::{StatsSnapshot, StatsTracker};
+use rip::netlink::stats::{StatsSnapshot, StatsTracker};
 
 let mut tracker = StatsTracker::new();
 loop {
@@ -131,27 +127,9 @@ loop {
 }
 ```
 
-**Parsing netlink responses (low-level):**
-```rust
-for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-    match IflaAttr::from(attr_type) {
-        IflaAttr::Ifname => name = get::string(attr_data)?,
-        IflaAttr::Mtu => mtu = get::u32_ne(attr_data)?,
-        // ...
-    }
-}
-```
-
-**Building requests:**
-```rust
-let mut builder = dump_request(NlMsgType::RTM_GETLINK);
-builder.append(&IfInfoMsg::new());
-let responses = conn.dump(builder).await?;
-```
-
 **Monitoring events (high-level API - preferred):**
 ```rust
-use rip_netlink::events::{EventStream, NetworkEvent};
+use rip::netlink::events::{EventStream, NetworkEvent};
 
 let mut stream = EventStream::builder()
     .links(true)
@@ -169,26 +147,21 @@ while let Some(event) = stream.next().await? {
 }
 ```
 
-**Monitoring events (low-level API):**
+**Building requests (low-level):**
 ```rust
-use rip_netlink::socket::rtnetlink_groups::*;
+use rip::netlink::{MessageBuilder, Connection};
+use rip::netlink::message::NlMsgType;
+use rip::netlink::types::link::IfInfoMsg;
 
-let mut conn = Connection::new(Protocol::Route)?;
-conn.subscribe(RTNLGRP_LINK)?;
-conn.subscribe(RTNLGRP_IPV4_IFADDR)?;
-
-loop {
-    let data = conn.recv_event().await?;
-    for result in MessageIter::new(&data) {
-        let (header, payload) = result?;
-        // Handle RTM_NEWLINK, RTM_DELLINK, RTM_NEWADDR, etc.
-    }
-}
+let mut builder = dump_request(NlMsgType::RTM_GETLINK);
+builder.append(&IfInfoMsg::new());
+let responses = conn.dump(builder).await?;
 ```
 
 **Adding TC qdisc with options:**
 ```rust
-use rip_netlink::types::tc::qdisc::htb::*;
+use rip::netlink::types::tc::qdisc::htb::*;
+use rip::netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
 
 let tcmsg = TcMsg::new()
     .with_ifindex(ifindex)
@@ -205,4 +178,22 @@ builder.append_attr(TCA_HTB_INIT, glob.as_bytes());
 builder.nest_end(options_token);
 
 conn.request_ack(builder).await?;
+```
+
+## Netlink Message Flow
+
+1. Create `Connection` for `Protocol::Route`
+2. Build request with `MessageBuilder::new(msg_type, flags)`
+3. Append message struct (e.g., `IfInfoMsg`) with `builder.append(&msg)`
+4. Add attributes with `builder.append_attr*()` methods
+5. For nested attributes: `nest_start()` / `nest_end()`
+6. Send via `conn.dump()` (for GET) or `conn.request_ack()` (for ADD/DEL)
+7. Parse responses with `MessageIter` and `AttrIter`
+
+## Publishing
+
+The `rip` crate is the only publishable crate. All binaries have `publish = false`.
+
+```bash
+cargo publish -p rip
 ```

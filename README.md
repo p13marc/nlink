@@ -1,29 +1,52 @@
 # rip - Rust IP utilities
 
-A modern Rust implementation of Linux network management tools, providing both library crates and CLI binaries.
+A modern Rust implementation of Linux network management tools, providing both a library crate and CLI binaries.
 
 ## Overview
 
-rip is a from-scratch implementation of Linux netlink-based network management. The primary goal is to provide high-quality Rust libraries for programmatic network configuration, with CLI tools serving as proof-of-concept binaries.
+rip is a from-scratch implementation of Linux netlink-based network management. The primary goal is to provide a high-quality Rust library for programmatic network configuration, with CLI tools serving as proof-of-concept binaries.
 
 **Key design principles:**
 
-- **Library-first**: Core functionality lives in reusable crates
+- **Library-first**: Core functionality lives in a single, well-designed crate
 - **Async/tokio-native**: Built for async Rust from the ground up
 - **Custom netlink**: No dependency on rtnetlink or netlink-packet-* crates
 - **Type-safe**: Leverage Rust's type system for correctness
 - **Modern CLI**: Not a drop-in replacement for iproute2 - free to improve
 
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+# Core netlink functionality
+rip = "0.1"
+
+# With additional features
+rip = { version = "0.1", features = ["sockdiag", "tuntap", "tc", "output"] }
+
+# All features
+rip = { version = "0.1", features = ["full"] }
+```
+
+### Features
+
+| Feature | Description |
+|---------|-------------|
+| `sockdiag` | Socket diagnostics via NETLINK_SOCK_DIAG |
+| `tuntap` | TUN/TAP device management |
+| `tc` | Traffic control utilities |
+| `output` | JSON/text output formatting |
+| `full` | All features enabled |
+
 ## Using as a Library
 
-The `rip-netlink` crate provides a high-level API for network monitoring and configuration:
-
 ```rust
-use rip_netlink::{Connection, Protocol};
-use rip_netlink::events::{EventStream, NetworkEvent};
+use rip::netlink::{Connection, Protocol};
+use rip::netlink::events::{EventStream, NetworkEvent};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> rip::Result<()> {
     let conn = Connection::new(Protocol::Route)?;
     
     // Query network state with convenience methods
@@ -60,13 +83,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-See [crates/rip-netlink/README.md](crates/rip-netlink/README.md) for complete library documentation.
+## Library Modules
 
-## Crates
-
-### rip-netlink
-
-Core async netlink library. Provides:
+### `rip::netlink` - Core netlink functionality
 
 - **High-level API**: `Connection` with convenience query methods (`get_links()`, `get_addresses()`, etc.)
 - **Event monitoring**: `EventStream` for real-time network change notifications
@@ -75,18 +94,32 @@ Core async netlink library. Provides:
 - **Statistics tracking**: `StatsSnapshot` and `StatsTracker` for rate calculation
 - **Low-level access**: `MessageBuilder` for custom netlink messages
 
-### rip-lib
-
-Shared utilities for parsing and formatting:
+### `rip::util` - Shared utilities
 
 - Argument parsing (`get_u8`, `get_u16`, `get_u32`, `get_rate`, `get_size`)
 - Address utilities (parse/format IP addresses and prefixes)
 - Name resolution (protocol names, scope names, table names)
 - Interface name/index mapping
 
-### rip-output
+### `rip::sockdiag` - Socket diagnostics (feature: `sockdiag`)
 
-Output formatting for CLI tools:
+- Query TCP, UDP, Unix, and other socket types
+- Filter by state, port, address, and other criteria
+- Retrieve detailed socket information (memory, TCP info, etc.)
+
+### `rip::tuntap` - TUN/TAP devices (feature: `tuntap`)
+
+- Create and manage TUN/TAP virtual network devices
+- Set device ownership and permissions
+- Async read/write support
+
+### `rip::tc` - Traffic control (feature: `tc`)
+
+- Qdisc option builders for htb, fq_codel, tbf, netem, etc.
+- Handle parsing and formatting
+- Class and filter builders
+
+### `rip::output` - Output formatting (feature: `output`)
 
 - Text and JSON output modes
 - `Printable` trait for consistent formatting
