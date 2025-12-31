@@ -14,35 +14,66 @@ rip is a from-scratch implementation of Linux netlink-based network management. 
 - **Type-safe**: Leverage Rust's type system for correctness
 - **Modern CLI**: Not a drop-in replacement for iproute2 - free to improve
 
+## Using as a Library
+
+The `rip-netlink` crate provides a high-level API for network monitoring and configuration:
+
+```rust
+use rip_netlink::{Connection, Protocol};
+use rip_netlink::events::{EventStream, NetworkEvent};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::new(Protocol::Route)?;
+    
+    // Query network state with convenience methods
+    let links = conn.get_links().await?;
+    for link in &links {
+        println!("{}: {} (up={})", 
+            link.ifindex(), 
+            link.name.as_deref().unwrap_or("?"),
+            link.is_up());
+    }
+    
+    // Get addresses for a specific interface
+    let addrs = conn.get_addresses_for("eth0").await?;
+    
+    // Get TC qdiscs
+    let qdiscs = conn.get_qdiscs().await?;
+    
+    // Monitor network events
+    let mut stream = EventStream::builder()
+        .links(true)
+        .addresses(true)
+        .tc(true)
+        .build()?;
+    
+    while let Some(event) = stream.next().await? {
+        match event {
+            NetworkEvent::NewLink(link) => println!("Link added: {:?}", link.name),
+            NetworkEvent::NewAddress(addr) => println!("Address added: {:?}", addr.address),
+            _ => {}
+        }
+    }
+    
+    Ok(())
+}
+```
+
+See [crates/rip-netlink/README.md](crates/rip-netlink/README.md) for complete library documentation.
+
 ## Crates
 
 ### rip-netlink
 
-Core async netlink implementation. Provides:
+Core async netlink library. Provides:
 
-- `NetlinkSocket` - Low-level async socket wrapper
-- `Connection` - High-level request/response handling with dump support
-- `MessageBuilder` - Zero-copy message construction with nested attribute support
-- `AttrIter` - Attribute parsing iterator
-- Protocol types for link, address, route, neighbor, and traffic control
-
-```rust
-use rip_netlink::{Connection, Protocol, MessageBuilder};
-use rip_netlink::types::link::{RtmType, IflaAttr};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let conn = Connection::new(Protocol::Route).await?;
-    
-    // Dump all links
-    let mut builder = MessageBuilder::new(RtmType::GetLink as u16, NLM_F_REQUEST | NLM_F_DUMP);
-    builder.append(&IfInfoMsg::default());
-    
-    let responses = conn.dump(builder.finish()).await?;
-    // Parse responses...
-    Ok(())
-}
-```
+- **High-level API**: `Connection` with convenience query methods (`get_links()`, `get_addresses()`, etc.)
+- **Event monitoring**: `EventStream` for real-time network change notifications
+- **Strongly-typed messages**: `LinkMessage`, `AddressMessage`, `RouteMessage`, `TcMessage`
+- **TC options parsing**: Typed access to qdisc parameters (fq_codel, htb, tbf, netem, etc.)
+- **Statistics tracking**: `StatsSnapshot` and `StatsTracker` for rate calculation
+- **Low-level access**: `MessageBuilder` for custom netlink messages
 
 ### rip-lib
 
@@ -225,7 +256,7 @@ cargo run --release -p tc -- qdisc show
 
 ## Project Status
 
-This is an early-stage project. Currently implemented:
+The library API is production-ready for network monitoring and querying. Currently implemented:
 
 - [x] Core netlink socket and connection handling
 - [x] Message building with nested attributes
@@ -252,6 +283,13 @@ This is an early-stage project. Currently implemented:
 - [x] Multicast addresses (ip maddress show)
 - [x] VRF management (ip vrf show, exec, identify, pids)
 - [x] XFRM/IPSec framework (ip xfrm state/policy show, count)
+
+**Library features:**
+
+- [x] High-level event stream API (`EventStream`, `NetworkEvent`)
+- [x] Convenience query methods (`get_links()`, `get_addresses()`, `get_qdiscs()`, etc.)
+- [x] Typed TC options parsing (fq_codel, htb, tbf, netem, prio, sfq)
+- [x] Statistics helpers with rate calculation (`StatsSnapshot`, `StatsTracker`)
 
 ## License
 

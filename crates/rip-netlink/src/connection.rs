@@ -4,6 +4,7 @@ use crate::builder::MessageBuilder;
 use crate::error::{Error, Result};
 use crate::message::{
     MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgError, NlMsgHdr,
+    NlMsgType,
 };
 use crate::parse::FromNetlink;
 use crate::socket::{NetlinkSocket, Protocol};
@@ -238,4 +239,188 @@ pub fn create_request(msg_type: u16) -> MessageBuilder {
 /// Helper to build a create-or-replace request.
 pub fn replace_request(msg_type: u16) -> MessageBuilder {
     MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_ACK | 0x400 | 0x100) // NLM_F_CREATE | NLM_F_REPLACE
+}
+
+// ============================================================================
+// Convenience Query Methods
+// ============================================================================
+
+use crate::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage};
+
+/// Helper function to convert interface name to index.
+/// This is a standalone implementation to avoid dependency on rip-lib.
+fn ifname_to_index(name: &str) -> Result<i32> {
+    let path = format!("/sys/class/net/{}/ifindex", name);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
+    content
+        .trim()
+        .parse()
+        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
+}
+
+impl Connection {
+    /// Get all network interfaces.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let links = conn.get_links().await?;
+    /// for link in links {
+    ///     println!("{}: {}", link.ifindex(), link.name.as_deref().unwrap_or("?"));
+    /// }
+    /// ```
+    pub async fn get_links(&self) -> Result<Vec<LinkMessage>> {
+        self.dump_typed(NlMsgType::RTM_GETLINK).await
+    }
+
+    /// Get a network interface by name.
+    ///
+    /// Returns `None` if the interface doesn't exist.
+    pub async fn get_link_by_name(&self, name: &str) -> Result<Option<LinkMessage>> {
+        let links = self.get_links().await?;
+        Ok(links.into_iter().find(|l| l.name.as_deref() == Some(name)))
+    }
+
+    /// Get a network interface by index.
+    ///
+    /// Returns `None` if the interface doesn't exist.
+    pub async fn get_link_by_index(&self, index: i32) -> Result<Option<LinkMessage>> {
+        let links = self.get_links().await?;
+        Ok(links.into_iter().find(|l| l.ifindex() == index))
+    }
+
+    /// Get all IP addresses.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let addresses = conn.get_addresses().await?;
+    /// for addr in addresses {
+    ///     println!("{:?}/{} on idx {}", addr.address, addr.prefix_len(), addr.ifindex());
+    /// }
+    /// ```
+    pub async fn get_addresses(&self) -> Result<Vec<AddressMessage>> {
+        self.dump_typed(NlMsgType::RTM_GETADDR).await
+    }
+
+    /// Get IP addresses for a specific interface by name.
+    pub async fn get_addresses_for(&self, ifname: &str) -> Result<Vec<AddressMessage>> {
+        let ifindex = ifname_to_index(ifname)?;
+        let addresses = self.get_addresses().await?;
+        Ok(addresses
+            .into_iter()
+            .filter(|a| a.ifindex() as i32 == ifindex)
+            .collect())
+    }
+
+    /// Get IP addresses for a specific interface by index.
+    pub async fn get_addresses_for_index(&self, ifindex: u32) -> Result<Vec<AddressMessage>> {
+        let addresses = self.get_addresses().await?;
+        Ok(addresses
+            .into_iter()
+            .filter(|a| a.ifindex() == ifindex)
+            .collect())
+    }
+
+    /// Get all routes.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let routes = conn.get_routes().await?;
+    /// for route in routes {
+    ///     println!("{:?}/{}", route.destination(), route.dst_len());
+    /// }
+    /// ```
+    pub async fn get_routes(&self) -> Result<Vec<RouteMessage>> {
+        self.dump_typed(NlMsgType::RTM_GETROUTE).await
+    }
+
+    /// Get routes for a specific table.
+    pub async fn get_routes_for_table(&self, table_id: u32) -> Result<Vec<RouteMessage>> {
+        let routes = self.get_routes().await?;
+        Ok(routes
+            .into_iter()
+            .filter(|r| r.table_id() == table_id)
+            .collect())
+    }
+
+    /// Get all neighbor entries.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let neighbors = conn.get_neighbors().await?;
+    /// for neigh in neighbors {
+    ///     println!("{:?} -> {:?}", neigh.destination, neigh.lladdr);
+    /// }
+    /// ```
+    pub async fn get_neighbors(&self) -> Result<Vec<NeighborMessage>> {
+        self.dump_typed(NlMsgType::RTM_GETNEIGH).await
+    }
+
+    /// Get neighbor entries for a specific interface.
+    pub async fn get_neighbors_for(&self, ifname: &str) -> Result<Vec<NeighborMessage>> {
+        let ifindex = ifname_to_index(ifname)?;
+        let neighbors = self.get_neighbors().await?;
+        Ok(neighbors
+            .into_iter()
+            .filter(|n| n.ifindex() as i32 == ifindex)
+            .collect())
+    }
+
+    /// Get all qdiscs.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let qdiscs = conn.get_qdiscs().await?;
+    /// for qdisc in qdiscs {
+    ///     println!("{}: {}", qdisc.ifindex(), qdisc.kind().unwrap_or("?"));
+    /// }
+    /// ```
+    pub async fn get_qdiscs(&self) -> Result<Vec<TcMessage>> {
+        self.dump_typed(NlMsgType::RTM_GETQDISC).await
+    }
+
+    /// Get qdiscs for a specific interface.
+    pub async fn get_qdiscs_for(&self, ifname: &str) -> Result<Vec<TcMessage>> {
+        let ifindex = ifname_to_index(ifname)?;
+        let qdiscs = self.get_qdiscs().await?;
+        Ok(qdiscs
+            .into_iter()
+            .filter(|q| q.ifindex() == ifindex)
+            .collect())
+    }
+
+    /// Get all TC classes.
+    pub async fn get_classes(&self) -> Result<Vec<TcMessage>> {
+        self.dump_typed(NlMsgType::RTM_GETTCLASS).await
+    }
+
+    /// Get TC classes for a specific interface.
+    pub async fn get_classes_for(&self, ifname: &str) -> Result<Vec<TcMessage>> {
+        let ifindex = ifname_to_index(ifname)?;
+        let classes = self.get_classes().await?;
+        Ok(classes
+            .into_iter()
+            .filter(|c| c.ifindex() == ifindex)
+            .collect())
+    }
+
+    /// Get all TC filters.
+    pub async fn get_filters(&self) -> Result<Vec<TcMessage>> {
+        self.dump_typed(NlMsgType::RTM_GETTFILTER).await
+    }
+
+    /// Get TC filters for a specific interface.
+    pub async fn get_filters_for(&self, ifname: &str) -> Result<Vec<TcMessage>> {
+        let ifindex = ifname_to_index(ifname)?;
+        let filters = self.get_filters().await?;
+        Ok(filters
+            .into_iter()
+            .filter(|f| f.ifindex() == ifindex)
+            .collect())
+    }
 }
