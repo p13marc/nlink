@@ -1,17 +1,17 @@
 //! ip monitor - watch for netlink events.
+//!
+//! This module uses the strongly-typed message API from rip-netlink.
 
 use clap::{Args, ValueEnum};
-use rip_netlink::attr::{AttrIter, get};
 use rip_netlink::message::{MessageIter, NlMsgType};
+use rip_netlink::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage};
+use rip_netlink::parse::FromNetlink;
 use rip_netlink::rtnetlink_groups::*;
-use rip_netlink::types::addr::{IfAddrMsg, IfaAttr};
-use rip_netlink::types::link::{IfInfoMsg, IflaAttr, iff};
-use rip_netlink::types::neigh::{NdMsg, NdaAttr, nud_state_name};
-use rip_netlink::types::route::{RtMsg, RtaAttr};
+use rip_netlink::types::link::iff;
+use rip_netlink::types::neigh::nud_state_name;
 use rip_netlink::{Connection, Protocol, Result};
 use rip_output::{OutputFormat, OutputOptions};
 use std::io::{self, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Event types that can be monitored.
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -123,16 +123,95 @@ impl MonitorCmd {
     ) -> Result<()> {
         match msg_type {
             NlMsgType::RTM_NEWLINK | NlMsgType::RTM_DELLINK => {
-                self.print_link_event(out, msg_type, payload)?;
+                if let Ok(link) = LinkMessage::from_bytes(payload) {
+                    let action = if msg_type == NlMsgType::RTM_NEWLINK {
+                        "LINK"
+                    } else {
+                        "LINK DEL"
+                    };
+                    let name = link.name.as_deref().unwrap_or("?");
+                    let state = if link.is_up() { "UP" } else { "DOWN" };
+                    writeln!(
+                        out,
+                        "{}: {} index {} state {}",
+                        action,
+                        name,
+                        link.ifindex(),
+                        state
+                    )?;
+                }
             }
             NlMsgType::RTM_NEWADDR | NlMsgType::RTM_DELADDR => {
-                self.print_addr_event(out, msg_type, payload)?;
+                if let Ok(addr) = AddressMessage::from_bytes(payload) {
+                    let action = if msg_type == NlMsgType::RTM_NEWADDR {
+                        "ADDR"
+                    } else {
+                        "ADDR DEL"
+                    };
+                    if let Some(address) = addr.primary_address() {
+                        let ifname = rip_lib::ifname::index_to_name(addr.ifindex())
+                            .unwrap_or_else(|_| format!("if{}", addr.ifindex()));
+                        writeln!(
+                            out,
+                            "{}: {}/{} dev {}",
+                            action,
+                            address,
+                            addr.prefix_len(),
+                            ifname
+                        )?;
+                    }
+                }
             }
             NlMsgType::RTM_NEWROUTE | NlMsgType::RTM_DELROUTE => {
-                self.print_route_event(out, msg_type, payload)?;
+                if let Ok(route) = RouteMessage::from_bytes(payload) {
+                    let action = if msg_type == NlMsgType::RTM_NEWROUTE {
+                        "ROUTE"
+                    } else {
+                        "ROUTE DEL"
+                    };
+                    let dst_str = route
+                        .destination
+                        .as_ref()
+                        .map(|d| format!("{}/{}", d, route.dst_len()))
+                        .unwrap_or_else(|| "default".to_string());
+
+                    write!(out, "{}: {}", action, dst_str)?;
+
+                    if let Some(ref gw) = route.gateway {
+                        write!(out, " via {}", gw)?;
+                    }
+
+                    if let Some(oif) = route.oif {
+                        if let Ok(name) = rip_lib::ifname::index_to_name(oif) {
+                            write!(out, " dev {}", name)?;
+                        }
+                    }
+
+                    writeln!(out)?;
+                }
             }
             NlMsgType::RTM_NEWNEIGH | NlMsgType::RTM_DELNEIGH => {
-                self.print_neigh_event(out, msg_type, payload)?;
+                if let Ok(neigh) = NeighborMessage::from_bytes(payload) {
+                    let action = if msg_type == NlMsgType::RTM_NEWNEIGH {
+                        "NEIGH"
+                    } else {
+                        "NEIGH DEL"
+                    };
+
+                    if let Some(ref dst) = neigh.destination {
+                        let ifname = rip_lib::ifname::index_to_name(neigh.ifindex())
+                            .unwrap_or_else(|_| format!("if{}", neigh.ifindex()));
+
+                        write!(out, "{}: {} dev {}", action, dst, ifname)?;
+
+                        if let Some(ref mac) = neigh.mac_address() {
+                            write!(out, " lladdr {}", mac)?;
+                        }
+
+                        write!(out, " {}", nud_state_name(neigh.header.ndm_state))?;
+                        writeln!(out)?;
+                    }
+                }
             }
             _ => {
                 writeln!(out, "EVENT: type={}", msg_type)?;
@@ -142,176 +221,88 @@ impl MonitorCmd {
         Ok(())
     }
 
-    fn print_link_event(&self, out: &mut impl Write, msg_type: u16, payload: &[u8]) -> Result<()> {
-        let ifinfo = IfInfoMsg::from_bytes(payload)?;
-        let attrs_data = &payload[IfInfoMsg::SIZE..];
-
-        let mut name = String::new();
-        for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-            if IflaAttr::from(attr_type) == IflaAttr::Ifname {
-                name = get::string(attr_data).unwrap_or("").to_string();
-                break;
-            }
-        }
-
-        let action = if msg_type == NlMsgType::RTM_NEWLINK {
-            "LINK"
-        } else {
-            "LINK DEL"
-        };
-
-        let state = if ifinfo.ifi_flags & iff::UP != 0 {
-            "UP"
-        } else {
-            "DOWN"
-        };
-
-        writeln!(
-            out,
-            "{}: {} index {} state {}",
-            action, name, ifinfo.ifi_index, state
-        )?;
-        Ok(())
-    }
-
-    fn print_addr_event(&self, out: &mut impl Write, msg_type: u16, payload: &[u8]) -> Result<()> {
-        let addr_msg = IfAddrMsg::from_bytes(payload)?;
-        let attrs_data = &payload[IfAddrMsg::SIZE..];
-
-        let mut address: Option<IpAddr> = None;
-        for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-            match IfaAttr::from(attr_type) {
-                IfaAttr::Address | IfaAttr::Local => {
-                    address = parse_ip_addr(addr_msg.ifa_family, attr_data);
-                    if address.is_some() {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let action = if msg_type == NlMsgType::RTM_NEWADDR {
-            "ADDR"
-        } else {
-            "ADDR DEL"
-        };
-
-        if let Some(addr) = address {
-            let ifname = rip_lib::ifname::index_to_name(addr_msg.ifa_index)
-                .unwrap_or_else(|_| format!("if{}", addr_msg.ifa_index));
-            writeln!(
-                out,
-                "{}: {}/{} dev {}",
-                action, addr, addr_msg.ifa_prefixlen, ifname
-            )?;
-        }
-        Ok(())
-    }
-
-    fn print_route_event(&self, out: &mut impl Write, msg_type: u16, payload: &[u8]) -> Result<()> {
-        let rt = RtMsg::from_bytes(payload)?;
-        let attrs_data = &payload[RtMsg::SIZE..];
-
-        let mut dst: Option<IpAddr> = None;
-        let mut gateway: Option<IpAddr> = None;
-        let mut oif: Option<u32> = None;
-
-        for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-            match RtaAttr::from(attr_type) {
-                RtaAttr::Dst => {
-                    dst = parse_ip_addr(rt.rtm_family, attr_data);
-                }
-                RtaAttr::Gateway => {
-                    gateway = parse_ip_addr(rt.rtm_family, attr_data);
-                }
-                RtaAttr::Oif => {
-                    oif = get::u32_ne(attr_data).ok();
-                }
-                _ => {}
-            }
-        }
-
-        let action = if msg_type == NlMsgType::RTM_NEWROUTE {
-            "ROUTE"
-        } else {
-            "ROUTE DEL"
-        };
-
-        let dst_str = dst
-            .map(|d| format!("{}/{}", d, rt.rtm_dst_len))
-            .unwrap_or_else(|| "default".to_string());
-
-        write!(out, "{}: {}", action, dst_str)?;
-
-        if let Some(gw) = gateway {
-            write!(out, " via {}", gw)?;
-        }
-
-        if let Some(idx) = oif {
-            if let Ok(name) = rip_lib::ifname::index_to_name(idx) {
-                write!(out, " dev {}", name)?;
-            }
-        }
-
-        writeln!(out)?;
-        Ok(())
-    }
-
-    fn print_neigh_event(&self, out: &mut impl Write, msg_type: u16, payload: &[u8]) -> Result<()> {
-        let neigh = NdMsg::from_bytes(payload)?;
-        let attrs_data = &payload[NdMsg::SIZE..];
-
-        let mut dst: Option<IpAddr> = None;
-        let mut lladdr: Option<String> = None;
-
-        for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-            match NdaAttr::from(attr_type) {
-                NdaAttr::Dst => {
-                    dst = parse_ip_addr(neigh.ndm_family, attr_data);
-                }
-                NdaAttr::Lladdr => {
-                    lladdr = Some(rip_lib::addr::format_mac(attr_data));
-                }
-                _ => {}
-            }
-        }
-
-        let action = if msg_type == NlMsgType::RTM_NEWNEIGH {
-            "NEIGH"
-        } else {
-            "NEIGH DEL"
-        };
-
-        if let Some(ip) = dst {
-            let ifname = rip_lib::ifname::index_to_name(neigh.ndm_ifindex as u32)
-                .unwrap_or_else(|_| format!("if{}", neigh.ndm_ifindex));
-
-            write!(out, "{}: {} dev {}", action, ip, ifname)?;
-
-            if let Some(ll) = lladdr {
-                write!(out, " lladdr {}", ll)?;
-            }
-
-            write!(out, " {}", nud_state_name(neigh.ndm_state))?;
-            writeln!(out)?;
-        }
-        Ok(())
-    }
-
     fn print_event_json(&self, out: &mut impl Write, msg_type: u16, payload: &[u8]) -> Result<()> {
         let event = match msg_type {
             NlMsgType::RTM_NEWLINK | NlMsgType::RTM_DELLINK => {
-                self.link_event_json(msg_type, payload)?
+                LinkMessage::from_bytes(payload).ok().map(|link| {
+                    let action = if msg_type == NlMsgType::RTM_NEWLINK {
+                        "new"
+                    } else {
+                        "del"
+                    };
+                    serde_json::json!({
+                        "event": "link",
+                        "action": action,
+                        "ifname": link.name.as_deref().unwrap_or(""),
+                        "ifindex": link.ifindex(),
+                        "flags": link.flags(),
+                        "up": link.flags() & iff::UP != 0,
+                        "mtu": link.mtu,
+                        "operstate": link.operstate.map(|s| s.name()),
+                    })
+                })
             }
             NlMsgType::RTM_NEWADDR | NlMsgType::RTM_DELADDR => {
-                self.addr_event_json(msg_type, payload)?
+                AddressMessage::from_bytes(payload).ok().and_then(|addr| {
+                    let action = if msg_type == NlMsgType::RTM_NEWADDR {
+                        "new"
+                    } else {
+                        "del"
+                    };
+                    addr.primary_address().map(|address| {
+                        serde_json::json!({
+                            "event": "address",
+                            "action": action,
+                            "address": address.to_string(),
+                            "prefixlen": addr.prefix_len(),
+                            "ifindex": addr.ifindex(),
+                            "family": addr.family(),
+                            "scope": addr.scope().name(),
+                            "label": addr.label,
+                        })
+                    })
+                })
             }
             NlMsgType::RTM_NEWROUTE | NlMsgType::RTM_DELROUTE => {
-                self.route_event_json(msg_type, payload)?
+                RouteMessage::from_bytes(payload).ok().map(|route| {
+                    let action = if msg_type == NlMsgType::RTM_NEWROUTE {
+                        "new"
+                    } else {
+                        "del"
+                    };
+                    serde_json::json!({
+                        "event": "route",
+                        "action": action,
+                        "dst": route.destination.as_ref().map(|d| d.to_string()),
+                        "dst_len": route.dst_len(),
+                        "gateway": route.gateway.as_ref().map(|g| g.to_string()),
+                        "oif": route.oif,
+                        "table": route.table_id(),
+                        "protocol": route.protocol().name(),
+                        "scope": route.scope().name(),
+                        "type": route.route_type().name(),
+                    })
+                })
             }
             NlMsgType::RTM_NEWNEIGH | NlMsgType::RTM_DELNEIGH => {
-                self.neigh_event_json(msg_type, payload)?
+                NeighborMessage::from_bytes(payload).ok().and_then(|neigh| {
+                    let action = if msg_type == NlMsgType::RTM_NEWNEIGH {
+                        "new"
+                    } else {
+                        "del"
+                    };
+                    neigh.destination.as_ref().map(|dst| {
+                        serde_json::json!({
+                            "event": "neigh",
+                            "action": action,
+                            "dst": dst.to_string(),
+                            "lladdr": neigh.mac_address(),
+                            "ifindex": neigh.ifindex(),
+                            "state": nud_state_name(neigh.header.ndm_state),
+                            "router": neigh.is_router(),
+                        })
+                    })
+                })
             }
             _ => Some(serde_json::json!({
                 "event": "unknown",
@@ -324,178 +315,5 @@ impl MonitorCmd {
             out.flush()?;
         }
         Ok(())
-    }
-
-    fn link_event_json(&self, msg_type: u16, payload: &[u8]) -> Result<Option<serde_json::Value>> {
-        let ifinfo = IfInfoMsg::from_bytes(payload)?;
-        let attrs_data = &payload[IfInfoMsg::SIZE..];
-
-        let mut name = String::new();
-        for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-            if IflaAttr::from(attr_type) == IflaAttr::Ifname {
-                name = get::string(attr_data).unwrap_or("").to_string();
-                break;
-            }
-        }
-
-        let action = if msg_type == NlMsgType::RTM_NEWLINK {
-            "new"
-        } else {
-            "del"
-        };
-
-        Ok(Some(serde_json::json!({
-            "event": "link",
-            "action": action,
-            "ifname": name,
-            "ifindex": ifinfo.ifi_index,
-            "flags": ifinfo.ifi_flags,
-            "up": ifinfo.ifi_flags & iff::UP != 0,
-        })))
-    }
-
-    fn addr_event_json(&self, msg_type: u16, payload: &[u8]) -> Result<Option<serde_json::Value>> {
-        let addr_msg = IfAddrMsg::from_bytes(payload)?;
-        let attrs_data = &payload[IfAddrMsg::SIZE..];
-
-        let mut address: Option<IpAddr> = None;
-        for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-            match IfaAttr::from(attr_type) {
-                IfaAttr::Address | IfaAttr::Local => {
-                    address = parse_ip_addr(addr_msg.ifa_family, attr_data);
-                    if address.is_some() {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let action = if msg_type == NlMsgType::RTM_NEWADDR {
-            "new"
-        } else {
-            "del"
-        };
-
-        if let Some(addr) = address {
-            Ok(Some(serde_json::json!({
-                "event": "address",
-                "action": action,
-                "address": addr.to_string(),
-                "prefixlen": addr_msg.ifa_prefixlen,
-                "ifindex": addr_msg.ifa_index,
-                "family": addr_msg.ifa_family,
-                "scope": addr_msg.ifa_scope,
-            })))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn route_event_json(&self, msg_type: u16, payload: &[u8]) -> Result<Option<serde_json::Value>> {
-        let rt = RtMsg::from_bytes(payload)?;
-        let attrs_data = &payload[RtMsg::SIZE..];
-
-        let mut dst: Option<IpAddr> = None;
-        let mut gateway: Option<IpAddr> = None;
-        let mut oif: Option<u32> = None;
-
-        for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-            match RtaAttr::from(attr_type) {
-                RtaAttr::Dst => {
-                    dst = parse_ip_addr(rt.rtm_family, attr_data);
-                }
-                RtaAttr::Gateway => {
-                    gateway = parse_ip_addr(rt.rtm_family, attr_data);
-                }
-                RtaAttr::Oif => {
-                    oif = get::u32_ne(attr_data).ok();
-                }
-                _ => {}
-            }
-        }
-
-        let action = if msg_type == NlMsgType::RTM_NEWROUTE {
-            "new"
-        } else {
-            "del"
-        };
-
-        Ok(Some(serde_json::json!({
-            "event": "route",
-            "action": action,
-            "dst": dst.map(|d| d.to_string()),
-            "dst_len": rt.rtm_dst_len,
-            "gateway": gateway.map(|g| g.to_string()),
-            "oif": oif,
-            "table": rt.rtm_table,
-            "protocol": rt.rtm_protocol,
-        })))
-    }
-
-    fn neigh_event_json(&self, msg_type: u16, payload: &[u8]) -> Result<Option<serde_json::Value>> {
-        let neigh = NdMsg::from_bytes(payload)?;
-        let attrs_data = &payload[NdMsg::SIZE..];
-
-        let mut dst: Option<IpAddr> = None;
-        let mut lladdr: Option<String> = None;
-
-        for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-            match NdaAttr::from(attr_type) {
-                NdaAttr::Dst => {
-                    dst = parse_ip_addr(neigh.ndm_family, attr_data);
-                }
-                NdaAttr::Lladdr => {
-                    lladdr = Some(rip_lib::addr::format_mac(attr_data));
-                }
-                _ => {}
-            }
-        }
-
-        let action = if msg_type == NlMsgType::RTM_NEWNEIGH {
-            "new"
-        } else {
-            "del"
-        };
-
-        if let Some(ip) = dst {
-            Ok(Some(serde_json::json!({
-                "event": "neigh",
-                "action": action,
-                "dst": ip.to_string(),
-                "lladdr": lladdr,
-                "ifindex": neigh.ndm_ifindex,
-                "state": nud_state_name(neigh.ndm_state),
-            })))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-/// Parse an IP address from raw bytes based on address family.
-fn parse_ip_addr(family: u8, data: &[u8]) -> Option<IpAddr> {
-    match family {
-        2 => {
-            // AF_INET
-            if data.len() >= 4 {
-                Some(IpAddr::V4(Ipv4Addr::new(
-                    data[0], data[1], data[2], data[3],
-                )))
-            } else {
-                None
-            }
-        }
-        10 => {
-            // AF_INET6
-            if data.len() >= 16 {
-                let mut octets = [0u8; 16];
-                octets.copy_from_slice(&data[..16]);
-                Some(IpAddr::V6(Ipv6Addr::from(octets)))
-            } else {
-                None
-            }
-        }
-        _ => None,
     }
 }
