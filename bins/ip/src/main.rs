@@ -74,6 +74,10 @@ enum Command {
     /// Manage IP tunnels (GRE, IPIP, SIT, VTI).
     #[command(visible_alias = "t", visible_alias = "tun")]
     Tunnel(commands::tunnel::TunnelCmd),
+
+    /// Show multicast addresses.
+    #[command(visible_alias = "maddr")]
+    Maddress(commands::maddress::MaddressCmd),
 }
 
 #[tokio::main]
@@ -123,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Netns(cmd) => cmd.run(format, &opts).await,
         Command::Monitor(cmd) => cmd.run(format, &opts).await,
         Command::Tunnel(cmd) => cmd.run(&conn, format, &opts).await,
+        Command::Maddress(cmd) => cmd.run(format, &opts, family).await,
     };
 
     if let Err(e) = result {
