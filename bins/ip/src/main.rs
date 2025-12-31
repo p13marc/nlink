@@ -78,6 +78,9 @@ enum Command {
     /// Show multicast addresses.
     #[command(visible_alias = "maddr")]
     Maddress(commands::maddress::MaddressCmd),
+
+    /// Manage VRF (Virtual Routing and Forwarding) devices.
+    Vrf(commands::vrf::VrfCmd),
 }
 
 #[tokio::main]
@@ -128,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Monitor(cmd) => cmd.run(format, &opts).await,
         Command::Tunnel(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Maddress(cmd) => cmd.run(format, &opts, family).await,
+        Command::Vrf(cmd) => cmd.run(&conn, format, &opts).await,
     };
 
     if let Err(e) = result {

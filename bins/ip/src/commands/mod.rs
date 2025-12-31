@@ -10,3 +10,4 @@ pub mod netns;
 pub mod route;
 pub mod rule;
 pub mod tunnel;
+pub mod vrf;
