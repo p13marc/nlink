@@ -7,6 +7,7 @@ members = [
     "crates/rip-output",
     "crates/rip-tc",
     "crates/rip-sockdiag",
+    "crates/rip-tuntap",
     "bins/ip",
     "bins/tc",
     "bins/ss",
@@ -58,3 +59,4 @@ rip-lib = { path = "crates/rip-lib" }
 rip-output = { path = "crates/rip-output" }
 rip-tclib = { path = "crates/rip-tc" }
 rip-sockdiag = { path = "crates/rip-sockdiag" }
+rip-tuntap = { path = "crates/rip-tuntap" }
