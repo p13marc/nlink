@@ -38,6 +38,33 @@
 //!     }
 //! }
 //! ```
+//!
+//! # Traffic Control (TC)
+//!
+//! The `tc` module provides typed configuration for qdiscs:
+//!
+//! ```ignore
+//! use rip_netlink::tc::NetemConfig;
+//! use std::time::Duration;
+//!
+//! // Add network emulation with delay and packet loss
+//! let netem = NetemConfig::new()
+//!     .delay(Duration::from_millis(100))
+//!     .jitter(Duration::from_millis(10))
+//!     .loss(1.0)  // 1% packet loss
+//!     .build();
+//!
+//! conn.add_qdisc("eth0", netem).await?;
+//!
+//! // Update the configuration
+//! let updated = NetemConfig::new()
+//!     .delay(Duration::from_millis(50))
+//!     .build();
+//! conn.change_qdisc("eth0", "root", updated).await?;
+//!
+//! // Delete the qdisc
+//! conn.del_qdisc("eth0", "root").await?;
+//! ```
 
 pub mod attr;
 mod builder;
@@ -49,6 +76,7 @@ pub mod messages;
 pub mod parse;
 mod socket;
 pub mod stats;
+pub mod tc;
 pub mod tc_options;
 pub mod types;
 
