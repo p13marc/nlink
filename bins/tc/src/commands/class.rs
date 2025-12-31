@@ -216,22 +216,22 @@ impl ClassCmd {
                     return false;
                 }
                 // Filter by kind if specified
-                if let Some(k) = kind_filter {
-                    if c.kind() != Some(k) {
-                        return false;
-                    }
+                if let Some(k) = kind_filter
+                    && c.kind() != Some(k)
+                {
+                    return false;
                 }
                 // Filter by parent if specified
-                if let Some(p) = parent_filter {
-                    if c.parent() != p {
-                        return false;
-                    }
+                if let Some(p) = parent_filter
+                    && c.parent() != p
+                {
+                    return false;
                 }
                 // Filter by classid if specified
-                if let Some(cid) = classid_filter {
-                    if c.handle() != cid {
-                        return false;
-                    }
+                if let Some(cid) = classid_filter
+                    && c.handle() != cid
+                {
+                    return false;
                 }
                 true
             })
@@ -246,7 +246,7 @@ impl ClassCmd {
                 }
             }
             OutputFormat::Json => {
-                let json: Vec<_> = classes.iter().map(|c| class_to_json(c)).collect();
+                let json: Vec<_> = classes.iter().map(class_to_json).collect();
                 if opts.pretty {
                     serde_json::to_writer_pretty(&mut stdout, &json)?;
                 } else {
@@ -628,37 +628,34 @@ fn add_htb_class_options(
     };
 
     // Build the tc_htb_opt structure
-    let mut opt = TcHtbOpt::default();
-
-    // Set rate - if > 4GB, use ~0U as marker
-    opt.rate = TcRateSpec {
-        rate: if rate64 >= (1u64 << 32) {
-            u32::MAX
-        } else {
-            rate64 as u32
+    let opt = TcHtbOpt {
+        rate: TcRateSpec {
+            rate: if rate64 >= (1u64 << 32) {
+                u32::MAX
+            } else {
+                rate64 as u32
+            },
+            mpu,
+            overhead,
+            ..Default::default()
         },
-        mpu,
-        overhead,
+        ceil: TcRateSpec {
+            rate: if ceil64 >= (1u64 << 32) {
+                u32::MAX
+            } else {
+                ceil64 as u32
+            },
+            mpu,
+            overhead,
+            ..Default::default()
+        },
+        buffer,
+        cbuffer,
+        quantum,
+        prio,
+        // level is set by kernel
         ..Default::default()
     };
-
-    // Set ceil
-    opt.ceil = TcRateSpec {
-        rate: if ceil64 >= (1u64 << 32) {
-            u32::MAX
-        } else {
-            ceil64 as u32
-        },
-        mpu,
-        overhead,
-        ..Default::default()
-    };
-
-    opt.buffer = buffer;
-    opt.cbuffer = cbuffer;
-    opt.quantum = quantum;
-    opt.prio = prio;
-    // level is set by kernel
 
     // Add 64-bit rate if needed
     if rate64 >= (1u64 << 32) {

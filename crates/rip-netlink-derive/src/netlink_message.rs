@@ -2,7 +2,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Expr, Fields, Lit, Meta, parse_macro_input};
+use syn::{Data, DeriveInput, Expr, Fields, Lit, parse_macro_input};
 
 /// Field information extracted from attributes.
 struct FieldInfo {
@@ -33,11 +33,10 @@ fn parse_field_attrs(field: &syn::Field) -> Option<FieldInfo> {
                 nested = true;
             } else if meta.path.is_ident("attr") {
                 let value: Expr = meta.value()?.parse()?;
-                if let Expr::Lit(expr_lit) = value {
-                    if let Lit::Int(lit_int) = expr_lit.lit {
+                if let Expr::Lit(expr_lit) = value
+                    && let Lit::Int(lit_int) = expr_lit.lit {
                         attr_id = Some(lit_int.base10_parse::<u16>().unwrap());
                     }
-                }
             }
             Ok(())
         });

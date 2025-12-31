@@ -5,7 +5,7 @@
 use clap::{Args, Subcommand};
 use rip_netlink::message::NlMsgType;
 use rip_netlink::messages::RouteMessage;
-use rip_netlink::types::route::{RouteProtocol, RouteScope, RouteType, RtMsg, RtaAttr};
+use rip_netlink::types::route::{RouteProtocol, RouteScope, RtMsg, RtaAttr};
 use rip_netlink::{Connection, Result, connection::dump_request};
 use rip_output::{OutputFormat, OutputOptions};
 use std::io::{self, Write};
@@ -208,11 +208,10 @@ impl RouteCmd {
                     continue;
                 }
                 // Filter by family
-                if let Some(fam) = family {
-                    if route.family() != fam {
+                if let Some(fam) = family
+                    && route.family() != fam {
                         continue;
                     }
-                }
                 routes.push(route);
             }
         }

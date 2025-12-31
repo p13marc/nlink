@@ -7,7 +7,7 @@ use clap::{Args, Subcommand};
 use rip_netlink::Result;
 use rip_output::{OutputFormat, OutputOptions};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -359,11 +359,12 @@ fn identify_namespace(pid: &str) -> Result<()> {
         }
 
         let ns_path = PathBuf::from(NETNS_RUN_DIR).join(&name);
-        if let Ok(stat) = fs::metadata(&ns_path) {
-            if stat.dev() == target_dev && stat.ino() == target_ino {
-                println!("{}", name);
-                return Ok(());
-            }
+        if let Ok(stat) = fs::metadata(&ns_path)
+            && stat.dev() == target_dev
+            && stat.ino() == target_ino
+        {
+            println!("{}", name);
+            return Ok(());
         }
     }
 
@@ -405,10 +406,11 @@ fn list_pids_in_namespace(name: &str) -> Result<()> {
         }
 
         let pid_ns_path = format!("/proc/{}/ns/net", name);
-        if let Ok(stat) = fs::metadata(&pid_ns_path) {
-            if stat.dev() == ns_dev && stat.ino() == ns_ino {
-                println!("{}", name);
-            }
+        if let Ok(stat) = fs::metadata(&pid_ns_path)
+            && stat.dev() == ns_dev
+            && stat.ino() == ns_ino
+        {
+            println!("{}", name);
         }
     }
 
@@ -432,7 +434,7 @@ fn monitor_namespaces() -> Result<()> {
         libc::inotify_add_watch(
             inotify_fd,
             path_cstr.as_ptr(),
-            (libc::IN_CREATE | libc::IN_DELETE) as u32,
+            libc::IN_CREATE | libc::IN_DELETE,
         )
     };
 
@@ -475,10 +477,10 @@ fn monitor_namespaces() -> Result<()> {
                 String::new()
             };
 
-            if event.mask & libc::IN_CREATE as u32 != 0 {
+            if event.mask & libc::IN_CREATE != 0 {
                 println!("add {}", name);
             }
-            if event.mask & libc::IN_DELETE as u32 != 0 {
+            if event.mask & libc::IN_DELETE != 0 {
                 println!("delete {}", name);
             }
 

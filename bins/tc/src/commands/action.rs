@@ -11,9 +11,7 @@ use rip_lib::ifname::name_to_index;
 use rip_lib::parse::get_rate;
 use rip_netlink::attr::AttrIter;
 use rip_netlink::connection::dump_request;
-use rip_netlink::message::{
-    NLM_F_ACK, NLM_F_CREATE, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgHdr, NlMsgType,
-};
+use rip_netlink::message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgType};
 use rip_netlink::types::tc::action::{
     self, TC_ACT_PIPE, TC_ACT_STOLEN, TCA_ACT_KIND, TCA_ACT_OPTIONS,
     gact::{PGACT_DETERM, PGACT_NETRAND, TCA_GACT_PARMS, TCA_GACT_PROB, TcGact, TcGactP},
@@ -202,18 +200,24 @@ impl ActionCmd {
             let opts_token = builder.nest_start(TCA_ACT_OPTIONS);
             match kind {
                 "gact" => {
-                    let mut gact = TcGact::default();
-                    gact.index = idx;
+                    let gact = TcGact {
+                        index: idx,
+                        ..Default::default()
+                    };
                     builder.append_attr(TCA_GACT_PARMS, gact.as_bytes());
                 }
                 "mirred" => {
-                    let mut mirred = TcMirred::default();
-                    mirred.index = idx;
+                    let mirred = TcMirred {
+                        index: idx,
+                        ..Default::default()
+                    };
                     builder.append_attr(TCA_MIRRED_PARMS, mirred.as_bytes());
                 }
                 "police" => {
-                    let mut police = TcPolice::default();
-                    police.index = idx;
+                    let police = TcPolice {
+                        index: idx,
+                        ..Default::default()
+                    };
                     builder.append_attr(TCA_POLICE_TBF, police.as_bytes());
                 }
                 _ => {}
@@ -252,18 +256,24 @@ impl ActionCmd {
         let opts_token = builder.nest_start(TCA_ACT_OPTIONS);
         match kind {
             "gact" => {
-                let mut gact = TcGact::default();
-                gact.index = index;
+                let gact = TcGact {
+                    index,
+                    ..Default::default()
+                };
                 builder.append_attr(TCA_GACT_PARMS, gact.as_bytes());
             }
             "mirred" => {
-                let mut mirred = TcMirred::default();
-                mirred.index = index;
+                let mirred = TcMirred {
+                    index,
+                    ..Default::default()
+                };
                 builder.append_attr(TCA_MIRRED_PARMS, mirred.as_bytes());
             }
             "police" => {
-                let mut police = TcPolice::default();
-                police.index = index;
+                let police = TcPolice {
+                    index,
+                    ..Default::default()
+                };
                 builder.append_attr(TCA_POLICE_TBF, police.as_bytes());
             }
             _ => {}
@@ -454,10 +464,10 @@ fn add_mirred_options(builder: &mut MessageBuilder, params: &[String]) -> Result
             "drop" | "shot" => action_result = action::TC_ACT_SHOT,
             _ => {
                 // Try to parse as device name if no dev keyword
-                if ifindex == 0 {
-                    if let Ok(idx) = name_to_index(&params[i]) {
-                        ifindex = idx;
-                    }
+                if ifindex == 0
+                    && let Ok(idx) = name_to_index(&params[i])
+                {
+                    ifindex = idx;
                 }
             }
         }
@@ -590,17 +600,11 @@ fn add_police_options(builder: &mut MessageBuilder, params: &[String]) -> Result
 fn parse_size(s: &str) -> Result<u64> {
     let s_lower = s.to_lowercase();
     let (num_str, multiplier) = if s_lower.ends_with("kb") || s_lower.ends_with("k") {
-        (s_lower.trim_end_matches(|c| c == 'k' || c == 'b'), 1024u64)
+        (s_lower.trim_end_matches(['k', 'b']), 1024u64)
     } else if s_lower.ends_with("mb") || s_lower.ends_with("m") {
-        (
-            s_lower.trim_end_matches(|c| c == 'm' || c == 'b'),
-            1024u64 * 1024,
-        )
+        (s_lower.trim_end_matches(['m', 'b']), 1024u64 * 1024)
     } else if s_lower.ends_with("gb") || s_lower.ends_with("g") {
-        (
-            s_lower.trim_end_matches(|c| c == 'g' || c == 'b'),
-            1024u64 * 1024 * 1024,
-        )
+        (s_lower.trim_end_matches(['g', 'b']), 1024u64 * 1024 * 1024)
     } else if s_lower.ends_with('b') {
         (s_lower.trim_end_matches('b'), 1u64)
     } else {

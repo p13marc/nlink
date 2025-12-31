@@ -8,7 +8,7 @@ use winnow::token::take;
 
 use crate::error::Result;
 use crate::parse::{FromNetlink, PResult, ToNetlink, parse_ip_addr};
-use crate::types::neigh::{NdMsg, NdaAttr, NeighborState};
+use crate::types::neigh::{NdMsg, NeighborState};
 
 /// Attribute IDs for NDA_* constants.
 mod attr_ids {

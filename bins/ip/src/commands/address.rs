@@ -128,17 +128,15 @@ impl AddressCmd {
             .into_iter()
             .filter(|addr| {
                 // Filter by device if specified
-                if let Some(idx) = filter_index {
-                    if addr.ifindex() != idx {
+                if let Some(idx) = filter_index
+                    && addr.ifindex() != idx {
                         return false;
                     }
-                }
                 // Filter by family if specified
-                if let Some(fam) = family {
-                    if addr.family() != fam {
+                if let Some(fam) = family
+                    && addr.family() != fam {
                         return false;
                     }
-                }
                 true
             })
             .collect();
@@ -217,11 +215,10 @@ impl AddressCmd {
         }
 
         // Add broadcast if specified (IPv4 only)
-        if let Some(brd_str) = broadcast {
-            if let Ok(brd_addr) = brd_str.parse::<std::net::Ipv4Addr>() {
+        if let Some(brd_str) = broadcast
+            && let Ok(brd_addr) = brd_str.parse::<std::net::Ipv4Addr>() {
                 builder = builder.broadcast(IpAddr::V4(brd_addr));
             }
-        }
 
         // Add label if specified
         if let Some(lbl) = label {
@@ -275,11 +272,10 @@ impl AddressCmd {
         }
 
         // Add broadcast if specified
-        if let Some(ref brd) = msg.broadcast {
-            if let IpAddr::V4(v4) = brd {
+        if let Some(ref brd) = msg.broadcast
+            && let IpAddr::V4(v4) = brd {
                 nl_builder.append_attr(IfaAttr::Broadcast as u16, &v4.octets());
             }
-        }
 
         // Add label if specified
         if let Some(ref lbl) = msg.label {
@@ -342,17 +338,15 @@ impl AddressCmd {
         // Filter and delete addresses
         for addr in all_addresses {
             // Skip if device filter doesn't match
-            if let Some(idx) = filter_index {
-                if addr.ifindex() != idx {
+            if let Some(idx) = filter_index
+                && addr.ifindex() != idx {
                     continue;
                 }
-            }
             // Skip if family filter doesn't match
-            if let Some(fam) = family {
-                if addr.family() != fam {
+            if let Some(fam) = family
+                && addr.family() != fam {
                     continue;
                 }
-            }
 
             // Delete this address
             let ifaddr = IfAddrMsg::new()
@@ -456,11 +450,10 @@ fn print_addr_text<W: Write>(
     write!(w, "    {} {}/{}", family, display_addr, addr.prefix_len())?;
 
     // Show peer if different from local
-    if let (Some(local), Some(address)) = (&addr.local, &addr.address) {
-        if local != address {
+    if let (Some(local), Some(address)) = (&addr.local, &addr.address)
+        && local != address {
             write!(w, " peer {}", address)?;
         }
-    }
 
     // Show broadcast for IPv4
     if let Some(ref brd) = addr.broadcast {

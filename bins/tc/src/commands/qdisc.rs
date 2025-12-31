@@ -203,7 +203,7 @@ impl QdiscCmd {
                 }
             }
             OutputFormat::Json => {
-                let json: Vec<_> = qdiscs.iter().map(|q| qdisc_to_json(q)).collect();
+                let json: Vec<_> = qdiscs.iter().map(qdisc_to_json).collect();
                 if opts.pretty {
                     serde_json::to_writer_pretty(&mut stdout, &json)?;
                 } else {
@@ -641,15 +641,17 @@ fn add_tbf_options(builder: &mut rip_netlink::MessageBuilder, params: &[String])
     };
 
     // Build the tc_tbf_qopt structure
-    let mut qopt = TcTbfQopt::default();
-    qopt.rate = TcRateSpec::new(rate as u32);
-    qopt.limit = limit;
-    qopt.buffer = buffer;
-    qopt.mtu = mtu;
-
-    if peakrate > 0 {
-        qopt.peakrate = TcRateSpec::new(peakrate as u32);
-    }
+    let qopt = TcTbfQopt {
+        rate: TcRateSpec::new(rate as u32),
+        peakrate: if peakrate > 0 {
+            TcRateSpec::new(peakrate as u32)
+        } else {
+            TcRateSpec::default()
+        },
+        limit,
+        buffer,
+        mtu,
+    };
 
     builder.append_attr(TCA_TBF_PARMS, qopt.as_bytes());
 
@@ -762,10 +764,12 @@ fn add_prio_options(builder: &mut rip_netlink::MessageBuilder, params: &[String]
 fn add_sfq_options(builder: &mut rip_netlink::MessageBuilder, params: &[String]) -> Result<()> {
     use rip_netlink::types::tc::qdisc::sfq::*;
 
-    let mut qopt = TcSfqQopt::default();
-    qopt.quantum = 0; // Let kernel calculate default
-    qopt.perturb_period = 0;
-    qopt.limit = 127;
+    let mut qopt = TcSfqQopt {
+        quantum: 0, // Let kernel calculate default
+        perturb_period: 0,
+        limit: 127,
+        ..Default::default()
+    };
 
     let mut i = 0;
     while i < params.len() {

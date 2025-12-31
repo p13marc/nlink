@@ -1,6 +1,6 @@
 //! Message builder for constructing netlink messages.
 
-use crate::attr::{NLA_F_NESTED, NLA_HDRLEN, NlAttr, nla_align};
+use crate::attr::{NLA_F_NESTED, NlAttr, nla_align};
 use crate::message::{NLMSG_HDRLEN, NlMsgHdr, nlmsg_align};
 
 /// Token returned when starting a nested attribute.
@@ -165,6 +165,7 @@ impl MessageBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attr::NLA_HDRLEN;
     use crate::message::NLM_F_REQUEST;
 
     #[test]

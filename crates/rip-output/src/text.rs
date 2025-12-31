@@ -40,6 +40,7 @@ impl<W: Write> TextOutput<W> {
 }
 
 /// Format bytes as a human-readable string.
+#[allow(dead_code)]
 pub fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * 1024;
@@ -60,6 +61,7 @@ pub fn format_bytes(bytes: u64) -> String {
 }
 
 /// Format a rate (bits per second) as a human-readable string.
+#[allow(dead_code)]
 pub fn format_rate(bps: u64) -> String {
     const KBIT: u64 = 1000;
     const MBIT: u64 = 1_000_000;
@@ -80,6 +82,7 @@ pub fn format_rate(bps: u64) -> String {
 }
 
 /// Format a duration in seconds as a human-readable string.
+#[allow(dead_code)]
 pub fn format_duration(secs: u64) -> String {
     if secs == 0 {
         return "0s".to_string();
@@ -108,6 +111,7 @@ pub fn format_duration(secs: u64) -> String {
 }
 
 /// Format a number with thousands separators.
+#[allow(dead_code)]
 pub fn format_number(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::new();

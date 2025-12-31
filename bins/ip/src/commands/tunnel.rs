@@ -18,7 +18,6 @@ use std::net::Ipv4Addr;
 
 /// IFLA_GRE_* attribute constants
 mod gre_attrs {
-    pub const IFLA_GRE_LINK: u16 = 1;
     pub const IFLA_GRE_IFLAGS: u16 = 2;
     pub const IFLA_GRE_OFLAGS: u16 = 3;
     pub const IFLA_GRE_IKEY: u16 = 4;
@@ -32,7 +31,6 @@ mod gre_attrs {
 
 /// IFLA_IPTUN_* attribute constants (for ipip/sit)
 mod iptun_attrs {
-    pub const IFLA_IPTUN_LINK: u16 = 1;
     pub const IFLA_IPTUN_LOCAL: u16 = 2;
     pub const IFLA_IPTUN_REMOTE: u16 = 3;
     pub const IFLA_IPTUN_TTL: u16 = 4;
@@ -229,15 +227,15 @@ impl TunnelCmd {
             let payload = &response[NLMSG_HDRLEN..];
             if let Some(tunnel) = parse_tunnel_link(payload) {
                 // Apply filters
-                if let Some(name) = name_filter {
-                    if tunnel.name != name {
-                        continue;
-                    }
+                if let Some(name) = name_filter
+                    && tunnel.name != name
+                {
+                    continue;
                 }
-                if let Some(mode) = mode_filter {
-                    if tunnel.mode != mode {
-                        continue;
-                    }
+                if let Some(mode) = mode_filter
+                    && tunnel.mode != mode
+                {
+                    continue;
                 }
                 tunnels.push(tunnel);
             }
@@ -261,6 +259,7 @@ impl TunnelCmd {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn add_tunnel(
         &self,
         conn: &Connection,
@@ -273,7 +272,7 @@ impl TunnelCmd {
         key: Option<u32>,
         ikey: Option<u32>,
         okey: Option<u32>,
-        pmtudisc: bool,
+        _pmtudisc: bool,
         nopmtudisc: bool,
         _dev: Option<&str>,
     ) -> Result<()> {
@@ -363,14 +362,8 @@ impl TunnelCmd {
                 builder.append_attr(gre_attrs::IFLA_GRE_OFLAGS, &GRE_KEY.to_be_bytes());
             }
 
-            // PMTU discovery (1 = enabled, 0 = disabled)
-            let pmtu: u8 = if nopmtudisc {
-                0
-            } else if pmtudisc {
-                1
-            } else {
-                1
-            };
+            // PMTU discovery (1 = enabled by default, 0 = disabled)
+            let pmtu: u8 = if nopmtudisc { 0 } else { 1 };
             builder.append_attr(gre_attrs::IFLA_GRE_PMTUDISC, &[pmtu]);
         } else {
             // IPIP/SIT attributes
@@ -388,13 +381,7 @@ impl TunnelCmd {
                 builder.append_attr(iptun_attrs::IFLA_IPTUN_TOS, &[t]);
             }
 
-            let pmtu: u8 = if nopmtudisc {
-                0
-            } else if pmtudisc {
-                1
-            } else {
-                1
-            };
+            let pmtu: u8 = if nopmtudisc { 0 } else { 1 };
             builder.append_attr(iptun_attrs::IFLA_IPTUN_PMTUDISC, &[pmtu]);
         }
 

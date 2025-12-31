@@ -181,11 +181,10 @@ impl MonitorCmd {
                         write!(out, " via {}", gw)?;
                     }
 
-                    if let Some(oif) = route.oif {
-                        if let Ok(name) = rip_lib::ifname::index_to_name(oif) {
+                    if let Some(oif) = route.oif
+                        && let Ok(name) = rip_lib::ifname::index_to_name(oif) {
                             write!(out, " dev {}", name)?;
                         }
-                    }
 
                     writeln!(out)?;
                 }

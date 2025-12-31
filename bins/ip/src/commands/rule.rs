@@ -191,11 +191,10 @@ impl RuleCmd {
         for response in &responses {
             if let Some(rule) = parse_rule_message(response)? {
                 // Filter by family if specified
-                if let Some(fam) = family {
-                    if rule.family != fam {
+                if let Some(fam) = family
+                    && rule.family != fam {
                         continue;
                     }
-                }
                 rules.push(rule);
             }
         }

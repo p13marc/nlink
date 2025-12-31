@@ -9,9 +9,9 @@ pub struct TcMsg {
     /// Address family.
     pub tcm_family: u8,
     /// Padding.
-    pub tcm__pad1: u8,
+    pub tcm_pad1: u8,
     /// Padding.
-    pub tcm__pad2: u16,
+    pub tcm_pad2: u16,
     /// Interface index.
     pub tcm_ifindex: i32,
     /// Qdisc handle.

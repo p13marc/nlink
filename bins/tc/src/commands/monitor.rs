@@ -124,11 +124,10 @@ fn print_event_text(
 
     write!(out, "{} {} ", action, object)?;
 
-    if let Some(kind) = tc_msg.kind() {
-        if !kind.is_empty() {
+    if let Some(kind) = tc_msg.kind()
+        && !kind.is_empty() {
             write!(out, "{} ", kind)?;
         }
-    }
 
     write!(out, "{} ", tc_handle::format(tc_msg.handle()))?;
     write!(out, "dev {} ", dev)?;

@@ -52,10 +52,12 @@ impl<W: Write> JsonOutput<W> {
 }
 
 /// Helper for building JSON objects.
+#[allow(dead_code)]
 pub struct JsonBuilder {
     map: Map<String, Value>,
 }
 
+#[allow(dead_code)]
 impl JsonBuilder {
     /// Create a new JSON builder.
     pub fn new() -> Self {

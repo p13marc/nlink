@@ -6,7 +6,7 @@ use winnow::token::take;
 
 use crate::error::Result;
 use crate::parse::{FromNetlink, PResult, ToNetlink, parse_string_from_bytes};
-use crate::types::link::{IfInfoMsg, IflaAttr, IflaInfo, LinkStats64, OperState};
+use crate::types::link::{IfInfoMsg, LinkStats64, OperState};
 
 /// Attribute IDs for IFLA_* constants.
 mod attr_ids {
@@ -16,7 +16,6 @@ mod attr_ids {
     pub const IFLA_MTU: u16 = 4;
     pub const IFLA_LINK: u16 = 5;
     pub const IFLA_QDISC: u16 = 6;
-    pub const IFLA_STATS: u16 = 7;
     pub const IFLA_MASTER: u16 = 10;
     pub const IFLA_TXQLEN: u16 = 13;
     pub const IFLA_OPERSTATE: u16 = 16;

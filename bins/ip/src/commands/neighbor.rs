@@ -158,17 +158,15 @@ impl NeighborCmd {
             let payload = &response[NLMSG_HDRLEN..];
             if let Ok(neigh) = NeighborMessage::from_bytes(payload) {
                 // Filter by device if specified
-                if let Some(idx) = filter_index {
-                    if neigh.ifindex() != idx {
+                if let Some(idx) = filter_index
+                    && neigh.ifindex() != idx {
                         continue;
                     }
-                }
                 // Filter by family if specified
-                if let Some(fam) = family {
-                    if neigh.family() != fam {
+                if let Some(fam) = family
+                    && neigh.family() != fam {
                         continue;
                     }
-                }
                 neighbors.push(neigh);
             }
         }

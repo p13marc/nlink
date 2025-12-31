@@ -229,7 +229,7 @@ impl FilterCmd {
             rip_netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
         })?;
 
-        let proto_filter = protocol_filter.map(|p| parse_protocol(p)).transpose()?;
+        let proto_filter = protocol_filter.map(parse_protocol).transpose()?;
 
         // Fetch all filters using typed API
         let all_filters: Vec<TcMessage> = conn.dump_typed(NlMsgType::RTM_GETTFILTER).await?;
@@ -247,16 +247,16 @@ impl FilterCmd {
                     return false;
                 }
                 // Filter by protocol if specified
-                if let Some(proto) = proto_filter {
-                    if f.protocol() != proto {
-                        return false;
-                    }
+                if let Some(proto) = proto_filter
+                    && f.protocol() != proto
+                {
+                    return false;
                 }
                 // Filter by priority if specified
-                if let Some(prio) = prio_filter {
-                    if f.priority() != prio {
-                        return false;
-                    }
+                if let Some(prio) = prio_filter
+                    && f.priority() != prio
+                {
+                    return false;
                 }
                 true
             })
@@ -271,7 +271,7 @@ impl FilterCmd {
                 }
             }
             OutputFormat::Json => {
-                let json: Vec<_> = filters.iter().map(|f| filter_to_json(f)).collect();
+                let json: Vec<_> = filters.iter().map(filter_to_json).collect();
                 if opts.pretty {
                     serde_json::to_writer_pretty(&mut stdout, &json)?;
                 } else {
@@ -311,8 +311,8 @@ impl FilterCmd {
 
         let tcmsg = TcMsg {
             tcm_family: 0,
-            tcm__pad1: 0,
-            tcm__pad2: 0,
+            tcm_pad1: 0,
+            tcm_pad2: 0,
             tcm_ifindex: ifindex as i32,
             tcm_handle: 0,
             tcm_parent: parent_handle,
@@ -365,8 +365,8 @@ impl FilterCmd {
 
         let tcmsg = TcMsg {
             tcm_family: 0,
-            tcm__pad1: 0,
-            tcm__pad2: 0,
+            tcm_pad1: 0,
+            tcm_pad2: 0,
             tcm_ifindex: ifindex as i32,
             tcm_handle: 0,
             tcm_parent: parent_handle,
@@ -410,8 +410,8 @@ impl FilterCmd {
 
         let tcmsg = TcMsg {
             tcm_family: 0,
-            tcm__pad1: 0,
-            tcm__pad2: 0,
+            tcm_pad1: 0,
+            tcm_pad2: 0,
             tcm_ifindex: ifindex as i32,
             tcm_handle: 0,
             tcm_parent: parent_handle,
@@ -461,8 +461,8 @@ impl FilterCmd {
 
         let tcmsg = TcMsg {
             tcm_family: 0,
-            tcm__pad1: 0,
-            tcm__pad2: 0,
+            tcm_pad1: 0,
+            tcm_pad2: 0,
             tcm_ifindex: ifindex as i32,
             tcm_handle: 0,
             tcm_parent: parent_handle,

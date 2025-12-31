@@ -19,7 +19,6 @@ mod attr_ids {
     pub const RTA_GATEWAY: u16 = 5;
     pub const RTA_PRIORITY: u16 = 6;
     pub const RTA_PREFSRC: u16 = 7;
-    pub const RTA_METRICS: u16 = 8;
     pub const RTA_TABLE: u16 = 15;
     pub const RTA_PREF: u16 = 20;
     pub const RTA_EXPIRES: u16 = 23;

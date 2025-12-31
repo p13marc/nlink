@@ -50,11 +50,7 @@ impl NlAttr {
 
     /// Get the payload length (total length minus header).
     pub fn payload_len(&self) -> usize {
-        if self.nla_len as usize >= NLA_HDRLEN {
-            self.nla_len as usize - NLA_HDRLEN
-        } else {
-            0
-        }
+        (self.nla_len as usize).saturating_sub(NLA_HDRLEN)
     }
 
     /// Convert to bytes.

@@ -6,9 +6,9 @@ use winnow::binary::le_u16;
 use winnow::prelude::*;
 use winnow::token::take;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::parse::{FromNetlink, PResult, ToNetlink, parse_ip_addr, parse_string_from_bytes};
-use crate::types::addr::{IfAddrMsg, IfaAttr, IfaCacheinfo, Scope};
+use crate::types::addr::{IfAddrMsg, IfaCacheinfo, Scope};
 
 /// Attribute IDs for IFA_* constants.
 mod attr_ids {

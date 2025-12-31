@@ -56,13 +56,11 @@ pub fn index_to_name(index: u32) -> Result<String> {
 
     for entry in entries.flatten() {
         let path = entry.path().join("ifindex");
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(idx) = content.trim().parse::<u32>() {
-                if idx == index {
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(idx) = content.trim().parse::<u32>()
+                && idx == index {
                     return Ok(entry.file_name().to_string_lossy().to_string());
                 }
-            }
-        }
     }
 
     Err(IfError::NotFound(format!("index {}", index)))

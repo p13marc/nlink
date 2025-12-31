@@ -5,7 +5,7 @@ use winnow::prelude::*;
 use winnow::token::take;
 
 use crate::parse::{FromNetlink, PResult, parse_string_from_bytes};
-use crate::types::tc::{TcMsg, TcaAttr, TcaStats};
+use crate::types::tc::TcMsg;
 
 /// Attribute IDs for TCA_* constants.
 mod attr_ids {
@@ -13,9 +13,7 @@ mod attr_ids {
     pub const TCA_OPTIONS: u16 = 2;
     pub const TCA_STATS: u16 = 3;
     pub const TCA_XSTATS: u16 = 4;
-    pub const TCA_RATE: u16 = 5;
     pub const TCA_STATS2: u16 = 7;
-    pub const TCA_STAB: u16 = 8;
     pub const TCA_CHAIN: u16 = 11;
     pub const TCA_HW_OFFLOAD: u16 = 12;
     pub const TCA_INGRESS_BLOCK: u16 = 13;

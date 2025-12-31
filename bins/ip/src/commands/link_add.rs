@@ -591,11 +591,10 @@ fn build_type_specific_data(builder: &mut MessageBuilder, link_type: &LinkAddTyp
                 builder.append_attr(2, &ip.octets());
             }
             // IFLA_GRE_LOCAL = 1
-            if let Some(addr) = local {
-                if let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
+            if let Some(addr) = local
+                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
                     builder.append_attr(1, &ip.octets());
                 }
-            }
             // IFLA_GRE_TTL = 4
             if let Some(t) = ttl {
                 builder.append_attr_u8(4, *t);
@@ -624,11 +623,10 @@ fn build_type_specific_data(builder: &mut MessageBuilder, link_type: &LinkAddTyp
                 builder.append_attr(2, &ip.octets());
             }
             // IFLA_IPTUN_LOCAL = 1
-            if let Some(addr) = local {
-                if let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
+            if let Some(addr) = local
+                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
                     builder.append_attr(1, &ip.octets());
                 }
-            }
             // IFLA_IPTUN_TTL = 4
             if let Some(t) = ttl {
                 builder.append_attr_u8(4, *t);
