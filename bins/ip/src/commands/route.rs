@@ -399,14 +399,55 @@ impl RouteCmd {
     }
 
     async fn get(
-        _conn: &Connection,
-        _destination: &str,
-        _format: OutputFormat,
-        _opts: &OutputOptions,
+        conn: &Connection,
+        destination: &str,
+        format: OutputFormat,
+        opts: &OutputOptions,
     ) -> Result<()> {
-        // TODO: Implement route get
-        Err(rip_netlink::Error::NotSupported(
-            "route get not yet implemented".into(),
-        ))
+        use rip_netlink::connection::ack_request;
+        use rip_netlink::message::NLMSG_HDRLEN;
+        use rip_netlink::parse::FromNetlink;
+
+        // Parse destination address
+        let dst_addr: IpAddr = destination.parse().map_err(|_| {
+            rip_netlink::Error::InvalidMessage(format!("invalid destination: {}", destination))
+        })?;
+
+        let family = if dst_addr.is_ipv4() { 2u8 } else { 10u8 };
+        let dst_len = if dst_addr.is_ipv4() { 32u8 } else { 128u8 };
+
+        let rtmsg = RtMsg::new().with_family(family).with_dst_len(dst_len);
+
+        let mut builder = ack_request(NlMsgType::RTM_GETROUTE);
+        builder.append(&rtmsg);
+
+        // Add destination address
+        match dst_addr {
+            IpAddr::V4(v4) => {
+                builder.append_attr(RtaAttr::Dst as u16, &v4.octets());
+            }
+            IpAddr::V6(v6) => {
+                builder.append_attr(RtaAttr::Dst as u16, &v6.octets());
+            }
+        }
+
+        // Send request and get response
+        let response = conn.request(builder).await?;
+
+        // Parse response
+        if response.len() < NLMSG_HDRLEN + RtMsg::SIZE {
+            return Err(rip_netlink::Error::InvalidMessage(
+                "invalid response from kernel".into(),
+            ));
+        }
+
+        let payload = &response[NLMSG_HDRLEN..];
+        let route = RouteMessage::from_bytes(payload).map_err(|e| {
+            rip_netlink::Error::InvalidMessage(format!("failed to parse route: {}", e))
+        })?;
+
+        print_all(&[route], format, opts)?;
+
+        Ok(())
     }
 }

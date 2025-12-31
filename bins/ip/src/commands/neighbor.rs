@@ -285,10 +285,85 @@ impl NeighborCmd {
         Ok(())
     }
 
-    async fn flush(_conn: &Connection, _dev: Option<&str>, _family: Option<u8>) -> Result<()> {
-        // TODO: Implement flush
-        Err(rip_netlink::Error::NotSupported(
-            "neighbor flush not yet implemented".into(),
-        ))
+    async fn flush(conn: &Connection, dev: Option<&str>, family: Option<u8>) -> Result<()> {
+        use rip_netlink::connection::ack_request;
+
+        // First, get all neighbor entries
+        let mut builder = dump_request(NlMsgType::RTM_GETNEIGH);
+        let ndmsg = NdMsg::new().with_family(family.unwrap_or(0));
+        builder.append(&ndmsg);
+
+        let responses = conn.dump(builder).await?;
+
+        // Get device index if filtering by name
+        let filter_index = if let Some(dev_name) = dev {
+            Some(rip_lib::get_ifindex(dev_name).map_err(rip_netlink::Error::InvalidMessage)? as u32)
+        } else {
+            None
+        };
+
+        // Collect neighbors to delete
+        let mut neighbors_to_delete = Vec::new();
+        for response in &responses {
+            if response.len() < NLMSG_HDRLEN + NdMsg::SIZE {
+                continue;
+            }
+
+            let payload = &response[NLMSG_HDRLEN..];
+            if let Ok(neigh) = NeighborMessage::from_bytes(payload) {
+                // Filter by device if specified
+                if let Some(idx) = filter_index
+                    && neigh.ifindex() != idx
+                {
+                    continue;
+                }
+                // Filter by family if specified
+                if let Some(fam) = family
+                    && neigh.family() != fam
+                {
+                    continue;
+                }
+                // Skip permanent/noarp entries (like iproute2 does)
+                if neigh.is_permanent() {
+                    continue;
+                }
+                neighbors_to_delete.push(neigh);
+            }
+        }
+
+        let count = neighbors_to_delete.len();
+
+        // Delete each neighbor
+        for neigh in neighbors_to_delete {
+            let del_ndmsg = NdMsg {
+                ndm_family: neigh.family(),
+                ndm_ifindex: neigh.ifindex() as i32,
+                ..Default::default()
+            };
+
+            let mut del_builder = ack_request(NlMsgType::RTM_DELNEIGH);
+            del_builder.append(&del_ndmsg);
+
+            // Add destination address
+            if let Some(addr) = neigh.destination {
+                match addr {
+                    IpAddr::V4(v4) => {
+                        del_builder.append_attr(NdaAttr::Dst as u16, &v4.octets());
+                    }
+                    IpAddr::V6(v6) => {
+                        del_builder.append_attr(NdaAttr::Dst as u16, &v6.octets());
+                    }
+                }
+
+                // Ignore errors for individual deletes (entry may have been removed)
+                let _ = conn.request_ack(del_builder).await;
+            }
+        }
+
+        if count > 0 {
+            eprintln!("Flushed {} neighbor entries", count);
+        }
+
+        Ok(())
     }
 }
