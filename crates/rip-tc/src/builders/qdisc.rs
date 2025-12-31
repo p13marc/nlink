@@ -7,7 +7,7 @@ use rip_netlink::message::NlMsgType;
 use rip_netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
 use rip_netlink::{Connection, MessageBuilder, Result};
 
-use crate::options::{fq_codel, htb, netem, prio, sfq, tbf};
+use crate::options::{cake, codel, fq, fq_codel, htb, netem, prio, sfq, tbf};
 
 /// Build a TcMsg with common fields for qdisc operations.
 fn build_tcmsg(dev: &str, parent: &str, handle: Option<&str>) -> Result<TcMsg> {
@@ -39,6 +39,9 @@ pub fn add_options(builder: &mut MessageBuilder, kind: &str, params: &[String]) 
     let options_token = builder.nest_start(TcaAttr::Options as u16);
 
     match kind {
+        "cake" => cake::build(builder, params)?,
+        "codel" => codel::build(builder, params)?,
+        "fq" => fq::build(builder, params)?,
         "fq_codel" => fq_codel::build(builder, params)?,
         "tbf" => tbf::build(builder, params)?,
         "htb" => htb::build(builder, params)?,

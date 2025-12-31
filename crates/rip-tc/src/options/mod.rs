@@ -3,6 +3,9 @@
 //! Each qdisc type has its own module that knows how to parse
 //! command-line parameters and build netlink attributes.
 
+pub mod cake;
+pub mod codel;
+pub mod fq;
 pub mod fq_codel;
 pub mod htb;
 pub mod netem;

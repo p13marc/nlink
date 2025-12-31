@@ -704,6 +704,89 @@ pub mod qdisc {
             unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
         }
     }
+
+    /// CoDel qdisc-specific attributes.
+    pub mod codel {
+        pub const TCA_CODEL_UNSPEC: u16 = 0;
+        pub const TCA_CODEL_TARGET: u16 = 1;
+        pub const TCA_CODEL_LIMIT: u16 = 2;
+        pub const TCA_CODEL_INTERVAL: u16 = 3;
+        pub const TCA_CODEL_ECN: u16 = 4;
+        pub const TCA_CODEL_CE_THRESHOLD: u16 = 5;
+    }
+
+    /// FQ (Fair Queue) qdisc-specific attributes.
+    pub mod fq {
+        pub const TCA_FQ_UNSPEC: u16 = 0;
+        pub const TCA_FQ_PLIMIT: u16 = 1;
+        pub const TCA_FQ_FLOW_PLIMIT: u16 = 2;
+        pub const TCA_FQ_QUANTUM: u16 = 3;
+        pub const TCA_FQ_INITIAL_QUANTUM: u16 = 4;
+        pub const TCA_FQ_RATE_ENABLE: u16 = 5;
+        pub const TCA_FQ_FLOW_DEFAULT_RATE: u16 = 6;
+        pub const TCA_FQ_FLOW_MAX_RATE: u16 = 7;
+        pub const TCA_FQ_BUCKETS_LOG: u16 = 8;
+        pub const TCA_FQ_FLOW_REFILL_DELAY: u16 = 9;
+        pub const TCA_FQ_ORPHAN_MASK: u16 = 10;
+        pub const TCA_FQ_LOW_RATE_THRESHOLD: u16 = 11;
+        pub const TCA_FQ_CE_THRESHOLD: u16 = 12;
+        pub const TCA_FQ_TIMER_SLACK: u16 = 13;
+        pub const TCA_FQ_HORIZON: u16 = 14;
+        pub const TCA_FQ_HORIZON_DROP: u16 = 15;
+        pub const TCA_FQ_PRIOMAP: u16 = 16;
+        pub const TCA_FQ_WEIGHTS: u16 = 17;
+        pub const TCA_FQ_OFFLOAD_HORIZON: u16 = 18;
+    }
+
+    /// CAKE qdisc-specific attributes.
+    pub mod cake {
+        pub const TCA_CAKE_UNSPEC: u16 = 0;
+        pub const TCA_CAKE_PAD: u16 = 1;
+        pub const TCA_CAKE_BASE_RATE64: u16 = 2;
+        pub const TCA_CAKE_DIFFSERV_MODE: u16 = 3;
+        pub const TCA_CAKE_ATM: u16 = 4;
+        pub const TCA_CAKE_FLOW_MODE: u16 = 5;
+        pub const TCA_CAKE_OVERHEAD: u16 = 6;
+        pub const TCA_CAKE_RTT: u16 = 7;
+        pub const TCA_CAKE_TARGET: u16 = 8;
+        pub const TCA_CAKE_AUTORATE: u16 = 9;
+        pub const TCA_CAKE_MEMORY: u16 = 10;
+        pub const TCA_CAKE_NAT: u16 = 11;
+        pub const TCA_CAKE_RAW: u16 = 12;
+        pub const TCA_CAKE_WASH: u16 = 13;
+        pub const TCA_CAKE_MPU: u16 = 14;
+        pub const TCA_CAKE_INGRESS: u16 = 15;
+        pub const TCA_CAKE_ACK_FILTER: u16 = 16;
+        pub const TCA_CAKE_SPLIT_GSO: u16 = 17;
+        pub const TCA_CAKE_FWMARK: u16 = 18;
+
+        /// CAKE diffserv modes.
+        pub const CAKE_DIFFSERV_DIFFSERV3: u32 = 0;
+        pub const CAKE_DIFFSERV_DIFFSERV4: u32 = 1;
+        pub const CAKE_DIFFSERV_DIFFSERV8: u32 = 2;
+        pub const CAKE_DIFFSERV_BESTEFFORT: u32 = 3;
+        pub const CAKE_DIFFSERV_PRECEDENCE: u32 = 4;
+
+        /// CAKE flow modes.
+        pub const CAKE_FLOW_NONE: u32 = 0;
+        pub const CAKE_FLOW_SRC_IP: u32 = 1;
+        pub const CAKE_FLOW_DST_IP: u32 = 2;
+        pub const CAKE_FLOW_HOSTS: u32 = 3;
+        pub const CAKE_FLOW_FLOWS: u32 = 4;
+        pub const CAKE_FLOW_DUAL_SRC: u32 = 5;
+        pub const CAKE_FLOW_DUAL_DST: u32 = 6;
+        pub const CAKE_FLOW_TRIPLE: u32 = 7;
+
+        /// CAKE ATM modes.
+        pub const CAKE_ATM_NONE: u32 = 0;
+        pub const CAKE_ATM_ATM: u32 = 1;
+        pub const CAKE_ATM_PTM: u32 = 2;
+
+        /// CAKE ACK filter modes.
+        pub const CAKE_ACK_NONE: u32 = 0;
+        pub const CAKE_ACK_FILTER: u32 = 1;
+        pub const CAKE_ACK_AGGRESSIVE: u32 = 2;
+    }
 }
 
 /// Common filter attributes.
