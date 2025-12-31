@@ -1236,4 +1236,199 @@ pub mod action {
             }
         }
     }
+
+    /// Vlan action attributes.
+    pub mod vlan {
+        pub const TCA_VLAN_UNSPEC: u16 = 0;
+        pub const TCA_VLAN_TM: u16 = 1;
+        pub const TCA_VLAN_PARMS: u16 = 2;
+        pub const TCA_VLAN_PUSH_VLAN_ID: u16 = 3;
+        pub const TCA_VLAN_PUSH_VLAN_PROTOCOL: u16 = 4;
+        pub const TCA_VLAN_PAD: u16 = 5;
+        pub const TCA_VLAN_PUSH_VLAN_PRIORITY: u16 = 6;
+        pub const TCA_VLAN_PUSH_ETH_DST: u16 = 7;
+        pub const TCA_VLAN_PUSH_ETH_SRC: u16 = 8;
+
+        /// Vlan action types.
+        pub const TCA_VLAN_ACT_POP: i32 = 1;
+        pub const TCA_VLAN_ACT_PUSH: i32 = 2;
+        pub const TCA_VLAN_ACT_MODIFY: i32 = 3;
+        pub const TCA_VLAN_ACT_POP_ETH: i32 = 4;
+        pub const TCA_VLAN_ACT_PUSH_ETH: i32 = 5;
+
+        /// Ethernet protocol for VLAN.
+        pub const ETH_P_8021Q: u16 = 0x8100;
+        pub const ETH_P_8021AD: u16 = 0x88A8;
+
+        /// Format vlan action type to string.
+        pub fn format_vlan_action(v_action: i32) -> &'static str {
+            match v_action {
+                TCA_VLAN_ACT_POP => "pop",
+                TCA_VLAN_ACT_PUSH => "push",
+                TCA_VLAN_ACT_MODIFY => "modify",
+                TCA_VLAN_ACT_POP_ETH => "pop_eth",
+                TCA_VLAN_ACT_PUSH_ETH => "push_eth",
+                _ => "unknown",
+            }
+        }
+
+        /// Vlan action parameters (struct tc_vlan).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcVlan {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+            /// Vlan-specific action type.
+            pub v_action: i32,
+        }
+
+        impl TcVlan {
+            pub fn new(v_action: i32, action: i32) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                    v_action,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+    }
+
+    /// Skbedit action attributes.
+    pub mod skbedit {
+        pub const TCA_SKBEDIT_UNSPEC: u16 = 0;
+        pub const TCA_SKBEDIT_TM: u16 = 1;
+        pub const TCA_SKBEDIT_PARMS: u16 = 2;
+        pub const TCA_SKBEDIT_PRIORITY: u16 = 3;
+        pub const TCA_SKBEDIT_QUEUE_MAPPING: u16 = 4;
+        pub const TCA_SKBEDIT_MARK: u16 = 5;
+        pub const TCA_SKBEDIT_PAD: u16 = 6;
+        pub const TCA_SKBEDIT_PTYPE: u16 = 7;
+        pub const TCA_SKBEDIT_MASK: u16 = 8;
+        pub const TCA_SKBEDIT_FLAGS: u16 = 9;
+        pub const TCA_SKBEDIT_QUEUE_MAPPING_MAX: u16 = 10;
+
+        /// Skbedit flags.
+        pub const SKBEDIT_F_PRIORITY: u64 = 0x1;
+        pub const SKBEDIT_F_QUEUE_MAPPING: u64 = 0x2;
+        pub const SKBEDIT_F_MARK: u64 = 0x4;
+        pub const SKBEDIT_F_PTYPE: u64 = 0x8;
+        pub const SKBEDIT_F_MASK: u64 = 0x10;
+        pub const SKBEDIT_F_INHERITDSFIELD: u64 = 0x20;
+
+        /// Packet types for ptype.
+        pub const PACKET_HOST: u16 = 0;
+        pub const PACKET_BROADCAST: u16 = 1;
+        pub const PACKET_MULTICAST: u16 = 2;
+        pub const PACKET_OTHERHOST: u16 = 3;
+        pub const PACKET_OUTGOING: u16 = 4;
+        pub const PACKET_LOOPBACK: u16 = 5;
+
+        /// Skbedit action parameters (struct tc_skbedit).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcSkbedit {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+        }
+
+        impl TcSkbedit {
+            pub fn new(action: i32) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+    }
+
+    /// Tunnel key action attributes.
+    pub mod tunnel_key {
+        pub const TCA_TUNNEL_KEY_UNSPEC: u16 = 0;
+        pub const TCA_TUNNEL_KEY_TM: u16 = 1;
+        pub const TCA_TUNNEL_KEY_PARMS: u16 = 2;
+        pub const TCA_TUNNEL_KEY_ENC_IPV4_SRC: u16 = 3;
+        pub const TCA_TUNNEL_KEY_ENC_IPV4_DST: u16 = 4;
+        pub const TCA_TUNNEL_KEY_ENC_IPV6_SRC: u16 = 5;
+        pub const TCA_TUNNEL_KEY_ENC_IPV6_DST: u16 = 6;
+        pub const TCA_TUNNEL_KEY_ENC_KEY_ID: u16 = 7;
+        pub const TCA_TUNNEL_KEY_PAD: u16 = 8;
+        pub const TCA_TUNNEL_KEY_ENC_DST_PORT: u16 = 9;
+        pub const TCA_TUNNEL_KEY_NO_CSUM: u16 = 10;
+        pub const TCA_TUNNEL_KEY_ENC_OPTS: u16 = 11;
+        pub const TCA_TUNNEL_KEY_ENC_TOS: u16 = 12;
+        pub const TCA_TUNNEL_KEY_ENC_TTL: u16 = 13;
+        pub const TCA_TUNNEL_KEY_NO_FRAG: u16 = 14;
+
+        /// Tunnel key action types.
+        pub const TCA_TUNNEL_KEY_ACT_SET: i32 = 1;
+        pub const TCA_TUNNEL_KEY_ACT_RELEASE: i32 = 2;
+
+        /// Tunnel key action parameters (struct tc_tunnel_key).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcTunnelKey {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+            /// Tunnel key action type.
+            pub t_action: i32,
+        }
+
+        impl TcTunnelKey {
+            pub fn new(t_action: i32, action: i32) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                    t_action,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+    }
 }

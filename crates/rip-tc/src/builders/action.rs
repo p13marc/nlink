@@ -19,6 +19,15 @@ use rip_netlink::types::tc::action::{
         TCA_MIRRED_PARMS, TcMirred,
     },
     police::{TCA_POLICE_AVRATE, TCA_POLICE_RATE64, TCA_POLICE_RESULT, TCA_POLICE_TBF, TcPolice},
+    skbedit::{
+        TCA_SKBEDIT_MARK, TCA_SKBEDIT_MASK, TCA_SKBEDIT_PARMS, TCA_SKBEDIT_PRIORITY,
+        TCA_SKBEDIT_PTYPE, TCA_SKBEDIT_QUEUE_MAPPING, TcSkbedit,
+    },
+    vlan::{
+        ETH_P_8021AD, ETH_P_8021Q, TCA_VLAN_ACT_MODIFY, TCA_VLAN_ACT_POP, TCA_VLAN_ACT_PUSH,
+        TCA_VLAN_PARMS, TCA_VLAN_PUSH_VLAN_ID, TCA_VLAN_PUSH_VLAN_PRIORITY,
+        TCA_VLAN_PUSH_VLAN_PROTOCOL, TcVlan,
+    },
 };
 use rip_netlink::{Connection, MessageBuilder, Result};
 
@@ -116,9 +125,11 @@ pub fn add_options(builder: &mut MessageBuilder, kind: &str, params: &[String]) 
         "gact" => add_gact_options(builder, params)?,
         "mirred" => add_mirred_options(builder, params)?,
         "police" => add_police_options(builder, params)?,
+        "vlan" => add_vlan_options(builder, params)?,
+        "skbedit" => add_skbedit_options(builder, params)?,
         _ => {
             return Err(rip_netlink::Error::InvalidMessage(format!(
-                "unknown action type '{}', supported: gact, mirred, police",
+                "unknown action type '{}', supported: gact, mirred, police, vlan, skbedit",
                 kind
             )));
         }
@@ -149,6 +160,20 @@ fn add_index_option(builder: &mut MessageBuilder, kind: &str, index: u32) {
                 ..Default::default()
             };
             builder.append_attr(TCA_POLICE_TBF, police.as_bytes());
+        }
+        "vlan" => {
+            let vlan = TcVlan {
+                index,
+                ..Default::default()
+            };
+            builder.append_attr(TCA_VLAN_PARMS, vlan.as_bytes());
+        }
+        "skbedit" => {
+            let skbedit = TcSkbedit {
+                index,
+                ..Default::default()
+            };
+            builder.append_attr(TCA_SKBEDIT_PARMS, skbedit.as_bytes());
         }
         _ => {}
     }
@@ -494,4 +519,263 @@ fn parse_size(s: &str) -> Result<u64> {
         .map_err(|_| rip_netlink::Error::InvalidMessage(format!("invalid size: {}", s)))?;
 
     Ok(num * multiplier)
+}
+
+// ============================================================================
+// Vlan (VLAN Tag Manipulation) Options
+// ============================================================================
+
+/// Add vlan options.
+///
+/// Supported parameters:
+/// - pop: Remove VLAN tag
+/// - push: Add VLAN tag
+/// - modify: Modify existing VLAN tag
+/// - id N: VLAN ID (1-4094)
+/// - protocol 802.1q|802.1ad: VLAN protocol
+/// - priority N: VLAN priority (0-7)
+/// - index N: Specify action index
+fn add_vlan_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()> {
+    let mut v_action = TCA_VLAN_ACT_POP;
+    let mut vlan_id: Option<u16> = None;
+    let mut vlan_prio: Option<u8> = None;
+    let mut vlan_proto: u16 = ETH_P_8021Q;
+    let mut action_result = TC_ACT_PIPE;
+    let mut index = 0u32;
+
+    let mut i = 0;
+    while i < params.len() {
+        let param = params[i].to_lowercase();
+        match param.as_str() {
+            "pop" => v_action = TCA_VLAN_ACT_POP,
+            "push" => v_action = TCA_VLAN_ACT_PUSH,
+            "modify" => v_action = TCA_VLAN_ACT_MODIFY,
+            "id" => {
+                i += 1;
+                if i < params.len() {
+                    let id: u16 = params[i].parse().map_err(|_| {
+                        rip_netlink::Error::InvalidMessage(format!(
+                            "invalid vlan id: {}",
+                            params[i]
+                        ))
+                    })?;
+                    if id == 0 || id > 4094 {
+                        return Err(rip_netlink::Error::InvalidMessage(
+                            "vlan id must be 1-4094".to_string(),
+                        ));
+                    }
+                    vlan_id = Some(id);
+                }
+            }
+            "protocol" => {
+                i += 1;
+                if i < params.len() {
+                    vlan_proto = match params[i].to_lowercase().as_str() {
+                        "802.1q" | "8021q" => ETH_P_8021Q,
+                        "802.1ad" | "8021ad" | "qinq" => ETH_P_8021AD,
+                        _ => {
+                            return Err(rip_netlink::Error::InvalidMessage(format!(
+                                "unknown vlan protocol: {}, use 802.1q or 802.1ad",
+                                params[i]
+                            )));
+                        }
+                    };
+                }
+            }
+            "priority" => {
+                i += 1;
+                if i < params.len() {
+                    let prio: u8 = params[i].parse().map_err(|_| {
+                        rip_netlink::Error::InvalidMessage(format!(
+                            "invalid priority: {}",
+                            params[i]
+                        ))
+                    })?;
+                    if prio > 7 {
+                        return Err(rip_netlink::Error::InvalidMessage(
+                            "vlan priority must be 0-7".to_string(),
+                        ));
+                    }
+                    vlan_prio = Some(prio);
+                }
+            }
+            "index" => {
+                i += 1;
+                if i < params.len() {
+                    index = params[i].parse().map_err(|_| {
+                        rip_netlink::Error::InvalidMessage(format!("invalid index: {}", params[i]))
+                    })?;
+                }
+            }
+            "pass" | "ok" => action_result = action::TC_ACT_OK,
+            "pipe" | "continue" => action_result = TC_ACT_PIPE,
+            "drop" | "shot" => action_result = action::TC_ACT_SHOT,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // Validate: push/modify require vlan id
+    if (v_action == TCA_VLAN_ACT_PUSH || v_action == TCA_VLAN_ACT_MODIFY) && vlan_id.is_none() {
+        return Err(rip_netlink::Error::InvalidMessage(
+            "vlan push/modify requires 'id <vlan_id>'".to_string(),
+        ));
+    }
+
+    let mut vlan = TcVlan::new(v_action, action_result);
+    vlan.index = index;
+    builder.append_attr(TCA_VLAN_PARMS, vlan.as_bytes());
+
+    if let Some(id) = vlan_id {
+        builder.append_attr(TCA_VLAN_PUSH_VLAN_ID, &id.to_ne_bytes());
+    }
+
+    if v_action == TCA_VLAN_ACT_PUSH {
+        builder.append_attr(TCA_VLAN_PUSH_VLAN_PROTOCOL, &vlan_proto.to_be_bytes());
+    }
+
+    if let Some(prio) = vlan_prio {
+        builder.append_attr(TCA_VLAN_PUSH_VLAN_PRIORITY, &[prio]);
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Skbedit (SKB Field Editing) Options
+// ============================================================================
+
+/// Add skbedit options.
+///
+/// Supported parameters:
+/// - priority N: Set packet priority (classid)
+/// - queue N: Set TX queue mapping
+/// - mark N: Set firewall mark
+/// - mark N/M: Set firewall mark with mask
+/// - ptype host|broadcast|multicast|otherhost: Set packet type
+/// - index N: Specify action index
+fn add_skbedit_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()> {
+    let mut priority: Option<u32> = None;
+    let mut queue: Option<u16> = None;
+    let mut mark: Option<u32> = None;
+    let mut mark_mask: Option<u32> = None;
+    let mut ptype: Option<u16> = None;
+    let mut action_result = TC_ACT_PIPE;
+    let mut index = 0u32;
+
+    let mut i = 0;
+    while i < params.len() {
+        let param = params[i].to_lowercase();
+        match param.as_str() {
+            "priority" => {
+                i += 1;
+                if i < params.len() {
+                    priority = Some(params[i].parse().map_err(|_| {
+                        rip_netlink::Error::InvalidMessage(format!(
+                            "invalid priority: {}",
+                            params[i]
+                        ))
+                    })?);
+                }
+            }
+            "queue" | "queue_mapping" => {
+                i += 1;
+                if i < params.len() {
+                    queue = Some(params[i].parse().map_err(|_| {
+                        rip_netlink::Error::InvalidMessage(format!("invalid queue: {}", params[i]))
+                    })?);
+                }
+            }
+            "mark" => {
+                i += 1;
+                if i < params.len() {
+                    // Support mark/mask format
+                    if let Some((m, mask_str)) = params[i].split_once('/') {
+                        mark = Some(parse_hex_or_dec(m)?);
+                        mark_mask = Some(parse_hex_or_dec(mask_str)?);
+                    } else {
+                        mark = Some(parse_hex_or_dec(&params[i])?);
+                    }
+                }
+            }
+            "ptype" => {
+                i += 1;
+                if i < params.len() {
+                    use rip_netlink::types::tc::action::skbedit::*;
+                    ptype = Some(match params[i].to_lowercase().as_str() {
+                        "host" => PACKET_HOST,
+                        "broadcast" => PACKET_BROADCAST,
+                        "multicast" => PACKET_MULTICAST,
+                        "otherhost" => PACKET_OTHERHOST,
+                        "outgoing" => PACKET_OUTGOING,
+                        "loopback" => PACKET_LOOPBACK,
+                        _ => {
+                            return Err(rip_netlink::Error::InvalidMessage(format!(
+                                "unknown ptype: {}, use host|broadcast|multicast|otherhost",
+                                params[i]
+                            )));
+                        }
+                    });
+                }
+            }
+            "index" => {
+                i += 1;
+                if i < params.len() {
+                    index = params[i].parse().map_err(|_| {
+                        rip_netlink::Error::InvalidMessage(format!("invalid index: {}", params[i]))
+                    })?;
+                }
+            }
+            "pass" | "ok" => action_result = action::TC_ACT_OK,
+            "pipe" | "continue" => action_result = TC_ACT_PIPE,
+            "drop" | "shot" => action_result = action::TC_ACT_SHOT,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // At least one field must be set
+    if priority.is_none() && queue.is_none() && mark.is_none() && ptype.is_none() {
+        return Err(rip_netlink::Error::InvalidMessage(
+            "skbedit requires at least one of: priority, queue, mark, ptype".to_string(),
+        ));
+    }
+
+    let mut skbedit = TcSkbedit::new(action_result);
+    skbedit.index = index;
+    builder.append_attr(TCA_SKBEDIT_PARMS, skbedit.as_bytes());
+
+    if let Some(p) = priority {
+        builder.append_attr(TCA_SKBEDIT_PRIORITY, &p.to_ne_bytes());
+    }
+
+    if let Some(q) = queue {
+        builder.append_attr(TCA_SKBEDIT_QUEUE_MAPPING, &q.to_ne_bytes());
+    }
+
+    if let Some(m) = mark {
+        builder.append_attr(TCA_SKBEDIT_MARK, &m.to_ne_bytes());
+    }
+
+    if let Some(mask) = mark_mask {
+        builder.append_attr(TCA_SKBEDIT_MASK, &mask.to_ne_bytes());
+    }
+
+    if let Some(pt) = ptype {
+        builder.append_attr(TCA_SKBEDIT_PTYPE, &pt.to_ne_bytes());
+    }
+
+    Ok(())
+}
+
+/// Parse hex or decimal number.
+fn parse_hex_or_dec(s: &str) -> Result<u32> {
+    if let Some(hex) = s.strip_prefix("0x") {
+        u32::from_str_radix(hex, 16)
+    } else if let Some(hex) = s.strip_prefix("0X") {
+        u32::from_str_radix(hex, 16)
+    } else {
+        s.parse()
+    }
+    .map_err(|_| rip_netlink::Error::InvalidMessage(format!("invalid number: {}", s)))
 }
