@@ -71,6 +71,8 @@ mod builder;
 pub mod connection;
 mod error;
 pub mod events;
+#[cfg(test)]
+mod fixtures;
 pub mod message;
 pub mod messages;
 pub mod parse;
