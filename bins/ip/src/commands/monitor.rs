@@ -1,9 +1,10 @@
 //! ip monitor - watch for netlink events.
 //!
-//! This module uses the strongly-typed message API from rip-netlink.
+//! This module uses the strongly-typed message API from rip-netlink
+//! and the generic monitor infrastructure from rip-output.
 
 use clap::{Args, ValueEnum};
-use rip_netlink::message::{MessageIter, NlMsgType};
+use rip_netlink::message::NlMsgType;
 use rip_netlink::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage};
 use rip_netlink::parse::FromNetlink;
 use rip_netlink::rtnetlink_groups::*;
@@ -11,9 +12,9 @@ use rip_netlink::types::link::iff;
 use rip_netlink::types::neigh::nud_state_name;
 use rip_netlink::{Connection, Protocol, Result};
 use rip_output::{
-    MonitorConfig, OutputFormat, OutputOptions, print_monitor_start, write_timestamp,
+    AddressEvent, IpEvent, LinkEvent, MonitorConfig, NeighborEvent, OutputFormat, OutputOptions,
+    RouteEvent, print_monitor_start, run_monitor_loop,
 };
-use std::io::{self, Write};
 
 /// Event types that can be monitored.
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -85,237 +86,116 @@ impl MonitorCmd {
             conn.subscribe(RTNLGRP_NEIGH)?;
         }
 
-        let mut stdout = io::stdout().lock();
-
+        let mut stdout = std::io::stdout().lock();
         print_monitor_start(
             &mut stdout,
             &config,
             "Monitoring netlink events (Ctrl+C to stop)...",
         )?;
+        drop(stdout);
 
-        // Event loop
-        loop {
-            let data = conn.recv_event().await?;
-
-            for result in MessageIter::new(&data) {
-                let (header, payload) = result?;
-
-                // Skip error/done/noop messages
-                if header.is_error() || header.is_done() || header.nlmsg_type == NlMsgType::NOOP {
-                    continue;
-                }
-
-                write_timestamp(&mut stdout, &config)?;
-
-                match format {
-                    OutputFormat::Text => {
-                        self.print_event_text(&mut stdout, header.nlmsg_type, payload, opts)?;
-                    }
-                    OutputFormat::Json => {
-                        self.print_event_json(&mut stdout, header.nlmsg_type, payload)?;
-                    }
-                }
-            }
-        }
+        // Run the monitor loop with event handler
+        run_monitor_loop(&conn, &config, |msg_type, payload| {
+            parse_ip_event(
+                msg_type,
+                payload,
+                monitor_link,
+                monitor_addr,
+                monitor_route,
+                monitor_neigh,
+            )
+        })
+        .await
     }
+}
 
-    fn print_event_text(
-        &self,
-        out: &mut impl Write,
-        msg_type: u16,
-        payload: &[u8],
-        _opts: &OutputOptions,
-    ) -> Result<()> {
-        match msg_type {
-            NlMsgType::RTM_NEWLINK | NlMsgType::RTM_DELLINK => {
-                if let Ok(link) = LinkMessage::from_bytes(payload) {
-                    let action = if msg_type == NlMsgType::RTM_NEWLINK {
-                        "LINK"
-                    } else {
-                        "LINK DEL"
-                    };
-                    let name = link.name.as_deref().unwrap_or("?");
-                    let state = if link.is_up() { "UP" } else { "DOWN" };
-                    writeln!(
-                        out,
-                        "{}: {} index {} state {}",
+/// Parse a netlink message into an IP event.
+fn parse_ip_event(
+    msg_type: u16,
+    payload: &[u8],
+    monitor_link: bool,
+    monitor_addr: bool,
+    monitor_route: bool,
+    monitor_neigh: bool,
+) -> Option<IpEvent> {
+    match msg_type {
+        NlMsgType::RTM_NEWLINK | NlMsgType::RTM_DELLINK if monitor_link => {
+            LinkMessage::from_bytes(payload).ok().map(|link| {
+                let action = if msg_type == NlMsgType::RTM_NEWLINK {
+                    "new"
+                } else {
+                    "del"
+                };
+                IpEvent::Link(LinkEvent {
+                    action,
+                    ifindex: link.ifindex(),
+                    name: link.name.clone().unwrap_or_default(),
+                    flags: link.flags(),
+                    up: link.flags() & iff::UP != 0,
+                    mtu: link.mtu,
+                    operstate: link.operstate.map(|s| s.name()),
+                })
+            })
+        }
+        NlMsgType::RTM_NEWADDR | NlMsgType::RTM_DELADDR if monitor_addr => {
+            AddressMessage::from_bytes(payload).ok().and_then(|addr| {
+                let action = if msg_type == NlMsgType::RTM_NEWADDR {
+                    "new"
+                } else {
+                    "del"
+                };
+                addr.primary_address().map(|address| {
+                    IpEvent::Address(AddressEvent {
                         action,
-                        name,
-                        link.ifindex(),
-                        state
-                    )?;
-                }
-            }
-            NlMsgType::RTM_NEWADDR | NlMsgType::RTM_DELADDR => {
-                if let Ok(addr) = AddressMessage::from_bytes(payload) {
-                    let action = if msg_type == NlMsgType::RTM_NEWADDR {
-                        "ADDR"
-                    } else {
-                        "ADDR DEL"
-                    };
-                    if let Some(address) = addr.primary_address() {
-                        let ifname = rip_lib::get_ifname_or_index(addr.ifindex() as i32);
-                        writeln!(
-                            out,
-                            "{}: {}/{} dev {}",
-                            action,
-                            address,
-                            addr.prefix_len(),
-                            ifname
-                        )?;
-                    }
-                }
-            }
-            NlMsgType::RTM_NEWROUTE | NlMsgType::RTM_DELROUTE => {
-                if let Ok(route) = RouteMessage::from_bytes(payload) {
-                    let action = if msg_type == NlMsgType::RTM_NEWROUTE {
-                        "ROUTE"
-                    } else {
-                        "ROUTE DEL"
-                    };
-                    let dst_str = route
-                        .destination
-                        .as_ref()
-                        .map(|d| format!("{}/{}", d, route.dst_len()))
-                        .unwrap_or_else(|| "default".to_string());
-
-                    write!(out, "{}: {}", action, dst_str)?;
-
-                    if let Some(ref gw) = route.gateway {
-                        write!(out, " via {}", gw)?;
-                    }
-
-                    if let Some(oif) = route.oif {
-                        let name = rip_lib::get_ifname_or_index(oif as i32);
-                        write!(out, " dev {}", name)?;
-                    }
-
-                    writeln!(out)?;
-                }
-            }
-            NlMsgType::RTM_NEWNEIGH | NlMsgType::RTM_DELNEIGH => {
-                if let Ok(neigh) = NeighborMessage::from_bytes(payload) {
-                    let action = if msg_type == NlMsgType::RTM_NEWNEIGH {
-                        "NEIGH"
-                    } else {
-                        "NEIGH DEL"
-                    };
-
-                    if let Some(ref dst) = neigh.destination {
-                        let ifname = rip_lib::get_ifname_or_index(neigh.ifindex() as i32);
-
-                        write!(out, "{}: {} dev {}", action, dst, ifname)?;
-
-                        if let Some(ref mac) = neigh.mac_address() {
-                            write!(out, " lladdr {}", mac)?;
-                        }
-
-                        write!(out, " {}", nud_state_name(neigh.header.ndm_state))?;
-                        writeln!(out)?;
-                    }
-                }
-            }
-            _ => {
-                writeln!(out, "EVENT: type={}", msg_type)?;
-            }
+                        address: address.to_string(),
+                        prefix_len: addr.prefix_len(),
+                        ifindex: addr.ifindex() as i32,
+                        family: addr.family(),
+                        scope: addr.scope().name(),
+                        label: addr.label.clone(),
+                    })
+                })
+            })
         }
-        out.flush()?;
-        Ok(())
-    }
-
-    fn print_event_json(&self, out: &mut impl Write, msg_type: u16, payload: &[u8]) -> Result<()> {
-        let event = match msg_type {
-            NlMsgType::RTM_NEWLINK | NlMsgType::RTM_DELLINK => {
-                LinkMessage::from_bytes(payload).ok().map(|link| {
-                    let action = if msg_type == NlMsgType::RTM_NEWLINK {
-                        "new"
-                    } else {
-                        "del"
-                    };
-                    serde_json::json!({
-                        "event": "link",
-                        "action": action,
-                        "ifname": link.name.as_deref().unwrap_or(""),
-                        "ifindex": link.ifindex(),
-                        "flags": link.flags(),
-                        "up": link.flags() & iff::UP != 0,
-                        "mtu": link.mtu,
-                        "operstate": link.operstate.map(|s| s.name()),
-                    })
+        NlMsgType::RTM_NEWROUTE | NlMsgType::RTM_DELROUTE if monitor_route => {
+            RouteMessage::from_bytes(payload).ok().map(|route| {
+                let action = if msg_type == NlMsgType::RTM_NEWROUTE {
+                    "new"
+                } else {
+                    "del"
+                };
+                IpEvent::Route(RouteEvent {
+                    action,
+                    destination: route.destination.as_ref().map(|d| d.to_string()),
+                    dst_len: route.dst_len(),
+                    gateway: route.gateway.as_ref().map(|g| g.to_string()),
+                    oif: route.oif,
+                    table: route.table_id(),
+                    protocol: route.protocol().name(),
+                    scope: route.scope().name(),
+                    route_type: route.route_type().name(),
                 })
-            }
-            NlMsgType::RTM_NEWADDR | NlMsgType::RTM_DELADDR => {
-                AddressMessage::from_bytes(payload).ok().and_then(|addr| {
-                    let action = if msg_type == NlMsgType::RTM_NEWADDR {
-                        "new"
-                    } else {
-                        "del"
-                    };
-                    addr.primary_address().map(|address| {
-                        serde_json::json!({
-                            "event": "address",
-                            "action": action,
-                            "address": address.to_string(),
-                            "prefixlen": addr.prefix_len(),
-                            "ifindex": addr.ifindex(),
-                            "family": addr.family(),
-                            "scope": addr.scope().name(),
-                            "label": addr.label,
-                        })
-                    })
-                })
-            }
-            NlMsgType::RTM_NEWROUTE | NlMsgType::RTM_DELROUTE => {
-                RouteMessage::from_bytes(payload).ok().map(|route| {
-                    let action = if msg_type == NlMsgType::RTM_NEWROUTE {
-                        "new"
-                    } else {
-                        "del"
-                    };
-                    serde_json::json!({
-                        "event": "route",
-                        "action": action,
-                        "dst": route.destination.as_ref().map(|d| d.to_string()),
-                        "dst_len": route.dst_len(),
-                        "gateway": route.gateway.as_ref().map(|g| g.to_string()),
-                        "oif": route.oif,
-                        "table": route.table_id(),
-                        "protocol": route.protocol().name(),
-                        "scope": route.scope().name(),
-                        "type": route.route_type().name(),
-                    })
-                })
-            }
-            NlMsgType::RTM_NEWNEIGH | NlMsgType::RTM_DELNEIGH => {
-                NeighborMessage::from_bytes(payload).ok().and_then(|neigh| {
-                    let action = if msg_type == NlMsgType::RTM_NEWNEIGH {
-                        "new"
-                    } else {
-                        "del"
-                    };
-                    neigh.destination.as_ref().map(|dst| {
-                        serde_json::json!({
-                            "event": "neigh",
-                            "action": action,
-                            "dst": dst.to_string(),
-                            "lladdr": neigh.mac_address(),
-                            "ifindex": neigh.ifindex(),
-                            "state": nud_state_name(neigh.header.ndm_state),
-                            "router": neigh.is_router(),
-                        })
-                    })
-                })
-            }
-            _ => Some(serde_json::json!({
-                "event": "unknown",
-                "type": msg_type,
-            })),
-        };
-
-        if let Some(e) = event {
-            writeln!(out, "{}", serde_json::to_string(&e)?)?;
-            out.flush()?;
+            })
         }
-        Ok(())
+        NlMsgType::RTM_NEWNEIGH | NlMsgType::RTM_DELNEIGH if monitor_neigh => {
+            NeighborMessage::from_bytes(payload).ok().and_then(|neigh| {
+                let action = if msg_type == NlMsgType::RTM_NEWNEIGH {
+                    "new"
+                } else {
+                    "del"
+                };
+                neigh.destination.as_ref().map(|dst| {
+                    IpEvent::Neighbor(NeighborEvent {
+                        action,
+                        destination: dst.to_string(),
+                        lladdr: neigh.mac_address(),
+                        ifindex: neigh.ifindex() as i32,
+                        state: nud_state_name(neigh.header.ndm_state),
+                        router: neigh.is_router(),
+                    })
+                })
+            })
+        }
+        _ => None,
     }
 }
