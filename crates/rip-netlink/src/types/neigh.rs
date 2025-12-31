@@ -135,6 +135,54 @@ pub fn nud_state_name(state: u16) -> &'static str {
     }
 }
 
+/// Neighbor state as an enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum NeighborState {
+    None = 0x00,
+    Incomplete = 0x01,
+    Reachable = 0x02,
+    Stale = 0x04,
+    Delay = 0x08,
+    Probe = 0x10,
+    Failed = 0x20,
+    Noarp = 0x40,
+    Permanent = 0x80,
+}
+
+impl From<u16> for NeighborState {
+    fn from(val: u16) -> Self {
+        match val {
+            0x01 => Self::Incomplete,
+            0x02 => Self::Reachable,
+            0x04 => Self::Stale,
+            0x08 => Self::Delay,
+            0x10 => Self::Probe,
+            0x20 => Self::Failed,
+            0x40 => Self::Noarp,
+            0x80 => Self::Permanent,
+            _ => Self::None,
+        }
+    }
+}
+
+impl NeighborState {
+    /// Get the name of this state.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::None => "NONE",
+            Self::Incomplete => "INCOMPLETE",
+            Self::Reachable => "REACHABLE",
+            Self::Stale => "STALE",
+            Self::Delay => "DELAY",
+            Self::Probe => "PROBE",
+            Self::Failed => "FAILED",
+            Self::Noarp => "NOARP",
+            Self::Permanent => "PERMANENT",
+        }
+    }
+}
+
 /// Neighbor flags (NTF_*).
 pub mod ntf {
     pub const USE: u8 = 0x01;

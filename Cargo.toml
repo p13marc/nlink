@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/rip-netlink",
+    "crates/rip-netlink-derive",
     "crates/rip-lib",
     "crates/rip-output",
     "bins/ip",
@@ -39,7 +40,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1"
 libc = "0.2"
 
+# Parser combinators
+winnow = "0.7"
+
+# Proc macros
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+
 # Workspace crates
 rip-netlink = { path = "crates/rip-netlink" }
+rip-netlink-derive = { path = "crates/rip-netlink-derive" }
 rip-lib = { path = "crates/rip-lib" }
 rip-output = { path = "crates/rip-output" }

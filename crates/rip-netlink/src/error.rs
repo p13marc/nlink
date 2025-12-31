@@ -54,6 +54,10 @@ pub enum Error {
     /// Operation not supported.
     #[error("operation not supported: {0}")]
     NotSupported(String),
+
+    /// Parse error.
+    #[error("parse error: {0}")]
+    Parse(String),
 }
 
 impl Error {
