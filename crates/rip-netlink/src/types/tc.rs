@@ -923,6 +923,111 @@ pub mod filter {
         pub const TCA_FLOWER_KEY_UDP_SRC: u16 = 20;
         pub const TCA_FLOWER_KEY_UDP_DST: u16 = 21;
         pub const TCA_FLOWER_FLAGS: u16 = 22;
+        pub const TCA_FLOWER_KEY_VLAN_ID: u16 = 23;
+        pub const TCA_FLOWER_KEY_VLAN_PRIO: u16 = 24;
+        pub const TCA_FLOWER_KEY_VLAN_ETH_TYPE: u16 = 25;
+        pub const TCA_FLOWER_KEY_ENC_KEY_ID: u16 = 26;
+        pub const TCA_FLOWER_KEY_ENC_IPV4_SRC: u16 = 27;
+        pub const TCA_FLOWER_KEY_ENC_IPV4_SRC_MASK: u16 = 28;
+        pub const TCA_FLOWER_KEY_ENC_IPV4_DST: u16 = 29;
+        pub const TCA_FLOWER_KEY_ENC_IPV4_DST_MASK: u16 = 30;
+        pub const TCA_FLOWER_KEY_ENC_IPV6_SRC: u16 = 31;
+        pub const TCA_FLOWER_KEY_ENC_IPV6_SRC_MASK: u16 = 32;
+        pub const TCA_FLOWER_KEY_ENC_IPV6_DST: u16 = 33;
+        pub const TCA_FLOWER_KEY_ENC_IPV6_DST_MASK: u16 = 34;
+        pub const TCA_FLOWER_KEY_TCP_SRC_MASK: u16 = 35;
+        pub const TCA_FLOWER_KEY_TCP_DST_MASK: u16 = 36;
+        pub const TCA_FLOWER_KEY_UDP_SRC_MASK: u16 = 37;
+        pub const TCA_FLOWER_KEY_UDP_DST_MASK: u16 = 38;
+        pub const TCA_FLOWER_KEY_SCTP_SRC_MASK: u16 = 39;
+        pub const TCA_FLOWER_KEY_SCTP_DST_MASK: u16 = 40;
+        pub const TCA_FLOWER_KEY_SCTP_SRC: u16 = 41;
+        pub const TCA_FLOWER_KEY_SCTP_DST: u16 = 42;
+        pub const TCA_FLOWER_KEY_ENC_UDP_SRC_PORT: u16 = 43;
+        pub const TCA_FLOWER_KEY_ENC_UDP_SRC_PORT_MASK: u16 = 44;
+        pub const TCA_FLOWER_KEY_ENC_UDP_DST_PORT: u16 = 45;
+        pub const TCA_FLOWER_KEY_ENC_UDP_DST_PORT_MASK: u16 = 46;
+        pub const TCA_FLOWER_KEY_FLAGS: u16 = 47;
+        pub const TCA_FLOWER_KEY_FLAGS_MASK: u16 = 48;
+        pub const TCA_FLOWER_KEY_ICMPV4_CODE: u16 = 49;
+        pub const TCA_FLOWER_KEY_ICMPV4_CODE_MASK: u16 = 50;
+        pub const TCA_FLOWER_KEY_ICMPV4_TYPE: u16 = 51;
+        pub const TCA_FLOWER_KEY_ICMPV4_TYPE_MASK: u16 = 52;
+        pub const TCA_FLOWER_KEY_ICMPV6_CODE: u16 = 53;
+        pub const TCA_FLOWER_KEY_ICMPV6_CODE_MASK: u16 = 54;
+        pub const TCA_FLOWER_KEY_ICMPV6_TYPE: u16 = 55;
+        pub const TCA_FLOWER_KEY_ICMPV6_TYPE_MASK: u16 = 56;
+        pub const TCA_FLOWER_KEY_ARP_SIP: u16 = 57;
+        pub const TCA_FLOWER_KEY_ARP_SIP_MASK: u16 = 58;
+        pub const TCA_FLOWER_KEY_ARP_TIP: u16 = 59;
+        pub const TCA_FLOWER_KEY_ARP_TIP_MASK: u16 = 60;
+        pub const TCA_FLOWER_KEY_ARP_OP: u16 = 61;
+        pub const TCA_FLOWER_KEY_ARP_OP_MASK: u16 = 62;
+        pub const TCA_FLOWER_KEY_ARP_SHA: u16 = 63;
+        pub const TCA_FLOWER_KEY_ARP_SHA_MASK: u16 = 64;
+        pub const TCA_FLOWER_KEY_ARP_THA: u16 = 65;
+        pub const TCA_FLOWER_KEY_ARP_THA_MASK: u16 = 66;
+        pub const TCA_FLOWER_KEY_MPLS_TTL: u16 = 67;
+        pub const TCA_FLOWER_KEY_MPLS_BOS: u16 = 68;
+        pub const TCA_FLOWER_KEY_MPLS_TC: u16 = 69;
+        pub const TCA_FLOWER_KEY_MPLS_LABEL: u16 = 70;
+        pub const TCA_FLOWER_KEY_TCP_FLAGS: u16 = 71;
+        pub const TCA_FLOWER_KEY_TCP_FLAGS_MASK: u16 = 72;
+        pub const TCA_FLOWER_KEY_IP_TOS: u16 = 73;
+        pub const TCA_FLOWER_KEY_IP_TOS_MASK: u16 = 74;
+        pub const TCA_FLOWER_KEY_IP_TTL: u16 = 75;
+        pub const TCA_FLOWER_KEY_IP_TTL_MASK: u16 = 76;
+        pub const TCA_FLOWER_KEY_CVLAN_ID: u16 = 77;
+        pub const TCA_FLOWER_KEY_CVLAN_PRIO: u16 = 78;
+        pub const TCA_FLOWER_KEY_CVLAN_ETH_TYPE: u16 = 79;
+        pub const TCA_FLOWER_KEY_ENC_IP_TOS: u16 = 80;
+        pub const TCA_FLOWER_KEY_ENC_IP_TOS_MASK: u16 = 81;
+        pub const TCA_FLOWER_KEY_ENC_IP_TTL: u16 = 82;
+        pub const TCA_FLOWER_KEY_ENC_IP_TTL_MASK: u16 = 83;
+        pub const TCA_FLOWER_KEY_CT_STATE: u16 = 84;
+        pub const TCA_FLOWER_KEY_CT_STATE_MASK: u16 = 85;
+        pub const TCA_FLOWER_KEY_CT_ZONE: u16 = 86;
+        pub const TCA_FLOWER_KEY_CT_ZONE_MASK: u16 = 87;
+        pub const TCA_FLOWER_KEY_CT_MARK: u16 = 88;
+        pub const TCA_FLOWER_KEY_CT_MARK_MASK: u16 = 89;
+        pub const TCA_FLOWER_KEY_CT_LABELS: u16 = 90;
+        pub const TCA_FLOWER_KEY_CT_LABELS_MASK: u16 = 91;
+
+        /// Flower filter flags.
+        pub const TCA_CLS_FLAGS_SKIP_HW: u32 = 1 << 0;
+        pub const TCA_CLS_FLAGS_SKIP_SW: u32 = 1 << 1;
+        pub const TCA_CLS_FLAGS_IN_HW: u32 = 1 << 2;
+        pub const TCA_CLS_FLAGS_NOT_IN_HW: u32 = 1 << 3;
+        pub const TCA_CLS_FLAGS_VERBOSE: u32 = 1 << 4;
+
+        /// Connection tracking state flags.
+        pub const TCA_FLOWER_KEY_CT_FLAGS_NEW: u16 = 1 << 0;
+        pub const TCA_FLOWER_KEY_CT_FLAGS_ESTABLISHED: u16 = 1 << 1;
+        pub const TCA_FLOWER_KEY_CT_FLAGS_RELATED: u16 = 1 << 2;
+        pub const TCA_FLOWER_KEY_CT_FLAGS_TRACKED: u16 = 1 << 3;
+        pub const TCA_FLOWER_KEY_CT_FLAGS_INVALID: u16 = 1 << 4;
+        pub const TCA_FLOWER_KEY_CT_FLAGS_REPLY: u16 = 1 << 5;
+
+        /// IP protocol constants.
+        pub const IPPROTO_TCP: u8 = 6;
+        pub const IPPROTO_UDP: u8 = 17;
+        pub const IPPROTO_ICMP: u8 = 1;
+        pub const IPPROTO_ICMPV6: u8 = 58;
+        pub const IPPROTO_SCTP: u8 = 132;
+        pub const IPPROTO_GRE: u8 = 47;
+
+        /// Parse IP protocol from string.
+        pub fn parse_ip_proto(s: &str) -> Option<u8> {
+            match s.to_lowercase().as_str() {
+                "tcp" => Some(IPPROTO_TCP),
+                "udp" => Some(IPPROTO_UDP),
+                "icmp" => Some(IPPROTO_ICMP),
+                "icmpv6" => Some(IPPROTO_ICMPV6),
+                "sctp" => Some(IPPROTO_SCTP),
+                "gre" => Some(IPPROTO_GRE),
+                _ => s.parse().ok(),
+            }
+        }
     }
 }
 

@@ -671,6 +671,32 @@ fn is_u32_keyword(s: &str) -> bool {
 // ============================================================================
 
 /// Add flower filter options.
+///
+/// Supported parameters:
+/// - classid/flowid HANDLE: Target class
+/// - ip_proto tcp|udp|icmp|sctp|N: IP protocol
+/// - src_ip ADDR[/PREFIX]: Source IPv4/IPv6 address
+/// - dst_ip ADDR[/PREFIX]: Destination IPv4/IPv6 address
+/// - src_port PORT: Source port (TCP/UDP/SCTP)
+/// - dst_port PORT: Destination port (TCP/UDP/SCTP)
+/// - src_mac MAC: Source MAC address
+/// - dst_mac MAC: Destination MAC address
+/// - eth_type ip|ipv6|arp|N: Ethernet type
+/// - vlan_id N: VLAN ID (1-4094)
+/// - vlan_prio N: VLAN priority (0-7)
+/// - ip_tos N[/MASK]: IP TOS/DSCP
+/// - ip_ttl N[/MASK]: IP TTL
+/// - tcp_flags FLAGS[/MASK]: TCP flags (syn,ack,fin,rst,psh,urg)
+/// - ct_state STATE: Connection tracking state (new,established,related,tracked,invalid,reply)
+/// - ct_zone N: Connection tracking zone
+/// - ct_mark N[/MASK]: Connection tracking mark
+/// - enc_key_id N: Tunnel key ID (VNI)
+/// - enc_dst_ip ADDR: Tunnel destination IP
+/// - enc_src_ip ADDR: Tunnel source IP
+/// - enc_dst_port PORT: Tunnel destination port
+/// - skip_hw: Don't offload to hardware
+/// - skip_sw: Don't process in software
+/// - action ACTION...: Attach action(s)
 fn add_flower_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()> {
     use rip_netlink::types::tc::filter::flower::*;
 
@@ -684,13 +710,12 @@ fn add_flower_options(builder: &mut MessageBuilder, params: &[String]) -> Result
                 i += 2;
             }
             "ip_proto" if i + 1 < params.len() => {
-                let proto = match params[i + 1].as_str() {
-                    "tcp" => 6u8,
-                    "udp" => 17u8,
-                    "icmp" => 1u8,
-                    "icmpv6" => 58u8,
-                    _ => params[i + 1].parse().unwrap_or(0),
-                };
+                let proto = parse_ip_proto(&params[i + 1]).ok_or_else(|| {
+                    rip_netlink::Error::InvalidMessage(format!(
+                        "invalid ip_proto: {}",
+                        params[i + 1]
+                    ))
+                })?;
                 builder.append_attr_u8(TCA_FLOWER_KEY_IP_PROTO, proto);
                 i += 2;
             }
@@ -709,15 +734,45 @@ fn add_flower_options(builder: &mut MessageBuilder, params: &[String]) -> Result
                 i += 2;
             }
             "dst_ip" if i + 1 < params.len() => {
-                let (addr, mask) = parse_ip_prefix(&params[i + 1])?;
-                builder.append_attr(TCA_FLOWER_KEY_IPV4_DST, &addr.to_be_bytes());
-                builder.append_attr(TCA_FLOWER_KEY_IPV4_DST_MASK, &mask.to_be_bytes());
-                i += 2;
+                i += 1;
+                if params[i].contains(':') {
+                    // IPv6
+                    let (addr, mask) = parse_ipv6_prefix_flower(&params[i])?;
+                    builder.append_attr(TCA_FLOWER_KEY_IPV6_DST, &addr);
+                    builder.append_attr(TCA_FLOWER_KEY_IPV6_DST_MASK, &mask);
+                } else {
+                    // IPv4
+                    let (addr, mask) = parse_ip_prefix(&params[i])?;
+                    builder.append_attr(TCA_FLOWER_KEY_IPV4_DST, &addr.to_be_bytes());
+                    builder.append_attr(TCA_FLOWER_KEY_IPV4_DST_MASK, &mask.to_be_bytes());
+                }
+                i += 1;
             }
             "src_ip" if i + 1 < params.len() => {
-                let (addr, mask) = parse_ip_prefix(&params[i + 1])?;
-                builder.append_attr(TCA_FLOWER_KEY_IPV4_SRC, &addr.to_be_bytes());
-                builder.append_attr(TCA_FLOWER_KEY_IPV4_SRC_MASK, &mask.to_be_bytes());
+                i += 1;
+                if params[i].contains(':') {
+                    // IPv6
+                    let (addr, mask) = parse_ipv6_prefix_flower(&params[i])?;
+                    builder.append_attr(TCA_FLOWER_KEY_IPV6_SRC, &addr);
+                    builder.append_attr(TCA_FLOWER_KEY_IPV6_SRC_MASK, &mask);
+                } else {
+                    // IPv4
+                    let (addr, mask) = parse_ip_prefix(&params[i])?;
+                    builder.append_attr(TCA_FLOWER_KEY_IPV4_SRC, &addr.to_be_bytes());
+                    builder.append_attr(TCA_FLOWER_KEY_IPV4_SRC_MASK, &mask.to_be_bytes());
+                }
+                i += 1;
+            }
+            "dst_mac" if i + 1 < params.len() => {
+                let mac = parse_mac_addr(&params[i + 1])?;
+                builder.append_attr(TCA_FLOWER_KEY_ETH_DST, &mac);
+                builder.append_attr(TCA_FLOWER_KEY_ETH_DST_MASK, &[0xff; 6]);
+                i += 2;
+            }
+            "src_mac" if i + 1 < params.len() => {
+                let mac = parse_mac_addr(&params[i + 1])?;
+                builder.append_attr(TCA_FLOWER_KEY_ETH_SRC, &mac);
+                builder.append_attr(TCA_FLOWER_KEY_ETH_SRC_MASK, &[0xff; 6]);
                 i += 2;
             }
             "eth_type" if i + 1 < params.len() => {
@@ -725,9 +780,125 @@ fn add_flower_options(builder: &mut MessageBuilder, params: &[String]) -> Result
                     "ip" | "ipv4" => 0x0800,
                     "ipv6" => 0x86dd,
                     "arp" => 0x0806,
+                    "vlan" | "802.1q" => 0x8100,
+                    "802.1ad" => 0x88a8,
                     _ => parse_hex_or_dec(&params[i + 1])? as u16,
                 };
                 builder.append_attr_u16_be(TCA_FLOWER_KEY_ETH_TYPE, eth_type);
+                i += 2;
+            }
+            "vlan_id" if i + 1 < params.len() => {
+                let id: u16 = params[i + 1]
+                    .parse()
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid vlan_id".into()))?;
+                if id == 0 || id > 4094 {
+                    return Err(rip_netlink::Error::InvalidMessage(
+                        "vlan_id must be 1-4094".into(),
+                    ));
+                }
+                builder.append_attr_u16(TCA_FLOWER_KEY_VLAN_ID, id);
+                i += 2;
+            }
+            "vlan_prio" if i + 1 < params.len() => {
+                let prio: u8 = params[i + 1]
+                    .parse()
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid vlan_prio".into()))?;
+                if prio > 7 {
+                    return Err(rip_netlink::Error::InvalidMessage(
+                        "vlan_prio must be 0-7".into(),
+                    ));
+                }
+                builder.append_attr_u8(TCA_FLOWER_KEY_VLAN_PRIO, prio);
+                i += 2;
+            }
+            "ip_tos" if i + 1 < params.len() => {
+                let (val, mask) = parse_value_mask_u8(&params[i + 1])?;
+                builder.append_attr_u8(TCA_FLOWER_KEY_IP_TOS, val);
+                builder.append_attr_u8(TCA_FLOWER_KEY_IP_TOS_MASK, mask);
+                i += 2;
+            }
+            "ip_ttl" if i + 1 < params.len() => {
+                let (val, mask) = parse_value_mask_u8(&params[i + 1])?;
+                builder.append_attr_u8(TCA_FLOWER_KEY_IP_TTL, val);
+                builder.append_attr_u8(TCA_FLOWER_KEY_IP_TTL_MASK, mask);
+                i += 2;
+            }
+            "tcp_flags" if i + 1 < params.len() => {
+                let (flags, mask) = parse_tcp_flags(&params[i + 1])?;
+                builder.append_attr_u16_be(TCA_FLOWER_KEY_TCP_FLAGS, flags);
+                builder.append_attr_u16_be(TCA_FLOWER_KEY_TCP_FLAGS_MASK, mask);
+                i += 2;
+            }
+            "ct_state" if i + 1 < params.len() => {
+                let state = parse_ct_state(&params[i + 1])?;
+                builder.append_attr_u16(TCA_FLOWER_KEY_CT_STATE, state);
+                builder.append_attr_u16(TCA_FLOWER_KEY_CT_STATE_MASK, state);
+                i += 2;
+            }
+            "ct_zone" if i + 1 < params.len() => {
+                let zone: u16 = params[i + 1]
+                    .parse()
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid ct_zone".into()))?;
+                builder.append_attr_u16(TCA_FLOWER_KEY_CT_ZONE, zone);
+                builder.append_attr_u16(TCA_FLOWER_KEY_CT_ZONE_MASK, 0xffff);
+                i += 2;
+            }
+            "ct_mark" if i + 1 < params.len() => {
+                let (val, mask) = parse_value_mask_u32(&params[i + 1])?;
+                builder.append_attr_u32(TCA_FLOWER_KEY_CT_MARK, val);
+                builder.append_attr_u32(TCA_FLOWER_KEY_CT_MARK_MASK, mask);
+                i += 2;
+            }
+            "enc_key_id" if i + 1 < params.len() => {
+                let id: u32 = params[i + 1]
+                    .parse()
+                    .map_err(|_| rip_netlink::Error::InvalidMessage("invalid enc_key_id".into()))?;
+                builder.append_attr_u32(TCA_FLOWER_KEY_ENC_KEY_ID, id.to_be());
+                i += 2;
+            }
+            "enc_dst_ip" if i + 1 < params.len() => {
+                i += 1;
+                if params[i].contains(':') {
+                    let (addr, mask) = parse_ipv6_prefix_flower(&params[i])?;
+                    builder.append_attr(TCA_FLOWER_KEY_ENC_IPV6_DST, &addr);
+                    builder.append_attr(TCA_FLOWER_KEY_ENC_IPV6_DST_MASK, &mask);
+                } else {
+                    let (addr, mask) = parse_ip_prefix(&params[i])?;
+                    builder.append_attr(TCA_FLOWER_KEY_ENC_IPV4_DST, &addr.to_be_bytes());
+                    builder.append_attr(TCA_FLOWER_KEY_ENC_IPV4_DST_MASK, &mask.to_be_bytes());
+                }
+                i += 1;
+            }
+            "enc_src_ip" if i + 1 < params.len() => {
+                i += 1;
+                if params[i].contains(':') {
+                    let (addr, mask) = parse_ipv6_prefix_flower(&params[i])?;
+                    builder.append_attr(TCA_FLOWER_KEY_ENC_IPV6_SRC, &addr);
+                    builder.append_attr(TCA_FLOWER_KEY_ENC_IPV6_SRC_MASK, &mask);
+                } else {
+                    let (addr, mask) = parse_ip_prefix(&params[i])?;
+                    builder.append_attr(TCA_FLOWER_KEY_ENC_IPV4_SRC, &addr.to_be_bytes());
+                    builder.append_attr(TCA_FLOWER_KEY_ENC_IPV4_SRC_MASK, &mask.to_be_bytes());
+                }
+                i += 1;
+            }
+            "enc_dst_port" if i + 1 < params.len() => {
+                let port: u16 = params[i + 1].parse().map_err(|_| {
+                    rip_netlink::Error::InvalidMessage("invalid enc_dst_port".into())
+                })?;
+                builder.append_attr_u16_be(TCA_FLOWER_KEY_ENC_UDP_DST_PORT, port);
+                i += 2;
+            }
+            "skip_hw" => {
+                builder.append_attr_u32(TCA_FLOWER_FLAGS, TCA_CLS_FLAGS_SKIP_HW);
+                i += 1;
+            }
+            "skip_sw" => {
+                builder.append_attr_u32(TCA_FLOWER_FLAGS, TCA_CLS_FLAGS_SKIP_SW);
+                i += 1;
+            }
+            "indev" if i + 1 < params.len() => {
+                builder.append_attr_str(TCA_FLOWER_INDEV, &params[i + 1]);
                 i += 2;
             }
             _ => i += 1,
@@ -735,6 +906,147 @@ fn add_flower_options(builder: &mut MessageBuilder, params: &[String]) -> Result
     }
 
     Ok(())
+}
+
+/// Parse MAC address (xx:xx:xx:xx:xx:xx format).
+fn parse_mac_addr(s: &str) -> Result<[u8; 6]> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        return Err(rip_netlink::Error::InvalidMessage(format!(
+            "invalid MAC address: {}",
+            s
+        )));
+    }
+    let mut mac = [0u8; 6];
+    for (i, part) in parts.iter().enumerate() {
+        mac[i] = u8::from_str_radix(part, 16).map_err(|_| {
+            rip_netlink::Error::InvalidMessage(format!("invalid MAC address: {}", s))
+        })?;
+    }
+    Ok(mac)
+}
+
+/// Parse IPv6 address with prefix for flower filter.
+fn parse_ipv6_prefix_flower(s: &str) -> Result<([u8; 16], [u8; 16])> {
+    let (addr_str, prefix_len) = if let Some((a, p)) = s.split_once('/') {
+        let plen: u8 = p
+            .parse()
+            .map_err(|_| rip_netlink::Error::InvalidMessage("invalid prefix length".into()))?;
+        (a, plen)
+    } else {
+        (s, 128)
+    };
+
+    let addr: std::net::Ipv6Addr = addr_str
+        .parse()
+        .map_err(|_| rip_netlink::Error::InvalidMessage("invalid IPv6 address".into()))?;
+
+    let mut mask = [0u8; 16];
+    for i in 0..16 {
+        let bits = if (i * 8) < prefix_len as usize {
+            let remaining = prefix_len as usize - (i * 8);
+            if remaining >= 8 { 8 } else { remaining }
+        } else {
+            0
+        };
+        mask[i] = if bits == 8 { 0xff } else { 0xff << (8 - bits) };
+    }
+
+    Ok((addr.octets(), mask))
+}
+
+/// Parse value/mask format for u8 (e.g., "0x10/0xff").
+fn parse_value_mask_u8(s: &str) -> Result<(u8, u8)> {
+    if let Some((val, mask)) = s.split_once('/') {
+        let v = parse_hex_or_dec(val)? as u8;
+        let m = parse_hex_or_dec(mask)? as u8;
+        Ok((v, m))
+    } else {
+        let v = parse_hex_or_dec(s)? as u8;
+        Ok((v, 0xff))
+    }
+}
+
+/// Parse value/mask format for u32 (e.g., "0x100/0xfff").
+fn parse_value_mask_u32(s: &str) -> Result<(u32, u32)> {
+    if let Some((val, mask)) = s.split_once('/') {
+        let v = parse_hex_or_dec(val)?;
+        let m = parse_hex_or_dec(mask)?;
+        Ok((v, m))
+    } else {
+        let v = parse_hex_or_dec(s)?;
+        Ok((v, 0xffffffff))
+    }
+}
+
+/// Parse TCP flags (syn,ack,fin,rst,psh,urg).
+fn parse_tcp_flags(s: &str) -> Result<(u16, u16)> {
+    let (flags_str, mask_str) = if let Some((f, m)) = s.split_once('/') {
+        (f, Some(m))
+    } else {
+        (s, None)
+    };
+
+    let mut flags: u16 = 0;
+    for flag in flags_str.split('+') {
+        flags |= match flag.to_lowercase().as_str() {
+            "fin" => 0x01,
+            "syn" => 0x02,
+            "rst" => 0x04,
+            "psh" => 0x08,
+            "ack" => 0x10,
+            "urg" => 0x20,
+            "ece" => 0x40,
+            "cwr" => 0x80,
+            _ => parse_hex_or_dec(flag)? as u16,
+        };
+    }
+
+    let mask = if let Some(m) = mask_str {
+        let mut mask: u16 = 0;
+        for flag in m.split('+') {
+            mask |= match flag.to_lowercase().as_str() {
+                "fin" => 0x01,
+                "syn" => 0x02,
+                "rst" => 0x04,
+                "psh" => 0x08,
+                "ack" => 0x10,
+                "urg" => 0x20,
+                "ece" => 0x40,
+                "cwr" => 0x80,
+                _ => parse_hex_or_dec(flag)? as u16,
+            };
+        }
+        mask
+    } else {
+        flags
+    };
+
+    Ok((flags, mask))
+}
+
+/// Parse connection tracking state.
+fn parse_ct_state(s: &str) -> Result<u16> {
+    use rip_netlink::types::tc::filter::flower::*;
+
+    let mut state: u16 = 0;
+    for part in s.split('+') {
+        state |= match part.to_lowercase().as_str() {
+            "new" => TCA_FLOWER_KEY_CT_FLAGS_NEW,
+            "established" | "est" => TCA_FLOWER_KEY_CT_FLAGS_ESTABLISHED,
+            "related" | "rel" => TCA_FLOWER_KEY_CT_FLAGS_RELATED,
+            "tracked" | "trk" => TCA_FLOWER_KEY_CT_FLAGS_TRACKED,
+            "invalid" | "inv" => TCA_FLOWER_KEY_CT_FLAGS_INVALID,
+            "reply" | "rpl" => TCA_FLOWER_KEY_CT_FLAGS_REPLY,
+            _ => {
+                return Err(rip_netlink::Error::InvalidMessage(format!(
+                    "unknown ct_state: {}",
+                    part
+                )));
+            }
+        };
+    }
+    Ok(state)
 }
 
 // ============================================================================
