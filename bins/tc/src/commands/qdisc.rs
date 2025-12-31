@@ -5,9 +5,8 @@ use rip_netlink::message::NlMsgType;
 use rip_netlink::messages::TcMessage;
 use rip_netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
 use rip_netlink::{Connection, Result};
-use rip_output::{OutputFormat, OutputOptions, print_items};
+use rip_output::{OutputFormat, OutputOptions, print_all};
 use rip_tclib::options::{fq_codel, htb, netem, prio, sfq, tbf};
-use std::io::{self, Write};
 
 #[derive(Args)]
 pub struct QdiscCmd {
@@ -190,7 +189,7 @@ impl QdiscCmd {
             })
             .collect();
 
-        print_items(&qdiscs, format, opts, qdisc_to_json, print_qdisc_text)?;
+        print_all(&qdiscs, format, opts)?;
 
         Ok(())
     }
@@ -365,69 +364,6 @@ impl QdiscCmd {
 
         Ok(())
     }
-}
-
-/// Convert a TcMessage to JSON representation.
-fn qdisc_to_json(qdisc: &TcMessage) -> serde_json::Value {
-    let dev = rip_lib::get_ifname_or_index(qdisc.ifindex());
-
-    serde_json::json!({
-        "dev": dev,
-        "kind": qdisc.kind().unwrap_or(""),
-        "handle": tc_handle::format(qdisc.handle()),
-        "parent": tc_handle::format(qdisc.parent()),
-        "bytes": qdisc.bytes(),
-        "packets": qdisc.packets(),
-        "drops": qdisc.drops(),
-        "overlimits": qdisc.overlimits(),
-        "requeues": qdisc.requeues(),
-        "qlen": qdisc.qlen(),
-        "backlog": qdisc.backlog(),
-    })
-}
-
-/// Print qdisc in text format.
-fn print_qdisc_text(
-    w: &mut io::StdoutLock<'_>,
-    qdisc: &TcMessage,
-    opts: &OutputOptions,
-) -> io::Result<()> {
-    let dev = rip_lib::get_ifname_or_index(qdisc.ifindex());
-
-    write!(
-        w,
-        "qdisc {} {} dev {} ",
-        qdisc.kind().unwrap_or(""),
-        tc_handle::format(qdisc.handle()),
-        dev
-    )?;
-
-    if qdisc.parent() == tc_handle::ROOT {
-        write!(w, "root ")?;
-    } else if qdisc.parent() == tc_handle::INGRESS {
-        write!(w, "ingress ")?;
-    } else if qdisc.parent() != 0 {
-        write!(w, "parent {} ", tc_handle::format(qdisc.parent()))?;
-    }
-
-    write!(w, "refcnt 2")?; // placeholder
-
-    writeln!(w)?;
-
-    if opts.stats {
-        writeln!(
-            w,
-            " Sent {} bytes {} pkt (dropped {}, overlimits {} requeues {})",
-            qdisc.bytes(),
-            qdisc.packets(),
-            qdisc.drops(),
-            qdisc.overlimits(),
-            qdisc.requeues()
-        )?;
-        writeln!(w, " backlog {}b {}p", qdisc.backlog(), qdisc.qlen())?;
-    }
-
-    Ok(())
 }
 
 /// Add qdisc-specific options to the message.

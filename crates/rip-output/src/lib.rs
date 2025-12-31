@@ -111,6 +111,42 @@ pub trait PrintableList {
     }
 }
 
+/// Print a list of Printable items to stdout.
+///
+/// This is the simplest way to print items that implement the `Printable` trait.
+/// For types with custom Printable implementations (LinkMessage, RouteMessage, etc.),
+/// this eliminates the need for separate print functions.
+///
+/// # Example
+/// ```ignore
+/// let links: Vec<LinkMessage> = conn.dump_typed(NlMsgType::RTM_GETLINK).await?;
+/// print_all(&links, format, opts)?;
+/// ```
+pub fn print_all<T: Printable>(
+    items: &[T],
+    format: OutputFormat,
+    opts: &OutputOptions,
+) -> std::io::Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    match format {
+        OutputFormat::Text => {
+            for item in items {
+                item.print_text(&mut stdout, opts)?;
+            }
+        }
+        OutputFormat::Json => {
+            let json: Vec<_> = items.iter().map(|i| i.to_json()).collect();
+            if opts.pretty {
+                serde_json::to_writer_pretty(&mut stdout, &json)?;
+            } else {
+                serde_json::to_writer(&mut stdout, &json)?;
+            }
+            writeln!(stdout)?;
+        }
+    }
+    Ok(())
+}
+
 /// Print a list of items in the specified format.
 ///
 /// This helper reduces boilerplate in command files by providing a single
@@ -133,6 +169,9 @@ pub trait PrintableList {
 ///     |w, link, opts| print_link_text(w, link, opts),
 /// )?;
 /// ```
+///
+/// Note: For types implementing `Printable`, prefer using `print_all()` instead.
+/// This function is still useful for types with custom output formats.
 pub fn print_items<T, J, P>(
     items: &[T],
     format: OutputFormat,

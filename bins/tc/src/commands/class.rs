@@ -5,8 +5,7 @@ use rip_netlink::message::NlMsgType;
 use rip_netlink::messages::TcMessage;
 use rip_netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
 use rip_netlink::{Connection, Result};
-use rip_output::{OutputFormat, OutputOptions, print_items};
-use std::io::{self, Write};
+use rip_output::{OutputFormat, OutputOptions, print_all};
 
 #[derive(Args)]
 pub struct ClassCmd {
@@ -235,7 +234,7 @@ impl ClassCmd {
             })
             .collect();
 
-        print_items(&classes, format, opts, class_to_json, print_class_text)?;
+        print_all(&classes, format, opts)?;
 
         Ok(())
     }
@@ -394,63 +393,6 @@ impl ClassCmd {
 
         Ok(())
     }
-}
-
-/// Convert a TcMessage to JSON representation for class.
-fn class_to_json(class: &TcMessage) -> serde_json::Value {
-    let dev = rip_lib::get_ifname_or_index(class.ifindex());
-
-    serde_json::json!({
-        "dev": dev,
-        "kind": class.kind().unwrap_or(""),
-        "class": tc_handle::format(class.handle()),
-        "parent": tc_handle::format(class.parent()),
-        "bytes": class.bytes(),
-        "packets": class.packets(),
-        "drops": class.drops(),
-        "overlimits": class.overlimits(),
-        "qlen": class.qlen(),
-        "backlog": class.backlog(),
-    })
-}
-
-/// Print class in text format.
-fn print_class_text(
-    w: &mut io::StdoutLock<'_>,
-    class: &TcMessage,
-    opts: &OutputOptions,
-) -> io::Result<()> {
-    let dev = rip_lib::get_ifname_or_index(class.ifindex());
-
-    write!(
-        w,
-        "class {} {} dev {} ",
-        class.kind().unwrap_or(""),
-        tc_handle::format(class.handle()),
-        dev
-    )?;
-
-    if class.parent() == tc_handle::ROOT {
-        write!(w, "root ")?;
-    } else if class.parent() != 0 {
-        write!(w, "parent {} ", tc_handle::format(class.parent()))?;
-    }
-
-    writeln!(w)?;
-
-    if opts.stats {
-        writeln!(
-            w,
-            " Sent {} bytes {} pkt (dropped {}, overlimits {})",
-            class.bytes(),
-            class.packets(),
-            class.drops(),
-            class.overlimits()
-        )?;
-        writeln!(w, " backlog {}b {}p", class.backlog(), class.qlen())?;
-    }
-
-    Ok(())
 }
 
 /// Add class-specific options to the message.

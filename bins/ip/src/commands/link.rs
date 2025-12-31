@@ -7,8 +7,7 @@ use rip_netlink::message::NlMsgType;
 use rip_netlink::messages::LinkMessage;
 use rip_netlink::types::link::{IfInfoMsg, IflaAttr, iff};
 use rip_netlink::{Connection, Result, connection::ack_request};
-use rip_output::{OutputFormat, OutputOptions, print_items};
-use std::io::{self, Write};
+use rip_output::{OutputFormat, OutputOptions, print_all};
 
 use super::link_add::{LinkAddType, add_link};
 
@@ -128,7 +127,7 @@ impl LinkCmd {
             })
             .collect();
 
-        print_items(&links, format, opts, link_to_json, print_link_text)?;
+        print_all(&links, format, opts)?;
 
         Ok(())
     }
@@ -211,148 +210,4 @@ impl LinkCmd {
 
         Ok(())
     }
-}
-
-/// Convert LinkMessage to JSON.
-fn link_to_json(link: &LinkMessage) -> serde_json::Value {
-    let mut obj = serde_json::json!({
-        "ifindex": link.ifindex(),
-        "ifname": link.name.as_deref().unwrap_or(""),
-        "flags": rip_lib::names::format_link_flags(link.flags()),
-        "mtu": link.mtu.unwrap_or(0),
-        "qdisc": link.qdisc.as_deref().unwrap_or(""),
-        "operstate": link.operstate.map(|s| s.name()).unwrap_or("UNKNOWN"),
-        "link_type": link_type_name(link.header.ifi_type),
-    });
-
-    if let Some(ref addr) = link.mac_address() {
-        obj["address"] = serde_json::json!(addr);
-    }
-    if let Some(master) = link.master {
-        obj["master"] = serde_json::json!(master);
-    }
-    if let Some(ref info) = link.link_info
-        && let Some(ref kind) = info.kind
-    {
-        obj["link_kind"] = serde_json::json!(kind);
-    }
-    if let Some(txqlen) = link.txqlen {
-        obj["txqlen"] = serde_json::json!(txqlen);
-    }
-    if let Some(group) = link.group {
-        obj["group"] = serde_json::json!(group_name(group));
-    }
-
-    obj
-}
-
-fn group_name(group: u32) -> String {
-    if group == 0 {
-        "default".to_string()
-    } else {
-        format!("{}", group)
-    }
-}
-
-fn link_type_name(ifi_type: u16) -> &'static str {
-    match ifi_type {
-        1 => "ether",      // ARPHRD_ETHER
-        772 => "loopback", // ARPHRD_LOOPBACK
-        776 => "sit",      // ARPHRD_SIT
-        778 => "gre",      // ARPHRD_IPGRE
-        823 => "ip6gre",   // ARPHRD_IP6GRE
-        65534 => "none",   // ARPHRD_NONE
-        _ => "unknown",
-    }
-}
-
-/// Print link in text format.
-fn print_link_text(
-    w: &mut io::StdoutLock<'_>,
-    link: &LinkMessage,
-    _opts: &OutputOptions,
-) -> io::Result<()> {
-    let name = link.name.as_deref().unwrap_or("?");
-
-    // Build flags string, adding NO-CARRIER if carrier is false
-    let mut flags = rip_lib::names::format_link_flags(link.flags());
-    if let Some(false) = link.carrier
-        && !link.is_loopback()
-    {
-        flags = format!("NO-CARRIER,{}", flags);
-    }
-
-    let mtu = link.mtu.unwrap_or(0);
-    let qdisc = link.qdisc.as_deref().unwrap_or("noqueue");
-    let operstate = link.operstate.map(|s| s.name()).unwrap_or("UNKNOWN");
-
-    // Line 1: index, name, flags, mtu, qdisc, state, group, qlen
-    write!(
-        w,
-        "{}: {}: <{}> mtu {} qdisc {} state {}",
-        link.ifindex(),
-        name,
-        flags,
-        mtu,
-        qdisc,
-        operstate
-    )?;
-
-    if let Some(group) = link.group {
-        write!(w, " group {}", group_name(group))?;
-    }
-
-    if let Some(qlen) = link.txqlen {
-        write!(w, " qlen {}", qlen)?;
-    }
-
-    if let Some(master) = link.master
-        && let Ok(master_name) = rip_lib::ifname::index_to_name(master)
-    {
-        write!(w, " master {}", master_name)?;
-    }
-
-    writeln!(w)?;
-
-    // Line 2: link type, address
-    write!(w, "    link/{}", link_type_name(link.header.ifi_type))?;
-    if let Some(ref addr) = link.mac_address() {
-        write!(w, " {}", addr)?;
-    }
-    if let Some(ref brd) = link.broadcast
-        && brd.len() == 6
-    {
-        write!(
-            w,
-            " brd {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            brd[0], brd[1], brd[2], brd[3], brd[4], brd[5]
-        )?;
-    }
-    // Show permanent address if different from current
-    if let Some(ref perm) = link.perm_address {
-        let perm_mac = if perm.len() == 6 {
-            Some(format!(
-                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                perm[0], perm[1], perm[2], perm[3], perm[4], perm[5]
-            ))
-        } else {
-            None
-        };
-        if perm_mac.as_ref() != link.mac_address().as_ref()
-            && let Some(ref perm_str) = perm_mac
-        {
-            write!(w, " permaddr {}", perm_str)?;
-        }
-    }
-    writeln!(w)?;
-
-    // Show link kind if present
-    if let Some(ref info) = link.link_info
-        && let Some(ref kind) = info.kind
-        && !kind.is_empty()
-    {
-        // This would be shown in more detailed output
-    }
-
-    Ok(())
 }

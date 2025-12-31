@@ -5,10 +5,9 @@
 use clap::{Args, Subcommand};
 use rip_netlink::message::NlMsgType;
 use rip_netlink::messages::RouteMessage;
-use rip_netlink::types::route::{RouteProtocol, RouteScope, RtMsg, RtaAttr};
+use rip_netlink::types::route::{RouteScope, RtMsg, RtaAttr};
 use rip_netlink::{Connection, Result, connection::dump_request};
-use rip_output::{OutputFormat, OutputOptions, print_items};
-use std::io::{self, Write};
+use rip_output::{OutputFormat, OutputOptions, print_all};
 use std::net::IpAddr;
 
 #[derive(Args)]
@@ -217,7 +216,7 @@ impl RouteCmd {
             }
         }
 
-        print_items(&routes, format, opts, route_to_json, print_route_text)?;
+        print_all(&routes, format, opts)?;
 
         Ok(())
     }
@@ -410,90 +409,4 @@ impl RouteCmd {
             "route get not yet implemented".into(),
         ))
     }
-}
-
-/// Convert RouteMessage to JSON.
-fn route_to_json(route: &RouteMessage) -> serde_json::Value {
-    let mut obj = serde_json::json!({
-        "type": route.route_type().name(),
-        "protocol": route.protocol().name(),
-        "scope": route.scope().name(),
-        "table": rip_lib::names::table_name(route.table_id()),
-    });
-
-    if let Some(ref dst) = route.destination {
-        obj["dst"] = serde_json::json!(format!("{}/{}", dst, route.dst_len()));
-    } else {
-        obj["dst"] = serde_json::json!("default");
-    }
-
-    if let Some(ref gw) = route.gateway {
-        obj["gateway"] = serde_json::json!(gw.to_string());
-    }
-
-    if let Some(oif) = route.oif {
-        let dev = rip_lib::get_ifname_or_index(oif as i32);
-        obj["dev"] = serde_json::json!(dev);
-    }
-
-    if let Some(ref src) = route.prefsrc {
-        obj["prefsrc"] = serde_json::json!(src.to_string());
-    }
-
-    if let Some(prio) = route.priority {
-        obj["metric"] = serde_json::json!(prio);
-    }
-
-    obj
-}
-
-/// Print route in text format.
-fn print_route_text(
-    w: &mut io::StdoutLock<'_>,
-    route: &RouteMessage,
-    _opts: &OutputOptions,
-) -> io::Result<()> {
-    // Destination
-    if let Some(ref dst) = route.destination {
-        write!(w, "{}/{}", dst, route.dst_len())?;
-    } else {
-        write!(w, "default")?;
-    }
-
-    // Gateway
-    if let Some(ref gw) = route.gateway {
-        write!(w, " via {}", gw)?;
-    }
-
-    // Device
-    if let Some(oif) = route.oif {
-        let dev = rip_lib::get_ifname_or_index(oif as i32);
-        write!(w, " dev {}", dev)?;
-    }
-
-    // Protocol
-    let protocol = route.protocol();
-    if protocol != RouteProtocol::Unspec {
-        write!(w, " proto {}", protocol.name())?;
-    }
-
-    // Scope
-    let scope = route.scope();
-    if scope != RouteScope::Universe {
-        write!(w, " scope {}", scope.name())?;
-    }
-
-    // Preferred source
-    if let Some(ref src) = route.prefsrc {
-        write!(w, " src {}", src)?;
-    }
-
-    // Metric
-    if let Some(prio) = route.priority {
-        write!(w, " metric {}", prio)?;
-    }
-
-    writeln!(w)?;
-
-    Ok(())
 }

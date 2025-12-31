@@ -6,10 +6,9 @@ use clap::{Args, Subcommand};
 use rip_netlink::message::{NLMSG_HDRLEN, NlMsgType};
 use rip_netlink::messages::NeighborMessage;
 use rip_netlink::parse::FromNetlink;
-use rip_netlink::types::neigh::{NdMsg, NdaAttr, nud, nud_state_name};
+use rip_netlink::types::neigh::{NdMsg, NdaAttr, nud};
 use rip_netlink::{Connection, Result, connection::dump_request};
-use rip_output::{OutputFormat, OutputOptions, print_items};
-use std::io::{self, Write};
+use rip_output::{OutputFormat, OutputOptions, print_all};
 use std::net::IpAddr;
 
 #[derive(Args)]
@@ -171,7 +170,7 @@ impl NeighborCmd {
             }
         }
 
-        print_items(&neighbors, format, opts, neigh_to_json, print_neigh_text)?;
+        print_all(&neighbors, format, opts)?;
 
         Ok(())
     }
@@ -292,70 +291,4 @@ impl NeighborCmd {
             "neighbor flush not yet implemented".into(),
         ))
     }
-}
-
-/// Convert NeighborMessage to JSON.
-fn neigh_to_json(neigh: &NeighborMessage) -> serde_json::Value {
-    let dev = rip_lib::ifname::index_to_name(neigh.ifindex())
-        .unwrap_or_else(|_| format!("if{}", neigh.ifindex()));
-
-    let mut obj = serde_json::json!({
-        "ifindex": neigh.ifindex(),
-        "dev": dev,
-        "state": nud_state_name(neigh.header.ndm_state),
-    });
-
-    if let Some(ref dst) = neigh.destination {
-        obj["dst"] = serde_json::json!(dst.to_string());
-    }
-
-    if let Some(ref mac) = neigh.mac_address() {
-        obj["lladdr"] = serde_json::json!(mac);
-    }
-
-    if neigh.is_router() {
-        obj["router"] = serde_json::json!(true);
-    }
-
-    if neigh.is_proxy() {
-        obj["proxy"] = serde_json::json!(true);
-    }
-
-    obj
-}
-
-/// Print neighbor in text format.
-fn print_neigh_text(
-    w: &mut io::StdoutLock<'_>,
-    neigh: &NeighborMessage,
-    _opts: &OutputOptions,
-) -> io::Result<()> {
-    // Destination
-    if let Some(ref dst) = neigh.destination {
-        write!(w, "{}", dst)?;
-    } else {
-        write!(w, "?")?;
-    }
-
-    // Device
-    let dev = rip_lib::ifname::index_to_name(neigh.ifindex())
-        .unwrap_or_else(|_| format!("if{}", neigh.ifindex()));
-    write!(w, " dev {}", dev)?;
-
-    // Link-layer address
-    if let Some(ref lladdr) = neigh.mac_address() {
-        write!(w, " lladdr {}", lladdr)?;
-    }
-
-    // Router flag for IPv6
-    if neigh.is_router() {
-        write!(w, " router")?;
-    }
-
-    // State
-    write!(w, " {}", nud_state_name(neigh.header.ndm_state))?;
-
-    writeln!(w)?;
-
-    Ok(())
 }
