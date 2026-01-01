@@ -187,6 +187,56 @@ async fn main() -> nlink::Result<()> {
 }
 ```
 
+### Reading Existing TC Configurations
+
+The library provides strongly-typed parsing for qdisc options, useful for detecting
+existing TC configurations:
+
+```rust
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::tc_options::QdiscOptions;
+
+#[tokio::main]
+async fn main() -> nlink::Result<()> {
+    let conn = Connection::new(Protocol::Route)?;
+    let qdiscs = conn.get_qdiscs_for("eth0").await?;
+    
+    for qdisc in &qdiscs {
+        // Option 1: Use netem_options() convenience method
+        if let Some(netem) = qdisc.netem_options() {
+            println!("Netem qdisc detected:");
+            println!("  delay: {}us (jitter: {}us)", netem.delay_us, netem.jitter_us);
+            println!("  loss: {}% (correlation: {}%)", netem.loss_percent, netem.loss_corr);
+            println!("  duplicate: {}%", netem.duplicate_percent);
+            println!("  reorder: {}% (gap: {})", netem.reorder_percent, netem.gap);
+            println!("  corrupt: {}%", netem.corrupt_percent);
+            if netem.rate > 0 {
+                println!("  rate: {} bytes/sec", netem.rate);
+            }
+        }
+        
+        // Option 2: Use parsed_options() for all qdisc types
+        match qdisc.parsed_options() {
+            Some(QdiscOptions::FqCodel(fq)) => {
+                println!("fq_codel: target={}us, interval={}us", fq.target_us, fq.interval_us);
+            }
+            Some(QdiscOptions::Htb(htb)) => {
+                println!("htb: default class={:#x}", htb.default_class);
+            }
+            Some(QdiscOptions::Tbf(tbf)) => {
+                println!("tbf: rate={} bytes/sec, burst={}", tbf.rate, tbf.burst);
+            }
+            Some(QdiscOptions::Netem(netem)) => {
+                println!("netem: loss={}%, delay={}us", netem.loss_percent, netem.delay_us);
+            }
+            _ => {}
+        }
+    }
+    
+    Ok(())
+}
+```
+
 ## Library Modules
 
 ### `nlink::netlink` - Core netlink functionality

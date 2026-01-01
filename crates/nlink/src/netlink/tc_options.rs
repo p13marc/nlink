@@ -679,4 +679,252 @@ mod tests {
         assert_eq!(opts.priomap[0], 1);
         assert_eq!(opts.priomap[6], 0);
     }
+
+    #[test]
+    fn test_netem_defaults() {
+        let opts = NetemOptions::default();
+        assert_eq!(opts.delay_us, 0);
+        assert_eq!(opts.jitter_us, 0);
+        assert_eq!(opts.loss_percent, 0.0);
+        assert_eq!(opts.duplicate_percent, 0.0);
+        assert_eq!(opts.reorder_percent, 0.0);
+        assert_eq!(opts.corrupt_percent, 0.0);
+        assert_eq!(opts.rate, 0);
+        assert_eq!(opts.limit, 0);
+        assert_eq!(opts.gap, 0);
+    }
+
+    #[test]
+    fn test_netem_parse_basic() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        // Build TcNetemQopt with 100ms delay, 1000 packet limit, 1% loss
+        let mut qopt = TcNetemQopt::new();
+        qopt.latency = 100_000; // 100ms in microseconds
+        qopt.limit = 1000;
+        qopt.loss = percent_to_prob(1.0); // 1% loss
+        qopt.gap = 0;
+        qopt.duplicate = 0;
+        qopt.jitter = 10_000; // 10ms jitter
+
+        let data = qopt.as_bytes().to_vec();
+        let opts = parse_netem_options(&data);
+
+        assert_eq!(opts.delay_us, 100_000);
+        assert_eq!(opts.jitter_us, 10_000);
+        assert_eq!(opts.limit, 1000);
+        assert!((opts.loss_percent - 1.0).abs() < 0.01);
+        assert_eq!(opts.duplicate_percent, 0.0);
+        assert_eq!(opts.gap, 0);
+    }
+
+    #[test]
+    fn test_netem_parse_with_correlation() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        // Build base options
+        let mut qopt = TcNetemQopt::new();
+        qopt.latency = 50_000; // 50ms
+        qopt.limit = 1000;
+        qopt.loss = percent_to_prob(5.0); // 5% loss
+        qopt.duplicate = percent_to_prob(2.0); // 2% duplicate
+        qopt.jitter = 5_000; // 5ms jitter
+
+        // Build correlation attributes
+        let mut corr = TcNetemCorr::default();
+        corr.delay_corr = percent_to_prob(25.0); // 25% delay correlation
+        corr.loss_corr = percent_to_prob(50.0); // 50% loss correlation
+        corr.dup_corr = percent_to_prob(10.0); // 10% duplicate correlation
+
+        // Construct full data with nested attribute
+        let mut data = qopt.as_bytes().to_vec();
+
+        // Add TCA_NETEM_CORR attribute (type 1)
+        let corr_bytes = corr.as_bytes();
+        let attr_len = 4 + corr_bytes.len(); // header + payload
+        data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_CORR.to_ne_bytes());
+        data.extend_from_slice(corr_bytes);
+
+        let opts = parse_netem_options(&data);
+
+        assert_eq!(opts.delay_us, 50_000);
+        assert_eq!(opts.jitter_us, 5_000);
+        assert!((opts.loss_percent - 5.0).abs() < 0.1);
+        assert!((opts.duplicate_percent - 2.0).abs() < 0.1);
+        assert!((opts.delay_corr - 25.0).abs() < 0.1);
+        assert!((opts.loss_corr - 50.0).abs() < 0.1);
+        assert!((opts.duplicate_corr - 10.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_netem_parse_with_reorder() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        let mut qopt = TcNetemQopt::new();
+        qopt.latency = 100_000;
+        qopt.limit = 1000;
+        qopt.gap = 5; // reorder gap
+
+        let mut reorder = TcNetemReorder::default();
+        reorder.probability = percent_to_prob(10.0); // 10% reorder
+        reorder.correlation = percent_to_prob(25.0); // 25% correlation
+
+        let mut data = qopt.as_bytes().to_vec();
+
+        // Add TCA_NETEM_REORDER attribute (type 3)
+        let reorder_bytes = reorder.as_bytes();
+        let attr_len = 4 + reorder_bytes.len();
+        data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_REORDER.to_ne_bytes());
+        data.extend_from_slice(reorder_bytes);
+
+        let opts = parse_netem_options(&data);
+
+        assert_eq!(opts.gap, 5);
+        assert!((opts.reorder_percent - 10.0).abs() < 0.1);
+        assert!((opts.reorder_corr - 25.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_netem_parse_with_corrupt() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        let mut qopt = TcNetemQopt::new();
+        qopt.latency = 0;
+        qopt.limit = 1000;
+
+        let mut corrupt = TcNetemCorrupt::default();
+        corrupt.probability = percent_to_prob(0.5); // 0.5% corruption
+        corrupt.correlation = percent_to_prob(10.0);
+
+        let mut data = qopt.as_bytes().to_vec();
+
+        // Add TCA_NETEM_CORRUPT attribute (type 4)
+        let corrupt_bytes = corrupt.as_bytes();
+        let attr_len = 4 + corrupt_bytes.len();
+        data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_CORRUPT.to_ne_bytes());
+        data.extend_from_slice(corrupt_bytes);
+
+        let opts = parse_netem_options(&data);
+
+        assert!((opts.corrupt_percent - 0.5).abs() < 0.1);
+        assert!((opts.corrupt_corr - 10.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_netem_parse_with_rate() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        let mut qopt = TcNetemQopt::new();
+        qopt.limit = 1000;
+
+        let mut rate = TcNetemRate::default();
+        rate.rate = 1_000_000; // 1 MB/s
+
+        let mut data = qopt.as_bytes().to_vec();
+
+        // Add TCA_NETEM_RATE attribute (type 6)
+        let rate_bytes = rate.as_bytes();
+        let attr_len = 4 + rate_bytes.len();
+        data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_RATE.to_ne_bytes());
+        data.extend_from_slice(rate_bytes);
+
+        let opts = parse_netem_options(&data);
+
+        assert_eq!(opts.rate, 1_000_000);
+    }
+
+    #[test]
+    fn test_netem_parse_with_rate64() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        let mut qopt = TcNetemQopt::new();
+        qopt.limit = 1000;
+
+        // Use a rate larger than u32::MAX
+        let rate64: u64 = 10_000_000_000; // 10 GB/s
+
+        let mut data = qopt.as_bytes().to_vec();
+
+        // Add TCA_NETEM_RATE64 attribute (type 8)
+        let attr_len = 4 + 8; // header + u64
+        data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_RATE64.to_ne_bytes());
+        data.extend_from_slice(&rate64.to_ne_bytes());
+
+        let opts = parse_netem_options(&data);
+
+        assert_eq!(opts.rate, 10_000_000_000);
+    }
+
+    #[test]
+    fn test_netem_parse_multiple_attrs() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        // Build a complete netem config with multiple attributes
+        let mut qopt = TcNetemQopt::new();
+        qopt.latency = 100_000; // 100ms
+        qopt.limit = 1000;
+        qopt.loss = percent_to_prob(1.0);
+        qopt.jitter = 10_000;
+
+        let mut corr = TcNetemCorr::default();
+        corr.delay_corr = percent_to_prob(25.0);
+        corr.loss_corr = percent_to_prob(50.0);
+
+        let mut corrupt = TcNetemCorrupt::default();
+        corrupt.probability = percent_to_prob(0.1);
+
+        let mut data = qopt.as_bytes().to_vec();
+
+        // Add correlation (with padding to 4-byte alignment)
+        let corr_bytes = corr.as_bytes();
+        let attr_len = 4 + corr_bytes.len();
+        let aligned_len = (attr_len + 3) & !3;
+        data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_CORR.to_ne_bytes());
+        data.extend_from_slice(corr_bytes);
+        // Add padding if needed
+        for _ in attr_len..aligned_len {
+            data.push(0);
+        }
+
+        // Add corruption
+        let corrupt_bytes = corrupt.as_bytes();
+        let attr_len = 4 + corrupt_bytes.len();
+        data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_CORRUPT.to_ne_bytes());
+        data.extend_from_slice(corrupt_bytes);
+
+        let opts = parse_netem_options(&data);
+
+        assert_eq!(opts.delay_us, 100_000);
+        assert_eq!(opts.jitter_us, 10_000);
+        assert!((opts.loss_percent - 1.0).abs() < 0.1);
+        assert!((opts.delay_corr - 25.0).abs() < 0.1);
+        assert!((opts.loss_corr - 50.0).abs() < 0.1);
+        assert!((opts.corrupt_percent - 0.1).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_netem_prob_conversion_roundtrip() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        // Test that percent -> prob -> percent roundtrips correctly
+        let test_values = [0.0, 0.1, 1.0, 10.0, 50.0, 99.9, 100.0];
+
+        for &percent in &test_values {
+            let prob = percent_to_prob(percent);
+            let back = prob_to_percent(prob);
+            assert!(
+                (percent - back).abs() < 0.01,
+                "Roundtrip failed for {}: got {}",
+                percent,
+                back
+            );
+        }
+    }
 }

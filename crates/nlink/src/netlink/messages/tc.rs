@@ -171,6 +171,49 @@ impl TcMessage {
     pub fn backlog(&self) -> u32 {
         self.stats_queue.map(|s| s.backlog).unwrap_or(0)
     }
+
+    /// Get parsed qdisc options if available.
+    ///
+    /// This parses the raw options data into a strongly-typed enum
+    /// based on the qdisc kind.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::tc_options::QdiscOptions;
+    ///
+    /// let qdiscs = conn.get_qdiscs().await?;
+    /// for qdisc in &qdiscs {
+    ///     if let Some(QdiscOptions::Netem(netem)) = qdisc.parsed_options() {
+    ///         println!("delay={}us, loss={}%", netem.delay_us, netem.loss_percent);
+    ///     }
+    /// }
+    /// ```
+    pub fn parsed_options(&self) -> Option<crate::netlink::tc_options::QdiscOptions> {
+        crate::netlink::tc_options::parse_qdisc_options(self)
+    }
+
+    /// Get netem options if this is a netem qdisc.
+    ///
+    /// This is a convenience method that returns `Some` only if the qdisc
+    /// kind is "netem" and the options can be parsed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let qdiscs = conn.get_qdiscs().await?;
+    /// for qdisc in &qdiscs {
+    ///     if let Some(netem) = qdisc.netem_options() {
+    ///         println!("delay={}us, loss={}%", netem.delay_us, netem.loss_percent);
+    ///     }
+    /// }
+    /// ```
+    pub fn netem_options(&self) -> Option<crate::netlink::tc_options::NetemOptions> {
+        match self.parsed_options()? {
+            crate::netlink::tc_options::QdiscOptions::Netem(opts) => Some(opts),
+            _ => None,
+        }
+    }
 }
 
 impl FromNetlink for TcMessage {

@@ -152,6 +152,34 @@ for qdisc in &qdiscs {
 }
 ```
 
+**Reading netem configuration (detecting existing TC settings):**
+```rust
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::tc_options::QdiscOptions;
+
+let conn = Connection::new(Protocol::Route)?;
+let qdiscs = conn.get_qdiscs_for("eth0").await?;
+
+for qdisc in &qdiscs {
+    // Option 1: Use convenience method directly on TcMessage
+    if let Some(netem) = qdisc.netem_options() {
+        println!("delay={}us, jitter={}us", netem.delay_us, netem.jitter_us);
+        println!("loss={}%, correlation={}%", netem.loss_percent, netem.loss_corr);
+        println!("duplicate={}%", netem.duplicate_percent);
+        println!("reorder={}%, gap={}", netem.reorder_percent, netem.gap);
+        println!("corrupt={}%", netem.corrupt_percent);
+        if netem.rate > 0 {
+            println!("rate={} bytes/sec", netem.rate);
+        }
+    }
+
+    // Option 2: Use parsed_options() for all qdisc types
+    if let Some(QdiscOptions::Netem(netem)) = qdisc.parsed_options() {
+        // Same fields available
+    }
+}
+```
+
 **Statistics tracking:**
 ```rust
 use nlink::netlink::stats::{StatsSnapshot, StatsTracker};
