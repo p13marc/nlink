@@ -204,7 +204,7 @@ impl TcMessage {
     /// let qdiscs = conn.get_qdiscs().await?;
     /// for qdisc in &qdiscs {
     ///     if let Some(netem) = qdisc.netem_options() {
-    ///         println!("delay={}us, loss={}%", netem.delay_us, netem.loss_percent);
+    ///         println!("delay={}ms, loss={}%", netem.delay_ms(), netem.loss_percent);
     ///     }
     /// }
     /// ```
@@ -213,6 +213,32 @@ impl TcMessage {
             crate::netlink::tc_options::QdiscOptions::Netem(opts) => Some(opts),
             _ => None,
         }
+    }
+
+    /// Check if this is a netem qdisc.
+    #[inline]
+    pub fn is_netem(&self) -> bool {
+        self.kind() == Some("netem")
+    }
+
+    /// Check if this qdisc is attached to the root.
+    #[inline]
+    pub fn is_root(&self) -> bool {
+        self.header.tcm_parent == crate::netlink::types::tc::tc_handle::ROOT
+    }
+
+    /// Check if this is an ingress qdisc.
+    #[inline]
+    pub fn is_ingress(&self) -> bool {
+        self.header.tcm_parent == crate::netlink::types::tc::tc_handle::INGRESS
+            || self.kind() == Some("ingress")
+    }
+
+    /// Check if this is a clsact qdisc.
+    #[inline]
+    pub fn is_clsact(&self) -> bool {
+        self.header.tcm_parent == crate::netlink::types::tc::tc_handle::CLSACT
+            || self.kind() == Some("clsact")
     }
 }
 

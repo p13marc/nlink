@@ -101,10 +101,12 @@ pub struct TbfOptions {
 /// netem qdisc options.
 #[derive(Debug, Clone, Default)]
 pub struct NetemOptions {
-    /// Added delay in microseconds.
-    pub delay_us: u32,
-    /// Delay jitter in microseconds.
-    pub jitter_us: u32,
+    /// Added delay in nanoseconds (use `delay_us()` for microseconds).
+    /// This field uses 64-bit precision when TCA_NETEM_LATENCY64 is present.
+    pub delay_ns: u64,
+    /// Delay jitter in nanoseconds (use `jitter_us()` for microseconds).
+    /// This field uses 64-bit precision when TCA_NETEM_JITTER64 is present.
+    pub jitter_ns: u64,
     /// Delay correlation (0-100%).
     pub delay_corr: f64,
     /// Packet loss probability (0-100%).
@@ -125,10 +127,63 @@ pub struct NetemOptions {
     pub corrupt_corr: f64,
     /// Rate limit in bytes/sec (0 if not set).
     pub rate: u64,
+    /// Per-packet overhead in bytes for rate limiting.
+    pub packet_overhead: i32,
+    /// ATM cell size for rate limiting overhead calculation.
+    pub cell_size: u32,
+    /// Per-cell overhead for rate limiting.
+    pub cell_overhead: i32,
     /// Queue limit in packets.
     pub limit: u32,
     /// Reorder gap.
     pub gap: u32,
+    /// ECN marking enabled.
+    pub ecn: bool,
+    /// Slot-based transmission configuration (if present).
+    pub slot: Option<NetemSlotOptions>,
+}
+
+/// Netem slot-based transmission options.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NetemSlotOptions {
+    /// Minimum delay between packets in nanoseconds.
+    pub min_delay_ns: i64,
+    /// Maximum delay between packets in nanoseconds.
+    pub max_delay_ns: i64,
+    /// Maximum packets per slot (0 = unlimited).
+    pub max_packets: i32,
+    /// Maximum bytes per slot (0 = unlimited).
+    pub max_bytes: i32,
+    /// Distribution delay in nanoseconds.
+    pub dist_delay_ns: i64,
+    /// Distribution jitter in nanoseconds.
+    pub dist_jitter_ns: i64,
+}
+
+impl NetemOptions {
+    /// Get delay in microseconds (for backward compatibility).
+    #[inline]
+    pub fn delay_us(&self) -> u32 {
+        (self.delay_ns / 1000) as u32
+    }
+
+    /// Get jitter in microseconds (for backward compatibility).
+    #[inline]
+    pub fn jitter_us(&self) -> u32 {
+        (self.jitter_ns / 1000) as u32
+    }
+
+    /// Get delay in milliseconds as a floating-point value.
+    #[inline]
+    pub fn delay_ms(&self) -> f64 {
+        self.delay_ns as f64 / 1_000_000.0
+    }
+
+    /// Get jitter in milliseconds as a floating-point value.
+    #[inline]
+    pub fn jitter_ms(&self) -> f64 {
+        self.jitter_ns as f64 / 1_000_000.0
+    }
 }
 
 /// prio qdisc options.
@@ -527,14 +582,17 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
 
     // First 24 bytes are TcNetemQopt
     if data.len() >= TcNetemQopt::SIZE {
-        opts.delay_us = u32::from_ne_bytes(data[0..4].try_into().unwrap());
+        // Parse delay/jitter as microseconds, convert to nanoseconds
+        let delay_us = u32::from_ne_bytes(data[0..4].try_into().unwrap());
+        opts.delay_ns = delay_us as u64 * 1000;
         opts.limit = u32::from_ne_bytes(data[4..8].try_into().unwrap());
         let loss_raw = u32::from_ne_bytes(data[8..12].try_into().unwrap());
         opts.loss_percent = prob_to_percent(loss_raw);
         opts.gap = u32::from_ne_bytes(data[12..16].try_into().unwrap());
         let dup_raw = u32::from_ne_bytes(data[16..20].try_into().unwrap());
         opts.duplicate_percent = prob_to_percent(dup_raw);
-        opts.jitter_us = u32::from_ne_bytes(data[20..24].try_into().unwrap());
+        let jitter_us = u32::from_ne_bytes(data[20..24].try_into().unwrap());
+        opts.jitter_ns = jitter_us as u64 * 1000;
     }
 
     // Parse nested attributes after TcNetemQopt
@@ -595,13 +653,49 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
                 }
             }
             TCA_NETEM_RATE => {
+                // TcNetemRate: rate (u32), packet_overhead (i32), cell_size (u32), cell_overhead (i32)
                 if payload.len() >= 4 {
                     opts.rate = u32::from_ne_bytes(payload[0..4].try_into().unwrap()) as u64;
+                }
+                if payload.len() >= TcNetemRate::SIZE {
+                    opts.packet_overhead = i32::from_ne_bytes(payload[4..8].try_into().unwrap());
+                    opts.cell_size = u32::from_ne_bytes(payload[8..12].try_into().unwrap());
+                    opts.cell_overhead = i32::from_ne_bytes(payload[12..16].try_into().unwrap());
                 }
             }
             TCA_NETEM_RATE64 => {
                 if payload.len() >= 8 {
                     opts.rate = u64::from_ne_bytes(payload[..8].try_into().unwrap());
+                }
+            }
+            TCA_NETEM_ECN => {
+                // ECN is a flag attribute (presence means enabled)
+                // Some kernels send a u32 value, others just the attribute
+                opts.ecn = true;
+            }
+            TCA_NETEM_LATENCY64 => {
+                // 64-bit latency in nanoseconds
+                if payload.len() >= 8 {
+                    opts.delay_ns = u64::from_ne_bytes(payload[..8].try_into().unwrap());
+                }
+            }
+            TCA_NETEM_JITTER64 => {
+                // 64-bit jitter in nanoseconds
+                if payload.len() >= 8 {
+                    opts.jitter_ns = u64::from_ne_bytes(payload[..8].try_into().unwrap());
+                }
+            }
+            TCA_NETEM_SLOT => {
+                // TcNetemSlot structure
+                if payload.len() >= TcNetemSlot::SIZE {
+                    opts.slot = Some(NetemSlotOptions {
+                        min_delay_ns: i64::from_ne_bytes(payload[0..8].try_into().unwrap()),
+                        max_delay_ns: i64::from_ne_bytes(payload[8..16].try_into().unwrap()),
+                        max_packets: i32::from_ne_bytes(payload[16..20].try_into().unwrap()),
+                        max_bytes: i32::from_ne_bytes(payload[20..24].try_into().unwrap()),
+                        dist_delay_ns: i64::from_ne_bytes(payload[24..32].try_into().unwrap()),
+                        dist_jitter_ns: i64::from_ne_bytes(payload[32..40].try_into().unwrap()),
+                    });
                 }
             }
             _ => {}
@@ -683,8 +777,10 @@ mod tests {
     #[test]
     fn test_netem_defaults() {
         let opts = NetemOptions::default();
-        assert_eq!(opts.delay_us, 0);
-        assert_eq!(opts.jitter_us, 0);
+        assert_eq!(opts.delay_ns, 0);
+        assert_eq!(opts.delay_us(), 0);
+        assert_eq!(opts.jitter_ns, 0);
+        assert_eq!(opts.jitter_us(), 0);
         assert_eq!(opts.loss_percent, 0.0);
         assert_eq!(opts.duplicate_percent, 0.0);
         assert_eq!(opts.reorder_percent, 0.0);
@@ -692,6 +788,8 @@ mod tests {
         assert_eq!(opts.rate, 0);
         assert_eq!(opts.limit, 0);
         assert_eq!(opts.gap, 0);
+        assert!(!opts.ecn);
+        assert!(opts.slot.is_none());
     }
 
     #[test]
@@ -710,8 +808,8 @@ mod tests {
         let data = qopt.as_bytes().to_vec();
         let opts = parse_netem_options(&data);
 
-        assert_eq!(opts.delay_us, 100_000);
-        assert_eq!(opts.jitter_us, 10_000);
+        assert_eq!(opts.delay_us(), 100_000);
+        assert_eq!(opts.jitter_us(), 10_000);
         assert_eq!(opts.limit, 1000);
         assert!((opts.loss_percent - 1.0).abs() < 0.01);
         assert_eq!(opts.duplicate_percent, 0.0);
@@ -748,8 +846,8 @@ mod tests {
 
         let opts = parse_netem_options(&data);
 
-        assert_eq!(opts.delay_us, 50_000);
-        assert_eq!(opts.jitter_us, 5_000);
+        assert_eq!(opts.delay_us(), 50_000);
+        assert_eq!(opts.jitter_us(), 5_000);
         assert!((opts.loss_percent - 5.0).abs() < 0.1);
         assert!((opts.duplicate_percent - 2.0).abs() < 0.1);
         assert!((opts.delay_corr - 25.0).abs() < 0.1);
@@ -901,12 +999,134 @@ mod tests {
 
         let opts = parse_netem_options(&data);
 
-        assert_eq!(opts.delay_us, 100_000);
-        assert_eq!(opts.jitter_us, 10_000);
+        assert_eq!(opts.delay_us(), 100_000);
+        assert_eq!(opts.jitter_us(), 10_000);
         assert!((opts.loss_percent - 1.0).abs() < 0.1);
         assert!((opts.delay_corr - 25.0).abs() < 0.1);
         assert!((opts.loss_corr - 50.0).abs() < 0.1);
         assert!((opts.corrupt_percent - 0.1).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_netem_parse_with_64bit_delay() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        let mut qopt = TcNetemQopt::new();
+        qopt.latency = 100_000; // Will be overridden by 64-bit value
+        qopt.limit = 1000;
+
+        // 5 seconds in nanoseconds (exceeds u32 microseconds)
+        let delay64_ns: u64 = 5_000_000_000;
+        let jitter64_ns: u64 = 500_000_000; // 0.5 seconds
+
+        let mut data = qopt.as_bytes().to_vec();
+
+        // Add TCA_NETEM_LATENCY64 attribute
+        let attr_len = 4 + 8;
+        let aligned_len = (attr_len + 3) & !3;
+        data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_LATENCY64.to_ne_bytes());
+        data.extend_from_slice(&delay64_ns.to_ne_bytes());
+        for _ in attr_len..aligned_len {
+            data.push(0);
+        }
+
+        // Add TCA_NETEM_JITTER64 attribute
+        data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_JITTER64.to_ne_bytes());
+        data.extend_from_slice(&jitter64_ns.to_ne_bytes());
+
+        let opts = parse_netem_options(&data);
+
+        assert_eq!(opts.delay_ns, 5_000_000_000);
+        assert_eq!(opts.jitter_ns, 500_000_000);
+        // delay_us() should still work but may overflow for very large values
+        assert_eq!(opts.delay_ms(), 5000.0);
+        assert_eq!(opts.jitter_ms(), 500.0);
+    }
+
+    #[test]
+    fn test_netem_parse_with_ecn() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        let mut qopt = TcNetemQopt::new();
+        qopt.limit = 1000;
+
+        let mut data = qopt.as_bytes().to_vec();
+
+        // Add TCA_NETEM_ECN attribute (flag, just presence matters)
+        let attr_len = 4 + 4; // header + u32 (some kernels send a value)
+        data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_ECN.to_ne_bytes());
+        data.extend_from_slice(&1u32.to_ne_bytes());
+
+        let opts = parse_netem_options(&data);
+
+        assert!(opts.ecn);
+    }
+
+    #[test]
+    fn test_netem_parse_with_slot() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        let mut qopt = TcNetemQopt::new();
+        qopt.limit = 1000;
+
+        let slot = TcNetemSlot {
+            min_delay: 1_000_000,  // 1ms in ns
+            max_delay: 10_000_000, // 10ms in ns
+            max_packets: 10,
+            max_bytes: 15000,
+            dist_delay: 0,
+            dist_jitter: 0,
+        };
+
+        let mut data = qopt.as_bytes().to_vec();
+
+        // Add TCA_NETEM_SLOT attribute
+        let slot_bytes = slot.as_bytes();
+        let attr_len = 4 + slot_bytes.len();
+        data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_SLOT.to_ne_bytes());
+        data.extend_from_slice(slot_bytes);
+
+        let opts = parse_netem_options(&data);
+
+        assert!(opts.slot.is_some());
+        let slot_opts = opts.slot.unwrap();
+        assert_eq!(slot_opts.min_delay_ns, 1_000_000);
+        assert_eq!(slot_opts.max_delay_ns, 10_000_000);
+        assert_eq!(slot_opts.max_packets, 10);
+        assert_eq!(slot_opts.max_bytes, 15000);
+    }
+
+    #[test]
+    fn test_netem_parse_with_rate_overhead() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        let mut qopt = TcNetemQopt::new();
+        qopt.limit = 1000;
+
+        let mut rate = TcNetemRate::default();
+        rate.rate = 1_000_000; // 1 MB/s
+        rate.packet_overhead = 14; // Ethernet header
+        rate.cell_size = 53; // ATM cell size
+        rate.cell_overhead = 5; // ATM cell overhead
+
+        let mut data = qopt.as_bytes().to_vec();
+
+        let rate_bytes = rate.as_bytes();
+        let attr_len = 4 + rate_bytes.len();
+        data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_RATE.to_ne_bytes());
+        data.extend_from_slice(rate_bytes);
+
+        let opts = parse_netem_options(&data);
+
+        assert_eq!(opts.rate, 1_000_000);
+        assert_eq!(opts.packet_overhead, 14);
+        assert_eq!(opts.cell_size, 53);
+        assert_eq!(opts.cell_overhead, 5);
     }
 
     #[test]

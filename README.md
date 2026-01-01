@@ -202,20 +202,36 @@ async fn main() -> nlink::Result<()> {
     let qdiscs = conn.get_qdiscs_for("eth0").await?;
     
     for qdisc in &qdiscs {
-        // Option 1: Use netem_options() convenience method
+        // Quick type checks
+        if qdisc.is_netem() && qdisc.is_root() {
+            println!("Found root netem qdisc");
+        }
+        
+        // Get netem options with full details
         if let Some(netem) = qdisc.netem_options() {
             println!("Netem qdisc detected:");
-            println!("  delay: {}us (jitter: {}us)", netem.delay_us, netem.jitter_us);
+            // Time values with convenience methods
+            println!("  delay: {}ms ({}us)", netem.delay_ms(), netem.delay_us());
+            println!("  jitter: {}ms", netem.jitter_ms());
+            // Percentages
             println!("  loss: {}% (correlation: {}%)", netem.loss_percent, netem.loss_corr);
             println!("  duplicate: {}%", netem.duplicate_percent);
             println!("  reorder: {}% (gap: {})", netem.reorder_percent, netem.gap);
             println!("  corrupt: {}%", netem.corrupt_percent);
+            // Rate with overhead parameters
             if netem.rate > 0 {
                 println!("  rate: {} bytes/sec", netem.rate);
+                println!("  packet_overhead: {}, cell_size: {}", 
+                    netem.packet_overhead, netem.cell_size);
+            }
+            // ECN and slot-based transmission
+            println!("  ecn: {}", netem.ecn);
+            if let Some(slot) = &netem.slot {
+                println!("  slot: {}ns - {}ns", slot.min_delay_ns, slot.max_delay_ns);
             }
         }
         
-        // Option 2: Use parsed_options() for all qdisc types
+        // Use parsed_options() for all qdisc types
         match qdisc.parsed_options() {
             Some(QdiscOptions::FqCodel(fq)) => {
                 println!("fq_codel: target={}us, interval={}us", fq.target_us, fq.interval_us);
@@ -227,7 +243,7 @@ async fn main() -> nlink::Result<()> {
                 println!("tbf: rate={} bytes/sec, burst={}", tbf.rate, tbf.burst);
             }
             Some(QdiscOptions::Netem(netem)) => {
-                println!("netem: loss={}%, delay={}us", netem.loss_percent, netem.delay_us);
+                println!("netem: loss={}%, delay={}ms", netem.loss_percent, netem.delay_ms());
             }
             _ => {}
         }
