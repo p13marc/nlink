@@ -101,10 +101,10 @@ pub struct TbfOptions {
 /// netem qdisc options.
 #[derive(Debug, Clone, Default)]
 pub struct NetemOptions {
-    /// Added delay in nanoseconds (use `delay_us()` for microseconds).
+    /// Added delay in nanoseconds. Use `delay()` to get as Duration.
     /// This field uses 64-bit precision when TCA_NETEM_LATENCY64 is present.
     pub delay_ns: u64,
-    /// Delay jitter in nanoseconds (use `jitter_us()` for microseconds).
+    /// Delay jitter in nanoseconds. Use `jitter()` to get as Duration.
     /// This field uses 64-bit precision when TCA_NETEM_JITTER64 is present.
     pub jitter_ns: u64,
     /// Delay correlation (0-100%).
@@ -196,28 +196,16 @@ pub struct NetemSlotOptions {
 }
 
 impl NetemOptions {
-    /// Get delay in microseconds (for backward compatibility).
+    /// Get the configured delay as a Duration.
     #[inline]
-    pub fn delay_us(&self) -> u32 {
-        (self.delay_ns / 1000) as u32
+    pub fn delay(&self) -> std::time::Duration {
+        std::time::Duration::from_nanos(self.delay_ns)
     }
 
-    /// Get jitter in microseconds (for backward compatibility).
+    /// Get the configured jitter as a Duration.
     #[inline]
-    pub fn jitter_us(&self) -> u32 {
-        (self.jitter_ns / 1000) as u32
-    }
-
-    /// Get delay in milliseconds as a floating-point value.
-    #[inline]
-    pub fn delay_ms(&self) -> f64 {
-        self.delay_ns as f64 / 1_000_000.0
-    }
-
-    /// Get jitter in milliseconds as a floating-point value.
-    #[inline]
-    pub fn jitter_ms(&self) -> f64 {
-        self.jitter_ns as f64 / 1_000_000.0
+    pub fn jitter(&self) -> std::time::Duration {
+        std::time::Duration::from_nanos(self.jitter_ns)
     }
 }
 
@@ -888,11 +876,12 @@ mod tests {
 
     #[test]
     fn test_netem_defaults() {
+        use std::time::Duration;
         let opts = NetemOptions::default();
         assert_eq!(opts.delay_ns, 0);
-        assert_eq!(opts.delay_us(), 0);
+        assert_eq!(opts.delay(), Duration::ZERO);
         assert_eq!(opts.jitter_ns, 0);
-        assert_eq!(opts.jitter_us(), 0);
+        assert_eq!(opts.jitter(), Duration::ZERO);
         assert_eq!(opts.loss_percent, 0.0);
         assert_eq!(opts.duplicate_percent, 0.0);
         assert_eq!(opts.reorder_percent, 0.0);
@@ -920,8 +909,8 @@ mod tests {
         let data = qopt.as_bytes().to_vec();
         let opts = parse_netem_options(&data);
 
-        assert_eq!(opts.delay_us(), 100_000);
-        assert_eq!(opts.jitter_us(), 10_000);
+        assert_eq!(opts.delay().as_micros(), 100_000);
+        assert_eq!(opts.jitter().as_micros(), 10_000);
         assert_eq!(opts.limit, 1000);
         assert!((opts.loss_percent - 1.0).abs() < 0.01);
         assert_eq!(opts.duplicate_percent, 0.0);
@@ -941,10 +930,11 @@ mod tests {
         qopt.jitter = 5_000; // 5ms jitter
 
         // Build correlation attributes
-        let mut corr = TcNetemCorr::default();
-        corr.delay_corr = percent_to_prob(25.0); // 25% delay correlation
-        corr.loss_corr = percent_to_prob(50.0); // 50% loss correlation
-        corr.dup_corr = percent_to_prob(10.0); // 10% duplicate correlation
+        let corr = TcNetemCorr {
+            delay_corr: percent_to_prob(25.0),
+            loss_corr: percent_to_prob(50.0),
+            dup_corr: percent_to_prob(10.0),
+        };
 
         // Construct full data with nested attribute
         let mut data = qopt.as_bytes().to_vec();
@@ -958,8 +948,8 @@ mod tests {
 
         let opts = parse_netem_options(&data);
 
-        assert_eq!(opts.delay_us(), 50_000);
-        assert_eq!(opts.jitter_us(), 5_000);
+        assert_eq!(opts.delay().as_micros(), 50_000);
+        assert_eq!(opts.jitter().as_micros(), 5_000);
         assert!((opts.loss_percent - 5.0).abs() < 0.1);
         assert!((opts.duplicate_percent - 2.0).abs() < 0.1);
         assert!((opts.delay_corr - 25.0).abs() < 0.1);
@@ -976,9 +966,10 @@ mod tests {
         qopt.limit = 1000;
         qopt.gap = 5; // reorder gap
 
-        let mut reorder = TcNetemReorder::default();
-        reorder.probability = percent_to_prob(10.0); // 10% reorder
-        reorder.correlation = percent_to_prob(25.0); // 25% correlation
+        let reorder = TcNetemReorder {
+            probability: percent_to_prob(10.0),
+            correlation: percent_to_prob(25.0),
+        };
 
         let mut data = qopt.as_bytes().to_vec();
 
@@ -1004,9 +995,10 @@ mod tests {
         qopt.latency = 0;
         qopt.limit = 1000;
 
-        let mut corrupt = TcNetemCorrupt::default();
-        corrupt.probability = percent_to_prob(0.5); // 0.5% corruption
-        corrupt.correlation = percent_to_prob(10.0);
+        let corrupt = TcNetemCorrupt {
+            probability: percent_to_prob(0.5),
+            correlation: percent_to_prob(10.0),
+        };
 
         let mut data = qopt.as_bytes().to_vec();
 
@@ -1030,8 +1022,10 @@ mod tests {
         let mut qopt = TcNetemQopt::new();
         qopt.limit = 1000;
 
-        let mut rate = TcNetemRate::default();
-        rate.rate = 1_000_000; // 1 MB/s
+        let rate = TcNetemRate {
+            rate: 1_000_000, // 1 MB/s
+            ..Default::default()
+        };
 
         let mut data = qopt.as_bytes().to_vec();
 
@@ -1081,12 +1075,16 @@ mod tests {
         qopt.loss = percent_to_prob(1.0);
         qopt.jitter = 10_000;
 
-        let mut corr = TcNetemCorr::default();
-        corr.delay_corr = percent_to_prob(25.0);
-        corr.loss_corr = percent_to_prob(50.0);
+        let corr = TcNetemCorr {
+            delay_corr: percent_to_prob(25.0),
+            loss_corr: percent_to_prob(50.0),
+            ..Default::default()
+        };
 
-        let mut corrupt = TcNetemCorrupt::default();
-        corrupt.probability = percent_to_prob(0.1);
+        let corrupt = TcNetemCorrupt {
+            probability: percent_to_prob(0.1),
+            ..Default::default()
+        };
 
         let mut data = qopt.as_bytes().to_vec();
 
@@ -1098,9 +1096,7 @@ mod tests {
         data.extend_from_slice(&TCA_NETEM_CORR.to_ne_bytes());
         data.extend_from_slice(corr_bytes);
         // Add padding if needed
-        for _ in attr_len..aligned_len {
-            data.push(0);
-        }
+        data.resize(data.len() + aligned_len - attr_len, 0);
 
         // Add corruption
         let corrupt_bytes = corrupt.as_bytes();
@@ -1111,8 +1107,8 @@ mod tests {
 
         let opts = parse_netem_options(&data);
 
-        assert_eq!(opts.delay_us(), 100_000);
-        assert_eq!(opts.jitter_us(), 10_000);
+        assert_eq!(opts.delay().as_micros(), 100_000);
+        assert_eq!(opts.jitter().as_micros(), 10_000);
         assert!((opts.loss_percent - 1.0).abs() < 0.1);
         assert!((opts.delay_corr - 25.0).abs() < 0.1);
         assert!((opts.loss_corr - 50.0).abs() < 0.1);
@@ -1139,9 +1135,7 @@ mod tests {
         data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
         data.extend_from_slice(&TCA_NETEM_LATENCY64.to_ne_bytes());
         data.extend_from_slice(&delay64_ns.to_ne_bytes());
-        for _ in attr_len..aligned_len {
-            data.push(0);
-        }
+        data.resize(data.len() + aligned_len - attr_len, 0);
 
         // Add TCA_NETEM_JITTER64 attribute
         data.extend_from_slice(&(attr_len as u16).to_ne_bytes());
@@ -1152,9 +1146,8 @@ mod tests {
 
         assert_eq!(opts.delay_ns, 5_000_000_000);
         assert_eq!(opts.jitter_ns, 500_000_000);
-        // delay_us() should still work but may overflow for very large values
-        assert_eq!(opts.delay_ms(), 5000.0);
-        assert_eq!(opts.jitter_ms(), 500.0);
+        assert_eq!(opts.delay().as_millis(), 5000);
+        assert_eq!(opts.jitter().as_millis(), 500);
     }
 
     #[test]
@@ -1219,11 +1212,12 @@ mod tests {
         let mut qopt = TcNetemQopt::new();
         qopt.limit = 1000;
 
-        let mut rate = TcNetemRate::default();
-        rate.rate = 1_000_000; // 1 MB/s
-        rate.packet_overhead = 14; // Ethernet header
-        rate.cell_size = 53; // ATM cell size
-        rate.cell_overhead = 5; // ATM cell overhead
+        let rate = TcNetemRate {
+            rate: 1_000_000,     // 1 MB/s
+            packet_overhead: 14, // Ethernet header
+            cell_size: 53,       // ATM cell size
+            cell_overhead: 5,    // ATM cell overhead
+        };
 
         let mut data = qopt.as_bytes().to_vec();
 
@@ -1289,9 +1283,7 @@ mod tests {
         nested.extend_from_slice(&(inner_len as u16).to_ne_bytes());
         nested.extend_from_slice(&NETEM_LOSS_GI.to_ne_bytes());
         nested.extend_from_slice(gi_bytes);
-        for _ in inner_len..inner_aligned {
-            nested.push(0);
-        }
+        nested.resize(nested.len() + inner_aligned - inner_len, 0);
 
         let outer_len = 4 + nested.len();
         data.extend_from_slice(&(outer_len as u16).to_ne_bytes());
@@ -1345,9 +1337,7 @@ mod tests {
         nested.extend_from_slice(&(inner_len as u16).to_ne_bytes());
         nested.extend_from_slice(&NETEM_LOSS_GE.to_ne_bytes());
         nested.extend_from_slice(ge_bytes);
-        for _ in inner_len..inner_aligned {
-            nested.push(0);
-        }
+        nested.resize(nested.len() + inner_aligned - inner_len, 0);
 
         let outer_len = 4 + nested.len();
         data.extend_from_slice(&(outer_len as u16).to_ne_bytes());

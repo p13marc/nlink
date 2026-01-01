@@ -89,7 +89,7 @@ pub mod types;
 pub use attr::{AttrIter, NlAttr};
 pub use builder::{MessageBuilder, NestToken};
 pub use connection::Connection;
-pub use error::{Error, Result, ResultExt};
+pub use error::{Error, Result};
 pub use message::{MessageIter, NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
 pub use namespace_events::{NamespaceEventSubscriber, NamespaceNetlinkEvent};
 #[cfg(feature = "namespace_watcher")]

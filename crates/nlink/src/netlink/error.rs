@@ -180,32 +180,6 @@ impl Error {
     }
 }
 
-/// Extension trait for adding context to Results.
-pub trait ResultExt<T> {
-    /// Add context to an error result.
-    fn with_context(self, operation: impl Into<String>) -> Result<T>;
-
-    /// Add context using a closure (only evaluated on error).
-    fn with_context_fn<F, S>(self, f: F) -> Result<T>
-    where
-        F: FnOnce() -> S,
-        S: Into<String>;
-}
-
-impl<T> ResultExt<T> for Result<T> {
-    fn with_context(self, operation: impl Into<String>) -> Result<T> {
-        self.map_err(|e| e.with_context(operation))
-    }
-
-    fn with_context_fn<F, S>(self, f: F) -> Result<T>
-    where
-        F: FnOnce() -> S,
-        S: Into<String>,
-    {
-        self.map_err(|e| e.with_context(f()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,23 +207,6 @@ mod tests {
         assert!(err.is_permission_denied());
         let msg = err.to_string();
         assert!(msg.contains("setting link up on eth0"));
-    }
-
-    #[test]
-    fn test_result_ext() {
-        let result: Result<()> = Err(Error::from_errno(-17)); // EEXIST
-        let result = result.with_context("adding qdisc to eth0");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.is_already_exists());
-        assert!(err.to_string().contains("adding qdisc to eth0"));
-    }
-
-    #[test]
-    fn test_result_ext_ok() {
-        let result: Result<i32> = Ok(42);
-        let result = result.with_context("this should not appear");
-        assert_eq!(result.unwrap(), 42);
     }
 
     #[test]

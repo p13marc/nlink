@@ -38,7 +38,7 @@ crates/nlink/src/
     builder.rs        # Message construction with MessageBuilder
     message.rs        # Netlink header parsing, MessageIter
     attr.rs           # Attribute (TLV) parsing with AttrIter
-    error.rs          # Error types with context support (ResultExt trait)
+    error.rs          # Error types with semantic checks (is_not_found, etc.)
     events.rs         # High-level event monitoring (EventStream, NetworkEvent)
     namespace.rs      # Network namespace utilities
     stats.rs          # Statistics tracking (StatsSnapshot, StatsTracker)
@@ -171,8 +171,7 @@ for qdisc in &qdiscs {
     // Get netem options with full details
     if let Some(netem) = qdisc.netem_options() {
         // Time values in nanoseconds (with convenience methods)
-        println!("delay={}ms, jitter={}ms", netem.delay_ms(), netem.jitter_ms());
-        println!("delay={}us, jitter={}us", netem.delay_us(), netem.jitter_us());
+        println!("delay={:?}, jitter={:?}", netem.delay(), netem.jitter());
         
         // Percentages
         println!("loss={}%, correlation={}%", netem.loss_percent, netem.loss_corr);
@@ -385,8 +384,8 @@ let conn = namespace::connection_for("myns")?;
 let link = conn.get_link_by_name("eth0").await?;
 
 let netem = NetemConfig::new()
-    .delay_ms(100)  // or .delay(Duration::from_millis(100))
-    .jitter_ms(10)  // or .jitter(Duration::from_millis(10))
+    .delay(Duration::from_millis(100))
+    .jitter(Duration::from_millis(10))
     .loss(1.0)
     .build();
 
@@ -433,19 +432,11 @@ builder.nest_end(options_token);
 conn.request_ack(builder).await?;
 ```
 
-**Error handling with context:**
+**Error handling:**
 ```rust
-use nlink::netlink::{Connection, Protocol, Error, ResultExt};
+use nlink::netlink::{Connection, Protocol, Error};
 
 let conn = Connection::new(Protocol::Route)?;
-
-// Add context to errors for better debugging
-conn.set_link_up("eth0").await
-    .with_context("bringing up eth0")?;
-
-// Lazy context evaluation (only computed on error)
-conn.add_qdisc("eth0", netem).await
-    .with_context_fn(|| format!("adding netem qdisc to {}", iface))?;
 
 // Check error types for recovery logic
 match conn.del_qdisc("eth0", "root").await {

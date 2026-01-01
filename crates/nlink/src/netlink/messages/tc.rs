@@ -266,7 +266,7 @@ impl TcMessage {
     /// let qdiscs = conn.get_qdiscs().await?;
     /// for qdisc in &qdiscs {
     ///     if let Some(netem) = qdisc.netem_options() {
-    ///         println!("delay={}ms, loss={}%", netem.delay_ms(), netem.loss_percent);
+    ///         println!("delay={:?}, loss={}%", netem.delay(), netem.loss_percent);
     ///     }
     /// }
     /// ```

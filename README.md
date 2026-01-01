@@ -257,8 +257,8 @@ async fn main() -> nlink::Result<()> {
         if let Some(netem) = qdisc.netem_options() {
             println!("Netem qdisc detected:");
             // Time values with convenience methods
-            println!("  delay: {}ms ({}us)", netem.delay_ms(), netem.delay_us());
-            println!("  jitter: {}ms", netem.jitter_ms());
+            println!("  delay: {:?}", netem.delay());
+            println!("  jitter: {:?}", netem.jitter());
             // Percentages
             println!("  loss: {}% (correlation: {}%)", netem.loss_percent, netem.loss_corr);
             println!("  duplicate: {}%", netem.duplicate_percent);
@@ -303,7 +303,7 @@ async fn main() -> nlink::Result<()> {
                 println!("tbf: rate={} bytes/sec, burst={}", tbf.rate, tbf.burst);
             }
             Some(QdiscOptions::Netem(netem)) => {
-                println!("netem: loss={}%, delay={}ms", netem.loss_percent, netem.delay_ms());
+                println!("netem: loss={}%, delay={:?}", netem.loss_percent, netem.delay());
             }
             _ => {}
         }
@@ -356,20 +356,11 @@ async fn main() -> nlink::Result<()> {
 The library provides rich error types with context support for better debugging:
 
 ```rust
-use nlink::netlink::{Connection, Protocol, Error, ResultExt};
+use nlink::netlink::{Connection, Protocol, Error};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
     let conn = Connection::new(Protocol::Route)?;
-    
-    // Add context to errors using the ResultExt trait
-    conn.set_link_up("eth0").await
-        .with_context("bringing up eth0")?;
-    
-    // Or use with_context_fn for lazy evaluation
-    let iface = "eth0";
-    conn.set_link_mtu(iface, 9000).await
-        .with_context_fn(|| format!("setting MTU on {}", iface))?;
     
     // Check error types for recovery logic
     match conn.del_qdisc("eth0", "root").await {
@@ -402,7 +393,7 @@ async fn main() -> nlink::Result<()> {
 - **TC options parsing**: Typed access to qdisc parameters (fq_codel, htb, tbf, netem, etc.)
 - **Netem loss models**: Support for Gilbert-Intuitive and Gilbert-Elliot state-based loss
 - **Statistics tracking**: `StatsSnapshot` and `StatsTracker` for rate calculation
-- **Error context**: `ResultExt` trait for adding context, semantic error types
+- **Error handling**: Semantic error types with `is_not_found()`, `is_permission_denied()`, etc.
 - **Low-level access**: `MessageBuilder` for custom netlink messages
 
 ### `nlink::util` - Shared utilities
