@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 documentation = "https://docs.rs/nlink"
+readme = "../../README.md"
 description = "Async netlink library for Linux network configuration"
 keywords = ["netlink", "linux", "networking", "async", "iproute2"]
 categories = ["network-programming", "os::linux-apis", "asynchronous"]
@@ -46,3 +47,8 @@ inotify = { version = "0.11", default-features = false, features = ["stream"], o
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
+rustdoc-args = ["--cfg", "docsrs"]
