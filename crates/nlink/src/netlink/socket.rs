@@ -1,6 +1,8 @@
 //! Low-level async netlink socket operations.
 
+use std::fs::File;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::BytesMut;
@@ -8,7 +10,7 @@ use netlink_sys::{Socket, SocketAddr, protocols};
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
-use super::error::Result;
+use super::error::{Error, Result};
 
 /// Netlink protocol families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +54,97 @@ pub struct NetlinkSocket {
 impl NetlinkSocket {
     /// Create a new netlink socket for the given protocol.
     pub fn new(protocol: Protocol) -> Result<Self> {
+        Self::create_socket(protocol)
+    }
+
+    /// Create a netlink socket that operates in a specific network namespace.
+    ///
+    /// The namespace is specified by an open file descriptor to a namespace file
+    /// (e.g., `/proc/<pid>/ns/net` or `/var/run/netns/<name>`).
+    ///
+    /// This function temporarily switches to the target namespace, creates the socket,
+    /// then restores the original namespace. The socket will operate in the target
+    /// namespace for all subsequent operations.
+    ///
+    /// # Safety
+    ///
+    /// This function uses `setns()` which affects the calling thread. It saves and
+    /// restores the original namespace, but callers should be aware of potential
+    /// issues in multi-threaded contexts if the restoration fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::fs::File;
+    /// use nlink::netlink::{NetlinkSocket, Protocol};
+    ///
+    /// let ns_file = File::open("/var/run/netns/myns")?;
+    /// let socket = NetlinkSocket::new_in_namespace(Protocol::Route, ns_file.as_raw_fd())?;
+    /// ```
+    pub fn new_in_namespace(protocol: Protocol, ns_fd: RawFd) -> Result<Self> {
+        // Save the current namespace so we can restore it
+        let current_ns = File::open("/proc/self/ns/net")
+            .map_err(|e| Error::InvalidMessage(format!("cannot open current namespace: {}", e)))?;
+        let current_ns_fd = current_ns.as_raw_fd();
+
+        // Switch to the target namespace
+        let ret = unsafe { libc::setns(ns_fd, libc::CLONE_NEWNET) };
+        if ret < 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+
+        // Create the socket in the target namespace
+        let result = Self::create_socket(protocol);
+
+        // Restore the original namespace (best effort - log but don't fail)
+        let restore_ret = unsafe { libc::setns(current_ns_fd, libc::CLONE_NEWNET) };
+        if restore_ret < 0 {
+            // We successfully created the socket but failed to restore namespace.
+            // This is a serious issue, but we still return the socket.
+            eprintln!(
+                "warning: failed to restore original namespace: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        result
+    }
+
+    /// Create a netlink socket that operates in a network namespace specified by path.
+    ///
+    /// This is a convenience method that opens the namespace file and calls
+    /// [`new_in_namespace`](Self::new_in_namespace).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{NetlinkSocket, Protocol};
+    ///
+    /// // For a named namespace
+    /// let socket = NetlinkSocket::new_in_namespace_path(
+    ///     Protocol::Route,
+    ///     "/var/run/netns/myns"
+    /// )?;
+    ///
+    /// // For a process namespace
+    /// let socket = NetlinkSocket::new_in_namespace_path(
+    ///     Protocol::Route,
+    ///     "/proc/1234/ns/net"
+    /// )?;
+    /// ```
+    pub fn new_in_namespace_path<P: AsRef<Path>>(protocol: Protocol, ns_path: P) -> Result<Self> {
+        let ns_file = File::open(ns_path.as_ref()).map_err(|e| {
+            Error::InvalidMessage(format!(
+                "cannot open namespace '{}': {}",
+                ns_path.as_ref().display(),
+                e
+            ))
+        })?;
+        Self::new_in_namespace(protocol, ns_file.as_raw_fd())
+    }
+
+    /// Internal helper to create the socket.
+    fn create_socket(protocol: Protocol) -> Result<Self> {
         let mut socket = Socket::new(protocol.as_isize())?;
         socket.set_non_blocking(true)?;
 

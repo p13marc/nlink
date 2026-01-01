@@ -1,5 +1,8 @@
 //! High-level netlink connection with request/response handling.
 
+use std::os::unix::io::RawFd;
+use std::path::Path;
+
 use super::builder::MessageBuilder;
 use super::error::{Error, Result};
 use super::message::{
@@ -19,6 +22,65 @@ impl Connection {
     pub fn new(protocol: Protocol) -> Result<Self> {
         Ok(Self {
             socket: NetlinkSocket::new(protocol)?,
+        })
+    }
+
+    /// Create a connection that operates in a specific network namespace.
+    ///
+    /// The namespace is specified by an open file descriptor to a namespace file
+    /// (e.g., `/proc/<pid>/ns/net` or `/var/run/netns/<name>`).
+    ///
+    /// This function temporarily switches to the target namespace, creates the socket,
+    /// then restores the original namespace. The socket will operate in the target
+    /// namespace for all subsequent operations.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::fs::File;
+    /// use std::os::unix::io::AsRawFd;
+    /// use nlink::netlink::{Connection, Protocol};
+    ///
+    /// let ns_file = File::open("/var/run/netns/myns")?;
+    /// let conn = Connection::new_in_namespace(Protocol::Route, ns_file.as_raw_fd())?;
+    ///
+    /// // All operations now occur in the "myns" namespace
+    /// let links = conn.get_links().await?;
+    /// ```
+    pub fn new_in_namespace(protocol: Protocol, ns_fd: RawFd) -> Result<Self> {
+        Ok(Self {
+            socket: NetlinkSocket::new_in_namespace(protocol, ns_fd)?,
+        })
+    }
+
+    /// Create a connection that operates in a network namespace specified by path.
+    ///
+    /// This is a convenience method that opens the namespace file and calls
+    /// [`new_in_namespace`](Self::new_in_namespace).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Protocol};
+    ///
+    /// // For a named namespace (created via `ip netns add myns`)
+    /// let conn = Connection::new_in_namespace_path(
+    ///     Protocol::Route,
+    ///     "/var/run/netns/myns"
+    /// )?;
+    ///
+    /// // For a container's namespace
+    /// let conn = Connection::new_in_namespace_path(
+    ///     Protocol::Route,
+    ///     "/proc/1234/ns/net"
+    /// )?;
+    ///
+    /// // Query interfaces in that namespace
+    /// let links = conn.get_links().await?;
+    /// ```
+    pub fn new_in_namespace_path<P: AsRef<Path>>(protocol: Protocol, ns_path: P) -> Result<Self> {
+        Ok(Self {
+            socket: NetlinkSocket::new_in_namespace_path(protocol, ns_path)?,
         })
     }
 
@@ -422,5 +484,145 @@ impl Connection {
             .into_iter()
             .filter(|f| f.ifindex() == ifindex)
             .collect())
+    }
+}
+
+// ============================================================================
+// Link State Management
+// ============================================================================
+
+use super::types::link::{IfInfoMsg, iff};
+
+impl Connection {
+    /// Bring a network interface up.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.set_link_up("eth0").await?;
+    /// ```
+    pub async fn set_link_up(&self, ifname: &str) -> Result<()> {
+        self.set_link_state(ifname, true).await
+    }
+
+    /// Bring a network interface up by index.
+    pub async fn set_link_up_by_index(&self, ifindex: i32) -> Result<()> {
+        self.set_link_state_by_index(ifindex, true).await
+    }
+
+    /// Bring a network interface down.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.set_link_down("eth0").await?;
+    /// ```
+    pub async fn set_link_down(&self, ifname: &str) -> Result<()> {
+        self.set_link_state(ifname, false).await
+    }
+
+    /// Bring a network interface down by index.
+    pub async fn set_link_down_by_index(&self, ifindex: i32) -> Result<()> {
+        self.set_link_state_by_index(ifindex, false).await
+    }
+
+    /// Set the state of a network interface (up or down).
+    ///
+    /// # Arguments
+    ///
+    /// * `ifname` - The interface name (e.g., "eth0")
+    /// * `up` - `true` to bring the interface up, `false` to bring it down
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Bring interface up
+    /// conn.set_link_state("eth0", true).await?;
+    ///
+    /// // Bring interface down
+    /// conn.set_link_state("eth0", false).await?;
+    /// ```
+    pub async fn set_link_state(&self, ifname: &str, up: bool) -> Result<()> {
+        let ifindex = ifname_to_index(ifname)?;
+        self.set_link_state_by_index(ifindex, up).await
+    }
+
+    /// Set the state of a network interface by index.
+    pub async fn set_link_state_by_index(&self, ifindex: i32, up: bool) -> Result<()> {
+        let mut ifinfo = IfInfoMsg::new().with_index(ifindex);
+
+        if up {
+            ifinfo.ifi_flags = iff::UP;
+            ifinfo.ifi_change = iff::UP;
+        } else {
+            ifinfo.ifi_flags = 0;
+            ifinfo.ifi_change = iff::UP;
+        }
+
+        let mut builder = ack_request(NlMsgType::RTM_SETLINK);
+        builder.append(&ifinfo);
+
+        self.request_ack(builder).await
+    }
+
+    /// Set the MTU of a network interface.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.set_link_mtu("eth0", 9000).await?;
+    /// ```
+    pub async fn set_link_mtu(&self, ifname: &str, mtu: u32) -> Result<()> {
+        let ifindex = ifname_to_index(ifname)?;
+        self.set_link_mtu_by_index(ifindex, mtu).await
+    }
+
+    /// Set the MTU of a network interface by index.
+    pub async fn set_link_mtu_by_index(&self, ifindex: i32, mtu: u32) -> Result<()> {
+        use super::types::link::IflaAttr;
+
+        let ifinfo = IfInfoMsg::new().with_index(ifindex);
+
+        let mut builder = ack_request(NlMsgType::RTM_SETLINK);
+        builder.append(&ifinfo);
+        builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+
+        self.request_ack(builder).await
+    }
+
+    /// Delete a network interface.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.del_link("veth0").await?;
+    /// ```
+    pub async fn del_link(&self, ifname: &str) -> Result<()> {
+        let ifindex = ifname_to_index(ifname)?;
+        self.del_link_by_index(ifindex).await
+    }
+
+    /// Delete a network interface by index.
+    pub async fn del_link_by_index(&self, ifindex: i32) -> Result<()> {
+        let ifinfo = IfInfoMsg::new().with_index(ifindex);
+
+        let mut builder = ack_request(NlMsgType::RTM_DELLINK);
+        builder.append(&ifinfo);
+
+        self.request_ack(builder).await
+    }
+}
+
+#[cfg(test)]
+mod send_sync_tests {
+    use super::*;
+
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+
+    #[test]
+    fn connection_is_send_sync() {
+        assert_send::<Connection>();
+        assert_sync::<Connection>();
     }
 }

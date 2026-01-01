@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+authors.workspace = true
 description = "Async netlink library for Linux network configuration"
 keywords = ["netlink", "linux", "networking", "async", "iproute2"]
 categories = ["network-programming", "os::linux-apis", "asynchronous"]

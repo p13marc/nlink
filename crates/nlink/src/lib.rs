@@ -25,11 +25,51 @@
 //!     // Query interfaces
 //!     let links = conn.get_links().await?;
 //!     for link in links {
-//!         println!("{}: {}", link.index, link.name.unwrap_or_default());
+//!         println!("{}: {}", link.ifindex(), link.name.as_deref().unwrap_or("?"));
 //!     }
 //!
 //!     Ok(())
 //! }
+//! ```
+//!
+//! # Link State Management
+//!
+//! ```ignore
+//! use nlink::netlink::{Connection, Protocol};
+//!
+//! let conn = Connection::new(Protocol::Route)?;
+//!
+//! // Bring an interface up
+//! conn.set_link_up("eth0").await?;
+//!
+//! // Bring it down
+//! conn.set_link_down("eth0").await?;
+//!
+//! // Set MTU
+//! conn.set_link_mtu("eth0", 9000).await?;
+//! ```
+//!
+//! # Network Namespace Support
+//!
+//! Operations can be performed in specific network namespaces:
+//!
+//! ```ignore
+//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::namespace;
+//!
+//! // Connect to a named namespace (created via `ip netns add myns`)
+//! let conn = namespace::connection_for("myns")?;
+//! let links = conn.get_links().await?;
+//!
+//! // Or connect to a container's namespace
+//! let conn = namespace::connection_for_pid(container_pid)?;
+//! let links = conn.get_links().await?;
+//!
+//! // Or use a path directly
+//! let conn = Connection::new_in_namespace_path(
+//!     Protocol::Route,
+//!     "/proc/1234/ns/net"
+//! )?;
 //! ```
 //!
 //! # Event Monitoring

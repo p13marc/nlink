@@ -39,6 +39,7 @@ crates/nlink/src/
     message.rs        # Netlink header parsing, MessageIter
     attr.rs           # Attribute (TLV) parsing with AttrIter
     events.rs         # High-level event monitoring (EventStream, NetworkEvent)
+    namespace.rs      # Network namespace utilities
     stats.rs          # Statistics tracking (StatsSnapshot, StatsTracker)
     tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, etc.)
     tc_options.rs     # TC options parsing
@@ -93,6 +94,47 @@ let routes = conn.get_routes().await?;
 // Query TC
 let qdiscs = conn.get_qdiscs().await?;
 let classes = conn.get_classes_for("eth0").await?;
+```
+
+**Link state management:**
+```rust
+use nlink::netlink::{Connection, Protocol};
+
+let conn = Connection::new(Protocol::Route)?;
+
+// Bring interface up/down
+conn.set_link_up("eth0").await?;
+conn.set_link_down("eth0").await?;
+
+// Set MTU
+conn.set_link_mtu("eth0", 9000).await?;
+
+// Delete a virtual interface
+conn.del_link("veth0").await?;
+```
+
+**Network namespace operations:**
+```rust
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::namespace;
+
+// Connect to a named namespace (created via `ip netns add myns`)
+let conn = namespace::connection_for("myns")?;
+let links = conn.get_links().await?;
+
+// Connect to a container's namespace by PID
+let conn = namespace::connection_for_pid(container_pid)?;
+
+// Or use a path directly
+let conn = Connection::new_in_namespace_path(
+    Protocol::Route,
+    "/proc/1234/ns/net"
+)?;
+
+// List available namespaces
+for ns in namespace::list()? {
+    println!("Namespace: {}", ns);
+}
 ```
 
 **Parsing TC options:**

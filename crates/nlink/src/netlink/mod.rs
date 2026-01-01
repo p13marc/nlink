@@ -75,6 +75,7 @@ pub mod events;
 mod fixtures;
 pub mod message;
 pub mod messages;
+pub mod namespace;
 pub mod parse;
 mod socket;
 pub mod stats;

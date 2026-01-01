@@ -64,6 +64,10 @@ async fn main() -> nlink::Result<()> {
     // Get TC qdiscs
     let qdiscs = conn.get_qdiscs().await?;
     
+    // Modify interface state
+    conn.set_link_up("eth0").await?;
+    conn.set_link_mtu("eth0", 9000).await?;
+    
     // Monitor network events
     let mut stream = EventStream::builder()
         .links(true)
@@ -83,11 +87,44 @@ async fn main() -> nlink::Result<()> {
 }
 ```
 
+### Working with Network Namespaces
+
+```rust
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::namespace;
+
+#[tokio::main]
+async fn main() -> nlink::Result<()> {
+    // Connect to a named namespace (created via `ip netns add myns`)
+    let conn = namespace::connection_for("myns")?;
+    let links = conn.get_links().await?;
+    
+    // Connect to a container's namespace by PID
+    let conn = namespace::connection_for_pid(1234)?;
+    let links = conn.get_links().await?;
+    
+    // Or use a path directly
+    let conn = Connection::new_in_namespace_path(
+        Protocol::Route,
+        "/proc/1234/ns/net"
+    )?;
+    
+    // List available namespaces
+    for ns in namespace::list()? {
+        println!("Namespace: {}", ns);
+    }
+    
+    Ok(())
+}
+```
+
 ## Library Modules
 
 ### `nlink::netlink` - Core netlink functionality
 
 - **High-level API**: `Connection` with convenience query methods (`get_links()`, `get_addresses()`, etc.)
+- **Link state management**: `set_link_up()`, `set_link_down()`, `set_link_mtu()`, `del_link()`
+- **Namespace support**: `Connection::new_in_namespace_path()` and `namespace` module helpers
 - **Event monitoring**: `EventStream` for real-time network change notifications
 - **Strongly-typed messages**: `LinkMessage`, `AddressMessage`, `RouteMessage`, `TcMessage`
 - **TC options parsing**: Typed access to qdisc parameters (fq_codel, htb, tbf, netem, etc.)
@@ -321,8 +358,11 @@ The library API is production-ready for network monitoring and querying. Current
 
 - [x] High-level event stream API (`EventStream`, `NetworkEvent`)
 - [x] Convenience query methods (`get_links()`, `get_addresses()`, `get_qdiscs()`, etc.)
+- [x] Link state management (`set_link_up()`, `set_link_down()`, `set_link_mtu()`, `del_link()`)
+- [x] Namespace-aware connections (`Connection::new_in_namespace_path()`, `namespace` module)
 - [x] Typed TC options parsing (fq_codel, htb, tbf, netem, prio, sfq)
 - [x] Statistics helpers with rate calculation (`StatsSnapshot`, `StatsTracker`)
+- [x] Thread-safe `Connection` (`Send + Sync`)
 
 ## License
 
