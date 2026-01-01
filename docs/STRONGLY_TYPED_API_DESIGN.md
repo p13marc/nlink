@@ -1,8 +1,8 @@
-# Strongly-Typed Library API Design for rip-netlink
+# Strongly-Typed Library API Design for nlink
 
 ## Executive Summary
 
-The current rip-netlink crate provides a working low-level netlink implementation, but the library API requires significant boilerplate from consumers. Each message type requires 40-60 lines of hand-written parsing code with manual type conversions and no compile-time safety guarantees.
+The current nlink crate provides a working low-level netlink implementation, but the library API requires significant boilerplate from consumers. Each message type requires 40-60 lines of hand-written parsing code with manual type conversions and no compile-time safety guarantees.
 
 This document proposes a strongly-typed API layer using parser combinators (winnow) and derive macros to provide:
 - Zero-copy parsing with compile-time type safety
@@ -81,7 +81,7 @@ Each is nearly identical structure with different attribute enums.
 ┌─────────────────────────────────────────────────────────┐
 │                    User Application                      │
 ├─────────────────────────────────────────────────────────┤
-│              rip-netlink (High-Level API)                │
+│              nlink (High-Level API)                │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐  │
 │  │ AddressMsg  │  │  RouteMsg   │  │    LinkMsg      │  │
 │  │ ::parse()   │  │ ::parse()   │  │   ::parse()     │  │
@@ -94,7 +94,7 @@ Each is nearly identical structure with different attribute enums.
 │                   Parser Combinators                     │
 │            winnow-based binary parsing                   │
 ├─────────────────────────────────────────────────────────┤
-│              rip-netlink (Low-Level API)                 │
+│              nlink (Low-Level API)                 │
 │  NetlinkSocket, Connection, MessageBuilder, AttrIter    │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -595,7 +595,7 @@ pub enum LinkInfoData {
 - Still returns low-level message types
 - User must iterate attributes manually for complex cases
 
-### 7.3 rip-netlink (Proposed)
+### 7.3 nlink (Proposed)
 
 **Goal:** Combine the best of both with:
 - Zero-copy parsing via winnow
@@ -611,7 +611,7 @@ pub enum LinkInfoData {
 ### Phase 1: Parser Foundation (2-3 days)
 
 1. Add `winnow` dependency
-2. Create `rip-netlink/src/parse.rs` with core combinators:
+2. Create `nlink/src/parse.rs` with core combinators:
    - `parse_nlmsghdr`
    - `parse_attr`
    - `parse_u8/u16/u32/u64` (native endian)
@@ -622,7 +622,7 @@ pub enum LinkInfoData {
 
 ### Phase 2: Derive Macros (3-4 days)
 
-1. Create `rip-netlink-derive` crate
+1. Create `nlink-derive` crate
 2. Implement `#[derive(NetlinkMessage)]`:
    - Parse header struct
    - Generate attribute iteration
@@ -771,14 +771,14 @@ while let Some(event) = events.next().await {
 
 ## 11. Conclusion
 
-The current rip-netlink implementation is functional but requires too much boilerplate from library consumers. By adding:
+The current nlink implementation is functional but requires too much boilerplate from library consumers. By adding:
 
 1. **winnow-based parsing** for zero-copy, type-safe message parsing
 2. **Derive macros** for automatic implementation of traits
 3. **Type-safe builders** for message construction
 4. **Strongly-typed message structs** with all attributes resolved
 
-We can reduce ~300 lines of parsing code per binary to ~20 lines while gaining compile-time safety guarantees. This positions rip-netlink as a superior library choice over existing options like netlink-packet-route.
+We can reduce ~300 lines of parsing code per binary to ~20 lines while gaining compile-time safety guarantees. This positions nlink as a superior library choice over existing options like netlink-packet-route.
 
 ---
 

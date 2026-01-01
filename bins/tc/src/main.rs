@@ -3,8 +3,8 @@
 //! Manages queuing disciplines (qdiscs), classes, and filters.
 
 use clap::{Parser, Subcommand};
-use rip::netlink::{Connection, Protocol, Result};
-use rip::output::{OutputFormat, OutputOptions};
+use nlink::netlink::{Connection, Protocol, Result};
+use nlink::output::{OutputFormat, OutputOptions};
 
 mod commands;
 

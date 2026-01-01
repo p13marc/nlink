@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Rip is a Rust library for Linux network configuration via netlink. The primary goal is to provide a well-designed Rust crate for programmatic network management. The binaries (`ip`, `tc`, `ss`) serve as proof-of-concept demonstrations.
+Nlink is a Rust library for Linux network configuration via netlink. The primary goal is to provide a well-designed Rust crate for programmatic network management. The binaries (`ip`, `tc`, `ss`) serve as proof-of-concept demonstrations.
 
 **Key design decisions:**
 - Custom netlink implementation - no dependency on rtnetlink/netlink-packet-* crates
@@ -17,20 +17,20 @@ Rip is a Rust library for Linux network configuration via netlink. The primary g
 
 ```bash
 cargo build                    # Build all crates and binaries
-cargo build -p rip             # Build the library
-cargo build -p rip-ip          # Build ip binary
+cargo build -p nlink           # Build the library
+cargo build -p nlink-ip        # Build ip binary
 cargo test                     # Run all tests
-cargo test -p rip              # Test the library
+cargo test -p nlink            # Test the library
 ```
 
 ## Architecture
 
 ### Library Crate
 
-**rip** (`crates/rip/`) - Single publishable crate with feature-gated modules:
+**nlink** (`crates/nlink/`) - Single publishable crate with feature-gated modules:
 
 ```
-crates/rip/src/
+crates/nlink/src/
   lib.rs              # Main entry point, re-exports
   netlink/            # Core netlink (always available)
     connection.rs     # High-level request/response/dump handling
@@ -67,15 +67,15 @@ crates/rip/src/
 
 ### Binaries
 
-- `bins/ip/` - Network configuration (depends on `rip` with `output` feature)
-- `bins/tc/` - Traffic control (depends on `rip` with `tc`, `output` features)
-- `bins/ss/` - Socket statistics (depends on `rip` with `sockdiag`, `output` features)
+- `bins/ip/` - Network configuration (depends on `nlink` with `output` feature)
+- `bins/tc/` - Traffic control (depends on `nlink` with `tc`, `output` features)
+- `bins/ss/` - Socket statistics (depends on `nlink` with `sockdiag`, `output` features)
 
 ## Key Patterns
 
 **High-level queries (preferred for library use):**
 ```rust
-use rip::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Protocol};
 
 let conn = Connection::new(Protocol::Route)?;
 
@@ -97,7 +97,7 @@ let classes = conn.get_classes_for("eth0").await?;
 
 **Parsing TC options:**
 ```rust
-use rip::netlink::tc_options::{parse_qdisc_options, QdiscOptions};
+use nlink::netlink::tc_options::{parse_qdisc_options, QdiscOptions};
 
 for qdisc in &qdiscs {
     if let Some(opts) = parse_qdisc_options(qdisc) {
@@ -112,7 +112,7 @@ for qdisc in &qdiscs {
 
 **Statistics tracking:**
 ```rust
-use rip::netlink::stats::{StatsSnapshot, StatsTracker};
+use nlink::netlink::stats::{StatsSnapshot, StatsTracker};
 
 let mut tracker = StatsTracker::new();
 loop {
@@ -129,7 +129,7 @@ loop {
 
 **Monitoring events (high-level API - preferred):**
 ```rust
-use rip::netlink::events::{EventStream, NetworkEvent};
+use nlink::netlink::events::{EventStream, NetworkEvent};
 
 let mut stream = EventStream::builder()
     .links(true)
@@ -149,9 +149,9 @@ while let Some(event) = stream.next().await? {
 
 **Building requests (low-level):**
 ```rust
-use rip::netlink::{MessageBuilder, Connection};
-use rip::netlink::message::NlMsgType;
-use rip::netlink::types::link::IfInfoMsg;
+use nlink::netlink::{MessageBuilder, Connection};
+use nlink::netlink::message::NlMsgType;
+use nlink::netlink::types::link::IfInfoMsg;
 
 let mut builder = dump_request(NlMsgType::RTM_GETLINK);
 builder.append(&IfInfoMsg::new());
@@ -160,8 +160,8 @@ let responses = conn.dump(builder).await?;
 
 **Adding TC qdisc with options:**
 ```rust
-use rip::netlink::types::tc::qdisc::htb::*;
-use rip::netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
+use nlink::netlink::types::tc::qdisc::htb::*;
+use nlink::netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
 
 let tcmsg = TcMsg::new()
     .with_ifindex(ifindex)
@@ -192,8 +192,8 @@ conn.request_ack(builder).await?;
 
 ## Publishing
 
-The `rip` crate is the only publishable crate. All binaries have `publish = false`.
+The `nlink` crate is the only publishable crate. All binaries have `publish = false`.
 
 ```bash
-cargo publish -p rip
+cargo publish -p nlink
 ```

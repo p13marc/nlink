@@ -4,8 +4,8 @@
 //! that are subscribed on interfaces.
 
 use clap::{Args, Subcommand};
-use rip::netlink::Result;
-use rip::output::{OutputFormat, OutputOptions, Printable, print_all};
+use nlink::netlink::Result;
+use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;

@@ -1,11 +1,11 @@
 //! tc qdisc command implementation.
 
 use clap::{Args, Subcommand};
-use rip::netlink::message::NlMsgType;
-use rip::netlink::messages::TcMessage;
-use rip::netlink::{Connection, Result};
-use rip::output::{OutputFormat, OutputOptions, print_all};
-use rip::tc::builders::qdisc as qdisc_builder;
+use nlink::netlink::message::NlMsgType;
+use nlink::netlink::messages::TcMessage;
+use nlink::netlink::{Connection, Result};
+use nlink::output::{OutputFormat, OutputOptions, print_all};
+use nlink::tc::builders::qdisc as qdisc_builder;
 
 #[derive(Args)]
 pub struct QdiscCmd {
@@ -171,7 +171,7 @@ impl QdiscCmd {
     ) -> Result<()> {
         // Get interface index if filtering
         let filter_index =
-            rip::util::get_ifindex_opt(dev).map_err(rip::netlink::Error::InvalidMessage)?;
+            nlink::util::get_ifindex_opt(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
 
         // Fetch all qdiscs using typed API
         let all_qdiscs: Vec<TcMessage> = conn.dump_typed(NlMsgType::RTM_GETQDISC).await?;

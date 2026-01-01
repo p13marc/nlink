@@ -1,10 +1,10 @@
-# rip - Rust IP utilities
+# nlink - Rust IP utilities
 
 A modern Rust implementation of Linux network management tools, providing both a library crate and CLI binaries.
 
 ## Overview
 
-rip is a from-scratch implementation of Linux netlink-based network management. The primary goal is to provide a high-quality Rust library for programmatic network configuration, with CLI tools serving as proof-of-concept binaries.
+nlink is a from-scratch implementation of Linux netlink-based network management. The primary goal is to provide a high-quality Rust library for programmatic network configuration, with CLI tools serving as proof-of-concept binaries.
 
 **Key design principles:**
 
@@ -20,13 +20,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 # Core netlink functionality
-rip = "0.1"
+nlink = "0.1"
 
 # With additional features
-rip = { version = "0.1", features = ["sockdiag", "tuntap", "tc", "output"] }
+nlink = { version = "0.1", features = ["sockdiag", "tuntap", "tc", "output"] }
 
 # All features
-rip = { version = "0.1", features = ["full"] }
+nlink = { version = "0.1", features = ["full"] }
 ```
 
 ### Features
@@ -42,11 +42,11 @@ rip = { version = "0.1", features = ["full"] }
 ## Using as a Library
 
 ```rust
-use rip::netlink::{Connection, Protocol};
-use rip::netlink::events::{EventStream, NetworkEvent};
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::events::{EventStream, NetworkEvent};
 
 #[tokio::main]
-async fn main() -> rip::Result<()> {
+async fn main() -> nlink::Result<()> {
     let conn = Connection::new(Protocol::Route)?;
     
     // Query network state with convenience methods
@@ -85,7 +85,7 @@ async fn main() -> rip::Result<()> {
 
 ## Library Modules
 
-### `rip::netlink` - Core netlink functionality
+### `nlink::netlink` - Core netlink functionality
 
 - **High-level API**: `Connection` with convenience query methods (`get_links()`, `get_addresses()`, etc.)
 - **Event monitoring**: `EventStream` for real-time network change notifications
@@ -94,32 +94,32 @@ async fn main() -> rip::Result<()> {
 - **Statistics tracking**: `StatsSnapshot` and `StatsTracker` for rate calculation
 - **Low-level access**: `MessageBuilder` for custom netlink messages
 
-### `rip::util` - Shared utilities
+### `nlink::util` - Shared utilities
 
 - Argument parsing (`get_u8`, `get_u16`, `get_u32`, `get_rate`, `get_size`)
 - Address utilities (parse/format IP addresses and prefixes)
 - Name resolution (protocol names, scope names, table names)
 - Interface name/index mapping
 
-### `rip::sockdiag` - Socket diagnostics (feature: `sockdiag`)
+### `nlink::sockdiag` - Socket diagnostics (feature: `sockdiag`)
 
 - Query TCP, UDP, Unix, and other socket types
 - Filter by state, port, address, and other criteria
 - Retrieve detailed socket information (memory, TCP info, etc.)
 
-### `rip::tuntap` - TUN/TAP devices (feature: `tuntap`)
+### `nlink::tuntap` - TUN/TAP devices (feature: `tuntap`)
 
 - Create and manage TUN/TAP virtual network devices
 - Set device ownership and permissions
 - Async read/write support
 
-### `rip::tc` - Traffic control (feature: `tc`)
+### `nlink::tc` - Traffic control (feature: `tc`)
 
 - Qdisc option builders for htb, fq_codel, tbf, netem, etc.
 - Handle parsing and formatting
 - Class and filter builders
 
-### `rip::output` - Output formatting (feature: `output`)
+### `nlink::output` - Output formatting (feature: `output`)
 
 - Text and JSON output modes
 - `Printable` trait for consistent formatting

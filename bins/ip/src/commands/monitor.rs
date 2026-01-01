@@ -4,14 +4,14 @@
 //! and the generic monitor infrastructure from rip-output.
 
 use clap::{Args, ValueEnum};
-use rip::netlink::message::NlMsgType;
-use rip::netlink::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage};
-use rip::netlink::parse::FromNetlink;
-use rip::netlink::rtnetlink_groups::*;
-use rip::netlink::types::link::iff;
-use rip::netlink::types::neigh::nud_state_name;
-use rip::netlink::{Connection, Protocol, Result};
-use rip::output::{
+use nlink::netlink::message::NlMsgType;
+use nlink::netlink::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage};
+use nlink::netlink::parse::FromNetlink;
+use nlink::netlink::rtnetlink_groups::*;
+use nlink::netlink::types::link::iff;
+use nlink::netlink::types::neigh::nud_state_name;
+use nlink::netlink::{Connection, Protocol, Result};
+use nlink::output::{
     AddressEvent, IpEvent, LinkEvent, MonitorConfig, NeighborEvent, OutputFormat, OutputOptions,
     RouteEvent, print_monitor_start, run_monitor_loop,
 };

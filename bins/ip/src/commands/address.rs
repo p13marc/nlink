@@ -3,11 +3,11 @@
 //! This module uses the strongly-typed AddressMessage API from rip-netlink.
 
 use clap::{Args, Subcommand};
-use rip::netlink::message::NlMsgType;
-use rip::netlink::messages::{AddressMessage, AddressMessageBuilder};
-use rip::netlink::types::addr::{IfAddrMsg, IfaAttr, Scope};
-use rip::netlink::{Connection, Result, connection::ack_request};
-use rip::output::{OutputFormat, OutputOptions};
+use nlink::netlink::message::NlMsgType;
+use nlink::netlink::messages::{AddressMessage, AddressMessageBuilder};
+use nlink::netlink::types::addr::{IfAddrMsg, IfaAttr, Scope};
+use nlink::netlink::{Connection, Result, connection::ack_request};
+use nlink::output::{OutputFormat, OutputOptions};
 use std::io::{self, Write};
 use std::net::IpAddr;
 
@@ -115,9 +115,9 @@ impl AddressCmd {
         let all_addresses: Vec<AddressMessage> = conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
 
         // Get device index if filtering by name
-        let filter_index = rip::util::get_ifindex_opt(dev)
+        let filter_index = nlink::util::get_ifindex_opt(dev)
             .map(|opt| opt.map(|i| i as u32))
-            .map_err(rip::netlink::Error::InvalidMessage)?;
+            .map_err(nlink::netlink::Error::InvalidMessage)?;
 
         // Filter addresses
         let addresses: Vec<_> = all_addresses
@@ -149,7 +149,7 @@ impl AddressCmd {
                     if addr.ifindex() != current_index {
                         current_index = addr.ifindex();
                         // Print interface header
-                        let ifname = rip::util::get_ifname_or_index(addr.ifindex() as i32);
+                        let ifname = nlink::util::get_ifname_or_index(addr.ifindex() as i32);
                         writeln!(stdout, "{}: {}:", addr.ifindex(), ifname)?;
                     }
                     print_addr_text(&mut stdout, addr, opts)?;
@@ -179,12 +179,12 @@ impl AddressCmd {
         scope: Option<&str>,
         peer: Option<&str>,
     ) -> Result<()> {
-        use rip::util::addr::parse_prefix;
+        use nlink::util::addr::parse_prefix;
 
         let (addr, prefix) = parse_prefix(address)
-            .map_err(|e| rip::netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
+            .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
 
-        let ifindex = rip::util::get_ifindex(dev).map_err(rip::netlink::Error::InvalidMessage)? as u32;
+        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
 
         // Parse scope
         let scope_val = if let Some(s) = scope {
@@ -204,7 +204,7 @@ impl AddressCmd {
         // Add peer address (for point-to-point)
         if let Some(peer_str) = peer {
             let peer_addr: IpAddr = peer_str.parse().map_err(|_| {
-                rip::netlink::Error::InvalidMessage(format!("invalid peer address: {}", peer_str))
+                nlink::netlink::Error::InvalidMessage(format!("invalid peer address: {}", peer_str))
             })?;
             builder = builder.address(peer_addr);
         }
@@ -285,12 +285,12 @@ impl AddressCmd {
     }
 
     async fn del(conn: &Connection, address: &str, dev: &str) -> Result<()> {
-        use rip::util::addr::parse_prefix;
+        use nlink::util::addr::parse_prefix;
 
         let (addr, prefix) = parse_prefix(address)
-            .map_err(|e| rip::netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
+            .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
 
-        let ifindex = rip::util::get_ifindex(dev).map_err(rip::netlink::Error::InvalidMessage)? as u32;
+        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
 
         let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
 
@@ -322,9 +322,9 @@ impl AddressCmd {
         let all_addresses: Vec<AddressMessage> = conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
 
         // Get device index if filtering by name
-        let filter_index = rip::util::get_ifindex_opt(dev)
+        let filter_index = nlink::util::get_ifindex_opt(dev)
             .map(|opt| opt.map(|i| i as u32))
-            .map_err(rip::netlink::Error::InvalidMessage)?;
+            .map_err(nlink::netlink::Error::InvalidMessage)?;
 
         // Filter and delete addresses
         for addr in all_addresses {
@@ -381,12 +381,12 @@ impl AddressCmd {
 
 /// Convert AddressMessage to JSON.
 fn addr_to_json(addr: &AddressMessage) -> serde_json::Value {
-    let ifname = rip::util::get_ifname_or_index(addr.ifindex() as i32);
+    let ifname = nlink::util::get_ifname_or_index(addr.ifindex() as i32);
 
     let mut obj = serde_json::json!({
         "ifindex": addr.ifindex(),
         "ifname": ifname,
-        "family": rip::util::names::family_name(addr.family()),
+        "family": nlink::util::names::family_name(addr.family()),
         "prefixlen": addr.prefix_len(),
         "scope": addr.scope().name(),
     });
@@ -431,7 +431,7 @@ fn print_addr_text<W: Write>(
     addr: &AddressMessage,
     _opts: &OutputOptions,
 ) -> io::Result<()> {
-    let family = rip::util::names::family_name(addr.family());
+    let family = nlink::util::names::family_name(addr.family());
 
     // Get the primary address to display
     let display_addr = addr

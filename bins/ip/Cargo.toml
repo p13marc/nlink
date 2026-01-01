@@ -1,5 +1,5 @@
 [package]
-name = "rip-ip"
+name = "nlink-ip"
 description = "ip command - network interface and routing configuration"
 version.workspace = true
 edition.workspace = true
@@ -11,7 +11,7 @@ name = "ip"
 path = "src/main.rs"
 
 [dependencies]
-rip = { workspace = true, features = ["output"] }
+nlink = { workspace = true, features = ["output"] }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

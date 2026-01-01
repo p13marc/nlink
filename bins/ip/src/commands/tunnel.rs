@@ -7,12 +7,12 @@
 //! provides compatibility with the classic `ip tunnel` syntax.
 
 use clap::{Args, Subcommand};
-use rip::netlink::attr::AttrIter;
-use rip::netlink::connection::dump_request;
-use rip::netlink::message::{NLMSG_HDRLEN, NlMsgType};
-use rip::netlink::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
-use rip::netlink::{Connection, MessageBuilder, Result};
-use rip::output::{OutputFormat, OutputOptions, Printable, print_all};
+use nlink::netlink::attr::AttrIter;
+use nlink::netlink::connection::dump_request;
+use nlink::netlink::message::{NLMSG_HDRLEN, NlMsgType};
+use nlink::netlink::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
+use nlink::netlink::{Connection, MessageBuilder, Result};
+use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::io::Write;
 use std::net::Ipv4Addr;
 
@@ -273,7 +273,7 @@ impl TunnelCmd {
             "ip6gre" => "ip6gre",
             "ip6tnl" => "ip6tnl",
             _ => {
-                return Err(rip::netlink::Error::InvalidMessage(format!(
+                return Err(nlink::netlink::Error::InvalidMessage(format!(
                     "unknown tunnel mode '{}', supported: gre, gretap, ipip, sit, vti",
                     mode
                 )));
@@ -282,12 +282,12 @@ impl TunnelCmd {
 
         // Parse addresses
         let remote_addr: Ipv4Addr = remote.parse().map_err(|_| {
-            rip::netlink::Error::InvalidMessage(format!("invalid remote address: {}", remote))
+            nlink::netlink::Error::InvalidMessage(format!("invalid remote address: {}", remote))
         })?;
 
         let local_addr: Option<Ipv4Addr> = if let Some(l) = local {
             Some(l.parse().map_err(|_| {
-                rip::netlink::Error::InvalidMessage(format!("invalid local address: {}", l))
+                nlink::netlink::Error::InvalidMessage(format!("invalid local address: {}", l))
             })?)
         } else {
             None
@@ -296,10 +296,10 @@ impl TunnelCmd {
         // Build netlink message
         let mut builder = MessageBuilder::new(
             NlMsgType::RTM_NEWLINK,
-            rip::netlink::message::NLM_F_REQUEST
-                | rip::netlink::message::NLM_F_ACK
-                | rip::netlink::message::NLM_F_CREATE
-                | rip::netlink::message::NLM_F_EXCL,
+            nlink::netlink::message::NLM_F_REQUEST
+                | nlink::netlink::message::NLM_F_ACK
+                | nlink::netlink::message::NLM_F_CREATE
+                | nlink::netlink::message::NLM_F_EXCL,
         );
 
         let ifinfo = IfInfoMsg::new();
@@ -383,14 +383,14 @@ impl TunnelCmd {
 
     async fn delete_tunnel(&self, conn: &Connection, name: &str) -> Result<()> {
         // Get interface index
-        let ifindex = rip::util::get_ifindex(name).map_err(|_| {
-            rip::netlink::Error::InvalidMessage(format!("tunnel '{}' not found", name))
+        let ifindex = nlink::util::get_ifindex(name).map_err(|_| {
+            nlink::netlink::Error::InvalidMessage(format!("tunnel '{}' not found", name))
         })? as u32;
 
         // Build delete message
         let mut builder = MessageBuilder::new(
             NlMsgType::RTM_DELLINK,
-            rip::netlink::message::NLM_F_REQUEST | rip::netlink::message::NLM_F_ACK,
+            nlink::netlink::message::NLM_F_REQUEST | nlink::netlink::message::NLM_F_ACK,
         );
 
         let mut ifinfo = IfInfoMsg::new();
@@ -413,14 +413,14 @@ impl TunnelCmd {
         key: Option<u32>,
     ) -> Result<()> {
         // Get interface index
-        let ifindex = rip::util::get_ifindex(name).map_err(|_| {
-            rip::netlink::Error::InvalidMessage(format!("tunnel '{}' not found", name))
+        let ifindex = nlink::util::get_ifindex(name).map_err(|_| {
+            nlink::netlink::Error::InvalidMessage(format!("tunnel '{}' not found", name))
         })? as u32;
 
         // Build change message
         let mut builder = MessageBuilder::new(
             NlMsgType::RTM_NEWLINK,
-            rip::netlink::message::NLM_F_REQUEST | rip::netlink::message::NLM_F_ACK,
+            nlink::netlink::message::NLM_F_REQUEST | nlink::netlink::message::NLM_F_ACK,
         );
 
         let mut ifinfo = IfInfoMsg::new();
@@ -434,14 +434,14 @@ impl TunnelCmd {
 
         if let Some(r) = remote {
             let addr: Ipv4Addr = r.parse().map_err(|_| {
-                rip::netlink::Error::InvalidMessage(format!("invalid remote address: {}", r))
+                nlink::netlink::Error::InvalidMessage(format!("invalid remote address: {}", r))
             })?;
             builder.append_attr(gre_attrs::IFLA_GRE_REMOTE, &addr.octets());
         }
 
         if let Some(l) = local {
             let addr: Ipv4Addr = l.parse().map_err(|_| {
-                rip::netlink::Error::InvalidMessage(format!("invalid local address: {}", l))
+                nlink::netlink::Error::InvalidMessage(format!("invalid local address: {}", l))
             })?;
             builder.append_attr(gre_attrs::IFLA_GRE_LOCAL, &addr.octets());
         }

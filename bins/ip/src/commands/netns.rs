@@ -4,8 +4,8 @@
 //! Each namespace has its own interfaces, routing tables, firewall rules, etc.
 
 use clap::{Args, Subcommand};
-use rip::netlink::Result;
-use rip::output::{OutputFormat, OutputOptions, Printable, print_all};
+use nlink::netlink::Result;
+use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -139,14 +139,14 @@ fn list_namespaces(format: OutputFormat, opts: &OutputOptions) -> Result<()> {
             return Ok(());
         }
         Err(e) => {
-            return Err(rip::netlink::Error::Io(e));
+            return Err(nlink::netlink::Error::Io(e));
         }
     };
 
     let mut namespaces: Vec<NamespaceInfo> = Vec::new();
 
     for entry in dir {
-        let entry = entry.map_err(rip::netlink::Error::Io)?;
+        let entry = entry.map_err(nlink::netlink::Error::Io)?;
         let name = entry.file_name().to_string_lossy().to_string();
         if name == "." || name == ".." {
             continue;
@@ -190,9 +190,9 @@ fn add_namespace(name: &str) -> Result<()> {
         .open(&netns_path)
         .map_err(|e| {
             if e.kind() == io::ErrorKind::AlreadyExists {
-                rip::netlink::Error::InvalidMessage(format!("namespace '{}' already exists", name))
+                nlink::netlink::Error::InvalidMessage(format!("namespace '{}' already exists", name))
             } else {
-                rip::netlink::Error::Io(e)
+                nlink::netlink::Error::Io(e)
             }
         })?;
     drop(file);
@@ -207,7 +207,7 @@ fn add_namespace(name: &str) -> Result<()> {
         // Fork a child process
         let pid = libc::fork();
         if pid < 0 {
-            return Err(rip::netlink::Error::Io(io::Error::last_os_error()));
+            return Err(nlink::netlink::Error::Io(io::Error::last_os_error()));
         }
 
         if pid == 0 {
@@ -249,7 +249,7 @@ fn add_namespace(name: &str) -> Result<()> {
     if result != 0 {
         // Clean up the file we created
         let _ = fs::remove_file(&netns_path);
-        return Err(rip::netlink::Error::InvalidMessage(format!(
+        return Err(nlink::netlink::Error::InvalidMessage(format!(
             "failed to create network namespace (exit code {})",
             result
         )));
@@ -264,7 +264,7 @@ fn delete_namespace(name: &str) -> Result<()> {
     let netns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
 
     if !netns_path.exists() {
-        return Err(rip::netlink::Error::InvalidMessage(format!(
+        return Err(nlink::netlink::Error::InvalidMessage(format!(
             "namespace '{}' does not exist",
             name
         )));
@@ -278,7 +278,7 @@ fn delete_namespace(name: &str) -> Result<()> {
 
     // Remove the file
     fs::remove_file(&netns_path).map_err(|e| {
-        rip::netlink::Error::InvalidMessage(format!("cannot remove namespace file: {}", e))
+        nlink::netlink::Error::InvalidMessage(format!("cannot remove namespace file: {}", e))
     })?;
 
     println!("Network namespace '{}' deleted", name);
@@ -288,7 +288,7 @@ fn delete_namespace(name: &str) -> Result<()> {
 /// Execute a command in a network namespace.
 fn exec_in_namespace(name: &str, command: &[String]) -> Result<()> {
     if command.is_empty() {
-        return Err(rip::netlink::Error::InvalidMessage(
+        return Err(nlink::netlink::Error::InvalidMessage(
             "no command specified".to_string(),
         ));
     }
@@ -296,7 +296,7 @@ fn exec_in_namespace(name: &str, command: &[String]) -> Result<()> {
     let netns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
 
     if !netns_path.exists() {
-        return Err(rip::netlink::Error::InvalidMessage(format!(
+        return Err(nlink::netlink::Error::InvalidMessage(format!(
             "namespace '{}' does not exist",
             name
         )));
@@ -304,7 +304,7 @@ fn exec_in_namespace(name: &str, command: &[String]) -> Result<()> {
 
     // Open the namespace file
     let netns_fd = File::open(&netns_path).map_err(|e| {
-        rip::netlink::Error::InvalidMessage(format!("cannot open namespace '{}': {}", name, e))
+        nlink::netlink::Error::InvalidMessage(format!("cannot open namespace '{}': {}", name, e))
     })?;
 
     // Switch to the namespace
@@ -313,7 +313,7 @@ fn exec_in_namespace(name: &str, command: &[String]) -> Result<()> {
 
     unsafe {
         if libc::setns(fd, libc::CLONE_NEWNET) < 0 {
-            return Err(rip::netlink::Error::Io(io::Error::last_os_error()));
+            return Err(nlink::netlink::Error::Io(io::Error::last_os_error()));
         }
     }
 
@@ -324,7 +324,7 @@ fn exec_in_namespace(name: &str, command: &[String]) -> Result<()> {
         .args(&command[1..])
         .status()
         .map_err(|e| {
-            rip::netlink::Error::InvalidMessage(format!("failed to execute '{}': {}", command[0], e))
+            nlink::netlink::Error::InvalidMessage(format!("failed to execute '{}': {}", command[0], e))
         })?;
 
     if !status.success() {
@@ -339,7 +339,7 @@ fn identify_namespace(pid: &str) -> Result<()> {
     let net_path = format!("/proc/{}/ns/net", pid);
 
     let target_stat = fs::metadata(&net_path).map_err(|e| {
-        rip::netlink::Error::InvalidMessage(format!("cannot access process {}: {}", pid, e))
+        nlink::netlink::Error::InvalidMessage(format!("cannot access process {}: {}", pid, e))
     })?;
 
     use std::os::unix::fs::MetadataExt;
@@ -387,19 +387,19 @@ fn list_pids_in_namespace(name: &str) -> Result<()> {
     let netns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
 
     if !netns_path.exists() {
-        return Err(rip::netlink::Error::InvalidMessage(format!(
+        return Err(nlink::netlink::Error::InvalidMessage(format!(
             "namespace '{}' does not exist",
             name
         )));
     }
 
-    let ns_stat = fs::metadata(&netns_path).map_err(rip::netlink::Error::Io)?;
+    let ns_stat = fs::metadata(&netns_path).map_err(nlink::netlink::Error::Io)?;
     use std::os::unix::fs::MetadataExt;
     let ns_dev = ns_stat.dev();
     let ns_ino = ns_stat.ino();
 
     // Iterate through /proc to find matching processes
-    let proc_dir = fs::read_dir("/proc").map_err(rip::netlink::Error::Io)?;
+    let proc_dir = fs::read_dir("/proc").map_err(nlink::netlink::Error::Io)?;
 
     for entry in proc_dir {
         let entry = match entry {
@@ -431,7 +431,7 @@ fn monitor_namespaces() -> Result<()> {
     // Create inotify instance
     let inotify_fd = unsafe { libc::inotify_init() };
     if inotify_fd < 0 {
-        return Err(rip::netlink::Error::Io(io::Error::last_os_error()));
+        return Err(nlink::netlink::Error::Io(io::Error::last_os_error()));
     }
 
     // Create the netns directory if needed
@@ -449,7 +449,7 @@ fn monitor_namespaces() -> Result<()> {
 
     if wd < 0 {
         unsafe { libc::close(inotify_fd) };
-        return Err(rip::netlink::Error::Io(io::Error::last_os_error()));
+        return Err(nlink::netlink::Error::Io(io::Error::last_os_error()));
     }
 
     println!("Monitoring network namespace changes...");
@@ -466,7 +466,7 @@ fn monitor_namespaces() -> Result<()> {
                 continue;
             }
             unsafe { libc::close(inotify_fd) };
-            return Err(rip::netlink::Error::Io(err));
+            return Err(nlink::netlink::Error::Io(err));
         }
 
         let mut offset = 0;
@@ -503,7 +503,7 @@ fn set_namespace_id(name: &str, nsid: &str) -> Result<()> {
     let netns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
 
     if !netns_path.exists() {
-        return Err(rip::netlink::Error::InvalidMessage(format!(
+        return Err(nlink::netlink::Error::InvalidMessage(format!(
             "namespace '{}' does not exist",
             name
         )));
@@ -513,7 +513,7 @@ fn set_namespace_id(name: &str, nsid: &str) -> Result<()> {
         -1
     } else {
         nsid.parse()
-            .map_err(|_| rip::netlink::Error::InvalidMessage(format!("invalid nsid: {}", nsid)))?
+            .map_err(|_| nlink::netlink::Error::InvalidMessage(format!("invalid nsid: {}", nsid)))?
     };
 
     // This requires RTM_NEWNSID netlink message
@@ -537,7 +537,7 @@ fn attach_namespace(name: &str, pid: u32) -> Result<()> {
     let proc_ns_path = format!("/proc/{}/ns/net", pid);
 
     if !Path::new(&proc_ns_path).exists() {
-        return Err(rip::netlink::Error::InvalidMessage(format!(
+        return Err(nlink::netlink::Error::InvalidMessage(format!(
             "process {} does not exist or has no network namespace",
             pid
         )));
@@ -556,9 +556,9 @@ fn attach_namespace(name: &str, pid: u32) -> Result<()> {
         .open(&netns_path)
         .map_err(|e| {
             if e.kind() == io::ErrorKind::AlreadyExists {
-                rip::netlink::Error::InvalidMessage(format!("namespace '{}' already exists", name))
+                nlink::netlink::Error::InvalidMessage(format!("namespace '{}' already exists", name))
             } else {
-                rip::netlink::Error::Io(e)
+                nlink::netlink::Error::Io(e)
             }
         })?;
     drop(file);
@@ -579,7 +579,7 @@ fn attach_namespace(name: &str, pid: u32) -> Result<()> {
 
     if result < 0 {
         let _ = fs::remove_file(&netns_path);
-        return Err(rip::netlink::Error::Io(io::Error::last_os_error()));
+        return Err(nlink::netlink::Error::Io(io::Error::last_os_error()));
     }
 
     println!("Attached namespace of process {} as '{}'", pid, name);
@@ -591,32 +591,32 @@ fn create_netns_dir() -> Result<()> {
     match fs::create_dir_all(NETNS_RUN_DIR) {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(rip::netlink::Error::Io(e)),
+        Err(e) => Err(nlink::netlink::Error::Io(e)),
     }
 }
 
 /// Validate namespace name.
 fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
-        return Err(rip::netlink::Error::InvalidMessage(
+        return Err(nlink::netlink::Error::InvalidMessage(
             "namespace name cannot be empty".to_string(),
         ));
     }
 
     if name.len() > 255 {
-        return Err(rip::netlink::Error::InvalidMessage(
+        return Err(nlink::netlink::Error::InvalidMessage(
             "namespace name too long".to_string(),
         ));
     }
 
     if name.contains('/') {
-        return Err(rip::netlink::Error::InvalidMessage(
+        return Err(nlink::netlink::Error::InvalidMessage(
             "namespace name cannot contain '/'".to_string(),
         ));
     }
 
     if name == "." || name == ".." {
-        return Err(rip::netlink::Error::InvalidMessage(
+        return Err(nlink::netlink::Error::InvalidMessage(
             "invalid namespace name".to_string(),
         ));
     }

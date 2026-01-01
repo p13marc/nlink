@@ -11,10 +11,10 @@
 //!   ip link set test0 up
 //!   ip link del test0
 
-use rip::netlink::events::{EventStream, NetworkEvent};
+use nlink::netlink::events::{EventStream, NetworkEvent};
 
 #[tokio::main]
-async fn main() -> rip::netlink::Result<()> {
+async fn main() -> nlink::netlink::Result<()> {
     println!("Monitoring network events (Ctrl+C to stop)...\n");
 
     let mut stream = EventStream::builder()

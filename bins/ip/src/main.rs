@@ -3,8 +3,8 @@
 mod commands;
 
 use clap::{Parser, Subcommand};
-use rip::netlink::{Connection, Protocol};
-use rip::output::OutputFormat;
+use nlink::netlink::{Connection, Protocol};
+use nlink::output::OutputFormat;
 
 #[derive(Parser)]
 #[command(name = "ip", version, about = "Network configuration tool")]
@@ -105,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
         OutputFormat::Text
     };
 
-    let opts = rip::output::OutputOptions {
+    let opts = nlink::output::OutputOptions {
         stats: cli.stats,
         details: cli.details,
         color: atty::is(atty::Stream::Stdout),

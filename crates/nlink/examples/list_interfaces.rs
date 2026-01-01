@@ -5,10 +5,10 @@
 //!
 //! Run with: cargo run -p rip --example list_interfaces
 
-use rip::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Protocol};
 
 #[tokio::main]
-async fn main() -> rip::netlink::Result<()> {
+async fn main() -> nlink::netlink::Result<()> {
     let conn = Connection::new(Protocol::Route)?;
 
     let links = conn.get_links().await?;

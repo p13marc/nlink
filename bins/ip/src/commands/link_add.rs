@@ -1,10 +1,10 @@
 //! Link type subcommands for `ip link add`.
 
 use clap::{Args, Subcommand};
-use rip::netlink::connection::create_request;
-use rip::netlink::message::NlMsgType;
-use rip::netlink::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
-use rip::netlink::{Connection, MessageBuilder, Result};
+use nlink::netlink::connection::create_request;
+use nlink::netlink::message::NlMsgType;
+use nlink::netlink::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
+use nlink::netlink::{Connection, MessageBuilder, Result};
 
 /// Common options for all link types.
 #[derive(Args, Debug)]
@@ -350,8 +350,8 @@ fn build_common_attrs(builder: &mut MessageBuilder, common: &CommonLinkArgs) -> 
         builder.append_attr_u32(IflaAttr::TxqLen as u16, txqlen);
     }
     if let Some(ref addr) = common.address {
-        let mac = rip::util::addr::parse_mac(addr).map_err(|e| {
-            rip::netlink::Error::InvalidMessage(format!("invalid MAC address: {}", e))
+        let mac = nlink::util::addr::parse_mac(addr).map_err(|e| {
+            nlink::netlink::Error::InvalidMessage(format!("invalid MAC address: {}", e))
         })?;
         builder.append_attr(IflaAttr::Address as u16, &mac);
     }
@@ -376,7 +376,7 @@ fn build_parent_link(builder: &mut MessageBuilder, link_type: &LinkAddType) -> R
 
     if let Some(name) = link_name {
         let idx =
-            rip::util::get_ifindex(name).map_err(rip::netlink::Error::InvalidMessage)? as u32;
+            nlink::util::get_ifindex(name).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
         builder.append_attr_u32(IflaAttr::Link as u16, idx);
     }
 

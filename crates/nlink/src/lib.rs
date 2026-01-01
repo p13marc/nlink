@@ -16,10 +16,10 @@
 //! # Example
 //!
 //! ```ignore
-//! use rip::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Protocol};
 //!
 //! #[tokio::main]
-//! async fn main() -> rip::netlink::Result<()> {
+//! async fn main() -> nlink::netlink::Result<()> {
 //!     let conn = Connection::new(Protocol::Route)?;
 //!
 //!     // Query interfaces
@@ -35,7 +35,7 @@
 //! # Event Monitoring
 //!
 //! ```ignore
-//! use rip::netlink::events::{EventStream, NetworkEvent};
+//! use nlink::netlink::events::{EventStream, NetworkEvent};
 //!
 //! let mut stream = EventStream::builder()
 //!     .links(true)

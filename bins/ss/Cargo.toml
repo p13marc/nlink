@@ -1,5 +1,5 @@
 [package]
-name = "rip-ss"
+name = "nlink-ss"
 description = "ss command - socket statistics"
 version.workspace = true
 edition.workspace = true
@@ -11,7 +11,7 @@ name = "ss"
 path = "src/main.rs"
 
 [dependencies]
-rip = { workspace = true, features = ["sockdiag", "output"] }
+nlink = { workspace = true, features = ["sockdiag", "output"] }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

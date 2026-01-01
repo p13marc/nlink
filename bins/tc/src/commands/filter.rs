@@ -1,12 +1,12 @@
 //! tc filter command implementation.
 
 use clap::{Args, Subcommand};
-use rip::netlink::message::NlMsgType;
-use rip::netlink::messages::TcMessage;
-use rip::netlink::types::tc::tc_handle;
-use rip::netlink::{Connection, Result};
-use rip::output::{OutputFormat, OutputOptions, print_items};
-use rip::tc::builders::filter as filter_builder;
+use nlink::netlink::message::NlMsgType;
+use nlink::netlink::messages::TcMessage;
+use nlink::netlink::types::tc::tc_handle;
+use nlink::netlink::{Connection, Result};
+use nlink::output::{OutputFormat, OutputOptions, print_items};
+use nlink::tc::builders::filter as filter_builder;
 use std::io::{self, Write};
 
 #[derive(Args)]
@@ -219,15 +219,15 @@ impl FilterCmd {
         opts: &OutputOptions,
     ) -> Result<()> {
         if dev.is_empty() {
-            return Err(rip::netlink::Error::InvalidMessage(
+            return Err(nlink::netlink::Error::InvalidMessage(
                 "device name required".into(),
             ));
         }
 
-        let ifindex = rip::util::get_ifindex(dev).map_err(rip::netlink::Error::InvalidMessage)?;
+        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
 
         let parent_handle = tc_handle::parse(parent).ok_or_else(|| {
-            rip::netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
+            nlink::netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
         })?;
 
         let proto_filter = protocol_filter
@@ -273,7 +273,7 @@ impl FilterCmd {
 
 /// Convert a TcMessage to JSON representation for filter.
 fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
-    let dev = rip::util::get_ifname_or_index(filter.ifindex());
+    let dev = nlink::util::get_ifname_or_index(filter.ifindex());
 
     let mut obj = serde_json::json!({
         "dev": dev,
@@ -300,7 +300,7 @@ fn print_filter_text(
     filter: &TcMessage,
     _opts: &OutputOptions,
 ) -> io::Result<()> {
-    let dev = rip::util::get_ifname_or_index(filter.ifindex());
+    let dev = nlink::util::get_ifname_or_index(filter.ifindex());
 
     write!(
         w,

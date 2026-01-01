@@ -1,6 +1,6 @@
 //! Output formatting for ss command.
 
-use rip::sockdiag::{InetSocket, SocketInfo, UnixSocket};
+use nlink::sockdiag::{InetSocket, SocketInfo, UnixSocket};
 use std::io::{self, Write};
 use std::net::SocketAddr;
 

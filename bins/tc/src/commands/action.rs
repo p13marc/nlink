@@ -7,19 +7,19 @@
 //! - police: Rate limiting with token bucket
 
 use clap::{Args, Subcommand};
-use rip::netlink::attr::AttrIter;
-use rip::netlink::connection::dump_request;
-use rip::netlink::message::{NLMSG_HDRLEN, NlMsgType};
-use rip::netlink::types::tc::action::{
+use nlink::netlink::attr::AttrIter;
+use nlink::netlink::connection::dump_request;
+use nlink::netlink::message::{NLMSG_HDRLEN, NlMsgType};
+use nlink::netlink::types::tc::action::{
     self, TCA_ACT_KIND, TCA_ACT_OPTIONS,
     gact::{TCA_GACT_PARMS, TcGact},
     mirred::{self, TCA_MIRRED_PARMS, TcMirred},
     police::{TCA_POLICE_TBF, TcPolice},
 };
-use rip::netlink::types::tc::{TCA_ACT_TAB, TcMsg};
-use rip::netlink::{Connection, Result};
-use rip::output::{OutputFormat, OutputOptions};
-use rip::tc::builders::action as action_builder;
+use nlink::netlink::types::tc::{TCA_ACT_TAB, TcMsg};
+use nlink::netlink::{Connection, Result};
+use nlink::output::{OutputFormat, OutputOptions};
+use nlink::tc::builders::action as action_builder;
 use std::io::{self, Write};
 
 #[derive(Args)]

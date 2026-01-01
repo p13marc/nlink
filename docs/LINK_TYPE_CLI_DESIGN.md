@@ -243,7 +243,7 @@ Options:
 
 ## Migration Path
 
-1. Remove incomplete `rip-link` crate with manual parsing
+1. Remove incomplete `nlink-link` crate with manual parsing
 2. Add `LinkAddType` enum to `bins/ip/src/commands/link.rs`
 3. Implement each link type as an enum variant with its own args
 4. Keep netlink building logic in helper functions (could move to library later)
@@ -252,6 +252,6 @@ Options:
 ## Questions for Review
 
 1. Is the syntax change from `--type X` to subcommands acceptable?
-2. Should we keep `rip-link` as a separate crate for the netlink building logic?
+2. Should we keep `nlink-link` as a separate crate for the netlink building logic?
 3. Any link types that should be prioritized for initial implementation?
 4. Should we support both syntaxes during a transition period?

@@ -7,11 +7,11 @@
 
 use std::time::Duration;
 
-use rip::netlink::stats::{StatsSnapshot, StatsTracker};
-use rip::netlink::{Connection, Protocol};
+use nlink::netlink::stats::{StatsSnapshot, StatsTracker};
+use nlink::netlink::{Connection, Protocol};
 
 #[tokio::main]
-async fn main() -> rip::netlink::Result<()> {
+async fn main() -> nlink::netlink::Result<()> {
     let conn = Connection::new(Protocol::Route)?;
     let mut tracker = StatsTracker::new();
 

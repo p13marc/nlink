@@ -3,11 +3,11 @@
 //! This module uses the strongly-typed LinkMessage API from rip-netlink.
 
 use clap::{Args, Subcommand};
-use rip::netlink::message::NlMsgType;
-use rip::netlink::messages::LinkMessage;
-use rip::netlink::types::link::{IfInfoMsg, IflaAttr, iff};
-use rip::netlink::{Connection, Result, connection::ack_request};
-use rip::output::{OutputFormat, OutputOptions, print_all};
+use nlink::netlink::message::NlMsgType;
+use nlink::netlink::messages::LinkMessage;
+use nlink::netlink::types::link::{IfInfoMsg, IflaAttr, iff};
+use nlink::netlink::{Connection, Result, connection::ack_request};
+use nlink::output::{OutputFormat, OutputOptions, print_all};
 
 use super::link_add::{LinkAddType, add_link};
 
@@ -133,7 +133,7 @@ impl LinkCmd {
     }
 
     async fn del(conn: &Connection, dev: &str) -> Result<()> {
-        let ifindex = rip::util::get_ifindex(dev).map_err(rip::netlink::Error::InvalidMessage)? as u32;
+        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
 
         let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
@@ -158,7 +158,7 @@ impl LinkCmd {
         master: Option<String>,
         nomaster: bool,
     ) -> Result<()> {
-        let ifindex = rip::util::get_ifindex(dev).map_err(rip::netlink::Error::InvalidMessage)? as u32;
+        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
 
         let mut ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
@@ -191,16 +191,16 @@ impl LinkCmd {
 
         // Add MAC address if specified
         if let Some(addr_str) = address {
-            let mac = rip::util::addr::parse_mac(&addr_str).map_err(|e| {
-                rip::netlink::Error::InvalidMessage(format!("invalid MAC address: {}", e))
+            let mac = nlink::util::addr::parse_mac(&addr_str).map_err(|e| {
+                nlink::netlink::Error::InvalidMessage(format!("invalid MAC address: {}", e))
             })?;
             builder.append_attr(IflaAttr::Address as u16, &mac);
         }
 
         // Set or clear master
         if let Some(master_name) = master {
-            let master_idx = rip::util::get_ifindex(&master_name)
-                .map_err(rip::netlink::Error::InvalidMessage)? as u32;
+            let master_idx = nlink::util::get_ifindex(&master_name)
+                .map_err(nlink::netlink::Error::InvalidMessage)? as u32;
             builder.append_attr_u32(IflaAttr::Master as u16, master_idx);
         } else if nomaster {
             builder.append_attr_u32(IflaAttr::Master as u16, 0);
