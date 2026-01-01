@@ -25,6 +25,17 @@ pub enum Error {
         message: String,
     },
 
+    /// Kernel error with operation context.
+    #[error("{operation}: {message} (errno {errno})")]
+    KernelWithContext {
+        /// The operation that failed.
+        operation: String,
+        /// The errno value from the kernel.
+        errno: i32,
+        /// Human-readable error message.
+        message: String,
+    },
+
     /// Message was truncated.
     #[error("message truncated: expected {expected} bytes, got {actual}")]
     Truncated {
@@ -58,6 +69,29 @@ pub enum Error {
     /// Parse error.
     #[error("parse error: {0}")]
     Parse(String),
+
+    /// Interface not found.
+    #[error("interface not found: {name}")]
+    InterfaceNotFound {
+        /// The interface name that was not found.
+        name: String,
+    },
+
+    /// Namespace not found.
+    #[error("namespace not found: {name}")]
+    NamespaceNotFound {
+        /// The namespace name that was not found.
+        name: String,
+    },
+
+    /// Qdisc not found.
+    #[error("qdisc not found: {kind} on {interface}")]
+    QdiscNotFound {
+        /// The qdisc kind (e.g., "netem", "htb").
+        kind: String,
+        /// The interface name.
+        interface: String,
+    },
 }
 
 impl Error {
@@ -68,5 +102,203 @@ impl Error {
             errno: -errno,
             message,
         }
+    }
+
+    /// Create a kernel error with operation context.
+    pub fn from_errno_with_context(errno: i32, operation: impl Into<String>) -> Self {
+        let message = io::Error::from_raw_os_error(-errno).to_string();
+        Self::KernelWithContext {
+            operation: operation.into(),
+            errno: -errno,
+            message,
+        }
+    }
+
+    /// Add context to this error.
+    ///
+    /// Wraps kernel errors with operation context. Other errors are returned unchanged.
+    pub fn with_context(self, operation: impl Into<String>) -> Self {
+        match self {
+            Self::Kernel { errno, message } => Self::KernelWithContext {
+                operation: operation.into(),
+                errno,
+                message,
+            },
+            other => other,
+        }
+    }
+
+    /// Check if this is a "not found" error (ENOENT, ENODEV, etc.).
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
+                matches!(*errno, 2 | 19) // ENOENT=2, ENODEV=19
+            }
+            Self::InterfaceNotFound { .. }
+            | Self::NamespaceNotFound { .. }
+            | Self::QdiscNotFound { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Check if this is a permission error (EPERM, EACCES).
+    pub fn is_permission_denied(&self) -> bool {
+        match self {
+            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
+                matches!(*errno, 1 | 13) // EPERM=1, EACCES=13
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if this is a "already exists" error (EEXIST).
+    pub fn is_already_exists(&self) -> bool {
+        match self {
+            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
+                *errno == 17 // EEXIST=17
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if this is a "device busy" error (EBUSY).
+    pub fn is_busy(&self) -> bool {
+        match self {
+            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
+                *errno == 16 // EBUSY=16
+            }
+            _ => false,
+        }
+    }
+
+    /// Get the errno value if this is a kernel error.
+    pub fn errno(&self) -> Option<i32> {
+        match self {
+            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => Some(*errno),
+            _ => None,
+        }
+    }
+}
+
+/// Extension trait for adding context to Results.
+pub trait ResultExt<T> {
+    /// Add context to an error result.
+    fn with_context(self, operation: impl Into<String>) -> Result<T>;
+
+    /// Add context using a closure (only evaluated on error).
+    fn with_context_fn<F, S>(self, f: F) -> Result<T>
+    where
+        F: FnOnce() -> S,
+        S: Into<String>;
+}
+
+impl<T> ResultExt<T> for Result<T> {
+    fn with_context(self, operation: impl Into<String>) -> Result<T> {
+        self.map_err(|e| e.with_context(operation))
+    }
+
+    fn with_context_fn<F, S>(self, f: F) -> Result<T>
+    where
+        F: FnOnce() -> S,
+        S: Into<String>,
+    {
+        self.map_err(|e| e.with_context(f()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_errno() {
+        let err = Error::from_errno(-1); // EPERM
+        assert!(err.is_permission_denied());
+        assert_eq!(err.errno(), Some(1));
+    }
+
+    #[test]
+    fn test_from_errno_with_context() {
+        let err = Error::from_errno_with_context(-2, "deleting interface eth0"); // ENOENT
+        assert!(err.is_not_found());
+        let msg = err.to_string();
+        assert!(msg.contains("deleting interface eth0"));
+        assert!(msg.contains("No such file or directory"));
+    }
+
+    #[test]
+    fn test_with_context() {
+        let err = Error::from_errno(-13); // EACCES
+        let err = err.with_context("setting link up on eth0");
+        assert!(err.is_permission_denied());
+        let msg = err.to_string();
+        assert!(msg.contains("setting link up on eth0"));
+    }
+
+    #[test]
+    fn test_result_ext() {
+        let result: Result<()> = Err(Error::from_errno(-17)); // EEXIST
+        let result = result.with_context("adding qdisc to eth0");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.is_already_exists());
+        assert!(err.to_string().contains("adding qdisc to eth0"));
+    }
+
+    #[test]
+    fn test_result_ext_ok() {
+        let result: Result<i32> = Ok(42);
+        let result = result.with_context("this should not appear");
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn test_is_not_found() {
+        assert!(Error::from_errno(-2).is_not_found()); // ENOENT
+        assert!(Error::from_errno(-19).is_not_found()); // ENODEV
+        assert!(
+            Error::InterfaceNotFound {
+                name: "eth0".into()
+            }
+            .is_not_found()
+        );
+        assert!(
+            Error::NamespaceNotFound {
+                name: "test".into()
+            }
+            .is_not_found()
+        );
+        assert!(
+            Error::QdiscNotFound {
+                kind: "netem".into(),
+                interface: "eth0".into()
+            }
+            .is_not_found()
+        );
+    }
+
+    #[test]
+    fn test_is_busy() {
+        assert!(Error::from_errno(-16).is_busy()); // EBUSY
+        assert!(!Error::from_errno(-1).is_busy()); // EPERM is not busy
+    }
+
+    #[test]
+    fn test_error_messages() {
+        let err = Error::InterfaceNotFound {
+            name: "eth0".into(),
+        };
+        assert_eq!(err.to_string(), "interface not found: eth0");
+
+        let err = Error::NamespaceNotFound {
+            name: "myns".into(),
+        };
+        assert_eq!(err.to_string(), "namespace not found: myns");
+
+        let err = Error::QdiscNotFound {
+            kind: "netem".into(),
+            interface: "docker0".into(),
+        };
+        assert_eq!(err.to_string(), "qdisc not found: netem on docker0");
     }
 }

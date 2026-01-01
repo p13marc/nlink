@@ -86,7 +86,7 @@ pub mod types;
 pub use attr::{AttrIter, NlAttr};
 pub use builder::{MessageBuilder, NestToken};
 pub use connection::Connection;
-pub use error::{Error, Result};
+pub use error::{Error, Result, ResultExt};
 pub use message::{MessageIter, NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
 pub use parse::{FromNetlink, ToNetlink};
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};

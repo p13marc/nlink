@@ -1112,6 +1112,54 @@ pub mod filter {
             }
         }
     }
+
+    /// BPF filter attributes.
+    pub mod bpf {
+        pub const TCA_BPF_UNSPEC: u16 = 0;
+        pub const TCA_BPF_ACT: u16 = 1;
+        pub const TCA_BPF_POLICE: u16 = 2;
+        pub const TCA_BPF_CLASSID: u16 = 3;
+        pub const TCA_BPF_OPS_LEN: u16 = 4;
+        pub const TCA_BPF_OPS: u16 = 5;
+        pub const TCA_BPF_FD: u16 = 6;
+        pub const TCA_BPF_NAME: u16 = 7;
+        pub const TCA_BPF_FLAGS: u16 = 8;
+        pub const TCA_BPF_FLAGS_GEN: u16 = 9;
+        pub const TCA_BPF_TAG: u16 = 10;
+        pub const TCA_BPF_ID: u16 = 11;
+
+        /// BPF filter flags.
+        pub const TCA_BPF_FLAG_ACT_DIRECT: u32 = 1 << 0;
+    }
+
+    /// Basic/matchall filter attributes.
+    pub mod basic {
+        pub const TCA_BASIC_UNSPEC: u16 = 0;
+        pub const TCA_BASIC_CLASSID: u16 = 1;
+        pub const TCA_BASIC_EMATCHES: u16 = 2;
+        pub const TCA_BASIC_ACT: u16 = 3;
+        pub const TCA_BASIC_POLICE: u16 = 4;
+    }
+
+    /// Matchall filter attributes.
+    pub mod matchall {
+        pub const TCA_MATCHALL_UNSPEC: u16 = 0;
+        pub const TCA_MATCHALL_CLASSID: u16 = 1;
+        pub const TCA_MATCHALL_ACT: u16 = 2;
+        pub const TCA_MATCHALL_FLAGS: u16 = 3;
+        pub const TCA_MATCHALL_PCNT: u16 = 4;
+        pub const TCA_MATCHALL_PAD: u16 = 5;
+    }
+
+    /// Firewall mark (fw) filter attributes.
+    pub mod fw {
+        pub const TCA_FW_UNSPEC: u16 = 0;
+        pub const TCA_FW_CLASSID: u16 = 1;
+        pub const TCA_FW_POLICE: u16 = 2;
+        pub const TCA_FW_INDEV: u16 = 3;
+        pub const TCA_FW_ACT: u16 = 4;
+        pub const TCA_FW_MASK: u16 = 5;
+    }
 }
 
 /// Common action attributes.

@@ -83,6 +83,7 @@ pub fn add_options(builder: &mut MessageBuilder, kind: &str, params: &[String]) 
         "flower" => add_flower_options(builder, params)?,
         "basic" | "matchall" => add_basic_options(builder, params)?,
         "fw" => add_fw_options(builder, params)?,
+        "bpf" => add_bpf_options(builder, params)?,
         _ => {
             // Unknown filter type
         }
@@ -242,8 +243,9 @@ fn add_u32_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()
     while i < params.len() {
         match params[i].as_str() {
             "classid" | "flowid" if i + 1 < params.len() => {
-                let classid = tc_handle::parse(&params[i + 1])
-                    .ok_or_else(|| crate::netlink::Error::InvalidMessage("invalid classid".into()))?;
+                let classid = tc_handle::parse(&params[i + 1]).ok_or_else(|| {
+                    crate::netlink::Error::InvalidMessage("invalid classid".into())
+                })?;
                 builder.append_attr_u32(TCA_U32_CLASSID, classid);
                 sel.set_terminal();
                 has_classid = true;
@@ -372,9 +374,9 @@ fn parse_ip_match(
                 "udp" => 17,
                 "icmp" => 1,
                 "gre" => 47,
-                _ => params[i]
-                    .parse()
-                    .map_err(|_| crate::netlink::Error::InvalidMessage("invalid protocol".into()))?,
+                _ => params[i].parse().map_err(|_| {
+                    crate::netlink::Error::InvalidMessage("invalid protocol".into())
+                })?,
             };
             sel.add_key(pack_key8(proto, 0xff, 9));
             i += 1;
@@ -704,8 +706,9 @@ fn add_flower_options(builder: &mut MessageBuilder, params: &[String]) -> Result
     while i < params.len() {
         match params[i].as_str() {
             "classid" | "flowid" if i + 1 < params.len() => {
-                let classid = tc_handle::parse(&params[i + 1])
-                    .ok_or_else(|| crate::netlink::Error::InvalidMessage("invalid classid".into()))?;
+                let classid = tc_handle::parse(&params[i + 1]).ok_or_else(|| {
+                    crate::netlink::Error::InvalidMessage("invalid classid".into())
+                })?;
                 builder.append_attr_u32(TCA_FLOWER_CLASSID, classid);
                 i += 2;
             }
@@ -800,9 +803,9 @@ fn add_flower_options(builder: &mut MessageBuilder, params: &[String]) -> Result
                 i += 2;
             }
             "vlan_prio" if i + 1 < params.len() => {
-                let prio: u8 = params[i + 1]
-                    .parse()
-                    .map_err(|_| crate::netlink::Error::InvalidMessage("invalid vlan_prio".into()))?;
+                let prio: u8 = params[i + 1].parse().map_err(|_| {
+                    crate::netlink::Error::InvalidMessage("invalid vlan_prio".into())
+                })?;
                 if prio > 7 {
                     return Err(crate::netlink::Error::InvalidMessage(
                         "vlan_prio must be 0-7".into(),
@@ -850,9 +853,9 @@ fn add_flower_options(builder: &mut MessageBuilder, params: &[String]) -> Result
                 i += 2;
             }
             "enc_key_id" if i + 1 < params.len() => {
-                let id: u32 = params[i + 1]
-                    .parse()
-                    .map_err(|_| crate::netlink::Error::InvalidMessage("invalid enc_key_id".into()))?;
+                let id: u32 = params[i + 1].parse().map_err(|_| {
+                    crate::netlink::Error::InvalidMessage("invalid enc_key_id".into())
+                })?;
                 builder.append_attr_u32(TCA_FLOWER_KEY_ENC_KEY_ID, id.to_be());
                 i += 2;
             }
@@ -1055,13 +1058,16 @@ fn parse_ct_state(s: &str) -> Result<u16> {
 
 /// Add basic/matchall filter options.
 fn add_basic_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()> {
+    use crate::netlink::types::tc::filter::basic::*;
+
     let mut i = 0;
     while i < params.len() {
         match params[i].as_str() {
             "classid" | "flowid" if i + 1 < params.len() => {
-                let classid = tc_handle::parse(&params[i + 1])
-                    .ok_or_else(|| crate::netlink::Error::InvalidMessage("invalid classid".into()))?;
-                builder.append_attr_u32(1, classid); // TCA_BASIC_CLASSID
+                let classid = tc_handle::parse(&params[i + 1]).ok_or_else(|| {
+                    crate::netlink::Error::InvalidMessage("invalid classid".into())
+                })?;
+                builder.append_attr_u32(TCA_BASIC_CLASSID, classid);
                 i += 2;
             }
             _ => i += 1,
@@ -1076,22 +1082,100 @@ fn add_basic_options(builder: &mut MessageBuilder, params: &[String]) -> Result<
 
 /// Add fw filter options.
 fn add_fw_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()> {
+    use crate::netlink::types::tc::filter::fw::*;
+
     let mut i = 0;
     while i < params.len() {
         match params[i].as_str() {
             "classid" | "flowid" if i + 1 < params.len() => {
-                let classid = tc_handle::parse(&params[i + 1])
-                    .ok_or_else(|| crate::netlink::Error::InvalidMessage("invalid classid".into()))?;
-                builder.append_attr_u32(1, classid); // TCA_FW_CLASSID
+                let classid = tc_handle::parse(&params[i + 1]).ok_or_else(|| {
+                    crate::netlink::Error::InvalidMessage("invalid classid".into())
+                })?;
+                builder.append_attr_u32(TCA_FW_CLASSID, classid);
                 i += 2;
             }
             "mask" if i + 1 < params.len() => {
                 let mask = parse_hex_or_dec(&params[i + 1])?;
-                builder.append_attr_u32(2, mask); // TCA_FW_MASK
+                builder.append_attr_u32(TCA_FW_MASK, mask);
                 i += 2;
             }
             _ => i += 1,
         }
     }
+    Ok(())
+}
+
+// ============================================================================
+// BPF Filter Options
+// ============================================================================
+
+/// Add BPF filter options.
+///
+/// Supported parameters:
+/// - classid/flowid HANDLE: Target class (for clsact/ingress use)
+/// - fd FD: File descriptor of loaded BPF program
+/// - name NAME: Name/section of BPF program (for pinned programs)
+/// - object-pinned PATH: Path to pinned BPF program
+/// - direct-action/da: Enable direct action mode (program returns TC_ACT_*)
+/// - skip_hw: Don't offload to hardware
+/// - skip_sw: Don't process in software
+///
+/// Note: BPF programs must be loaded separately (e.g., via libbpf or bpftool).
+/// This builder only attaches already-loaded programs via their file descriptor
+/// or pinned path.
+fn add_bpf_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()> {
+    use crate::netlink::types::tc::filter::bpf::*;
+    use crate::netlink::types::tc::filter::flower::{TCA_CLS_FLAGS_SKIP_HW, TCA_CLS_FLAGS_SKIP_SW};
+
+    let mut i = 0;
+    let mut has_da = false;
+
+    while i < params.len() {
+        match params[i].as_str() {
+            "classid" | "flowid" if i + 1 < params.len() => {
+                let classid = tc_handle::parse(&params[i + 1]).ok_or_else(|| {
+                    crate::netlink::Error::InvalidMessage("invalid classid".into())
+                })?;
+                builder.append_attr_u32(TCA_BPF_CLASSID, classid);
+                i += 2;
+            }
+            "fd" if i + 1 < params.len() => {
+                let fd: u32 = params[i + 1]
+                    .parse()
+                    .map_err(|_| crate::netlink::Error::InvalidMessage("invalid fd".into()))?;
+                builder.append_attr_u32(TCA_BPF_FD, fd);
+                i += 2;
+            }
+            "name" | "section" if i + 1 < params.len() => {
+                builder.append_attr_str(TCA_BPF_NAME, &params[i + 1]);
+                i += 2;
+            }
+            "object-pinned" | "pinned" if i + 1 < params.len() => {
+                // For pinned programs, we need to open the pinned path
+                // This is typically done by the caller; here we just set the name
+                builder.append_attr_str(TCA_BPF_NAME, &params[i + 1]);
+                i += 2;
+            }
+            "direct-action" | "da" => {
+                has_da = true;
+                i += 1;
+            }
+            "skip_hw" => {
+                builder.append_attr_u32(TCA_BPF_FLAGS_GEN, TCA_CLS_FLAGS_SKIP_HW);
+                i += 1;
+            }
+            "skip_sw" => {
+                builder.append_attr_u32(TCA_BPF_FLAGS_GEN, TCA_CLS_FLAGS_SKIP_SW);
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+
+    // Set direct-action flag if requested
+    if has_da {
+        builder.append_attr_u32(TCA_BPF_FLAGS, TCA_BPF_FLAG_ACT_DIRECT);
+    }
+
     Ok(())
 }

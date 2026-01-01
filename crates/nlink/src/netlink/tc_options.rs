@@ -141,6 +141,41 @@ pub struct NetemOptions {
     pub ecn: bool,
     /// Slot-based transmission configuration (if present).
     pub slot: Option<NetemSlotOptions>,
+    /// Loss model (if using state-based loss instead of random).
+    pub loss_model: Option<NetemLossModel>,
+}
+
+/// Netem loss model configuration.
+#[derive(Debug, Clone, Copy)]
+pub enum NetemLossModel {
+    /// Gilbert-Intuitive 4-state loss model.
+    ///
+    /// States: Good (1), Bad Burst (2), Bad Gap (3), Loss (4)
+    GilbertIntuitive {
+        /// Probability of transitioning from Good to Bad Burst (p13).
+        p13: f64,
+        /// Probability of transitioning from Bad Burst to Good (p31).
+        p31: f64,
+        /// Probability of transitioning from Bad Burst to Bad Gap (p32).
+        p32: f64,
+        /// Probability of transitioning from Good to Loss (p14).
+        p14: f64,
+        /// Probability of transitioning from Bad Gap to Bad Burst (p23).
+        p23: f64,
+    },
+    /// Gilbert-Elliot 2-state loss model.
+    ///
+    /// States: Good, Bad with different loss probabilities.
+    GilbertElliot {
+        /// Probability of transitioning from Good to Bad (p).
+        p: f64,
+        /// Probability of transitioning from Bad to Good (r).
+        r: f64,
+        /// Loss probability in Bad state (h), 1-h in Good state (1-k).
+        h: f64,
+        /// Loss probability in Good state (1-k).
+        k1: f64,
+    },
 }
 
 /// Netem slot-based transmission options.
@@ -698,6 +733,10 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
                     });
                 }
             }
+            TCA_NETEM_LOSS => {
+                // Loss model is a nested attribute containing the model type and parameters
+                parse_netem_loss_model(payload, &mut opts);
+            }
             _ => {}
         }
 
@@ -709,6 +748,79 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
     }
 
     opts
+}
+
+/// Parse TCA_NETEM_LOSS nested attribute for loss model.
+fn parse_netem_loss_model(data: &[u8], opts: &mut NetemOptions) {
+    use super::types::tc::qdisc::netem::*;
+
+    let mut input = data;
+
+    while input.len() >= 4 {
+        let Some(len) = input
+            .get(..2)
+            .and_then(|b| b.try_into().ok())
+            .map(u16::from_ne_bytes)
+        else {
+            break;
+        };
+        let len = len as usize;
+        let Some(attr_type) = input
+            .get(2..4)
+            .and_then(|b| b.try_into().ok())
+            .map(u16::from_ne_bytes)
+        else {
+            break;
+        };
+
+        if len < 4 || input.len() < len {
+            break;
+        }
+
+        let payload = &input[4..len];
+
+        match attr_type & 0x3FFF {
+            NETEM_LOSS_GI => {
+                // Gilbert-Intuitive 4-state model
+                if payload.len() >= TcNetemGiModel::SIZE {
+                    let p13 = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
+                    let p31 = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
+                    let p32 = u32::from_ne_bytes(payload[8..12].try_into().unwrap());
+                    let p14 = u32::from_ne_bytes(payload[12..16].try_into().unwrap());
+                    let p23 = u32::from_ne_bytes(payload[16..20].try_into().unwrap());
+                    opts.loss_model = Some(NetemLossModel::GilbertIntuitive {
+                        p13: prob_to_percent(p13),
+                        p31: prob_to_percent(p31),
+                        p32: prob_to_percent(p32),
+                        p14: prob_to_percent(p14),
+                        p23: prob_to_percent(p23),
+                    });
+                }
+            }
+            NETEM_LOSS_GE => {
+                // Gilbert-Elliot 2-state model
+                if payload.len() >= TcNetemGeModel::SIZE {
+                    let p = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
+                    let r = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
+                    let h = u32::from_ne_bytes(payload[8..12].try_into().unwrap());
+                    let k1 = u32::from_ne_bytes(payload[12..16].try_into().unwrap());
+                    opts.loss_model = Some(NetemLossModel::GilbertElliot {
+                        p: prob_to_percent(p),
+                        r: prob_to_percent(r),
+                        h: prob_to_percent(h),
+                        k1: prob_to_percent(k1),
+                    });
+                }
+            }
+            _ => {}
+        }
+
+        let aligned = (len + 3) & !3;
+        if input.len() <= aligned {
+            break;
+        }
+        input = &input[aligned..];
+    }
 }
 
 fn parse_prio_options(data: &[u8]) -> PrioOptions {
@@ -1145,6 +1257,114 @@ mod tests {
                 percent,
                 back
             );
+        }
+    }
+
+    #[test]
+    fn test_netem_parse_with_loss_model_gi() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        let mut qopt = TcNetemQopt::new();
+        qopt.limit = 1000;
+
+        // Gilbert-Intuitive model
+        let gi_model = TcNetemGiModel {
+            p13: percent_to_prob(5.0),
+            p31: percent_to_prob(95.0),
+            p32: percent_to_prob(3.0),
+            p14: percent_to_prob(1.0),
+            p23: percent_to_prob(10.0),
+        };
+
+        let mut data = qopt.as_bytes().to_vec();
+
+        // Add TCA_NETEM_LOSS attribute (nested)
+        // First the outer TCA_NETEM_LOSS, then nested NETEM_LOSS_GI
+        let gi_bytes = gi_model.as_bytes();
+        let inner_len = 4 + gi_bytes.len();
+        let inner_aligned = (inner_len + 3) & !3;
+
+        // Build nested attribute
+        let mut nested = Vec::new();
+        nested.extend_from_slice(&(inner_len as u16).to_ne_bytes());
+        nested.extend_from_slice(&NETEM_LOSS_GI.to_ne_bytes());
+        nested.extend_from_slice(gi_bytes);
+        for _ in inner_len..inner_aligned {
+            nested.push(0);
+        }
+
+        let outer_len = 4 + nested.len();
+        data.extend_from_slice(&(outer_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_LOSS.to_ne_bytes());
+        data.extend_from_slice(&nested);
+
+        let opts = parse_netem_options(&data);
+
+        assert!(opts.loss_model.is_some());
+        match opts.loss_model.unwrap() {
+            NetemLossModel::GilbertIntuitive {
+                p13,
+                p31,
+                p32,
+                p14,
+                p23,
+            } => {
+                assert!((p13 - 5.0).abs() < 0.1);
+                assert!((p31 - 95.0).abs() < 0.1);
+                assert!((p32 - 3.0).abs() < 0.1);
+                assert!((p14 - 1.0).abs() < 0.1);
+                assert!((p23 - 10.0).abs() < 0.1);
+            }
+            _ => panic!("Expected GilbertIntuitive model"),
+        }
+    }
+
+    #[test]
+    fn test_netem_parse_with_loss_model_ge() {
+        use super::super::types::tc::qdisc::netem::*;
+
+        let mut qopt = TcNetemQopt::new();
+        qopt.limit = 1000;
+
+        // Gilbert-Elliot model
+        let ge_model = TcNetemGeModel {
+            p: percent_to_prob(1.0),
+            r: percent_to_prob(10.0),
+            h: percent_to_prob(50.0),
+            k1: percent_to_prob(0.0),
+        };
+
+        let mut data = qopt.as_bytes().to_vec();
+
+        // Build nested attribute
+        let ge_bytes = ge_model.as_bytes();
+        let inner_len = 4 + ge_bytes.len();
+        let inner_aligned = (inner_len + 3) & !3;
+
+        let mut nested = Vec::new();
+        nested.extend_from_slice(&(inner_len as u16).to_ne_bytes());
+        nested.extend_from_slice(&NETEM_LOSS_GE.to_ne_bytes());
+        nested.extend_from_slice(ge_bytes);
+        for _ in inner_len..inner_aligned {
+            nested.push(0);
+        }
+
+        let outer_len = 4 + nested.len();
+        data.extend_from_slice(&(outer_len as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_LOSS.to_ne_bytes());
+        data.extend_from_slice(&nested);
+
+        let opts = parse_netem_options(&data);
+
+        assert!(opts.loss_model.is_some());
+        match opts.loss_model.unwrap() {
+            NetemLossModel::GilbertElliot { p, r, h, k1 } => {
+                assert!((p - 1.0).abs() < 0.1);
+                assert!((r - 10.0).abs() < 0.1);
+                assert!((h - 50.0).abs() < 0.1);
+                assert!((k1 - 0.0).abs() < 0.1);
+            }
+            _ => panic!("Expected GilbertElliot model"),
         }
     }
 }
