@@ -253,6 +253,44 @@ async fn main() -> nlink::Result<()> {
 }
 ```
 
+### Monitoring TC Statistics
+
+Track throughput and statistics changes over time:
+
+```rust
+use nlink::netlink::{Connection, Protocol};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> nlink::Result<()> {
+    let conn = Connection::new(Protocol::Route)?;
+    
+    let mut prev_stats = None;
+    
+    loop {
+        let qdiscs = conn.get_qdiscs_for("eth0").await?;
+        
+        for qdisc in &qdiscs {
+            // Real-time rate from kernel's rate estimator
+            println!("Rate: {} bps, {} pps", qdisc.bps(), qdisc.pps());
+            
+            // Calculate deltas from previous sample
+            if let (Some(curr), Some(prev)) = (&qdisc.stats_basic, &prev_stats) {
+                let delta = curr.delta(prev);
+                println!("Delta: {} bytes, {} packets", delta.bytes, delta.packets);
+            }
+            
+            // Queue statistics
+            println!("Queue: {} packets, {} drops", qdisc.qlen(), qdisc.drops());
+            
+            prev_stats = qdisc.stats_basic;
+        }
+        
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+```
+
 ## Library Modules
 
 ### `nlink::netlink` - Core netlink functionality

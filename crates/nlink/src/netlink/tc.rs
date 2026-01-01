@@ -148,10 +148,37 @@ impl NetemConfig {
         self
     }
 
+    /// Set the added delay in milliseconds (convenience method).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let netem = NetemConfig::new()
+    ///     .delay_ms(100)  // 100ms delay
+    ///     .build();
+    /// ```
+    pub fn delay_ms(self, ms: u64) -> Self {
+        self.delay(Duration::from_millis(ms))
+    }
+
     /// Set the delay jitter (variation).
     pub fn jitter(mut self, jitter: Duration) -> Self {
         self.jitter = Some(jitter);
         self
+    }
+
+    /// Set the delay jitter in milliseconds (convenience method).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let netem = NetemConfig::new()
+    ///     .delay_ms(100)
+    ///     .jitter_ms(10)  // 10ms jitter
+    ///     .build();
+    /// ```
+    pub fn jitter_ms(self, ms: u64) -> Self {
+        self.jitter(Duration::from_millis(ms))
     }
 
     /// Set the delay correlation (0-100%).

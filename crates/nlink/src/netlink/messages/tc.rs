@@ -70,6 +70,28 @@ pub struct TcStatsBasic {
     pub packets: u64,
 }
 
+impl TcStatsBasic {
+    /// Calculate the delta (difference) from a previous sample.
+    ///
+    /// Uses saturating subtraction to handle counter wraps gracefully.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let prev = qdisc.stats_basic.unwrap();
+    /// // ... wait some time ...
+    /// let curr = qdisc.stats_basic.unwrap();
+    /// let delta = curr.delta(&prev);
+    /// println!("Transferred {} bytes, {} packets", delta.bytes, delta.packets);
+    /// ```
+    pub fn delta(&self, previous: &Self) -> TcStatsBasic {
+        TcStatsBasic {
+            bytes: self.bytes.saturating_sub(previous.bytes),
+            packets: self.packets.saturating_sub(previous.packets),
+        }
+    }
+}
+
 /// Queue statistics (from TCA_STATS2/TCA_STATS_QUEUE).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TcStatsQueue {
@@ -83,6 +105,32 @@ pub struct TcStatsQueue {
     pub requeues: u32,
     /// Overlimit count.
     pub overlimits: u32,
+}
+
+impl TcStatsQueue {
+    /// Calculate the delta (difference) from a previous sample.
+    ///
+    /// Note: `qlen` and `backlog` are instantaneous values, not counters,
+    /// so they are taken from the current sample directly.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let prev = qdisc.stats_queue.unwrap();
+    /// // ... wait some time ...
+    /// let curr = qdisc.stats_queue.unwrap();
+    /// let delta = curr.delta(&prev);
+    /// println!("New drops: {}, new overlimits: {}", delta.drops, delta.overlimits);
+    /// ```
+    pub fn delta(&self, previous: &Self) -> TcStatsQueue {
+        TcStatsQueue {
+            qlen: self.qlen,       // Instantaneous, not a counter
+            backlog: self.backlog, // Instantaneous, not a counter
+            drops: self.drops.saturating_sub(previous.drops),
+            requeues: self.requeues.saturating_sub(previous.requeues),
+            overlimits: self.overlimits.saturating_sub(previous.overlimits),
+        }
+    }
 }
 
 /// Rate estimator statistics (from TCA_STATS2/TCA_STATS_RATE_EST).
@@ -170,6 +218,20 @@ impl TcMessage {
     /// Get backlog from queue stats.
     pub fn backlog(&self) -> u32 {
         self.stats_queue.map(|s| s.backlog).unwrap_or(0)
+    }
+
+    /// Get bytes per second from rate estimator.
+    ///
+    /// Returns 0 if rate estimator statistics are not available.
+    pub fn bps(&self) -> u32 {
+        self.stats_rate_est.map(|s| s.bps).unwrap_or(0)
+    }
+
+    /// Get packets per second from rate estimator.
+    ///
+    /// Returns 0 if rate estimator statistics are not available.
+    pub fn pps(&self) -> u32 {
+        self.stats_rate_est.map(|s| s.pps).unwrap_or(0)
     }
 
     /// Get parsed qdisc options if available.
