@@ -21,8 +21,10 @@ tuntap-async = ["tuntap"]
 tc = []
 # Output formatting (JSON/text)
 output = ["dep:serde"]
+# Namespace watcher (inotify-based)
+namespace_watcher = ["dep:inotify"]
 # All features
-full = ["sockdiag", "tuntap", "tuntap-async", "tc", "output"]
+full = ["sockdiag", "tuntap", "tuntap-async", "tc", "output", "namespace_watcher"]
 # Enable integration tests (require root or network namespace)
 integration = []
 
@@ -39,6 +41,7 @@ serde_json = { workspace = true }
 
 # Optional dependencies
 serde = { workspace = true, optional = true }
+inotify = { version = "0.11", default-features = false, features = ["stream"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

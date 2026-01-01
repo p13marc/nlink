@@ -3,6 +3,7 @@
 pub mod addr;
 pub mod link;
 pub mod neigh;
+pub mod nsid;
 pub mod route;
 pub mod rule;
 pub mod tc;
@@ -11,6 +12,7 @@ pub mod tc;
 pub use addr::{IfAddrMsg, IfaAttr};
 pub use link::{IfInfoMsg, IflaAttr};
 pub use neigh::{NdMsg, NdaAttr};
+pub use nsid::{RTM_DELNSID, RTM_GETNSID, RTM_NEWNSID, RTNLGRP_NSID, RtGenMsg, netnsa};
 pub use route::{RtMsg, RtaAttr};
 pub use tc::{TcMsg, TcaAttr};
 

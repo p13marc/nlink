@@ -76,6 +76,9 @@ mod fixtures;
 pub mod message;
 pub mod messages;
 pub mod namespace;
+pub mod namespace_events;
+#[cfg(feature = "namespace_watcher")]
+pub mod namespace_watcher;
 pub mod parse;
 mod socket;
 pub mod stats;
@@ -88,5 +91,10 @@ pub use builder::{MessageBuilder, NestToken};
 pub use connection::Connection;
 pub use error::{Error, Result, ResultExt};
 pub use message::{MessageIter, NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
+pub use namespace_events::{NamespaceEventSubscriber, NamespaceNetlinkEvent};
+#[cfg(feature = "namespace_watcher")]
+pub use namespace_watcher::{
+    NamespaceEvent, NamespaceEventStream, NamespaceWatcher, NamespaceWatcherConfig,
+};
 pub use parse::{FromNetlink, ToNetlink};
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};

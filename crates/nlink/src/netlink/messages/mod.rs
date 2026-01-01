@@ -18,11 +18,13 @@
 mod address;
 mod link;
 mod neighbor;
+mod nsid;
 mod route;
 mod tc;
 
 pub use address::*;
 pub use link::*;
 pub use neighbor::*;
+pub use nsid::*;
 pub use route::*;
 pub use tc::*;

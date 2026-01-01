@@ -613,6 +613,99 @@ impl Connection {
     }
 }
 
+// ============================================================================
+// Namespace ID Queries
+// ============================================================================
+
+use super::messages::NsIdMessage;
+use super::types::nsid::{RTM_GETNSID, RtGenMsg, netnsa};
+
+impl Connection {
+    /// Get the namespace ID for a given file descriptor.
+    ///
+    /// The file descriptor should be an open reference to a network namespace
+    /// (e.g., from opening `/proc/<pid>/ns/net`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the namespace ID cannot be determined.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::fs::File;
+    /// use std::os::unix::io::AsRawFd;
+    ///
+    /// let ns_file = File::open("/var/run/netns/myns")?;
+    /// let nsid = conn.get_nsid(ns_file.as_raw_fd()).await?;
+    /// println!("Namespace ID: {}", nsid);
+    /// ```
+    pub async fn get_nsid(&self, ns_fd: RawFd) -> Result<u32> {
+        let mut builder = ack_request(RTM_GETNSID);
+
+        // Append rtgenmsg header (1 byte + 3 padding)
+        builder.append(&RtGenMsg::new());
+        builder.append_bytes(&[0u8; 3]); // Padding to 4 bytes
+
+        // Add NETNSA_FD attribute
+        builder.append_attr_u32(netnsa::FD, ns_fd as u32);
+
+        let response = self.request(builder).await?;
+
+        // Parse the response
+        if response.len() >= super::message::NLMSG_HDRLEN {
+            let payload = &response[super::message::NLMSG_HDRLEN..];
+            if let Some(nsid_msg) = NsIdMessage::parse(payload)
+                && let Some(nsid) = nsid_msg.nsid {
+                    return Ok(nsid);
+                }
+        }
+
+        Err(Error::InvalidMessage(
+            "namespace ID not found in response".into(),
+        ))
+    }
+
+    /// Get the namespace ID for a given process's network namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the namespace ID cannot be determined.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Get the namespace ID for process 1234
+    /// let nsid = conn.get_nsid_for_pid(1234).await?;
+    /// println!("Namespace ID for PID 1234: {}", nsid);
+    /// ```
+    pub async fn get_nsid_for_pid(&self, pid: u32) -> Result<u32> {
+        let mut builder = ack_request(RTM_GETNSID);
+
+        // Append rtgenmsg header (1 byte + 3 padding)
+        builder.append(&RtGenMsg::new());
+        builder.append_bytes(&[0u8; 3]); // Padding to 4 bytes
+
+        // Add NETNSA_PID attribute
+        builder.append_attr_u32(netnsa::PID, pid);
+
+        let response = self.request(builder).await?;
+
+        // Parse the response
+        if response.len() >= super::message::NLMSG_HDRLEN {
+            let payload = &response[super::message::NLMSG_HDRLEN..];
+            if let Some(nsid_msg) = NsIdMessage::parse(payload)
+                && let Some(nsid) = nsid_msg.nsid {
+                    return Ok(nsid);
+                }
+        }
+
+        Err(Error::InvalidMessage(
+            "namespace ID not found in response".into(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod send_sync_tests {
     use super::*;
