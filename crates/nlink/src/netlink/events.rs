@@ -40,6 +40,7 @@ use super::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage
 use super::parse::FromNetlink;
 use super::socket::rtnetlink_groups::*;
 use super::{Protocol, Result};
+use std::path::PathBuf;
 
 /// Network events that can be received from the kernel.
 #[derive(Debug, Clone)]
@@ -127,6 +128,22 @@ impl NetworkEvent {
     }
 }
 
+/// Namespace configuration for EventStreamBuilder.
+#[derive(Debug, Clone)]
+#[derive(Default)]
+enum NamespaceConfig {
+    /// Use the current/default namespace.
+    #[default]
+    Default,
+    /// Use a named namespace (from /var/run/netns/).
+    Named(String),
+    /// Use a namespace by path.
+    Path(PathBuf),
+    /// Use a namespace by PID.
+    Pid(u32),
+}
+
+
 /// Builder for configuring an event stream.
 #[derive(Debug, Default)]
 pub struct EventStreamBuilder {
@@ -137,6 +154,7 @@ pub struct EventStreamBuilder {
     routes_v6: bool,
     neighbors: bool,
     tc: bool,
+    namespace: NamespaceConfig,
 }
 
 impl EventStreamBuilder {
@@ -210,9 +228,70 @@ impl EventStreamBuilder {
             .tc(true)
     }
 
+    /// Monitor events in a named network namespace.
+    ///
+    /// The namespace must exist in `/var/run/netns/` (created via `ip netns add`).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut stream = EventStream::builder()
+    ///     .namespace("myns")
+    ///     .links(true)
+    ///     .tc(true)
+    ///     .build()?;
+    /// ```
+    pub fn namespace(mut self, name: impl Into<String>) -> Self {
+        self.namespace = NamespaceConfig::Named(name.into());
+        self
+    }
+
+    /// Monitor events in a network namespace by path.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut stream = EventStream::builder()
+    ///     .namespace_path("/proc/1234/ns/net")
+    ///     .links(true)
+    ///     .build()?;
+    /// ```
+    pub fn namespace_path(mut self, path: impl AsRef<std::path::Path>) -> Self {
+        self.namespace = NamespaceConfig::Path(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Monitor events in a process's network namespace.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut stream = EventStream::builder()
+    ///     .namespace_pid(container_pid)
+    ///     .links(true)
+    ///     .build()?;
+    /// ```
+    pub fn namespace_pid(mut self, pid: u32) -> Self {
+        self.namespace = NamespaceConfig::Pid(pid);
+        self
+    }
+
     /// Build the event stream.
     pub fn build(self) -> Result<EventStream> {
-        let mut conn = Connection::new(Protocol::Route)?;
+        let mut conn = match self.namespace {
+            NamespaceConfig::Default => Connection::new(Protocol::Route)?,
+            NamespaceConfig::Named(ref name) => {
+                let path = PathBuf::from("/var/run/netns").join(name);
+                Connection::new_in_namespace_path(Protocol::Route, path)?
+            }
+            NamespaceConfig::Path(ref path) => {
+                Connection::new_in_namespace_path(Protocol::Route, path)?
+            }
+            NamespaceConfig::Pid(pid) => {
+                let path = PathBuf::from(format!("/proc/{}/ns/net", pid));
+                Connection::new_in_namespace_path(Protocol::Route, path)?
+            }
+        };
 
         if self.links {
             conn.subscribe(RTNLGRP_LINK)?;

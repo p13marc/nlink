@@ -189,6 +189,55 @@ while let Some(event) = stream.next().await? {
 }
 ```
 
+**Namespace-aware event monitoring:**
+```rust
+use nlink::netlink::events::{EventStream, NetworkEvent};
+
+// Monitor events in a named namespace
+let mut stream = EventStream::builder()
+    .namespace("myns")
+    .links(true)
+    .tc(true)
+    .build()?;
+
+// Or by PID (e.g., container process)
+let mut stream = EventStream::builder()
+    .namespace_pid(container_pid)
+    .links(true)
+    .build()?;
+
+// Or by path
+let mut stream = EventStream::builder()
+    .namespace_path("/proc/1234/ns/net")
+    .all()
+    .build()?;
+```
+
+**Namespace-aware TC operations (using ifindex):**
+```rust
+use nlink::netlink::{namespace, tc::NetemConfig};
+use std::time::Duration;
+
+// For namespace operations, use *_by_index methods to avoid
+// reading /sys/class/net/ from the host namespace
+let conn = namespace::connection_for("myns")?;
+let link = conn.get_link_by_name("eth0").await?;
+
+let netem = NetemConfig::new()
+    .delay(Duration::from_millis(100))
+    .loss(1.0)
+    .build();
+
+// Use ifindex instead of device name
+conn.add_qdisc_by_index(link.ifindex(), netem).await?;
+
+// All TC methods have *_by_index variants:
+// - add_qdisc_by_index / add_qdisc_by_index_full
+// - del_qdisc_by_index / del_qdisc_by_index_full
+// - replace_qdisc_by_index / replace_qdisc_by_index_full
+// - change_qdisc_by_index / change_qdisc_by_index_full
+```
+
 **Building requests (low-level):**
 ```rust
 use nlink::netlink::{MessageBuilder, Connection};

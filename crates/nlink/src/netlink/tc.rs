@@ -1011,6 +1011,43 @@ impl Connection {
         config: impl QdiscConfig,
     ) -> Result<()> {
         let ifindex = get_ifindex(dev)?;
+        self.add_qdisc_by_index_full(ifindex, parent, handle, config)
+            .await
+    }
+
+    /// Add a qdisc by interface index.
+    ///
+    /// This is useful for namespace-aware operations where you've already
+    /// resolved the interface index via `conn.get_link_by_name()`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{namespace, tc::NetemConfig};
+    /// use std::time::Duration;
+    ///
+    /// let conn = namespace::connection_for("myns")?;
+    /// let link = conn.get_link_by_name("eth0").await?;
+    ///
+    /// let netem = NetemConfig::new()
+    ///     .delay(Duration::from_millis(100))
+    ///     .build();
+    ///
+    /// conn.add_qdisc_by_index(link.ifindex(), netem).await?;
+    /// ```
+    pub async fn add_qdisc_by_index(&self, ifindex: i32, config: impl QdiscConfig) -> Result<()> {
+        self.add_qdisc_by_index_full(ifindex, "root", None, config)
+            .await
+    }
+
+    /// Add a qdisc by interface index with explicit parent and handle.
+    pub async fn add_qdisc_by_index_full(
+        &self,
+        ifindex: i32,
+        parent: &str,
+        handle: Option<&str>,
+        config: impl QdiscConfig,
+    ) -> Result<()> {
         let parent_handle = parse_handle(parent)?;
         let qdisc_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
 
@@ -1049,6 +1086,24 @@ impl Connection {
         handle: Option<&str>,
     ) -> Result<()> {
         let ifindex = get_ifindex(dev)?;
+        self.del_qdisc_by_index_full(ifindex, parent, handle).await
+    }
+
+    /// Delete a qdisc by interface index.
+    ///
+    /// This is useful for namespace-aware operations where you've already
+    /// resolved the interface index via `conn.get_link_by_name()`.
+    pub async fn del_qdisc_by_index(&self, ifindex: i32, parent: &str) -> Result<()> {
+        self.del_qdisc_by_index_full(ifindex, parent, None).await
+    }
+
+    /// Delete a qdisc by interface index with explicit handle.
+    pub async fn del_qdisc_by_index_full(
+        &self,
+        ifindex: i32,
+        parent: &str,
+        handle: Option<&str>,
+    ) -> Result<()> {
         let parent_handle = parse_handle(parent)?;
         let qdisc_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
 
@@ -1087,6 +1142,31 @@ impl Connection {
         config: impl QdiscConfig,
     ) -> Result<()> {
         let ifindex = get_ifindex(dev)?;
+        self.replace_qdisc_by_index_full(ifindex, parent, handle, config)
+            .await
+    }
+
+    /// Replace a qdisc by interface index (add or update).
+    ///
+    /// This is useful for namespace-aware operations where you've already
+    /// resolved the interface index via `conn.get_link_by_name()`.
+    pub async fn replace_qdisc_by_index(
+        &self,
+        ifindex: i32,
+        config: impl QdiscConfig,
+    ) -> Result<()> {
+        self.replace_qdisc_by_index_full(ifindex, "root", None, config)
+            .await
+    }
+
+    /// Replace a qdisc by interface index with explicit parent and handle.
+    pub async fn replace_qdisc_by_index_full(
+        &self,
+        ifindex: i32,
+        parent: &str,
+        handle: Option<&str>,
+        config: impl QdiscConfig,
+    ) -> Result<()> {
         let parent_handle = parse_handle(parent)?;
         let qdisc_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
 
@@ -1135,6 +1215,32 @@ impl Connection {
         config: impl QdiscConfig,
     ) -> Result<()> {
         let ifindex = get_ifindex(dev)?;
+        self.change_qdisc_by_index_full(ifindex, parent, handle, config)
+            .await
+    }
+
+    /// Change a qdisc's parameters by interface index.
+    ///
+    /// This is useful for namespace-aware operations where you've already
+    /// resolved the interface index via `conn.get_link_by_name()`.
+    pub async fn change_qdisc_by_index(
+        &self,
+        ifindex: i32,
+        parent: &str,
+        config: impl QdiscConfig,
+    ) -> Result<()> {
+        self.change_qdisc_by_index_full(ifindex, parent, None, config)
+            .await
+    }
+
+    /// Change a qdisc by interface index with explicit handle.
+    pub async fn change_qdisc_by_index_full(
+        &self,
+        ifindex: i32,
+        parent: &str,
+        handle: Option<&str>,
+        config: impl QdiscConfig,
+    ) -> Result<()> {
         let parent_handle = parse_handle(parent)?;
         let qdisc_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
 

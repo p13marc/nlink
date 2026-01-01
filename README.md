@@ -118,6 +118,75 @@ async fn main() -> nlink::Result<()> {
 }
 ```
 
+### Namespace-aware Event Monitoring
+
+```rust
+use nlink::netlink::events::{EventStream, NetworkEvent};
+
+#[tokio::main]
+async fn main() -> nlink::Result<()> {
+    // Monitor events in a named namespace
+    let mut stream = EventStream::builder()
+        .namespace("myns")
+        .links(true)
+        .tc(true)
+        .build()?;
+    
+    // Or by PID (e.g., container process)
+    let mut stream = EventStream::builder()
+        .namespace_pid(1234)
+        .links(true)
+        .build()?;
+    
+    // Or by path
+    let mut stream = EventStream::builder()
+        .namespace_path("/proc/1234/ns/net")
+        .all()
+        .build()?;
+    
+    while let Some(event) = stream.next().await? {
+        println!("{:?}", event);
+    }
+    
+    Ok(())
+}
+```
+
+### Namespace-aware TC Operations
+
+For TC operations in namespaces, use the `*_by_index` methods to avoid reading
+`/sys/class/net/` from the host namespace:
+
+```rust
+use nlink::netlink::namespace;
+use nlink::netlink::tc::NetemConfig;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> nlink::Result<()> {
+    let conn = namespace::connection_for("myns")?;
+    
+    // First, get the interface index via netlink (namespace-aware)
+    let link = conn.get_link_by_name("eth0").await?;
+    
+    let netem = NetemConfig::new()
+        .delay(Duration::from_millis(100))
+        .loss(1.0)
+        .build();
+    
+    // Use ifindex instead of device name
+    conn.add_qdisc_by_index(link.ifindex(), netem).await?;
+    
+    // All TC methods have *_by_index variants:
+    // - add_qdisc_by_index / add_qdisc_by_index_full
+    // - del_qdisc_by_index / del_qdisc_by_index_full  
+    // - replace_qdisc_by_index / replace_qdisc_by_index_full
+    // - change_qdisc_by_index / change_qdisc_by_index_full
+    
+    Ok(())
+}
+```
+
 ## Library Modules
 
 ### `nlink::netlink` - Core netlink functionality
@@ -360,6 +429,8 @@ The library API is production-ready for network monitoring and querying. Current
 - [x] Convenience query methods (`get_links()`, `get_addresses()`, `get_qdiscs()`, etc.)
 - [x] Link state management (`set_link_up()`, `set_link_down()`, `set_link_mtu()`, `del_link()`)
 - [x] Namespace-aware connections (`Connection::new_in_namespace_path()`, `namespace` module)
+- [x] Namespace-aware event monitoring (`EventStream::builder().namespace()`)
+- [x] Namespace-aware TC operations (`add_qdisc_by_index()`, etc.)
 - [x] Typed TC options parsing (fq_codel, htb, tbf, netem, prio, sfq)
 - [x] Statistics helpers with rate calculation (`StatsSnapshot`, `StatsTracker`)
 - [x] Thread-safe `Connection` (`Send + Sync`)
