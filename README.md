@@ -37,6 +37,7 @@ nlink = { version = "0.1", features = ["full"] }
 | `tuntap` | TUN/TAP device management |
 | `tc` | Traffic control utilities |
 | `output` | JSON/text output formatting |
+| `namespace_watcher` | Filesystem-based namespace watching via inotify |
 | `full` | All features enabled |
 
 ## Using as a Library
@@ -146,6 +147,51 @@ async fn main() -> nlink::Result<()> {
     
     while let Some(event) = stream.next().await? {
         println!("{:?}", event);
+    }
+    
+    Ok(())
+}
+```
+
+### Watching Namespace Changes
+
+Two complementary approaches for monitoring network namespace lifecycle:
+
+```rust
+use nlink::netlink::{NamespaceWatcher, NamespaceEvent};
+use nlink::netlink::{NamespaceEventSubscriber, NamespaceNetlinkEvent};
+
+#[tokio::main]
+async fn main() -> nlink::Result<()> {
+    // Option 1: Filesystem-based watching (feature: namespace_watcher)
+    // Watches /var/run/netns/ for named namespace creation/deletion
+    let mut watcher = NamespaceWatcher::new().await?;
+    
+    while let Some(event) = watcher.recv().await? {
+        match event {
+            NamespaceEvent::Created { name } => println!("Created: {}", name),
+            NamespaceEvent::Deleted { name } => println!("Deleted: {}", name),
+            _ => {}
+        }
+    }
+    
+    // Atomically list existing + watch for changes (no race condition)
+    let (existing, mut watcher) = NamespaceWatcher::list_and_watch().await?;
+    println!("Existing: {:?}", existing);
+    
+    // Option 2: Netlink-based events (always available)
+    // Receives RTM_NEWNSID/RTM_DELNSID kernel events
+    let mut sub = NamespaceEventSubscriber::new().await?;
+    
+    while let Some(event) = sub.recv().await? {
+        match event {
+            NamespaceNetlinkEvent::NewNsId { nsid, pid, fd } => {
+                println!("New NSID {}: pid={:?}", nsid, pid);
+            }
+            NamespaceNetlinkEvent::DelNsId { nsid } => {
+                println!("Deleted NSID {}", nsid);
+            }
+        }
     }
     
     Ok(())
@@ -350,6 +396,7 @@ async fn main() -> nlink::Result<()> {
 - **High-level API**: `Connection` with convenience query methods (`get_links()`, `get_addresses()`, etc.)
 - **Link state management**: `set_link_up()`, `set_link_down()`, `set_link_mtu()`, `del_link()`
 - **Namespace support**: `Connection::new_in_namespace_path()` and `namespace` module helpers
+- **Namespace watching**: `NamespaceWatcher` (inotify) and `NamespaceEventSubscriber` (netlink)
 - **Event monitoring**: `EventStream` for real-time network change notifications
 - **Strongly-typed messages**: `LinkMessage`, `AddressMessage`, `RouteMessage`, `TcMessage`
 - **TC options parsing**: Typed access to qdisc parameters (fq_codel, htb, tbf, netem, etc.)
@@ -589,6 +636,7 @@ The library API is production-ready for network monitoring and querying. Current
 - [x] Namespace-aware connections (`Connection::new_in_namespace_path()`, `namespace` module)
 - [x] Namespace-aware event monitoring (`EventStream::builder().namespace()`)
 - [x] Namespace-aware TC operations (`add_qdisc_by_index()`, etc.)
+- [x] Namespace watching (`NamespaceWatcher` via inotify, `NamespaceEventSubscriber` via netlink)
 - [x] Typed TC options parsing (fq_codel, htb, tbf, netem, prio, sfq)
 - [x] Statistics helpers with rate calculation (`StatsSnapshot`, `StatsTracker`)
 - [x] Thread-safe `Connection` (`Send + Sync`)

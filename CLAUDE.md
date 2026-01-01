@@ -65,6 +65,7 @@ crates/nlink/src/
 | `tuntap` | TUN/TAP device management |
 | `tc` | Traffic control utilities (qdisc builders, handle parsing) |
 | `output` | JSON/text output formatting |
+| `namespace_watcher` | Filesystem-based namespace watching via inotify |
 | `full` | All features enabled |
 
 ### Binaries
@@ -305,6 +306,72 @@ let mut stream = EventStream::builder()
     .namespace_path("/proc/1234/ns/net")
     .all()
     .build()?;
+```
+
+**Watching namespace creation/deletion (inotify-based, feature: namespace_watcher):**
+```rust
+use nlink::netlink::{NamespaceWatcher, NamespaceEvent};
+
+// Watch for namespace changes in /var/run/netns/
+let mut watcher = NamespaceWatcher::new().await?;
+
+while let Some(event) = watcher.recv().await? {
+    match event {
+        NamespaceEvent::Created { name } => println!("Namespace created: {}", name),
+        NamespaceEvent::Deleted { name } => println!("Namespace deleted: {}", name),
+        NamespaceEvent::DirectoryCreated => println!("/var/run/netns created"),
+        NamespaceEvent::DirectoryDeleted => println!("/var/run/netns deleted"),
+    }
+}
+```
+
+**Atomically list and watch namespaces (no race condition):**
+```rust
+use nlink::netlink::{NamespaceWatcher, NamespaceEvent};
+
+// Get current namespaces and start watching in one operation
+let (existing, mut watcher) = NamespaceWatcher::list_and_watch().await?;
+println!("Existing namespaces: {:?}", existing);
+
+// Now receive only new events (no duplicates of existing namespaces)
+while let Some(event) = watcher.recv().await? {
+    println!("{:?}", event);
+}
+```
+
+**Watching namespace ID events (netlink-based, always available):**
+```rust
+use nlink::netlink::{NamespaceEventSubscriber, NamespaceNetlinkEvent};
+
+// Subscribe to RTM_NEWNSID/RTM_DELNSID kernel events
+let mut sub = NamespaceEventSubscriber::new().await?;
+
+while let Some(event) = sub.recv().await? {
+    match event {
+        NamespaceNetlinkEvent::NewNsId { nsid, pid, fd } => {
+            println!("New NSID {}: pid={:?}, fd={:?}", nsid, pid, fd);
+        }
+        NamespaceNetlinkEvent::DelNsId { nsid } => {
+            println!("Deleted NSID {}", nsid);
+        }
+    }
+}
+```
+
+**Query namespace ID:**
+```rust
+use nlink::netlink::{Connection, Protocol};
+use std::os::fd::AsRawFd;
+
+let conn = Connection::new(Protocol::Route)?;
+
+// Get NSID for a namespace by file descriptor
+let ns_file = std::fs::File::open("/var/run/netns/myns")?;
+let nsid = conn.get_nsid(ns_file.as_raw_fd()).await?;
+println!("NSID: {}", nsid);
+
+// Or get NSID for a process's namespace
+let nsid = conn.get_nsid_for_pid(1234).await?;
 ```
 
 **Namespace-aware TC operations (using ifindex):**
