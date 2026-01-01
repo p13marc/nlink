@@ -198,7 +198,41 @@ for qdisc in &qdiscs {
 }
 ```
 
-**Statistics tracking:**
+**TC statistics and rate monitoring:**
+```rust
+use nlink::netlink::{Connection, Protocol};
+
+let conn = Connection::new(Protocol::Route)?;
+let qdiscs = conn.get_qdiscs_for("eth0").await?;
+
+for qdisc in &qdiscs {
+    // Real-time rate from kernel's rate estimator
+    println!("Rate: {} bps, {} pps", qdisc.bps(), qdisc.pps());
+    
+    // Queue statistics
+    println!("Queue: {} packets, {} bytes backlog", qdisc.qlen(), qdisc.backlog());
+    println!("Drops: {}, overlimits: {}", qdisc.drops(), qdisc.overlimits());
+}
+
+// Calculate deltas between samples
+let prev = qdiscs[0].stats_basic.unwrap();
+// ... wait ...
+let curr = conn.get_qdiscs_for("eth0").await?[0].stats_basic.unwrap();
+let delta = curr.delta(&prev);
+println!("Transferred: {} bytes, {} packets", delta.bytes, delta.packets);
+```
+
+**HTB class statistics:**
+```rust
+// Get all classes for an interface
+let classes = conn.get_classes_for("eth0").await?;
+for class in &classes {
+    println!("Class {:x}: {} bytes, {} packets", 
+        class.handle(), class.bytes(), class.packets());
+}
+```
+
+**Link statistics tracking:**
 ```rust
 use nlink::netlink::stats::{StatsSnapshot, StatsTracker};
 
@@ -270,7 +304,8 @@ let conn = namespace::connection_for("myns")?;
 let link = conn.get_link_by_name("eth0").await?;
 
 let netem = NetemConfig::new()
-    .delay(Duration::from_millis(100))
+    .delay_ms(100)  // or .delay(Duration::from_millis(100))
+    .jitter_ms(10)  // or .jitter(Duration::from_millis(10))
     .loss(1.0)
     .build();
 
