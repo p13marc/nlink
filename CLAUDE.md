@@ -38,11 +38,12 @@ crates/nlink/src/
     builder.rs        # Message construction with MessageBuilder
     message.rs        # Netlink header parsing, MessageIter
     attr.rs           # Attribute (TLV) parsing with AttrIter
+    error.rs          # Error types with context support (ResultExt trait)
     events.rs         # High-level event monitoring (EventStream, NetworkEvent)
     namespace.rs      # Network namespace utilities
     stats.rs          # Statistics tracking (StatsSnapshot, StatsTracker)
     tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, etc.)
-    tc_options.rs     # TC options parsing
+    tc_options.rs     # TC options parsing (netem loss models, etc.)
     messages/         # Strongly-typed message structs
     types/            # RTNetlink message structures (link, addr, route, neigh, rule, tc)
   util/               # Shared utilities (always available)
@@ -188,6 +189,19 @@ for qdisc in &qdiscs {
         println!("ecn={}", netem.ecn);
         if let Some(slot) = &netem.slot {
             println!("slot: min={}ns, max={}ns", slot.min_delay_ns, slot.max_delay_ns);
+        }
+        
+        // Loss models (Gilbert-Intuitive or Gilbert-Elliot)
+        if let Some(loss_model) = &netem.loss_model {
+            use nlink::netlink::tc_options::NetemLossModel;
+            match loss_model {
+                NetemLossModel::GilbertIntuitive { p13, p31, p32, p14, p23 } => {
+                    println!("4-state loss model: p13={}, p31={}", p13, p31);
+                }
+                NetemLossModel::GilbertElliot { p, r, h, k1 } => {
+                    println!("2-state loss model: p={}, r={}, h={}", p, r, h);
+                }
+            }
         }
     }
 
@@ -350,6 +364,36 @@ builder.append_attr(TCA_HTB_INIT, glob.as_bytes());
 builder.nest_end(options_token);
 
 conn.request_ack(builder).await?;
+```
+
+**Error handling with context:**
+```rust
+use nlink::netlink::{Connection, Protocol, Error, ResultExt};
+
+let conn = Connection::new(Protocol::Route)?;
+
+// Add context to errors for better debugging
+conn.set_link_up("eth0").await
+    .with_context("bringing up eth0")?;
+
+// Lazy context evaluation (only computed on error)
+conn.add_qdisc("eth0", netem).await
+    .with_context_fn(|| format!("adding netem qdisc to {}", iface))?;
+
+// Check error types for recovery logic
+match conn.del_qdisc("eth0", "root").await {
+    Ok(()) => println!("Deleted"),
+    Err(e) if e.is_not_found() => println!("Nothing to delete"),
+    Err(e) if e.is_permission_denied() => println!("Need root"),
+    Err(e) if e.is_already_exists() => println!("Already exists"),
+    Err(e) if e.is_busy() => println!("Device busy"),
+    Err(e) => return Err(e),
+}
+
+// Get errno for detailed handling
+if let Some(errno) = err.errno() {
+    println!("System error: {}", errno);
+}
 ```
 
 ## Netlink Message Flow

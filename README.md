@@ -229,6 +229,20 @@ async fn main() -> nlink::Result<()> {
             if let Some(slot) = &netem.slot {
                 println!("  slot: {}ns - {}ns", slot.min_delay_ns, slot.max_delay_ns);
             }
+            // Loss models (Gilbert-Intuitive or Gilbert-Elliot)
+            if let Some(loss_model) = &netem.loss_model {
+                use nlink::netlink::tc_options::NetemLossModel;
+                match loss_model {
+                    NetemLossModel::GilbertIntuitive { p13, p31, p32, p14, p23 } => {
+                        println!("  loss model: Gilbert-Intuitive (4-state)");
+                        println!("    p13={:.2}%, p31={:.2}%, p32={:.2}%", p13, p31, p32);
+                    }
+                    NetemLossModel::GilbertElliot { p, r, h, k1 } => {
+                        println!("  loss model: Gilbert-Elliot (2-state)");
+                        println!("    p={:.2}%, r={:.2}%, h={:.2}%, k1={:.2}%", p, r, h, k1);
+                    }
+                }
+            }
         }
         
         // Use parsed_options() for all qdisc types
@@ -291,6 +305,44 @@ async fn main() -> nlink::Result<()> {
 }
 ```
 
+### Error Handling with Context
+
+The library provides rich error types with context support for better debugging:
+
+```rust
+use nlink::netlink::{Connection, Protocol, Error, ResultExt};
+
+#[tokio::main]
+async fn main() -> nlink::Result<()> {
+    let conn = Connection::new(Protocol::Route)?;
+    
+    // Add context to errors using the ResultExt trait
+    conn.set_link_up("eth0").await
+        .with_context("bringing up eth0")?;
+    
+    // Or use with_context_fn for lazy evaluation
+    let iface = "eth0";
+    conn.set_link_mtu(iface, 9000).await
+        .with_context_fn(|| format!("setting MTU on {}", iface))?;
+    
+    // Check error types for recovery logic
+    match conn.del_qdisc("eth0", "root").await {
+        Ok(()) => println!("Qdisc deleted"),
+        Err(e) if e.is_not_found() => println!("No qdisc to delete"),
+        Err(e) if e.is_permission_denied() => println!("Need root privileges"),
+        Err(e) if e.is_busy() => println!("Device is busy"),
+        Err(e) => return Err(e),
+    }
+    
+    // Semantic error types provide clear messages
+    // Error::InterfaceNotFound { name: "eth99" } -> "interface not found: eth99"
+    // Error::NamespaceNotFound { name: "myns" } -> "namespace not found: myns"
+    // Error::QdiscNotFound { kind: "netem", interface: "eth0" } -> "qdisc not found: netem on eth0"
+    
+    Ok(())
+}
+```
+
 ## Library Modules
 
 ### `nlink::netlink` - Core netlink functionality
@@ -301,7 +353,9 @@ async fn main() -> nlink::Result<()> {
 - **Event monitoring**: `EventStream` for real-time network change notifications
 - **Strongly-typed messages**: `LinkMessage`, `AddressMessage`, `RouteMessage`, `TcMessage`
 - **TC options parsing**: Typed access to qdisc parameters (fq_codel, htb, tbf, netem, etc.)
+- **Netem loss models**: Support for Gilbert-Intuitive and Gilbert-Elliot state-based loss
 - **Statistics tracking**: `StatsSnapshot` and `StatsTracker` for rate calculation
+- **Error context**: `ResultExt` trait for adding context, semantic error types
 - **Low-level access**: `MessageBuilder` for custom netlink messages
 
 ### `nlink::util` - Shared utilities
@@ -516,7 +570,7 @@ The library API is production-ready for network monitoring and querying. Current
 - [x] TC class operations with HTB parameters (rate, ceil, burst, prio, quantum)
 - [x] TC monitor for qdisc/class/filter events
 - [x] TC filter operations (show, add, del)
-- [x] TC filter types: u32 (match ip/ip6/tcp/udp/icmp), flower, basic, fw
+- [x] TC filter types: u32 (match ip/ip6/tcp/udp/icmp), flower, basic, fw, bpf
 - [x] TC actions: gact (pass/drop/pipe), mirred (mirror/redirect), police (rate limiting)
 
 - [x] Network namespace support (ip netns list, add, del, exec, identify, pids, monitor, set, attach)
