@@ -22,101 +22,112 @@ This document outlines a detailed plan to make **nlink** better than **rtnetlink
 
 ---
 
-## Phase 1: Link Type Parity (Priority: Critical)
+## Implementation Notes from iproute2 Analysis
 
-Close the gap on the 5 link types rtnetlink has that nlink doesn't.
+### Key Findings
 
-### 1.1 WireGuard Link Type
-**Effort**: Medium | **Value**: High (very popular VPN)
+1. **WireGuard** uses **Generic Netlink (GENL)**, not RTNetlink - requires separate protocol handling
+2. **MACsec** also uses **Generic Netlink** for SA/SC management (complex)
+3. **MACsec link creation** uses standard RTNetlink but configuration uses GENL
+4. **NAT action** and **tunnel_key action** are straightforward RTNetlink TC actions
+5. **Simple link types** (ifb, macvtap, geneve, bareudp) are trivial to implement
 
-```rust
-// Target API
-let wg = WireguardLink::new("wg0")
-    .private_key(key)
-    .listen_port(51820)
-    .fwmark(0x100);
-conn.add_link(wg).await?;
-
-// Peer management
-conn.add_wireguard_peer("wg0", WgPeer::new(pubkey)
-    .endpoint("1.2.3.4:51820")
-    .allowed_ips(&["10.0.0.0/24"])
-    .persistent_keepalive(25)
-).await?;
+### Netlink Message Pattern (from iproute2)
+```c
+// Add attribute with data
+addattr_l(n, MAX_MSG, type, data, len);
+// Start nested attribute
+tail = addattr_nest(n, MAX_MSG, type);
+// End nested attribute
+addattr_nest_end(n, tail);
 ```
 
-**Implementation tasks:**
-- [ ] Add `WireguardLink` struct in `link.rs`
-- [ ] Define IFLA_WG_* constants
-- [ ] Implement `WgPeer` configuration
-- [ ] Add peer add/del/list methods
-- [ ] Add `get_wireguard_config()` method for reading config
-- [ ] Parse WG-specific link info in `LinkMessage`
-
-**Files to modify:**
-- `crates/nlink/src/netlink/link.rs` - Add WireguardLink
-- `crates/nlink/src/netlink/types/link.rs` - Add WG attributes
-
-### 1.2 MACsec Link Type
-**Effort**: Medium | **Value**: Medium (network encryption)
-
+This maps directly to nlink's `MessageBuilder`:
 ```rust
-// Target API
-let macsec = MacsecLink::new("macsec0", "eth0")
-    .sci(0x0011223344550001)
-    .cipher_suite(CipherSuite::GcmAes128)
-    .icv_length(16)
-    .encrypt(true)
-    .protect(true);
-conn.add_link(macsec).await?;
+builder.append_attr(type, data);
+let token = builder.nest_start(type);
+builder.nest_end(token);
 ```
 
-**Implementation tasks:**
-- [ ] Add `MacsecLink` struct
-- [ ] Define IFLA_MACSEC_* constants
-- [ ] Implement cipher suite enum
-- [ ] Add SA (Security Association) management
-- [ ] Parse MACsec-specific link info
+---
 
-**Files to modify:**
-- `crates/nlink/src/netlink/link.rs`
-- `crates/nlink/src/netlink/types/link.rs`
+## Phase 1: Easy Wins - Simple Link Types (Priority: High)
 
-### 1.3 macvtap Link Type
-**Effort**: Low | **Value**: Medium (virtualization)
+These link types use standard RTNetlink and are trivial to implement.
+
+### 1.1 IFB (Intermediate Functional Block)
+**Effort**: Trivial | **Value**: Medium (traffic redirection)
 
 ```rust
-// Target API - similar to macvlan but creates tap device
+// Target API - identical to dummy, no options
+let ifb = IfbLink::new("ifb0");
+conn.add_link(ifb).await?;
+```
+
+**Implementation**: Copy DummyLink pattern, change kind to "ifb"
+
+### 1.2 macvtap Link Type
+**Effort**: Trivial | **Value**: Medium (virtualization)
+
+```rust
+// Target API - identical to macvlan
 let macvtap = MacvtapLink::new("macvtap0", "eth0")
     .mode(MacvlanMode::Bridge);
 conn.add_link(macvtap).await?;
 ```
 
-**Implementation tasks:**
-- [ ] Add `MacvtapLink` struct (similar to MacvlanLink)
-- [ ] Kind = "macvtap" instead of "macvlan"
+**Implementation**: Copy MacvlanLink, change kind to "macvtap"
 
-**Files to modify:**
-- `crates/nlink/src/netlink/link.rs`
-
-### 1.4 xfrm Link Type
-**Effort**: Medium | **Value**: Low (IPsec tunnels)
+### 1.3 geneve Link Type
+**Effort**: Low | **Value**: Medium (overlay networking)
 
 ```rust
 // Target API
-let xfrm = XfrmLink::new("xfrm0")
-    .dev("eth0")
-    .if_id(100);
-conn.add_link(xfrm).await?;
+let geneve = GeneveLink::new("geneve0", 100)  // VNI
+    .remote("10.0.0.1".parse()?)
+    .remote6("2001:db8::1".parse()?)
+    .ttl(64)
+    .tos(0)
+    .df(DfMode::Set)
+    .port(6081)
+    .label(0)
+    .udp_csum(true)
+    .udp6_zero_csum_tx(false)
+    .collect_metadata(false);
+conn.add_link(geneve).await?;
 ```
 
-**Implementation tasks:**
-- [ ] Add `XfrmLink` struct
-- [ ] Define IFLA_XFRM_* constants
-- [ ] Implement if_id support
+**Attributes (from iplink_geneve.c)**:
+- IFLA_GENEVE_ID (u32) - VNI
+- IFLA_GENEVE_REMOTE (be32) / IFLA_GENEVE_REMOTE6 (in6_addr)
+- IFLA_GENEVE_TTL (u8), IFLA_GENEVE_TOS (u8)
+- IFLA_GENEVE_DF (u8) - 0=unset, 1=set, 2=inherit
+- IFLA_GENEVE_PORT (be16)
+- IFLA_GENEVE_LABEL (be32)
+- IFLA_GENEVE_UDP_CSUM (u8)
+- IFLA_GENEVE_UDP_ZERO_CSUM6_TX/RX (u8)
+- IFLA_GENEVE_COLLECT_METADATA (flag)
+- IFLA_GENEVE_INNER_PROTO_INHERIT (flag)
+- IFLA_GENEVE_TTL_INHERIT (flag)
 
-**Files to modify:**
-- `crates/nlink/src/netlink/link.rs`
+### 1.4 bareudp Link Type
+**Effort**: Low | **Value**: Low (MPLS/IP encap)
+
+```rust
+// Target API
+let bareudp = BareudpLink::new("bareudp0")
+    .port(6635)
+    .ethertype(0x6558)   // MPLS unicast
+    .srcport_min(true)
+    .multiproto(false);
+conn.add_link(bareudp).await?;
+```
+
+**Attributes (from iplink_bareudp.c)**:
+- IFLA_BAREUDP_PORT (be16)
+- IFLA_BAREUDP_ETHERTYPE (be16)
+- IFLA_BAREUDP_SRCPORT_MIN (flag)
+- IFLA_BAREUDP_MULTIPROTO_MODE (flag)
 
 ### 1.5 netkit Link Type
 **Effort**: Low | **Value**: Medium (container networking)
@@ -124,107 +135,81 @@ conn.add_link(xfrm).await?;
 ```rust
 // Target API
 let netkit = NetkitLink::new("nk0")
-    .mode(NetkitMode::L2)
+    .mode(NetkitMode::L2)  // or L3
+    .policy(NetkitPolicy::Forward)  // or Blackhole
+    .peer_policy(NetkitPolicy::Forward)
     .peer("nk1");
 conn.add_link(netkit).await?;
 ```
 
-**Implementation tasks:**
-- [ ] Add `NetkitLink` struct
-- [ ] Define IFLA_NETKIT_* constants
-- [ ] Implement peer configuration
-
-**Files to modify:**
-- `crates/nlink/src/netlink/link.rs`
+**Attributes (from iplink_netkit.c)**:
+- IFLA_NETKIT_MODE (u32) - 0=L3, 1=L2
+- IFLA_NETKIT_POLICY (u32) - default action
+- IFLA_NETKIT_PEER_POLICY (u32) - peer default action
+- IFLA_NETKIT_PEER_INFO (nested) - peer ifinfomsg + attrs
 
 ### Phase 1 Deliverables
-- [ ] 5 new link types implemented
-- [ ] Tests for each link type
-- [ ] Documentation updated
+- [ ] IfbLink (trivial)
+- [ ] MacvtapLink (trivial)
+- [ ] GeneveLink (low effort)
+- [ ] BareudpLink (low effort)
+- [ ] NetkitLink (low effort)
 
-**After Phase 1: nlink has 17 link types vs rtnetlink's 16**
-
----
-
-## Phase 2: Neighbor & Address Parity (Priority: High)
-
-### 2.1 Proxy ARP Support
-**Effort**: Low | **Value**: Medium
-
-```rust
-// Target API
-conn.add_neighbor_proxy("eth0", IpAddr::from([192, 168, 1, 100])).await?;
-conn.del_neighbor_proxy("eth0", IpAddr::from([192, 168, 1, 100])).await?;
-conn.get_neighbor_proxies("eth0").await?;
-```
-
-**Implementation tasks:**
-- [ ] Add `NTF_PROXY` flag support
-- [ ] Add `add_neighbor_proxy()` method
-- [ ] Add `del_neighbor_proxy()` method
-- [ ] Add `get_neighbor_proxies()` method
-- [ ] Filter neighbors by proxy flag in queries
-
-**Files to modify:**
-- `crates/nlink/src/netlink/neigh.rs`
-- `crates/nlink/src/netlink/connection.rs`
-
-### 2.2 Address Replace Operation
-**Effort**: Low | **Value**: Medium
-
-```rust
-// Target API
-conn.replace_address(addr_config).await?;
-```
-
-**Implementation tasks:**
-- [ ] Add `NLM_F_REPLACE` flag support in address operations
-- [ ] Add `replace_address()` method
-
-**Files to modify:**
-- `crates/nlink/src/netlink/addr.rs`
-
-### Phase 2 Deliverables
-- [ ] Proxy ARP support
-- [ ] Address replace operation
-- [ ] Full neighbor operation parity
-
-**After Phase 2: Full parity on address and neighbor operations**
+**After Phase 1: nlink has 17 link types vs rtnetlink's 16** ✓
 
 ---
 
-## Phase 3: TC Actions Parity (Priority: High)
+## Phase 2: TC Actions Parity (Priority: High)
 
 Close the gap on the 2 actions rtnetlink has that nlink doesn't.
 
-### 3.1 NAT Action
-**Effort**: Medium | **Value**: Medium
+### 2.1 NAT Action
+**Effort**: Low | **Value**: Medium
+
+**From m_nat.c**:
+```c
+struct tc_nat {
+    tc_gen;              // index, capab, action, refcnt, bindcnt
+    __be32 old_addr;     // Original IP
+    __be32 new_addr;     // Replacement IP
+    __be32 mask;         // Network mask
+    __u32 flags;         // TCA_NAT_FLAG_EGRESS or 0 (ingress)
+};
+```
 
 ```rust
 // Target API
 use nlink::netlink::action::NatAction;
 
-let nat = NatAction::new()
-    .old_addr("192.168.1.0/24".parse()?)
-    .new_addr("10.0.0.0/24".parse()?)
-    .direction(NatDirection::Egress);
+// Ingress NAT: rewrite destination
+let nat = NatAction::ingress("192.168.1.0/24".parse()?, "10.0.0.0/24".parse()?);
 
-let filter = MatchallFilter::new()
-    .actions(ActionList::new().with(nat))
-    .build();
+// Egress NAT: rewrite source
+let nat = NatAction::egress("192.168.1.0/24".parse()?, "10.0.0.0/24".parse()?);
+
+// Full builder
+let nat = NatAction::new()
+    .old_addr(Ipv4Addr::new(192, 168, 1, 0))
+    .new_addr(Ipv4Addr::new(10, 0, 0, 0))
+    .mask(Ipv4Addr::new(255, 255, 255, 0))
+    .egress()  // or .ingress()
+    .action(TcActionControl::Pipe);
 ```
 
-**Implementation tasks:**
-- [ ] Add `NatAction` struct
-- [ ] Define TCA_NAT_* constants
-- [ ] Implement old_addr/new_addr configuration
-- [ ] Support both ingress and egress NAT
+**Attributes**:
+- TCA_NAT_PARMS - struct tc_nat
+- TCA_NAT_TM - timing info (optional)
 
-**Files to modify:**
-- `crates/nlink/src/netlink/action.rs`
-
-### 3.2 tunnel_key Action
+### 2.2 tunnel_key Action
 **Effort**: Medium | **Value**: Medium (tunnel encapsulation)
+
+**From m_tunnel_key.c**:
+```c
+struct tc_tunnel_key {
+    tc_gen;
+    int t_action;   // TCA_TUNNEL_KEY_ACT_SET or ACT_RELEASE
+};
+```
 
 ```rust
 // Target API
@@ -232,234 +217,366 @@ use nlink::netlink::action::TunnelKeyAction;
 
 // Set tunnel metadata
 let set_key = TunnelKeyAction::set()
+    .id(100)                              // Tunnel ID
+    .src_ip("10.0.0.1".parse()?)          // IPv4 or IPv6
+    .dst_ip("10.0.0.2".parse()?)
+    .dst_port(4789)                       // UDP port
+    .tos(0)
+    .ttl(64)
+    .no_csum()                            // Disable checksum
+    .no_frag();                           // No fragmentation
+
+// With GENEVE options
+let set_key = TunnelKeyAction::set()
     .id(100)
-    .src("10.0.0.1".parse()?)
-    .dst("10.0.0.2".parse()?)
-    .dst_port(4789);
+    .src_ip("10.0.0.1".parse()?)
+    .dst_ip("10.0.0.2".parse()?)
+    .geneve_opt(0x0102, 0x80, &[0x01, 0x02, 0x03, 0x04]);
+
+// With VXLAN GBP
+let set_key = TunnelKeyAction::set()
+    .vxlan_gbp(0x100);
 
 // Unset tunnel metadata
 let unset_key = TunnelKeyAction::unset();
 ```
 
-**Implementation tasks:**
-- [ ] Add `TunnelKeyAction` struct
-- [ ] Define TCA_TUNNEL_KEY_* constants
-- [ ] Implement set/unset modes
-- [ ] Support tunnel ID, src/dst addresses, ports
+**Attributes**:
+- TCA_TUNNEL_KEY_PARMS - struct tc_tunnel_key
+- TCA_TUNNEL_KEY_ENC_IPV4_SRC/DST (be32)
+- TCA_TUNNEL_KEY_ENC_IPV6_SRC/DST (in6_addr)
+- TCA_TUNNEL_KEY_ENC_KEY_ID (be32)
+- TCA_TUNNEL_KEY_ENC_DST_PORT (be16)
+- TCA_TUNNEL_KEY_ENC_TOS (u8)
+- TCA_TUNNEL_KEY_ENC_TTL (u8)
+- TCA_TUNNEL_KEY_NO_CSUM (u8)
+- TCA_TUNNEL_KEY_NO_FRAG (flag)
+- TCA_TUNNEL_KEY_ENC_OPTS (nested) - GENEVE/VXLAN/ERSPAN options
 
-**Files to modify:**
-- `crates/nlink/src/netlink/action.rs`
+### Phase 2 Deliverables
+- [ ] NatAction
+- [ ] TunnelKeyAction
 
-### 3.3 Additional Actions (Beyond rtnetlink)
-Extend nlink's lead in TC actions.
+**After Phase 2: nlink has 7 actions vs rtnetlink's 3** ✓
 
-#### 3.3.1 bpf Action
-**Effort**: Medium | **Value**: High (eBPF integration)
+---
+
+## Phase 3: Neighbor Parity (Priority: Medium)
+
+### 3.1 Proxy ARP Support
+**Effort**: Low | **Value**: Medium
 
 ```rust
-let bpf = BpfAction::new(fd)
-    .name("my_prog")
-    .direct_action();
+// Target API
+conn.add_neighbor_proxy("eth0", "192.168.1.100".parse()?).await?;
+conn.del_neighbor_proxy("eth0", "192.168.1.100".parse()?).await?;
+let proxies = conn.get_neighbor_proxies().await?;
 ```
 
-#### 3.3.2 connmark Action
+**Implementation**:
+- Add `NTF_PROXY` flag (0x08) to neighbor flags
+- Filter by proxy flag in queries
+
+### 3.2 Address Replace Operation
+**Effort**: Low | **Value**: Low
+
+```rust
+// Target API
+conn.replace_address(addr_config).await?;
+```
+
+**Implementation**:
+- Add `NLM_F_REPLACE` (0x100) flag support
+- Create `replace_address()` method
+
+### Phase 3 Deliverables
+- [ ] Proxy ARP support
+- [ ] Address replace operation
+
+**After Phase 3: Full parity on neighbor/address operations** ✓
+
+---
+
+## Phase 4: Extended TC Actions (Priority: Medium)
+
+Go beyond rtnetlink with more TC actions.
+
+### 4.1 connmark Action
 **Effort**: Low | **Value**: Medium
 
 ```rust
 let connmark = ConnmarkAction::new()
     .zone(1)
-    .restore();
+    .save();   // or .restore()
 ```
 
-#### 3.3.3 ct Action (Connection Tracking)
-**Effort**: Medium | **Value**: High
-
-```rust
-let ct = CtAction::new()
-    .commit()
-    .zone(1)
-    .mark(0x100);
-```
-
-#### 3.3.4 csum Action (Checksum)
+### 4.2 csum Action (Checksum Recalculation)
 **Effort**: Low | **Value**: Low
 
 ```rust
 let csum = CsumAction::new()
-    .iph()
-    .tcp()
-    .udp();
+    .iph()     // Recalculate IP header checksum
+    .tcp()     // Recalculate TCP checksum
+    .udp()     // Recalculate UDP checksum
+    .icmp()    // Recalculate ICMP checksum
+    .igmp()    // Recalculate IGMP checksum
+    .udplite() // Recalculate UDP-Lite checksum
+    .sctp();   // Recalculate SCTP checksum
 ```
 
-#### 3.3.5 pedit Action (Packet Edit)
+### 4.3 ct Action (Connection Tracking)
+**Effort**: Medium | **Value**: High
+
+```rust
+let ct = CtAction::commit()
+    .zone(1)
+    .mark(0x100)
+    .mark_mask(0xffffffff)
+    .nat_src("10.0.0.1".parse()?, 1024..=65535)  // SNAT with port range
+    .nat_dst("192.168.1.1".parse()?, 80..=80);   // DNAT
+```
+
+### 4.4 pedit Action (Packet Edit)
 **Effort**: High | **Value**: High
 
 ```rust
 let pedit = PeditAction::new()
-    .add_key(PeditKey::ipv4_src().set(addr))
-    .add_key(PeditKey::tcp_dport().set(80));
+    .set_ipv4_src("10.0.0.1".parse()?)
+    .set_ipv4_dst("10.0.0.2".parse()?)
+    .set_tcp_dport(8080)
+    .set_eth_src([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])
+    .add_u32_at_offset(12, 0x12345678);  // Raw edit
 ```
 
-### Phase 3 Deliverables
-- [ ] NAT action (parity)
-- [ ] tunnel_key action (parity)
-- [ ] bpf action (beyond rtnetlink)
-- [ ] connmark action (beyond rtnetlink)
-- [ ] ct action (beyond rtnetlink)
-- [ ] csum action (beyond rtnetlink)
-- [ ] pedit action (beyond rtnetlink)
+### 4.5 sample Action
+**Effort**: Low | **Value**: Low
 
-**After Phase 3: nlink has 12 actions vs rtnetlink's 3**
+```rust
+let sample = SampleAction::new()
+    .rate(100)       // Sample 1 in 100 packets
+    .group(5)        // PSAMPLE group
+    .trunc(128);     // Truncate to 128 bytes
+```
+
+### Phase 4 Deliverables
+- [ ] ConnmarkAction
+- [ ] CsumAction
+- [ ] CtAction
+- [ ] PeditAction
+- [ ] SampleAction
+
+**After Phase 4: nlink has 12 actions vs rtnetlink's 3**
 
 ---
 
-## Phase 4: TC Filters Enhancement (Priority: Medium)
+## Phase 5: Extended TC Filters (Priority: Medium)
 
-Extend nlink's filter lead.
+Achieve full iproute2 filter parity.
 
-### 4.1 cgroup Filter
+### 5.1 cgroup Filter
 **Effort**: Low | **Value**: Medium
 
 ```rust
 let filter = CgroupFilter::new()
-    .classid("1:10")
-    .ematch(/* ... */);
+    .classid("1:10");
 ```
 
-### 4.2 flow Filter
+### 5.2 flow Filter
 **Effort**: Medium | **Value**: Low
 
 ```rust
 let filter = FlowFilter::new()
-    .keys(&[FlowKey::Src, FlowKey::Dst])
-    .mode(FlowMode::Hash);
+    .keys(&[FlowKey::Src, FlowKey::Dst, FlowKey::Proto])
+    .mode(FlowMode::Hash)
+    .divisor(256);
 ```
 
-### 4.3 route Filter
+### 5.3 route Filter
 **Effort**: Low | **Value**: Low
 
 ```rust
 let filter = RouteFilter::new()
-    .from("eth0")
-    .to("1:10");
-```
-
-### Phase 4 Deliverables
-- [ ] cgroup filter
-- [ ] flow filter
-- [ ] route filter
-
-**After Phase 4: nlink has 9 filters vs rtnetlink's 3 (full iproute2 parity)**
-
----
-
-## Phase 5: TC Qdiscs Enhancement (Priority: Medium)
-
-Extend nlink's qdisc lead further.
-
-### 5.1 Scheduling Qdiscs
-
-#### drr (Deficit Round Robin)
-```rust
-let drr = DrrConfig::new().quantum(1500);
-```
-
-#### qfq (Quick Fair Queueing)
-```rust
-let qfq = QfqConfig::new();
-```
-
-#### hfsc (Hierarchical Fair Service Curve)
-```rust
-let hfsc = HfscConfig::new()
-    .default_class(0x10);
-```
-
-### 5.2 Time-based Qdiscs
-
-#### etf (Earliest TxTime First)
-```rust
-let etf = EtfConfig::new()
-    .delta(500_000)  // ns
-    .clockid(ClockId::Tai)
-    .deadline_mode();
-```
-
-#### taprio (Time-Aware Priority)
-```rust
-let taprio = TaprioConfig::new()
-    .num_tc(4)
-    .add_entry(TaprioEntry::new().command(SetGates).gate_mask(0x1).interval(100_000))
-    .base_time(0);
-```
-
-### 5.3 Other Qdiscs
-
-#### mqprio (Multi-queue Priority)
-```rust
-let mqprio = MqprioConfig::new()
-    .num_tc(4)
-    .hw_offload(true);
-```
-
-#### plug
-```rust
-let plug = PlugConfig::new();
-conn.add_qdisc("eth0", plug).await?;
-conn.plug_buffer("eth0").await?;   // Stop releasing
-conn.plug_release("eth0").await?;  // Release all
+    .from("default")
+    .classid("1:10");
 ```
 
 ### Phase 5 Deliverables
-- [ ] drr qdisc
-- [ ] qfq qdisc
-- [ ] hfsc qdisc
-- [ ] etf qdisc
-- [ ] taprio qdisc
-- [ ] mqprio qdisc
-- [ ] plug qdisc
+- [ ] CgroupFilter
+- [ ] FlowFilter
+- [ ] RouteFilter
 
-**After Phase 5: nlink has 19 qdiscs vs rtnetlink's 2**
+**After Phase 5: nlink has 9 filters vs rtnetlink's 3 (full iproute2 parity)**
 
 ---
 
-## Phase 6: Additional Link Types (Priority: Low)
+## Phase 6: Extended TC Qdiscs (Priority: Low)
 
-Go beyond both rtnetlink and achieve broader iproute2 parity.
+Continue extending nlink's qdisc lead.
 
-### 6.1 geneve
+### 6.1 drr (Deficit Round Robin)
 ```rust
-let geneve = GeneveLink::new("geneve0", 100)  // VNI
-    .remote("10.0.0.1".parse()?)
-    .ttl(64);
+let drr = DrrConfig::new();
+let class = DrrClass::new().quantum(1500);
 ```
 
-### 6.2 bareudp
+### 6.2 qfq (Quick Fair Queueing)
 ```rust
-let bareudp = BareudpLink::new("bareudp0")
-    .port(6635)
-    .ethertype(0x6558);  // MPLS
+let qfq = QfqConfig::new();
+let class = QfqClass::new().weight(10).maxpkt(1500);
 ```
 
-### 6.3 ifb (Intermediate Functional Block)
+### 6.3 hfsc (Hierarchical Fair Service Curve)
 ```rust
-let ifb = IfbLink::new("ifb0");
+let hfsc = HfscConfig::new().default_class(0x10);
+let class = HfscClass::new()
+    .sc(ServiceCurve::new().m1(1000000).d(100).m2(500000))
+    .rt(ServiceCurve::new().m2(1000000));  // Real-time curve
 ```
 
-### 6.4 team
+### 6.4 mqprio (Multi-queue Priority)
 ```rust
-let team = TeamLink::new("team0")
-    .mode(TeamMode::RoundRobin)
-    .ports(&["eth0", "eth1"]);
+let mqprio = MqprioConfig::new()
+    .num_tc(4)
+    .hw_offload(true)
+    .map(&[0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]);
 ```
 
-### 6.5 ipvtap
+### 6.5 taprio (Time-Aware Priority)
 ```rust
-let ipvtap = IpvtapLink::new("ipvtap0", "eth0")
-    .mode(IpvlanMode::L3);
+let taprio = TaprioConfig::new()
+    .num_tc(4)
+    .base_time(0)
+    .cycle_time(1_000_000)  // 1ms cycle
+    .add_entry(TaprioEntry::set_gates(0x1, 250_000))   // TC0 for 250us
+    .add_entry(TaprioEntry::set_gates(0x2, 250_000))   // TC1 for 250us
+    .add_entry(TaprioEntry::set_gates(0x4, 250_000))   // TC2 for 250us
+    .add_entry(TaprioEntry::set_gates(0x8, 250_000));  // TC3 for 250us
 ```
 
-### 6.6 vti/vti6 (Virtual Tunnel Interface)
+### 6.6 etf (Earliest TxTime First)
+```rust
+let etf = EtfConfig::new()
+    .delta(500_000)         // 500us
+    .clockid(ClockId::Tai)
+    .deadline_mode()
+    .offload();
+```
+
+### 6.7 plug
+```rust
+let plug = PlugConfig::new().limit(10000);
+conn.add_qdisc("eth0", plug).await?;
+// Buffer packets
+conn.plug_buffer("eth0").await?;
+// Release all buffered
+conn.plug_release_one("eth0").await?;
+// Release indefinitely
+conn.plug_release_indefinite("eth0").await?;
+```
+
+### Phase 6 Deliverables
+- [ ] DrrConfig + DrrClass
+- [ ] QfqConfig + QfqClass
+- [ ] HfscConfig + HfscClass
+- [ ] MqprioConfig
+- [ ] TaprioConfig
+- [ ] EtfConfig
+- [ ] PlugConfig
+
+**After Phase 6: nlink has 19 qdiscs vs rtnetlink's 2**
+
+---
+
+## Phase 7: Complex Link Types (Priority: Low)
+
+These require Generic Netlink (GENL) support.
+
+### 7.1 WireGuard Configuration
+**Effort**: High | **Value**: High
+
+WireGuard link creation uses standard RTNetlink, but configuration (peers, keys) uses GENL.
+
+```rust
+// Link creation (standard RTNetlink)
+let wg = WireguardLink::new("wg0");
+conn.add_link(wg).await?;
+
+// Configuration (requires GENL)
+let wg_conn = WireguardConnection::new()?;
+wg_conn.set_device("wg0", WgDevice::new()
+    .private_key(key)
+    .listen_port(51820)
+    .fwmark(0x100)
+).await?;
+
+wg_conn.add_peer("wg0", WgPeer::new(pubkey)
+    .endpoint("1.2.3.4:51820".parse()?)
+    .allowed_ips(&["10.0.0.0/24".parse()?])
+    .persistent_keepalive(25)
+).await?;
+
+let device = wg_conn.get_device("wg0").await?;
+for peer in device.peers() {
+    println!("Peer: {} endpoint: {:?}", peer.public_key(), peer.endpoint());
+}
+```
+
+**Implementation requires**:
+- [ ] Generic Netlink socket support
+- [ ] WG_CMD_SET_DEVICE, WG_CMD_GET_DEVICE
+- [ ] WGDEVICE_A_* attributes
+- [ ] WGPEER_A_* attributes
+- [ ] WGALLOWEDIP_A_* attributes
+
+### 7.2 MACsec Configuration
+**Effort**: High | **Value**: Medium
+
+Similar to WireGuard - link creation is RTNetlink, SA/SC management is GENL.
+
+```rust
+// Link creation (standard RTNetlink)
+let macsec = MacsecLink::new("macsec0", "eth0")
+    .port(1)
+    .sci(0x0011223344550001)
+    .cipher(MacsecCipher::GcmAes128)
+    .icv_len(16)
+    .encrypt(true);
+conn.add_link(macsec).await?;
+
+// SA management (requires GENL)
+let macsec_conn = MacsecConnection::new()?;
+macsec_conn.add_tx_sa("macsec0", TxSa::new()
+    .an(0)
+    .pn(1)
+    .key(&[0u8; 16])
+    .active(true)
+).await?;
+
+macsec_conn.add_rx_sc("macsec0", RxSc::new()
+    .sci(0x0011223344550002)
+    .active(true)
+).await?;
+```
+
+### 7.3 team Link Type
+**Effort**: Medium | **Value**: Low
+
+Team uses libteam/teamd - complex userspace component.
+
+### Phase 7 Deliverables
+- [ ] Generic Netlink socket support
+- [ ] WireguardLink (basic creation)
+- [ ] WireguardConnection (GENL configuration)
+- [ ] MacsecLink (with IFLA_MACSEC_* attributes)
+- [ ] MacsecConnection (GENL SA/SC management) - optional
+
+---
+
+## Phase 8: Additional Link Types (Priority: Low)
+
+More link types beyond rtnetlink.
+
+### 8.1 vti/vti6 (Virtual Tunnel Interface)
 ```rust
 let vti = VtiLink::new("vti0")
     .local("10.0.0.1".parse()?)
@@ -468,25 +585,37 @@ let vti = VtiLink::new("vti0")
     .okey(100);
 ```
 
-### Phase 6 Deliverables
-- [ ] geneve link
-- [ ] bareudp link
-- [ ] ifb link
-- [ ] team link
-- [ ] ipvtap link
-- [ ] vti/vti6 link
+### 8.2 ip6gre/ip6gretap
+```rust
+let ip6gre = Ip6GreLink::new("ip6gre0")
+    .local("2001:db8::1".parse()?)
+    .remote("2001:db8::2".parse()?)
+    .ttl(64);
+```
 
-**After Phase 6: nlink has 23 link types vs rtnetlink's 16**
+### 8.3 nlmon (Netlink Monitor)
+```rust
+// Trivial - no options
+let nlmon = NlmonLink::new("nlmon0");
+```
+
+### 8.4 virt_wifi
+```rust
+let virt_wifi = VirtWifiLink::new("vwifi0", "wlan0");
+```
+
+### Phase 8 Deliverables
+- [ ] VtiLink / Vti6Link
+- [ ] Ip6GreLink / Ip6GretapLink
+- [ ] NlmonLink
+- [ ] VirtWifiLink
 
 ---
 
-## Phase 7: API Enhancements (Priority: Ongoing)
+## Phase 9: API Enhancements (Priority: Ongoing)
 
-Maintain and extend nlink's API advantages.
-
-### 7.1 Batch Operations
+### 9.1 Batch Operations
 ```rust
-// Execute multiple operations atomically
 conn.batch()
     .add_link(veth)
     .add_address(addr)
@@ -494,114 +623,58 @@ conn.batch()
     .execute().await?;
 ```
 
-### 7.2 Transaction Support
+### 9.2 Configuration Diff
 ```rust
-// Rollback on failure
-let txn = conn.transaction();
-txn.add_link(veth).await?;
-txn.add_address(addr).await?;
-txn.commit().await?;  // or txn.rollback()
+let before = conn.snapshot().await?;
+// ... changes ...
+let after = conn.snapshot().await?;
+let diff = before.diff(&after);
 ```
 
-### 7.3 Change Detection
+### 9.3 Builder Validation
 ```rust
-// Detect configuration drift
-let expected = conn.get_links().await?;
-// ... time passes ...
-let current = conn.get_links().await?;
-let changes = expected.diff(&current);
-```
-
-### 7.4 Configuration Snapshots
-```rust
-// Save/restore network configuration
-let snapshot = conn.snapshot().await?;
-// ... make changes ...
-conn.restore(snapshot).await?;
-```
-
-### 7.5 Builder Validation
-```rust
-// Validate configuration before sending
 let veth = VethLink::new("veth0", "veth1");
-veth.validate()?;  // Check for errors before execute
+veth.validate()?;  // Check before sending
 ```
 
 ---
 
-## Phase 8: Documentation & Testing (Priority: High)
+## Implementation Priority Order
 
-### 8.1 API Documentation
-- [ ] Document every public type
-- [ ] Add examples for every builder
-- [ ] Add module-level documentation
-- [ ] Create cookbook with common recipes
-
-### 8.2 Integration Tests
-- [ ] Test each link type creation/deletion
-- [ ] Test each TC qdisc
-- [ ] Test each TC filter
-- [ ] Test each TC action
-- [ ] Test namespace operations
-- [ ] Test event streaming
-
-### 8.3 Benchmarks
-- [ ] Connection creation overhead
-- [ ] Message throughput
-- [ ] Event processing latency
-- [ ] Comparison with rtnetlink
-
----
-
-## Implementation Timeline
-
-| Phase | Description | Tasks | Priority |
-|-------|-------------|-------|----------|
-| 1 | Link Type Parity | 5 link types | Critical |
-| 2 | Neighbor/Address Parity | 2 features | High |
-| 3 | TC Actions Parity + Beyond | 7 actions | High |
-| 4 | TC Filters Enhancement | 3 filters | Medium |
-| 5 | TC Qdiscs Enhancement | 7 qdiscs | Medium |
-| 6 | Additional Link Types | 6 link types | Low |
-| 7 | API Enhancements | 5 features | Ongoing |
-| 8 | Documentation & Testing | Comprehensive | High |
-
----
-
-## Final Feature Matrix (After All Phases)
-
-```
-                        iproute2    rtnetlink    nlink (current)    nlink (planned)
-                        --------    ---------    ---------------    ---------------
-Link Types:                31+          16              12                 23+
-Address Operations:       Full        Full            Full               Full
-Route Operations:         Full        Full            Full               Full  
-Neighbor Operations:      Full        Full            Good               Full
-TC Qdiscs:                 31           2              12                 19+
-TC Filters:                 9           3               6                  9
-TC Actions:                19           3               5                 12+
-High-level API:            No          No             Yes                Yes+
-Event Streaming:           No          No             Yes                Yes
-Namespace Support:         No          No             Yes                Yes
-Batch Operations:          No          No              No                Yes
-Transactions:              No          No              No                Yes
-```
-
----
-
-## Success Criteria
-
-nlink will be considered superior to rtnetlink when:
-
-1. **Link Types**: nlink ≥ rtnetlink (17+ vs 16) ✓ after Phase 1
-2. **Address Ops**: nlink = rtnetlink + labels/lifetimes ✓ already
-3. **Route Ops**: nlink = rtnetlink + route get ✓ already
-4. **Neighbor Ops**: nlink = rtnetlink ✓ after Phase 2
-5. **TC Qdiscs**: nlink >> rtnetlink (12+ vs 2) ✓ already
-6. **TC Filters**: nlink > rtnetlink (6 vs 3) ✓ already
-7. **TC Actions**: nlink ≥ rtnetlink (7+ vs 3) ✓ after Phase 3
-8. **High-level API**: nlink has, rtnetlink doesn't ✓ already
-9. **Namespaces**: nlink has, rtnetlink doesn't ✓ already
-10. **Documentation**: Comprehensive ✓ after Phase 8
+| Priority | Phase | Items | Effort |
+|----------|-------|-------|--------|
+| 1 | Phase 1 | 5 easy link types | Low |
+| 2 | Phase 2 | 2 TC actions (parity) | Low-Medium |
+| 3 | Phase 3 | Neighbor/address parity | Low |
+| 4 | Phase 4 | 5 extended TC actions | Medium |
+| 5 | Phase 5 | 3 TC filters | Low-Medium |
+| 6 | Phase 6 | 7 TC qdiscs | Medium |
+| 7 | Phase 7 | WireGuard/MACsec (GENL) | High |
+| 8 | Phase 8 | 4 more link types | Low |
 
 **Minimum viable superiority: Complete Phases 1-3**
+
+---
+
+## Final Feature Matrix
+
+```
+                        iproute2    rtnetlink    nlink (current)    nlink (after Phase 3)
+                        --------    ---------    ---------------    ---------------------
+Link Types:                31+          16              12                   17+
+TC Qdiscs:                 31           2              12                   12
+TC Filters:                 9           3               6                    6
+TC Actions:                19           3               5                    7
+Neighbor Ops:             Full        Full            Good                 Full
+High-level API:            No          No             Yes                  Yes
+```
+
+**After Phase 6:**
+```
+                        iproute2    rtnetlink    nlink (planned)
+                        --------    ---------    ---------------
+Link Types:                31+          16              21+
+TC Qdiscs:                 31           2              19
+TC Filters:                 9           3               9
+TC Actions:                19           3              12
+```
