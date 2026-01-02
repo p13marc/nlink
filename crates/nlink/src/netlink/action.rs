@@ -1,7 +1,7 @@
 //! TC action builders and configuration.
 //!
 //! This module provides strongly-typed configuration for TC actions including
-//! gact, mirred, police, and vlan actions.
+//! gact, mirred, police, vlan, skbedit, nat, and tunnel_key actions.
 //!
 //! # Example
 //!
@@ -26,9 +26,11 @@
 //!     .build();
 //! ```
 
+use std::net::Ipv4Addr;
+
 use super::builder::MessageBuilder;
 use super::error::{Error, Result};
-use super::types::tc::action::{self, TcGen, gact, mirred, police, vlan};
+use super::types::tc::action::{self, TcGen, gact, mirred, nat, police, tunnel_key, vlan};
 
 // ============================================================================
 // ActionConfig trait
@@ -738,6 +740,373 @@ impl ActionConfig for SkbeditAction {
 }
 
 // ============================================================================
+// NatAction
+// ============================================================================
+
+/// NAT action configuration.
+///
+/// The NAT action performs stateless network address translation.
+/// It can translate source (egress) or destination (ingress) addresses.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::action::NatAction;
+/// use std::net::Ipv4Addr;
+///
+/// // Source NAT: translate 10.0.0.0/8 to 192.168.1.1
+/// let snat = NatAction::snat(
+///     Ipv4Addr::new(10, 0, 0, 0),
+///     Ipv4Addr::new(192, 168, 1, 1),
+/// ).prefix(8);
+///
+/// // Destination NAT: translate 192.168.1.1 to 10.0.0.1
+/// let dnat = NatAction::dnat(
+///     Ipv4Addr::new(192, 168, 1, 1),
+///     Ipv4Addr::new(10, 0, 0, 1),
+/// );
+/// ```
+#[derive(Debug, Clone)]
+pub struct NatAction {
+    /// Original address to match.
+    old_addr: Ipv4Addr,
+    /// New address to translate to.
+    new_addr: Ipv4Addr,
+    /// Network prefix length (0-32).
+    prefix_len: u8,
+    /// True for source NAT (egress), false for destination NAT (ingress).
+    egress: bool,
+    /// Action result after NAT.
+    action: i32,
+}
+
+impl NatAction {
+    /// Create a source NAT (SNAT) action.
+    ///
+    /// Source NAT translates the source address of packets on egress.
+    pub fn snat(old_addr: Ipv4Addr, new_addr: Ipv4Addr) -> Self {
+        Self {
+            old_addr,
+            new_addr,
+            prefix_len: 32,
+            egress: true,
+            action: action::TC_ACT_OK,
+        }
+    }
+
+    /// Create a destination NAT (DNAT) action.
+    ///
+    /// Destination NAT translates the destination address of packets on ingress.
+    pub fn dnat(old_addr: Ipv4Addr, new_addr: Ipv4Addr) -> Self {
+        Self {
+            old_addr,
+            new_addr,
+            prefix_len: 32,
+            egress: false,
+            action: action::TC_ACT_OK,
+        }
+    }
+
+    /// Set the prefix length for network-based NAT.
+    ///
+    /// This allows translating a range of addresses.
+    pub fn prefix(mut self, prefix_len: u8) -> Self {
+        self.prefix_len = prefix_len.min(32);
+        self
+    }
+
+    /// Set the action result after NAT (default: pass).
+    pub fn action(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Pipe to next action after NAT.
+    pub fn pipe(mut self) -> Self {
+        self.action = action::TC_ACT_PIPE;
+        self
+    }
+
+    /// Build the action configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Convert prefix length to network mask.
+    fn prefix_to_mask(prefix_len: u8) -> u32 {
+        if prefix_len == 0 {
+            0
+        } else if prefix_len >= 32 {
+            0xFFFFFFFF
+        } else {
+            !((1u32 << (32 - prefix_len)) - 1)
+        }
+    }
+}
+
+impl ActionConfig for NatAction {
+    fn kind(&self) -> &'static str {
+        "nat"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        let mask = Self::prefix_to_mask(self.prefix_len);
+        let flags = if self.egress {
+            nat::TCA_NAT_FLAG_EGRESS
+        } else {
+            0
+        };
+
+        let parms = nat::TcNat::new(
+            u32::from_be_bytes(self.old_addr.octets()),
+            u32::from_be_bytes(self.new_addr.octets()),
+            u32::from_be_bytes(mask.to_be_bytes()),
+            flags,
+            self.action,
+        );
+
+        builder.append_attr(nat::TCA_NAT_PARMS, parms.as_bytes());
+        Ok(())
+    }
+}
+
+// ============================================================================
+// TunnelKeyAction
+// ============================================================================
+
+/// Tunnel key action configuration.
+///
+/// The tunnel_key action is used to set or release tunnel metadata
+/// for hardware offload of tunnel encapsulation/decapsulation.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::action::TunnelKeyAction;
+/// use std::net::Ipv4Addr;
+///
+/// // Set tunnel metadata for encapsulation
+/// let set = TunnelKeyAction::set()
+///     .src(Ipv4Addr::new(192, 168, 1, 1))
+///     .dst(Ipv4Addr::new(192, 168, 1, 2))
+///     .key_id(100)
+///     .dst_port(4789)
+///     .build();
+///
+/// // Release tunnel metadata
+/// let release = TunnelKeyAction::release();
+/// ```
+#[derive(Debug, Clone)]
+pub struct TunnelKeyAction {
+    /// Action type: set or release.
+    t_action: i32,
+    /// Source IPv4 address.
+    src_ipv4: Option<Ipv4Addr>,
+    /// Destination IPv4 address.
+    dst_ipv4: Option<Ipv4Addr>,
+    /// Source IPv6 address.
+    src_ipv6: Option<std::net::Ipv6Addr>,
+    /// Destination IPv6 address.
+    dst_ipv6: Option<std::net::Ipv6Addr>,
+    /// Tunnel key ID (VNI for VXLAN, etc.).
+    key_id: Option<u32>,
+    /// UDP destination port.
+    dst_port: Option<u16>,
+    /// TOS/DSCP value.
+    tos: Option<u8>,
+    /// TTL value.
+    ttl: Option<u8>,
+    /// Disable checksum.
+    no_csum: bool,
+    /// Disable fragmentation.
+    no_frag: bool,
+    /// Action result.
+    action: i32,
+}
+
+impl TunnelKeyAction {
+    /// Create a tunnel key set action.
+    ///
+    /// This action sets tunnel metadata on packets for encapsulation.
+    pub fn set() -> Self {
+        Self {
+            t_action: tunnel_key::TCA_TUNNEL_KEY_ACT_SET,
+            src_ipv4: None,
+            dst_ipv4: None,
+            src_ipv6: None,
+            dst_ipv6: None,
+            key_id: None,
+            dst_port: None,
+            tos: None,
+            ttl: None,
+            no_csum: false,
+            no_frag: false,
+            action: action::TC_ACT_PIPE,
+        }
+    }
+
+    /// Create a tunnel key release action.
+    ///
+    /// This action removes tunnel metadata from packets after decapsulation.
+    pub fn release() -> Self {
+        Self {
+            t_action: tunnel_key::TCA_TUNNEL_KEY_ACT_RELEASE,
+            src_ipv4: None,
+            dst_ipv4: None,
+            src_ipv6: None,
+            dst_ipv6: None,
+            key_id: None,
+            dst_port: None,
+            tos: None,
+            ttl: None,
+            no_csum: false,
+            no_frag: false,
+            action: action::TC_ACT_PIPE,
+        }
+    }
+
+    /// Set source IPv4 address.
+    pub fn src(mut self, addr: Ipv4Addr) -> Self {
+        self.src_ipv4 = Some(addr);
+        self.src_ipv6 = None;
+        self
+    }
+
+    /// Set destination IPv4 address.
+    pub fn dst(mut self, addr: Ipv4Addr) -> Self {
+        self.dst_ipv4 = Some(addr);
+        self.dst_ipv6 = None;
+        self
+    }
+
+    /// Set source IPv6 address.
+    pub fn src6(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.src_ipv6 = Some(addr);
+        self.src_ipv4 = None;
+        self
+    }
+
+    /// Set destination IPv6 address.
+    pub fn dst6(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.dst_ipv6 = Some(addr);
+        self.dst_ipv4 = None;
+        self
+    }
+
+    /// Set tunnel key ID (e.g., VNI for VXLAN).
+    pub fn key_id(mut self, id: u32) -> Self {
+        self.key_id = Some(id);
+        self
+    }
+
+    /// Set UDP destination port.
+    pub fn dst_port(mut self, port: u16) -> Self {
+        self.dst_port = Some(port);
+        self
+    }
+
+    /// Set TOS/DSCP value.
+    pub fn tos(mut self, tos: u8) -> Self {
+        self.tos = Some(tos);
+        self
+    }
+
+    /// Set TTL value.
+    pub fn ttl(mut self, ttl: u8) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Disable UDP checksum.
+    pub fn no_csum(mut self) -> Self {
+        self.no_csum = true;
+        self
+    }
+
+    /// Disable fragmentation (set DF bit).
+    pub fn no_frag(mut self) -> Self {
+        self.no_frag = true;
+        self
+    }
+
+    /// Set action result (default: pipe).
+    pub fn action(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build the action configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl ActionConfig for TunnelKeyAction {
+    fn kind(&self) -> &'static str {
+        "tunnel_key"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        let parms = tunnel_key::TcTunnelKey::new(self.t_action, self.action);
+        builder.append_attr(tunnel_key::TCA_TUNNEL_KEY_PARMS, parms.as_bytes());
+
+        // Only add metadata for "set" action
+        if self.t_action == tunnel_key::TCA_TUNNEL_KEY_ACT_SET {
+            // IPv4 addresses
+            if let Some(addr) = self.src_ipv4 {
+                builder.append_attr(tunnel_key::TCA_TUNNEL_KEY_ENC_IPV4_SRC, &addr.octets());
+            }
+            if let Some(addr) = self.dst_ipv4 {
+                builder.append_attr(tunnel_key::TCA_TUNNEL_KEY_ENC_IPV4_DST, &addr.octets());
+            }
+
+            // IPv6 addresses
+            if let Some(addr) = self.src_ipv6 {
+                builder.append_attr(tunnel_key::TCA_TUNNEL_KEY_ENC_IPV6_SRC, &addr.octets());
+            }
+            if let Some(addr) = self.dst_ipv6 {
+                builder.append_attr(tunnel_key::TCA_TUNNEL_KEY_ENC_IPV6_DST, &addr.octets());
+            }
+
+            // Key ID (as big-endian u32, but stored in network order)
+            if let Some(id) = self.key_id {
+                // Key ID is encoded as BE64 in the kernel
+                let id_be64 = (id as u64).to_be_bytes();
+                builder.append_attr(tunnel_key::TCA_TUNNEL_KEY_ENC_KEY_ID, &id_be64);
+            }
+
+            // Destination port (network byte order)
+            if let Some(port) = self.dst_port {
+                builder.append_attr_u16_be(tunnel_key::TCA_TUNNEL_KEY_ENC_DST_PORT, port);
+            }
+
+            // TOS
+            if let Some(tos) = self.tos {
+                builder.append_attr_u8(tunnel_key::TCA_TUNNEL_KEY_ENC_TOS, tos);
+            }
+
+            // TTL
+            if let Some(ttl) = self.ttl {
+                builder.append_attr_u8(tunnel_key::TCA_TUNNEL_KEY_ENC_TTL, ttl);
+            }
+
+            // No checksum flag (inverted: no_csum=true means checksum disabled)
+            builder.append_attr_u8(
+                tunnel_key::TCA_TUNNEL_KEY_NO_CSUM,
+                if self.no_csum { 1 } else { 0 },
+            );
+
+            // No fragmentation flag
+            if self.no_frag {
+                builder.append_attr_empty(tunnel_key::TCA_TUNNEL_KEY_NO_FRAG);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Helper functions
 // ============================================================================
 
@@ -903,9 +1272,58 @@ mod tests {
 
     #[test]
     fn test_action_list() {
-        let list = ActionList::new().add(GactAction::drop()).build();
+        let list = ActionList::new().with(GactAction::drop()).build();
 
         assert_eq!(list.len(), 1);
         assert!(!list.is_empty());
+    }
+
+    #[test]
+    fn test_nat_action() {
+        let snat = NatAction::snat(Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(192, 168, 1, 1))
+            .prefix(8)
+            .build();
+
+        assert_eq!(snat.old_addr, Ipv4Addr::new(10, 0, 0, 0));
+        assert_eq!(snat.new_addr, Ipv4Addr::new(192, 168, 1, 1));
+        assert_eq!(snat.prefix_len, 8);
+        assert!(snat.egress);
+        assert_eq!(ActionConfig::kind(&snat), "nat");
+
+        let dnat = NatAction::dnat(Ipv4Addr::new(192, 168, 1, 1), Ipv4Addr::new(10, 0, 0, 1));
+        assert!(!dnat.egress);
+    }
+
+    #[test]
+    fn test_nat_prefix_to_mask() {
+        assert_eq!(NatAction::prefix_to_mask(0), 0);
+        assert_eq!(NatAction::prefix_to_mask(8), 0xFF000000);
+        assert_eq!(NatAction::prefix_to_mask(16), 0xFFFF0000);
+        assert_eq!(NatAction::prefix_to_mask(24), 0xFFFFFF00);
+        assert_eq!(NatAction::prefix_to_mask(32), 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn test_tunnel_key_action() {
+        let set = TunnelKeyAction::set()
+            .src(Ipv4Addr::new(192, 168, 1, 1))
+            .dst(Ipv4Addr::new(192, 168, 1, 2))
+            .key_id(100)
+            .dst_port(4789)
+            .ttl(64)
+            .no_csum()
+            .build();
+
+        assert_eq!(set.t_action, tunnel_key::TCA_TUNNEL_KEY_ACT_SET);
+        assert_eq!(set.src_ipv4, Some(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(set.dst_ipv4, Some(Ipv4Addr::new(192, 168, 1, 2)));
+        assert_eq!(set.key_id, Some(100));
+        assert_eq!(set.dst_port, Some(4789));
+        assert_eq!(set.ttl, Some(64));
+        assert!(set.no_csum);
+        assert_eq!(ActionConfig::kind(&set), "tunnel_key");
+
+        let release = TunnelKeyAction::release();
+        assert_eq!(release.t_action, tunnel_key::TCA_TUNNEL_KEY_ACT_RELEASE);
     }
 }

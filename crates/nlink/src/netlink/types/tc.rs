@@ -1698,6 +1698,62 @@ pub mod action {
         }
     }
 
+    /// NAT action attributes.
+    pub mod nat {
+        pub const TCA_NAT_UNSPEC: u16 = 0;
+        pub const TCA_NAT_PARMS: u16 = 1;
+        pub const TCA_NAT_TM: u16 = 2;
+        pub const TCA_NAT_PAD: u16 = 3;
+
+        /// Flag to indicate egress NAT (source NAT), otherwise ingress (destination NAT).
+        pub const TCA_NAT_FLAG_EGRESS: u32 = 1;
+
+        /// NAT action parameters (struct tc_nat).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcNat {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+            /// Original address to match (network byte order).
+            pub old_addr: u32,
+            /// New address to translate to (network byte order).
+            pub new_addr: u32,
+            /// Network mask (network byte order).
+            pub mask: u32,
+            /// Flags (TCA_NAT_FLAG_EGRESS for source NAT).
+            pub flags: u32,
+        }
+
+        impl TcNat {
+            pub fn new(old_addr: u32, new_addr: u32, mask: u32, flags: u32, action: i32) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                    old_addr,
+                    new_addr,
+                    mask,
+                    flags,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+    }
+
     /// Tunnel key action attributes.
     pub mod tunnel_key {
         pub const TCA_TUNNEL_KEY_UNSPEC: u16 = 0;

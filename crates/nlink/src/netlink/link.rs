@@ -10,7 +10,12 @@
 //! - [`VlanLink`] - VLAN interface
 //! - [`VxlanLink`] - VXLAN overlay interface
 //! - [`MacvlanLink`] - MAC-based VLAN interface
+//! - [`MacvtapLink`] - MAC-based tap interface (for VMs)
 //! - [`IpvlanLink`] - IP-based VLAN interface
+//! - [`IfbLink`] - Intermediate Functional Block (for ingress shaping)
+//! - [`GeneveLink`] - Generic Network Virtualization Encapsulation
+//! - [`BareudpLink`] - Bare UDP tunneling
+//! - [`NetkitLink`] - BPF-optimized virtual ethernet
 //!
 //! # Example
 //!
@@ -1203,6 +1208,767 @@ impl LinkConfig for IpvlanLink {
         builder.append_attr_u16(ipvlan::IFLA_IPVLAN_FLAGS, self.flags as u16);
         builder.nest_end(data);
 
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// IFB Link
+// ============================================================================
+
+/// Configuration for an IFB (Intermediate Functional Block) interface.
+///
+/// IFB devices are used in conjunction with TC to redirect traffic for
+/// ingress shaping. They act as a pseudo-interface where you can attach
+/// qdiscs to shape incoming traffic.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::IfbLink;
+///
+/// let ifb = IfbLink::new("ifb0");
+/// conn.add_link(ifb).await?;
+///
+/// // Then redirect ingress traffic to ifb0 for shaping
+/// ```
+#[derive(Debug, Clone)]
+pub struct IfbLink {
+    name: String,
+    mtu: Option<u32>,
+}
+
+impl IfbLink {
+    /// Create a new IFB interface configuration.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            mtu: None,
+        }
+    }
+
+    /// Set the MTU for this interface.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+}
+
+impl LinkConfig for IfbLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "ifb"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        build_simple_link(&self.name, "ifb", self.mtu, None)
+    }
+}
+
+// ============================================================================
+// Macvtap Link
+// ============================================================================
+
+/// Configuration for a macvtap interface.
+///
+/// Macvtap is similar to macvlan but provides a tap-like interface
+/// that can be used by userspace programs (like QEMU/KVM for VM networking).
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::{MacvtapLink, MacvlanMode};
+///
+/// let macvtap = MacvtapLink::new("macvtap0", "eth0")
+///     .mode(MacvlanMode::Bridge);
+///
+/// conn.add_link(macvtap).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct MacvtapLink {
+    name: String,
+    parent: String,
+    mode: MacvlanMode,
+    mtu: Option<u32>,
+    address: Option<[u8; 6]>,
+}
+
+impl MacvtapLink {
+    /// Create a new macvtap interface configuration.
+    pub fn new(name: impl Into<String>, parent: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            parent: parent.into(),
+            mode: MacvlanMode::Bridge,
+            mtu: None,
+            address: None,
+        }
+    }
+
+    /// Set the macvtap mode.
+    pub fn mode(mut self, mode: MacvlanMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the MAC address.
+    pub fn address(mut self, addr: [u8; 6]) -> Self {
+        self.address = Some(addr);
+        self
+    }
+}
+
+impl LinkConfig for MacvtapLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "macvtap"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let parent_index = ifname_to_index(&self.parent)?;
+
+        let mut builder = create_link_message(&self.name);
+
+        // Link to parent
+        builder.append_attr_u32(IflaAttr::Link as u16, parent_index as u32);
+
+        // Add optional attributes
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(ref addr) = self.address {
+            builder.append_attr(IflaAttr::Address as u16, addr);
+        }
+
+        // IFLA_LINKINFO
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "macvtap");
+
+        // IFLA_INFO_DATA - uses same attributes as macvlan
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        builder.append_attr_u32(macvlan::IFLA_MACVLAN_MODE, self.mode as u32);
+        builder.nest_end(data);
+
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// Geneve Link
+// ============================================================================
+
+/// Configuration for a Geneve (Generic Network Virtualization Encapsulation) interface.
+///
+/// Geneve is an overlay network encapsulation protocol similar to VXLAN but
+/// with a more flexible TLV-based option mechanism.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::GeneveLink;
+/// use std::net::Ipv4Addr;
+///
+/// let geneve = GeneveLink::new("geneve0", 100)
+///     .remote(Ipv4Addr::new(192, 168, 1, 100))
+///     .port(6081);
+///
+/// conn.add_link(geneve).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct GeneveLink {
+    name: String,
+    vni: u32,
+    mtu: Option<u32>,
+    /// Remote IPv4 address
+    remote: Option<Ipv4Addr>,
+    /// Remote IPv6 address
+    remote6: Option<std::net::Ipv6Addr>,
+    /// TTL
+    ttl: Option<u8>,
+    /// TTL inherit from inner packet
+    ttl_inherit: bool,
+    /// TOS
+    tos: Option<u8>,
+    /// Don't Fragment setting
+    df: Option<GeneveDf>,
+    /// Flow label for IPv6
+    label: Option<u32>,
+    /// UDP destination port (default 6081)
+    port: Option<u16>,
+    /// Collect metadata mode (for BPF)
+    collect_metadata: bool,
+    /// UDP checksum
+    udp_csum: Option<bool>,
+    /// Zero UDP checksum for IPv6 TX
+    udp6_zero_csum_tx: Option<bool>,
+    /// Zero UDP checksum for IPv6 RX
+    udp6_zero_csum_rx: Option<bool>,
+    /// Inherit inner protocol
+    inner_proto_inherit: bool,
+}
+
+/// Geneve DF (Don't Fragment) setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneveDf {
+    /// Don't set DF
+    Unset = 0,
+    /// Set DF
+    Set = 1,
+    /// Inherit from inner packet
+    Inherit = 2,
+}
+
+/// Geneve-specific attributes (IFLA_GENEVE_*)
+mod geneve {
+    pub const IFLA_GENEVE_ID: u16 = 1;
+    pub const IFLA_GENEVE_REMOTE: u16 = 2;
+    pub const IFLA_GENEVE_TTL: u16 = 3;
+    pub const IFLA_GENEVE_TOS: u16 = 4;
+    pub const IFLA_GENEVE_PORT: u16 = 5;
+    pub const IFLA_GENEVE_COLLECT_METADATA: u16 = 6;
+    pub const IFLA_GENEVE_REMOTE6: u16 = 7;
+    pub const IFLA_GENEVE_UDP_CSUM: u16 = 8;
+    pub const IFLA_GENEVE_UDP_ZERO_CSUM6_TX: u16 = 9;
+    pub const IFLA_GENEVE_UDP_ZERO_CSUM6_RX: u16 = 10;
+    pub const IFLA_GENEVE_LABEL: u16 = 11;
+    pub const IFLA_GENEVE_TTL_INHERIT: u16 = 12;
+    pub const IFLA_GENEVE_DF: u16 = 13;
+    pub const IFLA_GENEVE_INNER_PROTO_INHERIT: u16 = 14;
+}
+
+impl GeneveLink {
+    /// Create a new Geneve interface configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name for the Geneve interface
+    /// * `vni` - Virtual Network Identifier (0-16777215)
+    pub fn new(name: impl Into<String>, vni: u32) -> Self {
+        Self {
+            name: name.into(),
+            vni,
+            mtu: None,
+            remote: None,
+            remote6: None,
+            ttl: None,
+            ttl_inherit: false,
+            tos: None,
+            df: None,
+            label: None,
+            port: None,
+            collect_metadata: false,
+            udp_csum: None,
+            udp6_zero_csum_tx: None,
+            udp6_zero_csum_rx: None,
+            inner_proto_inherit: false,
+        }
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the remote IPv4 address.
+    pub fn remote(mut self, addr: Ipv4Addr) -> Self {
+        self.remote = Some(addr);
+        self.remote6 = None;
+        self
+    }
+
+    /// Set the remote IPv6 address.
+    pub fn remote6(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.remote6 = Some(addr);
+        self.remote = None;
+        self
+    }
+
+    /// Set the TTL.
+    pub fn ttl(mut self, ttl: u8) -> Self {
+        self.ttl = Some(ttl);
+        self.ttl_inherit = false;
+        self
+    }
+
+    /// Inherit TTL from inner packet.
+    pub fn ttl_inherit(mut self) -> Self {
+        self.ttl_inherit = true;
+        self.ttl = None;
+        self
+    }
+
+    /// Set the TOS.
+    pub fn tos(mut self, tos: u8) -> Self {
+        self.tos = Some(tos);
+        self
+    }
+
+    /// Set the Don't Fragment behavior.
+    pub fn df(mut self, df: GeneveDf) -> Self {
+        self.df = Some(df);
+        self
+    }
+
+    /// Set the flow label for IPv6.
+    pub fn label(mut self, label: u32) -> Self {
+        self.label = Some(label);
+        self
+    }
+
+    /// Set the UDP destination port.
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
+    /// Enable collect metadata mode (for BPF programs).
+    pub fn collect_metadata(mut self) -> Self {
+        self.collect_metadata = true;
+        self
+    }
+
+    /// Set UDP checksum.
+    pub fn udp_csum(mut self, enabled: bool) -> Self {
+        self.udp_csum = Some(enabled);
+        self
+    }
+
+    /// Set zero UDP checksum for IPv6 TX.
+    pub fn udp6_zero_csum_tx(mut self, enabled: bool) -> Self {
+        self.udp6_zero_csum_tx = Some(enabled);
+        self
+    }
+
+    /// Set zero UDP checksum for IPv6 RX.
+    pub fn udp6_zero_csum_rx(mut self, enabled: bool) -> Self {
+        self.udp6_zero_csum_rx = Some(enabled);
+        self
+    }
+
+    /// Enable inner protocol inheritance.
+    pub fn inner_proto_inherit(mut self) -> Self {
+        self.inner_proto_inherit = true;
+        self
+    }
+}
+
+impl LinkConfig for GeneveLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "geneve"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+
+        // IFLA_LINKINFO
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "geneve");
+
+        // IFLA_INFO_DATA
+        let data = builder.nest_start(IflaInfo::Data as u16);
+
+        // VNI (required)
+        builder.append_attr_u32(geneve::IFLA_GENEVE_ID, self.vni);
+
+        // Remote address
+        if let Some(addr) = self.remote {
+            builder.append_attr(geneve::IFLA_GENEVE_REMOTE, &addr.octets());
+        } else if let Some(addr) = self.remote6 {
+            builder.append_attr(geneve::IFLA_GENEVE_REMOTE6, &addr.octets());
+        }
+
+        // TTL
+        if self.ttl_inherit {
+            builder.append_attr_u8(geneve::IFLA_GENEVE_TTL_INHERIT, 1);
+        } else if let Some(ttl) = self.ttl {
+            builder.append_attr_u8(geneve::IFLA_GENEVE_TTL, ttl);
+        }
+
+        // TOS
+        if let Some(tos) = self.tos {
+            builder.append_attr_u8(geneve::IFLA_GENEVE_TOS, tos);
+        }
+
+        // DF
+        if let Some(df) = self.df {
+            builder.append_attr_u8(geneve::IFLA_GENEVE_DF, df as u8);
+        }
+
+        // Flow label
+        if let Some(label) = self.label {
+            builder.append_attr_u32(geneve::IFLA_GENEVE_LABEL, label);
+        }
+
+        // Port
+        if let Some(port) = self.port {
+            builder.append_attr_u16_be(geneve::IFLA_GENEVE_PORT, port);
+        }
+
+        // Collect metadata
+        if self.collect_metadata {
+            builder.append_attr_empty(geneve::IFLA_GENEVE_COLLECT_METADATA);
+        }
+
+        // UDP checksum options
+        if let Some(enabled) = self.udp_csum {
+            builder.append_attr_u8(geneve::IFLA_GENEVE_UDP_CSUM, if enabled { 1 } else { 0 });
+        }
+        if let Some(enabled) = self.udp6_zero_csum_tx {
+            builder.append_attr_u8(
+                geneve::IFLA_GENEVE_UDP_ZERO_CSUM6_TX,
+                if enabled { 1 } else { 0 },
+            );
+        }
+        if let Some(enabled) = self.udp6_zero_csum_rx {
+            builder.append_attr_u8(
+                geneve::IFLA_GENEVE_UDP_ZERO_CSUM6_RX,
+                if enabled { 1 } else { 0 },
+            );
+        }
+
+        // Inner protocol inherit
+        if self.inner_proto_inherit {
+            builder.append_attr_empty(geneve::IFLA_GENEVE_INNER_PROTO_INHERIT);
+        }
+
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// Bareudp Link
+// ============================================================================
+
+/// Configuration for a Bareudp interface.
+///
+/// Bareudp is a minimal UDP tunneling driver that provides UDP encapsulation
+/// for various L3 protocols like MPLS and IP.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::BareudpLink;
+///
+/// // Create a bareudp tunnel for MPLS
+/// let bareudp = BareudpLink::new("bareudp0", 6635, 0x8847);
+/// conn.add_link(bareudp).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct BareudpLink {
+    name: String,
+    /// UDP destination port
+    port: u16,
+    /// EtherType of the tunneled protocol
+    ethertype: u16,
+    /// Minimum source port
+    srcport_min: Option<u16>,
+    /// Multiprotocol mode
+    multiproto_mode: bool,
+    mtu: Option<u32>,
+}
+
+/// Bareudp-specific attributes (IFLA_BAREUDP_*)
+mod bareudp {
+    pub const IFLA_BAREUDP_PORT: u16 = 1;
+    pub const IFLA_BAREUDP_ETHERTYPE: u16 = 2;
+    pub const IFLA_BAREUDP_SRCPORT_MIN: u16 = 3;
+    pub const IFLA_BAREUDP_MULTIPROTO_MODE: u16 = 4;
+}
+
+impl BareudpLink {
+    /// Create a new Bareudp interface configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name for the interface
+    /// * `port` - UDP destination port
+    /// * `ethertype` - EtherType of tunneled protocol (e.g., 0x8847 for MPLS unicast)
+    pub fn new(name: impl Into<String>, port: u16, ethertype: u16) -> Self {
+        Self {
+            name: name.into(),
+            port,
+            ethertype,
+            srcport_min: None,
+            multiproto_mode: false,
+            mtu: None,
+        }
+    }
+
+    /// Set the minimum source port.
+    pub fn srcport_min(mut self, port: u16) -> Self {
+        self.srcport_min = Some(port);
+        self
+    }
+
+    /// Enable multiprotocol mode.
+    pub fn multiproto_mode(mut self) -> Self {
+        self.multiproto_mode = true;
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+}
+
+impl LinkConfig for BareudpLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "bareudp"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+
+        // IFLA_LINKINFO
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "bareudp");
+
+        // IFLA_INFO_DATA
+        let data = builder.nest_start(IflaInfo::Data as u16);
+
+        // Port (required) - network byte order
+        builder.append_attr_u16_be(bareudp::IFLA_BAREUDP_PORT, self.port);
+
+        // Ethertype (required) - network byte order
+        builder.append_attr_u16_be(bareudp::IFLA_BAREUDP_ETHERTYPE, self.ethertype);
+
+        // Source port min
+        if let Some(srcport) = self.srcport_min {
+            builder.append_attr_u16(bareudp::IFLA_BAREUDP_SRCPORT_MIN, srcport);
+        }
+
+        // Multiproto mode
+        if self.multiproto_mode {
+            builder.append_attr_empty(bareudp::IFLA_BAREUDP_MULTIPROTO_MODE);
+        }
+
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// Netkit Link
+// ============================================================================
+
+/// Configuration for a Netkit interface.
+///
+/// Netkit devices are similar to veth but designed for BPF program attachment.
+/// They provide a more efficient path for BPF-based packet processing.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::{NetkitLink, NetkitMode, NetkitPolicy};
+///
+/// let netkit = NetkitLink::new("nk0", "nk1")
+///     .mode(NetkitMode::L3)
+///     .policy(NetkitPolicy::Forward);
+///
+/// conn.add_link(netkit).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct NetkitLink {
+    name: String,
+    peer_name: String,
+    mode: Option<NetkitMode>,
+    policy: Option<NetkitPolicy>,
+    peer_policy: Option<NetkitPolicy>,
+    scrub: Option<NetkitScrub>,
+    peer_scrub: Option<NetkitScrub>,
+    mtu: Option<u32>,
+}
+
+/// Netkit operating mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetkitMode {
+    /// L2 mode (Ethernet frames)
+    L2 = 0,
+    /// L3 mode (IP packets)
+    L3 = 1,
+}
+
+/// Netkit default policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetkitPolicy {
+    /// Forward packets (default)
+    Forward = 0,
+    /// Blackhole (drop)
+    Blackhole = 2,
+}
+
+/// Netkit scrub mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetkitScrub {
+    /// No scrubbing
+    None = 0,
+    /// Default scrubbing
+    Default = 1,
+}
+
+/// Netkit-specific attributes (IFLA_NETKIT_*)
+mod netkit {
+    pub const IFLA_NETKIT_PEER_INFO: u16 = 1;
+    pub const IFLA_NETKIT_MODE: u16 = 4;
+    pub const IFLA_NETKIT_POLICY: u16 = 2;
+    pub const IFLA_NETKIT_PEER_POLICY: u16 = 3;
+    pub const IFLA_NETKIT_SCRUB: u16 = 5;
+    pub const IFLA_NETKIT_PEER_SCRUB: u16 = 6;
+}
+
+impl NetkitLink {
+    /// Create a new Netkit pair configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name for the primary interface
+    /// * `peer_name` - Name for the peer interface
+    pub fn new(name: impl Into<String>, peer_name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            peer_name: peer_name.into(),
+            mode: None,
+            policy: None,
+            peer_policy: None,
+            scrub: None,
+            peer_scrub: None,
+            mtu: None,
+        }
+    }
+
+    /// Set the operating mode.
+    pub fn mode(mut self, mode: NetkitMode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    /// Set the default policy for the primary interface.
+    pub fn policy(mut self, policy: NetkitPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// Set the default policy for the peer interface.
+    pub fn peer_policy(mut self, policy: NetkitPolicy) -> Self {
+        self.peer_policy = Some(policy);
+        self
+    }
+
+    /// Set the scrub mode for the primary interface.
+    pub fn scrub(mut self, scrub: NetkitScrub) -> Self {
+        self.scrub = Some(scrub);
+        self
+    }
+
+    /// Set the scrub mode for the peer interface.
+    pub fn peer_scrub(mut self, scrub: NetkitScrub) -> Self {
+        self.peer_scrub = Some(scrub);
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+}
+
+impl LinkConfig for NetkitLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "netkit"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+
+        // IFLA_LINKINFO
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "netkit");
+
+        // IFLA_INFO_DATA
+        let data = builder.nest_start(IflaInfo::Data as u16);
+
+        // Mode
+        if let Some(mode) = self.mode {
+            builder.append_attr_u32(netkit::IFLA_NETKIT_MODE, mode as u32);
+        }
+
+        // Policy
+        if let Some(policy) = self.policy {
+            builder.append_attr_u32(netkit::IFLA_NETKIT_POLICY, policy as u32);
+        }
+
+        // Peer policy
+        if let Some(policy) = self.peer_policy {
+            builder.append_attr_u32(netkit::IFLA_NETKIT_PEER_POLICY, policy as u32);
+        }
+
+        // Scrub
+        if let Some(scrub) = self.scrub {
+            builder.append_attr_u32(netkit::IFLA_NETKIT_SCRUB, scrub as u32);
+        }
+
+        // Peer scrub
+        if let Some(scrub) = self.peer_scrub {
+            builder.append_attr_u32(netkit::IFLA_NETKIT_PEER_SCRUB, scrub as u32);
+        }
+
+        // Peer info (nested ifinfomsg for peer)
+        let peer_info = builder.nest_start(netkit::IFLA_NETKIT_PEER_INFO);
+        let peer_ifinfo = IfInfoMsg::new();
+        builder.append(&peer_ifinfo);
+        builder.append_attr_str(IflaAttr::Ifname as u16, &self.peer_name);
+        builder.nest_end(peer_info);
+
+        builder.nest_end(data);
         builder.nest_end(linkinfo);
 
         Ok(builder)

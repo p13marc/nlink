@@ -1307,9 +1307,8 @@ mod tests {
 
     #[test]
     fn test_fw_filter_builder() {
-        let filter = FwFilter::new(10).classid("1:10").mask(0xFF).build();
+        let filter = FwFilter::new().classid("1:10").mask(0xFF).build();
 
-        assert_eq!(filter.mark, 10);
         assert_eq!(filter.mask, 0xFF);
         assert_eq!(filter.classid, Some(tc_handle::make(1, 0x10)));
     }

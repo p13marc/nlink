@@ -77,6 +77,11 @@ impl MessageBuilder {
         self.append_attr(attr_type, &[value]);
     }
 
+    /// Append an empty (flag) attribute with no payload.
+    pub fn append_attr_empty(&mut self, attr_type: u16) {
+        self.append_attr(attr_type, &[]);
+    }
+
     /// Append a u16 attribute (native endian).
     pub fn append_attr_u16(&mut self, attr_type: u16, value: u16) {
         self.append_attr(attr_type, &value.to_ne_bytes());
