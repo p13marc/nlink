@@ -1,10 +1,11 @@
 //! Address message types.
 
 use crate::netlink::error::{Error, Result};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Interface address message (struct ifaddrmsg).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct IfAddrMsg {
     /// Address family (AF_INET, AF_INET6).
     pub ifa_family: u8,
@@ -53,18 +54,17 @@ impl IfAddrMsg {
 
     /// Convert to bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+        <Self as IntoBytes>::as_bytes(self)
     }
 
     /// Parse from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
-        if data.len() < Self::SIZE {
-            return Err(Error::Truncated {
+        Self::ref_from_prefix(data)
+            .map(|(r, _)| r)
+            .map_err(|_| Error::Truncated {
                 expected: Self::SIZE,
                 actual: data.len(),
-            });
-        }
-        Ok(unsafe { &*(data.as_ptr() as *const Self) })
+            })
     }
 }
 
@@ -174,7 +174,7 @@ impl Scope {
 
 /// Address cache info (struct ifa_cacheinfo).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, Immutable, KnownLayout)]
 pub struct IfaCacheinfo {
     pub ifa_prefered: u32,
     pub ifa_valid: u32,
@@ -185,10 +185,6 @@ pub struct IfaCacheinfo {
 impl IfaCacheinfo {
     /// Parse from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
-        if data.len() >= std::mem::size_of::<Self>() {
-            Some(unsafe { &*(data.as_ptr() as *const Self) })
-        } else {
-            None
-        }
+        Self::ref_from_prefix(data).map(|(r, _)| r).ok()
     }
 }

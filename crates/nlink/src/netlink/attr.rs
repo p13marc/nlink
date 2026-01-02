@@ -1,6 +1,7 @@
 //! Netlink attribute (rtattr/nlattr) handling.
 
 use super::error::{Error, Result};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Netlink attribute alignment.
 pub const NLA_ALIGNTO: usize = 4;
@@ -16,7 +17,7 @@ pub const NLA_HDRLEN: usize = 4; // nla_align(size_of::<NlAttr>())
 
 /// Netlink attribute header (mirrors struct nlattr / struct rtattr).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NlAttr {
     /// Length including header.
     pub nla_len: u16,
@@ -55,23 +56,17 @@ impl NlAttr {
 
     /// Convert to bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(
-                self as *const Self as *const u8,
-                std::mem::size_of::<Self>(),
-            )
-        }
+        <Self as IntoBytes>::as_bytes(self)
     }
 
     /// Parse from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
-        if data.len() < std::mem::size_of::<Self>() {
-            return Err(Error::Truncated {
+        Self::ref_from_prefix(data)
+            .map(|(r, _)| r)
+            .map_err(|_| Error::Truncated {
                 expected: std::mem::size_of::<Self>(),
                 actual: data.len(),
-            });
-        }
-        Ok(unsafe { &*(data.as_ptr() as *const Self) })
+            })
     }
 }
 

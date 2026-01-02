@@ -1,10 +1,11 @@
 //! Routing rule message types.
 
 use crate::netlink::error::{Error, Result};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// FIB rule header (struct fib_rule_hdr).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct FibRuleHdr {
     /// Address family.
     pub family: u8,
@@ -43,18 +44,17 @@ impl FibRuleHdr {
 
     /// Convert to bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+        <Self as IntoBytes>::as_bytes(self)
     }
 
     /// Parse from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
-        if data.len() < Self::SIZE {
-            return Err(Error::Truncated {
+        Self::ref_from_prefix(data)
+            .map(|(r, _)| r)
+            .map_err(|_| Error::Truncated {
                 expected: Self::SIZE,
                 actual: data.len(),
-            });
-        }
-        Ok(unsafe { &*(data.as_ptr() as *const Self) })
+            })
     }
 }
 

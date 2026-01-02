@@ -1,10 +1,11 @@
 //! Link (network interface) message types.
 
 use crate::netlink::error::{Error, Result};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Interface info message (struct ifinfomsg).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct IfInfoMsg {
     /// Address family (usually AF_UNSPEC).
     pub ifi_family: u8,
@@ -43,18 +44,17 @@ impl IfInfoMsg {
 
     /// Convert to bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+        <Self as IntoBytes>::as_bytes(self)
     }
 
     /// Parse from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
-        if data.len() < Self::SIZE {
-            return Err(Error::Truncated {
+        Self::ref_from_prefix(data)
+            .map(|(r, _)| r)
+            .map_err(|_| Error::Truncated {
                 expected: Self::SIZE,
                 actual: data.len(),
-            });
-        }
-        Ok(unsafe { &*(data.as_ptr() as *const Self) })
+            })
     }
 }
 
@@ -292,7 +292,7 @@ impl OperState {
 
 /// Link statistics (struct rtnl_link_stats64).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, Immutable, KnownLayout)]
 pub struct LinkStats64 {
     pub rx_packets: u64,
     pub tx_packets: u64,
@@ -326,19 +326,6 @@ pub struct LinkStats64 {
 impl LinkStats64 {
     /// Parse from bytes by copying (avoids alignment issues).
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() >= std::mem::size_of::<Self>() {
-            let mut stats = Self::default();
-            // SAFETY: We're copying bytes into a repr(C) struct with proper size
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    data.as_ptr(),
-                    &mut stats as *mut Self as *mut u8,
-                    std::mem::size_of::<Self>(),
-                );
-            }
-            Some(stats)
-        } else {
-            None
-        }
+        Self::read_from_prefix(data).map(|(r, _)| r).ok()
     }
 }

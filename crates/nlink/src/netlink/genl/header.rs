@@ -16,12 +16,13 @@
 //! ```
 
 use std::mem;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Generic Netlink message header.
 ///
 /// This header immediately follows the standard netlink header in GENL messages.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct GenlMsgHdr {
     /// Command identifier (family-specific)
     pub cmd: u8,
@@ -49,18 +50,13 @@ impl GenlMsgHdr {
     ///
     /// Returns `None` if the slice is too short.
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
-        if data.len() < GENL_HDRLEN {
-            return None;
-        }
-        // SAFETY: GenlMsgHdr is repr(C) and data is properly aligned
-        Some(unsafe { &*(data.as_ptr() as *const Self) })
+        Self::ref_from_prefix(data).map(|(r, _)| r).ok()
     }
 
     /// Get the header as a byte slice.
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: GenlMsgHdr is repr(C) with no padding
-        unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, GENL_HDRLEN) }
+        <Self as IntoBytes>::as_bytes(self)
     }
 }
 

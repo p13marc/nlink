@@ -42,6 +42,9 @@ libc = "0.2"
 # Parser combinators
 winnow = "0.7"
 
+# Zero-copy serialization
+zerocopy = { version = "0.8", features = ["derive"] }
+
 # Proc macros
 proc-macro2 = "1"
 quote = "1"

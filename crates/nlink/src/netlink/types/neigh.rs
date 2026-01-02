@@ -1,10 +1,11 @@
 //! Neighbor (ARP/NDP) message types.
 
 use crate::netlink::error::{Error, Result};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Neighbor message (struct ndmsg).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NdMsg {
     /// Address family.
     pub ndm_family: u8,
@@ -45,18 +46,17 @@ impl NdMsg {
 
     /// Convert to bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+        <Self as IntoBytes>::as_bytes(self)
     }
 
     /// Parse from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
-        if data.len() < Self::SIZE {
-            return Err(Error::Truncated {
+        Self::ref_from_prefix(data)
+            .map(|(r, _)| r)
+            .map_err(|_| Error::Truncated {
                 expected: Self::SIZE,
                 actual: data.len(),
-            });
-        }
-        Ok(unsafe { &*(data.as_ptr() as *const Self) })
+            })
     }
 }
 
@@ -197,7 +197,7 @@ pub mod ntf {
 
 /// Neighbor cache info (struct nda_cacheinfo).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, Immutable, KnownLayout)]
 pub struct NdaCacheinfo {
     pub ndm_confirmed: u32,
     pub ndm_used: u32,
@@ -208,10 +208,6 @@ pub struct NdaCacheinfo {
 impl NdaCacheinfo {
     /// Parse from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
-        if data.len() >= std::mem::size_of::<Self>() {
-            Some(unsafe { &*(data.as_ptr() as *const Self) })
-        } else {
-            None
-        }
+        Self::ref_from_prefix(data).map(|(r, _)| r).ok()
     }
 }

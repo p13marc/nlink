@@ -2,6 +2,7 @@
 
 use super::attr::{NLA_F_NESTED, NlAttr, nla_align};
 use super::message::{NLMSG_HDRLEN, NlMsgHdr, nlmsg_align};
+use zerocopy::{Immutable, IntoBytes};
 
 /// Token returned when starting a nested attribute.
 /// Used to finalize the nested attribute length.
@@ -53,13 +54,10 @@ impl MessageBuilder {
 
     /// Append a fixed-size struct to the message.
     ///
-    /// # Safety
-    /// The type T must be repr(C) and have no padding bytes that could leak data.
-    pub fn append<T: Copy>(&mut self, data: &T) {
-        let bytes = unsafe {
-            std::slice::from_raw_parts(data as *const T as *const u8, std::mem::size_of::<T>())
-        };
-        self.append_bytes(bytes);
+    /// The type T must implement `IntoBytes` and `Immutable` (from zerocopy),
+    /// which guarantees safe byte conversion without undefined behavior.
+    pub fn append<T: IntoBytes + Immutable>(&mut self, data: &T) {
+        self.append_bytes(data.as_bytes());
     }
 
     /// Append an attribute with the given type and data.

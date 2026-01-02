@@ -2,6 +2,7 @@
 
 use super::attr::AttrIter;
 use super::error::{Error, Result};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Netlink message header alignment.
 pub const NLMSG_ALIGNTO: usize = 4;
@@ -17,7 +18,7 @@ pub const NLMSG_HDRLEN: usize = nlmsg_align(std::mem::size_of::<NlMsgHdr>());
 
 /// Netlink message header (mirrors struct nlmsghdr).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct NlMsgHdr {
     /// Length of message including header.
     pub nlmsg_len: u32,
@@ -65,24 +66,17 @@ impl NlMsgHdr {
 
     /// Convert header to bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(
-                self as *const Self as *const u8,
-                std::mem::size_of::<Self>(),
-            )
-        }
+        <Self as IntoBytes>::as_bytes(self)
     }
 
     /// Parse header from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
-        if data.len() < std::mem::size_of::<Self>() {
-            return Err(Error::Truncated {
+        Self::ref_from_prefix(data)
+            .map(|(r, _)| r)
+            .map_err(|_| Error::Truncated {
                 expected: std::mem::size_of::<Self>(),
                 actual: data.len(),
-            });
-        }
-        // SAFETY: We verified the length, and NlMsgHdr is repr(C) with no padding requirements
-        Ok(unsafe { &*(data.as_ptr() as *const Self) })
+            })
     }
 }
 
@@ -223,7 +217,7 @@ impl<'a> Iterator for MessageIter<'a> {
 
 /// Netlink error message payload.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 pub struct NlMsgError {
     /// Error code (negative errno or 0 for ACK).
     pub error: i32,
@@ -234,13 +228,12 @@ pub struct NlMsgError {
 impl NlMsgError {
     /// Parse error message from payload.
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
-        if data.len() < std::mem::size_of::<Self>() {
-            return Err(Error::Truncated {
+        Self::ref_from_prefix(data)
+            .map(|(r, _)| r)
+            .map_err(|_| Error::Truncated {
                 expected: std::mem::size_of::<Self>(),
                 actual: data.len(),
-            });
-        }
-        Ok(unsafe { &*(data.as_ptr() as *const Self) })
+            })
     }
 
     /// Check if this is an ACK (no error).

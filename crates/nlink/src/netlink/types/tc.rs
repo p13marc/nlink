@@ -1,10 +1,11 @@
 //! Traffic control message types.
 
 use crate::netlink::error::{Error, Result};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Traffic control message (struct tcmsg).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct TcMsg {
     /// Address family.
     pub tcm_family: u8,
@@ -59,18 +60,17 @@ impl TcMsg {
 
     /// Convert to bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+        <Self as IntoBytes>::as_bytes(self)
     }
 
     /// Parse from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
-        if data.len() < Self::SIZE {
-            return Err(Error::Truncated {
+        Self::ref_from_prefix(data)
+            .map(|(r, _)| r)
+            .map_err(|_| Error::Truncated {
                 expected: Self::SIZE,
                 actual: data.len(),
-            });
-        }
-        Ok(unsafe { &*(data.as_ptr() as *const Self) })
+            })
     }
 }
 
@@ -299,6 +299,8 @@ pub struct TcEstimator {
 pub mod qdisc {
     /// HTB qdisc-specific attributes.
     pub mod htb {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_HTB_UNSPEC: u16 = 0;
         pub const TCA_HTB_PARMS: u16 = 1;
         pub const TCA_HTB_INIT: u16 = 2;
@@ -311,7 +313,7 @@ pub mod qdisc {
 
         /// HTB global parameters (struct tc_htb_glob).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcHtbGlob {
             pub version: u32,
             pub rate2quantum: u32,
@@ -339,13 +341,13 @@ pub mod qdisc {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
         /// HTB class parameters (struct tc_htb_opt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcHtbOpt {
             pub rate: super::TcRateSpec,
             pub ceil: super::TcRateSpec,
@@ -360,7 +362,7 @@ pub mod qdisc {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
@@ -381,6 +383,8 @@ pub mod qdisc {
 
     /// TBF qdisc-specific attributes.
     pub mod tbf {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_TBF_UNSPEC: u16 = 0;
         pub const TCA_TBF_PARMS: u16 = 1;
         pub const TCA_TBF_RTAB: u16 = 2;
@@ -392,7 +396,7 @@ pub mod qdisc {
 
         /// TBF parameters (struct tc_tbf_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcTbfQopt {
             pub rate: super::TcRateSpec,
             pub peakrate: super::TcRateSpec,
@@ -405,19 +409,21 @@ pub mod qdisc {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// PRIO qdisc-specific attributes.
     pub mod prio {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_PRIO_UNSPEC: u16 = 0;
         pub const TCA_PRIO_MQ: u16 = 1;
 
         /// PRIO parameters (struct tc_prio_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy)]
+        #[derive(Debug, Clone, Copy, IntoBytes, Immutable, KnownLayout)]
         pub struct TcPrioQopt {
             pub bands: i32,
             pub priomap: [u8; 16],
@@ -437,16 +443,18 @@ pub mod qdisc {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// SFQ qdisc-specific attributes.
     pub mod sfq {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         /// SFQ parameters (struct tc_sfq_qopt_v1).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcSfqQoptV1 {
             pub v0: TcSfqQopt,
             pub depth: u32,
@@ -464,7 +472,7 @@ pub mod qdisc {
 
         /// SFQ basic parameters (struct tc_sfq_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcSfqQopt {
             pub quantum: u32,
             pub perturb_period: i32,
@@ -477,13 +485,15 @@ pub mod qdisc {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// Netem qdisc-specific attributes.
     pub mod netem {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_NETEM_UNSPEC: u16 = 0;
         pub const TCA_NETEM_CORR: u16 = 1;
         pub const TCA_NETEM_DELAY_DIST: u16 = 2;
@@ -507,7 +517,7 @@ pub mod qdisc {
 
         /// Netem basic options (struct tc_netem_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemQopt {
             /// Added delay in microseconds.
             pub latency: u32,
@@ -534,13 +544,13 @@ pub mod qdisc {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
         /// Netem correlation structure (struct tc_netem_corr).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemCorr {
             /// Delay correlation.
             pub delay_corr: u32,
@@ -554,13 +564,13 @@ pub mod qdisc {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
         /// Netem reorder structure (struct tc_netem_reorder).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemReorder {
             pub probability: u32,
             pub correlation: u32,
@@ -570,13 +580,13 @@ pub mod qdisc {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
         /// Netem corrupt structure (struct tc_netem_corrupt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemCorrupt {
             pub probability: u32,
             pub correlation: u32,
@@ -586,13 +596,13 @@ pub mod qdisc {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
         /// Netem rate structure (struct tc_netem_rate).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemRate {
             /// Rate in bytes/s.
             pub rate: u32,
@@ -608,13 +618,13 @@ pub mod qdisc {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
         /// Netem slot structure (struct tc_netem_slot).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemSlot {
             /// Minimum delay in nanoseconds.
             pub min_delay: i64,
@@ -634,13 +644,13 @@ pub mod qdisc {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
         /// Gilbert-Intuitive loss model (4 state) (struct tc_netem_gimodel).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemGiModel {
             pub p13: u32,
             pub p31: u32,
@@ -653,13 +663,13 @@ pub mod qdisc {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
         /// Gilbert-Elliot loss model (struct tc_netem_gemodel).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemGeModel {
             pub p: u32,
             pub r: u32,
@@ -671,7 +681,7 @@ pub mod qdisc {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
@@ -688,7 +698,9 @@ pub mod qdisc {
 
     /// Rate specification (struct tc_ratespec).
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default)]
+    #[derive(
+        Debug, Clone, Copy, Default, zerocopy::IntoBytes, zerocopy::Immutable, zerocopy::KnownLayout,
+    )]
     pub struct TcRateSpec {
         pub cell_log: u8,
         pub linklayer: u8,
@@ -709,7 +721,7 @@ pub mod qdisc {
         }
 
         pub fn as_bytes(&self) -> &[u8] {
-            unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            <Self as zerocopy::IntoBytes>::as_bytes(self)
         }
     }
 
@@ -798,6 +810,8 @@ pub mod qdisc {
 
     /// RED (Random Early Detection) qdisc-specific attributes.
     pub mod red {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_RED_UNSPEC: u16 = 0;
         pub const TCA_RED_PARMS: u16 = 1;
         pub const TCA_RED_STAB: u16 = 2;
@@ -814,7 +828,7 @@ pub mod qdisc {
 
         /// RED parameters (struct tc_red_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcRedQopt {
             /// Queue limit in bytes.
             pub limit: u32,
@@ -836,7 +850,7 @@ pub mod qdisc {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
@@ -856,9 +870,11 @@ pub mod qdisc {
 
     /// FIFO qdisc types (pfifo, bfifo).
     pub mod fifo {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         /// FIFO limit structure (struct tc_fifo_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcFifoQopt {
             /// Queue limit (packets for pfifo, bytes for bfifo).
             pub limit: u32,
@@ -872,7 +888,7 @@ pub mod qdisc {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
@@ -892,6 +908,8 @@ pub mod qdisc {
 
     /// MQPRIO (Multi-Queue Priority) qdisc attributes.
     pub mod mqprio {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         /// Maximum number of traffic classes.
         pub const TC_QOPT_MAX_QUEUE: usize = 16;
 
@@ -912,7 +930,7 @@ pub mod qdisc {
 
         /// MQPRIO qdisc options (struct tc_mqprio_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy)]
+        #[derive(Debug, Clone, Copy, IntoBytes, Immutable, KnownLayout)]
         pub struct TcMqprioQopt {
             /// Number of traffic classes.
             pub num_tc: u8,
@@ -956,13 +974,15 @@ pub mod qdisc {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// Plug qdisc types and constants.
     pub mod plug {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         /// Plug action types.
         pub const TCQ_PLUG_BUFFER: i32 = 0;
         pub const TCQ_PLUG_RELEASE_ONE: i32 = 1;
@@ -971,7 +991,7 @@ pub mod qdisc {
 
         /// Plug qdisc options (struct tc_plug_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcPlugQopt {
             /// Action to perform.
             pub action: i32,
@@ -1003,7 +1023,7 @@ pub mod qdisc {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
@@ -1079,6 +1099,8 @@ pub mod qdisc {
 
     /// HFSC (Hierarchical Fair Service Curve) qdisc attributes and structures.
     pub mod hfsc {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_HFSC_UNSPEC: u16 = 0;
         pub const TCA_HFSC_RSC: u16 = 1;
         pub const TCA_HFSC_FSC: u16 = 2;
@@ -1086,7 +1108,7 @@ pub mod qdisc {
 
         /// HFSC qdisc options (struct tc_hfsc_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcHfscQopt {
             /// Default class ID.
             pub defcls: u16,
@@ -1100,13 +1122,13 @@ pub mod qdisc {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
         /// Service curve definition (struct tc_service_curve).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcServiceCurve {
             /// Slope of the first segment in bps.
             pub m1: u32,
@@ -1142,13 +1164,15 @@ pub mod qdisc {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// ETF (Earliest TxTime First) qdisc attributes and structures.
     pub mod etf {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_ETF_UNSPEC: u16 = 0;
         pub const TCA_ETF_PARMS: u16 = 1;
 
@@ -1162,7 +1186,7 @@ pub mod qdisc {
 
         /// ETF qdisc options (struct tc_etf_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy)]
+        #[derive(Debug, Clone, Copy, IntoBytes, Immutable, KnownLayout)]
         pub struct TcEtfQopt {
             /// Delta time in nanoseconds.
             pub delta: i32,
@@ -1227,7 +1251,7 @@ pub mod qdisc {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }

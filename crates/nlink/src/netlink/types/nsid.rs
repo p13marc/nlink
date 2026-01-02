@@ -3,6 +3,8 @@
 //! These constants and types are used for RTM_NEWNSID, RTM_DELNSID, and RTM_GETNSID
 //! messages which track network namespace IDs.
 
+use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
 /// RTM_NEWNSID - New namespace ID notification
 pub const RTM_NEWNSID: u16 = 88;
 /// RTM_DELNSID - Delete namespace ID notification
@@ -36,7 +38,7 @@ pub const RTNLGRP_NSID: u32 = 28;
 ///
 /// This is the header used for RTM_*NSID messages.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
 pub struct RtGenMsg {
     /// Address family (usually AF_UNSPEC = 0)
     pub rtgen_family: u8,
@@ -58,7 +60,7 @@ impl RtGenMsg {
     /// Convert to bytes for netlink message building.
     pub fn as_bytes(&self) -> &[u8] {
         // rtgenmsg is 1 byte
-        unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, 1) }
+        <Self as IntoBytes>::as_bytes(self)
     }
 
     /// Size of this struct for message building (includes padding to 4 bytes).
