@@ -66,6 +66,7 @@
 //! conn.del_qdisc("eth0", "root").await?;
 //! ```
 
+pub mod addr;
 pub mod attr;
 mod builder;
 pub mod connection;
@@ -73,13 +74,16 @@ mod error;
 pub mod events;
 #[cfg(test)]
 mod fixtures;
+pub mod link;
 pub mod message;
 pub mod messages;
 pub mod namespace;
 pub mod namespace_events;
 #[cfg(feature = "namespace_watcher")]
 pub mod namespace_watcher;
+pub mod neigh;
 pub mod parse;
+pub mod route;
 mod socket;
 pub mod stats;
 pub mod tc;
