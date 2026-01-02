@@ -9,18 +9,18 @@ This document outlines a detailed plan to make **nlink** better than **rtnetlink
 | Category | rtnetlink | nlink | Gap |
 |----------|:---------:|:-----:|:---:|
 | Link Types | 16 | **17** | **+1** ✅ |
-| Address Ops | Full | Full | 0 (nlink has labels/lifetimes) |
+| Address Ops | Full | **Full** | **0** ✅ (labels/lifetimes/replace) |
 | Route Ops | Full | Full | 0 (nlink has route get) |
-| Neighbor Ops | Full | Good | -1 (proxy ARP) |
+| Neighbor Ops | Full | **Full** | **0** ✅ (proxy ARP complete) |
 | TC Qdiscs | 2 | 12 | +10 |
 | TC Filters | 3 | 6 | +3 |
 | TC Actions | 3 | **7** | **+4** ✅ |
 | High-level API | No | Yes | +1 |
 | Namespaces | No | Yes | +1 |
 
-**Progress**: Phases 1-2 complete. nlink now leads rtnetlink in link types and TC actions.
+**Progress**: Phases 1-3 complete. nlink now has full parity on all core operations.
 
-**Remaining Goal**: Close neighbor ops gap (proxy ARP), then extend further.
+**Next Goal**: Extend TC actions (Phase 4) for further differentiation.
 
 ---
 
@@ -292,10 +292,10 @@ conn.replace_address(addr_config).await?;
 - Create `replace_address()` method
 
 ### Phase 3 Deliverables
-- [ ] Proxy ARP support
-- [ ] Address replace operation
+- [x] Proxy ARP support ✅ **DONE** (already existed: `add_proxy_arp`, `del_proxy_arp`)
+- [x] Address replace operation ✅ **DONE** (`build_replace()` with `NLM_F_REPLACE`)
 
-**After Phase 3: Full parity on neighbor/address operations** ✓
+**Phase 3 COMPLETE: Full parity on neighbor/address operations** ✓
 
 ---
 

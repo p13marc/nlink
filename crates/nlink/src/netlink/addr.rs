@@ -41,6 +41,8 @@ use super::types::addr::{IfAddrMsg, IfaAttr, Scope, ifa_flags};
 const NLM_F_CREATE: u16 = 0x400;
 /// NLM_F_EXCL flag
 const NLM_F_EXCL: u16 = 0x200;
+/// NLM_F_REPLACE flag
+const NLM_F_REPLACE: u16 = 0x100;
 
 /// Address families
 pub const AF_INET: u8 = 2;
@@ -53,6 +55,9 @@ pub trait AddressConfig {
 
     /// Build the netlink message for adding this address.
     fn build(&self) -> Result<MessageBuilder>;
+
+    /// Build a message for replacing this address (add or update).
+    fn build_replace(&self) -> Result<MessageBuilder>;
 
     /// Build a message for deleting this address.
     fn build_delete(&self) -> Result<MessageBuilder>;
@@ -227,6 +232,74 @@ impl AddressConfig for Ipv4Address {
         let mut builder = MessageBuilder::new(
             NlMsgType::RTM_NEWADDR,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+
+        // Build ifaddrmsg
+        let ifaddr = IfAddrMsg::new()
+            .with_family(AF_INET)
+            .with_prefixlen(self.prefix_len)
+            .with_index(ifindex as u32)
+            .with_scope(self.scope as u8);
+
+        builder.append(&ifaddr);
+
+        // IFA_LOCAL (the actual address on this interface)
+        builder.append_attr(IfaAttr::Local as u16, &self.address.octets());
+
+        // IFA_ADDRESS (peer address for ptp, or same as local)
+        if let Some(peer) = self.peer {
+            builder.append_attr(IfaAttr::Address as u16, &peer.octets());
+        } else {
+            builder.append_attr(IfaAttr::Address as u16, &self.address.octets());
+        }
+
+        // IFA_BROADCAST
+        if let Some(brd) = self.broadcast {
+            builder.append_attr(IfaAttr::Broadcast as u16, &brd.octets());
+        }
+
+        // IFA_LABEL
+        if let Some(ref label) = self.label {
+            builder.append_attr_str(IfaAttr::Label as u16, label);
+        }
+
+        // IFA_FLAGS (extended flags, 32-bit)
+        if self.flags != 0 {
+            builder.append_attr_u32(IfaAttr::Flags as u16, self.flags);
+        }
+
+        // IFA_CACHEINFO (lifetimes)
+        if self.preferred_lft.is_some() || self.valid_lft.is_some() {
+            let cacheinfo = IfaCacheinfo {
+                ifa_prefered: self.preferred_lft.unwrap_or(INFINITY_LIFE_TIME),
+                ifa_valid: self.valid_lft.unwrap_or(INFINITY_LIFE_TIME),
+                cstamp: 0,
+                tstamp: 0,
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &cacheinfo as *const IfaCacheinfo as *const u8,
+                    std::mem::size_of::<IfaCacheinfo>(),
+                )
+            };
+            builder.append_attr(IfaAttr::Cacheinfo as u16, bytes);
+        }
+
+        // IFA_RT_PRIORITY (metric)
+        if let Some(metric) = self.metric {
+            builder.append_attr_u32(IfaAttr::RtPriority as u16, metric);
+        }
+
+        Ok(builder)
+    }
+
+    fn build_replace(&self) -> Result<MessageBuilder> {
+        let ifindex = ifname_to_index(&self.interface)?;
+
+        // NLM_F_CREATE | NLM_F_REPLACE = add if not exists, update if exists
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWADDR,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
         );
 
         // Build ifaddrmsg
@@ -493,6 +566,63 @@ impl AddressConfig for Ipv6Address {
         Ok(builder)
     }
 
+    fn build_replace(&self) -> Result<MessageBuilder> {
+        let ifindex = ifname_to_index(&self.interface)?;
+
+        // NLM_F_CREATE | NLM_F_REPLACE = add if not exists, update if exists
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWADDR,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+        );
+
+        let ifaddr = IfAddrMsg::new()
+            .with_family(AF_INET6)
+            .with_prefixlen(self.prefix_len)
+            .with_index(ifindex as u32)
+            .with_scope(self.scope as u8);
+
+        builder.append(&ifaddr);
+
+        // IFA_LOCAL
+        builder.append_attr(IfaAttr::Local as u16, &self.address.octets());
+
+        // IFA_ADDRESS (peer or same as local)
+        if let Some(peer) = self.peer {
+            builder.append_attr(IfaAttr::Address as u16, &peer.octets());
+        } else {
+            builder.append_attr(IfaAttr::Address as u16, &self.address.octets());
+        }
+
+        // IFA_FLAGS (extended flags, 32-bit)
+        if self.flags != 0 {
+            builder.append_attr_u32(IfaAttr::Flags as u16, self.flags);
+        }
+
+        // IFA_CACHEINFO (lifetimes)
+        if self.preferred_lft.is_some() || self.valid_lft.is_some() {
+            let cacheinfo = IfaCacheinfo {
+                ifa_prefered: self.preferred_lft.unwrap_or(INFINITY_LIFE_TIME),
+                ifa_valid: self.valid_lft.unwrap_or(INFINITY_LIFE_TIME),
+                cstamp: 0,
+                tstamp: 0,
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &cacheinfo as *const IfaCacheinfo as *const u8,
+                    std::mem::size_of::<IfaCacheinfo>(),
+                )
+            };
+            builder.append_attr(IfaAttr::Cacheinfo as u16, bytes);
+        }
+
+        // IFA_RT_PRIORITY (metric)
+        if let Some(metric) = self.metric {
+            builder.append_attr_u32(IfaAttr::RtPriority as u16, metric);
+        }
+
+        Ok(builder)
+    }
+
     fn build_delete(&self) -> Result<MessageBuilder> {
         let ifindex = ifname_to_index(&self.interface)?;
 
@@ -610,18 +740,19 @@ impl Connection {
     /// Replace an IP address (add or update).
     ///
     /// This is like `add_address` but will update if the address exists.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Update address properties (lifetimes, etc.)
+    /// conn.replace_address(
+    ///     Ipv4Address::new("eth0", Ipv4Addr::new(192, 168, 1, 100), 24)
+    ///         .preferred_lifetime(3600)
+    ///         .valid_lifetime(7200)
+    /// ).await?;
+    /// ```
     pub async fn replace_address<A: AddressConfig>(&self, config: A) -> Result<()> {
-        // We need to rebuild with different flags
-        let builder = config.build()?;
-        // Modify flags in the header to use REPLACE instead of CREATE|EXCL
-        // We need to rebuild the message with different flags
-
-        // Get interface and rebuild with replace flags
-        let ifname = config.interface();
-        let _ifindex = ifname_to_index(ifname)?;
-
-        // For now, just use the build which handles flags internally
-        // TODO: Implement proper replace by modifying builder flags
+        let builder = config.build_replace()?;
         self.request_ack(builder).await
     }
 
