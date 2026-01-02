@@ -167,7 +167,7 @@ impl FibRuleAction {
 
 /// UID range for FRA_UID_RANGE.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, Immutable, KnownLayout)]
 pub struct FibRuleUidRange {
     pub start: u32,
     pub end: u32,
@@ -176,17 +176,13 @@ pub struct FibRuleUidRange {
 impl FibRuleUidRange {
     /// Parse from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
-        if data.len() >= std::mem::size_of::<Self>() {
-            Some(unsafe { &*(data.as_ptr() as *const Self) })
-        } else {
-            None
-        }
+        Self::ref_from_prefix(data).map(|(r, _)| r).ok()
     }
 }
 
 /// Port range for FRA_SPORT/FRA_DPORT.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, Immutable, KnownLayout)]
 pub struct FibRulePortRange {
     pub start: u16,
     pub end: u16,
@@ -195,10 +191,6 @@ pub struct FibRulePortRange {
 impl FibRulePortRange {
     /// Parse from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
-        if data.len() >= std::mem::size_of::<Self>() {
-            Some(unsafe { &*(data.as_ptr() as *const Self) })
-        } else {
-            None
-        }
+        Self::ref_from_prefix(data).map(|(r, _)| r).ok()
     }
 }

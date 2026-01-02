@@ -885,6 +885,40 @@ wg.remove_peer("wg0", peer_pubkey).await?;
 6. Send via `conn.dump()` (for GET) or `conn.request_ack()` (for ADD/DEL)
 7. Parse responses with `MessageIter` and `AttrIter`
 
+## Internal Design: Zero-Copy Serialization
+
+The `types/` module uses the `zerocopy` crate for safe, zero-copy serialization of netlink structures. All `#[repr(C)]` structs derive zerocopy traits instead of using unsafe pointer casts:
+
+```rust
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct SomeNetlinkStruct {
+    pub field1: u32,
+    pub field2: u16,
+    pub _pad: u16,  // Explicit padding for alignment
+}
+
+impl SomeNetlinkStruct {
+    // Safe serialization
+    pub fn as_bytes(&self) -> &[u8] {
+        <Self as IntoBytes>::as_bytes(self)
+    }
+
+    // Safe deserialization
+    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
+        Self::ref_from_prefix(data).map(|(r, _)| r).ok()
+    }
+}
+```
+
+**Key points:**
+- Use `IntoBytes` + `Immutable` + `KnownLayout` for serialization (`as_bytes()`)
+- Use `FromBytes` + `Immutable` + `KnownLayout` for deserialization (`from_bytes()`)
+- Add explicit `_pad` fields to satisfy zerocopy's padding requirements
+- No unsafe code in the types module
+
 ## Generic Netlink Message Flow
 
 1. Create `GenlConnection::new()` for `Protocol::Generic`

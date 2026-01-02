@@ -206,7 +206,7 @@ pub mod tc_handle {
 
 /// TC statistics (struct tc_stats).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, Immutable, KnownLayout)]
 pub struct TcStats {
     /// Bytes seen.
     pub bytes: u64,
@@ -229,17 +229,13 @@ pub struct TcStats {
 impl TcStats {
     /// Parse from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
-        if data.len() >= std::mem::size_of::<Self>() {
-            Some(unsafe { &*(data.as_ptr() as *const Self) })
-        } else {
-            None
-        }
+        Self::ref_from_prefix(data).map(|(r, _)| r).ok()
     }
 }
 
 /// TC statistics 2 (struct gnet_stats_basic).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, Immutable, KnownLayout)]
 pub struct GnetStatsBasic {
     pub bytes: u64,
     pub packets: u32,
@@ -247,7 +243,7 @@ pub struct GnetStatsBasic {
 
 /// TC queue stats (struct gnet_stats_queue).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, Immutable, KnownLayout)]
 pub struct GnetStatsQueue {
     pub qlen: u32,
     pub backlog: u32,
@@ -289,7 +285,7 @@ impl From<u16> for TcaStats {
 
 /// TC rate estimator parameters.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct TcEstimator {
     pub interval: i8,
     pub ewma_log: u8,
@@ -1261,6 +1257,8 @@ pub mod qdisc {
 pub mod filter {
     /// U32 filter attributes and structures.
     pub mod u32 {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_U32_UNSPEC: u16 = 0;
         pub const TCA_U32_CLASSID: u16 = 1;
         pub const TCA_U32_HASH: u16 = 2;
@@ -1283,7 +1281,7 @@ pub mod filter {
         /// U32 key (struct tc_u32_key).
         /// Matches a 32-bit value at a specific offset.
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcU32Key {
             /// Mask to apply (big-endian).
             pub mask: u32,
@@ -1321,7 +1319,7 @@ pub mod filter {
 
         /// U32 selector header (struct tc_u32_sel without keys).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcU32SelHdr {
             /// Flags (TC_U32_TERMINAL, etc.).
             pub flags: u8,
@@ -1347,7 +1345,7 @@ pub mod filter {
             pub const SIZE: usize = std::mem::size_of::<Self>();
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
@@ -1380,13 +1378,7 @@ pub mod filter {
                     Vec::with_capacity(TcU32SelHdr::SIZE + self.keys.len() * TcU32Key::SIZE);
                 buf.extend_from_slice(self.hdr.as_bytes());
                 for key in &self.keys {
-                    let key_bytes = unsafe {
-                        std::slice::from_raw_parts(
-                            key as *const TcU32Key as *const u8,
-                            TcU32Key::SIZE,
-                        )
-                    };
-                    buf.extend_from_slice(key_bytes);
+                    buf.extend_from_slice(<TcU32Key as IntoBytes>::as_bytes(key));
                 }
                 buf
             }
@@ -1394,7 +1386,7 @@ pub mod filter {
 
         /// U32 mark structure (struct tc_u32_mark).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcU32Mark {
             pub val: u32,
             pub mask: u32,
@@ -1413,7 +1405,7 @@ pub mod filter {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
@@ -1692,6 +1684,8 @@ pub mod filter {
 
 /// Common action attributes.
 pub mod action {
+    use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
     /// Generic action attributes.
     pub const TCA_ACT_UNSPEC: u16 = 0;
     pub const TCA_ACT_KIND: u16 = 1;
@@ -1758,7 +1752,7 @@ pub mod action {
     /// Common action header (tc_gen macro in kernel).
     /// This is the base structure for all action parameters.
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default)]
+    #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
     pub struct TcGen {
         pub index: u32,
         pub capab: u32,
@@ -1779,17 +1773,14 @@ pub mod action {
         }
 
         pub fn as_bytes(&self) -> &[u8] {
-            unsafe {
-                std::slice::from_raw_parts(
-                    self as *const Self as *const u8,
-                    std::mem::size_of::<Self>(),
-                )
-            }
+            <Self as IntoBytes>::as_bytes(self)
         }
     }
 
     /// Mirred action attributes.
     pub mod mirred {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_MIRRED_UNSPEC: u16 = 0;
         pub const TCA_MIRRED_TM: u16 = 1;
         pub const TCA_MIRRED_PARMS: u16 = 2;
@@ -1826,7 +1817,7 @@ pub mod action {
 
         /// Mirred action parameters (struct tc_mirred).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcMirred {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -1854,18 +1845,15 @@ pub mod action {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// Gact (generic action) attributes.
     pub mod gact {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_GACT_UNSPEC: u16 = 0;
         pub const TCA_GACT_TM: u16 = 1;
         pub const TCA_GACT_PARMS: u16 = 2;
@@ -1879,7 +1867,7 @@ pub mod action {
 
         /// Gact action parameters (struct tc_gact).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcGact {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -1901,18 +1889,13 @@ pub mod action {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
         /// Gact probability parameters (struct tc_gact_p).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcGactP {
             pub ptype: u16,
             pub pval: u16,
@@ -1929,18 +1912,15 @@ pub mod action {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// Police action attributes.
     pub mod police {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_POLICE_UNSPEC: u16 = 0;
         pub const TCA_POLICE_TBF: u16 = 1;
         pub const TCA_POLICE_RATE: u16 = 2;
@@ -1958,7 +1938,7 @@ pub mod action {
 
         /// Police action parameters (struct tc_police).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy)]
+        #[derive(Debug, Clone, Copy, IntoBytes, Immutable, KnownLayout)]
         pub struct TcPolice {
             pub index: u32,
             pub action: i32,
@@ -1991,18 +1971,15 @@ pub mod action {
 
         impl TcPolice {
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// Vlan action attributes.
     pub mod vlan {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_VLAN_UNSPEC: u16 = 0;
         pub const TCA_VLAN_TM: u16 = 1;
         pub const TCA_VLAN_PARMS: u16 = 2;
@@ -2038,7 +2015,7 @@ pub mod action {
 
         /// Vlan action parameters (struct tc_vlan).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcVlan {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2063,18 +2040,14 @@ pub mod action {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// Skbedit action attributes.
     pub mod skbedit {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
         pub const TCA_SKBEDIT_UNSPEC: u16 = 0;
         pub const TCA_SKBEDIT_TM: u16 = 1;
         pub const TCA_SKBEDIT_PARMS: u16 = 2;
@@ -2105,7 +2078,7 @@ pub mod action {
 
         /// Skbedit action parameters (struct tc_skbedit).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcSkbedit {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2127,18 +2100,14 @@ pub mod action {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// NAT action attributes.
     pub mod nat {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
         pub const TCA_NAT_UNSPEC: u16 = 0;
         pub const TCA_NAT_PARMS: u16 = 1;
         pub const TCA_NAT_TM: u16 = 2;
@@ -2149,7 +2118,7 @@ pub mod action {
 
         /// NAT action parameters (struct tc_nat).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNat {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2183,18 +2152,15 @@ pub mod action {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// Tunnel key action attributes.
     pub mod tunnel_key {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
         pub const TCA_TUNNEL_KEY_UNSPEC: u16 = 0;
         pub const TCA_TUNNEL_KEY_TM: u16 = 1;
         pub const TCA_TUNNEL_KEY_PARMS: u16 = 2;
@@ -2217,7 +2183,7 @@ pub mod action {
 
         /// Tunnel key action parameters (struct tc_tunnel_key).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcTunnelKey {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2242,25 +2208,21 @@ pub mod action {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// Connmark action attributes and structures.
     pub mod connmark {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
         pub const TCA_CONNMARK_UNSPEC: u16 = 0;
         pub const TCA_CONNMARK_PARMS: u16 = 1;
         pub const TCA_CONNMARK_TM: u16 = 2;
 
         /// Connmark action parameters (struct tc_connmark).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcConnmark {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2270,6 +2232,8 @@ pub mod action {
             pub bindcnt: i32,
             /// Conntrack zone.
             pub zone: u16,
+            /// Padding to ensure alignment for zerocopy.
+            pub _pad: u16,
         }
 
         impl TcConnmark {
@@ -2281,22 +2245,19 @@ pub mod action {
                     refcnt: 0,
                     bindcnt: 0,
                     zone,
+                    _pad: 0,
                 }
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// Csum (checksum) action attributes and structures.
     pub mod csum {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
         pub const TCA_CSUM_UNSPEC: u16 = 0;
         pub const TCA_CSUM_PARMS: u16 = 1;
         pub const TCA_CSUM_TM: u16 = 2;
@@ -2312,7 +2273,7 @@ pub mod action {
 
         /// Csum action parameters (struct tc_csum).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcCsum {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2337,18 +2298,14 @@ pub mod action {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// Sample action attributes and structures.
     pub mod sample {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
         pub const TCA_SAMPLE_UNSPEC: u16 = 0;
         pub const TCA_SAMPLE_TM: u16 = 1;
         pub const TCA_SAMPLE_PARMS: u16 = 2;
@@ -2358,7 +2315,7 @@ pub mod action {
 
         /// Sample action parameters (struct tc_sample - just tc_gen).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcSample {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2380,18 +2337,14 @@ pub mod action {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// CT (Connection Tracking) action attributes and structures.
     pub mod ct {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
         pub const TCA_CT_UNSPEC: u16 = 0;
         pub const TCA_CT_PARMS: u16 = 1;
         pub const TCA_CT_TM: u16 = 2;
@@ -2422,7 +2375,7 @@ pub mod action {
 
         /// CT action parameters (struct tc_ct - just tc_gen).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcCt {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2444,18 +2397,14 @@ pub mod action {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
 
     /// Pedit (packet edit) action attributes and structures.
     pub mod pedit {
+        use zerocopy::{Immutable, IntoBytes, KnownLayout};
         pub const TCA_PEDIT_UNSPEC: u16 = 0;
         pub const TCA_PEDIT_TM: u16 = 1;
         pub const TCA_PEDIT_PARMS: u16 = 2;
@@ -2482,7 +2431,7 @@ pub mod action {
 
         /// Pedit key (struct tc_pedit_key).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcPeditKey {
             /// Mask of bits to modify.
             pub mask: u32,
@@ -2513,18 +2462,13 @@ pub mod action {
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
 
         /// Pedit selector header (struct tc_pedit_sel without keys array).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
         pub struct TcPeditSel {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2536,6 +2480,8 @@ pub mod action {
             pub nkeys: u8,
             /// Flags.
             pub flags: u8,
+            /// Padding to ensure alignment for zerocopy.
+            pub _pad: u16,
         }
 
         impl TcPeditSel {
@@ -2548,16 +2494,12 @@ pub mod action {
                     bindcnt: 0,
                     nkeys,
                     flags: 0,
+                    _pad: 0,
                 }
             }
 
             pub fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        self as *const Self as *const u8,
-                        std::mem::size_of::<Self>(),
-                    )
-                }
+                <Self as IntoBytes>::as_bytes(self)
             }
         }
     }
