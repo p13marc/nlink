@@ -815,6 +815,7 @@ conn.request_ack(builder).await?;
 **Error handling:**
 ```rust
 use nlink::netlink::{Connection, Protocol, Error};
+use nlink::util::parse::get_rate;
 
 let conn = Connection::new(Protocol::Route)?;
 
@@ -832,6 +833,17 @@ match conn.del_qdisc("eth0", "root").await {
 if let Some(errno) = err.errno() {
     println!("System error: {}", errno);
 }
+
+// Automatic error conversion from util types (ParseError, AddrError, IfError)
+let rate = get_rate("1mbit")?;  // ParseError automatically converts to Error
+
+// Structured validation errors
+use nlink::netlink::error::ValidationErrorInfo;
+let err = Error::validation(vec![
+    ValidationErrorInfo::new("name", "cannot be empty"),
+    ValidationErrorInfo::new("vlan_id", "must be 1-4094"),
+]);
+// Displays as: "validation failed: name: cannot be empty; vlan_id: must be 1-4094"
 ```
 
 **WireGuard configuration via Generic Netlink:**

@@ -406,6 +406,7 @@ The library provides rich error types with context support for better debugging:
 
 ```rust
 use nlink::netlink::{Connection, Protocol, Error};
+use nlink::netlink::error::ValidationErrorInfo;
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
@@ -424,6 +425,16 @@ async fn main() -> nlink::Result<()> {
     // Error::InterfaceNotFound { name: "eth99" } -> "interface not found: eth99"
     // Error::NamespaceNotFound { name: "myns" } -> "namespace not found: myns"
     // Error::QdiscNotFound { kind: "netem", interface: "eth0" } -> "qdisc not found: netem on eth0"
+    
+    // Automatic error conversion from util types
+    use nlink::util::parse::get_rate;
+    let rate = get_rate("1mbit")?;  // ParseError converts to Error automatically
+    
+    // Structured validation errors
+    let err = Error::validation(vec![
+        ValidationErrorInfo::new("name", "cannot be empty"),
+        ValidationErrorInfo::new("vlan_id", "must be 1-4094"),
+    ]);
     
     Ok(())
 }
