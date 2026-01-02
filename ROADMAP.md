@@ -12,15 +12,15 @@ This document outlines a detailed plan to make **nlink** better than **rtnetlink
 | Address Ops | Full | **Full** | **0** ✅ (labels/lifetimes/replace) |
 | Route Ops | Full | Full | 0 (nlink has route get) |
 | Neighbor Ops | Full | **Full** | **0** ✅ (proxy ARP complete) |
-| TC Qdiscs | 2 | 12 | +10 |
+| TC Qdiscs | 2 | **16** | **+14** ✅ |
 | TC Filters | 3 | **8** | **+5** ✅ |
 | TC Actions | 3 | **10** | **+7** ✅ |
 | High-level API | No | Yes | +1 |
 | Namespaces | No | Yes | +1 |
 
-**Progress**: Phases 1-3 complete, Phase 4 partial (3/5 actions), Phase 5 partial (2/3 filters).
+**Progress**: Phases 1-3 complete, Phase 4 partial (3/5), Phase 5 partial (2/3), Phase 6 partial (4/7).
 
-**Next Goal**: Continue with Phase 6 qdiscs or complete remaining complex items.
+**nlink now massively surpasses rtnetlink in TC capabilities.**
 
 ---
 
@@ -478,15 +478,15 @@ conn.plug_release_indefinite("eth0").await?;
 ```
 
 ### Phase 6 Deliverables
-- [ ] DrrConfig + DrrClass
-- [ ] QfqConfig + QfqClass
-- [ ] HfscConfig + HfscClass
-- [ ] MqprioConfig
-- [ ] TaprioConfig
-- [ ] EtfConfig
-- [ ] PlugConfig
+- [x] DrrConfig ✅ **DONE** (classful qdisc, classes use quantum)
+- [x] QfqConfig ✅ **DONE** (classful qdisc, classes use weight/maxpkt)
+- [ ] HfscConfig + HfscClass (complex - service curves)
+- [x] MqprioConfig ✅ **DONE** (multi-queue priority with HW offload)
+- [ ] TaprioConfig (complex - time-aware scheduling)
+- [ ] EtfConfig (complex - time-based transmission)
+- [x] PlugConfig ✅ **DONE** (packet buffering/release)
 
-**After Phase 6: nlink has 19 qdiscs vs rtnetlink's 2**
+**Phase 6 Progress: 4/7 qdiscs done. nlink now has 16 qdiscs vs rtnetlink's 2**
 
 ---
 

@@ -876,6 +876,137 @@ pub mod qdisc {
             }
         }
     }
+
+    /// DRR (Deficit Round Robin) qdisc attributes.
+    pub mod drr {
+        pub const TCA_DRR_UNSPEC: u16 = 0;
+        pub const TCA_DRR_QUANTUM: u16 = 1;
+    }
+
+    /// QFQ (Quick Fair Queueing) qdisc attributes.
+    pub mod qfq {
+        pub const TCA_QFQ_UNSPEC: u16 = 0;
+        pub const TCA_QFQ_WEIGHT: u16 = 1;
+        pub const TCA_QFQ_LMAX: u16 = 2;
+    }
+
+    /// MQPRIO (Multi-Queue Priority) qdisc attributes.
+    pub mod mqprio {
+        /// Maximum number of traffic classes.
+        pub const TC_QOPT_MAX_QUEUE: usize = 16;
+
+        pub const TCA_MQPRIO_UNSPEC: u16 = 0;
+        pub const TCA_MQPRIO_MODE: u16 = 1;
+        pub const TCA_MQPRIO_SHAPER: u16 = 2;
+        pub const TCA_MQPRIO_MIN_RATE64: u16 = 3;
+        pub const TCA_MQPRIO_MAX_RATE64: u16 = 4;
+        pub const TCA_MQPRIO_TC_ENTRY: u16 = 5;
+
+        /// MQPRIO modes.
+        pub const TC_MQPRIO_MODE_DCB: u16 = 0;
+        pub const TC_MQPRIO_MODE_CHANNEL: u16 = 1;
+
+        /// MQPRIO shaper types.
+        pub const TC_MQPRIO_SHAPER_DCB: u16 = 0;
+        pub const TC_MQPRIO_SHAPER_BW_RATE: u16 = 1;
+
+        /// MQPRIO qdisc options (struct tc_mqprio_qopt).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy)]
+        pub struct TcMqprioQopt {
+            /// Number of traffic classes.
+            pub num_tc: u8,
+            /// Priority to traffic class mapping.
+            pub prio_tc_map: [u8; TC_QOPT_MAX_QUEUE],
+            /// Enable hardware offload (0=no, 1=yes).
+            pub hw: u8,
+            /// Queue count for each traffic class.
+            pub count: [u16; TC_QOPT_MAX_QUEUE],
+            /// Queue offset for each traffic class.
+            pub offset: [u16; TC_QOPT_MAX_QUEUE],
+        }
+
+        impl Default for TcMqprioQopt {
+            fn default() -> Self {
+                Self {
+                    num_tc: 8,
+                    prio_tc_map: [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 1, 1, 3, 3, 3, 3],
+                    hw: 1,
+                    count: [0; TC_QOPT_MAX_QUEUE],
+                    offset: [0; TC_QOPT_MAX_QUEUE],
+                }
+            }
+        }
+
+        impl TcMqprioQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn new() -> Self {
+                Self::default()
+            }
+
+            pub fn with_num_tc(mut self, num_tc: u8) -> Self {
+                self.num_tc = num_tc;
+                self
+            }
+
+            pub fn with_hw(mut self, hw: bool) -> Self {
+                self.hw = if hw { 1 } else { 0 };
+                self
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+    }
+
+    /// Plug qdisc types and constants.
+    pub mod plug {
+        /// Plug action types.
+        pub const TCQ_PLUG_BUFFER: i32 = 0;
+        pub const TCQ_PLUG_RELEASE_ONE: i32 = 1;
+        pub const TCQ_PLUG_RELEASE_INDEFINITE: i32 = 2;
+        pub const TCQ_PLUG_LIMIT: i32 = 3;
+
+        /// Plug qdisc options (struct tc_plug_qopt).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcPlugQopt {
+            /// Action to perform.
+            pub action: i32,
+            /// Limit for TCQ_PLUG_LIMIT action.
+            pub limit: u32,
+        }
+
+        impl TcPlugQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn new(action: i32, limit: u32) -> Self {
+                Self { action, limit }
+            }
+
+            pub fn buffer() -> Self {
+                Self::new(TCQ_PLUG_BUFFER, 0)
+            }
+
+            pub fn release_one() -> Self {
+                Self::new(TCQ_PLUG_RELEASE_ONE, 0)
+            }
+
+            pub fn release_indefinite() -> Self {
+                Self::new(TCQ_PLUG_RELEASE_INDEFINITE, 0)
+            }
+
+            pub fn limit(bytes: u32) -> Self {
+                Self::new(TCQ_PLUG_LIMIT, bytes)
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+    }
 }
 
 /// Common filter attributes.

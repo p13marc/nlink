@@ -1528,6 +1528,379 @@ impl QdiscConfig for BfifoConfig {
 }
 
 // ============================================================================
+// DrrConfig (Deficit Round Robin)
+// ============================================================================
+
+/// DRR (Deficit Round Robin) qdisc configuration.
+///
+/// DRR is a classful qdisc that implements the Deficit Round Robin algorithm
+/// for fair bandwidth distribution among classes. Each class gets a quantum
+/// of bytes to send per round.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::DrrConfig;
+///
+/// // Create DRR qdisc
+/// let config = DrrConfig::new()
+///     .handle("1:")
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct DrrConfig {
+    /// Parent handle.
+    pub parent: String,
+    /// Qdisc handle.
+    pub handle: Option<String>,
+}
+
+impl Default for DrrConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DrrConfig {
+    /// Create a new DRR configuration builder.
+    pub fn new() -> Self {
+        Self {
+            parent: "root".to_string(),
+            handle: None,
+        }
+    }
+
+    /// Set the parent handle.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = parent.into();
+        self
+    }
+
+    /// Set the qdisc handle.
+    pub fn handle(mut self, handle: impl Into<String>) -> Self {
+        self.handle = Some(handle.into());
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for DrrConfig {
+    fn kind(&self) -> &'static str {
+        "drr"
+    }
+
+    fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
+        // DRR qdisc has no options, only classes have options
+        Ok(())
+    }
+}
+
+// ============================================================================
+// QfqConfig (Quick Fair Queueing)
+// ============================================================================
+
+/// QFQ (Quick Fair Queueing) qdisc configuration.
+///
+/// QFQ is a classful qdisc that provides O(1) fair scheduling with weights.
+/// It is faster than DRR for large numbers of classes.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::QfqConfig;
+///
+/// // Create QFQ qdisc
+/// let config = QfqConfig::new()
+///     .handle("1:")
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct QfqConfig {
+    /// Parent handle.
+    pub parent: String,
+    /// Qdisc handle.
+    pub handle: Option<String>,
+}
+
+impl Default for QfqConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl QfqConfig {
+    /// Create a new QFQ configuration builder.
+    pub fn new() -> Self {
+        Self {
+            parent: "root".to_string(),
+            handle: None,
+        }
+    }
+
+    /// Set the parent handle.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = parent.into();
+        self
+    }
+
+    /// Set the qdisc handle.
+    pub fn handle(mut self, handle: impl Into<String>) -> Self {
+        self.handle = Some(handle.into());
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for QfqConfig {
+    fn kind(&self) -> &'static str {
+        "qfq"
+    }
+
+    fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
+        // QFQ qdisc has no options, only classes have options
+        Ok(())
+    }
+}
+
+// ============================================================================
+// PlugConfig (Plug/Unplug qdisc)
+// ============================================================================
+
+/// Plug qdisc configuration.
+///
+/// The plug qdisc allows buffering packets and releasing them on demand.
+/// This is useful for checkpoint/restore, debugging, or controlled packet release.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::PlugConfig;
+///
+/// // Create plug qdisc with 10000 byte limit
+/// let config = PlugConfig::new()
+///     .limit(10000)
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+///
+/// // Buffer packets
+/// conn.plug_buffer("eth0").await?;
+///
+/// // Release all buffered packets
+/// conn.plug_release_one("eth0").await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct PlugConfig {
+    /// Initial limit in bytes.
+    pub limit: Option<u32>,
+    /// Parent handle.
+    pub parent: String,
+    /// Qdisc handle.
+    pub handle: Option<String>,
+}
+
+impl Default for PlugConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PlugConfig {
+    /// Create a new plug configuration builder.
+    pub fn new() -> Self {
+        Self {
+            limit: None,
+            parent: "root".to_string(),
+            handle: None,
+        }
+    }
+
+    /// Set the parent handle.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = parent.into();
+        self
+    }
+
+    /// Set the qdisc handle.
+    pub fn handle(mut self, handle: impl Into<String>) -> Self {
+        self.handle = Some(handle.into());
+        self
+    }
+
+    /// Set the queue limit in bytes.
+    pub fn limit(mut self, bytes: u32) -> Self {
+        self.limit = Some(bytes);
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for PlugConfig {
+    fn kind(&self) -> &'static str {
+        "plug"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::plug::TcPlugQopt;
+
+        if let Some(limit) = self.limit {
+            let qopt = TcPlugQopt::limit(limit);
+            builder.append(&qopt);
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// MqprioConfig (Multi-Queue Priority)
+// ============================================================================
+
+/// MQPRIO (Multi-Queue Priority) qdisc configuration.
+///
+/// MQPRIO is a qdisc for multi-queue network devices that maps traffic classes
+/// to hardware queues. It supports hardware offload for NICs that support it.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::MqprioConfig;
+///
+/// // Create mqprio with 4 traffic classes and hardware offload
+/// let config = MqprioConfig::new()
+///     .num_tc(4)
+///     .map(&[0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3])
+///     .hw_offload(true)
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct MqprioConfig {
+    /// Number of traffic classes.
+    pub num_tc: u8,
+    /// Priority to traffic class mapping.
+    pub prio_tc_map: [u8; 16],
+    /// Enable hardware offload.
+    pub hw: bool,
+    /// Queue count for each traffic class.
+    pub count: [u16; 16],
+    /// Queue offset for each traffic class.
+    pub offset: [u16; 16],
+    /// Parent handle.
+    pub parent: String,
+    /// Qdisc handle.
+    pub handle: Option<String>,
+}
+
+impl Default for MqprioConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MqprioConfig {
+    /// Create a new mqprio configuration builder.
+    pub fn new() -> Self {
+        Self {
+            num_tc: 8,
+            prio_tc_map: [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 1, 1, 3, 3, 3, 3],
+            hw: true,
+            count: [0; 16],
+            offset: [0; 16],
+            parent: "root".to_string(),
+            handle: None,
+        }
+    }
+
+    /// Set the parent handle.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = parent.into();
+        self
+    }
+
+    /// Set the qdisc handle.
+    pub fn handle(mut self, handle: impl Into<String>) -> Self {
+        self.handle = Some(handle.into());
+        self
+    }
+
+    /// Set the number of traffic classes (1-16).
+    pub fn num_tc(mut self, num_tc: u8) -> Self {
+        self.num_tc = num_tc.min(16);
+        self
+    }
+
+    /// Set the priority to traffic class mapping.
+    ///
+    /// The array maps Linux priority (0-15) to traffic class (0-num_tc-1).
+    pub fn map(mut self, map: &[u8]) -> Self {
+        for (i, &tc) in map.iter().enumerate().take(16) {
+            self.prio_tc_map[i] = tc;
+        }
+        self
+    }
+
+    /// Enable or disable hardware offload.
+    pub fn hw_offload(mut self, enable: bool) -> Self {
+        self.hw = enable;
+        self
+    }
+
+    /// Set queue configuration for traffic classes.
+    ///
+    /// Each entry is (count, offset) specifying number of queues and starting queue.
+    pub fn queues(mut self, queues: &[(u16, u16)]) -> Self {
+        for (i, &(c, o)) in queues.iter().enumerate().take(16) {
+            self.count[i] = c;
+            self.offset[i] = o;
+        }
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for MqprioConfig {
+    fn kind(&self) -> &'static str {
+        "mqprio"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::mqprio::TcMqprioQopt;
+
+        let mut qopt = TcMqprioQopt::new()
+            .with_num_tc(self.num_tc)
+            .with_hw(self.hw);
+
+        qopt.prio_tc_map = self.prio_tc_map;
+        qopt.count = self.count;
+        qopt.offset = self.offset;
+
+        builder.append(&qopt);
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Helper functions
 // ============================================================================
 
@@ -1889,5 +2262,49 @@ mod tests {
 
         assert_eq!(config.loss, 100.0);
         assert_eq!(config.delay_correlation, 0.0);
+    }
+
+    #[test]
+    fn test_drr_builder() {
+        let config = DrrConfig::new().handle("1:").build();
+
+        assert_eq!(config.handle, Some("1:".to_string()));
+        assert_eq!(config.parent, "root");
+        assert_eq!(config.kind(), "drr");
+    }
+
+    #[test]
+    fn test_qfq_builder() {
+        let config = QfqConfig::new().handle("1:").parent("root").build();
+
+        assert_eq!(config.handle, Some("1:".to_string()));
+        assert_eq!(config.parent, "root");
+        assert_eq!(config.kind(), "qfq");
+    }
+
+    #[test]
+    fn test_plug_builder() {
+        let config = PlugConfig::new().limit(10000).build();
+
+        assert_eq!(config.limit, Some(10000));
+        assert_eq!(config.kind(), "plug");
+    }
+
+    #[test]
+    fn test_mqprio_builder() {
+        let config = MqprioConfig::new()
+            .num_tc(4)
+            .map(&[0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3])
+            .hw_offload(true)
+            .queues(&[(2, 0), (2, 2), (2, 4), (2, 6)])
+            .build();
+
+        assert_eq!(config.num_tc, 4);
+        assert!(config.hw);
+        assert_eq!(config.prio_tc_map[0], 0);
+        assert_eq!(config.prio_tc_map[3], 3);
+        assert_eq!(config.count[0], 2);
+        assert_eq!(config.offset[1], 2);
+        assert_eq!(config.kind(), "mqprio");
     }
 }
