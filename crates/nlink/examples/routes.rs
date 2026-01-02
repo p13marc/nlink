@@ -34,14 +34,10 @@ async fn main() -> nlink::netlink::Result<()> {
 }
 
 async fn list_routes(conn: &Connection, ipv4_only: Option<bool>) -> nlink::netlink::Result<()> {
-    let links = conn.get_links().await?;
     let routes = conn.get_routes().await?;
 
-    // Build ifindex -> name map (link ifindex is i32)
-    let names: std::collections::HashMap<i32, String> = links
-        .iter()
-        .filter_map(|l| l.name.clone().map(|n| (l.ifindex(), n)))
-        .collect();
+    // Use the get_interface_names() helper to build ifindex -> name map
+    let names = conn.get_interface_names().await?;
 
     println!(
         "{:<6} {:<24} {:<20} {:<16} {:>8}",
@@ -79,7 +75,7 @@ async fn list_routes(conn: &Connection, ipv4_only: Option<bool>) -> nlink::netli
 
         let dev = route
             .oif
-            .and_then(|idx| names.get(&(idx as i32)))
+            .and_then(|idx| names.get(&idx))
             .map(|s| s.as_str())
             .unwrap_or("-");
 

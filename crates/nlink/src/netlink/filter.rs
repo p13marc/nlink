@@ -1242,7 +1242,7 @@ impl RouteFilter {
 }
 
 /// Internal helper to avoid conflict with get_ifindex in this module.
-fn get_ifindex_internal(name: &str) -> Result<i32> {
+fn get_ifindex_internal(name: &str) -> Result<u32> {
     let path = format!("/sys/class/net/{}/ifindex", name);
     let content = std::fs::read_to_string(&path)
         .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
@@ -1603,7 +1603,7 @@ impl FilterConfig for FlowFilter {
 // ============================================================================
 
 /// Convert interface name to index.
-fn get_ifindex(name: &str) -> Result<i32> {
+fn get_ifindex(name: &str) -> Result<u32> {
     let path = format!("/sys/class/net/{}/ifindex", name);
     let content = std::fs::read_to_string(&path)
         .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
@@ -1674,7 +1674,7 @@ impl Connection {
     /// Add a filter by interface index.
     pub async fn add_filter_by_index(
         &self,
-        ifindex: i32,
+        ifindex: u32,
         parent: &str,
         config: impl FilterConfig,
     ) -> Result<()> {
@@ -1685,7 +1685,7 @@ impl Connection {
     /// Add a filter by interface index with explicit parameters.
     pub async fn add_filter_by_index_full(
         &self,
-        ifindex: i32,
+        ifindex: u32,
         parent: &str,
         handle: Option<&str>,
         protocol: u16,
@@ -1699,7 +1699,7 @@ impl Connection {
         let info = ((protocol as u32) << 16) | (priority as u32);
 
         let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex)
+            .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
             .with_handle(filter_handle)
             .with_info(info);
@@ -1738,7 +1738,7 @@ impl Connection {
     /// Delete a filter by interface index.
     pub async fn del_filter_by_index(
         &self,
-        ifindex: i32,
+        ifindex: u32,
         parent: &str,
         protocol: u16,
         priority: u16,
@@ -1747,7 +1747,7 @@ impl Connection {
         let info = ((protocol as u32) << 16) | (priority as u32);
 
         let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex)
+            .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
             .with_info(info);
 
@@ -1764,7 +1764,7 @@ impl Connection {
     }
 
     /// Delete all filters from a parent qdisc by interface index.
-    pub async fn flush_filters_by_index(&self, ifindex: i32, parent: &str) -> Result<()> {
+    pub async fn flush_filters_by_index(&self, ifindex: u32, parent: &str) -> Result<()> {
         // Get all filters
         let filters = self.get_filters().await?;
         let parent_handle = parse_handle(parent)?;

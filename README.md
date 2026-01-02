@@ -51,9 +51,12 @@ async fn main() -> nlink::Result<()> {
     for link in &links {
         println!("{}: {} (up={})", 
             link.ifindex(), 
-            link.name.as_deref().unwrap_or("?"),
+            link.name_or("?"),  // Convenience helper
             link.is_up());
     }
+    
+    // Build ifindex -> name map for resolving routes/addresses
+    let names = conn.get_interface_names().await?;
     
     // Modify interface state
     conn.set_link_up("eth0").await?;

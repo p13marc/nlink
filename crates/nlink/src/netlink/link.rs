@@ -2631,7 +2631,7 @@ impl LinkConfig for Ip6GretapLink {
 // ============================================================================
 
 /// Helper function to convert interface name to index.
-fn ifname_to_index(name: &str) -> Result<i32> {
+fn ifname_to_index(name: &str) -> Result<u32> {
     let path = format!("/sys/class/net/{}/ifindex", name);
     let content = std::fs::read_to_string(&path)
         .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
@@ -2728,14 +2728,14 @@ impl Connection {
     }
 
     /// Set the master device by interface indices.
-    pub async fn set_link_master_by_index(&self, ifindex: i32, master_index: i32) -> Result<()> {
+    pub async fn set_link_master_by_index(&self, ifindex: u32, master_index: u32) -> Result<()> {
         use super::connection::ack_request;
 
-        let ifinfo = IfInfoMsg::new().with_index(ifindex);
+        let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
         let mut builder = ack_request(NlMsgType::RTM_SETLINK);
         builder.append(&ifinfo);
-        builder.append_attr_u32(IflaAttr::Master as u16, master_index as u32);
+        builder.append_attr_u32(IflaAttr::Master as u16, master_index);
 
         self.request_ack(builder).await
     }
@@ -2754,10 +2754,10 @@ impl Connection {
     }
 
     /// Remove an interface from its master by index.
-    pub async fn set_link_nomaster_by_index(&self, ifindex: i32) -> Result<()> {
+    pub async fn set_link_nomaster_by_index(&self, ifindex: u32) -> Result<()> {
         use super::connection::ack_request;
 
-        let ifinfo = IfInfoMsg::new().with_index(ifindex);
+        let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
         let mut builder = ack_request(NlMsgType::RTM_SETLINK);
         builder.append(&ifinfo);
@@ -2781,10 +2781,10 @@ impl Connection {
     }
 
     /// Rename a network interface by index.
-    pub async fn set_link_name_by_index(&self, ifindex: i32, new_name: &str) -> Result<()> {
+    pub async fn set_link_name_by_index(&self, ifindex: u32, new_name: &str) -> Result<()> {
         use super::connection::ack_request;
 
-        let ifinfo = IfInfoMsg::new().with_index(ifindex);
+        let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
         let mut builder = ack_request(NlMsgType::RTM_SETLINK);
         builder.append(&ifinfo);
@@ -2806,10 +2806,10 @@ impl Connection {
     }
 
     /// Set the MAC address by interface index.
-    pub async fn set_link_address_by_index(&self, ifindex: i32, address: [u8; 6]) -> Result<()> {
+    pub async fn set_link_address_by_index(&self, ifindex: u32, address: [u8; 6]) -> Result<()> {
         use super::connection::ack_request;
 
-        let ifinfo = IfInfoMsg::new().with_index(ifindex);
+        let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
         let mut builder = ack_request(NlMsgType::RTM_SETLINK);
         builder.append(&ifinfo);
@@ -2832,10 +2832,10 @@ impl Connection {
     }
 
     /// Move a network interface to a namespace by PID (by index).
-    pub async fn set_link_netns_pid_by_index(&self, ifindex: i32, pid: u32) -> Result<()> {
+    pub async fn set_link_netns_pid_by_index(&self, ifindex: u32, pid: u32) -> Result<()> {
         use super::connection::ack_request;
 
-        let ifinfo = IfInfoMsg::new().with_index(ifindex);
+        let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
         let mut builder = ack_request(NlMsgType::RTM_SETLINK);
         builder.append(&ifinfo);
@@ -2851,10 +2851,10 @@ impl Connection {
     }
 
     /// Move a network interface to a namespace by fd (by index).
-    pub async fn set_link_netns_fd_by_index(&self, ifindex: i32, fd: i32) -> Result<()> {
+    pub async fn set_link_netns_fd_by_index(&self, ifindex: u32, fd: i32) -> Result<()> {
         use super::connection::ack_request;
 
-        let ifinfo = IfInfoMsg::new().with_index(ifindex);
+        let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
         let mut builder = ack_request(NlMsgType::RTM_SETLINK);
         builder.append(&ifinfo);

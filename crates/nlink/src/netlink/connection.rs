@@ -311,7 +311,7 @@ use super::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage
 
 /// Helper function to convert interface name to index.
 /// This is a standalone implementation to avoid dependency on rip-lib.
-fn ifname_to_index(name: &str) -> Result<i32> {
+fn ifname_to_index(name: &str) -> Result<u32> {
     let path = format!("/sys/class/net/{}/ifindex", name);
     let content = std::fs::read_to_string(&path)
         .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
@@ -347,9 +347,32 @@ impl Connection {
     /// Get a network interface by index.
     ///
     /// Returns `None` if the interface doesn't exist.
-    pub async fn get_link_by_index(&self, index: i32) -> Result<Option<LinkMessage>> {
+    pub async fn get_link_by_index(&self, index: u32) -> Result<Option<LinkMessage>> {
         let links = self.get_links().await?;
         Ok(links.into_iter().find(|l| l.ifindex() == index))
+    }
+
+    /// Build a map of interface index to name.
+    ///
+    /// This is a convenience method for code that needs to look up interface
+    /// names by index (e.g., when displaying addresses, routes, or TC objects).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let names = conn.get_interface_names().await?;
+    /// let addresses = conn.get_addresses().await?;
+    /// for addr in addresses {
+    ///     let name = names.get(&addr.ifindex()).map(|s| s.as_str()).unwrap_or("?");
+    ///     println!("{}: {:?}", name, addr.address);
+    /// }
+    /// ```
+    pub async fn get_interface_names(&self) -> Result<std::collections::HashMap<u32, String>> {
+        let links = self.get_links().await?;
+        Ok(links
+            .into_iter()
+            .filter_map(|l| l.name.clone().map(|n| (l.ifindex(), n)))
+            .collect())
     }
 
     /// Get all IP addresses.
@@ -372,7 +395,7 @@ impl Connection {
         let addresses = self.get_addresses().await?;
         Ok(addresses
             .into_iter()
-            .filter(|a| a.ifindex() as i32 == ifindex)
+            .filter(|a| a.ifindex() == ifindex)
             .collect())
     }
 
@@ -428,7 +451,7 @@ impl Connection {
         let neighbors = self.get_neighbors().await?;
         Ok(neighbors
             .into_iter()
-            .filter(|n| n.ifindex() as i32 == ifindex)
+            .filter(|n| n.ifindex() == ifindex)
             .collect())
     }
 
@@ -506,7 +529,7 @@ impl Connection {
     }
 
     /// Bring a network interface up by index.
-    pub async fn set_link_up_by_index(&self, ifindex: i32) -> Result<()> {
+    pub async fn set_link_up_by_index(&self, ifindex: u32) -> Result<()> {
         self.set_link_state_by_index(ifindex, true).await
     }
 
@@ -522,7 +545,7 @@ impl Connection {
     }
 
     /// Bring a network interface down by index.
-    pub async fn set_link_down_by_index(&self, ifindex: i32) -> Result<()> {
+    pub async fn set_link_down_by_index(&self, ifindex: u32) -> Result<()> {
         self.set_link_state_by_index(ifindex, false).await
     }
 
@@ -548,8 +571,8 @@ impl Connection {
     }
 
     /// Set the state of a network interface by index.
-    pub async fn set_link_state_by_index(&self, ifindex: i32, up: bool) -> Result<()> {
-        let mut ifinfo = IfInfoMsg::new().with_index(ifindex);
+    pub async fn set_link_state_by_index(&self, ifindex: u32, up: bool) -> Result<()> {
+        let mut ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
         if up {
             ifinfo.ifi_flags = iff::UP;
@@ -578,10 +601,10 @@ impl Connection {
     }
 
     /// Set the MTU of a network interface by index.
-    pub async fn set_link_mtu_by_index(&self, ifindex: i32, mtu: u32) -> Result<()> {
+    pub async fn set_link_mtu_by_index(&self, ifindex: u32, mtu: u32) -> Result<()> {
         use super::types::link::IflaAttr;
 
-        let ifinfo = IfInfoMsg::new().with_index(ifindex);
+        let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
         let mut builder = ack_request(NlMsgType::RTM_SETLINK);
         builder.append(&ifinfo);
@@ -603,8 +626,8 @@ impl Connection {
     }
 
     /// Delete a network interface by index.
-    pub async fn del_link_by_index(&self, ifindex: i32) -> Result<()> {
-        let ifinfo = IfInfoMsg::new().with_index(ifindex);
+    pub async fn del_link_by_index(&self, ifindex: u32) -> Result<()> {
+        let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
         let mut builder = ack_request(NlMsgType::RTM_DELLINK);
         builder.append(&ifinfo);
@@ -656,9 +679,10 @@ impl Connection {
         if response.len() >= super::message::NLMSG_HDRLEN {
             let payload = &response[super::message::NLMSG_HDRLEN..];
             if let Some(nsid_msg) = NsIdMessage::parse(payload)
-                && let Some(nsid) = nsid_msg.nsid {
-                    return Ok(nsid);
-                }
+                && let Some(nsid) = nsid_msg.nsid
+            {
+                return Ok(nsid);
+            }
         }
 
         Err(Error::InvalidMessage(
@@ -695,9 +719,10 @@ impl Connection {
         if response.len() >= super::message::NLMSG_HDRLEN {
             let payload = &response[super::message::NLMSG_HDRLEN..];
             if let Some(nsid_msg) = NsIdMessage::parse(payload)
-                && let Some(nsid) = nsid_msg.nsid {
-                    return Ok(nsid);
-                }
+                && let Some(nsid) = nsid_msg.nsid
+            {
+                return Ok(nsid);
+            }
         }
 
         Err(Error::InvalidMessage(

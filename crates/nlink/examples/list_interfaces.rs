@@ -20,7 +20,8 @@ async fn main() -> nlink::netlink::Result<()> {
     println!("{}", "-".repeat(60));
 
     for link in links {
-        let name = link.name.as_deref().unwrap_or("?");
+        // Use the name_or() helper for cleaner code
+        let name = link.name_or("?");
         let state = if link.is_up() { "UP" } else { "DOWN" };
         let mac = link
             .address

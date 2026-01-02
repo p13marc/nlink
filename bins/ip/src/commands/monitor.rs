@@ -149,7 +149,7 @@ fn parse_ip_event(
                         action,
                         address: address.to_string(),
                         prefix_len: addr.prefix_len(),
-                        ifindex: addr.ifindex() as i32,
+                        ifindex: addr.ifindex(),
                         family: addr.family(),
                         scope: addr.scope().name(),
                         label: addr.label.clone(),
@@ -189,7 +189,7 @@ fn parse_ip_event(
                         action,
                         destination: dst.to_string(),
                         lladdr: neigh.mac_address(),
-                        ifindex: neigh.ifindex() as i32,
+                        ifindex: neigh.ifindex(),
                         state: nud_state_name(neigh.header.ndm_state),
                         router: neigh.is_router(),
                     })

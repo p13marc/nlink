@@ -1113,7 +1113,7 @@ impl ActionConfig for TunnelKeyAction {
 // ============================================================================
 
 /// Convert interface name to index.
-fn get_ifindex(name: &str) -> Result<i32> {
+fn get_ifindex(name: &str) -> Result<u32> {
     let path = format!("/sys/class/net/{}/ifindex", name);
     let content = std::fs::read_to_string(&path)
         .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;

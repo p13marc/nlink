@@ -119,8 +119,18 @@ impl LinkMessage {
     }
 
     /// Get the interface index.
-    pub fn ifindex(&self) -> i32 {
-        self.header.ifi_index
+    ///
+    /// Returns the index as `u32` since interface indices are always non-negative.
+    pub fn ifindex(&self) -> u32 {
+        self.header.ifi_index as u32
+    }
+
+    /// Get the interface name, or a default placeholder.
+    ///
+    /// Returns the interface name if available, otherwise returns the provided default.
+    /// This is a convenience method to avoid repeated `.name.as_deref().unwrap_or("?")`.
+    pub fn name_or<'a>(&'a self, default: &'a str) -> &'a str {
+        self.name.as_deref().unwrap_or(default)
     }
 
     /// Get the interface flags.

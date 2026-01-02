@@ -95,7 +95,7 @@ pub struct Neighbor {
     /// VNI (for VXLAN)
     vni: Option<u32>,
     /// Master device index
-    master: Option<i32>,
+    master: Option<u32>,
 }
 
 impl Neighbor {
@@ -250,7 +250,7 @@ impl NeighborConfig for Neighbor {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
         );
 
-        let mut ndmsg = NdMsg::new().with_family(family).with_ifindex(ifindex);
+        let mut ndmsg = NdMsg::new().with_family(family).with_ifindex(ifindex as i32);
         ndmsg.ndm_state = self.state;
         ndmsg.ndm_flags = self.flags;
 
@@ -283,7 +283,7 @@ impl NeighborConfig for Neighbor {
 
         // NDA_MASTER
         if let Some(master) = self.master {
-            builder.append_attr_u32(NdaAttr::Master as u16, master as u32);
+            builder.append_attr_u32(NdaAttr::Master as u16, master);
         }
 
         Ok(builder)
@@ -299,7 +299,7 @@ impl NeighborConfig for Neighbor {
 
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK);
 
-        let ndmsg = NdMsg::new().with_family(family).with_ifindex(ifindex);
+        let ndmsg = NdMsg::new().with_family(family).with_ifindex(ifindex as i32);
 
         builder.append(&ndmsg);
 
@@ -322,7 +322,7 @@ impl NeighborConfig for Neighbor {
 // ============================================================================
 
 /// Helper function to convert interface name to index.
-fn ifname_to_index(name: &str) -> Result<i32> {
+fn ifname_to_index(name: &str) -> Result<u32> {
     let path = format!("/sys/class/net/{}/ifindex", name);
     let content = std::fs::read_to_string(&path)
         .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;

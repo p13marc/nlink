@@ -34,14 +34,10 @@ async fn main() -> nlink::netlink::Result<()> {
 }
 
 async fn list_neighbors(conn: &Connection) -> nlink::netlink::Result<()> {
-    let links = conn.get_links().await?;
     let neighbors = conn.get_neighbors().await?;
 
-    // Build ifindex -> name map (link ifindex is i32, neighbor ifindex is u32)
-    let names: std::collections::HashMap<u32, String> = links
-        .iter()
-        .filter_map(|l| l.name.clone().map(|n| (l.ifindex() as u32, n)))
-        .collect();
+    // Use the get_interface_names() helper to build ifindex -> name map
+    let names = conn.get_interface_names().await?;
 
     println!(
         "{:<16} {:<20} {:<20} {:<10}",
@@ -72,10 +68,10 @@ async fn list_neighbors_for(conn: &Connection, dev: &str) -> nlink::netlink::Res
     println!("{}", "-".repeat(50));
     println!("{:<20} {:<20} {:<10}", "ADDRESS", "LLADDR", "STATE");
 
-    let names = std::collections::HashMap::from([(link.ifindex() as u32, dev.to_string())]);
+    let names = std::collections::HashMap::from([(link.ifindex(), dev.to_string())]);
 
     for neigh in neighbors {
-        if neigh.ifindex() == link.ifindex() as u32 {
+        if neigh.ifindex() == link.ifindex() {
             print_neighbor(&neigh, &names);
         }
     }

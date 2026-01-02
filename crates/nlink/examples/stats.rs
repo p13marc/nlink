@@ -33,7 +33,7 @@ async fn main() -> nlink::netlink::Result<()> {
 
             for link in &links {
                 if let Some(rate) = rates.links.get(&link.ifindex()) {
-                    let name = link.name.as_deref().unwrap_or("?");
+                    let name = link.name_or("?");
 
                     // Format rates with appropriate units
                     let rx_bps = format_rate(rate.rx_bytes_per_sec);

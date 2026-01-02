@@ -23,7 +23,7 @@ impl Printable for RouteMessage {
 
         // Device
         if let Some(oif) = self.oif {
-            let dev = crate::util::get_ifname_or_index(oif as i32);
+            let dev = crate::util::get_ifname_or_index(oif);
             write!(w, " dev {}", dev)?;
         }
 
@@ -73,7 +73,7 @@ impl Printable for RouteMessage {
         }
 
         if let Some(oif) = self.oif {
-            let dev = crate::util::get_ifname_or_index(oif as i32);
+            let dev = crate::util::get_ifname_or_index(oif);
             obj["dev"] = serde_json::json!(dev);
         }
 

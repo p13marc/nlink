@@ -53,7 +53,7 @@ impl Printable for AddressMessage {
     }
 
     fn to_json(&self) -> serde_json::Value {
-        let ifname = crate::util::get_ifname_or_index(self.ifindex() as i32);
+        let ifname = crate::util::get_ifname_or_index(self.ifindex());
 
         let mut obj = serde_json::json!({
             "ifindex": self.ifindex(),

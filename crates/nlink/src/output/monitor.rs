@@ -166,7 +166,7 @@ where
 /// Link event for monitoring.
 pub struct LinkEvent {
     pub action: &'static str,
-    pub ifindex: i32,
+    pub ifindex: u32,
     pub name: String,
     pub flags: u32,
     pub up: bool,
@@ -206,7 +206,7 @@ pub struct AddressEvent {
     pub action: &'static str,
     pub address: String,
     pub prefix_len: u8,
-    pub ifindex: i32,
+    pub ifindex: u32,
     pub family: u8,
     pub scope: &'static str,
     pub label: Option<String>,
@@ -272,7 +272,7 @@ impl MonitorEvent for RouteEvent {
         }
 
         if let Some(oif) = self.oif {
-            let name = crate::util::get_ifname_or_index(oif as i32);
+            let name = crate::util::get_ifname_or_index(oif);
             write!(w, " dev {}", name)?;
         }
 
@@ -300,7 +300,7 @@ pub struct NeighborEvent {
     pub action: &'static str,
     pub destination: String,
     pub lladdr: Option<String>,
-    pub ifindex: i32,
+    pub ifindex: u32,
     pub state: &'static str,
     pub router: bool,
 }
@@ -349,7 +349,7 @@ pub struct TcEvent {
     pub handle: String,
     pub parent: String,
     pub dev: String,
-    pub ifindex: i32,
+    pub ifindex: u32,
 }
 
 impl MonitorEvent for TcEvent {

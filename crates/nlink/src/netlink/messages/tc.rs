@@ -149,8 +149,10 @@ impl TcMessage {
     }
 
     /// Get the interface index.
-    pub fn ifindex(&self) -> i32 {
-        self.header.tcm_ifindex
+    ///
+    /// Returns the index as `u32` since interface indices are always non-negative.
+    pub fn ifindex(&self) -> u32 {
+        self.header.tcm_ifindex as u32
     }
 
     /// Get the handle (qdisc/class ID).

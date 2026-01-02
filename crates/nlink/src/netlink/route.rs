@@ -913,7 +913,7 @@ impl RouteConfig for Ipv6Route {
 // ============================================================================
 
 /// Helper function to convert interface name to index.
-fn ifname_to_index(name: &str) -> Result<i32> {
+fn ifname_to_index(name: &str) -> Result<u32> {
     let path = format!("/sys/class/net/{}/ifindex", name);
     let content = std::fs::read_to_string(&path)
         .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;

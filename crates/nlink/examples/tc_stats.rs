@@ -25,7 +25,7 @@ async fn main() -> nlink::netlink::Result<()> {
 
     println!("Monitoring TC statistics (Ctrl+C to stop)...\n");
 
-    let mut prev_stats: HashMap<(i32, u32), QdiscStats> = HashMap::new();
+    let mut prev_stats: HashMap<(u32, u32), QdiscStats> = HashMap::new();
     let mut prev_time = Instant::now();
 
     loop {
@@ -47,12 +47,8 @@ async fn main() -> nlink::netlink::Result<()> {
         );
         println!("{}", "-".repeat(90));
 
-        // Get interface names
-        let links = conn.get_links().await?;
-        let names: HashMap<i32, String> = links
-            .iter()
-            .filter_map(|l| l.name.clone().map(|n| (l.ifindex(), n)))
-            .collect();
+        // Get interface names using the helper
+        let names = conn.get_interface_names().await?;
 
         for qdisc in &qdiscs {
             let ifname = names

@@ -57,14 +57,10 @@ async fn main() -> nlink::netlink::Result<()> {
 }
 
 async fn list_addresses(conn: &Connection) -> nlink::netlink::Result<()> {
-    let links = conn.get_links().await?;
     let addrs = conn.get_addresses().await?;
 
-    // Build ifindex -> name map (ifindex is i32 for links)
-    let names: std::collections::HashMap<i32, String> = links
-        .iter()
-        .filter_map(|l| l.name.clone().map(|n| (l.ifindex(), n)))
-        .collect();
+    // Use the get_interface_names() helper to build ifindex -> name map
+    let names = conn.get_interface_names().await?;
 
     println!(
         "{:<4} {:<16} {:<8} {:<40}",
@@ -75,7 +71,7 @@ async fn list_addresses(conn: &Connection) -> nlink::netlink::Result<()> {
     for addr in addrs {
         // addr.ifindex() returns u32, names keys are i32
         let ifname = names
-            .get(&(addr.ifindex() as i32))
+            .get(&(addr.ifindex()))
             .map(|s| s.as_str())
             .unwrap_or("?");
 

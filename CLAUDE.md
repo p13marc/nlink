@@ -97,12 +97,27 @@ let conn = Connection::new(Protocol::Route)?;
 let links = conn.get_links().await?;
 let eth0 = conn.get_link_by_name("eth0").await?;
 
+// Use name_or() helper for cleaner interface name access
+for link in &links {
+    println!("{}: {}", link.ifindex(), link.name_or("?"));
+}
+
+// Build ifindex -> name map for resolving routes/addresses/neighbors
+let names = conn.get_interface_names().await?;
+
 // Query addresses
 let addrs = conn.get_addresses().await?;
 let eth0_addrs = conn.get_addresses_for("eth0").await?;
 
-// Query routes
+// Query routes and resolve interface names
 let routes = conn.get_routes().await?;
+for route in &routes {
+    let dev = route.oif
+        .and_then(|idx| names.get(&idx))
+        .map(|s| s.as_str())
+        .unwrap_or("-");
+    println!("{:?} via {}", route.destination, dev);
+}
 
 // Query TC
 let qdiscs = conn.get_qdiscs().await?;

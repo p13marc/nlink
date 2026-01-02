@@ -113,7 +113,7 @@ fn parse_tc_event(
     // Parse TC message
     let tc_msg = TcMessage::from_bytes(payload).ok()?;
 
-    let dev = nlink::util::ifname::index_to_name(tc_msg.ifindex() as u32)
+    let dev = nlink::util::ifname::index_to_name(tc_msg.ifindex())
         .unwrap_or_else(|_| format!("if{}", tc_msg.ifindex()));
 
     let parent = if tc_msg.parent() == tc_handle::ROOT {

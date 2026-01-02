@@ -110,11 +110,11 @@ impl NetworkEvent {
     }
 
     /// Returns the interface index associated with this event, if any.
-    pub fn ifindex(&self) -> Option<i32> {
+    pub fn ifindex(&self) -> Option<u32> {
         match self {
             NetworkEvent::NewLink(m) | NetworkEvent::DelLink(m) => Some(m.ifindex()),
-            NetworkEvent::NewAddress(m) | NetworkEvent::DelAddress(m) => Some(m.ifindex() as i32),
-            NetworkEvent::NewNeighbor(m) | NetworkEvent::DelNeighbor(m) => Some(m.ifindex() as i32),
+            NetworkEvent::NewAddress(m) | NetworkEvent::DelAddress(m) => Some(m.ifindex()),
+            NetworkEvent::NewNeighbor(m) | NetworkEvent::DelNeighbor(m) => Some(m.ifindex()),
             NetworkEvent::NewQdisc(m)
             | NetworkEvent::DelQdisc(m)
             | NetworkEvent::NewClass(m)
@@ -129,8 +129,7 @@ impl NetworkEvent {
 }
 
 /// Namespace configuration for EventStreamBuilder.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 enum NamespaceConfig {
     /// Use the current/default namespace.
     #[default]
@@ -142,7 +141,6 @@ enum NamespaceConfig {
     /// Use a namespace by PID.
     Pid(u32),
 }
-
 
 /// Builder for configuring an event stream.
 #[derive(Debug, Default)]

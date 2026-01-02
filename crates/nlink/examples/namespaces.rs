@@ -109,14 +109,13 @@ async fn print_interfaces(conn: &Connection) -> nlink::netlink::Result<()> {
     );
 
     for link in &links {
-        let name = link.name.as_deref().unwrap_or("?");
+        let name = link.name_or("?");
         let state = if link.is_up() { "UP" } else { "DOWN" };
 
         // Collect addresses for this interface
-        // link.ifindex() returns i32, addr.ifindex() returns u32
         let link_addrs: Vec<String> = addrs
             .iter()
-            .filter(|a| a.ifindex() as i32 == link.ifindex())
+            .filter(|a| a.ifindex() == link.ifindex())
             .filter_map(|a| {
                 a.address
                     .as_ref()

@@ -231,11 +231,11 @@ impl TcRates {
 #[derive(Debug, Clone, Default)]
 pub struct StatsSnapshot {
     /// Link statistics by interface index.
-    pub links: HashMap<i32, LinkStats>,
+    pub links: HashMap<u32, LinkStats>,
     /// Qdisc statistics by (ifindex, handle).
-    pub qdiscs: HashMap<(i32, u32), TcStats>,
+    pub qdiscs: HashMap<(u32, u32), TcStats>,
     /// Class statistics by (ifindex, handle).
-    pub classes: HashMap<(i32, u32), TcStats>,
+    pub classes: HashMap<(u32, u32), TcStats>,
 }
 
 impl StatsSnapshot {
@@ -374,11 +374,11 @@ impl StatsSnapshot {
 #[derive(Debug, Clone, Default)]
 pub struct RatesSnapshot {
     /// Link rates by interface index.
-    pub links: HashMap<i32, LinkRates>,
+    pub links: HashMap<u32, LinkRates>,
     /// Qdisc rates by (ifindex, handle).
-    pub qdiscs: HashMap<(i32, u32), TcRates>,
+    pub qdiscs: HashMap<(u32, u32), TcRates>,
     /// Class rates by (ifindex, handle).
-    pub classes: HashMap<(i32, u32), TcRates>,
+    pub classes: HashMap<(u32, u32), TcRates>,
 }
 
 impl RatesSnapshot {

@@ -30,7 +30,7 @@ async fn main() -> nlink::netlink::Result<()> {
             NetworkEvent::NewLink(link) => {
                 println!(
                     "[LINK+] {} (index={}, mtu={:?}, up={})",
-                    link.name.as_deref().unwrap_or("?"),
+                    link.name_or("?"),
                     link.ifindex(),
                     link.mtu,
                     link.is_up()
@@ -39,7 +39,7 @@ async fn main() -> nlink::netlink::Result<()> {
             NetworkEvent::DelLink(link) => {
                 println!(
                     "[LINK-] {} (index={})",
-                    link.name.as_deref().unwrap_or("?"),
+                    link.name_or("?"),
                     link.ifindex()
                 );
             }

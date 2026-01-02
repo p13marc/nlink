@@ -344,7 +344,6 @@ fn add_mirred_options(builder: &mut MessageBuilder, params: &[String]) -> Result
                 i += 1;
                 if i < params.len() {
                     ifindex = crate::util::get_ifindex(&params[i])
-                        .map(|idx| idx as u32)
                         .map_err(crate::netlink::Error::InvalidMessage)?;
                 }
             }
@@ -364,7 +363,7 @@ fn add_mirred_options(builder: &mut MessageBuilder, params: &[String]) -> Result
                 if ifindex == 0
                     && let Ok(idx) = crate::util::get_ifindex(&params[i])
                 {
-                    ifindex = idx as u32;
+                    ifindex = idx;
                 }
             }
         }

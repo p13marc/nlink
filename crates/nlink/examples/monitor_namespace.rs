@@ -59,7 +59,7 @@ async fn main() -> nlink::netlink::Result<()> {
             NetworkEvent::NewLink(link) => {
                 println!(
                     "[LINK+] {} idx={} mtu={:?}",
-                    link.name.as_deref().unwrap_or("?"),
+                    link.name_or("?"),
                     link.ifindex(),
                     link.mtu
                 );
@@ -67,7 +67,7 @@ async fn main() -> nlink::netlink::Result<()> {
             NetworkEvent::DelLink(link) => {
                 println!(
                     "[LINK-] {} idx={}",
-                    link.name.as_deref().unwrap_or("?"),
+                    link.name_or("?"),
                     link.ifindex()
                 );
             }

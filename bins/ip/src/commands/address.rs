@@ -115,9 +115,8 @@ impl AddressCmd {
         let all_addresses: Vec<AddressMessage> = conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
 
         // Get device index if filtering by name
-        let filter_index = nlink::util::get_ifindex_opt(dev)
-            .map(|opt| opt.map(|i| i as u32))
-            .map_err(nlink::netlink::Error::InvalidMessage)?;
+        let filter_index =
+            nlink::util::get_ifindex_opt(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
 
         // Filter addresses
         let addresses: Vec<_> = all_addresses
@@ -149,7 +148,7 @@ impl AddressCmd {
                     if addr.ifindex() != current_index {
                         current_index = addr.ifindex();
                         // Print interface header
-                        let ifname = nlink::util::get_ifname_or_index(addr.ifindex() as i32);
+                        let ifname = nlink::util::get_ifname_or_index(addr.ifindex());
                         writeln!(stdout, "{}: {}:", addr.ifindex(), ifname)?;
                     }
                     print_addr_text(&mut stdout, addr, opts)?;
@@ -181,10 +180,12 @@ impl AddressCmd {
     ) -> Result<()> {
         use nlink::util::addr::parse_prefix;
 
-        let (addr, prefix) = parse_prefix(address)
-            .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
+        let (addr, prefix) = parse_prefix(address).map_err(|e| {
+            nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
+        })?;
 
-        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
+        let ifindex =
+            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
 
         // Parse scope
         let scope_val = if let Some(s) = scope {
@@ -287,10 +288,12 @@ impl AddressCmd {
     async fn del(conn: &Connection, address: &str, dev: &str) -> Result<()> {
         use nlink::util::addr::parse_prefix;
 
-        let (addr, prefix) = parse_prefix(address)
-            .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
+        let (addr, prefix) = parse_prefix(address).map_err(|e| {
+            nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
+        })?;
 
-        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
+        let ifindex =
+            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
 
         let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
 
@@ -322,9 +325,8 @@ impl AddressCmd {
         let all_addresses: Vec<AddressMessage> = conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
 
         // Get device index if filtering by name
-        let filter_index = nlink::util::get_ifindex_opt(dev)
-            .map(|opt| opt.map(|i| i as u32))
-            .map_err(nlink::netlink::Error::InvalidMessage)?;
+        let filter_index =
+            nlink::util::get_ifindex_opt(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
 
         // Filter and delete addresses
         for addr in all_addresses {
@@ -381,7 +383,7 @@ impl AddressCmd {
 
 /// Convert AddressMessage to JSON.
 fn addr_to_json(addr: &AddressMessage) -> serde_json::Value {
-    let ifname = nlink::util::get_ifname_or_index(addr.ifindex() as i32);
+    let ifname = nlink::util::get_ifname_or_index(addr.ifindex());
 
     let mut obj = serde_json::json!({
         "ifindex": addr.ifindex(),

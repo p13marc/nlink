@@ -2411,7 +2411,7 @@ impl QdiscConfig for EtfConfig {
 // ============================================================================
 
 /// Convert interface name to index.
-fn get_ifindex(name: &str) -> Result<i32> {
+fn get_ifindex(name: &str) -> Result<u32> {
     let path = format!("/sys/class/net/{}/ifindex", name);
     let content = std::fs::read_to_string(&path)
         .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
@@ -2483,7 +2483,7 @@ impl Connection {
     ///
     /// conn.add_qdisc_by_index(link.ifindex(), netem).await?;
     /// ```
-    pub async fn add_qdisc_by_index(&self, ifindex: i32, config: impl QdiscConfig) -> Result<()> {
+    pub async fn add_qdisc_by_index(&self, ifindex: u32, config: impl QdiscConfig) -> Result<()> {
         self.add_qdisc_by_index_full(ifindex, "root", None, config)
             .await
     }
@@ -2491,7 +2491,7 @@ impl Connection {
     /// Add a qdisc by interface index with explicit parent and handle.
     pub async fn add_qdisc_by_index_full(
         &self,
-        ifindex: i32,
+        ifindex: u32,
         parent: &str,
         handle: Option<&str>,
         config: impl QdiscConfig,
@@ -2500,7 +2500,7 @@ impl Connection {
         let qdisc_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
 
         let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex)
+            .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
             .with_handle(qdisc_handle);
 
@@ -2541,14 +2541,14 @@ impl Connection {
     ///
     /// This is useful for namespace-aware operations where you've already
     /// resolved the interface index via `conn.get_link_by_name()`.
-    pub async fn del_qdisc_by_index(&self, ifindex: i32, parent: &str) -> Result<()> {
+    pub async fn del_qdisc_by_index(&self, ifindex: u32, parent: &str) -> Result<()> {
         self.del_qdisc_by_index_full(ifindex, parent, None).await
     }
 
     /// Delete a qdisc by interface index with explicit handle.
     pub async fn del_qdisc_by_index_full(
         &self,
-        ifindex: i32,
+        ifindex: u32,
         parent: &str,
         handle: Option<&str>,
     ) -> Result<()> {
@@ -2556,7 +2556,7 @@ impl Connection {
         let qdisc_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
 
         let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex)
+            .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
             .with_handle(qdisc_handle);
 
@@ -2600,7 +2600,7 @@ impl Connection {
     /// resolved the interface index via `conn.get_link_by_name()`.
     pub async fn replace_qdisc_by_index(
         &self,
-        ifindex: i32,
+        ifindex: u32,
         config: impl QdiscConfig,
     ) -> Result<()> {
         self.replace_qdisc_by_index_full(ifindex, "root", None, config)
@@ -2610,7 +2610,7 @@ impl Connection {
     /// Replace a qdisc by interface index with explicit parent and handle.
     pub async fn replace_qdisc_by_index_full(
         &self,
-        ifindex: i32,
+        ifindex: u32,
         parent: &str,
         handle: Option<&str>,
         config: impl QdiscConfig,
@@ -2619,7 +2619,7 @@ impl Connection {
         let qdisc_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
 
         let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex)
+            .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
             .with_handle(qdisc_handle);
 
@@ -2673,7 +2673,7 @@ impl Connection {
     /// resolved the interface index via `conn.get_link_by_name()`.
     pub async fn change_qdisc_by_index(
         &self,
-        ifindex: i32,
+        ifindex: u32,
         parent: &str,
         config: impl QdiscConfig,
     ) -> Result<()> {
@@ -2684,7 +2684,7 @@ impl Connection {
     /// Change a qdisc by interface index with explicit handle.
     pub async fn change_qdisc_by_index_full(
         &self,
-        ifindex: i32,
+        ifindex: u32,
         parent: &str,
         handle: Option<&str>,
         config: impl QdiscConfig,
@@ -2693,7 +2693,7 @@ impl Connection {
         let qdisc_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
 
         let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex)
+            .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
             .with_handle(qdisc_handle);
 
