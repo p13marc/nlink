@@ -17,7 +17,7 @@ pub struct QdiscCmd {
 enum QdiscAction {
     /// Show qdiscs.
     Show {
-        /// Device name (use "dev <name>" or just "<name>").
+        /// Device name (use "dev NAME" or just "NAME").
         #[arg(value_name = "DEV")]
         dev: Option<String>,
 
