@@ -195,6 +195,55 @@ impl Error {
         Self::Validation(vec![ValidationErrorInfo::new(field, message)])
     }
 
+    /// Create an invalid message error.
+    ///
+    /// This is a convenience constructor for the common case of creating
+    /// an `InvalidMessage` error with a formatted message.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::Error;
+    ///
+    /// let err = Error::invalid_message("invalid MAC address format");
+    /// ```
+    pub fn invalid_message(message: impl Into<String>) -> Self {
+        Self::InvalidMessage(message.into())
+    }
+
+    /// Create an invalid attribute error.
+    pub fn invalid_attribute(message: impl Into<String>) -> Self {
+        Self::InvalidAttribute(message.into())
+    }
+
+    /// Create a not supported error.
+    pub fn not_supported(message: impl Into<String>) -> Self {
+        Self::NotSupported(message.into())
+    }
+
+    /// Create an interface not found error.
+    pub fn interface_not_found(name: impl Into<String>) -> Self {
+        Self::InterfaceNotFound { name: name.into() }
+    }
+
+    /// Create a namespace not found error.
+    pub fn namespace_not_found(name: impl Into<String>) -> Self {
+        Self::NamespaceNotFound { name: name.into() }
+    }
+
+    /// Create a qdisc not found error.
+    pub fn qdisc_not_found(kind: impl Into<String>, interface: impl Into<String>) -> Self {
+        Self::QdiscNotFound {
+            kind: kind.into(),
+            interface: interface.into(),
+        }
+    }
+
+    /// Create a GENL family not found error.
+    pub fn family_not_found(name: impl Into<String>) -> Self {
+        Self::FamilyNotFound { name: name.into() }
+    }
+
     /// Check if this is a "not found" error (ENOENT, ENODEV, etc.).
     pub fn is_not_found(&self) -> bool {
         match self {

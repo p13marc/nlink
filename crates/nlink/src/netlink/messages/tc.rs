@@ -59,6 +59,12 @@ pub struct TcMessage {
     pub stats_rate_est: Option<TcStatsRateEst>,
     /// Extended statistics (type-specific).
     pub xstats: Option<Vec<u8>>,
+    /// Interface name (not from netlink, populated separately for convenience).
+    ///
+    /// This field is not populated by netlink parsing since TC messages only
+    /// contain interface indices. Use [`TcMessage::with_name`] or
+    /// [`TcMessage::resolve_name`] to populate it.
+    pub name: Option<String>,
 }
 
 /// Basic traffic control statistics (from TCA_STATS2/TCA_STATS_BASIC).
@@ -185,6 +191,57 @@ impl TcMessage {
     /// Get the kind (type name) if present.
     pub fn kind(&self) -> Option<&str> {
         self.kind.as_deref()
+    }
+
+    /// Get the interface name if set.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Get the interface name or a fallback value.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// for qdisc in &qdiscs {
+    ///     println!("{}: {}", qdisc.name_or("?"), qdisc.kind().unwrap_or("?"));
+    /// }
+    /// ```
+    pub fn name_or<'a>(&'a self, fallback: &'a str) -> &'a str {
+        self.name.as_deref().unwrap_or(fallback)
+    }
+
+    /// Set the interface name.
+    ///
+    /// Returns self for method chaining.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Resolve and set the interface name from the ifindex.
+    ///
+    /// This performs a syscall to look up the interface name.
+    /// Returns self for method chaining.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let qdisc = conn.get_root_qdisc_for("eth0").await?.map(|q| q.resolve_name());
+    /// println!("Interface: {}", qdisc.name_or("?"));
+    /// ```
+    pub fn resolve_name(mut self) -> Self {
+        if let Ok(name) = crate::util::ifname::index_to_name(self.ifindex()) {
+            self.name = Some(name);
+        }
+        self
+    }
+
+    /// Resolve and set the interface name, mutating in place.
+    pub fn resolve_name_mut(&mut self) {
+        if let Ok(name) = crate::util::ifname::index_to_name(self.ifindex()) {
+            self.name = Some(name);
+        }
     }
 
     /// Get total bytes from basic stats.

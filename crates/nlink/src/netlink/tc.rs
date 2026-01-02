@@ -2750,10 +2750,7 @@ impl Connection {
     /// Apply a netem configuration to an interface.
     ///
     /// This is a convenience method that replaces any existing root qdisc
-    /// with a netem qdisc. It's equivalent to:
-    /// ```ignore
-    /// conn.replace_qdisc(dev, netem).await
-    /// ```
+    /// with a netem qdisc. If no root qdisc exists, it creates one.
     ///
     /// # Example
     ///
@@ -2770,15 +2767,24 @@ impl Connection {
     /// conn.apply_netem("eth0", netem).await?;
     /// ```
     pub async fn apply_netem(&self, dev: &str, config: NetemConfig) -> Result<()> {
-        self.replace_qdisc(dev, config).await
+        match self.replace_qdisc(dev, config.clone()).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.is_not_found() => self.add_qdisc(dev, config).await,
+            Err(e) => Err(e),
+        }
     }
 
     /// Apply a netem configuration by interface index.
     ///
     /// This is useful for namespace-aware operations where you've already
     /// resolved the interface index via `conn.get_link_by_name()`.
+    /// If no root qdisc exists, it creates one.
     pub async fn apply_netem_by_index(&self, ifindex: u32, config: NetemConfig) -> Result<()> {
-        self.replace_qdisc_by_index(ifindex, config).await
+        match self.replace_qdisc_by_index(ifindex, config.clone()).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.is_not_found() => self.add_qdisc_by_index(ifindex, config).await,
+            Err(e) => Err(e),
+        }
     }
 
     /// Remove netem configuration from an interface.

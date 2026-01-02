@@ -164,6 +164,8 @@ async fn add_netem(
     effect: &str,
     value: &str,
 ) -> nlink::netlink::Result<()> {
+    use nlink::netlink::Error;
+
     let config = match effect {
         "delay" => {
             let ms = parse_duration(value)?;
@@ -182,10 +184,7 @@ async fn add_netem(
             NetemConfig::new().duplicate(pct as f64).build()
         }
         _ => {
-            return Err(nlink::netlink::Error::InvalidMessage(format!(
-                "unknown effect: {}",
-                effect
-            )));
+            return Err(Error::not_supported(format!("unknown effect: {}", effect)));
         }
     };
 
@@ -207,33 +206,37 @@ async fn del_netem(conn: &Connection, dev: &str) -> nlink::netlink::Result<()> {
 }
 
 fn parse_duration(s: &str) -> nlink::netlink::Result<Duration> {
+    use nlink::netlink::Error;
+
     let s = s.trim();
     if let Some(ms) = s.strip_suffix("ms") {
-        let val: u64 = ms.parse().map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid duration: {}", e))
-        })?;
+        let val: u64 = ms
+            .parse()
+            .map_err(|e| Error::invalid_message(format!("invalid duration: {}", e)))?;
         Ok(Duration::from_millis(val))
     } else if let Some(us) = s.strip_suffix("us") {
-        let val: u64 = us.parse().map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid duration: {}", e))
-        })?;
+        let val: u64 = us
+            .parse()
+            .map_err(|e| Error::invalid_message(format!("invalid duration: {}", e)))?;
         Ok(Duration::from_micros(val))
     } else if let Some(s_val) = s.strip_suffix('s') {
-        let val: u64 = s_val.parse().map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid duration: {}", e))
-        })?;
+        let val: u64 = s_val
+            .parse()
+            .map_err(|e| Error::invalid_message(format!("invalid duration: {}", e)))?;
         Ok(Duration::from_secs(val))
     } else {
         // Assume milliseconds
-        let val: u64 = s.parse().map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid duration: {}", e))
-        })?;
+        let val: u64 = s
+            .parse()
+            .map_err(|e| Error::invalid_message(format!("invalid duration: {}", e)))?;
         Ok(Duration::from_millis(val))
     }
 }
 
 fn parse_percent(s: &str) -> nlink::netlink::Result<f32> {
+    use nlink::netlink::Error;
+
     let s = s.trim().trim_end_matches('%');
     s.parse()
-        .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid percentage: {}", e)))
+        .map_err(|e| Error::invalid_message(format!("invalid percentage: {}", e)))
 }

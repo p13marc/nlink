@@ -88,13 +88,11 @@ fn convert_event(
     monitor_class: bool,
     monitor_filter: bool,
 ) -> Option<TcEvent> {
-    let (tc_msg, object, action, should_show) = match event {
-        NetworkEvent::NewQdisc(tc) => (tc, "qdisc", "added", monitor_qdisc),
-        NetworkEvent::DelQdisc(tc) => (tc, "qdisc", "deleted", monitor_qdisc),
-        NetworkEvent::NewClass(tc) => (tc, "class", "added", monitor_class),
-        NetworkEvent::DelClass(tc) => (tc, "class", "deleted", monitor_class),
-        NetworkEvent::NewFilter(tc) => (tc, "filter", "added", monitor_filter),
-        NetworkEvent::DelFilter(tc) => (tc, "filter", "deleted", monitor_filter),
+    // Determine object type and whether to show based on event variant
+    let (object, should_show) = match &event {
+        NetworkEvent::NewQdisc(_) | NetworkEvent::DelQdisc(_) => ("qdisc", monitor_qdisc),
+        NetworkEvent::NewClass(_) | NetworkEvent::DelClass(_) => ("class", monitor_class),
+        NetworkEvent::NewFilter(_) | NetworkEvent::DelFilter(_) => ("filter", monitor_filter),
         _ => return None,
     };
 
@@ -102,8 +100,21 @@ fn convert_event(
         return None;
     }
 
-    let dev = nlink::util::ifname::index_to_name(tc_msg.ifindex())
-        .unwrap_or_else(|_| format!("if{}", tc_msg.ifindex()));
+    // Use action() helper: returns "new" or "del"
+    let action = if event.action() == "new" {
+        "added"
+    } else {
+        "deleted"
+    };
+
+    // Get the TC message using into_tc()
+    let mut tc_msg = event.into_tc()?;
+
+    // Resolve interface name if not already set
+    tc_msg.resolve_name_mut();
+    let dev = tc_msg
+        .name_or(&format!("if{}", tc_msg.ifindex()))
+        .to_string();
 
     let parent = if tc_msg.parent() == tc_handle::ROOT {
         "root".to_string()
