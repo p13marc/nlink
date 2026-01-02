@@ -1007,6 +1007,230 @@ pub mod qdisc {
             }
         }
     }
+
+    /// TAPRIO (Time Aware Priority) qdisc attributes and structures.
+    pub mod taprio {
+        pub const TCA_TAPRIO_ATTR_UNSPEC: u16 = 0;
+        pub const TCA_TAPRIO_ATTR_PRIOMAP: u16 = 1;
+        pub const TCA_TAPRIO_ATTR_SCHED_ENTRY_LIST: u16 = 2;
+        pub const TCA_TAPRIO_ATTR_SCHED_BASE_TIME: u16 = 3;
+        pub const TCA_TAPRIO_ATTR_SCHED_SINGLE_ENTRY: u16 = 4;
+        pub const TCA_TAPRIO_ATTR_SCHED_CLOCKID: u16 = 5;
+        pub const TCA_TAPRIO_PAD: u16 = 6;
+        pub const TCA_TAPRIO_ATTR_ADMIN_SCHED: u16 = 7;
+        pub const TCA_TAPRIO_ATTR_SCHED_CYCLE_TIME: u16 = 8;
+        pub const TCA_TAPRIO_ATTR_SCHED_CYCLE_TIME_EXTENSION: u16 = 9;
+        pub const TCA_TAPRIO_ATTR_FLAGS: u16 = 10;
+        pub const TCA_TAPRIO_ATTR_TXTIME_DELAY: u16 = 11;
+        pub const TCA_TAPRIO_ATTR_TC_ENTRY: u16 = 12;
+
+        /// Schedule entry attributes.
+        pub const TCA_TAPRIO_SCHED_ENTRY_UNSPEC: u16 = 0;
+        pub const TCA_TAPRIO_SCHED_ENTRY_INDEX: u16 = 1;
+        pub const TCA_TAPRIO_SCHED_ENTRY_CMD: u16 = 2;
+        pub const TCA_TAPRIO_SCHED_ENTRY_GATE_MASK: u16 = 3;
+        pub const TCA_TAPRIO_SCHED_ENTRY_INTERVAL: u16 = 4;
+
+        /// Gate commands.
+        pub const TC_TAPRIO_CMD_SET_GATES: u8 = 0;
+        pub const TC_TAPRIO_CMD_SET_AND_HOLD: u8 = 1;
+        pub const TC_TAPRIO_CMD_SET_AND_RELEASE: u8 = 2;
+
+        /// TAPRIO flags.
+        pub const TAPRIO_ATTR_FLAG_TXTIME_ASSIST: u32 = 1 << 0;
+        pub const TAPRIO_ATTR_FLAG_FULL_OFFLOAD: u32 = 1 << 1;
+
+        /// A schedule entry for TAPRIO.
+        #[derive(Debug, Clone, Copy)]
+        pub struct TaprioSchedEntry {
+            /// Gate command (SET_GATES, SET_AND_HOLD, SET_AND_RELEASE).
+            pub cmd: u8,
+            /// Gate mask (bit per traffic class).
+            pub gate_mask: u32,
+            /// Interval in nanoseconds.
+            pub interval: u32,
+        }
+
+        impl TaprioSchedEntry {
+            pub fn new(cmd: u8, gate_mask: u32, interval_ns: u32) -> Self {
+                Self {
+                    cmd,
+                    gate_mask,
+                    interval: interval_ns,
+                }
+            }
+
+            /// Create a SET_GATES entry.
+            pub fn set_gates(gate_mask: u32, interval_ns: u32) -> Self {
+                Self::new(TC_TAPRIO_CMD_SET_GATES, gate_mask, interval_ns)
+            }
+
+            /// Create a SET_AND_HOLD entry.
+            pub fn set_and_hold(gate_mask: u32, interval_ns: u32) -> Self {
+                Self::new(TC_TAPRIO_CMD_SET_AND_HOLD, gate_mask, interval_ns)
+            }
+
+            /// Create a SET_AND_RELEASE entry.
+            pub fn set_and_release(gate_mask: u32, interval_ns: u32) -> Self {
+                Self::new(TC_TAPRIO_CMD_SET_AND_RELEASE, gate_mask, interval_ns)
+            }
+        }
+    }
+
+    /// HFSC (Hierarchical Fair Service Curve) qdisc attributes and structures.
+    pub mod hfsc {
+        pub const TCA_HFSC_UNSPEC: u16 = 0;
+        pub const TCA_HFSC_RSC: u16 = 1;
+        pub const TCA_HFSC_FSC: u16 = 2;
+        pub const TCA_HFSC_USC: u16 = 3;
+
+        /// HFSC qdisc options (struct tc_hfsc_qopt).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcHfscQopt {
+            /// Default class ID.
+            pub defcls: u16,
+        }
+
+        impl TcHfscQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn new(defcls: u16) -> Self {
+                Self { defcls }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+
+        /// Service curve definition (struct tc_service_curve).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcServiceCurve {
+            /// Slope of the first segment in bps.
+            pub m1: u32,
+            /// X-projection of the first segment in microseconds.
+            pub d: u32,
+            /// Slope of the second segment in bps.
+            pub m2: u32,
+        }
+
+        impl TcServiceCurve {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn new(m1: u32, d: u32, m2: u32) -> Self {
+                Self { m1, d, m2 }
+            }
+
+            /// Create a simple service curve with just a rate (m2).
+            pub fn rate(rate_bps: u32) -> Self {
+                Self {
+                    m1: 0,
+                    d: 0,
+                    m2: rate_bps,
+                }
+            }
+
+            /// Create a two-slope service curve.
+            ///
+            /// - m1: initial rate in bps
+            /// - d: duration of first segment in microseconds
+            /// - m2: sustained rate in bps
+            pub fn two_slope(m1: u32, d_us: u32, m2: u32) -> Self {
+                Self { m1, d: d_us, m2 }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+    }
+
+    /// ETF (Earliest TxTime First) qdisc attributes and structures.
+    pub mod etf {
+        pub const TCA_ETF_UNSPEC: u16 = 0;
+        pub const TCA_ETF_PARMS: u16 = 1;
+
+        /// ETF flags.
+        pub const TC_ETF_DEADLINE_MODE_ON: i32 = 1 << 0;
+        pub const TC_ETF_OFFLOAD_ON: i32 = 1 << 1;
+        pub const TC_ETF_SKIP_SOCK_CHECK: i32 = 1 << 2;
+
+        /// Clock IDs for ETF.
+        pub const CLOCKID_INVALID: i32 = -1;
+
+        /// ETF qdisc options (struct tc_etf_qopt).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy)]
+        pub struct TcEtfQopt {
+            /// Delta time in nanoseconds.
+            pub delta: i32,
+            /// Clock ID (e.g., CLOCK_TAI).
+            pub clockid: i32,
+            /// Flags (deadline_mode, offload, skip_sock_check).
+            pub flags: i32,
+        }
+
+        impl Default for TcEtfQopt {
+            fn default() -> Self {
+                Self {
+                    delta: 0,
+                    clockid: CLOCKID_INVALID,
+                    flags: 0,
+                }
+            }
+        }
+
+        impl TcEtfQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn new() -> Self {
+                Self::default()
+            }
+
+            pub fn with_delta(mut self, delta_ns: i32) -> Self {
+                self.delta = delta_ns;
+                self
+            }
+
+            pub fn with_clockid(mut self, clockid: i32) -> Self {
+                self.clockid = clockid;
+                self
+            }
+
+            pub fn with_deadline_mode(mut self, enable: bool) -> Self {
+                if enable {
+                    self.flags |= TC_ETF_DEADLINE_MODE_ON;
+                } else {
+                    self.flags &= !TC_ETF_DEADLINE_MODE_ON;
+                }
+                self
+            }
+
+            pub fn with_offload(mut self, enable: bool) -> Self {
+                if enable {
+                    self.flags |= TC_ETF_OFFLOAD_ON;
+                } else {
+                    self.flags &= !TC_ETF_OFFLOAD_ON;
+                }
+                self
+            }
+
+            pub fn with_skip_sock_check(mut self, enable: bool) -> Self {
+                if enable {
+                    self.flags |= TC_ETF_SKIP_SOCK_CHECK;
+                } else {
+                    self.flags &= !TC_ETF_SKIP_SOCK_CHECK;
+                }
+                self
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+    }
 }
 
 /// Common filter attributes.

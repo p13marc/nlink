@@ -41,6 +41,10 @@ use super::types::tc::qdisc::netem::*;
 use super::types::tc::qdisc::{TcRateSpec, fq_codel, htb, prio, sfq, tbf};
 use super::types::tc::{TcMsg, TcaAttr, tc_handle};
 
+// Re-export for convenience
+pub use super::types::tc::qdisc::hfsc::TcServiceCurve;
+pub use super::types::tc::qdisc::taprio::TaprioSchedEntry;
+
 // ============================================================================
 // QdiscConfig trait
 // ============================================================================
@@ -1901,6 +1905,508 @@ impl QdiscConfig for MqprioConfig {
 }
 
 // ============================================================================
+// TaprioConfig (Time Aware Priority)
+// ============================================================================
+
+/// TAPRIO (Time Aware Priority) qdisc configuration.
+///
+/// TAPRIO implements IEEE 802.1Qbv Time-Aware Shaping for Time-Sensitive
+/// Networking (TSN). It uses a time-based gate control list to schedule
+/// traffic classes.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::{TaprioConfig, TaprioSchedEntry};
+///
+/// // Create TAPRIO with a simple schedule
+/// let config = TaprioConfig::new()
+///     .num_tc(2)
+///     .map(&[0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+///     .queues(&[(1, 0), (1, 1)])
+///     .clockid(libc::CLOCK_TAI)
+///     .base_time(0)
+///     .cycle_time(1_000_000) // 1ms cycle
+///     .entry(TaprioSchedEntry::set_gates(0x1, 500_000))  // TC0 open 500us
+///     .entry(TaprioSchedEntry::set_gates(0x2, 500_000))  // TC1 open 500us
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct TaprioConfig {
+    /// Number of traffic classes.
+    pub num_tc: u8,
+    /// Priority to traffic class mapping.
+    pub prio_tc_map: [u8; 16],
+    /// Queue count for each traffic class.
+    pub count: [u16; 16],
+    /// Queue offset for each traffic class.
+    pub offset: [u16; 16],
+    /// Clock ID (e.g., CLOCK_TAI).
+    pub clockid: i32,
+    /// Base time for schedule (nanoseconds since epoch).
+    pub base_time: i64,
+    /// Cycle time in nanoseconds.
+    pub cycle_time: i64,
+    /// Cycle time extension in nanoseconds.
+    pub cycle_time_extension: i64,
+    /// Schedule entries.
+    pub entries: Vec<super::types::tc::qdisc::taprio::TaprioSchedEntry>,
+    /// Flags (TXTIME_ASSIST, FULL_OFFLOAD).
+    pub flags: u32,
+    /// TX time delay in nanoseconds.
+    pub txtime_delay: u32,
+    /// Parent handle.
+    pub parent: String,
+    /// Qdisc handle.
+    pub handle: Option<String>,
+}
+
+impl Default for TaprioConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TaprioConfig {
+    /// Create a new TAPRIO configuration builder.
+    pub fn new() -> Self {
+        Self {
+            num_tc: 0,
+            prio_tc_map: [0; 16],
+            count: [0; 16],
+            offset: [0; 16],
+            clockid: -1,
+            base_time: 0,
+            cycle_time: 0,
+            cycle_time_extension: 0,
+            entries: Vec::new(),
+            flags: 0,
+            txtime_delay: 0,
+            parent: "root".to_string(),
+            handle: None,
+        }
+    }
+
+    /// Set the parent handle.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = parent.into();
+        self
+    }
+
+    /// Set the qdisc handle.
+    pub fn handle(mut self, handle: impl Into<String>) -> Self {
+        self.handle = Some(handle.into());
+        self
+    }
+
+    /// Set the number of traffic classes.
+    pub fn num_tc(mut self, num_tc: u8) -> Self {
+        self.num_tc = num_tc.min(16);
+        self
+    }
+
+    /// Set the priority to traffic class mapping.
+    pub fn map(mut self, map: &[u8]) -> Self {
+        for (i, &tc) in map.iter().enumerate().take(16) {
+            self.prio_tc_map[i] = tc;
+        }
+        self
+    }
+
+    /// Set queue configuration for traffic classes.
+    pub fn queues(mut self, queues: &[(u16, u16)]) -> Self {
+        for (i, &(c, o)) in queues.iter().enumerate().take(16) {
+            self.count[i] = c;
+            self.offset[i] = o;
+        }
+        self
+    }
+
+    /// Set the clock ID (e.g., libc::CLOCK_TAI).
+    pub fn clockid(mut self, clockid: i32) -> Self {
+        self.clockid = clockid;
+        self
+    }
+
+    /// Set the base time in nanoseconds since epoch.
+    pub fn base_time(mut self, base_time: i64) -> Self {
+        self.base_time = base_time;
+        self
+    }
+
+    /// Set the cycle time in nanoseconds.
+    pub fn cycle_time(mut self, cycle_time: i64) -> Self {
+        self.cycle_time = cycle_time;
+        self
+    }
+
+    /// Set the cycle time extension in nanoseconds.
+    pub fn cycle_time_extension(mut self, extension: i64) -> Self {
+        self.cycle_time_extension = extension;
+        self
+    }
+
+    /// Add a schedule entry.
+    pub fn entry(mut self, entry: super::types::tc::qdisc::taprio::TaprioSchedEntry) -> Self {
+        self.entries.push(entry);
+        self
+    }
+
+    /// Enable TXTIME assist mode.
+    pub fn txtime_assist(mut self, enable: bool) -> Self {
+        use super::types::tc::qdisc::taprio::TAPRIO_ATTR_FLAG_TXTIME_ASSIST;
+        if enable {
+            self.flags |= TAPRIO_ATTR_FLAG_TXTIME_ASSIST;
+        } else {
+            self.flags &= !TAPRIO_ATTR_FLAG_TXTIME_ASSIST;
+        }
+        self
+    }
+
+    /// Enable full offload mode.
+    pub fn full_offload(mut self, enable: bool) -> Self {
+        use super::types::tc::qdisc::taprio::TAPRIO_ATTR_FLAG_FULL_OFFLOAD;
+        if enable {
+            self.flags |= TAPRIO_ATTR_FLAG_FULL_OFFLOAD;
+        } else {
+            self.flags &= !TAPRIO_ATTR_FLAG_FULL_OFFLOAD;
+        }
+        self
+    }
+
+    /// Set the TX time delay in nanoseconds.
+    pub fn txtime_delay(mut self, delay: u32) -> Self {
+        self.txtime_delay = delay;
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for TaprioConfig {
+    fn kind(&self) -> &'static str {
+        "taprio"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::mqprio::TcMqprioQopt;
+        use super::types::tc::qdisc::taprio::*;
+
+        // Write the mqprio-style priomap
+        let mut qopt = TcMqprioQopt::new().with_num_tc(self.num_tc).with_hw(false);
+        qopt.prio_tc_map = self.prio_tc_map;
+        qopt.count = self.count;
+        qopt.offset = self.offset;
+        builder.append_attr(TCA_TAPRIO_ATTR_PRIOMAP, qopt.as_bytes());
+
+        // Clock ID
+        if self.clockid >= 0 {
+            builder.append_attr(TCA_TAPRIO_ATTR_SCHED_CLOCKID, &self.clockid.to_ne_bytes());
+        }
+
+        // Base time
+        if self.base_time != 0 {
+            builder.append_attr(
+                TCA_TAPRIO_ATTR_SCHED_BASE_TIME,
+                &self.base_time.to_ne_bytes(),
+            );
+        }
+
+        // Cycle time
+        if self.cycle_time != 0 {
+            builder.append_attr(
+                TCA_TAPRIO_ATTR_SCHED_CYCLE_TIME,
+                &self.cycle_time.to_ne_bytes(),
+            );
+        }
+
+        // Cycle time extension
+        if self.cycle_time_extension != 0 {
+            builder.append_attr(
+                TCA_TAPRIO_ATTR_SCHED_CYCLE_TIME_EXTENSION,
+                &self.cycle_time_extension.to_ne_bytes(),
+            );
+        }
+
+        // Flags
+        if self.flags != 0 {
+            builder.append_attr(TCA_TAPRIO_ATTR_FLAGS, &self.flags.to_ne_bytes());
+        }
+
+        // TX time delay
+        if self.txtime_delay != 0 {
+            builder.append_attr(
+                TCA_TAPRIO_ATTR_TXTIME_DELAY,
+                &self.txtime_delay.to_ne_bytes(),
+            );
+        }
+
+        // Schedule entries
+        if !self.entries.is_empty() {
+            let list_token = builder.nest_start(TCA_TAPRIO_ATTR_SCHED_ENTRY_LIST);
+            for (idx, entry) in self.entries.iter().enumerate() {
+                let entry_token = builder.nest_start(TCA_TAPRIO_ATTR_SCHED_SINGLE_ENTRY);
+                builder.append_attr(TCA_TAPRIO_SCHED_ENTRY_INDEX, &(idx as u32).to_ne_bytes());
+                builder.append_attr(TCA_TAPRIO_SCHED_ENTRY_CMD, &[entry.cmd]);
+                builder.append_attr(
+                    TCA_TAPRIO_SCHED_ENTRY_GATE_MASK,
+                    &entry.gate_mask.to_ne_bytes(),
+                );
+                builder.append_attr(
+                    TCA_TAPRIO_SCHED_ENTRY_INTERVAL,
+                    &entry.interval.to_ne_bytes(),
+                );
+                builder.nest_end(entry_token);
+            }
+            builder.nest_end(list_token);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// HfscConfig (Hierarchical Fair Service Curve)
+// ============================================================================
+
+/// HFSC (Hierarchical Fair Service Curve) qdisc configuration.
+///
+/// HFSC is a hierarchical packet scheduler that provides guaranteed bandwidth
+/// and delay bounds. It uses service curves to define bandwidth allocations.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::HfscConfig;
+///
+/// // Create HFSC qdisc with default class 0x10
+/// let config = HfscConfig::new()
+///     .default_class(0x10)
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct HfscConfig {
+    /// Default class for unclassified packets.
+    pub default_class: u16,
+    /// Parent handle.
+    pub parent: String,
+    /// Qdisc handle.
+    pub handle: Option<String>,
+}
+
+impl Default for HfscConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HfscConfig {
+    /// Create a new HFSC configuration builder.
+    pub fn new() -> Self {
+        Self {
+            default_class: 0,
+            parent: "root".to_string(),
+            handle: None,
+        }
+    }
+
+    /// Set the parent handle.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = parent.into();
+        self
+    }
+
+    /// Set the qdisc handle.
+    pub fn handle(mut self, handle: impl Into<String>) -> Self {
+        self.handle = Some(handle.into());
+        self
+    }
+
+    /// Set the default class for unclassified packets.
+    pub fn default_class(mut self, classid: u16) -> Self {
+        self.default_class = classid;
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for HfscConfig {
+    fn kind(&self) -> &'static str {
+        "hfsc"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::hfsc::TcHfscQopt;
+
+        let qopt = TcHfscQopt::new(self.default_class);
+        builder.append(&qopt);
+        Ok(())
+    }
+}
+
+// ============================================================================
+// EtfConfig (Earliest TxTime First)
+// ============================================================================
+
+/// ETF (Earliest TxTime First) qdisc configuration.
+///
+/// ETF is a qdisc for time-based transmission scheduling. Packets are
+/// transmitted at the exact time specified in the SO_TXTIME socket option.
+/// This is useful for Time-Sensitive Networking (TSN) applications.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::EtfConfig;
+///
+/// // Create ETF with CLOCK_TAI and hardware offload
+/// let config = EtfConfig::new()
+///     .clockid(libc::CLOCK_TAI)
+///     .delta_ns(300000)  // 300us
+///     .offload(true)
+///     .deadline_mode(true)
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct EtfConfig {
+    /// Delta time in nanoseconds.
+    pub delta: i32,
+    /// Clock ID (e.g., CLOCK_TAI, CLOCK_MONOTONIC).
+    pub clockid: i32,
+    /// Enable deadline mode.
+    pub deadline_mode: bool,
+    /// Enable hardware offload.
+    pub offload: bool,
+    /// Skip socket check.
+    pub skip_sock_check: bool,
+    /// Parent handle.
+    pub parent: String,
+    /// Qdisc handle.
+    pub handle: Option<String>,
+}
+
+impl Default for EtfConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EtfConfig {
+    /// Create a new ETF configuration builder.
+    pub fn new() -> Self {
+        Self {
+            delta: 0,
+            clockid: -1, // CLOCKID_INVALID
+            deadline_mode: false,
+            offload: false,
+            skip_sock_check: false,
+            parent: "root".to_string(),
+            handle: None,
+        }
+    }
+
+    /// Set the parent handle.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = parent.into();
+        self
+    }
+
+    /// Set the qdisc handle.
+    pub fn handle(mut self, handle: impl Into<String>) -> Self {
+        self.handle = Some(handle.into());
+        self
+    }
+
+    /// Set the clock ID (e.g., libc::CLOCK_TAI, libc::CLOCK_MONOTONIC).
+    pub fn clockid(mut self, clockid: i32) -> Self {
+        self.clockid = clockid;
+        self
+    }
+
+    /// Set the delta time in nanoseconds.
+    ///
+    /// This is the time offset from the scheduled transmission time.
+    pub fn delta_ns(mut self, delta: i32) -> Self {
+        self.delta = delta;
+        self
+    }
+
+    /// Enable or disable deadline mode.
+    ///
+    /// In deadline mode, the transmission time is treated as a deadline
+    /// rather than an exact time.
+    pub fn deadline_mode(mut self, enable: bool) -> Self {
+        self.deadline_mode = enable;
+        self
+    }
+
+    /// Enable or disable hardware offload.
+    ///
+    /// When enabled, the NIC handles the time-based transmission scheduling.
+    pub fn offload(mut self, enable: bool) -> Self {
+        self.offload = enable;
+        self
+    }
+
+    /// Enable or disable socket capability check skip.
+    pub fn skip_sock_check(mut self, enable: bool) -> Self {
+        self.skip_sock_check = enable;
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for EtfConfig {
+    fn kind(&self) -> &'static str {
+        "etf"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::etf::{
+            TC_ETF_DEADLINE_MODE_ON, TC_ETF_OFFLOAD_ON, TC_ETF_SKIP_SOCK_CHECK, TCA_ETF_PARMS,
+            TcEtfQopt,
+        };
+
+        let mut flags = 0i32;
+        if self.deadline_mode {
+            flags |= TC_ETF_DEADLINE_MODE_ON;
+        }
+        if self.offload {
+            flags |= TC_ETF_OFFLOAD_ON;
+        }
+        if self.skip_sock_check {
+            flags |= TC_ETF_SKIP_SOCK_CHECK;
+        }
+
+        let qopt = TcEtfQopt {
+            delta: self.delta,
+            clockid: self.clockid,
+            flags,
+        };
+
+        builder.append_attr(TCA_ETF_PARMS, qopt.as_bytes());
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Helper functions
 // ============================================================================
 
@@ -2306,5 +2812,58 @@ mod tests {
         assert_eq!(config.count[0], 2);
         assert_eq!(config.offset[1], 2);
         assert_eq!(config.kind(), "mqprio");
+    }
+
+    #[test]
+    fn test_etf_builder() {
+        let config = EtfConfig::new()
+            .clockid(1) // CLOCK_MONOTONIC on most systems
+            .delta_ns(300000)
+            .deadline_mode(true)
+            .offload(true)
+            .skip_sock_check(false)
+            .build();
+
+        assert_eq!(config.clockid, 1);
+        assert_eq!(config.delta, 300000);
+        assert!(config.deadline_mode);
+        assert!(config.offload);
+        assert!(!config.skip_sock_check);
+        assert_eq!(config.kind(), "etf");
+    }
+
+    #[test]
+    fn test_hfsc_builder() {
+        let config = HfscConfig::new().default_class(0x10).handle("1:").build();
+
+        assert_eq!(config.default_class, 0x10);
+        assert_eq!(config.handle, Some("1:".to_string()));
+        assert_eq!(config.kind(), "hfsc");
+    }
+
+    #[test]
+    fn test_taprio_builder() {
+        let config = TaprioConfig::new()
+            .num_tc(2)
+            .map(&[0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+            .queues(&[(1, 0), (1, 1)])
+            .clockid(11) // CLOCK_TAI
+            .base_time(1000000000)
+            .cycle_time(1000000)
+            .entry(TaprioSchedEntry::set_gates(0x1, 500000))
+            .entry(TaprioSchedEntry::set_gates(0x2, 500000))
+            .full_offload(true)
+            .build();
+
+        assert_eq!(config.num_tc, 2);
+        assert_eq!(config.clockid, 11);
+        assert_eq!(config.base_time, 1000000000);
+        assert_eq!(config.cycle_time, 1000000);
+        assert_eq!(config.entries.len(), 2);
+        assert_eq!(config.entries[0].gate_mask, 0x1);
+        assert_eq!(config.entries[0].interval, 500000);
+        assert_eq!(config.entries[1].gate_mask, 0x2);
+        assert!(config.flags & 2 != 0); // FULL_OFFLOAD flag
+        assert_eq!(config.kind(), "taprio");
     }
 }
