@@ -24,9 +24,13 @@
 //!
 //!     // Query interfaces
 //!     let links = conn.get_links().await?;
-//!     for link in links {
-//!         println!("{}: {}", link.ifindex(), link.name.as_deref().unwrap_or("?"));
+//!     for link in &links {
+//!         // Use name_or() helper for cleaner code
+//!         println!("{}: {}", link.ifindex(), link.name_or("?"));
 //!     }
+//!
+//!     // Build ifindex -> name map for resolving routes/addresses
+//!     let names = conn.get_interface_names().await?;
 //!
 //!     Ok(())
 //! }

@@ -129,6 +129,14 @@ impl LinkMessage {
     ///
     /// Returns the interface name if available, otherwise returns the provided default.
     /// This is a convenience method to avoid repeated `.name.as_deref().unwrap_or("?")`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// for link in conn.get_links().await? {
+    ///     println!("{}: {}", link.ifindex(), link.name_or("?"));
+    /// }
+    /// ```
     pub fn name_or<'a>(&'a self, default: &'a str) -> &'a str {
         self.name.as_deref().unwrap_or(default)
     }
