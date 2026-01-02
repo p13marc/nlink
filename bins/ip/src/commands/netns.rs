@@ -190,7 +190,10 @@ fn add_namespace(name: &str) -> Result<()> {
         .open(&netns_path)
         .map_err(|e| {
             if e.kind() == io::ErrorKind::AlreadyExists {
-                nlink::netlink::Error::InvalidMessage(format!("namespace '{}' already exists", name))
+                nlink::netlink::Error::InvalidMessage(format!(
+                    "namespace '{}' already exists",
+                    name
+                ))
             } else {
                 nlink::netlink::Error::Io(e)
             }
@@ -324,7 +327,10 @@ fn exec_in_namespace(name: &str, command: &[String]) -> Result<()> {
         .args(&command[1..])
         .status()
         .map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!("failed to execute '{}': {}", command[0], e))
+            nlink::netlink::Error::InvalidMessage(format!(
+                "failed to execute '{}': {}",
+                command[0], e
+            ))
         })?;
 
     if !status.success() {
@@ -556,7 +562,10 @@ fn attach_namespace(name: &str, pid: u32) -> Result<()> {
         .open(&netns_path)
         .map_err(|e| {
             if e.kind() == io::ErrorKind::AlreadyExists {
-                nlink::netlink::Error::InvalidMessage(format!("namespace '{}' already exists", name))
+                nlink::netlink::Error::InvalidMessage(format!(
+                    "namespace '{}' already exists",
+                    name
+                ))
             } else {
                 nlink::netlink::Error::Io(e)
             }

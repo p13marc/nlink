@@ -18,8 +18,9 @@ fn build_tcmsg(dev: &str, parent: &str, handle: Option<&str>) -> Result<TcMsg> {
     })?;
 
     let qdisc_handle = if let Some(h) = handle {
-        tc_handle::parse(h)
-            .ok_or_else(|| crate::netlink::Error::InvalidMessage(format!("invalid handle: {}", h)))?
+        tc_handle::parse(h).ok_or_else(|| {
+            crate::netlink::Error::InvalidMessage(format!("invalid handle: {}", h))
+        })?
     } else {
         0
     };

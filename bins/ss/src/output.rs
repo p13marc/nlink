@@ -224,92 +224,94 @@ fn print_inet_socket(
 
     // Memory info
     if opts.memory
-        && let Some(ref mem) = sock.mem_info {
-            writeln!(
-                handle,
-                "\t skmem:(r{},rb{},t{},tb{},f{},w{},o{},bl{},d{})",
-                mem.rmem_alloc,
-                mem.rcvbuf,
-                mem.wmem_alloc,
-                mem.sndbuf,
-                mem.fwd_alloc,
-                mem.wmem_queued,
-                mem.optmem,
-                mem.backlog,
-                mem.drops
-            )?;
-        }
+        && let Some(ref mem) = sock.mem_info
+    {
+        writeln!(
+            handle,
+            "\t skmem:(r{},rb{},t{},tb{},f{},w{},o{},bl{},d{})",
+            mem.rmem_alloc,
+            mem.rcvbuf,
+            mem.wmem_alloc,
+            mem.sndbuf,
+            mem.fwd_alloc,
+            mem.wmem_queued,
+            mem.optmem,
+            mem.backlog,
+            mem.drops
+        )?;
+    }
 
     // TCP info
     if opts.info
-        && let Some(ref info) = sock.tcp_info {
-            let mut parts = Vec::new();
+        && let Some(ref info) = sock.tcp_info
+    {
+        let mut parts = Vec::new();
 
-            if let Some(ref cong) = sock.congestion {
-                parts.push(format!("cubic:{}", cong));
-            }
-
-            parts.push(format!("wscale:{}:{}", info.wscale >> 4, info.wscale & 0xf));
-
-            if info.rto > 0 {
-                parts.push(format!("rto:{}", info.rto as f64 / 1000.0));
-            }
-            if info.rtt > 0 {
-                parts.push(format!(
-                    "rtt:{:.3}/{:.3}",
-                    info.rtt as f64 / 1000.0,
-                    info.rttvar as f64 / 1000.0
-                ));
-            }
-            if info.min_rtt > 0 {
-                parts.push(format!("minrtt:{:.3}", info.min_rtt as f64 / 1000.0));
-            }
-
-            parts.push(format!("cwnd:{}", info.snd_cwnd));
-            if info.snd_ssthresh < 0xFFFF {
-                parts.push(format!("ssthresh:{}", info.snd_ssthresh));
-            }
-
-            if info.bytes_sent > 0 {
-                parts.push(format!("bytes_sent:{}", info.bytes_sent));
-            }
-            if info.bytes_received > 0 {
-                parts.push(format!("bytes_rcvd:{}", info.bytes_received));
-            }
-            if info.bytes_acked > 0 {
-                parts.push(format!("bytes_acked:{}", info.bytes_acked));
-            }
-
-            if info.segs_out > 0 {
-                parts.push(format!("segs_out:{}", info.segs_out));
-            }
-            if info.segs_in > 0 {
-                parts.push(format!("segs_in:{}", info.segs_in));
-            }
-
-            if info.retrans > 0 {
-                parts.push(format!("retrans:{}/{}", info.retrans, info.total_retrans));
-            }
-            if info.lost > 0 {
-                parts.push(format!("lost:{}", info.lost));
-            }
-
-            if info.pacing_rate > 0 {
-                parts.push(format!("pacing_rate:{}", format_rate(info.pacing_rate)));
-            }
-            if info.delivery_rate > 0 {
-                parts.push(format!("delivery_rate:{}", format_rate(info.delivery_rate)));
-            }
-
-            if info.rcv_space > 0 {
-                parts.push(format!("rcv_space:{}", info.rcv_space));
-            }
-            if info.rcv_ssthresh > 0 {
-                parts.push(format!("rcv_ssthresh:{}", info.rcv_ssthresh));
-            }
-
-            writeln!(handle, "\t {}", parts.join(" "))?;
+        if let Some(ref cong) = sock.congestion {
+            parts.push(format!("cubic:{}", cong));
         }
+
+        parts.push(format!("wscale:{}:{}", info.wscale >> 4, info.wscale & 0xf));
+
+        if info.rto > 0 {
+            parts.push(format!("rto:{}", info.rto as f64 / 1000.0));
+        }
+        if info.rtt > 0 {
+            parts.push(format!(
+                "rtt:{:.3}/{:.3}",
+                info.rtt as f64 / 1000.0,
+                info.rttvar as f64 / 1000.0
+            ));
+        }
+        if info.min_rtt > 0 {
+            parts.push(format!("minrtt:{:.3}", info.min_rtt as f64 / 1000.0));
+        }
+
+        parts.push(format!("cwnd:{}", info.snd_cwnd));
+        if info.snd_ssthresh < 0xFFFF {
+            parts.push(format!("ssthresh:{}", info.snd_ssthresh));
+        }
+
+        if info.bytes_sent > 0 {
+            parts.push(format!("bytes_sent:{}", info.bytes_sent));
+        }
+        if info.bytes_received > 0 {
+            parts.push(format!("bytes_rcvd:{}", info.bytes_received));
+        }
+        if info.bytes_acked > 0 {
+            parts.push(format!("bytes_acked:{}", info.bytes_acked));
+        }
+
+        if info.segs_out > 0 {
+            parts.push(format!("segs_out:{}", info.segs_out));
+        }
+        if info.segs_in > 0 {
+            parts.push(format!("segs_in:{}", info.segs_in));
+        }
+
+        if info.retrans > 0 {
+            parts.push(format!("retrans:{}/{}", info.retrans, info.total_retrans));
+        }
+        if info.lost > 0 {
+            parts.push(format!("lost:{}", info.lost));
+        }
+
+        if info.pacing_rate > 0 {
+            parts.push(format!("pacing_rate:{}", format_rate(info.pacing_rate)));
+        }
+        if info.delivery_rate > 0 {
+            parts.push(format!("delivery_rate:{}", format_rate(info.delivery_rate)));
+        }
+
+        if info.rcv_space > 0 {
+            parts.push(format!("rcv_space:{}", info.rcv_space));
+        }
+        if info.rcv_ssthresh > 0 {
+            parts.push(format!("rcv_ssthresh:{}", info.rcv_ssthresh));
+        }
+
+        writeln!(handle, "\t {}", parts.join(" "))?;
+    }
 
     Ok(())
 }

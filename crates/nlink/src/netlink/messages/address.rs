@@ -7,7 +7,9 @@ use winnow::prelude::*;
 use winnow::token::take;
 
 use crate::netlink::error::Result;
-use crate::netlink::parse::{FromNetlink, PResult, ToNetlink, parse_ip_addr, parse_string_from_bytes};
+use crate::netlink::parse::{
+    FromNetlink, PResult, ToNetlink, parse_ip_addr, parse_string_from_bytes,
+};
 use crate::netlink::types::addr::{IfAddrMsg, IfaCacheinfo, Scope};
 
 /// Attribute IDs for IFA_* constants.

@@ -223,8 +223,8 @@ impl RuleCmd {
         sport: Option<&str>,
         dport: Option<&str>,
     ) -> Result<()> {
-        use nlink::util::addr::parse_prefix;
         use nlink::netlink::connection::ack_request;
+        use nlink::util::addr::parse_prefix;
 
         // Determine action
         let action = match action_type.to_lowercase().as_str() {
@@ -392,8 +392,8 @@ impl RuleCmd {
         fwmark: Option<&str>,
         table: Option<&str>,
     ) -> Result<()> {
-        use nlink::util::addr::parse_prefix;
         use nlink::netlink::connection::ack_request;
+        use nlink::util::addr::parse_prefix;
 
         // Parse source/destination prefixes
         let (src_addr, src_len) = if let Some(s) = from {

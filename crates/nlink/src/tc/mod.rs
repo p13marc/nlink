@@ -9,4 +9,4 @@ pub mod builders;
 pub mod handle;
 pub mod options;
 
-pub use handle::{format_handle, parse_handle, Handle};
+pub use handle::{Handle, format_handle, parse_handle};

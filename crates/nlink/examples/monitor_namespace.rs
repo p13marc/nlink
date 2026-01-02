@@ -65,11 +65,7 @@ async fn main() -> nlink::netlink::Result<()> {
                 );
             }
             NetworkEvent::DelLink(link) => {
-                println!(
-                    "[LINK-] {} idx={}",
-                    link.name_or("?"),
-                    link.ifindex()
-                );
+                println!("[LINK-] {} idx={}", link.name_or("?"), link.ifindex());
             }
             NetworkEvent::NewAddress(addr) => {
                 let ip = addr

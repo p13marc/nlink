@@ -234,8 +234,8 @@ impl RouteCmd {
         mtu: Option<u32>,
         replace: bool,
     ) -> Result<()> {
-        use nlink::util::addr::parse_prefix;
         use nlink::netlink::connection::{ack_request, replace_request};
+        use nlink::util::addr::parse_prefix;
 
         let table_id = nlink::util::names::table_id(table).unwrap_or(254);
 
@@ -308,8 +308,8 @@ impl RouteCmd {
 
         // Add output interface
         if let Some(dev_name) = dev {
-            let ifindex =
-                nlink::util::get_ifindex(dev_name).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
+            let ifindex = nlink::util::get_ifindex(dev_name)
+                .map_err(nlink::netlink::Error::InvalidMessage)? as u32;
             builder.append_attr_u32(RtaAttr::Oif as u16, ifindex);
         }
 
@@ -352,8 +352,8 @@ impl RouteCmd {
     }
 
     async fn del(conn: &Connection, destination: &str, table: &str) -> Result<()> {
-        use nlink::util::addr::parse_prefix;
         use nlink::netlink::connection::ack_request;
+        use nlink::util::addr::parse_prefix;
 
         let table_id = nlink::util::names::table_id(table).unwrap_or(254);
 

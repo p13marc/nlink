@@ -133,7 +133,8 @@ impl LinkCmd {
     }
 
     async fn del(conn: &Connection, dev: &str) -> Result<()> {
-        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
+        let ifindex =
+            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
 
         let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
@@ -158,7 +159,8 @@ impl LinkCmd {
         master: Option<String>,
         nomaster: bool,
     ) -> Result<()> {
-        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
+        let ifindex =
+            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
 
         let mut ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
@@ -200,7 +202,8 @@ impl LinkCmd {
         // Set or clear master
         if let Some(master_name) = master {
             let master_idx = nlink::util::get_ifindex(&master_name)
-                .map_err(nlink::netlink::Error::InvalidMessage)? as u32;
+                .map_err(nlink::netlink::Error::InvalidMessage)?
+                as u32;
             builder.append_attr_u32(IflaAttr::Master as u16, master_idx);
         } else if nomaster {
             builder.append_attr_u32(IflaAttr::Master as u16, 0);

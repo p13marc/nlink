@@ -213,9 +213,9 @@ fn add_htb_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()
                 i += 2;
             }
             "overhead" if i + 1 < params.len() => {
-                overhead = params[i + 1]
-                    .parse()
-                    .map_err(|_| crate::netlink::Error::InvalidMessage("invalid overhead".into()))?;
+                overhead = params[i + 1].parse().map_err(|_| {
+                    crate::netlink::Error::InvalidMessage("invalid overhead".into())
+                })?;
                 i += 2;
             }
             _ => i += 1,

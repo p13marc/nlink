@@ -224,7 +224,8 @@ impl FilterCmd {
             ));
         }
 
-        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
+        let ifindex =
+            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
 
         let parent_handle = tc_handle::parse(parent).ok_or_else(|| {
             nlink::netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))

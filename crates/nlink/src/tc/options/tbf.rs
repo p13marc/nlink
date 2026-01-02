@@ -1,7 +1,7 @@
 //! TBF (Token Bucket Filter) qdisc options.
 
-use crate::netlink::types::tc::qdisc::tbf::*;
 use crate::netlink::types::tc::qdisc::TcRateSpec;
+use crate::netlink::types::tc::qdisc::tbf::*;
 use crate::netlink::{Error, MessageBuilder, Result};
 
 /// Build TBF qdisc options from parameters.

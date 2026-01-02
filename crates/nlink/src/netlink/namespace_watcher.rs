@@ -188,9 +188,9 @@ impl NamespaceWatcher {
                         .inotify
                         .watches()
                         .add(PARENT_DIR, WatchMask::CREATE | WatchMask::MOVED_TO)
-                    {
-                        self.parent_wd = Some(new_wd);
-                    }
+                {
+                    self.parent_wd = Some(new_wd);
+                }
 
                 if self.config.emit_directory_events {
                     return Ok(Some(NamespaceEvent::DirectoryDeleted));
@@ -200,9 +200,10 @@ impl NamespaceWatcher {
                     return Ok(Some(NamespaceEvent::Created { name }));
                 }
             } else if mask.contains(EventMask::DELETE)
-                && let Some(name) = name {
-                    return Ok(Some(NamespaceEvent::Deleted { name }));
-                }
+                && let Some(name) = name
+            {
+                return Ok(Some(NamespaceEvent::Deleted { name }));
+            }
         } else if Some(wd) == self.parent_wd {
             // Event in /var/run/ - check if netns directory was created
             let is_netns = name.as_deref() == Some("netns");

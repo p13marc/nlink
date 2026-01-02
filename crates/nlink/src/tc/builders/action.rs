@@ -215,7 +215,10 @@ fn add_gact_options(builder: &mut MessageBuilder, params: &[String]) -> Result<(
                 i += 1;
                 if i < params.len() {
                     index = params[i].parse().map_err(|_| {
-                        crate::netlink::Error::InvalidMessage(format!("invalid index: {}", params[i]))
+                        crate::netlink::Error::InvalidMessage(format!(
+                            "invalid index: {}",
+                            params[i]
+                        ))
                     })?;
                 }
             }
@@ -351,7 +354,10 @@ fn add_mirred_options(builder: &mut MessageBuilder, params: &[String]) -> Result
                 i += 1;
                 if i < params.len() {
                     index = params[i].parse().map_err(|_| {
-                        crate::netlink::Error::InvalidMessage(format!("invalid index: {}", params[i]))
+                        crate::netlink::Error::InvalidMessage(format!(
+                            "invalid index: {}",
+                            params[i]
+                        ))
                     })?;
                 }
             }
@@ -413,7 +419,10 @@ fn add_police_options(builder: &mut MessageBuilder, params: &[String]) -> Result
                 i += 1;
                 if i < params.len() {
                     rate = crate::util::parse::get_rate(&params[i]).map_err(|_| {
-                        crate::netlink::Error::InvalidMessage(format!("invalid rate: {}", params[i]))
+                        crate::netlink::Error::InvalidMessage(format!(
+                            "invalid rate: {}",
+                            params[i]
+                        ))
                     })?;
                 }
             }
@@ -433,7 +442,10 @@ fn add_police_options(builder: &mut MessageBuilder, params: &[String]) -> Result
                 i += 1;
                 if i < params.len() {
                     avrate = crate::util::parse::get_rate(&params[i]).map_err(|_| {
-                        crate::netlink::Error::InvalidMessage(format!("invalid avrate: {}", params[i]))
+                        crate::netlink::Error::InvalidMessage(format!(
+                            "invalid avrate: {}",
+                            params[i]
+                        ))
                     })? as u32;
                 }
             }
@@ -455,7 +467,10 @@ fn add_police_options(builder: &mut MessageBuilder, params: &[String]) -> Result
                 i += 1;
                 if i < params.len() {
                     police.index = params[i].parse().map_err(|_| {
-                        crate::netlink::Error::InvalidMessage(format!("invalid index: {}", params[i]))
+                        crate::netlink::Error::InvalidMessage(format!(
+                            "invalid index: {}",
+                            params[i]
+                        ))
                     })?;
                 }
             }
@@ -602,7 +617,10 @@ fn add_vlan_options(builder: &mut MessageBuilder, params: &[String]) -> Result<(
                 i += 1;
                 if i < params.len() {
                     index = params[i].parse().map_err(|_| {
-                        crate::netlink::Error::InvalidMessage(format!("invalid index: {}", params[i]))
+                        crate::netlink::Error::InvalidMessage(format!(
+                            "invalid index: {}",
+                            params[i]
+                        ))
                     })?;
                 }
             }
@@ -681,7 +699,10 @@ fn add_skbedit_options(builder: &mut MessageBuilder, params: &[String]) -> Resul
                 i += 1;
                 if i < params.len() {
                     queue = Some(params[i].parse().map_err(|_| {
-                        crate::netlink::Error::InvalidMessage(format!("invalid queue: {}", params[i]))
+                        crate::netlink::Error::InvalidMessage(format!(
+                            "invalid queue: {}",
+                            params[i]
+                        ))
                     })?);
                 }
             }
@@ -721,7 +742,10 @@ fn add_skbedit_options(builder: &mut MessageBuilder, params: &[String]) -> Resul
                 i += 1;
                 if i < params.len() {
                     index = params[i].parse().map_err(|_| {
-                        crate::netlink::Error::InvalidMessage(format!("invalid index: {}", params[i]))
+                        crate::netlink::Error::InvalidMessage(format!(
+                            "invalid index: {}",
+                            params[i]
+                        ))
                     })?;
                 }
             }

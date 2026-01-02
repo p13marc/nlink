@@ -197,7 +197,8 @@ impl ClassCmd {
             ));
         }
 
-        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
+        let ifindex =
+            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
 
         let parent_filter = parent.and_then(tc_handle::parse);
         let classid_filter = classid.and_then(tc_handle::parse);

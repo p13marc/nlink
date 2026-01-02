@@ -120,9 +120,10 @@ impl VrfCmd {
             if let Some(vrf) = parse_vrf_link(payload) {
                 // Apply filter
                 if let Some(name) = name_filter
-                    && vrf.name != name {
-                        continue;
-                    }
+                    && vrf.name != name
+                {
+                    continue;
+                }
                 vrfs.push(vrf);
             }
         }
@@ -174,10 +175,12 @@ impl VrfCmd {
                     if line.contains("net_cls") {
                         // Extract VRF name if present
                         if let Some(vrf_name) = line.split('/').next_back()
-                            && !vrf_name.is_empty() && vrf_name != ":" {
-                                println!("{}", vrf_name);
-                                return Ok(());
-                            }
+                            && !vrf_name.is_empty()
+                            && vrf_name != ":"
+                        {
+                            println!("{}", vrf_name);
+                            return Ok(());
+                        }
                     }
                 }
                 // No VRF association found

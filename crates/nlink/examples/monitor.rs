@@ -37,11 +37,7 @@ async fn main() -> nlink::netlink::Result<()> {
                 );
             }
             NetworkEvent::DelLink(link) => {
-                println!(
-                    "[LINK-] {} (index={})",
-                    link.name_or("?"),
-                    link.ifindex()
-                );
+                println!("[LINK-] {} (index={})", link.name_or("?"), link.ifindex());
             }
 
             // Address events

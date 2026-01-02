@@ -140,7 +140,10 @@ impl NeighborCmd {
 
         // Get device index if filtering by name
         let filter_index = if let Some(dev_name) = dev {
-            Some(nlink::util::get_ifindex(dev_name).map_err(nlink::netlink::Error::InvalidMessage)? as u32)
+            Some(
+                nlink::util::get_ifindex(dev_name).map_err(nlink::netlink::Error::InvalidMessage)?
+                    as u32,
+            )
         } else {
             None
         };
@@ -185,16 +188,18 @@ impl NeighborCmd {
         state_name: Option<&str>,
         replace: bool,
     ) -> Result<()> {
-        use nlink::util::addr::{parse_addr, parse_mac};
         use nlink::netlink::connection::{ack_request, replace_request};
+        use nlink::util::addr::{parse_addr, parse_mac};
 
-        let addr = parse_addr(address)
-            .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
+        let addr = parse_addr(address).map_err(|e| {
+            nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
+        })?;
 
         let mac = parse_mac(lladdr)
             .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid MAC: {}", e)))?;
 
-        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
+        let ifindex =
+            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
 
         let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
 
@@ -251,13 +256,15 @@ impl NeighborCmd {
     }
 
     async fn del(conn: &Connection, address: &str, dev: &str) -> Result<()> {
-        use nlink::util::addr::parse_addr;
         use nlink::netlink::connection::ack_request;
+        use nlink::util::addr::parse_addr;
 
-        let addr = parse_addr(address)
-            .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e)))?;
+        let addr = parse_addr(address).map_err(|e| {
+            nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
+        })?;
 
-        let ifindex = nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
+        let ifindex =
+            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
 
         let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
 
@@ -297,7 +304,10 @@ impl NeighborCmd {
 
         // Get device index if filtering by name
         let filter_index = if let Some(dev_name) = dev {
-            Some(nlink::util::get_ifindex(dev_name).map_err(nlink::netlink::Error::InvalidMessage)? as u32)
+            Some(
+                nlink::util::get_ifindex(dev_name).map_err(nlink::netlink::Error::InvalidMessage)?
+                    as u32,
+            )
         } else {
             None
         };

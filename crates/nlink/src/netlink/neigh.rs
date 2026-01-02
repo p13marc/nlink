@@ -250,7 +250,9 @@ impl NeighborConfig for Neighbor {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
         );
 
-        let mut ndmsg = NdMsg::new().with_family(family).with_ifindex(ifindex as i32);
+        let mut ndmsg = NdMsg::new()
+            .with_family(family)
+            .with_ifindex(ifindex as i32);
         ndmsg.ndm_state = self.state;
         ndmsg.ndm_flags = self.flags;
 
@@ -299,7 +301,9 @@ impl NeighborConfig for Neighbor {
 
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK);
 
-        let ndmsg = NdMsg::new().with_family(family).with_ifindex(ifindex as i32);
+        let ndmsg = NdMsg::new()
+            .with_family(family)
+            .with_ifindex(ifindex as i32);
 
         builder.append(&ndmsg);
 
