@@ -49,6 +49,14 @@ impl TcMsg {
         self
     }
 
+    /// Set the info field.
+    ///
+    /// For filters, this contains (protocol << 16) | priority.
+    pub fn with_info(mut self, info: u32) -> Self {
+        self.tcm_info = info;
+        self
+    }
+
     /// Convert to bytes.
     pub fn as_bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
@@ -786,6 +794,87 @@ pub mod qdisc {
         pub const CAKE_ACK_NONE: u32 = 0;
         pub const CAKE_ACK_FILTER: u32 = 1;
         pub const CAKE_ACK_AGGRESSIVE: u32 = 2;
+    }
+
+    /// RED (Random Early Detection) qdisc-specific attributes.
+    pub mod red {
+        pub const TCA_RED_UNSPEC: u16 = 0;
+        pub const TCA_RED_PARMS: u16 = 1;
+        pub const TCA_RED_STAB: u16 = 2;
+        pub const TCA_RED_MAX_P: u16 = 3;
+        pub const TCA_RED_FLAGS: u16 = 4;
+        pub const TCA_RED_EARLY_DROP_BLOCK: u16 = 5;
+        pub const TCA_RED_MARK_BLOCK: u16 = 6;
+
+        /// RED flags.
+        pub const TC_RED_ECN: u32 = 1;
+        pub const TC_RED_HARDDROP: u32 = 2;
+        pub const TC_RED_ADAPTATIVE: u32 = 4;
+        pub const TC_RED_NODROP: u32 = 8;
+
+        /// RED parameters (struct tc_red_qopt).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcRedQopt {
+            /// Queue limit in bytes.
+            pub limit: u32,
+            /// Minimum threshold.
+            pub qth_min: u32,
+            /// Maximum threshold.
+            pub qth_max: u32,
+            /// Log of weight for EWMA.
+            pub wlog: u8,
+            /// Log of probability.
+            pub plog: u8,
+            /// Log of cell size.
+            pub scell_log: u8,
+            /// Flags (ECN, harddrop, etc.).
+            pub flags: u8,
+        }
+
+        impl TcRedQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
+    }
+
+    /// PIE (Proportional Integral controller-Enhanced) qdisc-specific attributes.
+    pub mod pie {
+        pub const TCA_PIE_UNSPEC: u16 = 0;
+        pub const TCA_PIE_TARGET: u16 = 1;
+        pub const TCA_PIE_LIMIT: u16 = 2;
+        pub const TCA_PIE_TUPDATE: u16 = 3;
+        pub const TCA_PIE_ALPHA: u16 = 4;
+        pub const TCA_PIE_BETA: u16 = 5;
+        pub const TCA_PIE_ECN: u16 = 6;
+        pub const TCA_PIE_BYTEMODE: u16 = 7;
+        pub const TCA_PIE_DQ_RATE_ESTIMATOR: u16 = 8;
+    }
+
+    /// FIFO qdisc types (pfifo, bfifo).
+    pub mod fifo {
+        /// FIFO limit structure (struct tc_fifo_qopt).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcFifoQopt {
+            /// Queue limit (packets for pfifo, bytes for bfifo).
+            pub limit: u32,
+        }
+
+        impl TcFifoQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn new(limit: u32) -> Self {
+                Self { limit }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+            }
+        }
     }
 }
 

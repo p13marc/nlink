@@ -66,12 +66,14 @@
 //! conn.del_qdisc("eth0", "root").await?;
 //! ```
 
+pub mod action;
 pub mod addr;
 pub mod attr;
 mod builder;
 pub mod connection;
 mod error;
 pub mod events;
+pub mod filter;
 #[cfg(test)]
 mod fixtures;
 pub mod link;
