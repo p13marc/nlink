@@ -1812,4 +1812,142 @@ pub mod action {
             }
         }
     }
+
+    /// Connmark action attributes and structures.
+    pub mod connmark {
+        pub const TCA_CONNMARK_UNSPEC: u16 = 0;
+        pub const TCA_CONNMARK_PARMS: u16 = 1;
+        pub const TCA_CONNMARK_TM: u16 = 2;
+
+        /// Connmark action parameters (struct tc_connmark).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcConnmark {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+            /// Conntrack zone.
+            pub zone: u16,
+        }
+
+        impl TcConnmark {
+            pub fn new(zone: u16, action: i32) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                    zone,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+    }
+
+    /// Csum (checksum) action attributes and structures.
+    pub mod csum {
+        pub const TCA_CSUM_UNSPEC: u16 = 0;
+        pub const TCA_CSUM_PARMS: u16 = 1;
+        pub const TCA_CSUM_TM: u16 = 2;
+
+        /// Update flags for checksum recalculation.
+        pub const TCA_CSUM_UPDATE_FLAG_IPV4HDR: u32 = 1;
+        pub const TCA_CSUM_UPDATE_FLAG_ICMP: u32 = 2;
+        pub const TCA_CSUM_UPDATE_FLAG_IGMP: u32 = 4;
+        pub const TCA_CSUM_UPDATE_FLAG_TCP: u32 = 8;
+        pub const TCA_CSUM_UPDATE_FLAG_UDP: u32 = 16;
+        pub const TCA_CSUM_UPDATE_FLAG_UDPLITE: u32 = 32;
+        pub const TCA_CSUM_UPDATE_FLAG_SCTP: u32 = 64;
+
+        /// Csum action parameters (struct tc_csum).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcCsum {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+            /// Update flags.
+            pub update_flags: u32,
+        }
+
+        impl TcCsum {
+            pub fn new(update_flags: u32, action: i32) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                    update_flags,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+    }
+
+    /// Sample action attributes and structures.
+    pub mod sample {
+        pub const TCA_SAMPLE_UNSPEC: u16 = 0;
+        pub const TCA_SAMPLE_TM: u16 = 1;
+        pub const TCA_SAMPLE_PARMS: u16 = 2;
+        pub const TCA_SAMPLE_RATE: u16 = 3;
+        pub const TCA_SAMPLE_TRUNC_SIZE: u16 = 4;
+        pub const TCA_SAMPLE_PSAMPLE_GROUP: u16 = 5;
+
+        /// Sample action parameters (struct tc_sample - just tc_gen).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcSample {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+        }
+
+        impl TcSample {
+            pub fn new(action: i32) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+    }
 }

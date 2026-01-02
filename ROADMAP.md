@@ -14,13 +14,13 @@ This document outlines a detailed plan to make **nlink** better than **rtnetlink
 | Neighbor Ops | Full | **Full** | **0** ✅ (proxy ARP complete) |
 | TC Qdiscs | 2 | 12 | +10 |
 | TC Filters | 3 | 6 | +3 |
-| TC Actions | 3 | **7** | **+4** ✅ |
+| TC Actions | 3 | **10** | **+7** ✅ |
 | High-level API | No | Yes | +1 |
 | Namespaces | No | Yes | +1 |
 
-**Progress**: Phases 1-3 complete. nlink now has full parity on all core operations.
+**Progress**: Phases 1-3 complete, Phase 4 in progress (3/5 actions done).
 
-**Next Goal**: Extend TC actions (Phase 4) for further differentiation.
+**Next Goal**: Complete remaining TC actions (ct, pedit) or move to Phase 5 filters.
 
 ---
 
@@ -361,13 +361,13 @@ let sample = SampleAction::new()
 ```
 
 ### Phase 4 Deliverables
-- [ ] ConnmarkAction
-- [ ] CsumAction
-- [ ] CtAction
-- [ ] PeditAction
-- [ ] SampleAction
+- [x] ConnmarkAction ✅ **DONE**
+- [x] CsumAction ✅ **DONE**
+- [ ] CtAction (complex - NAT with port ranges, labels, helpers)
+- [ ] PeditAction (complex - raw packet editing)
+- [x] SampleAction ✅ **DONE**
 
-**After Phase 4: nlink has 12 actions vs rtnetlink's 3**
+**Phase 4 Progress: 3/5 actions done. nlink now has 10 actions vs rtnetlink's 3**
 
 ---
 

@@ -30,7 +30,9 @@ use std::net::Ipv4Addr;
 
 use super::builder::MessageBuilder;
 use super::error::{Error, Result};
-use super::types::tc::action::{self, TcGen, gact, mirred, nat, police, tunnel_key, vlan};
+use super::types::tc::action::{
+    self, TcGen, connmark, csum, gact, mirred, nat, police, sample, tunnel_key, vlan,
+};
 
 // ============================================================================
 // ActionConfig trait
@@ -1122,6 +1124,286 @@ fn get_ifindex(name: &str) -> Result<i32> {
 }
 
 // ============================================================================
+// ConnmarkAction
+// ============================================================================
+
+/// Connmark action configuration.
+///
+/// The connmark action imports the connection tracking mark into the packet's
+/// skb mark field, allowing it to be used for classification or other actions.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::action::ConnmarkAction;
+///
+/// // Import connmark from default zone
+/// let mark = ConnmarkAction::new();
+///
+/// // Import connmark from specific zone
+/// let mark = ConnmarkAction::with_zone(1);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ConnmarkAction {
+    /// Conntrack zone (0 = default).
+    zone: u16,
+    /// Action result (TC_ACT_PIPE by default).
+    action: i32,
+}
+
+impl ConnmarkAction {
+    /// Create a new connmark action for the default zone.
+    pub fn new() -> Self {
+        Self {
+            zone: 0,
+            action: action::TC_ACT_PIPE,
+        }
+    }
+
+    /// Create a connmark action for a specific zone.
+    pub fn with_zone(zone: u16) -> Self {
+        Self {
+            zone,
+            action: action::TC_ACT_PIPE,
+        }
+    }
+
+    /// Set the conntrack zone.
+    pub fn zone(mut self, zone: u16) -> Self {
+        self.zone = zone;
+        self
+    }
+
+    /// Set the action result.
+    pub fn action(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build the action configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl Default for ConnmarkAction {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ActionConfig for ConnmarkAction {
+    fn kind(&self) -> &'static str {
+        "connmark"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        let parms = connmark::TcConnmark::new(self.zone, self.action);
+        builder.append_attr(connmark::TCA_CONNMARK_PARMS, parms.as_bytes());
+        Ok(())
+    }
+}
+
+// ============================================================================
+// CsumAction
+// ============================================================================
+
+/// Checksum recalculation action configuration.
+///
+/// The csum action recalculates one or more protocol checksums in the packet.
+/// This is useful after modifying packet headers with actions like pedit or nat.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::action::CsumAction;
+///
+/// // Recalculate IP and TCP checksums
+/// let csum = CsumAction::new()
+///     .iph()
+///     .tcp();
+///
+/// // Recalculate all common checksums
+/// let csum = CsumAction::new()
+///     .iph()
+///     .tcp()
+///     .udp()
+///     .icmp();
+/// ```
+#[derive(Debug, Clone)]
+pub struct CsumAction {
+    /// Update flags indicating which checksums to recalculate.
+    update_flags: u32,
+    /// Action result (TC_ACT_OK by default).
+    action: i32,
+}
+
+impl CsumAction {
+    /// Create a new csum action with no checksums selected.
+    pub fn new() -> Self {
+        Self {
+            update_flags: 0,
+            action: action::TC_ACT_OK,
+        }
+    }
+
+    /// Recalculate IPv4 header checksum.
+    pub fn iph(mut self) -> Self {
+        self.update_flags |= csum::TCA_CSUM_UPDATE_FLAG_IPV4HDR;
+        self
+    }
+
+    /// Recalculate ICMP checksum.
+    pub fn icmp(mut self) -> Self {
+        self.update_flags |= csum::TCA_CSUM_UPDATE_FLAG_ICMP;
+        self
+    }
+
+    /// Recalculate IGMP checksum.
+    pub fn igmp(mut self) -> Self {
+        self.update_flags |= csum::TCA_CSUM_UPDATE_FLAG_IGMP;
+        self
+    }
+
+    /// Recalculate TCP checksum.
+    pub fn tcp(mut self) -> Self {
+        self.update_flags |= csum::TCA_CSUM_UPDATE_FLAG_TCP;
+        self
+    }
+
+    /// Recalculate UDP checksum.
+    pub fn udp(mut self) -> Self {
+        self.update_flags |= csum::TCA_CSUM_UPDATE_FLAG_UDP;
+        self
+    }
+
+    /// Recalculate UDP-Lite checksum.
+    pub fn udplite(mut self) -> Self {
+        self.update_flags |= csum::TCA_CSUM_UPDATE_FLAG_UDPLITE;
+        self
+    }
+
+    /// Recalculate SCTP checksum.
+    pub fn sctp(mut self) -> Self {
+        self.update_flags |= csum::TCA_CSUM_UPDATE_FLAG_SCTP;
+        self
+    }
+
+    /// Set the action result.
+    pub fn action(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build the action configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl Default for CsumAction {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ActionConfig for CsumAction {
+    fn kind(&self) -> &'static str {
+        "csum"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        let parms = csum::TcCsum::new(self.update_flags, self.action);
+        builder.append_attr(csum::TCA_CSUM_PARMS, parms.as_bytes());
+        Ok(())
+    }
+}
+
+// ============================================================================
+// SampleAction
+// ============================================================================
+
+/// Packet sampling action configuration.
+///
+/// The sample action sends a copy of packets to a psample group for monitoring.
+/// This is useful for network analysis, debugging, and traffic monitoring.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::action::SampleAction;
+///
+/// // Sample 1 in 100 packets to group 5
+/// let sample = SampleAction::new(100, 5);
+///
+/// // Sample with truncation to 128 bytes
+/// let sample = SampleAction::new(100, 5)
+///     .trunc(128);
+/// ```
+#[derive(Debug, Clone)]
+pub struct SampleAction {
+    /// Sample rate (1 in N packets).
+    rate: u32,
+    /// Psample group ID.
+    group: u32,
+    /// Truncation size (optional).
+    trunc_size: Option<u32>,
+    /// Action result (TC_ACT_PIPE by default).
+    action: i32,
+}
+
+impl SampleAction {
+    /// Create a new sample action.
+    ///
+    /// - `rate`: Sample 1 in N packets
+    /// - `group`: Psample group ID to send samples to
+    pub fn new(rate: u32, group: u32) -> Self {
+        Self {
+            rate,
+            group,
+            trunc_size: None,
+            action: action::TC_ACT_PIPE,
+        }
+    }
+
+    /// Set the truncation size (maximum bytes to sample per packet).
+    pub fn trunc(mut self, size: u32) -> Self {
+        self.trunc_size = Some(size);
+        self
+    }
+
+    /// Set the action result.
+    pub fn action(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build the action configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl ActionConfig for SampleAction {
+    fn kind(&self) -> &'static str {
+        "sample"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        let parms = sample::TcSample::new(self.action);
+        builder.append_attr(sample::TCA_SAMPLE_PARMS, parms.as_bytes());
+        builder.append_attr_u32(sample::TCA_SAMPLE_RATE, self.rate);
+        builder.append_attr_u32(sample::TCA_SAMPLE_PSAMPLE_GROUP, self.group);
+
+        if let Some(trunc) = self.trunc_size {
+            builder.append_attr_u32(sample::TCA_SAMPLE_TRUNC_SIZE, trunc);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // ActionList - for building action chains
 // ============================================================================
 
@@ -1325,5 +1607,62 @@ mod tests {
 
         let release = TunnelKeyAction::release();
         assert_eq!(release.t_action, tunnel_key::TCA_TUNNEL_KEY_ACT_RELEASE);
+    }
+
+    #[test]
+    fn test_connmark_action() {
+        let mark = ConnmarkAction::new();
+        assert_eq!(mark.zone, 0);
+        assert_eq!(ActionConfig::kind(&mark), "connmark");
+
+        let mark_zone = ConnmarkAction::with_zone(5);
+        assert_eq!(mark_zone.zone, 5);
+
+        let mark_custom = ConnmarkAction::new()
+            .zone(10)
+            .action(action::TC_ACT_OK)
+            .build();
+        assert_eq!(mark_custom.zone, 10);
+        assert_eq!(mark_custom.action, action::TC_ACT_OK);
+    }
+
+    #[test]
+    fn test_csum_action() {
+        let csum_action = CsumAction::new().iph().tcp().udp().build();
+
+        assert_eq!(
+            csum_action.update_flags,
+            csum::TCA_CSUM_UPDATE_FLAG_IPV4HDR
+                | csum::TCA_CSUM_UPDATE_FLAG_TCP
+                | csum::TCA_CSUM_UPDATE_FLAG_UDP
+        );
+        assert_eq!(ActionConfig::kind(&csum_action), "csum");
+
+        // Test all flags
+        let all = CsumAction::new()
+            .iph()
+            .icmp()
+            .igmp()
+            .tcp()
+            .udp()
+            .udplite()
+            .sctp()
+            .build();
+
+        assert_eq!(all.update_flags, 0x7F); // All 7 flags set
+    }
+
+    #[test]
+    fn test_sample_action() {
+        let sample = SampleAction::new(100, 5);
+        assert_eq!(sample.rate, 100);
+        assert_eq!(sample.group, 5);
+        assert_eq!(sample.trunc_size, None);
+        assert_eq!(ActionConfig::kind(&sample), "sample");
+
+        let sample_trunc = SampleAction::new(50, 10).trunc(128).build();
+        assert_eq!(sample_trunc.rate, 50);
+        assert_eq!(sample_trunc.group, 10);
+        assert_eq!(sample_trunc.trunc_size, Some(128));
     }
 }
