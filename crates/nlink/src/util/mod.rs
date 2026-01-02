@@ -1,4 +1,4 @@
-//! Shared utilities for rip.
+//! Shared utilities for nlink.
 
 pub mod addr;
 pub mod device;

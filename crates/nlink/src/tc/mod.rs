@@ -1,4 +1,4 @@
-//! Traffic control utilities for rip.
+//! Traffic control utilities for nlink.
 //!
 //! This crate provides TC-specific utilities including:
 //! - Handle parsing and formatting

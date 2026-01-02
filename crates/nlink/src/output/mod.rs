@@ -1,4 +1,4 @@
-//! Output formatting (JSON/text) for rip.
+//! Output formatting (JSON/text) for nlink.
 
 mod json;
 pub mod monitor;
