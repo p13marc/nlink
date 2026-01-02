@@ -2,6 +2,7 @@
 
 use std::os::unix::io::RawFd;
 use std::path::Path;
+use std::task::{Context, Poll};
 
 use super::builder::MessageBuilder;
 use super::error::{Error, Result};
@@ -247,6 +248,13 @@ impl Connection {
     /// Receive the next event message (for monitoring).
     pub async fn recv_event(&self) -> Result<Vec<u8>> {
         self.socket.recv_msg().await
+    }
+
+    /// Poll for incoming event data.
+    ///
+    /// This is the poll-based version of `recv_event()` for use with `Stream` implementations.
+    pub(crate) fn poll_recv_event(&self, cx: &mut Context<'_>) -> Poll<Result<Vec<u8>>> {
+        self.socket.poll_recv(cx)
     }
 
     // ========================================================================

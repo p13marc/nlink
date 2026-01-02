@@ -11,6 +11,7 @@
 use std::env;
 
 use nlink::netlink::events::{EventStream, NetworkEvent};
+use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
@@ -54,7 +55,7 @@ async fn main() -> nlink::netlink::Result<()> {
 
     let mut stream = builder.build()?;
 
-    while let Some(event) = stream.next().await? {
+    while let Some(event) = stream.try_next().await? {
         match event {
             NetworkEvent::NewLink(link) => {
                 println!(

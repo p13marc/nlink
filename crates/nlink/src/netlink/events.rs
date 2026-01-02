@@ -3,10 +3,11 @@
 //! This module provides an ergonomic, strongly-typed interface for monitoring
 //! network changes including interface, address, route, neighbor, and TC events.
 //!
-//! # Example
+//! # Single Namespace Example
 //!
 //! ```ignore
 //! use nlink::netlink::events::{EventStream, NetworkEvent};
+//! use tokio_stream::StreamExt;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -16,7 +17,8 @@
 //!         .routes(true)
 //!         .build()?;
 //!
-//!     while let Some(event) = stream.next().await? {
+//!     // Using try_next() for familiar ? operator ergonomics
+//!     while let Some(event) = stream.try_next().await? {
 //!         match event {
 //!             NetworkEvent::NewLink(link) => {
 //!                 println!("New link: {}", link.name.as_deref().unwrap_or("?"));
@@ -33,6 +35,36 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! # Multi-Namespace Example
+//!
+//! ```ignore
+//! use nlink::netlink::events::{EventStream, MultiNamespaceEventStream};
+//! use tokio_stream::StreamExt;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let mut multi = MultiNamespaceEventStream::new();
+//!
+//!     // Monitor default namespace
+//!     multi.add("", EventStream::builder().all().build()?);
+//!
+//!     // Monitor named namespaces
+//!     multi.add("ns1", EventStream::builder().namespace("ns1").all().build()?);
+//!     multi.add("ns2", EventStream::builder().namespace("ns2").all().build()?);
+//!
+//!     while let Some(result) = multi.next().await {
+//!         let ev = result?;
+//!         println!("[{}] {:?}", ev.namespace, ev.event);
+//!     }
+//!     Ok(())
+//! }
+//! ```
+
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use tokio_stream::{Stream, StreamMap};
 
 use super::connection::Connection;
 use super::message::{MessageIter, NlMsgType};
@@ -323,7 +355,27 @@ impl EventStreamBuilder {
 
 /// A stream of network events.
 ///
+/// Implements the [`Stream`] trait from `tokio-stream`, allowing use with
+/// stream combinators and [`StreamMap`] for multi-namespace monitoring.
+///
 /// Use [`EventStream::builder()`] to configure which events to receive.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::events::EventStream;
+/// use tokio_stream::StreamExt;
+///
+/// let mut stream = EventStream::builder()
+///     .links(true)
+///     .tc(true)
+///     .build()?;
+///
+/// // Using try_next() for ? operator ergonomics
+/// while let Some(event) = stream.try_next().await? {
+///     println!("{:?}", event);
+/// }
+/// ```
 pub struct EventStream {
     conn: Connection,
     buffer: Vec<u8>,
@@ -336,33 +388,6 @@ impl EventStream {
         EventStreamBuilder::new()
     }
 
-    /// Receive the next event.
-    ///
-    /// This method blocks until an event is received. Returns `None` if
-    /// the connection is closed.
-    pub async fn next(&mut self) -> Result<Option<NetworkEvent>> {
-        // Return any pending events first
-        if let Some(event) = self.pending_events.pop() {
-            return Ok(Some(event));
-        }
-
-        // Receive new data
-        self.buffer = self.conn.recv_event().await?;
-
-        // Parse all messages in the buffer
-        for result in MessageIter::new(&self.buffer) {
-            let (header, payload) = result?;
-
-            if let Some(event) = parse_event(header.nlmsg_type, payload) {
-                self.pending_events.push(event);
-            }
-        }
-
-        // Return the first event (events are collected in reverse order)
-        self.pending_events.reverse();
-        Ok(self.pending_events.pop())
-    }
-
     /// Get a reference to the underlying connection.
     pub fn connection(&self) -> &Connection {
         &self.conn
@@ -373,6 +398,208 @@ impl EventStream {
         &mut self.conn
     }
 }
+
+impl Stream for EventStream {
+    type Item = Result<NetworkEvent>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+
+        // Return pending events first
+        if let Some(event) = this.pending_events.pop() {
+            return Poll::Ready(Some(Ok(event)));
+        }
+
+        // Poll for new data
+        loop {
+            match this.conn.poll_recv_event(cx) {
+                Poll::Ready(Ok(data)) => {
+                    this.buffer = data;
+
+                    // Parse all messages in the buffer
+                    for result in MessageIter::new(&this.buffer) {
+                        match result {
+                            Ok((header, payload)) => {
+                                if let Some(event) = parse_event(header.nlmsg_type, payload) {
+                                    this.pending_events.push(event);
+                                }
+                            }
+                            Err(e) => return Poll::Ready(Some(Err(e))),
+                        }
+                    }
+
+                    // Reverse so we pop in the correct order
+                    this.pending_events.reverse();
+
+                    // Return first event if available
+                    if let Some(event) = this.pending_events.pop() {
+                        return Poll::Ready(Some(Ok(event)));
+                    }
+
+                    // No events in this batch, continue polling
+                    continue;
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+// EventStream is Unpin because all its fields are Unpin (Vec, Connection)
+impl Unpin for EventStream {}
+
+// ============================================================================
+// Multi-Namespace Event Stream
+// ============================================================================
+
+/// An event paired with its source namespace.
+#[derive(Debug, Clone)]
+pub struct NamespacedEvent {
+    /// Namespace name ("" for default namespace).
+    pub namespace: String,
+    /// The network event.
+    pub event: NetworkEvent,
+}
+
+impl NamespacedEvent {
+    /// Returns true if this event is from the default namespace.
+    pub fn is_default_namespace(&self) -> bool {
+        self.namespace.is_empty()
+    }
+
+    /// Returns the interface index associated with this event, if any.
+    pub fn ifindex(&self) -> Option<u32> {
+        self.event.ifindex()
+    }
+}
+
+/// Monitor network events across multiple namespaces.
+///
+/// Uses [`StreamMap`] internally to multiplex events from multiple
+/// [`EventStream`] instances. Streams that end are automatically
+/// removed from the map.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::events::{EventStream, MultiNamespaceEventStream};
+/// use tokio_stream::StreamExt;
+///
+/// let mut multi = MultiNamespaceEventStream::new();
+///
+/// // Add default namespace (use empty string)
+/// multi.add("", EventStream::builder().all().build()?);
+///
+/// // Add named namespaces
+/// multi.add("ns1", EventStream::builder().namespace("ns1").all().build()?);
+/// multi.add("ns2", EventStream::builder().namespace("ns2").all().build()?);
+///
+/// // Monitor all namespaces
+/// while let Some(result) = multi.next().await {
+///     match result {
+///         Ok(ev) => println!("[{}] {:?}", ev.namespace, ev.event),
+///         Err(e) => eprintln!("Error: {}", e),
+///     }
+/// }
+/// ```
+pub struct MultiNamespaceEventStream {
+    streams: StreamMap<String, EventStream>,
+}
+
+impl MultiNamespaceEventStream {
+    /// Create a new empty multi-namespace event stream.
+    pub fn new() -> Self {
+        Self {
+            streams: StreamMap::new(),
+        }
+    }
+
+    /// Create with pre-allocated capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            streams: StreamMap::with_capacity(capacity),
+        }
+    }
+
+    /// Add a namespace to monitor.
+    ///
+    /// If a stream with this name already exists, it is replaced
+    /// and the old stream is returned.
+    ///
+    /// Use `""` (empty string) for the default namespace.
+    pub fn add(&mut self, name: impl Into<String>, stream: EventStream) -> Option<EventStream> {
+        self.streams.insert(name.into(), stream)
+    }
+
+    /// Remove a namespace from monitoring.
+    pub fn remove(&mut self, name: &str) -> Option<EventStream> {
+        self.streams.remove(name)
+    }
+
+    /// Check if a namespace is being monitored.
+    pub fn contains(&self, name: &str) -> bool {
+        self.streams.contains_key(name)
+    }
+
+    /// Number of namespaces being monitored.
+    pub fn len(&self) -> usize {
+        self.streams.len()
+    }
+
+    /// Returns true if no namespaces are being monitored.
+    pub fn is_empty(&self) -> bool {
+        self.streams.is_empty()
+    }
+
+    /// Get the next event from any monitored namespace.
+    ///
+    /// Returns `None` when all streams have ended.
+    pub async fn next(&mut self) -> Option<Result<NamespacedEvent>> {
+        use tokio_stream::StreamExt;
+
+        self.streams
+            .next()
+            .await
+            .map(|(namespace, result)| result.map(|event| NamespacedEvent { namespace, event }))
+    }
+
+    /// Iterator over namespace names being monitored.
+    pub fn namespaces(&self) -> impl Iterator<Item = &String> {
+        self.streams.keys()
+    }
+
+    /// Clear all streams.
+    pub fn clear(&mut self) {
+        self.streams.clear()
+    }
+}
+
+impl Default for MultiNamespaceEventStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Stream for MultiNamespaceEventStream {
+    type Item = Result<NamespacedEvent>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.streams).poll_next(cx) {
+            Poll::Ready(Some((namespace, result))) => Poll::Ready(Some(
+                result.map(|event| NamespacedEvent { namespace, event }),
+            )),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Unpin for MultiNamespaceEventStream {}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
 
 /// Parse a netlink message into a network event.
 fn parse_event(msg_type: u16, payload: &[u8]) -> Option<NetworkEvent> {
@@ -470,5 +697,35 @@ mod tests {
         assert!(builder.tc);
         assert!(!builder.routes_v4);
         assert!(!builder.neighbors);
+    }
+
+    #[test]
+    fn test_multi_namespace_new() {
+        let multi = MultiNamespaceEventStream::new();
+        assert!(multi.is_empty());
+        assert_eq!(multi.len(), 0);
+    }
+
+    #[test]
+    fn test_namespaced_event() {
+        let link = LinkMessage::default();
+        let event = NamespacedEvent {
+            namespace: "ns1".to_string(),
+            event: NetworkEvent::NewLink(link),
+        };
+        assert!(!event.is_default_namespace());
+
+        let event = NamespacedEvent {
+            namespace: "".to_string(),
+            event: NetworkEvent::NewLink(LinkMessage::default()),
+        };
+        assert!(event.is_default_namespace());
+    }
+
+    #[test]
+    fn test_event_stream_is_unpin() {
+        fn assert_unpin<T: Unpin>() {}
+        assert_unpin::<EventStream>();
+        assert_unpin::<MultiNamespaceEventStream>();
     }
 }

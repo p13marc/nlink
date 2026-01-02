@@ -4,6 +4,7 @@ use std::fs::File;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::task::{Context, Poll};
 
 use bytes::BytesMut;
 use netlink_sys::{Socket, SocketAddr, protocols};
@@ -227,6 +228,30 @@ impl NetlinkSocket {
                     // buf has been advanced by recv, so buf[..] contains the data
                     return Ok(buf.to_vec());
                 }
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
+    /// Poll for incoming data.
+    ///
+    /// This is the poll-based version of `recv_msg()` for use with `Stream` implementations.
+    /// Returns `Poll::Ready(Ok(data))` when data is available.
+    pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Result<Vec<u8>>> {
+        let mut buf = BytesMut::with_capacity(32768);
+
+        loop {
+            let mut guard = match self.fd.poll_read_ready(cx) {
+                Poll::Ready(Ok(guard)) => guard,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+                Poll::Pending => return Poll::Pending,
+            };
+
+            match guard.try_io(|inner| inner.get_ref().recv(&mut buf, 0)) {
+                Ok(result) => match result {
+                    Ok(_n) => return Poll::Ready(Ok(buf.to_vec())),
+                    Err(e) => return Poll::Ready(Err(e.into())),
+                },
                 Err(_would_block) => continue,
             }
         }

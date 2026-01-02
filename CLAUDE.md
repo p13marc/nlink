@@ -290,8 +290,13 @@ loop {
 ```
 
 **Monitoring events (high-level API - preferred):**
+
+`EventStream` implements the `Stream` trait from `tokio-stream`, enabling use with
+stream combinators and `StreamMap` for multi-namespace monitoring.
+
 ```rust
 use nlink::netlink::events::{EventStream, NetworkEvent};
+use tokio_stream::StreamExt;
 
 let mut stream = EventStream::builder()
     .links(true)
@@ -299,7 +304,8 @@ let mut stream = EventStream::builder()
     .tc(true)
     .build()?;
 
-while let Some(event) = stream.next().await? {
+// Use try_next() for familiar ? operator ergonomics
+while let Some(event) = stream.try_next().await? {
     match event {
         NetworkEvent::NewLink(link) => println!("Link: {}", link.name.unwrap_or_default()),
         NetworkEvent::NewAddress(addr) => println!("Addr: {:?}", addr.address),
@@ -309,9 +315,35 @@ while let Some(event) = stream.next().await? {
 }
 ```
 
-**Namespace-aware event monitoring:**
+**Multi-namespace event monitoring:**
+```rust
+use nlink::netlink::events::{EventStream, MultiNamespaceEventStream};
+use tokio_stream::StreamExt;
+
+let mut multi = MultiNamespaceEventStream::new();
+
+// Monitor default namespace (use empty string)
+multi.add("", EventStream::builder().all().build()?);
+
+// Monitor named namespaces
+multi.add("ns1", EventStream::builder().namespace("ns1").all().build()?);
+multi.add("ns2", EventStream::builder().namespace("ns2").all().build()?);
+
+// Events include namespace information
+while let Some(result) = multi.next().await {
+    let ev = result?;
+    println!("[{}] {:?}", ev.namespace, ev.event);
+}
+
+// Can also add/remove namespaces dynamically
+multi.remove("ns1");
+multi.add("ns3", EventStream::builder().namespace("ns3").tc(true).build()?);
+```
+
+**Namespace-aware event monitoring (single namespace):**
 ```rust
 use nlink::netlink::events::{EventStream, NetworkEvent};
+use tokio_stream::StreamExt;
 
 // Monitor events in a named namespace
 let mut stream = EventStream::builder()
@@ -331,6 +363,10 @@ let mut stream = EventStream::builder()
     .namespace_path("/proc/1234/ns/net")
     .all()
     .build()?;
+
+while let Some(event) = stream.try_next().await? {
+    println!("{:?}", event);
+}
 ```
 
 **Watching namespace creation/deletion (inotify-based, feature: namespace_watcher):**

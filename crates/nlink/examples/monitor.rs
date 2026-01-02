@@ -12,6 +12,7 @@
 //!   ip link del test0
 
 use nlink::netlink::events::{EventStream, NetworkEvent};
+use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
@@ -24,7 +25,7 @@ async fn main() -> nlink::netlink::Result<()> {
         .neighbors(true)
         .build()?;
 
-    while let Some(event) = stream.next().await? {
+    while let Some(event) = stream.try_next().await? {
         match event {
             // Link events
             NetworkEvent::NewLink(link) => {

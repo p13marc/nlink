@@ -99,6 +99,9 @@ pub use attr::{AttrIter, NlAttr};
 pub use builder::{MessageBuilder, NestToken};
 pub use connection::Connection;
 pub use error::{Error, Result};
+pub use events::{
+    EventStream, EventStreamBuilder, MultiNamespaceEventStream, NamespacedEvent, NetworkEvent,
+};
 pub use message::{MessageIter, NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
 pub use namespace::NamespaceSpec;
 pub use namespace_events::{NamespaceEventSubscriber, NamespaceNetlinkEvent};

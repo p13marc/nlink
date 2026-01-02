@@ -45,6 +45,9 @@ winnow = "0.7"
 # Zero-copy serialization
 zerocopy = { version = "0.8", features = ["derive"] }
 
+# Stream utilities
+tokio-stream = "0.1"
+
 # Proc macros
 proc-macro2 = "1"
 quote = "1"
