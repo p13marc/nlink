@@ -238,8 +238,8 @@ impl Connection {
     /// # Example
     ///
     /// ```ignore
-    /// use rip_netlink::messages::AddressMessage;
-    /// use rip_netlink::message::NlMsgType;
+    /// use nlink::netlink::messages::AddressMessage;
+    /// use nlink::netlink::message::NlMsgType;
     ///
     /// let addresses: Vec<AddressMessage> = conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
     /// for addr in addresses {

@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use rip_netlink::stats::{StatsSnapshot, StatsTracker};
+//! use nlink::netlink::stats::{StatsSnapshot, StatsTracker};
 //! use std::time::Duration;
 //!
 //! // Option 1: Manual rate calculation between snapshots

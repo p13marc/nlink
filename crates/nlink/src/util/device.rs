@@ -11,7 +11,7 @@ use super::ifname;
 ///
 /// # Example
 /// ```ignore
-/// let ifindex = rip_lib::device::get_ifindex("eth0")?;
+/// let ifindex = nlink::util::get_ifindex("eth0")?;
 /// ```
 pub fn get_ifindex(name: &str) -> Result<u32, String> {
     ifname::name_to_index(name).map_err(|e| format!("interface not found: {}", e))
@@ -23,7 +23,7 @@ pub fn get_ifindex(name: &str) -> Result<u32, String> {
 ///
 /// # Example
 /// ```ignore
-/// let ifindex = rip_lib::device::get_ifindex_opt(Some("eth0"))?;
+/// let ifindex = nlink::util::get_ifindex_opt(Some("eth0"))?;
 /// ```
 pub fn get_ifindex_opt(name: Option<&str>) -> Result<Option<u32>, String> {
     match name {
@@ -36,7 +36,7 @@ pub fn get_ifindex_opt(name: Option<&str>) -> Result<Option<u32>, String> {
 ///
 /// # Example
 /// ```ignore
-/// let name = rip_lib::device::get_ifname(1)?;
+/// let name = nlink::util::get_ifname(1)?;
 /// ```
 pub fn get_ifname(index: u32) -> Result<String, String> {
     ifname::index_to_name(index).map_err(|e| format!("interface not found: {}", e))
@@ -49,7 +49,7 @@ pub fn get_ifname(index: u32) -> Result<String, String> {
 ///
 /// # Example
 /// ```ignore
-/// let name = rip_lib::device::get_ifname_or_index(1);
+/// let name = nlink::util::get_ifname_or_index(1);
 /// // Returns "eth0" if found, or "if1" if not
 /// ```
 pub fn get_ifname_or_index(index: u32) -> String {

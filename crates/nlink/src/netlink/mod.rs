@@ -1,21 +1,23 @@
 //! Async netlink protocol implementation for Linux.
 //!
-//! This crate provides a complete netlink implementation from scratch,
+//! This module provides a complete netlink implementation from scratch,
 //! supporting RTNetlink (routing), traffic control, and other subsystems.
 //!
-//! # Strongly-Typed API
-//!
-//! The `parse` module provides traits for zero-copy parsing and serialization:
+//! # Quick Start
 //!
 //! ```ignore
-//! use rip_netlink::parse::{FromNetlink, ToNetlink};
-//! use rip_netlink::messages::AddressMessage;
+//! use nlink::netlink::{Connection, Protocol};
 //!
-//! // Parse a netlink message
-//! let msg = AddressMessage::from_bytes(&data)?;
+//! let conn = Connection::new(Protocol::Route)?;
 //!
-//! // Serialize back to bytes
-//! let bytes = msg.to_bytes()?;
+//! // Query interfaces
+//! let links = conn.get_links().await?;
+//! for link in &links {
+//!     println!("{}: {}", link.ifindex(), link.name_or("?"));
+//! }
+//!
+//! // Build ifindex -> name map for resolving routes/addresses
+//! let names = conn.get_interface_names().await?;
 //! ```
 //!
 //! # Event Monitoring
@@ -23,7 +25,7 @@
 //! The `events` module provides a high-level API for monitoring network changes:
 //!
 //! ```ignore
-//! use rip_netlink::events::{EventStream, NetworkEvent};
+//! use nlink::netlink::events::{EventStream, NetworkEvent};
 //!
 //! let mut stream = EventStream::builder()
 //!     .links(true)
@@ -44,7 +46,7 @@
 //! The `tc` module provides typed configuration for qdiscs:
 //!
 //! ```ignore
-//! use rip_netlink::tc::NetemConfig;
+//! use nlink::netlink::tc::NetemConfig;
 //! use std::time::Duration;
 //!
 //! // Add network emulation with delay and packet loss

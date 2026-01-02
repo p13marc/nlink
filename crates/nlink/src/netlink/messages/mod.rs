@@ -6,8 +6,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use rip_netlink::messages::AddressMessage;
-//! use rip_netlink::parse::FromNetlink;
+//! use nlink::netlink::messages::AddressMessage;
+//! use nlink::netlink::parse::FromNetlink;
 //!
 //! // Parse from raw netlink data
 //! let msg = AddressMessage::from_bytes(&data)?;

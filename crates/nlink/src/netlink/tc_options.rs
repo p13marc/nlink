@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use rip_netlink::tc_options::{QdiscOptions, parse_qdisc_options};
+//! use nlink::netlink::tc_options::{QdiscOptions, parse_qdisc_options};
 //!
 //! let qdiscs = conn.get_qdiscs().await?;
 //! for qdisc in &qdiscs {

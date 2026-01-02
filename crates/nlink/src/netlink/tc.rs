@@ -5,7 +5,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use rip_netlink::tc::{NetemConfig, QdiscConfig};
+//! use nlink::netlink::tc::{NetemConfig, QdiscConfig};
 //! use std::time::Duration;
 //!
 //! // Create a netem configuration with delay and loss
@@ -75,7 +75,7 @@ pub trait QdiscConfig: Send + Sync {
 /// # Example
 ///
 /// ```ignore
-/// use rip_netlink::tc::NetemConfig;
+/// use nlink::netlink::tc::NetemConfig;
 /// use std::time::Duration;
 ///
 /// // Simulate a lossy satellite link
@@ -355,7 +355,7 @@ impl QdiscConfig for NetemConfig {
 /// # Example
 ///
 /// ```ignore
-/// use rip_netlink::tc::FqCodelConfig;
+/// use nlink::netlink::tc::FqCodelConfig;
 /// use std::time::Duration;
 ///
 /// let config = FqCodelConfig::new()
@@ -526,7 +526,7 @@ impl QdiscConfig for FqCodelConfig {
 /// # Example
 ///
 /// ```ignore
-/// use rip_netlink::tc::TbfConfig;
+/// use nlink::netlink::tc::TbfConfig;
 ///
 /// let config = TbfConfig::new()
 ///     .rate(1_000_000)  // 1 MB/s
@@ -673,7 +673,7 @@ impl QdiscConfig for TbfConfig {
 /// # Example
 ///
 /// ```ignore
-/// use rip_netlink::tc::HtbQdiscConfig;
+/// use nlink::netlink::tc::HtbQdiscConfig;
 ///
 /// let config = HtbQdiscConfig::new()
 ///     .default_class(0x10)
@@ -776,7 +776,7 @@ impl QdiscConfig for HtbQdiscConfig {
 /// # Example
 ///
 /// ```ignore
-/// use rip_netlink::tc::PrioConfig;
+/// use nlink::netlink::tc::PrioConfig;
 ///
 /// let config = PrioConfig::new()
 ///     .bands(3)
@@ -867,7 +867,7 @@ impl QdiscConfig for PrioConfig {
 /// # Example
 ///
 /// ```ignore
-/// use rip_netlink::tc::SfqConfig;
+/// use nlink::netlink::tc::SfqConfig;
 ///
 /// let config = SfqConfig::new()
 ///     .perturb(10)
@@ -2436,7 +2436,7 @@ impl Connection {
     /// # Example
     ///
     /// ```ignore
-    /// use rip_netlink::tc::NetemConfig;
+    /// use nlink::netlink::tc::NetemConfig;
     /// use std::time::Duration;
     ///
     /// let netem = NetemConfig::new()

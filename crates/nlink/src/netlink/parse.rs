@@ -8,7 +8,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use rip_netlink::parse::{FromNetlink, parse_nlmsghdr};
+//! use nlink::netlink::parse::{FromNetlink, parse_nlmsghdr};
 //!
 //! // Parse a complete netlink message
 //! let msg = AddressMessage::from_bytes(&data)?;

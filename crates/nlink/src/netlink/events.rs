@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use rip_netlink::events::{EventStream, NetworkEvent};
+//! use nlink::netlink::events::{EventStream, NetworkEvent};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
