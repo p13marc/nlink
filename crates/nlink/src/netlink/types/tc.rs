@@ -1249,6 +1249,25 @@ pub mod filter {
         pub const TCA_FW_ACT: u16 = 4;
         pub const TCA_FW_MASK: u16 = 5;
     }
+
+    /// Cgroup filter attributes.
+    pub mod cgroup {
+        pub const TCA_CGROUP_UNSPEC: u16 = 0;
+        pub const TCA_CGROUP_ACT: u16 = 1;
+        pub const TCA_CGROUP_POLICE: u16 = 2;
+        pub const TCA_CGROUP_EMATCHES: u16 = 3;
+    }
+
+    /// Route filter attributes.
+    pub mod route4 {
+        pub const TCA_ROUTE4_UNSPEC: u16 = 0;
+        pub const TCA_ROUTE4_CLASSID: u16 = 1;
+        pub const TCA_ROUTE4_TO: u16 = 2;
+        pub const TCA_ROUTE4_FROM: u16 = 3;
+        pub const TCA_ROUTE4_IIF: u16 = 4;
+        pub const TCA_ROUTE4_POLICE: u16 = 5;
+        pub const TCA_ROUTE4_ACT: u16 = 6;
+    }
 }
 
 /// Common action attributes.

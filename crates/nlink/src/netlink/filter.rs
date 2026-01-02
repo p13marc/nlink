@@ -1073,6 +1073,220 @@ impl FilterConfig for BasicFilter {
 }
 
 // ============================================================================
+// CgroupFilter
+// ============================================================================
+
+/// Cgroup filter configuration.
+///
+/// The cgroup filter classifies packets based on their originating control group.
+/// This filter is typically used with the net_cls cgroup controller, which assigns
+/// a classid to all packets originating from processes in that cgroup.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::filter::CgroupFilter;
+/// use nlink::netlink::action::GactAction;
+///
+/// // Simple cgroup filter (classifies based on net_cls cgroup)
+/// let filter = CgroupFilter::new();
+///
+/// // With an action attached
+/// let filter = CgroupFilter::new()
+///     .with_action(GactAction::drop());
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct CgroupFilter {
+    /// Actions to attach.
+    actions: Option<super::action::ActionList>,
+}
+
+impl CgroupFilter {
+    /// Create a new cgroup filter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add an action to the filter.
+    pub fn with_action<A: super::action::ActionConfig + Clone + std::fmt::Debug + 'static>(
+        mut self,
+        action: A,
+    ) -> Self {
+        let actions = self.actions.take().unwrap_or_default().with(action);
+        self.actions = Some(actions);
+        self
+    }
+
+    /// Build the filter configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl FilterConfig for CgroupFilter {
+    fn kind(&self) -> &'static str {
+        "cgroup"
+    }
+
+    fn classid(&self) -> Option<u32> {
+        None // Cgroup filter doesn't have a classid in the traditional sense
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::filter::cgroup;
+
+        if let Some(ref actions) = self.actions {
+            let act_token = builder.nest_start(cgroup::TCA_CGROUP_ACT);
+            actions.write_to(builder)?;
+            builder.nest_end(act_token);
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// RouteFilter
+// ============================================================================
+
+/// Route filter configuration.
+///
+/// The route filter classifies packets based on routing table metadata (realms).
+/// Realms are assigned to routes and can be used to classify traffic based on
+/// its destination or source routing properties.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::filter::RouteFilter;
+///
+/// // Match traffic to realm 10
+/// let filter = RouteFilter::new()
+///     .to_realm(10)
+///     .classid("1:10");
+///
+/// // Match traffic from realm 5 arriving on eth1
+/// let filter = RouteFilter::new()
+///     .from_realm(5)
+///     .from_if("eth1")
+///     .classid("1:20");
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct RouteFilter {
+    /// Target class ID.
+    classid: Option<u32>,
+    /// Destination realm.
+    to_realm: Option<u32>,
+    /// Source realm.
+    from_realm: Option<u32>,
+    /// Input interface index.
+    from_if: Option<u32>,
+    /// Actions to attach.
+    actions: Option<super::action::ActionList>,
+}
+
+impl RouteFilter {
+    /// Create a new route filter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the target class ID.
+    pub fn classid(mut self, classid: &str) -> Self {
+        self.classid = tc_handle::parse(classid);
+        self
+    }
+
+    /// Match traffic destined for a specific realm.
+    pub fn to_realm(mut self, realm: u32) -> Self {
+        self.to_realm = Some(realm);
+        self
+    }
+
+    /// Match traffic originating from a specific realm.
+    pub fn from_realm(mut self, realm: u32) -> Self {
+        self.from_realm = Some(realm);
+        self
+    }
+
+    /// Match traffic arriving from a specific interface.
+    pub fn from_if(mut self, dev: &str) -> Result<Self> {
+        let ifindex = get_ifindex_internal(dev)?;
+        self.from_if = Some(ifindex as u32);
+        Ok(self)
+    }
+
+    /// Match traffic arriving from a specific interface by index.
+    pub fn from_if_index(mut self, ifindex: u32) -> Self {
+        self.from_if = Some(ifindex);
+        self
+    }
+
+    /// Add an action to the filter.
+    pub fn with_action<A: super::action::ActionConfig + Clone + std::fmt::Debug + 'static>(
+        mut self,
+        action: A,
+    ) -> Self {
+        let actions = self.actions.take().unwrap_or_default().with(action);
+        self.actions = Some(actions);
+        self
+    }
+
+    /// Build the filter configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+/// Internal helper to avoid conflict with get_ifindex in this module.
+fn get_ifindex_internal(name: &str) -> Result<i32> {
+    let path = format!("/sys/class/net/{}/ifindex", name);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
+    content
+        .trim()
+        .parse()
+        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
+}
+
+impl FilterConfig for RouteFilter {
+    fn kind(&self) -> &'static str {
+        "route"
+    }
+
+    fn classid(&self) -> Option<u32> {
+        self.classid
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::filter::route4;
+
+        if let Some(classid) = self.classid {
+            builder.append_attr_u32(route4::TCA_ROUTE4_CLASSID, classid);
+        }
+
+        if let Some(realm) = self.to_realm {
+            builder.append_attr_u32(route4::TCA_ROUTE4_TO, realm);
+        }
+
+        if let Some(realm) = self.from_realm {
+            builder.append_attr_u32(route4::TCA_ROUTE4_FROM, realm);
+        }
+
+        if let Some(ifindex) = self.from_if {
+            builder.append_attr_u32(route4::TCA_ROUTE4_IIF, ifindex);
+        }
+
+        if let Some(ref actions) = self.actions {
+            let act_token = builder.nest_start(route4::TCA_ROUTE4_ACT);
+            actions.write_to(builder)?;
+            builder.nest_end(act_token);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Helper functions
 // ============================================================================
 
@@ -1337,5 +1551,27 @@ mod tests {
                 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0
             ]
         );
+    }
+
+    #[test]
+    fn test_cgroup_filter_builder() {
+        let filter = CgroupFilter::new().build();
+
+        assert_eq!(FilterConfig::kind(&filter), "cgroup");
+        assert_eq!(filter.classid(), None);
+    }
+
+    #[test]
+    fn test_route_filter_builder() {
+        let filter = RouteFilter::new()
+            .to_realm(10)
+            .from_realm(5)
+            .classid("1:10")
+            .build();
+
+        assert_eq!(FilterConfig::kind(&filter), "route");
+        assert_eq!(filter.to_realm, Some(10));
+        assert_eq!(filter.from_realm, Some(5));
+        assert_eq!(filter.classid, Some(tc_handle::make(1, 0x10)));
     }
 }

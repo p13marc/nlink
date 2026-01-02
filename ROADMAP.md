@@ -13,14 +13,14 @@ This document outlines a detailed plan to make **nlink** better than **rtnetlink
 | Route Ops | Full | Full | 0 (nlink has route get) |
 | Neighbor Ops | Full | **Full** | **0** ✅ (proxy ARP complete) |
 | TC Qdiscs | 2 | 12 | +10 |
-| TC Filters | 3 | 6 | +3 |
+| TC Filters | 3 | **8** | **+5** ✅ |
 | TC Actions | 3 | **10** | **+7** ✅ |
 | High-level API | No | Yes | +1 |
 | Namespaces | No | Yes | +1 |
 
-**Progress**: Phases 1-3 complete, Phase 4 in progress (3/5 actions done).
+**Progress**: Phases 1-3 complete, Phase 4 partial (3/5 actions), Phase 5 partial (2/3 filters).
 
-**Next Goal**: Complete remaining TC actions (ct, pedit) or move to Phase 5 filters.
+**Next Goal**: Continue with Phase 6 qdiscs or complete remaining complex items.
 
 ---
 
@@ -380,7 +380,7 @@ Achieve full iproute2 filter parity.
 
 ```rust
 let filter = CgroupFilter::new()
-    .classid("1:10");
+    .with_action(GactAction::drop());
 ```
 
 ### 5.2 flow Filter
@@ -398,16 +398,17 @@ let filter = FlowFilter::new()
 
 ```rust
 let filter = RouteFilter::new()
-    .from("default")
+    .to_realm(10)
+    .from_realm(5)
     .classid("1:10");
 ```
 
 ### Phase 5 Deliverables
-- [ ] CgroupFilter
-- [ ] FlowFilter
-- [ ] RouteFilter
+- [x] CgroupFilter ✅ **DONE**
+- [ ] FlowFilter (complex - multi-key hashing)
+- [x] RouteFilter ✅ **DONE**
 
-**After Phase 5: nlink has 9 filters vs rtnetlink's 3 (full iproute2 parity)**
+**Phase 5 Progress: 2/3 filters done. nlink now has 8 filters vs rtnetlink's 3**
 
 ---
 
