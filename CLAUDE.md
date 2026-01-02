@@ -42,8 +42,10 @@ crates/nlink/src/
     events.rs         # High-level event monitoring (EventStream, NetworkEvent)
     namespace.rs      # Network namespace utilities
     stats.rs          # Statistics tracking (StatsSnapshot, StatsTracker)
-    tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, etc.)
+    tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, RedConfig, PieConfig, etc.)
     tc_options.rs     # TC options parsing (netem loss models, etc.)
+    filter.rs         # TC filter builders (U32Filter, FlowerFilter, MatchallFilter, FwFilter, BpfFilter, BasicFilter)
+    action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, ActionList)
     messages/         # Strongly-typed message structs
     types/            # RTNetlink message structures (link, addr, route, neigh, rule, tc)
   util/               # Shared utilities (always available)
@@ -397,6 +399,114 @@ conn.add_qdisc_by_index(link.ifindex(), netem).await?;
 // - del_qdisc_by_index / del_qdisc_by_index_full
 // - replace_qdisc_by_index / replace_qdisc_by_index_full
 // - change_qdisc_by_index / change_qdisc_by_index_full
+```
+
+**Adding TC filters:**
+```rust
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::filter::{U32Filter, FlowerFilter, MatchallFilter};
+use std::net::Ipv4Addr;
+
+let conn = Connection::new(Protocol::Route)?;
+
+// U32 filter to match destination port 80
+let filter = U32Filter::new()
+    .classid("1:10")
+    .match_dst_port(80)
+    .build();
+conn.add_filter("eth0", "1:", filter).await?;
+
+// Flower filter to match TCP traffic to 10.0.0.0/8
+let filter = FlowerFilter::new()
+    .classid("1:20")
+    .ip_proto_tcp()
+    .dst_ipv4(Ipv4Addr::new(10, 0, 0, 0), 8)
+    .build();
+conn.add_filter("eth0", "1:", filter).await?;
+
+// Matchall filter for all traffic
+let filter = MatchallFilter::new()
+    .classid("1:30")
+    .build();
+conn.add_filter("eth0", "1:", filter).await?;
+
+// Delete/flush filters
+conn.del_filter("eth0", "1:", "u32").await?;
+conn.flush_filters("eth0", "1:").await?;
+```
+
+**Adding TC actions:**
+```rust
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::action::{GactAction, MirredAction, PoliceAction, ActionList};
+use nlink::netlink::filter::MatchallFilter;
+
+let conn = Connection::new(Protocol::Route)?;
+
+// Drop action
+let drop = GactAction::drop();
+
+// Mirror/redirect to another interface
+let mirror = MirredAction::mirror_egress("eth1");
+let redirect = MirredAction::redirect_egress("eth1");
+
+// Police action for rate limiting
+let police = PoliceAction::new()
+    .rate(1_000_000)  // 1 Mbps
+    .burst(10000)
+    .exceed_drop()
+    .build();
+
+// Combine multiple actions in an ActionList
+let actions = ActionList::new()
+    .with(police)
+    .with(GactAction::pass());
+
+// Attach actions to a filter
+let filter = MatchallFilter::new()
+    .actions(actions)
+    .build();
+conn.add_filter("eth0", "ingress", filter).await?;
+```
+
+**Additional qdisc types:**
+```rust
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::tc::{RedConfig, PieConfig, IngressConfig, ClsactConfig, PfifoConfig, BfifoConfig};
+
+let conn = Connection::new(Protocol::Route)?;
+
+// RED (Random Early Detection) qdisc
+let red = RedConfig::new()
+    .limit(100000)
+    .min(10000)
+    .max(50000)
+    .avpkt(1500)
+    .ecn()
+    .build();
+conn.add_qdisc("eth0", red).await?;
+
+// PIE (Proportional Integral controller Enhanced) qdisc
+let pie = PieConfig::new()
+    .target_ms(15)
+    .tupdate_ms(15)
+    .alpha(2)
+    .beta(20)
+    .ecn()
+    .build();
+conn.add_qdisc("eth0", pie).await?;
+
+// Ingress qdisc (for ingress filtering)
+let ingress = IngressConfig::new();
+conn.add_qdisc("eth0", ingress).await?;
+
+// Clsact qdisc (for BPF programs, both ingress and egress)
+let clsact = ClsactConfig::new();
+conn.add_qdisc("eth0", clsact).await?;
+
+// Simple FIFO qdiscs
+let pfifo = PfifoConfig::new().limit(1000);
+let bfifo = BfifoConfig::new().limit(100000);
 ```
 
 **Building requests (low-level):**
