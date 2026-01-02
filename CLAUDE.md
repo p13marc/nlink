@@ -46,7 +46,7 @@ crates/nlink/src/
     tc_options.rs     # TC options parsing (netem loss models, etc.)
     filter.rs         # TC filter builders (U32Filter, FlowerFilter, MatchallFilter, FwFilter, BpfFilter, BasicFilter, CgroupFilter, RouteFilter, FlowFilter)
     action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ConnmarkAction, CsumAction, SampleAction, CtAction, PeditAction, ActionList)
-    link.rs           # Link type builders (DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, BareudpLink, NetkitLink)
+    link.rs           # Link type builders (DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, BareudpLink, NetkitLink, NlmonLink, VirtWifiLink, VtiLink, Vti6Link, Ip6GreLink, Ip6GretapLink)
     genl/             # Generic Netlink (GENL) support
       mod.rs          # GENL module entry, control family constants
       header.rs       # GenlMsgHdr (4-byte GENL header)
@@ -555,6 +555,44 @@ conn.add_link(
     NetkitLink::new("nk0", "nk1")
         .mode(NetkitMode::L3)
         .policy(NetkitPolicy::Forward)
+).await?;
+
+// Nlmon (Netlink monitor interface for debugging)
+conn.add_link(NlmonLink::new("nlmon0")).await?;
+
+// VirtWifi (Virtual WiFi on top of Ethernet)
+conn.add_link(VirtWifiLink::new("vwifi0", "eth0")).await?;
+
+// VTI (Virtual Tunnel Interface for route-based IPsec)
+conn.add_link(
+    VtiLink::new("vti0")
+        .local(Ipv4Addr::new(10, 0, 0, 1))
+        .remote(Ipv4Addr::new(10, 0, 0, 2))
+        .ikey(100)
+        .okey(100)
+).await?;
+
+// VTI6 (IPv6 Virtual Tunnel Interface)
+use std::net::Ipv6Addr;
+conn.add_link(
+    Vti6Link::new("vti6_0")
+        .local("2001:db8::1".parse()?)
+        .remote("2001:db8::2".parse()?)
+).await?;
+
+// IP6GRE (IPv6 GRE tunnel)
+conn.add_link(
+    Ip6GreLink::new("ip6gre0")
+        .local("2001:db8::1".parse()?)
+        .remote("2001:db8::2".parse()?)
+        .ttl(64)
+).await?;
+
+// IP6GRETAP (Layer 2 IPv6 GRE tunnel for bridging)
+conn.add_link(
+    Ip6GretapLink::new("ip6gretap0")
+        .local("2001:db8::1".parse()?)
+        .remote("2001:db8::2".parse()?)
 ).await?;
 ```
 

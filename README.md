@@ -651,7 +651,7 @@ The library API is production-ready for network monitoring and querying. Current
 - [x] Core netlink socket and connection handling
 - [x] Message building with nested attributes
 - [x] Link operations (show, add, del, set)
-- [x] Link types: dummy, veth, bridge, bond, vlan, vxlan, macvlan, macvtap, ipvlan, vrf, gre, ipip, sit, wireguard, ifb, geneve, bareudp, netkit
+- [x] Link types: dummy, veth, bridge, bond, vlan, vxlan, macvlan, macvtap, ipvlan, vrf, gre, ipip, sit, wireguard, ifb, geneve, bareudp, netkit, nlmon, virt_wifi, vti, vti6, ip6gre, ip6gretap
 - [x] Address operations (show, add, del)
 - [x] Route operations (show, add, del, replace)
 - [x] Neighbor operations (show, add, del, replace)
