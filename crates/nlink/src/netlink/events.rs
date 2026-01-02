@@ -158,6 +158,135 @@ impl NetworkEvent {
             NetworkEvent::NewRoute(_) | NetworkEvent::DelRoute(_) => None,
         }
     }
+
+    /// Returns "new" or "del" based on the event type.
+    ///
+    /// Useful for display/logging purposes.
+    pub fn action(&self) -> &'static str {
+        if self.is_new() { "new" } else { "del" }
+    }
+
+    /// Returns the inner LinkMessage if this is a link event.
+    pub fn as_link(&self) -> Option<&LinkMessage> {
+        match self {
+            NetworkEvent::NewLink(m) | NetworkEvent::DelLink(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Consumes self and returns the inner LinkMessage if this is a link event.
+    pub fn into_link(self) -> Option<LinkMessage> {
+        match self {
+            NetworkEvent::NewLink(m) | NetworkEvent::DelLink(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner AddressMessage if this is an address event.
+    pub fn as_address(&self) -> Option<&AddressMessage> {
+        match self {
+            NetworkEvent::NewAddress(m) | NetworkEvent::DelAddress(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Consumes self and returns the inner AddressMessage if this is an address event.
+    pub fn into_address(self) -> Option<AddressMessage> {
+        match self {
+            NetworkEvent::NewAddress(m) | NetworkEvent::DelAddress(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner RouteMessage if this is a route event.
+    pub fn as_route(&self) -> Option<&RouteMessage> {
+        match self {
+            NetworkEvent::NewRoute(m) | NetworkEvent::DelRoute(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Consumes self and returns the inner RouteMessage if this is a route event.
+    pub fn into_route(self) -> Option<RouteMessage> {
+        match self {
+            NetworkEvent::NewRoute(m) | NetworkEvent::DelRoute(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner NeighborMessage if this is a neighbor event.
+    pub fn as_neighbor(&self) -> Option<&NeighborMessage> {
+        match self {
+            NetworkEvent::NewNeighbor(m) | NetworkEvent::DelNeighbor(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Consumes self and returns the inner NeighborMessage if this is a neighbor event.
+    pub fn into_neighbor(self) -> Option<NeighborMessage> {
+        match self {
+            NetworkEvent::NewNeighbor(m) | NetworkEvent::DelNeighbor(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner TcMessage if this is a TC event (qdisc, class, filter, or action).
+    pub fn as_tc(&self) -> Option<&TcMessage> {
+        match self {
+            NetworkEvent::NewQdisc(m)
+            | NetworkEvent::DelQdisc(m)
+            | NetworkEvent::NewClass(m)
+            | NetworkEvent::DelClass(m)
+            | NetworkEvent::NewFilter(m)
+            | NetworkEvent::DelFilter(m)
+            | NetworkEvent::NewAction(m)
+            | NetworkEvent::DelAction(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Consumes self and returns the inner TcMessage if this is a TC event.
+    pub fn into_tc(self) -> Option<TcMessage> {
+        match self {
+            NetworkEvent::NewQdisc(m)
+            | NetworkEvent::DelQdisc(m)
+            | NetworkEvent::NewClass(m)
+            | NetworkEvent::DelClass(m)
+            | NetworkEvent::NewFilter(m)
+            | NetworkEvent::DelFilter(m)
+            | NetworkEvent::NewAction(m)
+            | NetworkEvent::DelAction(m) => Some(m),
+            _ => None,
+        }
+    }
+}
+
+/// Event types that can be subscribed to.
+///
+/// Used with [`EventStreamBuilder::event_types`] for convenient subscription
+/// based on CLI arguments or configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EventType {
+    /// Link (interface) events.
+    Link,
+    /// IPv4 and IPv6 address events.
+    Address,
+    /// IPv4 address events only.
+    AddressV4,
+    /// IPv6 address events only.
+    AddressV6,
+    /// IPv4 and IPv6 route events.
+    Route,
+    /// IPv4 route events only.
+    RouteV4,
+    /// IPv6 route events only.
+    RouteV6,
+    /// Neighbor (ARP/NDP) events.
+    Neighbor,
+    /// Traffic control events (qdiscs, classes, filters).
+    Tc,
+    /// All event types.
+    All,
 }
 
 /// Namespace configuration for EventStreamBuilder.
@@ -256,6 +385,66 @@ impl EventStreamBuilder {
             .routes(true)
             .neighbors(true)
             .tc(true)
+    }
+
+    /// Subscribe to event types from a slice.
+    ///
+    /// This is convenient when event types come from CLI arguments or configuration.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::events::{EventStream, EventType};
+    ///
+    /// let types = [EventType::Link, EventType::Address];
+    /// let stream = EventStream::builder()
+    ///     .event_types(&types)
+    ///     .build()?;
+    /// ```
+    pub fn event_types(mut self, types: &[EventType]) -> Self {
+        for t in types {
+            match t {
+                EventType::Link => self.links = true,
+                EventType::Address => {
+                    self.addresses_v4 = true;
+                    self.addresses_v6 = true;
+                }
+                EventType::AddressV4 => self.addresses_v4 = true,
+                EventType::AddressV6 => self.addresses_v6 = true,
+                EventType::Route => {
+                    self.routes_v4 = true;
+                    self.routes_v6 = true;
+                }
+                EventType::RouteV4 => self.routes_v4 = true,
+                EventType::RouteV6 => self.routes_v6 = true,
+                EventType::Neighbor => self.neighbors = true,
+                EventType::Tc => self.tc = true,
+                EventType::All => {
+                    self.links = true;
+                    self.addresses_v4 = true;
+                    self.addresses_v6 = true;
+                    self.routes_v4 = true;
+                    self.routes_v6 = true;
+                    self.neighbors = true;
+                    self.tc = true;
+                }
+            }
+        }
+        self
+    }
+
+    /// Subscribe to a single event type.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let stream = EventStream::builder()
+    ///     .event_type(EventType::Link)
+    ///     .event_type(EventType::Tc)
+    ///     .build()?;
+    /// ```
+    pub fn event_type(self, t: EventType) -> Self {
+        self.event_types(&[t])
     }
 
     /// Monitor events in a named network namespace.
