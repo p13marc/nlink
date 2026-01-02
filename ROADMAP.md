@@ -8,17 +8,19 @@ This document outlines a detailed plan to make **nlink** better than **rtnetlink
 
 | Category | rtnetlink | nlink | Gap |
 |----------|:---------:|:-----:|:---:|
-| Link Types | 16 | 12 | -4 |
+| Link Types | 16 | **17** | **+1** ✅ |
 | Address Ops | Full | Full | 0 (nlink has labels/lifetimes) |
 | Route Ops | Full | Full | 0 (nlink has route get) |
 | Neighbor Ops | Full | Good | -1 (proxy ARP) |
 | TC Qdiscs | 2 | 12 | +10 |
 | TC Filters | 3 | 6 | +3 |
-| TC Actions | 3 | 5 | +2 |
+| TC Actions | 3 | **7** | **+4** ✅ |
 | High-level API | No | Yes | +1 |
 | Namespaces | No | Yes | +1 |
 
-**Goal**: Close all gaps where rtnetlink leads, while maintaining and extending nlink's advantages.
+**Progress**: Phases 1-2 complete. nlink now leads rtnetlink in link types and TC actions.
+
+**Remaining Goal**: Close neighbor ops gap (proxy ARP), then extend further.
 
 ---
 
@@ -149,13 +151,13 @@ conn.add_link(netkit).await?;
 - IFLA_NETKIT_PEER_INFO (nested) - peer ifinfomsg + attrs
 
 ### Phase 1 Deliverables
-- [ ] IfbLink (trivial)
-- [ ] MacvtapLink (trivial)
-- [ ] GeneveLink (low effort)
-- [ ] BareudpLink (low effort)
-- [ ] NetkitLink (low effort)
+- [x] IfbLink (trivial) ✅ **DONE**
+- [x] MacvtapLink (trivial) ✅ **DONE**
+- [x] GeneveLink (low effort) ✅ **DONE**
+- [x] BareudpLink (low effort) ✅ **DONE**
+- [x] NetkitLink (low effort) ✅ **DONE**
 
-**After Phase 1: nlink has 17 link types vs rtnetlink's 16** ✓
+**Phase 1 COMPLETE: nlink has 17 link types vs rtnetlink's 16** ✓
 
 ---
 
@@ -254,10 +256,10 @@ let unset_key = TunnelKeyAction::unset();
 - TCA_TUNNEL_KEY_ENC_OPTS (nested) - GENEVE/VXLAN/ERSPAN options
 
 ### Phase 2 Deliverables
-- [ ] NatAction
-- [ ] TunnelKeyAction
+- [x] NatAction ✅ **DONE**
+- [x] TunnelKeyAction ✅ **DONE**
 
-**After Phase 2: nlink has 7 actions vs rtnetlink's 3** ✓
+**Phase 2 COMPLETE: nlink has 7 actions vs rtnetlink's 3** ✓
 
 ---
 

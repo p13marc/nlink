@@ -596,7 +596,7 @@ The library API is production-ready for network monitoring and querying. Current
 - [x] Core netlink socket and connection handling
 - [x] Message building with nested attributes
 - [x] Link operations (show, add, del, set)
-- [x] Link types: dummy, veth, bridge, bond, vlan, vxlan, macvlan, ipvlan, vrf, gre, ipip, sit, wireguard
+- [x] Link types: dummy, veth, bridge, bond, vlan, vxlan, macvlan, macvtap, ipvlan, vrf, gre, ipip, sit, wireguard, ifb, geneve, bareudp, netkit
 - [x] Address operations (show, add, del)
 - [x] Route operations (show, add, del, replace)
 - [x] Neighbor operations (show, add, del, replace)
@@ -609,7 +609,7 @@ The library API is production-ready for network monitoring and querying. Current
 - [x] TC monitor for qdisc/class/filter events
 - [x] TC filter operations (show, add, del)
 - [x] TC filter types: u32 (match ip/ip6/tcp/udp/icmp), flower, matchall, basic, fw, bpf
-- [x] TC actions: gact (pass/drop/pipe), mirred (mirror/redirect), police (rate limiting), vlan (push/pop/modify), skbedit (mark/priority/queue)
+- [x] TC actions: gact (pass/drop/pipe), mirred (mirror/redirect), police (rate limiting), vlan (push/pop/modify), skbedit (mark/priority/queue), nat (snat/dnat), tunnel_key (set/release)
 
 - [x] Network namespace support (ip netns list, add, del, exec, identify, pids, monitor, set, attach)
 - [x] Tunnel management (ip tunnel show, add, del, change) for GRE, IPIP, SIT, VTI
@@ -630,7 +630,7 @@ The library API is production-ready for network monitoring and querying. Current
 - [x] Namespace watching (`NamespaceWatcher` via inotify, `NamespaceEventSubscriber` via netlink)
 - [x] Typed TC options parsing (fq_codel, htb, tbf, netem, prio, sfq, red, pie)
 - [x] TC filter builders (`U32Filter`, `FlowerFilter`, `MatchallFilter`, `FwFilter`, `BpfFilter`, `BasicFilter`)
-- [x] TC action builders (`GactAction`, `MirredAction`, `PoliceAction`, `VlanAction`, `SkbeditAction`, `ActionList`)
+- [x] TC action builders (`GactAction`, `MirredAction`, `PoliceAction`, `VlanAction`, `SkbeditAction`, `NatAction`, `TunnelKeyAction`, `ActionList`)
 - [x] Statistics helpers with rate calculation (`StatsSnapshot`, `StatsTracker`)
 - [x] Thread-safe `Connection` (`Send + Sync`)
 

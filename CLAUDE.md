@@ -45,7 +45,8 @@ crates/nlink/src/
     tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, RedConfig, PieConfig, etc.)
     tc_options.rs     # TC options parsing (netem loss models, etc.)
     filter.rs         # TC filter builders (U32Filter, FlowerFilter, MatchallFilter, FwFilter, BpfFilter, BasicFilter)
-    action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, ActionList)
+    action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ActionList)
+    link.rs           # Link type builders (DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, BareudpLink, NetkitLink)
     messages/         # Strongly-typed message structs
     types/            # RTNetlink message structures (link, addr, route, neigh, rule, tc)
   util/               # Shared utilities (always available)
@@ -467,6 +468,92 @@ let filter = MatchallFilter::new()
     .actions(actions)
     .build();
 conn.add_filter("eth0", "ingress", filter).await?;
+```
+
+**Creating link types:**
+```rust
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::link::{
+    DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, 
+    MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, 
+    BareudpLink, NetkitLink, MacvlanMode, NetkitMode, NetkitPolicy,
+};
+use std::net::Ipv4Addr;
+
+let conn = Connection::new(Protocol::Route)?;
+
+// Dummy interface
+conn.add_link(DummyLink::new("dummy0")).await?;
+
+// Veth pair
+conn.add_link(VethLink::new("veth0", "veth1")).await?;
+
+// IFB (Intermediate Functional Block) for ingress shaping
+conn.add_link(IfbLink::new("ifb0")).await?;
+
+// Macvtap for VM networking
+conn.add_link(
+    MacvtapLink::new("macvtap0", "eth0")
+        .mode(MacvlanMode::Bridge)
+).await?;
+
+// Geneve tunnel
+conn.add_link(
+    GeneveLink::new("geneve0", 100)
+        .remote(Ipv4Addr::new(192, 168, 1, 100))
+        .port(6081)
+        .ttl(64)
+).await?;
+
+// Bareudp for MPLS encapsulation
+conn.add_link(
+    BareudpLink::new("bareudp0", 6635, 0x8847)  // MPLS unicast
+).await?;
+
+// Netkit (BPF-optimized veth)
+conn.add_link(
+    NetkitLink::new("nk0", "nk1")
+        .mode(NetkitMode::L3)
+        .policy(NetkitPolicy::Forward)
+).await?;
+```
+
+**NAT and tunnel_key actions:**
+```rust
+use nlink::netlink::action::{NatAction, TunnelKeyAction, ActionList};
+use nlink::netlink::filter::MatchallFilter;
+use std::net::Ipv4Addr;
+
+// Source NAT: translate 10.0.0.0/8 to 192.168.1.1
+let snat = NatAction::snat(
+    Ipv4Addr::new(10, 0, 0, 0),
+    Ipv4Addr::new(192, 168, 1, 1),
+).prefix(8);
+
+// Destination NAT
+let dnat = NatAction::dnat(
+    Ipv4Addr::new(192, 168, 1, 1),
+    Ipv4Addr::new(10, 0, 0, 1),
+);
+
+// Tunnel key set (for VXLAN/Geneve hardware offload)
+let tunnel_set = TunnelKeyAction::set()
+    .src(Ipv4Addr::new(192, 168, 1, 1))
+    .dst(Ipv4Addr::new(192, 168, 1, 2))
+    .key_id(100)  // VNI
+    .dst_port(4789)
+    .ttl(64)
+    .no_csum()
+    .build();
+
+// Tunnel key release (after decapsulation)
+let tunnel_release = TunnelKeyAction::release();
+
+// Attach to a filter
+let filter = MatchallFilter::new()
+    .actions(ActionList::new().with(snat))
+    .build();
+conn.add_filter("eth0", "egress", filter).await?;
 ```
 
 **Additional qdisc types:**
