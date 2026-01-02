@@ -92,6 +92,13 @@ pub enum Error {
         /// The interface name.
         interface: String,
     },
+
+    /// Generic Netlink family not found.
+    #[error("GENL family not found: {name}")]
+    FamilyNotFound {
+        /// The family name that was not found.
+        name: String,
+    },
 }
 
 impl Error {
@@ -136,7 +143,8 @@ impl Error {
             }
             Self::InterfaceNotFound { .. }
             | Self::NamespaceNotFound { .. }
-            | Self::QdiscNotFound { .. } => true,
+            | Self::QdiscNotFound { .. }
+            | Self::FamilyNotFound { .. } => true,
             _ => false,
         }
     }

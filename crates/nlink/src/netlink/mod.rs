@@ -76,6 +76,7 @@ pub mod events;
 pub mod filter;
 #[cfg(test)]
 mod fixtures;
+pub mod genl;
 pub mod link;
 pub mod message;
 pub mod messages;
