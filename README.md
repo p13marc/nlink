@@ -603,13 +603,13 @@ The library API is production-ready for network monitoring and querying. Current
 - [x] Policy routing rules (ip rule show, add, del, flush)
 - [x] Event monitoring (ip monitor) for link, address, route, neighbor changes
 - [x] TC qdisc operations (show, add, del, replace, change)
-- [x] TC qdisc types: fq_codel, htb, tbf, prio, sfq, netem (with full parameter support)
+- [x] TC qdisc types: fq_codel, htb, tbf, prio, sfq, netem, red, pie, ingress, clsact, pfifo, bfifo
 - [x] TC netem qdisc (delay, loss, reorder, corrupt, duplicate, rate limiting)
 - [x] TC class operations with HTB parameters (rate, ceil, burst, prio, quantum)
 - [x] TC monitor for qdisc/class/filter events
 - [x] TC filter operations (show, add, del)
-- [x] TC filter types: u32 (match ip/ip6/tcp/udp/icmp), flower, basic, fw, bpf
-- [x] TC actions: gact (pass/drop/pipe), mirred (mirror/redirect), police (rate limiting)
+- [x] TC filter types: u32 (match ip/ip6/tcp/udp/icmp), flower, matchall, basic, fw, bpf
+- [x] TC actions: gact (pass/drop/pipe), mirred (mirror/redirect), police (rate limiting), vlan (push/pop/modify), skbedit (mark/priority/queue)
 
 - [x] Network namespace support (ip netns list, add, del, exec, identify, pids, monitor, set, attach)
 - [x] Tunnel management (ip tunnel show, add, del, change) for GRE, IPIP, SIT, VTI
@@ -628,7 +628,9 @@ The library API is production-ready for network monitoring and querying. Current
 - [x] Namespace-aware event monitoring (`EventStream::builder().namespace()`)
 - [x] Namespace-aware TC operations (`add_qdisc_by_index()`, etc.)
 - [x] Namespace watching (`NamespaceWatcher` via inotify, `NamespaceEventSubscriber` via netlink)
-- [x] Typed TC options parsing (fq_codel, htb, tbf, netem, prio, sfq)
+- [x] Typed TC options parsing (fq_codel, htb, tbf, netem, prio, sfq, red, pie)
+- [x] TC filter builders (`U32Filter`, `FlowerFilter`, `MatchallFilter`, `FwFilter`, `BpfFilter`, `BasicFilter`)
+- [x] TC action builders (`GactAction`, `MirredAction`, `PoliceAction`, `VlanAction`, `SkbeditAction`, `ActionList`)
 - [x] Statistics helpers with rate calculation (`StatsSnapshot`, `StatsTracker`)
 - [x] Thread-safe `Connection` (`Send + Sync`)
 

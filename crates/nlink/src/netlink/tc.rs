@@ -959,6 +959,575 @@ impl QdiscConfig for SfqConfig {
 }
 
 // ============================================================================
+// RedConfig
+// ============================================================================
+
+/// RED (Random Early Detection) qdisc configuration.
+///
+/// RED is an Active Queue Management (AQM) algorithm that probabilistically
+/// drops packets before the queue is full to signal congestion.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::RedConfig;
+///
+/// let config = RedConfig::new()
+///     .limit(100 * 1024)    // 100KB limit
+///     .min(30 * 1024)       // 30KB min threshold
+///     .max(90 * 1024)       // 90KB max threshold
+///     .ecn(true)            // Enable ECN marking
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct RedConfig {
+    /// Queue limit in bytes.
+    pub limit: u32,
+    /// Minimum threshold in bytes.
+    pub min: u32,
+    /// Maximum threshold in bytes.
+    pub max: u32,
+    /// Maximum probability (0-255, default ~2%).
+    pub max_p: u8,
+    /// Enable ECN marking.
+    pub ecn: bool,
+    /// Enable hard drop (drop all above max).
+    pub harddrop: bool,
+    /// Enable adaptive RED.
+    pub adaptive: bool,
+    /// Parent handle.
+    pub parent: String,
+    /// Qdisc handle.
+    pub handle: Option<String>,
+}
+
+impl Default for RedConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RedConfig {
+    /// Create a new RED configuration builder.
+    pub fn new() -> Self {
+        Self {
+            limit: 0,
+            min: 0,
+            max: 0,
+            max_p: 5, // ~2% probability
+            ecn: false,
+            harddrop: false,
+            adaptive: false,
+            parent: "root".to_string(),
+            handle: None,
+        }
+    }
+
+    /// Set the parent handle.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = parent.into();
+        self
+    }
+
+    /// Set the qdisc handle.
+    pub fn handle(mut self, handle: impl Into<String>) -> Self {
+        self.handle = Some(handle.into());
+        self
+    }
+
+    /// Set the queue limit in bytes.
+    pub fn limit(mut self, bytes: u32) -> Self {
+        self.limit = bytes;
+        self
+    }
+
+    /// Set the minimum threshold in bytes.
+    pub fn min(mut self, bytes: u32) -> Self {
+        self.min = bytes;
+        self
+    }
+
+    /// Set the maximum threshold in bytes.
+    pub fn max(mut self, bytes: u32) -> Self {
+        self.max = bytes;
+        self
+    }
+
+    /// Set the maximum probability (0-100%).
+    pub fn max_probability(mut self, percent: f64) -> Self {
+        // Convert percentage to 0-255 scale
+        self.max_p = ((percent / 100.0) * 255.0).clamp(0.0, 255.0) as u8;
+        self
+    }
+
+    /// Enable or disable ECN marking.
+    pub fn ecn(mut self, enable: bool) -> Self {
+        self.ecn = enable;
+        self
+    }
+
+    /// Enable or disable hard drop.
+    pub fn harddrop(mut self, enable: bool) -> Self {
+        self.harddrop = enable;
+        self
+    }
+
+    /// Enable or disable adaptive RED.
+    pub fn adaptive(mut self, enable: bool) -> Self {
+        self.adaptive = enable;
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for RedConfig {
+    fn kind(&self) -> &'static str {
+        "red"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::red;
+
+        let mut flags: u8 = 0;
+        if self.ecn {
+            flags |= red::TC_RED_ECN as u8;
+        }
+        if self.harddrop {
+            flags |= red::TC_RED_HARDDROP as u8;
+        }
+        if self.adaptive {
+            flags |= red::TC_RED_ADAPTATIVE as u8;
+        }
+
+        let qopt = red::TcRedQopt {
+            limit: self.limit,
+            qth_min: self.min,
+            qth_max: self.max,
+            wlog: 9,      // Weight log (default)
+            plog: 13,     // Probability log (default)
+            scell_log: 0, // Cell size log
+            flags,
+        };
+
+        builder.append_attr(red::TCA_RED_PARMS, qopt.as_bytes());
+
+        // Add max probability
+        let max_p = (self.max_p as u32) << 24;
+        builder.append_attr_u32(red::TCA_RED_MAX_P, max_p);
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// PieConfig
+// ============================================================================
+
+/// PIE (Proportional Integral controller-Enhanced) qdisc configuration.
+///
+/// PIE is an AQM algorithm that achieves low latency and high throughput.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::PieConfig;
+/// use std::time::Duration;
+///
+/// let config = PieConfig::new()
+///     .target(Duration::from_millis(15))
+///     .limit(1000)
+///     .ecn(true)
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct PieConfig {
+    /// Target delay.
+    pub target: Option<Duration>,
+    /// Queue limit in packets.
+    pub limit: Option<u32>,
+    /// Probability update interval.
+    pub tupdate: Option<Duration>,
+    /// Alpha parameter (P controller).
+    pub alpha: Option<u32>,
+    /// Beta parameter (I controller).
+    pub beta: Option<u32>,
+    /// Enable ECN marking.
+    pub ecn: bool,
+    /// Use byte mode instead of packet mode.
+    pub bytemode: bool,
+    /// Parent handle.
+    pub parent: String,
+    /// Qdisc handle.
+    pub handle: Option<String>,
+}
+
+impl Default for PieConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PieConfig {
+    /// Create a new PIE configuration builder.
+    pub fn new() -> Self {
+        Self {
+            target: None,
+            limit: None,
+            tupdate: None,
+            alpha: None,
+            beta: None,
+            ecn: false,
+            bytemode: false,
+            parent: "root".to_string(),
+            handle: None,
+        }
+    }
+
+    /// Set the parent handle.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = parent.into();
+        self
+    }
+
+    /// Set the qdisc handle.
+    pub fn handle(mut self, handle: impl Into<String>) -> Self {
+        self.handle = Some(handle.into());
+        self
+    }
+
+    /// Set the target delay (default: 15ms).
+    pub fn target(mut self, target: Duration) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    /// Set the queue limit in packets.
+    pub fn limit(mut self, packets: u32) -> Self {
+        self.limit = Some(packets);
+        self
+    }
+
+    /// Set the probability update interval.
+    pub fn tupdate(mut self, interval: Duration) -> Self {
+        self.tupdate = Some(interval);
+        self
+    }
+
+    /// Set the alpha parameter.
+    pub fn alpha(mut self, alpha: u32) -> Self {
+        self.alpha = Some(alpha);
+        self
+    }
+
+    /// Set the beta parameter.
+    pub fn beta(mut self, beta: u32) -> Self {
+        self.beta = Some(beta);
+        self
+    }
+
+    /// Enable or disable ECN marking.
+    pub fn ecn(mut self, enable: bool) -> Self {
+        self.ecn = enable;
+        self
+    }
+
+    /// Enable or disable byte mode.
+    pub fn bytemode(mut self, enable: bool) -> Self {
+        self.bytemode = enable;
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for PieConfig {
+    fn kind(&self) -> &'static str {
+        "pie"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::pie;
+
+        if let Some(target) = self.target {
+            builder.append_attr_u32(pie::TCA_PIE_TARGET, target.as_micros() as u32);
+        }
+        if let Some(limit) = self.limit {
+            builder.append_attr_u32(pie::TCA_PIE_LIMIT, limit);
+        }
+        if let Some(tupdate) = self.tupdate {
+            builder.append_attr_u32(pie::TCA_PIE_TUPDATE, tupdate.as_micros() as u32);
+        }
+        if let Some(alpha) = self.alpha {
+            builder.append_attr_u32(pie::TCA_PIE_ALPHA, alpha);
+        }
+        if let Some(beta) = self.beta {
+            builder.append_attr_u32(pie::TCA_PIE_BETA, beta);
+        }
+        if self.ecn {
+            builder.append_attr_u32(pie::TCA_PIE_ECN, 1);
+        }
+        if self.bytemode {
+            builder.append_attr_u32(pie::TCA_PIE_BYTEMODE, 1);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// IngressConfig
+// ============================================================================
+
+/// Ingress qdisc configuration.
+///
+/// The ingress qdisc is used for ingress traffic processing and filtering.
+/// It's typically used with filters to classify/police incoming traffic.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::IngressConfig;
+///
+/// // Add ingress qdisc for filtering incoming traffic
+/// conn.add_qdisc_full("eth0", "ingress", None, IngressConfig::new()).await?;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct IngressConfig;
+
+impl IngressConfig {
+    /// Create a new ingress configuration.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl QdiscConfig for IngressConfig {
+    fn kind(&self) -> &'static str {
+        "ingress"
+    }
+
+    fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
+        // Ingress qdisc has no options
+        Ok(())
+    }
+}
+
+// ============================================================================
+// ClsactConfig
+// ============================================================================
+
+/// Clsact qdisc configuration.
+///
+/// The clsact qdisc is similar to ingress but provides both ingress and
+/// egress traffic processing. It's commonly used with BPF programs.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::ClsactConfig;
+///
+/// // Add clsact qdisc for BPF program attachment
+/// conn.add_qdisc_full("eth0", "clsact", None, ClsactConfig::new()).await?;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct ClsactConfig;
+
+impl ClsactConfig {
+    /// Create a new clsact configuration.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl QdiscConfig for ClsactConfig {
+    fn kind(&self) -> &'static str {
+        "clsact"
+    }
+
+    fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
+        // Clsact qdisc has no options
+        Ok(())
+    }
+}
+
+// ============================================================================
+// PfifoConfig
+// ============================================================================
+
+/// Pfifo (packet FIFO) qdisc configuration.
+///
+/// Simple FIFO queueing with a packet-based limit.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::PfifoConfig;
+///
+/// let config = PfifoConfig::new()
+///     .limit(1000)  // 1000 packets
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct PfifoConfig {
+    /// Queue limit in packets.
+    pub limit: u32,
+    /// Parent handle.
+    pub parent: String,
+    /// Qdisc handle.
+    pub handle: Option<String>,
+}
+
+impl Default for PfifoConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PfifoConfig {
+    /// Create a new pfifo configuration builder.
+    pub fn new() -> Self {
+        Self {
+            limit: 1000,
+            parent: "root".to_string(),
+            handle: None,
+        }
+    }
+
+    /// Set the parent handle.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = parent.into();
+        self
+    }
+
+    /// Set the qdisc handle.
+    pub fn handle(mut self, handle: impl Into<String>) -> Self {
+        self.handle = Some(handle.into());
+        self
+    }
+
+    /// Set the queue limit in packets.
+    pub fn limit(mut self, packets: u32) -> Self {
+        self.limit = packets;
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for PfifoConfig {
+    fn kind(&self) -> &'static str {
+        "pfifo"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::fifo::TcFifoQopt;
+
+        let qopt = TcFifoQopt::new(self.limit);
+        builder.append(&qopt);
+        Ok(())
+    }
+}
+
+// ============================================================================
+// BfifoConfig
+// ============================================================================
+
+/// Bfifo (byte FIFO) qdisc configuration.
+///
+/// Simple FIFO queueing with a byte-based limit.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::BfifoConfig;
+///
+/// let config = BfifoConfig::new()
+///     .limit(100 * 1024)  // 100KB
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct BfifoConfig {
+    /// Queue limit in bytes.
+    pub limit: u32,
+    /// Parent handle.
+    pub parent: String,
+    /// Qdisc handle.
+    pub handle: Option<String>,
+}
+
+impl Default for BfifoConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BfifoConfig {
+    /// Create a new bfifo configuration builder.
+    pub fn new() -> Self {
+        Self {
+            limit: 100 * 1024, // 100KB default
+            parent: "root".to_string(),
+            handle: None,
+        }
+    }
+
+    /// Set the parent handle.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = parent.into();
+        self
+    }
+
+    /// Set the qdisc handle.
+    pub fn handle(mut self, handle: impl Into<String>) -> Self {
+        self.handle = Some(handle.into());
+        self
+    }
+
+    /// Set the queue limit in bytes.
+    pub fn limit(mut self, bytes: u32) -> Self {
+        self.limit = bytes;
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for BfifoConfig {
+    fn kind(&self) -> &'static str {
+        "bfifo"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::fifo::TcFifoQopt;
+
+        let qopt = TcFifoQopt::new(self.limit);
+        builder.append(&qopt);
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Helper functions
 // ============================================================================
 
