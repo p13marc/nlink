@@ -537,3 +537,25 @@ mod tests {
         assert_eq!(msg.priority(), 100);
     }
 }
+
+// ============================================================================
+// Type Aliases for Discoverability
+// ============================================================================
+
+/// Type alias for [`TcMessage`] when working with qdiscs.
+///
+/// This is the same type as `TcMessage` but provides better discoverability
+/// when working specifically with qdisc operations.
+pub type QdiscMessage = TcMessage;
+
+/// Type alias for [`TcMessage`] when working with TC classes.
+///
+/// This is the same type as `TcMessage` but provides better discoverability
+/// when working specifically with class operations (HTB, HFSC, etc.).
+pub type ClassMessage = TcMessage;
+
+/// Type alias for [`TcMessage`] when working with TC filters.
+///
+/// This is the same type as `TcMessage` but provides better discoverability
+/// when working specifically with filter operations (u32, flower, etc.).
+pub type FilterMessage = TcMessage;

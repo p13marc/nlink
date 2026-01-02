@@ -432,7 +432,7 @@ impl Connection {
     }
 
     /// Get IP addresses for a specific interface by index.
-    pub async fn get_addresses_for_index(&self, ifindex: u32) -> Result<Vec<AddressMessage>> {
+    pub async fn get_addresses_by_index(&self, ifindex: u32) -> Result<Vec<AddressMessage>> {
         let addresses = self.get_addresses().await?;
         Ok(addresses
             .into_iter()
@@ -565,6 +565,49 @@ impl Connection {
         Ok(qdiscs
             .into_iter()
             .find(|q| q.ifindex() == ifindex && q.is_root()))
+    }
+
+    /// Get a qdisc by interface name and handle.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Get the qdisc with handle 1:0 on eth0
+    /// if let Some(qdisc) = conn.get_qdisc_by_handle("eth0", "1:").await? {
+    ///     println!("Found qdisc: {}", qdisc.kind().unwrap_or("?"));
+    /// }
+    /// ```
+    pub async fn get_qdisc_by_handle(
+        &self,
+        ifname: &str,
+        handle: &str,
+    ) -> Result<Option<TcMessage>> {
+        let ifindex = ifname_to_index(ifname)?;
+        self.get_qdisc_by_handle_index(ifindex, handle).await
+    }
+
+    /// Get a qdisc by interface index and handle.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Get the qdisc with handle 1:0 on interface index 2
+    /// if let Some(qdisc) = conn.get_qdisc_by_handle_index(2, "1:").await? {
+    ///     println!("Found qdisc: {}", qdisc.kind().unwrap_or("?"));
+    /// }
+    /// ```
+    pub async fn get_qdisc_by_handle_index(
+        &self,
+        ifindex: u32,
+        handle: &str,
+    ) -> Result<Option<TcMessage>> {
+        use super::types::tc::tc_handle;
+        let target_handle = tc_handle::parse(handle)
+            .ok_or_else(|| Error::InvalidMessage(format!("invalid handle: {}", handle)))?;
+        let qdiscs = self.get_qdiscs().await?;
+        Ok(qdiscs
+            .into_iter()
+            .find(|q| q.ifindex() == ifindex && q.handle() == target_handle))
     }
 
     /// Get netem options for an interface, if a netem qdisc is configured at root.

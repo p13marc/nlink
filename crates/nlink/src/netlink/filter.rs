@@ -39,7 +39,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use super::Connection;
 use super::action::ActionList;
 use super::builder::MessageBuilder;
-use super::connection::create_request;
+use super::connection::{ack_request, create_request, replace_request};
 use super::error::{Error, Result};
 use super::message::NlMsgType;
 use super::types::tc::filter::{basic, bpf, flower, fw, matchall, u32 as u32_mod};
@@ -1705,6 +1705,177 @@ impl Connection {
             .with_info(info);
 
         let mut builder = create_request(NlMsgType::RTM_NEWTFILTER);
+        builder.append(&tcmsg);
+
+        builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
+
+        let options_token = builder.nest_start(TcaAttr::Options as u16);
+        config.write_options(&mut builder)?;
+        builder.nest_end(options_token);
+
+        self.request_ack(builder).await
+    }
+
+    /// Replace a filter on an interface (create if not exists).
+    ///
+    /// This uses NLM_F_CREATE | NLM_F_REPLACE flags to atomically replace
+    /// an existing filter or create a new one.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let filter = U32Filter::new()
+    ///     .classid("1:10")
+    ///     .match_dst_port(80)
+    ///     .build();
+    /// conn.replace_filter("eth0", "1:", filter).await?;
+    /// ```
+    pub async fn replace_filter(
+        &self,
+        dev: &str,
+        parent: &str,
+        config: impl FilterConfig,
+    ) -> Result<()> {
+        let ifindex = get_ifindex(dev)?;
+        self.replace_filter_by_index_full(ifindex, parent, None, 0x0800, 0, config)
+            .await
+    }
+
+    /// Replace a filter with explicit parameters.
+    pub async fn replace_filter_full(
+        &self,
+        dev: &str,
+        parent: &str,
+        handle: Option<&str>,
+        protocol: u16,
+        priority: u16,
+        config: impl FilterConfig,
+    ) -> Result<()> {
+        let ifindex = get_ifindex(dev)?;
+        self.replace_filter_by_index_full(ifindex, parent, handle, protocol, priority, config)
+            .await
+    }
+
+    /// Replace a filter by interface index.
+    pub async fn replace_filter_by_index(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        config: impl FilterConfig,
+    ) -> Result<()> {
+        self.replace_filter_by_index_full(ifindex, parent, None, 0x0800, 0, config)
+            .await
+    }
+
+    /// Replace a filter by interface index with explicit parameters.
+    pub async fn replace_filter_by_index_full(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        handle: Option<&str>,
+        protocol: u16,
+        priority: u16,
+        config: impl FilterConfig,
+    ) -> Result<()> {
+        let parent_handle = parse_handle(parent)?;
+        let filter_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
+
+        let info = ((protocol as u32) << 16) | (priority as u32);
+
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent_handle)
+            .with_handle(filter_handle)
+            .with_info(info);
+
+        let mut builder = replace_request(NlMsgType::RTM_NEWTFILTER);
+        builder.append(&tcmsg);
+
+        builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
+
+        let options_token = builder.nest_start(TcaAttr::Options as u16);
+        config.write_options(&mut builder)?;
+        builder.nest_end(options_token);
+
+        self.request_ack(builder).await
+    }
+
+    /// Change an existing filter's parameters.
+    ///
+    /// Unlike `replace_filter`, this fails if the filter doesn't exist.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let filter = U32Filter::new()
+    ///     .classid("1:20")  // Change to different class
+    ///     .match_dst_port(80)
+    ///     .build();
+    /// conn.change_filter("eth0", "1:", 0x0800, 100, filter).await?;
+    /// ```
+    pub async fn change_filter(
+        &self,
+        dev: &str,
+        parent: &str,
+        protocol: u16,
+        priority: u16,
+        config: impl FilterConfig,
+    ) -> Result<()> {
+        let ifindex = get_ifindex(dev)?;
+        self.change_filter_by_index_full(ifindex, parent, None, protocol, priority, config)
+            .await
+    }
+
+    /// Change a filter with explicit handle.
+    pub async fn change_filter_full(
+        &self,
+        dev: &str,
+        parent: &str,
+        handle: Option<&str>,
+        protocol: u16,
+        priority: u16,
+        config: impl FilterConfig,
+    ) -> Result<()> {
+        let ifindex = get_ifindex(dev)?;
+        self.change_filter_by_index_full(ifindex, parent, handle, protocol, priority, config)
+            .await
+    }
+
+    /// Change a filter by interface index.
+    pub async fn change_filter_by_index(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        protocol: u16,
+        priority: u16,
+        config: impl FilterConfig,
+    ) -> Result<()> {
+        self.change_filter_by_index_full(ifindex, parent, None, protocol, priority, config)
+            .await
+    }
+
+    /// Change a filter by interface index with explicit handle.
+    pub async fn change_filter_by_index_full(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        handle: Option<&str>,
+        protocol: u16,
+        priority: u16,
+        config: impl FilterConfig,
+    ) -> Result<()> {
+        let parent_handle = parse_handle(parent)?;
+        let filter_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
+
+        let info = ((protocol as u32) << 16) | (priority as u32);
+
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent_handle)
+            .with_handle(filter_handle)
+            .with_info(info);
+
+        let mut builder = ack_request(NlMsgType::RTM_NEWTFILTER);
         builder.append(&tcmsg);
 
         builder.append_attr_str(TcaAttr::Kind as u16, config.kind());

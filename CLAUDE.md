@@ -85,6 +85,27 @@ crates/nlink/src/
 - `bins/tc/` - Traffic control (depends on `nlink` with `tc`, `output` features)
 - `bins/ss/` - Socket statistics (depends on `nlink` with `sockdiag`, `output` features)
 
+## Crate Root Re-exports
+
+Common types are re-exported at the crate root for convenience:
+
+```rust
+// Instead of:
+use nlink::netlink::{Connection, Error, Protocol, Result};
+use nlink::netlink::events::{EventStream, NetworkEvent};
+use nlink::netlink::messages::TcMessage;
+
+// You can use:
+use nlink::{Connection, Error, Protocol, Result};
+use nlink::{EventStream, NetworkEvent};
+use nlink::{TcMessage, QdiscMessage, ClassMessage, FilterMessage};
+```
+
+Type aliases for TC messages improve discoverability:
+- `QdiscMessage` = `TcMessage`
+- `ClassMessage` = `TcMessage`  
+- `FilterMessage` = `TcMessage`
+
 ## Key Patterns
 
 **High-level queries (preferred for library use):**
@@ -235,6 +256,35 @@ for qdisc in &qdiscs {
     if let Some(QdiscOptions::Netem(netem)) = qdisc.parsed_options() {
         // Same fields available
     }
+}
+```
+
+**Applying netem configuration (convenience methods):**
+```rust
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::tc::NetemConfig;
+use std::time::Duration;
+
+let conn = Connection::new(Protocol::Route)?;
+
+// Apply netem to an interface (replaces any existing root qdisc)
+let netem = NetemConfig::new()
+    .delay(Duration::from_millis(100))
+    .jitter(Duration::from_millis(10))
+    .loss(1.0)
+    .build();
+conn.apply_netem("eth0", netem).await?;
+
+// Or by interface index (for namespace operations)
+conn.apply_netem_by_index(ifindex, netem).await?;
+
+// Remove netem (restores default qdisc)
+conn.remove_netem("eth0").await?;
+conn.remove_netem_by_index(ifindex).await?;
+
+// Look up a qdisc by handle
+if let Some(qdisc) = conn.get_qdisc_by_handle("eth0", "1:").await? {
+    println!("Found qdisc: {}", qdisc.kind().unwrap_or("?"));
 }
 ```
 
@@ -490,8 +540,14 @@ let filter = MatchallFilter::new()
     .build();
 conn.add_filter("eth0", "1:", filter).await?;
 
+// Replace a filter (create or update)
+conn.replace_filter("eth0", "1:", filter).await?;
+
+// Change an existing filter (fails if not exists)
+conn.change_filter("eth0", "1:", 0x0800, 100, filter).await?;
+
 // Delete/flush filters
-conn.del_filter("eth0", "1:", "u32").await?;
+conn.del_filter("eth0", "1:", 0x0800, 100).await?;
 conn.flush_filters("eth0", "1:").await?;
 ```
 
@@ -877,6 +933,11 @@ match conn.del_qdisc("eth0", "root").await {
     Err(e) if e.is_permission_denied() => println!("Need root"),
     Err(e) if e.is_already_exists() => println!("Already exists"),
     Err(e) if e.is_busy() => println!("Device busy"),
+    Err(e) if e.is_invalid_argument() => println!("Invalid argument"),
+    Err(e) if e.is_no_device() => println!("Device not found"),
+    Err(e) if e.is_not_supported() => println!("Operation not supported"),
+    Err(e) if e.is_network_unreachable() => println!("Network unreachable"),
+    Err(e) if e.is_timeout() => println!("Operation timed out"),
     Err(e) => return Err(e),
 }
 
