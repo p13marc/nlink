@@ -12,11 +12,8 @@ nlink is a from-scratch implementation of Linux netlink-based network management
 - **Async/tokio-native**: Built for async Rust from the ground up
 - **Custom netlink**: No dependency on rtnetlink or netlink-packet-* crates
 - **Type-safe**: Leverage Rust's type system for correctness
-- **Modern CLI**: Not a drop-in replacement for iproute2 - free to improve
 
 ## Installation
-
-Add to your `Cargo.toml`:
 
 ```toml
 # Core netlink functionality
@@ -37,20 +34,19 @@ nlink = { version = "0.1", features = ["full"] }
 | `tuntap` | TUN/TAP device management |
 | `tc` | Traffic control utilities |
 | `output` | JSON/text output formatting |
-| `namespace_watcher` | Filesystem-based namespace watching via inotify |
+| `namespace_watcher` | Namespace watching via inotify |
 | `full` | All features enabled |
 
-## Using as a Library
+## Quick Start
 
 ```rust
 use nlink::netlink::{Connection, Protocol};
-use nlink::netlink::events::{EventStream, NetworkEvent};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
     let conn = Connection::new(Protocol::Route)?;
     
-    // Query network state with convenience methods
+    // Query interfaces
     let links = conn.get_links().await?;
     for link in &links {
         println!("{}: {} (up={})", 
@@ -59,27 +55,21 @@ async fn main() -> nlink::Result<()> {
             link.is_up());
     }
     
-    // Get addresses for a specific interface
-    let addrs = conn.get_addresses_for("eth0").await?;
-    
-    // Get TC qdiscs
-    let qdiscs = conn.get_qdiscs().await?;
-    
     // Modify interface state
     conn.set_link_up("eth0").await?;
     conn.set_link_mtu("eth0", 9000).await?;
     
-    // Monitor network events
+    // Monitor events
+    use nlink::netlink::events::{EventStream, NetworkEvent};
+    
     let mut stream = EventStream::builder()
         .links(true)
         .addresses(true)
-        .tc(true)
         .build()?;
     
     while let Some(event) = stream.next().await? {
         match event {
-            NetworkEvent::NewLink(link) => println!("Link added: {:?}", link.name),
-            NetworkEvent::NewAddress(addr) => println!("Address added: {:?}", addr.address),
+            NetworkEvent::NewLink(link) => println!("Link: {:?}", link.name),
             _ => {}
         }
     }
@@ -88,625 +78,53 @@ async fn main() -> nlink::Result<()> {
 }
 ```
 
-### Working with Network Namespaces
+## Documentation
 
-```rust
-use nlink::netlink::{Connection, Protocol};
-use nlink::netlink::namespace;
-
-#[tokio::main]
-async fn main() -> nlink::Result<()> {
-    // Connect to a named namespace (created via `ip netns add myns`)
-    let conn = namespace::connection_for("myns")?;
-    let links = conn.get_links().await?;
-    
-    // Connect to a container's namespace by PID
-    let conn = namespace::connection_for_pid(1234)?;
-    let links = conn.get_links().await?;
-    
-    // Or use a path directly
-    let conn = Connection::new_in_namespace_path(
-        Protocol::Route,
-        "/proc/1234/ns/net"
-    )?;
-    
-    // List available namespaces
-    for ns in namespace::list()? {
-        println!("Namespace: {}", ns);
-    }
-    
-    Ok(())
-}
-```
-
-### Namespace-aware Event Monitoring
-
-```rust
-use nlink::netlink::events::{EventStream, NetworkEvent};
-
-#[tokio::main]
-async fn main() -> nlink::Result<()> {
-    // Monitor events in a named namespace
-    let mut stream = EventStream::builder()
-        .namespace("myns")
-        .links(true)
-        .tc(true)
-        .build()?;
-    
-    // Or by PID (e.g., container process)
-    let mut stream = EventStream::builder()
-        .namespace_pid(1234)
-        .links(true)
-        .build()?;
-    
-    // Or by path
-    let mut stream = EventStream::builder()
-        .namespace_path("/proc/1234/ns/net")
-        .all()
-        .build()?;
-    
-    while let Some(event) = stream.next().await? {
-        println!("{:?}", event);
-    }
-    
-    Ok(())
-}
-```
-
-### Watching Namespace Changes
-
-Two complementary approaches for monitoring network namespace lifecycle:
-
-```rust
-use nlink::netlink::{NamespaceWatcher, NamespaceEvent};
-use nlink::netlink::{NamespaceEventSubscriber, NamespaceNetlinkEvent};
-
-#[tokio::main]
-async fn main() -> nlink::Result<()> {
-    // Option 1: Filesystem-based watching (feature: namespace_watcher)
-    // Watches /var/run/netns/ for named namespace creation/deletion
-    let mut watcher = NamespaceWatcher::new().await?;
-    
-    while let Some(event) = watcher.recv().await? {
-        match event {
-            NamespaceEvent::Created { name } => println!("Created: {}", name),
-            NamespaceEvent::Deleted { name } => println!("Deleted: {}", name),
-            _ => {}
-        }
-    }
-    
-    // Atomically list existing + watch for changes (no race condition)
-    let (existing, mut watcher) = NamespaceWatcher::list_and_watch().await?;
-    println!("Existing: {:?}", existing);
-    
-    // Option 2: Netlink-based events (always available)
-    // Receives RTM_NEWNSID/RTM_DELNSID kernel events
-    let mut sub = NamespaceEventSubscriber::new().await?;
-    
-    while let Some(event) = sub.recv().await? {
-        match event {
-            NamespaceNetlinkEvent::NewNsId { nsid, pid, fd } => {
-                println!("New NSID {}: pid={:?}", nsid, pid);
-            }
-            NamespaceNetlinkEvent::DelNsId { nsid } => {
-                println!("Deleted NSID {}", nsid);
-            }
-        }
-    }
-    
-    Ok(())
-}
-```
-
-### Namespace-aware TC Operations
-
-For TC operations in namespaces, use the `*_by_index` methods to avoid reading
-`/sys/class/net/` from the host namespace:
-
-```rust
-use nlink::netlink::namespace;
-use nlink::netlink::tc::NetemConfig;
-use std::time::Duration;
-
-#[tokio::main]
-async fn main() -> nlink::Result<()> {
-    let conn = namespace::connection_for("myns")?;
-    
-    // First, get the interface index via netlink (namespace-aware)
-    let link = conn.get_link_by_name("eth0").await?;
-    
-    let netem = NetemConfig::new()
-        .delay(Duration::from_millis(100))
-        .loss(1.0)
-        .build();
-    
-    // Use ifindex instead of device name
-    conn.add_qdisc_by_index(link.ifindex(), netem).await?;
-    
-    // All TC methods have *_by_index variants:
-    // - add_qdisc_by_index / add_qdisc_by_index_full
-    // - del_qdisc_by_index / del_qdisc_by_index_full  
-    // - replace_qdisc_by_index / replace_qdisc_by_index_full
-    // - change_qdisc_by_index / change_qdisc_by_index_full
-    
-    Ok(())
-}
-```
-
-### Reading Existing TC Configurations
-
-The library provides strongly-typed parsing for qdisc options, useful for detecting
-existing TC configurations:
-
-```rust
-use nlink::netlink::{Connection, Protocol};
-use nlink::netlink::tc_options::QdiscOptions;
-
-#[tokio::main]
-async fn main() -> nlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
-    let qdiscs = conn.get_qdiscs_for("eth0").await?;
-    
-    for qdisc in &qdiscs {
-        // Quick type checks
-        if qdisc.is_netem() && qdisc.is_root() {
-            println!("Found root netem qdisc");
-        }
-        
-        // Get netem options with full details
-        if let Some(netem) = qdisc.netem_options() {
-            println!("Netem qdisc detected:");
-            // Time values with convenience methods
-            println!("  delay: {:?}", netem.delay());
-            println!("  jitter: {:?}", netem.jitter());
-            // Percentages
-            println!("  loss: {}% (correlation: {}%)", netem.loss_percent, netem.loss_corr);
-            println!("  duplicate: {}%", netem.duplicate_percent);
-            println!("  reorder: {}% (gap: {})", netem.reorder_percent, netem.gap);
-            println!("  corrupt: {}%", netem.corrupt_percent);
-            // Rate with overhead parameters
-            if netem.rate > 0 {
-                println!("  rate: {} bytes/sec", netem.rate);
-                println!("  packet_overhead: {}, cell_size: {}", 
-                    netem.packet_overhead, netem.cell_size);
-            }
-            // ECN and slot-based transmission
-            println!("  ecn: {}", netem.ecn);
-            if let Some(slot) = &netem.slot {
-                println!("  slot: {}ns - {}ns", slot.min_delay_ns, slot.max_delay_ns);
-            }
-            // Loss models (Gilbert-Intuitive or Gilbert-Elliot)
-            if let Some(loss_model) = &netem.loss_model {
-                use nlink::netlink::tc_options::NetemLossModel;
-                match loss_model {
-                    NetemLossModel::GilbertIntuitive { p13, p31, p32, p14, p23 } => {
-                        println!("  loss model: Gilbert-Intuitive (4-state)");
-                        println!("    p13={:.2}%, p31={:.2}%, p32={:.2}%", p13, p31, p32);
-                    }
-                    NetemLossModel::GilbertElliot { p, r, h, k1 } => {
-                        println!("  loss model: Gilbert-Elliot (2-state)");
-                        println!("    p={:.2}%, r={:.2}%, h={:.2}%, k1={:.2}%", p, r, h, k1);
-                    }
-                }
-            }
-        }
-        
-        // Use parsed_options() for all qdisc types
-        match qdisc.parsed_options() {
-            Some(QdiscOptions::FqCodel(fq)) => {
-                println!("fq_codel: target={}us, interval={}us", fq.target_us, fq.interval_us);
-            }
-            Some(QdiscOptions::Htb(htb)) => {
-                println!("htb: default class={:#x}", htb.default_class);
-            }
-            Some(QdiscOptions::Tbf(tbf)) => {
-                println!("tbf: rate={} bytes/sec, burst={}", tbf.rate, tbf.burst);
-            }
-            Some(QdiscOptions::Netem(netem)) => {
-                println!("netem: loss={}%, delay={:?}", netem.loss_percent, netem.delay());
-            }
-            _ => {}
-        }
-    }
-    
-    Ok(())
-}
-```
-
-### Monitoring TC Statistics
-
-Track throughput and statistics changes over time:
-
-```rust
-use nlink::netlink::{Connection, Protocol};
-use std::time::Duration;
-
-#[tokio::main]
-async fn main() -> nlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
-    
-    let mut prev_stats = None;
-    
-    loop {
-        let qdiscs = conn.get_qdiscs_for("eth0").await?;
-        
-        for qdisc in &qdiscs {
-            // Real-time rate from kernel's rate estimator
-            println!("Rate: {} bps, {} pps", qdisc.bps(), qdisc.pps());
-            
-            // Calculate deltas from previous sample
-            if let (Some(curr), Some(prev)) = (&qdisc.stats_basic, &prev_stats) {
-                let delta = curr.delta(prev);
-                println!("Delta: {} bytes, {} packets", delta.bytes, delta.packets);
-            }
-            
-            // Queue statistics
-            println!("Queue: {} packets, {} drops", qdisc.qlen(), qdisc.drops());
-            
-            prev_stats = qdisc.stats_basic;
-        }
-        
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-}
-```
-
-### WireGuard Configuration via Generic Netlink
-
-Configure WireGuard interfaces using the kernel's Generic Netlink interface:
-
-```rust
-use nlink::netlink::genl::wireguard::{WireguardConnection, AllowedIp};
-use std::net::{Ipv4Addr, SocketAddrV4};
-
-#[tokio::main]
-async fn main() -> nlink::Result<()> {
-    // Create a WireGuard GENL connection
-    let wg = WireguardConnection::new().await?;
-    
-    // Get device information
-    let device = wg.get_device("wg0").await?;
-    println!("Public key: {:?}", device.public_key);
-    println!("Listen port: {:?}", device.listen_port);
-    
-    // List peers and their status
-    for peer in &device.peers {
-        println!("Peer: {:?}", peer.public_key);
-        println!("  Endpoint: {:?}", peer.endpoint);
-        println!("  RX: {} bytes, TX: {} bytes", peer.rx_bytes, peer.tx_bytes);
-        println!("  Allowed IPs: {:?}", peer.allowed_ips);
-    }
-    
-    // Configure device (requires root)
-    let private_key = [0u8; 32]; // Your private key
-    wg.set_device("wg0", |dev| {
-        dev.private_key(private_key)
-           .listen_port(51820)
-    }).await?;
-    
-    // Add a peer
-    let peer_pubkey = [0u8; 32]; // Peer's public key
-    wg.set_peer("wg0", peer_pubkey, |peer| {
-        peer.endpoint(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 51820).into())
-            .persistent_keepalive(25)
-            .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
-            .replace_allowed_ips()
-    }).await?;
-    
-    // Remove a peer
-    wg.remove_peer("wg0", peer_pubkey).await?;
-    
-    Ok(())
-}
-```
-
-### Error Handling with Context
-
-The library provides rich error types with context support for better debugging:
-
-```rust
-use nlink::netlink::{Connection, Protocol, Error};
-use nlink::netlink::error::ValidationErrorInfo;
-
-#[tokio::main]
-async fn main() -> nlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
-    
-    // Check error types for recovery logic
-    match conn.del_qdisc("eth0", "root").await {
-        Ok(()) => println!("Qdisc deleted"),
-        Err(e) if e.is_not_found() => println!("No qdisc to delete"),
-        Err(e) if e.is_permission_denied() => println!("Need root privileges"),
-        Err(e) if e.is_busy() => println!("Device is busy"),
-        Err(e) => return Err(e),
-    }
-    
-    // Semantic error types provide clear messages
-    // Error::InterfaceNotFound { name: "eth99" } -> "interface not found: eth99"
-    // Error::NamespaceNotFound { name: "myns" } -> "namespace not found: myns"
-    // Error::QdiscNotFound { kind: "netem", interface: "eth0" } -> "qdisc not found: netem on eth0"
-    
-    // Automatic error conversion from util types
-    use nlink::util::parse::get_rate;
-    let rate = get_rate("1mbit")?;  // ParseError converts to Error automatically
-    
-    // Structured validation errors
-    let err = Error::validation(vec![
-        ValidationErrorInfo::new("name", "cannot be empty"),
-        ValidationErrorInfo::new("vlan_id", "must be 1-4094"),
-    ]);
-    
-    Ok(())
-}
-```
+- **[Library Usage](docs/library.md)** - Detailed library examples: namespaces, TC, WireGuard, error handling
+- **[CLI Tools](docs/cli.md)** - ip and tc command reference
 
 ## Library Modules
 
-### `nlink::netlink` - Core netlink functionality
+| Module | Description |
+|--------|-------------|
+| `nlink::netlink` | Core netlink: Connection, EventStream, namespace, TC |
+| `nlink::util` | Parsing utilities, address helpers, name resolution |
+| `nlink::sockdiag` | Socket diagnostics (feature: `sockdiag`) |
+| `nlink::tuntap` | TUN/TAP devices (feature: `tuntap`) |
+| `nlink::netlink::genl` | Generic Netlink, WireGuard |
 
-- **High-level API**: `Connection` with convenience query methods (`get_links()`, `get_addresses()`, etc.)
-- **Link state management**: `set_link_up()`, `set_link_down()`, `set_link_mtu()`, `del_link()`
-- **Namespace support**: `Connection::new_in_namespace_path()` and `namespace` module helpers
-- **Namespace watching**: `NamespaceWatcher` (inotify) and `NamespaceEventSubscriber` (netlink)
-- **Event monitoring**: `EventStream` for real-time network change notifications
-- **Strongly-typed messages**: `LinkMessage`, `AddressMessage`, `RouteMessage`, `TcMessage`
-- **TC options parsing**: Typed access to qdisc parameters (fq_codel, htb, tbf, netem, etc.)
-- **Netem loss models**: Support for Gilbert-Intuitive and Gilbert-Elliot state-based loss
-- **Statistics tracking**: `StatsSnapshot` and `StatsTracker` for rate calculation
-- **Error handling**: Semantic error types with `is_not_found()`, `is_permission_denied()`, etc.
-- **Low-level access**: `MessageBuilder` for custom netlink messages
+## Project Status
 
-### `nlink::util` - Shared utilities
+The library API is production-ready for network monitoring and querying.
 
-- Argument parsing (`get_u8`, `get_u16`, `get_u32`, `get_rate`, `get_size`)
-- Address utilities (parse/format IP addresses and prefixes)
-- Name resolution (protocol names, scope names, table names)
-- Interface name/index mapping
+**Implemented:**
 
-### `nlink::sockdiag` - Socket diagnostics (feature: `sockdiag`)
-
-- Query TCP, UDP, Unix, and other socket types
-- Filter by state, port, address, and other criteria
-- Retrieve detailed socket information (memory, TCP info, etc.)
-
-### `nlink::tuntap` - TUN/TAP devices (feature: `tuntap`)
-
-- Create and manage TUN/TAP virtual network devices
-- Set device ownership and permissions
-- Async read/write support
-
-### `nlink::netlink::genl` - Generic Netlink
-
-- `GenlConnection` for GENL family communication
-- Family ID resolution with caching
-- `WireguardConnection` for WireGuard device configuration
-
-### `nlink::tc` - Traffic control (feature: `tc`)
-
-- Qdisc option builders for htb, fq_codel, tbf, netem, etc.
-- Handle parsing and formatting
-- Class and filter builders
-
-### `nlink::output` - Output formatting (feature: `output`)
-
-- Text and JSON output modes
-- `Printable` trait for consistent formatting
-- Configurable options (stats, details, color, numeric)
-
-## Binaries
-
-### ip
-
-Network interface and routing management:
-
-```bash
-# List interfaces
-ip link show
-
-# Create interfaces (each type is a subcommand with specific options)
-ip link add dummy test0
-ip link add veth veth0 --peer veth1
-ip link add bridge br0 --stp --vlan-filtering
-ip link add bond bond0 --mode 802.3ad --miimon 100
-ip link add vlan eth0.100 --link eth0 --id 100
-ip link add vxlan vxlan0 --vni 100 --remote 10.0.0.1 --dstport 4789
-
-# Delete interfaces
-ip link del test0
-
-# Modify interfaces
-ip link set eth0 --up --mtu 9000
-
-# Show addresses
-ip addr show
-
-# Add/remove addresses
-ip addr add 192.168.1.1/24 -d eth0
-ip addr del 192.168.1.1/24 -d eth0
-
-# Show routes
-ip route show
-
-# Add/remove routes
-ip route add 10.0.0.0/8 --via 192.168.1.1
-ip route del 10.0.0.0/8
-
-# Show neighbors
-ip neigh show
-
-# Add/remove neighbors
-ip neigh add 192.168.1.2 --lladdr 00:11:22:33:44:55 -d eth0
-ip neigh del 192.168.1.2 -d eth0
-
-# Show policy routing rules
-ip rule show
-
-# Add/remove rules
-ip rule add --from 10.0.0.0/8 --table 100 --priority 1000
-ip rule add --fwmark 0x100 --table 200
-ip rule del --priority 1000
-
-# Query route for a destination
-ip route get 8.8.8.8
-
-# Flush neighbor entries
-ip neigh flush dev eth0
-
-# Monitor netlink events (link, address, route, neighbor changes)
-ip monitor all
-ip monitor link address --timestamp
-ip monitor -j  # JSON output
-
-# Multicast addresses
-ip maddress show
-ip maddress show dev eth0
-
-# VRF (Virtual Routing and Forwarding)
-ip vrf show
-ip vrf exec vrf0 ping 10.0.0.1
-ip vrf identify $$
-ip vrf pids vrf0
-
-# XFRM (IPSec)
-ip xfrm state show
-ip xfrm state count
-ip xfrm policy show
-ip xfrm policy count
-
-# Network namespaces
-ip netns list
-ip netns add myns
-ip netns exec myns ip link show
-ip netns del myns
-ip netns identify $$  # Identify namespace of a PID
-ip netns pids myns    # List PIDs in a namespace
-ip netns monitor      # Watch namespace creation/deletion
-
-# Tunnels (GRE, IPIP, SIT, VTI)
-ip tunnel show
-ip tunnel add gre1 --mode gre --remote 10.0.0.1 --local 10.0.0.2 --ttl 64
-ip tunnel add tun0 --mode ipip --remote 192.168.1.1 --local 192.168.1.2
-ip tunnel change gre1 --remote 10.0.0.3
-ip tunnel del gre1
-```
-
-### tc
-
-Traffic control (qdisc, class, filter):
-
-```bash
-# List qdiscs
-tc qdisc show
-tc qdisc show dev eth0
-
-# Add qdiscs with type-specific options
-tc qdisc add dev eth0 --parent root htb default 10 r2q 10
-tc qdisc add dev eth0 --parent root fq_codel limit 10000 target 5ms interval 100ms ecn
-tc qdisc add dev eth0 --parent root tbf rate 1mbit burst 32kb limit 100kb
-tc qdisc add dev eth0 --parent root prio bands 3
-tc qdisc add dev eth0 --parent root sfq perturb 10 limit 127
-
-# Replace/change qdiscs
-tc qdisc replace dev eth0 --parent root fq_codel limit 5000
-tc qdisc change dev eth0 --parent root fq_codel target 10ms
-
-# Netem - network emulation (delay, loss, reorder, corrupt, duplicate)
-tc qdisc add dev eth0 --parent root netem delay 100ms 10ms 25%
-tc qdisc add dev eth0 --parent root netem loss 1% 25%
-tc qdisc add dev eth0 --parent root netem duplicate 1%
-tc qdisc add dev eth0 --parent root netem corrupt 0.1%
-tc qdisc add dev eth0 --parent root netem reorder 25% 50% gap 5
-tc qdisc add dev eth0 --parent root netem rate 1mbit
-tc qdisc add dev eth0 --parent root netem delay 100ms loss 1% duplicate 0.5%
-
-# Delete qdiscs
-tc qdisc del dev eth0 --parent root
-
-# List classes
-tc class show
-tc class show dev eth0
-
-# Add HTB classes with rate limiting
-tc class add dev eth0 --parent 1: --classid 1:10 htb rate 10mbit ceil 100mbit prio 1
-tc class add dev eth0 --parent 1: --classid 1:20 htb rate 5mbit ceil 50mbit burst 15k
-
-# Monitor TC events
-tc monitor all
-tc monitor qdisc class --timestamp
-tc monitor -j  # JSON output
-
-# List filters
-tc filter show
-tc filter show dev eth0
-```
+- Core netlink socket and connection handling
+- Link operations (show, add, del, set) with 20+ link types
+- Address, route, neighbor, and rule operations
+- Event monitoring (link, address, route, neighbor, TC)
+- TC qdisc operations with 19 qdisc types
+- TC class, filter (9 types), and action (12 types) support
+- Network namespace support
+- Tunnel management (GRE, IPIP, SIT, VTI)
+- WireGuard configuration via Generic Netlink
+- VRF and XFRM/IPSec support
 
 ## Building
 
 Requires Rust 1.85+ (edition 2024).
 
 ```bash
-# Build all crates and binaries
 cargo build --release
-
-# Run ip command
 cargo run --release -p ip -- link show
-
-# Run tc command
 cargo run --release -p tc -- qdisc show
 ```
-
-## Project Status
-
-The library API is production-ready for network monitoring and querying. Currently implemented:
-
-- [x] Core netlink socket and connection handling
-- [x] Message building with nested attributes
-- [x] Link operations (show, add, del, set)
-- [x] Link types: dummy, veth, bridge, bond, vlan, vxlan, macvlan, macvtap, ipvlan, vrf, gre, ipip, sit, wireguard, ifb, geneve, bareudp, netkit, nlmon, virt_wifi, vti, vti6, ip6gre, ip6gretap
-- [x] Address operations (show, add, del)
-- [x] Route operations (show, add, del, replace)
-- [x] Neighbor operations (show, add, del, replace)
-- [x] Policy routing rules (ip rule show, add, del, flush)
-- [x] Event monitoring (ip monitor) for link, address, route, neighbor changes
-- [x] TC qdisc operations (show, add, del, replace, change)
-- [x] TC qdisc types (19): fq_codel, htb, tbf, prio, sfq, netem, red, pie, ingress, clsact, pfifo, bfifo, drr, qfq, plug, mqprio, etf, hfsc, taprio
-- [x] TC netem qdisc (delay, loss, reorder, corrupt, duplicate, rate limiting)
-- [x] TC class operations with HTB parameters (rate, ceil, burst, prio, quantum)
-- [x] TC monitor for qdisc/class/filter events
-- [x] TC filter operations (show, add, del)
-- [x] TC filter types (9): u32 (match ip/ip6/tcp/udp/icmp), flower, matchall, basic, fw, bpf, cgroup, route, flow
-- [x] TC actions (12): gact, mirred, police, vlan, skbedit, nat, tunnel_key, connmark, csum, sample, ct, pedit
-
-- [x] Network namespace support (ip netns list, add, del, exec, identify, pids, monitor, set, attach)
-- [x] Tunnel management (ip tunnel show, add, del, change) for GRE, IPIP, SIT, VTI
-- [x] Route lookup (ip route get)
-- [x] Neighbor flush (ip neigh flush)
-- [x] Multicast addresses (ip maddress show)
-- [x] VRF management (ip vrf show, exec, identify, pids)
-- [x] XFRM/IPSec framework (ip xfrm state/policy show, count)
-
-**Library features:**
-
-- [x] High-level event stream API (`EventStream`, `NetworkEvent`)
-- [x] Convenience query methods (`get_links()`, `get_addresses()`, `get_qdiscs()`, etc.)
-- [x] Link state management (`set_link_up()`, `set_link_down()`, `set_link_mtu()`, `del_link()`)
-- [x] Namespace-aware connections (`Connection::new_in_namespace_path()`, `namespace` module)
-- [x] Namespace-aware event monitoring (`EventStream::builder().namespace()`)
-- [x] Namespace-aware TC operations (`add_qdisc_by_index()`, etc.)
-- [x] Namespace watching (`NamespaceWatcher` via inotify, `NamespaceEventSubscriber` via netlink)
-- [x] Typed TC options parsing (fq_codel, htb, tbf, netem, prio, sfq, red, pie)
-- [x] TC filter builders (`U32Filter`, `FlowerFilter`, `MatchallFilter`, `FwFilter`, `BpfFilter`, `BasicFilter`)
-- [x] TC action builders (`GactAction`, `MirredAction`, `PoliceAction`, `VlanAction`, `SkbeditAction`, `NatAction`, `TunnelKeyAction`, `ActionList`)
-- [x] Statistics helpers with rate calculation (`StatsSnapshot`, `StatsTracker`)
-- [x] Thread-safe `Connection` (`Send + Sync`)
-- [x] Generic Netlink (GENL) support with family ID resolution and caching
-- [x] WireGuard configuration via GENL (`WireguardConnection`, `WgDevice`, `WgPeer`)
 
 ## License
 
 Licensed under either of:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
