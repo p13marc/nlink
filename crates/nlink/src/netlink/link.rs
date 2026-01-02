@@ -36,7 +36,7 @@
 use std::net::Ipv4Addr;
 
 use super::builder::MessageBuilder;
-use super::connection::{Connection, create_request};
+use super::connection::Connection;
 use super::error::{Error, Result};
 use super::message::NlMsgType;
 use super::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
@@ -206,7 +206,6 @@ impl VethLink {
 
 /// VETH-specific nested attributes
 mod veth {
-    pub const VETH_INFO_UNSPEC: u16 = 0;
     pub const VETH_INFO_PEER: u16 = 1;
 }
 
@@ -314,7 +313,6 @@ pub struct BridgeLink {
 
 /// Bridge-specific attributes (IFLA_BR_*)
 mod bridge {
-    pub const IFLA_BR_UNSPEC: u16 = 0;
     pub const IFLA_BR_FORWARD_DELAY: u16 = 1;
     pub const IFLA_BR_HELLO_TIME: u16 = 2;
     pub const IFLA_BR_MAX_AGE: u16 = 3;
@@ -322,43 +320,7 @@ mod bridge {
     pub const IFLA_BR_STP_STATE: u16 = 5;
     pub const IFLA_BR_PRIORITY: u16 = 6;
     pub const IFLA_BR_VLAN_FILTERING: u16 = 7;
-    pub const IFLA_BR_VLAN_PROTOCOL: u16 = 8;
-    pub const IFLA_BR_GROUP_FWD_MASK: u16 = 9;
-    pub const IFLA_BR_ROOT_ID: u16 = 10;
-    pub const IFLA_BR_BRIDGE_ID: u16 = 11;
-    pub const IFLA_BR_ROOT_PORT: u16 = 12;
-    pub const IFLA_BR_ROOT_PATH_COST: u16 = 13;
-    pub const IFLA_BR_TOPOLOGY_CHANGE: u16 = 14;
-    pub const IFLA_BR_TOPOLOGY_CHANGE_DETECTED: u16 = 15;
-    pub const IFLA_BR_HELLO_TIMER: u16 = 16;
-    pub const IFLA_BR_TCN_TIMER: u16 = 17;
-    pub const IFLA_BR_TOPOLOGY_CHANGE_TIMER: u16 = 18;
-    pub const IFLA_BR_GC_TIMER: u16 = 19;
-    pub const IFLA_BR_GROUP_ADDR: u16 = 20;
-    pub const IFLA_BR_FDB_FLUSH: u16 = 21;
-    pub const IFLA_BR_MCAST_ROUTER: u16 = 22;
-    pub const IFLA_BR_MCAST_SNOOPING: u16 = 23;
-    pub const IFLA_BR_MCAST_QUERY_USE_IFADDR: u16 = 24;
-    pub const IFLA_BR_MCAST_QUERIER: u16 = 25;
-    pub const IFLA_BR_MCAST_HASH_ELASTICITY: u16 = 26;
-    pub const IFLA_BR_MCAST_HASH_MAX: u16 = 27;
-    pub const IFLA_BR_MCAST_LAST_MEMBER_CNT: u16 = 28;
-    pub const IFLA_BR_MCAST_STARTUP_QUERY_CNT: u16 = 29;
-    pub const IFLA_BR_MCAST_LAST_MEMBER_INTVL: u16 = 30;
-    pub const IFLA_BR_MCAST_MEMBERSHIP_INTVL: u16 = 31;
-    pub const IFLA_BR_MCAST_QUERIER_INTVL: u16 = 32;
-    pub const IFLA_BR_MCAST_QUERY_INTVL: u16 = 33;
-    pub const IFLA_BR_MCAST_QUERY_RESPONSE_INTVL: u16 = 34;
-    pub const IFLA_BR_MCAST_STARTUP_QUERY_INTVL: u16 = 35;
-    pub const IFLA_BR_NF_CALL_IPTABLES: u16 = 36;
-    pub const IFLA_BR_NF_CALL_IP6TABLES: u16 = 37;
-    pub const IFLA_BR_NF_CALL_ARPTABLES: u16 = 38;
     pub const IFLA_BR_VLAN_DEFAULT_PVID: u16 = 39;
-    pub const IFLA_BR_PAD: u16 = 40;
-    pub const IFLA_BR_VLAN_STATS_ENABLED: u16 = 41;
-    pub const IFLA_BR_MCAST_STATS_ENABLED: u16 = 42;
-    pub const IFLA_BR_MCAST_IGMP_VERSION: u16 = 43;
-    pub const IFLA_BR_MCAST_MLD_VERSION: u16 = 44;
 }
 
 impl BridgeLink {
@@ -544,11 +506,8 @@ pub struct VlanLink {
 
 /// VLAN-specific attributes (IFLA_VLAN_*)
 mod vlan {
-    pub const IFLA_VLAN_UNSPEC: u16 = 0;
     pub const IFLA_VLAN_ID: u16 = 1;
     pub const IFLA_VLAN_FLAGS: u16 = 2;
-    pub const IFLA_VLAN_EGRESS_QOS: u16 = 3;
-    pub const IFLA_VLAN_INGRESS_QOS: u16 = 4;
     pub const IFLA_VLAN_PROTOCOL: u16 = 5;
 
     /// VLAN flags
@@ -556,7 +515,6 @@ mod vlan {
     pub const VLAN_FLAG_GVRP: u32 = 0x2;
     pub const VLAN_FLAG_LOOSE_BINDING: u32 = 0x4;
     pub const VLAN_FLAG_MVRP: u32 = 0x8;
-    pub const VLAN_FLAG_BRIDGE_BINDING: u32 = 0x10;
 }
 
 /// VLAN flags structure
@@ -769,7 +727,6 @@ pub struct VxlanLink {
 
 /// VXLAN-specific attributes (IFLA_VXLAN_*)
 mod vxlan {
-    pub const IFLA_VXLAN_UNSPEC: u16 = 0;
     pub const IFLA_VXLAN_ID: u16 = 1;
     pub const IFLA_VXLAN_GROUP: u16 = 2;
     pub const IFLA_VXLAN_LINK: u16 = 3;
@@ -777,28 +734,13 @@ mod vxlan {
     pub const IFLA_VXLAN_TTL: u16 = 5;
     pub const IFLA_VXLAN_TOS: u16 = 6;
     pub const IFLA_VXLAN_LEARNING: u16 = 7;
-    pub const IFLA_VXLAN_AGEING: u16 = 8;
-    pub const IFLA_VXLAN_LIMIT: u16 = 9;
     pub const IFLA_VXLAN_PORT_RANGE: u16 = 10;
     pub const IFLA_VXLAN_PROXY: u16 = 11;
     pub const IFLA_VXLAN_RSC: u16 = 12;
     pub const IFLA_VXLAN_L2MISS: u16 = 13;
     pub const IFLA_VXLAN_L3MISS: u16 = 14;
     pub const IFLA_VXLAN_PORT: u16 = 15;
-    pub const IFLA_VXLAN_GROUP6: u16 = 16;
-    pub const IFLA_VXLAN_LOCAL6: u16 = 17;
     pub const IFLA_VXLAN_UDP_CSUM: u16 = 18;
-    pub const IFLA_VXLAN_UDP_ZERO_CSUM6_TX: u16 = 19;
-    pub const IFLA_VXLAN_UDP_ZERO_CSUM6_RX: u16 = 20;
-    pub const IFLA_VXLAN_REMCSUM_TX: u16 = 21;
-    pub const IFLA_VXLAN_REMCSUM_RX: u16 = 22;
-    pub const IFLA_VXLAN_GBP: u16 = 23;
-    pub const IFLA_VXLAN_REMCSUM_NOPARTIAL: u16 = 24;
-    pub const IFLA_VXLAN_COLLECT_METADATA: u16 = 25;
-    pub const IFLA_VXLAN_LABEL: u16 = 26;
-    pub const IFLA_VXLAN_GPE: u16 = 27;
-    pub const IFLA_VXLAN_TTL_INHERIT: u16 = 28;
-    pub const IFLA_VXLAN_DF: u16 = 29;
 }
 
 impl VxlanLink {
@@ -1069,16 +1011,7 @@ pub struct MacvlanLink {
 
 /// Macvlan-specific attributes
 mod macvlan {
-    pub const IFLA_MACVLAN_UNSPEC: u16 = 0;
     pub const IFLA_MACVLAN_MODE: u16 = 1;
-    pub const IFLA_MACVLAN_FLAGS: u16 = 2;
-    pub const IFLA_MACVLAN_MACADDR_MODE: u16 = 3;
-    pub const IFLA_MACVLAN_MACADDR: u16 = 4;
-    pub const IFLA_MACVLAN_MACADDR_DATA: u16 = 5;
-    pub const IFLA_MACVLAN_MACADDR_COUNT: u16 = 6;
-    pub const IFLA_MACVLAN_BC_QUEUE_LEN: u16 = 7;
-    pub const IFLA_MACVLAN_BC_QUEUE_LEN_USED: u16 = 8;
-    pub const IFLA_MACVLAN_BC_CUTOFF: u16 = 9;
 }
 
 impl MacvlanLink {
@@ -1203,7 +1136,6 @@ pub struct IpvlanLink {
 
 /// Ipvlan-specific attributes
 mod ipvlan {
-    pub const IFLA_IPVLAN_UNSPEC: u16 = 0;
     pub const IFLA_IPVLAN_MODE: u16 = 1;
     pub const IFLA_IPVLAN_FLAGS: u16 = 2;
 }

@@ -41,8 +41,6 @@ use super::types::addr::{IfAddrMsg, IfaAttr, Scope, ifa_flags};
 const NLM_F_CREATE: u16 = 0x400;
 /// NLM_F_EXCL flag
 const NLM_F_EXCL: u16 = 0x200;
-/// NLM_F_REPLACE flag
-const NLM_F_REPLACE: u16 = 0x100;
 
 /// Address families
 pub const AF_INET: u8 = 2;
@@ -614,13 +612,13 @@ impl Connection {
     /// This is like `add_address` but will update if the address exists.
     pub async fn replace_address<A: AddressConfig>(&self, config: A) -> Result<()> {
         // We need to rebuild with different flags
-        let mut builder = config.build()?;
+        let builder = config.build()?;
         // Modify flags in the header to use REPLACE instead of CREATE|EXCL
         // We need to rebuild the message with different flags
 
         // Get interface and rebuild with replace flags
         let ifname = config.interface();
-        let ifindex = ifname_to_index(ifname)?;
+        let _ifindex = ifname_to_index(ifname)?;
 
         // For now, just use the build which handles flags internally
         // TODO: Implement proper replace by modifying builder flags

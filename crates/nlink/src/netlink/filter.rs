@@ -795,27 +795,21 @@ impl FilterConfig for MatchallFilter {
 /// ```
 #[derive(Debug, Clone)]
 pub struct FwFilter {
-    /// Firewall mark to match.
-    mark: u32,
     /// Mask for the mark.
     mask: u32,
     /// Target class ID.
     classid: Option<u32>,
-    /// Priority.
-    priority: u16,
-    /// Protocol.
-    protocol: u16,
 }
 
 impl FwFilter {
-    /// Create a new fw filter builder with the specified mark.
-    pub fn new(mark: u32) -> Self {
+    /// Create a new fw filter builder.
+    ///
+    /// Note: The firewall mark is specified as the filter handle when calling
+    /// `add_filter_full()`. Use handle format like "10" for fwmark 10.
+    pub fn new() -> Self {
         Self {
-            mark,
             mask: 0xFFFFFFFF,
             classid: None,
-            priority: 0,
-            protocol: 0x0003, // ETH_P_ALL
         }
     }
 
@@ -837,15 +831,15 @@ impl FwFilter {
         self
     }
 
-    /// Set the priority.
-    pub fn priority(mut self, prio: u16) -> Self {
-        self.priority = prio;
-        self
-    }
-
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
+    }
+}
+
+impl Default for FwFilter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

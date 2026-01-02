@@ -40,8 +40,6 @@ use super::types::neigh::{NdMsg, NdaAttr, NeighborState, ntf, nud};
 const NLM_F_CREATE: u16 = 0x400;
 /// NLM_F_EXCL flag
 const NLM_F_EXCL: u16 = 0x200;
-/// NLM_F_REPLACE flag
-const NLM_F_REPLACE: u16 = 0x100;
 
 /// Address families
 const AF_INET: u8 = 2;

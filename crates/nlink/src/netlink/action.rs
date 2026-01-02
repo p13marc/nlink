@@ -461,15 +461,19 @@ impl ActionConfig for PoliceAction {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::TcRateSpec;
 
-        let mut parms = police::TcPolice::default();
-        parms.rate = TcRateSpec::new(self.rate.min(u32::MAX as u64) as u32);
-        parms.burst = self.burst;
-        parms.mtu = self.mtu;
-        parms.action = self.exceed_action;
+        let peakrate = match self.peakrate {
+            Some(pr) => TcRateSpec::new(pr.min(u32::MAX as u64) as u32),
+            None => TcRateSpec::default(),
+        };
 
-        if let Some(pr) = self.peakrate {
-            parms.peakrate = TcRateSpec::new(pr.min(u32::MAX as u64) as u32);
-        }
+        let parms = police::TcPolice {
+            rate: TcRateSpec::new(self.rate.min(u32::MAX as u64) as u32),
+            burst: self.burst,
+            mtu: self.mtu,
+            action: self.exceed_action,
+            peakrate,
+            ..Default::default()
+        };
 
         builder.append_attr(police::TCA_POLICE_TBF, parms.as_bytes());
 
@@ -478,10 +482,10 @@ impl ActionConfig for PoliceAction {
             builder.append_attr(police::TCA_POLICE_RATE64, &self.rate.to_ne_bytes());
         }
 
-        if let Some(pr) = self.peakrate {
-            if pr > u32::MAX as u64 {
-                builder.append_attr(police::TCA_POLICE_PEAKRATE64, &pr.to_ne_bytes());
-            }
+        if let Some(pr) = self.peakrate
+            && pr > u32::MAX as u64
+        {
+            builder.append_attr(police::TCA_POLICE_PEAKRATE64, &pr.to_ne_bytes());
         }
 
         // Add result action
@@ -651,17 +655,11 @@ pub struct SkbeditAction {
 
 /// Skbedit action attributes.
 mod skbedit {
-    pub const TCA_SKBEDIT_UNSPEC: u16 = 0;
-    pub const TCA_SKBEDIT_TM: u16 = 1;
     pub const TCA_SKBEDIT_PARMS: u16 = 2;
     pub const TCA_SKBEDIT_PRIORITY: u16 = 3;
     pub const TCA_SKBEDIT_QUEUE_MAPPING: u16 = 4;
     pub const TCA_SKBEDIT_MARK: u16 = 5;
-    pub const TCA_SKBEDIT_PAD: u16 = 6;
-    pub const TCA_SKBEDIT_PTYPE: u16 = 7;
     pub const TCA_SKBEDIT_MASK: u16 = 8;
-    pub const TCA_SKBEDIT_FLAGS: u16 = 9;
-    pub const TCA_SKBEDIT_QUEUE_MAPPING_MAX: u16 = 10;
 }
 
 impl SkbeditAction {
@@ -809,7 +807,7 @@ impl ActionList {
     }
 
     /// Add an action to the list.
-    pub fn add<T: ActionConfig + Clone + std::fmt::Debug + 'static>(mut self, action: T) -> Self {
+    pub fn with<T: ActionConfig + Clone + std::fmt::Debug + 'static>(mut self, action: T) -> Self {
         self.actions.push(Box::new(action));
         self
     }

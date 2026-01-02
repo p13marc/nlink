@@ -42,7 +42,7 @@
 //! conn.del_route_v4("192.168.2.0", 24).await?;
 //! ```
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use super::builder::MessageBuilder;
 use super::connection::Connection;
@@ -54,10 +54,6 @@ use super::types::route::{RouteProtocol, RouteScope, RouteType, RtMsg, RtaAttr, 
 const NLM_F_CREATE: u16 = 0x400;
 /// NLM_F_EXCL flag
 const NLM_F_EXCL: u16 = 0x200;
-/// NLM_F_REPLACE flag
-const NLM_F_REPLACE: u16 = 0x100;
-/// NLM_F_APPEND flag
-const NLM_F_APPEND: u16 = 0x800;
 
 /// Address families
 const AF_INET: u8 = 2;
@@ -65,8 +61,6 @@ const AF_INET6: u8 = 10;
 
 /// Route metrics attributes (RTAX_*)
 mod rtax {
-    pub const UNSPEC: u16 = 0;
-    pub const LOCK: u16 = 1;
     pub const MTU: u16 = 2;
     pub const WINDOW: u16 = 3;
     pub const RTT: u16 = 4;
@@ -81,8 +75,6 @@ mod rtax {
     pub const RTO_MIN: u16 = 13;
     pub const INITRWND: u16 = 14;
     pub const QUICKACK: u16 = 15;
-    pub const CC_ALGO: u16 = 16;
-    pub const FASTOPEN_NO_COOKIE: u16 = 17;
 }
 
 /// Nexthop flags (RTNH_F_*)
@@ -274,16 +266,6 @@ pub struct NextHop {
     weight: u8,
     /// Flags
     flags: u8,
-}
-
-/// Nexthop header structure (struct rtnexthop)
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-struct RtNextHop {
-    rtnh_len: u16,
-    rtnh_flags: u8,
-    rtnh_hops: u8, // weight - 1
-    rtnh_ifindex: i32,
 }
 
 impl NextHop {
@@ -594,10 +576,10 @@ impl RouteConfig for Ipv4Route {
         }
 
         // RTA_METRICS
-        if let Some(ref metrics) = self.metrics {
-            if metrics.has_any() {
-                metrics.write_to(&mut builder);
-            }
+        if let Some(ref metrics) = self.metrics
+            && metrics.has_any()
+        {
+            metrics.write_to(&mut builder);
         }
 
         // RTA_MULTIPATH
@@ -882,10 +864,10 @@ impl RouteConfig for Ipv6Route {
         }
 
         // RTA_METRICS
-        if let Some(ref metrics) = self.metrics {
-            if metrics.has_any() {
-                metrics.write_to(&mut builder);
-            }
+        if let Some(ref metrics) = self.metrics
+            && metrics.has_any()
+        {
+            metrics.write_to(&mut builder);
         }
 
         // RTA_MULTIPATH
