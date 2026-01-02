@@ -247,6 +247,39 @@ impl Error {
             _ => None,
         }
     }
+
+    /// Check if this is an "invalid argument" error (EINVAL).
+    ///
+    /// This typically indicates that the kernel rejected the request
+    /// due to invalid parameters (e.g., invalid handle, unsupported option).
+    pub fn is_invalid_argument(&self) -> bool {
+        self.errno() == Some(libc::EINVAL)
+    }
+
+    /// Check if this is a "no such device" error (ENODEV).
+    ///
+    /// This indicates the specified network device does not exist.
+    pub fn is_no_device(&self) -> bool {
+        self.errno() == Some(libc::ENODEV)
+    }
+
+    /// Check if this is a "not supported" error (EOPNOTSUPP).
+    ///
+    /// This indicates the requested operation is not supported by the kernel
+    /// or the specific device/driver.
+    pub fn is_not_supported(&self) -> bool {
+        self.errno() == Some(libc::EOPNOTSUPP)
+    }
+
+    /// Check if this is a "network unreachable" error (ENETUNREACH).
+    pub fn is_network_unreachable(&self) -> bool {
+        self.errno() == Some(libc::ENETUNREACH)
+    }
+
+    /// Check if this is a "connection timed out" error (ETIMEDOUT).
+    pub fn is_timeout(&self) -> bool {
+        self.errno() == Some(libc::ETIMEDOUT)
+    }
 }
 
 #[cfg(test)]

@@ -78,20 +78,42 @@
 //!
 //! # Event Monitoring
 //!
+//! `EventStream` implements the `Stream` trait from `tokio-stream`:
+//!
 //! ```ignore
 //! use nlink::netlink::events::{EventStream, NetworkEvent};
+//! use tokio_stream::StreamExt;
 //!
 //! let mut stream = EventStream::builder()
 //!     .links(true)
 //!     .addresses(true)
 //!     .build()?;
 //!
-//! while let Some(event) = stream.next().await? {
+//! // Use try_next() for familiar ? operator ergonomics
+//! while let Some(event) = stream.try_next().await? {
 //!     match event {
 //!         NetworkEvent::NewLink(link) => println!("New link: {:?}", link.name),
 //!         NetworkEvent::NewAddress(addr) => println!("New address: {:?}", addr.address),
 //!         _ => {}
 //!     }
+//! }
+//! ```
+//!
+//! # Multi-Namespace Event Monitoring
+//!
+//! Monitor events across multiple namespaces simultaneously:
+//!
+//! ```ignore
+//! use nlink::netlink::events::{EventStream, MultiNamespaceEventStream};
+//! use tokio_stream::StreamExt;
+//!
+//! let mut multi = MultiNamespaceEventStream::new();
+//! multi.add("", EventStream::builder().all().build()?);
+//! multi.add("ns1", EventStream::builder().namespace("ns1").all().build()?);
+//!
+//! while let Some(result) = multi.next().await {
+//!     let ev = result?;
+//!     println!("[{}] {:?}", ev.namespace, ev.event);
 //! }
 //! ```
 
@@ -114,3 +136,24 @@ pub mod output;
 
 // Re-export common types at crate root for convenience
 pub use netlink::{Connection, Error, Protocol, Result};
+
+// Event types
+pub use netlink::{
+    EventStream, EventStreamBuilder, MultiNamespaceEventStream, NamespacedEvent, NetworkEvent,
+};
+
+// Namespace types
+pub use netlink::NamespaceSpec;
+
+// Message types (commonly used)
+pub use netlink::messages::{
+    AddressMessage,
+    // Type aliases for TcMessage
+    ClassMessage,
+    FilterMessage,
+    LinkMessage,
+    NeighborMessage,
+    QdiscMessage,
+    RouteMessage,
+    TcMessage,
+};

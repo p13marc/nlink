@@ -2746,6 +2746,58 @@ impl Connection {
 
         self.request_ack(builder).await
     }
+
+    /// Apply a netem configuration to an interface.
+    ///
+    /// This is a convenience method that replaces any existing root qdisc
+    /// with a netem qdisc. It's equivalent to:
+    /// ```ignore
+    /// conn.replace_qdisc(dev, netem).await
+    /// ```
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::tc::NetemConfig;
+    /// use std::time::Duration;
+    ///
+    /// let netem = NetemConfig::new()
+    ///     .delay(Duration::from_millis(100))
+    ///     .jitter(Duration::from_millis(10))
+    ///     .loss(1.0)
+    ///     .build();
+    ///
+    /// conn.apply_netem("eth0", netem).await?;
+    /// ```
+    pub async fn apply_netem(&self, dev: &str, config: NetemConfig) -> Result<()> {
+        self.replace_qdisc(dev, config).await
+    }
+
+    /// Apply a netem configuration by interface index.
+    ///
+    /// This is useful for namespace-aware operations where you've already
+    /// resolved the interface index via `conn.get_link_by_name()`.
+    pub async fn apply_netem_by_index(&self, ifindex: u32, config: NetemConfig) -> Result<()> {
+        self.replace_qdisc_by_index(ifindex, config).await
+    }
+
+    /// Remove netem configuration from an interface.
+    ///
+    /// This deletes the root qdisc, which restores the default qdisc.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.remove_netem("eth0").await?;
+    /// ```
+    pub async fn remove_netem(&self, dev: &str) -> Result<()> {
+        self.del_qdisc(dev, "root").await
+    }
+
+    /// Remove netem configuration by interface index.
+    pub async fn remove_netem_by_index(&self, ifindex: u32) -> Result<()> {
+        self.del_qdisc_by_index(ifindex, "root").await
+    }
 }
 
 #[cfg(test)]
