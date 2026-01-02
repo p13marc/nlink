@@ -85,7 +85,7 @@ impl SockDiag {
         // SAFETY: sockaddr_nl is a C struct that is safe to zero-initialize.
         // All fields are primitive integers with no invalid bit patterns.
         let mut addr = {
-            let mut uninit = MaybeUninit::<libc::sockaddr_nl>::zeroed();
+            let uninit = MaybeUninit::<libc::sockaddr_nl>::zeroed();
             unsafe { uninit.assume_init() }
         };
         addr.nl_family = libc::AF_NETLINK as u16;
