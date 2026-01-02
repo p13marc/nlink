@@ -37,12 +37,16 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use super::Connection;
+use super::action::ActionList;
 use super::builder::MessageBuilder;
 use super::connection::create_request;
 use super::error::{Error, Result};
 use super::message::NlMsgType;
 use super::types::tc::filter::{basic, bpf, flower, fw, matchall, u32 as u32_mod};
 use super::types::tc::{TcMsg, TcaAttr, tc_handle};
+
+/// Ethernet protocol: all protocols.
+const ETH_P_ALL: u16 = 0x0003;
 
 // ============================================================================
 // FilterConfig trait
@@ -1287,6 +1291,314 @@ impl FilterConfig for RouteFilter {
 }
 
 // ============================================================================
+// FlowFilter
+// ============================================================================
+
+/// Flow filter configuration.
+///
+/// The flow filter classifies packets based on various fields and uses
+/// hashing to distribute traffic across classes.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::filter::{FlowFilter, FlowKey};
+///
+/// // Hash based on source and destination addresses
+/// let filter = FlowFilter::new()
+///     .keys(&[FlowKey::Src, FlowKey::Dst])
+///     .mode_hash()
+///     .divisor(256)
+///     .baseclass("1:10")
+///     .build();
+///
+/// conn.add_filter("eth0", "1:", filter).await?;
+///
+/// // Map mode: direct mapping without hashing
+/// let filter = FlowFilter::new()
+///     .key(FlowKey::Mark)
+///     .mode_map()
+///     .baseclass("1:0")
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct FlowFilter {
+    /// Key mask (which fields to use).
+    keys: u32,
+    /// Flow mode (map or hash).
+    mode: u32,
+    /// Base class ID.
+    baseclass: Option<u32>,
+    /// Right shift amount.
+    rshift: Option<u32>,
+    /// Additive constant.
+    addend: Option<u32>,
+    /// Bitwise AND mask.
+    mask: Option<u32>,
+    /// Bitwise XOR value.
+    xor: Option<u32>,
+    /// Hash table divisor.
+    divisor: Option<u32>,
+    /// Hash perturbation interval in seconds.
+    perturb: Option<u32>,
+    /// Filter priority.
+    priority: u16,
+    /// Protocol.
+    protocol: u16,
+    /// Actions to perform.
+    actions: Option<ActionList>,
+}
+
+/// Flow filter keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowKey {
+    /// Source address.
+    Src,
+    /// Destination address.
+    Dst,
+    /// IP protocol.
+    Proto,
+    /// Source port.
+    ProtoSrc,
+    /// Destination port.
+    ProtoDst,
+    /// Input interface.
+    Iif,
+    /// Packet priority.
+    Priority,
+    /// Packet mark.
+    Mark,
+    /// Conntrack state.
+    Nfct,
+    /// Conntrack source.
+    NfctSrc,
+    /// Conntrack destination.
+    NfctDst,
+    /// Conntrack source port.
+    NfctProtoSrc,
+    /// Conntrack destination port.
+    NfctProtoDst,
+    /// Routing realm.
+    RtClassid,
+    /// Socket UID.
+    SkUid,
+    /// Socket GID.
+    SkGid,
+    /// VLAN tag.
+    VlanTag,
+    /// Receive hash.
+    RxHash,
+}
+
+impl FlowKey {
+    fn to_bit(self) -> u32 {
+        use super::types::tc::filter::flow;
+        match self {
+            FlowKey::Src => flow::FLOW_KEY_SRC,
+            FlowKey::Dst => flow::FLOW_KEY_DST,
+            FlowKey::Proto => flow::FLOW_KEY_PROTO,
+            FlowKey::ProtoSrc => flow::FLOW_KEY_PROTO_SRC,
+            FlowKey::ProtoDst => flow::FLOW_KEY_PROTO_DST,
+            FlowKey::Iif => flow::FLOW_KEY_IIF,
+            FlowKey::Priority => flow::FLOW_KEY_PRIORITY,
+            FlowKey::Mark => flow::FLOW_KEY_MARK,
+            FlowKey::Nfct => flow::FLOW_KEY_NFCT,
+            FlowKey::NfctSrc => flow::FLOW_KEY_NFCT_SRC,
+            FlowKey::NfctDst => flow::FLOW_KEY_NFCT_DST,
+            FlowKey::NfctProtoSrc => flow::FLOW_KEY_NFCT_PROTO_SRC,
+            FlowKey::NfctProtoDst => flow::FLOW_KEY_NFCT_PROTO_DST,
+            FlowKey::RtClassid => flow::FLOW_KEY_RTCLASSID,
+            FlowKey::SkUid => flow::FLOW_KEY_SKUID,
+            FlowKey::SkGid => flow::FLOW_KEY_SKGID,
+            FlowKey::VlanTag => flow::FLOW_KEY_VLAN_TAG,
+            FlowKey::RxHash => flow::FLOW_KEY_RXHASH,
+        }
+    }
+}
+
+impl Default for FlowFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FlowFilter {
+    /// Create a new flow filter builder.
+    pub fn new() -> Self {
+        use super::types::tc::filter::flow;
+        Self {
+            keys: 0,
+            mode: flow::FLOW_MODE_MAP,
+            baseclass: None,
+            rshift: None,
+            addend: None,
+            mask: None,
+            xor: None,
+            divisor: None,
+            perturb: None,
+            priority: 0,
+            protocol: ETH_P_ALL,
+            actions: None,
+        }
+    }
+
+    /// Add a single key.
+    pub fn key(mut self, key: FlowKey) -> Self {
+        self.keys |= key.to_bit();
+        self
+    }
+
+    /// Add multiple keys.
+    pub fn keys(mut self, keys: &[FlowKey]) -> Self {
+        for key in keys {
+            self.keys |= key.to_bit();
+        }
+        self
+    }
+
+    /// Set mode to map (direct mapping).
+    pub fn mode_map(mut self) -> Self {
+        use super::types::tc::filter::flow;
+        self.mode = flow::FLOW_MODE_MAP;
+        self
+    }
+
+    /// Set mode to hash (multi-key hashing).
+    pub fn mode_hash(mut self) -> Self {
+        use super::types::tc::filter::flow;
+        self.mode = flow::FLOW_MODE_HASH;
+        self
+    }
+
+    /// Set the base class ID.
+    pub fn baseclass(mut self, classid: &str) -> Self {
+        self.baseclass = tc_handle::parse(classid);
+        self
+    }
+
+    /// Set the base class ID directly.
+    pub fn baseclass_id(mut self, classid: u32) -> Self {
+        self.baseclass = Some(classid);
+        self
+    }
+
+    /// Set the right shift amount.
+    pub fn rshift(mut self, shift: u32) -> Self {
+        self.rshift = Some(shift);
+        self
+    }
+
+    /// Set the additive constant.
+    pub fn addend(mut self, addend: u32) -> Self {
+        self.addend = Some(addend);
+        self
+    }
+
+    /// Set the bitwise AND mask.
+    pub fn mask(mut self, mask: u32) -> Self {
+        self.mask = Some(mask);
+        self
+    }
+
+    /// Set the bitwise XOR value.
+    pub fn xor(mut self, xor: u32) -> Self {
+        self.xor = Some(xor);
+        self
+    }
+
+    /// Set the hash table divisor.
+    pub fn divisor(mut self, divisor: u32) -> Self {
+        self.divisor = Some(divisor);
+        self
+    }
+
+    /// Set the hash perturbation interval in seconds.
+    pub fn perturb(mut self, seconds: u32) -> Self {
+        self.perturb = Some(seconds);
+        self
+    }
+
+    /// Set filter priority.
+    pub fn priority(mut self, priority: u16) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// Set the protocol.
+    pub fn protocol(mut self, protocol: u16) -> Self {
+        self.protocol = protocol;
+        self
+    }
+
+    /// Add actions to perform on matching packets.
+    pub fn actions(mut self, actions: ActionList) -> Self {
+        self.actions = Some(actions);
+        self
+    }
+
+    /// Build the filter configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl FilterConfig for FlowFilter {
+    fn kind(&self) -> &'static str {
+        "flow"
+    }
+
+    fn classid(&self) -> Option<u32> {
+        self.baseclass
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::filter::flow;
+
+        if self.keys != 0 {
+            builder.append_attr_u32(flow::TCA_FLOW_KEYS, self.keys);
+        }
+
+        builder.append_attr_u32(flow::TCA_FLOW_MODE, self.mode);
+
+        if let Some(baseclass) = self.baseclass {
+            builder.append_attr_u32(flow::TCA_FLOW_BASECLASS, baseclass);
+        }
+
+        if let Some(rshift) = self.rshift {
+            builder.append_attr_u32(flow::TCA_FLOW_RSHIFT, rshift);
+        }
+
+        if let Some(addend) = self.addend {
+            builder.append_attr_u32(flow::TCA_FLOW_ADDEND, addend);
+        }
+
+        if let Some(mask) = self.mask {
+            builder.append_attr_u32(flow::TCA_FLOW_MASK, mask);
+        }
+
+        if let Some(xor) = self.xor {
+            builder.append_attr_u32(flow::TCA_FLOW_XOR, xor);
+        }
+
+        if let Some(divisor) = self.divisor {
+            builder.append_attr_u32(flow::TCA_FLOW_DIVISOR, divisor);
+        }
+
+        if let Some(perturb) = self.perturb {
+            builder.append_attr_u32(flow::TCA_FLOW_PERTURB, perturb);
+        }
+
+        if let Some(ref actions) = self.actions {
+            let act_token = builder.nest_start(flow::TCA_FLOW_ACT);
+            actions.write_to(builder)?;
+            builder.nest_end(act_token);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Helper functions
 // ============================================================================
 
@@ -1573,5 +1885,36 @@ mod tests {
         assert_eq!(filter.to_realm, Some(10));
         assert_eq!(filter.from_realm, Some(5));
         assert_eq!(filter.classid, Some(tc_handle::make(1, 0x10)));
+    }
+
+    #[test]
+    fn test_flow_filter_builder() {
+        use crate::netlink::types::tc::filter::flow;
+
+        let filter = FlowFilter::new()
+            .keys(&[FlowKey::Src, FlowKey::Dst])
+            .mode_hash()
+            .divisor(256)
+            .baseclass("1:10")
+            .build();
+
+        assert_eq!(FilterConfig::kind(&filter), "flow");
+        assert_eq!(filter.keys, flow::FLOW_KEY_SRC | flow::FLOW_KEY_DST);
+        assert_eq!(filter.mode, flow::FLOW_MODE_HASH);
+        assert_eq!(filter.divisor, Some(256));
+        assert_eq!(filter.baseclass, Some(tc_handle::make(1, 0x10)));
+
+        // Test single key
+        let filter = FlowFilter::new()
+            .key(FlowKey::Mark)
+            .mode_map()
+            .mask(0xff)
+            .rshift(8)
+            .build();
+
+        assert_eq!(filter.keys, flow::FLOW_KEY_MARK);
+        assert_eq!(filter.mode, flow::FLOW_MODE_MAP);
+        assert_eq!(filter.mask, Some(0xff));
+        assert_eq!(filter.rshift, Some(8));
     }
 }

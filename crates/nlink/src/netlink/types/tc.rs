@@ -1623,6 +1623,47 @@ pub mod filter {
         pub const TCA_ROUTE4_POLICE: u16 = 5;
         pub const TCA_ROUTE4_ACT: u16 = 6;
     }
+
+    /// Flow filter attributes.
+    pub mod flow {
+        pub const TCA_FLOW_UNSPEC: u16 = 0;
+        pub const TCA_FLOW_KEYS: u16 = 1;
+        pub const TCA_FLOW_MODE: u16 = 2;
+        pub const TCA_FLOW_BASECLASS: u16 = 3;
+        pub const TCA_FLOW_RSHIFT: u16 = 4;
+        pub const TCA_FLOW_ADDEND: u16 = 5;
+        pub const TCA_FLOW_MASK: u16 = 6;
+        pub const TCA_FLOW_XOR: u16 = 7;
+        pub const TCA_FLOW_DIVISOR: u16 = 8;
+        pub const TCA_FLOW_ACT: u16 = 9;
+        pub const TCA_FLOW_POLICE: u16 = 10;
+        pub const TCA_FLOW_EMATCHES: u16 = 11;
+        pub const TCA_FLOW_PERTURB: u16 = 12;
+
+        /// Flow modes.
+        pub const FLOW_MODE_MAP: u32 = 0;
+        pub const FLOW_MODE_HASH: u32 = 1;
+
+        /// Flow keys (bit positions for key mask).
+        pub const FLOW_KEY_SRC: u32 = 1 << 0;
+        pub const FLOW_KEY_DST: u32 = 1 << 1;
+        pub const FLOW_KEY_PROTO: u32 = 1 << 2;
+        pub const FLOW_KEY_PROTO_SRC: u32 = 1 << 3;
+        pub const FLOW_KEY_PROTO_DST: u32 = 1 << 4;
+        pub const FLOW_KEY_IIF: u32 = 1 << 5;
+        pub const FLOW_KEY_PRIORITY: u32 = 1 << 6;
+        pub const FLOW_KEY_MARK: u32 = 1 << 7;
+        pub const FLOW_KEY_NFCT: u32 = 1 << 8;
+        pub const FLOW_KEY_NFCT_SRC: u32 = 1 << 9;
+        pub const FLOW_KEY_NFCT_DST: u32 = 1 << 10;
+        pub const FLOW_KEY_NFCT_PROTO_SRC: u32 = 1 << 11;
+        pub const FLOW_KEY_NFCT_PROTO_DST: u32 = 1 << 12;
+        pub const FLOW_KEY_RTCLASSID: u32 = 1 << 13;
+        pub const FLOW_KEY_SKUID: u32 = 1 << 14;
+        pub const FLOW_KEY_SKGID: u32 = 1 << 15;
+        pub const FLOW_KEY_VLAN_TAG: u32 = 1 << 16;
+        pub const FLOW_KEY_RXHASH: u32 = 1 << 17;
+    }
 }
 
 /// Common action attributes.
@@ -2311,6 +2352,178 @@ pub mod action {
                     action,
                     refcnt: 0,
                     bindcnt: 0,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+    }
+
+    /// CT (Connection Tracking) action attributes and structures.
+    pub mod ct {
+        pub const TCA_CT_UNSPEC: u16 = 0;
+        pub const TCA_CT_PARMS: u16 = 1;
+        pub const TCA_CT_TM: u16 = 2;
+        pub const TCA_CT_ACTION: u16 = 3;
+        pub const TCA_CT_ZONE: u16 = 4;
+        pub const TCA_CT_MARK: u16 = 5;
+        pub const TCA_CT_MARK_MASK: u16 = 6;
+        pub const TCA_CT_LABELS: u16 = 7;
+        pub const TCA_CT_LABELS_MASK: u16 = 8;
+        pub const TCA_CT_NAT_IPV4_MIN: u16 = 9;
+        pub const TCA_CT_NAT_IPV4_MAX: u16 = 10;
+        pub const TCA_CT_NAT_IPV6_MIN: u16 = 11;
+        pub const TCA_CT_NAT_IPV6_MAX: u16 = 12;
+        pub const TCA_CT_NAT_PORT_MIN: u16 = 13;
+        pub const TCA_CT_NAT_PORT_MAX: u16 = 14;
+        pub const TCA_CT_PAD: u16 = 15;
+        pub const TCA_CT_HELPER_NAME: u16 = 16;
+        pub const TCA_CT_HELPER_FAMILY: u16 = 17;
+        pub const TCA_CT_HELPER_PROTO: u16 = 18;
+
+        /// CT action flags.
+        pub const TCA_CT_ACT_COMMIT: u16 = 1 << 0;
+        pub const TCA_CT_ACT_FORCE: u16 = 1 << 1;
+        pub const TCA_CT_ACT_CLEAR: u16 = 1 << 2;
+        pub const TCA_CT_ACT_NAT: u16 = 1 << 3;
+        pub const TCA_CT_ACT_NAT_SRC: u16 = 1 << 4;
+        pub const TCA_CT_ACT_NAT_DST: u16 = 1 << 5;
+
+        /// CT action parameters (struct tc_ct - just tc_gen).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcCt {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+        }
+
+        impl TcCt {
+            pub fn new(action: i32) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+    }
+
+    /// Pedit (packet edit) action attributes and structures.
+    pub mod pedit {
+        pub const TCA_PEDIT_UNSPEC: u16 = 0;
+        pub const TCA_PEDIT_TM: u16 = 1;
+        pub const TCA_PEDIT_PARMS: u16 = 2;
+        pub const TCA_PEDIT_PAD: u16 = 3;
+        pub const TCA_PEDIT_PARMS_EX: u16 = 4;
+        pub const TCA_PEDIT_KEYS_EX: u16 = 5;
+        pub const TCA_PEDIT_KEY_EX: u16 = 6;
+
+        /// Pedit key extended attributes.
+        pub const TCA_PEDIT_KEY_EX_HTYPE: u16 = 1;
+        pub const TCA_PEDIT_KEY_EX_CMD: u16 = 2;
+
+        /// Pedit header types.
+        pub const TCA_PEDIT_KEY_EX_HDR_TYPE_NETWORK: u16 = 0;
+        pub const TCA_PEDIT_KEY_EX_HDR_TYPE_ETH: u16 = 1;
+        pub const TCA_PEDIT_KEY_EX_HDR_TYPE_IP4: u16 = 2;
+        pub const TCA_PEDIT_KEY_EX_HDR_TYPE_IP6: u16 = 3;
+        pub const TCA_PEDIT_KEY_EX_HDR_TYPE_TCP: u16 = 4;
+        pub const TCA_PEDIT_KEY_EX_HDR_TYPE_UDP: u16 = 5;
+
+        /// Pedit commands.
+        pub const TCA_PEDIT_KEY_EX_CMD_SET: u16 = 0;
+        pub const TCA_PEDIT_KEY_EX_CMD_ADD: u16 = 1;
+
+        /// Pedit key (struct tc_pedit_key).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcPeditKey {
+            /// Mask of bits to modify.
+            pub mask: u32,
+            /// Value to set.
+            pub val: u32,
+            /// Offset within the header.
+            pub off: u32,
+            /// Which header at that offset.
+            pub at: u32,
+            /// Offset mask.
+            pub offmask: u32,
+            /// Shift amount.
+            pub shift: u32,
+        }
+
+        impl TcPeditKey {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn new(mask: u32, val: u32, off: u32) -> Self {
+                Self {
+                    mask,
+                    val,
+                    off,
+                    at: 0,
+                    offmask: 0,
+                    shift: 0,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self as *const Self as *const u8,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+
+        /// Pedit selector header (struct tc_pedit_sel without keys array).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct TcPeditSel {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+            /// Number of keys.
+            pub nkeys: u8,
+            /// Flags.
+            pub flags: u8,
+        }
+
+        impl TcPeditSel {
+            pub fn new(action: i32, nkeys: u8) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                    nkeys,
+                    flags: 0,
                 }
             }
 

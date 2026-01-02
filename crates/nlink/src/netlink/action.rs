@@ -31,7 +31,7 @@ use std::net::Ipv4Addr;
 use super::builder::MessageBuilder;
 use super::error::{Error, Result};
 use super::types::tc::action::{
-    self, TcGen, connmark, csum, gact, mirred, nat, police, sample, tunnel_key, vlan,
+    self, TcGen, connmark, csum, ct, gact, mirred, nat, pedit, police, sample, tunnel_key, vlan,
 };
 
 // ============================================================================
@@ -1404,6 +1404,593 @@ impl ActionConfig for SampleAction {
 }
 
 // ============================================================================
+// CtAction (Connection Tracking)
+// ============================================================================
+
+/// CT (Connection Tracking) action configuration.
+///
+/// The ct action performs connection tracking on packets. It can commit new
+/// connections, restore connection state, perform NAT, and set marks/labels.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::action::CtAction;
+///
+/// // Simple connection tracking (restore state)
+/// let ct = CtAction::new();
+///
+/// // Commit a new connection
+/// let ct = CtAction::commit();
+///
+/// // Force commit (even if already committed)
+/// let ct = CtAction::commit().force();
+///
+/// // Clear connection tracking state
+/// let ct = CtAction::clear();
+///
+/// // SNAT with IP range and port range
+/// let ct = CtAction::commit()
+///     .nat_src("10.0.0.1".parse()?, "10.0.0.10".parse()?)
+///     .nat_port_range(1024, 65535);
+///
+/// // DNAT to specific IP
+/// let ct = CtAction::commit()
+///     .nat_dst_single("192.168.1.1".parse()?);
+///
+/// // With zone and mark
+/// let ct = CtAction::commit()
+///     .zone(1)
+///     .mark(0x100, 0xffffffff);
+/// ```
+#[derive(Debug, Clone)]
+pub struct CtAction {
+    /// CT action flags.
+    ct_action: u16,
+    /// Connection tracking zone.
+    zone: Option<u16>,
+    /// Mark value.
+    mark: Option<u32>,
+    /// Mark mask.
+    mark_mask: Option<u32>,
+    /// Labels (up to 128 bits).
+    labels: Option<[u8; 16]>,
+    /// Labels mask.
+    labels_mask: Option<[u8; 16]>,
+    /// NAT IPv4 min address.
+    nat_ipv4_min: Option<Ipv4Addr>,
+    /// NAT IPv4 max address.
+    nat_ipv4_max: Option<Ipv4Addr>,
+    /// NAT IPv6 min address.
+    nat_ipv6_min: Option<std::net::Ipv6Addr>,
+    /// NAT IPv6 max address.
+    nat_ipv6_max: Option<std::net::Ipv6Addr>,
+    /// NAT port min.
+    nat_port_min: Option<u16>,
+    /// NAT port max.
+    nat_port_max: Option<u16>,
+    /// Helper name.
+    helper_name: Option<String>,
+    /// Helper address family.
+    helper_family: Option<u8>,
+    /// Helper protocol.
+    helper_proto: Option<u8>,
+    /// Action result.
+    action: i32,
+}
+
+impl Default for CtAction {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CtAction {
+    /// Create a new CT action (restore connection state).
+    pub fn new() -> Self {
+        Self {
+            ct_action: 0,
+            zone: None,
+            mark: None,
+            mark_mask: None,
+            labels: None,
+            labels_mask: None,
+            nat_ipv4_min: None,
+            nat_ipv4_max: None,
+            nat_ipv6_min: None,
+            nat_ipv6_max: None,
+            nat_port_min: None,
+            nat_port_max: None,
+            helper_name: None,
+            helper_family: None,
+            helper_proto: None,
+            action: action::TC_ACT_PIPE,
+        }
+    }
+
+    /// Create a CT action that commits the connection.
+    pub fn commit() -> Self {
+        let mut s = Self::new();
+        s.ct_action = ct::TCA_CT_ACT_COMMIT;
+        s
+    }
+
+    /// Create a CT action that clears connection state.
+    pub fn clear() -> Self {
+        let mut s = Self::new();
+        s.ct_action = ct::TCA_CT_ACT_CLEAR;
+        s
+    }
+
+    /// Force commit even if already tracked.
+    pub fn force(mut self) -> Self {
+        self.ct_action |= ct::TCA_CT_ACT_FORCE;
+        self
+    }
+
+    /// Set connection tracking zone.
+    pub fn zone(mut self, zone: u16) -> Self {
+        self.zone = Some(zone);
+        self
+    }
+
+    /// Set mark value and mask.
+    pub fn mark(mut self, mark: u32, mask: u32) -> Self {
+        self.mark = Some(mark);
+        self.mark_mask = Some(mask);
+        self
+    }
+
+    /// Set labels (128-bit value).
+    pub fn labels(mut self, labels: [u8; 16], mask: [u8; 16]) -> Self {
+        self.labels = Some(labels);
+        self.labels_mask = Some(mask);
+        self
+    }
+
+    /// Configure SNAT with IPv4 address range.
+    pub fn nat_src(mut self, min: Ipv4Addr, max: Ipv4Addr) -> Self {
+        self.ct_action |= ct::TCA_CT_ACT_NAT | ct::TCA_CT_ACT_NAT_SRC;
+        self.nat_ipv4_min = Some(min);
+        self.nat_ipv4_max = Some(max);
+        self
+    }
+
+    /// Configure SNAT with single IPv4 address.
+    pub fn nat_src_single(mut self, addr: Ipv4Addr) -> Self {
+        self.ct_action |= ct::TCA_CT_ACT_NAT | ct::TCA_CT_ACT_NAT_SRC;
+        self.nat_ipv4_min = Some(addr);
+        self.nat_ipv4_max = Some(addr);
+        self
+    }
+
+    /// Configure DNAT with IPv4 address range.
+    pub fn nat_dst(mut self, min: Ipv4Addr, max: Ipv4Addr) -> Self {
+        self.ct_action |= ct::TCA_CT_ACT_NAT | ct::TCA_CT_ACT_NAT_DST;
+        self.nat_ipv4_min = Some(min);
+        self.nat_ipv4_max = Some(max);
+        self
+    }
+
+    /// Configure DNAT with single IPv4 address.
+    pub fn nat_dst_single(mut self, addr: Ipv4Addr) -> Self {
+        self.ct_action |= ct::TCA_CT_ACT_NAT | ct::TCA_CT_ACT_NAT_DST;
+        self.nat_ipv4_min = Some(addr);
+        self.nat_ipv4_max = Some(addr);
+        self
+    }
+
+    /// Configure SNAT with IPv6 address range.
+    pub fn nat_src6(mut self, min: std::net::Ipv6Addr, max: std::net::Ipv6Addr) -> Self {
+        self.ct_action |= ct::TCA_CT_ACT_NAT | ct::TCA_CT_ACT_NAT_SRC;
+        self.nat_ipv6_min = Some(min);
+        self.nat_ipv6_max = Some(max);
+        self
+    }
+
+    /// Configure DNAT with IPv6 address range.
+    pub fn nat_dst6(mut self, min: std::net::Ipv6Addr, max: std::net::Ipv6Addr) -> Self {
+        self.ct_action |= ct::TCA_CT_ACT_NAT | ct::TCA_CT_ACT_NAT_DST;
+        self.nat_ipv6_min = Some(min);
+        self.nat_ipv6_max = Some(max);
+        self
+    }
+
+    /// Set NAT port range.
+    pub fn nat_port_range(mut self, min: u16, max: u16) -> Self {
+        self.nat_port_min = Some(min);
+        self.nat_port_max = Some(max);
+        self
+    }
+
+    /// Set connection tracking helper.
+    pub fn helper(mut self, name: &str, family: u8, proto: u8) -> Self {
+        self.helper_name = Some(name.to_string());
+        self.helper_family = Some(family);
+        self.helper_proto = Some(proto);
+        self
+    }
+
+    /// Set action result (default: pipe).
+    pub fn action(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build the action configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl ActionConfig for CtAction {
+    fn kind(&self) -> &'static str {
+        "ct"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        let parms = ct::TcCt::new(self.action);
+        builder.append_attr(ct::TCA_CT_PARMS, parms.as_bytes());
+
+        if self.ct_action != 0 {
+            builder.append_attr(ct::TCA_CT_ACTION, &self.ct_action.to_ne_bytes());
+        }
+
+        if let Some(zone) = self.zone {
+            builder.append_attr(ct::TCA_CT_ZONE, &zone.to_ne_bytes());
+        }
+
+        if let Some(mark) = self.mark {
+            builder.append_attr(ct::TCA_CT_MARK, &mark.to_ne_bytes());
+        }
+
+        if let Some(mask) = self.mark_mask {
+            builder.append_attr(ct::TCA_CT_MARK_MASK, &mask.to_ne_bytes());
+        }
+
+        if let Some(labels) = &self.labels {
+            builder.append_attr(ct::TCA_CT_LABELS, labels);
+        }
+
+        if let Some(mask) = &self.labels_mask {
+            builder.append_attr(ct::TCA_CT_LABELS_MASK, mask);
+        }
+
+        if let Some(addr) = self.nat_ipv4_min {
+            builder.append_attr(ct::TCA_CT_NAT_IPV4_MIN, &addr.octets());
+        }
+
+        if let Some(addr) = self.nat_ipv4_max {
+            builder.append_attr(ct::TCA_CT_NAT_IPV4_MAX, &addr.octets());
+        }
+
+        if let Some(addr) = self.nat_ipv6_min {
+            builder.append_attr(ct::TCA_CT_NAT_IPV6_MIN, &addr.octets());
+        }
+
+        if let Some(addr) = self.nat_ipv6_max {
+            builder.append_attr(ct::TCA_CT_NAT_IPV6_MAX, &addr.octets());
+        }
+
+        if let Some(port) = self.nat_port_min {
+            builder.append_attr(ct::TCA_CT_NAT_PORT_MIN, &port.to_be_bytes());
+        }
+
+        if let Some(port) = self.nat_port_max {
+            builder.append_attr(ct::TCA_CT_NAT_PORT_MAX, &port.to_be_bytes());
+        }
+
+        if let Some(name) = &self.helper_name {
+            builder.append_attr_str(ct::TCA_CT_HELPER_NAME, name);
+        }
+
+        if let Some(family) = self.helper_family {
+            builder.append_attr(ct::TCA_CT_HELPER_FAMILY, &[family]);
+        }
+
+        if let Some(proto) = self.helper_proto {
+            builder.append_attr(ct::TCA_CT_HELPER_PROTO, &[proto]);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// PeditAction (Packet Edit)
+// ============================================================================
+
+/// Pedit (Packet Edit) action configuration.
+///
+/// The pedit action allows direct modification of packet header fields.
+/// It supports editing Ethernet, IPv4, IPv6, TCP, and UDP headers.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::action::PeditAction;
+///
+/// // Set IPv4 source address
+/// let pedit = PeditAction::new()
+///     .set_ipv4_src("10.0.0.1".parse()?)
+///     .build();
+///
+/// // Set IPv4 destination address
+/// let pedit = PeditAction::new()
+///     .set_ipv4_dst("10.0.0.2".parse()?)
+///     .build();
+///
+/// // Set TCP destination port
+/// let pedit = PeditAction::new()
+///     .set_tcp_dport(8080)
+///     .build();
+///
+/// // Set Ethernet source MAC
+/// let pedit = PeditAction::new()
+///     .set_eth_src([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])
+///     .build();
+///
+/// // Multiple edits
+/// let pedit = PeditAction::new()
+///     .set_ipv4_src("10.0.0.1".parse()?)
+///     .set_ipv4_dst("10.0.0.2".parse()?)
+///     .set_tcp_dport(8080)
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct PeditAction {
+    /// List of edit operations.
+    keys: Vec<PeditKey>,
+    /// Action result.
+    action: i32,
+}
+
+/// A single packet edit key.
+#[derive(Debug, Clone)]
+struct PeditKey {
+    /// Header type.
+    htype: u16,
+    /// Command (SET or ADD).
+    cmd: u16,
+    /// Mask of bits to modify.
+    mask: u32,
+    /// Value to set.
+    val: u32,
+    /// Offset within the header.
+    off: u32,
+}
+
+impl Default for PeditAction {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PeditAction {
+    /// Create a new pedit action.
+    pub fn new() -> Self {
+        Self {
+            keys: Vec::new(),
+            action: action::TC_ACT_PIPE,
+        }
+    }
+
+    /// Set IPv4 source address.
+    pub fn set_ipv4_src(mut self, addr: Ipv4Addr) -> Self {
+        self.keys.push(PeditKey {
+            htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_IP4,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask: 0,
+            val: u32::from_be_bytes(addr.octets()),
+            off: 12, // Offset of src in IPv4 header
+        });
+        self
+    }
+
+    /// Set IPv4 destination address.
+    pub fn set_ipv4_dst(mut self, addr: Ipv4Addr) -> Self {
+        self.keys.push(PeditKey {
+            htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_IP4,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask: 0,
+            val: u32::from_be_bytes(addr.octets()),
+            off: 16, // Offset of dst in IPv4 header
+        });
+        self
+    }
+
+    /// Set IPv4 TOS/DSCP field.
+    pub fn set_ipv4_tos(mut self, tos: u8) -> Self {
+        self.keys.push(PeditKey {
+            htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_IP4,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask: 0x00ff_ffff,
+            val: (tos as u32) << 24,
+            off: 0, // TOS is at offset 1 in u32 at offset 0
+        });
+        self
+    }
+
+    /// Set IPv4 TTL field.
+    pub fn set_ipv4_ttl(mut self, ttl: u8) -> Self {
+        self.keys.push(PeditKey {
+            htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_IP4,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask: 0xffff_00ff,
+            val: (ttl as u32) << 8,
+            off: 8, // TTL is at offset 8 in IPv4 header
+        });
+        self
+    }
+
+    /// Set TCP source port.
+    pub fn set_tcp_sport(mut self, port: u16) -> Self {
+        self.keys.push(PeditKey {
+            htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_TCP,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask: 0x0000_ffff,
+            val: (port as u32) << 16,
+            off: 0, // Source port at offset 0
+        });
+        self
+    }
+
+    /// Set TCP destination port.
+    pub fn set_tcp_dport(mut self, port: u16) -> Self {
+        self.keys.push(PeditKey {
+            htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_TCP,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask: 0xffff_0000,
+            val: port as u32,
+            off: 0, // Dest port at offset 2, but we need aligned access
+        });
+        self
+    }
+
+    /// Set UDP source port.
+    pub fn set_udp_sport(mut self, port: u16) -> Self {
+        self.keys.push(PeditKey {
+            htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_UDP,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask: 0x0000_ffff,
+            val: (port as u32) << 16,
+            off: 0,
+        });
+        self
+    }
+
+    /// Set UDP destination port.
+    pub fn set_udp_dport(mut self, port: u16) -> Self {
+        self.keys.push(PeditKey {
+            htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_UDP,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask: 0xffff_0000,
+            val: port as u32,
+            off: 0,
+        });
+        self
+    }
+
+    /// Set Ethernet source MAC address.
+    pub fn set_eth_src(mut self, mac: [u8; 6]) -> Self {
+        // First 4 bytes of MAC
+        self.keys.push(PeditKey {
+            htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_ETH,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask: 0,
+            val: u32::from_be_bytes([mac[0], mac[1], mac[2], mac[3]]),
+            off: 6, // Src MAC starts at offset 6
+        });
+        // Last 2 bytes of MAC
+        self.keys.push(PeditKey {
+            htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_ETH,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask: 0x0000_ffff,
+            val: ((mac[4] as u32) << 24) | ((mac[5] as u32) << 16),
+            off: 10,
+        });
+        self
+    }
+
+    /// Set Ethernet destination MAC address.
+    pub fn set_eth_dst(mut self, mac: [u8; 6]) -> Self {
+        // First 4 bytes of MAC
+        self.keys.push(PeditKey {
+            htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_ETH,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask: 0,
+            val: u32::from_be_bytes([mac[0], mac[1], mac[2], mac[3]]),
+            off: 0, // Dst MAC starts at offset 0
+        });
+        // Last 2 bytes of MAC
+        self.keys.push(PeditKey {
+            htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_ETH,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask: 0x0000_ffff,
+            val: ((mac[4] as u32) << 24) | ((mac[5] as u32) << 16),
+            off: 4,
+        });
+        self
+    }
+
+    /// Add a raw edit at a specific offset.
+    pub fn set_raw(mut self, htype: u16, off: u32, val: u32, mask: u32) -> Self {
+        self.keys.push(PeditKey {
+            htype,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
+            mask,
+            val,
+            off,
+        });
+        self
+    }
+
+    /// Add a value at a specific offset.
+    pub fn add_raw(mut self, htype: u16, off: u32, val: u32, mask: u32) -> Self {
+        self.keys.push(PeditKey {
+            htype,
+            cmd: pedit::TCA_PEDIT_KEY_EX_CMD_ADD,
+            mask,
+            val,
+            off,
+        });
+        self
+    }
+
+    /// Set action result (default: pipe).
+    pub fn action(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build the action configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl ActionConfig for PeditAction {
+    fn kind(&self) -> &'static str {
+        "pedit"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        if self.keys.is_empty() {
+            return Err(Error::InvalidMessage(
+                "pedit requires at least one key".into(),
+            ));
+        }
+
+        // Build the selector header + keys
+        let sel = pedit::TcPeditSel::new(self.action, self.keys.len() as u8);
+
+        // We need to write TCA_PEDIT_PARMS_EX which includes sel + keys
+        let mut parms_data = Vec::new();
+        parms_data.extend_from_slice(sel.as_bytes());
+
+        // Append each key
+        for key in &self.keys {
+            let k = pedit::TcPeditKey::new(key.mask, key.val, key.off);
+            parms_data.extend_from_slice(k.as_bytes());
+        }
+
+        builder.append_attr(pedit::TCA_PEDIT_PARMS_EX, &parms_data);
+
+        // Write extended key info (header type and command for each key)
+        let keys_ex_token = builder.nest_start(pedit::TCA_PEDIT_KEYS_EX);
+        for key in &self.keys {
+            let key_ex_token = builder.nest_start(pedit::TCA_PEDIT_KEY_EX);
+            builder.append_attr(pedit::TCA_PEDIT_KEY_EX_HTYPE, &key.htype.to_ne_bytes());
+            builder.append_attr(pedit::TCA_PEDIT_KEY_EX_CMD, &key.cmd.to_ne_bytes());
+            builder.nest_end(key_ex_token);
+        }
+        builder.nest_end(keys_ex_token);
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // ActionList - for building action chains
 // ============================================================================
 
@@ -1664,5 +2251,61 @@ mod tests {
         assert_eq!(sample_trunc.rate, 50);
         assert_eq!(sample_trunc.group, 10);
         assert_eq!(sample_trunc.trunc_size, Some(128));
+    }
+
+    #[test]
+    fn test_ct_action() {
+        let ct = CtAction::new();
+        assert_eq!(ct.ct_action, 0);
+        assert_eq!(ActionConfig::kind(&ct), "ct");
+
+        let commit = CtAction::commit();
+        assert_eq!(commit.ct_action, ct::TCA_CT_ACT_COMMIT);
+
+        let force = CtAction::commit().force();
+        assert_eq!(
+            force.ct_action,
+            ct::TCA_CT_ACT_COMMIT | ct::TCA_CT_ACT_FORCE
+        );
+
+        let clear = CtAction::clear();
+        assert_eq!(clear.ct_action, ct::TCA_CT_ACT_CLEAR);
+
+        let snat = CtAction::commit()
+            .nat_src_single(Ipv4Addr::new(10, 0, 0, 1))
+            .zone(1)
+            .mark(0x100, 0xffffffff)
+            .build();
+
+        assert!(snat.ct_action & ct::TCA_CT_ACT_NAT != 0);
+        assert!(snat.ct_action & ct::TCA_CT_ACT_NAT_SRC != 0);
+        assert_eq!(snat.zone, Some(1));
+        assert_eq!(snat.mark, Some(0x100));
+        assert_eq!(snat.nat_ipv4_min, Some(Ipv4Addr::new(10, 0, 0, 1)));
+    }
+
+    #[test]
+    fn test_pedit_action() {
+        let pedit = PeditAction::new()
+            .set_ipv4_src(Ipv4Addr::new(10, 0, 0, 1))
+            .build();
+
+        assert_eq!(pedit.keys.len(), 1);
+        assert_eq!(ActionConfig::kind(&pedit), "pedit");
+
+        let pedit_multi = PeditAction::new()
+            .set_ipv4_src(Ipv4Addr::new(10, 0, 0, 1))
+            .set_ipv4_dst(Ipv4Addr::new(10, 0, 0, 2))
+            .set_tcp_dport(8080)
+            .build();
+
+        assert_eq!(pedit_multi.keys.len(), 3);
+
+        let pedit_eth = PeditAction::new()
+            .set_eth_src([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])
+            .build();
+
+        // MAC address requires 2 keys (4 bytes + 2 bytes)
+        assert_eq!(pedit_eth.keys.len(), 2);
     }
 }

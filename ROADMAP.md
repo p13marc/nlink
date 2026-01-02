@@ -13,12 +13,12 @@ This document outlines a detailed plan to make **nlink** better than **rtnetlink
 | Route Ops | Full | Full | 0 (nlink has route get) |
 | Neighbor Ops | Full | **Full** | **0** ✅ (proxy ARP complete) |
 | TC Qdiscs | 2 | **19** | **+17** ✅ |
-| TC Filters | 3 | **8** | **+5** ✅ |
-| TC Actions | 3 | **10** | **+7** ✅ |
+| TC Filters | 3 | **9** | **+6** ✅ |
+| TC Actions | 3 | **12** | **+9** ✅ |
 | High-level API | No | Yes | +1 |
 | Namespaces | No | Yes | +1 |
 
-**Progress**: Phases 1-3 complete, Phase 4 partial (3/5), Phase 5 partial (2/3), Phase 6 complete (7/7).
+**Progress**: Phases 1-3 complete, Phase 4 complete (5/5), Phase 5 complete (3/3), Phase 6 complete (7/7).
 
 **nlink now massively surpasses rtnetlink in TC capabilities.**
 
@@ -363,11 +363,11 @@ let sample = SampleAction::new()
 ### Phase 4 Deliverables
 - [x] ConnmarkAction ✅ **DONE**
 - [x] CsumAction ✅ **DONE**
-- [ ] CtAction (complex - NAT with port ranges, labels, helpers)
-- [ ] PeditAction (complex - raw packet editing)
+- [x] CtAction ✅ **DONE** (NAT with port ranges, zones, marks, labels, helpers)
+- [x] PeditAction ✅ **DONE** (IPv4/TCP/UDP/Ethernet header editing)
 - [x] SampleAction ✅ **DONE**
 
-**Phase 4 Progress: 3/5 actions done. nlink now has 10 actions vs rtnetlink's 3**
+**Phase 4 COMPLETE: nlink now has 12 actions vs rtnetlink's 3** ✓
 
 ---
 
@@ -405,10 +405,10 @@ let filter = RouteFilter::new()
 
 ### Phase 5 Deliverables
 - [x] CgroupFilter ✅ **DONE**
-- [ ] FlowFilter (complex - multi-key hashing)
+- [x] FlowFilter ✅ **DONE** (multi-key hashing with all 18 flow keys)
 - [x] RouteFilter ✅ **DONE**
 
-**Phase 5 Progress: 2/3 filters done. nlink now has 8 filters vs rtnetlink's 3**
+**Phase 5 COMPLETE: nlink now has 9 filters vs rtnetlink's 3** ✓
 
 ---
 
@@ -678,6 +678,6 @@ High-level API:            No          No             Yes                  Yes
                         --------    ---------    -----
 Link Types:                31+          16          17
 TC Qdiscs:                 31           2          19
-TC Filters:                 9           3           8
-TC Actions:                19           3          10
+TC Filters:                 9           3           9
+TC Actions:                19           3          12
 ```
