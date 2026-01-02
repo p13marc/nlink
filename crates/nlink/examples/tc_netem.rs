@@ -189,23 +189,18 @@ async fn add_netem(
         }
     };
 
-    // Try to replace existing, fall back to add
-    match conn.replace_qdisc(dev, config.clone()).await {
-        Ok(()) => println!("Replaced netem on {} with {} {}", dev, effect, value),
-        Err(e) if e.is_not_found() => {
-            conn.add_qdisc(dev, config).await?;
-            println!("Added netem on {} with {} {}", dev, effect, value);
-        }
-        Err(e) => return Err(e),
-    }
+    // Use apply_netem convenience method - replaces existing or creates new
+    conn.apply_netem(dev, config).await?;
+    println!("Applied netem on {} with {} {}", dev, effect, value);
 
     Ok(())
 }
 
 async fn del_netem(conn: &Connection, dev: &str) -> nlink::netlink::Result<()> {
-    match conn.del_qdisc(dev, "root").await {
-        Ok(()) => println!("Deleted root qdisc on {}", dev),
-        Err(e) if e.is_not_found() => println!("No root qdisc on {}", dev),
+    // Use remove_netem convenience method
+    match conn.remove_netem(dev).await {
+        Ok(()) => println!("Removed netem from {}", dev),
+        Err(e) if e.is_not_found() => println!("No netem qdisc on {}", dev),
         Err(e) => return Err(e),
     }
     Ok(())
