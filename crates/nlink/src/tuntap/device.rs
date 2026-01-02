@@ -252,7 +252,8 @@ impl TunTapBuilder {
         // SAFETY: ifreq is a C struct that is safe to zero-initialize.
         // All fields are primitive integers, arrays, or unions of such types.
         let mut ifr = {
-            let mut uninit = MaybeUninit::<libc::ifreq>::zeroed();
+            let uninit = MaybeUninit::<libc::ifreq>::zeroed();
+            // SAFETY: zeroed is valid for ifreq
             unsafe { uninit.assume_init() }
         };
         ifr.ifr_ifru.ifru_flags = mode.flag() | self.flags.as_flags();

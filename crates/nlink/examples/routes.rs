@@ -51,10 +51,10 @@ async fn list_routes(conn: &Connection, ipv4_only: Option<bool>) -> nlink::netli
 
     for route in routes {
         // Filter by address family if requested
-        if let Some(v4) = ipv4_only {
-            if v4 != route.is_ipv4() {
-                continue;
-            }
+        if let Some(v4) = ipv4_only
+            && v4 != route.is_ipv4()
+        {
+            continue;
         }
 
         let table = match route.table {
