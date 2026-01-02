@@ -43,7 +43,7 @@ pub trait FromNetlink: Sized {
     fn from_bytes(data: &[u8]) -> Result<Self> {
         Self::parse
             .parse(data)
-            .map_err(|e| Error::Parse(format!("{}", e)))
+            .map_err(|e| Error::InvalidMessage(format!("parse error: {}", e)))
     }
 
     /// Write the header required for dump requests.

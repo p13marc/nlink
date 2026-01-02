@@ -88,6 +88,8 @@ impl NetlinkSocket {
         let current_ns_fd = current_ns.as_raw_fd();
 
         // Switch to the target namespace
+        // SAFETY: libc::setns switches to the namespace specified by ns_fd.
+        // ns_fd is a valid file descriptor to a namespace file.
         let ret = unsafe { libc::setns(ns_fd, libc::CLONE_NEWNET) };
         if ret < 0 {
             return Err(Error::Io(std::io::Error::last_os_error()));
@@ -97,6 +99,8 @@ impl NetlinkSocket {
         let result = Self::create_socket(protocol);
 
         // Restore the original namespace (best effort - log but don't fail)
+        // SAFETY: libc::setns restores the original namespace. current_ns_fd
+        // is valid (opened from /proc/self/ns/net above).
         let restore_ret = unsafe { libc::setns(current_ns_fd, libc::CLONE_NEWNET) };
         if restore_ret < 0 {
             // We successfully created the socket but failed to restore namespace.

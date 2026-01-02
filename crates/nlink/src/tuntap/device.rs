@@ -6,6 +6,7 @@ use super::error::{Error, Result};
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::mem::MaybeUninit;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
 // TUN/TAP ioctl constants
@@ -248,18 +249,28 @@ impl TunTapBuilder {
         let fd = file.as_raw_fd();
 
         // Build ifreq
-        let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+        // SAFETY: ifreq is a C struct that is safe to zero-initialize.
+        // All fields are primitive integers, arrays, or unions of such types.
+        let mut ifr = {
+            let mut uninit = MaybeUninit::<libc::ifreq>::zeroed();
+            unsafe { uninit.assume_init() }
+        };
         ifr.ifr_ifru.ifru_flags = mode.flag() | self.flags.as_flags();
 
         // Set name if provided
         if let Some(ref name) = self.name {
             let name_bytes = name.as_bytes();
+            // SAFETY: ifr_name is a [c_char; IFNAMSIZ] array. Casting to [u8] is safe
+            // because c_char and u8 have the same size and alignment on Linux.
             let name_slice =
                 unsafe { &mut *(&mut ifr.ifr_name as *mut [libc::c_char] as *mut [u8]) };
             name_slice[..name_bytes.len()].copy_from_slice(name_bytes);
         }
 
         // Create the interface
+        // SAFETY: libc::ioctl with TUNSETIFF is the standard way to create TUN/TAP
+        // devices. fd is a valid file descriptor from opening /dev/net/tun, and
+        // ifr is a properly initialized ifreq struct.
         let ret = unsafe { libc::ioctl(fd, TUNSETIFF, &ifr) };
         if ret < 0 {
             return Err(Error::ioctl("TUNSETIFF", io::Error::last_os_error()));
@@ -267,6 +278,8 @@ impl TunTapBuilder {
 
         // Set owner if specified
         if let Some(uid) = self.owner {
+            // SAFETY: TUNSETOWNER ioctl sets the owner UID of the TUN/TAP device.
+            // fd is valid and uid is a valid user ID.
             let ret = unsafe { libc::ioctl(fd, TUNSETOWNER, uid as libc::c_ulong) };
             if ret < 0 {
                 return Err(Error::ioctl("TUNSETOWNER", io::Error::last_os_error()));
@@ -275,6 +288,8 @@ impl TunTapBuilder {
 
         // Set group if specified
         if let Some(gid) = self.group {
+            // SAFETY: TUNSETGROUP ioctl sets the group GID of the TUN/TAP device.
+            // fd is valid and gid is a valid group ID.
             let ret = unsafe { libc::ioctl(fd, TUNSETGROUP, gid as libc::c_ulong) };
             if ret < 0 {
                 return Err(Error::ioctl("TUNSETGROUP", io::Error::last_os_error()));
@@ -283,6 +298,8 @@ impl TunTapBuilder {
 
         // Set persistent if requested
         if self.persistent {
+            // SAFETY: TUNSETPERSIST ioctl sets the persistent flag on the device.
+            // fd is valid, 1 enables persistence.
             let ret = unsafe { libc::ioctl(fd, TUNSETPERSIST, 1 as libc::c_int) };
             if ret < 0 {
                 return Err(Error::ioctl("TUNSETPERSIST", io::Error::last_os_error()));
@@ -290,6 +307,8 @@ impl TunTapBuilder {
         }
 
         // Get the actual interface name
+        // SAFETY: After TUNSETIFF, the kernel writes the actual interface name
+        // back to ifr_name. Casting to [u8] is safe (same size/alignment).
         let name = unsafe {
             let name_slice = &*(&ifr.ifr_name as *const [libc::c_char] as *const [u8]);
             let len = name_slice
@@ -361,6 +380,8 @@ impl TunTap {
 
     /// Set the VNET header size (for VNET_HDR mode).
     pub fn set_vnet_hdr_size(&self, size: i32) -> Result<()> {
+        // SAFETY: TUNSETVNETHDRSZ ioctl sets the VNET header size.
+        // The fd is valid (owned by self.file) and size is a valid i32.
         let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), TUNSETVNETHDRSZ, &size) };
         if ret < 0 {
             return Err(Error::ioctl("TUNSETVNETHDRSZ", io::Error::last_os_error()));
@@ -370,6 +391,8 @@ impl TunTap {
 
     /// Set offload flags.
     pub fn set_offload(&self, flags: u32) -> Result<()> {
+        // SAFETY: TUNSETOFFLOAD ioctl sets offload flags on the device.
+        // The fd is valid and flags is a valid bitmask.
         let ret =
             unsafe { libc::ioctl(self.file.as_raw_fd(), TUNSETOFFLOAD, flags as libc::c_ulong) };
         if ret < 0 {
@@ -381,6 +404,8 @@ impl TunTap {
     /// Make the device persistent.
     pub fn set_persistent(&mut self, persistent: bool) -> Result<()> {
         let value = if persistent { 1 } else { 0 };
+        // SAFETY: TUNSETPERSIST ioctl sets the persistent flag.
+        // The fd is valid and value is 0 or 1.
         let ret =
             unsafe { libc::ioctl(self.file.as_raw_fd(), TUNSETPERSIST, value as libc::c_int) };
         if ret < 0 {
@@ -392,6 +417,8 @@ impl TunTap {
 
     /// Delete a persistent device.
     pub fn delete(self) -> Result<()> {
+        // SAFETY: TUNSETPERSIST with 0 clears the persistent flag, causing
+        // the device to be deleted when closed. The fd is valid.
         let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), TUNSETPERSIST, 0 as libc::c_int) };
         if ret < 0 {
             return Err(Error::ioctl("TUNSETPERSIST", io::Error::last_os_error()));
@@ -471,6 +498,7 @@ impl FromRawFd for TunTap {
     /// The file descriptor must be a valid TUN/TAP device.
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
         TunTap {
+            // SAFETY: Caller guarantees fd is a valid TUN/TAP device fd.
             file: unsafe { File::from_raw_fd(fd) },
             name: String::new(), // Unknown
             mode: Mode::Tun,     // Unknown
@@ -483,6 +511,9 @@ impl FromRawFd for TunTap {
 fn lookup_user(name: &str) -> Result<u32> {
     let name_cstr = CString::new(name).map_err(|_| Error::InvalidName(name.to_string()))?;
 
+    // SAFETY: libc::getpwnam is a standard POSIX function. name_cstr.as_ptr()
+    // returns a valid null-terminated C string. The returned pointer is valid
+    // until the next getpwnam/getpwuid call (we read it immediately).
     unsafe {
         let pwd = libc::getpwnam(name_cstr.as_ptr());
         if pwd.is_null() {
@@ -496,6 +527,9 @@ fn lookup_user(name: &str) -> Result<u32> {
 fn lookup_group(name: &str) -> Result<u32> {
     let name_cstr = CString::new(name).map_err(|_| Error::InvalidName(name.to_string()))?;
 
+    // SAFETY: libc::getgrnam is a standard POSIX function. name_cstr.as_ptr()
+    // returns a valid null-terminated C string. The returned pointer is valid
+    // until the next getgrnam/getgrgid call (we read it immediately).
     unsafe {
         let grp = libc::getgrnam(name_cstr.as_ptr());
         if grp.is_null() {

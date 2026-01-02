@@ -2,6 +2,10 @@
 
 use std::io;
 
+use crate::util::addr::AddrError;
+use crate::util::ifname::IfError;
+use crate::util::parse::ParseError;
+
 /// Result type for netlink operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -66,9 +70,21 @@ pub enum Error {
     #[error("operation not supported: {0}")]
     NotSupported(String),
 
-    /// Parse error.
+    /// Parse error from util parsing functions.
     #[error("parse error: {0}")]
-    Parse(String),
+    Parse(#[from] ParseError),
+
+    /// Address parsing error.
+    #[error("address error: {0}")]
+    Address(#[from] AddrError),
+
+    /// Interface error (not found, invalid name).
+    #[error("interface error: {0}")]
+    Interface(#[from] IfError),
+
+    /// Validation errors from configuration builders.
+    #[error("validation failed: {}", format_validation_errors(.0))]
+    Validation(Vec<ValidationErrorInfo>),
 
     /// Interface not found.
     #[error("interface not found: {name}")]
@@ -99,6 +115,40 @@ pub enum Error {
         /// The family name that was not found.
         name: String,
     },
+}
+
+/// Structured validation error information.
+#[derive(Debug, Clone)]
+pub struct ValidationErrorInfo {
+    /// Field that failed validation.
+    pub field: String,
+    /// Description of the error.
+    pub message: String,
+}
+
+impl ValidationErrorInfo {
+    /// Create a new validation error.
+    pub fn new(field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ValidationErrorInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.field, self.message)
+    }
+}
+
+/// Format validation errors for display.
+fn format_validation_errors(errors: &[ValidationErrorInfo]) -> String {
+    errors
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 impl Error {
@@ -135,12 +185,23 @@ impl Error {
         }
     }
 
+    /// Create a validation error from a list of field errors.
+    pub fn validation(errors: impl IntoIterator<Item = ValidationErrorInfo>) -> Self {
+        Self::Validation(errors.into_iter().collect())
+    }
+
+    /// Create a single validation error.
+    pub fn validation_error(field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Validation(vec![ValidationErrorInfo::new(field, message)])
+    }
+
     /// Check if this is a "not found" error (ENOENT, ENODEV, etc.).
     pub fn is_not_found(&self) -> bool {
         match self {
             Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
                 matches!(*errno, 2 | 19) // ENOENT=2, ENODEV=19
             }
+            Self::Interface(IfError::NotFound(_)) => true,
             Self::InterfaceNotFound { .. }
             | Self::NamespaceNotFound { .. }
             | Self::QdiscNotFound { .. }

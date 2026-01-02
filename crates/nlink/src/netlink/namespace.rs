@@ -184,6 +184,9 @@ pub fn enter_path<P: AsRef<Path>>(path: P) -> Result<NamespaceGuard> {
         ))
     })?;
 
+    // SAFETY: libc::setns is a standard Linux syscall for switching namespaces.
+    // target.as_raw_fd() is a valid fd to a namespace file, CLONE_NEWNET
+    // specifies we're switching the network namespace.
     let ret = unsafe { libc::setns(target.as_raw_fd(), libc::CLONE_NEWNET) };
     if ret < 0 {
         return Err(Error::Io(std::io::Error::last_os_error()));
@@ -208,6 +211,8 @@ impl NamespaceGuard {
     }
 
     fn do_restore(&self) -> Result<()> {
+        // SAFETY: libc::setns restores the original namespace. The fd is valid
+        // (opened from /proc/self/ns/net when the guard was created).
         let ret = unsafe { libc::setns(self.original.as_raw_fd(), libc::CLONE_NEWNET) };
         if ret < 0 {
             return Err(Error::Io(std::io::Error::last_os_error()));

@@ -13,7 +13,7 @@ use super::socket::{
 use super::types::{AddressFamily, MemInfo, Protocol, SocketState, TcpInfo, TcpState, Timer};
 
 use std::io;
-use std::mem;
+use std::mem::{self, MaybeUninit};
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::io::{AsRawFd, RawFd};
 
@@ -67,6 +67,8 @@ pub struct SockDiag {
 impl SockDiag {
     /// Create a new socket diagnostics connection.
     pub async fn new() -> Result<Self> {
+        // SAFETY: libc::socket is a standard POSIX syscall. Arguments are valid
+        // constants for creating a netlink socket. Return value is checked below.
         let fd = unsafe {
             libc::socket(
                 libc::AF_NETLINK,
@@ -80,10 +82,18 @@ impl SockDiag {
         }
 
         // Bind to kernel
-        let mut addr: libc::sockaddr_nl = unsafe { mem::zeroed() };
+        // SAFETY: sockaddr_nl is a C struct that is safe to zero-initialize.
+        // All fields are primitive integers with no invalid bit patterns.
+        let mut addr = {
+            let mut uninit = MaybeUninit::<libc::sockaddr_nl>::zeroed();
+            unsafe { uninit.assume_init() }
+        };
         addr.nl_family = libc::AF_NETLINK as u16;
         addr.nl_pid = 0; // Let kernel assign
 
+        // SAFETY: libc::bind is a standard POSIX syscall. fd is a valid socket
+        // descriptor from the socket() call above. addr points to a valid
+        // sockaddr_nl struct with correct size passed.
         let ret = unsafe {
             libc::bind(
                 fd,
@@ -93,12 +103,15 @@ impl SockDiag {
         };
 
         if ret < 0 {
+            // SAFETY: fd is a valid file descriptor that we own.
             unsafe { libc::close(fd) };
             return Err(Error::Io(io::Error::last_os_error()));
         }
 
         // Get assigned port ID
         let mut addr_len = mem::size_of::<libc::sockaddr_nl>() as u32;
+        // SAFETY: libc::getsockname is a standard POSIX syscall. fd is valid,
+        // addr is a valid mutable pointer, addr_len is correctly sized.
         let ret = unsafe {
             libc::getsockname(
                 fd,
@@ -108,19 +121,24 @@ impl SockDiag {
         };
 
         if ret < 0 {
+            // SAFETY: fd is a valid file descriptor that we own.
             unsafe { libc::close(fd) };
             return Err(Error::Io(io::Error::last_os_error()));
         }
 
         // Set non-blocking
+        // SAFETY: libc::fcntl with F_GETFL is safe on a valid fd.
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         if flags < 0 {
+            // SAFETY: fd is a valid file descriptor that we own.
             unsafe { libc::close(fd) };
             return Err(Error::Io(io::Error::last_os_error()));
         }
 
+        // SAFETY: libc::fcntl with F_SETFL is safe on a valid fd with valid flags.
         let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
         if ret < 0 {
+            // SAFETY: fd is a valid file descriptor that we own.
             unsafe { libc::close(fd) };
             return Err(Error::Io(io::Error::last_os_error()));
         }
@@ -939,6 +957,9 @@ impl SockDiag {
             let mut guard = self.fd.writable().await?;
 
             match guard.try_io(|inner| {
+                // SAFETY: libc::send is a standard POSIX syscall. The fd is valid
+                // (owned by AsyncFd), data.as_ptr() points to valid memory for
+                // data.len() bytes, and flags=0 is valid.
                 let ret = unsafe {
                     libc::send(
                         *inner.get_ref(),
@@ -967,6 +988,9 @@ impl SockDiag {
             let mut guard = self.fd.readable().await?;
 
             match guard.try_io(|inner| {
+                // SAFETY: libc::recv is a standard POSIX syscall. The fd is valid
+                // (owned by AsyncFd), buf.as_mut_ptr() points to valid writable
+                // memory for buf.len() bytes, and flags=0 is valid.
                 let ret = unsafe {
                     libc::recv(
                         *inner.get_ref(),
@@ -996,6 +1020,8 @@ impl SockDiag {
 
 impl Drop for SockDiag {
     fn drop(&mut self) {
+        // SAFETY: The fd is valid and owned by this struct. After drop,
+        // the fd will no longer be used.
         unsafe {
             libc::close(*self.fd.get_ref());
         }
