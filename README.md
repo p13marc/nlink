@@ -603,13 +603,13 @@ The library API is production-ready for network monitoring and querying. Current
 - [x] Policy routing rules (ip rule show, add, del, flush)
 - [x] Event monitoring (ip monitor) for link, address, route, neighbor changes
 - [x] TC qdisc operations (show, add, del, replace, change)
-- [x] TC qdisc types: fq_codel, htb, tbf, prio, sfq, netem, red, pie, ingress, clsact, pfifo, bfifo
+- [x] TC qdisc types (19): fq_codel, htb, tbf, prio, sfq, netem, red, pie, ingress, clsact, pfifo, bfifo, drr, qfq, plug, mqprio, etf, hfsc, taprio
 - [x] TC netem qdisc (delay, loss, reorder, corrupt, duplicate, rate limiting)
 - [x] TC class operations with HTB parameters (rate, ceil, burst, prio, quantum)
 - [x] TC monitor for qdisc/class/filter events
 - [x] TC filter operations (show, add, del)
-- [x] TC filter types: u32 (match ip/ip6/tcp/udp/icmp), flower, matchall, basic, fw, bpf
-- [x] TC actions: gact (pass/drop/pipe), mirred (mirror/redirect), police (rate limiting), vlan (push/pop/modify), skbedit (mark/priority/queue), nat (snat/dnat), tunnel_key (set/release)
+- [x] TC filter types (9): u32 (match ip/ip6/tcp/udp/icmp), flower, matchall, basic, fw, bpf, cgroup, route, flow
+- [x] TC actions (12): gact, mirred, police, vlan, skbedit, nat, tunnel_key, connmark, csum, sample, ct, pedit
 
 - [x] Network namespace support (ip netns list, add, del, exec, identify, pids, monitor, set, attach)
 - [x] Tunnel management (ip tunnel show, add, del, change) for GRE, IPIP, SIT, VTI

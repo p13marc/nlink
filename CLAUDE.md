@@ -42,10 +42,10 @@ crates/nlink/src/
     events.rs         # High-level event monitoring (EventStream, NetworkEvent)
     namespace.rs      # Network namespace utilities
     stats.rs          # Statistics tracking (StatsSnapshot, StatsTracker)
-    tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, RedConfig, PieConfig, etc.)
+    tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, HtbConfig, TbfConfig, PrioConfig, SfqConfig, RedConfig, PieConfig, DrrConfig, QfqConfig, HfscConfig, MqprioConfig, TaprioConfig, EtfConfig, PlugConfig, etc.)
     tc_options.rs     # TC options parsing (netem loss models, etc.)
-    filter.rs         # TC filter builders (U32Filter, FlowerFilter, MatchallFilter, FwFilter, BpfFilter, BasicFilter)
-    action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ActionList)
+    filter.rs         # TC filter builders (U32Filter, FlowerFilter, MatchallFilter, FwFilter, BpfFilter, BasicFilter, CgroupFilter, RouteFilter, FlowFilter)
+    action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ConnmarkAction, CsumAction, SampleAction, CtAction, PeditAction, ActionList)
     link.rs           # Link type builders (DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, BareudpLink, NetkitLink)
     messages/         # Strongly-typed message structs
     types/            # RTNetlink message structures (link, addr, route, neigh, rule, tc)
@@ -436,6 +436,38 @@ conn.del_filter("eth0", "1:", "u32").await?;
 conn.flush_filters("eth0", "1:").await?;
 ```
 
+**Additional filter types (cgroup, route, flow):**
+```rust
+use nlink::netlink::filter::{CgroupFilter, RouteFilter, FlowFilter, FlowKey};
+use nlink::netlink::action::{GactAction, ActionList};
+
+// Cgroup filter - matches based on cgroup membership
+let cgroup = CgroupFilter::new()
+    .with_action(GactAction::drop());
+conn.add_filter("eth0", "1:", cgroup).await?;
+
+// Route filter - classifies based on routing realm
+let route = RouteFilter::new()
+    .to_realm(10)
+    .from_realm(5)
+    .classid(0x10010);  // 1:10
+conn.add_filter("eth0", "1:", route).await?;
+
+// Flow filter - multi-key hashing for load balancing
+let flow = FlowFilter::new()
+    .key(FlowKey::Src)              // Source IP
+    .key(FlowKey::Dst)              // Destination IP
+    .key(FlowKey::Proto)            // Protocol
+    .key(FlowKey::NfctSrc)          // Conntrack original source
+    .divisor(256)                    // Hash table size
+    .baseclass(0x10001);            // Base class 1:1
+conn.add_filter("eth0", "1:", flow).await?;
+
+// Flow keys available: Src, Dst, Proto, ProtoSrc, ProtoDst, Iif,
+// Priority, Mark, NfctSrc, NfctDst, NfctProtoSrc, NfctProtoDst,
+// RtClassId, SkUid, SkGid, VlanTag, RxHash
+```
+
 **Adding TC actions:**
 ```rust
 use nlink::netlink::{Connection, Protocol};
@@ -556,10 +588,70 @@ let filter = MatchallFilter::new()
 conn.add_filter("eth0", "egress", filter).await?;
 ```
 
+**Extended TC actions (connmark, csum, sample, ct, pedit):**
+```rust
+use nlink::netlink::action::{
+    ConnmarkAction, CsumAction, SampleAction, CtAction, PeditAction,
+    ActionList,
+};
+use nlink::netlink::filter::MatchallFilter;
+use std::net::Ipv4Addr;
+
+// Connmark action - save/restore connection marks
+let save_mark = ConnmarkAction::save().zone(1);
+let restore_mark = ConnmarkAction::restore().zone(1);
+
+// Csum action - recalculate checksums after packet modification
+let csum = CsumAction::new()
+    .iph()   // IP header checksum
+    .tcp()   // TCP checksum
+    .udp();  // UDP checksum
+
+// Sample action - sample packets for monitoring (e.g., sFlow)
+let sample = SampleAction::new()
+    .rate(100)      // Sample 1 in 100 packets
+    .group(5)       // PSAMPLE group ID
+    .trunc(128);    // Truncate to 128 bytes
+
+// CT action - connection tracking with NAT
+let ct = CtAction::commit()
+    .zone(1)
+    .mark(0x100)
+    .nat_src(Ipv4Addr::new(192, 168, 1, 1))  // SNAT to specific IP
+    .nat_src_port_range(1024, 65535);        // With port range
+
+// CT with destination NAT
+let dnat_ct = CtAction::commit()
+    .zone(1)
+    .nat_dst(Ipv4Addr::new(10, 0, 0, 1))
+    .nat_dst_port(8080);
+
+// Pedit action - edit packet headers
+let pedit = PeditAction::new()
+    .set_ipv4_src(Ipv4Addr::new(10, 0, 0, 1))
+    .set_ipv4_dst(Ipv4Addr::new(10, 0, 0, 2))
+    .set_tcp_sport(8080)
+    .set_tcp_dport(80)
+    .set_eth_src([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])
+    .set_eth_dst([0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb]);
+
+// Combine with other actions
+let filter = MatchallFilter::new()
+    .actions(ActionList::new()
+        .with(ct)
+        .with(csum))
+    .build();
+```
+
 **Additional qdisc types:**
 ```rust
 use nlink::netlink::{Connection, Protocol};
-use nlink::netlink::tc::{RedConfig, PieConfig, IngressConfig, ClsactConfig, PfifoConfig, BfifoConfig};
+use nlink::netlink::tc::{
+    RedConfig, PieConfig, IngressConfig, ClsactConfig, PfifoConfig, BfifoConfig,
+    DrrConfig, QfqConfig, HfscConfig, MqprioConfig, TaprioConfig, EtfConfig, PlugConfig,
+    TaprioSchedEntry,
+};
+use std::time::Duration;
 
 let conn = Connection::new(Protocol::Route)?;
 
@@ -594,6 +686,51 @@ conn.add_qdisc("eth0", clsact).await?;
 // Simple FIFO qdiscs
 let pfifo = PfifoConfig::new().limit(1000);
 let bfifo = BfifoConfig::new().limit(100000);
+
+// DRR (Deficit Round Robin) classful qdisc
+let drr = DrrConfig::new();
+conn.add_qdisc_full("eth0", "root", "1:", drr).await?;
+
+// QFQ (Quick Fair Queueing) classful qdisc
+let qfq = QfqConfig::new();
+conn.add_qdisc_full("eth0", "root", "1:", qfq).await?;
+
+// HFSC (Hierarchical Fair Service Curve) classful qdisc
+let hfsc = HfscConfig::new().default_class(0x10);
+conn.add_qdisc_full("eth0", "root", "1:", hfsc).await?;
+
+// MQPrio (Multi-Queue Priority) for hardware offload
+let mqprio = MqprioConfig::new()
+    .num_tc(4)
+    .hw_offload(true)
+    .map([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3])
+    .queues([(1, 0), (1, 1), (1, 2), (1, 3)]);
+conn.add_qdisc("eth0", mqprio).await?;
+
+// TAPRIO (Time-Aware Priority) for IEEE 802.1Qbv scheduling
+let taprio = TaprioConfig::new()
+    .num_tc(4)
+    .map([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3])
+    .queues([(1, 0), (1, 1), (1, 2), (1, 3)])
+    .base_time(0)
+    .sched_entry(TaprioSchedEntry::set_gate(0x1, 250_000))  // TC0 for 250us
+    .sched_entry(TaprioSchedEntry::set_gate(0x2, 250_000))  // TC1 for 250us
+    .sched_entry(TaprioSchedEntry::set_gate(0x4, 250_000))  // TC2 for 250us
+    .sched_entry(TaprioSchedEntry::set_gate(0x8, 250_000)); // TC3 for 250us
+conn.add_qdisc("eth0", taprio).await?;
+
+// ETF (Earliest TxTime First) for SO_TXTIME socket option
+let etf = EtfConfig::new()
+    .clockid_tai()      // Use TAI clock
+    .delta_ns(500_000)  // 500us delta
+    .deadline_mode()    // Enable deadline mode
+    .offload();         // Enable hardware offload
+conn.add_qdisc_full("eth0", "1:1", "10:", etf).await?;
+
+// Plug qdisc for packet buffering
+let plug = PlugConfig::new().limit(10000);
+conn.add_qdisc("eth0", plug).await?;
+// Control buffering: conn.plug_buffer(), conn.plug_release_one(), conn.plug_release_indefinite()
 ```
 
 **Building requests (low-level):**
