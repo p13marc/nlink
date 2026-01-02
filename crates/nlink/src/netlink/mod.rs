@@ -100,6 +100,7 @@ pub use builder::{MessageBuilder, NestToken};
 pub use connection::Connection;
 pub use error::{Error, Result};
 pub use message::{MessageIter, NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
+pub use namespace::NamespaceSpec;
 pub use namespace_events::{NamespaceEventSubscriber, NamespaceNetlinkEvent};
 #[cfg(feature = "namespace_watcher")]
 pub use namespace_watcher::{
@@ -107,3 +108,4 @@ pub use namespace_watcher::{
 };
 pub use parse::{FromNetlink, ToNetlink};
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};
+pub use tc_options::NetemParameter;

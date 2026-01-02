@@ -232,6 +232,45 @@ impl NetemConfig {
         self
     }
 
+    /// Set the rate limit in kilobits per second.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = NetemConfig::new()
+    ///     .rate_kbps(1000)  // 1 Mbps
+    ///     .build();
+    /// ```
+    pub fn rate_kbps(self, kbps: u64) -> Self {
+        self.rate(crate::util::rate::kbps_to_bytes(kbps))
+    }
+
+    /// Set the rate limit in megabits per second.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = NetemConfig::new()
+    ///     .rate_mbps(100)  // 100 Mbps
+    ///     .build();
+    /// ```
+    pub fn rate_mbps(self, mbps: u64) -> Self {
+        self.rate(crate::util::rate::mbps_to_bytes(mbps))
+    }
+
+    /// Set the rate limit in gigabits per second.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = NetemConfig::new()
+    ///     .rate_gbps(1)  // 1 Gbps
+    ///     .build();
+    /// ```
+    pub fn rate_gbps(self, gbps: u64) -> Self {
+        self.rate(crate::util::rate::gbps_to_bytes(gbps))
+    }
+
     /// Set the queue limit in packets.
     pub fn limit(mut self, packets: u32) -> Self {
         self.limit = packets;

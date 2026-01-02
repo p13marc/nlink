@@ -5,6 +5,7 @@ pub mod device;
 pub mod ifname;
 pub mod names;
 pub mod parse;
+pub mod rate;
 
 pub use addr::{format_addr, format_prefix, parse_addr, parse_prefix};
 pub use device::{get_ifindex, get_ifindex_opt, get_ifname, get_ifname_or_index};

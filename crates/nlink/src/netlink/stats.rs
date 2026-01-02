@@ -428,10 +428,39 @@ fn delta_u32(current: u32, previous: u32) -> f64 {
 /// Helper struct for tracking statistics over time.
 ///
 /// This maintains the previous snapshot and computes rates automatically.
+/// It also caches the most recent rates for convenient access.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::stats::StatsTracker;
+///
+/// let mut tracker = StatsTracker::new();
+///
+/// loop {
+///     let links = conn.get_links().await?;
+///     let snapshot = StatsSnapshot::from_links(&links);
+///
+///     // Update returns rates if we have a previous sample
+///     if let Some(rates) = tracker.update(snapshot) {
+///         for (ifindex, link_rates) in &rates.links {
+///             println!("Interface {}: {:.2} Mbps", ifindex, link_rates.total_bps() / 1_000_000.0);
+///         }
+///     }
+///
+///     // Can also access cached rates later
+///     if let Some(rate) = tracker.get_link_rate(1) {
+///         println!("eth0: {:.2} Mbps RX", rate.rx_bps() / 1_000_000.0);
+///     }
+///
+///     tokio::time::sleep(Duration::from_secs(1)).await;
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct StatsTracker {
     previous: Option<StatsSnapshot>,
     previous_time: Option<std::time::Instant>,
+    last_rates: Option<RatesSnapshot>,
 }
 
 impl Default for StatsTracker {
@@ -446,12 +475,15 @@ impl StatsTracker {
         Self {
             previous: None,
             previous_time: None,
+            last_rates: None,
         }
     }
 
     /// Update with a new snapshot and return the rates since the last update.
     ///
     /// On the first call, returns `None` since there's no previous snapshot.
+    /// The computed rates are cached and can be accessed via [`last_rates`](Self::last_rates),
+    /// [`get_link_rate`](Self::get_link_rate), etc.
     pub fn update(&mut self, snapshot: StatsSnapshot) -> Option<RatesSnapshot> {
         let now = std::time::Instant::now();
 
@@ -464,19 +496,72 @@ impl StatsTracker {
 
         self.previous = Some(snapshot);
         self.previous_time = Some(now);
+        self.last_rates = rates.clone();
 
         rates
     }
 
-    /// Reset the tracker, clearing the previous snapshot.
+    /// Reset the tracker, clearing the previous snapshot and cached rates.
     pub fn reset(&mut self) {
         self.previous = None;
         self.previous_time = None;
+        self.last_rates = None;
     }
 
     /// Get the previous snapshot, if any.
     pub fn previous(&self) -> Option<&StatsSnapshot> {
         self.previous.as_ref()
+    }
+
+    /// Get the last computed rates, if any.
+    ///
+    /// This returns the rates from the most recent [`update`](Self::update) call.
+    /// Returns `None` if `update` has been called fewer than 2 times or after [`reset`](Self::reset).
+    pub fn last_rates(&self) -> Option<&RatesSnapshot> {
+        self.last_rates.as_ref()
+    }
+
+    /// Get the cached rate for a specific interface by index.
+    ///
+    /// Returns `None` if no rates are cached or if the interface wasn't in the last snapshot.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if let Some(rate) = tracker.get_link_rate(ifindex) {
+    ///     println!("RX: {:.2} Mbps, TX: {:.2} Mbps",
+    ///         rate.rx_bps() / 1_000_000.0,
+    ///         rate.tx_bps() / 1_000_000.0);
+    /// }
+    /// ```
+    pub fn get_link_rate(&self, ifindex: u32) -> Option<&LinkRates> {
+        self.last_rates.as_ref()?.links.get(&ifindex)
+    }
+
+    /// Get all cached link rates.
+    ///
+    /// Returns `None` if no rates are cached.
+    pub fn get_all_link_rates(&self) -> Option<&HashMap<u32, LinkRates>> {
+        self.last_rates.as_ref().map(|r| &r.links)
+    }
+
+    /// Get the cached rate for a specific qdisc.
+    ///
+    /// The key is (ifindex, handle).
+    pub fn get_qdisc_rate(&self, ifindex: u32, handle: u32) -> Option<&TcRates> {
+        self.last_rates.as_ref()?.qdiscs.get(&(ifindex, handle))
+    }
+
+    /// Get the cached rate for a specific class.
+    ///
+    /// The key is (ifindex, handle).
+    pub fn get_class_rate(&self, ifindex: u32, handle: u32) -> Option<&TcRates> {
+        self.last_rates.as_ref()?.classes.get(&(ifindex, handle))
+    }
+
+    /// Check if rates are available (i.e., update has been called at least twice).
+    pub fn has_rates(&self) -> bool {
+        self.last_rates.is_some()
     }
 }
 
@@ -562,5 +647,80 @@ mod tests {
         let link_rates = rates.links.get(&1).unwrap();
         assert_eq!(link_rates.rx_bytes_per_sec, 1000.0);
         assert_eq!(link_rates.tx_bytes_per_sec, 2000.0);
+    }
+
+    #[test]
+    fn test_stats_tracker_caching() {
+        let mut tracker = StatsTracker::new();
+
+        // First update - no rates yet
+        let mut snapshot1 = StatsSnapshot::new();
+        snapshot1.links.insert(
+            1,
+            LinkStats {
+                name: Some("eth0".to_string()),
+                rx_bytes: 1000,
+                tx_bytes: 2000,
+                ..Default::default()
+            },
+        );
+
+        assert!(tracker.update(snapshot1).is_none());
+        assert!(!tracker.has_rates());
+        assert!(tracker.last_rates().is_none());
+        assert!(tracker.get_link_rate(1).is_none());
+
+        // Second update - now we have rates
+        let mut snapshot2 = StatsSnapshot::new();
+        snapshot2.links.insert(
+            1,
+            LinkStats {
+                name: Some("eth0".to_string()),
+                rx_bytes: 2000,
+                tx_bytes: 4000,
+                ..Default::default()
+            },
+        );
+
+        let rates = tracker.update(snapshot2);
+        assert!(rates.is_some());
+        assert!(tracker.has_rates());
+
+        // Check cached rates
+        let cached = tracker.last_rates().unwrap();
+        assert_eq!(cached.links.len(), 1);
+
+        let link_rate = tracker.get_link_rate(1);
+        assert!(link_rate.is_some());
+
+        // Check that get_all_link_rates works
+        let all_rates = tracker.get_all_link_rates().unwrap();
+        assert_eq!(all_rates.len(), 1);
+        assert!(all_rates.contains_key(&1));
+
+        // Non-existent interface returns None
+        assert!(tracker.get_link_rate(999).is_none());
+    }
+
+    #[test]
+    fn test_stats_tracker_reset_clears_cache() {
+        let mut tracker = StatsTracker::new();
+
+        // Build up some state
+        let mut snapshot1 = StatsSnapshot::new();
+        snapshot1.links.insert(1, LinkStats::default());
+        tracker.update(snapshot1);
+
+        let mut snapshot2 = StatsSnapshot::new();
+        snapshot2.links.insert(1, LinkStats::default());
+        tracker.update(snapshot2);
+
+        assert!(tracker.has_rates());
+
+        // Reset should clear everything
+        tracker.reset();
+        assert!(!tracker.has_rates());
+        assert!(tracker.last_rates().is_none());
+        assert!(tracker.previous().is_none());
     }
 }

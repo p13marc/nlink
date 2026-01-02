@@ -84,6 +84,30 @@ impl Connection {
         })
     }
 
+    /// Create a connection for the specified namespace.
+    ///
+    /// This is a convenience method that creates a Route protocol connection
+    /// for any namespace specification.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::Connection;
+    /// use nlink::netlink::namespace::NamespaceSpec;
+    ///
+    /// // For a named namespace
+    /// let conn = Connection::for_namespace(NamespaceSpec::Named("myns"))?;
+    ///
+    /// // For a container by PID
+    /// let conn = Connection::for_namespace(NamespaceSpec::Pid(1234))?;
+    ///
+    /// // For the default namespace
+    /// let conn = Connection::for_namespace(NamespaceSpec::Default)?;
+    /// ```
+    pub fn for_namespace(spec: super::namespace::NamespaceSpec<'_>) -> Result<Self> {
+        spec.connection()
+    }
+
     /// Get the underlying socket.
     pub fn socket(&self) -> &NetlinkSocket {
         &self.socket
@@ -507,6 +531,66 @@ impl Connection {
             .into_iter()
             .filter(|f| f.ifindex() == ifindex)
             .collect())
+    }
+
+    /// Get the root qdisc for an interface (parent == ROOT).
+    ///
+    /// Returns `None` if no root qdisc is configured.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if let Some(root) = conn.get_root_qdisc_for("eth0").await? {
+    ///     println!("Root qdisc: {}", root.kind().unwrap_or("?"));
+    /// }
+    /// ```
+    pub async fn get_root_qdisc_for(&self, ifname: &str) -> Result<Option<TcMessage>> {
+        let qdiscs = self.get_qdiscs_for(ifname).await?;
+        Ok(qdiscs.into_iter().find(|q| q.is_root()))
+    }
+
+    /// Get the root qdisc for an interface by index.
+    ///
+    /// Returns `None` if no root qdisc is configured.
+    pub async fn get_root_qdisc_by_index(&self, ifindex: u32) -> Result<Option<TcMessage>> {
+        let qdiscs = self.get_qdiscs().await?;
+        Ok(qdiscs
+            .into_iter()
+            .find(|q| q.ifindex() == ifindex && q.is_root()))
+    }
+
+    /// Get netem options for an interface, if a netem qdisc is configured at root.
+    ///
+    /// This is a convenience method that returns `Some` only if a netem qdisc
+    /// is the root qdisc and its options can be parsed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if let Some(netem) = conn.get_netem_for("eth0").await? {
+    ///     println!("Delay: {:?}, Loss: {}%", netem.delay(), netem.loss_percent);
+    ///     if netem.has_rate() {
+    ///         println!("Rate limit: {} bytes/sec", netem.rate);
+    ///     }
+    /// }
+    /// ```
+    pub async fn get_netem_for(
+        &self,
+        ifname: &str,
+    ) -> Result<Option<super::tc_options::NetemOptions>> {
+        let root = self.get_root_qdisc_for(ifname).await?;
+        Ok(root.and_then(|q| q.netem_options()))
+    }
+
+    /// Get netem options for an interface by index.
+    ///
+    /// Returns `None` if no netem qdisc is configured at root.
+    pub async fn get_netem_by_index(
+        &self,
+        ifindex: u32,
+    ) -> Result<Option<super::tc_options::NetemOptions>> {
+        let root = self.get_root_qdisc_by_index(ifindex).await?;
+        Ok(root.and_then(|q| q.netem_options()))
     }
 }
 

@@ -16,6 +16,12 @@
 //!
 //! // Or use a path directly
 //! let conn = namespace::connection_for_path("/proc/1234/ns/net")?;
+//!
+//! // Or use NamespaceSpec for a unified API
+//! use nlink::netlink::namespace::NamespaceSpec;
+//!
+//! let spec = NamespaceSpec::Named("myns");
+//! let conn = spec.connection()?;
 //! ```
 
 use std::fs::File;
@@ -25,6 +31,66 @@ use std::path::{Path, PathBuf};
 use super::connection::Connection;
 use super::error::{Error, Result};
 use super::socket::Protocol;
+
+/// Specification for which network namespace to use.
+///
+/// This enum provides a unified way to specify a network namespace,
+/// whether it's the default namespace, a named namespace, a path,
+/// or a process's namespace.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::namespace::NamespaceSpec;
+///
+/// // Different ways to specify a namespace
+/// let default = NamespaceSpec::Default;
+/// let named = NamespaceSpec::Named("myns");
+/// let by_path = NamespaceSpec::Path(Path::new("/proc/1234/ns/net"));
+/// let by_pid = NamespaceSpec::Pid(1234);
+///
+/// // Create connections
+/// let conn = named.connection()?;
+/// ```
+#[derive(Debug, Clone)]
+pub enum NamespaceSpec<'a> {
+    /// Use the current/default namespace.
+    Default,
+    /// Use a named namespace (from /var/run/netns/).
+    Named(&'a str),
+    /// Use a namespace specified by path.
+    Path(&'a Path),
+    /// Use a process's namespace by PID.
+    Pid(u32),
+}
+
+impl<'a> NamespaceSpec<'a> {
+    /// Create a connection for this namespace specification.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::namespace::NamespaceSpec;
+    ///
+    /// let spec = NamespaceSpec::Named("myns");
+    /// let conn = spec.connection()?;
+    /// let links = conn.get_links().await?;
+    /// ```
+    pub fn connection(&self) -> Result<Connection> {
+        match self {
+            NamespaceSpec::Default => Connection::new(Protocol::Route),
+            NamespaceSpec::Named(name) => connection_for(name),
+            NamespaceSpec::Path(path) => connection_for_path(path),
+            NamespaceSpec::Pid(pid) => connection_for_pid(*pid),
+        }
+    }
+
+    /// Check if this refers to the default namespace.
+    #[inline]
+    pub fn is_default(&self) -> bool {
+        matches!(self, NamespaceSpec::Default)
+    }
+}
 
 /// The runtime directory where named network namespaces are stored.
 pub const NETNS_RUN_DIR: &str = "/var/run/netns";
