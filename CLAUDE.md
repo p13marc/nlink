@@ -47,6 +47,14 @@ crates/nlink/src/
     filter.rs         # TC filter builders (U32Filter, FlowerFilter, MatchallFilter, FwFilter, BpfFilter, BasicFilter, CgroupFilter, RouteFilter, FlowFilter)
     action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ConnmarkAction, CsumAction, SampleAction, CtAction, PeditAction, ActionList)
     link.rs           # Link type builders (DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, BareudpLink, NetkitLink)
+    genl/             # Generic Netlink (GENL) support
+      mod.rs          # GENL module entry, control family constants
+      header.rs       # GenlMsgHdr (4-byte GENL header)
+      connection.rs   # GenlConnection with family ID resolution and caching
+      wireguard/      # WireGuard GENL configuration
+        mod.rs        # WireGuard constants and attribute types
+        types.rs      # WgDevice, WgPeer, AllowedIp, builders
+        connection.rs # WireguardConnection API
     messages/         # Strongly-typed message structs
     types/            # RTNetlink message structures (link, addr, route, neigh, rule, tc)
   util/               # Shared utilities (always available)
@@ -788,6 +796,47 @@ if let Some(errno) = err.errno() {
 }
 ```
 
+**WireGuard configuration via Generic Netlink:**
+```rust
+use nlink::netlink::genl::wireguard::{WireguardConnection, AllowedIp};
+use std::net::{Ipv4Addr, SocketAddrV4};
+
+// Create a WireGuard GENL connection
+let wg = WireguardConnection::new().await?;
+
+// Get device information
+let device = wg.get_device("wg0").await?;
+println!("Public key: {:?}", device.public_key);
+println!("Listen port: {:?}", device.listen_port);
+
+// List peers
+for peer in &device.peers {
+    println!("Peer: {:?}", peer.public_key);
+    println!("  Endpoint: {:?}", peer.endpoint);
+    println!("  RX: {} bytes, TX: {} bytes", peer.rx_bytes, peer.tx_bytes);
+    println!("  Allowed IPs: {:?}", peer.allowed_ips);
+}
+
+// Configure device (requires root)
+let private_key = [0u8; 32]; // Your private key
+wg.set_device("wg0", |dev| {
+    dev.private_key(private_key)
+       .listen_port(51820)
+}).await?;
+
+// Add a peer
+let peer_pubkey = [0u8; 32]; // Peer's public key
+wg.set_peer("wg0", peer_pubkey, |peer| {
+    peer.endpoint(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 51820).into())
+        .persistent_keepalive(25)
+        .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
+        .replace_allowed_ips()
+}).await?;
+
+// Remove a peer
+wg.remove_peer("wg0", peer_pubkey).await?;
+```
+
 ## Netlink Message Flow
 
 1. Create `Connection` for `Protocol::Route`
@@ -797,6 +846,14 @@ if let Some(errno) = err.errno() {
 5. For nested attributes: `nest_start()` / `nest_end()`
 6. Send via `conn.dump()` (for GET) or `conn.request_ack()` (for ADD/DEL)
 7. Parse responses with `MessageIter` and `AttrIter`
+
+## Generic Netlink Message Flow
+
+1. Create `GenlConnection::new()` for `Protocol::Generic`
+2. Resolve family ID with `conn.get_family("wireguard").await?`
+3. Build GENL message with `GenlMsgHdr` after `NlMsgHdr`
+4. Use `conn.command()` or `conn.dump_command()` with family ID
+5. Parse responses starting after the GENL header (4 bytes)
 
 ## Publishing
 

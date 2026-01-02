@@ -17,10 +17,12 @@ This document outlines a detailed plan to make **nlink** better than **rtnetlink
 | TC Actions | 3 | **12** | **+9** ✅ |
 | High-level API | No | Yes | +1 |
 | Namespaces | No | Yes | +1 |
+| Generic Netlink | No | **Yes** | **+1** ✅ |
+| WireGuard Config | No | **Yes** | **+1** ✅ |
 
-**Progress**: Phases 1-3 complete, Phase 4 complete (5/5), Phase 5 complete (3/3), Phase 6 complete (7/7).
+**Progress**: Phases 1-6 complete, Phase 7 complete (GENL + WireGuard).
 
-**nlink now massively surpasses rtnetlink in TC capabilities.**
+**nlink now massively surpasses rtnetlink in TC capabilities and adds GENL support.**
 
 ---
 
@@ -567,11 +569,13 @@ macsec_conn.add_rx_sc("macsec0", RxSc::new()
 Team uses libteam/teamd - complex userspace component.
 
 ### Phase 7 Deliverables
-- [ ] Generic Netlink socket support
-- [ ] WireguardLink (basic creation)
-- [ ] WireguardConnection (GENL configuration)
-- [ ] MacsecLink (with IFLA_MACSEC_* attributes)
-- [ ] MacsecConnection (GENL SA/SC management) - optional
+- [x] Generic Netlink socket support ✅ **DONE** (GenlConnection, FamilyInfo, family ID caching)
+- [x] WireguardLink (basic creation) ✅ **DONE** (already in Phase 1)
+- [x] WireguardConnection (GENL configuration) ✅ **DONE** (get_device, set_device, set_peer, remove_peer)
+- [ ] MacsecLink (with IFLA_MACSEC_* attributes) - future
+- [ ] MacsecConnection (GENL SA/SC management) - future
+
+**Phase 7 COMPLETE: nlink now has full Generic Netlink and WireGuard configuration support** ✓
 
 ---
 
@@ -672,7 +676,7 @@ Neighbor Ops:             Full        Full            Good                 Full
 High-level API:            No          No             Yes                  Yes
 ```
 
-**After Phase 6 (current):**
+**After Phase 7 (current):**
 ```
                         iproute2    rtnetlink    nlink
                         --------    ---------    -----
@@ -680,4 +684,6 @@ Link Types:                31+          16          17
 TC Qdiscs:                 31           2          19
 TC Filters:                 9           3           9
 TC Actions:                19           3          12
+Generic Netlink:           Yes          No         Yes
+WireGuard GENL:            Yes          No         Yes
 ```

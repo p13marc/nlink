@@ -351,6 +351,55 @@ async fn main() -> nlink::Result<()> {
 }
 ```
 
+### WireGuard Configuration via Generic Netlink
+
+Configure WireGuard interfaces using the kernel's Generic Netlink interface:
+
+```rust
+use nlink::netlink::genl::wireguard::{WireguardConnection, AllowedIp};
+use std::net::{Ipv4Addr, SocketAddrV4};
+
+#[tokio::main]
+async fn main() -> nlink::Result<()> {
+    // Create a WireGuard GENL connection
+    let wg = WireguardConnection::new().await?;
+    
+    // Get device information
+    let device = wg.get_device("wg0").await?;
+    println!("Public key: {:?}", device.public_key);
+    println!("Listen port: {:?}", device.listen_port);
+    
+    // List peers and their status
+    for peer in &device.peers {
+        println!("Peer: {:?}", peer.public_key);
+        println!("  Endpoint: {:?}", peer.endpoint);
+        println!("  RX: {} bytes, TX: {} bytes", peer.rx_bytes, peer.tx_bytes);
+        println!("  Allowed IPs: {:?}", peer.allowed_ips);
+    }
+    
+    // Configure device (requires root)
+    let private_key = [0u8; 32]; // Your private key
+    wg.set_device("wg0", |dev| {
+        dev.private_key(private_key)
+           .listen_port(51820)
+    }).await?;
+    
+    // Add a peer
+    let peer_pubkey = [0u8; 32]; // Peer's public key
+    wg.set_peer("wg0", peer_pubkey, |peer| {
+        peer.endpoint(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 51820).into())
+            .persistent_keepalive(25)
+            .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
+            .replace_allowed_ips()
+    }).await?;
+    
+    // Remove a peer
+    wg.remove_peer("wg0", peer_pubkey).await?;
+    
+    Ok(())
+}
+```
+
 ### Error Handling with Context
 
 The library provides rich error types with context support for better debugging:
@@ -414,6 +463,12 @@ async fn main() -> nlink::Result<()> {
 - Create and manage TUN/TAP virtual network devices
 - Set device ownership and permissions
 - Async read/write support
+
+### `nlink::netlink::genl` - Generic Netlink
+
+- `GenlConnection` for GENL family communication
+- Family ID resolution with caching
+- `WireguardConnection` for WireGuard device configuration
 
 ### `nlink::tc` - Traffic control (feature: `tc`)
 
@@ -633,6 +688,8 @@ The library API is production-ready for network monitoring and querying. Current
 - [x] TC action builders (`GactAction`, `MirredAction`, `PoliceAction`, `VlanAction`, `SkbeditAction`, `NatAction`, `TunnelKeyAction`, `ActionList`)
 - [x] Statistics helpers with rate calculation (`StatsSnapshot`, `StatsTracker`)
 - [x] Thread-safe `Connection` (`Send + Sync`)
+- [x] Generic Netlink (GENL) support with family ID resolution and caching
+- [x] WireGuard configuration via GENL (`WireguardConnection`, `WgDevice`, `WgPeer`)
 
 ## License
 
