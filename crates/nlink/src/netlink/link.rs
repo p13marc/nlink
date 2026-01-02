@@ -16,6 +16,12 @@
 //! - [`GeneveLink`] - Generic Network Virtualization Encapsulation
 //! - [`BareudpLink`] - Bare UDP tunneling
 //! - [`NetkitLink`] - BPF-optimized virtual ethernet
+//! - [`NlmonLink`] - Netlink monitor for debugging
+//! - [`VirtWifiLink`] - Virtual WiFi for testing
+//! - [`VtiLink`] - Virtual Tunnel Interface (IPv4 IPsec)
+//! - [`Vti6Link`] - Virtual Tunnel Interface (IPv6 IPsec)
+//! - [`Ip6GreLink`] - IPv6 GRE tunnel
+//! - [`Ip6GretapLink`] - IPv6 GRE TAP tunnel (Layer 2)
 //!
 //! # Example
 //!
@@ -1967,6 +1973,651 @@ impl LinkConfig for NetkitLink {
         builder.append(&peer_ifinfo);
         builder.append_attr_str(IflaAttr::Ifname as u16, &self.peer_name);
         builder.nest_end(peer_info);
+
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// Nlmon Link (Netlink Monitor)
+// ============================================================================
+
+/// Configuration for a netlink monitor interface.
+///
+/// Nlmon interfaces capture netlink traffic for debugging and analysis.
+/// All netlink messages passing through the system can be captured.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::NlmonLink;
+///
+/// let nlmon = NlmonLink::new("nlmon0");
+/// conn.add_link(nlmon).await?;
+///
+/// // Now use tcpdump or similar to capture netlink traffic:
+/// // tcpdump -i nlmon0 -w netlink.pcap
+/// ```
+#[derive(Debug, Clone)]
+pub struct NlmonLink {
+    name: String,
+}
+
+impl NlmonLink {
+    /// Create a new netlink monitor interface configuration.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl LinkConfig for NlmonLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "nlmon"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        build_simple_link(&self.name, "nlmon", None, None)
+    }
+}
+
+// ============================================================================
+// VirtWifi Link
+// ============================================================================
+
+/// Configuration for a virtual WiFi interface.
+///
+/// VirtWifi creates a virtual wireless interface on top of an existing
+/// Ethernet interface. This is useful for testing WiFi-dependent applications
+/// without actual WiFi hardware.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::VirtWifiLink;
+///
+/// let vwifi = VirtWifiLink::new("vwifi0", "eth0");
+/// conn.add_link(vwifi).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct VirtWifiLink {
+    name: String,
+    link: String,
+}
+
+impl VirtWifiLink {
+    /// Create a new virtual WiFi interface configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name for the virtual WiFi interface
+    /// * `link` - Name of the underlying Ethernet interface
+    pub fn new(name: impl Into<String>, link: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            link: link.into(),
+        }
+    }
+}
+
+impl LinkConfig for VirtWifiLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "virt_wifi"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let link_index = ifname_to_index(&self.link)?;
+
+        let mut builder = create_link_message(&self.name);
+
+        // Set the underlying link
+        builder.append_attr_u32(IflaAttr::Link as u16, link_index as u32);
+
+        // IFLA_LINKINFO
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "virt_wifi");
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// VTI Link (Virtual Tunnel Interface)
+// ============================================================================
+
+/// Configuration for a VTI (Virtual Tunnel Interface) for IPv4.
+///
+/// VTI interfaces are used with IPsec to create route-based VPNs.
+/// Traffic routed through the VTI is automatically encrypted/decrypted.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::VtiLink;
+/// use std::net::Ipv4Addr;
+///
+/// let vti = VtiLink::new("vti0")
+///     .local(Ipv4Addr::new(10, 0, 0, 1))
+///     .remote(Ipv4Addr::new(10, 0, 0, 2))
+///     .ikey(100)
+///     .okey(100);
+///
+/// conn.add_link(vti).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct VtiLink {
+    name: String,
+    local: Option<Ipv4Addr>,
+    remote: Option<Ipv4Addr>,
+    ikey: Option<u32>,
+    okey: Option<u32>,
+    link: Option<String>,
+}
+
+/// VTI-specific attributes (IFLA_VTI_*)
+#[allow(dead_code)]
+mod vti {
+    pub const IFLA_VTI_LINK: u16 = 1;
+    pub const IFLA_VTI_IKEY: u16 = 2;
+    pub const IFLA_VTI_OKEY: u16 = 3;
+    pub const IFLA_VTI_LOCAL: u16 = 4;
+    pub const IFLA_VTI_REMOTE: u16 = 5;
+    pub const IFLA_VTI_FWMARK: u16 = 6;
+}
+
+impl VtiLink {
+    /// Create a new VTI interface configuration.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            local: None,
+            remote: None,
+            ikey: None,
+            okey: None,
+            link: None,
+        }
+    }
+
+    /// Set the local (source) address.
+    pub fn local(mut self, addr: Ipv4Addr) -> Self {
+        self.local = Some(addr);
+        self
+    }
+
+    /// Set the remote (destination) address.
+    pub fn remote(mut self, addr: Ipv4Addr) -> Self {
+        self.remote = Some(addr);
+        self
+    }
+
+    /// Set the input key (for identifying incoming traffic).
+    pub fn ikey(mut self, key: u32) -> Self {
+        self.ikey = Some(key);
+        self
+    }
+
+    /// Set the output key (for marking outgoing traffic).
+    pub fn okey(mut self, key: u32) -> Self {
+        self.okey = Some(key);
+        self
+    }
+
+    /// Set the underlying link device.
+    pub fn link(mut self, link: impl Into<String>) -> Self {
+        self.link = Some(link.into());
+        self
+    }
+}
+
+impl LinkConfig for VtiLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "vti"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        // Set underlying link if specified
+        if let Some(ref link) = self.link {
+            let link_index = ifname_to_index(link)?;
+            builder.append_attr_u32(IflaAttr::Link as u16, link_index as u32);
+        }
+
+        // IFLA_LINKINFO
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "vti");
+
+        // IFLA_INFO_DATA
+        let data = builder.nest_start(IflaInfo::Data as u16);
+
+        if let Some(local) = self.local {
+            builder.append_attr(vti::IFLA_VTI_LOCAL, &local.octets());
+        }
+        if let Some(remote) = self.remote {
+            builder.append_attr(vti::IFLA_VTI_REMOTE, &remote.octets());
+        }
+        if let Some(ikey) = self.ikey {
+            builder.append_attr_u32_be(vti::IFLA_VTI_IKEY, ikey);
+        }
+        if let Some(okey) = self.okey {
+            builder.append_attr_u32_be(vti::IFLA_VTI_OKEY, okey);
+        }
+
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// VTI6 Link (Virtual Tunnel Interface for IPv6)
+// ============================================================================
+
+/// Configuration for a VTI6 (Virtual Tunnel Interface) for IPv6.
+///
+/// Similar to VTI but for IPv6 tunnels.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::Vti6Link;
+/// use std::net::Ipv6Addr;
+///
+/// let vti6 = Vti6Link::new("vti6_0")
+///     .local(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))
+///     .remote(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2));
+///
+/// conn.add_link(vti6).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct Vti6Link {
+    name: String,
+    local: Option<std::net::Ipv6Addr>,
+    remote: Option<std::net::Ipv6Addr>,
+    ikey: Option<u32>,
+    okey: Option<u32>,
+    link: Option<String>,
+}
+
+impl Vti6Link {
+    /// Create a new VTI6 interface configuration.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            local: None,
+            remote: None,
+            ikey: None,
+            okey: None,
+            link: None,
+        }
+    }
+
+    /// Set the local (source) address.
+    pub fn local(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.local = Some(addr);
+        self
+    }
+
+    /// Set the remote (destination) address.
+    pub fn remote(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.remote = Some(addr);
+        self
+    }
+
+    /// Set the input key (for identifying incoming traffic).
+    pub fn ikey(mut self, key: u32) -> Self {
+        self.ikey = Some(key);
+        self
+    }
+
+    /// Set the output key (for marking outgoing traffic).
+    pub fn okey(mut self, key: u32) -> Self {
+        self.okey = Some(key);
+        self
+    }
+
+    /// Set the underlying link device.
+    pub fn link(mut self, link: impl Into<String>) -> Self {
+        self.link = Some(link.into());
+        self
+    }
+}
+
+impl LinkConfig for Vti6Link {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "vti6"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        // Set underlying link if specified
+        if let Some(ref link) = self.link {
+            let link_index = ifname_to_index(link)?;
+            builder.append_attr_u32(IflaAttr::Link as u16, link_index as u32);
+        }
+
+        // IFLA_LINKINFO
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "vti6");
+
+        // IFLA_INFO_DATA - VTI6 uses same attributes as VTI
+        let data = builder.nest_start(IflaInfo::Data as u16);
+
+        if let Some(local) = self.local {
+            builder.append_attr(vti::IFLA_VTI_LOCAL, &local.octets());
+        }
+        if let Some(remote) = self.remote {
+            builder.append_attr(vti::IFLA_VTI_REMOTE, &remote.octets());
+        }
+        if let Some(ikey) = self.ikey {
+            builder.append_attr_u32_be(vti::IFLA_VTI_IKEY, ikey);
+        }
+        if let Some(okey) = self.okey {
+            builder.append_attr_u32_be(vti::IFLA_VTI_OKEY, okey);
+        }
+
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// IP6GRE Link
+// ============================================================================
+
+/// Configuration for an IP6GRE (IPv6 GRE tunnel) interface.
+///
+/// IP6GRE creates a GRE tunnel over IPv6. This is useful for
+/// encapsulating IPv4 or IPv6 traffic over an IPv6 network.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::Ip6GreLink;
+/// use std::net::Ipv6Addr;
+///
+/// let gre = Ip6GreLink::new("ip6gre0")
+///     .local(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))
+///     .remote(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2))
+///     .ttl(64);
+///
+/// conn.add_link(gre).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct Ip6GreLink {
+    name: String,
+    local: Option<std::net::Ipv6Addr>,
+    remote: Option<std::net::Ipv6Addr>,
+    ttl: Option<u8>,
+    encap_limit: Option<u8>,
+    flowinfo: Option<u32>,
+    flags: Option<u32>,
+    link: Option<String>,
+}
+
+/// IP6GRE-specific attributes (IFLA_GRE_*)
+#[allow(dead_code)]
+mod ip6gre {
+    pub const IFLA_GRE_LINK: u16 = 1;
+    pub const IFLA_GRE_IFLAGS: u16 = 2;
+    pub const IFLA_GRE_OFLAGS: u16 = 3;
+    pub const IFLA_GRE_IKEY: u16 = 4;
+    pub const IFLA_GRE_OKEY: u16 = 5;
+    pub const IFLA_GRE_LOCAL: u16 = 6;
+    pub const IFLA_GRE_REMOTE: u16 = 7;
+    pub const IFLA_GRE_TTL: u16 = 8;
+    pub const IFLA_GRE_TOS: u16 = 9;
+    pub const IFLA_GRE_ENCAP_LIMIT: u16 = 12;
+    pub const IFLA_GRE_FLOWINFO: u16 = 13;
+    pub const IFLA_GRE_FLAGS: u16 = 14;
+}
+
+impl Ip6GreLink {
+    /// Create a new IP6GRE interface configuration.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            local: None,
+            remote: None,
+            ttl: None,
+            encap_limit: None,
+            flowinfo: None,
+            flags: None,
+            link: None,
+        }
+    }
+
+    /// Set the local (source) address.
+    pub fn local(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.local = Some(addr);
+        self
+    }
+
+    /// Set the remote (destination) address.
+    pub fn remote(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.remote = Some(addr);
+        self
+    }
+
+    /// Set the TTL (hop limit).
+    pub fn ttl(mut self, ttl: u8) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set the encapsulation limit.
+    pub fn encap_limit(mut self, limit: u8) -> Self {
+        self.encap_limit = Some(limit);
+        self
+    }
+
+    /// Set the flow label.
+    pub fn flowinfo(mut self, flowinfo: u32) -> Self {
+        self.flowinfo = Some(flowinfo);
+        self
+    }
+
+    /// Set the underlying link device.
+    pub fn link(mut self, link: impl Into<String>) -> Self {
+        self.link = Some(link.into());
+        self
+    }
+}
+
+impl LinkConfig for Ip6GreLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "ip6gre"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        // IFLA_LINKINFO
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "ip6gre");
+
+        // IFLA_INFO_DATA
+        let data = builder.nest_start(IflaInfo::Data as u16);
+
+        if let Some(ref link) = self.link {
+            let link_index = ifname_to_index(link)?;
+            builder.append_attr_u32(ip6gre::IFLA_GRE_LINK, link_index as u32);
+        }
+        if let Some(local) = self.local {
+            builder.append_attr(ip6gre::IFLA_GRE_LOCAL, &local.octets());
+        }
+        if let Some(remote) = self.remote {
+            builder.append_attr(ip6gre::IFLA_GRE_REMOTE, &remote.octets());
+        }
+        if let Some(ttl) = self.ttl {
+            builder.append_attr_u8(ip6gre::IFLA_GRE_TTL, ttl);
+        }
+        if let Some(limit) = self.encap_limit {
+            builder.append_attr_u8(ip6gre::IFLA_GRE_ENCAP_LIMIT, limit);
+        }
+        if let Some(flowinfo) = self.flowinfo {
+            builder.append_attr_u32_be(ip6gre::IFLA_GRE_FLOWINFO, flowinfo);
+        }
+        if let Some(flags) = self.flags {
+            builder.append_attr_u32(ip6gre::IFLA_GRE_FLAGS, flags);
+        }
+
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// IP6GRETAP Link
+// ============================================================================
+
+/// Configuration for an IP6GRETAP (IPv6 GRE TAP tunnel) interface.
+///
+/// Similar to IP6GRE but operates at Layer 2, encapsulating Ethernet frames.
+/// This is useful for bridging networks over an IPv6 tunnel.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::Ip6GretapLink;
+/// use std::net::Ipv6Addr;
+///
+/// let gretap = Ip6GretapLink::new("ip6gretap0")
+///     .local(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))
+///     .remote(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2))
+///     .ttl(64);
+///
+/// conn.add_link(gretap).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct Ip6GretapLink {
+    name: String,
+    local: Option<std::net::Ipv6Addr>,
+    remote: Option<std::net::Ipv6Addr>,
+    ttl: Option<u8>,
+    encap_limit: Option<u8>,
+    flowinfo: Option<u32>,
+    link: Option<String>,
+}
+
+impl Ip6GretapLink {
+    /// Create a new IP6GRETAP interface configuration.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            local: None,
+            remote: None,
+            ttl: None,
+            encap_limit: None,
+            flowinfo: None,
+            link: None,
+        }
+    }
+
+    /// Set the local (source) address.
+    pub fn local(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.local = Some(addr);
+        self
+    }
+
+    /// Set the remote (destination) address.
+    pub fn remote(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.remote = Some(addr);
+        self
+    }
+
+    /// Set the TTL (hop limit).
+    pub fn ttl(mut self, ttl: u8) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set the encapsulation limit.
+    pub fn encap_limit(mut self, limit: u8) -> Self {
+        self.encap_limit = Some(limit);
+        self
+    }
+
+    /// Set the flow label.
+    pub fn flowinfo(mut self, flowinfo: u32) -> Self {
+        self.flowinfo = Some(flowinfo);
+        self
+    }
+
+    /// Set the underlying link device.
+    pub fn link(mut self, link: impl Into<String>) -> Self {
+        self.link = Some(link.into());
+        self
+    }
+}
+
+impl LinkConfig for Ip6GretapLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "ip6gretap"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        // IFLA_LINKINFO
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "ip6gretap");
+
+        // IFLA_INFO_DATA - uses same attributes as ip6gre
+        let data = builder.nest_start(IflaInfo::Data as u16);
+
+        if let Some(ref link) = self.link {
+            let link_index = ifname_to_index(link)?;
+            builder.append_attr_u32(ip6gre::IFLA_GRE_LINK, link_index as u32);
+        }
+        if let Some(local) = self.local {
+            builder.append_attr(ip6gre::IFLA_GRE_LOCAL, &local.octets());
+        }
+        if let Some(remote) = self.remote {
+            builder.append_attr(ip6gre::IFLA_GRE_REMOTE, &remote.octets());
+        }
+        if let Some(ttl) = self.ttl {
+            builder.append_attr_u8(ip6gre::IFLA_GRE_TTL, ttl);
+        }
+        if let Some(limit) = self.encap_limit {
+            builder.append_attr_u8(ip6gre::IFLA_GRE_ENCAP_LIMIT, limit);
+        }
+        if let Some(flowinfo) = self.flowinfo {
+            builder.append_attr_u32_be(ip6gre::IFLA_GRE_FLOWINFO, flowinfo);
+        }
 
         builder.nest_end(data);
         builder.nest_end(linkinfo);

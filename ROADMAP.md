@@ -8,7 +8,7 @@ This document outlines a detailed plan to make **nlink** better than **rtnetlink
 
 | Category | rtnetlink | nlink | Gap |
 |----------|:---------:|:-----:|:---:|
-| Link Types | 16 | **17** | **+1** ✅ |
+| Link Types | 16 | **23** | **+7** ✅ |
 | Address Ops | Full | **Full** | **0** ✅ (labels/lifetimes/replace) |
 | Route Ops | Full | Full | 0 (nlink has route get) |
 | Neighbor Ops | Full | **Full** | **0** ✅ (proxy ARP complete) |
@@ -20,9 +20,9 @@ This document outlines a detailed plan to make **nlink** better than **rtnetlink
 | Generic Netlink | No | **Yes** | **+1** ✅ |
 | WireGuard Config | No | **Yes** | **+1** ✅ |
 
-**Progress**: Phases 1-6 complete, Phase 7 complete (GENL + WireGuard).
+**Progress**: Phases 1-8 complete.
 
-**nlink now massively surpasses rtnetlink in TC capabilities and adds GENL support.**
+**nlink now massively surpasses rtnetlink in TC capabilities, GENL support, and link types.**
 
 ---
 
@@ -612,10 +612,12 @@ let virt_wifi = VirtWifiLink::new("vwifi0", "wlan0");
 ```
 
 ### Phase 8 Deliverables
-- [ ] VtiLink / Vti6Link
-- [ ] Ip6GreLink / Ip6GretapLink
-- [ ] NlmonLink
-- [ ] VirtWifiLink
+- [x] VtiLink / Vti6Link ✅ **DONE**
+- [x] Ip6GreLink / Ip6GretapLink ✅ **DONE**
+- [x] NlmonLink ✅ **DONE**
+- [x] VirtWifiLink ✅ **DONE**
+
+**Phase 8 COMPLETE: nlink now has 23 link types vs rtnetlink's 16** ✓
 
 ---
 
@@ -676,11 +678,11 @@ Neighbor Ops:             Full        Full            Good                 Full
 High-level API:            No          No             Yes                  Yes
 ```
 
-**After Phase 7 (current):**
+**After Phase 8 (current):**
 ```
                         iproute2    rtnetlink    nlink
                         --------    ---------    -----
-Link Types:                31+          16          17
+Link Types:                31+          16          23
 TC Qdiscs:                 31           2          19
 TC Filters:                 9           3           9
 TC Actions:                19           3          12
