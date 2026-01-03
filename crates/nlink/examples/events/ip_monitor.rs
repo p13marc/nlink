@@ -56,18 +56,20 @@ async fn main() -> nlink::netlink::Result<()> {
 
                 // Show link type if available
                 if let Some(info) = link.link_info()
-                    && let Some(kind) = info.kind() {
-                        println!("    link/{}", kind);
-                    }
+                    && let Some(kind) = info.kind()
+                {
+                    println!("    link/{}", kind);
+                }
 
                 // Show MAC address if available
                 if let Some(mac) = link.address()
-                    && mac.len() == 6 {
-                        println!(
-                            "    link/ether {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-                        );
-                    }
+                    && mac.len() == 6
+                {
+                    println!(
+                        "    link/ether {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                    );
+                }
 
                 if action == "del" {
                     println!("Deleted");
