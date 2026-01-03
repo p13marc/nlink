@@ -8,7 +8,7 @@ mod text;
 pub use json::JsonOutput;
 pub use monitor::{
     AddressEvent, IpEvent, LinkEvent, MonitorConfig, MonitorEvent, NeighborEvent, RouteEvent,
-    TcEvent, print_event, print_monitor_start, run_monitor_loop, write_timestamp,
+    TcEvent, print_event, print_monitor_start, write_timestamp,
 };
 pub use text::TextOutput;
 

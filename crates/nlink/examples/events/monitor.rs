@@ -1,9 +1,9 @@
-//! Monitor network events using EventStream.
+//! Monitor network events using the Stream API.
 //!
-//! This example demonstrates how to use the high-level EventStream API
+//! This example demonstrates how to use Connection<Route>::events()
 //! to monitor network changes in real-time.
 //!
-//! Run with: cargo run -p rip --example monitor
+//! Run with: cargo run -p nlink --example events_monitor
 //!
 //! Then in another terminal, try:
 //!   ip link add dummy test0 type dummy
@@ -11,21 +11,27 @@
 //!   ip link set test0 up
 //!   ip link del test0
 
-use nlink::netlink::events::{EventStream, NetworkEvent};
+use nlink::netlink::{Connection, NetworkEvent, Route, RouteGroup};
 use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
     println!("Monitoring network events (Ctrl+C to stop)...\n");
 
-    let mut stream = EventStream::builder()
-        .links(true)
-        .addresses(true)
-        .routes(true)
-        .neighbors(true)
-        .build()?;
+    let mut conn = Connection::<Route>::new()?;
+    conn.subscribe(&[
+        RouteGroup::Link,
+        RouteGroup::Ipv4Addr,
+        RouteGroup::Ipv6Addr,
+        RouteGroup::Ipv4Route,
+        RouteGroup::Ipv6Route,
+        RouteGroup::Neigh,
+    ])?;
 
-    while let Some(event) = stream.try_next().await? {
+    let mut events = conn.events();
+
+    while let Some(result) = events.next().await {
+        let event = result?;
         match event {
             // Link events
             NetworkEvent::NewLink(link) => {

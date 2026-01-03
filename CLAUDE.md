@@ -39,7 +39,7 @@ crates/nlink/src/
     message.rs        # Netlink header parsing, MessageIter
     attr.rs           # Attribute (TLV) parsing with AttrIter
     error.rs          # Error types with semantic checks (is_not_found, etc.)
-    events.rs         # High-level event monitoring (EventStream, NetworkEvent)
+    events.rs         # NetworkEvent enum for typed event handling
     namespace.rs      # Network namespace utilities
     stats.rs          # Statistics tracking (StatsSnapshot, StatsTracker)
     tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, HtbConfig, TbfConfig, PrioConfig, SfqConfig, RedConfig, PieConfig, DrrConfig, QfqConfig, HfscConfig, MqprioConfig, TaprioConfig, EtfConfig, PlugConfig, etc.)
@@ -99,14 +99,14 @@ Common types are re-exported at the crate root for convenience:
 
 ```rust
 // Instead of:
-use nlink::netlink::{Connection, Error, Protocol, Result};
-use nlink::netlink::events::{EventStream, NetworkEvent};
+use nlink::netlink::{Connection, Error, Protocol, Result, RouteGroup};
+use nlink::netlink::events::NetworkEvent;
 use nlink::netlink::stream::{EventSource, EventSubscription, OwnedEventStream};
 use nlink::netlink::messages::TcMessage;
 
 // You can use:
-use nlink::{Connection, Error, Protocol, Result};
-use nlink::{EventStream, NetworkEvent};
+use nlink::{Connection, Error, Protocol, Result, RouteGroup};
+use nlink::NetworkEvent;
 use nlink::{EventSource, EventSubscription, OwnedEventStream};
 use nlink::{TcMessage, QdiscMessage, ClassMessage, FilterMessage};
 ```
@@ -120,6 +120,9 @@ Stream types for event monitoring:
 - `EventSource` - Trait for protocols that emit events
 - `EventSubscription<'a, P>` - Borrowed stream from `conn.events()`
 - `OwnedEventStream<P>` - Owned stream from `conn.into_event_stream()`
+
+Multicast group subscription:
+- `RouteGroup` - Strongly-typed enum for rtnetlink multicast groups
 
 ## Key Patterns
 
@@ -359,23 +362,28 @@ loop {
 }
 ```
 
-**Monitoring events (high-level API - preferred):**
+**Monitoring events (Stream API):**
 
-`EventStream` implements the `Stream` trait from `tokio-stream`, enabling use with
-stream combinators and `StreamMap` for multi-namespace monitoring.
+The `Connection` type implements `EventSource` trait, providing `events()` and
+`into_event_stream()` methods that return `Stream` implementations compatible
+with `tokio-stream` combinators and `StreamMap` for multi-namespace monitoring.
 
 ```rust
-use nlink::netlink::events::{EventStream, NetworkEvent};
+use nlink::netlink::{Connection, Route, RouteGroup, NetworkEvent};
 use tokio_stream::StreamExt;
 
-let mut stream = EventStream::builder()
-    .links(true)
-    .addresses(true)
-    .tc(true)
-    .build()?;
+// Create connection and subscribe to multicast groups
+let mut conn = Connection::<Route>::new()?;
+conn.subscribe(&[RouteGroup::Link, RouteGroup::Ipv4Addr, RouteGroup::Tc])?;
 
-// Use try_next() for familiar ? operator ergonomics
-while let Some(event) = stream.try_next().await? {
+// Or subscribe to all common groups at once
+conn.subscribe_all()?;
+
+// Get event stream (borrowed)
+let mut events = conn.events();
+
+while let Some(result) = events.next().await {
+    let event = result?;
     match event {
         NetworkEvent::NewLink(link) => println!("Link: {}", link.name.unwrap_or_default()),
         NetworkEvent::NewAddress(addr) => println!("Addr: {:?}", addr.address),
@@ -385,56 +393,67 @@ while let Some(event) = stream.try_next().await? {
 }
 ```
 
+**RouteGroup enum for type-safe subscription:**
+```rust
+use nlink::netlink::RouteGroup;
+
+// Available groups:
+// RouteGroup::Link       - Interface state changes
+// RouteGroup::Ipv4Addr   - IPv4 address changes
+// RouteGroup::Ipv6Addr   - IPv6 address changes
+// RouteGroup::Ipv4Route  - IPv4 routing table changes
+// RouteGroup::Ipv6Route  - IPv6 routing table changes
+// RouteGroup::Neigh      - Neighbor (ARP/NDP) cache changes
+// RouteGroup::Tc         - Traffic control changes
+// RouteGroup::NsId       - Namespace ID changes
+// RouteGroup::Ipv4Rule   - IPv4 policy routing rules
+// RouteGroup::Ipv6Rule   - IPv6 policy routing rules
+```
+
 **Multi-namespace event monitoring:**
 ```rust
-use nlink::netlink::events::{EventStream, MultiNamespaceEventStream};
-use tokio_stream::StreamExt;
+use nlink::netlink::{Connection, Route, RouteGroup, namespace};
+use tokio_stream::{StreamExt, StreamMap};
 
-let mut multi = MultiNamespaceEventStream::new();
+let mut streams = StreamMap::new();
 
-// Monitor default namespace (use empty string)
-multi.add("", EventStream::builder().all().build()?);
+// Monitor default namespace
+let mut conn = Connection::<Route>::new()?;
+conn.subscribe_all()?;
+streams.insert("default", conn.into_event_stream());
 
 // Monitor named namespaces
-multi.add("ns1", EventStream::builder().namespace("ns1").all().build()?);
-multi.add("ns2", EventStream::builder().namespace("ns2").all().build()?);
+let mut conn_ns1 = namespace::connection_for("ns1")?;
+conn_ns1.subscribe_all()?;
+streams.insert("ns1", conn_ns1.into_event_stream());
 
-// Events include namespace information
-while let Some(result) = multi.next().await {
-    let ev = result?;
-    println!("[{}] {:?}", ev.namespace, ev.event);
+// Events include namespace key
+while let Some((ns, result)) = streams.next().await {
+    let event = result?;
+    println!("[{}] {:?}", ns, event);
 }
-
-// Can also add/remove namespaces dynamically
-multi.remove("ns1");
-multi.add("ns3", EventStream::builder().namespace("ns3").tc(true).build()?);
 ```
 
 **Namespace-aware event monitoring (single namespace):**
 ```rust
-use nlink::netlink::events::{EventStream, NetworkEvent};
+use nlink::netlink::{Connection, Route, RouteGroup, namespace};
 use tokio_stream::StreamExt;
 
 // Monitor events in a named namespace
-let mut stream = EventStream::builder()
-    .namespace("myns")
-    .links(true)
-    .tc(true)
-    .build()?;
+let mut conn = namespace::connection_for("myns")?;
+conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
+let mut events = conn.events();
 
 // Or by PID (e.g., container process)
-let mut stream = EventStream::builder()
-    .namespace_pid(container_pid)
-    .links(true)
-    .build()?;
+let mut conn = namespace::connection_for_pid(container_pid)?;
+conn.subscribe(&[RouteGroup::Link])?;
 
 // Or by path
-let mut stream = EventStream::builder()
-    .namespace_path("/proc/1234/ns/net")
-    .all()
-    .build()?;
+let mut conn = Connection::<Route>::new_in_namespace_path("/proc/1234/ns/net")?;
+conn.subscribe_all()?;
 
-while let Some(event) = stream.try_next().await? {
+while let Some(result) = events.next().await {
+    let event = result?;
     println!("{:?}", event);
 }
 ```

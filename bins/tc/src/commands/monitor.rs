@@ -1,12 +1,11 @@
 //! tc monitor - watch for traffic control events.
 //!
-//! This module uses the EventStream API from nlink for high-level
+//! This module uses the Connection events() API from nlink for high-level
 //! event monitoring with Stream trait support.
 
 use clap::{Args, ValueEnum};
-use nlink::netlink::Result;
-use nlink::netlink::events::{EventStream, NetworkEvent};
 use nlink::netlink::types::tc::tc_handle;
+use nlink::netlink::{Connection, NetworkEvent, Result, Route, RouteGroup};
 use nlink::output::{
     MonitorConfig, OutputFormat, OutputOptions, TcEvent, print_event, print_monitor_start,
 };
@@ -44,8 +43,9 @@ impl MonitorCmd {
             .with_format(format)
             .with_opts(*opts);
 
-        // Build EventStream for TC events
-        let mut stream = EventStream::builder().tc(true).build()?;
+        // Create connection and subscribe to TC events
+        let mut conn = Connection::<Route>::new()?;
+        conn.subscribe(&[RouteGroup::Tc])?;
 
         let mut stdout = std::io::stdout().lock();
         print_monitor_start(
@@ -68,8 +68,10 @@ impl MonitorCmd {
             .iter()
             .any(|o| matches!(o, TcEventType::Filter | TcEventType::All));
 
-        // Use try_next() for idiomatic async iteration with ? operator
-        while let Some(event) = stream.try_next().await? {
+        let mut events = conn.events();
+
+        while let Some(result) = events.next().await {
+            let event = result?;
             if let Some(tc_event) =
                 convert_event(event, monitor_qdisc, monitor_class, monitor_filter)
             {

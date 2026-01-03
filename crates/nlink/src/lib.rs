@@ -79,20 +79,18 @@
 //!
 //! # Event Monitoring
 //!
-//! `EventStream` implements the `Stream` trait from `tokio-stream`:
+//! Use `Connection::subscribe()` to select event types, then `events()` to get a stream:
 //!
 //! ```ignore
-//! use nlink::netlink::events::{EventStream, NetworkEvent};
+//! use nlink::netlink::{Connection, Route, RouteGroup, NetworkEvent};
 //! use tokio_stream::StreamExt;
 //!
-//! let mut stream = EventStream::builder()
-//!     .links(true)
-//!     .addresses(true)
-//!     .build()?;
+//! let mut conn = Connection::<Route>::new()?;
+//! conn.subscribe(&[RouteGroup::Link, RouteGroup::Ipv4Addr])?;
 //!
-//! // Use try_next() for familiar ? operator ergonomics
-//! while let Some(event) = stream.try_next().await? {
-//!     match event {
+//! let mut events = conn.events();
+//! while let Some(event) = events.next().await {
+//!     match event? {
 //!         NetworkEvent::NewLink(link) => println!("New link: {:?}", link.name),
 //!         NetworkEvent::NewAddress(addr) => println!("New address: {:?}", addr.address),
 //!         _ => {}
@@ -102,19 +100,24 @@
 //!
 //! # Multi-Namespace Event Monitoring
 //!
-//! Monitor events across multiple namespaces simultaneously:
+//! Use `tokio_stream::StreamMap` to monitor multiple namespaces:
 //!
 //! ```ignore
-//! use nlink::netlink::events::{EventStream, MultiNamespaceEventStream};
-//! use tokio_stream::StreamExt;
+//! use nlink::netlink::{Connection, Route, RouteGroup};
+//! use tokio_stream::{StreamExt, StreamMap};
 //!
-//! let mut multi = MultiNamespaceEventStream::new();
-//! multi.add("", EventStream::builder().all().build()?);
-//! multi.add("ns1", EventStream::builder().namespace("ns1").all().build()?);
+//! let mut streams = StreamMap::new();
 //!
-//! while let Some(result) = multi.next().await {
-//!     let ev = result?;
-//!     println!("[{}] {:?}", ev.namespace, ev.event);
+//! let mut conn1 = Connection::<Route>::new()?;
+//! conn1.subscribe_all()?;
+//! streams.insert("default", conn1.into_event_stream());
+//!
+//! let mut conn2 = Connection::<Route>::new_in_namespace("ns1")?;
+//! conn2.subscribe_all()?;
+//! streams.insert("ns1", conn2.into_event_stream());
+//!
+//! while let Some((ns, event)) = streams.next().await {
+//!     println!("[{}] {:?}", ns, event?);
 //! }
 //! ```
 
@@ -142,12 +145,13 @@ pub use netlink::{Connection, Error, Protocol, Result};
 pub use netlink::{Generic, Route};
 
 // Event types
-pub use netlink::{
-    EventStream, EventStreamBuilder, MultiNamespaceEventStream, NamespacedEvent, NetworkEvent,
-};
+pub use netlink::NetworkEvent;
 
 // Stream-based event API
 pub use netlink::{EventSource, EventSubscription, OwnedEventStream};
+
+// Route protocol multicast groups
+pub use netlink::RouteGroup;
 
 // Namespace types
 pub use netlink::NamespaceSpec;

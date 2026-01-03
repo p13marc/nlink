@@ -1,25 +1,30 @@
 //! Monitor helper utilities for event-based output.
 //!
-//! This module provides a generic framework for monitoring netlink events
-//! and formatting the output in both text and JSON formats.
+//! This module provides output formatting helpers for monitoring netlink events
+//! in both text and JSON formats.
 //!
 //! # Example
 //!
 //! ```ignore
-//! use rip_output::monitor::{MonitorConfig, EventHandler, run_monitor_loop};
+//! use nlink::netlink::{Connection, Route, RouteGroup};
+//! use nlink::output::{MonitorConfig, print_event};
+//! use tokio_stream::StreamExt;
 //!
 //! let config = MonitorConfig::new()
 //!     .with_timestamp(true)
 //!     .with_format(OutputFormat::Text);
 //!
-//! run_monitor_loop(&mut conn, &config, |msg_type, payload| {
-//!     // Parse and return event
-//! }).await?;
+//! let mut conn = Connection::<Route>::new()?;
+//! conn.subscribe(&[RouteGroup::Link])?;
+//! let mut events = conn.events();
+//!
+//! while let Some(result) = events.next().await {
+//!     let event = result?;
+//!     // Convert and print event...
+//! }
 //! ```
 
 use super::{OutputFormat, OutputOptions};
-use crate::netlink::message::{MessageIter, NlMsgType};
-use crate::netlink::{Connection, Result, Route};
 use std::io::{self, Write};
 use std::time::SystemTime;
 
@@ -113,50 +118,6 @@ pub fn print_monitor_start<W: Write>(
         writeln!(w, "{}", message)?;
     }
     Ok(())
-}
-
-/// Event handler function type.
-///
-/// Takes a message type and payload, returns an optional event to display.
-pub type EventHandler<E> = dyn Fn(u16, &[u8]) -> Option<E>;
-
-/// Run a generic monitor loop.
-///
-/// This function handles the common monitor loop pattern:
-/// 1. Receive events from the connection
-/// 2. Parse each message using the provided handler
-/// 3. Print events in the configured format
-///
-/// # Arguments
-/// * `conn` - The netlink connection (should already be subscribed to groups)
-/// * `config` - Monitor configuration
-/// * `handler` - Function to parse messages into events
-pub async fn run_monitor_loop<E>(
-    conn: &Connection<Route>,
-    config: &MonitorConfig,
-    handler: impl Fn(u16, &[u8]) -> Option<E>,
-) -> Result<()>
-where
-    E: MonitorEvent,
-{
-    let mut stdout = io::stdout().lock();
-
-    loop {
-        let data = conn.recv_event().await?;
-
-        for result in MessageIter::new(&data) {
-            let (header, payload) = result?;
-
-            // Skip error/done/noop messages
-            if header.is_error() || header.is_done() || header.nlmsg_type == NlMsgType::NOOP {
-                continue;
-            }
-
-            if let Some(event) = handler(header.nlmsg_type, payload) {
-                print_event(&mut stdout, &event, config)?;
-            }
-        }
-    }
 }
 
 // ============================================================================

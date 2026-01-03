@@ -1,45 +1,43 @@
 //! Monitor events in a specific network namespace.
 //!
 //! This example demonstrates namespace-aware event monitoring
-//! using EventStream with namespace options.
+//! using Connection with namespace support.
 //!
-//! Run with: cargo run -p nlink --example monitor_namespace -- myns
+//! Run with: cargo run -p nlink --example events_monitor_namespace -- myns
 //!
 //! First create a namespace: sudo ip netns add myns
 //! Then make changes: sudo ip netns exec myns ip link add dummy0 type dummy
 
 use std::env;
+use std::path::PathBuf;
 
-use nlink::netlink::events::{EventStream, NetworkEvent};
+use nlink::netlink::{Connection, NetworkEvent, Route, RouteGroup};
 use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    let mut builder = EventStream::builder()
-        .links(true)
-        .addresses(true)
-        .routes(true);
-
-    match args.get(1).map(|s| s.as_str()) {
+    let mut conn = match args.get(1).map(|s| s.as_str()) {
         Some("--pid") => {
             let pid: u32 = args
                 .get(2)
                 .expect("usage: --pid <pid>")
                 .parse()
                 .expect("invalid PID");
-            builder = builder.namespace_pid(pid);
+            let path = PathBuf::from(format!("/proc/{}/ns/net", pid));
             println!("Monitoring events in namespace of PID {}...", pid);
+            Connection::<Route>::new_in_namespace_path(&path)?
         }
         Some("--path") => {
             let path = args.get(2).expect("usage: --path <path>");
-            builder = builder.namespace_path(path);
             println!("Monitoring events in namespace at {}...", path);
+            Connection::<Route>::new_in_namespace_path(path)?
         }
         Some(ns_name) => {
-            builder = builder.namespace(ns_name);
+            let path = PathBuf::from("/var/run/netns").join(ns_name);
             println!("Monitoring events in namespace '{}'...", ns_name);
+            Connection::<Route>::new_in_namespace_path(&path)?
         }
         None => {
             println!("Monitoring events in default namespace...");
@@ -48,14 +46,24 @@ async fn main() -> nlink::netlink::Result<()> {
             println!("  --pid <pid>   - Monitor by process ID");
             println!("  --path <path> - Monitor by namespace path");
             println!("  <name>        - Monitor named namespace");
+            Connection::<Route>::new()?
         }
-    }
+    };
+
+    conn.subscribe(&[
+        RouteGroup::Link,
+        RouteGroup::Ipv4Addr,
+        RouteGroup::Ipv6Addr,
+        RouteGroup::Ipv4Route,
+        RouteGroup::Ipv6Route,
+    ])?;
 
     println!("{}", "-".repeat(50));
 
-    let mut stream = builder.build()?;
+    let mut events = conn.events();
 
-    while let Some(event) = stream.try_next().await? {
+    while let Some(result) = events.next().await {
+        let event = result?;
         match event {
             NetworkEvent::NewLink(link) => {
                 println!(

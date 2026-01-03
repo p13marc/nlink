@@ -2,7 +2,6 @@
 
 use std::os::unix::io::RawFd;
 use std::path::Path;
-use std::task::{Context, Poll};
 
 use super::builder::MessageBuilder;
 use super::error::{Error, Result};
@@ -280,6 +279,66 @@ impl<P: ProtocolState> Connection<P> {
 }
 
 // ============================================================================
+// Route protocol multicast groups
+// ============================================================================
+
+/// Multicast groups for Route protocol event notifications.
+///
+/// Use with [`Connection<Route>::subscribe`] to receive specific event types.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::{Connection, Route, RouteGroup};
+///
+/// let mut conn = Connection::<Route>::new()?;
+/// conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
+/// let mut events = conn.events();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RouteGroup {
+    /// Link (interface) state changes (RTM_NEWLINK, RTM_DELLINK).
+    Link,
+    /// IPv4 address changes (RTM_NEWADDR, RTM_DELADDR).
+    Ipv4Addr,
+    /// IPv6 address changes (RTM_NEWADDR, RTM_DELADDR).
+    Ipv6Addr,
+    /// IPv4 route changes (RTM_NEWROUTE, RTM_DELROUTE).
+    Ipv4Route,
+    /// IPv6 route changes (RTM_NEWROUTE, RTM_DELROUTE).
+    Ipv6Route,
+    /// Neighbor (ARP/NDP) cache changes (RTM_NEWNEIGH, RTM_DELNEIGH).
+    Neigh,
+    /// Traffic control changes (qdiscs, classes, filters, actions).
+    Tc,
+    /// Namespace ID changes (RTM_NEWNSID, RTM_DELNSID).
+    NsId,
+    /// IPv4 routing rule changes (RTM_NEWRULE, RTM_DELRULE).
+    Ipv4Rule,
+    /// IPv6 routing rule changes (RTM_NEWRULE, RTM_DELRULE).
+    Ipv6Rule,
+}
+
+impl RouteGroup {
+    /// Convert to the raw netlink multicast group number.
+    fn to_group(self) -> u32 {
+        use super::socket::rtnetlink_groups::*;
+        match self {
+            Self::Link => RTNLGRP_LINK,
+            Self::Ipv4Addr => RTNLGRP_IPV4_IFADDR,
+            Self::Ipv6Addr => RTNLGRP_IPV6_IFADDR,
+            Self::Ipv4Route => RTNLGRP_IPV4_ROUTE,
+            Self::Ipv6Route => RTNLGRP_IPV6_ROUTE,
+            Self::Neigh => RTNLGRP_NEIGH,
+            Self::Tc => RTNLGRP_TC,
+            Self::NsId => RTNLGRP_NSID,
+            Self::Ipv4Rule => RTNLGRP_IPV4_RULE,
+            Self::Ipv6Rule => RTNLGRP_IPV6_RULE,
+        }
+    }
+}
+
+// ============================================================================
 // Route protocol specific methods
 // ============================================================================
 
@@ -308,21 +367,46 @@ impl Connection<Route> {
         spec.connection()
     }
 
-    /// Subscribe to multicast groups for monitoring.
-    pub fn subscribe(&mut self, group: u32) -> Result<()> {
-        self.socket.add_membership(group)
-    }
-
-    /// Receive the next event message (for monitoring).
-    pub async fn recv_event(&self) -> Result<Vec<u8>> {
-        self.socket.recv_msg().await
-    }
-
-    /// Poll for incoming event data.
+    /// Subscribe to multicast groups for event notifications.
     ///
-    /// This is the poll-based version of `recv_event()` for use with `Stream` implementations.
-    pub(crate) fn poll_recv_event(&self, cx: &mut Context<'_>) -> Poll<Result<Vec<u8>>> {
-        self.socket.poll_recv(cx)
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Route, RouteGroup};
+    ///
+    /// let mut conn = Connection::<Route>::new()?;
+    /// conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
+    /// ```
+    pub fn subscribe(&mut self, groups: &[RouteGroup]) -> Result<()> {
+        for group in groups {
+            self.socket.add_membership(group.to_group())?;
+        }
+        Ok(())
+    }
+
+    /// Subscribe to all commonly-used event groups.
+    ///
+    /// Subscribes to: Link, Ipv4Addr, Ipv6Addr, Ipv4Route, Ipv6Route, Neigh, Tc.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Route};
+    ///
+    /// let mut conn = Connection::<Route>::new()?;
+    /// conn.subscribe_all()?;
+    /// let mut events = conn.events();
+    /// ```
+    pub fn subscribe_all(&mut self) -> Result<()> {
+        self.subscribe(&[
+            RouteGroup::Link,
+            RouteGroup::Ipv4Addr,
+            RouteGroup::Ipv6Addr,
+            RouteGroup::Ipv4Route,
+            RouteGroup::Ipv6Route,
+            RouteGroup::Neigh,
+            RouteGroup::Tc,
+        ])
     }
 
     // ========================================================================

@@ -1,13 +1,12 @@
 //! ip monitor - watch for netlink events.
 //!
-//! This module uses the EventStream API from nlink for high-level
+//! This module uses the Connection events() API from nlink for high-level
 //! event monitoring with Stream trait support.
 
 use clap::{Args, ValueEnum};
-use nlink::netlink::Result;
-use nlink::netlink::events::{EventStream, EventType as NlinkEventType, NetworkEvent};
 use nlink::netlink::types::link::iff;
 use nlink::netlink::types::neigh::nud_state_name;
+use nlink::netlink::{Connection, NetworkEvent, Result, Route, RouteGroup};
 use nlink::output::{
     AddressEvent, IpEvent, LinkEvent, MonitorConfig, NeighborEvent, OutputFormat, OutputOptions,
     RouteEvent, print_event, print_monitor_start,
@@ -30,15 +29,32 @@ pub enum EventType {
 }
 
 impl EventType {
-    /// Convert to nlink's EventType for EventStream builder.
-    fn to_nlink(self) -> NlinkEventType {
-        match self {
-            EventType::Link => NlinkEventType::Link,
-            EventType::Address => NlinkEventType::Address,
-            EventType::Route => NlinkEventType::Route,
-            EventType::Neigh => NlinkEventType::Neighbor,
-            EventType::All => NlinkEventType::All,
+    /// Convert to RouteGroup slices for subscription.
+    fn to_groups(types: &[EventType]) -> Vec<RouteGroup> {
+        let mut groups = Vec::new();
+        for t in types {
+            match t {
+                EventType::Link => groups.push(RouteGroup::Link),
+                EventType::Address => {
+                    groups.push(RouteGroup::Ipv4Addr);
+                    groups.push(RouteGroup::Ipv6Addr);
+                }
+                EventType::Route => {
+                    groups.push(RouteGroup::Ipv4Route);
+                    groups.push(RouteGroup::Ipv6Route);
+                }
+                EventType::Neigh => groups.push(RouteGroup::Neigh),
+                EventType::All => {
+                    groups.push(RouteGroup::Link);
+                    groups.push(RouteGroup::Ipv4Addr);
+                    groups.push(RouteGroup::Ipv6Addr);
+                    groups.push(RouteGroup::Ipv4Route);
+                    groups.push(RouteGroup::Ipv6Route);
+                    groups.push(RouteGroup::Neigh);
+                }
+            }
         }
+        groups
     }
 }
 
@@ -61,11 +77,12 @@ impl MonitorCmd {
             .with_format(format)
             .with_opts(*opts);
 
-        // Convert CLI event types to nlink event types
-        let event_types: Vec<_> = self.objects.iter().map(|o| o.to_nlink()).collect();
+        // Convert CLI event types to RouteGroups
+        let groups = EventType::to_groups(&self.objects);
 
-        // Build EventStream with selected event types
-        let mut stream = EventStream::builder().event_types(&event_types).build()?;
+        // Create connection and subscribe
+        let mut conn = Connection::<Route>::new()?;
+        conn.subscribe(&groups)?;
 
         let mut stdout = std::io::stdout().lock();
         print_monitor_start(
@@ -74,8 +91,10 @@ impl MonitorCmd {
             "Monitoring netlink events (Ctrl+C to stop)...",
         )?;
 
-        // Use try_next() for idiomatic async iteration with ? operator
-        while let Some(event) = stream.try_next().await? {
+        let mut events = conn.events();
+
+        while let Some(result) = events.next().await {
+            let event = result?;
             if let Some(ip_event) = convert_event(event) {
                 print_event(&mut stdout, &ip_event, &config)?;
             }
