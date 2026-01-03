@@ -2511,10 +2511,10 @@ impl Connection<Route> {
     /// # Example
     ///
     /// ```ignore
-    /// use nlink::netlink::{namespace, tc::NetemConfig};
+    /// use nlink::netlink::{Connection, Route, namespace, tc::NetemConfig};
     /// use std::time::Duration;
     ///
-    /// let conn = namespace::connection_for("myns")?;
+    /// let conn: Connection<Route> = namespace::connection_for("myns")?;
     /// let link = conn.get_link_by_name("eth0").await?;
     ///
     /// let netem = NetemConfig::new()

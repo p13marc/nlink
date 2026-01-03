@@ -8,20 +8,23 @@
 //!
 //! ```ignore
 //! use nlink::netlink::namespace;
-//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Route, Generic};
 //!
-//! // Get a connection for a named namespace
-//! let conn = namespace::connection_for("myns")?;
+//! // Get a Route connection for a named namespace
+//! let conn: Connection<Route> = namespace::connection_for("myns")?;
 //! let links = conn.get_links().await?;
 //!
+//! // Or a Generic connection for WireGuard in a namespace
+//! let conn: Connection<Generic> = namespace::connection_for("myns")?;
+//!
 //! // Or use a path directly
-//! let conn = namespace::connection_for_path("/proc/1234/ns/net")?;
+//! let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net")?;
 //!
 //! // Or use NamespaceSpec for a unified API
 //! use nlink::netlink::namespace::NamespaceSpec;
 //!
 //! let spec = NamespaceSpec::Named("myns");
-//! let conn = spec.connection()?;
+//! let conn: Connection<Route> = spec.connection()?;
 //! ```
 
 use std::fs::File;
@@ -30,7 +33,7 @@ use std::path::{Path, PathBuf};
 
 use super::connection::Connection;
 use super::error::{Error, Result};
-use super::protocol::Route;
+use super::protocol::ProtocolState;
 
 /// Specification for which network namespace to use.
 ///
@@ -41,6 +44,7 @@ use super::protocol::Route;
 /// # Example
 ///
 /// ```ignore
+/// use nlink::netlink::{Connection, Route};
 /// use nlink::netlink::namespace::NamespaceSpec;
 ///
 /// // Different ways to specify a namespace
@@ -49,8 +53,8 @@ use super::protocol::Route;
 /// let by_path = NamespaceSpec::Path(Path::new("/proc/1234/ns/net"));
 /// let by_pid = NamespaceSpec::Pid(1234);
 ///
-/// // Create connections
-/// let conn = named.connection()?;
+/// // Create connections (generic over protocol type)
+/// let conn: Connection<Route> = named.connection()?;
 /// ```
 #[derive(Debug, Clone)]
 pub enum NamespaceSpec<'a> {
@@ -71,14 +75,15 @@ impl<'a> NamespaceSpec<'a> {
     ///
     /// ```ignore
     /// use nlink::netlink::namespace::NamespaceSpec;
+    /// use nlink::netlink::protocol::Route;
     ///
     /// let spec = NamespaceSpec::Named("myns");
-    /// let conn = spec.connection()?;
+    /// let conn: Connection<Route> = spec.connection()?;
     /// let links = conn.get_links().await?;
     /// ```
-    pub fn connection(&self) -> Result<Connection<Route>> {
+    pub fn connection<P: ProtocolState>(&self) -> Result<Connection<P>> {
         match self {
-            NamespaceSpec::Default => Connection::<Route>::new(),
+            NamespaceSpec::Default => Connection::<P>::new(),
             NamespaceSpec::Named(name) => connection_for(name),
             NamespaceSpec::Path(path) => connection_for_path(path),
             NamespaceSpec::Pid(pid) => connection_for_pid(*pid),
@@ -104,12 +109,13 @@ pub const NETNS_RUN_DIR: &str = "/var/run/netns";
 ///
 /// ```ignore
 /// use nlink::netlink::namespace;
+/// use nlink::netlink::protocol::Route;
 ///
 /// // Create a connection to work in the "production" namespace
-/// let conn = namespace::connection_for("production")?;
+/// let conn: Connection<Route> = namespace::connection_for("production")?;
 /// let links = conn.get_links().await?;
 /// ```
-pub fn connection_for(name: &str) -> Result<Connection<Route>> {
+pub fn connection_for<P: ProtocolState>(name: &str) -> Result<Connection<P>> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(name);
     connection_for_path(&path)
 }
@@ -125,13 +131,14 @@ pub fn connection_for(name: &str) -> Result<Connection<Route>> {
 ///
 /// ```ignore
 /// use nlink::netlink::namespace;
+/// use nlink::netlink::protocol::Route;
 ///
 /// // For a container's namespace
-/// let conn = namespace::connection_for_path("/proc/1234/ns/net")?;
+/// let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net")?;
 /// let links = conn.get_links().await?;
 /// ```
-pub fn connection_for_path<T: AsRef<Path>>(path: T) -> Result<Connection<Route>> {
-    Connection::<Route>::new_in_namespace_path(path)
+pub fn connection_for_path<P: ProtocolState, T: AsRef<Path>>(path: T) -> Result<Connection<P>> {
+    Connection::<P>::new_in_namespace_path(path)
 }
 
 /// Get a connection for a process's network namespace.
@@ -140,12 +147,13 @@ pub fn connection_for_path<T: AsRef<Path>>(path: T) -> Result<Connection<Route>>
 ///
 /// ```ignore
 /// use nlink::netlink::namespace;
+/// use nlink::netlink::protocol::Route;
 ///
 /// // Get interfaces visible to process 1234
-/// let conn = namespace::connection_for_pid(1234)?;
+/// let conn: Connection<Route> = namespace::connection_for_pid(1234)?;
 /// let links = conn.get_links().await?;
 /// ```
-pub fn connection_for_pid(pid: u32) -> Result<Connection<Route>> {
+pub fn connection_for_pid<P: ProtocolState>(pid: u32) -> Result<Connection<P>> {
     let path = format!("/proc/{}/ns/net", pid);
     connection_for_path(&path)
 }
@@ -300,10 +308,10 @@ impl Drop for NamespaceGuard {
 /// # Example
 ///
 /// ```ignore
-/// use nlink::netlink::namespace;
+/// use nlink::netlink::{Connection, Route, namespace};
 ///
 /// if namespace::exists("myns") {
-///     let conn = namespace::connection_for("myns")?;
+///     let conn: Connection<Route> = namespace::connection_for("myns")?;
 ///     // ...
 /// }
 /// ```

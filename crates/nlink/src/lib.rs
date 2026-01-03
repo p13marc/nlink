@@ -58,22 +58,23 @@
 //! Operations can be performed in specific network namespaces:
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Route, Generic};
 //! use nlink::netlink::namespace;
 //!
 //! // Connect to a named namespace (created via `ip netns add myns`)
-//! let conn = namespace::connection_for("myns")?;
+//! // Functions are generic over protocol type
+//! let conn: Connection<Route> = namespace::connection_for("myns")?;
 //! let links = conn.get_links().await?;
 //!
 //! // Or connect to a container's namespace
-//! let conn = namespace::connection_for_pid(container_pid)?;
+//! let conn: Connection<Route> = namespace::connection_for_pid(container_pid)?;
 //! let links = conn.get_links().await?;
 //!
 //! // Or use a path directly
-//! let conn = Connection::new_in_namespace_path(
-//!     Protocol::Route,
-//!     "/proc/1234/ns/net"
-//! )?;
+//! let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net")?;
+//!
+//! // Generic connections work too (e.g., for WireGuard in a namespace)
+//! let genl: Connection<Generic> = namespace::connection_for("myns")?;
 //! ```
 //!
 //! # Event Monitoring

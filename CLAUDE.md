@@ -169,21 +169,22 @@ conn.del_link("veth0").await?;
 
 **Network namespace operations:**
 ```rust
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route, Generic};
 use nlink::netlink::namespace;
 
 // Connect to a named namespace (created via `ip netns add myns`)
-let conn = namespace::connection_for("myns")?;
+// Functions are generic over protocol type
+let conn: Connection<Route> = namespace::connection_for("myns")?;
 let links = conn.get_links().await?;
 
 // Connect to a container's namespace by PID
-let conn = namespace::connection_for_pid(container_pid)?;
+let conn: Connection<Route> = namespace::connection_for_pid(container_pid)?;
 
 // Or use a path directly
-let conn = Connection::new_in_namespace_path(
-    Protocol::Route,
-    "/proc/1234/ns/net"
-)?;
+let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net")?;
+
+// Generic connections work too (e.g., for WireGuard in a namespace)
+let genl: Connection<Generic> = namespace::connection_for("myns")?;
 
 // List available namespaces
 for ns in namespace::list()? {
@@ -492,12 +493,12 @@ let nsid = conn.get_nsid_for_pid(1234).await?;
 
 **Namespace-aware TC operations (using ifindex):**
 ```rust
-use nlink::netlink::{namespace, tc::NetemConfig};
+use nlink::netlink::{Connection, Route, namespace, tc::NetemConfig};
 use std::time::Duration;
 
 // For namespace operations, use *_by_index methods to avoid
 // reading /sys/class/net/ from the host namespace
-let conn = namespace::connection_for("myns")?;
+let conn: Connection<Route> = namespace::connection_for("myns")?;
 let link = conn.get_link_by_name("eth0").await?;
 
 let netem = NetemConfig::new()
