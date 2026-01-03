@@ -106,6 +106,8 @@ Some examples require specific features or root privileges. See the individual e
 |---------|-------------|---------|
 | `events_monitor` | Monitor network events (link, address, route changes) | `cargo run -p nlink --example events_monitor` |
 | `events_monitor_namespace` | Monitor events in a specific namespace | `cargo run -p nlink --example events_monitor_namespace -- <ns_name>` |
+| `events_ip_monitor` | Monitor events like `ip monitor` (links, addresses, routes, neighbors) | `cargo run -p nlink --example events_ip_monitor` |
+| `events_tc_monitor` | Monitor TC events like `tc monitor` (qdiscs, classes, filters) | `cargo run -p nlink --example events_tc_monitor` |
 
 ## Namespace Examples
 

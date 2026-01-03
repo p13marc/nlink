@@ -110,6 +110,14 @@ path = "examples/events/monitor.rs"
 name = "events_monitor_namespace"
 path = "examples/events/monitor_namespace.rs"
 
+[[example]]
+name = "events_ip_monitor"
+path = "examples/events/ip_monitor.rs"
+
+[[example]]
+name = "events_tc_monitor"
+path = "examples/events/tc_monitor.rs"
+
 # Namespace examples
 [[example]]
 name = "namespace_events"
