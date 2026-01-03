@@ -22,7 +22,8 @@ examples/
 │       └── stats.rs
 ├── events/             # Event monitoring examples
 │   ├── monitor.rs
-│   └── monitor_namespace.rs
+│   ├── monitor_namespace.rs
+│   └── multi_source.rs
 ├── namespace/          # Namespace management examples
 │   ├── events.rs
 │   └── watch.rs
@@ -33,9 +34,11 @@ examples/
 │   ├── tcp_connections.rs
 │   └── unix_sockets.rs
 ├── uevent/             # Kernel uevent examples
-│   └── device_monitor.rs
+│   ├── device_monitor.rs
+│   └── device_monitor_stream.rs
 ├── connector/          # Kernel connector examples
-│   └── process_monitor.rs
+│   ├── process_monitor.rs
+│   └── process_monitor_stream.rs
 ├── netfilter/          # Netfilter examples
 │   └── conntrack.rs
 ├── xfrm/               # XFRM (IPsec) examples
@@ -45,7 +48,8 @@ examples/
 ├── audit/              # Linux Audit examples
 │   └── audit_status.rs
 └── selinux/            # SELinux examples
-    └── selinux_monitor.rs
+    ├── selinux_monitor.rs
+    └── selinux_monitor_stream.rs
 ```
 
 ## Running Examples
@@ -129,12 +133,14 @@ Some examples require specific features or root privileges. See the individual e
 | Example | Description | Command |
 |---------|-------------|---------|
 | `uevent_device_monitor` | Monitor device hotplug events (like udev) | `cargo run -p nlink --example uevent_device_monitor` |
+| `uevent_device_monitor_stream` | Same using Stream API with `conn.events()` | `cargo run -p nlink --example uevent_device_monitor_stream` |
 
 ## Connector Examples (Process Events)
 
 | Example | Description | Command |
 |---------|-------------|---------|
 | `connector_process_monitor` | Monitor process fork/exec/exit events | `sudo cargo run -p nlink --example connector_process_monitor` |
+| `connector_process_monitor_stream` | Same using Stream API with `conn.events()` | `sudo cargo run -p nlink --example connector_process_monitor_stream` |
 
 ## Netfilter Examples (Connection Tracking)
 
@@ -165,6 +171,13 @@ Some examples require specific features or root privileges. See the individual e
 | Example | Description | Command |
 |---------|-------------|---------|
 | `selinux_monitor` | Monitor SELinux enforcement mode changes and policy loads | `cargo run -p nlink --example selinux_monitor` |
+| `selinux_monitor_stream` | Same using Stream API with `conn.events()` | `cargo run -p nlink --example selinux_monitor_stream` |
+
+## Multi-Source Event Monitoring
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `events_multi_source` | Combine multiple event sources with `tokio::select!` | `sudo cargo run -p nlink --example events_multi_source` |
 
 ## Example Usage Patterns
 
@@ -196,6 +209,61 @@ let links = conn.get_links().await?;
 for link in links {
     // Instead of: link.name.as_deref().unwrap_or("?")
     println!("Interface: {}", link.name_or("?"));
+}
+```
+
+### Using the Stream API with `conn.events()`
+
+Protocols implementing `EventSource` can use the unified Stream API:
+
+```rust
+use nlink::netlink::{Connection, KobjectUevent, Connector, SELinux};
+use tokio_stream::StreamExt;
+
+// Device hotplug events
+let conn = Connection::<KobjectUevent>::new()?;
+let mut events = conn.events();  // Borrows connection
+while let Some(event) = events.next().await {
+    println!("{:?}", event?);
+}
+
+// Process events (requires root)
+let conn = Connection::<Connector>::new().await?;
+let mut events = conn.events();
+while let Some(event) = events.next().await {
+    println!("{:?}", event?);
+}
+
+// SELinux events
+let conn = Connection::<SELinux>::new()?;
+let mut events = conn.events();
+while let Some(event) = events.next().await {
+    println!("{:?}", event?);
+}
+```
+
+### Combining multiple event sources
+
+```rust
+use nlink::netlink::{Connection, KobjectUevent, Connector};
+use std::pin::pin;
+use tokio_stream::StreamExt;
+
+let uevent_conn = Connection::<KobjectUevent>::new()?;
+let proc_conn = Connection::<Connector>::new().await?;
+
+let mut uevent_events = pin!(uevent_conn.events());
+let mut proc_events = pin!(proc_conn.events());
+
+loop {
+    tokio::select! {
+        Some(result) = uevent_events.next() => {
+            println!("[device] {:?}", result?);
+        }
+        Some(result) = proc_events.next() => {
+            println!("[proc] {:?}", result?);
+        }
+    }
 }
 ```
 

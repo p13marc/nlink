@@ -101,11 +101,13 @@ Common types are re-exported at the crate root for convenience:
 // Instead of:
 use nlink::netlink::{Connection, Error, Protocol, Result};
 use nlink::netlink::events::{EventStream, NetworkEvent};
+use nlink::netlink::stream::{EventSource, EventSubscription, OwnedEventStream};
 use nlink::netlink::messages::TcMessage;
 
 // You can use:
 use nlink::{Connection, Error, Protocol, Result};
 use nlink::{EventStream, NetworkEvent};
+use nlink::{EventSource, EventSubscription, OwnedEventStream};
 use nlink::{TcMessage, QdiscMessage, ClassMessage, FilterMessage};
 ```
 
@@ -113,6 +115,11 @@ Type aliases for TC messages improve discoverability:
 - `QdiscMessage` = `TcMessage`
 - `ClassMessage` = `TcMessage`  
 - `FilterMessage` = `TcMessage`
+
+Stream types for event monitoring:
+- `EventSource` - Trait for protocols that emit events
+- `EventSubscription<'a, P>` - Borrowed stream from `conn.events()`
+- `OwnedEventStream<P>` - Owned stream from `conn.into_event_stream()`
 
 ## Key Patterns
 
@@ -496,6 +503,72 @@ println!("NSID: {}", nsid);
 
 // Or get NSID for a process's namespace
 let nsid = conn.get_nsid_for_pid(1234).await?;
+```
+
+**EventSource trait (unified Stream API for all protocols):**
+
+Protocols that support event monitoring implement the `EventSource` trait,
+providing a unified Stream-based API via `events()` (borrowed) and
+`into_event_stream()` (owned).
+
+```rust
+use nlink::netlink::{Connection, KobjectUevent, Connector, SELinux};
+use tokio_stream::StreamExt;
+
+// Device hotplug events
+let conn = Connection::<KobjectUevent>::new()?;
+let mut events = conn.events();  // Borrows connection
+while let Some(event) = events.next().await {
+    let uevent = event?;
+    println!("[{}] {}", uevent.action, uevent.devpath);
+}
+
+// Process events (requires root)
+let conn = Connection::<Connector>::new().await?;
+let mut events = conn.events();
+while let Some(event) = events.next().await {
+    println!("{:?}", event?);
+}
+
+// SELinux events
+let conn = Connection::<SELinux>::new()?;
+let mut events = conn.events();
+while let Some(event) = events.next().await {
+    println!("{:?}", event?);
+}
+
+// Owned stream (consumes connection)
+let conn = Connection::<KobjectUevent>::new()?;
+let mut stream = conn.into_event_stream();
+while let Some(event) = stream.next().await {
+    println!("{:?}", event?);
+}
+// Recover connection if needed
+let conn = stream.into_connection();
+```
+
+**Combining multiple event sources with tokio::select!:**
+```rust
+use nlink::netlink::{Connection, KobjectUevent, Connector};
+use std::pin::pin;
+use tokio_stream::StreamExt;
+
+let uevent_conn = Connection::<KobjectUevent>::new()?;
+let proc_conn = Connection::<Connector>::new().await?;
+
+let mut uevent_events = pin!(uevent_conn.events());
+let mut proc_events = pin!(proc_conn.events());
+
+loop {
+    tokio::select! {
+        Some(result) = uevent_events.next() => {
+            println!("[device] {:?}", result?);
+        }
+        Some(result) = proc_events.next() => {
+            println!("[proc] {:?}", result?);
+        }
+    }
+}
 ```
 
 **Namespace-aware TC operations (using ifindex):**

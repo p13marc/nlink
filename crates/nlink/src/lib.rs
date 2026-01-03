@@ -146,6 +146,9 @@ pub use netlink::{
     EventStream, EventStreamBuilder, MultiNamespaceEventStream, NamespacedEvent, NetworkEvent,
 };
 
+// Stream-based event API
+pub use netlink::{EventSource, EventSubscription, OwnedEventStream};
+
 // Namespace types
 pub use netlink::NamespaceSpec;
 

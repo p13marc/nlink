@@ -146,10 +146,18 @@ path = "examples/genl/wireguard.rs"
 name = "uevent_device_monitor"
 path = "examples/uevent/device_monitor.rs"
 
+[[example]]
+name = "uevent_device_monitor_stream"
+path = "examples/uevent/device_monitor_stream.rs"
+
 # Connector examples (process events)
 [[example]]
 name = "connector_process_monitor"
 path = "examples/connector/process_monitor.rs"
+
+[[example]]
+name = "connector_process_monitor_stream"
+path = "examples/connector/process_monitor_stream.rs"
 
 # Netfilter examples (connection tracking)
 [[example]]
@@ -175,3 +183,12 @@ path = "examples/audit/audit_status.rs"
 [[example]]
 name = "selinux_monitor"
 path = "examples/selinux/selinux_monitor.rs"
+
+[[example]]
+name = "selinux_monitor_stream"
+path = "examples/selinux/selinux_monitor_stream.rs"
+
+# Multi-source event monitoring
+[[example]]
+name = "events_multi_source"
+path = "examples/events/multi_source.rs"

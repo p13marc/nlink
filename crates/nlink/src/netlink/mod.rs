@@ -100,6 +100,7 @@ pub mod selinux;
 mod sockdiag;
 mod socket;
 pub mod stats;
+mod stream;
 pub mod tc;
 pub mod tc_options;
 pub mod types;
@@ -126,4 +127,5 @@ pub use protocol::{
     SockDiag, Wireguard, Xfrm,
 };
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};
+pub use stream::{EventSource, EventSubscription, OwnedEventStream};
 pub use tc_options::NetemParameter;

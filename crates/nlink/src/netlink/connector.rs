@@ -210,6 +210,129 @@ impl ProcEvent {
             ProcEvent::None | ProcEvent::Unknown { .. } => None,
         }
     }
+
+    /// Parse a process event from the payload after the cn_msg header.
+    ///
+    /// The input should be the data after the connector message header (20 bytes).
+    /// Used by the stream implementation.
+    pub fn parse_from_bytes(input: &[u8]) -> Option<Self> {
+        let mut input = input;
+
+        // Parse proc_event header
+        let header = ProcEventHeader::parse(&mut input).ok()?;
+
+        // Parse event-specific data based on type
+        match header.what {
+            PROC_EVENT_NONE => Some(ProcEvent::None),
+
+            PROC_EVENT_FORK => {
+                let parent_pid = parse_u32_ne(&mut input).ok()?;
+                let parent_tgid = parse_u32_ne(&mut input).ok()?;
+                let child_pid = parse_u32_ne(&mut input).ok()?;
+                let child_tgid = parse_u32_ne(&mut input).ok()?;
+                Some(ProcEvent::Fork {
+                    parent_pid,
+                    parent_tgid,
+                    child_pid,
+                    child_tgid,
+                })
+            }
+
+            PROC_EVENT_EXEC => {
+                let pid = parse_u32_ne(&mut input).ok()?;
+                let tgid = parse_u32_ne(&mut input).ok()?;
+                Some(ProcEvent::Exec { pid, tgid })
+            }
+
+            PROC_EVENT_UID => {
+                let pid = parse_u32_ne(&mut input).ok()?;
+                let tgid = parse_u32_ne(&mut input).ok()?;
+                let ruid = parse_u32_ne(&mut input).ok()?;
+                let euid = parse_u32_ne(&mut input).ok()?;
+                Some(ProcEvent::Uid {
+                    pid,
+                    tgid,
+                    ruid,
+                    euid,
+                })
+            }
+
+            PROC_EVENT_GID => {
+                let pid = parse_u32_ne(&mut input).ok()?;
+                let tgid = parse_u32_ne(&mut input).ok()?;
+                let rgid = parse_u32_ne(&mut input).ok()?;
+                let egid = parse_u32_ne(&mut input).ok()?;
+                Some(ProcEvent::Gid {
+                    pid,
+                    tgid,
+                    rgid,
+                    egid,
+                })
+            }
+
+            PROC_EVENT_SID => {
+                let pid = parse_u32_ne(&mut input).ok()?;
+                let tgid = parse_u32_ne(&mut input).ok()?;
+                Some(ProcEvent::Sid { pid, tgid })
+            }
+
+            PROC_EVENT_COMM => {
+                let pid = parse_u32_ne(&mut input).ok()?;
+                let tgid = parse_u32_ne(&mut input).ok()?;
+                // comm is 16 bytes
+                if input.len() < 16 {
+                    return None;
+                }
+                let comm = parse_string_from_bytes(&input[..16]);
+                Some(ProcEvent::Comm { pid, tgid, comm })
+            }
+
+            PROC_EVENT_PTRACE => {
+                let pid = parse_u32_ne(&mut input).ok()?;
+                let tgid = parse_u32_ne(&mut input).ok()?;
+                let tracer_pid = parse_u32_ne(&mut input).ok()?;
+                let tracer_tgid = parse_u32_ne(&mut input).ok()?;
+                Some(ProcEvent::Ptrace {
+                    pid,
+                    tgid,
+                    tracer_pid,
+                    tracer_tgid,
+                })
+            }
+
+            PROC_EVENT_COREDUMP => {
+                let pid = parse_u32_ne(&mut input).ok()?;
+                let tgid = parse_u32_ne(&mut input).ok()?;
+                let parent_pid = parse_u32_ne(&mut input).ok()?;
+                let parent_tgid = parse_u32_ne(&mut input).ok()?;
+                Some(ProcEvent::Coredump {
+                    pid,
+                    tgid,
+                    parent_pid,
+                    parent_tgid,
+                })
+            }
+
+            PROC_EVENT_EXIT => {
+                let pid = parse_u32_ne(&mut input).ok()?;
+                let tgid = parse_u32_ne(&mut input).ok()?;
+                let exit_code = parse_u32_ne(&mut input).ok()?;
+                let exit_signal = parse_u32_ne(&mut input).ok()?;
+                let parent_pid = parse_u32_ne(&mut input).ok()?;
+                let parent_tgid = parse_u32_ne(&mut input).ok()?;
+                Some(ProcEvent::Exit {
+                    pid,
+                    tgid,
+                    exit_code,
+                    exit_signal,
+                    parent_pid,
+                    parent_tgid,
+                })
+            }
+
+            _ => Some(ProcEvent::Unknown { what: header.what }),
+        }
+    }
 }
 
 /// cn_msg header structure (20 bytes).

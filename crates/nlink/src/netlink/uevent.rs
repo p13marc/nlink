@@ -55,7 +55,7 @@ impl Uevent {
     /// Parse a uevent from raw message data.
     ///
     /// Uevent format: header@devpath\0KEY=VALUE\0KEY=VALUE\0...
-    fn parse(data: &[u8]) -> Option<Self> {
+    pub fn parse(data: &[u8]) -> Option<Self> {
         // Find the header (action@devpath)
         let first_null = data.iter().position(|&b| b == 0)?;
         let header = std::str::from_utf8(&data[..first_null]).ok()?;
