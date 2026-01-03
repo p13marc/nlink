@@ -6,9 +6,9 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Route};
 //!
-//! let conn = Connection::new(Protocol::Route)?;
+//! let conn = Connection::<Route>::new()?;
 //!
 //! // Query interfaces
 //! let links = conn.get_links().await?;
@@ -22,18 +22,18 @@
 //!
 //! # Event Monitoring
 //!
-//! The `events` module provides a high-level API for monitoring network changes:
+//! Subscribe to multicast groups and use the stream API to monitor events:
 //!
 //! ```ignore
-//! use nlink::netlink::events::{EventStream, NetworkEvent};
+//! use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
+//! use tokio_stream::StreamExt;
 //!
-//! let mut stream = EventStream::builder()
-//!     .links(true)
-//!     .addresses(true)
-//!     .build()?;
+//! let mut conn = Connection::<Route>::new()?;
+//! conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Ipv4Addr])?;
 //!
-//! while let Some(event) = stream.next().await? {
-//!     match event {
+//! let mut events = conn.events();
+//! while let Some(event) = events.next().await {
+//!     match event? {
 //!         NetworkEvent::NewLink(link) => println!("New link: {:?}", link.name),
 //!         NetworkEvent::NewAddress(addr) => println!("New address: {:?}", addr.address),
 //!         _ => {}

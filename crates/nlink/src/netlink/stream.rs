@@ -6,7 +6,7 @@
 //! # Overview
 //!
 //! Protocols that implement [`EventSource`] can produce events via:
-//! - [`Connection::subscribe()`] - returns a borrowed stream, connection remains usable
+//! - [`Connection::events()`] - returns a borrowed stream, connection remains usable
 //! - [`Connection::into_events()`] - consumes connection, returns owned stream
 //!
 //! # Example
@@ -17,13 +17,13 @@
 //!
 //! let conn = Connection::<KobjectUevent>::new()?;
 //!
-//! // Subscribe to events (borrows connection)
-//! let mut events = conn.subscribe();
+//! // Get event stream (borrows connection)
+//! let mut events = conn.events();
 //! while let Some(event) = events.try_next().await? {
 //!     println!("[{}] {}", event.action, event.devpath);
 //! }
 //!
-//! // Connection still usable after dropping subscription
+//! // Connection still usable after dropping stream
 //! drop(events);
 //! ```
 //!
@@ -37,8 +37,8 @@
 //! let uevent_conn = Connection::<KobjectUevent>::new()?;
 //! let selinux_conn = Connection::<SELinux>::new()?;
 //!
-//! let mut uevent_events = pin!(uevent_conn.subscribe());
-//! let mut selinux_events = pin!(selinux_conn.subscribe());
+//! let mut uevent_events = pin!(uevent_conn.events());
+//! let mut selinux_events = pin!(selinux_conn.events());
 //!
 //! loop {
 //!     tokio::select! {
@@ -70,7 +70,7 @@ mod private {
 /// Trait for protocols that can produce events via multicast subscription.
 ///
 /// This trait is sealed and cannot be implemented outside this crate.
-/// Protocols implementing this trait can use [`Connection::subscribe()`]
+/// Protocols implementing this trait can use [`Connection::events()`]
 /// and [`Connection::into_events()`] to receive events as a [`Stream`].
 ///
 /// # Implementors
@@ -96,8 +96,8 @@ pub trait EventSource: ProtocolState + private::Sealed {
 
 /// A stream of events that borrows the underlying connection.
 ///
-/// Created by [`Connection::subscribe()`]. The connection remains
-/// usable for queries while this subscription is active.
+/// Created by [`Connection::events()`]. The connection remains
+/// usable for queries while this stream is active.
 ///
 /// # Example
 ///
@@ -106,7 +106,7 @@ pub trait EventSource: ProtocolState + private::Sealed {
 /// use tokio_stream::StreamExt;
 ///
 /// let conn = Connection::<KobjectUevent>::new()?;
-/// let mut events = conn.subscribe();
+/// let mut events = conn.events();
 ///
 /// while let Some(event) = events.try_next().await? {
 ///     println!("{:?}", event);

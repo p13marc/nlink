@@ -5,11 +5,11 @@
 //! # Example
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::addr::{Ipv4Address, Ipv6Address, AddressFlags};
 //! use std::net::{Ipv4Addr, Ipv6Addr};
 //!
-//! let conn = Connection::new(Protocol::Route)?;
+//! let conn = Connection::<Route>::new()?;
 //!
 //! // Add an IPv4 address
 //! conn.add_address(

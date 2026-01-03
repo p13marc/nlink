@@ -5,11 +5,11 @@
 //! # Example
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::neigh::{Neighbor, NeighborState};
 //! use std::net::Ipv4Addr;
 //!
-//! let conn = Connection::new(Protocol::Route)?;
+//! let conn = Connection::<Route>::new()?;
 //!
 //! // Add a permanent ARP entry
 //! conn.add_neighbor(

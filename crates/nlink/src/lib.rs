@@ -16,11 +16,11 @@
 //! # Example
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Route};
 //!
 //! #[tokio::main]
 //! async fn main() -> nlink::netlink::Result<()> {
-//!     let conn = Connection::new(Protocol::Route)?;
+//!     let conn = Connection::<Route>::new()?;
 //!
 //!     // Query interfaces
 //!     let links = conn.get_links().await?;
@@ -39,9 +39,9 @@
 //! # Link State Management
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Route};
 //!
-//! let conn = Connection::new(Protocol::Route)?;
+//! let conn = Connection::<Route>::new()?;
 //!
 //! // Bring an interface up
 //! conn.set_link_up("eth0").await?;

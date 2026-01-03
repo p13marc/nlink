@@ -797,7 +797,7 @@ impl Connection<Route> {
 
     /// Add a routing rule.
     ///
-    /// Use the [`RuleBuilder`] to construct the rule.
+    /// Use the [`super::rule::RuleBuilder`] to construct the rule.
     ///
     /// # Example
     ///

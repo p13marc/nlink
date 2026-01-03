@@ -5,10 +5,10 @@
 //! # Example
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::rule::RuleBuilder;
 //!
-//! let conn = Connection::new(Protocol::Route)?;
+//! let conn = Connection::<Route>::new()?;
 //!
 //! // Add a rule to lookup table 100 for traffic from 10.0.0.0/8
 //! conn.add_rule(

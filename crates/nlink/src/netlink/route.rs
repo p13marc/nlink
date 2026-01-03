@@ -5,11 +5,11 @@
 //! # Example
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::route::{Ipv4Route, Ipv6Route, RouteType, NextHop};
 //! use std::net::{Ipv4Addr, Ipv6Addr};
 //!
-//! let conn = Connection::new(Protocol::Route)?;
+//! let conn = Connection::<Route>::new()?;
 //!
 //! // Add a simple route via gateway
 //! conn.add_route(

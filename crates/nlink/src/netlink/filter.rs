@@ -6,11 +6,11 @@
 //! # Example
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::filter::{U32Filter, FlowerFilter, MatchallFilter};
 //! use std::net::Ipv4Addr;
 //!
-//! let conn = Connection::new(Protocol::Route)?;
+//! let conn = Connection::<Route>::new()?;
 //!
 //! // Add a u32 filter to match destination port 80
 //! let filter = U32Filter::new()

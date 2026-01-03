@@ -82,10 +82,10 @@
 //! # Example
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::link::{DummyLink, VethLink, BridgeLink, VlanLink};
 //!
-//! let conn = Connection::new(Protocol::Route)?;
+//! let conn = Connection::<Route>::new()?;
 //!
 //! // Create a dummy interface
 //! conn.add_link(DummyLink::new("dummy0")).await?;

@@ -6,11 +6,11 @@
 //! # Example
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Protocol};
+//! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::action::{GactAction, MirredAction, PoliceAction};
 //! use nlink::netlink::filter::MatchallFilter;
 //!
-//! let conn = Connection::new(Protocol::Route)?;
+//! let conn = Connection::<Route>::new()?;
 //!
 //! // Drop all traffic
 //! let drop = GactAction::drop();
