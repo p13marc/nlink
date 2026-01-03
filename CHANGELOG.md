@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-01-03
+
+### Fixed
+
+- Fixed race condition in `NamespaceWatcher` when the first namespace is created on a system
+  where `/var/run/netns` doesn't exist. The watcher now scans the directory after switching
+  watches to catch namespaces created during the transition.
+
+### Documentation
+
+- Fixed outdated API references in documentation:
+  - Updated `Connection::new(Protocol::Route)` to `Connection::<Route>::new()`
+  - Updated `conn.subscribe()` to `conn.events()` in stream module docs
+  - Updated `EventStream::builder()` to new subscribe/events API
+  - Fixed `RuleBuilder` doc link to use full path
+
 ## [0.5.0] - 2026-01-03
 
 ### Breaking Changes
