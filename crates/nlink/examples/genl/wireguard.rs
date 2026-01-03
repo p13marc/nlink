@@ -1,6 +1,6 @@
 //! Query WireGuard interfaces via Generic Netlink.
 //!
-//! This example demonstrates how to use the Generic Netlink protocol
+//! This example demonstrates how to use the Connection<Wireguard> API
 //! to query WireGuard device configuration and peer information.
 //!
 //! Run with: cargo run -p nlink --example genl_wireguard
@@ -10,13 +10,13 @@
 //!   sudo wg genkey | sudo tee /etc/wireguard/private.key
 //!   sudo wg set wg0 private-key /etc/wireguard/private.key listen-port 51820
 
-use nlink::netlink::genl::wireguard::WireguardConnection;
+use nlink::netlink::{Connection, Wireguard};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
-    // Try to connect to WireGuard GENL family
-    let wg = match WireguardConnection::new().await {
-        Ok(wg) => wg,
+    // Create a WireGuard connection (resolves GENL family ID)
+    let conn = match Connection::<Wireguard>::new_async().await {
+        Ok(conn) => conn,
         Err(e) => {
             eprintln!("Failed to connect to WireGuard: {}", e);
             eprintln!("Make sure the wireguard kernel module is loaded.");
@@ -32,7 +32,7 @@ async fn main() -> nlink::netlink::Result<()> {
     let mut found_any = false;
 
     for ifname in &interface_names {
-        match wg.get_device(ifname).await {
+        match conn.get_device(ifname).await {
             Ok(device) => {
                 found_any = true;
                 print_device(&device);

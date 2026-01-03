@@ -114,6 +114,6 @@ pub use namespace_watcher::{
     NamespaceEvent, NamespaceEventStream, NamespaceWatcher, NamespaceWatcherConfig,
 };
 pub use parse::{FromNetlink, ToNetlink};
-pub use protocol::{Generic, ProtocolState, Route, SockDiag};
+pub use protocol::{Generic, ProtocolState, Route, SockDiag, Wireguard};
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};
 pub use tc_options::NetemParameter;

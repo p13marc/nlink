@@ -109,6 +109,22 @@ impl ProtocolState for Generic {
     const PROTOCOL: Protocol = Protocol::Generic;
 }
 
+/// WireGuard protocol state.
+///
+/// Used for WireGuard device configuration via Generic Netlink.
+/// Contains the resolved WireGuard family ID.
+#[derive(Debug, Default)]
+pub struct Wireguard {
+    /// Resolved WireGuard GENL family ID.
+    pub(crate) family_id: u16,
+}
+
+impl private::Sealed for Wireguard {}
+
+impl ProtocolState for Wireguard {
+    const PROTOCOL: Protocol = Protocol::Generic;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +150,6 @@ mod tests {
         assert_eq!(Route::PROTOCOL, Protocol::Route);
         assert_eq!(SockDiag::PROTOCOL, Protocol::SockDiag);
         assert_eq!(Generic::PROTOCOL, Protocol::Generic);
+        assert_eq!(Wireguard::PROTOCOL, Protocol::Generic);
     }
 }

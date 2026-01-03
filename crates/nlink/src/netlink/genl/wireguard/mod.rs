@@ -8,15 +8,15 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use nlink::netlink::genl::wireguard::{WireguardConnection, WgPeer};
+//! use nlink::netlink::{Connection, Wireguard};
 //! use std::net::SocketAddr;
 //!
 //! # async fn example() -> nlink::Result<()> {
-//! // Create a connection to the WireGuard GENL family
-//! let wg = WireguardConnection::new().await?;
+//! // Create a WireGuard connection
+//! let conn = Connection::<Wireguard>::new_async().await?;
 //!
 //! // Get device information
-//! let device = wg.get_device("wg0").await?;
+//! let device = conn.get_device("wg0").await?;
 //! println!("Public key: {:?}", device.public_key);
 //! println!("Listen port: {:?}", device.listen_port);
 //!
@@ -33,22 +33,23 @@
 //! # Setting Configuration
 //!
 //! ```rust,no_run
-//! use nlink::netlink::genl::wireguard::{WireguardConnection, WgDevice, WgPeer, AllowedIp};
+//! use nlink::netlink::{Connection, Wireguard};
+//! use nlink::netlink::genl::wireguard::AllowedIp;
 //! use std::net::{Ipv4Addr, SocketAddrV4};
 //!
 //! # async fn example() -> nlink::Result<()> {
-//! let wg = WireguardConnection::new().await?;
+//! let conn = Connection::<Wireguard>::new_async().await?;
 //!
 //! // Set device private key and listen port
 //! let private_key = [0u8; 32]; // Your private key
-//! wg.set_device("wg0", |dev| {
+//! conn.set_device("wg0", |dev| {
 //!     dev.private_key(private_key)
 //!        .listen_port(51820)
 //! }).await?;
 //!
 //! // Add a peer
 //! let peer_pubkey = [0u8; 32]; // Peer's public key
-//! wg.set_peer("wg0", peer_pubkey, |peer| {
+//! conn.set_peer("wg0", peer_pubkey, |peer| {
 //!     peer.endpoint(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 51820).into())
 //!         .persistent_keepalive(25)
 //!         .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
@@ -60,8 +61,13 @@
 mod connection;
 mod types;
 
+pub use types::{
+    AllowedIp, WG_KEY_LEN, WgDevice, WgDeviceBuilder, WgPeer, WgPeerBuilder, WgPeerFlags,
+};
+
+// Re-export deprecated type for backwards compatibility
+#[allow(deprecated)]
 pub use connection::WireguardConnection;
-pub use types::{AllowedIp, WgDevice, WgDeviceBuilder, WgPeer, WgPeerBuilder, WgPeerFlags};
 
 /// WireGuard Generic Netlink family name.
 pub const WG_GENL_NAME: &str = "wireguard";

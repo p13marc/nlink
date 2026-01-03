@@ -120,6 +120,14 @@ impl<P: ProtocolState> Connection<P> {
         &self.state
     }
 
+    /// Create a connection from its parts.
+    ///
+    /// This is primarily used internally for protocols that require
+    /// async initialization (like WireGuard which needs family ID resolution).
+    pub(crate) fn from_parts(socket: NetlinkSocket, state: P) -> Self {
+        Self { socket, state }
+    }
+
     // ========================================================================
     // Internal request methods (pub(crate) - not part of public API)
     // ========================================================================

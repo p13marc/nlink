@@ -1,4 +1,7 @@
-//! WireGuard connection for device configuration.
+//! WireGuard connection implementation for `Connection<Wireguard>`.
+//!
+//! This module provides methods for WireGuard device configuration
+//! integrated into the Connection pattern.
 
 use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
@@ -10,37 +13,30 @@ use crate::netlink::attr::{AttrIter, NLA_F_NESTED, get};
 use crate::netlink::builder::MessageBuilder;
 use crate::netlink::connection::Connection;
 use crate::netlink::error::{Error, Result};
-use crate::netlink::genl::GENL_HDRLEN;
-use crate::netlink::protocol::Generic;
+use crate::netlink::genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr};
+use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
+use crate::netlink::protocol::{ProtocolState, Wireguard};
+use crate::netlink::socket::NetlinkSocket;
 
-/// Connection for configuring WireGuard interfaces.
-///
-/// This struct wraps a Generic Netlink connection and provides
-/// high-level methods for WireGuard device management.
-pub struct WireguardConnection {
-    conn: Connection<Generic>,
-    family_id: u16,
-}
-
-impl WireguardConnection {
+impl Connection<Wireguard> {
     /// Create a new WireGuard connection.
     ///
-    /// This resolves the WireGuard GENL family ID on first use.
-    pub async fn new() -> Result<Self> {
-        let conn = Connection::<Generic>::new()?;
-        let family_id = conn.get_family_id(WG_GENL_NAME).await?;
-        Ok(Self { conn, family_id })
-    }
+    /// This resolves the WireGuard GENL family ID during initialization.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Wireguard};
+    ///
+    /// let conn = Connection::<Wireguard>::new().await?;
+    /// let device = conn.get_device("wg0").await?;
+    /// ```
+    pub async fn new_async() -> Result<Self> {
+        let socket = NetlinkSocket::new(Wireguard::PROTOCOL)?;
+        let family_id = resolve_wireguard_family(&socket).await?;
 
-    /// Create a WireGuard connection from an existing GENL connection.
-    pub async fn from_connection(conn: Connection<Generic>) -> Result<Self> {
-        let family_id = conn.get_family_id(WG_GENL_NAME).await?;
-        Ok(Self { conn, family_id })
-    }
-
-    /// Get the underlying connection.
-    pub fn connection(&self) -> &Connection<Generic> {
-        &self.conn
+        let state = Wireguard { family_id };
+        Ok(Self::from_parts(socket, state))
     }
 
     /// Get device information.
@@ -48,15 +44,9 @@ impl WireguardConnection {
     /// Returns the current configuration and status of the WireGuard interface.
     pub async fn get_device(&self, ifname: &str) -> Result<WgDevice> {
         let responses = self
-            .conn
-            .dump_command(
-                self.family_id,
-                WgCmd::GetDevice as u8,
-                WG_GENL_VERSION,
-                |builder| {
-                    builder.append_attr_str(WgDeviceAttr::Ifname as u16, ifname);
-                },
-            )
+            .dump_wg_command(WgCmd::GetDevice as u8, |builder| {
+                builder.append_attr_str(WgDeviceAttr::Ifname as u16, ifname);
+            })
             .await?;
 
         if responses.is_empty() {
@@ -87,7 +77,10 @@ impl WireguardConnection {
     /// # Example
     ///
     /// ```ignore
-    /// wg.set_device("wg0", |dev| {
+    /// use nlink::netlink::{Connection, Wireguard};
+    ///
+    /// let conn = Connection::<Wireguard>::new_async().await?;
+    /// conn.set_device("wg0", |dev| {
     ///     dev.private_key(my_key)
     ///        .listen_port(51820)
     /// }).await?;
@@ -123,105 +116,167 @@ impl WireguardConnection {
         self.apply_device_config(ifname, &device_builder).await
     }
 
+    /// Get the WireGuard family ID.
+    pub fn family_id(&self) -> u16 {
+        self.state().family_id
+    }
+
     /// Apply device configuration to the kernel.
     async fn apply_device_config(&self, ifname: &str, config: &WgDeviceBuilder) -> Result<()> {
-        self.conn
-            .command(
-                self.family_id,
-                WgCmd::SetDevice as u8,
-                WG_GENL_VERSION,
-                |builder| {
-                    // Device name
-                    builder.append_attr_str(WgDeviceAttr::Ifname as u16, ifname);
+        self.wg_command(WgCmd::SetDevice as u8, |builder| {
+            // Device name
+            builder.append_attr_str(WgDeviceAttr::Ifname as u16, ifname);
 
-                    // Device flags
-                    if config.has_replace_peers() {
-                        builder.append_attr_u32(
-                            WgDeviceAttr::Flags as u16,
-                            WgDeviceFlag::ReplacePeers as u32,
-                        );
-                    }
+            // Device flags
+            if config.has_replace_peers() {
+                builder.append_attr_u32(
+                    WgDeviceAttr::Flags as u16,
+                    WgDeviceFlag::ReplacePeers as u32,
+                );
+            }
 
-                    // Private key
-                    if let Some(key) = config.get_private_key() {
-                        builder.append_attr(WgDeviceAttr::PrivateKey as u16, key);
-                    }
+            // Private key
+            if let Some(key) = config.get_private_key() {
+                builder.append_attr(WgDeviceAttr::PrivateKey as u16, key);
+            }
 
-                    // Listen port
-                    if let Some(port) = config.get_listen_port() {
-                        builder.append_attr_u16(WgDeviceAttr::ListenPort as u16, port);
-                    }
+            // Listen port
+            if let Some(port) = config.get_listen_port() {
+                builder.append_attr_u16(WgDeviceAttr::ListenPort as u16, port);
+            }
 
-                    // Fwmark
-                    if let Some(mark) = config.get_fwmark() {
-                        builder.append_attr_u32(WgDeviceAttr::Fwmark as u16, mark);
-                    }
+            // Fwmark
+            if let Some(mark) = config.get_fwmark() {
+                builder.append_attr_u32(WgDeviceAttr::Fwmark as u16, mark);
+            }
 
-                    // Peers
-                    if !config.get_peers().is_empty() {
-                        let peers_token =
-                            builder.nest_start(WgDeviceAttr::Peers as u16 | NLA_F_NESTED);
-                        for (idx, peer) in config.get_peers().iter().enumerate() {
-                            self.append_peer_attrs(builder, idx as u16, peer);
-                        }
-                        builder.nest_end(peers_token);
-                    }
-                },
-            )
-            .await?;
+            // Peers
+            if !config.get_peers().is_empty() {
+                let peers_token = builder.nest_start(WgDeviceAttr::Peers as u16 | NLA_F_NESTED);
+                for (idx, peer) in config.get_peers().iter().enumerate() {
+                    append_peer_attrs(builder, idx as u16, peer);
+                }
+                builder.nest_end(peers_token);
+            }
+        })
+        .await?;
 
         Ok(())
     }
 
-    /// Append peer attributes to a message builder.
-    fn append_peer_attrs(
+    /// Send a WireGuard GENL command and wait for ACK.
+    async fn wg_command(
         &self,
-        builder: &mut MessageBuilder,
-        idx: u16,
-        peer: &super::types::WgPeerBuilder,
-    ) {
-        let peer_token = builder.nest_start(idx | NLA_F_NESTED);
+        cmd: u8,
+        build_attrs: impl FnOnce(&mut MessageBuilder),
+    ) -> Result<Vec<u8>> {
+        let family_id = self.state().family_id;
 
-        // Public key (required)
-        builder.append_attr(WgPeerAttr::PublicKey as u16, peer.get_public_key());
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
 
-        // Flags
-        let flags = peer.get_flags();
-        if flags != 0 {
-            builder.append_attr_u32(WgPeerAttr::Flags as u16, flags);
-        }
+        // Append GENL header
+        let genl_hdr = GenlMsgHdr::new(cmd, WG_GENL_VERSION);
+        builder.append(&genl_hdr);
 
-        // Preshared key
-        if let Some(psk) = peer.get_preshared_key() {
-            builder.append_attr(WgPeerAttr::PresharedKey as u16, psk);
-        }
+        // Let caller append attributes
+        build_attrs(&mut builder);
 
-        // Endpoint
-        if let Some(endpoint) = peer.get_endpoint() {
-            let sockaddr_bytes = sockaddr_to_bytes(endpoint);
-            builder.append_attr(WgPeerAttr::Endpoint as u16, &sockaddr_bytes);
-        }
+        // Send request
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
 
-        // Persistent keepalive
-        if let Some(interval) = peer.get_persistent_keepalive() {
-            builder.append_attr_u16(WgPeerAttr::PersistentKeepalive as u16, interval);
-        }
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
 
-        // Allowed IPs
-        let allowed_ips = peer.get_allowed_ips();
-        if !allowed_ips.is_empty() {
-            let ips_token = builder.nest_start(WgPeerAttr::AllowedIps as u16 | NLA_F_NESTED);
-            for (ip_idx, allowed_ip) in allowed_ips.iter().enumerate() {
-                let ip_token = builder.nest_start(ip_idx as u16 | NLA_F_NESTED);
-                builder.append_attr_u16(WgAllowedIpAttr::Family as u16, allowed_ip.family());
-                builder.append_attr(WgAllowedIpAttr::IpAddr as u16, &allowed_ip.addr_bytes());
-                builder.append_attr_u8(WgAllowedIpAttr::CidrMask as u16, allowed_ip.cidr);
-                builder.nest_end(ip_token);
+        // Receive response
+        let response: Vec<u8> = self.socket().recv_msg().await?;
+        self.process_genl_response(&response, seq)?;
+
+        Ok(response)
+    }
+
+    /// Send a WireGuard GENL dump command and collect all responses.
+    async fn dump_wg_command(
+        &self,
+        cmd: u8,
+        build_attrs: impl FnOnce(&mut MessageBuilder),
+    ) -> Result<Vec<Vec<u8>>> {
+        let family_id = self.state().family_id;
+
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
+
+        // Append GENL header
+        let genl_hdr = GenlMsgHdr::new(cmd, WG_GENL_VERSION);
+        builder.append(&genl_hdr);
+
+        // Let caller append attributes
+        build_attrs(&mut builder);
+
+        // Send request
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        let mut responses = Vec::new();
+
+        loop {
+            let data: Vec<u8> = self.socket().recv_msg().await?;
+            let mut done = false;
+
+            for result in MessageIter::new(&data) {
+                let (header, payload) = result?;
+
+                if header.nlmsg_seq != seq {
+                    continue;
+                }
+
+                if header.is_error() {
+                    let err = NlMsgError::from_bytes(payload)?;
+                    if !err.is_ack() {
+                        return Err(Error::from_errno(err.error));
+                    }
+                    continue;
+                }
+
+                if header.is_done() {
+                    done = true;
+                    break;
+                }
+
+                // Include the payload (with GENL header)
+                responses.push(payload.to_vec());
             }
-            builder.nest_end(ips_token);
+
+            if done {
+                break;
+            }
         }
 
-        builder.nest_end(peer_token);
+        Ok(responses)
+    }
+
+    /// Process a GENL response, checking for errors.
+    fn process_genl_response(&self, data: &[u8], seq: u32) -> Result<()> {
+        for result in MessageIter::new(data) {
+            let (header, payload) = result?;
+
+            if header.nlmsg_seq != seq {
+                continue;
+            }
+
+            if header.is_error() {
+                let err = NlMsgError::from_bytes(payload)?;
+                if !err.is_ack() {
+                    return Err(Error::from_errno(err.error));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Parse device attributes from a GENL response.
@@ -317,56 +372,169 @@ impl WireguardConnection {
     /// Parse allowed IPs nested attribute.
     fn parse_allowed_ips_attr(&self, data: &[u8], allowed_ips: &mut Vec<AllowedIp>) -> Result<()> {
         for (_idx, ip_data) in AttrIter::new(data) {
-            if let Some(ip) = self.parse_allowed_ip_attrs(ip_data)? {
+            if let Some(ip) = parse_allowed_ip_attrs(ip_data)? {
                 allowed_ips.push(ip);
             }
         }
         Ok(())
     }
+}
 
-    /// Parse a single allowed IP's attributes.
-    fn parse_allowed_ip_attrs(&self, data: &[u8]) -> Result<Option<AllowedIp>> {
-        let mut family: Option<u16> = None;
-        let mut addr_bytes: Option<&[u8]> = None;
-        let mut cidr: Option<u8> = None;
+/// Resolve the WireGuard GENL family ID.
+async fn resolve_wireguard_family(socket: &NetlinkSocket) -> Result<u16> {
+    // Build CTRL_CMD_GETFAMILY request
+    let mut builder = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK);
 
-        for (attr_type, payload) in AttrIter::new(data) {
-            match attr_type {
-                t if t == WgAllowedIpAttr::Family as u16 => {
-                    family = Some(get::u16_ne(payload)?);
-                }
-                t if t == WgAllowedIpAttr::IpAddr as u16 => {
-                    addr_bytes = Some(payload);
-                }
-                t if t == WgAllowedIpAttr::CidrMask as u16 => {
-                    cidr = Some(get::u8(payload)?);
-                }
-                _ => {}
-            }
+    // Append GENL header
+    let genl_hdr = GenlMsgHdr::new(CtrlCmd::GetFamily as u8, 1);
+    builder.append(&genl_hdr);
+
+    // Append family name attribute
+    builder.append_attr_str(CtrlAttr::FamilyName as u16, WG_GENL_NAME);
+
+    // Send request
+    let seq = socket.next_seq();
+    builder.set_seq(seq);
+    builder.set_pid(socket.pid());
+
+    let msg = builder.finish();
+    socket.send(&msg).await?;
+
+    // Receive response
+    let response: Vec<u8> = socket.recv_msg().await?;
+
+    // Parse response
+    for result in MessageIter::new(&response) {
+        let (header, payload) = result?;
+
+        if header.nlmsg_seq != seq {
+            continue;
         }
 
-        let (family, addr_bytes, cidr) = match (family, addr_bytes, cidr) {
-            (Some(f), Some(a), Some(c)) => (f, a, c),
-            _ => return Ok(None),
-        };
-
-        let addr = match family as i32 {
-            libc::AF_INET if addr_bytes.len() >= 4 => IpAddr::V4(std::net::Ipv4Addr::new(
-                addr_bytes[0],
-                addr_bytes[1],
-                addr_bytes[2],
-                addr_bytes[3],
-            )),
-            libc::AF_INET6 if addr_bytes.len() >= 16 => {
-                let mut octets = [0u8; 16];
-                octets.copy_from_slice(&addr_bytes[..16]);
-                IpAddr::V6(std::net::Ipv6Addr::from(octets))
+        if header.is_error() {
+            let err = NlMsgError::from_bytes(payload)?;
+            if !err.is_ack() {
+                if err.error == -libc::ENOENT {
+                    return Err(Error::FamilyNotFound {
+                        name: WG_GENL_NAME.to_string(),
+                    });
+                }
+                return Err(Error::from_errno(err.error));
             }
-            _ => return Ok(None),
-        };
+            continue;
+        }
 
-        Ok(Some(AllowedIp { addr, cidr }))
+        if header.is_done() {
+            continue;
+        }
+
+        // Parse GENL header
+        if payload.len() < GENL_HDRLEN {
+            return Err(Error::InvalidMessage("GENL header too short".into()));
+        }
+
+        // Parse attributes after GENL header
+        let attrs_data = &payload[GENL_HDRLEN..];
+        for (attr_type, attr_payload) in AttrIter::new(attrs_data) {
+            if attr_type == CtrlAttr::FamilyId as u16 {
+                return get::u16_ne(attr_payload);
+            }
+        }
     }
+
+    Err(Error::FamilyNotFound {
+        name: WG_GENL_NAME.to_string(),
+    })
+}
+
+/// Append peer attributes to a message builder.
+fn append_peer_attrs(builder: &mut MessageBuilder, idx: u16, peer: &super::types::WgPeerBuilder) {
+    let peer_token = builder.nest_start(idx | NLA_F_NESTED);
+
+    // Public key (required)
+    builder.append_attr(WgPeerAttr::PublicKey as u16, peer.get_public_key());
+
+    // Flags
+    let flags = peer.get_flags();
+    if flags != 0 {
+        builder.append_attr_u32(WgPeerAttr::Flags as u16, flags);
+    }
+
+    // Preshared key
+    if let Some(psk) = peer.get_preshared_key() {
+        builder.append_attr(WgPeerAttr::PresharedKey as u16, psk);
+    }
+
+    // Endpoint
+    if let Some(endpoint) = peer.get_endpoint() {
+        let sockaddr_bytes = sockaddr_to_bytes(endpoint);
+        builder.append_attr(WgPeerAttr::Endpoint as u16, &sockaddr_bytes);
+    }
+
+    // Persistent keepalive
+    if let Some(interval) = peer.get_persistent_keepalive() {
+        builder.append_attr_u16(WgPeerAttr::PersistentKeepalive as u16, interval);
+    }
+
+    // Allowed IPs
+    let allowed_ips = peer.get_allowed_ips();
+    if !allowed_ips.is_empty() {
+        let ips_token = builder.nest_start(WgPeerAttr::AllowedIps as u16 | NLA_F_NESTED);
+        for (ip_idx, allowed_ip) in allowed_ips.iter().enumerate() {
+            let ip_token = builder.nest_start(ip_idx as u16 | NLA_F_NESTED);
+            builder.append_attr_u16(WgAllowedIpAttr::Family as u16, allowed_ip.family());
+            builder.append_attr(WgAllowedIpAttr::IpAddr as u16, &allowed_ip.addr_bytes());
+            builder.append_attr_u8(WgAllowedIpAttr::CidrMask as u16, allowed_ip.cidr);
+            builder.nest_end(ip_token);
+        }
+        builder.nest_end(ips_token);
+    }
+
+    builder.nest_end(peer_token);
+}
+
+/// Parse a single allowed IP's attributes.
+fn parse_allowed_ip_attrs(data: &[u8]) -> Result<Option<AllowedIp>> {
+    let mut family: Option<u16> = None;
+    let mut addr_bytes: Option<&[u8]> = None;
+    let mut cidr: Option<u8> = None;
+
+    for (attr_type, payload) in AttrIter::new(data) {
+        match attr_type {
+            t if t == WgAllowedIpAttr::Family as u16 => {
+                family = Some(get::u16_ne(payload)?);
+            }
+            t if t == WgAllowedIpAttr::IpAddr as u16 => {
+                addr_bytes = Some(payload);
+            }
+            t if t == WgAllowedIpAttr::CidrMask as u16 => {
+                cidr = Some(get::u8(payload)?);
+            }
+            _ => {}
+        }
+    }
+
+    let (family, addr_bytes, cidr) = match (family, addr_bytes, cidr) {
+        (Some(f), Some(a), Some(c)) => (f, a, c),
+        _ => return Ok(None),
+    };
+
+    let addr = match family as i32 {
+        libc::AF_INET if addr_bytes.len() >= 4 => IpAddr::V4(std::net::Ipv4Addr::new(
+            addr_bytes[0],
+            addr_bytes[1],
+            addr_bytes[2],
+            addr_bytes[3],
+        )),
+        libc::AF_INET6 if addr_bytes.len() >= 16 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&addr_bytes[..16]);
+            IpAddr::V6(std::net::Ipv6Addr::from(octets))
+        }
+        _ => return Ok(None),
+    };
+
+    Ok(Some(AllowedIp { addr, cidr }))
 }
 
 /// Convert a SocketAddr to kernel sockaddr bytes.
@@ -421,6 +589,13 @@ fn parse_sockaddr(data: &[u8]) -> Option<SocketAddr> {
         _ => None,
     }
 }
+
+// Re-export the old type as deprecated for backwards compatibility
+#[deprecated(
+    since = "0.4.0",
+    note = "Use Connection::<Wireguard>::new_async() instead"
+)]
+pub type WireguardConnection = ();
 
 #[cfg(test)]
 mod tests {
