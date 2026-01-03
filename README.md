@@ -92,6 +92,13 @@ async fn main() -> nlink::Result<()> {
 |--------|-------------|
 | `nlink::netlink` | Core netlink: `Connection<Route>`, EventStream, namespace, TC |
 | `nlink::netlink::genl` | Generic Netlink: `Connection<Generic>`, `Connection<Wireguard>` |
+| `nlink::netlink::uevent` | Device hotplug events: `Connection<KobjectUevent>` |
+| `nlink::netlink::connector` | Process lifecycle events: `Connection<Connector>` |
+| `nlink::netlink::netfilter` | Connection tracking: `Connection<Netfilter>` |
+| `nlink::netlink::xfrm` | IPsec SA/SP management: `Connection<Xfrm>` |
+| `nlink::netlink::fib_lookup` | FIB route lookups: `Connection<FibLookup>` |
+| `nlink::netlink::audit` | Linux Audit subsystem: `Connection<Audit>` |
+| `nlink::netlink::selinux` | SELinux events: `Connection<SELinux>` |
 | `nlink::sockdiag` | Socket diagnostics: `Connection<SockDiag>` (feature: `sockdiag`) |
 | `nlink::util` | Parsing utilities, address helpers, name resolution |
 | `nlink::tuntap` | TUN/TAP devices (feature: `tuntap`) |

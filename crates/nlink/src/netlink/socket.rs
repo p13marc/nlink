@@ -30,12 +30,22 @@ pub enum Protocol {
     KobjectUevent,
     /// XFRM (IPsec)
     Xfrm,
+    /// SELinux event notifications
+    SELinux,
+    /// Linux Audit
+    Audit,
     /// FIB lookup
     FibLookup,
 }
 
 /// NETLINK_XFRM protocol number (6).
 const NETLINK_XFRM: isize = 6;
+
+/// NETLINK_SELINUX protocol number (7).
+const NETLINK_SELINUX: isize = 7;
+
+/// NETLINK_AUDIT protocol number (9).
+const NETLINK_AUDIT: isize = 9;
 
 /// NETLINK_FIB_LOOKUP protocol number (10).
 const NETLINK_FIB_LOOKUP: isize = 10;
@@ -50,6 +60,8 @@ impl Protocol {
             Protocol::Connector => protocols::NETLINK_CONNECTOR,
             Protocol::KobjectUevent => protocols::NETLINK_KOBJECT_UEVENT,
             Protocol::Xfrm => NETLINK_XFRM,
+            Protocol::SELinux => NETLINK_SELINUX,
+            Protocol::Audit => NETLINK_AUDIT,
             Protocol::FibLookup => NETLINK_FIB_LOOKUP,
         }
     }

@@ -51,6 +51,10 @@ crates/nlink/src/
     uevent.rs         # KobjectUevent (device hotplug events)
     connector.rs      # Connector (process lifecycle events)
     netfilter.rs      # Netfilter (connection tracking)
+    xfrm.rs           # XFRM (IPsec SA/SP management)
+    fib_lookup.rs     # FIB route lookups
+    audit.rs          # Linux Audit subsystem
+    selinux.rs        # SELinux event notifications
     genl/             # Generic Netlink (GENL) support
       mod.rs          # GENL module entry, control family constants
       header.rs       # GenlMsgHdr (4-byte GENL header)
@@ -1101,6 +1105,100 @@ for entry in &entries {
 
 // Query IPv6 entries
 let entries_v6 = conn.get_conntrack_v6().await?;
+```
+
+**IPsec SA/SP management via XFRM:**
+```rust
+use nlink::netlink::{Connection, Xfrm};
+
+let conn = Connection::<Xfrm>::new()?;
+
+// List Security Associations (SAs)
+let sas = conn.get_security_associations().await?;
+for sa in &sas {
+    println!("SA: {:?} -> {:?} proto={:?} mode={:?}",
+        sa.src, sa.dst, sa.protocol, sa.mode);
+    println!("  SPI: 0x{:08x}, reqid: {}", sa.spi, sa.reqid);
+}
+
+// List Security Policies (SPs)
+let sps = conn.get_security_policies().await?;
+for sp in &sps {
+    println!("SP: {:?} dir={:?} action={:?}",
+        sp.selector, sp.direction, sp.action);
+}
+```
+
+**FIB route lookups:**
+```rust
+use nlink::netlink::{Connection, FibLookup};
+use std::net::Ipv4Addr;
+
+let conn = Connection::<FibLookup>::new()?;
+
+// Simple route lookup
+let result = conn.lookup(Ipv4Addr::new(8, 8, 8, 8).into()).await?;
+println!("Route type: {:?}, scope: {:?}", result.route_type, result.scope);
+println!("Table: {}, prefix_len: {}", result.table, result.prefix_len);
+
+// Lookup in specific table with fwmark
+let result = conn.lookup_with_options(
+    Ipv4Addr::new(10, 0, 0, 1).into(),
+    Some(100),  // table
+    Some(0x42), // fwmark
+).await?;
+```
+
+**Linux Audit subsystem:**
+```rust
+use nlink::netlink::{Connection, Audit};
+
+let conn = Connection::<Audit>::new()?;
+
+// Get audit daemon status
+let status = conn.get_status().await?;
+println!("Audit enabled: {}", status.is_enabled());
+println!("Audit locked: {}", status.is_locked());
+println!("Failure mode: {:?}", status.failure_mode());
+println!("Backlog: {}/{}", status.backlog, status.backlog_limit);
+println!("Lost messages: {}", status.lost);
+
+// Get TTY auditing status
+let tty = conn.get_tty_status().await?;
+println!("TTY auditing: {}", tty.enabled != 0);
+
+// Get audit features
+let features = conn.get_features().await?;
+println!("Audit version: {}", features.vers);
+```
+
+**SELinux event notifications:**
+```rust
+use nlink::netlink::{Connection, SELinux};
+use nlink::netlink::selinux::SELinuxEvent;
+
+// Check if SELinux is available
+if !Connection::<SELinux>::is_available() {
+    println!("SELinux not available");
+    return Ok(());
+}
+
+// Get current enforcement mode
+let enforcing = Connection::<SELinux>::get_enforce()?;
+println!("Current mode: {}", if enforcing { "enforcing" } else { "permissive" });
+
+// Monitor SELinux events
+let conn = Connection::<SELinux>::new()?;
+loop {
+    match conn.recv().await? {
+        SELinuxEvent::SetEnforce { enforcing } => {
+            println!("Mode changed: {}", if enforcing { "enforcing" } else { "permissive" });
+        }
+        SELinuxEvent::PolicyLoad { seqno } => {
+            println!("Policy loaded (seqno: {})", seqno);
+        }
+    }
+}
 ```
 
 ## Netlink Message Flow

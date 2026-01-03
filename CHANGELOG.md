@@ -48,6 +48,38 @@ All notable changes to this project will be documented in this file.
   - Types: `ConntrackEntry`, `ConntrackTuple`, `IpProtocol`, `TcpConntrackState`
   - Added example: `netfilter_conntrack`
 
+- `Connection<Xfrm>` for IPsec SA/SP management
+  - `Connection::<Xfrm>::new()` constructor
+  - `conn.get_security_associations()` for listing SAs
+  - `conn.get_security_policies()` for listing SPs
+  - Types: `SecurityAssociation`, `SecurityPolicy`, `XfrmSelector`, `IpsecProtocol`, `XfrmMode`
+  - Added example: `xfrm_ipsec_monitor`
+
+- `Connection<FibLookup>` for FIB route lookups
+  - `Connection::<FibLookup>::new()` constructor
+  - `conn.lookup(addr)` for route lookups
+  - `conn.lookup_in_table(addr, table)` for table-specific lookups
+  - `conn.lookup_with_mark(addr, mark)` for fwmark-aware lookups
+  - `conn.lookup_with_options(addr, table, mark)` for full control
+  - Types: `FibResult`, `RouteType`, `RouteScope`
+  - Added example: `fib_lookup_route_lookup`
+
+- `Connection<Audit>` for Linux Audit subsystem
+  - `Connection::<Audit>::new()` constructor
+  - `conn.get_status()` for audit daemon status
+  - `conn.get_tty_status()` for TTY auditing status
+  - `conn.get_features()` for kernel audit features
+  - Types: `AuditStatus`, `AuditTtyStatus`, `AuditFeatures`, `AuditFailureMode`, `AuditEventType`
+  - Added example: `audit_status`
+
+- `Connection<SELinux>` for SELinux event notifications
+  - `Connection::<SELinux>::new()` constructor with multicast subscription
+  - `conn.recv()` for receiving SELinux events
+  - `SELinux::is_available()` to check if SELinux is present
+  - `SELinux::get_enforce()` to read current enforcement mode
+  - Types: `SELinuxEvent` (SetEnforce, PolicyLoad)
+  - Added example: `selinux_monitor`
+
 ### Changed
 
 #### API Cleanup

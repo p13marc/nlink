@@ -71,6 +71,7 @@
 pub mod action;
 pub mod addr;
 pub mod attr;
+pub mod audit;
 mod builder;
 pub mod connection;
 pub mod connector;
@@ -94,6 +95,7 @@ pub mod parse;
 mod protocol;
 pub mod route;
 pub mod rule;
+pub mod selinux;
 #[cfg(feature = "sockdiag")]
 mod sockdiag;
 mod socket;
@@ -120,8 +122,8 @@ pub use namespace_watcher::{
 };
 pub use parse::{FromNetlink, ToNetlink};
 pub use protocol::{
-    Connector, FibLookup, Generic, KobjectUevent, Netfilter, ProtocolState, Route, SockDiag,
-    Wireguard, Xfrm,
+    Audit, Connector, FibLookup, Generic, KobjectUevent, Netfilter, ProtocolState, Route, SELinux,
+    SockDiag, Wireguard, Xfrm,
 };
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};
 pub use tc_options::NetemParameter;

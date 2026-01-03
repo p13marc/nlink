@@ -165,3 +165,13 @@ path = "examples/xfrm/ipsec_monitor.rs"
 [[example]]
 name = "fib_lookup_route_lookup"
 path = "examples/fib_lookup/route_lookup.rs"
+
+# Audit examples
+[[example]]
+name = "audit_status"
+path = "examples/audit/audit_status.rs"
+
+# SELinux examples
+[[example]]
+name = "selinux_monitor"
+path = "examples/selinux/selinux_monitor.rs"

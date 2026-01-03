@@ -40,8 +40,12 @@ examples/
 │   └── conntrack.rs
 ├── xfrm/               # XFRM (IPsec) examples
 │   └── ipsec_monitor.rs
-└── fib_lookup/         # FIB lookup examples
-    └── route_lookup.rs
+├── fib_lookup/         # FIB lookup examples
+│   └── route_lookup.rs
+├── audit/              # Linux Audit examples
+│   └── audit_status.rs
+└── selinux/            # SELinux examples
+    └── selinux_monitor.rs
 ```
 
 ## Running Examples
@@ -149,6 +153,18 @@ Some examples require specific features or root privileges. See the individual e
 | Example | Description | Command |
 |---------|-------------|---------|
 | `fib_lookup_route_lookup` | Perform FIB route lookups for IP addresses | `cargo run -p nlink --example fib_lookup_route_lookup` |
+
+## Audit Examples (Linux Audit Subsystem)
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `audit_status` | Display audit daemon status, TTY auditing, and features | `cargo run -p nlink --example audit_status` |
+
+## SELinux Examples
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `selinux_monitor` | Monitor SELinux enforcement mode changes and policy loads | `cargo run -p nlink --example selinux_monitor` |
 
 ## Example Usage Patterns
 

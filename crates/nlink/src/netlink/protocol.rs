@@ -199,6 +199,35 @@ impl ProtocolState for FibLookup {
     const PROTOCOL: Protocol = Protocol::FibLookup;
 }
 
+/// SELinux protocol state.
+///
+/// Used for receiving SELinux event notifications (setenforce, policyload).
+/// This is a zero-sized type with no additional state.
+///
+/// Note: Does not implement `Default` because connections require
+/// multicast group subscription. Use `Connection::<SELinux>::new()`.
+#[derive(Debug, Clone, Copy)]
+pub struct SELinux;
+
+impl private::Sealed for SELinux {}
+
+impl ProtocolState for SELinux {
+    const PROTOCOL: Protocol = Protocol::SELinux;
+}
+
+/// Audit protocol state.
+///
+/// Used for interacting with the Linux Audit subsystem.
+/// This is a zero-sized type with no additional state.
+#[derive(Debug, Clone, Copy)]
+pub struct Audit;
+
+impl private::Sealed for Audit {}
+
+impl ProtocolState for Audit {
+    const PROTOCOL: Protocol = Protocol::Audit;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +259,8 @@ mod tests {
         assert_eq!(Netfilter::PROTOCOL, Protocol::Netfilter);
         assert_eq!(Xfrm::PROTOCOL, Protocol::Xfrm);
         assert_eq!(FibLookup::PROTOCOL, Protocol::FibLookup);
+        assert_eq!(SELinux::PROTOCOL, Protocol::SELinux);
+        assert_eq!(Audit::PROTOCOL, Protocol::Audit);
     }
 
     #[test]
@@ -239,5 +270,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<Netfilter>(), 0);
         assert_eq!(std::mem::size_of::<Xfrm>(), 0);
         assert_eq!(std::mem::size_of::<FibLookup>(), 0);
+        assert_eq!(std::mem::size_of::<SELinux>(), 0);
+        assert_eq!(std::mem::size_of::<Audit>(), 0);
     }
 }
