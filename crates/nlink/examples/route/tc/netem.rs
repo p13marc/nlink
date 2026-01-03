@@ -81,42 +81,46 @@ async fn show_netem(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Resu
                         if let Some(jitter) = netem.jitter() {
                             print!(" +/- {:?}", jitter);
                         }
-                        if netem.delay_corr > 0.0 {
-                            print!(" ({}% correlation)", netem.delay_corr);
+                        if let Some(corr) = netem.delay_correlation() {
+                            print!(" ({:.1}% correlation)", corr);
                         }
                         println!();
                     }
 
-                    if netem.loss_percent > 0.0 {
-                        print!("  loss {:.2}%", netem.loss_percent);
-                        if netem.loss_corr > 0.0 {
-                            print!(" ({}% correlation)", netem.loss_corr);
+                    if let Some(loss) = netem.loss() {
+                        print!("  loss {:.2}%", loss);
+                        if let Some(corr) = netem.loss_correlation() {
+                            print!(" ({:.1}% correlation)", corr);
                         }
                         println!();
                     }
 
-                    if netem.duplicate_percent > 0.0 {
-                        println!("  duplicate {:.2}%", netem.duplicate_percent);
+                    if let Some(dup) = netem.duplicate() {
+                        println!("  duplicate {:.2}%", dup);
                     }
 
-                    if netem.corrupt_percent > 0.0 {
-                        println!("  corrupt {:.2}%", netem.corrupt_percent);
+                    if let Some(corrupt) = netem.corrupt() {
+                        println!("  corrupt {:.2}%", corrupt);
                     }
 
-                    if netem.reorder_percent > 0.0 {
-                        println!("  reorder {:.2}% gap {}", netem.reorder_percent, netem.gap);
+                    if let Some(reorder) = netem.reorder() {
+                        print!("  reorder {:.2}%", reorder);
+                        if let Some(gap) = netem.gap() {
+                            print!(" gap {}", gap);
+                        }
+                        println!();
                     }
 
-                    if netem.rate > 0 {
-                        println!("  rate {} bytes/sec", netem.rate);
+                    if let Some(rate) = netem.rate_bps() {
+                        println!("  rate {} bytes/sec", rate);
                     }
 
-                    if netem.ecn {
+                    if netem.ecn() {
                         println!("  ecn enabled");
                     }
 
                     // Show loss model if present
-                    if let Some(loss_model) = &netem.loss_model {
+                    if let Some(loss_model) = netem.loss_model() {
                         use nlink::netlink::tc_options::NetemLossModel;
                         match loss_model {
                             NetemLossModel::GilbertIntuitive {

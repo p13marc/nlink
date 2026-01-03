@@ -4,22 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [0.5.0] - Unreleased
 
-### Added
+### Breaking Changes
 
-- `NetemOptions` correlation accessors: `delay_correlation()`, `loss_correlation()`, 
-  `duplicate_correlation()`, `reorder_correlation()`, `corrupt_correlation()`
-- `NetemOptions::ecn()` - Check if ECN marking is enabled
-- `NetemOptions::gap()` - Get the reorder gap value
-- `NetemOptions::limit()` - Get the queue limit in packets
-- `NetemOptions::slot()` - Get slot-based transmission configuration
-- `NetemOptions::loss_model()` - Get loss model configuration
+#### `NetemOptions` Fields Now Private
+All `NetemOptions` fields are now `pub(crate)` with public accessor methods. This completes
+the accessor pattern for type safety and future flexibility.
 
-### Changed
+```rust
+// Before (direct field access)
+if netem.loss_percent > 0.0 {
+    println!("loss: {}%", netem.loss_percent);
+}
 
-- **Breaking:** Renamed `into_event_stream()` to `into_events()` for consistency with 
-  Rust naming conventions (`iter()`/`into_iter()` pattern)
+// After (use accessor methods)
+if let Some(loss) = netem.loss() {
+    println!("loss: {:.2}%", loss);
+}
+```
 
-### Migration
+New accessor methods added:
+- `delay_ns()`, `jitter_ns()` - Raw nanosecond values
+- `loss_percent()`, `duplicate_percent()`, `reorder_percent()`, `corrupt_percent()` - Raw percentages
+- `packet_overhead()`, `cell_size()`, `cell_overhead()` - Rate limiting overhead values
+
+#### Renamed `into_event_stream()` to `into_events()`
+For consistency with Rust naming conventions (`iter()`/`into_iter()` pattern).
 
 ```rust
 // Before
@@ -28,6 +37,77 @@ let mut stream = conn.into_event_stream();
 // After
 let mut stream = conn.into_events();
 ```
+
+### Added
+
+#### NetemOptions Accessors
+- `delay_correlation()`, `loss_correlation()`, `duplicate_correlation()`, 
+  `reorder_correlation()`, `corrupt_correlation()` - Correlation percentages
+- `ecn()` - Check if ECN marking is enabled
+- `gap()` - Get the reorder gap value
+- `limit()` - Get the queue limit in packets
+- `slot()` - Get slot-based transmission configuration
+- `loss_model()` - Get loss model configuration (Gilbert-Intuitive or Gilbert-Elliot)
+- `packet_overhead()`, `cell_size()`, `cell_overhead()` - Rate limiting overhead values
+- `delay_ns()`, `jitter_ns()` - Raw delay/jitter values in nanoseconds
+- `loss_percent()`, `duplicate_percent()`, `reorder_percent()`, `corrupt_percent()` - Raw percentages
+
+#### FqCodelOptions Accessors
+- `target()` - Get target delay as Duration
+- `interval()` - Get interval as Duration
+- `limit()` - Get queue limit in packets
+- `flows()` - Get number of flows
+- `quantum()` - Get quantum (bytes per round)
+- `ecn()` - Check if ECN is enabled
+- `ce_threshold()` - Get CE threshold as Duration
+- `memory_limit()` - Get memory limit in bytes
+- `drop_batch_size()` - Get drop batch size
+
+#### HtbOptions Accessors
+- `default_class()` - Get default class ID
+- `rate2quantum()` - Get rate to quantum divisor
+- `direct_qlen()` - Get direct queue length
+- `version()` - Get HTB version
+
+#### TbfOptions Accessors
+- `rate()` - Get rate in bytes/sec
+- `peakrate()` - Get peak rate in bytes/sec
+- `burst()` - Get bucket size (burst) in bytes
+- `mtu()` - Get MTU in bytes
+- `limit()` - Get queue limit in bytes
+
+#### TcMessage Convenience Methods
+- `is_class()` - Check if this is a TC class
+- `is_filter()` - Check if this is a TC filter
+- `filter_protocol()` - Get filter protocol (ETH_P_* value)
+- `filter_priority()` - Get filter priority
+- `handle_str()` - Get handle as human-readable string (e.g., "1:0")
+- `parent_str()` - Get parent as human-readable string (e.g., "root")
+
+#### LinkMessage Statistics Helpers
+Convenience methods that delegate to `stats()`:
+- `total_bytes()`, `total_packets()`, `total_errors()`, `total_dropped()`
+- `rx_bytes()`, `tx_bytes()`, `rx_packets()`, `tx_packets()`
+- `rx_errors()`, `tx_errors()`, `rx_dropped()`, `tx_dropped()`
+
+#### Additional Error Checks
+- `is_address_in_use()` - EADDRINUSE
+- `is_name_too_long()` - ENAMETOOLONG
+- `is_try_again()` - EAGAIN
+- `is_no_buffer_space()` - ENOBUFS
+- `is_connection_refused()` - ECONNREFUSED
+- `is_host_unreachable()` - EHOSTUNREACH
+- `is_message_too_long()` - EMSGSIZE
+- `is_too_many_open_files()` - EMFILE
+- `is_read_only()` - EROFS
+
+### Fixed
+
+- Fixed Connector not receiving events even as root (missing multicast group join)
+
+### Documentation
+
+- Updated CLAUDE.md and docs/library.md with new accessor patterns
 
 ## [0.4.0] - 2026-01-03
 

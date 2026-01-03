@@ -266,17 +266,17 @@ for qdisc in &qdiscs {
         // Rate limiting as Option<u64>
         if let Some(rate) = netem.rate_bps() {
             println!("rate={} bytes/sec", rate);
-            println!("packet_overhead={}, cell_size={}", netem.packet_overhead, netem.cell_size);
+            println!("packet_overhead={}, cell_size={}", netem.packet_overhead(), netem.cell_size());
         }
         
         // ECN and slot-based transmission
-        println!("ecn={}", netem.ecn);
-        if let Some(slot) = &netem.slot {
+        println!("ecn={}", netem.ecn());
+        if let Some(slot) = netem.slot() {
             println!("slot: min={}ns, max={}ns", slot.min_delay_ns, slot.max_delay_ns);
         }
         
         // Loss models (Gilbert-Intuitive or Gilbert-Elliot)
-        if let Some(loss_model) = &netem.loss_model {
+        if let Some(loss_model) = netem.loss_model() {
             use nlink::netlink::tc_options::NetemLossModel;
             match loss_model {
                 NetemLossModel::GilbertIntuitive { p13, p31, p32, p14, p23 } => {
@@ -289,10 +289,6 @@ for qdisc in &qdiscs {
         }
     }
 
-    // Option 2: Use parsed_options() for all qdisc types
-    if let Some(QdiscOptions::Netem(netem)) = qdisc.parsed_options() {
-        // Same fields available
-    }
 }
 ```
 

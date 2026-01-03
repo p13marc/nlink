@@ -183,14 +183,14 @@ for qdisc in &qdiscs {
     match qdisc.options() {
         Some(QdiscOptions::Netem(netem)) => {
             println!("delay: {:?}, jitter: {:?}", netem.delay(), netem.jitter());
-            println!("loss: {}%, duplicate: {}%", netem.loss_percent, netem.duplicate_percent);
+            println!("loss: {:?}, duplicate: {:?}", netem.loss(), netem.duplicate());
             
-            if netem.rate > 0 {
-                println!("rate: {} bytes/sec", netem.rate);
+            if let Some(rate) = netem.rate_bps() {
+                println!("rate: {} bytes/sec", rate);
             }
             
             // Loss models (Gilbert-Intuitive or Gilbert-Elliot)
-            if let Some(loss_model) = &netem.loss_model {
+            if let Some(loss_model) = netem.loss_model() {
                 use nlink::netlink::tc_options::NetemLossModel;
                 match loss_model {
                     NetemLossModel::GilbertIntuitive { p13, p31, .. } => {
@@ -203,13 +203,13 @@ for qdisc in &qdiscs {
             }
         }
         Some(QdiscOptions::FqCodel(fq)) => {
-            println!("fq_codel: target={}us, interval={}us", fq.target_us, fq.interval_us);
+            println!("fq_codel: target={:?}, interval={:?}", fq.target(), fq.interval());
         }
         Some(QdiscOptions::Htb(htb)) => {
-            println!("htb: default class={:#x}", htb.default_class);
+            println!("htb: default class={:?}", htb.default_class());
         }
         Some(QdiscOptions::Tbf(tbf)) => {
-            println!("tbf: rate={} bytes/sec", tbf.rate);
+            println!("tbf: rate={:?}", tbf.rate());
         }
         _ => {}
     }

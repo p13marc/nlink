@@ -385,6 +385,78 @@ impl LinkMessage {
     pub fn has_carrier(&self) -> bool {
         self.carrier.unwrap_or(false)
     }
+
+    // =========================================================================
+    // Statistics convenience methods
+    // =========================================================================
+
+    /// Get total bytes transferred (rx + tx), or 0 if stats not available.
+    ///
+    /// This is a convenience method that delegates to `stats().total_bytes()`.
+    pub fn total_bytes(&self) -> u64 {
+        self.stats.as_ref().map(|s| s.total_bytes()).unwrap_or(0)
+    }
+
+    /// Get total packets transferred (rx + tx), or 0 if stats not available.
+    ///
+    /// This is a convenience method that delegates to `stats().total_packets()`.
+    pub fn total_packets(&self) -> u64 {
+        self.stats.as_ref().map(|s| s.total_packets()).unwrap_or(0)
+    }
+
+    /// Get total errors (rx + tx), or 0 if stats not available.
+    ///
+    /// This is a convenience method that delegates to `stats().total_errors()`.
+    pub fn total_errors(&self) -> u64 {
+        self.stats.as_ref().map(|s| s.total_errors()).unwrap_or(0)
+    }
+
+    /// Get total dropped packets (rx + tx), or 0 if stats not available.
+    ///
+    /// This is a convenience method that delegates to `stats().total_dropped()`.
+    pub fn total_dropped(&self) -> u64 {
+        self.stats.as_ref().map(|s| s.total_dropped()).unwrap_or(0)
+    }
+
+    /// Get received bytes, or 0 if stats not available.
+    pub fn rx_bytes(&self) -> u64 {
+        self.stats.as_ref().map(|s| s.rx_bytes()).unwrap_or(0)
+    }
+
+    /// Get transmitted bytes, or 0 if stats not available.
+    pub fn tx_bytes(&self) -> u64 {
+        self.stats.as_ref().map(|s| s.tx_bytes()).unwrap_or(0)
+    }
+
+    /// Get received packets, or 0 if stats not available.
+    pub fn rx_packets(&self) -> u64 {
+        self.stats.as_ref().map(|s| s.rx_packets()).unwrap_or(0)
+    }
+
+    /// Get transmitted packets, or 0 if stats not available.
+    pub fn tx_packets(&self) -> u64 {
+        self.stats.as_ref().map(|s| s.tx_packets()).unwrap_or(0)
+    }
+
+    /// Get receive errors, or 0 if stats not available.
+    pub fn rx_errors(&self) -> u64 {
+        self.stats.as_ref().map(|s| s.rx_errors()).unwrap_or(0)
+    }
+
+    /// Get transmit errors, or 0 if stats not available.
+    pub fn tx_errors(&self) -> u64 {
+        self.stats.as_ref().map(|s| s.tx_errors()).unwrap_or(0)
+    }
+
+    /// Get dropped received packets, or 0 if stats not available.
+    pub fn rx_dropped(&self) -> u64 {
+        self.stats.as_ref().map(|s| s.rx_dropped()).unwrap_or(0)
+    }
+
+    /// Get dropped transmitted packets, or 0 if stats not available.
+    pub fn tx_dropped(&self) -> u64 {
+        self.stats.as_ref().map(|s| s.tx_dropped()).unwrap_or(0)
+    }
 }
 
 impl FromNetlink for LinkMessage {

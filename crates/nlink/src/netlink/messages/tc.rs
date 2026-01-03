@@ -367,7 +367,7 @@ impl TcMessage {
     /// for qdisc in &qdiscs {
     ///     match qdisc.options() {
     ///         Some(QdiscOptions::Netem(netem)) => {
-    ///             println!("delay={:?}, loss={}%", netem.delay(), netem.loss_percent);
+    ///             println!("delay={:?}, loss={:?}", netem.delay(), netem.loss());
     ///         }
     ///         Some(QdiscOptions::FqCodel(fq)) => {
     ///             println!("target={}us", fq.target_us);
@@ -404,6 +404,84 @@ impl TcMessage {
     pub fn is_clsact(&self) -> bool {
         self.header.tcm_parent == crate::netlink::types::tc::tc_handle::CLSACT
             || self.kind() == Some("clsact")
+    }
+
+    /// Check if this is a TC class (has a parent that is not root/ingress/clsact).
+    ///
+    /// Classes are child elements of classful qdiscs like HTB, CBQ, or HFSC.
+    /// They have a non-root parent and typically have a minor number in their handle.
+    #[inline]
+    pub fn is_class(&self) -> bool {
+        use crate::netlink::types::tc::tc_handle;
+        let parent = self.header.tcm_parent;
+        // A class has a parent that is not root, ingress, or clsact
+        parent != tc_handle::ROOT
+            && parent != tc_handle::INGRESS
+            && parent != tc_handle::CLSACT
+            && parent != tc_handle::UNSPEC
+            // And its handle has a non-zero minor number (classes have major:minor format)
+            && tc_handle::minor(self.header.tcm_handle) != 0
+    }
+
+    /// Check if this is a TC filter.
+    ///
+    /// Filters are identified by having a protocol and priority set.
+    /// They attach to qdiscs or classes to classify packets.
+    #[inline]
+    pub fn is_filter(&self) -> bool {
+        // Filters have a non-zero info field that encodes protocol and priority
+        // The info field is (priority << 16) | protocol
+        self.header.tcm_info != 0
+    }
+
+    /// Get the filter protocol (ETH_P_* value), if this is a filter.
+    ///
+    /// Returns the protocol in host byte order.
+    #[inline]
+    pub fn filter_protocol(&self) -> Option<u16> {
+        if self.is_filter() {
+            Some((self.header.tcm_info & 0xFFFF) as u16)
+        } else {
+            None
+        }
+    }
+
+    /// Get the filter priority, if this is a filter.
+    #[inline]
+    pub fn filter_priority(&self) -> Option<u16> {
+        if self.is_filter() {
+            Some((self.header.tcm_info >> 16) as u16)
+        } else {
+            None
+        }
+    }
+
+    /// Get the handle as a human-readable string (e.g., "1:0", "ffff:").
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// for qdisc in &qdiscs {
+    ///     println!("handle: {}", qdisc.handle_str());
+    /// }
+    /// ```
+    #[inline]
+    pub fn handle_str(&self) -> String {
+        crate::netlink::types::tc::tc_handle::format(self.header.tcm_handle)
+    }
+
+    /// Get the parent as a human-readable string (e.g., "root", "1:0").
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// for qdisc in &qdiscs {
+    ///     println!("parent: {}", qdisc.parent_str());
+    /// }
+    /// ```
+    #[inline]
+    pub fn parent_str(&self) -> String {
+        crate::netlink::types::tc::tc_handle::format(self.header.tcm_parent)
     }
 }
 

@@ -329,6 +329,66 @@ impl Error {
     pub fn is_timeout(&self) -> bool {
         self.errno() == Some(libc::ETIMEDOUT)
     }
+
+    /// Check if this is an "address already in use" error (EADDRINUSE).
+    ///
+    /// This typically occurs when trying to add an IP address that is
+    /// already assigned to an interface.
+    pub fn is_address_in_use(&self) -> bool {
+        self.errno() == Some(libc::EADDRINUSE)
+    }
+
+    /// Check if this is a "name too long" error (ENAMETOOLONG).
+    ///
+    /// Interface names in Linux are limited to 15 characters (IFNAMSIZ - 1).
+    pub fn is_name_too_long(&self) -> bool {
+        self.errno() == Some(libc::ENAMETOOLONG)
+    }
+
+    /// Check if this is a "resource temporarily unavailable" error (EAGAIN).
+    ///
+    /// This may occur during transient resource contention.
+    pub fn is_try_again(&self) -> bool {
+        self.errno() == Some(libc::EAGAIN)
+    }
+
+    /// Check if this is a "no buffer space available" error (ENOBUFS).
+    ///
+    /// This typically occurs when the kernel cannot allocate memory
+    /// for network operations.
+    pub fn is_no_buffer_space(&self) -> bool {
+        self.errno() == Some(libc::ENOBUFS)
+    }
+
+    /// Check if this is a "connection refused" error (ECONNREFUSED).
+    pub fn is_connection_refused(&self) -> bool {
+        self.errno() == Some(libc::ECONNREFUSED)
+    }
+
+    /// Check if this is a "host unreachable" error (EHOSTUNREACH).
+    pub fn is_host_unreachable(&self) -> bool {
+        self.errno() == Some(libc::EHOSTUNREACH)
+    }
+
+    /// Check if this is a "message too long" error (EMSGSIZE).
+    ///
+    /// This occurs when a netlink message exceeds the maximum size.
+    pub fn is_message_too_long(&self) -> bool {
+        self.errno() == Some(libc::EMSGSIZE)
+    }
+
+    /// Check if this is a "too many open files" error (EMFILE).
+    pub fn is_too_many_open_files(&self) -> bool {
+        self.errno() == Some(libc::EMFILE)
+    }
+
+    /// Check if this is a "read-only file system" error (EROFS).
+    ///
+    /// This can occur when trying to modify network configuration
+    /// in a read-only namespace or container.
+    pub fn is_read_only(&self) -> bool {
+        self.errno() == Some(libc::EROFS)
+    }
 }
 
 #[cfg(test)]

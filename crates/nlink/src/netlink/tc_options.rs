@@ -70,6 +70,83 @@ pub struct FqCodelOptions {
     pub drop_batch_size: Option<u32>,
 }
 
+impl FqCodelOptions {
+    /// Get the target delay as a Duration, or None if not set.
+    #[inline]
+    pub fn target(&self) -> Option<std::time::Duration> {
+        if self.target_us > 0 {
+            Some(std::time::Duration::from_micros(self.target_us as u64))
+        } else {
+            None
+        }
+    }
+
+    /// Get the interval as a Duration, or None if not set.
+    #[inline]
+    pub fn interval(&self) -> Option<std::time::Duration> {
+        if self.interval_us > 0 {
+            Some(std::time::Duration::from_micros(self.interval_us as u64))
+        } else {
+            None
+        }
+    }
+
+    /// Get the queue limit in packets, or None if not set.
+    #[inline]
+    pub fn limit(&self) -> Option<u32> {
+        if self.limit > 0 {
+            Some(self.limit)
+        } else {
+            None
+        }
+    }
+
+    /// Get the number of flows, or None if not set.
+    #[inline]
+    pub fn flows(&self) -> Option<u32> {
+        if self.flows > 0 {
+            Some(self.flows)
+        } else {
+            None
+        }
+    }
+
+    /// Get the quantum (bytes per round), or None if not set.
+    #[inline]
+    pub fn quantum(&self) -> Option<u32> {
+        if self.quantum > 0 {
+            Some(self.quantum)
+        } else {
+            None
+        }
+    }
+
+    /// Check if ECN marking is enabled.
+    #[inline]
+    pub fn ecn(&self) -> bool {
+        self.ecn
+    }
+
+    /// Get the CE threshold as a Duration, if configured.
+    #[inline]
+    pub fn ce_threshold(&self) -> Option<std::time::Duration> {
+        self.ce_threshold_us
+            .map(|us| std::time::Duration::from_micros(us as u64))
+    }
+
+    /// Get the memory limit in bytes, if configured.
+    #[inline]
+    pub fn memory_limit(&self) -> Option<u32> {
+        self.memory_limit
+    }
+
+    /// Get the drop batch size, if configured.
+    #[inline]
+    pub fn drop_batch_size(&self) -> Option<u32> {
+        self.drop_batch_size
+    }
+}
+
 /// htb qdisc options.
 #[derive(Debug, Clone, Default)]
 pub struct HtbOptions {
@@ -81,6 +158,40 @@ pub struct HtbOptions {
     pub direct_qlen: Option<u32>,
     /// HTB version.
     pub version: u32,
+}
+
+impl HtbOptions {
+    /// Get the default class ID, or None if not set (0).
+    #[inline]
+    pub fn default_class(&self) -> Option<u32> {
+        if self.default_class != 0 {
+            Some(self.default_class)
+        } else {
+            None
+        }
+    }
+
+    /// Get the rate to quantum divisor, or None if not set (0).
+    #[inline]
+    pub fn rate2quantum(&self) -> Option<u32> {
+        if self.rate2quantum != 0 {
+            Some(self.rate2quantum)
+        } else {
+            None
+        }
+    }
+
+    /// Get the direct queue length, if configured.
+    #[inline]
+    pub fn direct_qlen(&self) -> Option<u32> {
+        self.direct_qlen
+    }
+
+    /// Get the HTB version.
+    #[inline]
+    pub fn version(&self) -> u32 {
+        self.version
+    }
 }
 
 /// tbf qdisc options.
@@ -98,51 +209,97 @@ pub struct TbfOptions {
     pub limit: u32,
 }
 
+impl TbfOptions {
+    /// Get the rate in bytes/sec, or None if not set.
+    #[inline]
+    pub fn rate(&self) -> Option<u64> {
+        if self.rate > 0 { Some(self.rate) } else { None }
+    }
+
+    /// Get the peak rate in bytes/sec, or None if not set.
+    #[inline]
+    pub fn peakrate(&self) -> Option<u64> {
+        if self.peakrate > 0 {
+            Some(self.peakrate)
+        } else {
+            None
+        }
+    }
+
+    /// Get the bucket size (burst) in bytes, or None if not set.
+    #[inline]
+    pub fn burst(&self) -> Option<u32> {
+        if self.burst > 0 {
+            Some(self.burst)
+        } else {
+            None
+        }
+    }
+
+    /// Get the MTU (maximum packet size) in bytes, or None if not set.
+    #[inline]
+    pub fn mtu(&self) -> Option<u32> {
+        if self.mtu > 0 { Some(self.mtu) } else { None }
+    }
+
+    /// Get the queue limit in bytes, or None if not set.
+    #[inline]
+    pub fn limit(&self) -> Option<u32> {
+        if self.limit > 0 {
+            Some(self.limit)
+        } else {
+            None
+        }
+    }
+}
+
 /// netem qdisc options.
+///
+/// All fields are private; use accessor methods to retrieve values.
+/// For example, use `delay()` to get the delay as a `Duration`, or
+/// `loss()` to get the loss percentage.
 #[derive(Debug, Clone, Default)]
 pub struct NetemOptions {
-    /// Added delay in nanoseconds. Use `delay()` to get as Duration.
-    /// This field uses 64-bit precision when TCA_NETEM_LATENCY64 is present.
-    pub delay_ns: u64,
-    /// Delay jitter in nanoseconds. Use `jitter()` to get as Duration.
-    /// This field uses 64-bit precision when TCA_NETEM_JITTER64 is present.
-    pub jitter_ns: u64,
+    /// Added delay in nanoseconds.
+    pub(crate) delay_ns: u64,
+    /// Delay jitter in nanoseconds.
+    pub(crate) jitter_ns: u64,
     /// Delay correlation (0-100%).
-    pub delay_corr: f64,
+    pub(crate) delay_corr: f64,
     /// Packet loss probability (0-100%).
-    pub loss_percent: f64,
+    pub(crate) loss_percent: f64,
     /// Loss correlation (0-100%).
-    pub loss_corr: f64,
+    pub(crate) loss_corr: f64,
     /// Duplicate probability (0-100%).
-    pub duplicate_percent: f64,
+    pub(crate) duplicate_percent: f64,
     /// Duplicate correlation (0-100%).
-    pub duplicate_corr: f64,
+    pub(crate) duplicate_corr: f64,
     /// Reorder probability (0-100%).
-    pub reorder_percent: f64,
+    pub(crate) reorder_percent: f64,
     /// Reorder correlation (0-100%).
-    pub reorder_corr: f64,
+    pub(crate) reorder_corr: f64,
     /// Corruption probability (0-100%).
-    pub corrupt_percent: f64,
+    pub(crate) corrupt_percent: f64,
     /// Corruption correlation (0-100%).
-    pub corrupt_corr: f64,
+    pub(crate) corrupt_corr: f64,
     /// Rate limit in bytes/sec (0 if not set).
-    pub rate: u64,
+    pub(crate) rate: u64,
     /// Per-packet overhead in bytes for rate limiting.
-    pub packet_overhead: i32,
+    pub(crate) packet_overhead: i32,
     /// ATM cell size for rate limiting overhead calculation.
-    pub cell_size: u32,
+    pub(crate) cell_size: u32,
     /// Per-cell overhead for rate limiting.
-    pub cell_overhead: i32,
+    pub(crate) cell_overhead: i32,
     /// Queue limit in packets.
-    pub limit: u32,
+    pub(crate) limit: u32,
     /// Reorder gap.
-    pub gap: u32,
+    pub(crate) gap: u32,
     /// ECN marking enabled.
-    pub ecn: bool,
+    pub(crate) ecn: bool,
     /// Slot-based transmission configuration (if present).
-    pub slot: Option<NetemSlotOptions>,
+    pub(crate) slot: Option<NetemSlotOptions>,
     /// Loss model (if using state-based loss instead of random).
-    pub loss_model: Option<NetemLossModel>,
+    pub(crate) loss_model: Option<NetemLossModel>,
 }
 
 /// Netem loss model configuration.
@@ -281,6 +438,32 @@ impl NetemOptions {
         if self.rate > 0 { Some(self.rate) } else { None }
     }
 
+    /// Get the per-packet overhead in bytes for rate limiting.
+    ///
+    /// This is added to each packet's size when calculating rate limiting.
+    /// Common values: 14 for Ethernet header, 38 for PPPoE+Ethernet.
+    #[inline]
+    pub fn packet_overhead(&self) -> i32 {
+        self.packet_overhead
+    }
+
+    /// Get the ATM cell size for rate limiting overhead calculation.
+    ///
+    /// When set, packets are rounded up to multiples of this cell size.
+    /// Typically 53 for ATM networks.
+    #[inline]
+    pub fn cell_size(&self) -> u32 {
+        self.cell_size
+    }
+
+    /// Get the per-cell overhead for rate limiting.
+    ///
+    /// This overhead is added for each ATM cell.
+    #[inline]
+    pub fn cell_overhead(&self) -> i32 {
+        self.cell_overhead
+    }
+
     /// Get the delay correlation percentage (0-100%), or None if not set.
     #[inline]
     pub fn delay_correlation(&self) -> Option<f64> {
@@ -329,6 +512,54 @@ impl NetemOptions {
         } else {
             None
         }
+    }
+
+    /// Get the raw delay in nanoseconds.
+    ///
+    /// Prefer using `delay()` which returns an `Option<Duration>`.
+    #[inline]
+    pub fn delay_ns(&self) -> u64 {
+        self.delay_ns
+    }
+
+    /// Get the raw jitter in nanoseconds.
+    ///
+    /// Prefer using `jitter()` which returns an `Option<Duration>`.
+    #[inline]
+    pub fn jitter_ns(&self) -> u64 {
+        self.jitter_ns
+    }
+
+    /// Get the raw loss percentage (0.0-100.0).
+    ///
+    /// Prefer using `loss()` which returns `None` if not configured.
+    #[inline]
+    pub fn loss_percent(&self) -> f64 {
+        self.loss_percent
+    }
+
+    /// Get the raw duplicate percentage (0.0-100.0).
+    ///
+    /// Prefer using `duplicate()` which returns `None` if not configured.
+    #[inline]
+    pub fn duplicate_percent(&self) -> f64 {
+        self.duplicate_percent
+    }
+
+    /// Get the raw reorder percentage (0.0-100.0).
+    ///
+    /// Prefer using `reorder()` which returns `None` if not configured.
+    #[inline]
+    pub fn reorder_percent(&self) -> f64 {
+        self.reorder_percent
+    }
+
+    /// Get the raw corrupt percentage (0.0-100.0).
+    ///
+    /// Prefer using `corrupt()` which returns `None` if not configured.
+    #[inline]
+    pub fn corrupt_percent(&self) -> f64 {
+        self.corrupt_percent
     }
 
     /// Check if ECN marking is enabled.
