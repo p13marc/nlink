@@ -492,6 +492,28 @@ impl Connection<Route> {
             .collect())
     }
 
+    /// Get an address entry by IP address.
+    ///
+    /// Returns `None` if no address entry matches the given IP.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::net::IpAddr;
+    ///
+    /// let ip: IpAddr = "192.168.1.100".parse()?;
+    /// if let Some(addr) = conn.get_address_by_ip(ip).await? {
+    ///     println!("Found on interface index {}", addr.ifindex());
+    /// }
+    /// ```
+    pub async fn get_address_by_ip(
+        &self,
+        addr: std::net::IpAddr,
+    ) -> Result<Option<AddressMessage>> {
+        let addresses = self.get_addresses().await?;
+        Ok(addresses.into_iter().find(|a| a.address == Some(addr)))
+    }
+
     /// Get all routes.
     ///
     /// # Example
@@ -513,6 +535,104 @@ impl Connection<Route> {
             .into_iter()
             .filter(|r| r.table_id() == table_id)
             .collect())
+    }
+
+    /// Get a specific IPv4 route by destination and prefix length.
+    ///
+    /// Uses RTM_GETROUTE without NLM_F_DUMP to query the kernel directly,
+    /// which is more efficient than dumping all routes for large routing tables.
+    ///
+    /// Returns `None` if no matching route is found.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::net::Ipv4Addr;
+    ///
+    /// // Look up route to 10.0.0.0/8
+    /// if let Some(route) = conn.get_route_v4(Ipv4Addr::new(10, 0, 0, 0), 8).await? {
+    ///     println!("Gateway: {:?}", route.gateway);
+    /// }
+    /// ```
+    pub async fn get_route_v4(
+        &self,
+        destination: std::net::Ipv4Addr,
+        prefix_len: u8,
+    ) -> Result<Option<RouteMessage>> {
+        use crate::netlink::types::route::{RtMsg, RtaAttr};
+
+        // Build RTM_GETROUTE request WITHOUT NLM_F_DUMP
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETROUTE, NLM_F_REQUEST);
+
+        let rtmsg = RtMsg::new()
+            .with_family(libc::AF_INET as u8)
+            .with_dst_len(prefix_len);
+        builder.append(&rtmsg);
+        builder.append_attr(RtaAttr::Dst as u16, &destination.octets());
+
+        // Send single request (not dump)
+        match self.send_request(builder).await {
+            Ok(response) => {
+                // Parse the response - skip netlink header
+                if response.len() >= NLMSG_HDRLEN {
+                    let payload = &response[NLMSG_HDRLEN..];
+                    if let Ok(msg) = RouteMessage::from_bytes(payload) {
+                        return Ok(Some(msg));
+                    }
+                }
+                Ok(None)
+            }
+            Err(e) if e.is_not_found() => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get a specific IPv6 route by destination and prefix length.
+    ///
+    /// Uses RTM_GETROUTE without NLM_F_DUMP to query the kernel directly,
+    /// which is more efficient than dumping all routes for large routing tables.
+    ///
+    /// Returns `None` if no matching route is found.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::net::Ipv6Addr;
+    ///
+    /// // Look up route to 2001:db8::/32
+    /// let dest: Ipv6Addr = "2001:db8::".parse()?;
+    /// if let Some(route) = conn.get_route_v6(dest, 32).await? {
+    ///     println!("Gateway: {:?}", route.gateway);
+    /// }
+    /// ```
+    pub async fn get_route_v6(
+        &self,
+        destination: std::net::Ipv6Addr,
+        prefix_len: u8,
+    ) -> Result<Option<RouteMessage>> {
+        use crate::netlink::types::route::{RtMsg, RtaAttr};
+
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETROUTE, NLM_F_REQUEST);
+
+        let rtmsg = RtMsg::new()
+            .with_family(libc::AF_INET6 as u8)
+            .with_dst_len(prefix_len);
+        builder.append(&rtmsg);
+        builder.append_attr(RtaAttr::Dst as u16, &destination.octets());
+
+        match self.send_request(builder).await {
+            Ok(response) => {
+                if response.len() >= NLMSG_HDRLEN {
+                    let payload = &response[NLMSG_HDRLEN..];
+                    if let Ok(msg) = RouteMessage::from_bytes(payload) {
+                        return Ok(Some(msg));
+                    }
+                }
+                Ok(None)
+            }
+            Err(e) if e.is_not_found() => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Get all neighbor entries.

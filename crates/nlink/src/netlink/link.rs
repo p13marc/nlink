@@ -30,6 +30,55 @@
 //! - [`Ip6GretapLink`] - IPv6 GRE TAP tunnel (Layer 2)
 //! - [`WireguardLink`] - WireGuard interface
 //!
+//! # Tunnel Modification Limitations
+//!
+//! Tunnel parameters (local/remote IP, keys, TTL, encapsulation options) are
+//! **immutable after creation**. This is a Linux kernel limitation, not a library bug:
+//!
+//! - `RTM_NEWLINK` with `NLM_F_CREATE` sets tunnel parameters at creation time
+//! - `RTM_SETLINK` can only modify link-level attributes (MTU, name, up/down state)
+//! - No kernel API exists to modify `IFLA_LINKINFO_DATA` after creation
+//!
+//! ## What Can Be Changed After Creation
+//!
+//! These operations work on all link types, including tunnels:
+//!
+//! - Interface up/down state ([`set_link_up()`](Connection::set_link_up), [`set_link_down()`](Connection::set_link_down))
+//! - MTU ([`set_link_mtu()`](Connection::set_link_mtu))
+//! - Interface name ([`set_link_name()`](Connection::set_link_name))
+//! - MAC address ([`set_link_address()`](Connection::set_link_address))
+//! - Master device ([`set_link_master()`](Connection::set_link_master))
+//! - Network namespace ([`set_link_netns_pid()`](Connection::set_link_netns_pid))
+//!
+//! ## What Cannot Be Changed (requires delete + recreate)
+//!
+//! These parameters are set at creation and cannot be modified:
+//!
+//! - Tunnel endpoints (local/remote IP addresses)
+//! - Tunnel keys (GRE, VTI)
+//! - TTL, TOS, encapsulation flags
+//! - VXLAN VNI, port, learning settings
+//! - Geneve VNI and options
+//! - Any parameter stored in `IFLA_LINKINFO_DATA`
+//!
+//! ## Safe Replacement Pattern
+//!
+//! To change tunnel parameters, delete and recreate the tunnel:
+//!
+//! ```ignore
+//! // To change tunnel parameters:
+//! conn.del_link("gre1").await?;
+//! conn.add_link(GreLink::new("gre1")
+//!     .remote(new_remote_ip)
+//!     .local(new_local_ip)
+//!     .ttl(64)
+//! ).await?;
+//! ```
+//!
+//! Note: This causes a brief network interruption. For zero-downtime changes,
+//! consider creating the new tunnel with a temporary name, migrating traffic,
+//! then renaming.
+//!
 //! # Example
 //!
 //! ```ignore

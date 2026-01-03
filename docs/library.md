@@ -252,6 +252,96 @@ loop {
 }
 ```
 
+## Tunnel Management
+
+### Creating Tunnels
+
+```rust
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::link::{GreLink, VxlanLink, VtiLink};
+use std::net::Ipv4Addr;
+
+let conn = Connection::new(Protocol::Route)?;
+
+// GRE tunnel
+conn.add_link(GreLink::new("gre1")
+    .local(Ipv4Addr::new(192, 168, 1, 1))
+    .remote(Ipv4Addr::new(192, 168, 1, 2))
+    .ttl(64)
+    .key(100)
+).await?;
+
+// VXLAN tunnel
+conn.add_link(VxlanLink::new("vxlan0", 100)  // VNI = 100
+    .local(Ipv4Addr::new(10, 0, 0, 1))
+    .remote(Ipv4Addr::new(10, 0, 0, 2))
+    .port(4789)
+    .learning(true)
+).await?;
+
+// VTI for IPsec
+conn.add_link(VtiLink::new("vti0")
+    .local(Ipv4Addr::new(192, 168, 1, 1))
+    .remote(Ipv4Addr::new(192, 168, 1, 2))
+    .ikey(100)
+    .okey(100)
+).await?;
+```
+
+### Tunnel Modification Limitations
+
+**Important:** Tunnel parameters are immutable after creation. This is a Linux kernel limitation.
+
+**What CAN be changed:**
+- Interface state (up/down)
+- MTU
+- Interface name
+- MAC address
+- Master device (bridge membership)
+- Network namespace
+
+**What CANNOT be changed (requires delete + recreate):**
+- Tunnel endpoints (local/remote IP)
+- Tunnel keys
+- TTL, TOS, encapsulation flags
+- VXLAN VNI, port settings
+- Any `IFLA_LINKINFO_DATA` parameter
+
+### Safe Tunnel Replacement
+
+```rust
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::link::GreLink;
+use std::net::Ipv4Addr;
+
+let conn = Connection::new(Protocol::Route)?;
+
+// To change tunnel parameters, delete and recreate:
+conn.del_link("gre1").await?;
+conn.add_link(GreLink::new("gre1")
+    .local(Ipv4Addr::new(192, 168, 1, 1))
+    .remote(Ipv4Addr::new(10, 0, 0, 1))  // New remote
+    .ttl(128)  // New TTL
+).await?;
+```
+
+For zero-downtime changes, create a new tunnel with a temporary name, migrate traffic, then rename:
+
+```rust
+// 1. Create new tunnel with temp name
+conn.add_link(GreLink::new("gre1_new")
+    .remote(new_remote)
+    .local(local)
+).await?;
+
+// 2. Update routing to use new tunnel
+// ... (application-specific)
+
+// 3. Delete old tunnel and rename new one
+conn.del_link("gre1").await?;
+conn.set_link_name("gre1_new", "gre1").await?;
+```
+
 ## WireGuard via Generic Netlink
 
 ```rust
