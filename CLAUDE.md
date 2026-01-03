@@ -240,18 +240,32 @@ for qdisc in &qdiscs {
 
     // Get netem options with full details
     if let Some(netem) = qdisc.netem_options() {
-        // Time values in nanoseconds (with convenience methods)
-        println!("delay={:?}, jitter={:?}", netem.delay(), netem.jitter());
+        // Time values as Option<Duration>
+        if let Some(delay) = netem.delay() {
+            print!("delay={:?}", delay);
+            if let Some(jitter) = netem.jitter() {
+                print!(" +/- {:?}", jitter);
+            }
+            println!();
+        }
         
-        // Percentages
-        println!("loss={}%, correlation={}%", netem.loss_percent, netem.loss_corr);
-        println!("duplicate={}%", netem.duplicate_percent);
-        println!("reorder={}%, gap={}", netem.reorder_percent, netem.gap);
-        println!("corrupt={}%", netem.corrupt_percent);
+        // Percentages as Option<f64>
+        if let Some(loss) = netem.loss() {
+            println!("loss={:.2}%", loss);
+        }
+        if let Some(dup) = netem.duplicate() {
+            println!("duplicate={:.2}%", dup);
+        }
+        if let Some(reorder) = netem.reorder() {
+            println!("reorder={:.2}%, gap={}", reorder, netem.gap);
+        }
+        if let Some(corrupt) = netem.corrupt() {
+            println!("corrupt={:.2}%", corrupt);
+        }
         
-        // Rate limiting with overhead params
-        if netem.rate > 0 {
-            println!("rate={} bytes/sec", netem.rate);
+        // Rate limiting as Option<u64>
+        if let Some(rate) = netem.rate_bps() {
+            println!("rate={} bytes/sec", rate);
             println!("packet_overhead={}, cell_size={}", netem.packet_overhead, netem.cell_size);
         }
         

@@ -48,15 +48,15 @@ async fn main() -> nlink::netlink::Result<()> {
                     use nlink::netlink::tc_options::QdiscOptions;
                     match opts {
                         QdiscOptions::Netem(netem) => {
-                            if netem.has_delay() {
-                                print!("    delay {:?}", netem.delay());
-                                if netem.has_jitter() {
-                                    print!(" {:?}", netem.jitter());
+                            if let Some(delay) = netem.delay() {
+                                print!("    delay {:?}", delay);
+                                if let Some(jitter) = netem.jitter() {
+                                    print!(" {:?}", jitter);
                                 }
                                 println!();
                             }
-                            if netem.loss_percent > 0.0 {
-                                println!("    loss {:.2}%", netem.loss_percent);
+                            if let Some(loss) = netem.loss() {
+                                println!("    loss {:.2}%", loss);
                             }
                         }
                         QdiscOptions::FqCodel(fq) => {

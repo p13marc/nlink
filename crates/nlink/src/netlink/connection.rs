@@ -991,9 +991,14 @@ impl Connection<Route> {
     ///
     /// ```ignore
     /// if let Some(netem) = conn.get_netem_for("eth0").await? {
-    ///     println!("Delay: {:?}, Loss: {}%", netem.delay(), netem.loss_percent);
-    ///     if netem.has_rate() {
-    ///         println!("Rate limit: {} bytes/sec", netem.rate);
+    ///     if let Some(delay) = netem.delay() {
+    ///         println!("Delay: {:?}", delay);
+    ///     }
+    ///     if let Some(loss) = netem.loss() {
+    ///         println!("Loss: {:.2}%", loss);
+    ///     }
+    ///     if let Some(rate) = netem.rate_bps() {
+    ///         println!("Rate limit: {} bytes/sec", rate);
     ///     }
     /// }
     /// ```

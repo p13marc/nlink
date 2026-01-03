@@ -62,6 +62,31 @@ conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
 #### Removed Deprecated Type Aliases
 - Removed `WireguardConnection` (use `Connection<Wireguard>` instead)
 
+#### `NetemOptions` Methods Return `Option<T>`
+The `NetemOptions` methods now return `Option<Duration>` or `Option<f64>` instead of
+raw values that required checking for zero. This is more idiomatic Rust.
+
+```rust
+// Before
+if netem.delay().as_micros() > 0 {
+    println!("delay: {:?}", netem.delay());
+}
+
+// After
+if let Some(delay) = netem.delay() {
+    println!("delay: {:?}", delay);
+}
+```
+
+Changed methods:
+- `delay()` → `Option<Duration>` (was `Duration`)
+- `jitter()` → `Option<Duration>` (was `Duration`)
+- `loss()` → `Option<f64>` (new, replaces checking `loss_percent`)
+- `duplicate()` → `Option<f64>` (new, replaces checking `duplicate_percent`)
+- `reorder()` → `Option<f64>` (new, replaces checking `reorder_percent` or `gap`)
+- `corrupt()` → `Option<f64>` (new, replaces checking `corrupt_percent`)
+- `rate_bps()` → `Option<u64>` (new, replaces checking `rate`)
+
 ### Documentation
 - Updated `CLAUDE.md` with new accessor patterns and API examples
 - Updated all examples to use accessor methods

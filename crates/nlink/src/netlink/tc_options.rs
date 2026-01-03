@@ -215,58 +215,70 @@ pub enum NetemParameter {
 }
 
 impl NetemOptions {
-    /// Get the configured delay as a Duration.
+    /// Get the configured delay as a Duration, or None if not set.
     #[inline]
-    pub fn delay(&self) -> std::time::Duration {
-        std::time::Duration::from_nanos(self.delay_ns)
+    pub fn delay(&self) -> Option<std::time::Duration> {
+        if self.delay_ns > 0 {
+            Some(std::time::Duration::from_nanos(self.delay_ns))
+        } else {
+            None
+        }
     }
 
-    /// Get the configured jitter as a Duration.
+    /// Get the configured jitter as a Duration, or None if not set.
     #[inline]
-    pub fn jitter(&self) -> std::time::Duration {
-        std::time::Duration::from_nanos(self.jitter_ns)
+    pub fn jitter(&self) -> Option<std::time::Duration> {
+        if self.jitter_ns > 0 {
+            Some(std::time::Duration::from_nanos(self.jitter_ns))
+        } else {
+            None
+        }
     }
 
-    /// Returns true if delay is configured (delay_ns > 0).
+    /// Get the configured loss percentage, or None if not set.
     #[inline]
-    pub fn has_delay(&self) -> bool {
-        self.delay_ns > 0
+    pub fn loss(&self) -> Option<f64> {
+        if self.loss_percent > 0.0 || self.loss_model.is_some() {
+            Some(self.loss_percent)
+        } else {
+            None
+        }
     }
 
-    /// Returns true if jitter is configured (jitter_ns > 0).
+    /// Get the configured duplicate percentage, or None if not set.
     #[inline]
-    pub fn has_jitter(&self) -> bool {
-        self.jitter_ns > 0
+    pub fn duplicate(&self) -> Option<f64> {
+        if self.duplicate_percent > 0.0 {
+            Some(self.duplicate_percent)
+        } else {
+            None
+        }
     }
 
-    /// Returns true if packet loss is configured (loss > 0% or loss model is set).
+    /// Get the configured reorder percentage, or None if not set.
     #[inline]
-    pub fn has_loss(&self) -> bool {
-        self.loss_percent > 0.0 || self.loss_model.is_some()
+    pub fn reorder(&self) -> Option<f64> {
+        if self.reorder_percent > 0.0 || self.gap > 0 {
+            Some(self.reorder_percent)
+        } else {
+            None
+        }
     }
 
-    /// Returns true if packet duplication is configured.
+    /// Get the configured corrupt percentage, or None if not set.
     #[inline]
-    pub fn has_duplicate(&self) -> bool {
-        self.duplicate_percent > 0.0
+    pub fn corrupt(&self) -> Option<f64> {
+        if self.corrupt_percent > 0.0 {
+            Some(self.corrupt_percent)
+        } else {
+            None
+        }
     }
 
-    /// Returns true if packet reordering is configured.
+    /// Get the configured rate limit in bytes/sec, or None if not set.
     #[inline]
-    pub fn has_reorder(&self) -> bool {
-        self.reorder_percent > 0.0 || self.gap > 0
-    }
-
-    /// Returns true if packet corruption is configured.
-    #[inline]
-    pub fn has_corrupt(&self) -> bool {
-        self.corrupt_percent > 0.0
-    }
-
-    /// Returns true if rate limiting is configured.
-    #[inline]
-    pub fn has_rate(&self) -> bool {
-        self.rate > 0
+    pub fn rate_bps(&self) -> Option<u64> {
+        if self.rate > 0 { Some(self.rate) } else { None }
     }
 
     /// Returns the set of configured parameters.
@@ -283,25 +295,25 @@ impl NetemOptions {
     /// ```
     pub fn configured_parameters(&self) -> Vec<NetemParameter> {
         let mut params = Vec::new();
-        if self.has_delay() {
+        if self.delay().is_some() {
             params.push(NetemParameter::Delay);
         }
-        if self.has_jitter() {
+        if self.jitter().is_some() {
             params.push(NetemParameter::Jitter);
         }
-        if self.has_loss() {
+        if self.loss().is_some() {
             params.push(NetemParameter::Loss);
         }
-        if self.has_duplicate() {
+        if self.duplicate().is_some() {
             params.push(NetemParameter::Duplicate);
         }
-        if self.has_reorder() {
+        if self.reorder().is_some() {
             params.push(NetemParameter::Reorder);
         }
-        if self.has_corrupt() {
+        if self.corrupt().is_some() {
             params.push(NetemParameter::Corrupt);
         }
-        if self.has_rate() {
+        if self.rate_bps().is_some() {
             params.push(NetemParameter::Rate);
         }
         params
@@ -339,14 +351,14 @@ impl NetemOptions {
     /// ```
     pub fn requires_recreation_for(&self, new_config: &super::tc::NetemConfig) -> bool {
         // Check if any currently-set parameters would be removed by the new config
-        let removes_delay = self.has_delay() && new_config.delay.is_none();
-        let removes_jitter = self.has_jitter() && new_config.jitter.is_none();
-        let removes_loss = self.has_loss() && new_config.loss <= 0.0;
-        let removes_duplicate = self.has_duplicate() && new_config.duplicate <= 0.0;
+        let removes_delay = self.delay().is_some() && new_config.delay.is_none();
+        let removes_jitter = self.jitter().is_some() && new_config.jitter.is_none();
+        let removes_loss = self.loss().is_some() && new_config.loss <= 0.0;
+        let removes_duplicate = self.duplicate().is_some() && new_config.duplicate <= 0.0;
         let removes_reorder =
-            self.has_reorder() && new_config.reorder <= 0.0 && new_config.gap == 0;
-        let removes_corrupt = self.has_corrupt() && new_config.corrupt <= 0.0;
-        let removes_rate = self.has_rate() && new_config.rate.is_none();
+            self.reorder().is_some() && new_config.reorder <= 0.0 && new_config.gap == 0;
+        let removes_corrupt = self.corrupt().is_some() && new_config.corrupt <= 0.0;
+        let removes_rate = self.rate_bps().is_some() && new_config.rate.is_none();
 
         removes_delay
             || removes_jitter
@@ -1025,17 +1037,16 @@ mod tests {
 
     #[test]
     fn test_netem_defaults() {
-        use std::time::Duration;
         let opts = NetemOptions::default();
         assert_eq!(opts.delay_ns, 0);
-        assert_eq!(opts.delay(), Duration::ZERO);
+        assert!(opts.delay().is_none());
         assert_eq!(opts.jitter_ns, 0);
-        assert_eq!(opts.jitter(), Duration::ZERO);
-        assert_eq!(opts.loss_percent, 0.0);
-        assert_eq!(opts.duplicate_percent, 0.0);
-        assert_eq!(opts.reorder_percent, 0.0);
-        assert_eq!(opts.corrupt_percent, 0.0);
-        assert_eq!(opts.rate, 0);
+        assert!(opts.jitter().is_none());
+        assert!(opts.loss().is_none());
+        assert!(opts.duplicate().is_none());
+        assert!(opts.reorder().is_none());
+        assert!(opts.corrupt().is_none());
+        assert!(opts.rate_bps().is_none());
         assert_eq!(opts.limit, 0);
         assert_eq!(opts.gap, 0);
         assert!(!opts.ecn);
@@ -1043,31 +1054,31 @@ mod tests {
     }
 
     #[test]
-    fn test_netem_has_delay() {
+    fn test_netem_delay() {
         let mut opts = NetemOptions::default();
-        assert!(!opts.has_delay());
+        assert!(opts.delay().is_none());
 
         opts.delay_ns = 100_000_000; // 100ms
-        assert!(opts.has_delay());
+        assert_eq!(opts.delay(), Some(std::time::Duration::from_millis(100)));
     }
 
     #[test]
-    fn test_netem_has_jitter() {
+    fn test_netem_jitter() {
         let mut opts = NetemOptions::default();
-        assert!(!opts.has_jitter());
+        assert!(opts.jitter().is_none());
 
         opts.jitter_ns = 10_000_000; // 10ms
-        assert!(opts.has_jitter());
+        assert_eq!(opts.jitter(), Some(std::time::Duration::from_millis(10)));
     }
 
     #[test]
-    fn test_netem_has_loss() {
+    fn test_netem_loss() {
         let mut opts = NetemOptions::default();
-        assert!(!opts.has_loss());
+        assert!(opts.loss().is_none());
 
         // Test with loss_percent
         opts.loss_percent = 1.0;
-        assert!(opts.has_loss());
+        assert_eq!(opts.loss(), Some(1.0));
 
         // Test with loss_model
         opts.loss_percent = 0.0;
@@ -1077,49 +1088,49 @@ mod tests {
             h: 50.0,
             k1: 0.0,
         });
-        assert!(opts.has_loss());
+        assert!(opts.loss().is_some());
     }
 
     #[test]
-    fn test_netem_has_duplicate() {
+    fn test_netem_duplicate() {
         let mut opts = NetemOptions::default();
-        assert!(!opts.has_duplicate());
+        assert!(opts.duplicate().is_none());
 
         opts.duplicate_percent = 0.5;
-        assert!(opts.has_duplicate());
+        assert_eq!(opts.duplicate(), Some(0.5));
     }
 
     #[test]
-    fn test_netem_has_reorder() {
+    fn test_netem_reorder() {
         let mut opts = NetemOptions::default();
-        assert!(!opts.has_reorder());
+        assert!(opts.reorder().is_none());
 
         // Test with reorder_percent
         opts.reorder_percent = 5.0;
-        assert!(opts.has_reorder());
+        assert_eq!(opts.reorder(), Some(5.0));
 
         // Test with gap only
         opts.reorder_percent = 0.0;
         opts.gap = 5;
-        assert!(opts.has_reorder());
+        assert_eq!(opts.reorder(), Some(0.0));
     }
 
     #[test]
-    fn test_netem_has_corrupt() {
+    fn test_netem_corrupt() {
         let mut opts = NetemOptions::default();
-        assert!(!opts.has_corrupt());
+        assert!(opts.corrupt().is_none());
 
         opts.corrupt_percent = 0.1;
-        assert!(opts.has_corrupt());
+        assert_eq!(opts.corrupt(), Some(0.1));
     }
 
     #[test]
-    fn test_netem_has_rate() {
+    fn test_netem_rate_bps() {
         let mut opts = NetemOptions::default();
-        assert!(!opts.has_rate());
+        assert!(opts.rate_bps().is_none());
 
         opts.rate = 1_000_000;
-        assert!(opts.has_rate());
+        assert_eq!(opts.rate_bps(), Some(1_000_000));
     }
 
     #[test]
@@ -1149,6 +1160,7 @@ mod tests {
     #[test]
     fn test_netem_parse_basic() {
         use super::super::types::tc::qdisc::netem::*;
+        use std::time::Duration;
 
         // Build TcNetemQopt with 100ms delay, 1000 packet limit, 1% loss
         let mut qopt = TcNetemQopt::new();
@@ -1162,8 +1174,8 @@ mod tests {
         let data = qopt.as_bytes().to_vec();
         let opts = parse_netem_options(&data);
 
-        assert_eq!(opts.delay().as_micros(), 100_000);
-        assert_eq!(opts.jitter().as_micros(), 10_000);
+        assert_eq!(opts.delay(), Some(Duration::from_millis(100)));
+        assert_eq!(opts.jitter(), Some(Duration::from_millis(10)));
         assert_eq!(opts.limit, 1000);
         assert!((opts.loss_percent - 1.0).abs() < 0.01);
         assert_eq!(opts.duplicate_percent, 0.0);
@@ -1173,6 +1185,7 @@ mod tests {
     #[test]
     fn test_netem_parse_with_correlation() {
         use super::super::types::tc::qdisc::netem::*;
+        use std::time::Duration;
 
         // Build base options
         let mut qopt = TcNetemQopt::new();
@@ -1201,8 +1214,8 @@ mod tests {
 
         let opts = parse_netem_options(&data);
 
-        assert_eq!(opts.delay().as_micros(), 50_000);
-        assert_eq!(opts.jitter().as_micros(), 5_000);
+        assert_eq!(opts.delay(), Some(Duration::from_micros(50_000)));
+        assert_eq!(opts.jitter(), Some(Duration::from_micros(5_000)));
         assert!((opts.loss_percent - 5.0).abs() < 0.1);
         assert!((opts.duplicate_percent - 2.0).abs() < 0.1);
         assert!((opts.delay_corr - 25.0).abs() < 0.1);
@@ -1320,6 +1333,7 @@ mod tests {
     #[test]
     fn test_netem_parse_multiple_attrs() {
         use super::super::types::tc::qdisc::netem::*;
+        use std::time::Duration;
 
         // Build a complete netem config with multiple attributes
         let mut qopt = TcNetemQopt::new();
@@ -1360,8 +1374,8 @@ mod tests {
 
         let opts = parse_netem_options(&data);
 
-        assert_eq!(opts.delay().as_micros(), 100_000);
-        assert_eq!(opts.jitter().as_micros(), 10_000);
+        assert_eq!(opts.delay(), Some(Duration::from_millis(100)));
+        assert_eq!(opts.jitter(), Some(Duration::from_millis(10)));
         assert!((opts.loss_percent - 1.0).abs() < 0.1);
         assert!((opts.delay_corr - 25.0).abs() < 0.1);
         assert!((opts.loss_corr - 50.0).abs() < 0.1);
@@ -1371,6 +1385,7 @@ mod tests {
     #[test]
     fn test_netem_parse_with_64bit_delay() {
         use super::super::types::tc::qdisc::netem::*;
+        use std::time::Duration;
 
         let mut qopt = TcNetemQopt::new();
         qopt.latency = 100_000; // Will be overridden by 64-bit value
@@ -1399,8 +1414,8 @@ mod tests {
 
         assert_eq!(opts.delay_ns, 5_000_000_000);
         assert_eq!(opts.jitter_ns, 500_000_000);
-        assert_eq!(opts.delay().as_millis(), 5000);
-        assert_eq!(opts.jitter().as_millis(), 500);
+        assert_eq!(opts.delay(), Some(Duration::from_secs(5)));
+        assert_eq!(opts.jitter(), Some(Duration::from_millis(500)));
     }
 
     #[test]

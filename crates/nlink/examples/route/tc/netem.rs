@@ -76,11 +76,9 @@ async fn show_netem(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Resu
         if let Some(opts) = qdisc.options() {
             match opts {
                 QdiscOptions::Netem(netem) => {
-                    let delay = netem.delay();
-                    if !delay.is_zero() {
+                    if let Some(delay) = netem.delay() {
                         print!("  delay {:?}", delay);
-                        let jitter = netem.jitter();
-                        if !jitter.is_zero() {
+                        if let Some(jitter) = netem.jitter() {
                             print!(" +/- {:?}", jitter);
                         }
                         if netem.delay_corr > 0.0 {
