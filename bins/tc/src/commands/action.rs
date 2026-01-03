@@ -8,8 +8,7 @@
 
 use clap::{Args, Subcommand};
 use nlink::netlink::attr::AttrIter;
-use nlink::netlink::connection::dump_request;
-use nlink::netlink::message::{NLMSG_HDRLEN, NlMsgType};
+use nlink::netlink::message::NLMSG_HDRLEN;
 use nlink::netlink::types::tc::action::{
     self, TCA_ACT_KIND, TCA_ACT_OPTIONS,
     gact::{TCA_GACT_PARMS, TcGact},
@@ -111,20 +110,7 @@ impl ActionCmd {
         format: OutputFormat,
         _opts: &OutputOptions,
     ) -> Result<()> {
-        let mut builder = dump_request(NlMsgType::RTM_GETACTION);
-
-        // Add tcmsg header (zeroed for action dump)
-        let tcmsg = TcMsg::default();
-        builder.append(&tcmsg);
-
-        // Add TCA_ACT_TAB with action kind
-        let tab_token = builder.nest_start(TCA_ACT_TAB);
-        let act_token = builder.nest_start(1); // First action slot
-        builder.append_attr(TCA_ACT_KIND, kind.as_bytes());
-        builder.nest_end(act_token);
-        builder.nest_end(tab_token);
-
-        let responses = conn.send_dump(builder).await?;
+        let responses = action_builder::dump(conn, kind).await?;
 
         let stdout = io::stdout();
         let mut handle = stdout.lock();

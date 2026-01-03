@@ -5,8 +5,7 @@
 use clap::{Args, Subcommand};
 use nlink::netlink::message::NlMsgType;
 use nlink::netlink::messages::LinkMessage;
-use nlink::netlink::types::link::{IfInfoMsg, IflaAttr, iff};
-use nlink::netlink::{Connection, Result, Route, connection::ack_request};
+use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions, print_all};
 
 use super::link_add::{LinkAddType, add_link};
@@ -86,7 +85,7 @@ impl LinkCmd {
         match self.action.unwrap_or(LinkAction::Show { dev: None }) {
             LinkAction::Show { dev } => Self::show(conn, dev.as_deref(), format, opts).await,
             LinkAction::Add { link_type } => add_link(conn, link_type).await,
-            LinkAction::Del { dev } => Self::del(conn, &dev).await,
+            LinkAction::Del { dev } => conn.del_link(&dev).await,
             LinkAction::Set {
                 dev,
                 up,
@@ -132,20 +131,6 @@ impl LinkCmd {
         Ok(())
     }
 
-    async fn del(conn: &Connection<Route>, dev: &str) -> Result<()> {
-        let ifindex =
-            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
-
-        let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
-
-        let mut builder = ack_request(NlMsgType::RTM_DELLINK);
-        builder.append(&ifinfo);
-
-        conn.send_ack(builder).await?;
-
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn set(
         conn: &Connection<Route>,
@@ -159,57 +144,42 @@ impl LinkCmd {
         master: Option<String>,
         nomaster: bool,
     ) -> Result<()> {
-        let ifindex =
-            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
-
-        let mut ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
-
-        // Set flags
+        // Set up/down state
         if up {
-            ifinfo.ifi_flags = iff::UP;
-            ifinfo.ifi_change = iff::UP;
+            conn.set_link_up(dev).await?;
         } else if down {
-            ifinfo.ifi_flags = 0;
-            ifinfo.ifi_change = iff::UP;
+            conn.set_link_down(dev).await?;
         }
 
-        let mut builder = ack_request(NlMsgType::RTM_SETLINK);
-        builder.append(&ifinfo);
-
-        // Add MTU if specified
+        // Set MTU if specified
         if let Some(mtu_val) = mtu {
-            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu_val);
+            conn.set_link_mtu(dev, mtu_val).await?;
         }
 
-        // Add new name if specified
+        // Set new name if specified
         if let Some(new_name) = name {
-            builder.append_attr_str(IflaAttr::Ifname as u16, &new_name);
+            conn.set_link_name(dev, &new_name).await?;
         }
 
-        // Add TX queue length if specified
+        // Set TX queue length if specified
         if let Some(qlen) = txqlen {
-            builder.append_attr_u32(IflaAttr::TxqLen as u16, qlen);
+            conn.set_link_txqlen(dev, qlen).await?;
         }
 
-        // Add MAC address if specified
+        // Set MAC address if specified
         if let Some(addr_str) = address {
             let mac = nlink::util::addr::parse_mac(&addr_str).map_err(|e| {
                 nlink::netlink::Error::InvalidMessage(format!("invalid MAC address: {}", e))
             })?;
-            builder.append_attr(IflaAttr::Address as u16, &mac);
+            conn.set_link_address(dev, mac).await?;
         }
 
         // Set or clear master
         if let Some(master_name) = master {
-            let master_idx = nlink::util::get_ifindex(&master_name)
-                .map_err(nlink::netlink::Error::InvalidMessage)?
-                as u32;
-            builder.append_attr_u32(IflaAttr::Master as u16, master_idx);
+            conn.set_link_master(dev, &master_name).await?;
         } else if nomaster {
-            builder.append_attr_u32(IflaAttr::Master as u16, 0);
+            conn.set_link_nomaster(dev).await?;
         }
-
-        conn.send_ack(builder).await?;
 
         Ok(())
     }

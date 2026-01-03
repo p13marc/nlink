@@ -3,11 +3,9 @@
 //! This module uses the strongly-typed NeighborMessage API from rip-netlink.
 
 use clap::{Args, Subcommand};
-use nlink::netlink::message::{NLMSG_HDRLEN, NlMsgType};
-use nlink::netlink::messages::NeighborMessage;
-use nlink::netlink::parse::FromNetlink;
-use nlink::netlink::types::neigh::{NdMsg, NdaAttr, nud};
-use nlink::netlink::{Connection, Result, Route, connection::dump_request};
+use nlink::netlink::neigh::Neighbor;
+use nlink::netlink::types::neigh::NeighborState;
+use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions, print_all};
 use std::net::IpAddr;
 
@@ -130,48 +128,22 @@ impl NeighborCmd {
         opts: &OutputOptions,
         family: Option<u8>,
     ) -> Result<()> {
-        // Build request with family filter
-        let mut builder = dump_request(NlMsgType::RTM_GETNEIGH);
-        let ndmsg = NdMsg::new().with_family(family.unwrap_or(0));
-        builder.append(&ndmsg);
-
-        // Send and receive
-        let responses = conn.send_dump(builder).await?;
-
-        // Get device index if filtering by name
-        let filter_index = if let Some(dev_name) = dev {
-            Some(
-                nlink::util::get_ifindex(dev_name).map_err(nlink::netlink::Error::InvalidMessage)?
-                    as u32,
-            )
+        // Get neighbors (optionally filtered by device)
+        let neighbors = if let Some(dev_name) = dev {
+            conn.get_neighbors_for(dev_name).await?
         } else {
-            None
+            conn.get_neighbors().await?
         };
 
-        // Parse responses into typed NeighborMessage
-        let mut neighbors = Vec::new();
-        for response in &responses {
-            if response.len() < NLMSG_HDRLEN + NdMsg::SIZE {
-                continue;
-            }
-
-            let payload = &response[NLMSG_HDRLEN..];
-            if let Ok(neigh) = NeighborMessage::from_bytes(payload) {
-                // Filter by device if specified
-                if let Some(idx) = filter_index
-                    && neigh.ifindex() != idx
-                {
-                    continue;
-                }
-                // Filter by family if specified
-                if let Some(fam) = family
-                    && neigh.family() != fam
-                {
-                    continue;
-                }
-                neighbors.push(neigh);
-            }
-        }
+        // Filter by family if specified
+        let neighbors: Vec<_> = if let Some(fam) = family {
+            neighbors
+                .into_iter()
+                .filter(|n| n.family() == fam)
+                .collect()
+        } else {
+            neighbors
+        };
 
         print_all(&neighbors, format, opts)?;
 
@@ -188,186 +160,85 @@ impl NeighborCmd {
         state_name: Option<&str>,
         replace: bool,
     ) -> Result<()> {
-        use nlink::netlink::connection::{ack_request, replace_request};
         use nlink::util::addr::{parse_addr, parse_mac};
 
-        let addr = parse_addr(address).map_err(|e| {
+        let addr: IpAddr = parse_addr(address).map_err(|e| {
             nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
         })?;
 
         let mac = parse_mac(lladdr)
             .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid MAC: {}", e)))?;
 
-        let ifindex =
-            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
-
-        let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
-
         // Parse NUD state
         let state = if permanent {
-            nud::PERMANENT
+            NeighborState::Permanent
         } else if let Some(s) = state_name {
             match s.to_lowercase().as_str() {
-                "reachable" => nud::REACHABLE,
-                "stale" => nud::STALE,
-                "delay" => nud::DELAY,
-                "probe" => nud::PROBE,
-                "failed" => nud::FAILED,
-                "noarp" => nud::NOARP,
-                "permanent" => nud::PERMANENT,
-                _ => nud::REACHABLE,
+                "reachable" => NeighborState::Reachable,
+                "stale" => NeighborState::Stale,
+                "delay" => NeighborState::Delay,
+                "probe" => NeighborState::Probe,
+                "failed" => NeighborState::Failed,
+                "noarp" => NeighborState::Noarp,
+                "permanent" => NeighborState::Permanent,
+                _ => NeighborState::Reachable,
             }
         } else {
-            nud::REACHABLE
+            NeighborState::Reachable
         };
 
-        let ndmsg = NdMsg {
-            ndm_family: family,
-            ndm_ifindex: ifindex as i32,
-            ndm_state: state,
-            ndm_flags: 0,
-            ndm_type: 0,
-            ..Default::default()
-        };
+        let neigh = Neighbor::new(dev, addr).lladdr(mac).state(state);
 
-        let mut builder = if replace {
-            replace_request(NlMsgType::RTM_NEWNEIGH)
+        if replace {
+            conn.replace_neighbor(neigh).await
         } else {
-            ack_request(NlMsgType::RTM_NEWNEIGH)
-        };
-        builder.append(&ndmsg);
-
-        // Add destination address
-        match addr {
-            IpAddr::V4(v4) => {
-                builder.append_attr(NdaAttr::Dst as u16, &v4.octets());
-            }
-            IpAddr::V6(v6) => {
-                builder.append_attr(NdaAttr::Dst as u16, &v6.octets());
-            }
+            conn.add_neighbor(neigh).await
         }
-
-        // Add link-layer address
-        builder.append_attr(NdaAttr::Lladdr as u16, &mac);
-
-        conn.send_ack(builder).await?;
-
-        Ok(())
     }
 
     async fn del(conn: &Connection<Route>, address: &str, dev: &str) -> Result<()> {
-        use nlink::netlink::connection::ack_request;
         use nlink::util::addr::parse_addr;
 
-        let addr = parse_addr(address).map_err(|e| {
+        let addr: IpAddr = parse_addr(address).map_err(|e| {
             nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
         })?;
 
-        let ifindex =
-            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
-
-        let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
-
-        let ndmsg = NdMsg {
-            ndm_family: family,
-            ndm_ifindex: ifindex as i32,
-            ..Default::default()
-        };
-
-        let mut builder = ack_request(NlMsgType::RTM_DELNEIGH);
-        builder.append(&ndmsg);
-
-        // Add destination address
-        match addr {
-            IpAddr::V4(v4) => {
-                builder.append_attr(NdaAttr::Dst as u16, &v4.octets());
-            }
-            IpAddr::V6(v6) => {
-                builder.append_attr(NdaAttr::Dst as u16, &v6.octets());
-            }
-        }
-
-        conn.send_ack(builder).await?;
-
-        Ok(())
+        let neigh = Neighbor::new(dev, addr);
+        conn.del_neighbor(neigh).await
     }
 
     async fn flush(conn: &Connection<Route>, dev: Option<&str>, family: Option<u8>) -> Result<()> {
-        use nlink::netlink::connection::ack_request;
-
-        // First, get all neighbor entries
-        let mut builder = dump_request(NlMsgType::RTM_GETNEIGH);
-        let ndmsg = NdMsg::new().with_family(family.unwrap_or(0));
-        builder.append(&ndmsg);
-
-        let responses = conn.send_dump(builder).await?;
-
-        // Get device index if filtering by name
-        let filter_index = if let Some(dev_name) = dev {
-            Some(
-                nlink::util::get_ifindex(dev_name).map_err(nlink::netlink::Error::InvalidMessage)?
-                    as u32,
-            )
+        // Get all neighbor entries
+        let neighbors = if let Some(dev_name) = dev {
+            conn.get_neighbors_for(dev_name).await?
         } else {
-            None
+            conn.get_neighbors().await?
         };
 
-        // Collect neighbors to delete
-        let mut neighbors_to_delete = Vec::new();
-        for response in &responses {
-            if response.len() < NLMSG_HDRLEN + NdMsg::SIZE {
-                continue;
-            }
-
-            let payload = &response[NLMSG_HDRLEN..];
-            if let Ok(neigh) = NeighborMessage::from_bytes(payload) {
-                // Filter by device if specified
-                if let Some(idx) = filter_index
-                    && neigh.ifindex() != idx
-                {
-                    continue;
-                }
-                // Filter by family if specified
+        // Filter by family if specified, and skip permanent/noarp entries
+        let neighbors_to_delete: Vec<_> = neighbors
+            .into_iter()
+            .filter(|n| {
                 if let Some(fam) = family
-                    && neigh.family() != fam
-                {
-                    continue;
-                }
+                    && n.family() != fam {
+                        return false;
+                    }
                 // Skip permanent/noarp entries (like iproute2 does)
-                if neigh.is_permanent() {
-                    continue;
-                }
-                neighbors_to_delete.push(neigh);
-            }
-        }
+                !n.is_permanent()
+            })
+            .collect();
 
         let count = neighbors_to_delete.len();
 
-        // Delete each neighbor
+        // Delete each neighbor - need interface name for Neighbor builder
+        let names = conn.get_interface_names().await?;
+
         for neigh in neighbors_to_delete {
-            let del_ndmsg = NdMsg {
-                ndm_family: neigh.family(),
-                ndm_ifindex: neigh.ifindex() as i32,
-                ..Default::default()
-            };
-
-            let mut del_builder = ack_request(NlMsgType::RTM_DELNEIGH);
-            del_builder.append(&del_ndmsg);
-
-            // Add destination address
-            if let Some(addr) = neigh.destination {
-                match addr {
-                    IpAddr::V4(v4) => {
-                        del_builder.append_attr(NdaAttr::Dst as u16, &v4.octets());
-                    }
-                    IpAddr::V6(v6) => {
-                        del_builder.append_attr(NdaAttr::Dst as u16, &v6.octets());
-                    }
+            if let Some(addr) = neigh.destination
+                && let Some(ifname) = names.get(&neigh.ifindex()) {
+                    // Ignore errors for individual deletes (entry may have been removed)
+                    let _ = conn.del_neighbor(Neighbor::new(ifname, addr)).await;
                 }
-
-                // Ignore errors for individual deletes (entry may have been removed)
-                let _ = conn.send_ack(del_builder).await;
-            }
         }
 
         if count > 0 {

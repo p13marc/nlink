@@ -129,7 +129,7 @@ impl<P: ProtocolState> Connection<P> {
     ///
     /// This is a low-level method. Prefer using typed methods like `get_links()`,
     /// `add_route()`, etc. when available.
-    pub async fn send_request(&self, mut builder: MessageBuilder) -> Result<Vec<u8>> {
+    pub(crate) async fn send_request(&self, mut builder: MessageBuilder) -> Result<Vec<u8>> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -148,7 +148,7 @@ impl<P: ProtocolState> Connection<P> {
     ///
     /// This is a low-level method. Prefer using typed methods like `add_link()`,
     /// `del_route()`, etc. when available.
-    pub async fn send_ack(&self, mut builder: MessageBuilder) -> Result<()> {
+    pub(crate) async fn send_ack(&self, mut builder: MessageBuilder) -> Result<()> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -167,7 +167,7 @@ impl<P: ProtocolState> Connection<P> {
     ///
     /// This is a low-level method. Prefer using typed methods like `get_links()`,
     /// `get_routes()`, etc. when available.
-    pub async fn send_dump(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
+    pub(crate) async fn send_dump(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -366,22 +366,22 @@ impl Connection<Route> {
 }
 
 /// Helper to build a dump request.
-pub fn dump_request(msg_type: u16) -> MessageBuilder {
+pub(crate) fn dump_request(msg_type: u16) -> MessageBuilder {
     MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_DUMP)
 }
 
 /// Helper to build a request expecting ACK.
-pub fn ack_request(msg_type: u16) -> MessageBuilder {
+pub(crate) fn ack_request(msg_type: u16) -> MessageBuilder {
     MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_ACK)
 }
 
 /// Helper to build a create request.
-pub fn create_request(msg_type: u16) -> MessageBuilder {
+pub(crate) fn create_request(msg_type: u16) -> MessageBuilder {
     MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_ACK | 0x400) // NLM_F_CREATE
 }
 
 /// Helper to build a create-or-replace request.
-pub fn replace_request(msg_type: u16) -> MessageBuilder {
+pub(crate) fn replace_request(msg_type: u16) -> MessageBuilder {
     MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_ACK | 0x400 | 0x100) // NLM_F_CREATE | NLM_F_REPLACE
 }
 
@@ -389,7 +389,9 @@ pub fn replace_request(msg_type: u16) -> MessageBuilder {
 // Convenience Query Methods
 // ============================================================================
 
-use super::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage};
+use super::messages::{
+    AddressMessage, LinkMessage, NeighborMessage, RouteMessage, RuleMessage, TcMessage,
+};
 
 /// Helper function to convert interface name to index.
 /// This is a standalone implementation to avoid dependency on rip-lib.
@@ -535,6 +537,104 @@ impl Connection<Route> {
             .into_iter()
             .filter(|n| n.ifindex() == ifindex)
             .collect())
+    }
+
+    /// Get all routing rules.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let rules = conn.get_rules().await?;
+    /// for rule in rules {
+    ///     println!("{}: {:?} -> table {}", rule.priority, rule.source, rule.table);
+    /// }
+    /// ```
+    pub async fn get_rules(&self) -> Result<Vec<RuleMessage>> {
+        self.dump_typed(NlMsgType::RTM_GETRULE).await
+    }
+
+    /// Get routing rules for a specific address family.
+    ///
+    /// # Arguments
+    ///
+    /// * `family` - Address family: `libc::AF_INET` for IPv4, `libc::AF_INET6` for IPv6
+    pub async fn get_rules_for_family(&self, family: u8) -> Result<Vec<RuleMessage>> {
+        let rules = self.get_rules().await?;
+        Ok(rules.into_iter().filter(|r| r.family() == family).collect())
+    }
+
+    /// Get IPv4 routing rules.
+    pub async fn get_rules_v4(&self) -> Result<Vec<RuleMessage>> {
+        self.get_rules_for_family(libc::AF_INET as u8).await
+    }
+
+    /// Get IPv6 routing rules.
+    pub async fn get_rules_v6(&self) -> Result<Vec<RuleMessage>> {
+        self.get_rules_for_family(libc::AF_INET6 as u8).await
+    }
+
+    /// Add a routing rule.
+    ///
+    /// Use the [`RuleBuilder`] to construct the rule.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::rule::RuleBuilder;
+    ///
+    /// // Add a rule to lookup table 100 for traffic from 10.0.0.0/8
+    /// conn.add_rule(
+    ///     RuleBuilder::v4()
+    ///         .priority(100)
+    ///         .from("10.0.0.0", 8)
+    ///         .table(100)
+    /// ).await?;
+    /// ```
+    pub async fn add_rule(&self, rule: super::rule::RuleBuilder) -> Result<()> {
+        let builder = rule.build()?;
+        self.send_ack(builder).await
+    }
+
+    /// Delete a routing rule.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::rule::RuleBuilder;
+    ///
+    /// conn.del_rule(
+    ///     RuleBuilder::v4()
+    ///         .priority(100)
+    /// ).await?;
+    /// ```
+    pub async fn del_rule(&self, rule: super::rule::RuleBuilder) -> Result<()> {
+        let builder = rule.build_delete()?;
+        self.send_ack(builder).await
+    }
+
+    /// Delete a rule by priority.
+    pub async fn del_rule_by_priority(&self, family: u8, priority: u32) -> Result<()> {
+        let rule = super::rule::RuleBuilder::new(family).priority(priority);
+        self.del_rule(rule).await
+    }
+
+    /// Flush all non-default routing rules for a family.
+    ///
+    /// This deletes all rules except the default ones (priority 0, 32766, 32767).
+    pub async fn flush_rules(&self, family: u8) -> Result<()> {
+        let rules = self.get_rules_for_family(family).await?;
+
+        for rule in rules {
+            // Skip default rules
+            if rule.priority == 0 || rule.priority == 32766 || rule.priority == 32767 {
+                continue;
+            }
+
+            // Delete by priority
+            let _ = self.del_rule_by_priority(family, rule.priority).await;
+        }
+
+        Ok(())
     }
 
     /// Get all qdiscs.
@@ -816,6 +916,31 @@ impl Connection<Route> {
 
         let mut builder = ack_request(NlMsgType::RTM_DELLINK);
         builder.append(&ifinfo);
+
+        self.send_ack(builder).await
+    }
+
+    /// Set the TX queue length of a network interface.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.set_link_txqlen("eth0", 1000).await?;
+    /// ```
+    pub async fn set_link_txqlen(&self, ifname: &str, txqlen: u32) -> Result<()> {
+        let ifindex = ifname_to_index(ifname)?;
+        self.set_link_txqlen_by_index(ifindex, txqlen).await
+    }
+
+    /// Set the TX queue length of a network interface by index.
+    pub async fn set_link_txqlen_by_index(&self, ifindex: u32, txqlen: u32) -> Result<()> {
+        use super::types::link::IflaAttr;
+
+        let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
+
+        let mut builder = ack_request(NlMsgType::RTM_SETLINK);
+        builder.append(&ifinfo);
+        builder.append_attr_u32(IflaAttr::TxqLen as u16, txqlen);
 
         self.send_ack(builder).await
     }

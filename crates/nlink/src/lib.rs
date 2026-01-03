@@ -137,8 +137,8 @@ pub mod output;
 // Re-export common types at crate root for convenience
 pub use netlink::{Connection, Error, Protocol, Result};
 
-// Protocol state types and type aliases
-pub use netlink::{Generic, GenlConnection, Route, RouteConnection};
+// Protocol state types
+pub use netlink::{Generic, Route};
 
 // Event types
 pub use netlink::{
@@ -158,5 +158,6 @@ pub use netlink::messages::{
     NeighborMessage,
     QdiscMessage,
     RouteMessage,
+    RuleMessage,
     TcMessage,
 };

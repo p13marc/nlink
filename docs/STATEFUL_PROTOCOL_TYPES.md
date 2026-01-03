@@ -28,10 +28,6 @@ route.get_links().await?;  // Compile-time guaranteed to work
 
 let genl = Connection::<Generic>::new()?;
 genl.get_family("wireguard").await?;  // Only available on Generic
-
-// Type aliases for convenience
-let route = RouteConnection::new()?;
-let genl = GenlConnection::new()?;  // Now an alias, not a separate type
 ```
 
 ## Architecture
@@ -94,18 +90,6 @@ impl ProtocolState for Generic {
 
 The cache eliminates repeated kernel queries for family IDs, improving performance when making multiple requests to the same family.
 
-## Type Aliases
-
-For convenience and discoverability, type aliases are provided:
-
-```rust
-/// Route protocol connection (most common)
-pub type RouteConnection = Connection<Route>;
-
-/// Generic netlink connection
-pub type GenlConnection = Connection<Generic>;
-```
-
 ## Files Modified
 
 ### Core Changes
@@ -114,8 +98,8 @@ pub type GenlConnection = Connection<Generic>;
 |------|---------|
 | `netlink/protocol.rs` | **NEW**: `ProtocolState` trait, `Route`, `Generic` types |
 | `netlink/connection.rs` | Refactored to `Connection<P>`, added `impl Connection<Generic>` |
-| `netlink/mod.rs` | Added exports, type aliases |
-| `lib.rs` | Re-exported `Route`, `Generic`, `RouteConnection`, `GenlConnection` |
+| `netlink/mod.rs` | Added exports for protocol types |
+| `lib.rs` | Re-exported `Route`, `Generic` |
 
 ### Extension Files
 
@@ -161,11 +145,8 @@ All binaries (`ip`, `tc`) and examples updated to use:
 // Before
 let conn = Connection::new(Protocol::Route)?;
 
-// After (explicit)
+// After
 let conn = Connection::<Route>::new()?;
-
-// After (type alias)
-let conn = RouteConnection::new()?;
 ```
 
 **Function signatures:**
@@ -182,11 +163,8 @@ async fn do_something(conn: &Connection<Route>) -> Result<()>
 // Before
 let genl = GenlConnection::new()?;
 
-// After (explicit)
+// After
 let genl = Connection::<Generic>::new()?;
-
-// After (type alias - same name, different underlying type)
-let genl = GenlConnection::new()?;
 ```
 
 ## Benefits
@@ -197,7 +175,7 @@ let genl = GenlConnection::new()?;
 
 3. **No Code Duplication**: Shared logic (socket operations, namespace handling) is in the generic `impl<P>` block, while protocol-specific methods are in specialized impl blocks.
 
-4. **Clear API**: Type parameters make it explicit which protocol a connection uses. Type aliases provide discoverability for common use cases.
+4. **Clear API**: Type parameters make it explicit which protocol a connection uses.
 
 5. **Sealed Trait**: The `ProtocolState` trait is sealed, preventing external implementations and ensuring only supported protocols can be used.
 

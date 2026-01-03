@@ -7,21 +7,28 @@
 //! - [`DummyLink`] - Dummy interface (loopback-like, no actual network)
 //! - [`VethLink`] - Virtual ethernet pair
 //! - [`BridgeLink`] - Bridge interface
+//! - [`BondLink`] - Bonding (link aggregation) interface
 //! - [`VlanLink`] - VLAN interface
 //! - [`VxlanLink`] - VXLAN overlay interface
 //! - [`MacvlanLink`] - MAC-based VLAN interface
 //! - [`MacvtapLink`] - MAC-based tap interface (for VMs)
 //! - [`IpvlanLink`] - IP-based VLAN interface
+//! - [`VrfLink`] - Virtual Routing and Forwarding interface
 //! - [`IfbLink`] - Intermediate Functional Block (for ingress shaping)
 //! - [`GeneveLink`] - Generic Network Virtualization Encapsulation
 //! - [`BareudpLink`] - Bare UDP tunneling
 //! - [`NetkitLink`] - BPF-optimized virtual ethernet
 //! - [`NlmonLink`] - Netlink monitor for debugging
 //! - [`VirtWifiLink`] - Virtual WiFi for testing
+//! - [`GreLink`] - GRE tunnel (IPv4)
+//! - [`GretapLink`] - GRE TAP tunnel (Layer 2 over IPv4)
+//! - [`IpipLink`] - IP-in-IP tunnel
+//! - [`SitLink`] - SIT tunnel (IPv6-in-IPv4)
 //! - [`VtiLink`] - Virtual Tunnel Interface (IPv4 IPsec)
 //! - [`Vti6Link`] - Virtual Tunnel Interface (IPv6 IPsec)
 //! - [`Ip6GreLink`] - IPv6 GRE tunnel
 //! - [`Ip6GretapLink`] - IPv6 GRE TAP tunnel (Layer 2)
+//! - [`WireguardLink`] - WireGuard interface
 //!
 //! # Example
 //!
@@ -2624,6 +2631,756 @@ impl LinkConfig for Ip6GretapLink {
         builder.nest_end(linkinfo);
 
         Ok(builder)
+    }
+}
+
+// ============================================================================
+// Bond Link
+// ============================================================================
+
+/// Bond mode constants.
+pub mod bond_mode {
+    pub const BALANCE_RR: u8 = 0;
+    pub const ACTIVE_BACKUP: u8 = 1;
+    pub const BALANCE_XOR: u8 = 2;
+    pub const BROADCAST: u8 = 3;
+    pub const LACP: u8 = 4; // 802.3ad
+    pub const BALANCE_TLB: u8 = 5;
+    pub const BALANCE_ALB: u8 = 6;
+}
+
+/// Bond attribute constants.
+mod bond_attr {
+    pub const IFLA_BOND_MODE: u16 = 1;
+    pub const IFLA_BOND_MIIMON: u16 = 3;
+    pub const IFLA_BOND_UPDELAY: u16 = 4;
+    pub const IFLA_BOND_DOWNDELAY: u16 = 5;
+    pub const IFLA_BOND_XMIT_HASH_POLICY: u16 = 14;
+    pub const IFLA_BOND_MIN_LINKS: u16 = 18;
+}
+
+/// Configuration for a bonding (link aggregation) interface.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::{BondLink, bond_mode};
+///
+/// let bond = BondLink::new("bond0")
+///     .mode(bond_mode::LACP)
+///     .miimon(100)
+///     .min_links(1);
+///
+/// conn.add_link(bond).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct BondLink {
+    name: String,
+    mode: u8,
+    miimon: Option<u32>,
+    updelay: Option<u32>,
+    downdelay: Option<u32>,
+    min_links: Option<u32>,
+    xmit_hash_policy: Option<u8>,
+    mtu: Option<u32>,
+    address: Option<[u8; 6]>,
+}
+
+impl BondLink {
+    /// Create a new bond interface configuration.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            mode: bond_mode::BALANCE_RR,
+            miimon: None,
+            updelay: None,
+            downdelay: None,
+            min_links: None,
+            xmit_hash_policy: None,
+            mtu: None,
+            address: None,
+        }
+    }
+
+    /// Set the bonding mode.
+    pub fn mode(mut self, mode: u8) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Set the MII link monitoring interval in milliseconds.
+    pub fn miimon(mut self, ms: u32) -> Self {
+        self.miimon = Some(ms);
+        self
+    }
+
+    /// Set the delay before enabling a slave after link up (ms).
+    pub fn updelay(mut self, ms: u32) -> Self {
+        self.updelay = Some(ms);
+        self
+    }
+
+    /// Set the delay before disabling a slave after link down (ms).
+    pub fn downdelay(mut self, ms: u32) -> Self {
+        self.downdelay = Some(ms);
+        self
+    }
+
+    /// Set the minimum number of links for the bond to be up.
+    pub fn min_links(mut self, n: u32) -> Self {
+        self.min_links = Some(n);
+        self
+    }
+
+    /// Set the transmit hash policy (0=layer2, 1=layer3+4, 2=layer2+3).
+    pub fn xmit_hash_policy(mut self, policy: u8) -> Self {
+        self.xmit_hash_policy = Some(policy);
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the MAC address.
+    pub fn address(mut self, address: [u8; 6]) -> Self {
+        self.address = Some(address);
+        self
+    }
+}
+
+impl LinkConfig for BondLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "bond"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(ref addr) = self.address {
+            builder.append_attr(IflaAttr::Address as u16, addr);
+        }
+
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "bond");
+
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        builder.append_attr_u8(bond_attr::IFLA_BOND_MODE, self.mode);
+        if let Some(v) = self.miimon {
+            builder.append_attr_u32(bond_attr::IFLA_BOND_MIIMON, v);
+        }
+        if let Some(v) = self.updelay {
+            builder.append_attr_u32(bond_attr::IFLA_BOND_UPDELAY, v);
+        }
+        if let Some(v) = self.downdelay {
+            builder.append_attr_u32(bond_attr::IFLA_BOND_DOWNDELAY, v);
+        }
+        if let Some(v) = self.min_links {
+            builder.append_attr_u32(bond_attr::IFLA_BOND_MIN_LINKS, v);
+        }
+        if let Some(v) = self.xmit_hash_policy {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_XMIT_HASH_POLICY, v);
+        }
+        builder.nest_end(data);
+
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// VRF Link
+// ============================================================================
+
+/// VRF attribute constants.
+mod vrf_attr {
+    pub const IFLA_VRF_TABLE: u16 = 1;
+}
+
+/// Configuration for a VRF (Virtual Routing and Forwarding) interface.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::VrfLink;
+///
+/// let vrf = VrfLink::new("vrf-red", 100);
+///
+/// conn.add_link(vrf).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct VrfLink {
+    name: String,
+    table: u32,
+    mtu: Option<u32>,
+}
+
+impl VrfLink {
+    /// Create a new VRF interface configuration.
+    pub fn new(name: &str, table: u32) -> Self {
+        Self {
+            name: name.to_string(),
+            table,
+            mtu: None,
+        }
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+}
+
+impl LinkConfig for VrfLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "vrf"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "vrf");
+
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        builder.append_attr_u32(vrf_attr::IFLA_VRF_TABLE, self.table);
+        builder.nest_end(data);
+
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// GRE Link (IPv4)
+// ============================================================================
+
+/// GRE tunnel attribute constants.
+mod gre_attr {
+    pub const IFLA_GRE_LOCAL: u16 = 1;
+    pub const IFLA_GRE_REMOTE: u16 = 2;
+    pub const IFLA_GRE_TTL: u16 = 4;
+    pub const IFLA_GRE_IKEY: u16 = 5;
+    pub const IFLA_GRE_OKEY: u16 = 6;
+    pub const IFLA_GRE_IFLAGS: u16 = 7;
+    pub const IFLA_GRE_OFLAGS: u16 = 8;
+}
+
+/// GRE key flag.
+const GRE_KEY: u16 = 0x2000;
+
+/// Configuration for a GRE tunnel interface.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::GreLink;
+/// use std::net::Ipv4Addr;
+///
+/// let gre = GreLink::new("gre1")
+///     .remote(Ipv4Addr::new(192, 168, 1, 1))
+///     .local(Ipv4Addr::new(192, 168, 1, 2))
+///     .ttl(64);
+///
+/// conn.add_link(gre).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct GreLink {
+    name: String,
+    local: Option<Ipv4Addr>,
+    remote: Option<Ipv4Addr>,
+    ttl: Option<u8>,
+    key: Option<u32>,
+    mtu: Option<u32>,
+}
+
+impl GreLink {
+    /// Create a new GRE tunnel configuration.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            local: None,
+            remote: None,
+            ttl: None,
+            key: None,
+            mtu: None,
+        }
+    }
+
+    /// Set the local endpoint address.
+    pub fn local(mut self, addr: Ipv4Addr) -> Self {
+        self.local = Some(addr);
+        self
+    }
+
+    /// Set the remote endpoint address.
+    pub fn remote(mut self, addr: Ipv4Addr) -> Self {
+        self.remote = Some(addr);
+        self
+    }
+
+    /// Set the TTL.
+    pub fn ttl(mut self, ttl: u8) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set the tunnel key.
+    pub fn key(mut self, key: u32) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+}
+
+impl LinkConfig for GreLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "gre"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "gre");
+
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        if let Some(addr) = self.remote {
+            builder.append_attr(gre_attr::IFLA_GRE_REMOTE, &addr.octets());
+        }
+        if let Some(addr) = self.local {
+            builder.append_attr(gre_attr::IFLA_GRE_LOCAL, &addr.octets());
+        }
+        if let Some(ttl) = self.ttl {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_TTL, ttl);
+        }
+        if let Some(key) = self.key {
+            builder.append_attr_u32(gre_attr::IFLA_GRE_IKEY, key);
+            builder.append_attr_u32(gre_attr::IFLA_GRE_OKEY, key);
+            builder.append_attr_u16(gre_attr::IFLA_GRE_IFLAGS, GRE_KEY);
+            builder.append_attr_u16(gre_attr::IFLA_GRE_OFLAGS, GRE_KEY);
+        }
+        builder.nest_end(data);
+
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// GRETAP Link (Layer 2 GRE)
+// ============================================================================
+
+/// Configuration for a GRETAP (Ethernet over GRE) tunnel interface.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::GretapLink;
+/// use std::net::Ipv4Addr;
+///
+/// let gretap = GretapLink::new("gretap1")
+///     .remote(Ipv4Addr::new(192, 168, 1, 1))
+///     .local(Ipv4Addr::new(192, 168, 1, 2));
+///
+/// conn.add_link(gretap).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct GretapLink {
+    name: String,
+    local: Option<Ipv4Addr>,
+    remote: Option<Ipv4Addr>,
+    ttl: Option<u8>,
+    key: Option<u32>,
+    mtu: Option<u32>,
+}
+
+impl GretapLink {
+    /// Create a new GRETAP tunnel configuration.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            local: None,
+            remote: None,
+            ttl: None,
+            key: None,
+            mtu: None,
+        }
+    }
+
+    /// Set the local endpoint address.
+    pub fn local(mut self, addr: Ipv4Addr) -> Self {
+        self.local = Some(addr);
+        self
+    }
+
+    /// Set the remote endpoint address.
+    pub fn remote(mut self, addr: Ipv4Addr) -> Self {
+        self.remote = Some(addr);
+        self
+    }
+
+    /// Set the TTL.
+    pub fn ttl(mut self, ttl: u8) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set the tunnel key.
+    pub fn key(mut self, key: u32) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+}
+
+impl LinkConfig for GretapLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "gretap"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "gretap");
+
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        if let Some(addr) = self.remote {
+            builder.append_attr(gre_attr::IFLA_GRE_REMOTE, &addr.octets());
+        }
+        if let Some(addr) = self.local {
+            builder.append_attr(gre_attr::IFLA_GRE_LOCAL, &addr.octets());
+        }
+        if let Some(ttl) = self.ttl {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_TTL, ttl);
+        }
+        if let Some(key) = self.key {
+            builder.append_attr_u32(gre_attr::IFLA_GRE_IKEY, key);
+            builder.append_attr_u32(gre_attr::IFLA_GRE_OKEY, key);
+            builder.append_attr_u16(gre_attr::IFLA_GRE_IFLAGS, GRE_KEY);
+            builder.append_attr_u16(gre_attr::IFLA_GRE_OFLAGS, GRE_KEY);
+        }
+        builder.nest_end(data);
+
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// IPIP Link
+// ============================================================================
+
+/// IPIP tunnel attribute constants.
+mod iptun_attr {
+    pub const IFLA_IPTUN_LOCAL: u16 = 1;
+    pub const IFLA_IPTUN_REMOTE: u16 = 2;
+    pub const IFLA_IPTUN_TTL: u16 = 4;
+}
+
+/// Configuration for an IPIP (IP-in-IP) tunnel interface.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::IpipLink;
+/// use std::net::Ipv4Addr;
+///
+/// let ipip = IpipLink::new("ipip1")
+///     .remote(Ipv4Addr::new(192, 168, 1, 1))
+///     .local(Ipv4Addr::new(192, 168, 1, 2));
+///
+/// conn.add_link(ipip).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct IpipLink {
+    name: String,
+    local: Option<Ipv4Addr>,
+    remote: Option<Ipv4Addr>,
+    ttl: Option<u8>,
+    mtu: Option<u32>,
+}
+
+impl IpipLink {
+    /// Create a new IPIP tunnel configuration.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            local: None,
+            remote: None,
+            ttl: None,
+            mtu: None,
+        }
+    }
+
+    /// Set the local endpoint address.
+    pub fn local(mut self, addr: Ipv4Addr) -> Self {
+        self.local = Some(addr);
+        self
+    }
+
+    /// Set the remote endpoint address.
+    pub fn remote(mut self, addr: Ipv4Addr) -> Self {
+        self.remote = Some(addr);
+        self
+    }
+
+    /// Set the TTL.
+    pub fn ttl(mut self, ttl: u8) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+}
+
+impl LinkConfig for IpipLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "ipip"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "ipip");
+
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        if let Some(addr) = self.remote {
+            builder.append_attr(iptun_attr::IFLA_IPTUN_REMOTE, &addr.octets());
+        }
+        if let Some(addr) = self.local {
+            builder.append_attr(iptun_attr::IFLA_IPTUN_LOCAL, &addr.octets());
+        }
+        if let Some(ttl) = self.ttl {
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_TTL, ttl);
+        }
+        builder.nest_end(data);
+
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// SIT Link (IPv6-in-IPv4)
+// ============================================================================
+
+/// Configuration for a SIT (Simple Internet Transition) tunnel interface.
+///
+/// SIT tunnels encapsulate IPv6 packets in IPv4 for transition mechanisms.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::SitLink;
+/// use std::net::Ipv4Addr;
+///
+/// let sit = SitLink::new("sit1")
+///     .remote(Ipv4Addr::new(192, 168, 1, 1))
+///     .local(Ipv4Addr::new(192, 168, 1, 2));
+///
+/// conn.add_link(sit).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct SitLink {
+    name: String,
+    local: Option<Ipv4Addr>,
+    remote: Option<Ipv4Addr>,
+    ttl: Option<u8>,
+    mtu: Option<u32>,
+}
+
+impl SitLink {
+    /// Create a new SIT tunnel configuration.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            local: None,
+            remote: None,
+            ttl: None,
+            mtu: None,
+        }
+    }
+
+    /// Set the local endpoint address.
+    pub fn local(mut self, addr: Ipv4Addr) -> Self {
+        self.local = Some(addr);
+        self
+    }
+
+    /// Set the remote endpoint address.
+    pub fn remote(mut self, addr: Ipv4Addr) -> Self {
+        self.remote = Some(addr);
+        self
+    }
+
+    /// Set the TTL.
+    pub fn ttl(mut self, ttl: u8) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+}
+
+impl LinkConfig for SitLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "sit"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        let mut builder = create_link_message(&self.name);
+
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "sit");
+
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        if let Some(addr) = self.remote {
+            builder.append_attr(iptun_attr::IFLA_IPTUN_REMOTE, &addr.octets());
+        }
+        if let Some(addr) = self.local {
+            builder.append_attr(iptun_attr::IFLA_IPTUN_LOCAL, &addr.octets());
+        }
+        if let Some(ttl) = self.ttl {
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_TTL, ttl);
+        }
+        builder.nest_end(data);
+
+        builder.nest_end(linkinfo);
+
+        Ok(builder)
+    }
+}
+
+// ============================================================================
+// WireGuard Link
+// ============================================================================
+
+/// Configuration for a WireGuard interface.
+///
+/// Note: WireGuard interfaces are created with just the interface name.
+/// Configuration (keys, peers, etc.) is done via the WireGuard netlink API.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::WireguardLink;
+///
+/// let wg = WireguardLink::new("wg0");
+/// conn.add_link(wg).await?;
+///
+/// // Then configure via WireguardConnection
+/// let wg_conn = WireguardConnection::new().await?;
+/// wg_conn.set_device("wg0", |dev| dev.private_key(key)).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct WireguardLink {
+    name: String,
+    mtu: Option<u32>,
+}
+
+impl WireguardLink {
+    /// Create a new WireGuard interface configuration.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            mtu: None,
+        }
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+}
+
+impl LinkConfig for WireguardLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "wireguard"
+    }
+
+    fn build(&self) -> Result<MessageBuilder> {
+        build_simple_link(&self.name, "wireguard", self.mtu, None)
     }
 }
 

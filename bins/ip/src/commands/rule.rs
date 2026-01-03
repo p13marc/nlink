@@ -1,12 +1,9 @@
 //! ip rule command implementation.
 
 use clap::{Args, Subcommand};
-use nlink::netlink::attr::{AttrIter, get};
-use nlink::netlink::message::{NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
-use nlink::netlink::types::rule::{
-    FibRuleAction, FibRuleHdr, FibRulePortRange, FibRuleUidRange, FraAttr,
-};
-use nlink::netlink::{Connection, Result, Route, connection::dump_request};
+use nlink::netlink::rule::RuleBuilder;
+use nlink::netlink::types::rule::{FibRuleAction, FibRulePortRange, FibRuleUidRange};
+use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::io::Write;
 
@@ -177,27 +174,34 @@ impl RuleCmd {
         opts: &OutputOptions,
         family: Option<u8>,
     ) -> Result<()> {
-        // Build request
-        let mut builder = dump_request(NlMsgType::RTM_GETRULE);
-        let hdr = FibRuleHdr::new().with_family(family.unwrap_or(0));
-        builder.append(&hdr);
+        let raw_rules = if let Some(fam) = family {
+            conn.get_rules_for_family(fam).await?
+        } else {
+            conn.get_rules().await?
+        };
 
-        // Send and receive
-        let responses = conn.send_dump(builder).await?;
-
-        let mut rules = Vec::new();
-
-        for response in &responses {
-            if let Some(rule) = parse_rule_message(response)? {
-                // Filter by family if specified
-                if let Some(fam) = family
-                    && rule.family != fam
-                {
-                    continue;
-                }
-                rules.push(rule);
-            }
-        }
+        // Convert to RuleInfo for display
+        let mut rules: Vec<RuleInfo> = raw_rules
+            .iter()
+            .map(|r| RuleInfo {
+                _family: r.family(),
+                src_len: r.src_len(),
+                dst_len: r.dst_len(),
+                action: r.action(),
+                priority: r.priority,
+                table: r.table,
+                source: r.source.map(|a| a.to_string()),
+                destination: r.destination.map(|a| a.to_string()),
+                iif: r.iifname.clone(),
+                oif: r.oifname.clone(),
+                fwmark: r.fwmark,
+                fwmask: r.fwmask,
+                ipproto: r.ip_proto,
+                sport: r.sport_range,
+                dport: r.dport_range,
+                uid_range: r.uid_range,
+            })
+            .collect();
 
         // Sort by priority
         rules.sort_by_key(|r| r.priority);
@@ -223,23 +227,7 @@ impl RuleCmd {
         sport: Option<&str>,
         dport: Option<&str>,
     ) -> Result<()> {
-        use nlink::netlink::connection::ack_request;
         use nlink::util::addr::parse_prefix;
-
-        // Determine action
-        let action = match action_type.to_lowercase().as_str() {
-            "lookup" | "table" => FibRuleAction::ToTbl,
-            "blackhole" => FibRuleAction::Blackhole,
-            "unreachable" => FibRuleAction::Unreachable,
-            "prohibit" => FibRuleAction::Prohibit,
-            "nop" => FibRuleAction::Nop,
-            _ => {
-                return Err(nlink::netlink::Error::InvalidMessage(format!(
-                    "unknown action: {}",
-                    action_type
-                )));
-            }
-        };
 
         // Parse source/destination prefixes
         let (src_addr, src_len) = if let Some(s) = from {
@@ -283,99 +271,78 @@ impl RuleCmd {
             .map(|t| nlink::util::names::table_id(t).unwrap_or(254))
             .unwrap_or(254);
 
-        let mut hdr = FibRuleHdr::new().with_family(actual_family);
-        hdr.src_len = src_len;
-        hdr.dst_len = dst_len;
-        hdr.action = action as u8;
-        hdr.table = if table_id <= 255 { table_id as u8 } else { 0 };
+        // Build the rule
+        let mut rule = RuleBuilder::new(actual_family).table(table_id);
 
-        let mut builder = ack_request(NlMsgType::RTM_NEWRULE);
-        builder.append(&hdr);
-
-        // Add priority
+        // Set priority
         if let Some(prio) = priority {
-            builder.append_attr_u32(FraAttr::Priority as u16, prio);
+            rule = rule.priority(prio);
         }
 
-        // Add source
+        // Set source
         if let Some(addr) = src_addr {
-            match addr {
-                std::net::IpAddr::V4(v4) => {
-                    builder.append_attr(FraAttr::Src as u16, &v4.octets());
-                }
-                std::net::IpAddr::V6(v6) => {
-                    builder.append_attr(FraAttr::Src as u16, &v6.octets());
-                }
-            }
+            rule = rule.from_addr(addr, src_len);
         }
 
-        // Add destination
+        // Set destination
         if let Some(addr) = dst_addr {
-            match addr {
-                std::net::IpAddr::V4(v4) => {
-                    builder.append_attr(FraAttr::Dst as u16, &v4.octets());
-                }
-                std::net::IpAddr::V6(v6) => {
-                    builder.append_attr(FraAttr::Dst as u16, &v6.octets());
-                }
-            }
+            rule = rule.to_addr(addr, dst_len);
         }
 
-        // Add input interface
+        // Set input interface
         if let Some(iif_name) = iif {
-            builder.append_attr_str(FraAttr::Iifname as u16, iif_name);
+            rule = rule.iif(iif_name);
         }
 
-        // Add output interface
+        // Set output interface
         if let Some(oif_name) = oif {
-            builder.append_attr_str(FraAttr::Oifname as u16, oif_name);
+            rule = rule.oif(oif_name);
         }
 
-        // Add fwmark
+        // Set fwmark
         if let Some(mark_str) = fwmark {
             let (mark, mask) = parse_fwmark(mark_str)?;
-            builder.append_attr_u32(FraAttr::Fwmark as u16, mark);
             if mask != 0xffffffff {
-                builder.append_attr_u32(FraAttr::Fwmask as u16, mask);
+                rule = rule.fwmark_mask(mark, mask);
+            } else {
+                rule = rule.fwmark(mark);
             }
         }
 
-        // Add table if > 255
-        if table_id > 255 {
-            builder.append_attr_u32(FraAttr::Table as u16, table_id);
-        }
+        // Set action
+        rule = match action_type.to_lowercase().as_str() {
+            "lookup" | "table" => rule, // default is table lookup
+            "blackhole" => rule.blackhole(),
+            "unreachable" => rule.unreachable(),
+            "prohibit" => rule.prohibit(),
+            "nop" => rule, // nop not directly supported, use default
+            _ => {
+                return Err(nlink::netlink::Error::InvalidMessage(format!(
+                    "unknown action: {}",
+                    action_type
+                )));
+            }
+        };
 
-        // Add IP protocol
+        // Set IP protocol
         if let Some(proto) = ipproto {
             let proto_num = parse_ip_proto(proto)?;
-            builder.append_attr(FraAttr::IpProto as u16, &[proto_num]);
+            rule = rule.ipproto(proto_num);
         }
 
-        // Add sport
+        // Set sport
         if let Some(port) = sport {
-            let range = parse_port_range(port)?;
-            let range_bytes = [
-                (range.0 & 0xff) as u8,
-                ((range.0 >> 8) & 0xff) as u8,
-                (range.1 & 0xff) as u8,
-                ((range.1 >> 8) & 0xff) as u8,
-            ];
-            builder.append_attr(FraAttr::Sport as u16, &range_bytes);
+            let (start, end) = parse_port_range(port)?;
+            rule = rule.sport(start, end);
         }
 
-        // Add dport
+        // Set dport
         if let Some(port) = dport {
-            let range = parse_port_range(port)?;
-            let range_bytes = [
-                (range.0 & 0xff) as u8,
-                ((range.0 >> 8) & 0xff) as u8,
-                (range.1 & 0xff) as u8,
-                ((range.1 >> 8) & 0xff) as u8,
-            ];
-            builder.append_attr(FraAttr::Dport as u16, &range_bytes);
+            let (start, end) = parse_port_range(port)?;
+            rule = rule.dport(start, end);
         }
 
-        conn.send_ack(builder).await?;
+        conn.add_rule(rule).await?;
 
         Ok(())
     }
@@ -392,7 +359,6 @@ impl RuleCmd {
         fwmark: Option<&str>,
         table: Option<&str>,
     ) -> Result<()> {
-        use nlink::netlink::connection::ack_request;
         use nlink::util::addr::parse_prefix;
 
         // Parse source/destination prefixes
@@ -437,105 +403,62 @@ impl RuleCmd {
             .map(|t| nlink::util::names::table_id(t).unwrap_or(254))
             .unwrap_or(0);
 
-        let mut hdr = FibRuleHdr::new().with_family(actual_family);
-        hdr.src_len = src_len;
-        hdr.dst_len = dst_len;
-        hdr.table = if table_id <= 255 { table_id as u8 } else { 0 };
+        // Build the rule for deletion
+        let mut rule = RuleBuilder::new(actual_family);
 
-        let mut builder = ack_request(NlMsgType::RTM_DELRULE);
-        builder.append(&hdr);
+        if table_id > 0 {
+            rule = rule.table(table_id);
+        }
 
-        // Add priority
+        // Set priority
         if let Some(prio) = priority {
-            builder.append_attr_u32(FraAttr::Priority as u16, prio);
+            rule = rule.priority(prio);
         }
 
-        // Add source
+        // Set source
         if let Some(addr) = src_addr {
-            match addr {
-                std::net::IpAddr::V4(v4) => {
-                    builder.append_attr(FraAttr::Src as u16, &v4.octets());
-                }
-                std::net::IpAddr::V6(v6) => {
-                    builder.append_attr(FraAttr::Src as u16, &v6.octets());
-                }
-            }
+            rule = rule.from_addr(addr, src_len);
         }
 
-        // Add destination
+        // Set destination
         if let Some(addr) = dst_addr {
-            match addr {
-                std::net::IpAddr::V4(v4) => {
-                    builder.append_attr(FraAttr::Dst as u16, &v4.octets());
-                }
-                std::net::IpAddr::V6(v6) => {
-                    builder.append_attr(FraAttr::Dst as u16, &v6.octets());
-                }
-            }
+            rule = rule.to_addr(addr, dst_len);
         }
 
-        // Add input interface
+        // Set input interface
         if let Some(iif_name) = iif {
-            builder.append_attr_str(FraAttr::Iifname as u16, iif_name);
+            rule = rule.iif(iif_name);
         }
 
-        // Add output interface
+        // Set output interface
         if let Some(oif_name) = oif {
-            builder.append_attr_str(FraAttr::Oifname as u16, oif_name);
+            rule = rule.oif(oif_name);
         }
 
-        // Add fwmark
+        // Set fwmark
         if let Some(mark_str) = fwmark {
             let (mark, mask) = parse_fwmark(mark_str)?;
-            builder.append_attr_u32(FraAttr::Fwmark as u16, mark);
             if mask != 0xffffffff {
-                builder.append_attr_u32(FraAttr::Fwmask as u16, mask);
+                rule = rule.fwmark_mask(mark, mask);
+            } else {
+                rule = rule.fwmark(mark);
             }
         }
 
-        // Add table if > 255
-        if table_id > 255 {
-            builder.append_attr_u32(FraAttr::Table as u16, table_id);
-        }
-
-        conn.send_ack(builder).await?;
+        conn.del_rule(rule).await?;
 
         Ok(())
     }
 
     async fn flush(conn: &Connection<Route>, family: Option<u8>) -> Result<()> {
-        // Get all rules first
-        let mut builder = dump_request(NlMsgType::RTM_GETRULE);
-        let hdr = FibRuleHdr::new().with_family(family.unwrap_or(0));
-        builder.append(&hdr);
-
-        let responses = conn.send_dump(builder).await?;
-
-        let mut rules = Vec::new();
-        for response in &responses {
-            if let Some(rule) = parse_rule_message(response)? {
-                // Skip default rules (priority 0 or 32766/32767)
-                if rule.priority == 0 || rule.priority == 32766 || rule.priority == 32767 {
-                    continue;
-                }
-                rules.push(rule);
-            }
+        // Flush IPv4 rules
+        if family.is_none() || family == Some(libc::AF_INET as u8) {
+            conn.flush_rules(libc::AF_INET as u8).await?;
         }
 
-        // Delete each rule
-        for rule in rules {
-            use nlink::netlink::connection::ack_request;
-
-            let mut hdr = FibRuleHdr::new().with_family(rule.family);
-            hdr.src_len = rule.src_len;
-            hdr.dst_len = rule.dst_len;
-
-            let mut del_builder = ack_request(NlMsgType::RTM_DELRULE);
-            del_builder.append(&hdr);
-            del_builder.append_attr_u32(FraAttr::Priority as u16, rule.priority);
-
-            // Ignore errors (rule may have been deleted already)
-            let _ = conn.send_ack(del_builder).await;
+        // Flush IPv6 rules
+        if family.is_none() || family == Some(libc::AF_INET6 as u8) {
+            conn.flush_rules(libc::AF_INET6 as u8).await?;
         }
 
         Ok(())
@@ -545,7 +468,7 @@ impl RuleCmd {
 /// Parsed rule information.
 #[derive(Debug)]
 struct RuleInfo {
-    family: u8,
+    _family: u8,
     src_len: u8,
     dst_len: u8,
     action: FibRuleAction,
@@ -720,97 +643,6 @@ impl Printable for RuleInfo {
 
         obj
     }
-}
-
-fn parse_rule_message(data: &[u8]) -> Result<Option<RuleInfo>> {
-    if data.len() < NLMSG_HDRLEN + FibRuleHdr::SIZE {
-        return Ok(None);
-    }
-
-    let header = NlMsgHdr::from_bytes(data)?;
-
-    // Skip non-rule messages
-    if header.nlmsg_type != NlMsgType::RTM_NEWRULE {
-        return Ok(None);
-    }
-
-    let payload = &data[NLMSG_HDRLEN..];
-    let hdr = FibRuleHdr::from_bytes(payload)?;
-    let attrs_data = &payload[FibRuleHdr::SIZE..];
-
-    let mut priority = 0u32;
-    let mut table = hdr.table as u32;
-    let mut source = None;
-    let mut destination = None;
-    let mut iif = None;
-    let mut oif = None;
-    let mut fwmark = None;
-    let mut fwmask = None;
-    let mut ipproto = None;
-    let mut sport = None;
-    let mut dport = None;
-    let mut uid_range = None;
-
-    for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-        match FraAttr::from(attr_type) {
-            FraAttr::Priority => {
-                priority = get::u32_ne(attr_data).unwrap_or(0);
-            }
-            FraAttr::Table => {
-                table = get::u32_ne(attr_data).unwrap_or(table);
-            }
-            FraAttr::Src => {
-                source = nlink::util::addr::format_addr_bytes(attr_data, hdr.family);
-            }
-            FraAttr::Dst => {
-                destination = nlink::util::addr::format_addr_bytes(attr_data, hdr.family);
-            }
-            FraAttr::Iifname => {
-                iif = get::string(attr_data).ok().map(String::from);
-            }
-            FraAttr::Oifname => {
-                oif = get::string(attr_data).ok().map(String::from);
-            }
-            FraAttr::Fwmark => {
-                fwmark = Some(get::u32_ne(attr_data).unwrap_or(0));
-            }
-            FraAttr::Fwmask => {
-                fwmask = Some(get::u32_ne(attr_data).unwrap_or(0xffffffff));
-            }
-            FraAttr::IpProto => {
-                ipproto = get::u8(attr_data).ok();
-            }
-            FraAttr::Sport => {
-                sport = FibRulePortRange::from_bytes(attr_data).copied();
-            }
-            FraAttr::Dport => {
-                dport = FibRulePortRange::from_bytes(attr_data).copied();
-            }
-            FraAttr::UidRange => {
-                uid_range = FibRuleUidRange::from_bytes(attr_data).copied();
-            }
-            _ => {}
-        }
-    }
-
-    Ok(Some(RuleInfo {
-        family: hdr.family,
-        src_len: hdr.src_len,
-        dst_len: hdr.dst_len,
-        action: FibRuleAction::from(hdr.action),
-        priority,
-        table,
-        source,
-        destination,
-        iif,
-        oif,
-        fwmark,
-        fwmask,
-        ipproto,
-        sport,
-        dport,
-        uid_range,
-    }))
 }
 
 /// Parse fwmark/mask string like "0x100" or "0x100/0xff00".

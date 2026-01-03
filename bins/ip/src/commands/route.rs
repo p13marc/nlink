@@ -3,12 +3,11 @@
 //! This module uses the strongly-typed RouteMessage API from rip-netlink.
 
 use clap::{Args, Subcommand};
-use nlink::netlink::message::NlMsgType;
-use nlink::netlink::messages::RouteMessage;
-use nlink::netlink::types::route::{RouteScope, RtMsg, RtaAttr};
-use nlink::netlink::{Connection, Result, Route, connection::dump_request};
+use nlink::netlink::route::{Ipv4Route, Ipv6Route, RouteMetrics};
+use nlink::netlink::types::route::{RouteProtocol, RouteScope};
+use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions, print_all};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[derive(Args)]
 pub struct RouteCmd {
@@ -174,47 +173,15 @@ impl RouteCmd {
     ) -> Result<()> {
         let table_id = nlink::util::names::table_id(table).unwrap_or(254); // main
 
-        // Use the strongly-typed API to get all routes
-        // Note: We need to build a custom request with family/table filter
-        let mut builder = dump_request(NlMsgType::RTM_GETROUTE);
-        let rtmsg = RtMsg::new()
-            .with_family(family.unwrap_or(0))
-            .with_table(if table_id <= 255 { table_id as u8 } else { 0 });
-        builder.append(&rtmsg);
+        // Get routes and filter
+        let routes = conn.get_routes_for_table(table_id).await?;
 
-        // For table IDs > 255, add RTA_TABLE attribute
-        if table_id > 255 {
-            builder.append_attr_u32(RtaAttr::Table as u16, table_id);
-        }
-
-        // Send and receive
-        let responses = conn.send_dump(builder).await?;
-
-        // Parse responses into typed RouteMessage
-        let mut routes = Vec::new();
-        for response in &responses {
-            use nlink::netlink::message::NLMSG_HDRLEN;
-            use nlink::netlink::parse::FromNetlink;
-
-            if response.len() < NLMSG_HDRLEN + RtMsg::SIZE {
-                continue;
-            }
-
-            let payload = &response[NLMSG_HDRLEN..];
-            if let Ok(route) = RouteMessage::from_bytes(payload) {
-                // Filter by table
-                if route.table_id() != table_id {
-                    continue;
-                }
-                // Filter by family
-                if let Some(fam) = family
-                    && route.family() != fam
-                {
-                    continue;
-                }
-                routes.push(route);
-            }
-        }
+        // Filter by family if specified
+        let routes: Vec<_> = if let Some(fam) = family {
+            routes.into_iter().filter(|r| r.family() == fam).collect()
+        } else {
+            routes
+        };
 
         print_all(&routes, format, opts)?;
 
@@ -234,168 +201,154 @@ impl RouteCmd {
         mtu: Option<u32>,
         replace: bool,
     ) -> Result<()> {
-        use nlink::netlink::connection::{ack_request, replace_request};
         use nlink::util::addr::parse_prefix;
 
         let table_id = nlink::util::names::table_id(table).unwrap_or(254);
 
-        // Parse destination
-        let (dst_addr, dst_len, family) = if destination == "default" {
-            (
-                None,
-                0u8,
-                via.map(|v| if v.contains(':') { 10u8 } else { 2u8 })
-                    .unwrap_or(2),
-            )
+        // Parse destination to determine family
+        let (dst_addr, dst_len, is_ipv6) = if destination == "default" {
+            // Determine family from gateway or default to IPv4
+            let is_v6 = via.is_some_and(|v| v.contains(':'));
+            (None, 0u8, is_v6)
         } else {
             let (addr, prefix) = parse_prefix(destination).map_err(|e| {
                 nlink::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
             })?;
-            let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
-            (Some(addr), prefix, family)
+            let is_v6 = addr.is_ipv6();
+            (Some(addr), prefix, is_v6)
         };
 
         // Parse scope
-        let scope_val = if let Some(s) = scope {
-            RouteScope::from_name(s).map(|sc| sc as u8).unwrap_or(0)
-        } else if via.is_some() {
-            0 // RT_SCOPE_UNIVERSE
+        let scope_val = scope.and_then(RouteScope::from_name);
+
+        // Build metrics if MTU specified
+        let metrics = mtu.map(|m| RouteMetrics::new().mtu(m));
+
+        if is_ipv6 {
+            // Build IPv6 route
+            let dst_v6 = dst_addr
+                .and_then(|a| match a {
+                    IpAddr::V6(v6) => Some(v6),
+                    _ => None,
+                })
+                .unwrap_or(Ipv6Addr::UNSPECIFIED);
+
+            let mut route = Ipv6Route::from_addr(dst_v6, dst_len)
+                .table(table_id)
+                .protocol(RouteProtocol::Static);
+
+            if let Some(gw) = via {
+                let gw_addr: Ipv6Addr = gw.parse().map_err(|_| {
+                    nlink::netlink::Error::InvalidMessage(format!("invalid gateway: {}", gw))
+                })?;
+                route = route.gateway(gw_addr);
+            }
+
+            if let Some(dev_name) = dev {
+                route = route.dev(dev_name);
+            }
+
+            if let Some(src_str) = src {
+                let src_addr: Ipv6Addr = src_str.parse().map_err(|_| {
+                    nlink::netlink::Error::InvalidMessage(format!("invalid source: {}", src_str))
+                })?;
+                route = route.prefsrc(src_addr);
+            }
+
+            if let Some(sc) = scope_val {
+                route = route.scope(sc);
+            }
+
+            if let Some(m) = metric {
+                route = route.priority(m);
+            }
+
+            if let Some(met) = metrics {
+                route = route.metrics(met);
+            }
+
+            if replace {
+                conn.replace_route(route).await
+            } else {
+                conn.add_route(route).await
+            }
         } else {
-            253 // RT_SCOPE_LINK
-        };
+            // Build IPv4 route
+            let dst_v4 = dst_addr
+                .and_then(|a| match a {
+                    IpAddr::V4(v4) => Some(v4),
+                    _ => None,
+                })
+                .unwrap_or(Ipv4Addr::UNSPECIFIED);
 
-        let rtmsg = RtMsg::new()
-            .with_family(family)
-            .with_dst_len(dst_len)
-            .with_table(if table_id <= 255 { table_id as u8 } else { 0 })
-            .with_protocol(4) // RTPROT_STATIC
-            .with_scope(scope_val)
-            .with_type(1); // RTN_UNICAST
+            let mut route = Ipv4Route::from_addr(dst_v4, dst_len)
+                .table(table_id)
+                .protocol(RouteProtocol::Static);
 
-        let mut builder = if replace {
-            replace_request(NlMsgType::RTM_NEWROUTE)
-        } else {
-            ack_request(NlMsgType::RTM_NEWROUTE)
-        };
-        builder.append(&rtmsg);
+            if let Some(gw) = via {
+                let gw_addr: Ipv4Addr = gw.parse().map_err(|_| {
+                    nlink::netlink::Error::InvalidMessage(format!("invalid gateway: {}", gw))
+                })?;
+                route = route.gateway(gw_addr);
+            }
 
-        // Add destination
-        if let Some(addr) = dst_addr {
-            match addr {
-                IpAddr::V4(v4) => {
-                    builder.append_attr(RtaAttr::Dst as u16, &v4.octets());
-                }
-                IpAddr::V6(v6) => {
-                    builder.append_attr(RtaAttr::Dst as u16, &v6.octets());
-                }
+            if let Some(dev_name) = dev {
+                route = route.dev(dev_name);
+            }
+
+            if let Some(src_str) = src {
+                let src_addr: Ipv4Addr = src_str.parse().map_err(|_| {
+                    nlink::netlink::Error::InvalidMessage(format!("invalid source: {}", src_str))
+                })?;
+                route = route.prefsrc(src_addr);
+            }
+
+            if let Some(sc) = scope_val {
+                route = route.scope(sc);
+            }
+
+            if let Some(m) = metric {
+                route = route.priority(m);
+            }
+
+            if let Some(met) = metrics {
+                route = route.metrics(met);
+            }
+
+            if replace {
+                conn.replace_route(route).await
+            } else {
+                conn.add_route(route).await
             }
         }
-
-        // Add gateway
-        if let Some(gw) = via {
-            let gw_addr: IpAddr = gw.parse().map_err(|_| {
-                nlink::netlink::Error::InvalidMessage(format!("invalid gateway: {}", gw))
-            })?;
-            match gw_addr {
-                IpAddr::V4(v4) => {
-                    builder.append_attr(RtaAttr::Gateway as u16, &v4.octets());
-                }
-                IpAddr::V6(v6) => {
-                    builder.append_attr(RtaAttr::Gateway as u16, &v6.octets());
-                }
-            }
-        }
-
-        // Add output interface
-        if let Some(dev_name) = dev {
-            let ifindex = nlink::util::get_ifindex(dev_name)
-                .map_err(nlink::netlink::Error::InvalidMessage)? as u32;
-            builder.append_attr_u32(RtaAttr::Oif as u16, ifindex);
-        }
-
-        // Add preferred source
-        if let Some(src_str) = src {
-            let src_addr: IpAddr = src_str.parse().map_err(|_| {
-                nlink::netlink::Error::InvalidMessage(format!("invalid source: {}", src_str))
-            })?;
-            match src_addr {
-                IpAddr::V4(v4) => {
-                    builder.append_attr(RtaAttr::Prefsrc as u16, &v4.octets());
-                }
-                IpAddr::V6(v6) => {
-                    builder.append_attr(RtaAttr::Prefsrc as u16, &v6.octets());
-                }
-            }
-        }
-
-        // Add table if > 255
-        if table_id > 255 {
-            builder.append_attr_u32(RtaAttr::Table as u16, table_id);
-        }
-
-        // Add metric
-        if let Some(m) = metric {
-            builder.append_attr_u32(RtaAttr::Priority as u16, m);
-        }
-
-        // Add MTU via RTA_METRICS
-        if let Some(mtu_val) = mtu {
-            let metrics = builder.nest_start(RtaAttr::Metrics as u16);
-            // RTAX_MTU = 2
-            builder.append_attr_u32(2, mtu_val);
-            builder.nest_end(metrics);
-        }
-
-        conn.send_ack(builder).await?;
-
-        Ok(())
     }
 
     async fn del(conn: &Connection<Route>, destination: &str, table: &str) -> Result<()> {
-        use nlink::netlink::connection::ack_request;
         use nlink::util::addr::parse_prefix;
 
         let table_id = nlink::util::names::table_id(table).unwrap_or(254);
 
         // Parse destination
-        let (dst_addr, dst_len, family) = if destination == "default" {
-            (None, 0u8, 2u8) // Assume IPv4 for default
+        if destination == "default" {
+            // Delete default route - try IPv4 first
+            let route = Ipv4Route::from_addr(Ipv4Addr::UNSPECIFIED, 0).table(table_id);
+            conn.del_route(route).await
         } else {
             let (addr, prefix) = parse_prefix(destination).map_err(|e| {
                 nlink::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
             })?;
-            let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
-            (Some(addr), prefix, family)
-        };
 
-        let rtmsg = RtMsg::new()
-            .with_family(family)
-            .with_dst_len(dst_len)
-            .with_table(if table_id <= 255 { table_id as u8 } else { 0 });
-
-        let mut builder = ack_request(NlMsgType::RTM_DELROUTE);
-        builder.append(&rtmsg);
-
-        // Add destination
-        if let Some(addr) = dst_addr {
             match addr {
                 IpAddr::V4(v4) => {
-                    builder.append_attr(RtaAttr::Dst as u16, &v4.octets());
+                    let route = Ipv4Route::from_addr(v4, prefix).table(table_id);
+                    conn.del_route(route).await
                 }
                 IpAddr::V6(v6) => {
-                    builder.append_attr(RtaAttr::Dst as u16, &v6.octets());
+                    let route = Ipv6Route::from_addr(v6, prefix).table(table_id);
+                    conn.del_route(route).await
                 }
             }
         }
-
-        // Add table if > 255
-        if table_id > 255 {
-            builder.append_attr_u32(RtaAttr::Table as u16, table_id);
-        }
-
-        conn.send_ack(builder).await?;
-
-        Ok(())
     }
 
     async fn get(
@@ -404,49 +357,28 @@ impl RouteCmd {
         format: OutputFormat,
         opts: &OutputOptions,
     ) -> Result<()> {
-        use nlink::netlink::connection::ack_request;
-        use nlink::netlink::message::NLMSG_HDRLEN;
-        use nlink::netlink::parse::FromNetlink;
+        // Parse destination prefix
+        use nlink::util::addr::parse_prefix;
 
-        // Parse destination address
-        let dst_addr: IpAddr = destination.parse().map_err(|_| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid destination: {}", destination))
+        let (dst_addr, prefix_len) = parse_prefix(destination).map_err(|e| {
+            nlink::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
         })?;
 
-        let family = if dst_addr.is_ipv4() { 2u8 } else { 10u8 };
-        let dst_len = if dst_addr.is_ipv4() { 32u8 } else { 128u8 };
+        // Get all routes and filter for the matching destination
+        let routes = conn.get_routes().await?;
+        let matching: Vec<_> = routes
+            .into_iter()
+            .filter(|r| r.destination == Some(dst_addr) && r.dst_len() == prefix_len)
+            .collect();
 
-        let rtmsg = RtMsg::new().with_family(family).with_dst_len(dst_len);
-
-        let mut builder = ack_request(NlMsgType::RTM_GETROUTE);
-        builder.append(&rtmsg);
-
-        // Add destination address
-        match dst_addr {
-            IpAddr::V4(v4) => {
-                builder.append_attr(RtaAttr::Dst as u16, &v4.octets());
-            }
-            IpAddr::V6(v6) => {
-                builder.append_attr(RtaAttr::Dst as u16, &v6.octets());
-            }
+        if matching.is_empty() {
+            return Err(nlink::netlink::Error::InvalidMessage(format!(
+                "route to {} not found",
+                destination
+            )));
         }
 
-        // Send request and get response
-        let response = conn.send_request(builder).await?;
-
-        // Parse response
-        if response.len() < NLMSG_HDRLEN + RtMsg::SIZE {
-            return Err(nlink::netlink::Error::InvalidMessage(
-                "invalid response from kernel".into(),
-            ));
-        }
-
-        let payload = &response[NLMSG_HDRLEN..];
-        let route = RouteMessage::from_bytes(payload).map_err(|e| {
-            nlink::netlink::Error::InvalidMessage(format!("failed to parse route: {}", e))
-        })?;
-
-        print_all(&[route], format, opts)?;
+        print_all(&matching, format, opts)?;
 
         Ok(())
     }

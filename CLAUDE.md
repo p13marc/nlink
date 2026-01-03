@@ -47,6 +47,7 @@ crates/nlink/src/
     filter.rs         # TC filter builders (U32Filter, FlowerFilter, MatchallFilter, FwFilter, BpfFilter, BasicFilter, CgroupFilter, RouteFilter, FlowFilter)
     action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ConnmarkAction, CsumAction, SampleAction, CtAction, PeditAction, ActionList)
     link.rs           # Link type builders (DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, BareudpLink, NetkitLink, NlmonLink, VirtWifiLink, VtiLink, Vti6Link, Ip6GreLink, Ip6GretapLink)
+    rule.rs           # Routing rule builder (RuleBuilder)
     genl/             # Generic Netlink (GENL) support
       mod.rs          # GENL module entry, control family constants
       header.rs       # GenlMsgHdr (4-byte GENL header)
@@ -143,6 +144,10 @@ for route in &routes {
 // Query TC
 let qdiscs = conn.get_qdiscs().await?;
 let classes = conn.get_classes_for("eth0").await?;
+
+// Query routing rules
+let rules = conn.get_rules().await?;
+let ipv4_rules = conn.get_rules_for_family(libc::AF_INET as u8).await?;
 ```
 
 **Link state management:**
@@ -917,6 +922,30 @@ builder.append_attr(TCA_HTB_INIT, glob.as_bytes());
 builder.nest_end(options_token);
 
 conn.request_ack(builder).await?;
+```
+
+**Routing rules:**
+```rust
+use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::rule::RuleBuilder;
+
+let conn = Connection::new(Protocol::Route)?;
+
+// Add a routing rule (IPv4, lookup table 100 for traffic from 10.0.0.0/8)
+let rule = RuleBuilder::new(libc::AF_INET as u8)
+    .table(100)
+    .src_prefix("10.0.0.0".parse()?, 8)
+    .priority(1000);
+conn.add_rule(rule).await?;
+
+// Delete a rule
+let rule = RuleBuilder::new(libc::AF_INET as u8)
+    .table(100)
+    .priority(1000);
+conn.del_rule(rule).await?;
+
+// Flush all IPv4 rules (except protected ones)
+conn.flush_rules(libc::AF_INET as u8).await?;
 ```
 
 **Error handling:**

@@ -3,10 +3,10 @@
 //! This module uses the strongly-typed AddressMessage API from rip-netlink.
 
 use clap::{Args, Subcommand};
-use nlink::netlink::message::NlMsgType;
-use nlink::netlink::messages::{AddressMessage, AddressMessageBuilder};
-use nlink::netlink::types::addr::{IfAddrMsg, IfaAttr, Scope};
-use nlink::netlink::{Connection, Result, Route, connection::ack_request};
+use nlink::netlink::addr::{Ipv4Address, Ipv6Address};
+use nlink::netlink::messages::AddressMessage;
+use nlink::netlink::types::addr::Scope;
+use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions};
 use std::io::{self, Write};
 use std::net::IpAddr;
@@ -112,7 +112,7 @@ impl AddressCmd {
         family: Option<u8>,
     ) -> Result<()> {
         // Use the strongly-typed API to get all addresses
-        let all_addresses: Vec<AddressMessage> = conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
+        let all_addresses = conn.get_addresses().await?;
 
         // Get device index if filtering by name
         let filter_index =
@@ -176,16 +176,13 @@ impl AddressCmd {
         label: Option<&str>,
         broadcast: Option<&str>,
         scope: Option<&str>,
-        peer: Option<&str>,
+        _peer: Option<&str>,
     ) -> Result<()> {
         use nlink::util::addr::parse_prefix;
 
         let (addr, prefix) = parse_prefix(address).map_err(|e| {
             nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
         })?;
-
-        let ifindex =
-            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
 
         // Parse scope
         let scope_val = if let Some(s) = scope {
@@ -194,95 +191,26 @@ impl AddressCmd {
             Scope::Universe
         };
 
-        // Build the message using the typed builder
-        let mut builder = AddressMessageBuilder::new()
-            .ifindex(ifindex)
-            .prefix_len(prefix)
-            .scope(scope_val)
-            .address(addr)
-            .local(addr);
-
-        // Add peer address (for point-to-point)
-        if let Some(peer_str) = peer {
-            let peer_addr: IpAddr = peer_str.parse().map_err(|_| {
-                nlink::netlink::Error::InvalidMessage(format!("invalid peer address: {}", peer_str))
-            })?;
-            builder = builder.address(peer_addr);
-        }
-
-        // Add broadcast if specified (IPv4 only)
-        if let Some(brd_str) = broadcast
-            && let Ok(brd_addr) = brd_str.parse::<std::net::Ipv4Addr>()
-        {
-            builder = builder.broadcast(IpAddr::V4(brd_addr));
-        }
-
-        // Add label if specified
-        if let Some(lbl) = label {
-            builder = builder.label(lbl);
-        }
-
-        let msg = builder.build();
-
-        // For now, we still need to use the low-level builder for sending
-        // because we need to set the message type and flags
-        let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
-        let ifaddr = IfAddrMsg::new()
-            .with_family(family)
-            .with_prefixlen(prefix)
-            .with_index(ifindex)
-            .with_scope(scope_val as u8);
-
-        let mut nl_builder = ack_request(NlMsgType::RTM_NEWADDR);
-        nl_builder.append(&ifaddr);
-
-        // Add local address
         match addr {
             IpAddr::V4(v4) => {
-                nl_builder.append_attr(IfaAttr::Local as u16, &v4.octets());
+                let mut config = Ipv4Address::new(dev, v4, prefix).scope(scope_val);
+
+                if let Some(lbl) = label {
+                    config = config.label(lbl);
+                }
+
+                if let Some(brd_str) = broadcast
+                    && let Ok(brd_addr) = brd_str.parse::<std::net::Ipv4Addr>() {
+                        config = config.broadcast(brd_addr);
+                    }
+
+                conn.add_address(config).await
             }
             IpAddr::V6(v6) => {
-                nl_builder.append_attr(IfaAttr::Local as u16, &v6.octets());
+                let config = Ipv6Address::new(dev, v6, prefix).scope(scope_val);
+                conn.add_address(config).await
             }
         }
-
-        // Add address attribute (peer or same as local)
-        if let Some(peer_str) = peer {
-            let peer_addr: IpAddr = peer_str.parse().unwrap();
-            match peer_addr {
-                IpAddr::V4(v4) => {
-                    nl_builder.append_attr(IfaAttr::Address as u16, &v4.octets());
-                }
-                IpAddr::V6(v6) => {
-                    nl_builder.append_attr(IfaAttr::Address as u16, &v6.octets());
-                }
-            }
-        } else {
-            match addr {
-                IpAddr::V4(v4) => {
-                    nl_builder.append_attr(IfaAttr::Address as u16, &v4.octets());
-                }
-                IpAddr::V6(v6) => {
-                    nl_builder.append_attr(IfaAttr::Address as u16, &v6.octets());
-                }
-            }
-        }
-
-        // Add broadcast if specified
-        if let Some(ref brd) = msg.broadcast
-            && let IpAddr::V4(v4) = brd
-        {
-            nl_builder.append_attr(IfaAttr::Broadcast as u16, &v4.octets());
-        }
-
-        // Add label if specified
-        if let Some(ref lbl) = msg.label {
-            nl_builder.append_attr_str(IfaAttr::Label as u16, lbl);
-        }
-
-        conn.send_ack(nl_builder).await?;
-
-        Ok(())
     }
 
     async fn del(conn: &Connection<Route>, address: &str, dev: &str) -> Result<()> {
@@ -292,37 +220,12 @@ impl AddressCmd {
             nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
         })?;
 
-        let ifindex =
-            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
-
-        let family = if addr.is_ipv4() { 2u8 } else { 10u8 };
-
-        let ifaddr = IfAddrMsg::new()
-            .with_family(family)
-            .with_prefixlen(prefix)
-            .with_index(ifindex);
-
-        let mut builder = ack_request(NlMsgType::RTM_DELADDR);
-        builder.append(&ifaddr);
-
-        // Add address attribute
-        match addr {
-            IpAddr::V4(v4) => {
-                builder.append_attr(IfaAttr::Local as u16, &v4.octets());
-            }
-            IpAddr::V6(v6) => {
-                builder.append_attr(IfaAttr::Local as u16, &v6.octets());
-            }
-        }
-
-        conn.send_ack(builder).await?;
-
-        Ok(())
+        conn.del_address(dev, addr, prefix).await
     }
 
     async fn flush(conn: &Connection<Route>, dev: Option<&str>, family: Option<u8>) -> Result<()> {
         // Get all addresses using the typed API
-        let all_addresses: Vec<AddressMessage> = conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
+        let all_addresses = conn.get_addresses().await?;
 
         // Get device index if filtering by name
         let filter_index =
@@ -343,38 +246,16 @@ impl AddressCmd {
                 continue;
             }
 
-            // Delete this address
-            let ifaddr = IfAddrMsg::new()
-                .with_family(addr.family())
-                .with_prefixlen(addr.prefix_len())
-                .with_index(addr.ifindex());
-
-            let mut builder = ack_request(NlMsgType::RTM_DELADDR);
-            builder.append(&ifaddr);
-
-            // Add address attribute
-            if let Some(local) = &addr.local {
-                match local {
-                    IpAddr::V4(v4) => {
-                        builder.append_attr(IfaAttr::Local as u16, &v4.octets());
-                    }
-                    IpAddr::V6(v6) => {
-                        builder.append_attr(IfaAttr::Local as u16, &v6.octets());
-                    }
-                }
-            } else if let Some(address) = &addr.address {
-                match address {
-                    IpAddr::V4(v4) => {
-                        builder.append_attr(IfaAttr::Local as u16, &v4.octets());
-                    }
-                    IpAddr::V6(v6) => {
-                        builder.append_attr(IfaAttr::Local as u16, &v6.octets());
-                    }
+            // Get the address to delete
+            let address_to_del = addr.local.or(addr.address);
+            if let Some(ip_addr) = address_to_del {
+                // Get interface name for del_address
+                let ifname = nlink::util::get_ifname(addr.ifindex());
+                if let Ok(name) = ifname {
+                    // Ignore errors for individual deletions
+                    let _ = conn.del_address(&name, ip_addr, addr.prefix_len()).await;
                 }
             }
-
-            // Ignore errors for individual deletions
-            let _ = conn.send_ack(builder).await;
         }
 
         Ok(())

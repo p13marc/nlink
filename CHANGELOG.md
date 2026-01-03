@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-01-03
+
+### Added
+
+#### Routing Rules API
+- `RuleBuilder` for creating routing rules programmatically
+- `conn.get_rules()` - Get all routing rules
+- `conn.get_rules_for_family(family)` - Get rules for specific address family
+- `conn.add_rule(builder)` - Add a routing rule
+- `conn.del_rule(builder)` - Delete a routing rule
+- `conn.flush_rules(family)` - Flush all rules for a family
+
+### Changed
+
+#### API Cleanup
+- Made `send_request()`, `send_ack()`, `send_dump()` methods `pub(crate)` (internal only)
+- Removed `RouteConnection` and `GenlConnection` type aliases (use `Connection<Route>` and `Connection<Generic>` directly)
+- Reorganized examples into protocol-based subdirectories (`route/`, `events/`, `namespace/`)
+- Moved TC type aliases (`QdiscMessage`, `ClassMessage`, `FilterMessage`) before test module
+
+#### Binary Refactoring
+- All binary commands now use high-level APIs instead of low-level `send_*` methods
+- Refactored: `address.rs`, `link.rs`, `link_add.rs`, `neighbor.rs`, `route.rs`, `rule.rs`, `tunnel.rs`, `vrf.rs`
+
+### Fixed
+
+- Clippy warnings (collapsible if statements, redundant closures, unnecessary casts)
+- IpvlanLink no longer attempts to set MAC address (inherits from parent)
+
+### Documentation
+
+- Added `docs/API_CLEANUP_REPORT.md` with refactoring details and recommendations
+
 ## [0.3.0] - 2026-01-02
 
 ### Added

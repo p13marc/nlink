@@ -92,6 +92,31 @@ pub async fn del(conn: &Connection<Route>, kind: &str, index: Option<u32>) -> Re
     Ok(())
 }
 
+/// Dump all actions of a specific kind.
+///
+/// # Arguments
+/// * `conn` - The netlink connection
+/// * `kind` - Action type (gact, mirred, police)
+///
+/// Returns raw netlink messages that can be parsed by the caller.
+pub async fn dump(conn: &Connection<Route>, kind: &str) -> Result<Vec<Vec<u8>>> {
+    use crate::netlink::connection::dump_request;
+    use crate::netlink::message::NlMsgType;
+
+    let mut builder = dump_request(NlMsgType::RTM_GETACTION);
+
+    let tcmsg = TcMsg::default();
+    builder.append(&tcmsg);
+
+    let tab_token = builder.nest_start(TCA_ACT_TAB);
+    let act_token = builder.nest_start(1);
+    builder.append_attr(TCA_ACT_KIND, kind.as_bytes());
+    builder.nest_end(act_token);
+    builder.nest_end(tab_token);
+
+    conn.send_dump(builder).await
+}
+
 /// Get a specific action.
 ///
 /// # Arguments

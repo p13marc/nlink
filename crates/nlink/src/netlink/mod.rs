@@ -90,6 +90,7 @@ pub mod neigh;
 pub mod parse;
 mod protocol;
 pub mod route;
+pub mod rule;
 mod socket;
 pub mod stats;
 pub mod tc;
@@ -114,14 +115,3 @@ pub use parse::{FromNetlink, ToNetlink};
 pub use protocol::{Generic, ProtocolState, Route};
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};
 pub use tc_options::NetemParameter;
-
-/// Type alias for a Route protocol connection.
-///
-/// This is the most commonly used connection type for interface, address,
-/// route, neighbor, and traffic control operations.
-pub type RouteConnection = Connection<Route>;
-
-/// Type alias for a Generic netlink connection.
-///
-/// Used for family-based protocols like WireGuard and MACsec.
-pub type GenlConnection = Connection<Generic>;

@@ -5,9 +5,6 @@
 
 use clap::{Args, Subcommand};
 use nlink::netlink::attr::AttrIter;
-use nlink::netlink::connection::dump_request;
-use nlink::netlink::message::{NLMSG_HDRLEN, NlMsgType};
-use nlink::netlink::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
 use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::io::Write;
@@ -103,29 +100,35 @@ impl VrfCmd {
         opts: &OutputOptions,
     ) -> Result<()> {
         // Get all links and filter for VRF type
-        let mut builder = dump_request(NlMsgType::RTM_GETLINK);
-        let ifinfo = IfInfoMsg::new();
-        builder.append(&ifinfo);
-
-        let responses = conn.send_dump(builder).await?;
+        let links = conn.get_links().await?;
 
         let mut vrfs = Vec::new();
 
-        for response in &responses {
-            if response.len() < NLMSG_HDRLEN + std::mem::size_of::<IfInfoMsg>() {
+        for link in &links {
+            // Check if this is a VRF device
+            let link_info = match &link.link_info {
+                Some(info) => info,
+                None => continue,
+            };
+
+            if link_info.kind.as_deref() != Some("vrf") {
                 continue;
             }
 
-            let payload = &response[NLMSG_HDRLEN..];
-            if let Some(vrf) = parse_vrf_link(payload) {
-                // Apply filter
-                if let Some(name) = name_filter
-                    && vrf.name != name
-                {
+            // Apply name filter
+            if let Some(name) = name_filter
+                && link.name.as_deref() != Some(name) {
                     continue;
                 }
-                vrfs.push(vrf);
-            }
+
+            // Extract VRF table from link_info.data
+            let table = extract_vrf_table(link_info.data.as_deref().unwrap_or(&[]));
+
+            vrfs.push(VrfInfo {
+                name: link.name.clone().unwrap_or_default(),
+                ifindex: link.ifindex(),
+                table,
+            });
         }
 
         print_all(&vrfs, format, opts)?;
@@ -225,60 +228,12 @@ impl VrfCmd {
     }
 }
 
-/// Parse a link message and extract VRF info if it's a VRF device.
-fn parse_vrf_link(payload: &[u8]) -> Option<VrfInfo> {
-    if payload.len() < std::mem::size_of::<IfInfoMsg>() {
-        return None;
-    }
-
-    let ifinfo = unsafe { &*(payload.as_ptr() as *const IfInfoMsg) };
-    let attrs_data = &payload[std::mem::size_of::<IfInfoMsg>()..];
-
-    let mut name = None;
-    let mut kind = None;
-    let mut table = None;
-
-    for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-        match attr_type {
-            a if a == IflaAttr::Ifname as u16 => {
-                if let Ok(s) = std::str::from_utf8(attr_data) {
-                    name = Some(s.trim_end_matches('\0').to_string());
-                }
-            }
-            a if a == IflaAttr::Linkinfo as u16 => {
-                // Parse nested IFLA_LINKINFO
-                for (info_type, info_data) in AttrIter::new(attr_data) {
-                    match info_type {
-                        t if t == IflaInfo::Kind as u16 => {
-                            if let Ok(s) = std::str::from_utf8(info_data) {
-                                kind = Some(s.trim_end_matches('\0').to_string());
-                            }
-                        }
-                        t if t == IflaInfo::Data as u16 => {
-                            // Parse VRF-specific data
-                            for (vrf_type, vrf_data) in AttrIter::new(info_data) {
-                                if vrf_type == IFLA_VRF_TABLE && vrf_data.len() >= 4 {
-                                    table =
-                                        Some(u32::from_ne_bytes(vrf_data[..4].try_into().unwrap()));
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
+/// Extract VRF table ID from link_info.data bytes.
+fn extract_vrf_table(data: &[u8]) -> u32 {
+    for (attr_type, attr_data) in AttrIter::new(data) {
+        if attr_type == IFLA_VRF_TABLE && attr_data.len() >= 4 {
+            return u32::from_ne_bytes(attr_data[..4].try_into().unwrap());
         }
     }
-
-    // Only return if this is a VRF device
-    if kind.as_deref() != Some("vrf") {
-        return None;
-    }
-
-    Some(VrfInfo {
-        name: name.unwrap_or_default(),
-        ifindex: ifinfo.ifi_index as u32,
-        table: table.unwrap_or(0),
-    })
+    0
 }
