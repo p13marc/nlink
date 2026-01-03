@@ -204,7 +204,12 @@ impl QdiscCmd {
         qdisc_builder::add(conn, dev, parent, handle, kind, params).await
     }
 
-    async fn del(conn: &Connection<Route>, dev: &str, parent: &str, handle: Option<&str>) -> Result<()> {
+    async fn del(
+        conn: &Connection<Route>,
+        dev: &str,
+        parent: &str,
+        handle: Option<&str>,
+    ) -> Result<()> {
         qdisc_builder::del(conn, dev, parent, handle).await
     }
 

@@ -437,13 +437,15 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
         } => {
             let mut link = VxlanLink::new(&name, vni).port(dstport);
             if let Some(ref addr) = remote
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
-                    link = link.remote(ip);
-                }
+                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
+            {
+                link = link.remote(ip);
+            }
             if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
-                    link = link.local(ip);
-                }
+                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
+            {
+                link = link.local(ip);
+            }
             if let Some(ref dev_name) = dev {
                 link = link.dev(dev_name);
             }
@@ -541,9 +543,10 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             })?;
             let mut link = GreLink::new(&name).remote(remote_ip);
             if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
-                    link = link.local(ip);
-                }
+                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
+            {
+                link = link.local(ip);
+            }
             if let Some(t) = ttl {
                 link = link.ttl(t);
             }
@@ -569,9 +572,10 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             })?;
             let mut link = GretapLink::new(&name).remote(remote_ip);
             if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
-                    link = link.local(ip);
-                }
+                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
+            {
+                link = link.local(ip);
+            }
             if let Some(t) = ttl {
                 link = link.ttl(t);
             }
@@ -596,9 +600,10 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             })?;
             let mut link = IpipLink::new(&name).remote(remote_ip);
             if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
-                    link = link.local(ip);
-                }
+                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
+            {
+                link = link.local(ip);
+            }
             if let Some(t) = ttl {
                 link = link.ttl(t);
             }
@@ -620,9 +625,10 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             })?;
             let mut link = SitLink::new(&name).remote(remote_ip);
             if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>() {
-                    link = link.local(ip);
-                }
+                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
+            {
+                link = link.local(ip);
+            }
             if let Some(t) = ttl {
                 link = link.ttl(t);
             }
