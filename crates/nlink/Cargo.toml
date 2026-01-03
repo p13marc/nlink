@@ -140,3 +140,18 @@ required-features = ["sockdiag"]
 [[example]]
 name = "genl_wireguard"
 path = "examples/genl/wireguard.rs"
+
+# Uevent examples (device hotplug)
+[[example]]
+name = "uevent_device_monitor"
+path = "examples/uevent/device_monitor.rs"
+
+# Connector examples (process events)
+[[example]]
+name = "connector_process_monitor"
+path = "examples/connector/process_monitor.rs"
+
+# Netfilter examples (connection tracking)
+[[example]]
+name = "netfilter_conntrack"
+path = "examples/netfilter/conntrack.rs"

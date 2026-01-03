@@ -28,6 +28,26 @@ All notable changes to this project will be documented in this file.
 - `conn.family_id()` to access resolved GENL family ID
 - Added genl example: `wireguard`
 
+#### New Protocol Implementations
+- `Connection<KobjectUevent>` for device hotplug events (udev-style)
+  - `Connection::<KobjectUevent>::new()` constructor with multicast subscription
+  - `conn.recv()` to receive `Uevent` with action, devpath, subsystem, env
+  - Helper methods: `is_add()`, `is_remove()`, `devname()`, `driver()`, etc.
+  - Added example: `uevent_device_monitor`
+
+- `Connection<Connector>` for process lifecycle events
+  - `Connection::<Connector>::new()` async constructor with registration
+  - `conn.recv()` to receive `ProcEvent` (Fork, Exec, Exit, Uid, Gid, Sid, Comm, Ptrace, Coredump)
+  - `conn.unregister()` to stop receiving events
+  - Added example: `connector_process_monitor`
+
+- `Connection<Netfilter>` for connection tracking
+  - `Connection::<Netfilter>::new()` constructor
+  - `conn.get_conntrack()` for IPv4 entries
+  - `conn.get_conntrack_v6()` for IPv6 entries
+  - Types: `ConntrackEntry`, `ConntrackTuple`, `IpProtocol`, `TcpConntrackState`
+  - Added example: `netfilter_conntrack`
+
 ### Changed
 
 #### API Cleanup

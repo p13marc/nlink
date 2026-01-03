@@ -73,6 +73,7 @@ pub mod addr;
 pub mod attr;
 mod builder;
 pub mod connection;
+pub mod connector;
 mod error;
 pub mod events;
 pub mod filter;
@@ -87,6 +88,7 @@ pub mod namespace_events;
 #[cfg(feature = "namespace_watcher")]
 pub mod namespace_watcher;
 pub mod neigh;
+pub mod netfilter;
 pub mod parse;
 mod protocol;
 pub mod route;
@@ -98,6 +100,7 @@ pub mod stats;
 pub mod tc;
 pub mod tc_options;
 pub mod types;
+pub mod uevent;
 
 pub use attr::{AttrIter, NlAttr};
 pub use builder::{MessageBuilder, NestToken};
@@ -114,6 +117,8 @@ pub use namespace_watcher::{
     NamespaceEvent, NamespaceEventStream, NamespaceWatcher, NamespaceWatcherConfig,
 };
 pub use parse::{FromNetlink, ToNetlink};
-pub use protocol::{Generic, ProtocolState, Route, SockDiag, Wireguard};
+pub use protocol::{
+    Connector, Generic, KobjectUevent, Netfilter, ProtocolState, Route, SockDiag, Wireguard,
+};
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};
 pub use tc_options::NetemParameter;

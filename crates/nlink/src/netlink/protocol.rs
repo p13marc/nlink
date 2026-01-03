@@ -44,7 +44,10 @@ mod private {
 /// Each implementation provides:
 /// - The underlying netlink protocol constant
 /// - Protocol-specific state (if any)
-pub trait ProtocolState: private::Sealed + Default {
+///
+/// Types that implement `Default` can use the generic `Connection::new()`.
+/// Types that require special initialization should provide their own constructor.
+pub trait ProtocolState: private::Sealed {
     /// The netlink protocol for this state type.
     const PROTOCOL: Protocol;
 }
@@ -125,6 +128,51 @@ impl ProtocolState for Wireguard {
     const PROTOCOL: Protocol = Protocol::Generic;
 }
 
+/// Kobject uevent protocol state.
+///
+/// Used for receiving kernel object events (device hotplug, like udev).
+/// This is a zero-sized type with no additional state.
+///
+/// Note: Does not implement `Default` because connections require
+/// multicast group subscription. Use `Connection::<KobjectUevent>::new()`.
+#[derive(Debug, Clone, Copy)]
+pub struct KobjectUevent;
+
+impl private::Sealed for KobjectUevent {}
+
+impl ProtocolState for KobjectUevent {
+    const PROTOCOL: Protocol = Protocol::KobjectUevent;
+}
+
+/// Connector protocol state.
+///
+/// Used for kernel connector events, primarily process events (fork/exec/exit).
+/// This is a zero-sized type with no additional state.
+///
+/// Note: Does not implement `Default` because connections require
+/// registration with the kernel. Use `Connection::<Connector>::new()`.
+#[derive(Debug, Clone, Copy)]
+pub struct Connector;
+
+impl private::Sealed for Connector {}
+
+impl ProtocolState for Connector {
+    const PROTOCOL: Protocol = Protocol::Connector;
+}
+
+/// Netfilter protocol state.
+///
+/// Used for netfilter operations, primarily connection tracking (conntrack).
+/// This is a zero-sized type with no additional state.
+#[derive(Debug, Clone, Copy)]
+pub struct Netfilter;
+
+impl private::Sealed for Netfilter {}
+
+impl ProtocolState for Netfilter {
+    const PROTOCOL: Protocol = Protocol::Netfilter;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +199,15 @@ mod tests {
         assert_eq!(SockDiag::PROTOCOL, Protocol::SockDiag);
         assert_eq!(Generic::PROTOCOL, Protocol::Generic);
         assert_eq!(Wireguard::PROTOCOL, Protocol::Generic);
+        assert_eq!(KobjectUevent::PROTOCOL, Protocol::KobjectUevent);
+        assert_eq!(Connector::PROTOCOL, Protocol::Connector);
+        assert_eq!(Netfilter::PROTOCOL, Protocol::Netfilter);
+    }
+
+    #[test]
+    fn new_types_are_zero_sized() {
+        assert_eq!(std::mem::size_of::<KobjectUevent>(), 0);
+        assert_eq!(std::mem::size_of::<Connector>(), 0);
+        assert_eq!(std::mem::size_of::<Netfilter>(), 0);
     }
 }

@@ -81,7 +81,7 @@ impl<'a> NamespaceSpec<'a> {
     /// let conn: Connection<Route> = spec.connection()?;
     /// let links = conn.get_links().await?;
     /// ```
-    pub fn connection<P: ProtocolState>(&self) -> Result<Connection<P>> {
+    pub fn connection<P: ProtocolState + Default>(&self) -> Result<Connection<P>> {
         match self {
             NamespaceSpec::Default => Connection::<P>::new(),
             NamespaceSpec::Named(name) => connection_for(name),
@@ -115,7 +115,7 @@ pub const NETNS_RUN_DIR: &str = "/var/run/netns";
 /// let conn: Connection<Route> = namespace::connection_for("production")?;
 /// let links = conn.get_links().await?;
 /// ```
-pub fn connection_for<P: ProtocolState>(name: &str) -> Result<Connection<P>> {
+pub fn connection_for<P: ProtocolState + Default>(name: &str) -> Result<Connection<P>> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(name);
     connection_for_path(&path)
 }
@@ -137,7 +137,9 @@ pub fn connection_for<P: ProtocolState>(name: &str) -> Result<Connection<P>> {
 /// let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net")?;
 /// let links = conn.get_links().await?;
 /// ```
-pub fn connection_for_path<P: ProtocolState, T: AsRef<Path>>(path: T) -> Result<Connection<P>> {
+pub fn connection_for_path<P: ProtocolState + Default, T: AsRef<Path>>(
+    path: T,
+) -> Result<Connection<P>> {
     Connection::<P>::new_in_namespace_path(path)
 }
 
@@ -153,7 +155,7 @@ pub fn connection_for_path<P: ProtocolState, T: AsRef<Path>>(path: T) -> Result<
 /// let conn: Connection<Route> = namespace::connection_for_pid(1234)?;
 /// let links = conn.get_links().await?;
 /// ```
-pub fn connection_for_pid<P: ProtocolState>(pid: u32) -> Result<Connection<P>> {
+pub fn connection_for_pid<P: ProtocolState + Default>(pid: u32) -> Result<Connection<P>> {
     let path = format!("/proc/{}/ns/net", pid);
     connection_for_path(&path)
 }

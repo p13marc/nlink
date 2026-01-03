@@ -41,11 +41,15 @@ pub struct Connection<P: ProtocolState> {
 }
 
 // ============================================================================
-// Shared methods for all protocol types
+// Shared methods for protocol types that implement Default
 // ============================================================================
 
-impl<P: ProtocolState> Connection<P> {
+impl<P: ProtocolState + Default> Connection<P> {
     /// Create a new connection for this protocol type.
+    ///
+    /// This is available for protocols that implement `Default`.
+    /// For protocols that require special initialization (like `Connector`,
+    /// `KobjectUevent`, or `Wireguard`), use their specific constructors.
     ///
     /// # Example
     ///
@@ -109,7 +113,13 @@ impl<P: ProtocolState> Connection<P> {
             state: P::default(),
         })
     }
+}
 
+// ============================================================================
+// Shared methods for all protocol types
+// ============================================================================
+
+impl<P: ProtocolState> Connection<P> {
     /// Get the underlying socket.
     pub fn socket(&self) -> &NetlinkSocket {
         &self.socket

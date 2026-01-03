@@ -48,6 +48,9 @@ crates/nlink/src/
     action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ConnmarkAction, CsumAction, SampleAction, CtAction, PeditAction, ActionList)
     link.rs           # Link type builders (DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, BareudpLink, NetkitLink, NlmonLink, VirtWifiLink, VtiLink, Vti6Link, Ip6GreLink, Ip6GretapLink)
     rule.rs           # Routing rule builder (RuleBuilder)
+    uevent.rs         # KobjectUevent (device hotplug events)
+    connector.rs      # Connector (process lifecycle events)
+    netfilter.rs      # Netfilter (connection tracking)
     genl/             # Generic Netlink (GENL) support
       mod.rs          # GENL module entry, control family constants
       header.rs       # GenlMsgHdr (4-byte GENL header)
@@ -1031,6 +1034,73 @@ conn.remove_peer("wg0", peer_pubkey).await?;
 
 // Access the resolved GENL family ID if needed
 println!("WireGuard family ID: {}", conn.family_id());
+```
+
+**Device hotplug events (udev-style) via KobjectUevent:**
+```rust
+use nlink::netlink::{Connection, KobjectUevent};
+
+// Subscribe to kernel uevents
+let conn = Connection::<KobjectUevent>::new()?;
+
+loop {
+    let event = conn.recv().await?;
+    println!("[{}] {} ({})", event.action, event.devpath, event.subsystem);
+    
+    // Access device properties
+    if let Some(devname) = event.devname() {
+        println!("  Device: /dev/{}", devname);
+    }
+    if event.is_add() {
+        println!("  New device added!");
+    }
+}
+```
+
+**Process lifecycle events via Connector:**
+```rust
+use nlink::netlink::{Connection, Connector};
+use nlink::netlink::connector::ProcEvent;
+
+// Subscribe to process events (requires CAP_NET_ADMIN)
+let conn = Connection::<Connector>::new().await?;
+
+loop {
+    match conn.recv().await? {
+        ProcEvent::Fork { parent_pid, child_pid, .. } => {
+            println!("fork: {} -> {}", parent_pid, child_pid);
+        }
+        ProcEvent::Exec { pid, .. } => {
+            println!("exec: {}", pid);
+        }
+        ProcEvent::Exit { pid, exit_code, .. } => {
+            println!("exit: {} (code {})", pid, exit_code);
+        }
+        _ => {}
+    }
+}
+```
+
+**Connection tracking (conntrack) via Netfilter:**
+```rust
+use nlink::netlink::{Connection, Netfilter};
+use nlink::netlink::netfilter::IpProtocol;
+
+let conn = Connection::<Netfilter>::new()?;
+
+// Query IPv4 connection tracking entries
+let entries = conn.get_conntrack().await?;
+for entry in &entries {
+    println!("{:?} {}:{} -> {}:{}",
+        entry.proto,
+        entry.orig.src_ip.unwrap_or_default(),
+        entry.orig.src_port.unwrap_or(0),
+        entry.orig.dst_ip.unwrap_or_default(),
+        entry.orig.dst_port.unwrap_or(0));
+}
+
+// Query IPv6 entries
+let entries_v6 = conn.get_conntrack_v6().await?;
 ```
 
 ## Netlink Message Flow

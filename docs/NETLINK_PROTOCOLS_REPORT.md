@@ -39,13 +39,13 @@ The library uses a unified `Connection<P: ProtocolState>` pattern for all netlin
 | `NETLINK_SOCK_DIAG` | 4 | Socket monitoring (ss-like queries) | `Connection<SockDiag>` (feature-gated) |
 | `NETLINK_GENERIC` | 16 | Generic netlink (extensible subsystem) | `Connection<Generic>`, `Connection<Wireguard>` |
 
-### Partially Implemented (Protocol Enum Only)
+### Implemented (Core Functionality)
 
-| Protocol | ID | Description | Status |
-|----------|-----|-------------|--------|
-| `NETLINK_NETFILTER` | 12 | Netfilter subsystem | `Protocol::Netfilter` enum variant exists, no API |
-| `NETLINK_CONNECTOR` | 11 | Kernel connector | `Protocol::Connector` enum variant exists, no API |
-| `NETLINK_KOBJECT_UEVENT` | 15 | Kernel uevents (udev) | `Protocol::KobjectUevent` enum variant exists, no API |
+| Protocol | ID | Description | Implementation |
+|----------|-----|-------------|----------------|
+| `NETLINK_NETFILTER` | 12 | Netfilter subsystem | `Connection<Netfilter>` - conntrack queries |
+| `NETLINK_CONNECTOR` | 11 | Kernel connector | `Connection<Connector>` - process events |
+| `NETLINK_KOBJECT_UEVENT` | 15 | Kernel uevents (udev) | `Connection<KobjectUevent>` - device events |
 
 ### Not Implemented
 
@@ -147,35 +147,25 @@ println!("Audit enabled: {}", status.enabled);
 
 ---
 
-### Medium Priority: NETLINK_NETFILTER (Full Implementation)
+### Medium Priority: NETLINK_NETFILTER (Expand Implementation)
 
-**Why**: Currently only has socket enum. Full implementation enables firewall management.
+**Why**: Basic conntrack implemented. Full implementation enables complete firewall management.
 
-**Use cases**:
-- nftables configuration
-- Connection tracking (conntrack)
+**Current status**: `Connection<Netfilter>` supports:
+- `get_conntrack()` - query IPv4 connection tracking entries
+- `get_conntrack_v6()` - query IPv6 connection tracking entries
+
+**Remaining work**:
+- nftables configuration (complex expression language)
 - NAT management
+- Conntrack modification (delete, flush)
 - Packet filtering rules
 
 **Complexity**: Very High - nftables has complex expression language
 
-**Estimated effort**: 4-6 weeks for comprehensive support
+**Estimated effort**: 3-5 weeks for comprehensive support beyond conntrack
 
-**Note**: Consider using existing `nftables` crate or implementing incrementally (conntrack first).
-
-**Example API**:
-```rust
-let conn = Connection::<Netfilter>::new()?;
-
-// Query connection tracking table
-let conns = conn.get_conntrack().await?;
-for ct in conns {
-    println!("{} -> {} ({})", ct.src, ct.dst, ct.proto);
-}
-
-// Flush conntrack entries
-conn.flush_conntrack().await?;
-```
+**Note**: Consider using existing `nftables` crate for full nftables support.
 
 ---
 
@@ -371,9 +361,10 @@ impl Connection<Nl80211> {
 
 | Category | Count | Examples |
 |----------|-------|----------|
-| Fully Implemented | 3 | Route, SockDiag, Generic |
+| Fully Implemented | 6 | Route, SockDiag, Generic, Wireguard, Connector, KobjectUevent |
+| Core Functionality | 1 | Netfilter (conntrack queries) |
 | High Priority Missing | 4 | XFRM, nl80211, devlink, ethtool |
-| Medium Priority Missing | 4 | Audit, Netfilter, macsec, team |
+| Medium Priority Missing | 3 | Audit, macsec, team |
 | Low Priority Missing | 6 | FIB, RDMA, Crypto, etc. |
 | Not Worth Implementing | 5 | Obsolete/deprecated protocols |
 
