@@ -155,3 +155,13 @@ path = "examples/connector/process_monitor.rs"
 [[example]]
 name = "netfilter_conntrack"
 path = "examples/netfilter/conntrack.rs"
+
+# XFRM examples (IPsec)
+[[example]]
+name = "xfrm_ipsec_monitor"
+path = "examples/xfrm/ipsec_monitor.rs"
+
+# FIB lookup examples
+[[example]]
+name = "fib_lookup_route_lookup"
+path = "examples/fib_lookup/route_lookup.rs"

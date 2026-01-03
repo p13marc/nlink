@@ -173,6 +173,32 @@ impl ProtocolState for Netfilter {
     const PROTOCOL: Protocol = Protocol::Netfilter;
 }
 
+/// XFRM protocol state.
+///
+/// Used for IPsec Security Association (SA) and Security Policy (SP) management.
+/// This is a zero-sized type with no additional state.
+#[derive(Debug, Clone, Copy)]
+pub struct Xfrm;
+
+impl private::Sealed for Xfrm {}
+
+impl ProtocolState for Xfrm {
+    const PROTOCOL: Protocol = Protocol::Xfrm;
+}
+
+/// FIB lookup protocol state.
+///
+/// Used for performing FIB (Forwarding Information Base) route lookups.
+/// This is a zero-sized type with no additional state.
+#[derive(Debug, Clone, Copy)]
+pub struct FibLookup;
+
+impl private::Sealed for FibLookup {}
+
+impl ProtocolState for FibLookup {
+    const PROTOCOL: Protocol = Protocol::FibLookup;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +228,8 @@ mod tests {
         assert_eq!(KobjectUevent::PROTOCOL, Protocol::KobjectUevent);
         assert_eq!(Connector::PROTOCOL, Protocol::Connector);
         assert_eq!(Netfilter::PROTOCOL, Protocol::Netfilter);
+        assert_eq!(Xfrm::PROTOCOL, Protocol::Xfrm);
+        assert_eq!(FibLookup::PROTOCOL, Protocol::FibLookup);
     }
 
     #[test]
@@ -209,5 +237,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<KobjectUevent>(), 0);
         assert_eq!(std::mem::size_of::<Connector>(), 0);
         assert_eq!(std::mem::size_of::<Netfilter>(), 0);
+        assert_eq!(std::mem::size_of::<Xfrm>(), 0);
+        assert_eq!(std::mem::size_of::<FibLookup>(), 0);
     }
 }

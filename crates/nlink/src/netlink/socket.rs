@@ -28,7 +28,17 @@ pub enum Protocol {
     Connector,
     /// Kobject uevent
     KobjectUevent,
+    /// XFRM (IPsec)
+    Xfrm,
+    /// FIB lookup
+    FibLookup,
 }
+
+/// NETLINK_XFRM protocol number (6).
+const NETLINK_XFRM: isize = 6;
+
+/// NETLINK_FIB_LOOKUP protocol number (10).
+const NETLINK_FIB_LOOKUP: isize = 10;
 
 impl Protocol {
     fn as_isize(self) -> isize {
@@ -39,6 +49,8 @@ impl Protocol {
             Protocol::Netfilter => protocols::NETLINK_NETFILTER,
             Protocol::Connector => protocols::NETLINK_CONNECTOR,
             Protocol::KobjectUevent => protocols::NETLINK_KOBJECT_UEVENT,
+            Protocol::Xfrm => NETLINK_XFRM,
+            Protocol::FibLookup => NETLINK_FIB_LOOKUP,
         }
     }
 }

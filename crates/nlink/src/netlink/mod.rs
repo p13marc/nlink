@@ -76,6 +76,7 @@ pub mod connection;
 pub mod connector;
 mod error;
 pub mod events;
+pub mod fib_lookup;
 pub mod filter;
 #[cfg(test)]
 mod fixtures;
@@ -101,6 +102,7 @@ pub mod tc;
 pub mod tc_options;
 pub mod types;
 pub mod uevent;
+pub mod xfrm;
 
 pub use attr::{AttrIter, NlAttr};
 pub use builder::{MessageBuilder, NestToken};
@@ -118,7 +120,8 @@ pub use namespace_watcher::{
 };
 pub use parse::{FromNetlink, ToNetlink};
 pub use protocol::{
-    Connector, Generic, KobjectUevent, Netfilter, ProtocolState, Route, SockDiag, Wireguard,
+    Connector, FibLookup, Generic, KobjectUevent, Netfilter, ProtocolState, Route, SockDiag,
+    Wireguard, Xfrm,
 };
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};
 pub use tc_options::NetemParameter;

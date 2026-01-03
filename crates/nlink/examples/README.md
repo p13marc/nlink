@@ -23,9 +23,25 @@ examples/
 ├── events/             # Event monitoring examples
 │   ├── monitor.rs
 │   └── monitor_namespace.rs
-└── namespace/          # Namespace management examples
-    ├── events.rs
-    └── watch.rs
+├── namespace/          # Namespace management examples
+│   ├── events.rs
+│   └── watch.rs
+├── genl/               # Generic Netlink examples
+│   └── wireguard.rs
+├── sockdiag/           # Socket diagnostics examples
+│   ├── list_sockets.rs
+│   ├── tcp_connections.rs
+│   └── unix_sockets.rs
+├── uevent/             # Kernel uevent examples
+│   └── device_monitor.rs
+├── connector/          # Kernel connector examples
+│   └── process_monitor.rs
+├── netfilter/          # Netfilter examples
+│   └── conntrack.rs
+├── xfrm/               # XFRM (IPsec) examples
+│   └── ipsec_monitor.rs
+└── fib_lookup/         # FIB lookup examples
+    └── route_lookup.rs
 ```
 
 ## Running Examples
@@ -89,6 +105,50 @@ Some examples require specific features or root privileges. See the individual e
 |---------|-------------|---------|
 | `namespace_events` | Monitor NSID netlink events | `cargo run -p nlink --example namespace_events` |
 | `namespace_watch` | Watch namespace creation/deletion (inotify) | `cargo run -p nlink --features namespace_watcher --example namespace_watch` |
+
+## Generic Netlink Examples
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `genl_wireguard` | Query WireGuard device configuration | `cargo run -p nlink --example genl_wireguard` |
+
+## Socket Diagnostics Examples
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `sockdiag_list_sockets` | List all sockets (TCP, UDP, Unix) | `cargo run -p nlink --features sockdiag --example sockdiag_list_sockets` |
+| `sockdiag_tcp_connections` | List TCP connections with state | `cargo run -p nlink --features sockdiag --example sockdiag_tcp_connections` |
+| `sockdiag_unix_sockets` | List Unix domain sockets | `cargo run -p nlink --features sockdiag --example sockdiag_unix_sockets` |
+
+## Uevent Examples (Device Hotplug)
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `uevent_device_monitor` | Monitor device hotplug events (like udev) | `cargo run -p nlink --example uevent_device_monitor` |
+
+## Connector Examples (Process Events)
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `connector_process_monitor` | Monitor process fork/exec/exit events | `sudo cargo run -p nlink --example connector_process_monitor` |
+
+## Netfilter Examples (Connection Tracking)
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `netfilter_conntrack` | List connection tracking entries | `cargo run -p nlink --example netfilter_conntrack` |
+
+## XFRM Examples (IPsec)
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `xfrm_ipsec_monitor` | List IPsec Security Associations and Policies | `cargo run -p nlink --example xfrm_ipsec_monitor` |
+
+## FIB Lookup Examples
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `fib_lookup_route_lookup` | Perform FIB route lookups for IP addresses | `cargo run -p nlink --example fib_lookup_route_lookup` |
 
 ## Example Usage Patterns
 
