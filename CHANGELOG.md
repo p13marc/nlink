@@ -2,6 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2026-01-03
+
+### Added
+
+#### Strongly-Typed Event Subscription
+- `RouteGroup` enum for type-safe multicast group subscription
+  - `Link`, `Ipv4Addr`, `Ipv6Addr`, `Ipv4Route`, `Ipv6Route`, `Neigh`, `Tc`, `NsId`, `Ipv4Rule`, `Ipv6Rule`
+- `Connection<Route>::subscribe(&[RouteGroup])` - Subscribe to specific groups
+- `Connection<Route>::subscribe_all()` - Subscribe to all common groups (Link, Ipv4Addr, Ipv6Addr, Ipv4Route, Ipv6Route, Neigh, Tc)
+
+### Changed
+
+- Event monitoring now uses `Connection::events()` and `into_event_stream()` from `EventSource` trait
+- Multi-namespace monitoring now uses `tokio_stream::StreamMap` directly instead of wrapper type
+
+### Removed
+
+- `EventStream` and `EventStreamBuilder` - Use `Connection<Route>::subscribe()` + `events()` instead
+- `MultiNamespaceEventStream` and `NamespacedEvent` - Use `StreamMap` directly
+- `run_monitor_loop` from output module - Incompatible with new Stream API
+
+### Documentation
+
+- Updated `CLAUDE.md` with new event monitoring patterns
+- Added `docs/EVENT_API_CONSOLIDATION_REPORT.md` documenting the API changes
+
+### Migration Guide
+
+Before:
+```rust
+let mut stream = EventStream::builder()
+    .links(true)
+    .tc(true)
+    .namespace("myns")
+    .build()?;
+
+while let Some(event) = stream.try_next().await? {
+    // handle event
+}
+```
+
+After:
+```rust
+let mut conn = Connection::<Route>::new_in_namespace("myns")?;
+conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
+let mut events = conn.events();
+
+while let Some(result) = events.next().await {
+    let event = result?;
+    // handle event
+}
+```
+
 ## [0.3.1] - 2026-01-03
 
 ### Added
