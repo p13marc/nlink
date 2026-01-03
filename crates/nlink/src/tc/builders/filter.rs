@@ -5,7 +5,7 @@
 use crate::netlink::connection::{ack_request, create_request, replace_request};
 use crate::netlink::message::NlMsgType;
 use crate::netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
-use crate::netlink::{Connection, MessageBuilder, Result};
+use crate::netlink::{Connection, MessageBuilder, Result, Route};
 
 /// Build a TcMsg with common fields for filter operations.
 fn build_tcmsg(dev: &str, parent: &str, protocol: u16, priority: u16) -> Result<TcMsg> {
@@ -104,7 +104,7 @@ pub fn add_options(builder: &mut MessageBuilder, kind: &str, params: &[String]) 
 /// * `kind` - Filter type (e.g., "u32", "flower")
 /// * `params` - Type-specific parameters
 pub async fn add(
-    conn: &Connection,
+    conn: &Connection<Route>,
     dev: &str,
     parent: &str,
     protocol: &str,
@@ -122,7 +122,7 @@ pub async fn add(
 
     add_options(&mut builder, kind, params)?;
 
-    conn.request_ack(builder).await?;
+    conn.send_ack(builder).await?;
     Ok(())
 }
 
@@ -136,7 +136,7 @@ pub async fn add(
 /// * `prio` - Optional priority
 /// * `kind` - Optional filter type
 pub async fn del(
-    conn: &Connection,
+    conn: &Connection<Route>,
     dev: &str,
     parent: &str,
     protocol: Option<&str>,
@@ -158,7 +158,7 @@ pub async fn del(
         builder.append_attr_str(TcaAttr::Kind as u16, k);
     }
 
-    conn.request_ack(builder).await?;
+    conn.send_ack(builder).await?;
     Ok(())
 }
 
@@ -173,7 +173,7 @@ pub async fn del(
 /// * `kind` - Filter type
 /// * `params` - Type-specific parameters
 pub async fn replace(
-    conn: &Connection,
+    conn: &Connection<Route>,
     dev: &str,
     parent: &str,
     protocol: &str,
@@ -191,7 +191,7 @@ pub async fn replace(
 
     add_options(&mut builder, kind, params)?;
 
-    conn.request_ack(builder).await?;
+    conn.send_ack(builder).await?;
     Ok(())
 }
 
@@ -206,7 +206,7 @@ pub async fn replace(
 /// * `kind` - Filter type
 /// * `params` - Type-specific parameters
 pub async fn change(
-    conn: &Connection,
+    conn: &Connection<Route>,
     dev: &str,
     parent: &str,
     protocol: &str,
@@ -224,7 +224,7 @@ pub async fn change(
 
     add_options(&mut builder, kind, params)?;
 
-    conn.request_ack(builder).await?;
+    conn.send_ack(builder).await?;
     Ok(())
 }
 

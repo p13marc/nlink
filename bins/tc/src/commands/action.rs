@@ -17,7 +17,7 @@ use nlink::netlink::types::tc::action::{
     police::{TCA_POLICE_TBF, TcPolice},
 };
 use nlink::netlink::types::tc::{TCA_ACT_TAB, TcMsg};
-use nlink::netlink::{Connection, Result};
+use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions};
 use nlink::tc::builders::action as action_builder;
 use std::io::{self, Write};
@@ -76,7 +76,7 @@ enum ActionAction {
 impl ActionCmd {
     pub async fn run(
         &self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         format: OutputFormat,
         opts: &OutputOptions,
     ) -> Result<()> {
@@ -106,7 +106,7 @@ impl ActionCmd {
     }
 
     async fn show_actions(
-        conn: &Connection,
+        conn: &Connection<Route>,
         kind: &str,
         format: OutputFormat,
         _opts: &OutputOptions,
@@ -124,7 +124,7 @@ impl ActionCmd {
         builder.nest_end(act_token);
         builder.nest_end(tab_token);
 
-        let responses = conn.dump(builder).await?;
+        let responses = conn.send_dump(builder).await?;
 
         let stdout = io::stdout();
         let mut handle = stdout.lock();
@@ -147,7 +147,7 @@ impl ActionCmd {
     }
 
     async fn get_action(
-        conn: &Connection,
+        conn: &Connection<Route>,
         kind: &str,
         index: u32,
         format: OutputFormat,

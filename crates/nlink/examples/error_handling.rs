@@ -5,11 +5,11 @@
 //!
 //! Run with: cargo run -p nlink --example error_handling
 
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
+    let conn = Connection::<Route>::new()?;
 
     println!("Error handling patterns:");
     println!("{}", "-".repeat(50));

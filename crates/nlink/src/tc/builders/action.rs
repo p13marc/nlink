@@ -29,7 +29,7 @@ use crate::netlink::types::tc::action::{
         TCA_VLAN_PUSH_VLAN_PROTOCOL, TcVlan,
     },
 };
-use crate::netlink::{Connection, MessageBuilder, Result};
+use crate::netlink::{Connection, MessageBuilder, Result, Route};
 
 /// Add a new action.
 ///
@@ -37,7 +37,7 @@ use crate::netlink::{Connection, MessageBuilder, Result};
 /// * `conn` - The netlink connection
 /// * `kind` - Action type (gact, mirred, police)
 /// * `params` - Type-specific parameters
-pub async fn add(conn: &Connection, kind: &str, params: &[String]) -> Result<()> {
+pub async fn add(conn: &Connection<Route>, kind: &str, params: &[String]) -> Result<()> {
     let mut builder = MessageBuilder::new(
         NlMsgType::RTM_NEWACTION,
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
@@ -58,7 +58,7 @@ pub async fn add(conn: &Connection, kind: &str, params: &[String]) -> Result<()>
     builder.nest_end(act_token);
     builder.nest_end(tab_token);
 
-    conn.request(builder).await?;
+    conn.send_request(builder).await?;
     Ok(())
 }
 
@@ -68,7 +68,7 @@ pub async fn add(conn: &Connection, kind: &str, params: &[String]) -> Result<()>
 /// * `conn` - The netlink connection
 /// * `kind` - Action type
 /// * `index` - Optional action index
-pub async fn del(conn: &Connection, kind: &str, index: Option<u32>) -> Result<()> {
+pub async fn del(conn: &Connection<Route>, kind: &str, index: Option<u32>) -> Result<()> {
     let mut builder = MessageBuilder::new(NlMsgType::RTM_DELACTION, NLM_F_REQUEST | NLM_F_ACK);
 
     let tcmsg = TcMsg::default();
@@ -88,7 +88,7 @@ pub async fn del(conn: &Connection, kind: &str, index: Option<u32>) -> Result<()
     builder.nest_end(act_token);
     builder.nest_end(tab_token);
 
-    conn.request(builder).await?;
+    conn.send_request(builder).await?;
     Ok(())
 }
 
@@ -98,7 +98,7 @@ pub async fn del(conn: &Connection, kind: &str, index: Option<u32>) -> Result<()
 /// * `conn` - The netlink connection
 /// * `kind` - Action type
 /// * `index` - Action index
-pub async fn get(conn: &Connection, kind: &str, index: u32) -> Result<Vec<u8>> {
+pub async fn get(conn: &Connection<Route>, kind: &str, index: u32) -> Result<Vec<u8>> {
     let mut builder = MessageBuilder::new(NlMsgType::RTM_GETACTION, NLM_F_REQUEST);
 
     let tcmsg = TcMsg::default();
@@ -116,7 +116,7 @@ pub async fn get(conn: &Connection, kind: &str, index: u32) -> Result<Vec<u8>> {
     builder.nest_end(act_token);
     builder.nest_end(tab_token);
 
-    conn.request(builder).await
+    conn.send_request(builder).await
 }
 
 /// Add action-specific options to the message.

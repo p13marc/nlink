@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 use nlink::netlink::message::NlMsgType;
 use nlink::netlink::messages::TcMessage;
 use nlink::netlink::types::tc::tc_handle;
-use nlink::netlink::{Connection, Result};
+use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions, print_all};
 use nlink::tc::builders::class as class_builder;
 
@@ -125,7 +125,7 @@ enum ClassAction {
 impl ClassCmd {
     pub async fn run(
         self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         format: OutputFormat,
         opts: &OutputOptions,
     ) -> Result<()> {
@@ -183,7 +183,7 @@ impl ClassCmd {
     }
 
     async fn show(
-        conn: &Connection,
+        conn: &Connection<Route>,
         dev: &str,
         kind_filter: Option<&str>,
         parent: Option<&str>,

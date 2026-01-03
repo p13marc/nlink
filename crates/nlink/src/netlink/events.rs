@@ -66,12 +66,13 @@ use std::task::{Context, Poll};
 
 use tokio_stream::{Stream, StreamMap};
 
+use super::Result;
 use super::connection::Connection;
 use super::message::{MessageIter, NlMsgType};
 use super::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage};
 use super::parse::FromNetlink;
+use super::protocol::Route;
 use super::socket::rtnetlink_groups::*;
-use super::{Protocol, Result};
 use std::path::PathBuf;
 
 /// Network events that can be received from the kernel.
@@ -498,17 +499,15 @@ impl EventStreamBuilder {
     /// Build the event stream.
     pub fn build(self) -> Result<EventStream> {
         let mut conn = match self.namespace {
-            NamespaceConfig::Default => Connection::new(Protocol::Route)?,
+            NamespaceConfig::Default => Connection::<Route>::new()?,
             NamespaceConfig::Named(ref name) => {
                 let path = PathBuf::from("/var/run/netns").join(name);
-                Connection::new_in_namespace_path(Protocol::Route, path)?
+                Connection::<Route>::new_in_namespace_path(path)?
             }
-            NamespaceConfig::Path(ref path) => {
-                Connection::new_in_namespace_path(Protocol::Route, path)?
-            }
+            NamespaceConfig::Path(ref path) => Connection::<Route>::new_in_namespace_path(path)?,
             NamespaceConfig::Pid(pid) => {
                 let path = PathBuf::from(format!("/proc/{}/ns/net", pid));
-                Connection::new_in_namespace_path(Protocol::Route, path)?
+                Connection::<Route>::new_in_namespace_path(path)?
             }
         };
 
@@ -566,7 +565,7 @@ impl EventStreamBuilder {
 /// }
 /// ```
 pub struct EventStream {
-    conn: Connection,
+    conn: Connection<Route>,
     buffer: Vec<u8>,
     pending_events: Vec<NetworkEvent>,
 }
@@ -578,12 +577,12 @@ impl EventStream {
     }
 
     /// Get a reference to the underlying connection.
-    pub fn connection(&self) -> &Connection {
+    pub fn connection(&self) -> &Connection<Route> {
         &self.conn
     }
 
     /// Get a mutable reference to the underlying connection.
-    pub fn connection_mut(&mut self) -> &mut Connection {
+    pub fn connection_mut(&mut self) -> &mut Connection<Route> {
         &mut self.conn
     }
 }

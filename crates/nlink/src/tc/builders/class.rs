@@ -5,7 +5,7 @@
 use crate::netlink::connection::{ack_request, create_request, replace_request};
 use crate::netlink::message::NlMsgType;
 use crate::netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
-use crate::netlink::{Connection, MessageBuilder, Result};
+use crate::netlink::{Connection, MessageBuilder, Result, Route};
 
 /// Build a TcMsg with common fields for class operations.
 fn build_tcmsg(dev: &str, parent: &str, classid: &str) -> Result<TcMsg> {
@@ -54,7 +54,7 @@ pub fn add_options(builder: &mut MessageBuilder, kind: &str, params: &[String]) 
 /// * `kind` - Class type (e.g., "htb")
 /// * `params` - Type-specific parameters
 pub async fn add(
-    conn: &Connection,
+    conn: &Connection<Route>,
     dev: &str,
     parent: &str,
     classid: &str,
@@ -69,7 +69,7 @@ pub async fn add(
 
     add_options(&mut builder, kind, params)?;
 
-    conn.request_ack(builder).await?;
+    conn.send_ack(builder).await?;
     Ok(())
 }
 
@@ -80,13 +80,13 @@ pub async fn add(
 /// * `dev` - Device name
 /// * `parent` - Parent handle
 /// * `classid` - Class ID to delete
-pub async fn del(conn: &Connection, dev: &str, parent: &str, classid: &str) -> Result<()> {
+pub async fn del(conn: &Connection<Route>, dev: &str, parent: &str, classid: &str) -> Result<()> {
     let tcmsg = build_tcmsg(dev, parent, classid)?;
 
     let mut builder = ack_request(NlMsgType::RTM_DELTCLASS);
     builder.append(&tcmsg);
 
-    conn.request_ack(builder).await?;
+    conn.send_ack(builder).await?;
     Ok(())
 }
 
@@ -100,7 +100,7 @@ pub async fn del(conn: &Connection, dev: &str, parent: &str, classid: &str) -> R
 /// * `kind` - Class type
 /// * `params` - Type-specific parameters
 pub async fn change(
-    conn: &Connection,
+    conn: &Connection<Route>,
     dev: &str,
     parent: &str,
     classid: &str,
@@ -115,7 +115,7 @@ pub async fn change(
 
     add_options(&mut builder, kind, params)?;
 
-    conn.request_ack(builder).await?;
+    conn.send_ack(builder).await?;
     Ok(())
 }
 
@@ -129,7 +129,7 @@ pub async fn change(
 /// * `kind` - Class type
 /// * `params` - Type-specific parameters
 pub async fn replace(
-    conn: &Connection,
+    conn: &Connection<Route>,
     dev: &str,
     parent: &str,
     classid: &str,
@@ -144,7 +144,7 @@ pub async fn replace(
 
     add_options(&mut builder, kind, params)?;
 
-    conn.request_ack(builder).await?;
+    conn.send_ack(builder).await?;
     Ok(())
 }
 

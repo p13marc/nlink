@@ -11,7 +11,7 @@ use nlink::netlink::attr::AttrIter;
 use nlink::netlink::connection::dump_request;
 use nlink::netlink::message::{NLMSG_HDRLEN, NlMsgType};
 use nlink::netlink::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
-use nlink::netlink::{Connection, MessageBuilder, Result};
+use nlink::netlink::{Connection, MessageBuilder, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::io::Write;
 use std::net::Ipv4Addr;
@@ -146,7 +146,7 @@ enum TunnelAction {
 impl TunnelCmd {
     pub async fn run(
         &self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         format: OutputFormat,
         opts: &OutputOptions,
     ) -> Result<()> {
@@ -204,7 +204,7 @@ impl TunnelCmd {
 
     async fn show_tunnels(
         &self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         name_filter: Option<&str>,
         mode_filter: Option<&str>,
         format: OutputFormat,
@@ -215,7 +215,7 @@ impl TunnelCmd {
         let ifinfo = IfInfoMsg::new();
         builder.append(&ifinfo);
 
-        let responses = conn.dump(builder).await?;
+        let responses = conn.send_dump(builder).await?;
 
         let mut tunnels = Vec::new();
 
@@ -249,7 +249,7 @@ impl TunnelCmd {
     #[allow(clippy::too_many_arguments)]
     async fn add_tunnel(
         &self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         name: &str,
         mode: &str,
         remote: &str,
@@ -375,13 +375,13 @@ impl TunnelCmd {
         builder.nest_end(info_data);
         builder.nest_end(linkinfo);
 
-        conn.request(builder).await?;
+        conn.send_request(builder).await?;
 
         println!("Tunnel '{}' created", name);
         Ok(())
     }
 
-    async fn delete_tunnel(&self, conn: &Connection, name: &str) -> Result<()> {
+    async fn delete_tunnel(&self, conn: &Connection<Route>, name: &str) -> Result<()> {
         // Get interface index
         let ifindex = nlink::util::get_ifindex(name).map_err(|_| {
             nlink::netlink::Error::InvalidMessage(format!("tunnel '{}' not found", name))
@@ -397,7 +397,7 @@ impl TunnelCmd {
         ifinfo.ifi_index = ifindex as i32;
         builder.append(&ifinfo);
 
-        conn.request(builder).await?;
+        conn.send_request(builder).await?;
 
         println!("Tunnel '{}' deleted", name);
         Ok(())
@@ -405,7 +405,7 @@ impl TunnelCmd {
 
     async fn change_tunnel(
         &self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         name: &str,
         remote: Option<&str>,
         local: Option<&str>,
@@ -460,7 +460,7 @@ impl TunnelCmd {
         builder.nest_end(info_data);
         builder.nest_end(linkinfo);
 
-        conn.request(builder).await?;
+        conn.send_request(builder).await?;
 
         println!("Tunnel '{}' changed", name);
         Ok(())

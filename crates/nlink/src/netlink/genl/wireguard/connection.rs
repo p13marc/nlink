@@ -8,16 +8,17 @@ use super::{
 };
 use crate::netlink::attr::{AttrIter, NLA_F_NESTED, get};
 use crate::netlink::builder::MessageBuilder;
+use crate::netlink::connection::Connection;
 use crate::netlink::error::{Error, Result};
-use crate::netlink::genl::GenlConnection;
-use crate::netlink::genl::header::GENL_HDRLEN;
+use crate::netlink::genl::GENL_HDRLEN;
+use crate::netlink::protocol::Generic;
 
 /// Connection for configuring WireGuard interfaces.
 ///
 /// This struct wraps a Generic Netlink connection and provides
 /// high-level methods for WireGuard device management.
 pub struct WireguardConnection {
-    genl: GenlConnection,
+    conn: Connection<Generic>,
     family_id: u16,
 }
 
@@ -26,20 +27,20 @@ impl WireguardConnection {
     ///
     /// This resolves the WireGuard GENL family ID on first use.
     pub async fn new() -> Result<Self> {
-        let genl = GenlConnection::new()?;
-        let family_id = genl.get_family_id(WG_GENL_NAME).await?;
-        Ok(Self { genl, family_id })
+        let conn = Connection::<Generic>::new()?;
+        let family_id = conn.get_family_id(WG_GENL_NAME).await?;
+        Ok(Self { conn, family_id })
     }
 
     /// Create a WireGuard connection from an existing GENL connection.
-    pub async fn from_genl(genl: GenlConnection) -> Result<Self> {
-        let family_id = genl.get_family_id(WG_GENL_NAME).await?;
-        Ok(Self { genl, family_id })
+    pub async fn from_connection(conn: Connection<Generic>) -> Result<Self> {
+        let family_id = conn.get_family_id(WG_GENL_NAME).await?;
+        Ok(Self { conn, family_id })
     }
 
-    /// Get the underlying GENL connection.
-    pub fn genl(&self) -> &GenlConnection {
-        &self.genl
+    /// Get the underlying connection.
+    pub fn connection(&self) -> &Connection<Generic> {
+        &self.conn
     }
 
     /// Get device information.
@@ -47,7 +48,7 @@ impl WireguardConnection {
     /// Returns the current configuration and status of the WireGuard interface.
     pub async fn get_device(&self, ifname: &str) -> Result<WgDevice> {
         let responses = self
-            .genl
+            .conn
             .dump_command(
                 self.family_id,
                 WgCmd::GetDevice as u8,
@@ -124,7 +125,7 @@ impl WireguardConnection {
 
     /// Apply device configuration to the kernel.
     async fn apply_device_config(&self, ifname: &str, config: &WgDeviceBuilder) -> Result<()> {
-        self.genl
+        self.conn
             .command(
                 self.family_id,
                 WgCmd::SetDevice as u8,

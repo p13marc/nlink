@@ -11,11 +11,11 @@
 
 use std::env;
 
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
+    let conn = Connection::<Route>::new()?;
     let args: Vec<String> = env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
@@ -33,7 +33,7 @@ async fn main() -> nlink::netlink::Result<()> {
     Ok(())
 }
 
-async fn list_routes(conn: &Connection, ipv4_only: Option<bool>) -> nlink::netlink::Result<()> {
+async fn list_routes(conn: &Connection<Route>, ipv4_only: Option<bool>) -> nlink::netlink::Result<()> {
     let routes = conn.get_routes().await?;
 
     // Use the get_interface_names() helper to build ifindex -> name map

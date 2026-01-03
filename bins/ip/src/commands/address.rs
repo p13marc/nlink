@@ -6,7 +6,7 @@ use clap::{Args, Subcommand};
 use nlink::netlink::message::NlMsgType;
 use nlink::netlink::messages::{AddressMessage, AddressMessageBuilder};
 use nlink::netlink::types::addr::{IfAddrMsg, IfaAttr, Scope};
-use nlink::netlink::{Connection, Result, connection::ack_request};
+use nlink::netlink::{Connection, Result, Route, connection::ack_request};
 use nlink::output::{OutputFormat, OutputOptions};
 use std::io::{self, Write};
 use std::net::IpAddr;
@@ -71,7 +71,7 @@ enum AddressAction {
 impl AddressCmd {
     pub async fn run(
         self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         format: OutputFormat,
         opts: &OutputOptions,
         family: Option<u8>,
@@ -105,7 +105,7 @@ impl AddressCmd {
     }
 
     async fn show(
-        conn: &Connection,
+        conn: &Connection<Route>,
         dev: Option<&str>,
         format: OutputFormat,
         opts: &OutputOptions,
@@ -170,7 +170,7 @@ impl AddressCmd {
 
     #[allow(clippy::too_many_arguments)]
     async fn add(
-        conn: &Connection,
+        conn: &Connection<Route>,
         address: &str,
         dev: &str,
         label: Option<&str>,
@@ -280,12 +280,12 @@ impl AddressCmd {
             nl_builder.append_attr_str(IfaAttr::Label as u16, lbl);
         }
 
-        conn.request_ack(nl_builder).await?;
+        conn.send_ack(nl_builder).await?;
 
         Ok(())
     }
 
-    async fn del(conn: &Connection, address: &str, dev: &str) -> Result<()> {
+    async fn del(conn: &Connection<Route>, address: &str, dev: &str) -> Result<()> {
         use nlink::util::addr::parse_prefix;
 
         let (addr, prefix) = parse_prefix(address).map_err(|e| {
@@ -315,12 +315,12 @@ impl AddressCmd {
             }
         }
 
-        conn.request_ack(builder).await?;
+        conn.send_ack(builder).await?;
 
         Ok(())
     }
 
-    async fn flush(conn: &Connection, dev: Option<&str>, family: Option<u8>) -> Result<()> {
+    async fn flush(conn: &Connection<Route>, dev: Option<&str>, family: Option<u8>) -> Result<()> {
         // Get all addresses using the typed API
         let all_addresses: Vec<AddressMessage> = conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
 
@@ -374,7 +374,7 @@ impl AddressCmd {
             }
 
             // Ignore errors for individual deletions
-            let _ = conn.request_ack(builder).await;
+            let _ = conn.send_ack(builder).await;
         }
 
         Ok(())

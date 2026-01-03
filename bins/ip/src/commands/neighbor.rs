@@ -7,7 +7,7 @@ use nlink::netlink::message::{NLMSG_HDRLEN, NlMsgType};
 use nlink::netlink::messages::NeighborMessage;
 use nlink::netlink::parse::FromNetlink;
 use nlink::netlink::types::neigh::{NdMsg, NdaAttr, nud};
-use nlink::netlink::{Connection, Result, connection::dump_request};
+use nlink::netlink::{Connection, Result, Route, connection::dump_request};
 use nlink::output::{OutputFormat, OutputOptions, print_all};
 use std::net::IpAddr;
 
@@ -85,7 +85,7 @@ enum NeighborAction {
 impl NeighborCmd {
     pub async fn run(
         self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         format: OutputFormat,
         opts: &OutputOptions,
         family: Option<u8>,
@@ -124,7 +124,7 @@ impl NeighborCmd {
     }
 
     async fn show(
-        conn: &Connection,
+        conn: &Connection<Route>,
         dev: Option<&str>,
         format: OutputFormat,
         opts: &OutputOptions,
@@ -136,7 +136,7 @@ impl NeighborCmd {
         builder.append(&ndmsg);
 
         // Send and receive
-        let responses = conn.dump(builder).await?;
+        let responses = conn.send_dump(builder).await?;
 
         // Get device index if filtering by name
         let filter_index = if let Some(dev_name) = dev {
@@ -180,7 +180,7 @@ impl NeighborCmd {
 
     #[allow(clippy::too_many_arguments)]
     async fn add(
-        conn: &Connection,
+        conn: &Connection<Route>,
         address: &str,
         lladdr: &str,
         dev: &str,
@@ -250,12 +250,12 @@ impl NeighborCmd {
         // Add link-layer address
         builder.append_attr(NdaAttr::Lladdr as u16, &mac);
 
-        conn.request_ack(builder).await?;
+        conn.send_ack(builder).await?;
 
         Ok(())
     }
 
-    async fn del(conn: &Connection, address: &str, dev: &str) -> Result<()> {
+    async fn del(conn: &Connection<Route>, address: &str, dev: &str) -> Result<()> {
         use nlink::netlink::connection::ack_request;
         use nlink::util::addr::parse_addr;
 
@@ -287,12 +287,12 @@ impl NeighborCmd {
             }
         }
 
-        conn.request_ack(builder).await?;
+        conn.send_ack(builder).await?;
 
         Ok(())
     }
 
-    async fn flush(conn: &Connection, dev: Option<&str>, family: Option<u8>) -> Result<()> {
+    async fn flush(conn: &Connection<Route>, dev: Option<&str>, family: Option<u8>) -> Result<()> {
         use nlink::netlink::connection::ack_request;
 
         // First, get all neighbor entries
@@ -300,7 +300,7 @@ impl NeighborCmd {
         let ndmsg = NdMsg::new().with_family(family.unwrap_or(0));
         builder.append(&ndmsg);
 
-        let responses = conn.dump(builder).await?;
+        let responses = conn.send_dump(builder).await?;
 
         // Get device index if filtering by name
         let filter_index = if let Some(dev_name) = dev {
@@ -366,7 +366,7 @@ impl NeighborCmd {
                 }
 
                 // Ignore errors for individual deletes (entry may have been removed)
-                let _ = conn.request_ack(del_builder).await;
+                let _ = conn.send_ack(del_builder).await;
             }
         }
 

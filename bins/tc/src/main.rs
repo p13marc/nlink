@@ -3,7 +3,7 @@
 //! Manages queuing disciplines (qdiscs), classes, and filters.
 
 use clap::{Parser, Subcommand};
-use nlink::netlink::{Connection, Protocol, Result};
+use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions};
 
 mod commands;
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
     };
 
     // Create netlink connection
-    let conn = Connection::new(Protocol::Route)?;
+    let conn = Connection::<Route>::new()?;
 
     match cli.command {
         Command::Qdisc(cmd) => cmd.run(&conn, format, &opts).await,

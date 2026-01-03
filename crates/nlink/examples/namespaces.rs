@@ -12,8 +12,8 @@
 
 use std::env;
 
-use nlink::netlink::Connection;
 use nlink::netlink::namespace;
+use nlink::netlink::{Connection, Route};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
@@ -99,7 +99,7 @@ async fn query_namespace_by_pid(pid: u32) -> nlink::netlink::Result<()> {
     print_interfaces(&conn).await
 }
 
-async fn print_interfaces(conn: &Connection) -> nlink::netlink::Result<()> {
+async fn print_interfaces(conn: &Connection<Route>) -> nlink::netlink::Result<()> {
     let links = conn.get_links().await?;
     let addrs = conn.get_addresses().await?;
 

@@ -6,7 +6,7 @@ use clap::{Args, Subcommand};
 use nlink::netlink::message::NlMsgType;
 use nlink::netlink::messages::LinkMessage;
 use nlink::netlink::types::link::{IfInfoMsg, IflaAttr, iff};
-use nlink::netlink::{Connection, Result, connection::ack_request};
+use nlink::netlink::{Connection, Result, Route, connection::ack_request};
 use nlink::output::{OutputFormat, OutputOptions, print_all};
 
 use super::link_add::{LinkAddType, add_link};
@@ -79,7 +79,7 @@ enum LinkAction {
 impl LinkCmd {
     pub async fn run(
         self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         format: OutputFormat,
         opts: &OutputOptions,
     ) -> Result<()> {
@@ -107,7 +107,7 @@ impl LinkCmd {
     }
 
     async fn show(
-        conn: &Connection,
+        conn: &Connection<Route>,
         dev: Option<&str>,
         format: OutputFormat,
         opts: &OutputOptions,
@@ -132,7 +132,7 @@ impl LinkCmd {
         Ok(())
     }
 
-    async fn del(conn: &Connection, dev: &str) -> Result<()> {
+    async fn del(conn: &Connection<Route>, dev: &str) -> Result<()> {
         let ifindex =
             nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)? as u32;
 
@@ -141,14 +141,14 @@ impl LinkCmd {
         let mut builder = ack_request(NlMsgType::RTM_DELLINK);
         builder.append(&ifinfo);
 
-        conn.request_ack(builder).await?;
+        conn.send_ack(builder).await?;
 
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn set(
-        conn: &Connection,
+        conn: &Connection<Route>,
         dev: &str,
         up: bool,
         down: bool,
@@ -209,7 +209,7 @@ impl LinkCmd {
             builder.append_attr_u32(IflaAttr::Master as u16, 0);
         }
 
-        conn.request_ack(builder).await?;
+        conn.send_ack(builder).await?;
 
         Ok(())
     }

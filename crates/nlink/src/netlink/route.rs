@@ -48,6 +48,7 @@ use super::builder::MessageBuilder;
 use super::connection::Connection;
 use super::error::{Error, Result};
 use super::message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType};
+use super::protocol::Route;
 use super::types::route::{RouteProtocol, RouteScope, RouteType, RtMsg, RtaAttr, rt_table};
 
 /// NLM_F_CREATE flag
@@ -1001,7 +1002,7 @@ fn write_multipath_v6(builder: &mut MessageBuilder, nexthops: &[NextHop]) -> Res
 // Connection Methods
 // ============================================================================
 
-impl Connection {
+impl Connection<Route> {
     /// Add a route.
     ///
     /// # Example
@@ -1024,13 +1025,13 @@ impl Connection {
     /// ```
     pub async fn add_route<R: RouteConfig>(&self, config: R) -> Result<()> {
         let builder = config.build()?;
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Delete a route using a config.
     pub async fn del_route<R: RouteConfig>(&self, config: R) -> Result<()> {
         let builder = config.build_delete()?;
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Delete an IPv4 route by destination.
@@ -1059,6 +1060,6 @@ impl Connection {
         // This is a simplified version - a proper implementation would
         // rebuild the message with different flags
         let builder = config.build()?;
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 }

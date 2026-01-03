@@ -42,6 +42,7 @@ use super::builder::MessageBuilder;
 use super::connection::{ack_request, create_request, replace_request};
 use super::error::{Error, Result};
 use super::message::NlMsgType;
+use super::protocol::Route;
 use super::types::tc::filter::{basic, bpf, flower, fw, matchall, u32 as u32_mod};
 use super::types::tc::{TcMsg, TcaAttr, tc_handle};
 
@@ -1622,7 +1623,7 @@ fn parse_handle(s: &str) -> Result<u32> {
 // Connection extension methods for filters
 // ============================================================================
 
-impl Connection {
+impl Connection<Route> {
     /// Add a filter to an interface.
     ///
     /// # Example
@@ -1713,7 +1714,7 @@ impl Connection {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Replace a filter on an interface (create if not exists).
@@ -1797,7 +1798,7 @@ impl Connection {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Change an existing filter's parameters.
@@ -1884,7 +1885,7 @@ impl Connection {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Delete a filter from an interface.
@@ -1925,7 +1926,7 @@ impl Connection {
         let mut builder = create_request(NlMsgType::RTM_DELTFILTER);
         builder.append(&tcmsg);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Delete all filters from a parent qdisc.

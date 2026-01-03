@@ -14,11 +14,11 @@ use std::net::IpAddr;
 
 use nlink::netlink::addr::{Ipv4Address, Ipv6Address};
 use nlink::netlink::types::addr::Scope;
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
+    let conn = Connection::<Route>::new()?;
     let args: Vec<String> = env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
@@ -56,7 +56,7 @@ async fn main() -> nlink::netlink::Result<()> {
     Ok(())
 }
 
-async fn list_addresses(conn: &Connection) -> nlink::netlink::Result<()> {
+async fn list_addresses(conn: &Connection<Route>) -> nlink::netlink::Result<()> {
     let addrs = conn.get_addresses().await?;
 
     // Use the get_interface_names() helper to build ifindex -> name map

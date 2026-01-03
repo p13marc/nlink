@@ -12,11 +12,11 @@ use std::env;
 
 use nlink::netlink::messages::NeighborMessage;
 use nlink::netlink::neigh::State as NeighborState;
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
+    let conn = Connection::<Route>::new()?;
     let args: Vec<String> = env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
@@ -33,7 +33,7 @@ async fn main() -> nlink::netlink::Result<()> {
     Ok(())
 }
 
-async fn list_neighbors(conn: &Connection) -> nlink::netlink::Result<()> {
+async fn list_neighbors(conn: &Connection<Route>) -> nlink::netlink::Result<()> {
     let neighbors = conn.get_neighbors().await?;
 
     // Use the get_interface_names() helper to build ifindex -> name map
@@ -52,7 +52,7 @@ async fn list_neighbors(conn: &Connection) -> nlink::netlink::Result<()> {
     Ok(())
 }
 
-async fn list_neighbors_for(conn: &Connection, dev: &str) -> nlink::netlink::Result<()> {
+async fn list_neighbors_for(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result<()> {
     let link = conn.get_link_by_name(dev).await?;
     let link = match link {
         Some(l) => l,

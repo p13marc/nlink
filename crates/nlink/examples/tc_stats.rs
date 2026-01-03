@@ -14,11 +14,11 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use nlink::netlink::messages::TcMessage;
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
+    let conn = Connection::<Route>::new()?;
     let args: Vec<String> = env::args().collect();
 
     let dev = args.get(1).map(|s| s.as_str());

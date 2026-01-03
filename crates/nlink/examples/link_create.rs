@@ -16,11 +16,11 @@
 use std::env;
 
 use nlink::netlink::link::{BridgeLink, DummyLink, VethLink};
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
+    let conn = Connection::<Route>::new()?;
     let args: Vec<String> = env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
@@ -76,7 +76,7 @@ async fn main() -> nlink::netlink::Result<()> {
     Ok(())
 }
 
-async fn create_dummy(conn: &Connection, name: &str) -> nlink::netlink::Result<()> {
+async fn create_dummy(conn: &Connection<Route>, name: &str) -> nlink::netlink::Result<()> {
     let link = DummyLink::new(name);
 
     conn.add_link(link).await?;
@@ -92,7 +92,7 @@ async fn create_dummy(conn: &Connection, name: &str) -> nlink::netlink::Result<(
     Ok(())
 }
 
-async fn create_veth(conn: &Connection, name: &str, peer: &str) -> nlink::netlink::Result<()> {
+async fn create_veth(conn: &Connection<Route>, name: &str, peer: &str) -> nlink::netlink::Result<()> {
     let link = VethLink::new(name, peer);
 
     conn.add_link(link).await?;
@@ -120,7 +120,7 @@ async fn create_veth(conn: &Connection, name: &str, peer: &str) -> nlink::netlin
     Ok(())
 }
 
-async fn create_bridge(conn: &Connection, name: &str) -> nlink::netlink::Result<()> {
+async fn create_bridge(conn: &Connection<Route>, name: &str) -> nlink::netlink::Result<()> {
     let link = BridgeLink::new(name);
 
     conn.add_link(link).await?;
@@ -137,7 +137,7 @@ async fn create_bridge(conn: &Connection, name: &str) -> nlink::netlink::Result<
     Ok(())
 }
 
-async fn delete_link(conn: &Connection, name: &str) -> nlink::netlink::Result<()> {
+async fn delete_link(conn: &Connection<Route>, name: &str) -> nlink::netlink::Result<()> {
     match conn.del_link(name).await {
         Ok(()) => println!("Deleted interface: {}", name),
         Err(e) if e.is_not_found() => println!("Interface {} not found", name),

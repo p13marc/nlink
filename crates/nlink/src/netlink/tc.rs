@@ -37,6 +37,7 @@ use super::builder::MessageBuilder;
 use super::connection::{ack_request, create_request, replace_request};
 use super::error::{Error, Result};
 use super::message::NlMsgType;
+use super::protocol::Route;
 use super::types::tc::qdisc::netem::*;
 use super::types::tc::qdisc::{TcRateSpec, fq_codel, htb, prio, sfq, tbf};
 use super::types::tc::{TcMsg, TcaAttr, tc_handle};
@@ -2469,7 +2470,7 @@ fn parse_handle(s: &str) -> Result<u32> {
 // Connection extension methods
 // ============================================================================
 
-impl Connection {
+impl Connection<Route> {
     /// Add a qdisc to an interface.
     ///
     /// # Example
@@ -2551,7 +2552,7 @@ impl Connection {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Delete a qdisc from an interface.
@@ -2602,7 +2603,7 @@ impl Connection {
         let mut builder = ack_request(NlMsgType::RTM_DELQDISC);
         builder.append(&tcmsg);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Replace a qdisc (add or update).
@@ -2670,7 +2671,7 @@ impl Connection {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Change a qdisc's parameters.
@@ -2744,7 +2745,7 @@ impl Connection {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Apply a netem configuration to an interface.

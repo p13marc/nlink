@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 use nlink::netlink::connection::create_request;
 use nlink::netlink::message::NlMsgType;
 use nlink::netlink::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
-use nlink::netlink::{Connection, MessageBuilder, Result};
+use nlink::netlink::{Connection, MessageBuilder, Result, Route};
 
 /// Common options for all link types.
 #[derive(Args, Debug)]
@@ -293,7 +293,7 @@ pub enum LinkAddType {
 }
 
 /// Add a link with the specified type.
-pub async fn add_link(conn: &Connection, link_type: LinkAddType) -> Result<()> {
+pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Result<()> {
     let (name, kind, common) = match &link_type {
         LinkAddType::Dummy { name, common } => (name.as_str(), "dummy", common),
         LinkAddType::Veth { name, common, .. } => (name.as_str(), "veth", common),
@@ -337,7 +337,7 @@ pub async fn add_link(conn: &Connection, link_type: LinkAddType) -> Result<()> {
 
     builder.nest_end(linkinfo);
 
-    conn.request_ack(builder).await?;
+    conn.send_ack(builder).await?;
 
     Ok(())
 }

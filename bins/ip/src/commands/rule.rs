@@ -6,7 +6,7 @@ use nlink::netlink::message::{NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
 use nlink::netlink::types::rule::{
     FibRuleAction, FibRuleHdr, FibRulePortRange, FibRuleUidRange, FraAttr,
 };
-use nlink::netlink::{Connection, Result, connection::dump_request};
+use nlink::netlink::{Connection, Result, Route, connection::dump_request};
 use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::io::Write;
 
@@ -108,7 +108,7 @@ enum RuleAction {
 impl RuleCmd {
     pub async fn run(
         self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         format: OutputFormat,
         opts: &OutputOptions,
         family: Option<u8>,
@@ -172,7 +172,7 @@ impl RuleCmd {
     }
 
     async fn show(
-        conn: &Connection,
+        conn: &Connection<Route>,
         format: OutputFormat,
         opts: &OutputOptions,
         family: Option<u8>,
@@ -183,7 +183,7 @@ impl RuleCmd {
         builder.append(&hdr);
 
         // Send and receive
-        let responses = conn.dump(builder).await?;
+        let responses = conn.send_dump(builder).await?;
 
         let mut rules = Vec::new();
 
@@ -209,7 +209,7 @@ impl RuleCmd {
 
     #[allow(clippy::too_many_arguments)]
     async fn add(
-        conn: &Connection,
+        conn: &Connection<Route>,
         family: u8,
         priority: Option<u32>,
         from: Option<&str>,
@@ -375,14 +375,14 @@ impl RuleCmd {
             builder.append_attr(FraAttr::Dport as u16, &range_bytes);
         }
 
-        conn.request_ack(builder).await?;
+        conn.send_ack(builder).await?;
 
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn del(
-        conn: &Connection,
+        conn: &Connection<Route>,
         family: u8,
         priority: Option<u32>,
         from: Option<&str>,
@@ -498,18 +498,18 @@ impl RuleCmd {
             builder.append_attr_u32(FraAttr::Table as u16, table_id);
         }
 
-        conn.request_ack(builder).await?;
+        conn.send_ack(builder).await?;
 
         Ok(())
     }
 
-    async fn flush(conn: &Connection, family: Option<u8>) -> Result<()> {
+    async fn flush(conn: &Connection<Route>, family: Option<u8>) -> Result<()> {
         // Get all rules first
         let mut builder = dump_request(NlMsgType::RTM_GETRULE);
         let hdr = FibRuleHdr::new().with_family(family.unwrap_or(0));
         builder.append(&hdr);
 
-        let responses = conn.dump(builder).await?;
+        let responses = conn.send_dump(builder).await?;
 
         let mut rules = Vec::new();
         for response in &responses {
@@ -535,7 +535,7 @@ impl RuleCmd {
             del_builder.append_attr_u32(FraAttr::Priority as u16, rule.priority);
 
             // Ignore errors (rule may have been deleted already)
-            let _ = conn.request_ack(del_builder).await;
+            let _ = conn.send_ack(del_builder).await;
         }
 
         Ok(())

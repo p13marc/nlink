@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 use nlink::netlink::message::NlMsgType;
 use nlink::netlink::messages::TcMessage;
 use nlink::netlink::types::tc::tc_handle;
-use nlink::netlink::{Connection, Result};
+use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions, print_items};
 use nlink::tc::builders::filter as filter_builder;
 use std::io::{self, Write};
@@ -146,7 +146,7 @@ enum FilterAction {
 impl FilterCmd {
     pub async fn run(
         self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         format: OutputFormat,
         opts: &OutputOptions,
     ) -> Result<()> {
@@ -210,7 +210,7 @@ impl FilterCmd {
     }
 
     async fn show(
-        conn: &Connection,
+        conn: &Connection<Route>,
         dev: &str,
         parent: &str,
         protocol_filter: Option<&str>,

@@ -50,6 +50,7 @@ use super::builder::MessageBuilder;
 use super::connection::Connection;
 use super::error::{Error, Result};
 use super::message::NlMsgType;
+use super::protocol::Route;
 use super::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
 
 /// NLM_F_CREATE flag
@@ -2689,7 +2690,7 @@ fn build_simple_link(
 // Connection Methods
 // ============================================================================
 
-impl Connection {
+impl Connection<Route> {
     /// Add a new network interface.
     ///
     /// # Example
@@ -2708,7 +2709,7 @@ impl Connection {
     /// ```
     pub async fn add_link<L: LinkConfig>(&self, config: L) -> Result<()> {
         let builder = config.build()?;
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Set the master (controller) device for an interface.
@@ -2737,7 +2738,7 @@ impl Connection {
         builder.append(&ifinfo);
         builder.append_attr_u32(IflaAttr::Master as u16, master_index);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Remove an interface from its master device.
@@ -2763,7 +2764,7 @@ impl Connection {
         builder.append(&ifinfo);
         builder.append_attr_u32(IflaAttr::Master as u16, 0);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Rename a network interface.
@@ -2790,7 +2791,7 @@ impl Connection {
         builder.append(&ifinfo);
         builder.append_attr_str(IflaAttr::Ifname as u16, new_name);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Set the MAC address of a network interface.
@@ -2815,7 +2816,7 @@ impl Connection {
         builder.append(&ifinfo);
         builder.append_attr(IflaAttr::Address as u16, &address);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Move a network interface to a different network namespace.
@@ -2841,7 +2842,7 @@ impl Connection {
         builder.append(&ifinfo);
         builder.append_attr_u32(IflaAttr::NetNsPid as u16, pid);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Move a network interface to a namespace by file descriptor.
@@ -2860,6 +2861,6 @@ impl Connection {
         builder.append(&ifinfo);
         builder.append_attr_u32(IflaAttr::NetNsFd as u16, fd as u32);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 }

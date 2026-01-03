@@ -11,18 +11,54 @@ use super::message::{
     NlMsgType,
 };
 use super::parse::FromNetlink;
-use super::socket::{NetlinkSocket, Protocol};
+use super::protocol::{ProtocolState, Route};
+use super::socket::NetlinkSocket;
 
-/// High-level netlink connection.
-pub struct Connection {
+/// High-level netlink connection parameterized by protocol state.
+///
+/// The type parameter `P` determines which protocol this connection uses
+/// and which methods are available:
+///
+/// - [`Connection<Route>`]: RTNetlink for interfaces, addresses, routes, TC
+/// - [`Connection<Generic>`]: Generic netlink for WireGuard, MACsec, etc.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::{Connection, Route, Generic};
+///
+/// // Route protocol connection
+/// let route = Connection::<Route>::new()?;
+/// route.get_links().await?;
+///
+/// // Generic netlink connection
+/// let genl = Connection::<Generic>::new()?;
+/// genl.get_family("wireguard").await?;
+/// ```
+pub struct Connection<P: ProtocolState> {
     socket: NetlinkSocket,
+    state: P,
 }
 
-impl Connection {
-    /// Create a new connection for the given protocol.
-    pub fn new(protocol: Protocol) -> Result<Self> {
+// ============================================================================
+// Shared methods for all protocol types
+// ============================================================================
+
+impl<P: ProtocolState> Connection<P> {
+    /// Create a new connection for this protocol type.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Route, Generic};
+    ///
+    /// let route = Connection::<Route>::new()?;
+    /// let genl = Connection::<Generic>::new()?;
+    /// ```
+    pub fn new() -> Result<Self> {
         Ok(Self {
-            socket: NetlinkSocket::new(protocol)?,
+            socket: NetlinkSocket::new(P::PROTOCOL)?,
+            state: P::default(),
         })
     }
 
@@ -31,82 +67,47 @@ impl Connection {
     /// The namespace is specified by an open file descriptor to a namespace file
     /// (e.g., `/proc/<pid>/ns/net` or `/var/run/netns/<name>`).
     ///
-    /// This function temporarily switches to the target namespace, creates the socket,
-    /// then restores the original namespace. The socket will operate in the target
-    /// namespace for all subsequent operations.
-    ///
     /// # Example
     ///
     /// ```ignore
     /// use std::fs::File;
     /// use std::os::unix::io::AsRawFd;
-    /// use nlink::netlink::{Connection, Protocol};
+    /// use nlink::netlink::{Connection, Route};
     ///
     /// let ns_file = File::open("/var/run/netns/myns")?;
-    /// let conn = Connection::new_in_namespace(Protocol::Route, ns_file.as_raw_fd())?;
+    /// let conn = Connection::<Route>::new_in_namespace(ns_file.as_raw_fd())?;
     ///
     /// // All operations now occur in the "myns" namespace
     /// let links = conn.get_links().await?;
     /// ```
-    pub fn new_in_namespace(protocol: Protocol, ns_fd: RawFd) -> Result<Self> {
+    pub fn new_in_namespace(ns_fd: RawFd) -> Result<Self> {
         Ok(Self {
-            socket: NetlinkSocket::new_in_namespace(protocol, ns_fd)?,
+            socket: NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?,
+            state: P::default(),
         })
     }
 
     /// Create a connection that operates in a network namespace specified by path.
     ///
-    /// This is a convenience method that opens the namespace file and calls
-    /// [`new_in_namespace`](Self::new_in_namespace).
-    ///
     /// # Example
     ///
     /// ```ignore
-    /// use nlink::netlink::{Connection, Protocol};
+    /// use nlink::netlink::{Connection, Route};
     ///
     /// // For a named namespace (created via `ip netns add myns`)
-    /// let conn = Connection::new_in_namespace_path(
-    ///     Protocol::Route,
-    ///     "/var/run/netns/myns"
-    /// )?;
+    /// let conn = Connection::<Route>::new_in_namespace_path("/var/run/netns/myns")?;
     ///
     /// // For a container's namespace
-    /// let conn = Connection::new_in_namespace_path(
-    ///     Protocol::Route,
-    ///     "/proc/1234/ns/net"
-    /// )?;
+    /// let conn = Connection::<Route>::new_in_namespace_path("/proc/1234/ns/net")?;
     ///
     /// // Query interfaces in that namespace
     /// let links = conn.get_links().await?;
     /// ```
-    pub fn new_in_namespace_path<P: AsRef<Path>>(protocol: Protocol, ns_path: P) -> Result<Self> {
+    pub fn new_in_namespace_path<T: AsRef<Path>>(ns_path: T) -> Result<Self> {
         Ok(Self {
-            socket: NetlinkSocket::new_in_namespace_path(protocol, ns_path)?,
+            socket: NetlinkSocket::new_in_namespace_path(P::PROTOCOL, ns_path)?,
+            state: P::default(),
         })
-    }
-
-    /// Create a connection for the specified namespace.
-    ///
-    /// This is a convenience method that creates a Route protocol connection
-    /// for any namespace specification.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use nlink::netlink::Connection;
-    /// use nlink::netlink::namespace::NamespaceSpec;
-    ///
-    /// // For a named namespace
-    /// let conn = Connection::for_namespace(NamespaceSpec::Named("myns"))?;
-    ///
-    /// // For a container by PID
-    /// let conn = Connection::for_namespace(NamespaceSpec::Pid(1234))?;
-    ///
-    /// // For the default namespace
-    /// let conn = Connection::for_namespace(NamespaceSpec::Default)?;
-    /// ```
-    pub fn for_namespace(spec: super::namespace::NamespaceSpec<'_>) -> Result<Self> {
-        spec.connection()
     }
 
     /// Get the underlying socket.
@@ -114,8 +115,21 @@ impl Connection {
         &self.socket
     }
 
+    /// Get the protocol state.
+    pub fn state(&self) -> &P {
+        &self.state
+    }
+
+    // ========================================================================
+    // Internal request methods (pub(crate) - not part of public API)
+    // ========================================================================
+
     /// Send a request and wait for a single response or ACK.
-    pub async fn request(&self, mut builder: MessageBuilder) -> Result<Vec<u8>> {
+    /// Send a request and wait for a response.
+    ///
+    /// This is a low-level method. Prefer using typed methods like `get_links()`,
+    /// `add_route()`, etc. when available.
+    pub async fn send_request(&self, mut builder: MessageBuilder) -> Result<Vec<u8>> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -131,7 +145,10 @@ impl Connection {
     }
 
     /// Send a request that expects an ACK only (no data response).
-    pub async fn request_ack(&self, mut builder: MessageBuilder) -> Result<()> {
+    ///
+    /// This is a low-level method. Prefer using typed methods like `add_link()`,
+    /// `del_route()`, etc. when available.
+    pub async fn send_ack(&self, mut builder: MessageBuilder) -> Result<()> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -147,7 +164,10 @@ impl Connection {
     }
 
     /// Send a dump request and collect all responses.
-    pub async fn dump(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
+    ///
+    /// This is a low-level method. Prefer using typed methods like `get_links()`,
+    /// `get_routes()`, etc. when available.
+    pub async fn send_dump(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -239,6 +259,36 @@ impl Connection {
 
         Err(Error::InvalidMessage("expected ACK message".into()))
     }
+}
+
+// ============================================================================
+// Route protocol specific methods
+// ============================================================================
+
+impl Connection<Route> {
+    /// Create a connection for the specified namespace.
+    ///
+    /// This is a convenience method that creates a Route protocol connection
+    /// for any namespace specification.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Route};
+    /// use nlink::netlink::namespace::NamespaceSpec;
+    ///
+    /// // For a named namespace
+    /// let conn = Connection::<Route>::for_namespace(NamespaceSpec::Named("myns"))?;
+    ///
+    /// // For a container by PID
+    /// let conn = Connection::<Route>::for_namespace(NamespaceSpec::Pid(1234))?;
+    ///
+    /// // For the default namespace
+    /// let conn = Connection::<Route>::for_namespace(NamespaceSpec::Default)?;
+    /// ```
+    pub fn for_namespace(spec: super::namespace::NamespaceSpec<'_>) -> Result<Self> {
+        spec.connection()
+    }
 
     /// Subscribe to multicast groups for monitoring.
     pub fn subscribe(&mut self, group: u32) -> Result<()> {
@@ -258,7 +308,7 @@ impl Connection {
     }
 
     // ========================================================================
-    // Strongly-typed API
+    // Strongly-typed API for Route protocol
     // ========================================================================
 
     /// Send a dump request and parse all responses into typed messages.
@@ -286,7 +336,7 @@ impl Connection {
         T::write_dump_header(&mut header_buf);
         builder.append_bytes(&header_buf);
 
-        let responses = self.dump(builder).await?;
+        let responses = self.send_dump(builder).await?;
 
         let mut parsed = Vec::with_capacity(responses.len());
         for response in responses {
@@ -343,7 +393,7 @@ use super::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage
 
 /// Helper function to convert interface name to index.
 /// This is a standalone implementation to avoid dependency on rip-lib.
-fn ifname_to_index(name: &str) -> Result<u32> {
+pub(crate) fn ifname_to_index(name: &str) -> Result<u32> {
     let path = format!("/sys/class/net/{}/ifindex", name);
     let content = std::fs::read_to_string(&path)
         .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
@@ -353,7 +403,7 @@ fn ifname_to_index(name: &str) -> Result<u32> {
         .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
 }
 
-impl Connection {
+impl Connection<Route> {
     /// Get all network interfaces.
     ///
     /// # Example
@@ -651,7 +701,7 @@ impl Connection {
 
 use super::types::link::{IfInfoMsg, iff};
 
-impl Connection {
+impl Connection<Route> {
     /// Bring a network interface up.
     ///
     /// # Example
@@ -720,7 +770,7 @@ impl Connection {
         let mut builder = ack_request(NlMsgType::RTM_SETLINK);
         builder.append(&ifinfo);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Set the MTU of a network interface.
@@ -745,7 +795,7 @@ impl Connection {
         builder.append(&ifinfo);
         builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Delete a network interface.
@@ -767,7 +817,7 @@ impl Connection {
         let mut builder = ack_request(NlMsgType::RTM_DELLINK);
         builder.append(&ifinfo);
 
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 }
 
@@ -778,7 +828,7 @@ impl Connection {
 use super::messages::NsIdMessage;
 use super::types::nsid::{RTM_GETNSID, RtGenMsg, netnsa};
 
-impl Connection {
+impl Connection<Route> {
     /// Get the namespace ID for a given file descriptor.
     ///
     /// The file descriptor should be an open reference to a network namespace
@@ -808,7 +858,7 @@ impl Connection {
         // Add NETNSA_FD attribute
         builder.append_attr_u32(netnsa::FD, ns_fd as u32);
 
-        let response = self.request(builder).await?;
+        let response = self.send_request(builder).await?;
 
         // Parse the response
         if response.len() >= super::message::NLMSG_HDRLEN {
@@ -848,7 +898,7 @@ impl Connection {
         // Add NETNSA_PID attribute
         builder.append_attr_u32(netnsa::PID, pid);
 
-        let response = self.request(builder).await?;
+        let response = self.send_request(builder).await?;
 
         // Parse the response
         if response.len() >= super::message::NLMSG_HDRLEN {
@@ -866,6 +916,332 @@ impl Connection {
     }
 }
 
+// ============================================================================
+// Generic Netlink protocol methods
+// ============================================================================
+
+use super::genl::{
+    CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, FamilyInfo, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
+};
+use super::protocol::Generic;
+use std::collections::HashMap;
+
+impl Connection<Generic> {
+    /// Get information about a Generic Netlink family.
+    ///
+    /// The result is cached, so subsequent calls for the same family
+    /// do not require kernel communication.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Generic};
+    ///
+    /// let conn = Connection::<Generic>::new()?;
+    /// let wg = conn.get_family("wireguard").await?;
+    /// println!("WireGuard family ID: {}", wg.id);
+    /// ```
+    pub async fn get_family(&self, name: &str) -> Result<FamilyInfo> {
+        // Check cache first
+        {
+            let cache = self.state.cache.read().unwrap();
+            if let Some(info) = cache.get(name) {
+                return Ok(info.clone());
+            }
+        }
+
+        // Query kernel for family info
+        let info = self.query_family(name).await?;
+
+        // Cache the result
+        {
+            let mut cache = self.state.cache.write().unwrap();
+            cache.insert(name.to_string(), info.clone());
+        }
+
+        Ok(info)
+    }
+
+    /// Get the family ID for a given family name.
+    ///
+    /// This is a convenience method that returns just the ID.
+    pub async fn get_family_id(&self, name: &str) -> Result<u16> {
+        Ok(self.get_family(name).await?.id)
+    }
+
+    /// Clear the family cache.
+    ///
+    /// This is rarely needed, but may be useful if families are
+    /// dynamically loaded/unloaded.
+    pub fn clear_cache(&self) {
+        let mut cache = self.state.cache.write().unwrap();
+        cache.clear();
+    }
+
+    /// Query the kernel for family information.
+    async fn query_family(&self, name: &str) -> Result<FamilyInfo> {
+        // Build CTRL_CMD_GETFAMILY request
+        let mut builder = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK);
+
+        // Append GENL header
+        let genl_hdr = GenlMsgHdr::new(CtrlCmd::GetFamily as u8, 1);
+        builder.append(&genl_hdr);
+
+        // Append family name attribute
+        builder.append_attr_str(CtrlAttr::FamilyName as u16, name);
+
+        // Send request
+        let seq = self.socket.next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket.pid());
+
+        let msg = builder.finish();
+        self.socket.send(&msg).await?;
+
+        // Receive response
+        let response = self.socket.recv_msg().await?;
+
+        // Parse response
+        self.parse_family_response(&response, seq, name)
+    }
+
+    /// Parse a CTRL_CMD_GETFAMILY response.
+    fn parse_family_response(&self, data: &[u8], seq: u32, name: &str) -> Result<FamilyInfo> {
+        for result in MessageIter::new(data) {
+            let (header, payload) = result?;
+
+            // Check sequence number
+            if header.nlmsg_seq != seq {
+                continue;
+            }
+
+            // Check for error
+            if header.is_error() {
+                let err = NlMsgError::from_bytes(payload)?;
+                if !err.is_ack() {
+                    // ENOENT means family not found
+                    if err.error == -libc::ENOENT {
+                        return Err(Error::FamilyNotFound {
+                            name: name.to_string(),
+                        });
+                    }
+                    return Err(Error::from_errno(err.error));
+                }
+                continue;
+            }
+
+            // Skip DONE message
+            if header.is_done() {
+                continue;
+            }
+
+            // Parse GENL header
+            if payload.len() < GENL_HDRLEN {
+                return Err(Error::InvalidMessage("GENL header too short".into()));
+            }
+
+            // Parse attributes after GENL header
+            let attrs_data = &payload[GENL_HDRLEN..];
+            return self.parse_family_attrs(attrs_data);
+        }
+
+        Err(Error::FamilyNotFound {
+            name: name.to_string(),
+        })
+    }
+
+    /// Parse family attributes from a CTRL_CMD_GETFAMILY response.
+    fn parse_family_attrs(&self, data: &[u8]) -> Result<FamilyInfo> {
+        use super::attr::{AttrIter, get};
+
+        let mut id: Option<u16> = None;
+        let mut version: u8 = 0;
+        let mut hdr_size: u32 = 0;
+        let mut max_attr: u32 = 0;
+        let mut mcast_groups = HashMap::new();
+
+        for (attr_type, payload) in AttrIter::new(data) {
+            match attr_type {
+                t if t == CtrlAttr::FamilyId as u16 => {
+                    id = Some(get::u16_ne(payload)?);
+                }
+                t if t == CtrlAttr::Version as u16 => {
+                    version = get::u32_ne(payload)? as u8;
+                }
+                t if t == CtrlAttr::HdrSize as u16 => {
+                    hdr_size = get::u32_ne(payload)?;
+                }
+                t if t == CtrlAttr::MaxAttr as u16 => {
+                    max_attr = get::u32_ne(payload)?;
+                }
+                t if t == CtrlAttr::McastGroups as u16 => {
+                    mcast_groups = self.parse_mcast_groups(payload)?;
+                }
+                _ => {}
+            }
+        }
+
+        let id = id.ok_or_else(|| Error::InvalidMessage("missing family ID".into()))?;
+
+        Ok(FamilyInfo {
+            id,
+            version,
+            hdr_size,
+            max_attr,
+            mcast_groups,
+        })
+    }
+
+    /// Parse multicast groups from CTRL_ATTR_MCAST_GROUPS.
+    fn parse_mcast_groups(&self, data: &[u8]) -> Result<HashMap<String, u32>> {
+        use super::attr::{AttrIter, get};
+
+        let mut groups = HashMap::new();
+
+        // The mcast_groups attribute contains nested arrays
+        for (_group_idx, group_payload) in AttrIter::new(data) {
+            let mut name: Option<String> = None;
+            let mut grp_id: Option<u32> = None;
+
+            // Parse the nested group attributes
+            for (attr_type, payload) in AttrIter::new(group_payload) {
+                match attr_type {
+                    t if t == CtrlAttrMcastGrp::Name as u16 => {
+                        name = Some(get::string(payload)?.to_string());
+                    }
+                    t if t == CtrlAttrMcastGrp::Id as u16 => {
+                        grp_id = Some(get::u32_ne(payload)?);
+                    }
+                    _ => {}
+                }
+            }
+
+            if let (Some(name), Some(id)) = (name, grp_id) {
+                groups.insert(name, id);
+            }
+        }
+
+        Ok(groups)
+    }
+
+    /// Send a GENL command and wait for a response.
+    ///
+    /// This is a low-level method for sending arbitrary GENL commands.
+    /// Family-specific wrappers (like WireguardConnection) should use this.
+    pub async fn command(
+        &self,
+        family_id: u16,
+        cmd: u8,
+        version: u8,
+        build_attrs: impl FnOnce(&mut MessageBuilder),
+    ) -> Result<Vec<u8>> {
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
+
+        // Append GENL header
+        let genl_hdr = GenlMsgHdr::new(cmd, version);
+        builder.append(&genl_hdr);
+
+        // Let caller append attributes
+        build_attrs(&mut builder);
+
+        // Send request
+        let seq = self.socket.next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket.pid());
+
+        let msg = builder.finish();
+        self.socket.send(&msg).await?;
+
+        // Receive response
+        let response = self.socket.recv_msg().await?;
+        self.process_genl_response(&response, seq)?;
+
+        Ok(response)
+    }
+
+    /// Send a GENL dump command and collect all responses.
+    pub async fn dump_command(
+        &self,
+        family_id: u16,
+        cmd: u8,
+        version: u8,
+        build_attrs: impl FnOnce(&mut MessageBuilder),
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
+
+        // Append GENL header
+        let genl_hdr = GenlMsgHdr::new(cmd, version);
+        builder.append(&genl_hdr);
+
+        // Let caller append attributes
+        build_attrs(&mut builder);
+
+        // Send request
+        let seq = self.socket.next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket.pid());
+
+        let msg = builder.finish();
+        self.socket.send(&msg).await?;
+
+        let mut responses = Vec::new();
+
+        loop {
+            let data = self.socket.recv_msg().await?;
+            let mut done = false;
+
+            for result in MessageIter::new(&data) {
+                let (header, payload) = result?;
+
+                if header.nlmsg_seq != seq {
+                    continue;
+                }
+
+                if header.is_error() {
+                    let err = NlMsgError::from_bytes(payload)?;
+                    if !err.is_ack() {
+                        return Err(Error::from_errno(err.error));
+                    }
+                    continue;
+                }
+
+                if header.is_done() {
+                    done = true;
+                    break;
+                }
+
+                // Include the payload (with GENL header)
+                responses.push(payload.to_vec());
+            }
+
+            if done {
+                break;
+            }
+        }
+
+        Ok(responses)
+    }
+
+    /// Process a GENL response, checking for errors.
+    fn process_genl_response(&self, data: &[u8], seq: u32) -> Result<()> {
+        for result in MessageIter::new(data) {
+            let (header, payload) = result?;
+
+            if header.nlmsg_seq != seq {
+                continue;
+            }
+
+            if header.is_error() {
+                let err = NlMsgError::from_bytes(payload)?;
+                if !err.is_ack() {
+                    return Err(Error::from_errno(err.error));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod send_sync_tests {
     use super::*;
@@ -875,7 +1251,7 @@ mod send_sync_tests {
 
     #[test]
     fn connection_is_send_sync() {
-        assert_send::<Connection>();
-        assert_sync::<Connection>();
+        assert_send::<Connection<Route>>();
+        assert_sync::<Connection<Route>>();
     }
 }

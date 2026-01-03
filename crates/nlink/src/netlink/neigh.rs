@@ -34,6 +34,7 @@ use super::builder::MessageBuilder;
 use super::connection::Connection;
 use super::error::{Error, Result};
 use super::message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType};
+use super::protocol::Route;
 use super::types::neigh::{NdMsg, NdaAttr, NeighborState, ntf, nud};
 
 /// NLM_F_CREATE flag
@@ -340,7 +341,7 @@ fn ifname_to_index(name: &str) -> Result<u32> {
 // Connection Methods
 // ============================================================================
 
-impl Connection {
+impl Connection<Route> {
     /// Add a neighbor entry.
     ///
     /// # Example
@@ -358,13 +359,13 @@ impl Connection {
     /// ```
     pub async fn add_neighbor<N: NeighborConfig>(&self, config: N) -> Result<()> {
         let builder = config.build()?;
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Delete a neighbor entry using a config.
     pub async fn del_neighbor<N: NeighborConfig>(&self, config: N) -> Result<()> {
         let builder = config.build_delete()?;
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Delete an IPv4 neighbor entry.
@@ -391,7 +392,7 @@ impl Connection {
     pub async fn replace_neighbor<N: NeighborConfig>(&self, config: N) -> Result<()> {
         // Similar to add but with REPLACE flag
         let builder = config.build()?;
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Flush all neighbor entries for an interface.

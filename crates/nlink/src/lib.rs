@@ -137,6 +137,9 @@ pub mod output;
 // Re-export common types at crate root for convenience
 pub use netlink::{Connection, Error, Protocol, Result};
 
+// Protocol state types and type aliases
+pub use netlink::{Generic, GenlConnection, Route, RouteConnection};
+
 // Event types
 pub use netlink::{
     EventStream, EventStreamBuilder, MultiNamespaceEventStream, NamespacedEvent, NetworkEvent,

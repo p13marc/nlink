@@ -6,7 +6,7 @@ use clap::{Args, Subcommand};
 use nlink::netlink::message::NlMsgType;
 use nlink::netlink::messages::RouteMessage;
 use nlink::netlink::types::route::{RouteScope, RtMsg, RtaAttr};
-use nlink::netlink::{Connection, Result, connection::dump_request};
+use nlink::netlink::{Connection, Result, Route, connection::dump_request};
 use nlink::output::{OutputFormat, OutputOptions, print_all};
 use std::net::IpAddr;
 
@@ -105,7 +105,7 @@ enum RouteAction {
 impl RouteCmd {
     pub async fn run(
         self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         format: OutputFormat,
         opts: &OutputOptions,
         family: Option<u8>,
@@ -166,7 +166,7 @@ impl RouteCmd {
     }
 
     async fn show(
-        conn: &Connection,
+        conn: &Connection<Route>,
         table: &str,
         format: OutputFormat,
         opts: &OutputOptions,
@@ -188,7 +188,7 @@ impl RouteCmd {
         }
 
         // Send and receive
-        let responses = conn.dump(builder).await?;
+        let responses = conn.send_dump(builder).await?;
 
         // Parse responses into typed RouteMessage
         let mut routes = Vec::new();
@@ -223,7 +223,7 @@ impl RouteCmd {
 
     #[allow(clippy::too_many_arguments)]
     async fn add(
-        conn: &Connection,
+        conn: &Connection<Route>,
         destination: &str,
         via: Option<&str>,
         dev: Option<&str>,
@@ -346,12 +346,12 @@ impl RouteCmd {
             builder.nest_end(metrics);
         }
 
-        conn.request_ack(builder).await?;
+        conn.send_ack(builder).await?;
 
         Ok(())
     }
 
-    async fn del(conn: &Connection, destination: &str, table: &str) -> Result<()> {
+    async fn del(conn: &Connection<Route>, destination: &str, table: &str) -> Result<()> {
         use nlink::netlink::connection::ack_request;
         use nlink::util::addr::parse_prefix;
 
@@ -393,13 +393,13 @@ impl RouteCmd {
             builder.append_attr_u32(RtaAttr::Table as u16, table_id);
         }
 
-        conn.request_ack(builder).await?;
+        conn.send_ack(builder).await?;
 
         Ok(())
     }
 
     async fn get(
-        conn: &Connection,
+        conn: &Connection<Route>,
         destination: &str,
         format: OutputFormat,
         opts: &OutputOptions,
@@ -432,7 +432,7 @@ impl RouteCmd {
         }
 
         // Send request and get response
-        let response = conn.request(builder).await?;
+        let response = conn.send_request(builder).await?;
 
         // Parse response
         if response.len() < NLMSG_HDRLEN + RtMsg::SIZE {

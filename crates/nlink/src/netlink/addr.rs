@@ -35,6 +35,7 @@ use super::builder::MessageBuilder;
 use super::connection::Connection;
 use super::error::{Error, Result};
 use super::message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType};
+use super::protocol::Route;
 use super::types::addr::{IfAddrMsg, IfaAttr, Scope, ifa_flags};
 
 /// NLM_F_CREATE flag
@@ -661,7 +662,7 @@ fn ifname_to_index(name: &str) -> Result<u32> {
 // Connection Methods
 // ============================================================================
 
-impl Connection {
+impl Connection<Route> {
     /// Add an IP address to an interface.
     ///
     /// # Example
@@ -682,7 +683,7 @@ impl Connection {
     /// ```
     pub async fn add_address<A: AddressConfig>(&self, config: A) -> Result<()> {
         let builder = config.build()?;
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Delete an IP address from an interface.
@@ -697,12 +698,12 @@ impl Connection {
             IpAddr::V4(addr) => {
                 let config = Ipv4Address::new(ifname, addr, prefix_len);
                 let builder = config.build_delete()?;
-                self.request_ack(builder).await
+                self.send_ack(builder).await
             }
             IpAddr::V6(addr) => {
                 let config = Ipv6Address::new(ifname, addr, prefix_len);
                 let builder = config.build_delete()?;
-                self.request_ack(builder).await
+                self.send_ack(builder).await
             }
         }
     }
@@ -716,7 +717,7 @@ impl Connection {
     ) -> Result<()> {
         let config = Ipv4Address::new(ifname, address, prefix_len);
         let builder = config.build_delete()?;
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Delete an IPv6 address from an interface.
@@ -728,13 +729,13 @@ impl Connection {
     ) -> Result<()> {
         let config = Ipv6Address::new(ifname, address, prefix_len);
         let builder = config.build_delete()?;
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Delete an IP address using a typed config.
     pub async fn del_address_config<A: AddressConfig>(&self, config: A) -> Result<()> {
         let builder = config.build_delete()?;
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Replace an IP address (add or update).
@@ -753,7 +754,7 @@ impl Connection {
     /// ```
     pub async fn replace_address<A: AddressConfig>(&self, config: A) -> Result<()> {
         let builder = config.build_replace()?;
-        self.request_ack(builder).await
+        self.send_ack(builder).await
     }
 
     /// Flush all addresses from an interface.

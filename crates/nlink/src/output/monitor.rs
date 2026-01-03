@@ -19,7 +19,7 @@
 
 use super::{OutputFormat, OutputOptions};
 use crate::netlink::message::{MessageIter, NlMsgType};
-use crate::netlink::{Connection, Result};
+use crate::netlink::{Connection, Result, Route};
 use std::io::{self, Write};
 use std::time::SystemTime;
 
@@ -132,7 +132,7 @@ pub type EventHandler<E> = dyn Fn(u16, &[u8]) -> Option<E>;
 /// * `config` - Monitor configuration
 /// * `handler` - Function to parse messages into events
 pub async fn run_monitor_loop<E>(
-    conn: &Connection,
+    conn: &Connection<Route>,
     config: &MonitorConfig,
     handler: impl Fn(u16, &[u8]) -> Option<E>,
 ) -> Result<()>

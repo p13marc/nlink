@@ -18,11 +18,11 @@ use std::time::Duration;
 
 use nlink::netlink::tc::NetemConfig;
 use nlink::netlink::tc_options::QdiscOptions;
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
+    let conn = Connection::<Route>::new()?;
     let args: Vec<String> = env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
@@ -54,7 +54,7 @@ async fn main() -> nlink::netlink::Result<()> {
     Ok(())
 }
 
-async fn show_netem(conn: &Connection, dev: &str) -> nlink::netlink::Result<()> {
+async fn show_netem(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result<()> {
     let qdiscs = conn.get_qdiscs_for(dev).await?;
 
     println!("TC qdiscs on {}:", dev);
@@ -159,7 +159,7 @@ async fn show_netem(conn: &Connection, dev: &str) -> nlink::netlink::Result<()> 
 }
 
 async fn add_netem(
-    conn: &Connection,
+    conn: &Connection<Route>,
     dev: &str,
     effect: &str,
     value: &str,
@@ -195,7 +195,7 @@ async fn add_netem(
     Ok(())
 }
 
-async fn del_netem(conn: &Connection, dev: &str) -> nlink::netlink::Result<()> {
+async fn del_netem(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result<()> {
     // Use remove_netem convenience method
     match conn.remove_netem(dev).await {
         Ok(()) => println!("Removed netem from {}", dev),

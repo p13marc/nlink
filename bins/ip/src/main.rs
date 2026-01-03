@@ -3,7 +3,7 @@
 mod commands;
 
 use clap::{Parser, Subcommand};
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 use nlink::output::OutputFormat;
 
 #[derive(Parser)]
@@ -121,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Create netlink connection
-    let conn = Connection::new(Protocol::Route)?;
+    let conn = Connection::<Route>::new()?;
 
     // Execute command
     let result = match cli.command {

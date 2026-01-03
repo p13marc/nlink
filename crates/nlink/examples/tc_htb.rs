@@ -12,11 +12,11 @@
 use std::env;
 
 use nlink::netlink::tc_options::QdiscOptions;
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
+    let conn = Connection::<Route>::new()?;
     let args: Vec<String> = env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
@@ -42,7 +42,7 @@ async fn main() -> nlink::netlink::Result<()> {
     Ok(())
 }
 
-async fn show_htb(conn: &Connection, dev: &str) -> nlink::netlink::Result<()> {
+async fn show_htb(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result<()> {
     let qdiscs = conn.get_qdiscs_for(dev).await?;
 
     println!("TC qdiscs on {}:", dev);
@@ -92,7 +92,7 @@ async fn show_htb(conn: &Connection, dev: &str) -> nlink::netlink::Result<()> {
     Ok(())
 }
 
-async fn show_classes(conn: &Connection, dev: &str) -> nlink::netlink::Result<()> {
+async fn show_classes(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result<()> {
     let classes = conn.get_classes_for(dev).await?;
 
     println!("TC classes on {}:", dev);

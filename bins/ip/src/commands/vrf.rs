@@ -8,7 +8,7 @@ use nlink::netlink::attr::AttrIter;
 use nlink::netlink::connection::dump_request;
 use nlink::netlink::message::{NLMSG_HDRLEN, NlMsgType};
 use nlink::netlink::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
-use nlink::netlink::{Connection, Result};
+use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::io::Write;
 
@@ -82,7 +82,7 @@ impl Printable for VrfInfo {
 impl VrfCmd {
     pub async fn run(
         &self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         format: OutputFormat,
         opts: &OutputOptions,
     ) -> Result<()> {
@@ -97,7 +97,7 @@ impl VrfCmd {
 
     async fn show(
         &self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         name_filter: Option<&str>,
         format: OutputFormat,
         opts: &OutputOptions,
@@ -107,7 +107,7 @@ impl VrfCmd {
         let ifinfo = IfInfoMsg::new();
         builder.append(&ifinfo);
 
-        let responses = conn.dump(builder).await?;
+        let responses = conn.send_dump(builder).await?;
 
         let mut vrfs = Vec::new();
 

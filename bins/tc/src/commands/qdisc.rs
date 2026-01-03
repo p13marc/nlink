@@ -3,7 +3,7 @@
 use clap::{Args, Subcommand};
 use nlink::netlink::message::NlMsgType;
 use nlink::netlink::messages::TcMessage;
-use nlink::netlink::{Connection, Result};
+use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions, print_all};
 use nlink::tc::builders::qdisc as qdisc_builder;
 
@@ -119,7 +119,7 @@ enum QdiscAction {
 impl QdiscCmd {
     pub async fn run(
         self,
-        conn: &Connection,
+        conn: &Connection<Route>,
         format: OutputFormat,
         opts: &OutputOptions,
     ) -> Result<()> {
@@ -163,7 +163,7 @@ impl QdiscCmd {
     }
 
     async fn show(
-        conn: &Connection,
+        conn: &Connection<Route>,
         dev: Option<&str>,
         _invisible: bool,
         format: OutputFormat,
@@ -194,7 +194,7 @@ impl QdiscCmd {
     }
 
     async fn add(
-        conn: &Connection,
+        conn: &Connection<Route>,
         dev: &str,
         parent: &str,
         handle: Option<&str>,
@@ -204,12 +204,12 @@ impl QdiscCmd {
         qdisc_builder::add(conn, dev, parent, handle, kind, params).await
     }
 
-    async fn del(conn: &Connection, dev: &str, parent: &str, handle: Option<&str>) -> Result<()> {
+    async fn del(conn: &Connection<Route>, dev: &str, parent: &str, handle: Option<&str>) -> Result<()> {
         qdisc_builder::del(conn, dev, parent, handle).await
     }
 
     async fn replace(
-        conn: &Connection,
+        conn: &Connection<Route>,
         dev: &str,
         parent: &str,
         handle: Option<&str>,
@@ -220,7 +220,7 @@ impl QdiscCmd {
     }
 
     async fn change(
-        conn: &Connection,
+        conn: &Connection<Route>,
         dev: &str,
         parent: &str,
         handle: Option<&str>,

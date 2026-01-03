@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use super::connection::Connection;
 use super::error::{Error, Result};
-use super::socket::Protocol;
+use super::protocol::Route;
 
 /// Specification for which network namespace to use.
 ///
@@ -76,9 +76,9 @@ impl<'a> NamespaceSpec<'a> {
     /// let conn = spec.connection()?;
     /// let links = conn.get_links().await?;
     /// ```
-    pub fn connection(&self) -> Result<Connection> {
+    pub fn connection(&self) -> Result<Connection<Route>> {
         match self {
-            NamespaceSpec::Default => Connection::new(Protocol::Route),
+            NamespaceSpec::Default => Connection::<Route>::new(),
             NamespaceSpec::Named(name) => connection_for(name),
             NamespaceSpec::Path(path) => connection_for_path(path),
             NamespaceSpec::Pid(pid) => connection_for_pid(*pid),
@@ -109,7 +109,7 @@ pub const NETNS_RUN_DIR: &str = "/var/run/netns";
 /// let conn = namespace::connection_for("production")?;
 /// let links = conn.get_links().await?;
 /// ```
-pub fn connection_for(name: &str) -> Result<Connection> {
+pub fn connection_for(name: &str) -> Result<Connection<Route>> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(name);
     connection_for_path(&path)
 }
@@ -130,8 +130,8 @@ pub fn connection_for(name: &str) -> Result<Connection> {
 /// let conn = namespace::connection_for_path("/proc/1234/ns/net")?;
 /// let links = conn.get_links().await?;
 /// ```
-pub fn connection_for_path<P: AsRef<Path>>(path: P) -> Result<Connection> {
-    Connection::new_in_namespace_path(Protocol::Route, path)
+pub fn connection_for_path<T: AsRef<Path>>(path: T) -> Result<Connection<Route>> {
+    Connection::<Route>::new_in_namespace_path(path)
 }
 
 /// Get a connection for a process's network namespace.
@@ -145,7 +145,7 @@ pub fn connection_for_path<P: AsRef<Path>>(path: P) -> Result<Connection> {
 /// let conn = namespace::connection_for_pid(1234)?;
 /// let links = conn.get_links().await?;
 /// ```
-pub fn connection_for_pid(pid: u32) -> Result<Connection> {
+pub fn connection_for_pid(pid: u32) -> Result<Connection<Route>> {
     let path = format!("/proc/{}/ns/net", pid);
     connection_for_path(&path)
 }

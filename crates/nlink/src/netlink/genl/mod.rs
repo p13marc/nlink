@@ -17,7 +17,7 @@
 //! └────────────────┬────────────────────────┘
 //!                  │
 //! ┌────────────────▼────────────────────────┐
-//! │ GenlConnection                          │
+//! │ Connection<Generic>                     │
 //! │ (Generic GENL operations, family cache) │
 //! └────────────────┬────────────────────────┘
 //!                  │
@@ -29,10 +29,10 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use nlink::netlink::genl::GenlConnection;
+//! use nlink::netlink::{Connection, Generic};
 //!
 //! # async fn example() -> nlink::Result<()> {
-//! let conn = GenlConnection::new()?;
+//! let conn = Connection::<Generic>::new()?;
 //!
 //! // Resolve a family ID
 //! let family = conn.get_family("wireguard").await?;
@@ -44,7 +44,7 @@
 mod connection;
 mod header;
 
-pub use connection::{FamilyInfo, GenlConnection};
+pub use connection::FamilyInfo;
 pub use header::{GENL_HDRLEN, GenlMsgHdr};
 
 pub mod wireguard;
