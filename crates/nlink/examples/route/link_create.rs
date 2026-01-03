@@ -85,14 +85,18 @@ async fn create_dummy(conn: &Connection<Route>, name: &str) -> nlink::netlink::R
     // Show the created interface
     if let Some(created) = conn.get_link_by_name(name).await? {
         println!("  ifindex: {}", created.ifindex());
-        println!("  mtu: {:?}", created.mtu);
+        println!("  mtu: {:?}", created.mtu());
         println!("  state: {}", if created.is_up() { "UP" } else { "DOWN" });
     }
 
     Ok(())
 }
 
-async fn create_veth(conn: &Connection<Route>, name: &str, peer: &str) -> nlink::netlink::Result<()> {
+async fn create_veth(
+    conn: &Connection<Route>,
+    name: &str,
+    peer: &str,
+) -> nlink::netlink::Result<()> {
     let link = VethLink::new(name, peer);
 
     conn.add_link(link).await?;
@@ -107,13 +111,13 @@ async fn create_veth(conn: &Connection<Route>, name: &str, peer: &str) -> nlink:
             "  {}: ifindex={}, mtu={:?}",
             name,
             link1.ifindex(),
-            link1.mtu
+            link1.mtu()
         );
         println!(
             "  {}: ifindex={}, mtu={:?}",
             peer,
             link2.ifindex(),
-            link2.mtu
+            link2.mtu()
         );
     }
 

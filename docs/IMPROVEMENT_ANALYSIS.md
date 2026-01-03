@@ -128,12 +128,12 @@ let veth = VethLink::new("a", "b").build()?;
 
 ---
 
-### 5. Rename `RouteGroup` to `RtnetlinkGroup`
+### 5. Rename `RouteGroup` to `RtnetlinkGroup` ✓ DONE
 
 **Rationale:** `RouteGroup` sounds like route-specific, but it covers links, addresses, neighbors, TC, etc.
 
 ```rust
-// Current
+// Before
 conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
 
 // After
@@ -544,11 +544,11 @@ Document:
 ## Proposed Roadmap
 
 ### v0.4.0 (Breaking Changes)
-- [ ] Unify message accessor patterns
-- [ ] Simplify qdisc options API
-- [ ] Standardize builder pattern
-- [ ] Remove deprecated type aliases
-- [ ] Rename `RouteGroup` to `RtnetlinkGroup`
+- [x] Unify message accessor patterns
+- [x] Simplify qdisc options API
+- [ ] Standardize builder pattern (deferred to v0.5.0)
+- [x] Remove deprecated type aliases
+- [x] Rename `RouteGroup` to `RtnetlinkGroup`
 
 ### v0.5.0 (New Features)
 - [ ] CAKE qdisc builder

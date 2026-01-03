@@ -65,10 +65,6 @@ pub use types::{
     AllowedIp, WG_KEY_LEN, WgDevice, WgDeviceBuilder, WgPeer, WgPeerBuilder, WgPeerFlags,
 };
 
-// Re-export deprecated type for backwards compatibility
-#[allow(deprecated)]
-pub use connection::WireguardConnection;
-
 /// WireGuard Generic Netlink family name.
 pub const WG_GENL_NAME: &str = "wireguard";
 

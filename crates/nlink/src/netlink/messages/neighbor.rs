@@ -27,25 +27,25 @@ mod attr_ids {
 #[derive(Debug, Clone, Default)]
 pub struct NeighborMessage {
     /// Fixed-size header.
-    pub header: NdMsg,
+    pub(crate) header: NdMsg,
     /// Destination address (NDA_DST).
-    pub destination: Option<IpAddr>,
+    pub(crate) destination: Option<IpAddr>,
     /// Link-layer address (NDA_LLADDR).
-    pub lladdr: Option<Vec<u8>>,
+    pub(crate) lladdr: Option<Vec<u8>>,
     /// Number of probes (NDA_PROBES).
-    pub probes: Option<u32>,
+    pub(crate) probes: Option<u32>,
     /// VLAN ID (NDA_VLAN).
-    pub vlan: Option<u16>,
+    pub(crate) vlan: Option<u16>,
     /// Port (NDA_PORT).
-    pub port: Option<u16>,
+    pub(crate) port: Option<u16>,
     /// VNI (NDA_VNI).
-    pub vni: Option<u32>,
+    pub(crate) vni: Option<u32>,
     /// Interface index (NDA_IFINDEX).
-    pub ifindex_attr: Option<u32>,
+    pub(crate) ifindex_attr: Option<u32>,
     /// Master device index (NDA_MASTER).
-    pub master: Option<u32>,
+    pub(crate) master: Option<u32>,
     /// Cache info.
-    pub cache_info: Option<NeighborCacheInfo>,
+    pub(crate) cache_info: Option<NeighborCacheInfo>,
 }
 
 /// Neighbor cache information.
@@ -67,19 +67,13 @@ impl NeighborMessage {
         Self::default()
     }
 
+    // =========================================================================
+    // Accessor methods
+    // =========================================================================
+
     /// Get the address family.
     pub fn family(&self) -> u8 {
         self.header.ndm_family
-    }
-
-    /// Check if this is an IPv4 neighbor.
-    pub fn is_ipv4(&self) -> bool {
-        self.header.ndm_family == libc::AF_INET as u8
-    }
-
-    /// Check if this is an IPv6 neighbor.
-    pub fn is_ipv6(&self) -> bool {
-        self.header.ndm_family == libc::AF_INET6 as u8
     }
 
     /// Get the interface index.
@@ -90,6 +84,78 @@ impl NeighborMessage {
     /// Get the neighbor state.
     pub fn state(&self) -> NeighborState {
         NeighborState::from(self.header.ndm_state)
+    }
+
+    /// Get the neighbor flags.
+    pub fn flags(&self) -> u8 {
+        self.header.ndm_flags
+    }
+
+    /// Get the destination address.
+    pub fn destination(&self) -> Option<&IpAddr> {
+        self.destination.as_ref()
+    }
+
+    /// Get the link-layer address as bytes.
+    pub fn lladdr(&self) -> Option<&[u8]> {
+        self.lladdr.as_deref()
+    }
+
+    /// Get the number of probes.
+    pub fn probes(&self) -> Option<u32> {
+        self.probes
+    }
+
+    /// Get the VLAN ID.
+    pub fn vlan(&self) -> Option<u16> {
+        self.vlan
+    }
+
+    /// Get the port.
+    pub fn port(&self) -> Option<u16> {
+        self.port
+    }
+
+    /// Get the VNI.
+    pub fn vni(&self) -> Option<u32> {
+        self.vni
+    }
+
+    /// Get the master device index.
+    pub fn master(&self) -> Option<u32> {
+        self.master
+    }
+
+    /// Get the cache info.
+    pub fn cache_info(&self) -> Option<&NeighborCacheInfo> {
+        self.cache_info.as_ref()
+    }
+
+    /// Format the link-layer address as a MAC string.
+    pub fn mac_address(&self) -> Option<String> {
+        let lladdr = self.lladdr.as_ref()?;
+        if lladdr.len() == 6 {
+            Some(format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                lladdr[0], lladdr[1], lladdr[2], lladdr[3], lladdr[4], lladdr[5]
+            ))
+        } else {
+            None
+        }
+    }
+
+    // =========================================================================
+    // Boolean checks
+    // =========================================================================
+
+    /// Check if this is an IPv4 neighbor.
+    pub fn is_ipv4(&self) -> bool {
+        self.header.ndm_family == libc::AF_INET as u8
+    }
+
+    /// Check if this is an IPv6 neighbor.
+    pub fn is_ipv6(&self) -> bool {
+        self.header.ndm_family == libc::AF_INET6 as u8
     }
 
     /// Check if the neighbor is reachable.
@@ -125,19 +191,6 @@ impl NeighborMessage {
     /// Check if this is a proxy entry.
     pub fn is_proxy(&self) -> bool {
         self.header.ndm_flags & 0x08 != 0 // NTF_PROXY
-    }
-
-    /// Format the link-layer address as a MAC string.
-    pub fn mac_address(&self) -> Option<String> {
-        let lladdr = self.lladdr.as_ref()?;
-        if lladdr.len() == 6 {
-            Some(format!(
-                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                lladdr[0], lladdr[1], lladdr[2], lladdr[3], lladdr[4], lladdr[5]
-            ))
-        } else {
-            None
-        }
     }
 }
 

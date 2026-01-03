@@ -38,33 +38,33 @@ mod stats2_ids {
 #[derive(Debug, Clone, Default)]
 pub struct TcMessage {
     /// Fixed-size header (struct tcmsg).
-    pub header: TcMsg,
+    pub(crate) header: TcMsg,
     /// Qdisc/class/filter type (e.g., "htb", "fq_codel", "u32").
-    pub kind: Option<String>,
+    pub(crate) kind: Option<String>,
     /// Raw options data (type-specific, nested attributes).
-    pub options: Option<Vec<u8>>,
+    pub(crate) options: Option<Vec<u8>>,
     /// Chain index for filters.
-    pub chain: Option<u32>,
+    pub(crate) chain: Option<u32>,
     /// Hardware offload flag.
-    pub hw_offload: Option<u8>,
+    pub(crate) hw_offload: Option<u8>,
     /// Ingress block index.
-    pub ingress_block: Option<u32>,
+    pub(crate) ingress_block: Option<u32>,
     /// Egress block index.
-    pub egress_block: Option<u32>,
+    pub(crate) egress_block: Option<u32>,
     /// Basic statistics.
-    pub stats_basic: Option<TcStatsBasic>,
+    pub(crate) stats_basic: Option<TcStatsBasic>,
     /// Queue statistics.
-    pub stats_queue: Option<TcStatsQueue>,
+    pub(crate) stats_queue: Option<TcStatsQueue>,
     /// Rate estimator.
-    pub stats_rate_est: Option<TcStatsRateEst>,
+    pub(crate) stats_rate_est: Option<TcStatsRateEst>,
     /// Extended statistics (type-specific).
-    pub xstats: Option<Vec<u8>>,
+    pub(crate) xstats: Option<Vec<u8>>,
     /// Interface name (not from netlink, populated separately for convenience).
     ///
     /// This field is not populated by netlink parsing since TC messages only
     /// contain interface indices. Use [`TcMessage::with_name`] or
     /// [`TcMessage::resolve_name`] to populate it.
-    pub name: Option<String>,
+    pub(crate) name: Option<String>,
 }
 
 /// Basic traffic control statistics (from TCA_STATS2/TCA_STATS_BASIC).
@@ -154,9 +154,11 @@ impl TcMessage {
         Self::default()
     }
 
+    // =========================================================================
+    // Accessor methods
+    // =========================================================================
+
     /// Get the interface index.
-    ///
-    /// Returns the index as `u32` since interface indices are always non-negative.
     pub fn ifindex(&self) -> u32 {
         self.header.tcm_ifindex as u32
     }
@@ -193,6 +195,51 @@ impl TcMessage {
         self.kind.as_deref()
     }
 
+    /// Get the raw options data.
+    pub fn raw_options(&self) -> Option<&[u8]> {
+        self.options.as_deref()
+    }
+
+    /// Get the chain index.
+    pub fn chain(&self) -> Option<u32> {
+        self.chain
+    }
+
+    /// Get the hardware offload flag.
+    pub fn hw_offload(&self) -> Option<u8> {
+        self.hw_offload
+    }
+
+    /// Get the ingress block index.
+    pub fn ingress_block(&self) -> Option<u32> {
+        self.ingress_block
+    }
+
+    /// Get the egress block index.
+    pub fn egress_block(&self) -> Option<u32> {
+        self.egress_block
+    }
+
+    /// Get the basic statistics.
+    pub fn stats_basic(&self) -> Option<&TcStatsBasic> {
+        self.stats_basic.as_ref()
+    }
+
+    /// Get the queue statistics.
+    pub fn stats_queue(&self) -> Option<&TcStatsQueue> {
+        self.stats_queue.as_ref()
+    }
+
+    /// Get the rate estimator statistics.
+    pub fn stats_rate_est(&self) -> Option<&TcStatsRateEst> {
+        self.stats_rate_est.as_ref()
+    }
+
+    /// Get the extended statistics.
+    pub fn xstats(&self) -> Option<&[u8]> {
+        self.xstats.as_deref()
+    }
+
     /// Get the interface name if set.
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
@@ -211,38 +258,9 @@ impl TcMessage {
         self.name.as_deref().unwrap_or(fallback)
     }
 
-    /// Set the interface name.
-    ///
-    /// Returns self for method chaining.
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
-        self
-    }
-
-    /// Resolve and set the interface name from the ifindex.
-    ///
-    /// This performs a syscall to look up the interface name.
-    /// Returns self for method chaining.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let qdisc = conn.get_root_qdisc_for("eth0").await?.map(|q| q.resolve_name());
-    /// println!("Interface: {}", qdisc.name_or("?"));
-    /// ```
-    pub fn resolve_name(mut self) -> Self {
-        if let Ok(name) = crate::util::ifname::index_to_name(self.ifindex()) {
-            self.name = Some(name);
-        }
-        self
-    }
-
-    /// Resolve and set the interface name, mutating in place.
-    pub fn resolve_name_mut(&mut self) {
-        if let Ok(name) = crate::util::ifname::index_to_name(self.ifindex()) {
-            self.name = Some(name);
-        }
-    }
+    // =========================================================================
+    // Convenience statistics accessors
+    // =========================================================================
 
     /// Get total bytes from basic stats.
     pub fn bytes(&self) -> u64 {
@@ -293,10 +311,52 @@ impl TcMessage {
         self.stats_rate_est.map(|s| s.pps).unwrap_or(0)
     }
 
+    // =========================================================================
+    // Name resolution
+    // =========================================================================
+
+    /// Set the interface name.
+    ///
+    /// Returns self for method chaining.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Resolve and set the interface name from the ifindex.
+    ///
+    /// This performs a syscall to look up the interface name.
+    /// Returns self for method chaining.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let qdisc = conn.get_root_qdisc_for("eth0").await?.map(|q| q.resolve_name());
+    /// println!("Interface: {}", qdisc.name_or("?"));
+    /// ```
+    pub fn resolve_name(mut self) -> Self {
+        if let Ok(name) = crate::util::ifname::index_to_name(self.ifindex()) {
+            self.name = Some(name);
+        }
+        self
+    }
+
+    /// Resolve and set the interface name, mutating in place.
+    pub fn resolve_name_mut(&mut self) {
+        if let Ok(name) = crate::util::ifname::index_to_name(self.ifindex()) {
+            self.name = Some(name);
+        }
+    }
+
+    // =========================================================================
+    // Options parsing
+    // =========================================================================
+
     /// Get parsed qdisc options if available.
     ///
     /// This parses the raw options data into a strongly-typed enum
-    /// based on the qdisc kind.
+    /// based on the qdisc kind. Use pattern matching to extract
+    /// type-specific options.
     ///
     /// # Example
     ///
@@ -305,35 +365,19 @@ impl TcMessage {
     ///
     /// let qdiscs = conn.get_qdiscs().await?;
     /// for qdisc in &qdiscs {
-    ///     if let Some(QdiscOptions::Netem(netem)) = qdisc.parsed_options() {
-    ///         println!("delay={}us, loss={}%", netem.delay_us, netem.loss_percent);
+    ///     match qdisc.options() {
+    ///         Some(QdiscOptions::Netem(netem)) => {
+    ///             println!("delay={:?}, loss={}%", netem.delay(), netem.loss_percent);
+    ///         }
+    ///         Some(QdiscOptions::FqCodel(fq)) => {
+    ///             println!("target={}us", fq.target_us);
+    ///         }
+    ///         _ => {}
     ///     }
     /// }
     /// ```
-    pub fn parsed_options(&self) -> Option<crate::netlink::tc_options::QdiscOptions> {
+    pub fn options(&self) -> Option<crate::netlink::tc_options::QdiscOptions> {
         crate::netlink::tc_options::parse_qdisc_options(self)
-    }
-
-    /// Get netem options if this is a netem qdisc.
-    ///
-    /// This is a convenience method that returns `Some` only if the qdisc
-    /// kind is "netem" and the options can be parsed.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let qdiscs = conn.get_qdiscs().await?;
-    /// for qdisc in &qdiscs {
-    ///     if let Some(netem) = qdisc.netem_options() {
-    ///         println!("delay={:?}, loss={}%", netem.delay(), netem.loss_percent);
-    ///     }
-    /// }
-    /// ```
-    pub fn netem_options(&self) -> Option<crate::netlink::tc_options::NetemOptions> {
-        match self.parsed_options()? {
-            crate::netlink::tc_options::QdiscOptions::Netem(opts) => Some(opts),
-            _ => None,
-        }
     }
 
     /// Check if this is a netem qdisc.

@@ -5,7 +5,7 @@
 
 use clap::{Args, ValueEnum};
 use nlink::netlink::types::tc::tc_handle;
-use nlink::netlink::{Connection, NetworkEvent, Result, Route, RouteGroup};
+use nlink::netlink::{Connection, NetworkEvent, Result, Route, RtnetlinkGroup};
 use nlink::output::{
     MonitorConfig, OutputFormat, OutputOptions, TcEvent, print_event, print_monitor_start,
 };
@@ -45,7 +45,7 @@ impl MonitorCmd {
 
         // Create connection and subscribe to TC events
         let mut conn = Connection::<Route>::new()?;
-        conn.subscribe(&[RouteGroup::Tc])?;
+        conn.subscribe(&[RtnetlinkGroup::Tc])?;
 
         let mut stdout = std::io::stdout().lock();
         print_monitor_start(

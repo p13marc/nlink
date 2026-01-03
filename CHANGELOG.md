@@ -2,14 +2,78 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-01-03 (UNRELEASED)
+
+### Breaking Changes
+
+#### Message Struct Fields Now Private
+All message struct fields are now `pub(crate)` with public accessor methods. This enables future
+internal changes without breaking the public API.
+
+Affected types:
+- `LinkMessage` - use `ifindex()`, `name()`, `flags()`, `mtu()`, `operstate()`, `link_info()`, `stats()`, etc.
+- `AddressMessage` - use `ifindex()`, `family()`, `prefix_len()`, `address()`, `local()`, `label()`, etc.
+- `RouteMessage` - use `family()`, `dst_len()`, `destination()`, `gateway()`, `oif()`, `table_id()`, etc.
+- `NeighborMessage` - use `ifindex()`, `family()`, `destination()`, `lladdr()`, `state()`, etc.
+- `TcMessage` - use `ifindex()`, `handle()`, `parent()`, `kind()`, `options()`, etc.
+- `LinkInfo` - use `kind()`, `slave_kind()`, `data()`, `slave_data()`
+- `LinkStats` - use `rx_packets()`, `tx_packets()`, `rx_bytes()`, `tx_bytes()`, `total_packets()`, `total_bytes()`
+
+```rust
+// Before
+let name = link.name.as_deref().unwrap_or("?");
+let mtu = link.mtu.unwrap_or(0);
+
+// After
+let name = link.name_or("?");
+let mtu = link.mtu().unwrap_or(0);
+```
+
+#### Qdisc Options API Simplified
+- Removed `netem_options()` convenience method
+- Renamed `options()` (raw bytes) to `raw_options()`
+- New `options()` method returns parsed `QdiscOptions` enum
+
+```rust
+// Before
+if let Some(netem) = qdisc.netem_options() {
+    println!("delay: {:?}", netem.delay());
+}
+
+// After
+use nlink::netlink::tc_options::QdiscOptions;
+if let Some(QdiscOptions::Netem(netem)) = qdisc.options() {
+    println!("delay: {:?}", netem.delay());
+}
+```
+
+#### Renamed `RouteGroup` to `RtnetlinkGroup`
+The enum for multicast group subscription was renamed to better reflect that it covers
+all rtnetlink groups (links, addresses, routes, neighbors, TC), not just routes.
+
+```rust
+// Before
+conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
+
+// After
+conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
+```
+
+#### Removed Deprecated Type Aliases
+- Removed `WireguardConnection` (use `Connection<Wireguard>` instead)
+
+### Documentation
+- Updated `CLAUDE.md` with new accessor patterns and API examples
+- Updated all examples to use accessor methods
+
 ## [0.3.2] - 2026-01-03
 
 ### Added
 
 #### Strongly-Typed Event Subscription
-- `RouteGroup` enum for type-safe multicast group subscription
+- `RtnetlinkGroup` enum for type-safe multicast group subscription
   - `Link`, `Ipv4Addr`, `Ipv6Addr`, `Ipv4Route`, `Ipv6Route`, `Neigh`, `Tc`, `NsId`, `Ipv4Rule`, `Ipv6Rule`
-- `Connection<Route>::subscribe(&[RouteGroup])` - Subscribe to specific groups
+- `Connection<Route>::subscribe(&[RtnetlinkGroup])` - Subscribe to specific groups
 - `Connection<Route>::subscribe_all()` - Subscribe to all common groups (Link, Ipv4Addr, Ipv6Addr, Ipv4Route, Ipv6Route, Neigh, Tc)
 
 ### Changed
@@ -46,7 +110,7 @@ while let Some(event) = stream.try_next().await? {
 After:
 ```rust
 let mut conn = Connection::<Route>::new_in_namespace("myns")?;
-conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
+conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
 let mut events = conn.events();
 
 while let Some(result) = events.next().await {

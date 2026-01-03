@@ -289,14 +289,14 @@ impl<P: ProtocolState> Connection<P> {
 /// # Example
 ///
 /// ```ignore
-/// use nlink::netlink::{Connection, Route, RouteGroup};
+/// use nlink::netlink::{Connection, Route, RtnetlinkGroup};
 ///
 /// let mut conn = Connection::<Route>::new()?;
-/// conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
+/// conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
 /// let mut events = conn.events();
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RouteGroup {
+pub enum RtnetlinkGroup {
     /// Link (interface) state changes (RTM_NEWLINK, RTM_DELLINK).
     Link,
     /// IPv4 address changes (RTM_NEWADDR, RTM_DELADDR).
@@ -319,7 +319,7 @@ pub enum RouteGroup {
     Ipv6Rule,
 }
 
-impl RouteGroup {
+impl RtnetlinkGroup {
     /// Convert to the raw netlink multicast group number.
     fn to_group(self) -> u32 {
         use super::socket::rtnetlink_groups::*;
@@ -372,12 +372,12 @@ impl Connection<Route> {
     /// # Example
     ///
     /// ```ignore
-    /// use nlink::netlink::{Connection, Route, RouteGroup};
+    /// use nlink::netlink::{Connection, Route, RtnetlinkGroup};
     ///
     /// let mut conn = Connection::<Route>::new()?;
-    /// conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
+    /// conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
     /// ```
-    pub fn subscribe(&mut self, groups: &[RouteGroup]) -> Result<()> {
+    pub fn subscribe(&mut self, groups: &[RtnetlinkGroup]) -> Result<()> {
         for group in groups {
             self.socket.add_membership(group.to_group())?;
         }
@@ -399,13 +399,13 @@ impl Connection<Route> {
     /// ```
     pub fn subscribe_all(&mut self) -> Result<()> {
         self.subscribe(&[
-            RouteGroup::Link,
-            RouteGroup::Ipv4Addr,
-            RouteGroup::Ipv6Addr,
-            RouteGroup::Ipv4Route,
-            RouteGroup::Ipv6Route,
-            RouteGroup::Neigh,
-            RouteGroup::Tc,
+            RtnetlinkGroup::Link,
+            RtnetlinkGroup::Ipv4Addr,
+            RtnetlinkGroup::Ipv6Addr,
+            RtnetlinkGroup::Ipv4Route,
+            RtnetlinkGroup::Ipv6Route,
+            RtnetlinkGroup::Neigh,
+            RtnetlinkGroup::Tc,
         ])
     }
 
@@ -1001,8 +1001,12 @@ impl Connection<Route> {
         &self,
         ifname: &str,
     ) -> Result<Option<super::tc_options::NetemOptions>> {
+        use super::tc_options::QdiscOptions;
         let root = self.get_root_qdisc_for(ifname).await?;
-        Ok(root.and_then(|q| q.netem_options()))
+        Ok(match root.and_then(|q| q.options()) {
+            Some(QdiscOptions::Netem(opts)) => Some(opts),
+            _ => None,
+        })
     }
 
     /// Get netem options for an interface by index.
@@ -1012,8 +1016,12 @@ impl Connection<Route> {
         &self,
         ifindex: u32,
     ) -> Result<Option<super::tc_options::NetemOptions>> {
+        use super::tc_options::QdiscOptions;
         let root = self.get_root_qdisc_by_index(ifindex).await?;
-        Ok(root.and_then(|q| q.netem_options()))
+        Ok(match root.and_then(|q| q.options()) {
+            Some(QdiscOptions::Netem(opts)) => Some(opts),
+            _ => None,
+        })
     }
 }
 
@@ -1474,7 +1482,7 @@ impl Connection<Generic> {
     /// Send a GENL command and wait for a response.
     ///
     /// This is a low-level method for sending arbitrary GENL commands.
-    /// Family-specific wrappers (like WireguardConnection) should use this.
+    /// Family-specific wrappers (like `Connection<Wireguard>`) should use this.
     pub async fn command(
         &self,
         family_id: u16,

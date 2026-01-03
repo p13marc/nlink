@@ -28,27 +28,27 @@ mod attr_ids {
 #[derive(Debug, Clone, Default)]
 pub struct RouteMessage {
     /// Fixed-size header.
-    pub header: RtMsg,
+    pub(crate) header: RtMsg,
     /// Destination address (RTA_DST).
-    pub destination: Option<IpAddr>,
+    pub(crate) destination: Option<IpAddr>,
     /// Source address (RTA_SRC).
-    pub source: Option<IpAddr>,
+    pub(crate) source: Option<IpAddr>,
     /// Input interface index (RTA_IIF).
-    pub iif: Option<u32>,
+    pub(crate) iif: Option<u32>,
     /// Output interface index (RTA_OIF).
-    pub oif: Option<u32>,
+    pub(crate) oif: Option<u32>,
     /// Gateway address (RTA_GATEWAY).
-    pub gateway: Option<IpAddr>,
+    pub(crate) gateway: Option<IpAddr>,
     /// Priority/metric (RTA_PRIORITY).
-    pub priority: Option<u32>,
+    pub(crate) priority: Option<u32>,
     /// Preferred source address (RTA_PREFSRC).
-    pub prefsrc: Option<IpAddr>,
+    pub(crate) prefsrc: Option<IpAddr>,
     /// Routing table ID (RTA_TABLE).
-    pub table: Option<u32>,
+    pub(crate) table: Option<u32>,
     /// Route preference (RTA_PREF).
-    pub pref: Option<u8>,
+    pub(crate) pref: Option<u8>,
     /// Expiration time (RTA_EXPIRES).
-    pub expires: Option<u32>,
+    pub(crate) expires: Option<u32>,
 }
 
 impl RouteMessage {
@@ -57,19 +57,13 @@ impl RouteMessage {
         Self::default()
     }
 
+    // =========================================================================
+    // Accessor methods
+    // =========================================================================
+
     /// Get the address family.
     pub fn family(&self) -> u8 {
         self.header.rtm_family
-    }
-
-    /// Check if this is an IPv4 route.
-    pub fn is_ipv4(&self) -> bool {
-        self.header.rtm_family == libc::AF_INET as u8
-    }
-
-    /// Check if this is an IPv6 route.
-    pub fn is_ipv6(&self) -> bool {
-        self.header.rtm_family == libc::AF_INET6 as u8
     }
 
     /// Get the destination prefix length.
@@ -100,6 +94,65 @@ impl RouteMessage {
     /// Get the routing table ID.
     pub fn table_id(&self) -> u32 {
         self.table.unwrap_or(self.header.rtm_table as u32)
+    }
+
+    /// Get the destination address.
+    pub fn destination(&self) -> Option<&IpAddr> {
+        self.destination.as_ref()
+    }
+
+    /// Get the source address.
+    pub fn source(&self) -> Option<&IpAddr> {
+        self.source.as_ref()
+    }
+
+    /// Get the input interface index.
+    pub fn iif(&self) -> Option<u32> {
+        self.iif
+    }
+
+    /// Get the output interface index.
+    pub fn oif(&self) -> Option<u32> {
+        self.oif
+    }
+
+    /// Get the gateway address.
+    pub fn gateway(&self) -> Option<&IpAddr> {
+        self.gateway.as_ref()
+    }
+
+    /// Get the priority/metric.
+    pub fn priority(&self) -> Option<u32> {
+        self.priority
+    }
+
+    /// Get the preferred source address.
+    pub fn prefsrc(&self) -> Option<&IpAddr> {
+        self.prefsrc.as_ref()
+    }
+
+    /// Get the route preference.
+    pub fn pref(&self) -> Option<u8> {
+        self.pref
+    }
+
+    /// Get the expiration time.
+    pub fn expires(&self) -> Option<u32> {
+        self.expires
+    }
+
+    // =========================================================================
+    // Boolean checks
+    // =========================================================================
+
+    /// Check if this is an IPv4 route.
+    pub fn is_ipv4(&self) -> bool {
+        self.header.rtm_family == libc::AF_INET as u8
+    }
+
+    /// Check if this is an IPv6 route.
+    pub fn is_ipv6(&self) -> bool {
+        self.header.rtm_family == libc::AF_INET6 as u8
     }
 
     /// Check if this is a default route (0.0.0.0/0 or ::/0).

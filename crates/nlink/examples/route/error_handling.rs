@@ -17,7 +17,7 @@ async fn main() -> nlink::netlink::Result<()> {
     // Pattern 1: Check specific error types
     println!("\n1. Checking error types:");
     match conn.get_link_by_name("nonexistent_interface_12345").await {
-        Ok(Some(link)) => println!("   Found: {:?}", link.name),
+        Ok(Some(link)) => println!("   Found: {:?}", link.name()),
         Ok(None) => println!("   Interface not found (expected)"),
         Err(e) => println!("   Error: {}", e),
     }

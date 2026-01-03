@@ -57,7 +57,7 @@ async fn show_htb(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result
             found_htb = true;
             println!("qdisc htb handle {:x}:", qdisc.handle() >> 16);
 
-            if let Some(QdiscOptions::Htb(htb)) = qdisc.parsed_options() {
+            if let Some(QdiscOptions::Htb(htb)) = qdisc.options() {
                 println!("  default class: {:x}", htb.default_class);
                 println!("  r2q: {}", htb.rate2quantum);
                 if let Some(qlen) = htb.direct_qlen {

@@ -106,26 +106,27 @@ impl VrfCmd {
 
         for link in &links {
             // Check if this is a VRF device
-            let link_info = match &link.link_info {
+            let link_info = match link.link_info() {
                 Some(info) => info,
                 None => continue,
             };
 
-            if link_info.kind.as_deref() != Some("vrf") {
+            if link_info.kind() != Some("vrf") {
                 continue;
             }
 
             // Apply name filter
             if let Some(name) = name_filter
-                && link.name.as_deref() != Some(name) {
-                    continue;
-                }
+                && link.name() != Some(name)
+            {
+                continue;
+            }
 
             // Extract VRF table from link_info.data
-            let table = extract_vrf_table(link_info.data.as_deref().unwrap_or(&[]));
+            let table = extract_vrf_table(link_info.data().unwrap_or(&[]));
 
             vrfs.push(VrfInfo {
-                name: link.name.clone().unwrap_or_default(),
+                name: link.name().unwrap_or_default().to_string(),
                 ifindex: link.ifindex(),
                 table,
             });

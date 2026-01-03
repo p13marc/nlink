@@ -82,11 +82,11 @@
 //! Use `Connection::subscribe()` to select event types, then `events()` to get a stream:
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Route, RouteGroup, NetworkEvent};
+//! use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
 //! use tokio_stream::StreamExt;
 //!
 //! let mut conn = Connection::<Route>::new()?;
-//! conn.subscribe(&[RouteGroup::Link, RouteGroup::Ipv4Addr])?;
+//! conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Ipv4Addr])?;
 //!
 //! let mut events = conn.events();
 //! while let Some(event) = events.next().await {
@@ -103,7 +103,7 @@
 //! Use `tokio_stream::StreamMap` to monitor multiple namespaces:
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Route, RouteGroup};
+//! use nlink::netlink::{Connection, Route, RtnetlinkGroup};
 //! use tokio_stream::{StreamExt, StreamMap};
 //!
 //! let mut streams = StreamMap::new();
@@ -151,7 +151,7 @@ pub use netlink::NetworkEvent;
 pub use netlink::{EventSource, EventSubscription, OwnedEventStream};
 
 // Route protocol multicast groups
-pub use netlink::RouteGroup;
+pub use netlink::RtnetlinkGroup;
 
 // Namespace types
 pub use netlink::NamespaceSpec;

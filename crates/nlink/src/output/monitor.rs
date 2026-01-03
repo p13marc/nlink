@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Route, RouteGroup};
+//! use nlink::netlink::{Connection, Route, RtnetlinkGroup};
 //! use nlink::output::{MonitorConfig, print_event};
 //! use tokio_stream::StreamExt;
 //!
@@ -15,7 +15,7 @@
 //!     .with_format(OutputFormat::Text);
 //!
 //! let mut conn = Connection::<Route>::new()?;
-//! conn.subscribe(&[RouteGroup::Link])?;
+//! conn.subscribe(&[RtnetlinkGroup::Link])?;
 //! let mut events = conn.events();
 //!
 //! while let Some(result) = events.next().await {

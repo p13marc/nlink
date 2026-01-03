@@ -78,9 +78,8 @@ async fn list_addresses(conn: &Connection<Route>) -> nlink::netlink::Result<()> 
         let family = if addr.is_ipv4() { "inet" } else { "inet6" };
 
         let ip = addr
-            .address
-            .as_ref()
-            .or(addr.local.as_ref())
+            .address()
+            .or(addr.local())
             .map(|a| format!("{}/{}", a, addr.prefix_len()))
             .unwrap_or_else(|| "?".into());
 

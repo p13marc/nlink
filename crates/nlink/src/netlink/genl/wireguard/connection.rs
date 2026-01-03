@@ -590,13 +590,6 @@ fn parse_sockaddr(data: &[u8]) -> Option<SocketAddr> {
     }
 }
 
-// Re-export the old type as deprecated for backwards compatibility
-#[deprecated(
-    since = "0.4.0",
-    note = "Use Connection::<Wireguard>::new_async() instead"
-)]
-pub type WireguardConnection = ();
-
 #[cfg(test)]
 mod tests {
     use super::*;

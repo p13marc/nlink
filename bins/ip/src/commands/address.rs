@@ -200,9 +200,10 @@ impl AddressCmd {
                 }
 
                 if let Some(brd_str) = broadcast
-                    && let Ok(brd_addr) = brd_str.parse::<std::net::Ipv4Addr>() {
-                        config = config.broadcast(brd_addr);
-                    }
+                    && let Ok(brd_addr) = brd_str.parse::<std::net::Ipv4Addr>()
+                {
+                    config = config.broadcast(brd_addr);
+                }
 
                 conn.add_address(config).await
             }
@@ -247,13 +248,13 @@ impl AddressCmd {
             }
 
             // Get the address to delete
-            let address_to_del = addr.local.or(addr.address);
+            let address_to_del = addr.local().or(addr.address());
             if let Some(ip_addr) = address_to_del {
                 // Get interface name for del_address
                 let ifname = nlink::util::get_ifname(addr.ifindex());
                 if let Ok(name) = ifname {
                     // Ignore errors for individual deletions
-                    let _ = conn.del_address(&name, ip_addr, addr.prefix_len()).await;
+                    let _ = conn.del_address(&name, *ip_addr, addr.prefix_len()).await;
                 }
             }
         }
@@ -274,16 +275,16 @@ fn addr_to_json(addr: &AddressMessage) -> serde_json::Value {
         "scope": addr.scope().name(),
     });
 
-    if let Some(ref address) = addr.address {
+    if let Some(address) = addr.address() {
         obj["address"] = serde_json::json!(address.to_string());
     }
-    if let Some(ref local) = addr.local {
+    if let Some(local) = addr.local() {
         obj["local"] = serde_json::json!(local.to_string());
     }
-    if let Some(ref label) = addr.label {
+    if let Some(label) = addr.label() {
         obj["label"] = serde_json::json!(label);
     }
-    if let Some(ref broadcast) = addr.broadcast {
+    if let Some(broadcast) = addr.broadcast() {
         obj["broadcast"] = serde_json::json!(broadcast.to_string());
     }
 
@@ -325,14 +326,14 @@ fn print_addr_text<W: Write>(
     write!(w, "    {} {}/{}", family, display_addr, addr.prefix_len())?;
 
     // Show peer if different from local
-    if let (Some(local), Some(address)) = (&addr.local, &addr.address)
+    if let (Some(local), Some(address)) = (addr.local(), addr.address())
         && local != address
     {
         write!(w, " peer {}", address)?;
     }
 
     // Show broadcast for IPv4
-    if let Some(ref brd) = addr.broadcast {
+    if let Some(brd) = addr.broadcast() {
         write!(w, " brd {}", brd)?;
     }
 
@@ -349,7 +350,7 @@ fn print_addr_text<W: Write>(
         write!(w, " tentative")?;
     }
 
-    if let Some(ref label) = addr.label {
+    if let Some(label) = addr.label() {
         write!(w, " {}", label)?;
     }
 

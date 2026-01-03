@@ -220,9 +220,10 @@ impl NeighborCmd {
             .into_iter()
             .filter(|n| {
                 if let Some(fam) = family
-                    && n.family() != fam {
-                        return false;
-                    }
+                    && n.family() != fam
+                {
+                    return false;
+                }
                 // Skip permanent/noarp entries (like iproute2 does)
                 !n.is_permanent()
             })
@@ -234,11 +235,12 @@ impl NeighborCmd {
         let names = conn.get_interface_names().await?;
 
         for neigh in neighbors_to_delete {
-            if let Some(addr) = neigh.destination
-                && let Some(ifname) = names.get(&neigh.ifindex()) {
-                    // Ignore errors for individual deletes (entry may have been removed)
-                    let _ = conn.del_neighbor(Neighbor::new(ifname, addr)).await;
-                }
+            if let Some(addr) = neigh.destination()
+                && let Some(ifname) = names.get(&neigh.ifindex())
+            {
+                // Ignore errors for individual deletes (entry may have been removed)
+                let _ = conn.del_neighbor(Neighbor::new(ifname, *addr)).await;
+            }
         }
 
         if count > 0 {

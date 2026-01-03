@@ -216,13 +216,13 @@ impl TunnelCmd {
 
         for link in &links {
             // Check if this is a tunnel type
-            let link_info = match &link.link_info {
+            let link_info = match link.link_info() {
                 Some(info) => info,
                 None => continue,
             };
 
-            let kind = match &link_info.kind {
-                Some(k) => k.as_str(),
+            let kind = match link_info.kind() {
+                Some(k) => k,
                 None => continue,
             };
 
@@ -232,22 +232,24 @@ impl TunnelCmd {
 
             // Apply name filter
             if let Some(name) = name_filter
-                && link.name.as_deref() != Some(name) {
-                    continue;
-                }
+                && link.name() != Some(name)
+            {
+                continue;
+            }
 
             // Apply mode filter
             if let Some(mode) = mode_filter
-                && kind != mode {
-                    continue;
-                }
+                && kind != mode
+            {
+                continue;
+            }
 
             // Extract tunnel-specific info from link_info.data
             let (remote, local, ttl, key) =
-                extract_tunnel_info(kind, link_info.data.as_deref().unwrap_or(&[]));
+                extract_tunnel_info(kind, link_info.data().unwrap_or(&[]));
 
             tunnels.push(TunnelInfo {
-                name: link.name.clone().unwrap_or_default(),
+                name: link.name().unwrap_or_default().to_string(),
                 mode: kind.to_string(),
                 remote,
                 local,

@@ -3388,13 +3388,14 @@ impl LinkConfig for SitLink {
 /// # Example
 ///
 /// ```ignore
+/// use nlink::netlink::{Connection, Wireguard};
 /// use nlink::netlink::link::WireguardLink;
 ///
 /// let wg = WireguardLink::new("wg0");
 /// conn.add_link(wg).await?;
 ///
-/// // Then configure via WireguardConnection
-/// let wg_conn = WireguardConnection::new().await?;
+/// // Then configure via Connection<Wireguard>
+/// let wg_conn = Connection::<Wireguard>::new_async().await?;
 /// wg_conn.set_device("wg0", |dev| dev.private_key(key)).await?;
 /// ```
 #[derive(Debug, Clone)]

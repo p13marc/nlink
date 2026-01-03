@@ -11,7 +11,7 @@
 //!   ip link set test0 up
 //!   ip link del test0
 
-use nlink::netlink::{Connection, NetworkEvent, Route, RouteGroup};
+use nlink::netlink::{Connection, NetworkEvent, Route, RtnetlinkGroup};
 use tokio_stream::StreamExt;
 
 #[tokio::main]
@@ -20,12 +20,12 @@ async fn main() -> nlink::netlink::Result<()> {
 
     let mut conn = Connection::<Route>::new()?;
     conn.subscribe(&[
-        RouteGroup::Link,
-        RouteGroup::Ipv4Addr,
-        RouteGroup::Ipv6Addr,
-        RouteGroup::Ipv4Route,
-        RouteGroup::Ipv6Route,
-        RouteGroup::Neigh,
+        RtnetlinkGroup::Link,
+        RtnetlinkGroup::Ipv4Addr,
+        RtnetlinkGroup::Ipv6Addr,
+        RtnetlinkGroup::Ipv4Route,
+        RtnetlinkGroup::Ipv6Route,
+        RtnetlinkGroup::Neigh,
     ])?;
 
     let mut events = conn.events();
@@ -39,7 +39,7 @@ async fn main() -> nlink::netlink::Result<()> {
                     "[LINK+] {} (index={}, mtu={:?}, up={})",
                     link.name_or("?"),
                     link.ifindex(),
-                    link.mtu,
+                    link.mtu(),
                     link.is_up()
                 );
             }
@@ -50,9 +50,8 @@ async fn main() -> nlink::netlink::Result<()> {
             // Address events
             NetworkEvent::NewAddress(addr) => {
                 let ip = addr
-                    .address
-                    .as_ref()
-                    .or(addr.local.as_ref())
+                    .address()
+                    .or(addr.local())
                     .map(|a| a.to_string())
                     .unwrap_or_else(|| "?".into());
                 println!(
@@ -64,9 +63,8 @@ async fn main() -> nlink::netlink::Result<()> {
             }
             NetworkEvent::DelAddress(addr) => {
                 let ip = addr
-                    .address
-                    .as_ref()
-                    .or(addr.local.as_ref())
+                    .address()
+                    .or(addr.local())
                     .map(|a| a.to_string())
                     .unwrap_or_else(|| "?".into());
                 println!(
@@ -80,21 +78,18 @@ async fn main() -> nlink::netlink::Result<()> {
             // Route events
             NetworkEvent::NewRoute(route) => {
                 let dst = route
-                    .destination
-                    .as_ref()
+                    .destination()
                     .map(|a| format!("{}/{}", a, route.dst_len()))
                     .unwrap_or_else(|| "default".into());
                 let via = route
-                    .gateway
-                    .as_ref()
+                    .gateway()
                     .map(|a| format!(" via {}", a))
                     .unwrap_or_default();
                 println!("[ROUTE+] {}{}", dst, via);
             }
             NetworkEvent::DelRoute(route) => {
                 let dst = route
-                    .destination
-                    .as_ref()
+                    .destination()
                     .map(|a| format!("{}/{}", a, route.dst_len()))
                     .unwrap_or_else(|| "default".into());
                 println!("[ROUTE-] {}", dst);
@@ -103,13 +98,11 @@ async fn main() -> nlink::netlink::Result<()> {
             // Neighbor events
             NetworkEvent::NewNeighbor(neigh) => {
                 let ip = neigh
-                    .destination
-                    .as_ref()
+                    .destination()
                     .map(|a| a.to_string())
                     .unwrap_or_else(|| "?".into());
                 let mac = neigh
-                    .lladdr
-                    .as_ref()
+                    .lladdr()
                     .map(|m| {
                         format!(
                             " lladdr {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -121,8 +114,7 @@ async fn main() -> nlink::netlink::Result<()> {
             }
             NetworkEvent::DelNeighbor(neigh) => {
                 let ip = neigh
-                    .destination
-                    .as_ref()
+                    .destination()
                     .map(|a| a.to_string())
                     .unwrap_or_else(|| "?".into());
                 println!("[NEIGH-] {} on ifindex={}", ip, neigh.ifindex());

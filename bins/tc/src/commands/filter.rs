@@ -288,7 +288,7 @@ fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
         obj["handle"] = serde_json::json!(format!("{:x}", filter.handle()));
     }
 
-    if let Some(chain) = filter.chain {
+    if let Some(chain) = filter.chain() {
         obj["chain"] = serde_json::json!(chain);
     }
 
@@ -312,7 +312,7 @@ fn print_filter_text(
         filter.kind().unwrap_or("")
     )?;
 
-    if let Some(chain) = filter.chain {
+    if let Some(chain) = filter.chain() {
         write!(w, "chain {} ", chain)?;
     }
 

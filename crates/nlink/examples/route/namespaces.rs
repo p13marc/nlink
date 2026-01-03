@@ -117,9 +117,8 @@ async fn print_interfaces(conn: &Connection<Route>) -> nlink::netlink::Result<()
             .iter()
             .filter(|a| a.ifindex() == link.ifindex())
             .filter_map(|a| {
-                a.address
-                    .as_ref()
-                    .or(a.local.as_ref())
+                a.address()
+                    .or(a.local())
                     .map(|ip| format!("{}/{}", ip, a.prefix_len()))
             })
             .collect();

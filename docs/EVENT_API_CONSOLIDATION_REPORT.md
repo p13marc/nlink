@@ -29,7 +29,7 @@ let mut stream = EventStream::builder()
 After:
 ```rust
 let mut conn = Connection::<Route>::new_in_namespace("myns")?;
-conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
+conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
 let mut events = conn.events();
 ```
 
@@ -65,13 +65,13 @@ while let Some((ns, result)) = streams.next().await {
 }
 ```
 
-### 3. Added `RouteGroup` Enum
+### 3. Added `RtnetlinkGroup` Enum
 
 Strongly-typed multicast group subscription replaces raw `u32` group numbers:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RouteGroup {
+pub enum RtnetlinkGroup {
     Link,       // Interface state changes
     Ipv4Addr,   // IPv4 address changes
     Ipv6Addr,   // IPv6 address changes
@@ -90,7 +90,7 @@ pub enum RouteGroup {
 ```rust
 impl Connection<Route> {
     /// Subscribe to specific multicast groups.
-    pub fn subscribe(&mut self, groups: &[RouteGroup]) -> Result<()>;
+    pub fn subscribe(&mut self, groups: &[RtnetlinkGroup]) -> Result<()>;
     
     /// Subscribe to all commonly-used event groups.
     pub fn subscribe_all(&mut self) -> Result<()>;
@@ -104,11 +104,11 @@ impl Connection<Route> {
 ### Basic Event Monitoring
 
 ```rust
-use nlink::netlink::{Connection, Route, RouteGroup, NetworkEvent};
+use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
 use tokio_stream::StreamExt;
 
 let mut conn = Connection::<Route>::new()?;
-conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
+conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
 
 let mut events = conn.events();
 while let Some(result) = events.next().await {
@@ -132,7 +132,7 @@ let mut events = conn.events();
 ### Multi-Namespace Monitoring
 
 ```rust
-use nlink::netlink::{Connection, Route, RouteGroup, namespace};
+use nlink::netlink::{Connection, Route, RtnetlinkGroup, namespace};
 use tokio_stream::{StreamExt, StreamMap};
 
 let mut streams = StreamMap::new();
@@ -172,7 +172,7 @@ while let Some((ns, result)) = streams.next().await {
 
 | File | Changes |
 |------|---------|
-| `crates/nlink/src/netlink/connection.rs` | Added `RouteGroup` enum, `subscribe()`, `subscribe_all()` |
+| `crates/nlink/src/netlink/connection.rs` | Added `RtnetlinkGroup` enum, `subscribe()`, `subscribe_all()` |
 | `crates/nlink/src/netlink/events.rs` | Removed `EventStream`, `EventStreamBuilder`, `MultiNamespaceEventStream`, kept `NetworkEvent` |
 | `crates/nlink/src/netlink/mod.rs` | Updated exports |
 | `crates/nlink/src/lib.rs` | Updated re-exports |

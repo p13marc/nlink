@@ -72,75 +72,76 @@ async fn show_netem(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Resu
 
         println!("qdisc {} parent {}", kind, parent);
 
-        // Show netem-specific options
-        if let Some(netem) = qdisc.netem_options() {
-            let delay = netem.delay();
-            if !delay.is_zero() {
-                print!("  delay {:?}", delay);
-                let jitter = netem.jitter();
-                if !jitter.is_zero() {
-                    print!(" +/- {:?}", jitter);
-                }
-                if netem.delay_corr > 0.0 {
-                    print!(" ({}% correlation)", netem.delay_corr);
-                }
-                println!();
-            }
-
-            if netem.loss_percent > 0.0 {
-                print!("  loss {:.2}%", netem.loss_percent);
-                if netem.loss_corr > 0.0 {
-                    print!(" ({}% correlation)", netem.loss_corr);
-                }
-                println!();
-            }
-
-            if netem.duplicate_percent > 0.0 {
-                println!("  duplicate {:.2}%", netem.duplicate_percent);
-            }
-
-            if netem.corrupt_percent > 0.0 {
-                println!("  corrupt {:.2}%", netem.corrupt_percent);
-            }
-
-            if netem.reorder_percent > 0.0 {
-                println!("  reorder {:.2}% gap {}", netem.reorder_percent, netem.gap);
-            }
-
-            if netem.rate > 0 {
-                println!("  rate {} bytes/sec", netem.rate);
-            }
-
-            if netem.ecn {
-                println!("  ecn enabled");
-            }
-
-            // Show loss model if present
-            if let Some(loss_model) = &netem.loss_model {
-                use nlink::netlink::tc_options::NetemLossModel;
-                match loss_model {
-                    NetemLossModel::GilbertIntuitive {
-                        p13,
-                        p31,
-                        p32,
-                        p14,
-                        p23,
-                    } => {
-                        println!("  loss model: Gilbert-Intuitive (4-state)");
-                        println!(
-                            "    p13={:.2}% p31={:.2}% p32={:.2}% p14={:.2}% p23={:.2}%",
-                            p13, p31, p32, p14, p23
-                        );
-                    }
-                    NetemLossModel::GilbertElliot { p, r, h, k1 } => {
-                        println!("  loss model: Gilbert-Elliot (2-state)");
-                        println!("    p={:.2}% r={:.2}% h={:.2}% k1={:.2}%", p, r, h, k1);
-                    }
-                }
-            }
-        } else if let Some(opts) = qdisc.parsed_options() {
-            // Show other qdisc types briefly
+        // Show qdisc-specific options
+        if let Some(opts) = qdisc.options() {
             match opts {
+                QdiscOptions::Netem(netem) => {
+                    let delay = netem.delay();
+                    if !delay.is_zero() {
+                        print!("  delay {:?}", delay);
+                        let jitter = netem.jitter();
+                        if !jitter.is_zero() {
+                            print!(" +/- {:?}", jitter);
+                        }
+                        if netem.delay_corr > 0.0 {
+                            print!(" ({}% correlation)", netem.delay_corr);
+                        }
+                        println!();
+                    }
+
+                    if netem.loss_percent > 0.0 {
+                        print!("  loss {:.2}%", netem.loss_percent);
+                        if netem.loss_corr > 0.0 {
+                            print!(" ({}% correlation)", netem.loss_corr);
+                        }
+                        println!();
+                    }
+
+                    if netem.duplicate_percent > 0.0 {
+                        println!("  duplicate {:.2}%", netem.duplicate_percent);
+                    }
+
+                    if netem.corrupt_percent > 0.0 {
+                        println!("  corrupt {:.2}%", netem.corrupt_percent);
+                    }
+
+                    if netem.reorder_percent > 0.0 {
+                        println!("  reorder {:.2}% gap {}", netem.reorder_percent, netem.gap);
+                    }
+
+                    if netem.rate > 0 {
+                        println!("  rate {} bytes/sec", netem.rate);
+                    }
+
+                    if netem.ecn {
+                        println!("  ecn enabled");
+                    }
+
+                    // Show loss model if present
+                    if let Some(loss_model) = &netem.loss_model {
+                        use nlink::netlink::tc_options::NetemLossModel;
+                        match loss_model {
+                            NetemLossModel::GilbertIntuitive {
+                                p13,
+                                p31,
+                                p32,
+                                p14,
+                                p23,
+                            } => {
+                                println!("  loss model: Gilbert-Intuitive (4-state)");
+                                println!(
+                                    "    p13={:.2}% p31={:.2}% p32={:.2}% p14={:.2}% p23={:.2}%",
+                                    p13, p31, p32, p14, p23
+                                );
+                            }
+                            NetemLossModel::GilbertElliot { p, r, h, k1 } => {
+                                println!("  loss model: Gilbert-Elliot (2-state)");
+                                println!("    p={:.2}% r={:.2}% h={:.2}% k1={:.2}%", p, r, h, k1);
+                            }
+                        }
+                    }
+                }
+                // Show other qdisc types briefly
                 QdiscOptions::FqCodel(fq) => {
                     println!("  target {}us interval {}us", fq.target_us, fq.interval_us);
                 }

@@ -274,9 +274,11 @@ impl NetemOptions {
     /// # Example
     ///
     /// ```ignore
-    /// let opts = qdisc.netem_options().unwrap();
-    /// for param in opts.configured_parameters() {
-    ///     println!("Configured: {:?}", param);
+    /// use nlink::netlink::tc_options::QdiscOptions;
+    /// if let Some(QdiscOptions::Netem(opts)) = qdisc.options() {
+    ///     for param in opts.configured_parameters() {
+    ///         println!("Configured: {:?}", param);
+    ///     }
     /// }
     /// ```
     pub fn configured_parameters(&self) -> Vec<NetemParameter> {
@@ -315,9 +317,13 @@ impl NetemOptions {
     ///
     /// ```ignore
     /// use nlink::netlink::tc::NetemConfig;
+    /// use nlink::netlink::tc_options::QdiscOptions;
     /// use std::time::Duration;
     ///
-    /// let current = qdisc.netem_options().unwrap();
+    /// let current = match qdisc.options() {
+    ///     Some(QdiscOptions::Netem(opts)) => opts,
+    ///     _ => return Ok(()),
+    /// };
     /// let new_config = NetemConfig::new()
     ///     .delay(Duration::from_millis(100))
     ///     .build();

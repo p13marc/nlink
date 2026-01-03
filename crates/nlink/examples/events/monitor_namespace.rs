@@ -11,7 +11,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use nlink::netlink::{Connection, NetworkEvent, Route, RouteGroup};
+use nlink::netlink::{Connection, NetworkEvent, Route, RtnetlinkGroup};
 use tokio_stream::StreamExt;
 
 #[tokio::main]
@@ -51,11 +51,11 @@ async fn main() -> nlink::netlink::Result<()> {
     };
 
     conn.subscribe(&[
-        RouteGroup::Link,
-        RouteGroup::Ipv4Addr,
-        RouteGroup::Ipv6Addr,
-        RouteGroup::Ipv4Route,
-        RouteGroup::Ipv6Route,
+        RtnetlinkGroup::Link,
+        RtnetlinkGroup::Ipv4Addr,
+        RtnetlinkGroup::Ipv6Addr,
+        RtnetlinkGroup::Ipv4Route,
+        RtnetlinkGroup::Ipv6Route,
     ])?;
 
     println!("{}", "-".repeat(50));
@@ -70,7 +70,7 @@ async fn main() -> nlink::netlink::Result<()> {
                     "[LINK+] {} idx={} mtu={:?}",
                     link.name_or("?"),
                     link.ifindex(),
-                    link.mtu
+                    link.mtu()
                 );
             }
             NetworkEvent::DelLink(link) => {
@@ -78,34 +78,30 @@ async fn main() -> nlink::netlink::Result<()> {
             }
             NetworkEvent::NewAddress(addr) => {
                 let ip = addr
-                    .address
-                    .as_ref()
-                    .or(addr.local.as_ref())
+                    .address()
+                    .or(addr.local())
                     .map(|a| format!("{}/{}", a, addr.prefix_len()))
                     .unwrap_or_else(|| "?".into());
                 println!("[ADDR+] {} on idx={}", ip, addr.ifindex());
             }
             NetworkEvent::DelAddress(addr) => {
                 let ip = addr
-                    .address
-                    .as_ref()
-                    .or(addr.local.as_ref())
+                    .address()
+                    .or(addr.local())
                     .map(|a| a.to_string())
                     .unwrap_or_else(|| "?".into());
                 println!("[ADDR-] {} on idx={}", ip, addr.ifindex());
             }
             NetworkEvent::NewRoute(route) => {
                 let dst = route
-                    .destination
-                    .as_ref()
+                    .destination()
                     .map(|a| format!("{}/{}", a, route.dst_len()))
                     .unwrap_or_else(|| "default".into());
                 println!("[ROUTE+] {}", dst);
             }
             NetworkEvent::DelRoute(route) => {
                 let dst = route
-                    .destination
-                    .as_ref()
+                    .destination()
                     .map(|a| format!("{}/{}", a, route.dst_len()))
                     .unwrap_or_else(|| "default".into());
                 println!("[ROUTE-] {}", dst);

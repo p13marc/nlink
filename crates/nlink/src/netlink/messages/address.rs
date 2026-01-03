@@ -27,21 +27,21 @@ mod attr_ids {
 #[derive(Debug, Clone, Default)]
 pub struct AddressMessage {
     /// Fixed-size header.
-    pub header: IfAddrMsg,
+    pub(crate) header: IfAddrMsg,
     /// Address (IFA_ADDRESS).
-    pub address: Option<IpAddr>,
+    pub(crate) address: Option<IpAddr>,
     /// Local address (IFA_LOCAL).
-    pub local: Option<IpAddr>,
+    pub(crate) local: Option<IpAddr>,
     /// Interface label (IFA_LABEL).
-    pub label: Option<String>,
+    pub(crate) label: Option<String>,
     /// Broadcast address (IFA_BROADCAST).
-    pub broadcast: Option<IpAddr>,
+    pub(crate) broadcast: Option<IpAddr>,
     /// Anycast address (IFA_ANYCAST).
-    pub anycast: Option<IpAddr>,
+    pub(crate) anycast: Option<IpAddr>,
     /// Extended flags (IFA_FLAGS).
-    pub flags: Option<u32>,
+    pub(crate) flags: Option<u32>,
     /// Cache info (IFA_CACHEINFO) - preferred/valid lifetimes.
-    pub cache_info: Option<AddressCacheInfo>,
+    pub(crate) cache_info: Option<AddressCacheInfo>,
 }
 
 /// Address cache information.
@@ -63,19 +63,13 @@ impl AddressMessage {
         Self::default()
     }
 
+    // =========================================================================
+    // Accessor methods
+    // =========================================================================
+
     /// Get the address family.
     pub fn family(&self) -> u8 {
         self.header.ifa_family
-    }
-
-    /// Check if this is an IPv4 address.
-    pub fn is_ipv4(&self) -> bool {
-        self.header.ifa_family == libc::AF_INET as u8
-    }
-
-    /// Check if this is an IPv6 address.
-    pub fn is_ipv6(&self) -> bool {
-        self.header.ifa_family == libc::AF_INET6 as u8
     }
 
     /// Get the prefix length.
@@ -93,33 +87,81 @@ impl AddressMessage {
         Scope::from(self.header.ifa_scope)
     }
 
+    /// Get the address.
+    pub fn address(&self) -> Option<&IpAddr> {
+        self.address.as_ref()
+    }
+
+    /// Get the local address.
+    pub fn local(&self) -> Option<&IpAddr> {
+        self.local.as_ref()
+    }
+
+    /// Get the interface label.
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    /// Get the broadcast address.
+    pub fn broadcast(&self) -> Option<&IpAddr> {
+        self.broadcast.as_ref()
+    }
+
+    /// Get the anycast address.
+    pub fn anycast(&self) -> Option<&IpAddr> {
+        self.anycast.as_ref()
+    }
+
+    /// Get the extended flags.
+    pub fn flags(&self) -> u32 {
+        self.flags.unwrap_or(self.header.ifa_flags as u32)
+    }
+
+    /// Get the cache info.
+    pub fn cache_info(&self) -> Option<&AddressCacheInfo> {
+        self.cache_info.as_ref()
+    }
+
     /// Get the primary address (local or address).
+    ///
+    /// For point-to-point links, `local` is the local address and `address` is
+    /// the peer address. For other links, they are typically the same.
     pub fn primary_address(&self) -> Option<&IpAddr> {
         self.local.as_ref().or(self.address.as_ref())
     }
 
+    // =========================================================================
+    // Boolean checks
+    // =========================================================================
+
+    /// Check if this is an IPv4 address.
+    pub fn is_ipv4(&self) -> bool {
+        self.header.ifa_family == libc::AF_INET as u8
+    }
+
+    /// Check if this is an IPv6 address.
+    pub fn is_ipv6(&self) -> bool {
+        self.header.ifa_family == libc::AF_INET6 as u8
+    }
+
     /// Check if this is a secondary/temporary address.
     pub fn is_secondary(&self) -> bool {
-        let flags = self.flags.unwrap_or(self.header.ifa_flags as u32);
-        flags & 0x01 != 0 // IFA_F_SECONDARY
+        self.flags() & 0x01 != 0 // IFA_F_SECONDARY
     }
 
     /// Check if this is a permanent address.
     pub fn is_permanent(&self) -> bool {
-        let flags = self.flags.unwrap_or(self.header.ifa_flags as u32);
-        flags & 0x80 != 0 // IFA_F_PERMANENT
+        self.flags() & 0x80 != 0 // IFA_F_PERMANENT
     }
 
     /// Check if this address is deprecated.
     pub fn is_deprecated(&self) -> bool {
-        let flags = self.flags.unwrap_or(self.header.ifa_flags as u32);
-        flags & 0x20 != 0 // IFA_F_DEPRECATED
+        self.flags() & 0x20 != 0 // IFA_F_DEPRECATED
     }
 
     /// Check if this address is tentative.
     pub fn is_tentative(&self) -> bool {
-        let flags = self.flags.unwrap_or(self.header.ifa_flags as u32);
-        flags & 0x40 != 0 // IFA_F_TENTATIVE
+        self.flags() & 0x40 != 0 // IFA_F_TENTATIVE
     }
 }
 

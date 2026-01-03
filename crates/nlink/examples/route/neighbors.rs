@@ -86,16 +86,11 @@ fn print_neighbor(neigh: &NeighborMessage, names: &std::collections::HashMap<u32
         .unwrap_or("?");
 
     let ip = neigh
-        .destination
-        .as_ref()
+        .destination()
         .map(|a| a.to_string())
         .unwrap_or_else(|| "?".into());
 
-    let mac = neigh
-        .lladdr
-        .as_ref()
-        .map(|m| format_mac(m))
-        .unwrap_or_else(|| "-".into());
+    let mac = neigh.lladdr().map(format_mac).unwrap_or_else(|| "-".into());
 
     let state = neighbor_state_str(neigh.state());
 

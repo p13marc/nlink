@@ -43,73 +43,167 @@ mod info_ids {
 #[derive(Debug, Clone, Default)]
 pub struct LinkMessage {
     /// Fixed-size header.
-    pub header: IfInfoMsg,
+    pub(crate) header: IfInfoMsg,
     /// Interface name (IFLA_IFNAME).
-    pub name: Option<String>,
+    pub(crate) name: Option<String>,
     /// Hardware address (IFLA_ADDRESS).
-    pub address: Option<Vec<u8>>,
+    pub(crate) address: Option<Vec<u8>>,
     /// Broadcast address (IFLA_BROADCAST).
-    pub broadcast: Option<Vec<u8>>,
+    pub(crate) broadcast: Option<Vec<u8>>,
     /// Permanent hardware address (IFLA_PERM_ADDRESS).
-    pub perm_address: Option<Vec<u8>>,
+    pub(crate) perm_address: Option<Vec<u8>>,
     /// MTU (IFLA_MTU).
-    pub mtu: Option<u32>,
+    pub(crate) mtu: Option<u32>,
     /// Minimum MTU (IFLA_MIN_MTU).
-    pub min_mtu: Option<u32>,
+    pub(crate) min_mtu: Option<u32>,
     /// Maximum MTU (IFLA_MAX_MTU).
-    pub max_mtu: Option<u32>,
+    pub(crate) max_mtu: Option<u32>,
     /// Link index for stacked devices (IFLA_LINK).
-    pub link: Option<u32>,
+    pub(crate) link: Option<u32>,
     /// Qdisc name (IFLA_QDISC).
-    pub qdisc: Option<String>,
+    pub(crate) qdisc: Option<String>,
     /// Master device index (IFLA_MASTER).
-    pub master: Option<u32>,
+    pub(crate) master: Option<u32>,
     /// Transmit queue length (IFLA_TXQLEN).
-    pub txqlen: Option<u32>,
+    pub(crate) txqlen: Option<u32>,
     /// Operational state (IFLA_OPERSTATE).
-    pub operstate: Option<OperState>,
+    pub(crate) operstate: Option<OperState>,
     /// Group (IFLA_GROUP).
-    pub group: Option<u32>,
+    pub(crate) group: Option<u32>,
     /// Promiscuity count (IFLA_PROMISCUITY).
-    pub promiscuity: Option<u32>,
+    pub(crate) promiscuity: Option<u32>,
     /// Number of TX queues (IFLA_NUM_TX_QUEUES).
-    pub num_tx_queues: Option<u32>,
+    pub(crate) num_tx_queues: Option<u32>,
     /// Number of RX queues (IFLA_NUM_RX_QUEUES).
-    pub num_rx_queues: Option<u32>,
+    pub(crate) num_rx_queues: Option<u32>,
     /// Carrier state (IFLA_CARRIER).
-    pub carrier: Option<bool>,
+    pub(crate) carrier: Option<bool>,
     /// Link info (IFLA_LINKINFO).
-    pub link_info: Option<LinkInfo>,
+    pub(crate) link_info: Option<LinkInfo>,
     /// Statistics (IFLA_STATS64).
-    pub stats: Option<LinkStats>,
+    pub(crate) stats: Option<LinkStats>,
 }
 
 /// Link type information from IFLA_LINKINFO.
 #[derive(Debug, Clone, Default)]
 pub struct LinkInfo {
     /// Link type kind (e.g., "vlan", "bridge", "bond").
-    pub kind: Option<String>,
+    pub(crate) kind: Option<String>,
     /// Slave kind for bonded interfaces.
-    pub slave_kind: Option<String>,
+    pub(crate) slave_kind: Option<String>,
     /// Raw type-specific data.
-    pub data: Option<Vec<u8>>,
+    pub(crate) data: Option<Vec<u8>>,
     /// Raw slave-specific data.
-    pub slave_data: Option<Vec<u8>>,
+    pub(crate) slave_data: Option<Vec<u8>>,
+}
+
+impl LinkInfo {
+    /// Get the link type kind (e.g., "vlan", "bridge", "bond").
+    pub fn kind(&self) -> Option<&str> {
+        self.kind.as_deref()
+    }
+
+    /// Get the slave kind for bonded interfaces.
+    pub fn slave_kind(&self) -> Option<&str> {
+        self.slave_kind.as_deref()
+    }
+
+    /// Get the raw type-specific data.
+    pub fn data(&self) -> Option<&[u8]> {
+        self.data.as_deref()
+    }
+
+    /// Get the raw slave-specific data.
+    pub fn slave_data(&self) -> Option<&[u8]> {
+        self.slave_data.as_deref()
+    }
 }
 
 /// Link statistics.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LinkStats {
-    pub rx_packets: u64,
-    pub tx_packets: u64,
-    pub rx_bytes: u64,
-    pub tx_bytes: u64,
-    pub rx_errors: u64,
-    pub tx_errors: u64,
-    pub rx_dropped: u64,
-    pub tx_dropped: u64,
-    pub multicast: u64,
-    pub collisions: u64,
+    pub(crate) rx_packets: u64,
+    pub(crate) tx_packets: u64,
+    pub(crate) rx_bytes: u64,
+    pub(crate) tx_bytes: u64,
+    pub(crate) rx_errors: u64,
+    pub(crate) tx_errors: u64,
+    pub(crate) rx_dropped: u64,
+    pub(crate) tx_dropped: u64,
+    pub(crate) multicast: u64,
+    pub(crate) collisions: u64,
+}
+
+impl LinkStats {
+    /// Get the number of received packets.
+    pub fn rx_packets(&self) -> u64 {
+        self.rx_packets
+    }
+
+    /// Get the number of transmitted packets.
+    pub fn tx_packets(&self) -> u64 {
+        self.tx_packets
+    }
+
+    /// Get the number of received bytes.
+    pub fn rx_bytes(&self) -> u64 {
+        self.rx_bytes
+    }
+
+    /// Get the number of transmitted bytes.
+    pub fn tx_bytes(&self) -> u64 {
+        self.tx_bytes
+    }
+
+    /// Get the number of receive errors.
+    pub fn rx_errors(&self) -> u64 {
+        self.rx_errors
+    }
+
+    /// Get the number of transmit errors.
+    pub fn tx_errors(&self) -> u64 {
+        self.tx_errors
+    }
+
+    /// Get the number of dropped received packets.
+    pub fn rx_dropped(&self) -> u64 {
+        self.rx_dropped
+    }
+
+    /// Get the number of dropped transmitted packets.
+    pub fn tx_dropped(&self) -> u64 {
+        self.tx_dropped
+    }
+
+    /// Get the number of multicast packets.
+    pub fn multicast(&self) -> u64 {
+        self.multicast
+    }
+
+    /// Get the number of collisions.
+    pub fn collisions(&self) -> u64 {
+        self.collisions
+    }
+
+    /// Get total packets (rx + tx).
+    pub fn total_packets(&self) -> u64 {
+        self.rx_packets + self.tx_packets
+    }
+
+    /// Get total bytes (rx + tx).
+    pub fn total_bytes(&self) -> u64 {
+        self.rx_bytes + self.tx_bytes
+    }
+
+    /// Get total errors (rx + tx).
+    pub fn total_errors(&self) -> u64 {
+        self.rx_errors + self.tx_errors
+    }
+
+    /// Get total dropped (rx + tx).
+    pub fn total_dropped(&self) -> u64 {
+        self.rx_dropped + self.tx_dropped
+    }
 }
 
 impl LinkMessage {
@@ -118,17 +212,21 @@ impl LinkMessage {
         Self::default()
     }
 
+    // =========================================================================
+    // Accessor methods
+    // =========================================================================
+
     /// Get the interface index.
-    ///
-    /// Returns the index as `u32` since interface indices are always non-negative.
     pub fn ifindex(&self) -> u32 {
         self.header.ifi_index as u32
     }
 
+    /// Get the interface name.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
     /// Get the interface name, or a default placeholder.
-    ///
-    /// Returns the interface name if available, otherwise returns the provided default.
-    /// This is a convenience method to avoid repeated `.name.as_deref().unwrap_or("?")`.
     ///
     /// # Example
     ///
@@ -141,10 +239,122 @@ impl LinkMessage {
         self.name.as_deref().unwrap_or(default)
     }
 
+    /// Get the hardware address as bytes.
+    pub fn address(&self) -> Option<&[u8]> {
+        self.address.as_deref()
+    }
+
+    /// Get the broadcast address as bytes.
+    pub fn broadcast(&self) -> Option<&[u8]> {
+        self.broadcast.as_deref()
+    }
+
+    /// Get the permanent hardware address as bytes.
+    pub fn perm_address(&self) -> Option<&[u8]> {
+        self.perm_address.as_deref()
+    }
+
+    /// Get the MTU.
+    pub fn mtu(&self) -> Option<u32> {
+        self.mtu
+    }
+
+    /// Get the minimum MTU.
+    pub fn min_mtu(&self) -> Option<u32> {
+        self.min_mtu
+    }
+
+    /// Get the maximum MTU.
+    pub fn max_mtu(&self) -> Option<u32> {
+        self.max_mtu
+    }
+
+    /// Get the link index for stacked devices (e.g., VLAN parent).
+    pub fn link(&self) -> Option<u32> {
+        self.link
+    }
+
+    /// Get the qdisc name.
+    pub fn qdisc(&self) -> Option<&str> {
+        self.qdisc.as_deref()
+    }
+
+    /// Get the master device index.
+    pub fn master(&self) -> Option<u32> {
+        self.master
+    }
+
+    /// Get the transmit queue length.
+    pub fn txqlen(&self) -> Option<u32> {
+        self.txqlen
+    }
+
+    /// Get the operational state.
+    pub fn operstate(&self) -> Option<OperState> {
+        self.operstate
+    }
+
+    /// Get the interface group.
+    pub fn group(&self) -> Option<u32> {
+        self.group
+    }
+
+    /// Get the promiscuity count.
+    pub fn promiscuity(&self) -> Option<u32> {
+        self.promiscuity
+    }
+
+    /// Get the number of TX queues.
+    pub fn num_tx_queues(&self) -> Option<u32> {
+        self.num_tx_queues
+    }
+
+    /// Get the number of RX queues.
+    pub fn num_rx_queues(&self) -> Option<u32> {
+        self.num_rx_queues
+    }
+
+    /// Get the carrier state.
+    pub fn carrier(&self) -> Option<bool> {
+        self.carrier
+    }
+
+    /// Get the link info.
+    pub fn link_info(&self) -> Option<&LinkInfo> {
+        self.link_info.as_ref()
+    }
+
+    /// Get the statistics.
+    pub fn stats(&self) -> Option<&LinkStats> {
+        self.stats.as_ref()
+    }
+
     /// Get the interface flags.
     pub fn flags(&self) -> u32 {
         self.header.ifi_flags
     }
+
+    /// Get the link type kind (e.g., "vlan", "bridge", "veth").
+    pub fn kind(&self) -> Option<&str> {
+        self.link_info.as_ref()?.kind.as_deref()
+    }
+
+    /// Format the hardware address as a MAC string.
+    pub fn mac_address(&self) -> Option<String> {
+        let addr = self.address.as_ref()?;
+        if addr.len() == 6 {
+            Some(format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]
+            ))
+        } else {
+            None
+        }
+    }
+
+    // =========================================================================
+    // Boolean checks
+    // =========================================================================
 
     /// Check if the interface is up.
     pub fn is_up(&self) -> bool {
@@ -174,24 +384,6 @@ impl LinkMessage {
     /// Check if the carrier is present.
     pub fn has_carrier(&self) -> bool {
         self.carrier.unwrap_or(false)
-    }
-
-    /// Get the link type kind.
-    pub fn kind(&self) -> Option<&str> {
-        self.link_info.as_ref()?.kind.as_deref()
-    }
-
-    /// Format the hardware address as a MAC string.
-    pub fn mac_address(&self) -> Option<String> {
-        let addr = self.address.as_ref()?;
-        if addr.len() == 6 {
-            Some(format!(
-                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]
-            ))
-        } else {
-            None
-        }
     }
 }
 

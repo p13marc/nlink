@@ -5,8 +5,8 @@
 
 use clap::{Args, ValueEnum};
 use nlink::netlink::types::link::iff;
-use nlink::netlink::types::neigh::nud_state_name;
-use nlink::netlink::{Connection, NetworkEvent, Result, Route, RouteGroup};
+
+use nlink::netlink::{Connection, NetworkEvent, Result, Route, RtnetlinkGroup};
 use nlink::output::{
     AddressEvent, IpEvent, LinkEvent, MonitorConfig, NeighborEvent, OutputFormat, OutputOptions,
     RouteEvent, print_event, print_monitor_start,
@@ -29,28 +29,28 @@ pub enum EventType {
 }
 
 impl EventType {
-    /// Convert to RouteGroup slices for subscription.
-    fn to_groups(types: &[EventType]) -> Vec<RouteGroup> {
+    /// Convert to RtnetlinkGroup slices for subscription.
+    fn to_groups(types: &[EventType]) -> Vec<RtnetlinkGroup> {
         let mut groups = Vec::new();
         for t in types {
             match t {
-                EventType::Link => groups.push(RouteGroup::Link),
+                EventType::Link => groups.push(RtnetlinkGroup::Link),
                 EventType::Address => {
-                    groups.push(RouteGroup::Ipv4Addr);
-                    groups.push(RouteGroup::Ipv6Addr);
+                    groups.push(RtnetlinkGroup::Ipv4Addr);
+                    groups.push(RtnetlinkGroup::Ipv6Addr);
                 }
                 EventType::Route => {
-                    groups.push(RouteGroup::Ipv4Route);
-                    groups.push(RouteGroup::Ipv6Route);
+                    groups.push(RtnetlinkGroup::Ipv4Route);
+                    groups.push(RtnetlinkGroup::Ipv6Route);
                 }
-                EventType::Neigh => groups.push(RouteGroup::Neigh),
+                EventType::Neigh => groups.push(RtnetlinkGroup::Neigh),
                 EventType::All => {
-                    groups.push(RouteGroup::Link);
-                    groups.push(RouteGroup::Ipv4Addr);
-                    groups.push(RouteGroup::Ipv6Addr);
-                    groups.push(RouteGroup::Ipv4Route);
-                    groups.push(RouteGroup::Ipv6Route);
-                    groups.push(RouteGroup::Neigh);
+                    groups.push(RtnetlinkGroup::Link);
+                    groups.push(RtnetlinkGroup::Ipv4Addr);
+                    groups.push(RtnetlinkGroup::Ipv6Addr);
+                    groups.push(RtnetlinkGroup::Ipv4Route);
+                    groups.push(RtnetlinkGroup::Ipv6Route);
+                    groups.push(RtnetlinkGroup::Neigh);
                 }
             }
         }
@@ -77,7 +77,7 @@ impl MonitorCmd {
             .with_format(format)
             .with_opts(*opts);
 
-        // Convert CLI event types to RouteGroups
+        // Convert CLI event types to RtnetlinkGroups
         let groups = EventType::to_groups(&self.objects);
 
         // Create connection and subscribe
@@ -112,11 +112,11 @@ fn convert_event(event: NetworkEvent) -> Option<IpEvent> {
         return Some(IpEvent::Link(LinkEvent {
             action,
             ifindex: link.ifindex(),
-            name: link.name.clone().unwrap_or_default(),
+            name: link.name().unwrap_or_default().to_string(),
             flags: link.flags(),
             up: link.flags() & iff::UP != 0,
-            mtu: link.mtu,
-            operstate: link.operstate.map(|s| s.name()),
+            mtu: link.mtu(),
+            operstate: link.operstate().map(|s| s.name()),
         }));
     }
 
@@ -129,7 +129,7 @@ fn convert_event(event: NetworkEvent) -> Option<IpEvent> {
                 ifindex: addr.ifindex(),
                 family: addr.family(),
                 scope: addr.scope().name(),
-                label: addr.label.clone(),
+                label: addr.label().map(|s| s.to_string()),
             })
         });
     }
@@ -137,10 +137,10 @@ fn convert_event(event: NetworkEvent) -> Option<IpEvent> {
     if let Some(route) = event.as_route() {
         return Some(IpEvent::Route(RouteEvent {
             action,
-            destination: route.destination.as_ref().map(|d| d.to_string()),
+            destination: route.destination().map(|d| d.to_string()),
             dst_len: route.dst_len(),
-            gateway: route.gateway.as_ref().map(|g| g.to_string()),
-            oif: route.oif,
+            gateway: route.gateway().map(|g| g.to_string()),
+            oif: route.oif(),
             table: route.table_id(),
             protocol: route.protocol().name(),
             scope: route.scope().name(),
@@ -149,13 +149,13 @@ fn convert_event(event: NetworkEvent) -> Option<IpEvent> {
     }
 
     if let Some(neigh) = event.as_neighbor() {
-        return neigh.destination.as_ref().map(|dst| {
+        return neigh.destination().map(|dst| {
             IpEvent::Neighbor(NeighborEvent {
                 action,
                 destination: dst.to_string(),
                 lladdr: neigh.mac_address(),
                 ifindex: neigh.ifindex(),
-                state: nud_state_name(neigh.header.ndm_state),
+                state: neigh.state().name(),
                 router: neigh.is_router(),
             })
         });

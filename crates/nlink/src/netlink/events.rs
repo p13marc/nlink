@@ -6,11 +6,11 @@
 //! # Example
 //!
 //! ```ignore
-//! use nlink::netlink::{Connection, Route, RouteGroup, NetworkEvent};
+//! use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
 //! use tokio_stream::StreamExt;
 //!
 //! let mut conn = Connection::<Route>::new()?;
-//! conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
+//! conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
 //!
 //! let mut events = conn.events();
 //! while let Some(event) = events.next().await {

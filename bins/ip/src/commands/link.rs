@@ -119,7 +119,7 @@ impl LinkCmd {
             .into_iter()
             .filter(|link| {
                 if let Some(filter_dev) = dev {
-                    link.name.as_deref() == Some(filter_dev)
+                    link.name() == Some(filter_dev)
                 } else {
                     true
                 }

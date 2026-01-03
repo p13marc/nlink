@@ -99,13 +99,13 @@ Common types are re-exported at the crate root for convenience:
 
 ```rust
 // Instead of:
-use nlink::netlink::{Connection, Error, Protocol, Result, RouteGroup};
+use nlink::netlink::{Connection, Error, Protocol, Result, RtnetlinkGroup};
 use nlink::netlink::events::NetworkEvent;
 use nlink::netlink::stream::{EventSource, EventSubscription, OwnedEventStream};
 use nlink::netlink::messages::TcMessage;
 
 // You can use:
-use nlink::{Connection, Error, Protocol, Result, RouteGroup};
+use nlink::{Connection, Error, Protocol, Result, RtnetlinkGroup};
 use nlink::NetworkEvent;
 use nlink::{EventSource, EventSubscription, OwnedEventStream};
 use nlink::{TcMessage, QdiscMessage, ClassMessage, FilterMessage};
@@ -122,7 +122,7 @@ Stream types for event monitoring:
 - `OwnedEventStream<P>` - Owned stream from `conn.into_event_stream()`
 
 Multicast group subscription:
-- `RouteGroup` - Strongly-typed enum for rtnetlink multicast groups
+- `RtnetlinkGroup` - Strongly-typed enum for rtnetlink multicast groups
 
 ## Key Patterns
 
@@ -369,12 +369,12 @@ The `Connection` type implements `EventSource` trait, providing `events()` and
 with `tokio-stream` combinators and `StreamMap` for multi-namespace monitoring.
 
 ```rust
-use nlink::netlink::{Connection, Route, RouteGroup, NetworkEvent};
+use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
 use tokio_stream::StreamExt;
 
 // Create connection and subscribe to multicast groups
 let mut conn = Connection::<Route>::new()?;
-conn.subscribe(&[RouteGroup::Link, RouteGroup::Ipv4Addr, RouteGroup::Tc])?;
+conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Ipv4Addr, RtnetlinkGroup::Tc])?;
 
 // Or subscribe to all common groups at once
 conn.subscribe_all()?;
@@ -393,26 +393,26 @@ while let Some(result) = events.next().await {
 }
 ```
 
-**RouteGroup enum for type-safe subscription:**
+**RtnetlinkGroup enum for type-safe subscription:**
 ```rust
-use nlink::netlink::RouteGroup;
+use nlink::netlink::RtnetlinkGroup;
 
 // Available groups:
-// RouteGroup::Link       - Interface state changes
-// RouteGroup::Ipv4Addr   - IPv4 address changes
-// RouteGroup::Ipv6Addr   - IPv6 address changes
-// RouteGroup::Ipv4Route  - IPv4 routing table changes
-// RouteGroup::Ipv6Route  - IPv6 routing table changes
-// RouteGroup::Neigh      - Neighbor (ARP/NDP) cache changes
-// RouteGroup::Tc         - Traffic control changes
-// RouteGroup::NsId       - Namespace ID changes
-// RouteGroup::Ipv4Rule   - IPv4 policy routing rules
-// RouteGroup::Ipv6Rule   - IPv6 policy routing rules
+// RtnetlinkGroup::Link       - Interface state changes
+// RtnetlinkGroup::Ipv4Addr   - IPv4 address changes
+// RtnetlinkGroup::Ipv6Addr   - IPv6 address changes
+// RtnetlinkGroup::Ipv4Route  - IPv4 routing table changes
+// RtnetlinkGroup::Ipv6Route  - IPv6 routing table changes
+// RtnetlinkGroup::Neigh      - Neighbor (ARP/NDP) cache changes
+// RtnetlinkGroup::Tc         - Traffic control changes
+// RtnetlinkGroup::NsId       - Namespace ID changes
+// RtnetlinkGroup::Ipv4Rule   - IPv4 policy routing rules
+// RtnetlinkGroup::Ipv6Rule   - IPv6 policy routing rules
 ```
 
 **Multi-namespace event monitoring:**
 ```rust
-use nlink::netlink::{Connection, Route, RouteGroup, namespace};
+use nlink::netlink::{Connection, Route, RtnetlinkGroup, namespace};
 use tokio_stream::{StreamExt, StreamMap};
 
 let mut streams = StreamMap::new();
@@ -436,17 +436,17 @@ while let Some((ns, result)) = streams.next().await {
 
 **Namespace-aware event monitoring (single namespace):**
 ```rust
-use nlink::netlink::{Connection, Route, RouteGroup, namespace};
+use nlink::netlink::{Connection, Route, RtnetlinkGroup, namespace};
 use tokio_stream::StreamExt;
 
 // Monitor events in a named namespace
 let mut conn = namespace::connection_for("myns")?;
-conn.subscribe(&[RouteGroup::Link, RouteGroup::Tc])?;
+conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
 let mut events = conn.events();
 
 // Or by PID (e.g., container process)
 let mut conn = namespace::connection_for_pid(container_pid)?;
-conn.subscribe(&[RouteGroup::Link])?;
+conn.subscribe(&[RtnetlinkGroup::Link])?;
 
 // Or by path
 let mut conn = Connection::<Route>::new_in_namespace_path("/proc/1234/ns/net")?;

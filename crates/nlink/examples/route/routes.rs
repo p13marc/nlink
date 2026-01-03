@@ -33,7 +33,10 @@ async fn main() -> nlink::netlink::Result<()> {
     Ok(())
 }
 
-async fn list_routes(conn: &Connection<Route>, ipv4_only: Option<bool>) -> nlink::netlink::Result<()> {
+async fn list_routes(
+    conn: &Connection<Route>,
+    ipv4_only: Option<bool>,
+) -> nlink::netlink::Result<()> {
     let routes = conn.get_routes().await?;
 
     // Use the get_interface_names() helper to build ifindex -> name map
@@ -53,34 +56,32 @@ async fn list_routes(conn: &Connection<Route>, ipv4_only: Option<bool>) -> nlink
             continue;
         }
 
-        let table = match route.table {
-            Some(254) => "main".to_string(),
-            Some(255) => "local".to_string(),
-            Some(253) => "default".to_string(),
-            Some(0) | None => "unspec".to_string(),
-            Some(t) => t.to_string(),
+        let table = match route.table_id() {
+            254 => "main".to_string(),
+            255 => "local".to_string(),
+            253 => "default".to_string(),
+            0 => "unspec".to_string(),
+            t => t.to_string(),
         };
 
         let dst = route
-            .destination
-            .as_ref()
+            .destination()
             .map(|a| format!("{}/{}", a, route.dst_len()))
             .unwrap_or_else(|| "default".into());
 
         let gw = route
-            .gateway
-            .as_ref()
+            .gateway()
             .map(|a| a.to_string())
             .unwrap_or_else(|| "-".into());
 
         let dev = route
-            .oif
+            .oif()
             .and_then(|idx| names.get(&idx))
             .map(|s| s.as_str())
             .unwrap_or("-");
 
         let metric = route
-            .priority
+            .priority()
             .map(|m| m.to_string())
             .unwrap_or_else(|| "-".into());
 

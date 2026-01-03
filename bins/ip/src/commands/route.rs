@@ -368,7 +368,7 @@ impl RouteCmd {
         let routes = conn.get_routes().await?;
         let matching: Vec<_> = routes
             .into_iter()
-            .filter(|r| r.destination == Some(dst_addr) && r.dst_len() == prefix_len)
+            .filter(|r| r.destination() == Some(&dst_addr) && r.dst_len() == prefix_len)
             .collect();
 
         if matching.is_empty() {

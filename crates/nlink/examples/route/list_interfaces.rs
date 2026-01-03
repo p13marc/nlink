@@ -24,8 +24,7 @@ async fn main() -> nlink::netlink::Result<()> {
         let name = link.name_or("?");
         let state = if link.is_up() { "UP" } else { "DOWN" };
         let mac = link
-            .address
-            .as_ref()
+            .address()
             .map(|m| {
                 m.iter()
                     .map(|b| format!("{:02x}", b))
@@ -34,7 +33,7 @@ async fn main() -> nlink::netlink::Result<()> {
             })
             .unwrap_or_else(|| "-".into());
         let mtu = link
-            .mtu
+            .mtu()
             .map(|m| m.to_string())
             .unwrap_or_else(|| "-".into());
 
