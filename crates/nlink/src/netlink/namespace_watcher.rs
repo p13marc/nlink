@@ -74,6 +74,9 @@ pub struct NamespaceWatcher {
     config: NamespaceWatcherConfig,
     netns_wd: Option<WatchDescriptor>,
     parent_wd: Option<WatchDescriptor>,
+    /// Events discovered during watch transitions (e.g., namespaces created
+    /// between parent directory event and watch setup on netns directory).
+    pending_events: Vec<NamespaceEvent>,
 }
 
 impl NamespaceWatcher {
@@ -115,6 +118,7 @@ impl NamespaceWatcher {
             config,
             netns_wd,
             parent_wd,
+            pending_events: Vec::new(),
         })
     }
 
@@ -146,6 +150,11 @@ impl NamespaceWatcher {
     /// This method is async and will wait until an event is available.
     /// Returns `Ok(None)` if the watcher has been closed.
     pub async fn recv(&mut self) -> Result<Option<NamespaceEvent>> {
+        // First drain any pending events from watch transitions
+        if let Some(event) = self.pending_events.pop() {
+            return Ok(Some(event));
+        }
+
         loop {
             let events = self
                 .inotify
@@ -221,8 +230,27 @@ impl NamespaceWatcher {
                     }
                     self.netns_wd = Some(new_wd);
 
+                    // Scan for existing namespaces that were created during the switch.
+                    // This handles the race condition where `ip netns add` creates both
+                    // the directory and the namespace file in rapid succession, and we
+                    // miss the file creation event.
+                    if let Ok(entries) = std::fs::read_dir(NETNS_DIR) {
+                        for entry in entries.flatten() {
+                            if let Some(name) = entry.file_name().to_str() {
+                                self.pending_events.push(NamespaceEvent::Created {
+                                    name: name.to_string(),
+                                });
+                            }
+                        }
+                    }
+
                     if self.config.emit_directory_events {
                         return Ok(Some(NamespaceEvent::DirectoryCreated));
+                    }
+
+                    // If we found namespaces during the scan, return the first one
+                    if let Some(event) = self.pending_events.pop() {
+                        return Ok(Some(event));
                     }
                 }
             }
