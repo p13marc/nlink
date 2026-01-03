@@ -62,6 +62,19 @@ impl ProtocolState for Route {
     const PROTOCOL: Protocol = Protocol::Route;
 }
 
+/// Socket diagnostics protocol state.
+///
+/// Used for querying socket information (TCP, UDP, Unix, etc.).
+/// This is a zero-sized type with no additional state.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SockDiag;
+
+impl private::Sealed for SockDiag {}
+
+impl ProtocolState for SockDiag {
+    const PROTOCOL: Protocol = Protocol::SockDiag;
+}
+
 /// Generic netlink protocol state.
 ///
 /// Used for family-based protocols like WireGuard and MACsec.
@@ -106,6 +119,11 @@ mod tests {
     }
 
     #[test]
+    fn sockdiag_is_zero_sized() {
+        assert_eq!(std::mem::size_of::<SockDiag>(), 0);
+    }
+
+    #[test]
     fn generic_has_cache() {
         let g = Generic::default();
         assert!(g.cache.read().unwrap().is_empty());
@@ -114,6 +132,7 @@ mod tests {
     #[test]
     fn protocol_constants() {
         assert_eq!(Route::PROTOCOL, Protocol::Route);
+        assert_eq!(SockDiag::PROTOCOL, Protocol::SockDiag);
         assert_eq!(Generic::PROTOCOL, Protocol::Generic);
     }
 }

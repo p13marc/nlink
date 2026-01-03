@@ -119,3 +119,24 @@ path = "examples/namespace/events.rs"
 name = "namespace_watch"
 path = "examples/namespace/watch.rs"
 required-features = ["namespace_watcher"]
+
+# Socket diagnostics examples
+[[example]]
+name = "sockdiag_list_sockets"
+path = "examples/sockdiag/list_sockets.rs"
+required-features = ["sockdiag"]
+
+[[example]]
+name = "sockdiag_tcp_connections"
+path = "examples/sockdiag/tcp_connections.rs"
+required-features = ["sockdiag"]
+
+[[example]]
+name = "sockdiag_unix_sockets"
+path = "examples/sockdiag/unix_sockets.rs"
+required-features = ["sockdiag"]
+
+# Generic Netlink examples
+[[example]]
+name = "genl_wireguard"
+path = "examples/genl/wireguard.rs"

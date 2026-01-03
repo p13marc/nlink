@@ -20,6 +20,8 @@ pub enum Protocol {
     Route,
     /// Generic netlink
     Generic,
+    /// Socket diagnostics (ss-like queries)
+    SockDiag,
     /// Netfilter
     Netfilter,
     /// Kernel connector
@@ -33,6 +35,7 @@ impl Protocol {
         match self {
             Protocol::Route => protocols::NETLINK_ROUTE,
             Protocol::Generic => protocols::NETLINK_GENERIC,
+            Protocol::SockDiag => protocols::NETLINK_SOCK_DIAG,
             Protocol::Netfilter => protocols::NETLINK_NETFILTER,
             Protocol::Connector => protocols::NETLINK_CONNECTOR,
             Protocol::KobjectUevent => protocols::NETLINK_KOBJECT_UEVENT,

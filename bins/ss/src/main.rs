@@ -6,8 +6,9 @@
 mod output;
 
 use clap::Parser;
+use nlink::netlink::{Connection, SockDiag};
 use nlink::output::OutputFormat;
-use nlink::sockdiag::{InetFilter, Protocol, SockDiag, SocketFilter, TcpState, UnixFilter};
+use nlink::sockdiag::{InetFilter, Protocol, SocketFilter, TcpState, UnixFilter};
 
 #[derive(Parser)]
 #[command(name = "ss", version, about = "Socket statistics utility")]
@@ -141,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Create socket diagnostics connection
-    let mut diag = SockDiag::new().await?;
+    let conn = Connection::<SockDiag>::new()?;
 
     // Determine which socket types to query
     let query_tcp = cli.tcp || (!cli.udp && !cli.unix && !cli.raw && !cli.sctp && !cli.mptcp);
@@ -172,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
         };
         apply_inet_filters(&cli, &mut filter);
 
-        let sockets = diag
+        let sockets = conn
             .query(&SocketFilter {
                 kind: nlink::sockdiag::filter::FilterKind::Inet(filter),
             })
@@ -193,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
         };
         apply_inet_filters(&cli, &mut filter);
 
-        let sockets = diag
+        let sockets = conn
             .query(&SocketFilter {
                 kind: nlink::sockdiag::filter::FilterKind::Inet(filter),
             })
@@ -210,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
         };
         apply_inet_filters(&cli, &mut filter);
 
-        let sockets = diag
+        let sockets = conn
             .query(&SocketFilter {
                 kind: nlink::sockdiag::filter::FilterKind::Inet(filter),
             })
@@ -227,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
         };
         apply_inet_filters(&cli, &mut filter);
 
-        let sockets = diag
+        let sockets = conn
             .query(&SocketFilter {
                 kind: nlink::sockdiag::filter::FilterKind::Inet(filter),
             })
@@ -244,7 +245,7 @@ async fn main() -> anyhow::Result<()> {
         };
         apply_inet_filters(&cli, &mut filter);
 
-        let sockets = diag
+        let sockets = conn
             .query(&SocketFilter {
                 kind: nlink::sockdiag::filter::FilterKind::Inet(filter),
             })
@@ -265,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         };
 
-        let sockets = diag
+        let sockets = conn
             .query(&SocketFilter {
                 kind: nlink::sockdiag::filter::FilterKind::Unix(filter),
             })
