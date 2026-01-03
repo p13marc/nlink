@@ -416,10 +416,14 @@ impl Connection<Connector> {
     /// let conn = Connection::<Connector>::new().await?;
     /// ```
     pub async fn new() -> Result<Self> {
-        let socket = NetlinkSocket::new(Connector::PROTOCOL)?;
+        let mut socket = NetlinkSocket::new(Connector::PROTOCOL)?;
+
+        // Join the proc connector multicast group
+        socket.add_membership(CN_IDX_PROC)?;
+
         let conn = Self::from_parts(socket, Connector);
 
-        // Send registration message
+        // Send registration message to enable proc events
         conn.send_proc_control(PROC_CN_MCAST_LISTEN).await?;
 
         Ok(conn)
