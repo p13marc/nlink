@@ -40,11 +40,12 @@ nlink = { version = "0.1", features = ["full"] }
 ## Quick Start
 
 ```rust
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
+use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
+    let mut conn = Connection::<Route>::new()?;
     
     // Query interfaces
     let links = conn.get_links().await?;
@@ -63,16 +64,12 @@ async fn main() -> nlink::Result<()> {
     conn.set_link_mtu("eth0", 9000).await?;
     
     // Monitor events
-    use nlink::netlink::events::{EventStream, NetworkEvent};
+    conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Ipv4Addr])?;
+    let mut events = conn.events();
     
-    let mut stream = EventStream::builder()
-        .links(true)
-        .addresses(true)
-        .build()?;
-    
-    while let Some(event) = stream.next().await? {
-        match event {
-            NetworkEvent::NewLink(link) => println!("Link: {:?}", link.name),
+    while let Some(result) = events.next().await {
+        match result? {
+            NetworkEvent::NewLink(link) => println!("Link: {}", link.name_or("?")),
             _ => {}
         }
     }

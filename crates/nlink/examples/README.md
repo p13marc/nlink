@@ -207,7 +207,6 @@ Get interface name with a default value:
 ```rust
 let links = conn.get_links().await?;
 for link in links {
-    // Instead of: link.name.as_deref().unwrap_or("?")
     println!("Interface: {}", link.name_or("?"));
 }
 ```

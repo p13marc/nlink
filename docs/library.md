@@ -5,18 +5,18 @@ This document covers library usage patterns for the nlink crate.
 ## Quick Start
 
 ```rust
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
-    let conn = Connection::new(Protocol::Route)?;
+    let conn = Connection::<Route>::new()?;
     
     // Query interfaces
     let links = conn.get_links().await?;
     for link in &links {
         println!("{}: {} (up={})", 
             link.ifindex(), 
-            link.name.as_deref().unwrap_or("?"),
+            link.name_or("?"),
             link.is_up());
     }
     
@@ -59,18 +59,17 @@ for ns in namespace::list()? {
 ### Basic Event Stream
 
 ```rust
-use nlink::netlink::events::{EventStream, NetworkEvent};
+use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
+use tokio_stream::StreamExt;
 
-let mut stream = EventStream::builder()
-    .links(true)
-    .addresses(true)
-    .tc(true)
-    .build()?;
+let mut conn = Connection::<Route>::new()?;
+conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Ipv4Addr, RtnetlinkGroup::Tc])?;
 
-while let Some(event) = stream.next().await? {
-    match event {
-        NetworkEvent::NewLink(link) => println!("Link added: {:?}", link.name),
-        NetworkEvent::NewAddress(addr) => println!("Address added: {:?}", addr.address),
+let mut events = conn.events();
+while let Some(result) = events.next().await {
+    match result? {
+        NetworkEvent::NewLink(link) => println!("Link added: {}", link.name_or("?")),
+        NetworkEvent::NewAddress(addr) => println!("Address added: {:?}", addr.address()),
         _ => {}
     }
 }
@@ -79,26 +78,21 @@ while let Some(event) = stream.next().await? {
 ### Namespace-aware Monitoring
 
 ```rust
-use nlink::netlink::events::{EventStream, NetworkEvent};
+use nlink::netlink::{Connection, Route, RtnetlinkGroup, namespace};
+use tokio_stream::StreamExt;
 
 // Monitor events in a named namespace
-let mut stream = EventStream::builder()
-    .namespace("myns")
-    .links(true)
-    .tc(true)
-    .build()?;
+let mut conn = namespace::connection_for("myns")?;
+conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
+let mut events = conn.events();
 
 // Or by PID
-let mut stream = EventStream::builder()
-    .namespace_pid(1234)
-    .links(true)
-    .build()?;
+let mut conn = namespace::connection_for_pid(1234)?;
+conn.subscribe(&[RtnetlinkGroup::Link])?;
 
 // Or by path
-let mut stream = EventStream::builder()
-    .namespace_path("/proc/1234/ns/net")
-    .all()
-    .build()?;
+let mut conn = Connection::<Route>::new_in_namespace_path("/proc/1234/ns/net")?;
+conn.subscribe_all()?;
 ```
 
 ## Watching Namespace Changes
@@ -173,10 +167,10 @@ conn.add_qdisc_by_index(link.ifindex(), netem).await?;
 ### Reading Existing TC Configurations
 
 ```rust
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 use nlink::netlink::tc_options::QdiscOptions;
 
-let conn = Connection::new(Protocol::Route)?;
+let conn = Connection::<Route>::new()?;
 let qdiscs = conn.get_qdiscs_for("eth0").await?;
 
 for qdisc in &qdiscs {
@@ -185,31 +179,29 @@ for qdisc in &qdiscs {
         println!("Found root netem qdisc");
     }
     
-    // Get netem options with full details
-    if let Some(netem) = qdisc.netem_options() {
-        println!("delay: {:?}, jitter: {:?}", netem.delay(), netem.jitter());
-        println!("loss: {}%, duplicate: {}%", netem.loss_percent, netem.duplicate_percent);
-        
-        if netem.rate > 0 {
-            println!("rate: {} bytes/sec", netem.rate);
-        }
-        
-        // Loss models (Gilbert-Intuitive or Gilbert-Elliot)
-        if let Some(loss_model) = &netem.loss_model {
-            use nlink::netlink::tc_options::NetemLossModel;
-            match loss_model {
-                NetemLossModel::GilbertIntuitive { p13, p31, .. } => {
-                    println!("4-state loss model: p13={:.2}%, p31={:.2}%", p13, p31);
-                }
-                NetemLossModel::GilbertElliot { p, r, h, .. } => {
-                    println!("2-state loss model: p={:.2}%, r={:.2}%, h={:.2}%", p, r, h);
+    // Use options() for all qdisc types - returns parsed QdiscOptions enum
+    match qdisc.options() {
+        Some(QdiscOptions::Netem(netem)) => {
+            println!("delay: {:?}, jitter: {:?}", netem.delay(), netem.jitter());
+            println!("loss: {}%, duplicate: {}%", netem.loss_percent, netem.duplicate_percent);
+            
+            if netem.rate > 0 {
+                println!("rate: {} bytes/sec", netem.rate);
+            }
+            
+            // Loss models (Gilbert-Intuitive or Gilbert-Elliot)
+            if let Some(loss_model) = &netem.loss_model {
+                use nlink::netlink::tc_options::NetemLossModel;
+                match loss_model {
+                    NetemLossModel::GilbertIntuitive { p13, p31, .. } => {
+                        println!("4-state loss model: p13={:.2}%, p31={:.2}%", p13, p31);
+                    }
+                    NetemLossModel::GilbertElliot { p, r, h, .. } => {
+                        println!("2-state loss model: p={:.2}%, r={:.2}%, h={:.2}%", p, r, h);
+                    }
                 }
             }
         }
-    }
-    
-    // Use parsed_options() for all qdisc types
-    match qdisc.parsed_options() {
         Some(QdiscOptions::FqCodel(fq)) => {
             println!("fq_codel: target={}us, interval={}us", fq.target_us, fq.interval_us);
         }
@@ -227,10 +219,10 @@ for qdisc in &qdiscs {
 ### Monitoring TC Statistics
 
 ```rust
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 use std::time::Duration;
 
-let conn = Connection::new(Protocol::Route)?;
+let conn = Connection::<Route>::new()?;
 let mut prev_stats = None;
 
 loop {
@@ -258,11 +250,11 @@ loop {
 ### Creating Tunnels
 
 ```rust
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 use nlink::netlink::link::{GreLink, VxlanLink, VtiLink};
 use std::net::Ipv4Addr;
 
-let conn = Connection::new(Protocol::Route)?;
+let conn = Connection::<Route>::new()?;
 
 // GRE tunnel
 conn.add_link(GreLink::new("gre1")
@@ -311,11 +303,11 @@ conn.add_link(VtiLink::new("vti0")
 ### Safe Tunnel Replacement
 
 ```rust
-use nlink::netlink::{Connection, Protocol};
+use nlink::netlink::{Connection, Route};
 use nlink::netlink::link::GreLink;
 use std::net::Ipv4Addr;
 
-let conn = Connection::new(Protocol::Route)?;
+let conn = Connection::<Route>::new()?;
 
 // To change tunnel parameters, delete and recreate:
 conn.del_link("gre1").await?;
@@ -346,10 +338,11 @@ conn.set_link_name("gre1_new", "gre1").await?;
 ## WireGuard via Generic Netlink
 
 ```rust
-use nlink::netlink::genl::wireguard::{WireguardConnection, AllowedIp};
+use nlink::netlink::{Connection, Wireguard};
+use nlink::netlink::genl::wireguard::AllowedIp;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-let wg = WireguardConnection::new().await?;
+let wg = Connection::<Wireguard>::new_async().await?;
 
 // Get device information
 let device = wg.get_device("wg0").await?;
@@ -385,10 +378,10 @@ wg.remove_peer("wg0", peer_pubkey).await?;
 ## Error Handling
 
 ```rust
-use nlink::netlink::{Connection, Protocol, Error};
+use nlink::netlink::{Connection, Route, Error};
 use nlink::netlink::error::ValidationErrorInfo;
 
-let conn = Connection::new(Protocol::Route)?;
+let conn = Connection::<Route>::new()?;
 
 // Check error types for recovery logic
 match conn.del_qdisc("eth0", "root").await {
