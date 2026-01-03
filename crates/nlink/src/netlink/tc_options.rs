@@ -281,6 +281,93 @@ impl NetemOptions {
         if self.rate > 0 { Some(self.rate) } else { None }
     }
 
+    /// Get the delay correlation percentage (0-100%), or None if not set.
+    #[inline]
+    pub fn delay_correlation(&self) -> Option<f64> {
+        if self.delay_corr > 0.0 {
+            Some(self.delay_corr)
+        } else {
+            None
+        }
+    }
+
+    /// Get the loss correlation percentage (0-100%), or None if not set.
+    #[inline]
+    pub fn loss_correlation(&self) -> Option<f64> {
+        if self.loss_corr > 0.0 {
+            Some(self.loss_corr)
+        } else {
+            None
+        }
+    }
+
+    /// Get the duplicate correlation percentage (0-100%), or None if not set.
+    #[inline]
+    pub fn duplicate_correlation(&self) -> Option<f64> {
+        if self.duplicate_corr > 0.0 {
+            Some(self.duplicate_corr)
+        } else {
+            None
+        }
+    }
+
+    /// Get the reorder correlation percentage (0-100%), or None if not set.
+    #[inline]
+    pub fn reorder_correlation(&self) -> Option<f64> {
+        if self.reorder_corr > 0.0 {
+            Some(self.reorder_corr)
+        } else {
+            None
+        }
+    }
+
+    /// Get the corrupt correlation percentage (0-100%), or None if not set.
+    #[inline]
+    pub fn corrupt_correlation(&self) -> Option<f64> {
+        if self.corrupt_corr > 0.0 {
+            Some(self.corrupt_corr)
+        } else {
+            None
+        }
+    }
+
+    /// Check if ECN marking is enabled.
+    #[inline]
+    pub fn ecn(&self) -> bool {
+        self.ecn
+    }
+
+    /// Get the reorder gap, or None if not set.
+    ///
+    /// The gap specifies how many packets can be reordered. A gap of N means
+    /// that packet N can be reordered with packets 1 through N-1.
+    #[inline]
+    pub fn gap(&self) -> Option<u32> {
+        if self.gap > 0 { Some(self.gap) } else { None }
+    }
+
+    /// Get the queue limit in packets, or None if not set.
+    #[inline]
+    pub fn limit(&self) -> Option<u32> {
+        if self.limit > 0 {
+            Some(self.limit)
+        } else {
+            None
+        }
+    }
+
+    /// Get the slot-based transmission configuration, if present.
+    #[inline]
+    pub fn slot(&self) -> Option<&NetemSlotOptions> {
+        self.slot.as_ref()
+    }
+
+    /// Get the loss model configuration, if using state-based loss.
+    #[inline]
+    pub fn loss_model(&self) -> Option<&NetemLossModel> {
+        self.loss_model.as_ref()
+    }
+
     /// Returns the set of configured parameters.
     ///
     /// # Example

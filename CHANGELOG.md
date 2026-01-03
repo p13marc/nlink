@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - Unreleased
+
+### Added
+
+- `NetemOptions` correlation accessors: `delay_correlation()`, `loss_correlation()`, 
+  `duplicate_correlation()`, `reorder_correlation()`, `corrupt_correlation()`
+- `NetemOptions::ecn()` - Check if ECN marking is enabled
+- `NetemOptions::gap()` - Get the reorder gap value
+- `NetemOptions::limit()` - Get the queue limit in packets
+- `NetemOptions::slot()` - Get slot-based transmission configuration
+- `NetemOptions::loss_model()` - Get loss model configuration
+
+### Changed
+
+- **Breaking:** Renamed `into_event_stream()` to `into_events()` for consistency with 
+  Rust naming conventions (`iter()`/`into_iter()` pattern)
+
+### Migration
+
+```rust
+// Before
+let mut stream = conn.into_event_stream();
+
+// After
+let mut stream = conn.into_events();
+```
+
 ## [0.4.0] - 2026-01-03
 
 ### Breaking Changes
@@ -103,7 +130,7 @@ Changed methods:
 
 ### Changed
 
-- Event monitoring now uses `Connection::events()` and `into_event_stream()` from `EventSource` trait
+- Event monitoring now uses `Connection::events()` and `into_events()` from `EventSource` trait
 - Multi-namespace monitoring now uses `tokio_stream::StreamMap` directly instead of wrapper type
 
 ### Removed

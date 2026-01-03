@@ -119,7 +119,7 @@ Type aliases for TC messages improve discoverability:
 Stream types for event monitoring:
 - `EventSource` - Trait for protocols that emit events
 - `EventSubscription<'a, P>` - Borrowed stream from `conn.events()`
-- `OwnedEventStream<P>` - Owned stream from `conn.into_event_stream()`
+- `OwnedEventStream<P>` - Owned stream from `conn.into_events()`
 
 Multicast group subscription:
 - `RtnetlinkGroup` - Strongly-typed enum for rtnetlink multicast groups
@@ -379,7 +379,7 @@ loop {
 **Monitoring events (Stream API):**
 
 The `Connection` type implements `EventSource` trait, providing `events()` and
-`into_event_stream()` methods that return `Stream` implementations compatible
+`into_events()` methods that return `Stream` implementations compatible
 with `tokio-stream` combinators and `StreamMap` for multi-namespace monitoring.
 
 ```rust
@@ -434,12 +434,12 @@ let mut streams = StreamMap::new();
 // Monitor default namespace
 let mut conn = Connection::<Route>::new()?;
 conn.subscribe_all()?;
-streams.insert("default", conn.into_event_stream());
+streams.insert("default", conn.into_events());
 
 // Monitor named namespaces
 let mut conn_ns1 = namespace::connection_for("ns1")?;
 conn_ns1.subscribe_all()?;
-streams.insert("ns1", conn_ns1.into_event_stream());
+streams.insert("ns1", conn_ns1.into_events());
 
 // Events include namespace key
 while let Some((ns, result)) = streams.next().await {
@@ -542,7 +542,7 @@ let nsid = conn.get_nsid_for_pid(1234).await?;
 
 Protocols that support event monitoring implement the `EventSource` trait,
 providing a unified Stream-based API via `events()` (borrowed) and
-`into_event_stream()` (owned).
+`into_events()` (owned).
 
 ```rust
 use nlink::netlink::{Connection, KobjectUevent, Connector, SELinux};
@@ -572,7 +572,7 @@ while let Some(event) = events.next().await {
 
 // Owned stream (consumes connection)
 let conn = Connection::<KobjectUevent>::new()?;
-let mut stream = conn.into_event_stream();
+let mut stream = conn.into_events();
 while let Some(event) = stream.next().await {
     println!("{:?}", event?);
 }

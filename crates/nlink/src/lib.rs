@@ -110,11 +110,11 @@
 //!
 //! let mut conn1 = Connection::<Route>::new()?;
 //! conn1.subscribe_all()?;
-//! streams.insert("default", conn1.into_event_stream());
+//! streams.insert("default", conn1.into_events());
 //!
 //! let mut conn2 = Connection::<Route>::new_in_namespace("ns1")?;
 //! conn2.subscribe_all()?;
-//! streams.insert("ns1", conn2.into_event_stream());
+//! streams.insert("ns1", conn2.into_events());
 //!
 //! while let Some((ns, event)) = streams.next().await {
 //!     println!("[{}] {:?}", ns, event?);

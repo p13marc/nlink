@@ -7,7 +7,7 @@
 //!
 //! Protocols that implement [`EventSource`] can produce events via:
 //! - [`Connection::subscribe()`] - returns a borrowed stream, connection remains usable
-//! - [`Connection::into_event_stream()`] - consumes connection, returns owned stream
+//! - [`Connection::into_events()`] - consumes connection, returns owned stream
 //!
 //! # Example
 //!
@@ -71,7 +71,7 @@ mod private {
 ///
 /// This trait is sealed and cannot be implemented outside this crate.
 /// Protocols implementing this trait can use [`Connection::subscribe()`]
-/// and [`Connection::into_event_stream()`] to receive events as a [`Stream`].
+/// and [`Connection::into_events()`] to receive events as a [`Stream`].
 ///
 /// # Implementors
 ///
@@ -174,7 +174,7 @@ impl<P: EventSource> Unpin for EventSubscription<'_, P> {}
 
 /// A stream of events that owns the underlying connection.
 ///
-/// Created by [`Connection::into_event_stream()`]. Use [`EventSubscription`]
+/// Created by [`Connection::into_events()`]. Use [`EventSubscription`]
 /// via [`Connection::subscribe()`] if you need to retain access to the connection.
 ///
 /// # Example
@@ -184,7 +184,7 @@ impl<P: EventSource> Unpin for EventSubscription<'_, P> {}
 /// use tokio_stream::StreamExt;
 ///
 /// let conn = Connection::<SELinux>::new()?;
-/// let mut stream = conn.into_event_stream();
+/// let mut stream = conn.into_events();
 ///
 /// while let Some(event) = stream.try_next().await? {
 ///     println!("{:?}", event);
@@ -304,7 +304,7 @@ impl<P: EventSource> Connection<P> {
     /// use tokio_stream::StreamExt;
     ///
     /// let conn = Connection::<SELinux>::new()?;
-    /// let mut stream = conn.into_event_stream();
+    /// let mut stream = conn.into_events();
     ///
     /// while let Some(event) = stream.try_next().await? {
     ///     println!("{:?}", event);
@@ -313,7 +313,7 @@ impl<P: EventSource> Connection<P> {
     /// // Recover connection if needed
     /// let conn = stream.into_connection();
     /// ```
-    pub fn into_event_stream(self) -> OwnedEventStream<P> {
+    pub fn into_events(self) -> OwnedEventStream<P> {
         OwnedEventStream::new(self)
     }
 }
