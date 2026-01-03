@@ -51,11 +51,11 @@ crates/nlink/src/
     genl/             # Generic Netlink (GENL) support
       mod.rs          # GENL module entry, control family constants
       header.rs       # GenlMsgHdr (4-byte GENL header)
-      connection.rs   # GenlConnection with family ID resolution and caching
+      connection.rs   # Connection<Generic> with family ID resolution
       wireguard/      # WireGuard GENL configuration
         mod.rs        # WireGuard constants and attribute types
         types.rs      # WgDevice, WgPeer, AllowedIp, builders
-        connection.rs # WireguardConnection API
+        connection.rs # Connection<Wireguard> API
     messages/         # Strongly-typed message structs
     types/            # RTNetlink message structures (link, addr, route, neigh, rule, tc)
   util/               # Shared utilities (always available)
@@ -990,14 +990,15 @@ let err = Error::validation(vec![
 
 **WireGuard configuration via Generic Netlink:**
 ```rust
-use nlink::netlink::genl::wireguard::{WireguardConnection, AllowedIp};
+use nlink::netlink::{Connection, Wireguard};
+use nlink::netlink::genl::wireguard::AllowedIp;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-// Create a WireGuard GENL connection
-let wg = WireguardConnection::new().await?;
+// Create a WireGuard connection (async due to GENL family resolution)
+let conn = Connection::<Wireguard>::new_async().await?;
 
 // Get device information
-let device = wg.get_device("wg0").await?;
+let device = conn.get_device("wg0").await?;
 println!("Public key: {:?}", device.public_key);
 println!("Listen port: {:?}", device.listen_port);
 
@@ -1011,14 +1012,14 @@ for peer in &device.peers {
 
 // Configure device (requires root)
 let private_key = [0u8; 32]; // Your private key
-wg.set_device("wg0", |dev| {
+conn.set_device("wg0", |dev| {
     dev.private_key(private_key)
        .listen_port(51820)
 }).await?;
 
 // Add a peer
 let peer_pubkey = [0u8; 32]; // Peer's public key
-wg.set_peer("wg0", peer_pubkey, |peer| {
+conn.set_peer("wg0", peer_pubkey, |peer| {
     peer.endpoint(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 51820).into())
         .persistent_keepalive(25)
         .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
@@ -1026,7 +1027,10 @@ wg.set_peer("wg0", peer_pubkey, |peer| {
 }).await?;
 
 // Remove a peer
-wg.remove_peer("wg0", peer_pubkey).await?;
+conn.remove_peer("wg0", peer_pubkey).await?;
+
+// Access the resolved GENL family ID if needed
+println!("WireGuard family ID: {}", conn.family_id());
 ```
 
 ## Netlink Message Flow

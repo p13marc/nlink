@@ -14,17 +14,36 @@ All notable changes to this project will be documented in this file.
 - `conn.del_rule(builder)` - Delete a routing rule
 - `conn.flush_rules(family)` - Flush all rules for a family
 
+#### SockDiag Refactoring
+- `Connection<SockDiag>` now follows the typed connection pattern
+- `Connection::<SockDiag>::new()` constructor
+- `conn.tcp_sockets()`, `conn.udp_sockets()`, `conn.unix_sockets()` query methods
+- `TcpSocketsQuery`, `UdpSocketsQuery`, `UnixSocketsQuery` builders for filtering
+- Added sockdiag examples: `list_sockets`, `tcp_connections`, `unix_sockets`
+
+#### WireGuard Refactoring
+- `Connection<Wireguard>` now follows the typed connection pattern
+- `Connection::<Wireguard>::new_async()` for async initialization with GENL family resolution
+- `conn.get_device()`, `conn.set_device()`, `conn.set_peer()`, `conn.remove_peer()` methods
+- `conn.family_id()` to access resolved GENL family ID
+- Added genl example: `wireguard`
+
 ### Changed
 
 #### API Cleanup
 - Made `send_request()`, `send_ack()`, `send_dump()` methods `pub(crate)` (internal only)
 - Removed `RouteConnection` and `GenlConnection` type aliases (use `Connection<Route>` and `Connection<Generic>` directly)
-- Reorganized examples into protocol-based subdirectories (`route/`, `events/`, `namespace/`)
+- Reorganized examples into protocol-based subdirectories (`route/`, `events/`, `namespace/`, `sockdiag/`, `genl/`)
 - Moved TC type aliases (`QdiscMessage`, `ClassMessage`, `FilterMessage`) before test module
 
 #### Binary Refactoring
 - All binary commands now use high-level APIs instead of low-level `send_*` methods
 - Refactored: `address.rs`, `link.rs`, `link_add.rs`, `neighbor.rs`, `route.rs`, `rule.rs`, `tunnel.rs`, `vrf.rs`
+
+### Deprecated
+
+- `SockDiag` struct (use `Connection<SockDiag>` instead)
+- `WireguardConnection` type alias (use `Connection<Wireguard>` instead)
 
 ### Fixed
 

@@ -4,25 +4,30 @@ This report analyzes Linux netlink protocol families and their implementation st
 
 ## Current Architecture
 
-The library uses two different patterns for netlink protocols:
+The library uses a unified `Connection<P: ProtocolState>` pattern for all netlink protocols:
 
-1. **`Connection<P: ProtocolState>`** - The main typed connection pattern
-   - `Connection<Route>` - RTNetlink (interfaces, routes, TC, etc.)
-   - `Connection<Generic>` - Generic Netlink (WireGuard, etc.)
-   - Methods are added via `impl Connection<Route>` blocks in different modules
+1. **`Connection<Route>`** - RTNetlink (interfaces, routes, TC, etc.)
+   - Methods organized by domain across multiple files
+   - `connection.rs` - Core queries (get_links, get_routes, etc.)
+   - `addr.rs` - Address management
+   - `link.rs` - Link creation/modification
+   - `route.rs` - Route management
+   - `neigh.rs` - Neighbor/ARP table
+   - `tc.rs` - Traffic control
+   - `filter.rs` - TC filters
 
-2. **Separate module** - `sockdiag` module has its own `SockDiag` struct
-   - Does NOT use `ProtocolState` trait
-   - Completely independent implementation
+2. **`Connection<Generic>`** - Generic Netlink base
+   - Family ID resolution and caching
+   - Used for GENL protocols that don't have dedicated state types
 
-**Note**: `impl Connection<Route>` appears in 7 files because methods are organized by domain:
-- `connection.rs` - Core queries (get_links, get_routes, etc.)
-- `addr.rs` - Address management
-- `link.rs` - Link creation/modification
-- `route.rs` - Route management
-- `neigh.rs` - Neighbor/ARP table
-- `tc.rs` - Traffic control
-- `filter.rs` - TC filters
+3. **`Connection<Wireguard>`** - WireGuard via Generic Netlink
+   - `new_async()` constructor (resolves GENL family ID)
+   - Device and peer management methods
+   - Stores resolved family ID in state
+
+4. **`Connection<SockDiag>`** - Socket diagnostics
+   - TCP, UDP, and Unix socket queries
+   - Query builders for filtering
 
 ## Current Implementation Status
 
@@ -31,8 +36,8 @@ The library uses two different patterns for netlink protocols:
 | Protocol | ID | Description | Implementation |
 |----------|-----|-------------|----------------|
 | `NETLINK_ROUTE` | 0 | Routing, interfaces, addresses, TC, rules, neighbors | `Connection<Route>` - comprehensive |
-| `NETLINK_SOCK_DIAG` | 4 | Socket monitoring (ss-like queries) | `SockDiag` struct (separate module, feature-gated) |
-| `NETLINK_GENERIC` | 16 | Generic netlink (extensible subsystem) | `Connection<Generic>` with WireGuard support |
+| `NETLINK_SOCK_DIAG` | 4 | Socket monitoring (ss-like queries) | `Connection<SockDiag>` (feature-gated) |
+| `NETLINK_GENERIC` | 16 | Generic netlink (extensible subsystem) | `Connection<Generic>`, `Connection<Wireguard>` |
 
 ### Partially Implemented (Protocol Enum Only)
 
@@ -300,6 +305,7 @@ The current architecture uses a sealed `ProtocolState` trait. To add a new proto
 2. Create state type (e.g., `Xfrm`) in `protocol.rs`
 3. Implement `ProtocolState` for the new type
 4. Add protocol-specific methods to `Connection<NewType>`
+5. Export the new type from `mod.rs`
 
 Example for XFRM:
 ```rust
@@ -324,12 +330,40 @@ impl Connection<Xfrm> {
 
 ### Adding Generic Netlink Families
 
-For new GENL families (like nl80211):
+For new GENL families (like nl80211), follow the WireGuard pattern:
 
-1. Create module under `netlink/genl/` (e.g., `genl/nl80211/`)
-2. Define message types and attributes
-3. Implement query/set operations
-4. Optionally create wrapper connection type
+1. Create state type that stores any required runtime state (e.g., resolved family ID)
+2. Implement `ProtocolState` with `PROTOCOL = Protocol::Generic`
+3. Provide `new_async()` constructor for async initialization
+4. Add protocol-specific methods to `Connection<NewType>`
+
+Example for nl80211:
+```rust
+// In protocol.rs
+#[derive(Debug, Default)]
+pub struct Nl80211 {
+    pub(crate) family_id: u16,
+}
+
+impl private::Sealed for Nl80211 {}
+
+impl ProtocolState for Nl80211 {
+    const PROTOCOL: Protocol = Protocol::Generic;
+}
+
+// In genl/nl80211/connection.rs
+impl Connection<Nl80211> {
+    pub async fn new_async() -> Result<Self> {
+        let socket = NetlinkSocket::new(Nl80211::PROTOCOL)?;
+        let family_id = resolve_nl80211_family(&socket).await?;
+        let state = Nl80211 { family_id };
+        Ok(Self::from_parts(socket, state))
+    }
+
+    pub async fn get_interfaces(&self) -> Result<Vec<WifiInterface>> { ... }
+    pub async fn scan(&self, ifindex: u32) -> Result<Vec<BssInfo>> { ... }
+}
+```
 
 ---
 

@@ -90,11 +90,11 @@ async fn main() -> nlink::Result<()> {
 
 | Module | Description |
 |--------|-------------|
-| `nlink::netlink` | Core netlink: Connection, EventStream, namespace, TC |
+| `nlink::netlink` | Core netlink: `Connection<Route>`, EventStream, namespace, TC |
+| `nlink::netlink::genl` | Generic Netlink: `Connection<Generic>`, `Connection<Wireguard>` |
+| `nlink::sockdiag` | Socket diagnostics: `Connection<SockDiag>` (feature: `sockdiag`) |
 | `nlink::util` | Parsing utilities, address helpers, name resolution |
-| `nlink::sockdiag` | Socket diagnostics (feature: `sockdiag`) |
 | `nlink::tuntap` | TUN/TAP devices (feature: `tuntap`) |
-| `nlink::netlink::genl` | Generic Netlink, WireGuard |
 
 ## Project Status
 
