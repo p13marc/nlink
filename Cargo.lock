@@ -136,9 +136,9 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "clap"
-version = "4.5.53"
+version = "4.5.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9e340e012a1bf4935f5282ed1436d1489548e8f72308207ea5df0e23d2d03f8"
+checksum = "c6e6ff9dcd79cff5cd969a17a545d79e84ab086e444102a591e288a8aa3ce394"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -146,9 +146,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.53"
+version = "4.5.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d76b5d13eaa18c901fd2f7fca939fefe3a0727a953561fefdf3b2922b8569d00"
+checksum = "fa42cf4d2b7a41bc8f663a7cab4031ebafa1bf3875705bfaf8466dc60ab52c00"
 dependencies = [
  "anstream",
  "anstyle",
@@ -342,9 +342,9 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "libc"
-version = "0.2.178"
+version = "0.2.179"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37c93d8daa9d8a012fd8ab92f088405fb202ea0b6ab73ee2482ae66af4f42091"
+checksum = "c5a2d376baa530d1238d133232d15e239abad80d05838b4b59354e5268af431f"
 
 [[package]]
 name = "lock_api"
@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "nlink"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "inotify",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-bridge"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "atty",
  "clap",
@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-config"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "clap",
  "nlink",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-diag"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "clap",
  "nlink",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-ip"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-ss"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "atty",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-tc"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-wg"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64",
  "clap",
@@ -833,9 +833,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "2.0.112"
+version = "2.0.113"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21f182278bf2d2bcb3c88b1b08a37df029d71ce3d3ae26168e3c653b213b99d4"
+checksum = "678faa00651c9eb72dd2020cbdf275d92eccb2400d568e419efdd64838145cb4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -879,9 +879,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.48.0"
+version = "1.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408"
+checksum = "72a2903cd7736441aac9df9d7688bd0ce48edccaadf181c3b90be801e81d3d86"
 dependencies = [
  "bytes",
  "libc",
@@ -907,9 +907,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-stream"
-version = "0.1.17"
+version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eca58d7bba4a75707817a2c44174253f9236b2d5fbd055602e9d5c07c139a047"
+checksum = "32da49809aab5c3bc678af03902d4ccddea2a87d028d86392a4b1560c6906c70"
 dependencies = [
  "futures-core",
  "pin-project-lite",
@@ -1190,6 +1190,6 @@ dependencies = [
 
 [[package]]
 name = "zmij"
-version = "1.0.4"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77cc0158b0d3103d58e9e82bdbe9cf9289d80dbcf4e686ff16730eb9e5814d1a"
+checksum = "30e0d8dffbae3d840f64bda38e28391faef673a7b5a6017840f2a106c8145868"
