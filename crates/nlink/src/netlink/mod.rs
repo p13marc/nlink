@@ -77,6 +77,7 @@ pub mod connection;
 pub mod connector;
 mod error;
 pub mod events;
+pub mod fdb;
 pub mod fib_lookup;
 pub mod filter;
 #[cfg(test)]

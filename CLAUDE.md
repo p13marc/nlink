@@ -1089,6 +1089,61 @@ conn.del_rule(rule).await?;
 conn.flush_rules(libc::AF_INET as u8).await?;
 ```
 
+**Bridge FDB management:**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::fdb::FdbEntryBuilder;
+
+let conn = Connection::<Route>::new()?;
+
+// Query FDB entries for a bridge
+let entries = conn.get_fdb("br0").await?;
+for entry in &entries {
+    println!("{} vlan={:?} dst={:?}", entry.mac_str(), entry.vlan, entry.dst);
+}
+
+// Query FDB for a specific port
+let port_entries = conn.get_fdb_for_port("br0", "veth0").await?;
+
+// Add a static FDB entry
+let mac = FdbEntryBuilder::parse_mac("aa:bb:cc:dd:ee:ff")?;
+conn.add_fdb(
+    FdbEntryBuilder::new(mac)
+        .dev("veth0")
+        .master("br0")
+        .vlan(100)
+        .permanent()
+).await?;
+
+// Add VXLAN FDB entry (remote VTEP)
+use std::net::Ipv4Addr;
+conn.add_fdb(
+    FdbEntryBuilder::new([0x00; 6])  // all-zeros for BUM traffic
+        .dev("vxlan0")
+        .dst(Ipv4Addr::new(192, 168, 1, 100).into())
+).await?;
+
+// Replace entry (add or update)
+conn.replace_fdb(
+    FdbEntryBuilder::new(mac)
+        .dev("veth0")
+        .master("br0")
+).await?;
+
+// Delete entry
+conn.del_fdb("veth0", mac, None).await?;
+
+// Delete entry with VLAN
+conn.del_fdb("veth0", mac, Some(100)).await?;
+
+// Flush all dynamic entries (keeps permanent entries)
+conn.flush_fdb("br0").await?;
+
+// Namespace-aware operations (use ifindex to avoid /sys reads)
+let link = conn.get_link_by_name("veth0").await?.unwrap();
+conn.del_fdb_by_index(link.ifindex(), mac, None).await?;
+```
+
 **Error handling:**
 ```rust
 use nlink::netlink::{Connection, Protocol, Error};
