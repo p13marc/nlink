@@ -12,23 +12,45 @@ examples/
 │   ├── error_handling.rs
 │   ├── link_create.rs
 │   ├── list_interfaces.rs
+│   ├── mpls.rs           # MPLS routes and encapsulation
 │   ├── namespaces.rs
 │   ├── neighbors.rs
+│   ├── nexthop.rs        # Nexthop objects and groups
 │   ├── routes.rs
+│   ├── srv6.rs           # SRv6 segment routing
 │   ├── stats.rs
-│   └── tc/             # Traffic control examples
+│   └── tc/               # Traffic control examples
+│       ├── actions.rs    # TC actions (drop, mirror, police, etc.)
+│       ├── chains.rs     # TC filter chains
+│       ├── classes.rs    # TC class management (HTB)
+│       ├── filters.rs    # TC filters (u32, flower, matchall)
 │       ├── htb.rs
 │       ├── netem.rs
 │       └── stats.rs
+├── bridge/             # Bridge management examples
+│   ├── fdb.rs            # FDB (forwarding database) management
+│   └── vlan.rs           # VLAN filtering
+├── config/             # Declarative configuration examples
+│   └── declarative.rs    # Define desired state, compute diff, apply
+├── diagnostics/        # Network diagnostics examples
+│   ├── bottleneck.rs     # Find network bottlenecks
+│   ├── connectivity.rs   # Check connectivity to destination
+│   └── scan.rs           # Full diagnostic scan
+├── ratelimit/          # Rate limiting examples
+│   └── simple.rs         # High-level rate limiting API
 ├── events/             # Event monitoring examples
+│   ├── ip_monitor.rs
 │   ├── monitor.rs
 │   ├── monitor_namespace.rs
-│   └── multi_source.rs
+│   ├── multi_source.rs
+│   └── tc_monitor.rs
 ├── namespace/          # Namespace management examples
 │   ├── events.rs
 │   └── watch.rs
 ├── genl/               # Generic Netlink examples
-│   └── wireguard.rs
+│   ├── macsec.rs         # MACsec (IEEE 802.1AE) configuration
+│   ├── mptcp.rs          # MPTCP endpoint configuration
+│   └── wireguard.rs      # WireGuard configuration
 ├── sockdiag/           # Socket diagnostics examples
 │   ├── list_sockets.rs
 │   ├── tcp_connections.rs
@@ -80,6 +102,14 @@ Some examples require specific features or root privileges. See the individual e
 |---------|-------------|---------|
 | `route_link_create` | Create virtual interfaces (dummy, veth, bridge) | `sudo cargo run -p nlink --example route_link_create` |
 
+### Advanced Routing
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `route_nexthop` | Nexthop objects and ECMP groups (Linux 5.3+) | `cargo run -p nlink --example route_nexthop` |
+| `route_mpls` | MPLS routes and encapsulation | `cargo run -p nlink --example route_mpls` |
+| `route_srv6` | SRv6 segment routing and local SIDs | `cargo run -p nlink --example route_srv6` |
+
 ### Traffic Control (TC)
 
 | Example | Description | Command |
@@ -87,6 +117,10 @@ Some examples require specific features or root privileges. See the individual e
 | `route_tc_netem` | Network emulation (delay, loss, corruption) | `cargo run -p nlink --example route_tc_netem` |
 | `route_tc_htb` | HTB qdisc and class inspection | `cargo run -p nlink --example route_tc_htb` |
 | `route_tc_stats` | Real-time TC qdisc statistics monitoring | `cargo run -p nlink --example route_tc_stats` |
+| `route_tc_classes` | TC class management with typed builders | `cargo run -p nlink --example route_tc_classes` |
+| `route_tc_filters` | TC filters (u32, flower, matchall, etc.) | `cargo run -p nlink --example route_tc_filters` |
+| `route_tc_chains` | TC filter chains for complex classification | `cargo run -p nlink --example route_tc_chains` |
+| `route_tc_actions` | TC actions (drop, mirror, police, NAT, etc.) | `cargo run -p nlink --example route_tc_actions` |
 
 ### Namespaces
 
@@ -100,6 +134,33 @@ Some examples require specific features or root privileges. See the individual e
 |---------|-------------|---------|
 | `route_error_handling` | Demonstrate error handling patterns | `cargo run -p nlink --example route_error_handling` |
 
+## Bridge Examples
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `bridge_fdb` | Bridge FDB (forwarding database) management | `cargo run -p nlink --example bridge_fdb` |
+| `bridge_vlan` | Bridge VLAN filtering configuration | `cargo run -p nlink --example bridge_vlan` |
+
+## Declarative Configuration Examples
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `config_declarative` | Define network state, compute diff, apply changes | `cargo run -p nlink --example config_declarative` |
+
+## Rate Limiting Examples
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `ratelimit_simple` | High-level rate limiting API (RateLimiter, PerHostLimiter) | `cargo run -p nlink --example ratelimit_simple` |
+
+## Network Diagnostics Examples
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| `diagnostics_scan` | Full diagnostic scan of all interfaces | `cargo run -p nlink --example diagnostics_scan` |
+| `diagnostics_connectivity` | Check connectivity to a destination | `cargo run -p nlink --example diagnostics_connectivity` |
+| `diagnostics_bottleneck` | Find network bottlenecks | `cargo run -p nlink --example diagnostics_bottleneck` |
+
 ## Event Monitoring Examples
 
 | Example | Description | Command |
@@ -108,6 +169,7 @@ Some examples require specific features or root privileges. See the individual e
 | `events_monitor_namespace` | Monitor events in a specific namespace | `cargo run -p nlink --example events_monitor_namespace -- <ns_name>` |
 | `events_ip_monitor` | Monitor events like `ip monitor` (links, addresses, routes, neighbors) | `cargo run -p nlink --example events_ip_monitor` |
 | `events_tc_monitor` | Monitor TC events like `tc monitor` (qdiscs, classes, filters) | `cargo run -p nlink --example events_tc_monitor` |
+| `events_multi_source` | Combine multiple event sources with `tokio::select!` | `sudo cargo run -p nlink --example events_multi_source` |
 
 ## Namespace Examples
 
@@ -121,6 +183,8 @@ Some examples require specific features or root privileges. See the individual e
 | Example | Description | Command |
 |---------|-------------|---------|
 | `genl_wireguard` | Query WireGuard device configuration | `cargo run -p nlink --example genl_wireguard` |
+| `genl_macsec` | MACsec (IEEE 802.1AE) device configuration | `cargo run -p nlink --example genl_macsec` |
+| `genl_mptcp` | MPTCP (Multipath TCP) endpoint configuration | `cargo run -p nlink --example genl_mptcp` |
 
 ## Socket Diagnostics Examples
 
@@ -174,12 +238,6 @@ Some examples require specific features or root privileges. See the individual e
 |---------|-------------|---------|
 | `selinux_monitor` | Monitor SELinux enforcement mode changes and policy loads | `cargo run -p nlink --example selinux_monitor` |
 | `selinux_monitor_stream` | Same using Stream API with `conn.events()` | `cargo run -p nlink --example selinux_monitor_stream` |
-
-## Multi-Source Event Monitoring
-
-| Example | Description | Command |
-|---------|-------------|---------|
-| `events_multi_source` | Combine multiple event sources with `tokio::select!` | `sudo cargo run -p nlink --example events_multi_source` |
 
 ## Example Usage Patterns
 
@@ -279,6 +337,45 @@ match conn.del_qdisc("eth0", "root").await {
 }
 ```
 
+### Declarative configuration
+
+```rust
+use nlink::netlink::config::{NetworkConfig, LinkConfig, LinkType, AddressConfig};
+
+let config = NetworkConfig::new()
+    .link(LinkConfig::new("dummy0").link_type(LinkType::Dummy).up())
+    .address(AddressConfig::new("dummy0", "10.0.0.1/24"));
+
+// Compute diff and apply
+let diff = config.diff(&conn).await?;
+if !diff.is_empty() {
+    config.apply(&conn).await?;
+}
+```
+
+### Rate limiting
+
+```rust
+use nlink::netlink::ratelimit::RateLimiter;
+
+let limiter = RateLimiter::new("eth0")
+    .egress("100mbit")
+    .ingress("50mbit");
+limiter.apply(&conn).await?;
+```
+
+### Network diagnostics
+
+```rust
+use nlink::netlink::diagnostics::Diagnostics;
+
+let diag = Diagnostics::new(conn);
+let report = diag.scan().await?;
+for issue in &report.issues {
+    println!("[{:?}] {}", issue.severity, issue.message);
+}
+```
+
 ## Root Privileges
 
 Some operations require root privileges:
@@ -286,6 +383,8 @@ Some operations require root privileges:
 - Adding/deleting addresses (`route_addresses -- add/del`)
 - Modifying TC configuration
 - Accessing other network namespaces
+- Applying rate limits
+- Adding MPLS/SRv6 routes
 
 Run with `sudo` when needed:
 
@@ -300,9 +399,11 @@ Some examples require specific features:
 | Feature | Examples |
 |---------|----------|
 | `namespace_watcher` | `namespace_watch` |
+| `sockdiag` | `sockdiag_*` examples |
 
 Enable features with `--features`:
 
 ```bash
 cargo run -p nlink --features namespace_watcher --example namespace_watch
+cargo run -p nlink --features sockdiag --example sockdiag_list_sockets
 ```
