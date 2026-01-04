@@ -1144,6 +1144,52 @@ let link = conn.get_link_by_name("veth0").await?.unwrap();
 conn.del_fdb_by_index(link.ifindex(), mac, None).await?;
 ```
 
+**Bridge VLAN filtering:**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::bridge_vlan::BridgeVlanBuilder;
+
+let conn = Connection::<Route>::new()?;
+
+// Query VLAN configuration for a port
+let vlans = conn.get_bridge_vlans("eth0").await?;
+for vlan in &vlans {
+    println!("VLAN {}: pvid={} untagged={}",
+        vlan.vid, vlan.flags.pvid, vlan.flags.untagged);
+}
+
+// Query VLANs for all ports of a bridge
+let all_vlans = conn.get_bridge_vlans_all("br0").await?;
+
+// Add VLAN 100 as PVID and untagged (native VLAN)
+conn.add_bridge_vlan(
+    BridgeVlanBuilder::new(100)
+        .dev("eth0")
+        .pvid()
+        .untagged()
+).await?;
+
+// Convenience method for setting PVID
+conn.set_bridge_pvid("eth0", 100).await?;
+
+// Add a tagged VLAN
+conn.add_bridge_vlan_tagged("eth0", 200).await?;
+
+// Add VLAN range 300-310 as tagged
+conn.add_bridge_vlan_range("eth0", 300, 310).await?;
+
+// Delete a single VLAN
+conn.del_bridge_vlan("eth0", 100).await?;
+
+// Delete a VLAN range
+conn.del_bridge_vlan_range("eth0", 300, 310).await?;
+
+// Namespace-aware operations (use ifindex)
+let link = conn.get_link_by_name("eth0").await?.unwrap();
+conn.get_bridge_vlans_by_index(link.ifindex()).await?;
+conn.set_bridge_pvid_by_index(link.ifindex(), 100).await?;
+```
+
 **Error handling:**
 ```rust
 use nlink::netlink::{Connection, Protocol, Error};
