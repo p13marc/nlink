@@ -49,7 +49,7 @@ Cool features that would enhance the library's capabilities.
 |---|------|--------|--------|--------|
 | 11 | [Integration Tests Infrastructure](./011-integration-tests.md) | Medium | Completed | [Report](../reports/011-integration-tests.md) |
 | 12 | [Declarative Network Config](./012-declarative-config.md) | High | Completed | [Report](../reports/012-declarative-config.md) |
-| 13 | [Rate Limiting DSL](./013-rate-limit-dsl.md) | Medium | Planned | |
+| 13 | [Rate Limiting DSL](./013-rate-limit-dsl.md) | Medium | Completed | [Report](../reports/013-rate-limit-dsl.md) |
 | 14 | [Network Diagnostics](./014-network-diagnostics.md) | Medium | Planned | |
 
 ## Implementation Guidelines
