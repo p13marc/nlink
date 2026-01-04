@@ -61,11 +61,10 @@ pub async fn run(args: SetArgs) -> Result<()> {
             if let Some(port) = args.listen_port {
                 dev = dev.listen_port(port);
             }
-            if let Some(ref path) = args.private_key {
-                if let Ok(key) = read_key_file(path) {
+            if let Some(ref path) = args.private_key
+                && let Ok(key) = read_key_file(path) {
                     dev = dev.private_key(key);
                 }
-            }
             if let Some(mark) = args.fwmark {
                 dev = dev.fwmark(mark);
             }
@@ -119,7 +118,7 @@ pub async fn run(args: SetArgs) -> Result<()> {
 
 /// Read a key from a file.
 fn read_key_file(path: &PathBuf) -> Result<[u8; 32]> {
-    let content = fs::read_to_string(path).map_err(|e| Error::Io(e))?;
+    let content = fs::read_to_string(path).map_err(Error::Io)?;
 
     let bytes = base64_decode(&content)
         .map_err(|e| Error::InvalidMessage(format!("Invalid base64 in key file: {}", e)))?;

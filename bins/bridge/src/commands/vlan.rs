@@ -161,7 +161,7 @@ fn print_vlans_text(entries: &[BridgeVlanEntry], names: &std::collections::HashM
         by_dev.entry(entry.ifindex).or_default().push(entry);
     }
 
-    println!("{:<12} {}", "port", "vlan-id");
+    println!("{:<12} vlan-id", "port");
 
     for (ifindex, vlans) in by_dev {
         let dev = names

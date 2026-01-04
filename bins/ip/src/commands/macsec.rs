@@ -60,11 +60,8 @@ impl MacsecCmd {
             return Ok(());
         }
 
-        // Create MACsec connection for detailed info
-        let macsec_conn = match Connection::<Macsec>::new_async().await {
-            Ok(c) => Some(c),
-            Err(_) => None, // MACsec GENL not available
-        };
+        // Create MACsec connection for detailed info (may not be available)
+        let macsec_conn = Connection::<Macsec>::new_async().await.ok();
 
         let mut devices_info = Vec::new();
 
@@ -86,10 +83,10 @@ impl MacsecCmd {
             // Show all MACsec devices
             for link in &macsec_links {
                 let name = link.name_or("?");
-                if let Some(macsec) = &macsec_conn {
-                    if let Ok(dev) = macsec.get_device(name).await {
-                        devices_info.push((name.to_string(), dev));
-                    }
+                if let Some(macsec) = &macsec_conn
+                    && let Ok(dev) = macsec.get_device(name).await
+                {
+                    devices_info.push((name.to_string(), dev));
                 }
             }
         }

@@ -26,7 +26,7 @@ pub fn pubkey() -> Result<()> {
     let mut input = String::new();
     io::stdin()
         .read_to_string(&mut input)
-        .map_err(|e| Error::Io(e))?;
+        .map_err(Error::Io)?;
 
     let private_bytes = base64_decode(&input)
         .map_err(|e| Error::InvalidMessage(format!("Invalid base64: {}", e)))?;

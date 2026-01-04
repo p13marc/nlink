@@ -189,16 +189,14 @@ pub async fn run_conf(interface: &str) -> Result<()> {
     let device = conn.get_device(interface).await?;
 
     println!("[Interface]");
-    if let Some(port) = device.listen_port {
-        if port != 0 {
+    if let Some(port) = device.listen_port
+        && port != 0 {
             println!("ListenPort = {}", port);
         }
-    }
-    if let Some(fwmark) = device.fwmark {
-        if fwmark != 0 {
+    if let Some(fwmark) = device.fwmark
+        && fwmark != 0 {
             println!("FwMark = 0x{:x}", fwmark);
         }
-    }
     // Private key is not returned by kernel, so we can't output it
     // In the real wg tool, it requires PrivateKey to be set
 
@@ -216,11 +214,10 @@ pub async fn run_conf(interface: &str) -> Result<()> {
         if let Some(ref endpoint) = peer.endpoint {
             println!("Endpoint = {}", endpoint);
         }
-        if let Some(keepalive) = peer.persistent_keepalive {
-            if keepalive > 0 {
+        if let Some(keepalive) = peer.persistent_keepalive
+            && keepalive > 0 {
                 println!("PersistentKeepalive = {}", keepalive);
             }
-        }
     }
 
     Ok(())
@@ -236,17 +233,15 @@ fn print_device(device: &WgDevice) {
     }
     println!("  private key: (hidden)");
 
-    if let Some(port) = device.listen_port {
-        if port != 0 {
+    if let Some(port) = device.listen_port
+        && port != 0 {
             println!("  listening port: {}", port);
         }
-    }
 
-    if let Some(fwmark) = device.fwmark {
-        if fwmark != 0 {
+    if let Some(fwmark) = device.fwmark
+        && fwmark != 0 {
             println!("  fwmark: 0x{:x}", fwmark);
         }
-    }
 
     for peer in &device.peers {
         println!();
@@ -283,11 +278,10 @@ fn print_peer(peer: &WgPeer) {
         );
     }
 
-    if let Some(keepalive) = peer.persistent_keepalive {
-        if keepalive > 0 {
+    if let Some(keepalive) = peer.persistent_keepalive
+        && keepalive > 0 {
             println!("  persistent keepalive: every {} seconds", keepalive);
         }
-    }
 }
 
 /// Print device in machine-readable dump format.
@@ -362,13 +356,11 @@ async fn get_wireguard_interfaces() -> Result<Vec<String>> {
 
     let mut wg_interfaces = Vec::new();
     for link in links {
-        if let Some(info) = link.link_info() {
-            if info.kind() == Some("wireguard") {
-                if let Some(name) = link.name() {
+        if let Some(info) = link.link_info()
+            && info.kind() == Some("wireguard")
+                && let Some(name) = link.name() {
                     wg_interfaces.push(name.to_string());
                 }
-            }
-        }
     }
 
     Ok(wg_interfaces)

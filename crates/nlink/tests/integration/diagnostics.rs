@@ -279,8 +279,10 @@ async fn test_diagnostics_link_down_detection() {
     let conn = ns.connection().unwrap();
 
     // Use config that doesn't skip down interfaces
-    let mut config = DiagnosticsConfig::default();
-    config.skip_down = false;
+    let config = DiagnosticsConfig {
+        skip_down: false,
+        ..Default::default()
+    };
 
     let diag = Diagnostics::with_config(conn, config);
 

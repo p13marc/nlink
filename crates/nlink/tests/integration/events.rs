@@ -36,7 +36,7 @@ async fn test_link_events() -> Result<()> {
     let event = tokio::time::timeout(Duration::from_secs(2), events.next()).await;
 
     if let Ok(Some(Ok(NetworkEvent::NewLink(link)))) = event {
-        assert_eq!(link.name().as_deref(), Some("dummy0"));
+        assert_eq!(link.name(), Some("dummy0"));
     } else {
         // Event might have been missed due to timing, that's ok for this test
     }
@@ -192,7 +192,7 @@ async fn test_link_down_event() -> Result<()> {
 
     // Should receive a NewLink event with updated flags
     if let Ok(Some(Ok(NetworkEvent::NewLink(link)))) = event {
-        assert_eq!(link.name().as_deref(), Some("dummy0"));
+        assert_eq!(link.name(), Some("dummy0"));
         // The link should be down (up flag not set)
     }
 
@@ -224,7 +224,7 @@ async fn test_del_link_event() -> Result<()> {
     let event = tokio::time::timeout(Duration::from_secs(2), events.next()).await;
 
     if let Ok(Some(Ok(NetworkEvent::DelLink(link)))) = event {
-        assert_eq!(link.name().as_deref(), Some("dummy0"));
+        assert_eq!(link.name(), Some("dummy0"));
     }
 
     Ok(())
@@ -289,7 +289,7 @@ async fn test_owned_event_stream() -> Result<()> {
     let event = tokio::time::timeout(Duration::from_secs(2), stream.next()).await;
 
     if let Ok(Some(Ok(NetworkEvent::NewLink(link)))) = event {
-        assert_eq!(link.name().as_deref(), Some("dummy0"));
+        assert_eq!(link.name(), Some("dummy0"));
     }
 
     // Recover connection from stream if needed
@@ -318,11 +318,10 @@ async fn test_event_stream_continues() -> Result<()> {
 
     // Collect events with timeout
     let mut received = 0;
-    loop {
-        match tokio::time::timeout(Duration::from_millis(500), events.next()).await {
-            Ok(Some(Ok(_))) => received += 1,
-            _ => break,
-        }
+    while let Ok(Some(Ok(_))) =
+        tokio::time::timeout(Duration::from_millis(500), events.next()).await
+    {
+        received += 1;
     }
 
     // Should have received multiple events

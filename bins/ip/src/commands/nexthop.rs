@@ -424,13 +424,11 @@ fn get_ifname(ifindex: u32) -> Option<String> {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let idx_path = entry.path().join("ifindex");
-        if let Ok(content) = std::fs::read_to_string(&idx_path) {
-            if let Ok(idx) = content.trim().parse::<u32>() {
-                if idx == ifindex {
+        if let Ok(content) = std::fs::read_to_string(&idx_path)
+            && let Ok(idx) = content.trim().parse::<u32>()
+                && idx == ifindex {
                     return Some(name);
                 }
-            }
-        }
     }
     None
 }

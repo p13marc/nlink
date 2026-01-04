@@ -198,7 +198,7 @@ pub fn is_root() -> bool {
 #[macro_export]
 macro_rules! require_root {
     () => {
-        if !crate::common::is_root() {
+        if !$crate::common::is_root() {
             eprintln!("Skipping test: requires root");
             return Ok(());
         }
@@ -209,7 +209,7 @@ macro_rules! require_root {
 #[macro_export]
 macro_rules! require_root_void {
     () => {
-        if !crate::common::is_root() {
+        if !$crate::common::is_root() {
             eprintln!("Skipping test: requires root");
             return;
         }

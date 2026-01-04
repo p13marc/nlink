@@ -277,7 +277,7 @@ async fn test_add_htb_class() -> Result<()> {
     // Verify
     let classes = conn.get_classes_for("dummy0").await?;
     assert!(
-        classes.len() >= 1,
+        !classes.is_empty(),
         "at least one class should exist (may include root)"
     );
 

@@ -142,11 +142,10 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
         }
 
         // Filter by interface if specified
-        if let Some(ref filter) = args.interface {
-            if name != filter {
+        if let Some(ref filter) = args.interface
+            && name != filter {
                 continue;
             }
-        }
 
         let kind = link
             .link_info()
@@ -183,20 +182,17 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
             .unwrap_or("?");
 
         // Filter by interface if specified
-        if let Some(ref filter) = args.interface {
-            if dev != filter {
+        if let Some(ref filter) = args.interface
+            && dev != filter {
                 continue;
             }
-        }
 
         // Skip loopback addresses if requested
-        if args.skip_loopback {
-            if let Some(link) = links.iter().find(|l| l.ifindex() == addr.ifindex()) {
-                if link.is_loopback() {
+        if args.skip_loopback
+            && let Some(link) = links.iter().find(|l| l.ifindex() == addr.ifindex())
+                && link.is_loopback() {
                     continue;
                 }
-            }
-        }
 
         let address = addr
             .address()
@@ -350,20 +346,17 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
                 .unwrap_or("?");
 
             // Filter by interface if specified
-            if let Some(ref filter) = args.interface {
-                if dev != filter {
+            if let Some(ref filter) = args.interface
+                && dev != filter {
                     continue;
                 }
-            }
 
             // Skip loopback qdiscs
-            if args.skip_loopback {
-                if let Some(link) = links.iter().find(|l| l.ifindex() == qdisc.ifindex()) {
-                    if link.is_loopback() {
+            if args.skip_loopback
+                && let Some(link) = links.iter().find(|l| l.ifindex() == qdisc.ifindex())
+                    && link.is_loopback() {
                         continue;
                     }
-                }
-            }
 
             let parent = if qdisc.is_root() {
                 "root".to_string()
