@@ -44,6 +44,18 @@ impl NdMsg {
         self
     }
 
+    /// Set the neighbor state.
+    pub fn with_state(mut self, state: u16) -> Self {
+        self.ndm_state = state;
+        self
+    }
+
+    /// Set the neighbor flags.
+    pub fn with_flags(mut self, flags: u8) -> Self {
+        self.ndm_flags = flags;
+        self
+    }
+
     /// Convert to bytes.
     pub fn as_bytes(&self) -> &[u8] {
         <Self as IntoBytes>::as_bytes(self)

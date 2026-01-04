@@ -17,7 +17,7 @@ These should be implemented first as they provide the most value for common use 
 | # | Plan | Effort | Status | Report |
 |---|------|--------|--------|--------|
 | 1 | [Expose TC Class API](./001-tc-class-api.md) | Low | Completed | [Report](../reports/001-tc-class-api.md) |
-| 2 | [Bridge FDB Management](./002-bridge-fdb.md) | Medium | Planned |
+| 2 | [Bridge FDB Management](./002-bridge-fdb.md) | Medium | Completed | [Report](../reports/002-bridge-fdb.md) |
 | 3 | [Bridge VLAN Filtering](./003-bridge-vlan.md) | Medium | Planned |
 | 4 | [HTB Class Typed Builder](./004-htb-class-builder.md) | Low | Planned |
 

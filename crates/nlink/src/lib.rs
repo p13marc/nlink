@@ -169,3 +169,6 @@ pub use netlink::messages::{
     RuleMessage,
     TcMessage,
 };
+
+// FDB types
+pub use netlink::fdb::{FdbEntry, FdbEntryBuilder};
