@@ -146,6 +146,11 @@ impl NlMsgType {
     pub const RTM_NEWNSID: u16 = 88;
     pub const RTM_DELNSID: u16 = 89;
     pub const RTM_GETNSID: u16 = 90;
+
+    // Nexthop messages (Linux 5.3+)
+    pub const RTM_NEWNEXTHOP: u16 = 104;
+    pub const RTM_DELNEXTHOP: u16 = 105;
+    pub const RTM_GETNEXTHOP: u16 = 106;
 }
 
 /// Netlink message flags.

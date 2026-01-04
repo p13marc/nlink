@@ -48,6 +48,7 @@ crates/nlink/src/
     action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ConnmarkAction, CsumAction, SampleAction, CtAction, PeditAction, ActionList)
     link.rs           # Link type builders (DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, BareudpLink, NetkitLink, NlmonLink, VirtWifiLink, VtiLink, Vti6Link, Ip6GreLink, Ip6GretapLink)
     rule.rs           # Routing rule builder (RuleBuilder)
+    nexthop.rs        # Nexthop objects and groups (NexthopBuilder, NexthopGroupBuilder) - Linux 5.3+
     uevent.rs         # KobjectUevent (device hotplug events)
     connector.rs      # Connector (process lifecycle events)
     netfilter.rs      # Netfilter (connection tracking)
@@ -1158,6 +1159,89 @@ conn.del_rule(rule).await?;
 
 // Flush all IPv4 rules (except protected ones)
 conn.flush_rules(libc::AF_INET as u8).await?;
+```
+
+**Nexthop objects and groups (Linux 5.3+):**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::nexthop::{NexthopBuilder, NexthopGroupBuilder};
+use nlink::netlink::route::Ipv4Route;
+use std::net::Ipv4Addr;
+
+let conn = Connection::<Route>::new()?;
+
+// Create individual nexthops
+conn.add_nexthop(
+    NexthopBuilder::new(1)
+        .gateway(Ipv4Addr::new(192, 168, 1, 1).into())
+        .dev("eth0")
+).await?;
+
+conn.add_nexthop(
+    NexthopBuilder::new(2)
+        .gateway(Ipv4Addr::new(192, 168, 2, 1).into())
+        .dev("eth1")
+).await?;
+
+// Create ECMP group with equal weights
+conn.add_nexthop_group(
+    NexthopGroupBuilder::new(100)
+        .member(1, 1)  // nexthop 1, weight 1
+        .member(2, 1)  // nexthop 2, weight 1
+).await?;
+
+// Create weighted multipath (2:1 ratio)
+conn.add_nexthop_group(
+    NexthopGroupBuilder::new(101)
+        .member(1, 2)  // weight 2
+        .member(2, 1)  // weight 1
+).await?;
+
+// Create resilient group (maintains flow affinity during changes)
+conn.add_nexthop_group(
+    NexthopGroupBuilder::new(102)
+        .resilient()
+        .member(1, 1)
+        .member(2, 1)
+        .buckets(128)
+        .idle_timer(120)
+).await?;
+
+// Use nexthop group in a route
+conn.add_route(
+    Ipv4Route::new("10.0.0.0", 8)
+        .nexthop_group(100)  // Reference nexthop group ID 100
+).await?;
+
+// Query nexthops
+let nexthops = conn.get_nexthops().await?;
+for nh in &nexthops {
+    if nh.is_group() {
+        println!("Group {}: {:?}", nh.id, nh.group);
+    } else {
+        println!("NH {}: gateway={:?} ifindex={:?}", nh.id, nh.gateway, nh.ifindex);
+    }
+}
+
+// Query only groups
+let groups = conn.get_nexthop_groups().await?;
+
+// Get specific nexthop
+if let Some(nh) = conn.get_nexthop(1).await? {
+    println!("Nexthop 1: {:?}", nh);
+}
+
+// Replace a nexthop (update or create)
+conn.replace_nexthop(
+    NexthopBuilder::new(1)
+        .gateway(Ipv4Addr::new(192, 168, 1, 254).into())
+        .dev("eth0")
+).await?;
+
+// Cleanup
+conn.del_nexthop_group(100).await?;
+conn.del_nexthop(1).await?;
+conn.del_nexthop(2).await?;
 ```
 
 **Bridge FDB management:**

@@ -3,6 +3,7 @@
 pub mod addr;
 pub mod link;
 pub mod neigh;
+pub mod nexthop;
 pub mod nsid;
 pub mod route;
 pub mod rule;
