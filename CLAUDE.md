@@ -92,6 +92,7 @@ crates/nlink/src/
     selinux.rs        # SELinux event notifications
     config/           # Declarative network configuration (NetworkConfig, diff, apply)
     ratelimit.rs      # High-level rate limiting DSL (RateLimiter, PerHostLimiter)
+    diagnostics.rs    # Network diagnostics (Diagnostics, DiagnosticReport, Issue, Bottleneck)
     genl/             # Generic Netlink (GENL) support
       mod.rs          # GENL module entry, control family constants
       header.rs       # GenlMsgHdr (4-byte GENL header)
@@ -382,6 +383,72 @@ PerHostLimiter::new("eth0", "10mbit")?  // Default rate for unmatched traffic
 PerHostLimiter::new("eth0", "10mbit")?
     .remove(&conn)
     .await?;
+```
+
+**Network diagnostics (Diagnostics):**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::diagnostics::{Diagnostics, DiagnosticsConfig, Severity, IssueCategory};
+
+let conn = Connection::<Route>::new()?;
+let diag = Diagnostics::new(conn);
+
+// Full diagnostic scan of all interfaces
+let report = diag.scan().await?;
+for iface in &report.interfaces {
+    println!("{}: {} bps, {} drops", 
+        iface.name, iface.rates.tx_bps, iface.stats.tx_dropped());
+    if let Some(tc) = &iface.tc {
+        println!("  TC: {} ({} drops)", tc.qdisc, tc.drops);
+    }
+}
+
+// Print all detected issues
+for issue in &report.issues {
+    println!("[{:?}] {}: {}", issue.severity, issue.category, issue.message);
+}
+
+// Scan specific interface
+let eth0 = diag.scan_interface("eth0").await?;
+println!("eth0 MTU: {:?}", eth0.mtu);
+
+// Check connectivity to a destination
+let report = diag.check_connectivity("8.8.8.8".parse()?).await?;
+if !report.issues.is_empty() {
+    println!("Connectivity issues:");
+    for issue in &report.issues {
+        println!("  - {}", issue.message);
+    }
+}
+if let Some(route) = &report.route {
+    println!("Route: {} via {:?}", route.destination, report.gateway);
+}
+
+// Find bottleneck in the system
+if let Some(bottleneck) = diag.find_bottleneck().await? {
+    println!("Bottleneck: {} ({:?})", bottleneck.location, bottleneck.bottleneck_type);
+    println!("  Drop rate: {:.2}%", bottleneck.drop_rate * 100.0);
+    println!("  Recommendation: {}", bottleneck.recommendation);
+}
+
+// Custom configuration for stricter thresholds
+let config = DiagnosticsConfig {
+    packet_loss_threshold: 0.001,  // 0.1% packet loss triggers warning
+    error_rate_threshold: 0.0001,  // 0.01% error rate triggers warning
+    qdisc_drop_threshold: 0.001,   // 0.1% qdisc drop rate triggers warning
+    skip_loopback: true,           // Skip lo interface
+    skip_down: false,              // Include down interfaces
+    ..Default::default()
+};
+let diag = Diagnostics::with_config(conn, config);
+
+// Real-time issue monitoring
+use tokio_stream::StreamExt;
+let mut issues = diag.watch().await?;
+while let Some(issue) = issues.next().await {
+    let issue = issue?;
+    println!("[{:?}] {}", issue.severity, issue.message);
+}
 ```
 
 **Network namespace operations:**
