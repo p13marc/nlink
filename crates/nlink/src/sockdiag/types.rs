@@ -418,6 +418,165 @@ pub struct TcpInfo {
     pub snd_wnd: u32,
 }
 
+impl TcpInfo {
+    /// Format as ss-style string with all non-zero metrics.
+    ///
+    /// This produces output similar to `ss -i`:
+    /// ```text
+    /// rtt:0.123/0.050 ato:40 mss:1448 cwnd:10 ssthresh:7 bytes_acked:12345
+    /// ```
+    pub fn format_ss(&self) -> String {
+        let mut parts = Vec::new();
+
+        // RTT (in milliseconds with 3 decimal places)
+        if self.rtt > 0 {
+            let rtt_ms = self.rtt as f64 / 1000.0;
+            let rttvar_ms = self.rttvar as f64 / 1000.0;
+            parts.push(format!("rtt:{:.3}/{:.3}", rtt_ms, rttvar_ms));
+        }
+
+        // RTO
+        if self.rto > 0 && self.rto != 200_000 {
+            // Skip default RTO
+            parts.push(format!("rto:{}", self.rto / 1000));
+        }
+
+        // MSS
+        if self.snd_mss > 0 {
+            parts.push(format!("mss:{}", self.snd_mss));
+        }
+
+        // Congestion window
+        if self.snd_cwnd > 0 {
+            parts.push(format!("cwnd:{}", self.snd_cwnd));
+        }
+
+        // Slow-start threshold
+        if self.snd_ssthresh > 0 && self.snd_ssthresh < u32::MAX {
+            parts.push(format!("ssthresh:{}", self.snd_ssthresh));
+        }
+
+        // Bytes metrics
+        if self.bytes_acked > 0 {
+            parts.push(format!("bytes_acked:{}", self.bytes_acked));
+        }
+        if self.bytes_received > 0 {
+            parts.push(format!("bytes_received:{}", self.bytes_received));
+        }
+
+        // Segments
+        if self.segs_out > 0 {
+            parts.push(format!("segs_out:{}", self.segs_out));
+        }
+        if self.segs_in > 0 {
+            parts.push(format!("segs_in:{}", self.segs_in));
+        }
+
+        // Retransmissions
+        if self.retrans > 0 {
+            parts.push(format!("retrans:{}/{}", self.retrans, self.total_retrans));
+        } else if self.total_retrans > 0 {
+            parts.push(format!("retrans:0/{}", self.total_retrans));
+        }
+
+        // Delivery rate
+        if self.delivery_rate > 0 {
+            parts.push(format!(
+                "delivery_rate:{}{}",
+                format_rate_bps(self.delivery_rate * 8),
+                if self.delivery_rate_app_limited {
+                    "app_limited"
+                } else {
+                    ""
+                }
+            ));
+        }
+
+        // Pacing rate
+        if self.pacing_rate > 0 && self.pacing_rate < u64::MAX {
+            parts.push(format!(
+                "pacing_rate:{}",
+                format_rate_bps(self.pacing_rate * 8)
+            ));
+        }
+
+        // Minimum RTT
+        if self.min_rtt > 0 {
+            parts.push(format!("minrtt:{:.3}", self.min_rtt as f64 / 1000.0));
+        }
+
+        // Receive window
+        if self.rcv_space > 0 {
+            parts.push(format!("rcv_space:{}", self.rcv_space));
+        }
+
+        parts.join(" ")
+    }
+
+    /// Format RTT as "rtt/rttvar" in milliseconds.
+    pub fn rtt_str(&self) -> String {
+        if self.rtt > 0 {
+            format!(
+                "{:.3}/{:.3}",
+                self.rtt as f64 / 1000.0,
+                self.rttvar as f64 / 1000.0
+            )
+        } else {
+            String::new()
+        }
+    }
+
+    /// Format congestion window.
+    pub fn cwnd_str(&self) -> String {
+        if self.snd_cwnd > 0 {
+            format!("{}", self.snd_cwnd)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Format delivery rate as human-readable string.
+    pub fn delivery_rate_str(&self) -> String {
+        if self.delivery_rate > 0 {
+            format_rate_bps(self.delivery_rate * 8)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Format pacing rate as human-readable string.
+    pub fn pacing_rate_str(&self) -> String {
+        if self.pacing_rate > 0 && self.pacing_rate < u64::MAX {
+            format_rate_bps(self.pacing_rate * 8)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Get the send window scale (high nibble of wscale).
+    pub fn snd_wscale(&self) -> u8 {
+        self.wscale >> 4
+    }
+
+    /// Get the receive window scale (low nibble of wscale).
+    pub fn rcv_wscale(&self) -> u8 {
+        self.wscale & 0x0f
+    }
+}
+
+/// Format bits per second as human-readable string.
+fn format_rate_bps(bps: u64) -> String {
+    if bps >= 1_000_000_000 {
+        format!("{:.1}Gbps", bps as f64 / 1_000_000_000.0)
+    } else if bps >= 1_000_000 {
+        format!("{:.1}Mbps", bps as f64 / 1_000_000.0)
+    } else if bps >= 1_000 {
+        format!("{:.1}Kbps", bps as f64 / 1_000.0)
+    } else {
+        format!("{}bps", bps)
+    }
+}
+
 /// Socket memory information.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemInfo {
@@ -439,6 +598,78 @@ pub struct MemInfo {
     pub backlog: u32,
     /// Drops.
     pub drops: u32,
+}
+
+impl MemInfo {
+    /// Format as skmem style string.
+    ///
+    /// This produces output like ss's skmem() format:
+    /// ```text
+    /// skmem:(r0,rb131072,t0,tb16384,f0,w0,o0,bl0,d0)
+    /// ```
+    pub fn format_skmem(&self) -> String {
+        format!(
+            "skmem:(r{},rb{},t{},tb{},f{},w{},o{},bl{},d{})",
+            self.rmem_alloc,
+            self.rcvbuf,
+            self.wmem_alloc,
+            self.sndbuf,
+            self.fwd_alloc,
+            self.wmem_queued,
+            self.optmem,
+            self.backlog,
+            self.drops
+        )
+    }
+
+    /// Format as compact skmem string (only non-zero values).
+    pub fn format_skmem_compact(&self) -> String {
+        let mut parts = Vec::new();
+
+        if self.rmem_alloc > 0 {
+            parts.push(format!("r{}", self.rmem_alloc));
+        }
+        if self.rcvbuf > 0 {
+            parts.push(format!("rb{}", self.rcvbuf));
+        }
+        if self.wmem_alloc > 0 {
+            parts.push(format!("t{}", self.wmem_alloc));
+        }
+        if self.sndbuf > 0 {
+            parts.push(format!("tb{}", self.sndbuf));
+        }
+        if self.fwd_alloc > 0 {
+            parts.push(format!("f{}", self.fwd_alloc));
+        }
+        if self.wmem_queued > 0 {
+            parts.push(format!("w{}", self.wmem_queued));
+        }
+        if self.optmem > 0 {
+            parts.push(format!("o{}", self.optmem));
+        }
+        if self.backlog > 0 {
+            parts.push(format!("bl{}", self.backlog));
+        }
+        if self.drops > 0 {
+            parts.push(format!("d{}", self.drops));
+        }
+
+        if parts.is_empty() {
+            "skmem:()".to_string()
+        } else {
+            format!("skmem:({})", parts.join(","))
+        }
+    }
+
+    /// Check if there are any drops.
+    pub fn has_drops(&self) -> bool {
+        self.drops > 0
+    }
+
+    /// Total memory in use (rmem + wmem).
+    pub fn total_mem(&self) -> u64 {
+        self.rmem_alloc as u64 + self.wmem_alloc as u64
+    }
 }
 
 /// Timer information.

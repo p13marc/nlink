@@ -5,15 +5,13 @@
 
 use clap::{Args, Subcommand};
 use nlink::netlink::Result;
+use nlink::netlink::namespace::{self, NETNS_RUN_DIR};
 use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// Network namespace runtime directory.
-const NETNS_RUN_DIR: &str = "/var/run/netns";
 
 /// Namespace information for display.
 #[derive(Debug)]
@@ -132,32 +130,15 @@ impl NetnsCmd {
 
 /// List all network namespaces.
 fn list_namespaces(format: OutputFormat, opts: &OutputOptions) -> Result<()> {
-    let dir = match fs::read_dir(NETNS_RUN_DIR) {
-        Ok(d) => d,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            // No namespaces directory means no namespaces
-            return Ok(());
-        }
-        Err(e) => {
-            return Err(nlink::netlink::Error::Io(e));
-        }
-    };
+    let names = namespace::list()?;
 
-    let mut namespaces: Vec<NamespaceInfo> = Vec::new();
-
-    for entry in dir {
-        let entry = entry.map_err(nlink::netlink::Error::Io)?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name == "." || name == ".." {
-            continue;
-        }
-        namespaces.push(NamespaceInfo {
+    let namespaces: Vec<NamespaceInfo> = names
+        .into_iter()
+        .map(|name| NamespaceInfo {
             nsid: get_namespace_id(&name),
             name,
-        });
-    }
-
-    namespaces.sort_by(|a, b| a.name.cmp(&b.name));
+        })
+        .collect();
 
     print_all(&namespaces, format, opts)?;
 
@@ -264,26 +245,7 @@ fn add_namespace(name: &str) -> Result<()> {
 
 /// Delete a network namespace.
 fn delete_namespace(name: &str) -> Result<()> {
-    let netns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
-
-    if !netns_path.exists() {
-        return Err(nlink::netlink::Error::InvalidMessage(format!(
-            "namespace '{}' does not exist",
-            name
-        )));
-    }
-
-    // Unmount the namespace
-    unsafe {
-        let path_cstr = std::ffi::CString::new(netns_path.to_str().unwrap()).unwrap();
-        libc::umount2(path_cstr.as_ptr(), libc::MNT_DETACH);
-    }
-
-    // Remove the file
-    fs::remove_file(&netns_path).map_err(|e| {
-        nlink::netlink::Error::InvalidMessage(format!("cannot remove namespace file: {}", e))
-    })?;
-
+    namespace::delete(name)?;
     println!("Network namespace '{}' deleted", name);
     Ok(())
 }
@@ -296,31 +258,8 @@ fn exec_in_namespace(name: &str, command: &[String]) -> Result<()> {
         ));
     }
 
-    let netns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
-
-    if !netns_path.exists() {
-        return Err(nlink::netlink::Error::InvalidMessage(format!(
-            "namespace '{}' does not exist",
-            name
-        )));
-    }
-
-    // Open the namespace file
-    let netns_fd = File::open(&netns_path).map_err(|e| {
-        nlink::netlink::Error::InvalidMessage(format!("cannot open namespace '{}': {}", name, e))
-    })?;
-
-    // Switch to the namespace
-    use std::os::unix::io::AsRawFd;
-    let fd = netns_fd.as_raw_fd();
-
-    unsafe {
-        if libc::setns(fd, libc::CLONE_NEWNET) < 0 {
-            return Err(nlink::netlink::Error::Io(io::Error::last_os_error()));
-        }
-    }
-
-    drop(netns_fd);
+    // Enter the namespace (we don't restore since we're about to exec)
+    let _guard = namespace::enter(name)?;
 
     // Execute the command
     let status = Command::new(&command[0])
@@ -390,15 +329,13 @@ fn identify_namespace(pid: &str) -> Result<()> {
 
 /// List PIDs in a network namespace.
 fn list_pids_in_namespace(name: &str) -> Result<()> {
-    let netns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
-
-    if !netns_path.exists() {
-        return Err(nlink::netlink::Error::InvalidMessage(format!(
-            "namespace '{}' does not exist",
-            name
-        )));
+    if !namespace::exists(name) {
+        return Err(nlink::netlink::Error::NamespaceNotFound {
+            name: name.to_string(),
+        });
     }
 
+    let netns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
     let ns_stat = fs::metadata(&netns_path).map_err(nlink::netlink::Error::Io)?;
     use std::os::unix::fs::MetadataExt;
     let ns_dev = ns_stat.dev();
@@ -506,13 +443,10 @@ fn monitor_namespaces() -> Result<()> {
 
 /// Set the namespace ID for a network namespace.
 fn set_namespace_id(name: &str, nsid: &str) -> Result<()> {
-    let netns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
-
-    if !netns_path.exists() {
-        return Err(nlink::netlink::Error::InvalidMessage(format!(
-            "namespace '{}' does not exist",
-            name
-        )));
+    if !namespace::exists(name) {
+        return Err(nlink::netlink::Error::NamespaceNotFound {
+            name: name.to_string(),
+        });
     }
 
     let id: i32 = if nsid == "auto" {

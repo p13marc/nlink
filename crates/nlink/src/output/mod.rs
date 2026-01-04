@@ -1,10 +1,15 @@
 //! Output formatting (JSON/text) for nlink.
 
+pub mod formatting;
 mod json;
 pub mod monitor;
 mod printable;
 mod text;
 
+pub use formatting::{
+    format_bytes, format_duration, format_duration_compact, format_hex, format_ipv4, format_mac,
+    format_percent, format_rate_bps, format_rate_bytes, format_tc_handle, format_time_ago,
+};
 pub use json::JsonOutput;
 pub use monitor::{
     AddressEvent, IpEvent, LinkEvent, MonitorConfig, MonitorEvent, NeighborEvent, RouteEvent,

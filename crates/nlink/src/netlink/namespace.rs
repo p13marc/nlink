@@ -322,6 +322,187 @@ pub fn exists(name: &str) -> bool {
     path.exists()
 }
 
+/// Create a named network namespace.
+///
+/// This is equivalent to `ip netns add <name>`. It creates the namespace
+/// directory if needed, creates a new network namespace, and bind-mounts
+/// it to `/var/run/netns/<name>`.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The namespace already exists
+/// - Permission is denied (requires root or CAP_SYS_ADMIN)
+/// - The namespace directory cannot be created
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::namespace;
+///
+/// namespace::create("myns")?;
+/// // Now "myns" exists and can be used
+/// let conn = namespace::connection_for("myns")?;
+/// ```
+pub fn create(name: &str) -> Result<()> {
+    let ns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
+
+    // Check if namespace already exists
+    if ns_path.exists() {
+        return Err(Error::InvalidMessage(format!(
+            "namespace '{}' already exists",
+            name
+        )));
+    }
+
+    // Create the netns directory if it doesn't exist
+    if !Path::new(NETNS_RUN_DIR).exists() {
+        std::fs::create_dir_all(NETNS_RUN_DIR).map_err(|e| {
+            Error::InvalidMessage(format!("cannot create {}: {}", NETNS_RUN_DIR, e))
+        })?;
+    }
+
+    // Create an empty file for the bind mount
+    File::create(&ns_path).map_err(|e| {
+        Error::InvalidMessage(format!("cannot create namespace file '{}': {}", name, e))
+    })?;
+
+    // Create a new network namespace
+    // SAFETY: unshare is a standard Linux syscall. CLONE_NEWNET creates a new
+    // network namespace for the current process.
+    let ret = unsafe { libc::unshare(libc::CLONE_NEWNET) };
+    if ret < 0 {
+        // Clean up the file we created
+        let _ = std::fs::remove_file(&ns_path);
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+
+    // Bind mount the namespace to the file
+    let ns_path_cstr =
+        std::ffi::CString::new(ns_path.to_string_lossy().as_bytes()).map_err(|_| {
+            let _ = std::fs::remove_file(&ns_path);
+            Error::InvalidMessage("invalid namespace path".to_string())
+        })?;
+
+    let self_ns = std::ffi::CString::new("/proc/self/ns/net").unwrap();
+
+    // SAFETY: mount is a standard Linux syscall. We're bind-mounting the current
+    // process's network namespace (which we just created) to the namespace file.
+    let ret = unsafe {
+        libc::mount(
+            self_ns.as_ptr(),
+            ns_path_cstr.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND,
+            std::ptr::null(),
+        )
+    };
+
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        // Clean up on failure
+        let _ = std::fs::remove_file(&ns_path);
+        return Err(Error::Io(err));
+    }
+
+    Ok(())
+}
+
+/// Delete a named network namespace.
+///
+/// This is equivalent to `ip netns del <name>`. It unmounts and removes
+/// the namespace file from `/var/run/netns/<name>`.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The namespace doesn't exist
+/// - Permission is denied
+/// - The unmount fails (e.g., namespace is in use)
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::namespace;
+///
+/// namespace::delete("myns")?;
+/// ```
+pub fn delete(name: &str) -> Result<()> {
+    let ns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
+
+    if !ns_path.exists() {
+        return Err(Error::NamespaceNotFound {
+            name: name.to_string(),
+        });
+    }
+
+    let ns_path_cstr = std::ffi::CString::new(ns_path.to_string_lossy().as_bytes())
+        .map_err(|_| Error::InvalidMessage("invalid namespace path".to_string()))?;
+
+    // Unmount the namespace
+    // SAFETY: umount2 is a standard Linux syscall. MNT_DETACH allows lazy
+    // unmounting which succeeds even if the mount is busy.
+    let ret = unsafe { libc::umount2(ns_path_cstr.as_ptr(), libc::MNT_DETACH) };
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        // EINVAL means it's not a mount point (maybe already unmounted)
+        if err.raw_os_error() != Some(libc::EINVAL) {
+            return Err(Error::Io(err));
+        }
+    }
+
+    // Remove the file
+    std::fs::remove_file(&ns_path)
+        .map_err(|e| Error::InvalidMessage(format!("cannot remove namespace file: {}", e)))?;
+
+    Ok(())
+}
+
+/// Execute a function in a network namespace and return to the original.
+///
+/// This is a convenience wrapper around [`enter`] that ensures the original
+/// namespace is restored even if the function panics.
+///
+/// # Warning
+///
+/// This affects the entire thread. In async contexts, prefer using
+/// [`connection_for`] which creates a socket in the namespace without
+/// affecting the thread state.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::namespace;
+///
+/// let result = namespace::execute_in("myns", || {
+///     // Code here runs in "myns" namespace
+///     std::fs::read_to_string("/proc/net/dev")
+/// })??;
+/// // Back in original namespace
+/// ```
+pub fn execute_in<F, T>(name: &str, f: F) -> Result<T>
+where
+    F: FnOnce() -> T,
+{
+    let guard = enter(name)?;
+    let result = f();
+    guard.restore()?;
+    Ok(result)
+}
+
+/// Execute a function in a network namespace specified by path.
+///
+/// See [`execute_in`] for details.
+pub fn execute_in_path<F, T, P: AsRef<Path>>(path: P, f: F) -> Result<T>
+where
+    F: FnOnce() -> T,
+{
+    let guard = enter_path(path)?;
+    let result = f();
+    guard.restore()?;
+    Ok(result)
+}
+
 /// List all named network namespaces.
 ///
 /// Returns the names of namespaces in `/var/run/netns/`.

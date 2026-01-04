@@ -3,6 +3,7 @@
 use clap::Args;
 use nlink::netlink::diagnostics::{Diagnostics, Severity};
 use nlink::netlink::{Connection, Result, Route};
+use nlink::output::formatting::{format_bytes, format_rate_bps};
 use std::time::Duration;
 
 #[derive(Args)]
@@ -120,12 +121,12 @@ pub async fn run(args: InterfaceArgs, json: bool) -> Result<()> {
                 println!("Rates ({}ms sample):", iface.rates.sample_duration_ms);
                 println!(
                     "  RX: {} ({} pps)",
-                    format_rate(iface.rates.rx_bps),
+                    format_rate_bps(iface.rates.rx_bps * 8),
                     iface.rates.rx_pps
                 );
                 println!(
                     "  TX: {} ({} pps)",
-                    format_rate(iface.rates.tx_bps),
+                    format_rate_bps(iface.rates.tx_bps * 8),
                     iface.rates.tx_pps
                 );
                 println!();
@@ -141,13 +142,10 @@ pub async fn run(args: InterfaceArgs, json: bool) -> Result<()> {
                         format_bytes(tc.bytes)
                     );
                     println!("  Drops: {}, Overlimits: {}", tc.drops, tc.overlimits);
-                    println!(
-                        "  Queue: {} packets, {} bytes backlog",
-                        tc.qlen, tc.backlog
-                    );
+                    println!("  Queue: {} packets, {} bytes backlog", tc.qlen, tc.backlog);
                     println!(
                         "  Rate: {} ({} pps)",
-                        format_rate(tc.rate_bps),
+                        format_rate_bps(tc.rate_bps * 8),
                         tc.rate_pps
                     );
                     println!();
@@ -184,36 +182,4 @@ pub async fn run(args: InterfaceArgs, json: bool) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * 1024;
-    const GIB: u64 = MIB * 1024;
-
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.2} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.2} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
-fn format_rate(bps: u64) -> String {
-    const KBPS: u64 = 1000;
-    const MBPS: u64 = KBPS * 1000;
-    const GBPS: u64 = MBPS * 1000;
-
-    if bps >= GBPS {
-        format!("{:.2} Gbps", (bps * 8) as f64 / GBPS as f64)
-    } else if bps >= MBPS {
-        format!("{:.2} Mbps", (bps * 8) as f64 / MBPS as f64)
-    } else if bps >= KBPS {
-        format!("{:.2} Kbps", (bps * 8) as f64 / KBPS as f64)
-    } else {
-        format!("{} bps", bps * 8)
-    }
 }

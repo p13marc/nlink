@@ -561,6 +561,44 @@ impl Connection<Route> {
             .collect())
     }
 
+    /// Get interface name by index.
+    ///
+    /// This is a convenience method for getting a single interface name.
+    /// For looking up multiple names, prefer [`get_interface_names()`]
+    /// to build a lookup map.
+    ///
+    /// Returns `None` if no interface with that index exists.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if let Some(name) = conn.interface_name(route.oif.unwrap()).await? {
+    ///     println!("Route via {}", name);
+    /// }
+    /// ```
+    pub async fn interface_name(&self, ifindex: u32) -> Result<Option<String>> {
+        let link = self.get_link_by_index(ifindex).await?;
+        Ok(link.and_then(|l| l.name))
+    }
+
+    /// Get interface name by index, or return a default value.
+    ///
+    /// This is a convenience method for display purposes when you want
+    /// a fallback value like "-" or "?" for unknown interfaces.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let dev = conn.interface_name_or(route.oif.unwrap_or(0), "-").await?;
+    /// println!("Route via {}", dev);
+    /// ```
+    pub async fn interface_name_or(&self, ifindex: u32, default: &str) -> Result<String> {
+        Ok(self
+            .interface_name(ifindex)
+            .await?
+            .unwrap_or_else(|| default.to_string()))
+    }
+
     /// Get all IP addresses.
     ///
     /// # Example

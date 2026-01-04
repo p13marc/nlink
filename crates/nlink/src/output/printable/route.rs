@@ -10,11 +10,7 @@ use crate::output::{OutputOptions, Printable};
 impl Printable for RouteMessage {
     fn print_text<W: Write>(&self, w: &mut W, _opts: &OutputOptions) -> std::io::Result<()> {
         // Destination
-        if let Some(ref dst) = self.destination {
-            write!(w, "{}/{}", dst, self.dst_len())?;
-        } else {
-            write!(w, "default")?;
-        }
+        write!(w, "{}", self.destination_str())?;
 
         // Gateway
         if let Some(ref gw) = self.gateway {
@@ -60,13 +56,8 @@ impl Printable for RouteMessage {
             "protocol": self.protocol().name(),
             "scope": self.scope().name(),
             "table": crate::util::names::table_name(self.table_id()),
+            "dst": self.destination_str(),
         });
-
-        if let Some(ref dst) = self.destination {
-            obj["dst"] = serde_json::json!(format!("{}/{}", dst, self.dst_len()));
-        } else {
-            obj["dst"] = serde_json::json!("default");
-        }
 
         if let Some(ref gw) = self.gateway {
             obj["gateway"] = serde_json::json!(gw.to_string());

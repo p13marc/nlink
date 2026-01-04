@@ -173,6 +173,109 @@ impl RouteMessage {
     pub fn has_gateway(&self) -> bool {
         self.gateway.is_some()
     }
+
+    // =========================================================================
+    // Route classification helpers
+    // =========================================================================
+
+    /// Check if this is a system-generated route (local, broadcast, multicast).
+    ///
+    /// These routes are automatically created by the kernel and should
+    /// generally not be captured in configuration snapshots.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let routes = conn.get_routes().await?;
+    /// let user_routes: Vec<_> = routes.iter()
+    ///     .filter(|r| !r.is_system_generated())
+    ///     .collect();
+    /// ```
+    pub fn is_system_generated(&self) -> bool {
+        matches!(
+            self.route_type(),
+            RouteType::Local | RouteType::Broadcast | RouteType::Multicast
+        )
+    }
+
+    /// Check if this is a static user-configured route.
+    ///
+    /// Returns true for routes installed by static configuration (boot or admin).
+    /// This excludes kernel-generated routes and routes from routing protocols.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let routes = conn.get_routes().await?;
+    /// for route in routes.iter().filter(|r| r.is_static()) {
+    ///     println!("Static route: {:?}", route.destination());
+    /// }
+    /// ```
+    pub fn is_static(&self) -> bool {
+        matches!(self.protocol(), RouteProtocol::Static | RouteProtocol::Boot)
+    }
+
+    /// Check if this route was installed by a routing daemon/protocol.
+    ///
+    /// Returns true for routes from BGP, OSPF, RIP, etc.
+    pub fn is_dynamic(&self) -> bool {
+        !matches!(
+            self.protocol(),
+            RouteProtocol::Unspec
+                | RouteProtocol::Redirect
+                | RouteProtocol::Kernel
+                | RouteProtocol::Boot
+                | RouteProtocol::Static
+        )
+    }
+
+    /// Check if this is a connected/direct route (via link).
+    pub fn is_connected(&self) -> bool {
+        self.protocol() == RouteProtocol::Kernel && self.scope() == RouteScope::Link
+    }
+
+    /// Get the device name using an interface name map.
+    ///
+    /// This is a convenience method for display purposes.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let names = conn.get_interface_names().await?;
+    /// let routes = conn.get_routes().await?;
+    /// for route in &routes {
+    ///     println!("{:?} via {}", route.destination(), route.device_name(&names));
+    /// }
+    /// ```
+    pub fn device_name(&self, names: &std::collections::HashMap<u32, String>) -> String {
+        self.oif
+            .and_then(|idx| names.get(&idx))
+            .cloned()
+            .unwrap_or_else(|| "-".to_string())
+    }
+
+    /// Get the device name or a default value.
+    pub fn device_name_or(
+        &self,
+        names: &std::collections::HashMap<u32, String>,
+        default: &str,
+    ) -> String {
+        self.oif
+            .and_then(|idx| names.get(&idx))
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
+    }
+
+    /// Format the destination as a CIDR string (e.g., "10.0.0.0/8" or "default").
+    pub fn destination_str(&self) -> String {
+        if self.is_default() {
+            "default".to_string()
+        } else if let Some(dst) = &self.destination {
+            format!("{}/{}", dst, self.dst_len())
+        } else {
+            format!("0.0.0.0/{}", self.dst_len())
+        }
+    }
 }
 
 impl FromNetlink for RouteMessage {

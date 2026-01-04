@@ -1,5 +1,6 @@
 //! Output formatting for ss command.
 
+use nlink::output::formatting::format_rate_bps;
 use nlink::sockdiag::{InetSocket, SocketInfo, UnixSocket};
 use std::io::{self, Write};
 use std::net::SocketAddr;
@@ -297,10 +298,16 @@ fn print_inet_socket(
         }
 
         if info.pacing_rate > 0 {
-            parts.push(format!("pacing_rate:{}", format_rate(info.pacing_rate)));
+            parts.push(format!(
+                "pacing_rate:{}",
+                format_rate_bps(info.pacing_rate * 8)
+            ));
         }
         if info.delivery_rate > 0 {
-            parts.push(format!("delivery_rate:{}", format_rate(info.delivery_rate)));
+            parts.push(format!(
+                "delivery_rate:{}",
+                format_rate_bps(info.delivery_rate * 8)
+            ));
         }
 
         if info.rcv_space > 0 {
@@ -373,16 +380,4 @@ fn format_addr(addr: &SocketAddr, numeric: bool) -> String {
     };
 
     format!("{}:{}", ip_str, port_str)
-}
-
-fn format_rate(bytes_per_sec: u64) -> String {
-    if bytes_per_sec >= 1_000_000_000 {
-        format!("{:.1}Gbps", bytes_per_sec as f64 * 8.0 / 1_000_000_000.0)
-    } else if bytes_per_sec >= 1_000_000 {
-        format!("{:.1}Mbps", bytes_per_sec as f64 * 8.0 / 1_000_000.0)
-    } else if bytes_per_sec >= 1_000 {
-        format!("{:.1}Kbps", bytes_per_sec as f64 * 8.0 / 1_000.0)
-    } else {
-        format!("{}bps", bytes_per_sec * 8)
-    }
 }

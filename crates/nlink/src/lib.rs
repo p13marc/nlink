@@ -175,3 +175,10 @@ pub use netlink::fdb::{FdbEntry, FdbEntryBuilder};
 
 // Bridge VLAN types
 pub use netlink::bridge_vlan::{BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanFlags};
+
+// Diagnostics types
+pub use netlink::diagnostics::{
+    Bottleneck, BottleneckType, ConnectivityReport, DiagnosticReport, Diagnostics,
+    DiagnosticsConfig, InterfaceDiag, Issue, IssueCategory, IssueStream, LinkRates, RouteDiag,
+    RouteInfo, Severity, TcDiag,
+};

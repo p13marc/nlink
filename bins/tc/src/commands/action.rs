@@ -17,6 +17,7 @@ use nlink::netlink::types::tc::action::{
 };
 use nlink::netlink::types::tc::{TCA_ACT_TAB, TcMsg};
 use nlink::netlink::{Connection, Result, Route};
+use nlink::output::formatting::format_rate_bps;
 use nlink::output::{OutputFormat, OutputOptions};
 use nlink::tc::builders::action as action_builder;
 use std::io::{self, Write};
@@ -322,7 +323,7 @@ fn print_action_options_text(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
                     write!(
                         w,
                         "rate {} burst {} mtu {} action {}",
-                        format_rate(p.rate.rate as u64),
+                        format_rate_bps(p.rate.rate as u64),
                         p.burst,
                         p.mtu,
                         action::format_action_result(p.action)
@@ -336,17 +337,4 @@ fn print_action_options_text(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
     }
 
     Ok(())
-}
-
-/// Format rate for display.
-fn format_rate(rate: u64) -> String {
-    if rate >= 1_000_000_000 {
-        format!("{}Gbit", rate / 1_000_000_000)
-    } else if rate >= 1_000_000 {
-        format!("{}Mbit", rate / 1_000_000)
-    } else if rate >= 1000 {
-        format!("{}Kbit", rate / 1000)
-    } else {
-        format!("{}bit", rate)
-    }
 }

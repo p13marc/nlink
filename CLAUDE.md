@@ -120,6 +120,7 @@ crates/nlink/src/
   tuntap/             # TUN/TAP device management (feature: tuntap)
   tc/                 # Traffic control utilities (feature: tc)
   output/             # Output formatting (feature: output)
+    formatting.rs     # Shared utilities (format_bytes, format_rate, format_duration, etc.)
 ```
 
 ### Feature Flags
@@ -2212,6 +2213,156 @@ impl SomeNetlinkStruct {
 3. Build GENL message with `GenlMsgHdr` after `NlMsgHdr`
 4. Use `conn.command()` or `conn.dump_command()` with family ID
 5. Parse responses starting after the GENL header (4 bytes)
+
+## Output Formatting Utilities
+
+The `output::formatting` module provides shared utility functions for formatting
+common values in a human-readable way:
+
+```rust
+use nlink::output::formatting::{
+    format_bytes, format_rate_bps, format_rate_bytes,
+    format_duration, format_duration_compact, format_time_ago,
+    format_percent, format_mac, format_ipv4, format_hex, format_tc_handle,
+};
+use std::time::{Duration, SystemTime};
+
+// Bytes formatting (binary: KiB, MiB, GiB)
+assert_eq!(format_bytes(1536), "1.50 KiB");
+assert_eq!(format_bytes(1_073_741_824), "1.00 GiB");
+
+// Rate formatting
+assert_eq!(format_rate_bps(1_000_000), "1.0 Mbps");
+assert_eq!(format_rate_bytes(1_048_576), "1.0 MiB/s");
+
+// Duration formatting
+assert_eq!(format_duration(Duration::from_secs(3661)), "1h 1m 1s");
+assert_eq!(format_duration_compact(Duration::from_secs(90)), "1m30s");
+
+// Time ago (relative time)
+let past = SystemTime::now() - Duration::from_secs(3600);
+assert_eq!(format_time_ago(past), "1 hour ago");
+
+// Other formatters
+assert_eq!(format_percent(0.1234), "12.34%");
+assert_eq!(format_mac(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]), "00:11:22:33:44:55");
+assert_eq!(format_tc_handle(0x10010), "1:10");
+```
+
+## Namespace Management
+
+Extended namespace operations for creating, deleting, and executing in namespaces:
+
+```rust
+use nlink::netlink::namespace;
+
+// Create a named namespace (equivalent to `ip netns add`)
+namespace::create("myns")?;
+
+// Delete a namespace (equivalent to `ip netns del`)
+namespace::delete("myns")?;
+
+// Execute a function in a namespace and return to original
+let result = namespace::execute_in("myns", || {
+    std::fs::read_to_string("/proc/net/dev")
+})??;
+
+// Check if namespace exists
+if namespace::exists("myns") {
+    println!("Namespace exists");
+}
+
+// List all named namespaces
+for ns in namespace::list()? {
+    println!("Namespace: {}", ns);
+}
+```
+
+## Route Classification Helpers
+
+RouteMessage includes helpers for filtering routes by type:
+
+```rust
+use nlink::netlink::{Connection, Route};
+
+let conn = Connection::<Route>::new()?;
+let routes = conn.get_routes().await?;
+
+// Filter out system-generated routes (local, broadcast, multicast)
+let user_routes: Vec<_> = routes.iter()
+    .filter(|r| !r.is_system_generated())
+    .collect();
+
+// Find static routes only
+let static_routes: Vec<_> = routes.iter()
+    .filter(|r| r.is_static())
+    .collect();
+
+// Find dynamic routes (from routing protocols)
+let dynamic_routes: Vec<_> = routes.iter()
+    .filter(|r| r.is_dynamic())
+    .collect();
+
+// Format destination as CIDR string
+for route in &routes {
+    println!("{}", route.destination_str()); // e.g., "10.0.0.0/8" or "default"
+}
+
+// Get device name with interface map
+let names = conn.get_interface_names().await?;
+for route in &routes {
+    println!("{} via {}", route.destination_str(), route.device_name(&names));
+}
+```
+
+## Interface Name Helpers
+
+Convenience methods for resolving interface names:
+
+```rust
+use nlink::netlink::{Connection, Route};
+
+let conn = Connection::<Route>::new()?;
+
+// Get a single interface name by index
+if let Some(name) = conn.interface_name(ifindex).await? {
+    println!("Interface: {}", name);
+}
+
+// Get interface name with fallback
+let dev = conn.interface_name_or(ifindex, "-").await?;
+println!("Device: {}", dev);
+
+// For multiple lookups, prefer building a map once
+let names = conn.get_interface_names().await?;
+```
+
+## Socket Diagnostics Formatting
+
+TcpInfo and MemInfo include formatting methods for ss-style output:
+
+```rust
+use nlink::sockdiag::{TcpInfo, MemInfo};
+
+// Format TCP info as ss-style string
+let tcp_info: TcpInfo = /* ... */;
+println!("{}", tcp_info.format_ss());
+// Output: "rtt:0.123/0.050 mss:1448 cwnd:10 ssthresh:7 bytes_acked:12345"
+
+// Individual metric formatters
+println!("RTT: {}", tcp_info.rtt_str());           // "0.123/0.050"
+println!("CWND: {}", tcp_info.cwnd_str());         // "10"
+println!("Rate: {}", tcp_info.delivery_rate_str()); // "1.5Gbps"
+
+// Format memory info as skmem() string
+let mem_info: MemInfo = /* ... */;
+println!("{}", mem_info.format_skmem());
+// Output: "skmem:(r0,rb131072,t0,tb16384,f0,w0,o0,bl0,d0)"
+
+// Compact version (only non-zero values)
+println!("{}", mem_info.format_skmem_compact());
+// Output: "skmem:(rb131072,tb16384)"
+```
 
 ## Publishing
 
