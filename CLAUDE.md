@@ -90,6 +90,7 @@ crates/nlink/src/
     fib_lookup.rs     # FIB route lookups
     audit.rs          # Linux Audit subsystem
     selinux.rs        # SELinux event notifications
+    config/           # Declarative network configuration (NetworkConfig, diff, apply)
     genl/             # Generic Netlink (GENL) support
       mod.rs          # GENL module entry, control family constants
       header.rs       # GenlMsgHdr (4-byte GENL header)
@@ -225,6 +226,108 @@ conn.set_link_mtu("eth0", 9000).await?;
 
 // Delete a virtual interface
 conn.del_link("veth0").await?;
+```
+
+**Declarative network configuration:**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::config::{NetworkConfig, ApplyOptions};
+
+let conn = Connection::<Route>::new()?;
+
+// Define desired network state declaratively
+let config = NetworkConfig::new()
+    // Add interfaces with optional configuration
+    .link("br0", |l| l.bridge())
+    .link("veth0", |l| l.veth("veth1").master("br0").up())
+    .link("dummy0", |l| l.dummy().mtu(9000))
+    
+    // Add addresses
+    .address("br0", "192.168.1.1/24")?
+    .address("br0", "2001:db8::1/64")?
+    
+    // Add routes
+    .route("10.0.0.0/8", |r| r.via("192.168.1.254").dev("br0"))?
+    .route("default", |r| r.via("192.168.1.1"))?
+    
+    // Add qdiscs
+    .qdisc("veth0", |q| q.netem().delay_ms(100).loss_percent(1.0));
+
+// Compute diff between current and desired state
+let diff = config.diff(&conn).await?;
+println!("Links to add: {:?}", diff.links_to_add);
+println!("Addresses to add: {:?}", diff.addresses_to_add);
+
+// Apply configuration (creates, modifies, or removes as needed)
+let result = config.apply(&conn).await?;
+println!("Changes made: {}", result.changes_made);
+
+// Dry-run mode to preview changes without applying
+let result = config.apply_with_options(&conn, ApplyOptions {
+    dry_run: true,
+    ..Default::default()
+}).await?;
+for line in result.summary() {
+    println!("{}", line);
+}
+
+// The apply is idempotent - running again produces no changes
+let result = config.apply(&conn).await?;
+assert_eq!(result.changes_made, 0);
+```
+
+**Declarative config link types:**
+```rust
+use nlink::netlink::config::NetworkConfig;
+
+let config = NetworkConfig::new()
+    // Bridge with VLAN filtering
+    .link("br0", |l| l.bridge().vlan_filtering(true))
+    
+    // Veth pair
+    .link("veth0", |l| l.veth("veth1"))
+    
+    // VLAN on parent interface
+    .link("eth0.100", |l| l.vlan("eth0", 100))
+    
+    // VXLAN tunnel
+    .link("vxlan0", |l| l.vxlan(100).local("10.0.0.1".parse()?).dstport(4789))
+    
+    // Bond with mode and options
+    .link("bond0", |l| l.bond().mode(BondMode::ActiveBackup))
+    
+    // Macvlan
+    .link("macvlan0", |l| l.macvlan("eth0").mode(MacvlanMode::Bridge));
+```
+
+**Declarative config qdisc types:**
+```rust
+use nlink::netlink::config::NetworkConfig;
+
+let config = NetworkConfig::new()
+    // Netem for network emulation
+    .qdisc("eth0", |q| q
+        .netem()
+        .delay_ms(100)
+        .jitter_ms(10)
+        .loss_percent(0.5)
+        .duplicate_percent(0.1)
+        .reorder_percent(1.0))
+    
+    // HTB for hierarchical traffic shaping
+    .qdisc("eth0", |q| q.htb().default_class(0x10))
+    
+    // FQ_Codel for fair queueing
+    .qdisc("eth0", |q| q.fq_codel().target_us(5000).interval_us(100000))
+    
+    // TBF for token bucket rate limiting
+    .qdisc("eth0", |q| q.tbf().rate(1_000_000).burst(32000))
+    
+    // Prio for priority queueing
+    .qdisc("eth0", |q| q.prio().bands(3))
+    
+    // SFQ for stochastic fair queueing
+    .qdisc("eth0", |q| q.sfq().perturb(10));
 ```
 
 **Network namespace operations:**

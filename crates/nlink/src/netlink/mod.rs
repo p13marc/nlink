@@ -74,6 +74,7 @@ pub mod attr;
 pub mod audit;
 pub mod bridge_vlan;
 mod builder;
+pub mod config;
 pub mod connection;
 pub mod connector;
 mod error;

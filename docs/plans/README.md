@@ -45,12 +45,12 @@ Useful features for specific use cases.
 
 Cool features that would enhance the library's capabilities.
 
-| # | Plan | Effort | Status |
-|---|------|--------|--------|
-| 11 | [Integration Tests Infrastructure](./011-integration-tests.md) | Medium | Planned |
-| 12 | [Declarative Network Config](./012-declarative-config.md) | High | Planned |
-| 13 | [Rate Limiting DSL](./013-rate-limit-dsl.md) | Medium | Planned |
-| 14 | [Network Diagnostics](./014-network-diagnostics.md) | Medium | Planned |
+| # | Plan | Effort | Status | Report |
+|---|------|--------|--------|--------|
+| 11 | [Integration Tests Infrastructure](./011-integration-tests.md) | Medium | Completed | [Report](../reports/011-integration-tests.md) |
+| 12 | [Declarative Network Config](./012-declarative-config.md) | High | Completed | [Report](../reports/012-declarative-config.md) |
+| 13 | [Rate Limiting DSL](./013-rate-limit-dsl.md) | Medium | Planned | |
+| 14 | [Network Diagnostics](./014-network-diagnostics.md) | Medium | Planned | |
 
 ## Implementation Guidelines
 

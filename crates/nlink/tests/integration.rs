@@ -47,3 +47,6 @@ mod tc;
 
 #[path = "integration/events.rs"]
 mod events;
+
+#[path = "integration/config.rs"]
+mod config;
