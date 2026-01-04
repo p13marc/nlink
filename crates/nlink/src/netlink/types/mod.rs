@@ -2,6 +2,7 @@
 
 pub mod addr;
 pub mod link;
+pub mod mpls;
 pub mod neigh;
 pub mod nexthop;
 pub mod nsid;

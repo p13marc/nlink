@@ -48,6 +48,7 @@ use super::builder::MessageBuilder;
 use super::connection::Connection;
 use super::error::{Error, Result};
 use super::message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType};
+use super::mpls::MplsEncap;
 use super::protocol::Route;
 use super::types::route::{RouteProtocol, RouteScope, RouteType, RtMsg, RtaAttr, rt_table};
 
@@ -375,6 +376,8 @@ pub struct Ipv4Route {
     multipath: Option<Vec<NextHop>>,
     /// Nexthop group ID (Linux 5.3+, RTA_NH_ID)
     nexthop_id: Option<u32>,
+    /// MPLS encapsulation
+    mpls_encap: Option<MplsEncap>,
 }
 
 impl Ipv4Route {
@@ -403,6 +406,7 @@ impl Ipv4Route {
             mark: None,
             multipath: None,
             nexthop_id: None,
+            mpls_encap: None,
         }
     }
 
@@ -423,6 +427,7 @@ impl Ipv4Route {
             mark: None,
             multipath: None,
             nexthop_id: None,
+            mpls_encap: None,
         }
     }
 
@@ -533,6 +538,31 @@ impl Ipv4Route {
         self
     }
 
+    /// Add MPLS encapsulation (push labels).
+    ///
+    /// This causes the route to push MPLS labels onto outgoing packets.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::route::Ipv4Route;
+    /// use nlink::netlink::mpls::MplsEncap;
+    ///
+    /// // Push a single label
+    /// let route = Ipv4Route::new("10.0.0.0", 8)
+    ///     .gateway("192.168.1.1".parse()?)
+    ///     .mpls_encap(MplsEncap::new().label(100));
+    ///
+    /// // Push a label stack
+    /// let route = Ipv4Route::new("10.0.0.0", 8)
+    ///     .gateway("192.168.1.1".parse()?)
+    ///     .mpls_encap(MplsEncap::new().labels(&[100, 200]));
+    /// ```
+    pub fn mpls_encap(mut self, encap: MplsEncap) -> Self {
+        self.mpls_encap = Some(encap);
+        self
+    }
+
     /// Determine the scope based on route configuration.
     fn determine_scope(&self) -> RouteScope {
         if let Some(scope) = self.scope {
@@ -633,6 +663,11 @@ impl RouteConfig for Ipv4Route {
             builder.append_attr_u32(RtaAttr::NhId as u16, nh_id);
         }
 
+        // RTA_ENCAP_TYPE + RTA_ENCAP (MPLS encapsulation)
+        if let Some(ref encap) = self.mpls_encap {
+            encap.write_to(&mut builder);
+        }
+
         Ok(builder)
     }
 
@@ -701,6 +736,8 @@ pub struct Ipv6Route {
     pref: Option<u8>,
     /// Nexthop group ID (Linux 5.3+, RTA_NH_ID)
     nexthop_id: Option<u32>,
+    /// MPLS encapsulation
+    mpls_encap: Option<MplsEncap>,
 }
 
 impl Ipv6Route {
@@ -725,6 +762,7 @@ impl Ipv6Route {
             multipath: None,
             pref: None,
             nexthop_id: None,
+            mpls_encap: None,
         }
     }
 
@@ -746,6 +784,7 @@ impl Ipv6Route {
             multipath: None,
             pref: None,
             nexthop_id: None,
+            mpls_encap: None,
         }
     }
 
@@ -840,6 +879,14 @@ impl Ipv6Route {
         self.nexthop_id = Some(group_id);
         self.gateway = None;
         self.multipath = None;
+        self
+    }
+
+    /// Add MPLS encapsulation (push labels).
+    ///
+    /// This causes the route to push MPLS labels onto outgoing packets.
+    pub fn mpls_encap(mut self, encap: MplsEncap) -> Self {
+        self.mpls_encap = Some(encap);
         self
     }
 
@@ -943,6 +990,11 @@ impl RouteConfig for Ipv6Route {
         // RTA_NH_ID (nexthop group reference, Linux 5.3+)
         if let Some(nh_id) = self.nexthop_id {
             builder.append_attr_u32(RtaAttr::NhId as u16, nh_id);
+        }
+
+        // RTA_ENCAP_TYPE + RTA_ENCAP (MPLS encapsulation)
+        if let Some(ref encap) = self.mpls_encap {
+            encap.write_to(&mut builder);
         }
 
         Ok(builder)
