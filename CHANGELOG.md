@@ -2,6 +2,199 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-01-04
+
+### Added
+
+#### Network Diagnostics Module (Plan 014)
+High-level diagnostic tools for network troubleshooting:
+
+- `NetworkScanner` - Discover active hosts on a subnet
+  - `scan()` for full subnet scanning with configurable concurrency
+  - `scan_range()` for scanning IP ranges
+  - Hostname resolution, latency measurement, and port checking
+  - `ScanResult` with host details and optional port scan results
+
+- `ConnectivityChecker` - Multi-path connectivity testing
+  - `check()` for checking connectivity to a destination
+  - Supports multiple methods: ICMP ping, TCP connect, HTTP(S) GET
+  - `ConnectivityResult` with latency, hops, and detailed status
+  - Configurable timeout and retry behavior
+
+- `BottleneckDetector` - Identify network bottlenecks
+  - `detect()` for analyzing a network path
+  - Identifies issues: congestion, packet loss, high latency, MTU problems
+  - `BottleneckReport` with severity levels and recommendations
+  - Path analysis with per-hop metrics
+
+#### Rate Limiting DSL (Plan 013)
+Declarative rate limiting configuration:
+
+- `RateLimiter` builder for interface-level rate limiting
+  - `ingress()`, `egress()` for directional limits
+  - `rate()`, `burst()` for traffic parameters
+  - `with_netem()` for adding delay/loss simulation
+
+- `PerHostLimiter` for per-source/destination rate limiting
+  - `per_source()`, `per_destination()` modes
+  - HTB-based implementation with flower filters
+  - Automatic class and filter management
+
+- `RateLimit` type with human-readable parsing
+  - Supports units: `bps`, `kbps`, `mbps`, `gbps`, `bit`, `kbit`, `mbit`, `gbit`
+  - `RateLimit::parse("100mbit")` for string parsing
+
+#### Declarative Network Configuration (Plan 012)
+Infrastructure-as-code for network configuration:
+
+- `NetworkConfig` - Full network state representation
+  - Links, addresses, routes, rules, qdiscs, classes, filters
+  - YAML/JSON serialization via serde
+
+- `NetworkConfig::capture()` - Snapshot current network state
+- `NetworkConfig::diff()` - Compare configurations
+- `NetworkConfig::apply()` - Apply configuration changes
+- `ConfigDiff` with add/remove/modify operations
+- Dry-run support for previewing changes
+
+#### Integration Test Infrastructure (Plan 011)
+Comprehensive test framework for netlink operations:
+
+- `TestNamespace` - Isolated network namespace for testing
+- Tests for all link types: dummy, veth, bridge, vlan, macvlan, vxlan, etc.
+- Tests for addresses, routes, neighbors, TC qdiscs/classes/filters
+- Tests for FDB, VLAN filtering, routing rules
+
+#### TC Filter Chains (Plan 010)
+Linux 4.1+ TC chain support:
+
+- `conn.add_tc_chain()` - Create filter chain
+- `conn.del_tc_chain()` - Delete filter chain
+- `conn.get_tc_chains()` - List chains for a qdisc
+- `FlowerFilter::chain()` - Assign filter to chain
+- `FlowerFilter::goto_chain()` - Jump to another chain
+- `GactAction::goto_chain()` - Action-based chain jumping
+
+#### MPTCP Path Manager (Plan 009)
+Multipath TCP endpoint configuration via Generic Netlink:
+
+- `Connection<Mptcp>` for MPTCP operations
+- `MptcpEndpointBuilder` for creating endpoints
+  - `subflow()`, `signal()`, `backup()`, `fullmesh()` flags
+  - `dev()` for binding to specific interface
+- `conn.get_endpoints()`, `add_endpoint()`, `del_endpoint()`
+- `conn.get_limits()`, `set_limits()` for connection limits
+- `conn.flush_endpoints()` for bulk deletion
+
+#### MACsec Configuration (Plan 008)
+IEEE 802.1AE MACsec via Generic Netlink:
+
+- `Connection<Macsec>` for MACsec operations
+- `conn.get_device()` - Get device configuration
+- `MacsecSaBuilder` for Security Associations
+- TX SA management: `add_tx_sa()`, `update_tx_sa()`, `del_tx_sa()`
+- RX SC management: `add_rx_sc()`, `del_rx_sc()`
+- RX SA management: `add_rx_sa()`, `update_rx_sa()`, `del_rx_sa()`
+- Cipher suite support: GCM-AES-128, GCM-AES-256, GCM-AES-XPN-128, GCM-AES-XPN-256
+
+#### SRv6 Segment Routing (Plan 007)
+Segment Routing over IPv6 support:
+
+- `Srv6Encap` for SRv6 encapsulation
+  - `encap()`, `inline()` modes
+  - `segment()`, `segments()` for SID list
+- `Srv6LocalBuilder` for local SID behaviors
+  - `end()`, `end_x()`, `end_dx4()`, `end_dx6()`
+  - `end_dt4()`, `end_dt6()`, `end_dt46()`
+  - `end_b6()`, `end_b6_encaps()`
+- `conn.add_srv6_local()`, `del_srv6_local()`
+- `conn.get_srv6_local_routes()`
+
+#### MPLS Routes (Plan 006)
+Multi-Protocol Label Switching support:
+
+- `MplsEncap` for MPLS encapsulation on IP routes
+  - `label()`, `labels()` for label stack
+  - `ttl()` for TTL value
+- `MplsRouteBuilder` for MPLS forwarding
+  - `pop()` - Pop label and deliver to local stack
+  - `swap()` - Swap to new label
+  - `swap_stack()` - Swap to label stack
+- `conn.add_mpls_route()`, `del_mpls_route()`
+- `conn.get_mpls_routes()`
+- `MplsLabel` constants: `IMPLICIT_NULL`, `EXPLICIT_NULL_V4`, `EXPLICIT_NULL_V6`
+
+#### Nexthop Objects (Plan 005)
+Linux 5.3+ nexthop object support:
+
+- `NexthopBuilder` for individual nexthops
+  - `gateway()`, `dev()` for next hop specification
+  - `blackhole()`, `onlink()` flags
+- `NexthopGroupBuilder` for ECMP groups
+  - `member(id, weight)` for weighted members
+  - `resilient()` for resilient hashing
+  - `buckets()`, `idle_timer()` for resilient params
+- `conn.add_nexthop()`, `replace_nexthop()`, `del_nexthop()`
+- `conn.add_nexthop_group()`, `del_nexthop_group()`
+- `conn.get_nexthops()`, `get_nexthop_groups()`, `get_nexthop(id)`
+- `Ipv4Route::nexthop_group()` for using groups in routes
+
+#### HTB Class Builder (Plan 004)
+Typed HTB class configuration:
+
+- `HtbClassConfig` builder for HTB classes
+  - `new(rate)` with human-readable rate parsing
+  - `from_bps(rate)` for programmatic values
+  - `ceil()`, `ceil_bps()` for ceiling rate
+  - `burst_bytes()`, `cburst_bytes()` for burst sizes
+  - `prio()`, `quantum()`, `mtu()` for tuning
+- `conn.add_class_config()`, `change_class_config()`, `replace_class_config()`
+- `*_by_index()` variants for namespace-aware operations
+
+#### Bridge VLAN Filtering (Plan 003)
+IEEE 802.1Q VLAN support for bridges:
+
+- `BridgeVlanBuilder` for VLAN configuration
+  - `pvid()`, `untagged()` flags
+  - `range()` for VLAN ranges
+- `conn.get_bridge_vlans()` - Query VLANs for a port
+- `conn.get_bridge_vlans_all()` - Query all VLANs on a bridge
+- `conn.add_bridge_vlan()`, `del_bridge_vlan()`
+- `conn.add_bridge_vlan_tagged()`, `add_bridge_vlan_range()`
+- `conn.set_bridge_pvid()` - Set native VLAN
+- `*_by_index()` variants for all operations
+
+#### Bridge FDB Management (Plan 002)
+Forwarding Database operations:
+
+- `FdbEntryBuilder` for FDB entries
+  - `permanent()`, `static_entry()`, `dynamic()` states
+  - `vlan()` for VLAN-aware bridges
+  - `dst()` for VXLAN remote VTEP
+- `conn.get_fdb()` - Query FDB for a bridge
+- `conn.get_fdb_for_port()` - Query FDB for specific port
+- `conn.add_fdb()`, `replace_fdb()`, `del_fdb()`
+- `conn.flush_fdb()` - Flush dynamic entries
+- `*_by_index()` variants for namespace operations
+
+#### TC Class API (Plan 001)
+General TC class management:
+
+- `conn.add_class()`, `change_class()`, `replace_class()`, `del_class()`
+- `conn.get_classes()`, `get_classes_for()`
+- Support for HTB, DRR, QFQ, HFSC class types
+- `*_by_index()` variants for namespace-aware operations
+
+### Changed
+
+- All new examples organized into subdirectories by feature area
+- Updated `crates/nlink/examples/README.md` with comprehensive documentation
+
+### Fixed
+
+- Rate parsing in tests now correctly expects bits/sec (not bytes/sec)
+- Integration tests requiring root now have `#[ignore]` attribute for CI compatibility
+
 ## [0.5.1] - 2026-01-03
 
 ### Fixed
