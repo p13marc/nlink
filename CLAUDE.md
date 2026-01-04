@@ -49,6 +49,7 @@ crates/nlink/src/
     link.rs           # Link type builders (DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, BareudpLink, NetkitLink, NlmonLink, VirtWifiLink, VtiLink, Vti6Link, Ip6GreLink, Ip6GretapLink)
     rule.rs           # Routing rule builder (RuleBuilder)
     nexthop.rs        # Nexthop objects and groups (NexthopBuilder, NexthopGroupBuilder) - Linux 5.3+
+    mpls.rs           # MPLS routes and encapsulation (MplsEncap, MplsRouteBuilder)
     uevent.rs         # KobjectUevent (device hotplug events)
     connector.rs      # Connector (process lifecycle events)
     netfilter.rs      # Netfilter (connection tracking)
@@ -1242,6 +1243,65 @@ conn.replace_nexthop(
 conn.del_nexthop_group(100).await?;
 conn.del_nexthop(1).await?;
 conn.del_nexthop(2).await?;
+```
+
+**MPLS routes and encapsulation:**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::mpls::{MplsEncap, MplsLabel, MplsRouteBuilder};
+use nlink::netlink::route::Ipv4Route;
+use std::net::Ipv4Addr;
+
+let conn = Connection::<Route>::new()?;
+
+// IP route with MPLS encapsulation (push labels)
+conn.add_route(
+    Ipv4Route::new("10.0.0.0", 8)
+        .gateway(Ipv4Addr::new(192, 168, 1, 1))
+        .dev("eth0")
+        .mpls_encap(MplsEncap::new().label(100))
+).await?;
+
+// IP route with label stack (outer to inner)
+conn.add_route(
+    Ipv4Route::new("10.1.0.0", 16)
+        .gateway(Ipv4Addr::new(192, 168, 1, 1))
+        .mpls_encap(MplsEncap::new().labels(&[100, 200, 300]).ttl(64))
+).await?;
+
+// MPLS pop route (label -> IP, at egress PE)
+conn.add_mpls_route(
+    MplsRouteBuilder::pop(100)
+        .dev("eth0")
+).await?;
+
+// MPLS swap route (label -> label, at transit LSR)
+conn.add_mpls_route(
+    MplsRouteBuilder::swap(100, 200)
+        .via("192.168.2.1".parse()?)
+        .dev("eth1")
+).await?;
+
+// MPLS swap with label stack
+conn.add_mpls_route(
+    MplsRouteBuilder::swap_stack(100, &[200, 300])
+        .via("192.168.2.1".parse()?)
+        .dev("eth1")
+).await?;
+
+// Query MPLS routes
+let routes = conn.get_mpls_routes().await?;
+for route in &routes {
+    println!("Label {}: {:?}", route.label.0, route.action);
+}
+
+// Delete MPLS route
+conn.del_mpls_route(100).await?;
+
+// Special label constants
+let implicit_null = MplsLabel::IMPLICIT_NULL;  // 3 - penultimate hop popping
+let explicit_null_v4 = MplsLabel::EXPLICIT_NULL_V4;  // 0
+let explicit_null_v6 = MplsLabel::EXPLICIT_NULL_V6;  // 2
 ```
 
 **Bridge FDB management:**

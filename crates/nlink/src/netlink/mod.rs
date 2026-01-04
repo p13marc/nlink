@@ -87,6 +87,7 @@ pub mod genl;
 pub mod link;
 pub mod message;
 pub mod messages;
+pub mod mpls;
 pub mod namespace;
 pub mod namespace_events;
 #[cfg(feature = "namespace_watcher")]
