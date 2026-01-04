@@ -63,6 +63,7 @@ impl TestNamespace {
     }
 
     /// Get the namespace name.
+    #[allow(dead_code)]
     pub fn name(&self) -> &str {
         &self.name
     }
