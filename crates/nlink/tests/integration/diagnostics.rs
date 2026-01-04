@@ -91,6 +91,7 @@ fn test_bottleneck_type_display() {
 // ============================================================================
 
 #[tokio::test]
+#[ignore] // Requires root privileges for network namespaces
 async fn test_diagnostics_scan() {
     let ns = TestNamespace::new("diag_scan").unwrap();
 
@@ -121,6 +122,7 @@ async fn test_diagnostics_scan() {
 }
 
 #[tokio::test]
+#[ignore] // Requires root privileges for network namespaces
 async fn test_diagnostics_scan_interface() {
     let ns = TestNamespace::new("diag_scan_if").unwrap();
 
@@ -140,6 +142,7 @@ async fn test_diagnostics_scan_interface() {
 }
 
 #[tokio::test]
+#[ignore] // Requires root privileges for network namespaces
 async fn test_diagnostics_scan_interface_not_found() {
     let ns = TestNamespace::new("diag_notfound").unwrap();
 
@@ -155,6 +158,7 @@ async fn test_diagnostics_scan_interface_not_found() {
 }
 
 #[tokio::test]
+#[ignore] // Requires root privileges for network namespaces
 async fn test_diagnostics_check_connectivity_no_route() {
     let ns = TestNamespace::new("diag_conn").unwrap();
 
@@ -182,6 +186,7 @@ async fn test_diagnostics_check_connectivity_no_route() {
 }
 
 #[tokio::test]
+#[ignore] // Requires root privileges for network namespaces
 async fn test_diagnostics_check_connectivity_with_route() {
     let ns = TestNamespace::new("diag_route").unwrap();
 
@@ -209,6 +214,7 @@ async fn test_diagnostics_check_connectivity_with_route() {
 }
 
 #[tokio::test]
+#[ignore] // Requires root privileges for network namespaces
 async fn test_diagnostics_find_bottleneck() {
     let ns = TestNamespace::new("diag_bottle").unwrap();
 
@@ -230,6 +236,7 @@ async fn test_diagnostics_find_bottleneck() {
 }
 
 #[tokio::test]
+#[ignore] // Requires root privileges for network namespaces
 async fn test_diagnostics_with_tc() {
     let ns = TestNamespace::new("diag_tc").unwrap();
 
@@ -261,6 +268,7 @@ async fn test_diagnostics_with_tc() {
 }
 
 #[tokio::test]
+#[ignore] // Requires root privileges for network namespaces
 async fn test_diagnostics_link_down_detection() {
     let ns = TestNamespace::new("diag_down").unwrap();
 
@@ -293,6 +301,7 @@ async fn test_diagnostics_link_down_detection() {
 }
 
 #[tokio::test]
+#[ignore] // Requires root privileges for network namespaces
 async fn test_diagnostics_no_address_detection() {
     let ns = TestNamespace::new("diag_noaddr").unwrap();
 
@@ -321,6 +330,7 @@ async fn test_diagnostics_no_address_detection() {
 }
 
 #[tokio::test]
+#[ignore] // Requires root privileges for network namespaces
 async fn test_diagnostics_route_summary() {
     let ns = TestNamespace::new("diag_routes").unwrap();
 
@@ -341,6 +351,7 @@ async fn test_diagnostics_route_summary() {
 }
 
 #[tokio::test]
+#[ignore] // Requires root privileges for network namespaces
 async fn test_diagnostics_custom_config() {
     let ns = TestNamespace::new("diag_config").unwrap();
 
@@ -368,6 +379,7 @@ async fn test_diagnostics_custom_config() {
 }
 
 #[tokio::test]
+#[ignore] // Requires root privileges for network namespaces
 async fn test_diagnostics_skip_loopback() {
     let ns = TestNamespace::new("diag_lo").unwrap();
 
