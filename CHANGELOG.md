@@ -185,6 +185,57 @@ General TC class management:
 - Support for HTB, DRR, QFQ, HFSC class types
 - `*_by_index()` variants for namespace-aware operations
 
+#### HFSC/DRR/QFQ Class Builders
+Typed class configuration for additional classful qdiscs:
+
+- `HfscClassConfig` for HFSC classes
+  - `new()` with service curve configuration
+  - `realtime()`, `linkshare()`, `upperlimit()` service curves
+  - Each curve takes `(m1, d, m2)` parameters
+- `DrrClassConfig` for DRR classes
+  - `new()` with optional quantum
+  - `quantum()` for deficit quantum setting
+- `QfqClassConfig` for QFQ classes
+  - `new()` with weight and maxpkt
+  - `weight()`, `maxpkt()` configuration
+
+#### FDB Event Monitoring
+Bridge FDB events now included in NetworkEvent:
+
+- `NetworkEvent::NewFdb(FdbEntry)` - New FDB entry added
+- `NetworkEvent::DelFdb(FdbEntry)` - FDB entry removed
+- Events include MAC address, VLAN, ifindex, and state
+- Automatically received when subscribing to `RtnetlinkGroup::Neigh`
+
+#### Bridge VLAN Tunneling
+VLAN-to-VNI mapping for VXLAN bridges:
+
+- `BridgeVlanTunnelEntry` for parsed tunnel mappings
+  - `vid`, `tunnel_id`, `flags` fields
+- `BridgeVlanTunnelBuilder` for creating mappings
+  - `new(vid, tunnel_id)` constructor
+  - `dev()` for specifying bridge port
+  - `range(vid_end, tunnel_id_end)` for ranges
+- `conn.get_vlan_tunnels()` - Query tunnel mappings
+- `conn.add_vlan_tunnel()`, `del_vlan_tunnel()` - Modify mappings
+- `*_by_index()` variants for namespace operations
+
+#### MPTCP Per-Connection Management
+Subflow and address management for active MPTCP connections:
+
+- `MptcpAddress` for IP address with optional port
+- `MptcpSubflowBuilder` for creating/destroying subflows
+  - `new(token)` with connection token
+  - `local_addr()`, `remote_addr()` endpoints
+  - `local_id()`, `remote_id()` address IDs
+  - `dev()` for interface binding
+  - `backup()` for backup path marking
+- `MptcpAnnounceBuilder` for address announcements
+  - `new(token)` with connection token
+  - `addr_id()`, `address()` configuration
+- `conn.create_subflow()`, `destroy_subflow()` - Subflow lifecycle
+- `conn.announce_addr()`, `remove_addr()` - Address announcements
+
 ### Changed
 
 - All new examples organized into subdirectories by feature area
