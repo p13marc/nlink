@@ -5,6 +5,10 @@ members = [
     "bins/ip",
     "bins/tc",
     "bins/ss",
+    "bins/bridge",
+    "bins/wg",
+    "bins/diag",
+    "bins/config",
 ]
 
 [workspace.package]

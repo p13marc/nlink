@@ -55,8 +55,8 @@ Expose existing library functionality via CLI:
 
 | Command | Plan | Status | Library Support |
 |---------|------|--------|-----------------|
-| `ip nexthop` | 017 | Planned | ✓ Complete |
-| `ip mptcp` | 018 | Planned | ✓ Complete |
+| `ip nexthop` | 017 | ✓ Done | ✓ Complete |
+| `ip mptcp` | 018 | ✓ Done | ✓ Complete |
 | `ip sr` | 024 | Planned | ✓ Complete |
 | `ip macsec` | 025 | Planned | ✓ Complete |
 
@@ -64,7 +64,7 @@ Expose existing library functionality via CLI:
 
 | Command | Plan | Status | Library Support |
 |---------|------|--------|-----------------|
-| `tc chain` | 019 | Planned | ✓ Complete |
+| `tc chain` | 019 | ✓ Done | ✓ Complete |
 
 ### `nlink-ss` Improvements
 
@@ -78,10 +78,10 @@ Expose existing library functionality via CLI:
 
 | Binary | Plan | Status | Library Support |
 |--------|------|--------|-----------------|
-| `nlink-bridge` | 020 | Planned | ✓ Complete |
-| `nlink-wg` | 021 | Planned | ✓ Complete |
-| `nlink-diag` | 022 | Planned | ✓ Complete |
-| `nlink-config` | 023 | Planned | ✓ Complete |
+| `nlink-bridge` | 020 | ✓ Done | ✓ Complete |
+| `nlink-wg` | 021 | ✓ Done | ✓ Complete |
+| `nlink-diag` | 022 | ✓ Done | ✓ Complete |
+| `nlink-config` | 023 | ✓ Done | Partial (capture/example) |
 
 ## Library Coverage Analysis
 

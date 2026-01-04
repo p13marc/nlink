@@ -43,7 +43,7 @@ use std::net::IpAddr;
 use super::builder::MessageBuilder;
 use super::connection::Connection;
 use super::error::{Error, Result};
-use super::message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType};
+use super::message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgType};
 use super::messages::NeighborMessage;
 use super::protocol::Route;
 use super::types::neigh::{NdMsg, NdaAttr, NeighborState};
@@ -423,17 +423,38 @@ impl Connection<Route> {
     /// Use this method when operating in a network namespace to avoid
     /// reading `/sys/class/net/` from the wrong namespace.
     pub async fn get_fdb_by_index(&self, bridge_idx: u32) -> Result<Vec<FdbEntry>> {
-        // Query all neighbors - the kernel will return AF_BRIDGE entries
-        // Note: We can't easily filter by family in the dump request with
-        // the current dump_typed infrastructure, so we filter the results
-        let neighbors = self.get_neighbors().await?;
+        // Query neighbors with AF_BRIDGE family to get FDB entries
+        let neighbors = self.get_bridge_neighbors().await?;
 
         Ok(neighbors
             .iter()
-            .filter(|n| n.family() == AF_BRIDGE)
             .filter(|n| n.master() == Some(bridge_idx) || n.ifindex() == bridge_idx)
             .filter_map(FdbEntry::from_neighbor)
             .collect())
+    }
+
+    /// Get all bridge neighbor entries (AF_BRIDGE FDB dump).
+    async fn get_bridge_neighbors(&self) -> Result<Vec<NeighborMessage>> {
+        use super::message::NLMSG_HDRLEN;
+        use super::parse::FromNetlink;
+
+        let ndmsg = NdMsg::new().with_family(AF_BRIDGE);
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETNEIGH, NLM_F_REQUEST | NLM_F_DUMP);
+        builder.append(&ndmsg);
+
+        let responses = self.send_dump(builder).await?;
+
+        let mut parsed = Vec::new();
+        for response in responses {
+            if response.len() < NLMSG_HDRLEN {
+                continue;
+            }
+            let payload = &response[NLMSG_HDRLEN..];
+            if let Ok(msg) = NeighborMessage::from_bytes(payload) {
+                parsed.push(msg);
+            }
+        }
+        Ok(parsed)
     }
 
     /// Get FDB entries for a specific bridge port.
@@ -447,11 +468,10 @@ impl Connection<Route> {
         let bridge_idx = crate::util::get_ifindex(bridge).map_err(Error::InvalidMessage)? as u32;
         let port_idx = crate::util::get_ifindex(port).map_err(Error::InvalidMessage)? as u32;
 
-        let neighbors = self.get_neighbors().await?;
+        let neighbors = self.get_bridge_neighbors().await?;
 
         Ok(neighbors
             .iter()
-            .filter(|n| n.family() == AF_BRIDGE)
             .filter(|n| n.ifindex() == port_idx)
             .filter(|n| n.master() == Some(bridge_idx))
             .filter_map(FdbEntry::from_neighbor)

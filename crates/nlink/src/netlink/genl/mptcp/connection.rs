@@ -133,14 +133,12 @@ impl Connection<Mptcp> {
     /// println!("Max add_addr_accepted: {:?}", limits.add_addr_accepted);
     /// ```
     pub async fn get_limits(&self) -> Result<MptcpLimits> {
-        let responses = self
-            .dump_mptcp_command(mptcp_pm_cmd::GET_LIMITS, |_builder| {})
+        let response = self
+            .mptcp_query(mptcp_pm_cmd::GET_LIMITS, |_builder| {})
             .await?;
 
-        for response in &responses {
-            if let Some(limits) = parse_limits_response(response)? {
-                return Ok(limits);
-            }
+        if let Some(limits) = parse_limits_response(&response)? {
+            return Ok(limits);
         }
 
         Ok(MptcpLimits::default())
@@ -221,6 +219,51 @@ impl Connection<Mptcp> {
         self.process_genl_response(&response, seq)?;
 
         Ok(response)
+    }
+
+    /// Send an MPTCP PM GENL query command (no ACK requested).
+    async fn mptcp_query(
+        &self,
+        cmd: u8,
+        build_attrs: impl FnOnce(&mut MessageBuilder),
+    ) -> Result<Vec<u8>> {
+        let family_id = self.state().family_id;
+
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST);
+
+        let genl_hdr = GenlMsgHdr::new(cmd, MPTCP_PM_GENL_VERSION);
+        builder.append(&genl_hdr);
+
+        build_attrs(&mut builder);
+
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        let response: Vec<u8> = self.socket().recv_msg().await?;
+
+        // Extract the payload from the first valid message
+        for result in MessageIter::new(&response) {
+            let (header, payload) = result?;
+            if header.nlmsg_seq != seq {
+                continue;
+            }
+            if header.is_error() {
+                let err = NlMsgError::from_bytes(payload)?;
+                if !err.is_ack() {
+                    return Err(Error::from_errno(err.error));
+                }
+                continue;
+            }
+            if !header.is_done() {
+                return Ok(payload.to_vec());
+            }
+        }
+
+        Ok(Vec::new())
     }
 
     /// Send an MPTCP PM GENL dump command and collect all responses.
@@ -305,7 +348,7 @@ impl Connection<Mptcp> {
 
 /// Resolve the MPTCP PM GENL family ID.
 async fn resolve_mptcp_family(socket: &NetlinkSocket) -> Result<u16> {
-    let mut builder = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK);
+    let mut builder = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST);
 
     let genl_hdr = GenlMsgHdr::new(CtrlCmd::GetFamily as u8, 1);
     builder.append(&genl_hdr);

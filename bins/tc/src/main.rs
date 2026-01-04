@@ -9,6 +9,7 @@ use nlink::output::{OutputFormat, OutputOptions};
 mod commands;
 
 use commands::action::ActionCmd;
+use commands::chain::ChainCmd;
 use commands::class::ClassCmd;
 use commands::filter::FilterCmd;
 use commands::monitor::MonitorCmd;
@@ -61,6 +62,9 @@ enum Command {
     #[command(visible_alias = "f")]
     Filter(FilterCmd),
 
+    /// Manage filter chains
+    Chain(ChainCmd),
+
     /// Manage traffic control actions
     #[command(visible_alias = "a")]
     Action(ActionCmd),
@@ -95,6 +99,7 @@ async fn main() -> Result<()> {
         Command::Qdisc(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Class(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Filter(cmd) => cmd.run(&conn, format, &opts).await,
+        Command::Chain(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Action(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Monitor(cmd) => cmd.run(format, &opts).await,
     }

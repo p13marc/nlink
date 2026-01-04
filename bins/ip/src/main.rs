@@ -63,6 +63,10 @@ enum Command {
     #[command(visible_alias = "ru")]
     Rule(commands::rule::RuleCmd),
 
+    /// Manage nexthop objects.
+    #[command(visible_alias = "nh")]
+    Nexthop(commands::nexthop::NexthopCmd),
+
     /// Manage network namespaces.
     #[command(visible_alias = "ns")]
     Netns(commands::netns::NetnsCmd),
@@ -84,6 +88,9 @@ enum Command {
 
     /// Manage XFRM (IPSec) state and policy.
     Xfrm(commands::xfrm::XfrmCmd),
+
+    /// Manage MPTCP (Multipath TCP) endpoints and limits.
+    Mptcp(commands::mptcp::MptcpCmd),
 }
 
 #[tokio::main]
@@ -130,12 +137,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Route(cmd) => cmd.run(&conn, format, &opts, family).await,
         Command::Neighbor(cmd) => cmd.run(&conn, format, &opts, family).await,
         Command::Rule(cmd) => cmd.run(&conn, format, &opts, family).await,
+        Command::Nexthop(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Netns(cmd) => cmd.run(format, &opts).await,
         Command::Monitor(cmd) => cmd.run(format, &opts).await,
         Command::Tunnel(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Maddress(cmd) => cmd.run(format, &opts, family).await,
         Command::Vrf(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Xfrm(cmd) => cmd.run(format, &opts).await,
+        Command::Mptcp(cmd) => cmd.run(format, &opts).await,
     };
 
     if let Err(e) = result {

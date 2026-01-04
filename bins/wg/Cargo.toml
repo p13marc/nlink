@@ -1,0 +1,19 @@
+[package]
+name = "nlink-wg"
+description = "WireGuard management utility"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "wg"
+path = "src/main.rs"
+
+[dependencies]
+nlink = { workspace = true, features = ["output"] }
+tokio = { workspace = true }
+clap = { workspace = true }
+base64 = "0.22"
+rand = "0.8"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
