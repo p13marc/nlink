@@ -50,3 +50,6 @@ mod events;
 
 #[path = "integration/config.rs"]
 mod config;
+
+#[path = "integration/ratelimit.rs"]
+mod ratelimit;

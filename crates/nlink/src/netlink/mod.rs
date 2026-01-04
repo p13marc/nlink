@@ -98,6 +98,7 @@ pub mod netfilter;
 pub mod nexthop;
 pub mod parse;
 mod protocol;
+pub mod ratelimit;
 pub mod route;
 pub mod rule;
 pub mod selinux;

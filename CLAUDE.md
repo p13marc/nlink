@@ -91,6 +91,7 @@ crates/nlink/src/
     audit.rs          # Linux Audit subsystem
     selinux.rs        # SELinux event notifications
     config/           # Declarative network configuration (NetworkConfig, diff, apply)
+    ratelimit.rs      # High-level rate limiting DSL (RateLimiter, PerHostLimiter)
     genl/             # Generic Netlink (GENL) support
       mod.rs          # GENL module entry, control family constants
       header.rs       # GenlMsgHdr (4-byte GENL header)
@@ -328,6 +329,59 @@ let config = NetworkConfig::new()
     
     // SFQ for stochastic fair queueing
     .qdisc("eth0", |q| q.sfq().perturb(10));
+```
+
+**High-level rate limiting (RateLimiter):**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::ratelimit::RateLimiter;
+use std::time::Duration;
+
+let conn = Connection::<Route>::new()?;
+
+// Simple rate limiting - egress and ingress
+RateLimiter::new("eth0")
+    .egress("100mbit")?       // Limit upload to 100 Mbps
+    .ingress("1gbit")?        // Limit download to 1 Gbps
+    .burst_to("150mbit")?     // Allow bursting to 150 Mbps
+    .latency(Duration::from_millis(20))  // AQM latency target
+    .apply(&conn)
+    .await?;
+
+// Egress only with bytes-per-second values
+RateLimiter::new("eth0")
+    .egress_bps(12_500_000)   // 100 Mbps = 12.5 MB/s
+    .burst_size("64kb")?      // 64 KB burst buffer
+    .apply(&conn)
+    .await?;
+
+// Remove all rate limits
+RateLimiter::new("eth0")
+    .remove(&conn)
+    .await?;
+```
+
+**Per-host rate limiting (PerHostLimiter):**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::ratelimit::PerHostLimiter;
+use std::time::Duration;
+
+let conn = Connection::<Route>::new()?;
+
+// Per-IP and per-subnet rate limiting
+PerHostLimiter::new("eth0", "10mbit")?  // Default rate for unmatched traffic
+    .limit_ip("192.168.1.100".parse()?, "100mbit")?  // VIP client
+    .limit_subnet("10.0.0.0/8", "50mbit")?           // Internal network
+    .limit_port(80, "500mbit")?                       // HTTP traffic
+    .latency(Duration::from_millis(5))
+    .apply(&conn)
+    .await?;
+
+// Remove per-host limits
+PerHostLimiter::new("eth0", "10mbit")?
+    .remove(&conn)
+    .await?;
 ```
 
 **Network namespace operations:**
