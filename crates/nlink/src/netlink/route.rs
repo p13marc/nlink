@@ -50,6 +50,7 @@ use super::error::{Error, Result};
 use super::message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType};
 use super::mpls::MplsEncap;
 use super::protocol::Route;
+use super::srv6::Srv6Encap;
 use super::types::route::{RouteProtocol, RouteScope, RouteType, RtMsg, RtaAttr, rt_table};
 
 /// NLM_F_CREATE flag
@@ -378,6 +379,8 @@ pub struct Ipv4Route {
     nexthop_id: Option<u32>,
     /// MPLS encapsulation
     mpls_encap: Option<MplsEncap>,
+    /// SRv6 encapsulation
+    srv6_encap: Option<Srv6Encap>,
 }
 
 impl Ipv4Route {
@@ -407,6 +410,7 @@ impl Ipv4Route {
             multipath: None,
             nexthop_id: None,
             mpls_encap: None,
+            srv6_encap: None,
         }
     }
 
@@ -428,6 +432,7 @@ impl Ipv4Route {
             multipath: None,
             nexthop_id: None,
             mpls_encap: None,
+            srv6_encap: None,
         }
     }
 
@@ -563,6 +568,29 @@ impl Ipv4Route {
         self
     }
 
+    /// Add SRv6 encapsulation.
+    ///
+    /// This causes the route to encapsulate packets with an SRv6 header.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::route::Ipv4Route;
+    /// use nlink::netlink::srv6::Srv6Encap;
+    ///
+    /// // Encapsulate IPv4 traffic in SRv6
+    /// let route = Ipv4Route::new("10.0.0.0", 8)
+    ///     .dev("eth0")
+    ///     .srv6_encap(
+    ///         Srv6Encap::encap()
+    ///             .segment("fc00:1::1".parse()?)
+    ///     );
+    /// ```
+    pub fn srv6_encap(mut self, encap: Srv6Encap) -> Self {
+        self.srv6_encap = Some(encap);
+        self
+    }
+
     /// Determine the scope based on route configuration.
     fn determine_scope(&self) -> RouteScope {
         if let Some(scope) = self.scope {
@@ -668,6 +696,11 @@ impl RouteConfig for Ipv4Route {
             encap.write_to(&mut builder);
         }
 
+        // RTA_ENCAP_TYPE + RTA_ENCAP (SRv6 encapsulation)
+        if let Some(ref encap) = self.srv6_encap {
+            encap.write_to(&mut builder);
+        }
+
         Ok(builder)
     }
 
@@ -738,6 +771,8 @@ pub struct Ipv6Route {
     nexthop_id: Option<u32>,
     /// MPLS encapsulation
     mpls_encap: Option<MplsEncap>,
+    /// SRv6 encapsulation
+    srv6_encap: Option<Srv6Encap>,
 }
 
 impl Ipv6Route {
@@ -763,6 +798,7 @@ impl Ipv6Route {
             pref: None,
             nexthop_id: None,
             mpls_encap: None,
+            srv6_encap: None,
         }
     }
 
@@ -785,6 +821,7 @@ impl Ipv6Route {
             pref: None,
             nexthop_id: None,
             mpls_encap: None,
+            srv6_encap: None,
         }
     }
 
@@ -887,6 +924,39 @@ impl Ipv6Route {
     /// This causes the route to push MPLS labels onto outgoing packets.
     pub fn mpls_encap(mut self, encap: MplsEncap) -> Self {
         self.mpls_encap = Some(encap);
+        self
+    }
+
+    /// Add SRv6 encapsulation.
+    ///
+    /// This causes the route to encapsulate packets with an SRv6 header.
+    /// For IPv6 routes, you can use inline mode to insert the SRH into
+    /// the existing IPv6 packet without adding a new outer header.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::route::Ipv6Route;
+    /// use nlink::netlink::srv6::Srv6Encap;
+    ///
+    /// // Inline mode (insert SRH into IPv6 packet)
+    /// let route = Ipv6Route::new("2001:db8::", 32)
+    ///     .dev("eth0")
+    ///     .srv6_encap(
+    ///         Srv6Encap::inline()
+    ///             .segment("fc00:1::1".parse()?)
+    ///     );
+    ///
+    /// // Encap mode (add outer IPv6 header with SRH)
+    /// let route = Ipv6Route::new("2001:db8::", 32)
+    ///     .dev("eth0")
+    ///     .srv6_encap(
+    ///         Srv6Encap::encap()
+    ///             .segments(&["fc00:1::1".parse()?, "fc00:2::1".parse()?])
+    ///     );
+    /// ```
+    pub fn srv6_encap(mut self, encap: Srv6Encap) -> Self {
+        self.srv6_encap = Some(encap);
         self
     }
 
@@ -994,6 +1064,11 @@ impl RouteConfig for Ipv6Route {
 
         // RTA_ENCAP_TYPE + RTA_ENCAP (MPLS encapsulation)
         if let Some(ref encap) = self.mpls_encap {
+            encap.write_to(&mut builder);
+        }
+
+        // RTA_ENCAP_TYPE + RTA_ENCAP (SRv6 encapsulation)
+        if let Some(ref encap) = self.srv6_encap {
             encap.write_to(&mut builder);
         }
 

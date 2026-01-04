@@ -8,6 +8,7 @@ pub mod nexthop;
 pub mod nsid;
 pub mod route;
 pub mod rule;
+pub mod srv6;
 pub mod tc;
 
 // Re-export commonly used types
