@@ -126,8 +126,8 @@ pub use namespace_watcher::{
 };
 pub use parse::{FromNetlink, ToNetlink};
 pub use protocol::{
-    Audit, Connector, FibLookup, Generic, KobjectUevent, Netfilter, ProtocolState, Route, SELinux,
-    SockDiag, Wireguard, Xfrm,
+    Audit, Connector, FibLookup, Generic, KobjectUevent, Macsec, Netfilter, ProtocolState, Route,
+    SELinux, SockDiag, Wireguard, Xfrm,
 };
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};
 pub use stream::{EventSource, EventSubscription, OwnedEventStream};

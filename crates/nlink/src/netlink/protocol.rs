@@ -228,6 +228,22 @@ impl ProtocolState for Audit {
     const PROTOCOL: Protocol = Protocol::Audit;
 }
 
+/// MACsec protocol state.
+///
+/// Used for MACsec (IEEE 802.1AE) device configuration via Generic Netlink.
+/// Contains the resolved MACsec family ID.
+#[derive(Debug, Default)]
+pub struct Macsec {
+    /// Resolved MACsec GENL family ID.
+    pub(crate) family_id: u16,
+}
+
+impl private::Sealed for Macsec {}
+
+impl ProtocolState for Macsec {
+    const PROTOCOL: Protocol = Protocol::Generic;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +270,7 @@ mod tests {
         assert_eq!(SockDiag::PROTOCOL, Protocol::SockDiag);
         assert_eq!(Generic::PROTOCOL, Protocol::Generic);
         assert_eq!(Wireguard::PROTOCOL, Protocol::Generic);
+        assert_eq!(Macsec::PROTOCOL, Protocol::Generic);
         assert_eq!(KobjectUevent::PROTOCOL, Protocol::KobjectUevent);
         assert_eq!(Connector::PROTOCOL, Protocol::Connector);
         assert_eq!(Netfilter::PROTOCOL, Protocol::Netfilter);

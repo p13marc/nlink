@@ -66,6 +66,10 @@ crates/nlink/src/
         mod.rs        # WireGuard constants and attribute types
         types.rs      # WgDevice, WgPeer, AllowedIp, builders
         connection.rs # Connection<Wireguard> API
+      macsec/         # MACsec (IEEE 802.1AE) GENL configuration
+        mod.rs        # MACsec constants and attribute types
+        types.rs      # MacsecDevice, MacsecTxSc, MacsecRxSc, MacsecSaBuilder
+        connection.rs # Connection<Macsec> API
     messages/         # Strongly-typed message structs
     types/            # RTNetlink message structures (link, addr, route, neigh, rule, tc)
   util/               # Shared utilities (always available)
@@ -1572,6 +1576,71 @@ conn.remove_peer("wg0", peer_pubkey).await?;
 
 // Access the resolved GENL family ID if needed
 println!("WireGuard family ID: {}", conn.family_id());
+```
+
+**MACsec (IEEE 802.1AE) configuration via Generic Netlink:**
+```rust
+use nlink::netlink::{Connection, Macsec};
+use nlink::netlink::genl::macsec::{MacsecSaBuilder, MacsecCipherSuite};
+
+// Create a MACsec connection (async due to GENL family resolution)
+let conn = Connection::<Macsec>::new_async().await?;
+
+// Get device information
+let device = conn.get_device("macsec0").await?;
+println!("SCI: {:016x}", device.sci);
+println!("Cipher: {:?}", device.cipher_suite);
+println!("Encoding SA: {}", device.encoding_sa);
+
+// List TX SAs
+for sa in &device.tx_sc.sas {
+    println!("TX SA {}: active={}, pn={}", sa.an, sa.active, sa.next_pn);
+}
+
+// List RX SCs and their SAs
+for rxsc in &device.rx_scs {
+    println!("RX SC {:016x}:", rxsc.sci);
+    for sa in &rxsc.sas {
+        println!("  SA {}: active={}", sa.an, sa.active);
+    }
+}
+
+// Add a TX SA (requires root)
+let key = [0u8; 16]; // 128-bit key for GCM-AES-128
+conn.add_tx_sa("macsec0",
+    MacsecSaBuilder::new(0)  // AN 0-3
+        .key(&key)
+        .pn(1)
+        .active(true)
+).await?;
+
+// Update TX SA (activate/deactivate or update PN)
+conn.update_tx_sa("macsec0",
+    MacsecSaBuilder::new(0)
+        .active(false)
+).await?;
+
+// Delete TX SA
+conn.del_tx_sa("macsec0", 0).await?;
+
+// Add RX SC (peer's SCI)
+let peer_sci = 0x001122334455_0001u64;  // MAC + port
+conn.add_rx_sc("macsec0", peer_sci).await?;
+
+// Add RX SA for a peer
+conn.add_rx_sa("macsec0", peer_sci,
+    MacsecSaBuilder::new(0)
+        .key(&key)
+        .pn(1)
+        .active(true)
+).await?;
+
+// Delete RX SA and SC
+conn.del_rx_sa("macsec0", peer_sci, 0).await?;
+conn.del_rx_sc("macsec0", peer_sci).await?;
+
+// Access the resolved GENL family ID if needed
+println!("MACsec family ID: {}", conn.family_id());
 ```
 
 **Device hotplug events (udev-style) via KobjectUevent:**
