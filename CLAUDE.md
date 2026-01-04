@@ -70,6 +70,10 @@ crates/nlink/src/
         mod.rs        # MACsec constants and attribute types
         types.rs      # MacsecDevice, MacsecTxSc, MacsecRxSc, MacsecSaBuilder
         connection.rs # Connection<Macsec> API
+      mptcp/          # MPTCP (Multipath TCP) GENL configuration
+        mod.rs        # MPTCP PM constants
+        types.rs      # MptcpEndpoint, MptcpLimits, MptcpFlags, MptcpEndpointBuilder
+        connection.rs # Connection<Mptcp> API
     messages/         # Strongly-typed message structs
     types/            # RTNetlink message structures (link, addr, route, neigh, rule, tc)
   util/               # Shared utilities (always available)
@@ -1641,6 +1645,58 @@ conn.del_rx_sc("macsec0", peer_sci).await?;
 
 // Access the resolved GENL family ID if needed
 println!("MACsec family ID: {}", conn.family_id());
+```
+
+**MPTCP (Multipath TCP) endpoint configuration via Generic Netlink:**
+```rust
+use nlink::netlink::{Connection, Mptcp};
+use nlink::netlink::genl::mptcp::{MptcpEndpointBuilder, MptcpLimits, MptcpFlags};
+
+// Create MPTCP connection (async for GENL family resolution)
+let conn = Connection::<Mptcp>::new_async().await?;
+
+// List configured endpoints
+for ep in conn.get_endpoints().await? {
+    println!("Endpoint {}: {} flags={:?}", ep.id, ep.address, ep.flags);
+}
+
+// Add endpoint for second interface (signal + subflow)
+conn.add_endpoint(
+    MptcpEndpointBuilder::new("192.168.2.1".parse()?)
+        .id(1)
+        .dev("eth1")
+        .subflow()
+        .signal()
+).await?;
+
+// Add backup endpoint (used when primary fails)
+conn.add_endpoint(
+    MptcpEndpointBuilder::new("10.0.0.1".parse()?)
+        .id(2)
+        .dev("wlan0")
+        .backup()
+        .signal()
+).await?;
+
+// Set MPTCP limits
+conn.set_limits(
+    MptcpLimits::new()
+        .subflows(4)           // Max subflows per connection
+        .add_addr_accepted(4)  // Max addresses to accept from peers
+).await?;
+
+// Get current limits
+let limits = conn.get_limits().await?;
+println!("Max subflows: {:?}", limits.subflows);
+
+// Update endpoint flags
+conn.set_endpoint_flags(1, MptcpFlags { backup: true, ..Default::default() }).await?;
+
+// Delete endpoint
+conn.del_endpoint(1).await?;
+
+// Flush all endpoints
+conn.flush_endpoints().await?;
 ```
 
 **Device hotplug events (udev-style) via KobjectUevent:**

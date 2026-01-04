@@ -244,6 +244,22 @@ impl ProtocolState for Macsec {
     const PROTOCOL: Protocol = Protocol::Generic;
 }
 
+/// MPTCP protocol state.
+///
+/// Used for MPTCP (Multipath TCP) endpoint configuration via Generic Netlink.
+/// Contains the resolved MPTCP Path Manager family ID.
+#[derive(Debug, Default)]
+pub struct Mptcp {
+    /// Resolved MPTCP PM GENL family ID.
+    pub(crate) family_id: u16,
+}
+
+impl private::Sealed for Mptcp {}
+
+impl ProtocolState for Mptcp {
+    const PROTOCOL: Protocol = Protocol::Generic;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +287,7 @@ mod tests {
         assert_eq!(Generic::PROTOCOL, Protocol::Generic);
         assert_eq!(Wireguard::PROTOCOL, Protocol::Generic);
         assert_eq!(Macsec::PROTOCOL, Protocol::Generic);
+        assert_eq!(Mptcp::PROTOCOL, Protocol::Generic);
         assert_eq!(KobjectUevent::PROTOCOL, Protocol::KobjectUevent);
         assert_eq!(Connector::PROTOCOL, Protocol::Connector);
         assert_eq!(Netfilter::PROTOCOL, Protocol::Netfilter);

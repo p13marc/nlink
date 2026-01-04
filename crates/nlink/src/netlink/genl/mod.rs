@@ -48,6 +48,7 @@ pub use connection::FamilyInfo;
 pub use header::{GENL_HDRLEN, GenlMsgHdr};
 
 pub mod macsec;
+pub mod mptcp;
 pub mod wireguard;
 
 // Control family constants (fixed, not dynamically assigned)
