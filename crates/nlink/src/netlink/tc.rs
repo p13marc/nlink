@@ -2447,6 +2447,299 @@ impl QdiscConfig for EtfConfig {
 }
 
 // ============================================================================
+// ClassConfig trait
+// ============================================================================
+
+/// Trait for TC class configurations.
+///
+/// This trait is analogous to `QdiscConfig` but for traffic control classes.
+/// Classes are used with classful qdiscs like HTB, HFSC, and DRR.
+pub trait ClassConfig: Send + Sync {
+    /// Get the class type (e.g., "htb", "hfsc", "drr").
+    fn kind(&self) -> &'static str;
+
+    /// Write the class options to a message builder.
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()>;
+}
+
+// ============================================================================
+// HtbClassConfig
+// ============================================================================
+
+/// HTB class configuration builder.
+///
+/// Provides a type-safe way to configure HTB classes with compile-time
+/// validation and IDE autocompletion.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::{Connection, Route};
+/// use nlink::netlink::tc::{HtbQdiscConfig, HtbClassConfig};
+///
+/// let conn = Connection::<Route>::new()?;
+///
+/// // First add HTB qdisc
+/// let htb = HtbQdiscConfig::new().default_class(0x30).build();
+/// conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
+///
+/// // Add root class (total bandwidth)
+/// conn.add_class_config("eth0", "1:0", "1:1",
+///     HtbClassConfig::new("1gbit")?
+///         .ceil("1gbit")?
+///         .build()
+/// ).await?;
+///
+/// // Add child class with guaranteed and ceiling rates
+/// conn.add_class_config("eth0", "1:1", "1:10",
+///     HtbClassConfig::new("100mbit")?
+///         .ceil("500mbit")?
+///         .prio(1)
+///         .build()
+/// ).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct HtbClassConfig {
+    /// Guaranteed rate in bytes/sec.
+    rate: u64,
+    /// Maximum rate (ceil) in bytes/sec.
+    ceil: Option<u64>,
+    /// Burst size in bytes.
+    burst: Option<u32>,
+    /// Ceil burst size in bytes.
+    cburst: Option<u32>,
+    /// Priority (0-7, lower is higher priority).
+    prio: Option<u32>,
+    /// Quantum for round-robin.
+    quantum: Option<u32>,
+    /// MTU for rate calculations.
+    mtu: u32,
+    /// Minimum packet unit.
+    mpu: u16,
+    /// Per-packet overhead.
+    overhead: u16,
+}
+
+impl HtbClassConfig {
+    /// Create a new HTB class configuration with rate parsed from a string.
+    ///
+    /// The rate string supports common formats like "100mbit", "1gbit", "10mbps".
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = HtbClassConfig::new("100mbit")?;
+    /// ```
+    pub fn new(rate: &str) -> Result<Self> {
+        let rate_bps = crate::util::parse::get_rate(rate)?;
+        Ok(Self::from_bps(rate_bps))
+    }
+
+    /// Create a new HTB class configuration with rate in bytes per second.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = HtbClassConfig::from_bps(12_500_000); // 100 Mbps
+    /// ```
+    pub fn from_bps(rate: u64) -> Self {
+        Self {
+            rate,
+            ceil: None,
+            burst: None,
+            cburst: None,
+            prio: None,
+            quantum: None,
+            mtu: 1600,
+            mpu: 0,
+            overhead: 0,
+        }
+    }
+
+    /// Set the ceiling rate from a string (e.g., "500mbit").
+    ///
+    /// The ceiling rate is the maximum rate the class can use when borrowing
+    /// from parent classes.
+    pub fn ceil(mut self, ceil: &str) -> Result<Self> {
+        self.ceil = Some(crate::util::parse::get_rate(ceil)?);
+        Ok(self)
+    }
+
+    /// Set the ceiling rate in bytes per second.
+    pub fn ceil_bps(mut self, ceil: u64) -> Self {
+        self.ceil = Some(ceil);
+        self
+    }
+
+    /// Set the burst size from a string (e.g., "15k", "64kb").
+    ///
+    /// The burst is the amount of data that can be sent at hardware speed
+    /// before rate limiting kicks in.
+    pub fn burst(mut self, burst: &str) -> Result<Self> {
+        self.burst = Some(crate::util::parse::get_size(burst)? as u32);
+        Ok(self)
+    }
+
+    /// Set the burst size in bytes.
+    pub fn burst_bytes(mut self, burst: u32) -> Self {
+        self.burst = Some(burst);
+        self
+    }
+
+    /// Set the ceil burst size from a string.
+    ///
+    /// The cburst is the burst for the ceiling rate.
+    pub fn cburst(mut self, cburst: &str) -> Result<Self> {
+        self.cburst = Some(crate::util::parse::get_size(cburst)? as u32);
+        Ok(self)
+    }
+
+    /// Set the ceil burst size in bytes.
+    pub fn cburst_bytes(mut self, cburst: u32) -> Self {
+        self.cburst = Some(cburst);
+        self
+    }
+
+    /// Set the priority (0-7, lower = higher priority).
+    ///
+    /// Classes with lower priority values are served first.
+    pub fn prio(mut self, prio: u32) -> Self {
+        self.prio = Some(prio.min(7));
+        self
+    }
+
+    /// Set the quantum for round-robin scheduling.
+    ///
+    /// The quantum determines how many bytes a class can send before
+    /// yielding to siblings.
+    pub fn quantum(mut self, quantum: u32) -> Self {
+        self.quantum = Some(quantum);
+        self
+    }
+
+    /// Set the MTU for rate table calculations.
+    ///
+    /// Default is 1600 bytes.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = mtu;
+        self
+    }
+
+    /// Set the minimum packet unit.
+    ///
+    /// Packets smaller than this are treated as this size for rate calculations.
+    pub fn mpu(mut self, mpu: u16) -> Self {
+        self.mpu = mpu;
+        self
+    }
+
+    /// Set the per-packet overhead.
+    ///
+    /// Added to each packet for rate calculations (e.g., for ATM or Ethernet framing).
+    pub fn overhead(mut self, overhead: u16) -> Self {
+        self.overhead = overhead;
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> HtbClassBuilt {
+        HtbClassBuilt(self)
+    }
+}
+
+/// Built HTB class configuration, ready to be applied.
+///
+/// This is the result of calling `HtbClassConfig::build()`.
+#[derive(Debug, Clone)]
+pub struct HtbClassBuilt(HtbClassConfig);
+
+impl ClassConfig for HtbClassBuilt {
+    fn kind(&self) -> &'static str {
+        "htb"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        let cfg = &self.0;
+        let rate = cfg.rate;
+        let ceil = cfg.ceil.unwrap_or(rate);
+
+        // Get HZ for time calculations (typically 1000 on Linux)
+        let hz: u64 = 1000;
+
+        // Calculate burst from rate if not specified
+        let burst = cfg
+            .burst
+            .unwrap_or_else(|| (rate / hz + cfg.mtu as u64) as u32);
+        let cburst = cfg
+            .cburst
+            .unwrap_or_else(|| (ceil / hz + cfg.mtu as u64) as u32);
+
+        // Calculate buffer time (in ticks)
+        let buffer = if rate > 0 {
+            ((burst as u64 * 1_000_000) / rate) as u32
+        } else {
+            burst
+        };
+
+        let cbuffer = if ceil > 0 {
+            ((cburst as u64 * 1_000_000) / ceil) as u32
+        } else {
+            cburst
+        };
+
+        // Build the tc_htb_opt structure
+        let opt = htb::TcHtbOpt {
+            rate: TcRateSpec {
+                rate: if rate >= (1u64 << 32) {
+                    u32::MAX
+                } else {
+                    rate as u32
+                },
+                mpu: cfg.mpu,
+                overhead: cfg.overhead,
+                ..Default::default()
+            },
+            ceil: TcRateSpec {
+                rate: if ceil >= (1u64 << 32) {
+                    u32::MAX
+                } else {
+                    ceil as u32
+                },
+                mpu: cfg.mpu,
+                overhead: cfg.overhead,
+                ..Default::default()
+            },
+            buffer,
+            cbuffer,
+            quantum: cfg.quantum.unwrap_or(0),
+            prio: cfg.prio.unwrap_or(0),
+            ..Default::default()
+        };
+
+        // Add 64-bit rate if needed (for rates >= 4 Gbps)
+        if rate >= (1u64 << 32) {
+            builder.append_attr(htb::TCA_HTB_RATE64, &rate.to_ne_bytes());
+        }
+
+        if ceil >= (1u64 << 32) {
+            builder.append_attr(htb::TCA_HTB_CEIL64, &ceil.to_ne_bytes());
+        }
+
+        // Add the main parameters structure
+        builder.append_attr(htb::TCA_HTB_PARMS, opt.as_bytes());
+
+        // Add rate tables
+        let rtab = compute_htb_rate_table(rate, cfg.mtu);
+        let ctab = compute_htb_rate_table(ceil, cfg.mtu);
+
+        builder.append_attr(htb::TCA_HTB_RTAB, &rtab);
+        builder.append_attr(htb::TCA_HTB_CTAB, &ctab);
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Helper functions
 // ============================================================================
 
@@ -3208,6 +3501,179 @@ impl Connection<Route> {
 
         self.send_ack(builder).await
     }
+
+    // ========================================================================
+    // Typed Class Config Operations
+    // ========================================================================
+
+    /// Add a TC class with typed configuration.
+    ///
+    /// This method provides a type-safe way to add classes, as an alternative
+    /// to the string-based `add_class` method.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Route};
+    /// use nlink::netlink::tc::{HtbQdiscConfig, HtbClassConfig};
+    ///
+    /// let conn = Connection::<Route>::new()?;
+    ///
+    /// // First add HTB qdisc
+    /// let htb = HtbQdiscConfig::new().default_class(0x30).build();
+    /// conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
+    ///
+    /// // Add a class with guaranteed 100mbit, ceiling 500mbit
+    /// conn.add_class_config("eth0", "1:0", "1:10",
+    ///     HtbClassConfig::new("100mbit")?
+    ///         .ceil("500mbit")?
+    ///         .prio(1)
+    ///         .build()
+    /// ).await?;
+    /// ```
+    pub async fn add_class_config<C: ClassConfig>(
+        &self,
+        dev: &str,
+        parent: &str,
+        classid: &str,
+        config: C,
+    ) -> Result<()> {
+        let ifindex = get_ifindex(dev)?;
+        self.add_class_config_by_index(ifindex, parent, classid, config)
+            .await
+    }
+
+    /// Add a TC class with typed configuration by interface index.
+    ///
+    /// This is useful for namespace-aware operations where you've already
+    /// resolved the interface index via `conn.get_link_by_name()`.
+    pub async fn add_class_config_by_index<C: ClassConfig>(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        classid: &str,
+        config: C,
+    ) -> Result<()> {
+        let parent_handle = parse_handle(parent)?;
+        let class_handle = parse_handle(classid)?;
+
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent_handle)
+            .with_handle(class_handle);
+
+        let mut builder = create_request(NlMsgType::RTM_NEWTCLASS);
+        builder.append(&tcmsg);
+        builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
+
+        let options_token = builder.nest_start(TcaAttr::Options as u16);
+        config.write_options(&mut builder)?;
+        builder.nest_end(options_token);
+
+        self.send_ack(builder).await
+    }
+
+    /// Change a TC class with typed configuration.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Update an existing class's rate
+    /// conn.change_class_config("eth0", "1:0", "1:10",
+    ///     HtbClassConfig::new("200mbit")?
+    ///         .ceil("800mbit")?
+    ///         .build()
+    /// ).await?;
+    /// ```
+    pub async fn change_class_config<C: ClassConfig>(
+        &self,
+        dev: &str,
+        parent: &str,
+        classid: &str,
+        config: C,
+    ) -> Result<()> {
+        let ifindex = get_ifindex(dev)?;
+        self.change_class_config_by_index(ifindex, parent, classid, config)
+            .await
+    }
+
+    /// Change a TC class with typed configuration by interface index.
+    pub async fn change_class_config_by_index<C: ClassConfig>(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        classid: &str,
+        config: C,
+    ) -> Result<()> {
+        let parent_handle = parse_handle(parent)?;
+        let class_handle = parse_handle(classid)?;
+
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent_handle)
+            .with_handle(class_handle);
+
+        let mut builder = ack_request(NlMsgType::RTM_NEWTCLASS);
+        builder.append(&tcmsg);
+        builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
+
+        let options_token = builder.nest_start(TcaAttr::Options as u16);
+        config.write_options(&mut builder)?;
+        builder.nest_end(options_token);
+
+        self.send_ack(builder).await
+    }
+
+    /// Replace a TC class with typed configuration (add or update).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Create or update a class
+    /// conn.replace_class_config("eth0", "1:0", "1:10",
+    ///     HtbClassConfig::new("100mbit")?
+    ///         .ceil("500mbit")?
+    ///         .build()
+    /// ).await?;
+    /// ```
+    pub async fn replace_class_config<C: ClassConfig>(
+        &self,
+        dev: &str,
+        parent: &str,
+        classid: &str,
+        config: C,
+    ) -> Result<()> {
+        let ifindex = get_ifindex(dev)?;
+        self.replace_class_config_by_index(ifindex, parent, classid, config)
+            .await
+    }
+
+    /// Replace a TC class with typed configuration by interface index.
+    pub async fn replace_class_config_by_index<C: ClassConfig>(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        classid: &str,
+        config: C,
+    ) -> Result<()> {
+        let parent_handle = parse_handle(parent)?;
+        let class_handle = parse_handle(classid)?;
+
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent_handle)
+            .with_handle(class_handle);
+
+        let mut builder = replace_request(NlMsgType::RTM_NEWTCLASS);
+        builder.append(&tcmsg);
+        builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
+
+        let options_token = builder.nest_start(TcaAttr::Options as u16);
+        config.write_options(&mut builder)?;
+        builder.nest_end(options_token);
+
+        self.send_ack(builder).await
+    }
 }
 
 #[cfg(test)]
@@ -3366,5 +3832,79 @@ mod tests {
         assert_eq!(config.entries[1].gate_mask, 0x2);
         assert!(config.flags & 2 != 0); // FULL_OFFLOAD flag
         assert_eq!(config.kind(), "taprio");
+    }
+
+    #[test]
+    fn test_htb_class_config_from_bps() {
+        let config = HtbClassConfig::from_bps(12_500_000) // 100 Mbps
+            .ceil_bps(62_500_000) // 500 Mbps
+            .prio(1)
+            .quantum(1500)
+            .build();
+
+        assert_eq!(config.0.rate, 12_500_000);
+        assert_eq!(config.0.ceil, Some(62_500_000));
+        assert_eq!(config.0.prio, Some(1));
+        assert_eq!(config.0.quantum, Some(1500));
+        assert_eq!(config.kind(), "htb");
+    }
+
+    #[test]
+    fn test_htb_class_config_new() {
+        let config = HtbClassConfig::new("100mbit")
+            .unwrap()
+            .ceil("500mbit")
+            .unwrap()
+            .prio(2)
+            .build();
+
+        // 100 Mbps = 100,000,000 bits/sec (get_rate returns bits/sec)
+        assert_eq!(config.0.rate, 100_000_000);
+        // 500 Mbps = 500,000,000 bits/sec
+        assert_eq!(config.0.ceil, Some(500_000_000));
+        assert_eq!(config.0.prio, Some(2));
+        assert_eq!(config.kind(), "htb");
+    }
+
+    #[test]
+    fn test_htb_class_config_burst() {
+        let config = HtbClassConfig::from_bps(1_000_000)
+            .burst_bytes(16384)
+            .cburst_bytes(32768)
+            .mtu(9000)
+            .mpu(64)
+            .overhead(14)
+            .build();
+
+        assert_eq!(config.0.burst, Some(16384));
+        assert_eq!(config.0.cburst, Some(32768));
+        assert_eq!(config.0.mtu, 9000);
+        assert_eq!(config.0.mpu, 64);
+        assert_eq!(config.0.overhead, 14);
+    }
+
+    #[test]
+    fn test_htb_class_config_prio_clamp() {
+        let config = HtbClassConfig::from_bps(1_000_000)
+            .prio(100) // Should clamp to 7
+            .build();
+
+        assert_eq!(config.0.prio, Some(7));
+    }
+
+    #[test]
+    fn test_htb_class_config_defaults() {
+        let config = HtbClassConfig::from_bps(1_000_000).build();
+
+        // ceil defaults to rate
+        assert_eq!(config.0.ceil, None);
+        // Other defaults
+        assert_eq!(config.0.burst, None);
+        assert_eq!(config.0.cburst, None);
+        assert_eq!(config.0.prio, None);
+        assert_eq!(config.0.quantum, None);
+        assert_eq!(config.0.mtu, 1600);
+        assert_eq!(config.0.mpu, 0);
+        assert_eq!(config.0.overhead, 0);
     }
 }
