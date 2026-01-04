@@ -63,6 +63,11 @@ pub trait FilterConfig: Send + Sync {
 
     /// Get the classid if set.
     fn classid(&self) -> Option<u32>;
+
+    /// Get the chain index if set.
+    fn chain(&self) -> Option<u32> {
+        None
+    }
 }
 
 // ============================================================================
@@ -107,6 +112,8 @@ pub struct U32Filter {
     priority: u16,
     /// Protocol (default: ETH_P_IP).
     protocol: u16,
+    /// Chain index for this filter.
+    chain: Option<u32>,
 }
 
 impl U32Filter {
@@ -223,6 +230,15 @@ impl U32Filter {
         self
     }
 
+    /// Set the chain index for this filter.
+    ///
+    /// Chains provide logical grouping of filters for better performance
+    /// and organization (Linux 4.1+).
+    pub fn chain(mut self, chain: u32) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
@@ -236,6 +252,10 @@ impl FilterConfig for U32Filter {
 
     fn classid(&self) -> Option<u32> {
         self.classid
+    }
+
+    fn chain(&self) -> Option<u32> {
+        self.chain
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -337,6 +357,10 @@ pub struct FlowerFilter {
     priority: u16,
     /// Protocol (default: ETH_P_ALL).
     protocol: u16,
+    /// Chain index for this filter.
+    chain: Option<u32>,
+    /// Goto chain action (jump to another chain on match).
+    goto_chain: Option<u32>,
 }
 
 impl FlowerFilter {
@@ -522,6 +546,24 @@ impl FlowerFilter {
         self
     }
 
+    /// Set the chain index for this filter.
+    ///
+    /// Chains provide logical grouping of filters for better performance
+    /// and organization (Linux 4.1+).
+    pub fn chain(mut self, chain: u32) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
+    /// Jump to another chain on match.
+    ///
+    /// This adds a goto_chain action that transfers packet processing
+    /// to the specified chain when this filter matches.
+    pub fn goto_chain(mut self, chain: u32) -> Self {
+        self.goto_chain = Some(chain);
+        self
+    }
+
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
@@ -568,6 +610,10 @@ impl FilterConfig for FlowerFilter {
 
     fn classid(&self) -> Option<u32> {
         self.classid
+    }
+
+    fn chain(&self) -> Option<u32> {
+        self.chain
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -674,6 +720,26 @@ impl FilterConfig for FlowerFilter {
             builder.append_attr(flower::TCA_FLOWER_KEY_TCP_FLAGS_MASK, &mask.to_be_bytes());
         }
 
+        // Add goto_chain action if set
+        if let Some(chain) = self.goto_chain {
+            use super::action::{ActionConfig, GactAction};
+            use super::types::tc::action;
+            use super::types::tc::filter::flower::TCA_FLOWER_ACT;
+
+            let goto = GactAction::goto_chain(chain);
+            let act_token = builder.nest_start(TCA_FLOWER_ACT);
+
+            // Action index 1
+            let act1_token = builder.nest_start(1);
+            builder.append_attr_str(action::TCA_ACT_KIND, goto.kind());
+            let opt_token = builder.nest_start(action::TCA_ACT_OPTIONS);
+            goto.write_options(builder)?;
+            builder.nest_end(opt_token);
+            builder.nest_end(act1_token);
+
+            builder.nest_end(act_token);
+        }
+
         Ok(())
     }
 }
@@ -705,6 +771,10 @@ pub struct MatchallFilter {
     priority: u16,
     /// Protocol.
     protocol: u16,
+    /// Chain index for this filter.
+    chain: Option<u32>,
+    /// Goto chain action (jump to another chain on match).
+    goto_chain: Option<u32>,
 }
 
 impl MatchallFilter {
@@ -752,6 +822,24 @@ impl MatchallFilter {
         self
     }
 
+    /// Set the chain index for this filter.
+    ///
+    /// Chains provide logical grouping of filters for better performance
+    /// and organization (Linux 4.1+).
+    pub fn chain(mut self, chain: u32) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
+    /// Jump to another chain on match.
+    ///
+    /// This adds a goto_chain action that transfers packet processing
+    /// to the specified chain when this filter matches.
+    pub fn goto_chain(mut self, chain: u32) -> Self {
+        self.goto_chain = Some(chain);
+        self
+    }
+
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
@@ -767,6 +855,10 @@ impl FilterConfig for MatchallFilter {
         self.classid
     }
 
+    fn chain(&self) -> Option<u32> {
+        self.chain
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         if let Some(classid) = self.classid {
             builder.append_attr_u32(matchall::TCA_MATCHALL_CLASSID, classid);
@@ -774,6 +866,25 @@ impl FilterConfig for MatchallFilter {
 
         if self.flags != 0 {
             builder.append_attr_u32(matchall::TCA_MATCHALL_FLAGS, self.flags);
+        }
+
+        // Add goto_chain action if set
+        if let Some(chain) = self.goto_chain {
+            use super::action::{ActionConfig, GactAction};
+            use super::types::tc::action;
+
+            let goto = GactAction::goto_chain(chain);
+            let act_token = builder.nest_start(matchall::TCA_MATCHALL_ACT);
+
+            // Action index 1
+            let act1_token = builder.nest_start(1);
+            builder.append_attr_str(action::TCA_ACT_KIND, goto.kind());
+            let opt_token = builder.nest_start(action::TCA_ACT_OPTIONS);
+            goto.write_options(builder)?;
+            builder.nest_end(opt_token);
+            builder.nest_end(act1_token);
+
+            builder.nest_end(act_token);
         }
 
         Ok(())
@@ -804,6 +915,8 @@ pub struct FwFilter {
     mask: u32,
     /// Target class ID.
     classid: Option<u32>,
+    /// Chain index for this filter.
+    chain: Option<u32>,
 }
 
 impl FwFilter {
@@ -815,6 +928,7 @@ impl FwFilter {
         Self {
             mask: 0xFFFFFFFF,
             classid: None,
+            chain: None,
         }
     }
 
@@ -833,6 +947,15 @@ impl FwFilter {
     /// Set the target class ID from raw value.
     pub fn classid_raw(mut self, classid: u32) -> Self {
         self.classid = Some(classid);
+        self
+    }
+
+    /// Set the chain index for this filter.
+    ///
+    /// Chains provide logical grouping of filters for better performance
+    /// and organization (Linux 4.1+).
+    pub fn chain(mut self, chain: u32) -> Self {
+        self.chain = Some(chain);
         self
     }
 
@@ -855,6 +978,10 @@ impl FilterConfig for FwFilter {
 
     fn classid(&self) -> Option<u32> {
         self.classid
+    }
+
+    fn chain(&self) -> Option<u32> {
+        self.chain
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -904,6 +1031,8 @@ pub struct BpfFilter {
     priority: u16,
     /// Protocol.
     protocol: u16,
+    /// Chain index for this filter.
+    chain: Option<u32>,
 }
 
 impl BpfFilter {
@@ -916,6 +1045,7 @@ impl BpfFilter {
             classid: None,
             priority: 0,
             protocol: 0x0003, // ETH_P_ALL
+            chain: None,
         }
     }
 
@@ -952,6 +1082,15 @@ impl BpfFilter {
         self
     }
 
+    /// Set the chain index for this filter.
+    ///
+    /// Chains provide logical grouping of filters for better performance
+    /// and organization (Linux 4.1+).
+    pub fn chain(mut self, chain: u32) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
@@ -965,6 +1104,10 @@ impl FilterConfig for BpfFilter {
 
     fn classid(&self) -> Option<u32> {
         self.classid
+    }
+
+    fn chain(&self) -> Option<u32> {
+        self.chain
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -1019,6 +1162,8 @@ pub struct BasicFilter {
     priority: u16,
     /// Protocol.
     protocol: u16,
+    /// Chain index for this filter.
+    chain: Option<u32>,
 }
 
 impl BasicFilter {
@@ -1054,6 +1199,15 @@ impl BasicFilter {
         self
     }
 
+    /// Set the chain index for this filter.
+    ///
+    /// Chains provide logical grouping of filters for better performance
+    /// and organization (Linux 4.1+).
+    pub fn chain(mut self, chain: u32) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
@@ -1067,6 +1221,10 @@ impl FilterConfig for BasicFilter {
 
     fn classid(&self) -> Option<u32> {
         self.classid
+    }
+
+    fn chain(&self) -> Option<u32> {
+        self.chain
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -1104,6 +1262,8 @@ impl FilterConfig for BasicFilter {
 pub struct CgroupFilter {
     /// Actions to attach.
     actions: Option<super::action::ActionList>,
+    /// Chain index for this filter.
+    chain: Option<u32>,
 }
 
 impl CgroupFilter {
@@ -1122,6 +1282,15 @@ impl CgroupFilter {
         self
     }
 
+    /// Set the chain index for this filter.
+    ///
+    /// Chains provide logical grouping of filters for better performance
+    /// and organization (Linux 4.1+).
+    pub fn chain(mut self, chain: u32) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
@@ -1135,6 +1304,10 @@ impl FilterConfig for CgroupFilter {
 
     fn classid(&self) -> Option<u32> {
         None // Cgroup filter doesn't have a classid in the traditional sense
+    }
+
+    fn chain(&self) -> Option<u32> {
+        self.chain
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -1187,6 +1360,8 @@ pub struct RouteFilter {
     from_if: Option<u32>,
     /// Actions to attach.
     actions: Option<super::action::ActionList>,
+    /// Chain index for this filter.
+    chain: Option<u32>,
 }
 
 impl RouteFilter {
@@ -1236,6 +1411,15 @@ impl RouteFilter {
         self
     }
 
+    /// Set the chain index for this filter.
+    ///
+    /// Chains provide logical grouping of filters for better performance
+    /// and organization (Linux 4.1+).
+    pub fn chain(mut self, chain: u32) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
@@ -1260,6 +1444,10 @@ impl FilterConfig for RouteFilter {
 
     fn classid(&self) -> Option<u32> {
         self.classid
+    }
+
+    fn chain(&self) -> Option<u32> {
+        self.chain
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -1348,6 +1536,8 @@ pub struct FlowFilter {
     protocol: u16,
     /// Actions to perform.
     actions: Option<ActionList>,
+    /// Chain index for this filter.
+    chain: Option<u32>,
 }
 
 /// Flow filter keys.
@@ -1440,6 +1630,7 @@ impl FlowFilter {
             priority: 0,
             protocol: ETH_P_ALL,
             actions: None,
+            chain: None,
         }
     }
 
@@ -1537,6 +1728,15 @@ impl FlowFilter {
         self
     }
 
+    /// Set the chain index for this filter.
+    ///
+    /// Chains provide logical grouping of filters for better performance
+    /// and organization (Linux 4.1+).
+    pub fn chain(mut self, chain: u32) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
@@ -1550,6 +1750,10 @@ impl FilterConfig for FlowFilter {
 
     fn classid(&self) -> Option<u32> {
         self.baseclass
+    }
+
+    fn chain(&self) -> Option<u32> {
+        self.chain
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -1710,6 +1914,11 @@ impl Connection<Route> {
 
         builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
 
+        // Add chain attribute if set
+        if let Some(chain) = config.chain() {
+            builder.append_attr_u32(TcaAttr::Chain as u16, chain);
+        }
+
         let options_token = builder.nest_start(TcaAttr::Options as u16);
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
@@ -1793,6 +2002,11 @@ impl Connection<Route> {
         builder.append(&tcmsg);
 
         builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
+
+        // Add chain attribute if set
+        if let Some(chain) = config.chain() {
+            builder.append_attr_u32(TcaAttr::Chain as u16, chain);
+        }
 
         let options_token = builder.nest_start(TcaAttr::Options as u16);
         config.write_options(&mut builder)?;
@@ -1880,6 +2094,11 @@ impl Connection<Route> {
         builder.append(&tcmsg);
 
         builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
+
+        // Add chain attribute if set
+        if let Some(chain) = config.chain() {
+            builder.append_attr_u32(TcaAttr::Chain as u16, chain);
+        }
 
         let options_token = builder.nest_start(TcaAttr::Options as u16);
         config.write_options(&mut builder)?;

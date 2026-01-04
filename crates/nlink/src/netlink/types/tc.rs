@@ -1731,6 +1731,30 @@ pub mod action {
     pub const TC_ACT_REPEAT: i32 = 6;
     pub const TC_ACT_REDIRECT: i32 = 7;
     pub const TC_ACT_TRAP: i32 = 8;
+    /// Jump to chain (opcode, chain is encoded in upper bits).
+    pub const TC_ACT_JUMP: i32 = 0x10000000;
+    /// Goto chain (opcode, chain is encoded in upper bits).
+    pub const TC_ACT_GOTO_CHAIN: i32 = 0x20000000;
+
+    /// Encode a goto_chain action value.
+    ///
+    /// The chain number is encoded in the lower 24 bits.
+    #[inline]
+    pub const fn tc_act_goto_chain(chain: u32) -> i32 {
+        TC_ACT_GOTO_CHAIN | (chain as i32 & 0x00FFFFFF)
+    }
+
+    /// Decode the chain number from a goto_chain action.
+    #[inline]
+    pub const fn tc_act_chain(action: i32) -> u32 {
+        (action & 0x00FFFFFF) as u32
+    }
+
+    /// Check if an action is a goto_chain.
+    #[inline]
+    pub const fn is_goto_chain(action: i32) -> bool {
+        (action & TC_ACT_GOTO_CHAIN) != 0
+    }
 
     /// Parse action result from string.
     pub fn parse_action_result(s: &str) -> Option<i32> {
