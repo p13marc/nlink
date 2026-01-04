@@ -38,7 +38,7 @@ Useful features for specific use cases.
 | # | Plan | Effort | Status | Report |
 |---|------|--------|--------|--------|
 | 8 | [MACsec Configuration](./008-macsec.md) | Medium | Completed | [Report](../reports/008-macsec.md) |
-| 9 | [MPTCP Endpoints](./009-mptcp.md) | Medium | Planned | |
+| 9 | [MPTCP Endpoints](./009-mptcp.md) | Medium | Completed | [Report](../reports/009-mptcp.md) |
 | 10 | [TC Filter Chains](./010-tc-chains.md) | Low | Planned | |
 
 ## Priority 4: Feature Ideas
