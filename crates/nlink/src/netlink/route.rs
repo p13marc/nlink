@@ -341,6 +341,10 @@ impl Default for NextHop {
 ///     .dev("eth0")
 ///     .metrics(RouteMetrics::new().mtu(1400));
 ///
+/// // Route using a nexthop group (Linux 5.3+)
+/// let route = Ipv4Route::new("10.0.0.0", 8)
+///     .nexthop_group(100);  // Reference nexthop group ID 100
+///
 /// conn.add_route(route).await?;
 /// ```
 #[derive(Debug, Clone)]
@@ -369,6 +373,8 @@ pub struct Ipv4Route {
     mark: Option<u32>,
     /// Multipath nexthops
     multipath: Option<Vec<NextHop>>,
+    /// Nexthop group ID (Linux 5.3+, RTA_NH_ID)
+    nexthop_id: Option<u32>,
 }
 
 impl Ipv4Route {
@@ -396,6 +402,7 @@ impl Ipv4Route {
             metrics: None,
             mark: None,
             multipath: None,
+            nexthop_id: None,
         }
     }
 
@@ -415,6 +422,7 @@ impl Ipv4Route {
             metrics: None,
             mark: None,
             multipath: None,
+            nexthop_id: None,
         }
     }
 
@@ -490,6 +498,38 @@ impl Ipv4Route {
     pub fn multipath(mut self, nexthops: Vec<NextHop>) -> Self {
         self.multipath = Some(nexthops);
         self.gateway = None;
+        self.nexthop_id = None;
+        self
+    }
+
+    /// Set nexthop group ID (Linux 5.3+).
+    ///
+    /// This uses a pre-configured nexthop group for routing decisions.
+    /// Nexthop groups provide a more flexible alternative to multipath routes,
+    /// supporting features like weighted ECMP and resilient hashing.
+    ///
+    /// This clears any gateway or multipath settings.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // First, create a nexthop group
+    /// conn.add_nexthop_group(
+    ///     NexthopGroupBuilder::new(100)
+    ///         .add_member(1, 1)   // nexthop ID 1, weight 1
+    ///         .add_member(2, 1)   // nexthop ID 2, weight 1
+    /// ).await?;
+    ///
+    /// // Then use it in a route
+    /// conn.add_route(
+    ///     Ipv4Route::new("10.0.0.0", 8)
+    ///         .nexthop_group(100)
+    /// ).await?;
+    /// ```
+    pub fn nexthop_group(mut self, group_id: u32) -> Self {
+        self.nexthop_id = Some(group_id);
+        self.gateway = None;
+        self.multipath = None;
         self
     }
 
@@ -504,7 +544,7 @@ impl Ipv4Route {
             RouteType::Local | RouteType::Nat => RouteScope::Host,
             RouteType::Broadcast | RouteType::Multicast | RouteType::Anycast => RouteScope::Link,
             RouteType::Unicast | RouteType::Unspec => {
-                if self.gateway.is_some() || self.multipath.is_some() {
+                if self.gateway.is_some() || self.multipath.is_some() || self.nexthop_id.is_some() {
                     RouteScope::Universe
                 } else {
                     RouteScope::Link
@@ -588,6 +628,11 @@ impl RouteConfig for Ipv4Route {
             write_multipath_v4(&mut builder, nexthops)?;
         }
 
+        // RTA_NH_ID (nexthop group reference, Linux 5.3+)
+        if let Some(nh_id) = self.nexthop_id {
+            builder.append_attr_u32(RtaAttr::NhId as u16, nh_id);
+        }
+
         Ok(builder)
     }
 
@@ -654,6 +699,8 @@ pub struct Ipv6Route {
     multipath: Option<Vec<NextHop>>,
     /// Route preference (pref)
     pref: Option<u8>,
+    /// Nexthop group ID (Linux 5.3+, RTA_NH_ID)
+    nexthop_id: Option<u32>,
 }
 
 impl Ipv6Route {
@@ -677,6 +724,7 @@ impl Ipv6Route {
             mark: None,
             multipath: None,
             pref: None,
+            nexthop_id: None,
         }
     }
 
@@ -697,6 +745,7 @@ impl Ipv6Route {
             mark: None,
             multipath: None,
             pref: None,
+            nexthop_id: None,
         }
     }
 
@@ -770,12 +819,27 @@ impl Ipv6Route {
     pub fn multipath(mut self, nexthops: Vec<NextHop>) -> Self {
         self.multipath = Some(nexthops);
         self.gateway = None;
+        self.nexthop_id = None;
         self
     }
 
     /// Set route preference (low=0, medium=1, high=2).
     pub fn pref(mut self, pref: u8) -> Self {
         self.pref = Some(pref);
+        self
+    }
+
+    /// Set nexthop group ID (Linux 5.3+).
+    ///
+    /// This uses a pre-configured nexthop group for routing decisions.
+    /// Nexthop groups provide a more flexible alternative to multipath routes,
+    /// supporting features like weighted ECMP and resilient hashing.
+    ///
+    /// This clears any gateway or multipath settings.
+    pub fn nexthop_group(mut self, group_id: u32) -> Self {
+        self.nexthop_id = Some(group_id);
+        self.gateway = None;
+        self.multipath = None;
         self
     }
 
@@ -787,7 +851,7 @@ impl Ipv6Route {
         match self.route_type {
             RouteType::Local => RouteScope::Host,
             RouteType::Unicast | RouteType::Unspec => {
-                if self.gateway.is_some() || self.multipath.is_some() {
+                if self.gateway.is_some() || self.multipath.is_some() || self.nexthop_id.is_some() {
                     RouteScope::Universe
                 } else {
                     RouteScope::Link
@@ -874,6 +938,11 @@ impl RouteConfig for Ipv6Route {
         // RTA_MULTIPATH
         if let Some(ref nexthops) = self.multipath {
             write_multipath_v6(&mut builder, nexthops)?;
+        }
+
+        // RTA_NH_ID (nexthop group reference, Linux 5.3+)
+        if let Some(nh_id) = self.nexthop_id {
+            builder.append_attr_u32(RtaAttr::NhId as u16, nh_id);
         }
 
         Ok(builder)

@@ -93,6 +93,7 @@ pub mod namespace_events;
 pub mod namespace_watcher;
 pub mod neigh;
 pub mod netfilter;
+pub mod nexthop;
 pub mod parse;
 mod protocol;
 pub mod route;

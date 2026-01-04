@@ -25,11 +25,11 @@ These should be implemented first as they provide the most value for common use 
 
 Important features that require more substantial work.
 
-| # | Plan | Effort | Status |
-|---|------|--------|--------|
-| 5 | [Nexthop Groups](./005-nexthop-groups.md) | High | Planned |
-| 6 | [MPLS Routes](./006-mpls-routes.md) | High | Planned |
-| 7 | [Segment Routing (SRv6)](./007-srv6.md) | High | Planned |
+| # | Plan | Effort | Status | Report |
+|---|------|--------|--------|--------|
+| 5 | [Nexthop Groups](./005-nexthop-groups.md) | High | Completed | [Report](../reports/005-nexthop-groups.md) |
+| 6 | [MPLS Routes](./006-mpls-routes.md) | High | Planned | |
+| 7 | [Segment Routing (SRv6)](./007-srv6.md) | High | Planned | |
 
 ## Priority 3: Medium Impact
 
