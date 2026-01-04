@@ -147,6 +147,11 @@ impl NlMsgType {
     pub const RTM_DELNSID: u16 = 89;
     pub const RTM_GETNSID: u16 = 90;
 
+    // Chain messages (Linux 4.1+)
+    pub const RTM_NEWCHAIN: u16 = 100;
+    pub const RTM_DELCHAIN: u16 = 101;
+    pub const RTM_GETCHAIN: u16 = 102;
+
     // Nexthop messages (Linux 5.3+)
     pub const RTM_NEWNEXTHOP: u16 = 104;
     pub const RTM_DELNEXTHOP: u16 = 105;

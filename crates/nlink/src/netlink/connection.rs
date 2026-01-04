@@ -913,6 +913,132 @@ impl Connection<Route> {
             .collect())
     }
 
+    /// Get all TC filter chains for an interface.
+    ///
+    /// Filter chains provide logical grouping of filters for better
+    /// performance and organization (Linux 4.1+).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let chains = conn.get_tc_chains("eth0", "ingress").await?;
+    /// for chain in chains {
+    ///     println!("Chain: {}", chain);
+    /// }
+    /// ```
+    pub async fn get_tc_chains(&self, ifname: &str, parent: &str) -> Result<Vec<u32>> {
+        let ifindex = ifname_to_index(ifname)?;
+        self.get_tc_chains_by_index(ifindex, parent).await
+    }
+
+    /// Get all TC filter chains for an interface by index.
+    pub async fn get_tc_chains_by_index(&self, ifindex: u32, parent: &str) -> Result<Vec<u32>> {
+        use super::types::tc::{TcMsg, tc_handle};
+
+        let parent_handle = tc_handle::parse(parent)
+            .ok_or_else(|| Error::InvalidMessage(format!("invalid parent handle: {}", parent)))?;
+
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent_handle);
+
+        let mut builder = dump_request(NlMsgType::RTM_GETCHAIN);
+        builder.append(&tcmsg);
+
+        let responses = self.send_dump(builder).await?;
+        let mut chains = Vec::new();
+
+        for response in responses {
+            if response.len() < NLMSG_HDRLEN {
+                continue;
+            }
+            let payload = &response[NLMSG_HDRLEN..];
+            if let Ok(tc) = TcMessage::from_bytes(payload)
+                && let Some(chain) = tc.chain()
+            {
+                chains.push(chain);
+            }
+        }
+
+        Ok(chains)
+    }
+
+    /// Add a TC filter chain.
+    ///
+    /// Chains provide logical grouping of filters (Linux 4.1+).
+    /// Chain 0 is created automatically when adding filters.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Create chain 100 on ingress qdisc
+    /// conn.add_tc_chain("eth0", "ingress", 100).await?;
+    /// ```
+    pub async fn add_tc_chain(&self, ifname: &str, parent: &str, chain: u32) -> Result<()> {
+        let ifindex = ifname_to_index(ifname)?;
+        self.add_tc_chain_by_index(ifindex, parent, chain).await
+    }
+
+    /// Add a TC filter chain by interface index.
+    pub async fn add_tc_chain_by_index(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        chain: u32,
+    ) -> Result<()> {
+        use super::types::tc::{TcMsg, TcaAttr, tc_handle};
+
+        let parent_handle = tc_handle::parse(parent)
+            .ok_or_else(|| Error::InvalidMessage(format!("invalid parent handle: {}", parent)))?;
+
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent_handle);
+
+        let mut builder = create_request(NlMsgType::RTM_NEWCHAIN);
+        builder.append(&tcmsg);
+        builder.append_attr_u32(TcaAttr::Chain as u16, chain);
+
+        self.send_ack(builder).await
+    }
+
+    /// Delete a TC filter chain.
+    ///
+    /// All filters in the chain must be deleted before the chain can be removed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.del_tc_chain("eth0", "ingress", 100).await?;
+    /// ```
+    pub async fn del_tc_chain(&self, ifname: &str, parent: &str, chain: u32) -> Result<()> {
+        let ifindex = ifname_to_index(ifname)?;
+        self.del_tc_chain_by_index(ifindex, parent, chain).await
+    }
+
+    /// Delete a TC filter chain by interface index.
+    pub async fn del_tc_chain_by_index(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        chain: u32,
+    ) -> Result<()> {
+        use super::types::tc::{TcMsg, TcaAttr, tc_handle};
+
+        let parent_handle = tc_handle::parse(parent)
+            .ok_or_else(|| Error::InvalidMessage(format!("invalid parent handle: {}", parent)))?;
+
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent_handle);
+
+        let mut builder = create_request(NlMsgType::RTM_DELCHAIN);
+        builder.append(&tcmsg);
+        builder.append_attr_u32(TcaAttr::Chain as u16, chain);
+
+        self.send_ack(builder).await
+    }
+
     /// Get the root qdisc for an interface (parent == ROOT).
     ///
     /// Returns `None` if no root qdisc is configured.

@@ -39,7 +39,7 @@ Useful features for specific use cases.
 |---|------|--------|--------|--------|
 | 8 | [MACsec Configuration](./008-macsec.md) | Medium | Completed | [Report](../reports/008-macsec.md) |
 | 9 | [MPTCP Endpoints](./009-mptcp.md) | Medium | Completed | [Report](../reports/009-mptcp.md) |
-| 10 | [TC Filter Chains](./010-tc-chains.md) | Low | Planned | |
+| 10 | [TC Filter Chains](./010-tc-chains.md) | Low | Completed | [Report](../reports/010-tc-chains.md) |
 
 ## Priority 4: Feature Ideas
 

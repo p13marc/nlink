@@ -811,6 +811,51 @@ conn.add_filter("eth0", "1:", flow).await?;
 // RtClassId, SkUid, SkGid, VlanTag, RxHash
 ```
 
+**TC filter chains (Linux 4.1+):**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::filter::{FlowerFilter, MatchallFilter};
+use nlink::netlink::action::GactAction;
+use nlink::netlink::tc::IngressConfig;
+
+let conn = Connection::<Route>::new()?;
+
+// Add ingress qdisc
+conn.add_qdisc("eth0", IngressConfig::new()).await?;
+
+// Create filter chains for organizing filters
+conn.add_tc_chain("eth0", "ingress", 0).await?;
+conn.add_tc_chain("eth0", "ingress", 100).await?;
+
+// Add filter in chain 0 that jumps to chain 100 for TCP traffic
+let filter = FlowerFilter::new()
+    .chain(0)
+    .ip_proto_tcp()
+    .goto_chain(100)
+    .build();
+conn.add_filter("eth0", "ingress", filter).await?;
+
+// Add filter in chain 100 to drop traffic to port 80
+let filter = FlowerFilter::new()
+    .chain(100)
+    .ip_proto_tcp()
+    .dst_port(80)
+    .build();
+conn.add_filter("eth0", "ingress", filter).await?;
+
+// List chains
+let chains = conn.get_tc_chains("eth0", "ingress").await?;
+for chain in chains {
+    println!("Chain: {}", chain);
+}
+
+// Delete a chain (filters must be removed first)
+conn.del_tc_chain("eth0", "ingress", 100).await?;
+
+// Goto chain action can also be used with GactAction
+let goto = GactAction::goto_chain(100);
+```
+
 **Adding TC actions:**
 ```rust
 use nlink::netlink::{Connection, Protocol};

@@ -122,6 +122,15 @@ impl GactAction {
         Self::new(action::TC_ACT_STOLEN)
     }
 
+    /// Create a goto_chain action.
+    ///
+    /// This transfers packet processing to the specified chain.
+    /// Chains provide logical grouping of filters (Linux 4.1+).
+    pub fn goto_chain(chain: u32) -> Self {
+        use super::types::tc::action::tc_act_goto_chain;
+        Self::new(tc_act_goto_chain(chain))
+    }
+
     /// Add random probability for an alternate action.
     ///
     /// The probability is a percentage (0-100).
