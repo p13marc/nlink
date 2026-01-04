@@ -91,6 +91,12 @@ enum Command {
 
     /// Manage MPTCP (Multipath TCP) endpoints and limits.
     Mptcp(commands::mptcp::MptcpCmd),
+
+    /// Manage Segment Routing (SRv6).
+    Sr(commands::sr::SrCmd),
+
+    /// Show MACsec device information.
+    Macsec(commands::macsec::MacsecCmd),
 }
 
 #[tokio::main]
@@ -145,6 +151,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Vrf(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Xfrm(cmd) => cmd.run(format, &opts).await,
         Command::Mptcp(cmd) => cmd.run(format, &opts).await,
+        Command::Sr(cmd) => cmd.run(&conn, format, &opts).await,
+        Command::Macsec(cmd) => cmd.run(&conn, format, &opts).await,
     };
 
     if let Err(e) = result {

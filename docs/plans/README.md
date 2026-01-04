@@ -57,8 +57,8 @@ Expose existing library functionality via CLI:
 |---------|------|--------|-----------------|
 | `ip nexthop` | 017 | ✓ Done | ✓ Complete |
 | `ip mptcp` | 018 | ✓ Done | ✓ Complete |
-| `ip sr` | 024 | Planned | ✓ Complete |
-| `ip macsec` | 025 | Planned | ✓ Complete |
+| `ip sr` | 024 | ✓ Done | ✓ Complete |
+| `ip macsec` | 025 | ✓ Done | ✓ Complete |
 
 ### `nlink-tc` Improvements
 
@@ -70,9 +70,9 @@ Expose existing library functionality via CLI:
 
 | Feature | Plan | Status | Library Support |
 |---------|------|--------|-----------------|
-| Summary mode | 026 | Planned | ✓ Complete |
-| Kill mode | 026 | Planned | Partial |
-| Netlink sockets | 026 | Planned | Needed |
+| Summary mode | 026 | ✓ Done | ✓ Complete |
+| Kill mode | 026 | Future | Partial |
+| Netlink sockets | 026 | ✓ Done | ✓ Complete |
 
 ### New Binaries
 
