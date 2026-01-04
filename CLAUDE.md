@@ -23,6 +23,38 @@ cargo test                     # Run all tests
 cargo test -p nlink            # Test the library
 ```
 
+## Integration Tests
+
+The library includes comprehensive integration tests that use network namespaces
+for isolated testing. These tests require root privileges and a Linux kernel with
+network namespace support.
+
+```bash
+# Build the integration tests
+cargo test --test integration --no-run
+
+# Run integration tests (requires root and CAP_SYS_ADMIN)
+sudo ./target/debug/deps/integration-* --test-threads=1
+
+# Run a specific test
+sudo ./target/debug/deps/integration-* test_create_dummy_interface --test-threads=1
+```
+
+**Test categories:**
+- `link::*` - Interface creation (dummy, veth, bridge, vlan, macvlan, etc.)
+- `address::*` - IPv4/IPv6 address management
+- `route::*` - Routing table manipulation
+- `tc::*` - Traffic control (qdiscs, classes, filters)
+- `events::*` - Netlink event monitoring
+
+**Requirements:**
+- Root privileges (or CAP_NET_ADMIN + CAP_SYS_ADMIN)
+- Linux kernel with network namespace support
+- The `ip` command available in PATH (for namespace setup)
+
+Tests use `--test-threads=1` to avoid namespace name collisions. Each test
+creates a unique namespace that is automatically cleaned up on completion.
+
 ## Architecture
 
 ### Library Crate
