@@ -345,14 +345,45 @@ let delta = curr.delta(&prev);
 println!("Transferred: {} bytes, {} packets", delta.bytes, delta.packets);
 ```
 
-**HTB class statistics:**
+**TC class management:**
 ```rust
-// Get all classes for an interface
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::tc::HtbQdiscConfig;
+
+let conn = Connection::<Route>::new()?;
+
+// First add an HTB qdisc
+let htb = HtbQdiscConfig::new().default_class(0x10).build();
+conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
+
+// Add classes with rate limiting
+conn.add_class("eth0", "1:0", "1:1", "htb", 
+    &["rate", "100mbit", "ceil", "1gbit"]).await?;
+conn.add_class("eth0", "1:1", "1:10", "htb", 
+    &["rate", "10mbit", "ceil", "100mbit"]).await?;
+
+// Query classes
 let classes = conn.get_classes_for("eth0").await?;
 for class in &classes {
     println!("Class {:x}: {} bytes, {} packets", 
         class.handle(), class.bytes(), class.packets());
 }
+
+// Change class parameters
+conn.change_class("eth0", "1:0", "1:10", "htb",
+    &["rate", "20mbit", "ceil", "100mbit"]).await?;
+
+// Replace class (add or update)
+conn.replace_class("eth0", "1:0", "1:10", "htb",
+    &["rate", "15mbit", "ceil", "100mbit"]).await?;
+
+// Delete class
+conn.del_class("eth0", "1:0", "1:10").await?;
+
+// Namespace-aware operations use *_by_index variants
+let link = conn.get_link_by_name("eth0").await?;
+conn.add_class_by_index(link.ifindex(), "1:0", "1:20", "htb",
+    &["rate", "5mbit"]).await?;
 ```
 
 **Link statistics tracking:**

@@ -2467,6 +2467,215 @@ fn parse_handle(s: &str) -> Result<u32> {
 }
 
 // ============================================================================
+// Class option helpers
+// ============================================================================
+
+/// Add class-specific options to the message builder.
+fn add_class_options(builder: &mut MessageBuilder, kind: &str, params: &[String]) -> Result<()> {
+    if params.is_empty() {
+        return Ok(());
+    }
+
+    let options_token = builder.nest_start(TcaAttr::Options as u16);
+
+    match kind {
+        "htb" => add_htb_class_options(builder, params)?,
+        _ => {
+            // Unknown class type - just ignore parameters
+        }
+    }
+
+    builder.nest_end(options_token);
+    Ok(())
+}
+
+/// Add HTB class options.
+fn add_htb_class_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()> {
+    use crate::util::parse::{get_rate, get_size};
+
+    let mut rate64: u64 = 0;
+    let mut ceil64: u64 = 0;
+    let mut burst: u32 = 0;
+    let mut cburst: u32 = 0;
+    let mut prio: u32 = 0;
+    let mut quantum: u32 = 0;
+    let mut mtu: u32 = 1600;
+    let mut mpu: u16 = 0;
+    let mut overhead: u16 = 0;
+
+    let mut i = 0;
+    while i < params.len() {
+        match params[i].as_str() {
+            "rate" if i + 1 < params.len() => {
+                rate64 = get_rate(&params[i + 1])
+                    .map_err(|_| Error::InvalidMessage("invalid rate".into()))?;
+                i += 2;
+            }
+            "ceil" if i + 1 < params.len() => {
+                ceil64 = get_rate(&params[i + 1])
+                    .map_err(|_| Error::InvalidMessage("invalid ceil".into()))?;
+                i += 2;
+            }
+            "burst" | "buffer" | "maxburst" if i + 1 < params.len() => {
+                burst = get_size(&params[i + 1])
+                    .map_err(|_| Error::InvalidMessage("invalid burst".into()))?
+                    as u32;
+                i += 2;
+            }
+            "cburst" | "cbuffer" | "cmaxburst" if i + 1 < params.len() => {
+                cburst = get_size(&params[i + 1])
+                    .map_err(|_| Error::InvalidMessage("invalid cburst".into()))?
+                    as u32;
+                i += 2;
+            }
+            "prio" if i + 1 < params.len() => {
+                prio = params[i + 1]
+                    .parse()
+                    .map_err(|_| Error::InvalidMessage("invalid prio".into()))?;
+                i += 2;
+            }
+            "quantum" if i + 1 < params.len() => {
+                quantum = get_size(&params[i + 1])
+                    .map_err(|_| Error::InvalidMessage("invalid quantum".into()))?
+                    as u32;
+                i += 2;
+            }
+            "mtu" if i + 1 < params.len() => {
+                mtu = params[i + 1]
+                    .parse()
+                    .map_err(|_| Error::InvalidMessage("invalid mtu".into()))?;
+                i += 2;
+            }
+            "mpu" if i + 1 < params.len() => {
+                mpu = params[i + 1]
+                    .parse()
+                    .map_err(|_| Error::InvalidMessage("invalid mpu".into()))?;
+                i += 2;
+            }
+            "overhead" if i + 1 < params.len() => {
+                overhead = params[i + 1]
+                    .parse()
+                    .map_err(|_| Error::InvalidMessage("invalid overhead".into()))?;
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    // Rate is required
+    if rate64 == 0 {
+        return Err(Error::InvalidMessage("htb class: rate is required".into()));
+    }
+
+    // Default ceil to rate if not specified
+    if ceil64 == 0 {
+        ceil64 = rate64;
+    }
+
+    // Get HZ for time calculations (typically 100 or 1000 on Linux)
+    let hz: u64 = 1000;
+
+    // Compute burst from rate if not specified
+    if burst == 0 {
+        burst = (rate64 / hz + mtu as u64) as u32;
+    }
+
+    // Compute cburst from ceil if not specified
+    if cburst == 0 {
+        cburst = (ceil64 / hz + mtu as u64) as u32;
+    }
+
+    // Calculate buffer time (in ticks)
+    let buffer = if rate64 > 0 {
+        ((burst as u64 * 1_000_000) / rate64) as u32
+    } else {
+        burst
+    };
+
+    let cbuffer = if ceil64 > 0 {
+        ((cburst as u64 * 1_000_000) / ceil64) as u32
+    } else {
+        cburst
+    };
+
+    // Build the tc_htb_opt structure
+    let opt = htb::TcHtbOpt {
+        rate: TcRateSpec {
+            rate: if rate64 >= (1u64 << 32) {
+                u32::MAX
+            } else {
+                rate64 as u32
+            },
+            mpu,
+            overhead,
+            ..Default::default()
+        },
+        ceil: TcRateSpec {
+            rate: if ceil64 >= (1u64 << 32) {
+                u32::MAX
+            } else {
+                ceil64 as u32
+            },
+            mpu,
+            overhead,
+            ..Default::default()
+        },
+        buffer,
+        cbuffer,
+        quantum,
+        prio,
+        ..Default::default()
+    };
+
+    // Add 64-bit rate if needed
+    if rate64 >= (1u64 << 32) {
+        builder.append_attr(htb::TCA_HTB_RATE64, &rate64.to_ne_bytes());
+    }
+
+    if ceil64 >= (1u64 << 32) {
+        builder.append_attr(htb::TCA_HTB_CEIL64, &ceil64.to_ne_bytes());
+    }
+
+    // Add the main parameters structure
+    builder.append_attr(htb::TCA_HTB_PARMS, opt.as_bytes());
+
+    // Add rate tables
+    let rtab = compute_htb_rate_table(rate64, mtu);
+    let ctab = compute_htb_rate_table(ceil64, mtu);
+
+    builder.append_attr(htb::TCA_HTB_RTAB, &rtab);
+    builder.append_attr(htb::TCA_HTB_CTAB, &ctab);
+
+    Ok(())
+}
+
+/// Compute a rate table for HTB class.
+fn compute_htb_rate_table(rate: u64, mtu: u32) -> [u8; 1024] {
+    let mut table = [0u8; 1024];
+
+    if rate == 0 {
+        return table;
+    }
+
+    let cell_log: u32 = 3;
+    let cell_size = 1u32 << cell_log;
+    let time_units_per_sec: u64 = 1_000_000;
+
+    for i in 0..256 {
+        let size = ((i + 1) as u32) * cell_size;
+        let size = size.min(mtu);
+
+        let time = (size as u64 * time_units_per_sec) / rate;
+        let time = time.min(u32::MAX as u64) as u32;
+
+        let offset = i * 4;
+        table[offset..offset + 4].copy_from_slice(&time.to_ne_bytes());
+    }
+
+    table
+}
+
+// ============================================================================
 // Connection extension methods
 // ============================================================================
 
@@ -2804,6 +3013,200 @@ impl Connection<Route> {
     /// Remove netem configuration by interface index.
     pub async fn remove_netem_by_index(&self, ifindex: u32) -> Result<()> {
         self.del_qdisc_by_index(ifindex, "root").await
+    }
+
+    // ========================================================================
+    // TC Class Operations
+    // ========================================================================
+
+    /// Add a TC class.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Route};
+    /// use nlink::netlink::tc::HtbQdiscConfig;
+    ///
+    /// let conn = Connection::<Route>::new()?;
+    ///
+    /// // First add an HTB qdisc
+    /// let htb = HtbQdiscConfig::new().default_class(0x10).build();
+    /// conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
+    ///
+    /// // Then add a class with rate 10mbit, ceil 100mbit
+    /// conn.add_class("eth0", "1:0", "1:10", "htb",
+    ///     &["rate", "10mbit", "ceil", "100mbit"]).await?;
+    /// ```
+    pub async fn add_class(
+        &self,
+        dev: &str,
+        parent: &str,
+        classid: &str,
+        kind: &str,
+        params: &[&str],
+    ) -> Result<()> {
+        let ifindex = get_ifindex(dev)?;
+        self.add_class_by_index(ifindex, parent, classid, kind, params)
+            .await
+    }
+
+    /// Add a TC class by interface index.
+    ///
+    /// This is useful for namespace-aware operations where you've already
+    /// resolved the interface index via `conn.get_link_by_name()`.
+    pub async fn add_class_by_index(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        classid: &str,
+        kind: &str,
+        params: &[&str],
+    ) -> Result<()> {
+        let parent_handle = parse_handle(parent)?;
+        let class_handle = parse_handle(classid)?;
+
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent_handle)
+            .with_handle(class_handle);
+
+        let mut builder = create_request(NlMsgType::RTM_NEWTCLASS);
+        builder.append(&tcmsg);
+        builder.append_attr_str(TcaAttr::Kind as u16, kind);
+
+        let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
+        add_class_options(&mut builder, kind, &params)?;
+
+        self.send_ack(builder).await
+    }
+
+    /// Delete a TC class.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.del_class("eth0", "1:0", "1:10").await?;
+    /// ```
+    pub async fn del_class(&self, dev: &str, parent: &str, classid: &str) -> Result<()> {
+        let ifindex = get_ifindex(dev)?;
+        self.del_class_by_index(ifindex, parent, classid).await
+    }
+
+    /// Delete a TC class by interface index.
+    pub async fn del_class_by_index(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        classid: &str,
+    ) -> Result<()> {
+        let parent_handle = parse_handle(parent)?;
+        let class_handle = parse_handle(classid)?;
+
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent_handle)
+            .with_handle(class_handle);
+
+        let mut builder = ack_request(NlMsgType::RTM_DELTCLASS);
+        builder.append(&tcmsg);
+
+        self.send_ack(builder).await
+    }
+
+    /// Change a TC class's parameters.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.change_class("eth0", "1:0", "1:10", "htb",
+    ///     &["rate", "20mbit", "ceil", "100mbit"]).await?;
+    /// ```
+    pub async fn change_class(
+        &self,
+        dev: &str,
+        parent: &str,
+        classid: &str,
+        kind: &str,
+        params: &[&str],
+    ) -> Result<()> {
+        let ifindex = get_ifindex(dev)?;
+        self.change_class_by_index(ifindex, parent, classid, kind, params)
+            .await
+    }
+
+    /// Change a TC class by interface index.
+    pub async fn change_class_by_index(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        classid: &str,
+        kind: &str,
+        params: &[&str],
+    ) -> Result<()> {
+        let parent_handle = parse_handle(parent)?;
+        let class_handle = parse_handle(classid)?;
+
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent_handle)
+            .with_handle(class_handle);
+
+        let mut builder = ack_request(NlMsgType::RTM_NEWTCLASS);
+        builder.append(&tcmsg);
+        builder.append_attr_str(TcaAttr::Kind as u16, kind);
+
+        let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
+        add_class_options(&mut builder, kind, &params)?;
+
+        self.send_ack(builder).await
+    }
+
+    /// Replace a TC class (add or update).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.replace_class("eth0", "1:0", "1:10", "htb",
+    ///     &["rate", "10mbit", "ceil", "100mbit"]).await?;
+    /// ```
+    pub async fn replace_class(
+        &self,
+        dev: &str,
+        parent: &str,
+        classid: &str,
+        kind: &str,
+        params: &[&str],
+    ) -> Result<()> {
+        let ifindex = get_ifindex(dev)?;
+        self.replace_class_by_index(ifindex, parent, classid, kind, params)
+            .await
+    }
+
+    /// Replace a TC class by interface index.
+    pub async fn replace_class_by_index(
+        &self,
+        ifindex: u32,
+        parent: &str,
+        classid: &str,
+        kind: &str,
+        params: &[&str],
+    ) -> Result<()> {
+        let parent_handle = parse_handle(parent)?;
+        let class_handle = parse_handle(classid)?;
+
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent_handle)
+            .with_handle(class_handle);
+
+        let mut builder = replace_request(NlMsgType::RTM_NEWTCLASS);
+        builder.append(&tcmsg);
+        builder.append_attr_str(TcaAttr::Kind as u16, kind);
+
+        let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
+        add_class_options(&mut builder, kind, &params)?;
+
+        self.send_ack(builder).await
     }
 }
 
