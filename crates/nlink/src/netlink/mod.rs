@@ -77,6 +77,7 @@ mod builder;
 pub mod config;
 pub mod connection;
 pub mod connector;
+pub mod diagnostics;
 mod error;
 pub mod events;
 pub mod fdb;
