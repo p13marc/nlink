@@ -103,6 +103,7 @@ pub mod selinux;
 #[cfg(feature = "sockdiag")]
 mod sockdiag;
 mod socket;
+pub mod srv6;
 pub mod stats;
 mod stream;
 pub mod tc;

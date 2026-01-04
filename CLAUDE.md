@@ -50,6 +50,7 @@ crates/nlink/src/
     rule.rs           # Routing rule builder (RuleBuilder)
     nexthop.rs        # Nexthop objects and groups (NexthopBuilder, NexthopGroupBuilder) - Linux 5.3+
     mpls.rs           # MPLS routes and encapsulation (MplsEncap, MplsRouteBuilder)
+    srv6.rs           # SRv6 routes and encapsulation (Srv6Encap, Srv6LocalBuilder)
     uevent.rs         # KobjectUevent (device hotplug events)
     connector.rs      # Connector (process lifecycle events)
     netfilter.rs      # Netfilter (connection tracking)
@@ -1302,6 +1303,90 @@ conn.del_mpls_route(100).await?;
 let implicit_null = MplsLabel::IMPLICIT_NULL;  // 3 - penultimate hop popping
 let explicit_null_v4 = MplsLabel::EXPLICIT_NULL_V4;  // 0
 let explicit_null_v6 = MplsLabel::EXPLICIT_NULL_V6;  // 2
+```
+
+**SRv6 (Segment Routing over IPv6) routes and encapsulation:**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::srv6::{Srv6Encap, Srv6LocalBuilder, Srv6Mode};
+use nlink::netlink::route::{Ipv4Route, Ipv6Route};
+use std::net::Ipv6Addr;
+
+let conn = Connection::<Route>::new()?;
+
+// IPv4 route with SRv6 encapsulation (IPv4oIPv6)
+conn.add_route(
+    Ipv4Route::new("10.0.0.0", 8)
+        .dev("eth0")
+        .srv6_encap(
+            Srv6Encap::encap()
+                .segment("fc00:1::1".parse()?)
+        )
+).await?;
+
+// IPv4 route with SRv6 segment list
+conn.add_route(
+    Ipv4Route::new("10.1.0.0", 16)
+        .dev("eth0")
+        .srv6_encap(
+            Srv6Encap::encap()
+                .segments(&[
+                    "fc00:1::1".parse()?,  // First segment (final destination)
+                    "fc00:2::1".parse()?,  // Intermediate segment
+                ])
+        )
+).await?;
+
+// IPv6 route with SRv6 inline mode (insert SRH into IPv6 packet)
+conn.add_route(
+    Ipv6Route::new("2001:db8::", 32)
+        .dev("eth0")
+        .srv6_encap(
+            Srv6Encap::inline()
+                .segment("fc00:1::1".parse()?)
+        )
+).await?;
+
+// SRv6 End local SID (simple transit)
+conn.add_srv6_local(
+    Srv6LocalBuilder::end("fc00:1::1".parse()?)
+        .dev("eth0")
+).await?;
+
+// SRv6 End.X local SID (pop and forward to nexthop)
+conn.add_srv6_local(
+    Srv6LocalBuilder::end_x("fc00:1::1".parse()?, "fe80::1".parse()?)
+        .dev("eth0")
+).await?;
+
+// SRv6 End.DT4 local SID (decap and lookup IPv4 in VRF)
+conn.add_srv6_local(
+    Srv6LocalBuilder::end_dt4("fc00:1::100".parse()?, 100)  // table 100
+        .dev("eth0")
+).await?;
+
+// SRv6 End.DT6 local SID (decap and lookup IPv6 in VRF)
+conn.add_srv6_local(
+    Srv6LocalBuilder::end_dt6("fc00:1::200".parse()?, 100)
+        .dev("eth0")
+).await?;
+
+// SRv6 End.B6.Encaps local SID (encap with new SRH)
+conn.add_srv6_local(
+    Srv6LocalBuilder::end_b6_encaps(
+        "fc00:1::300".parse()?,
+        &["fc00:2::1".parse()?, "fc00:3::1".parse()?]
+    ).dev("eth0")
+).await?;
+
+// Query SRv6 local routes
+let routes = conn.get_srv6_local_routes().await?;
+for route in &routes {
+    println!("SID {:?}: {}", route.sid, route.action.name());
+}
+
+// Delete SRv6 local route
+conn.del_srv6_local("fc00:1::100".parse()?).await?;
 ```
 
 **Bridge FDB management:**

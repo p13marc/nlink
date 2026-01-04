@@ -29,7 +29,7 @@ Important features that require more substantial work.
 |---|------|--------|--------|--------|
 | 5 | [Nexthop Groups](./005-nexthop-groups.md) | High | Completed | [Report](../reports/005-nexthop-groups.md) |
 | 6 | [MPLS Routes](./006-mpls-routes.md) | High | Completed | [Report](../reports/006-mpls-routes.md) |
-| 7 | [Segment Routing (SRv6)](./007-srv6.md) | High | Planned | |
+| 7 | [Segment Routing (SRv6)](./007-srv6.md) | High | Completed | [Report](../reports/007-srv6.md) |
 
 ## Priority 3: Medium Impact
 
