@@ -1,108 +1,111 @@
-# Implementation Plans
+# Binary Improvement Plans
 
-This directory contains detailed implementation plans for nlink improvements and new features.
+This directory contains implementation plans for improving nlink binaries and creating new ones.
 
-## Priority 0: Compliance Fixes
+## Plan Index
 
-These should be addressed immediately before implementing new features.
+### Existing Binary Improvements
 
-| # | Plan | Effort | Status | Report |
-|---|------|--------|--------|--------|
-| 0 | [Zerocopy Compliance](./000-zerocopy-compliance.md) | Low | Completed | [Report](../reports/000-zerocopy-compliance.md) |
+| Plan | Binary | Feature | Effort | Priority |
+|------|--------|---------|--------|----------|
+| [017](017-ip-nexthop-command.md) | `ip` | Add `nexthop` command | Half day | **High** |
+| [018](018-ip-mptcp-command.md) | `ip` | Add `mptcp` command | Half day | **High** |
+| [019](019-tc-chain-command.md) | `tc` | Add `chain` command | Half day | **High** |
+| [024](024-ip-sr-command.md) | `ip` | Add `sr` command (SRv6) | 1 day | Medium |
+| [025](025-ip-macsec-command.md) | `ip` | Add `macsec` show | Half day | Medium |
+| [026](026-ss-improvements.md) | `ss` | Summary, kill, netlink | 1 day | Medium |
 
-## Priority 1: High Impact, Low-Medium Effort
+### New Binaries
 
-These should be implemented first as they provide the most value for common use cases.
+| Plan | Binary | Description | Effort | Priority |
+|------|--------|-------------|--------|----------|
+| [020](020-nlink-bridge-binary.md) | `nlink-bridge` | Bridge FDB + VLAN management | 2-3 days | **High** |
+| [021](021-nlink-wg-binary.md) | `nlink-wg` | WireGuard management | 2-3 days | Medium |
+| [022](022-nlink-diag-binary.md) | `nlink-diag` | Network diagnostics | 2 days | Medium |
+| [023](023-nlink-config-binary.md) | `nlink-config` | Declarative configuration | 2 days | Medium |
 
-| # | Plan | Effort | Status | Report |
-|---|------|--------|--------|--------|
-| 1 | [Expose TC Class API](./001-tc-class-api.md) | Low | Completed | [Report](../reports/001-tc-class-api.md) |
-| 2 | [Bridge FDB Management](./002-bridge-fdb.md) | Medium | Completed | [Report](../reports/002-bridge-fdb.md) |
-| 3 | [Bridge VLAN Filtering](./003-bridge-vlan.md) | Medium | Completed | [Report](../reports/003-bridge-vlan.md) |
-| 4 | [HTB Class Typed Builder](./004-htb-class-builder.md) | Low | Completed | [Report](../reports/004-htb-class-builder.md) |
+## Recommended Implementation Order
 
-## Priority 2: High Impact, High Effort
+### Phase 1: Quick Wins (1 week)
+Expose existing library functionality via CLI:
 
-Important features that require more substantial work.
+1. **Plan 017** - `ip nexthop` - Full nexthop support exists in library
+2. **Plan 018** - `ip mptcp` - Full MPTCP support exists in library
+3. **Plan 019** - `tc chain` - Full chain support exists in library
 
-| # | Plan | Effort | Status | Report |
-|---|------|--------|--------|--------|
-| 5 | [Nexthop Groups](./005-nexthop-groups.md) | High | Completed | [Report](../reports/005-nexthop-groups.md) |
-| 6 | [MPLS Routes](./006-mpls-routes.md) | High | Completed | [Report](../reports/006-mpls-routes.md) |
-| 7 | [Segment Routing (SRv6)](./007-srv6.md) | High | Completed | [Report](../reports/007-srv6.md) |
+### Phase 2: New High-Value Binary (1 week)
 
-## Priority 3: Medium Impact
+4. **Plan 020** - `nlink-bridge` - FDB and VLAN management (popular use case)
 
-Useful features for specific use cases.
+### Phase 3: Extended Features (2 weeks)
 
-| # | Plan | Effort | Status | Report |
-|---|------|--------|--------|--------|
-| 8 | [MACsec Configuration](./008-macsec.md) | Medium | Completed | [Report](../reports/008-macsec.md) |
-| 9 | [MPTCP Endpoints](./009-mptcp.md) | Medium | Completed | [Report](../reports/009-mptcp.md) |
-| 10 | [TC Filter Chains](./010-tc-chains.md) | Low | Completed | [Report](../reports/010-tc-chains.md) |
+5. **Plan 021** - `nlink-wg` - WireGuard management
+6. **Plan 022** - `nlink-diag` - Network diagnostics (unique value)
+7. **Plan 023** - `nlink-config` - Declarative configuration (unique value)
 
-## Priority 4: Feature Ideas
+### Phase 4: Polish (ongoing)
 
-Cool features that would enhance the library's capabilities.
+8. **Plan 024** - `ip sr` - SRv6 support
+9. **Plan 025** - `ip macsec` - MACsec display
+10. **Plan 026** - `ss` improvements
 
-| # | Plan | Effort | Status | Report |
-|---|------|--------|--------|--------|
-| 11 | [Integration Tests Infrastructure](./011-integration-tests.md) | Medium | Completed | [Report](../reports/011-integration-tests.md) |
-| 12 | [Declarative Network Config](./012-declarative-config.md) | High | Completed | [Report](../reports/012-declarative-config.md) |
-| 13 | [Rate Limiting DSL](./013-rate-limit-dsl.md) | Medium | Completed | [Report](../reports/013-rate-limit-dsl.md) |
-| 14 | [Network Diagnostics](./014-network-diagnostics.md) | Medium | Planned | |
+## Summary by Binary
 
-## Implementation Guidelines
+### `nlink-ip` Improvements
 
-**All implementations must follow the project guidelines** documented in [GUIDELINES.md](./GUIDELINES.md):
+| Command | Plan | Status | Library Support |
+|---------|------|--------|-----------------|
+| `ip nexthop` | 017 | Planned | ✓ Complete |
+| `ip mptcp` | 018 | Planned | ✓ Complete |
+| `ip sr` | 024 | Planned | ✓ Complete |
+| `ip macsec` | 025 | Planned | ✓ Complete |
 
-1. **Strongly Typed**: Use enums and typed builders, not raw integers or strings
-2. **High Level API**: Hide netlink complexity, provide `Connection<Protocol>` methods
-3. **Async (Tokio)**: All I/O methods must be `async`
-4. **Zerocopy**: Kernel structures use `#[repr(C)]` + zerocopy derives
-5. **Winnow**: Message parsing implements `FromNetlink` trait with winnow combinators
+### `nlink-tc` Improvements
 
-## How to Use These Plans
+| Command | Plan | Status | Library Support |
+|---------|------|--------|-----------------|
+| `tc chain` | 019 | Planned | ✓ Complete |
 
-1. Read [GUIDELINES.md](./GUIDELINES.md) first
-2. Pick a plan from the list above
-3. Read through the implementation details
-4. Create a feature branch: `git checkout -b feature/plan-XXX-name`
-5. Implement following the plan's steps
-6. Verify compliance with guidelines checklist
-7. Run tests: `cargo test -p nlink`
-8. Run clippy: `cargo clippy -p nlink --all-targets -- -D warnings`
-9. Create a report in `docs/reports/XXX-plan-name.md`
-10. Update this README to mark the plan as "Completed" with a link to the report
-11. Submit for review
+### `nlink-ss` Improvements
 
-## Plan Template
+| Feature | Plan | Status | Library Support |
+|---------|------|--------|-----------------|
+| Summary mode | 026 | Planned | ✓ Complete |
+| Kill mode | 026 | Planned | Partial |
+| Netlink sockets | 026 | Planned | Needed |
 
-Each plan follows this structure:
+### New Binaries
 
-```markdown
-# Feature Name
+| Binary | Plan | Status | Library Support |
+|--------|------|--------|-----------------|
+| `nlink-bridge` | 020 | Planned | ✓ Complete |
+| `nlink-wg` | 021 | Planned | ✓ Complete |
+| `nlink-diag` | 022 | Planned | ✓ Complete |
+| `nlink-config` | 023 | Planned | ✓ Complete |
 
-## Overview
-Brief description of what this feature does.
+## Library Coverage Analysis
 
-## Motivation
-Why this feature is needed.
+All planned binary features have **existing library support** from Plans 001-014:
 
-## Design
-### API Design
-### Implementation Details
-### File Changes
+- **Plan 005** (Nexthops) → `ip nexthop`
+- **Plan 009** (MPTCP) → `ip mptcp`
+- **Plan 010** (TC Chains) → `tc chain`
+- **Plan 007** (SRv6) → `ip sr`
+- **Plan 008** (MACsec) → `ip macsec`
+- **Plan 002** (FDB) → `nlink-bridge fdb`
+- **Plan 003** (VLAN) → `nlink-bridge vlan`
+- **Plan 012** (Config) → `nlink-config`
+- **Plan 014** (Diagnostics) → `nlink-diag`
+- WireGuard GENL → `nlink-wg`
 
-## Implementation Steps
-Step-by-step guide.
+The library is ahead of the binaries - these plans catch up the CLI.
 
-## Testing
-How to test the implementation.
+## Effort Estimates
 
-## Documentation
-What docs need updating.
-
-## Future Work
-Optional enhancements.
-```
+| Effort | Plans |
+|--------|-------|
+| Half day | 017, 018, 019, 025 |
+| 1 day | 024, 026 |
+| 2 days | 022, 023 |
+| 2-3 days | 020, 021 |
+| **Total** | ~15-18 days |
