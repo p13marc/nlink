@@ -71,6 +71,49 @@ pub mod mptcp_pm_addr_attr {
     pub const IF_IDX: u16 = 7;
 }
 
+/// MPTCP event/subflow attributes.
+///
+/// Used for per-connection operations (ANNOUNCE, REMOVE, SUBFLOW_CREATE, SUBFLOW_DESTROY).
+/// These attributes are from the mptcp_event_attr enum.
+pub mod mptcp_attr {
+    /// Connection token (u32) - identifies the MPTCP connection.
+    pub const TOKEN: u16 = 1;
+    /// Address family (u16).
+    pub const FAMILY: u16 = 2;
+    /// Local address ID (u8).
+    pub const LOC_ID: u16 = 3;
+    /// Remote address ID (u8).
+    pub const REM_ID: u16 = 4;
+    /// Source IPv4 address (4 bytes).
+    pub const SADDR4: u16 = 5;
+    /// Source IPv6 address (16 bytes).
+    pub const SADDR6: u16 = 6;
+    /// Destination IPv4 address (4 bytes).
+    pub const DADDR4: u16 = 7;
+    /// Destination IPv6 address (16 bytes).
+    pub const DADDR6: u16 = 8;
+    /// Source port (u16, network byte order).
+    pub const SPORT: u16 = 9;
+    /// Destination port (u16, network byte order).
+    pub const DPORT: u16 = 10;
+    /// Backup flag (u8).
+    pub const BACKUP: u16 = 11;
+    /// Error code (i32).
+    pub const ERROR: u16 = 12;
+    /// Flags (u16).
+    pub const FLAGS: u16 = 13;
+    /// Timeout (u32).
+    pub const TIMEOUT: u16 = 14;
+    /// Interface index (u32).
+    pub const IF_IDX: u16 = 15;
+    /// Reset reason (u32).
+    pub const RESET_REASON: u16 = 16;
+    /// Reset flags (u32).
+    pub const RESET_FLAGS: u16 = 17;
+    /// Server side flag (u8).
+    pub const SERVER_SIDE: u16 = 18;
+}
+
 /// MPTCP endpoint flags.
 ///
 /// These flags control how an endpoint is used for MPTCP connections.

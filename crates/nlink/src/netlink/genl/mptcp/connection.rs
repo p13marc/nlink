@@ -193,6 +193,187 @@ impl Connection<Mptcp> {
         Ok(())
     }
 
+    // ========================================================================
+    // Per-Connection Operations (Subflow Management)
+    // ========================================================================
+
+    /// Create a new subflow on an existing MPTCP connection.
+    ///
+    /// This allows programmatic creation of subflows between specific
+    /// local and remote addresses on an active MPTCP connection.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::genl::mptcp::MptcpSubflowBuilder;
+    /// use std::net::Ipv4Addr;
+    ///
+    /// // Create a subflow using local address ID 1 to the remote
+    /// conn.create_subflow(
+    ///     MptcpSubflowBuilder::new(connection_token)
+    ///         .local_id(1)
+    ///         .remote_addr(Ipv4Addr::new(10, 0, 0, 1).into())
+    ///         .remote_port(80)
+    /// ).await?;
+    /// ```
+    pub async fn create_subflow(&self, subflow: super::types::MptcpSubflowBuilder) -> Result<()> {
+        use crate::netlink::types::mptcp::mptcp_attr;
+
+        self.mptcp_command(mptcp_pm_cmd::SUBFLOW_CREATE, |builder| {
+            // Token is required
+            builder.append_attr_u32(mptcp_attr::TOKEN, subflow.token);
+
+            // Local address ID
+            if let Some(id) = subflow.local_id {
+                builder.append_attr_u8(mptcp_attr::LOC_ID, id);
+            }
+
+            // Remote address ID
+            if let Some(id) = subflow.remote_id {
+                builder.append_attr_u8(mptcp_attr::REM_ID, id);
+            }
+
+            // Local address
+            if let Some(ref addr) = subflow.local_addr {
+                append_source_addr(builder, addr);
+            }
+
+            // Remote address
+            if let Some(ref addr) = subflow.remote_addr {
+                append_dest_addr(builder, addr);
+            }
+
+            // Interface
+            if let Some(ifindex) = subflow.ifindex {
+                builder.append_attr_u32(mptcp_attr::IF_IDX, ifindex);
+            } else if let Some(ref dev) = subflow.dev
+                && let Ok(ifindex) = crate::util::device::get_ifindex(dev)
+            {
+                builder.append_attr_u32(mptcp_attr::IF_IDX, ifindex);
+            }
+
+            // Backup flag
+            if subflow.backup {
+                builder.append_attr_u8(mptcp_attr::BACKUP, 1);
+            }
+        })
+        .await?;
+
+        Ok(())
+    }
+
+    /// Destroy a subflow on an existing MPTCP connection.
+    ///
+    /// This closes a specific subflow identified by its local and remote addresses.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::genl::mptcp::MptcpSubflowBuilder;
+    /// use std::net::Ipv4Addr;
+    ///
+    /// // Destroy the subflow between specific addresses
+    /// conn.destroy_subflow(
+    ///     MptcpSubflowBuilder::new(connection_token)
+    ///         .local_addr(Ipv4Addr::new(192, 168, 1, 1).into())
+    ///         .local_port(12345)
+    ///         .remote_addr(Ipv4Addr::new(10, 0, 0, 1).into())
+    ///         .remote_port(80)
+    /// ).await?;
+    /// ```
+    pub async fn destroy_subflow(&self, subflow: super::types::MptcpSubflowBuilder) -> Result<()> {
+        use crate::netlink::types::mptcp::mptcp_attr;
+
+        self.mptcp_command(mptcp_pm_cmd::SUBFLOW_DESTROY, |builder| {
+            // Token is required
+            builder.append_attr_u32(mptcp_attr::TOKEN, subflow.token);
+
+            // Local address ID
+            if let Some(id) = subflow.local_id {
+                builder.append_attr_u8(mptcp_attr::LOC_ID, id);
+            }
+
+            // Remote address ID
+            if let Some(id) = subflow.remote_id {
+                builder.append_attr_u8(mptcp_attr::REM_ID, id);
+            }
+
+            // Local address
+            if let Some(ref addr) = subflow.local_addr {
+                append_source_addr(builder, addr);
+            }
+
+            // Remote address
+            if let Some(ref addr) = subflow.remote_addr {
+                append_dest_addr(builder, addr);
+            }
+        })
+        .await?;
+
+        Ok(())
+    }
+
+    /// Announce an address to a peer on a specific connection.
+    ///
+    /// This sends an ADD_ADDR message to the peer on the specified connection.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::genl::mptcp::MptcpAnnounceBuilder;
+    /// use std::net::Ipv4Addr;
+    ///
+    /// // Announce address ID 1 to the peer
+    /// conn.announce_addr(
+    ///     MptcpAnnounceBuilder::new(connection_token)
+    ///         .addr_id(1)
+    ///         .address(Ipv4Addr::new(192, 168, 2, 1).into())
+    /// ).await?;
+    /// ```
+    pub async fn announce_addr(&self, announce: super::types::MptcpAnnounceBuilder) -> Result<()> {
+        use crate::netlink::types::mptcp::mptcp_attr;
+
+        self.mptcp_command(mptcp_pm_cmd::ANNOUNCE, |builder| {
+            // Token is required
+            builder.append_attr_u32(mptcp_attr::TOKEN, announce.token);
+
+            // Address ID
+            if let Some(id) = announce.addr_id {
+                builder.append_attr_u8(mptcp_attr::LOC_ID, id);
+            }
+
+            // Address to announce
+            if let Some(ref addr) = announce.address {
+                append_source_addr(builder, addr);
+            }
+        })
+        .await?;
+
+        Ok(())
+    }
+
+    /// Remove an address announcement from a specific connection.
+    ///
+    /// This sends a REMOVE_ADDR message to the peer.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Remove address ID 1 from the connection
+    /// conn.remove_addr(connection_token, 1).await?;
+    /// ```
+    pub async fn remove_addr(&self, token: u32, addr_id: u8) -> Result<()> {
+        use crate::netlink::types::mptcp::mptcp_attr;
+
+        self.mptcp_command(mptcp_pm_cmd::REMOVE, |builder| {
+            builder.append_attr_u32(mptcp_attr::TOKEN, token);
+            builder.append_attr_u8(mptcp_attr::LOC_ID, addr_id);
+        })
+        .await?;
+
+        Ok(())
+    }
+
     /// Send an MPTCP PM GENL command and wait for ACK.
     async fn mptcp_command(
         &self,
@@ -552,6 +733,53 @@ fn parse_limits_response(payload: &[u8]) -> Result<Option<MptcpLimits>> {
     }
 
     if found { Ok(Some(limits)) } else { Ok(None) }
+}
+
+/// Append source address attributes for subflow operations.
+fn append_source_addr(builder: &mut MessageBuilder, addr: &super::types::MptcpAddress) {
+    use crate::netlink::types::mptcp::mptcp_attr;
+
+    // Address family
+    let family = match addr.addr {
+        IpAddr::V4(_) => libc::AF_INET as u16,
+        IpAddr::V6(_) => libc::AF_INET6 as u16,
+    };
+    builder.append_attr(mptcp_attr::FAMILY, &family.to_ne_bytes());
+
+    // Source address
+    match addr.addr {
+        IpAddr::V4(a) => {
+            builder.append_attr(mptcp_attr::SADDR4, &a.octets());
+        }
+        IpAddr::V6(a) => {
+            builder.append_attr(mptcp_attr::SADDR6, &a.octets());
+        }
+    }
+
+    // Source port
+    if let Some(port) = addr.port {
+        builder.append_attr(mptcp_attr::SPORT, &port.to_be_bytes());
+    }
+}
+
+/// Append destination address attributes for subflow operations.
+fn append_dest_addr(builder: &mut MessageBuilder, addr: &super::types::MptcpAddress) {
+    use crate::netlink::types::mptcp::mptcp_attr;
+
+    // Destination address
+    match addr.addr {
+        IpAddr::V4(a) => {
+            builder.append_attr(mptcp_attr::DADDR4, &a.octets());
+        }
+        IpAddr::V6(a) => {
+            builder.append_attr(mptcp_attr::DADDR6, &a.octets());
+        }
+    }
+
+    // Destination port
+    if let Some(port) = addr.port {
+        builder.append_attr(mptcp_attr::DPORT, &port.to_be_bytes());
+    }
 }
 
 #[cfg(test)]

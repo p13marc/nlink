@@ -4,11 +4,17 @@
 //! bridges with VLAN filtering enabled. It allows assigning VLANs to bridge
 //! ports, setting PVID (Port VLAN ID), and configuring tagged/untagged modes.
 //!
+//! # VLAN Tunneling
+//!
+//! For VXLAN bridges, this module also supports VLAN-to-VNI (tunnel ID) mapping.
+//! This allows different VLANs on a bridge port to be mapped to different VXLAN
+//! tunnel identifiers.
+//!
 //! # Example
 //!
 //! ```ignore
 //! use nlink::netlink::{Connection, Route};
-//! use nlink::netlink::bridge_vlan::BridgeVlanBuilder;
+//! use nlink::netlink::bridge_vlan::{BridgeVlanBuilder, BridgeVlanTunnelBuilder};
 //!
 //! let conn = Connection::<Route>::new()?;
 //!
@@ -36,6 +42,18 @@
 //!
 //! // Delete VLAN
 //! conn.del_bridge_vlan("eth0", 100).await?;
+//!
+//! // VLAN-to-VNI tunnel mapping (for VXLAN bridges)
+//! conn.add_vlan_tunnel(
+//!     BridgeVlanTunnelBuilder::new(100, 10000)
+//!         .dev("vxlan0")
+//! ).await?;
+//!
+//! // Query tunnel mappings
+//! let tunnels = conn.get_vlan_tunnels("vxlan0").await?;
+//! for t in &tunnels {
+//!     println!("VLAN {} -> VNI {}", t.vid, t.tunnel_id);
+//! }
 //! ```
 
 use super::attr::AttrIter;
@@ -45,7 +63,8 @@ use super::error::{Error, Result};
 use super::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgType};
 use super::protocol::Route;
 use super::types::link::{
-    BridgeVlanInfo, IfInfoMsg, IflaAttr, bridge_af, bridge_vlan_flags, rtext_filter,
+    BridgeVlanInfo, IfInfoMsg, IflaAttr, bridge_af, bridge_vlan_flags, bridge_vlan_tunnel,
+    rtext_filter,
 };
 
 /// VLAN flags for bridge port configuration.
@@ -87,6 +106,195 @@ impl BridgeVlanEntry {
     /// Check if egress is untagged.
     pub fn is_untagged(&self) -> bool {
         self.flags.untagged
+    }
+}
+
+// ============================================================================
+// VLAN Tunnel Mapping (VLAN-to-VNI for VXLAN bridges)
+// ============================================================================
+
+/// VLAN-to-tunnel ID mapping entry.
+///
+/// This represents a mapping between a VLAN ID and a tunnel ID (VNI for VXLAN).
+/// Used on VXLAN bridge ports to map local VLANs to remote VXLAN tunnel IDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeVlanTunnelEntry {
+    /// Interface index
+    pub ifindex: u32,
+    /// VLAN ID (1-4094)
+    pub vid: u16,
+    /// Tunnel ID (VNI for VXLAN, max 16M)
+    pub tunnel_id: u32,
+}
+
+/// Builder for VLAN-to-tunnel ID mapping operations.
+///
+/// Creates mappings between VLAN IDs and tunnel IDs (VNI) for VXLAN bridges.
+/// The tunnel ID is typically a VXLAN Network Identifier (VNI).
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::bridge_vlan::BridgeVlanTunnelBuilder;
+///
+/// // Map VLAN 100 to VNI 10000
+/// let config = BridgeVlanTunnelBuilder::new(100, 10000)
+///     .dev("vxlan0");
+///
+/// // Map VLAN range 200-210 to VNI range 20000-20010 (1:1 mapping)
+/// let range_config = BridgeVlanTunnelBuilder::new(200, 20000)
+///     .dev("vxlan0")
+///     .range(210);
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct BridgeVlanTunnelBuilder {
+    dev: Option<String>,
+    ifindex: Option<u32>,
+    vid: u16,
+    vid_end: Option<u16>,
+    tunnel_id: u32,
+}
+
+impl BridgeVlanTunnelBuilder {
+    /// Maximum tunnel ID (24-bit, ~16 million).
+    pub const MAX_TUNNEL_ID: u32 = (1 << 24) - 1;
+
+    /// Create a new VLAN tunnel mapping builder.
+    ///
+    /// # Arguments
+    ///
+    /// * `vid` - VLAN ID (1-4094)
+    /// * `tunnel_id` - Tunnel ID / VNI (0 to 16777215)
+    pub fn new(vid: u16, tunnel_id: u32) -> Self {
+        Self {
+            vid,
+            tunnel_id,
+            ..Default::default()
+        }
+    }
+
+    /// Set device name.
+    pub fn dev(mut self, dev: impl Into<String>) -> Self {
+        self.dev = Some(dev.into());
+        self
+    }
+
+    /// Set interface index directly.
+    ///
+    /// Use this instead of `dev()` when operating in a network namespace.
+    pub fn ifindex(mut self, ifindex: u32) -> Self {
+        self.ifindex = Some(ifindex);
+        self
+    }
+
+    /// Set VLAN range end for bulk operations.
+    ///
+    /// When set, VLANs from `vid` to `vid_end` are mapped to tunnel IDs
+    /// starting from `tunnel_id` with a 1:1 mapping.
+    /// For example, VLAN 100-110 with tunnel_id 10000 maps to:
+    /// - VLAN 100 -> VNI 10000
+    /// - VLAN 101 -> VNI 10001
+    /// - ...
+    /// - VLAN 110 -> VNI 10010
+    pub fn range(mut self, vid_end: u16) -> Self {
+        self.vid_end = Some(vid_end);
+        self
+    }
+
+    /// Resolve interface name to index.
+    fn resolve_ifindex(&self) -> Result<i32> {
+        if let Some(idx) = self.ifindex {
+            Ok(idx as i32)
+        } else if let Some(ref dev) = self.dev {
+            crate::util::get_ifindex(dev)
+                .map(|idx| idx as i32)
+                .map_err(Error::InvalidMessage)
+        } else {
+            Err(Error::InvalidMessage(
+                "device name or ifindex required".into(),
+            ))
+        }
+    }
+
+    /// Build netlink message for adding tunnel mapping.
+    pub(crate) fn build_add(&self) -> Result<MessageBuilder> {
+        self.build_message(NlMsgType::RTM_SETLINK)
+    }
+
+    /// Build netlink message for deleting tunnel mapping.
+    pub(crate) fn build_del(&self) -> Result<MessageBuilder> {
+        self.build_message(NlMsgType::RTM_DELLINK)
+    }
+
+    fn build_message(&self, msg_type: u16) -> Result<MessageBuilder> {
+        let ifindex = self.resolve_ifindex()?;
+
+        // Validate tunnel ID
+        if self.tunnel_id > Self::MAX_TUNNEL_ID {
+            return Err(Error::InvalidMessage(format!(
+                "tunnel_id {} exceeds maximum {}",
+                self.tunnel_id,
+                Self::MAX_TUNNEL_ID
+            )));
+        }
+
+        let mut builder = MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_ACK);
+
+        // Use AF_BRIDGE family
+        let ifinfo = IfInfoMsg::new()
+            .with_family(libc::AF_BRIDGE as u8)
+            .with_index(ifindex);
+        builder.append(&ifinfo);
+
+        // IFLA_AF_SPEC containing tunnel info
+        let af_spec = builder.nest_start(IflaAttr::AfSpec as u16);
+
+        if let Some(vid_end) = self.vid_end {
+            // Range operation: emit tunnel entries with RANGE_BEGIN and RANGE_END flags
+            self.add_tunnel_entry(
+                &mut builder,
+                self.vid,
+                self.tunnel_id,
+                bridge_vlan_flags::RANGE_BEGIN,
+            );
+
+            // Calculate the end tunnel ID (1:1 mapping)
+            let tunnel_id_end = self.tunnel_id + (vid_end - self.vid) as u32;
+            if tunnel_id_end > Self::MAX_TUNNEL_ID {
+                return Err(Error::InvalidMessage(format!(
+                    "tunnel_id range end {} exceeds maximum {}",
+                    tunnel_id_end,
+                    Self::MAX_TUNNEL_ID
+                )));
+            }
+
+            self.add_tunnel_entry(
+                &mut builder,
+                vid_end,
+                tunnel_id_end,
+                bridge_vlan_flags::RANGE_END,
+            );
+        } else {
+            // Single mapping
+            self.add_tunnel_entry(&mut builder, self.vid, self.tunnel_id, 0);
+        }
+
+        builder.nest_end(af_spec);
+
+        Ok(builder)
+    }
+
+    /// Add a single tunnel entry to the message.
+    fn add_tunnel_entry(&self, builder: &mut MessageBuilder, vid: u16, tunnel_id: u32, flags: u16) {
+        let tunnel_info = builder.nest_start(bridge_af::IFLA_BRIDGE_VLAN_TUNNEL_INFO);
+
+        builder.append_attr_u32(bridge_vlan_tunnel::IFLA_BRIDGE_VLAN_TUNNEL_ID, tunnel_id);
+        builder.append_attr_u16(bridge_vlan_tunnel::IFLA_BRIDGE_VLAN_TUNNEL_VID, vid);
+        if flags != 0 {
+            builder.append_attr_u16(bridge_vlan_tunnel::IFLA_BRIDGE_VLAN_TUNNEL_FLAGS, flags);
+        }
+
+        builder.nest_end(tunnel_info);
     }
 }
 
@@ -485,6 +693,117 @@ impl Connection<Route> {
         self.add_bridge_vlan(BridgeVlanBuilder::new(vid_start).dev(dev).range(vid_end))
             .await
     }
+
+    // ========================================================================
+    // VLAN Tunnel Mapping Methods (VLAN-to-VNI for VXLAN bridges)
+    // ========================================================================
+
+    /// Get VLAN-to-tunnel ID mappings for a bridge port.
+    ///
+    /// Returns all VLAN-to-VNI mappings configured on the specified interface.
+    /// This is typically used on VXLAN bridge ports.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let tunnels = conn.get_vlan_tunnels("vxlan0").await?;
+    /// for t in &tunnels {
+    ///     println!("VLAN {} -> VNI {}", t.vid, t.tunnel_id);
+    /// }
+    /// ```
+    pub async fn get_vlan_tunnels(&self, dev: &str) -> Result<Vec<BridgeVlanTunnelEntry>> {
+        let ifindex = crate::util::get_ifindex(dev).map_err(Error::InvalidMessage)? as u32;
+        self.get_vlan_tunnels_by_index(ifindex).await
+    }
+
+    /// Get VLAN-to-tunnel ID mappings by interface index.
+    ///
+    /// Use this method when operating in a network namespace.
+    pub async fn get_vlan_tunnels_by_index(
+        &self,
+        ifindex: u32,
+    ) -> Result<Vec<BridgeVlanTunnelEntry>> {
+        // Request link with BRVLAN filter (tunnel info is included)
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETLINK, NLM_F_REQUEST);
+
+        let ifinfo = IfInfoMsg::new()
+            .with_family(libc::AF_BRIDGE as u8)
+            .with_index(ifindex as i32);
+        builder.append(&ifinfo);
+        builder.append_attr_u32(IflaAttr::ExtMask as u16, rtext_filter::BRVLAN);
+
+        let response = self.send_request(builder).await?;
+        parse_tunnel_entries(&response, ifindex)
+    }
+
+    /// Add VLAN-to-tunnel ID mapping.
+    ///
+    /// Creates a mapping between a VLAN ID and a tunnel ID (VNI) on a
+    /// VXLAN bridge port.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::bridge_vlan::BridgeVlanTunnelBuilder;
+    ///
+    /// // Map VLAN 100 to VNI 10000
+    /// conn.add_vlan_tunnel(
+    ///     BridgeVlanTunnelBuilder::new(100, 10000)
+    ///         .dev("vxlan0")
+    /// ).await?;
+    ///
+    /// // Map VLAN range 200-210 to VNI range 20000-20010
+    /// conn.add_vlan_tunnel(
+    ///     BridgeVlanTunnelBuilder::new(200, 20000)
+    ///         .dev("vxlan0")
+    ///         .range(210)
+    /// ).await?;
+    /// ```
+    pub async fn add_vlan_tunnel(&self, config: BridgeVlanTunnelBuilder) -> Result<()> {
+        let builder = config.build_add()?;
+        self.send_ack(builder).await
+    }
+
+    /// Delete VLAN-to-tunnel ID mapping.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.del_vlan_tunnel("vxlan0", 100).await?;
+    /// ```
+    pub async fn del_vlan_tunnel(&self, dev: &str, vid: u16) -> Result<()> {
+        // We need to specify a tunnel_id, but for deletion only vid matters
+        let builder = BridgeVlanTunnelBuilder::new(vid, 0).dev(dev).build_del()?;
+        self.send_ack(builder).await
+    }
+
+    /// Delete VLAN-to-tunnel ID mapping by interface index.
+    pub async fn del_vlan_tunnel_by_index(&self, ifindex: u32, vid: u16) -> Result<()> {
+        let builder = BridgeVlanTunnelBuilder::new(vid, 0)
+            .ifindex(ifindex)
+            .build_del()?;
+        self.send_ack(builder).await
+    }
+
+    /// Delete a range of VLAN-to-tunnel ID mappings.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.del_vlan_tunnel_range("vxlan0", 200, 210).await?;
+    /// ```
+    pub async fn del_vlan_tunnel_range(
+        &self,
+        dev: &str,
+        vid_start: u16,
+        vid_end: u16,
+    ) -> Result<()> {
+        let builder = BridgeVlanTunnelBuilder::new(vid_start, 0)
+            .dev(dev)
+            .range(vid_end)
+            .build_del()?;
+        self.send_ack(builder).await
+    }
 }
 
 // ============================================================================
@@ -581,6 +900,94 @@ fn parse_af_spec_vlans(data: &[u8], ifindex: u32, entries: &mut Vec<BridgeVlanEn
     }
 }
 
+// ============================================================================
+// Tunnel Parsing Helpers
+// ============================================================================
+
+/// Parse tunnel entries from a single netlink response.
+fn parse_tunnel_entries(data: &[u8], ifindex: u32) -> Result<Vec<BridgeVlanTunnelEntry>> {
+    let mut entries = Vec::new();
+
+    // Skip ifinfomsg header
+    if data.len() < IfInfoMsg::SIZE {
+        return Ok(entries);
+    }
+    let attrs_data = &data[IfInfoMsg::SIZE..];
+
+    // Look for IFLA_AF_SPEC
+    for (attr_type, payload) in AttrIter::new(attrs_data) {
+        if attr_type == IflaAttr::AfSpec as u16 {
+            // Parse nested attributes inside AF_SPEC
+            parse_af_spec_tunnels(payload, ifindex, &mut entries);
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Parse tunnel info from IFLA_AF_SPEC payload.
+fn parse_af_spec_tunnels(data: &[u8], ifindex: u32, entries: &mut Vec<BridgeVlanTunnelEntry>) {
+    let mut range_start: Option<(u16, u32)> = None; // (vid, tunnel_id)
+
+    for (attr_type, payload) in AttrIter::new(data) {
+        if attr_type == bridge_af::IFLA_BRIDGE_VLAN_TUNNEL_INFO {
+            // Parse the nested tunnel info attributes
+            let mut vid: Option<u16> = None;
+            let mut tunnel_id: Option<u32> = None;
+            let mut flags: u16 = 0;
+
+            for (tunnel_attr, tunnel_payload) in AttrIter::new(payload) {
+                match tunnel_attr {
+                    t if t == bridge_vlan_tunnel::IFLA_BRIDGE_VLAN_TUNNEL_ID => {
+                        if tunnel_payload.len() >= 4 {
+                            tunnel_id =
+                                Some(u32::from_ne_bytes(tunnel_payload[..4].try_into().unwrap()));
+                        }
+                    }
+                    t if t == bridge_vlan_tunnel::IFLA_BRIDGE_VLAN_TUNNEL_VID => {
+                        if tunnel_payload.len() >= 2 {
+                            vid = Some(u16::from_ne_bytes(tunnel_payload[..2].try_into().unwrap()));
+                        }
+                    }
+                    t if t == bridge_vlan_tunnel::IFLA_BRIDGE_VLAN_TUNNEL_FLAGS => {
+                        if tunnel_payload.len() >= 2 {
+                            flags = u16::from_ne_bytes(tunnel_payload[..2].try_into().unwrap());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if let (Some(v), Some(t)) = (vid, tunnel_id) {
+                let is_range_begin = flags & bridge_vlan_flags::RANGE_BEGIN != 0;
+                let is_range_end = flags & bridge_vlan_flags::RANGE_END != 0;
+
+                if is_range_begin {
+                    range_start = Some((v, t));
+                } else if is_range_end {
+                    // End of range - emit all mappings (1:1 mapping)
+                    if let Some((start_vid, start_tunnel_id)) = range_start.take() {
+                        for i in 0..=(v - start_vid) {
+                            entries.push(BridgeVlanTunnelEntry {
+                                ifindex,
+                                vid: start_vid + i,
+                                tunnel_id: start_tunnel_id + i as u32,
+                            });
+                        }
+                    }
+                } else {
+                    // Single entry
+                    entries.push(BridgeVlanTunnelEntry {
+                        ifindex,
+                        vid: v,
+                        tunnel_id: t,
+                    });
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,5 +1077,65 @@ mod tests {
         let builder = BridgeVlanBuilder::new(100).master();
         let flags = builder.build_flags();
         assert_eq!(flags, bridge_vlan_flags::MASTER);
+    }
+
+    // ========================================================================
+    // Tunnel Builder Tests
+    // ========================================================================
+
+    #[test]
+    fn test_tunnel_builder_new() {
+        let builder = BridgeVlanTunnelBuilder::new(100, 10000);
+        assert_eq!(builder.vid, 100);
+        assert_eq!(builder.tunnel_id, 10000);
+        assert!(builder.dev.is_none());
+        assert!(builder.ifindex.is_none());
+        assert!(builder.vid_end.is_none());
+    }
+
+    #[test]
+    fn test_tunnel_builder_chain() {
+        let builder = BridgeVlanTunnelBuilder::new(100, 10000)
+            .dev("vxlan0")
+            .range(110);
+
+        assert_eq!(builder.dev, Some("vxlan0".to_string()));
+        assert_eq!(builder.vid, 100);
+        assert_eq!(builder.vid_end, Some(110));
+        assert_eq!(builder.tunnel_id, 10000);
+    }
+
+    #[test]
+    fn test_tunnel_builder_ifindex() {
+        let builder = BridgeVlanTunnelBuilder::new(100, 10000).ifindex(5);
+        assert_eq!(builder.ifindex, Some(5));
+    }
+
+    #[test]
+    fn test_tunnel_entry_equality() {
+        let entry1 = BridgeVlanTunnelEntry {
+            ifindex: 1,
+            vid: 100,
+            tunnel_id: 10000,
+        };
+        let entry2 = BridgeVlanTunnelEntry {
+            ifindex: 1,
+            vid: 100,
+            tunnel_id: 10000,
+        };
+        let entry3 = BridgeVlanTunnelEntry {
+            ifindex: 1,
+            vid: 100,
+            tunnel_id: 10001,
+        };
+
+        assert_eq!(entry1, entry2);
+        assert_ne!(entry1, entry3);
+    }
+
+    #[test]
+    fn test_tunnel_max_id() {
+        // Maximum valid tunnel ID
+        assert_eq!(BridgeVlanTunnelBuilder::MAX_TUNNEL_ID, 0xFFFFFF);
     }
 }

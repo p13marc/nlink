@@ -352,6 +352,16 @@ pub mod bridge_af {
     pub const IFLA_BRIDGE_MST: u16 = 6;
 }
 
+/// Bridge VLAN tunnel info nested attributes (IFLA_BRIDGE_VLAN_TUNNEL_*).
+pub mod bridge_vlan_tunnel {
+    /// Tunnel ID (VNI for VXLAN)
+    pub const IFLA_BRIDGE_VLAN_TUNNEL_ID: u16 = 1;
+    /// VLAN ID
+    pub const IFLA_BRIDGE_VLAN_TUNNEL_VID: u16 = 2;
+    /// Flags (range begin/end)
+    pub const IFLA_BRIDGE_VLAN_TUNNEL_FLAGS: u16 = 3;
+}
+
 /// Bridge VLAN info flags (BRIDGE_VLAN_INFO_*).
 pub mod bridge_vlan_flags {
     /// Operate on bridge device (global VLAN)

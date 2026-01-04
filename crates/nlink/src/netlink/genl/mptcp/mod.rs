@@ -37,7 +37,10 @@
 mod connection;
 mod types;
 
-pub use types::{MptcpEndpoint, MptcpEndpointBuilder, MptcpFlags, MptcpLimits};
+pub use types::{
+    MptcpAddress, MptcpAnnounceBuilder, MptcpEndpoint, MptcpEndpointBuilder, MptcpFlags,
+    MptcpLimits, MptcpSubflowBuilder,
+};
 
 /// MPTCP Path Manager Generic Netlink family name.
 pub const MPTCP_PM_GENL_NAME: &str = "mptcp_pm";

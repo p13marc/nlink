@@ -179,6 +179,24 @@ async fn main() -> nlink::netlink::Result<()> {
                     tc.ifindex()
                 );
             }
+
+            // FDB events (bridge forwarding database)
+            NetworkEvent::NewFdb(fdb) => {
+                println!(
+                    "[FDB+] {} on ifindex={} vlan={:?}",
+                    fdb.mac_str(),
+                    fdb.ifindex,
+                    fdb.vlan
+                );
+            }
+            NetworkEvent::DelFdb(fdb) => {
+                println!(
+                    "[FDB-] {} on ifindex={} vlan={:?}",
+                    fdb.mac_str(),
+                    fdb.ifindex,
+                    fdb.vlan
+                );
+            }
         }
     }
 

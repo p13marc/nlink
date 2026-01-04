@@ -235,6 +235,221 @@ impl MptcpLimits {
     }
 }
 
+// ============================================================================
+// Per-Connection Operations (Subflow Management)
+// ============================================================================
+
+/// Address specification for subflow operations.
+///
+/// Used to specify source or destination addresses for subflow create/destroy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MptcpAddress {
+    /// IP address.
+    pub addr: IpAddr,
+    /// Optional port number.
+    pub port: Option<u16>,
+}
+
+impl MptcpAddress {
+    /// Create a new address specification.
+    pub fn new(addr: IpAddr) -> Self {
+        Self { addr, port: None }
+    }
+
+    /// Create a new address with port.
+    pub fn with_port(addr: IpAddr, port: u16) -> Self {
+        Self {
+            addr,
+            port: Some(port),
+        }
+    }
+}
+
+impl From<IpAddr> for MptcpAddress {
+    fn from(addr: IpAddr) -> Self {
+        Self::new(addr)
+    }
+}
+
+impl From<std::net::SocketAddr> for MptcpAddress {
+    fn from(addr: std::net::SocketAddr) -> Self {
+        Self {
+            addr: addr.ip(),
+            port: Some(addr.port()),
+        }
+    }
+}
+
+/// Builder for subflow creation.
+///
+/// Creates a new subflow on an existing MPTCP connection.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::genl::mptcp::MptcpSubflowBuilder;
+/// use std::net::Ipv4Addr;
+///
+/// // Create subflow from local address to remote address
+/// let subflow = MptcpSubflowBuilder::new(connection_token)
+///     .local_addr(Ipv4Addr::new(192, 168, 1, 1).into())
+///     .local_id(1)
+///     .remote_addr(Ipv4Addr::new(10, 0, 0, 1).into())
+///     .remote_port(80);
+/// ```
+#[derive(Debug, Clone)]
+pub struct MptcpSubflowBuilder {
+    /// Connection token (identifies the MPTCP connection).
+    pub(crate) token: u32,
+    /// Local address ID.
+    pub(crate) local_id: Option<u8>,
+    /// Remote address ID.
+    pub(crate) remote_id: Option<u8>,
+    /// Local address.
+    pub(crate) local_addr: Option<MptcpAddress>,
+    /// Remote address.
+    pub(crate) remote_addr: Option<MptcpAddress>,
+    /// Interface index.
+    pub(crate) ifindex: Option<u32>,
+    /// Device name (resolved to ifindex).
+    pub(crate) dev: Option<String>,
+    /// Backup flag.
+    pub(crate) backup: bool,
+}
+
+impl MptcpSubflowBuilder {
+    /// Create a new subflow builder for the given connection token.
+    ///
+    /// The token identifies the MPTCP connection and can be obtained from
+    /// the socket options or MPTCP events.
+    pub fn new(token: u32) -> Self {
+        Self {
+            token,
+            local_id: None,
+            remote_id: None,
+            local_addr: None,
+            remote_addr: None,
+            ifindex: None,
+            dev: None,
+            backup: false,
+        }
+    }
+
+    /// Set the local address ID.
+    pub fn local_id(mut self, id: u8) -> Self {
+        self.local_id = Some(id);
+        self
+    }
+
+    /// Set the remote address ID.
+    pub fn remote_id(mut self, id: u8) -> Self {
+        self.remote_id = Some(id);
+        self
+    }
+
+    /// Set the local address.
+    pub fn local_addr(mut self, addr: impl Into<MptcpAddress>) -> Self {
+        self.local_addr = Some(addr.into());
+        self
+    }
+
+    /// Set the local port.
+    pub fn local_port(mut self, port: u16) -> Self {
+        if let Some(ref mut addr) = self.local_addr {
+            addr.port = Some(port);
+        }
+        self
+    }
+
+    /// Set the remote address.
+    pub fn remote_addr(mut self, addr: impl Into<MptcpAddress>) -> Self {
+        self.remote_addr = Some(addr.into());
+        self
+    }
+
+    /// Set the remote port.
+    pub fn remote_port(mut self, port: u16) -> Self {
+        if let Some(ref mut addr) = self.remote_addr {
+            addr.port = Some(port);
+        }
+        self
+    }
+
+    /// Set the interface by name.
+    pub fn dev(mut self, dev: impl Into<String>) -> Self {
+        self.dev = Some(dev.into());
+        self
+    }
+
+    /// Set the interface index directly.
+    pub fn ifindex(mut self, ifindex: u32) -> Self {
+        self.ifindex = Some(ifindex);
+        self
+    }
+
+    /// Mark this subflow as a backup path.
+    pub fn backup(mut self) -> Self {
+        self.backup = true;
+        self
+    }
+}
+
+/// Builder for address announcement on a specific connection.
+///
+/// Announces a local address to the peer on a specific MPTCP connection.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::genl::mptcp::MptcpAnnounceBuilder;
+/// use std::net::Ipv4Addr;
+///
+/// // Announce address ID 1 to the peer
+/// let announce = MptcpAnnounceBuilder::new(connection_token)
+///     .addr_id(1)
+///     .address(Ipv4Addr::new(192, 168, 2, 1).into());
+/// ```
+#[derive(Debug, Clone)]
+pub struct MptcpAnnounceBuilder {
+    /// Connection token.
+    pub(crate) token: u32,
+    /// Address ID to announce.
+    pub(crate) addr_id: Option<u8>,
+    /// Address to announce.
+    pub(crate) address: Option<MptcpAddress>,
+}
+
+impl MptcpAnnounceBuilder {
+    /// Create a new announce builder for the given connection token.
+    pub fn new(token: u32) -> Self {
+        Self {
+            token,
+            addr_id: None,
+            address: None,
+        }
+    }
+
+    /// Set the address ID to announce.
+    pub fn addr_id(mut self, id: u8) -> Self {
+        self.addr_id = Some(id);
+        self
+    }
+
+    /// Set the address to announce.
+    pub fn address(mut self, addr: impl Into<MptcpAddress>) -> Self {
+        self.address = Some(addr.into());
+        self
+    }
+
+    /// Set the port to announce.
+    pub fn port(mut self, port: u16) -> Self {
+        if let Some(ref mut addr) = self.address {
+            addr.port = Some(port);
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +548,70 @@ mod tests {
         assert!(!ep.is_subflow());
         assert!(ep.is_backup());
         assert!(!ep.is_fullmesh());
+    }
+
+    // ========================================================================
+    // Subflow and Announce Builder Tests
+    // ========================================================================
+
+    #[test]
+    fn test_mptcp_address_new() {
+        let addr = MptcpAddress::new(Ipv4Addr::new(10, 0, 0, 1).into());
+        assert_eq!(addr.addr, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(addr.port.is_none());
+    }
+
+    #[test]
+    fn test_mptcp_address_with_port() {
+        let addr = MptcpAddress::with_port(Ipv4Addr::new(10, 0, 0, 1).into(), 8080);
+        assert_eq!(addr.addr, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(addr.port, Some(8080));
+    }
+
+    #[test]
+    fn test_mptcp_address_from_socket_addr() {
+        let socket_addr: std::net::SocketAddr = "192.168.1.1:443".parse().unwrap();
+        let addr: MptcpAddress = socket_addr.into();
+        assert_eq!(addr.addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(addr.port, Some(443));
+    }
+
+    #[test]
+    fn test_subflow_builder() {
+        let subflow = MptcpSubflowBuilder::new(0x12345678)
+            .local_id(1)
+            .remote_id(2)
+            .local_addr(MptcpAddress::new(Ipv4Addr::new(192, 168, 1, 1).into()))
+            .remote_addr(MptcpAddress::new(Ipv4Addr::new(10, 0, 0, 1).into()))
+            .backup();
+
+        assert_eq!(subflow.token, 0x12345678);
+        assert_eq!(subflow.local_id, Some(1));
+        assert_eq!(subflow.remote_id, Some(2));
+        assert!(subflow.local_addr.is_some());
+        assert!(subflow.remote_addr.is_some());
+        assert!(subflow.backup);
+    }
+
+    #[test]
+    fn test_subflow_builder_with_dev() {
+        let subflow = MptcpSubflowBuilder::new(0xABCDEF00).dev("eth0").ifindex(5);
+
+        assert_eq!(subflow.dev, Some("eth0".to_string()));
+        assert_eq!(subflow.ifindex, Some(5));
+    }
+
+    #[test]
+    fn test_announce_builder() {
+        let announce = MptcpAnnounceBuilder::new(0x11223344)
+            .addr_id(3)
+            .address(MptcpAddress::new(Ipv4Addr::new(192, 168, 2, 1).into()))
+            .port(8080);
+
+        assert_eq!(announce.token, 0x11223344);
+        assert_eq!(announce.addr_id, Some(3));
+        assert!(announce.address.is_some());
+        let addr = announce.address.unwrap();
+        assert_eq!(addr.port, Some(8080));
     }
 }

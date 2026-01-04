@@ -2740,6 +2740,335 @@ impl ClassConfig for HtbClassBuilt {
 }
 
 // ============================================================================
+// HfscClassConfig
+// ============================================================================
+
+/// HFSC class configuration builder.
+///
+/// HFSC (Hierarchical Fair Service Curve) uses three service curves to provide
+/// both bandwidth guarantees and latency bounds:
+///
+/// - **RSC (Real-time Service Curve)**: Guaranteed minimum latency service
+/// - **FSC (Fair Service Curve)**: Guaranteed bandwidth over time
+/// - **USC (Upper-limit Service Curve)**: Maximum bandwidth limit
+///
+/// Each curve can be a simple rate or a two-slope curve with an initial burst.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::{Connection, Route};
+/// use nlink::netlink::tc::{HfscConfig, HfscClassConfig, TcServiceCurve};
+///
+/// let conn = Connection::<Route>::new()?;
+///
+/// // First add HFSC qdisc
+/// let hfsc = HfscConfig::new().default_class(0x10).build();
+/// conn.add_qdisc_full("eth0", "root", Some("1:"), hfsc).await?;
+///
+/// // Add root class with link-share curve
+/// conn.add_class_config("eth0", "1:0", "1:1",
+///     HfscClassConfig::new()
+///         .ls_rate(1_000_000_000)  // 1 Gbps link-share
+///         .build()
+/// ).await?;
+///
+/// // Add real-time class with latency guarantee
+/// conn.add_class_config("eth0", "1:1", "1:10",
+///     HfscClassConfig::new()
+///         .rt_curve(TcServiceCurve::two_slope(10_000_000, 5000, 1_000_000))
+///         .ls_rate(100_000_000)
+///         .build()
+/// ).await?;
+///
+/// // Add best-effort class with upper limit
+/// conn.add_class_config("eth0", "1:1", "1:20",
+///     HfscClassConfig::new()
+///         .ls_rate(50_000_000)
+///         .ul_rate(100_000_000)  // Cap at 100 Mbps
+///         .build()
+/// ).await?;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct HfscClassConfig {
+    /// Real-time service curve (latency guarantee).
+    rsc: Option<TcServiceCurve>,
+    /// Fair service curve (bandwidth share).
+    fsc: Option<TcServiceCurve>,
+    /// Upper-limit service curve (maximum bandwidth).
+    usc: Option<TcServiceCurve>,
+}
+
+impl HfscClassConfig {
+    /// Create a new HFSC class configuration builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the real-time service curve (latency guarantee).
+    ///
+    /// The RSC provides a guaranteed minimum latency service. Packets are
+    /// scheduled to meet the delay bound specified by this curve.
+    pub fn rt_curve(mut self, curve: TcServiceCurve) -> Self {
+        self.rsc = Some(curve);
+        self
+    }
+
+    /// Set the real-time curve as a simple rate.
+    pub fn rt_rate(mut self, rate_bps: u32) -> Self {
+        self.rsc = Some(TcServiceCurve::rate(rate_bps));
+        self
+    }
+
+    /// Set the link-share (fair) service curve.
+    ///
+    /// The FSC determines the bandwidth share among sibling classes.
+    /// This is the most commonly used curve.
+    pub fn ls_curve(mut self, curve: TcServiceCurve) -> Self {
+        self.fsc = Some(curve);
+        self
+    }
+
+    /// Set the link-share curve as a simple rate.
+    pub fn ls_rate(mut self, rate_bps: u32) -> Self {
+        self.fsc = Some(TcServiceCurve::rate(rate_bps));
+        self
+    }
+
+    /// Set the upper-limit service curve.
+    ///
+    /// The USC caps the maximum bandwidth a class can use, even when
+    /// there's spare bandwidth available.
+    pub fn ul_curve(mut self, curve: TcServiceCurve) -> Self {
+        self.usc = Some(curve);
+        self
+    }
+
+    /// Set the upper-limit curve as a simple rate.
+    pub fn ul_rate(mut self, rate_bps: u32) -> Self {
+        self.usc = Some(TcServiceCurve::rate(rate_bps));
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> HfscClassBuilt {
+        HfscClassBuilt(self)
+    }
+}
+
+/// Built HFSC class configuration, ready to be applied.
+#[derive(Debug, Clone)]
+pub struct HfscClassBuilt(HfscClassConfig);
+
+impl ClassConfig for HfscClassBuilt {
+    fn kind(&self) -> &'static str {
+        "hfsc"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::hfsc::{TCA_HFSC_FSC, TCA_HFSC_RSC, TCA_HFSC_USC};
+
+        let cfg = &self.0;
+
+        if let Some(ref rsc) = cfg.rsc {
+            builder.append_attr(TCA_HFSC_RSC, rsc.as_bytes());
+        }
+
+        if let Some(ref fsc) = cfg.fsc {
+            builder.append_attr(TCA_HFSC_FSC, fsc.as_bytes());
+        }
+
+        if let Some(ref usc) = cfg.usc {
+            builder.append_attr(TCA_HFSC_USC, usc.as_bytes());
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// DrrClassConfig
+// ============================================================================
+
+/// DRR class configuration builder.
+///
+/// DRR (Deficit Round Robin) is a simple fair queuing algorithm where each
+/// class gets a quantum of bytes to send per round. Classes with larger
+/// quanta get proportionally more bandwidth.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::{Connection, Route};
+/// use nlink::netlink::tc::{DrrConfig, DrrClassConfig};
+///
+/// let conn = Connection::<Route>::new()?;
+///
+/// // First add DRR qdisc
+/// let drr = DrrConfig::new().handle("1:").build();
+/// conn.add_qdisc_full("eth0", "root", Some("1:"), drr).await?;
+///
+/// // Add classes with different quanta (bandwidth proportions)
+/// conn.add_class_config("eth0", "1:0", "1:1",
+///     DrrClassConfig::new()
+///         .quantum(1500)  // 1 packet worth
+///         .build()
+/// ).await?;
+///
+/// conn.add_class_config("eth0", "1:0", "1:2",
+///     DrrClassConfig::new()
+///         .quantum(3000)  // 2x bandwidth of class 1:1
+///         .build()
+/// ).await?;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct DrrClassConfig {
+    /// Quantum in bytes (bandwidth share).
+    quantum: Option<u32>,
+}
+
+impl DrrClassConfig {
+    /// Create a new DRR class configuration builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the quantum in bytes.
+    ///
+    /// The quantum determines how many bytes this class can send per round.
+    /// Classes with larger quanta get proportionally more bandwidth.
+    /// If not set, defaults to the interface MTU.
+    pub fn quantum(mut self, bytes: u32) -> Self {
+        self.quantum = Some(bytes);
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> DrrClassBuilt {
+        DrrClassBuilt(self)
+    }
+}
+
+/// Built DRR class configuration, ready to be applied.
+#[derive(Debug, Clone)]
+pub struct DrrClassBuilt(DrrClassConfig);
+
+impl ClassConfig for DrrClassBuilt {
+    fn kind(&self) -> &'static str {
+        "drr"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::drr::TCA_DRR_QUANTUM;
+
+        if let Some(quantum) = self.0.quantum {
+            builder.append_attr_u32(TCA_DRR_QUANTUM, quantum);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// QfqClassConfig
+// ============================================================================
+
+/// QFQ class configuration builder.
+///
+/// QFQ (Quick Fair Queueing) is similar to DRR but with O(1) complexity
+/// for scheduling. Each class has a weight and an optional maximum packet
+/// size limit.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::{Connection, Route};
+/// use nlink::netlink::tc::{QfqConfig, QfqClassConfig};
+///
+/// let conn = Connection::<Route>::new()?;
+///
+/// // First add QFQ qdisc
+/// let qfq = QfqConfig::new().handle("1:").build();
+/// conn.add_qdisc_full("eth0", "root", Some("1:"), qfq).await?;
+///
+/// // Add classes with different weights
+/// conn.add_class_config("eth0", "1:0", "1:1",
+///     QfqClassConfig::new()
+///         .weight(1)
+///         .build()
+/// ).await?;
+///
+/// conn.add_class_config("eth0", "1:0", "1:2",
+///     QfqClassConfig::new()
+///         .weight(2)  // 2x bandwidth of class 1:1
+///         .lmax(9000) // Max packet size (for jumbo frames)
+///         .build()
+/// ).await?;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct QfqClassConfig {
+    /// Weight (bandwidth share).
+    weight: Option<u32>,
+    /// Maximum packet length.
+    lmax: Option<u32>,
+}
+
+impl QfqClassConfig {
+    /// Create a new QFQ class configuration builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the weight.
+    ///
+    /// The weight determines the relative bandwidth share. A class with
+    /// weight 2 gets twice the bandwidth of a class with weight 1.
+    /// Valid range is 1-1023.
+    pub fn weight(mut self, weight: u32) -> Self {
+        self.weight = Some(weight.clamp(1, 1023));
+        self
+    }
+
+    /// Set the maximum packet length.
+    ///
+    /// This is used for internal scheduling calculations. Should be at
+    /// least the interface MTU. Default is typically 2048.
+    pub fn lmax(mut self, bytes: u32) -> Self {
+        self.lmax = Some(bytes);
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> QfqClassBuilt {
+        QfqClassBuilt(self)
+    }
+}
+
+/// Built QFQ class configuration, ready to be applied.
+#[derive(Debug, Clone)]
+pub struct QfqClassBuilt(QfqClassConfig);
+
+impl ClassConfig for QfqClassBuilt {
+    fn kind(&self) -> &'static str {
+        "qfq"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::qfq::{TCA_QFQ_LMAX, TCA_QFQ_WEIGHT};
+
+        if let Some(weight) = self.0.weight {
+            builder.append_attr_u32(TCA_QFQ_WEIGHT, weight);
+        }
+
+        if let Some(lmax) = self.0.lmax {
+            builder.append_attr_u32(TCA_QFQ_LMAX, lmax);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Helper functions
 // ============================================================================
 

@@ -26,6 +26,7 @@
 //! }
 //! ```
 
+use super::fdb::FdbEntry;
 use super::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage};
 
 /// Network events that can be received from the kernel.
@@ -60,6 +61,12 @@ pub enum NetworkEvent {
     /// A neighbor entry was removed.
     DelNeighbor(NeighborMessage),
 
+    // FDB (bridge forwarding database) events
+    /// A new FDB entry was added or learned.
+    NewFdb(FdbEntry),
+    /// An FDB entry was removed.
+    DelFdb(FdbEntry),
+
     // Traffic control events
     /// A new qdisc was added or changed.
     NewQdisc(TcMessage),
@@ -88,6 +95,7 @@ impl NetworkEvent {
                 | NetworkEvent::NewAddress(_)
                 | NetworkEvent::NewRoute(_)
                 | NetworkEvent::NewNeighbor(_)
+                | NetworkEvent::NewFdb(_)
                 | NetworkEvent::NewQdisc(_)
                 | NetworkEvent::NewClass(_)
                 | NetworkEvent::NewFilter(_)
@@ -106,6 +114,7 @@ impl NetworkEvent {
             NetworkEvent::NewLink(m) | NetworkEvent::DelLink(m) => Some(m.ifindex()),
             NetworkEvent::NewAddress(m) | NetworkEvent::DelAddress(m) => Some(m.ifindex()),
             NetworkEvent::NewNeighbor(m) | NetworkEvent::DelNeighbor(m) => Some(m.ifindex()),
+            NetworkEvent::NewFdb(m) | NetworkEvent::DelFdb(m) => Some(m.ifindex),
             NetworkEvent::NewQdisc(m)
             | NetworkEvent::DelQdisc(m)
             | NetworkEvent::NewClass(m)
@@ -185,6 +194,22 @@ impl NetworkEvent {
     pub fn into_neighbor(self) -> Option<NeighborMessage> {
         match self {
             NetworkEvent::NewNeighbor(m) | NetworkEvent::DelNeighbor(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner FdbEntry if this is an FDB event.
+    pub fn as_fdb(&self) -> Option<&FdbEntry> {
+        match self {
+            NetworkEvent::NewFdb(m) | NetworkEvent::DelFdb(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Consumes self and returns the inner FdbEntry if this is an FDB event.
+    pub fn into_fdb(self) -> Option<FdbEntry> {
+        match self {
+            NetworkEvent::NewFdb(m) | NetworkEvent::DelFdb(m) => Some(m),
             _ => None,
         }
     }

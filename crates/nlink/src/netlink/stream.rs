@@ -376,13 +376,27 @@ fn parse_route_event(msg_type: u16, payload: &[u8]) -> Option<NetworkEvent> {
             .ok()
             .map(NetworkEvent::DelRoute),
 
-        // Neighbor events
-        t if t == NlMsgType::RTM_NEWNEIGH => NeighborMessage::from_bytes(payload)
-            .ok()
-            .map(NetworkEvent::NewNeighbor),
-        t if t == NlMsgType::RTM_DELNEIGH => NeighborMessage::from_bytes(payload)
-            .ok()
-            .map(NetworkEvent::DelNeighbor),
+        // Neighbor events (including FDB for AF_BRIDGE family)
+        t if t == NlMsgType::RTM_NEWNEIGH => NeighborMessage::from_bytes(payload).ok().map(|msg| {
+            // AF_BRIDGE (7) neighbor messages are FDB entries
+            if msg.family() == 7 {
+                super::fdb::FdbEntry::from_neighbor(&msg)
+                    .map(NetworkEvent::NewFdb)
+                    .unwrap_or(NetworkEvent::NewNeighbor(msg))
+            } else {
+                NetworkEvent::NewNeighbor(msg)
+            }
+        }),
+        t if t == NlMsgType::RTM_DELNEIGH => NeighborMessage::from_bytes(payload).ok().map(|msg| {
+            // AF_BRIDGE (7) neighbor messages are FDB entries
+            if msg.family() == 7 {
+                super::fdb::FdbEntry::from_neighbor(&msg)
+                    .map(NetworkEvent::DelFdb)
+                    .unwrap_or(NetworkEvent::DelNeighbor(msg))
+            } else {
+                NetworkEvent::DelNeighbor(msg)
+            }
+        }),
 
         // TC events - qdiscs
         t if t == NlMsgType::RTM_NEWQDISC => TcMessage::from_bytes(payload)

@@ -725,6 +725,86 @@ conn.add_class_config_by_index(link.ifindex(), "1:1", "1:50",
 ).await?;
 ```
 
+**Typed HFSC class configuration:**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::tc::{HfscConfig, HfscClassConfig, TcServiceCurve};
+
+let conn = Connection::<Route>::new()?;
+
+// First add HFSC qdisc
+let hfsc = HfscConfig::new().default_class(0x10).build();
+conn.add_qdisc_full("eth0", "root", Some("1:"), hfsc).await?;
+
+// Add root class with link-share curve
+conn.add_class_config("eth0", "1:0", "1:1",
+    HfscClassConfig::new()
+        .ls_rate(1_000_000_000)  // 1 Gbps link-share
+        .build()
+).await?;
+
+// Add real-time class with latency guarantee (two-slope curve)
+conn.add_class_config("eth0", "1:1", "1:10",
+    HfscClassConfig::new()
+        .rt_curve(TcServiceCurve::two_slope(10_000_000, 5000, 1_000_000))
+        .ls_rate(100_000_000)
+        .build()
+).await?;
+
+// Add best-effort class with upper limit
+conn.add_class_config("eth0", "1:1", "1:20",
+    HfscClassConfig::new()
+        .ls_rate(50_000_000)
+        .ul_rate(100_000_000)  // Cap at 100 Mbps
+        .build()
+).await?;
+```
+
+**Typed DRR class configuration:**
+```rust
+use nlink::netlink::tc::{DrrConfig, DrrClassConfig};
+
+// First add DRR qdisc
+let drr = DrrConfig::new().handle("1:").build();
+conn.add_qdisc_full("eth0", "root", Some("1:"), drr).await?;
+
+// Add classes with different quanta (bandwidth proportions)
+conn.add_class_config("eth0", "1:0", "1:1",
+    DrrClassConfig::new()
+        .quantum(1500)  // 1 packet worth
+        .build()
+).await?;
+
+conn.add_class_config("eth0", "1:0", "1:2",
+    DrrClassConfig::new()
+        .quantum(3000)  // 2x bandwidth of class 1:1
+        .build()
+).await?;
+```
+
+**Typed QFQ class configuration:**
+```rust
+use nlink::netlink::tc::{QfqConfig, QfqClassConfig};
+
+// First add QFQ qdisc
+let qfq = QfqConfig::new().handle("1:").build();
+conn.add_qdisc_full("eth0", "root", Some("1:"), qfq).await?;
+
+// Add classes with different weights
+conn.add_class_config("eth0", "1:0", "1:1",
+    QfqClassConfig::new()
+        .weight(1)
+        .build()
+).await?;
+
+conn.add_class_config("eth0", "1:0", "1:2",
+    QfqClassConfig::new()
+        .weight(2)      // 2x bandwidth of class 1:1
+        .lmax(9000)     // Max packet size (for jumbo frames)
+        .build()
+).await?;
+```
+
 **Link statistics tracking:**
 ```rust
 use nlink::netlink::stats::{StatsSnapshot, StatsTracker};
@@ -783,11 +863,42 @@ use nlink::netlink::RtnetlinkGroup;
 // RtnetlinkGroup::Ipv6Addr   - IPv6 address changes
 // RtnetlinkGroup::Ipv4Route  - IPv4 routing table changes
 // RtnetlinkGroup::Ipv6Route  - IPv6 routing table changes
-// RtnetlinkGroup::Neigh      - Neighbor (ARP/NDP) cache changes
+// RtnetlinkGroup::Neigh      - Neighbor (ARP/NDP) cache changes + FDB events
 // RtnetlinkGroup::Tc         - Traffic control changes
 // RtnetlinkGroup::NsId       - Namespace ID changes
 // RtnetlinkGroup::Ipv4Rule   - IPv4 policy routing rules
 // RtnetlinkGroup::Ipv6Rule   - IPv6 policy routing rules
+```
+
+**FDB event monitoring (bridge MAC address learning):**
+```rust
+use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
+use tokio_stream::StreamExt;
+
+let mut conn = Connection::<Route>::new()?;
+// FDB events come through the Neigh group (AF_BRIDGE family)
+conn.subscribe(&[RtnetlinkGroup::Neigh])?;
+
+let mut events = conn.events();
+while let Some(result) = events.next().await {
+    match result? {
+        NetworkEvent::NewFdb(entry) => {
+            println!("FDB add: {} on ifindex {} vlan={:?}",
+                entry.mac_str(), entry.ifindex, entry.vlan);
+            if entry.is_permanent() {
+                println!("  (static entry)");
+            }
+        }
+        NetworkEvent::DelFdb(entry) => {
+            println!("FDB del: {}", entry.mac_str());
+        }
+        NetworkEvent::NewNeighbor(neigh) => {
+            // Regular ARP/NDP neighbor events
+            println!("Neighbor: {:?}", neigh.lladdr());
+        }
+        _ => {}
+    }
+}
 ```
 
 **Multi-namespace event monitoring:**
@@ -1800,6 +1911,44 @@ conn.get_bridge_vlans_by_index(link.ifindex()).await?;
 conn.set_bridge_pvid_by_index(link.ifindex(), 100).await?;
 ```
 
+**Bridge VLAN tunneling (VLAN-to-VNI mapping for VXLAN):**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::bridge_vlan::BridgeVlanTunnelBuilder;
+
+let conn = Connection::<Route>::new()?;
+
+// Map VLAN 100 to VNI 10000 on a VXLAN bridge port
+conn.add_vlan_tunnel(
+    BridgeVlanTunnelBuilder::new(100, 10000)
+        .dev("vxlan0")
+).await?;
+
+// Map VLAN range 200-210 to VNI range 20000-20010 (1:1 mapping)
+conn.add_vlan_tunnel(
+    BridgeVlanTunnelBuilder::new(200, 20000)
+        .dev("vxlan0")
+        .range(210)
+).await?;
+
+// Query tunnel mappings
+let tunnels = conn.get_vlan_tunnels("vxlan0").await?;
+for t in &tunnels {
+    println!("VLAN {} -> VNI {}", t.vid, t.tunnel_id);
+}
+
+// Delete tunnel mapping
+conn.del_vlan_tunnel("vxlan0", 100).await?;
+
+// Delete tunnel mapping range
+conn.del_vlan_tunnel_range("vxlan0", 200, 210).await?;
+
+// Namespace-aware operations
+let link = conn.get_link_by_name("vxlan0").await?.unwrap();
+conn.get_vlan_tunnels_by_index(link.ifindex()).await?;
+conn.del_vlan_tunnel_by_index(link.ifindex(), 100).await?;
+```
+
 **Error handling:**
 ```rust
 use nlink::netlink::{Connection, Protocol, Error};
@@ -1999,6 +2148,44 @@ conn.del_endpoint(1).await?;
 
 // Flush all endpoints
 conn.flush_endpoints().await?;
+```
+
+**MPTCP per-connection subflow management:**
+```rust
+use nlink::netlink::{Connection, Mptcp};
+use nlink::netlink::genl::mptcp::{MptcpSubflowBuilder, MptcpAnnounceBuilder, MptcpAddress};
+use std::net::Ipv4Addr;
+
+let conn = Connection::<Mptcp>::new_async().await?;
+
+// Create a new subflow on an existing MPTCP connection
+// The token identifies the connection (obtained from socket options or events)
+conn.create_subflow(
+    MptcpSubflowBuilder::new(connection_token)
+        .local_id(1)                                    // Use local address ID 1
+        .remote_addr(Ipv4Addr::new(10, 0, 0, 1).into()) // Remote address
+        .remote_port(80)
+        .backup()                                       // Mark as backup path
+).await?;
+
+// Destroy a specific subflow
+conn.destroy_subflow(
+    MptcpSubflowBuilder::new(connection_token)
+        .local_addr(MptcpAddress::with_port(
+            Ipv4Addr::new(192, 168, 1, 1).into(), 12345))
+        .remote_addr(MptcpAddress::with_port(
+            Ipv4Addr::new(10, 0, 0, 1).into(), 80))
+).await?;
+
+// Announce an address to the peer on a specific connection
+conn.announce_addr(
+    MptcpAnnounceBuilder::new(connection_token)
+        .addr_id(2)
+        .address(Ipv4Addr::new(192, 168, 2, 1).into())
+).await?;
+
+// Remove an address announcement
+conn.remove_addr(connection_token, 2).await?;
 ```
 
 **Device hotplug events (udev-style) via KobjectUevent:**
