@@ -295,7 +295,7 @@ pub struct TcEstimator {
 pub mod qdisc {
     /// HTB qdisc-specific attributes.
     pub mod htb {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_HTB_UNSPEC: u16 = 0;
         pub const TCA_HTB_PARMS: u16 = 1;
@@ -309,7 +309,7 @@ pub mod qdisc {
 
         /// HTB global parameters (struct tc_htb_glob).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcHtbGlob {
             pub version: u32,
             pub rate2quantum: u32,
@@ -339,11 +339,16 @@ pub mod qdisc {
             pub fn as_bytes(&self) -> &[u8] {
                 <Self as IntoBytes>::as_bytes(self)
             }
+
+            /// Parse from bytes.
+            pub fn from_bytes(data: &[u8]) -> Option<&Self> {
+                Self::ref_from_prefix(data).map(|(r, _)| r).ok()
+            }
         }
 
         /// HTB class parameters (struct tc_htb_opt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcHtbOpt {
             pub rate: super::TcRateSpec,
             pub ceil: super::TcRateSpec,
@@ -359,6 +364,11 @@ pub mod qdisc {
 
             pub fn as_bytes(&self) -> &[u8] {
                 <Self as IntoBytes>::as_bytes(self)
+            }
+
+            /// Parse from bytes.
+            pub fn from_bytes(data: &[u8]) -> Option<&Self> {
+                Self::ref_from_prefix(data).map(|(r, _)| r).ok()
             }
         }
     }
@@ -379,7 +389,7 @@ pub mod qdisc {
 
     /// TBF qdisc-specific attributes.
     pub mod tbf {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_TBF_UNSPEC: u16 = 0;
         pub const TCA_TBF_PARMS: u16 = 1;
@@ -392,7 +402,7 @@ pub mod qdisc {
 
         /// TBF parameters (struct tc_tbf_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcTbfQopt {
             pub rate: super::TcRateSpec,
             pub peakrate: super::TcRateSpec,
@@ -412,14 +422,14 @@ pub mod qdisc {
 
     /// PRIO qdisc-specific attributes.
     pub mod prio {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_PRIO_UNSPEC: u16 = 0;
         pub const TCA_PRIO_MQ: u16 = 1;
 
         /// PRIO parameters (struct tc_prio_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcPrioQopt {
             pub bands: i32,
             pub priomap: [u8; 16],
@@ -446,11 +456,11 @@ pub mod qdisc {
 
     /// SFQ qdisc-specific attributes.
     pub mod sfq {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         /// SFQ parameters (struct tc_sfq_qopt_v1).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcSfqQoptV1 {
             pub v0: TcSfqQopt,
             pub depth: u32,
@@ -468,7 +478,7 @@ pub mod qdisc {
 
         /// SFQ basic parameters (struct tc_sfq_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcSfqQopt {
             pub quantum: u32,
             pub perturb_period: i32,
@@ -488,7 +498,7 @@ pub mod qdisc {
 
     /// Netem qdisc-specific attributes.
     pub mod netem {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_NETEM_UNSPEC: u16 = 0;
         pub const TCA_NETEM_CORR: u16 = 1;
@@ -513,7 +523,7 @@ pub mod qdisc {
 
         /// Netem basic options (struct tc_netem_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemQopt {
             /// Added delay in microseconds.
             pub latency: u32,
@@ -546,7 +556,7 @@ pub mod qdisc {
 
         /// Netem correlation structure (struct tc_netem_corr).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemCorr {
             /// Delay correlation.
             pub delay_corr: u32,
@@ -566,7 +576,7 @@ pub mod qdisc {
 
         /// Netem reorder structure (struct tc_netem_reorder).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemReorder {
             pub probability: u32,
             pub correlation: u32,
@@ -582,7 +592,7 @@ pub mod qdisc {
 
         /// Netem corrupt structure (struct tc_netem_corrupt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemCorrupt {
             pub probability: u32,
             pub correlation: u32,
@@ -598,7 +608,7 @@ pub mod qdisc {
 
         /// Netem rate structure (struct tc_netem_rate).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemRate {
             /// Rate in bytes/s.
             pub rate: u32,
@@ -620,7 +630,7 @@ pub mod qdisc {
 
         /// Netem slot structure (struct tc_netem_slot).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemSlot {
             /// Minimum delay in nanoseconds.
             pub min_delay: i64,
@@ -646,7 +656,7 @@ pub mod qdisc {
 
         /// Gilbert-Intuitive loss model (4 state) (struct tc_netem_gimodel).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemGiModel {
             pub p13: u32,
             pub p31: u32,
@@ -665,7 +675,7 @@ pub mod qdisc {
 
         /// Gilbert-Elliot loss model (struct tc_netem_gemodel).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNetemGeModel {
             pub p: u32,
             pub r: u32,
@@ -695,7 +705,14 @@ pub mod qdisc {
     /// Rate specification (struct tc_ratespec).
     #[repr(C)]
     #[derive(
-        Debug, Clone, Copy, Default, zerocopy::IntoBytes, zerocopy::Immutable, zerocopy::KnownLayout,
+        Debug,
+        Clone,
+        Copy,
+        Default,
+        zerocopy::FromBytes,
+        zerocopy::IntoBytes,
+        zerocopy::Immutable,
+        zerocopy::KnownLayout,
     )]
     pub struct TcRateSpec {
         pub cell_log: u8,
@@ -806,7 +823,7 @@ pub mod qdisc {
 
     /// RED (Random Early Detection) qdisc-specific attributes.
     pub mod red {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_RED_UNSPEC: u16 = 0;
         pub const TCA_RED_PARMS: u16 = 1;
@@ -824,7 +841,7 @@ pub mod qdisc {
 
         /// RED parameters (struct tc_red_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcRedQopt {
             /// Queue limit in bytes.
             pub limit: u32,
@@ -866,11 +883,11 @@ pub mod qdisc {
 
     /// FIFO qdisc types (pfifo, bfifo).
     pub mod fifo {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         /// FIFO limit structure (struct tc_fifo_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcFifoQopt {
             /// Queue limit (packets for pfifo, bytes for bfifo).
             pub limit: u32,
@@ -904,7 +921,7 @@ pub mod qdisc {
 
     /// MQPRIO (Multi-Queue Priority) qdisc attributes.
     pub mod mqprio {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         /// Maximum number of traffic classes.
         pub const TC_QOPT_MAX_QUEUE: usize = 16;
@@ -926,7 +943,7 @@ pub mod qdisc {
 
         /// MQPRIO qdisc options (struct tc_mqprio_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcMqprioQopt {
             /// Number of traffic classes.
             pub num_tc: u8,
@@ -977,7 +994,7 @@ pub mod qdisc {
 
     /// Plug qdisc types and constants.
     pub mod plug {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         /// Plug action types.
         pub const TCQ_PLUG_BUFFER: i32 = 0;
@@ -987,7 +1004,7 @@ pub mod qdisc {
 
         /// Plug qdisc options (struct tc_plug_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcPlugQopt {
             /// Action to perform.
             pub action: i32,
@@ -1095,7 +1112,7 @@ pub mod qdisc {
 
     /// HFSC (Hierarchical Fair Service Curve) qdisc attributes and structures.
     pub mod hfsc {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_HFSC_UNSPEC: u16 = 0;
         pub const TCA_HFSC_RSC: u16 = 1;
@@ -1104,7 +1121,7 @@ pub mod qdisc {
 
         /// HFSC qdisc options (struct tc_hfsc_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcHfscQopt {
             /// Default class ID.
             pub defcls: u16,
@@ -1124,7 +1141,7 @@ pub mod qdisc {
 
         /// Service curve definition (struct tc_service_curve).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcServiceCurve {
             /// Slope of the first segment in bps.
             pub m1: u32,
@@ -1167,7 +1184,7 @@ pub mod qdisc {
 
     /// ETF (Earliest TxTime First) qdisc attributes and structures.
     pub mod etf {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_ETF_UNSPEC: u16 = 0;
         pub const TCA_ETF_PARMS: u16 = 1;
@@ -1182,7 +1199,7 @@ pub mod qdisc {
 
         /// ETF qdisc options (struct tc_etf_qopt).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcEtfQopt {
             /// Delta time in nanoseconds.
             pub delta: i32,
@@ -1257,7 +1274,7 @@ pub mod qdisc {
 pub mod filter {
     /// U32 filter attributes and structures.
     pub mod u32 {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_U32_UNSPEC: u16 = 0;
         pub const TCA_U32_CLASSID: u16 = 1;
@@ -1281,7 +1298,7 @@ pub mod filter {
         /// U32 key (struct tc_u32_key).
         /// Matches a 32-bit value at a specific offset.
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcU32Key {
             /// Mask to apply (big-endian).
             pub mask: u32,
@@ -1319,7 +1336,7 @@ pub mod filter {
 
         /// U32 selector header (struct tc_u32_sel without keys).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcU32SelHdr {
             /// Flags (TC_U32_TERMINAL, etc.).
             pub flags: u8,
@@ -1386,7 +1403,7 @@ pub mod filter {
 
         /// U32 mark structure (struct tc_u32_mark).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcU32Mark {
             pub val: u32,
             pub mask: u32,
@@ -1684,7 +1701,7 @@ pub mod filter {
 
 /// Common action attributes.
 pub mod action {
-    use zerocopy::{Immutable, IntoBytes, KnownLayout};
+    use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
     /// Generic action attributes.
     pub const TCA_ACT_UNSPEC: u16 = 0;
@@ -1752,7 +1769,7 @@ pub mod action {
     /// Common action header (tc_gen macro in kernel).
     /// This is the base structure for all action parameters.
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+    #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
     pub struct TcGen {
         pub index: u32,
         pub capab: u32,
@@ -1779,7 +1796,7 @@ pub mod action {
 
     /// Mirred action attributes.
     pub mod mirred {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_MIRRED_UNSPEC: u16 = 0;
         pub const TCA_MIRRED_TM: u16 = 1;
@@ -1817,7 +1834,7 @@ pub mod action {
 
         /// Mirred action parameters (struct tc_mirred).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcMirred {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -1852,7 +1869,7 @@ pub mod action {
 
     /// Gact (generic action) attributes.
     pub mod gact {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_GACT_UNSPEC: u16 = 0;
         pub const TCA_GACT_TM: u16 = 1;
@@ -1867,7 +1884,7 @@ pub mod action {
 
         /// Gact action parameters (struct tc_gact).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcGact {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -1895,7 +1912,7 @@ pub mod action {
 
         /// Gact probability parameters (struct tc_gact_p).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcGactP {
             pub ptype: u16,
             pub pval: u16,
@@ -1919,7 +1936,7 @@ pub mod action {
 
     /// Police action attributes.
     pub mod police {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_POLICE_UNSPEC: u16 = 0;
         pub const TCA_POLICE_TBF: u16 = 1;
@@ -1938,7 +1955,7 @@ pub mod action {
 
         /// Police action parameters (struct tc_police).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcPolice {
             pub index: u32,
             pub action: i32,
@@ -1978,7 +1995,7 @@ pub mod action {
 
     /// Vlan action attributes.
     pub mod vlan {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_VLAN_UNSPEC: u16 = 0;
         pub const TCA_VLAN_TM: u16 = 1;
@@ -2015,7 +2032,7 @@ pub mod action {
 
         /// Vlan action parameters (struct tc_vlan).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcVlan {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2047,7 +2064,7 @@ pub mod action {
 
     /// Skbedit action attributes.
     pub mod skbedit {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
         pub const TCA_SKBEDIT_UNSPEC: u16 = 0;
         pub const TCA_SKBEDIT_TM: u16 = 1;
         pub const TCA_SKBEDIT_PARMS: u16 = 2;
@@ -2078,7 +2095,7 @@ pub mod action {
 
         /// Skbedit action parameters (struct tc_skbedit).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcSkbedit {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2107,7 +2124,7 @@ pub mod action {
 
     /// NAT action attributes.
     pub mod nat {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
         pub const TCA_NAT_UNSPEC: u16 = 0;
         pub const TCA_NAT_PARMS: u16 = 1;
         pub const TCA_NAT_TM: u16 = 2;
@@ -2118,7 +2135,7 @@ pub mod action {
 
         /// NAT action parameters (struct tc_nat).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcNat {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2159,7 +2176,7 @@ pub mod action {
 
     /// Tunnel key action attributes.
     pub mod tunnel_key {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
         pub const TCA_TUNNEL_KEY_UNSPEC: u16 = 0;
         pub const TCA_TUNNEL_KEY_TM: u16 = 1;
@@ -2183,7 +2200,7 @@ pub mod action {
 
         /// Tunnel key action parameters (struct tc_tunnel_key).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcTunnelKey {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2215,14 +2232,14 @@ pub mod action {
 
     /// Connmark action attributes and structures.
     pub mod connmark {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
         pub const TCA_CONNMARK_UNSPEC: u16 = 0;
         pub const TCA_CONNMARK_PARMS: u16 = 1;
         pub const TCA_CONNMARK_TM: u16 = 2;
 
         /// Connmark action parameters (struct tc_connmark).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcConnmark {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2257,7 +2274,7 @@ pub mod action {
 
     /// Csum (checksum) action attributes and structures.
     pub mod csum {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
         pub const TCA_CSUM_UNSPEC: u16 = 0;
         pub const TCA_CSUM_PARMS: u16 = 1;
         pub const TCA_CSUM_TM: u16 = 2;
@@ -2273,7 +2290,7 @@ pub mod action {
 
         /// Csum action parameters (struct tc_csum).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcCsum {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2305,7 +2322,7 @@ pub mod action {
 
     /// Sample action attributes and structures.
     pub mod sample {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
         pub const TCA_SAMPLE_UNSPEC: u16 = 0;
         pub const TCA_SAMPLE_TM: u16 = 1;
         pub const TCA_SAMPLE_PARMS: u16 = 2;
@@ -2315,7 +2332,7 @@ pub mod action {
 
         /// Sample action parameters (struct tc_sample - just tc_gen).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcSample {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2344,7 +2361,7 @@ pub mod action {
 
     /// CT (Connection Tracking) action attributes and structures.
     pub mod ct {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
         pub const TCA_CT_UNSPEC: u16 = 0;
         pub const TCA_CT_PARMS: u16 = 1;
         pub const TCA_CT_TM: u16 = 2;
@@ -2375,7 +2392,7 @@ pub mod action {
 
         /// CT action parameters (struct tc_ct - just tc_gen).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcCt {
             /// Common action fields (tc_gen).
             pub index: u32,
@@ -2404,7 +2421,7 @@ pub mod action {
 
     /// Pedit (packet edit) action attributes and structures.
     pub mod pedit {
-        use zerocopy::{Immutable, IntoBytes, KnownLayout};
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
         pub const TCA_PEDIT_UNSPEC: u16 = 0;
         pub const TCA_PEDIT_TM: u16 = 1;
         pub const TCA_PEDIT_PARMS: u16 = 2;
@@ -2431,7 +2448,7 @@ pub mod action {
 
         /// Pedit key (struct tc_pedit_key).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcPeditKey {
             /// Mask of bits to modify.
             pub mask: u32,
@@ -2468,7 +2485,7 @@ pub mod action {
 
         /// Pedit selector header (struct tc_pedit_sel without keys array).
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
         pub struct TcPeditSel {
             /// Common action fields (tc_gen).
             pub index: u32,

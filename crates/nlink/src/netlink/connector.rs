@@ -29,10 +29,7 @@
 //! }
 //! ```
 
-use winnow::binary::le_u32;
-use winnow::prelude::*;
-use winnow::token::take;
-use zerocopy::{Immutable, IntoBytes, KnownLayout};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use super::connection::Connection;
 use super::error::Result;
@@ -337,7 +334,7 @@ impl ProcEvent {
 
 /// cn_msg header structure (20 bytes).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, IntoBytes, Immutable, KnownLayout)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 struct CnMsg {
     /// Connector ID (idx, val)
     idx: u32,
@@ -358,25 +355,10 @@ impl CnMsg {
         <Self as IntoBytes>::as_bytes(self)
     }
 
-    /// Parse a cn_msg from bytes using winnow.
-    fn parse(input: &mut &[u8]) -> PResult<Self> {
-        let idx = le_u32.parse_next(input)?;
-        let val = le_u32.parse_next(input)?;
-        let seq = le_u32.parse_next(input)?;
-        let ack = le_u32.parse_next(input)?;
-        let len_bytes: &[u8] = take(2usize).parse_next(input)?;
-        let len = u16::from_ne_bytes(len_bytes.try_into().unwrap());
-        let flags_bytes: &[u8] = take(2usize).parse_next(input)?;
-        let flags = u16::from_ne_bytes(flags_bytes.try_into().unwrap());
-
-        Ok(Self {
-            idx,
-            val,
-            seq,
-            ack,
-            len,
-            flags,
-        })
+    /// Parse a cn_msg from bytes using zerocopy.
+    /// Returns the parsed struct and the remaining bytes.
+    fn from_bytes(data: &[u8]) -> Option<(&Self, &[u8])> {
+        Self::ref_from_prefix(data).ok()
     }
 }
 
@@ -500,16 +482,16 @@ impl Connection<Connector> {
         }
     }
 
-    /// Parse a process event from raw message data using winnow.
+    /// Parse a process event from raw message data.
     fn parse_proc_event(&self, data: &[u8]) -> Option<ProcEvent> {
         // Skip netlink header (16 bytes)
         if data.len() < NLMSG_HDRLEN {
             return None;
         }
-        let mut input = &data[NLMSG_HDRLEN..];
+        let after_nlhdr = &data[NLMSG_HDRLEN..];
 
-        // Parse cn_msg header
-        let _cn_msg = CnMsg::parse(&mut input).ok()?;
+        // Parse cn_msg header using zerocopy
+        let (_cn_msg, mut input) = CnMsg::from_bytes(after_nlhdr)?;
 
         // Parse proc_event header
         let header = ProcEventHeader::parse(&mut input).ok()?;
