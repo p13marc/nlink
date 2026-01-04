@@ -172,3 +172,6 @@ pub use netlink::messages::{
 
 // FDB types
 pub use netlink::fdb::{FdbEntry, FdbEntryBuilder};
+
+// Bridge VLAN types
+pub use netlink::bridge_vlan::{BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanFlags};

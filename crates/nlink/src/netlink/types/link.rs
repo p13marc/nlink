@@ -329,3 +329,119 @@ impl LinkStats64 {
         Self::read_from_prefix(data).map(|(r, _)| r).ok()
     }
 }
+
+// ============================================================================
+// Bridge VLAN types
+// ============================================================================
+
+/// IFLA_AF_SPEC attribute types for AF_BRIDGE.
+pub mod bridge_af {
+    /// Bridge flags
+    pub const IFLA_BRIDGE_FLAGS: u16 = 0;
+    /// Bridge mode
+    pub const IFLA_BRIDGE_MODE: u16 = 1;
+    /// VLAN info
+    pub const IFLA_BRIDGE_VLAN_INFO: u16 = 2;
+    /// VLAN tunnel info
+    pub const IFLA_BRIDGE_VLAN_TUNNEL_INFO: u16 = 3;
+    /// Multicast router
+    pub const IFLA_BRIDGE_MRP: u16 = 4;
+    /// CFM
+    pub const IFLA_BRIDGE_CFM: u16 = 5;
+    /// MST
+    pub const IFLA_BRIDGE_MST: u16 = 6;
+}
+
+/// Bridge VLAN info flags (BRIDGE_VLAN_INFO_*).
+pub mod bridge_vlan_flags {
+    /// Operate on bridge device (global VLAN)
+    pub const MASTER: u16 = 1 << 0;
+    /// This is the PVID (Port VLAN ID)
+    pub const PVID: u16 = 1 << 1;
+    /// Egress untagged (strip VLAN tag)
+    pub const UNTAGGED: u16 = 1 << 2;
+    /// Start of VLAN range
+    pub const RANGE_BEGIN: u16 = 1 << 3;
+    /// End of VLAN range
+    pub const RANGE_END: u16 = 1 << 4;
+    /// Global bridge VLAN entry
+    pub const BRENTRY: u16 = 1 << 5;
+    /// VLAN is only for ingress
+    pub const ONLY_OPTS: u16 = 1 << 6;
+}
+
+/// Bridge VLAN info structure (struct bridge_vlan_info).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct BridgeVlanInfo {
+    /// VLAN flags (BRIDGE_VLAN_INFO_*)
+    pub flags: u16,
+    /// VLAN ID (1-4094)
+    pub vid: u16,
+}
+
+impl BridgeVlanInfo {
+    /// Size of this structure.
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+
+    /// Create a new bridge VLAN info.
+    pub fn new(vid: u16) -> Self {
+        Self { flags: 0, vid }
+    }
+
+    /// Set the flags.
+    pub fn with_flags(mut self, flags: u16) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    /// Check if this is the PVID.
+    pub fn is_pvid(&self) -> bool {
+        self.flags & bridge_vlan_flags::PVID != 0
+    }
+
+    /// Check if egress is untagged.
+    pub fn is_untagged(&self) -> bool {
+        self.flags & bridge_vlan_flags::UNTAGGED != 0
+    }
+
+    /// Check if this is start of a range.
+    pub fn is_range_begin(&self) -> bool {
+        self.flags & bridge_vlan_flags::RANGE_BEGIN != 0
+    }
+
+    /// Check if this is end of a range.
+    pub fn is_range_end(&self) -> bool {
+        self.flags & bridge_vlan_flags::RANGE_END != 0
+    }
+
+    /// Convert to bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        <Self as IntoBytes>::as_bytes(self)
+    }
+
+    /// Parse from bytes.
+    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
+        Self::ref_from_prefix(data).map(|(r, _)| r).ok()
+    }
+}
+
+/// Extended filter mask for requesting additional link info.
+pub mod rtext_filter {
+    /// Request VLAN info
+    pub const VF: u32 = 1 << 0;
+    /// Request bridge VLAN info
+    pub const BRVLAN: u32 = 1 << 1;
+    /// Request compressed bridge VLAN info
+    pub const BRVLAN_COMPRESSED: u32 = 1 << 2;
+    /// Skip statistics
+    pub const SKIP_STATS: u32 = 1 << 3;
+    /// Request MRP info
+    pub const MRP: u32 = 1 << 4;
+    /// Request CFM info
+    pub const CFM_CONFIG: u32 = 1 << 5;
+    /// Request CFM status
+    pub const CFM_STATUS: u32 = 1 << 6;
+    /// Request MST info
+    pub const MST: u32 = 1 << 7;
+}
