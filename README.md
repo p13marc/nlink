@@ -1,5 +1,9 @@
 # nlink - Rust IP utilities
 
+[![Crates.io](https://img.shields.io/crates/v/nlink.svg)](https://crates.io/crates/nlink)
+[![Documentation](https://docs.rs/nlink/badge.svg)](https://docs.rs/nlink)
+[![License](https://img.shields.io/crates/l/nlink.svg)](https://github.com/p13marc/nlink#license)
+
 A modern Rust implementation of Linux network management tools, providing both a library crate and CLI binaries.
 
 ## Overview
@@ -18,13 +22,13 @@ nlink is a from-scratch implementation of Linux netlink-based network management
 
 ```toml
 # Core netlink functionality
-nlink = "0.5"
+nlink = "0.6"
 
 # With additional features
-nlink = { version = "0.5", features = ["sockdiag", "tuntap", "tc", "output"] }
+nlink = { version = "0.6", features = ["sockdiag", "tuntap", "tc", "output"] }
 
 # All features
-nlink = { version = "0.5", features = ["full"] }
+nlink = { version = "0.6", features = ["full"] }
 ```
 
 ### Features
