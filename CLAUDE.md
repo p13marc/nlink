@@ -386,6 +386,77 @@ conn.add_class_by_index(link.ifindex(), "1:0", "1:20", "htb",
     &["rate", "5mbit"]).await?;
 ```
 
+**Typed HTB class configuration (preferred):**
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::tc::{HtbQdiscConfig, HtbClassConfig};
+
+let conn = Connection::<Route>::new()?;
+
+// First add HTB qdisc
+let htb = HtbQdiscConfig::new().default_class(0x30).build();
+conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
+
+// Add root class (total bandwidth) - typed builder
+conn.add_class_config("eth0", "1:0", "1:1",
+    HtbClassConfig::new("1gbit")?
+        .ceil("1gbit")?
+        .build()
+).await?;
+
+// Add child classes with priorities
+conn.add_class_config("eth0", "1:1", "1:10",
+    HtbClassConfig::new("100mbit")?
+        .ceil("500mbit")?
+        .prio(1)              // High priority
+        .build()
+).await?;
+
+conn.add_class_config("eth0", "1:1", "1:20",
+    HtbClassConfig::new("200mbit")?
+        .ceil("800mbit")?
+        .prio(2)
+        .build()
+).await?;
+
+// Best effort class
+conn.add_class_config("eth0", "1:1", "1:30",
+    HtbClassConfig::new("50mbit")?
+        .prio(3)
+        .build()
+).await?;
+
+// Alternative: from_bps for programmatic rate values
+let rate_bps = 125_000_000; // 1 Gbps in bits/sec
+conn.add_class_config("eth0", "1:1", "1:40",
+    HtbClassConfig::from_bps(rate_bps)
+        .ceil_bps(rate_bps * 2)
+        .burst_bytes(64 * 1024)  // 64KB burst
+        .quantum(1500)
+        .mtu(9000)               // Jumbo frames
+        .build()
+).await?;
+
+// Change/replace also have typed variants
+conn.change_class_config("eth0", "1:1", "1:10",
+    HtbClassConfig::new("150mbit")?
+        .ceil("600mbit")?
+        .build()
+).await?;
+
+conn.replace_class_config("eth0", "1:1", "1:10",
+    HtbClassConfig::new("200mbit")?
+        .ceil("800mbit")?
+        .build()
+).await?;
+
+// Namespace-aware with *_by_index variants
+let link = conn.get_link_by_name("eth0").await?;
+conn.add_class_config_by_index(link.ifindex(), "1:1", "1:50",
+    HtbClassConfig::new("10mbit")?.build()
+).await?;
+```
+
 **Link statistics tracking:**
 ```rust
 use nlink::netlink::stats::{StatsSnapshot, StatsTracker};
