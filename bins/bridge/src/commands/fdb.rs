@@ -133,9 +133,10 @@ fn print_fdb_text(entries: &[FdbEntry], names: &std::collections::HashMap<u32, S
         let mut line = format!("{} dev {}", entry.mac_str(), dev);
 
         if let Some(master_idx) = entry.master
-            && let Some(master) = names.get(&master_idx) {
-                line.push_str(&format!(" master {}", master));
-            }
+            && let Some(master) = names.get(&master_idx)
+        {
+            line.push_str(&format!(" master {}", master));
+        }
 
         if let Some(vlan) = entry.vlan {
             line.push_str(&format!(" vlan {}", vlan));

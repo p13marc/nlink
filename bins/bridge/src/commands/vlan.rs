@@ -164,10 +164,7 @@ fn print_vlans_text(entries: &[BridgeVlanEntry], names: &std::collections::HashM
     println!("{:<12} vlan-id", "port");
 
     for (ifindex, vlans) in by_dev {
-        let dev = names
-            .get(&ifindex)
-            .map(|s| s.as_str())
-            .unwrap_or("?");
+        let dev = names.get(&ifindex).map(|s| s.as_str()).unwrap_or("?");
 
         for (i, vlan) in vlans.iter().enumerate() {
             let port_col = if i == 0 { dev } else { "" };
@@ -206,7 +203,10 @@ fn print_vlans_json(
     let json_output: Vec<serde_json::Value> = by_dev
         .into_iter()
         .map(|(ifindex, vlans)| {
-            let dev = names.get(&ifindex).cloned().unwrap_or_else(|| "?".to_string());
+            let dev = names
+                .get(&ifindex)
+                .cloned()
+                .unwrap_or_else(|| "?".to_string());
 
             let vlan_list: Vec<serde_json::Value> = vlans
                 .iter()

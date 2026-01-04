@@ -227,7 +227,12 @@ fn print_issue(issue: &Issue) {
         .as_ref()
         .map(|s| format!("[{}] ", s))
         .unwrap_or_default();
-    println!("  {} {}{}", severity_icon(issue.severity), iface, issue.message);
+    println!(
+        "  {} {}{}",
+        severity_icon(issue.severity),
+        iface,
+        issue.message
+    );
     if let Some(ref details) = issue.details {
         println!("      {}", details);
     }

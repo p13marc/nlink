@@ -109,7 +109,11 @@ pub async fn run(args: ShowArgs) -> Result<()> {
             Some(ShowField::PresharedKeys) => {
                 for peer in &device.peers {
                     if let Some(ref psk) = peer.preshared_key {
-                        println!("{}\t{}", base64_encode(&peer.public_key), base64_encode(psk));
+                        println!(
+                            "{}\t{}",
+                            base64_encode(&peer.public_key),
+                            base64_encode(psk)
+                        );
                     } else {
                         println!("{}\t(none)", base64_encode(&peer.public_key));
                     }
@@ -127,7 +131,8 @@ pub async fn run(args: ShowArgs) -> Result<()> {
             }
             Some(ShowField::AllowedIps) => {
                 for peer in &device.peers {
-                    let ips: Vec<String> = peer.allowed_ips.iter().map(|ip| ip.to_string()).collect();
+                    let ips: Vec<String> =
+                        peer.allowed_ips.iter().map(|ip| ip.to_string()).collect();
                     println!(
                         "{}\t{}",
                         base64_encode(&peer.public_key),
@@ -190,13 +195,15 @@ pub async fn run_conf(interface: &str) -> Result<()> {
 
     println!("[Interface]");
     if let Some(port) = device.listen_port
-        && port != 0 {
-            println!("ListenPort = {}", port);
-        }
+        && port != 0
+    {
+        println!("ListenPort = {}", port);
+    }
     if let Some(fwmark) = device.fwmark
-        && fwmark != 0 {
-            println!("FwMark = 0x{:x}", fwmark);
-        }
+        && fwmark != 0
+    {
+        println!("FwMark = 0x{:x}", fwmark);
+    }
     // Private key is not returned by kernel, so we can't output it
     // In the real wg tool, it requires PrivateKey to be set
 
@@ -215,9 +222,10 @@ pub async fn run_conf(interface: &str) -> Result<()> {
             println!("Endpoint = {}", endpoint);
         }
         if let Some(keepalive) = peer.persistent_keepalive
-            && keepalive > 0 {
-                println!("PersistentKeepalive = {}", keepalive);
-            }
+            && keepalive > 0
+        {
+            println!("PersistentKeepalive = {}", keepalive);
+        }
     }
 
     Ok(())
@@ -234,14 +242,16 @@ fn print_device(device: &WgDevice) {
     println!("  private key: (hidden)");
 
     if let Some(port) = device.listen_port
-        && port != 0 {
-            println!("  listening port: {}", port);
-        }
+        && port != 0
+    {
+        println!("  listening port: {}", port);
+    }
 
     if let Some(fwmark) = device.fwmark
-        && fwmark != 0 {
-            println!("  fwmark: 0x{:x}", fwmark);
-        }
+        && fwmark != 0
+    {
+        println!("  fwmark: 0x{:x}", fwmark);
+    }
 
     for peer in &device.peers {
         println!();
@@ -279,9 +289,10 @@ fn print_peer(peer: &WgPeer) {
     }
 
     if let Some(keepalive) = peer.persistent_keepalive
-        && keepalive > 0 {
-            println!("  persistent keepalive: every {} seconds", keepalive);
-        }
+        && keepalive > 0
+    {
+        println!("  persistent keepalive: every {} seconds", keepalive);
+    }
 }
 
 /// Print device in machine-readable dump format.
@@ -358,9 +369,10 @@ async fn get_wireguard_interfaces() -> Result<Vec<String>> {
     for link in links {
         if let Some(info) = link.link_info()
             && info.kind() == Some("wireguard")
-                && let Some(name) = link.name() {
-                    wg_interfaces.push(name.to_string());
-                }
+            && let Some(name) = link.name()
+        {
+            wg_interfaces.push(name.to_string());
+        }
     }
 
     Ok(wg_interfaces)

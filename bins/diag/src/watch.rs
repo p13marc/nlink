@@ -28,7 +28,10 @@ pub async fn run(args: WatchArgs, json: bool) -> Result<()> {
 
     let min_severity = args.min_severity.unwrap_or(Severity::Info);
 
-    eprintln!("Watching for network issues (min severity: {:?})...", min_severity);
+    eprintln!(
+        "Watching for network issues (min severity: {:?})...",
+        min_severity
+    );
     eprintln!("Press Ctrl+C to stop.");
     eprintln!();
 

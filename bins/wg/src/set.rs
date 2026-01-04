@@ -62,9 +62,10 @@ pub async fn run(args: SetArgs) -> Result<()> {
                 dev = dev.listen_port(port);
             }
             if let Some(ref path) = args.private_key
-                && let Ok(key) = read_key_file(path) {
-                    dev = dev.private_key(key);
-                }
+                && let Ok(key) = read_key_file(path)
+            {
+                dev = dev.private_key(key);
+            }
             if let Some(mark) = args.fwmark {
                 dev = dev.fwmark(mark);
             }
@@ -162,9 +163,9 @@ fn parse_allowed_ips(s: &str) -> Result<Vec<AllowedIp>> {
             continue;
         }
 
-        let (addr_str, prefix_str) = cidr.split_once('/').ok_or_else(|| {
-            Error::InvalidMessage(format!("Invalid CIDR notation: {}", cidr))
-        })?;
+        let (addr_str, prefix_str) = cidr
+            .split_once('/')
+            .ok_or_else(|| Error::InvalidMessage(format!("Invalid CIDR notation: {}", cidr)))?;
 
         let addr: IpAddr = addr_str.trim().parse().map_err(|e| {
             Error::InvalidMessage(format!("Invalid IP address '{}': {}", addr_str, e))

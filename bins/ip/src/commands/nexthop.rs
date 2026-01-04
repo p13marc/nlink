@@ -426,9 +426,10 @@ fn get_ifname(ifindex: u32) -> Option<String> {
         let idx_path = entry.path().join("ifindex");
         if let Ok(content) = std::fs::read_to_string(&idx_path)
             && let Ok(idx) = content.trim().parse::<u32>()
-                && idx == ifindex {
-                    return Some(name);
-                }
+            && idx == ifindex
+        {
+            return Some(name);
+        }
     }
     None
 }
