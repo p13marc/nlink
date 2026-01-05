@@ -36,13 +36,15 @@ async fn main() -> nlink::Result<()> {
         println!("  RX:         {}", rx_max);
     }
     if let Some(rx_mini_max) = rings.rx_mini_max
-        && rx_mini_max > 0 {
-            println!("  RX Mini:    {}", rx_mini_max);
-        }
+        && rx_mini_max > 0
+    {
+        println!("  RX Mini:    {}", rx_mini_max);
+    }
     if let Some(rx_jumbo_max) = rings.rx_jumbo_max
-        && rx_jumbo_max > 0 {
-            println!("  RX Jumbo:   {}", rx_jumbo_max);
-        }
+        && rx_jumbo_max > 0
+    {
+        println!("  RX Jumbo:   {}", rx_jumbo_max);
+    }
     if let Some(tx_max) = rings.tx_max {
         println!("  TX:         {}", tx_max);
     }
@@ -53,13 +55,15 @@ async fn main() -> nlink::Result<()> {
         println!("  RX:         {}", rx);
     }
     if let Some(rx_mini) = rings.rx_mini
-        && rx_mini > 0 {
-            println!("  RX Mini:    {}", rx_mini);
-        }
+        && rx_mini > 0
+    {
+        println!("  RX Mini:    {}", rx_mini);
+    }
     if let Some(rx_jumbo) = rings.rx_jumbo
-        && rx_jumbo > 0 {
-            println!("  RX Jumbo:   {}", rx_jumbo);
-        }
+        && rx_jumbo > 0
+    {
+        println!("  RX Jumbo:   {}", rx_jumbo);
+    }
     if let Some(tx) = rings.tx {
         println!("  TX:         {}", tx);
     }
