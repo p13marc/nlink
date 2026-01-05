@@ -2,6 +2,105 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-01-05
+
+### Added
+
+#### Ethtool Configuration via Generic Netlink (Linux 5.6+)
+Complete ethtool netlink interface for querying and configuring network device settings:
+
+- `Connection<Ethtool>` for ethtool operations
+  - `Connection::<Ethtool>::new_async()` constructor with GENL family resolution
+  - `conn.family_id()` to access resolved GENL family ID
+  - `conn.monitor_group_id()` to access monitor multicast group ID
+
+- **Link State** (`get_link_state()`)
+  - Carrier detection status
+  - Signal Quality Index (SQI) for automotive Ethernet
+  - Extended link state information
+
+- **Link Info** (`get_link_info()`)
+  - Port type (TP, AUI, MII, FIBRE, BNC, etc.)
+  - PHY address
+  - MDI-X status and control
+  - Transceiver type
+
+- **Link Modes** (`get_link_modes()`, `set_link_modes()`)
+  - Speed, duplex, autonegotiation
+  - Supported/advertised/peer link modes
+  - Lane count and master/slave configuration
+  - `LinkModesBuilder` for configuration
+
+- **Features** (`get_features()`, `set_features()`)
+  - Query hardware, wanted, active, and nochange feature sets
+  - Bitset parsing for feature names
+  - `FeaturesBuilder` for enabling/disabling features
+
+- **Ring Buffers** (`get_rings()`, `set_rings()`)
+  - RX/TX ring sizes and maximums
+  - RX mini/jumbo ring support
+  - Buffer length and CQE size
+  - TX/RX push mode
+  - `RingsBuilder` for configuration
+
+- **Channels** (`get_channels()`, `set_channels()`)
+  - RX/TX/combined/other queue counts
+  - Maximum values for each type
+  - `ChannelsBuilder` for configuration
+
+- **Coalesce** (`get_coalesce()`, `set_coalesce()`)
+  - Interrupt coalescing parameters (rx/tx usecs, max frames)
+  - Adaptive coalescing settings
+  - Packet rate thresholds
+  - `CoalesceBuilder` for configuration
+
+- **Pause** (`get_pause()`, `set_pause()`)
+  - Flow control autonegotiation
+  - RX/TX pause frame settings
+  - `PauseBuilder` for configuration
+
+- **Event Monitoring** (implements `EventSource` trait)
+  - `conn.subscribe()` to join monitor multicast group
+  - `conn.events()` / `conn.into_events()` for Stream-based monitoring
+  - `EthtoolEvent` enum with variants for all setting types
+  - Compatible with `tokio_stream::StreamExt` and `StreamMap`
+
+- **Types and Enums**
+  - `LinkState`, `LinkInfo`, `LinkModes`, `Features`, `Rings`, `Channels`, `Coalesce`, `Pause`
+  - `Duplex` (Half, Full, Unknown)
+  - `Port` (TP, AUI, MII, FIBRE, BNC, DA, None, Other)
+  - `Transceiver` (Internal, External, Unknown)
+  - `MdiX` (Auto, On, Off, Unknown)
+  - `LinkExtState` for extended link down reasons
+  - `EthtoolEvent` for event monitoring
+
+- **Bitset Support**
+  - `EthtoolBitset` for parsing ethtool bitsets
+  - Compact and verbose bitset format support
+  - Named bit lookup for features and link modes
+
+#### New Binary: nlink-ethtool
+Proof-of-concept ethtool utility demonstrating the library:
+
+- `nlink-ethtool <interface>` - Show all settings (like `ethtool`)
+- `nlink-ethtool features <interface>` - Show device features
+- `nlink-ethtool rings <interface>` - Show ring buffer sizes
+- `nlink-ethtool channels <interface>` - Show channel counts
+- `nlink-ethtool coalesce <interface>` - Show coalescing parameters
+- `nlink-ethtool pause <interface>` - Show pause settings
+- `nlink-ethtool monitor` - Monitor ethtool events
+
+#### New Examples
+- `ethtool_link_state` - Query link state and carrier detection
+- `ethtool_features` - List device features (offloads)
+- `ethtool_rings` - Query ring buffer configuration
+- `ethtool_monitor` - Monitor ethtool events in real-time
+
+### Changed
+
+- `Ethtool` protocol now implements `EventSource` trait for consistent event monitoring API
+- Event monitoring uses `subscribe()` + `events()` pattern (consistent with Route, KobjectUevent, etc.)
+
 ## [0.6.0] - 2026-01-04
 
 ### Added
