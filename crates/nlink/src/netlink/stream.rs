@@ -327,7 +327,7 @@ use super::events::NetworkEvent;
 use super::message::NlMsgType;
 use super::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage};
 use super::parse::FromNetlink;
-use super::protocol::{Connector, KobjectUevent, Route, SELinux};
+use super::protocol::{Connector, Ethtool, KobjectUevent, Route, SELinux};
 use super::selinux::SELinuxEvent;
 use super::uevent::Uevent;
 
@@ -509,6 +509,287 @@ fn parse_selinux_event(data: &[u8]) -> Option<SELinuxEvent> {
             Some(SELinuxEvent::PolicyLoad { seqno: msg.seqno })
         }
         _ => None,
+    }
+}
+
+// Ethtool protocol events
+impl private::Sealed for Ethtool {}
+
+impl EventSource for Ethtool {
+    type Event = super::genl::ethtool::EthtoolEvent;
+
+    fn parse_events(data: &[u8]) -> Vec<Self::Event> {
+        parse_ethtool_events(data)
+    }
+}
+
+fn parse_ethtool_events(data: &[u8]) -> Vec<super::genl::ethtool::EthtoolEvent> {
+    use super::genl::{GENL_HDRLEN, GenlMsgHdr};
+
+    let mut events = Vec::new();
+
+    for msg_result in MessageIter::new(data) {
+        let Ok((header, payload)) = msg_result else {
+            continue;
+        };
+
+        if header.is_error() || header.is_done() {
+            continue;
+        }
+
+        // Parse GENL header
+        if payload.len() < GENL_HDRLEN {
+            continue;
+        }
+
+        let Some(genl_hdr) = GenlMsgHdr::from_bytes(payload) else {
+            continue;
+        };
+
+        let cmd = genl_hdr.cmd;
+        let attrs_data = &payload[GENL_HDRLEN..];
+
+        if let Some(event) = parse_ethtool_event(cmd, attrs_data) {
+            events.push(event);
+        }
+    }
+
+    events
+}
+
+fn parse_ethtool_event(cmd: u8, data: &[u8]) -> Option<super::genl::ethtool::EthtoolEvent> {
+    use super::attr::AttrIter;
+    use super::genl::ethtool::{
+        Channels, Coalesce, EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolEvent,
+        EthtoolFeaturesAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr,
+        EthtoolLinkstateAttr, EthtoolPauseAttr, EthtoolRingsAttr, Features, LinkExtState, LinkInfo,
+        LinkModes, LinkState, Pause, Rings,
+    };
+    use super::genl::ethtool::{Duplex, MdiX, Port, Transceiver};
+
+    // Helper to parse header
+    fn parse_header(data: &[u8]) -> (Option<String>, Option<u32>) {
+        let mut ifname = None;
+        let mut ifindex = None;
+        for (attr_type, payload) in AttrIter::new(data) {
+            if attr_type == EthtoolHeaderAttr::DevName as u16 {
+                ifname = Some(
+                    std::str::from_utf8(payload)
+                        .unwrap_or("")
+                        .trim_end_matches('\0')
+                        .to_string(),
+                );
+            } else if attr_type == EthtoolHeaderAttr::DevIndex as u16 && payload.len() >= 4 {
+                ifindex = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+        }
+        (ifname, ifindex)
+    }
+
+    // Ethtool notifications use the same command IDs as their GET counterparts
+    match cmd {
+        c if c == EthtoolCmd::LinkinfoGet as u8 => {
+            let mut info = LinkInfo::default();
+            for (attr_type, payload) in AttrIter::new(data) {
+                match attr_type {
+                    t if t == EthtoolLinkinfoAttr::Header as u16 => {
+                        let (name, idx) = parse_header(payload);
+                        info.ifname = name;
+                        info.ifindex = idx;
+                    }
+                    t if t == EthtoolLinkinfoAttr::Port as u16 && !payload.is_empty() => {
+                        info.port = Some(Port::from_u8(payload[0]));
+                    }
+                    t if t == EthtoolLinkinfoAttr::Phyaddr as u16 && !payload.is_empty() => {
+                        info.phyaddr = Some(payload[0]);
+                    }
+                    t if t == EthtoolLinkinfoAttr::TpMdiCtrl as u16 && !payload.is_empty() => {
+                        info.tp_mdix_ctrl = Some(MdiX::from_u8(payload[0]));
+                    }
+                    t if t == EthtoolLinkinfoAttr::TpMdix as u16 && !payload.is_empty() => {
+                        info.tp_mdix = Some(MdiX::from_u8(payload[0]));
+                    }
+                    t if t == EthtoolLinkinfoAttr::Transceiver as u16 && !payload.is_empty() => {
+                        info.transceiver = Some(Transceiver::from_u8(payload[0]));
+                    }
+                    _ => {}
+                }
+            }
+            Some(EthtoolEvent::LinkInfoChanged {
+                ifname: info.ifname.clone(),
+                info,
+            })
+        }
+        c if c == EthtoolCmd::LinkmodesGet as u8 => {
+            let mut modes = LinkModes::default();
+            for (attr_type, payload) in AttrIter::new(data) {
+                match attr_type {
+                    t if t == EthtoolLinkmodesAttr::Header as u16 => {
+                        let (name, idx) = parse_header(payload);
+                        modes.ifname = name;
+                        modes.ifindex = idx;
+                    }
+                    t if t == EthtoolLinkmodesAttr::Autoneg as u16 && !payload.is_empty() => {
+                        modes.autoneg = payload[0] != 0;
+                    }
+                    t if t == EthtoolLinkmodesAttr::Speed as u16 && payload.len() >= 4 => {
+                        let speed = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+                        if speed != 0xFFFFFFFF {
+                            modes.speed = Some(speed);
+                        }
+                    }
+                    t if t == EthtoolLinkmodesAttr::Duplex as u16 && !payload.is_empty() => {
+                        modes.duplex = Some(Duplex::from_u8(payload[0]));
+                    }
+                    _ => {}
+                }
+            }
+            Some(EthtoolEvent::LinkModesChanged {
+                ifname: modes.ifname.clone(),
+                modes,
+            })
+        }
+        c if c == EthtoolCmd::LinkstateGet as u8 => {
+            // LinkState doesn't have a dedicated NTF, but we handle it anyway
+            let mut state = LinkState::default();
+            for (attr_type, payload) in AttrIter::new(data) {
+                match attr_type {
+                    t if t == EthtoolLinkstateAttr::Header as u16 => {
+                        let (name, idx) = parse_header(payload);
+                        state.ifname = name;
+                        state.ifindex = idx;
+                    }
+                    t if t == EthtoolLinkstateAttr::Link as u16 && !payload.is_empty() => {
+                        state.link = payload[0] != 0;
+                    }
+                    t if t == EthtoolLinkstateAttr::Sqi as u16 && payload.len() >= 4 => {
+                        state.sqi = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                    }
+                    t if t == EthtoolLinkstateAttr::SqiMax as u16 && payload.len() >= 4 => {
+                        state.sqi_max = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                    }
+                    t if t == EthtoolLinkstateAttr::ExtState as u16 && !payload.is_empty() => {
+                        state.ext_state = Some(LinkExtState::from_u8(payload[0]));
+                    }
+                    _ => {}
+                }
+            }
+            Some(EthtoolEvent::LinkStateChanged {
+                ifname: state.ifname.clone(),
+                state,
+            })
+        }
+        c if c == EthtoolCmd::FeaturesGet as u8 => {
+            let mut features = Features::default();
+            for (attr_type, payload) in AttrIter::new(data) {
+                if attr_type == EthtoolFeaturesAttr::Header as u16 {
+                    let (name, idx) = parse_header(payload);
+                    features.ifname = name;
+                    features.ifindex = idx;
+                }
+                // Note: full bitset parsing would require more complex handling
+            }
+            Some(EthtoolEvent::FeaturesChanged {
+                ifname: features.ifname.clone(),
+                features,
+            })
+        }
+        c if c == EthtoolCmd::RingsGet as u8 => {
+            let mut rings = Rings::default();
+            for (attr_type, payload) in AttrIter::new(data) {
+                match attr_type {
+                    t if t == EthtoolRingsAttr::Header as u16 => {
+                        let (name, idx) = parse_header(payload);
+                        rings.ifname = name;
+                        rings.ifindex = idx;
+                    }
+                    t if t == EthtoolRingsAttr::Rx as u16 && payload.len() >= 4 => {
+                        rings.rx = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                    }
+                    t if t == EthtoolRingsAttr::Tx as u16 && payload.len() >= 4 => {
+                        rings.tx = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                    }
+                    _ => {}
+                }
+            }
+            Some(EthtoolEvent::RingsChanged {
+                ifname: rings.ifname.clone(),
+                rings,
+            })
+        }
+        c if c == EthtoolCmd::ChannelsGet as u8 => {
+            let mut channels = Channels::default();
+            for (attr_type, payload) in AttrIter::new(data) {
+                match attr_type {
+                    t if t == EthtoolChannelsAttr::Header as u16 => {
+                        let (name, idx) = parse_header(payload);
+                        channels.ifname = name;
+                        channels.ifindex = idx;
+                    }
+                    t if t == EthtoolChannelsAttr::CombinedCount as u16 && payload.len() >= 4 => {
+                        channels.combined_count =
+                            Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                    }
+                    _ => {}
+                }
+            }
+            Some(EthtoolEvent::ChannelsChanged {
+                ifname: channels.ifname.clone(),
+                channels,
+            })
+        }
+        c if c == EthtoolCmd::CoalesceGet as u8 => {
+            let mut coalesce = Coalesce::default();
+            for (attr_type, payload) in AttrIter::new(data) {
+                match attr_type {
+                    t if t == EthtoolCoalesceAttr::Header as u16 => {
+                        let (name, idx) = parse_header(payload);
+                        coalesce.ifname = name;
+                        coalesce.ifindex = idx;
+                    }
+                    t if t == EthtoolCoalesceAttr::RxUsecs as u16 && payload.len() >= 4 => {
+                        coalesce.rx_usecs =
+                            Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                    }
+                    t if t == EthtoolCoalesceAttr::TxUsecs as u16 && payload.len() >= 4 => {
+                        coalesce.tx_usecs =
+                            Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                    }
+                    _ => {}
+                }
+            }
+            Some(EthtoolEvent::CoalesceChanged {
+                ifname: coalesce.ifname.clone(),
+                coalesce,
+            })
+        }
+        c if c == EthtoolCmd::PauseGet as u8 => {
+            let mut pause = Pause::default();
+            for (attr_type, payload) in AttrIter::new(data) {
+                match attr_type {
+                    t if t == EthtoolPauseAttr::Header as u16 => {
+                        let (name, idx) = parse_header(payload);
+                        pause.ifname = name;
+                        pause.ifindex = idx;
+                    }
+                    t if t == EthtoolPauseAttr::Autoneg as u16 && !payload.is_empty() => {
+                        pause.autoneg = Some(payload[0] != 0);
+                    }
+                    t if t == EthtoolPauseAttr::Rx as u16 && !payload.is_empty() => {
+                        pause.rx = Some(payload[0] != 0);
+                    }
+                    t if t == EthtoolPauseAttr::Tx as u16 && !payload.is_empty() => {
+                        pause.tx = Some(payload[0] != 0);
+                    }
+                    _ => {}
+                }
+            }
+            Some(EthtoolEvent::PauseChanged {
+                ifname: pause.ifname.clone(),
+                pause,
+            })
+        }
+        _ => Some(EthtoolEvent::Unknown { cmd }),
     }
 }
 

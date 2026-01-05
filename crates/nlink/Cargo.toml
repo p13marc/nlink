@@ -149,6 +149,22 @@ required-features = ["sockdiag"]
 name = "genl_wireguard"
 path = "examples/genl/wireguard.rs"
 
+[[example]]
+name = "ethtool_link_state"
+path = "examples/genl/ethtool_link_state.rs"
+
+[[example]]
+name = "ethtool_features"
+path = "examples/genl/ethtool_features.rs"
+
+[[example]]
+name = "ethtool_rings"
+path = "examples/genl/ethtool_rings.rs"
+
+[[example]]
+name = "ethtool_monitor"
+path = "examples/genl/ethtool_monitor.rs"
+
 # Uevent examples (device hotplug)
 [[example]]
 name = "uevent_device_monitor"

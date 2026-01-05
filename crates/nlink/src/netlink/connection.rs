@@ -124,6 +124,11 @@ impl<P: ProtocolState> Connection<P> {
         &self.socket
     }
 
+    /// Get a mutable reference to the underlying socket.
+    pub(crate) fn socket_mut(&mut self) -> &mut NetlinkSocket {
+        &mut self.socket
+    }
+
     /// Get the protocol state.
     pub fn state(&self) -> &P {
         &self.state

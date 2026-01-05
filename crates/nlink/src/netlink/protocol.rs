@@ -260,6 +260,24 @@ impl ProtocolState for Mptcp {
     const PROTOCOL: Protocol = Protocol::Generic;
 }
 
+/// Ethtool protocol state.
+///
+/// Used for querying and configuring network device settings via Generic Netlink.
+/// Contains the resolved ethtool family ID and monitor group ID.
+#[derive(Debug, Default)]
+pub struct Ethtool {
+    /// Resolved ethtool GENL family ID.
+    pub(crate) family_id: u16,
+    /// Monitor multicast group ID (for event notifications).
+    pub(crate) monitor_group_id: Option<u32>,
+}
+
+impl private::Sealed for Ethtool {}
+
+impl ProtocolState for Ethtool {
+    const PROTOCOL: Protocol = Protocol::Generic;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +306,7 @@ mod tests {
         assert_eq!(Wireguard::PROTOCOL, Protocol::Generic);
         assert_eq!(Macsec::PROTOCOL, Protocol::Generic);
         assert_eq!(Mptcp::PROTOCOL, Protocol::Generic);
+        assert_eq!(Ethtool::PROTOCOL, Protocol::Generic);
         assert_eq!(KobjectUevent::PROTOCOL, Protocol::KobjectUevent);
         assert_eq!(Connector::PROTOCOL, Protocol::Connector);
         assert_eq!(Netfilter::PROTOCOL, Protocol::Netfilter);

@@ -1,0 +1,13 @@
+[package]
+name = "nlink-ethtool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Proof-of-concept ethtool utility using nlink"
+
+[dependencies]
+nlink = { path = "../../crates/nlink", features = ["output"] }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-stream = "0.1"

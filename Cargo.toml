@@ -9,6 +9,7 @@ members = [
     "bins/wg",
     "bins/diag",
     "bins/config",
+    "bins/ethtool",
 ]
 
 [workspace.package]

@@ -454,6 +454,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nlink-ethtool"
+version = "0.6.0"
+dependencies = [
+ "clap",
+ "nlink",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "nlink-ip"
 version = "0.6.0"
 dependencies = [

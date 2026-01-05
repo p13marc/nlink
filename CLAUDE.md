@@ -109,6 +109,11 @@ crates/nlink/src/
         mod.rs        # MPTCP PM constants
         types.rs      # MptcpEndpoint, MptcpLimits, MptcpFlags, MptcpEndpointBuilder
         connection.rs # Connection<Mptcp> API
+      ethtool/        # Ethtool GENL configuration (Linux 5.6+)
+        mod.rs        # Ethtool constants and attribute enums
+        types.rs      # LinkState, LinkModes, Features, Rings, Channels, builders
+        bitset.rs     # EthtoolBitset parsing (compact and verbose formats)
+        connection.rs # Connection<Ethtool> API
     messages/         # Strongly-typed message structs
     types/            # RTNetlink message structures (link, addr, route, neigh, rule, tc)
   util/               # Shared utilities (always available)
@@ -2186,6 +2191,129 @@ conn.announce_addr(
 
 // Remove an address announcement
 conn.remove_addr(connection_token, 2).await?;
+```
+
+**Ethtool configuration via Generic Netlink (Linux 5.6+):**
+```rust
+use nlink::netlink::{Connection, Ethtool};
+
+// Create an ethtool connection (async due to GENL family resolution)
+let conn = Connection::<Ethtool>::new_async().await?;
+
+// Get link state (carrier detection)
+let state = conn.get_link_state("eth0").await?;
+println!("Link detected: {}", state.link);
+if let Some(sqi) = state.sqi {
+    println!("Signal quality: {}/{}", sqi, state.sqi_max.unwrap_or(100));
+}
+
+// Get link modes (speed, duplex, autonegotiation)
+let modes = conn.get_link_modes("eth0").await?;
+println!("Speed: {:?} Mb/s", modes.speed);
+println!("Duplex: {:?}", modes.duplex);
+println!("Autoneg: {}", modes.autoneg);
+
+// Show supported/advertised modes
+for mode in modes.supported_modes() {
+    println!("Supported: {}", mode);
+}
+
+// Get link info (port type, transceiver)
+let info = conn.get_link_info("eth0").await?;
+println!("Port: {:?}", info.port);
+println!("Transceiver: {:?}", info.transceiver);
+
+// Get device features (offloads)
+let features = conn.get_features("eth0").await?;
+println!("TSO enabled: {}", features.is_active("tx-tcp-segmentation"));
+println!("GRO enabled: {}", features.is_active("rx-gro"));
+
+// List all features
+for (name, enabled) in features.iter() {
+    println!("{}: {}", name, if enabled { "on" } else { "off" });
+}
+
+// Get ring buffer sizes
+let rings = conn.get_rings("eth0").await?;
+println!("RX: {:?} (max {:?})", rings.rx, rings.rx_max);
+println!("TX: {:?} (max {:?})", rings.tx, rings.tx_max);
+
+// Get channel counts (RX/TX queues)
+let channels = conn.get_channels("eth0").await?;
+println!("Combined: {:?} (max {:?})", channels.combined_count, channels.combined_max);
+
+// Set link modes (requires root)
+use nlink::netlink::genl::ethtool::Duplex;
+conn.set_link_modes("eth0", |m| {
+    m.autoneg(false)
+     .speed(1000)
+     .duplex(Duplex::Full)
+}).await?;
+
+// Set ring buffer sizes (requires root)
+conn.set_rings("eth0", |r| {
+    r.rx(4096).tx(4096)
+}).await?;
+
+// Set channel counts (requires root)
+conn.set_channels("eth0", |c| {
+    c.combined(4)
+}).await?;
+
+// Get interrupt coalescing settings
+let coalesce = conn.get_coalesce("eth0").await?;
+println!("RX usecs: {:?}", coalesce.rx_usecs);
+println!("TX usecs: {:?}", coalesce.tx_usecs);
+println!("Adaptive RX: {:?}", coalesce.use_adaptive_rx);
+
+// Set coalesce parameters (requires root)
+conn.set_coalesce("eth0", |c| {
+    c.rx_usecs(100)
+     .tx_usecs(100)
+     .use_adaptive_rx(true)
+}).await?;
+
+// Get pause frame settings
+let pause = conn.get_pause("eth0").await?;
+println!("Autoneg: {}", pause.autoneg);
+println!("RX pause: {}", pause.rx);
+println!("TX pause: {}", pause.tx);
+
+// Set pause parameters (requires root)
+conn.set_pause("eth0", |p| {
+    p.autoneg(true)
+     .rx(true)
+     .tx(true)
+}).await?;
+
+// Monitor ethtool events (link changes, setting changes)
+use nlink::netlink::genl::ethtool::EthtoolEvent;
+use tokio_stream::StreamExt;
+
+let mut conn = Connection::<Ethtool>::new_async().await?;
+conn.subscribe()?;
+
+let mut events = conn.events();
+while let Some(result) = events.next().await {
+    match result? {
+        EthtoolEvent::LinkStateChanged { ifname, state } => {
+            println!("[{}] Link: {}", ifname.unwrap_or_default(), state.link);
+        }
+        EthtoolEvent::LinkModesChanged { ifname, modes } => {
+            println!("[{}] Speed: {:?} Mb/s", ifname.unwrap_or_default(), modes.speed);
+        }
+        EthtoolEvent::FeaturesChanged { ifname, features } => {
+            println!("[{}] Features changed", ifname.unwrap_or_default());
+        }
+        EthtoolEvent::CoalesceChanged { ifname, coalesce } => {
+            println!("[{}] Coalesce: rx_usecs={:?}", ifname.unwrap_or_default(), coalesce.rx_usecs);
+        }
+        EthtoolEvent::PauseChanged { ifname, pause } => {
+            println!("[{}] Pause: rx={:?} tx={:?}", ifname.unwrap_or_default(), pause.rx, pause.tx);
+        }
+        _ => {}
+    }
+}
 ```
 
 **Device hotplug events (udev-style) via KobjectUevent:**
