@@ -1237,13 +1237,12 @@ async fn resolve_ethtool_family(socket: &NetlinkSocket) -> Result<(u16, Option<u
                                     .trim_end_matches('\0')
                                     .to_string(),
                             );
-                        } else if grp_attr_type == CtrlAttrMcastGrp::Id as u16 {
-                            if grp_attr_payload.len() >= 4 {
+                        } else if grp_attr_type == CtrlAttrMcastGrp::Id as u16
+                            && grp_attr_payload.len() >= 4 {
                                 grp_id = Some(u32::from_ne_bytes(
                                     grp_attr_payload[..4].try_into().unwrap(),
                                 ));
                             }
-                        }
                     }
 
                     if grp_name.as_deref() == Some(ETHTOOL_MCGRP_MONITOR) {
