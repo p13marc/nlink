@@ -1086,30 +1086,47 @@ loop {
 }
 ```
 
-**Namespace-aware TC operations (using ifindex):**
+**Namespace-aware operations (using ifindex):**
+
+For namespace operations, use `*_by_index` methods to avoid reading `/sys/class/net/` from the host namespace:
+
 ```rust
 use nlink::netlink::{Connection, Route, namespace, tc::NetemConfig};
+use nlink::netlink::addr::Ipv4Address;
 use std::time::Duration;
+use std::net::Ipv4Addr;
 
-// For namespace operations, use *_by_index methods to avoid
-// reading /sys/class/net/ from the host namespace
 let conn: Connection<Route> = namespace::connection_for("myns")?;
-let link = conn.get_link_by_name("eth0").await?;
+let link = conn.get_link_by_name("eth0").await?.unwrap();
+let ifindex = link.ifindex();
 
+// TC operations
 let netem = NetemConfig::new()
     .delay(Duration::from_millis(100))
-    .jitter(Duration::from_millis(10))
-    .loss(1.0)
     .build();
+conn.add_qdisc_by_index(ifindex, netem).await?;
 
-// Use ifindex instead of device name
-conn.add_qdisc_by_index(link.ifindex(), netem).await?;
+// Address operations
+conn.add_address_by_index(ifindex, "10.0.0.1".parse()?, 24).await?;
+conn.replace_address_by_index(ifindex, "10.0.0.1".parse()?, 24).await?;
+
+// Or use typed builders with with_index constructors
+conn.add_address(Ipv4Address::with_index(ifindex, Ipv4Addr::new(10, 0, 0, 2), 24)).await?;
+
+// Neighbor operations
+conn.add_neighbor_v4_by_index(ifindex, Ipv4Addr::new(10, 0, 0, 100), [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]).await?;
+
+// Link operations - methods accept InterfaceRef (name or index)
+use nlink::netlink::InterfaceRef;
+conn.set_link_up(InterfaceRef::Index(ifindex)).await?;
+conn.set_link_mtu(InterfaceRef::Index(ifindex), 9000).await?;
+conn.set_link_master(InterfaceRef::Index(ifindex), InterfaceRef::Index(br_ifindex)).await?;
 
 // All TC methods have *_by_index variants:
-// - add_qdisc_by_index / add_qdisc_by_index_full
-// - del_qdisc_by_index / del_qdisc_by_index_full
-// - replace_qdisc_by_index / replace_qdisc_by_index_full
-// - change_qdisc_by_index / change_qdisc_by_index_full
+// - add_qdisc_by_index / del_qdisc_by_index / replace_qdisc_by_index
+// - add_class_by_index / del_class_by_index
+// - add_filter_by_index / del_filter_by_index
+// - get_qdiscs_by_index / get_classes_by_index / get_filters_by_index
 ```
 
 **Adding TC filters:**
