@@ -253,7 +253,7 @@ async fn test_config_apply_creates_address() -> Result<()> {
     assert!(result.is_success());
 
     // Verify address was added
-    let addrs = conn.get_addresses_for("dummy0").await?;
+    let addrs = conn.get_addresses_by_name("dummy0").await?;
     assert!(!addrs.is_empty());
     Ok(())
 }
@@ -370,7 +370,7 @@ async fn test_config_apply_qdisc() -> Result<()> {
     assert!(result.is_success());
 
     // Verify qdisc was added
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     let netem = qdiscs.iter().find(|q| q.kind() == Some("netem"));
     assert!(netem.is_some());
     Ok(())

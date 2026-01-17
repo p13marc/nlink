@@ -656,16 +656,15 @@ impl Connection<Route> {
         self.dump_typed(NlMsgType::RTM_GETADDR).await
     }
 
-    /// Get IP addresses for a specific interface by name.
-    pub async fn get_addresses_for(&self, ifname: &str) -> Result<Vec<AddressMessage>> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
-        let addresses = self.get_addresses().await?;
-        Ok(addresses
-            .into_iter()
-            .filter(|a| a.ifindex() == ifindex)
-            .collect())
+    /// Get IP addresses for a specific interface.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn get_addresses_by_name(
+        &self,
+        iface: impl Into<InterfaceRef>,
+    ) -> Result<Vec<AddressMessage>> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.get_addresses_by_index(ifindex).await
     }
 
     /// Get IP addresses for a specific interface by index.
@@ -835,15 +834,16 @@ impl Connection<Route> {
     }
 
     /// Get neighbor entries for a specific interface.
-    pub async fn get_neighbors_for(&self, ifname: &str) -> Result<Vec<NeighborMessage>> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
-        let neighbors = self.get_neighbors().await?;
-        Ok(neighbors
-            .into_iter()
-            .filter(|n| n.ifindex() == ifindex)
-            .collect())
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
+    /// See also [`get_neighbors_by_index`](Self::get_neighbors_by_index) in the neighbor module.
+    pub async fn get_neighbors_by_name(
+        &self,
+        iface: impl Into<InterfaceRef>,
+    ) -> Result<Vec<NeighborMessage>> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.get_neighbors_by_index(ifindex).await
     }
 
     /// Get all routing rules.
@@ -959,10 +959,18 @@ impl Connection<Route> {
     }
 
     /// Get qdiscs for a specific interface.
-    pub async fn get_qdiscs_for(&self, ifname: &str) -> Result<Vec<TcMessage>> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn get_qdiscs_by_name(
+        &self,
+        iface: impl Into<InterfaceRef>,
+    ) -> Result<Vec<TcMessage>> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.get_qdiscs_by_index(ifindex).await
+    }
+
+    /// Get qdiscs for a specific interface by index.
+    pub async fn get_qdiscs_by_index(&self, ifindex: u32) -> Result<Vec<TcMessage>> {
         let qdiscs = self.get_qdiscs().await?;
         Ok(qdiscs
             .into_iter()
@@ -976,10 +984,18 @@ impl Connection<Route> {
     }
 
     /// Get TC classes for a specific interface.
-    pub async fn get_classes_for(&self, ifname: &str) -> Result<Vec<TcMessage>> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn get_classes_by_name(
+        &self,
+        iface: impl Into<InterfaceRef>,
+    ) -> Result<Vec<TcMessage>> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.get_classes_by_index(ifindex).await
+    }
+
+    /// Get TC classes for a specific interface by index.
+    pub async fn get_classes_by_index(&self, ifindex: u32) -> Result<Vec<TcMessage>> {
         let classes = self.get_classes().await?;
         Ok(classes
             .into_iter()
@@ -993,10 +1009,18 @@ impl Connection<Route> {
     }
 
     /// Get TC filters for a specific interface.
-    pub async fn get_filters_for(&self, ifname: &str) -> Result<Vec<TcMessage>> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn get_filters_by_name(
+        &self,
+        iface: impl Into<InterfaceRef>,
+    ) -> Result<Vec<TcMessage>> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.get_filters_by_index(ifindex).await
+    }
+
+    /// Get TC filters for a specific interface by index.
+    pub async fn get_filters_by_index(&self, ifindex: u32) -> Result<Vec<TcMessage>> {
         let filters = self.get_filters().await?;
         Ok(filters
             .into_iter()
@@ -1140,16 +1164,21 @@ impl Connection<Route> {
     ///
     /// Returns `None` if no root qdisc is configured.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
-    /// if let Some(root) = conn.get_root_qdisc_for("eth0").await? {
+    /// if let Some(root) = conn.get_root_qdisc_by_name("eth0").await? {
     ///     println!("Root qdisc: {}", root.kind().unwrap_or("?"));
     /// }
     /// ```
-    pub async fn get_root_qdisc_for(&self, ifname: &str) -> Result<Option<TcMessage>> {
-        let qdiscs = self.get_qdiscs_for(ifname).await?;
-        Ok(qdiscs.into_iter().find(|q| q.is_root()))
+    pub async fn get_root_qdisc_by_name(
+        &self,
+        iface: impl Into<InterfaceRef>,
+    ) -> Result<Option<TcMessage>> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.get_root_qdisc_by_index(ifindex).await
     }
 
     /// Get the root qdisc for an interface by index.
@@ -1212,10 +1241,12 @@ impl Connection<Route> {
     /// This is a convenience method that returns `Some` only if a netem qdisc
     /// is the root qdisc and its options can be parsed.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
-    /// if let Some(netem) = conn.get_netem_for("eth0").await? {
+    /// if let Some(netem) = conn.get_netem_by_name("eth0").await? {
     ///     if let Some(delay) = netem.delay() {
     ///         println!("Delay: {:?}", delay);
     ///     }
@@ -1227,16 +1258,12 @@ impl Connection<Route> {
     ///     }
     /// }
     /// ```
-    pub async fn get_netem_for(
+    pub async fn get_netem_by_name(
         &self,
-        ifname: &str,
+        iface: impl Into<InterfaceRef>,
     ) -> Result<Option<super::tc_options::NetemOptions>> {
-        use super::tc_options::QdiscOptions;
-        let root = self.get_root_qdisc_for(ifname).await?;
-        Ok(match root.and_then(|q| q.options()) {
-            Some(QdiscOptions::Netem(opts)) => Some(opts),
-            _ => None,
-        })
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.get_netem_by_index(ifindex).await
     }
 
     /// Get netem options for an interface by index.
@@ -1264,13 +1291,17 @@ use super::types::link::{IfInfoMsg, iff};
 impl Connection<Route> {
     /// Bring a network interface up.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// conn.set_link_up("eth0").await?;
+    /// conn.set_link_up(5u32).await?;  // by index
     /// ```
-    pub async fn set_link_up(&self, ifname: &str) -> Result<()> {
-        self.set_link_state(ifname, true).await
+    pub async fn set_link_up(&self, iface: impl Into<InterfaceRef>) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.set_link_up_by_index(ifindex).await
     }
 
     /// Bring a network interface up by index.
@@ -1280,13 +1311,17 @@ impl Connection<Route> {
 
     /// Bring a network interface down.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// conn.set_link_down("eth0").await?;
+    /// conn.set_link_down(5u32).await?;  // by index
     /// ```
-    pub async fn set_link_down(&self, ifname: &str) -> Result<()> {
-        self.set_link_state(ifname, false).await
+    pub async fn set_link_down(&self, iface: impl Into<InterfaceRef>) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.set_link_down_by_index(ifindex).await
     }
 
     /// Bring a network interface down by index.
@@ -1296,9 +1331,11 @@ impl Connection<Route> {
 
     /// Set the state of a network interface (up or down).
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Arguments
     ///
-    /// * `ifname` - The interface name (e.g., "eth0")
+    /// * `iface` - The interface name or index
     /// * `up` - `true` to bring the interface up, `false` to bring it down
     ///
     /// # Example
@@ -1307,13 +1344,11 @@ impl Connection<Route> {
     /// // Bring interface up
     /// conn.set_link_state("eth0", true).await?;
     ///
-    /// // Bring interface down
-    /// conn.set_link_state("eth0", false).await?;
+    /// // Bring interface down by index
+    /// conn.set_link_state(5u32, false).await?;
     /// ```
-    pub async fn set_link_state(&self, ifname: &str, up: bool) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    pub async fn set_link_state(&self, iface: impl Into<InterfaceRef>, up: bool) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_state_by_index(ifindex, up).await
     }
 
@@ -1337,15 +1372,16 @@ impl Connection<Route> {
 
     /// Set the MTU of a network interface.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// conn.set_link_mtu("eth0", 9000).await?;
+    /// conn.set_link_mtu(5u32, 9000).await?;  // by index
     /// ```
-    pub async fn set_link_mtu(&self, ifname: &str, mtu: u32) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    pub async fn set_link_mtu(&self, iface: impl Into<InterfaceRef>, mtu: u32) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_mtu_by_index(ifindex, mtu).await
     }
 
@@ -1364,15 +1400,16 @@ impl Connection<Route> {
 
     /// Delete a network interface.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// conn.del_link("veth0").await?;
+    /// conn.del_link(5u32).await?;  // by index
     /// ```
-    pub async fn del_link(&self, ifname: &str) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    pub async fn del_link(&self, iface: impl Into<InterfaceRef>) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
         self.del_link_by_index(ifindex).await
     }
 
@@ -1388,15 +1425,16 @@ impl Connection<Route> {
 
     /// Set the TX queue length of a network interface.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// conn.set_link_txqlen("eth0", 1000).await?;
+    /// conn.set_link_txqlen(5u32, 1000).await?;  // by index
     /// ```
-    pub async fn set_link_txqlen(&self, ifname: &str, txqlen: u32) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    pub async fn set_link_txqlen(&self, iface: impl Into<InterfaceRef>, txqlen: u32) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_txqlen_by_index(ifindex, txqlen).await
     }
 

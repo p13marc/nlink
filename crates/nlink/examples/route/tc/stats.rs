@@ -30,7 +30,7 @@ async fn main() -> nlink::netlink::Result<()> {
 
     loop {
         let qdiscs = if let Some(d) = dev {
-            conn.get_qdiscs_for(d).await?
+            conn.get_qdiscs_by_name(d).await?
         } else {
             conn.get_qdiscs().await?
         };

@@ -18,7 +18,7 @@ async fn main() -> nlink::Result<()> {
 
     for link in &links {
         let name = link.name_or("?");
-        let classes = conn.get_classes_for(name).await?;
+        let classes = conn.get_classes_by_name(name).await?;
 
         if !classes.is_empty() {
             println!("Interface: {}", name);

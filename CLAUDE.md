@@ -198,7 +198,7 @@ let names = conn.get_interface_names().await?;
 
 // Query addresses
 let addrs = conn.get_addresses().await?;
-let eth0_addrs = conn.get_addresses_for("eth0").await?;
+let eth0_addrs = conn.get_addresses_by_name("eth0").await?;
 
 // Query routes and resolve interface names
 let routes = conn.get_routes().await?;
@@ -212,7 +212,7 @@ for route in &routes {
 
 // Query TC
 let qdiscs = conn.get_qdiscs().await?;
-let classes = conn.get_classes_for("eth0").await?;
+let classes = conn.get_classes_by_name("eth0").await?;
 
 // Query routing rules
 let rules = conn.get_rules().await?;
@@ -503,7 +503,7 @@ use nlink::netlink::{Connection, Protocol};
 use nlink::netlink::tc_options::QdiscOptions;
 
 let conn = Connection::new(Protocol::Route)?;
-let qdiscs = conn.get_qdiscs_for("eth0").await?;
+let qdiscs = conn.get_qdiscs_by_name("eth0").await?;
 
 for qdisc in &qdiscs {
     // Quick checks using convenience methods
@@ -599,7 +599,7 @@ if let Some(qdisc) = conn.get_qdisc_by_handle("eth0", "1:").await? {
 use nlink::netlink::{Connection, Protocol};
 
 let conn = Connection::new(Protocol::Route)?;
-let qdiscs = conn.get_qdiscs_for("eth0").await?;
+let qdiscs = conn.get_qdiscs_by_name("eth0").await?;
 
 for qdisc in &qdiscs {
     // Real-time rate from kernel's rate estimator
@@ -613,7 +613,7 @@ for qdisc in &qdiscs {
 // Calculate deltas between samples
 let prev = qdiscs[0].stats_basic.unwrap();
 // ... wait ...
-let curr = conn.get_qdiscs_for("eth0").await?[0].stats_basic.unwrap();
+let curr = conn.get_qdiscs_by_name("eth0").await?[0].stats_basic.unwrap();
 let delta = curr.delta(&prev);
 println!("Transferred: {} bytes, {} packets", delta.bytes, delta.packets);
 ```
@@ -636,7 +636,7 @@ conn.add_class("eth0", "1:1", "1:10", "htb",
     &["rate", "10mbit", "ceil", "100mbit"]).await?;
 
 // Query classes
-let classes = conn.get_classes_for("eth0").await?;
+let classes = conn.get_classes_by_name("eth0").await?;
 for class in &classes {
     println!("Class {:x}: {} bytes, {} packets", 
         class.handle(), class.bytes(), class.packets());

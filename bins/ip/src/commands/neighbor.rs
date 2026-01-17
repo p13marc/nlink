@@ -130,7 +130,7 @@ impl NeighborCmd {
     ) -> Result<()> {
         // Get neighbors (optionally filtered by device)
         let neighbors = if let Some(dev_name) = dev {
-            conn.get_neighbors_for(dev_name).await?
+            conn.get_neighbors_by_name(dev_name).await?
         } else {
             conn.get_neighbors().await?
         };
@@ -210,7 +210,7 @@ impl NeighborCmd {
     async fn flush(conn: &Connection<Route>, dev: Option<&str>, family: Option<u8>) -> Result<()> {
         // Get all neighbor entries
         let neighbors = if let Some(dev_name) = dev {
-            conn.get_neighbors_for(dev_name).await?
+            conn.get_neighbors_by_name(dev_name).await?
         } else {
             conn.get_neighbors().await?
         };

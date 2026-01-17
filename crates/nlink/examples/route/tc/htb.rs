@@ -43,7 +43,7 @@ async fn main() -> nlink::netlink::Result<()> {
 }
 
 async fn show_htb(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result<()> {
-    let qdiscs = conn.get_qdiscs_for(dev).await?;
+    let qdiscs = conn.get_qdiscs_by_name(dev).await?;
 
     println!("TC qdiscs on {}:", dev);
     println!("{}", "-".repeat(60));
@@ -93,7 +93,7 @@ async fn show_htb(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result
 }
 
 async fn show_classes(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result<()> {
-    let classes = conn.get_classes_for(dev).await?;
+    let classes = conn.get_classes_by_name(dev).await?;
 
     println!("TC classes on {}:", dev);
     println!("{}", "-".repeat(80));

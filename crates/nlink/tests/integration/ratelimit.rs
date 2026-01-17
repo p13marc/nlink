@@ -112,7 +112,7 @@ async fn test_egress_rate_limiting() -> nlink::Result<()> {
         .await?;
 
     // Verify HTB qdisc was created
-    let qdiscs = conn.get_qdiscs_for("test0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("test0").await?;
     let htb_qdisc = qdiscs.iter().find(|q| q.kind() == Some("htb"));
     assert!(htb_qdisc.is_some(), "HTB qdisc should exist");
 
@@ -124,7 +124,7 @@ async fn test_egress_rate_limiting() -> nlink::Result<()> {
     RateLimiter::new("test0").remove(&conn).await?;
 
     // Verify qdisc was removed
-    let qdiscs = conn.get_qdiscs_for("test0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("test0").await?;
     let htb_qdisc = qdiscs.iter().find(|q| q.kind() == Some("htb"));
     assert!(htb_qdisc.is_none(), "HTB qdisc should be removed");
 
@@ -155,7 +155,7 @@ async fn test_ingress_rate_limiting() -> nlink::Result<()> {
     assert!(ifb_link.is_some(), "IFB device should be created");
 
     // Verify ingress qdisc on main interface
-    let qdiscs = conn.get_qdiscs_for("test0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("test0").await?;
     let ingress = qdiscs.iter().find(|q| q.is_ingress());
     assert!(
         ingress.is_some(),
@@ -163,7 +163,7 @@ async fn test_ingress_rate_limiting() -> nlink::Result<()> {
     );
 
     // Verify HTB on IFB device
-    let ifb_qdiscs = conn.get_qdiscs_for("ifb_test0").await?;
+    let ifb_qdiscs = conn.get_qdiscs_by_name("ifb_test0").await?;
     let htb = ifb_qdiscs.iter().find(|q| q.kind() == Some("htb"));
     assert!(htb.is_some(), "HTB qdisc should exist on IFB device");
 
@@ -199,7 +199,7 @@ async fn test_bidirectional_rate_limiting() -> nlink::Result<()> {
         .await?;
 
     // Verify egress HTB
-    let qdiscs = conn.get_qdiscs_for("test0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("test0").await?;
     let htb = qdiscs.iter().find(|q| q.kind() == Some("htb"));
     assert!(htb.is_some(), "Egress HTB should exist");
 
@@ -208,7 +208,7 @@ async fn test_bidirectional_rate_limiting() -> nlink::Result<()> {
     assert!(ingress.is_some(), "Ingress qdisc should exist");
 
     // Verify IFB device and its HTB
-    let ifb_qdiscs = conn.get_qdiscs_for("ifb_test0").await?;
+    let ifb_qdiscs = conn.get_qdiscs_by_name("ifb_test0").await?;
     let ifb_htb = ifb_qdiscs.iter().find(|q| q.kind() == Some("htb"));
     assert!(ifb_htb.is_some(), "HTB on IFB should exist");
 
@@ -239,7 +239,7 @@ async fn test_per_host_rate_limiting() -> nlink::Result<()> {
         .await?;
 
     // Verify HTB qdisc was created
-    let qdiscs = conn.get_qdiscs_for("test0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("test0").await?;
     let htb = qdiscs.iter().find(|q| q.kind() == Some("htb"));
     assert!(htb.is_some(), "HTB qdisc should exist");
 
@@ -254,7 +254,7 @@ async fn test_per_host_rate_limiting() -> nlink::Result<()> {
     );
 
     // Verify flower filters were created
-    let filters = conn.get_filters_for("test0").await?;
+    let filters = conn.get_filters_by_name("test0").await?;
     assert!(!filters.is_empty(), "Flower filters should exist");
 
     // Cleanup
@@ -285,7 +285,7 @@ async fn test_rate_limiter_idempotency() -> nlink::Result<()> {
     limiter.apply(&conn).await?;
 
     // Verify config is still correct
-    let qdiscs = conn.get_qdiscs_for("test0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("test0").await?;
     let htb_count = qdiscs.iter().filter(|q| q.kind() == Some("htb")).count();
     assert_eq!(htb_count, 1, "Should have exactly one HTB qdisc");
 

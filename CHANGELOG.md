@@ -2,6 +2,76 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] - 2026-01-17
+
+### Breaking Changes
+
+#### API Naming Consistency: `*_for()` → `*_by_name()`
+All interface query methods have been renamed for consistency with the `*_by_index()` pattern:
+
+| Old Name | New Name |
+|----------|----------|
+| `get_addresses_for(name)` | `get_addresses_by_name(name)` |
+| `get_neighbors_for(name)` | `get_neighbors_by_name(name)` |
+| `get_qdiscs_for(name)` | `get_qdiscs_by_name(name)` |
+| `get_classes_for(name)` | `get_classes_by_name(name)` |
+| `get_filters_for(name, parent)` | `get_filters_by_name(name, parent)` |
+| `get_root_qdisc_for(name)` | `get_root_qdisc_by_name(name)` |
+| `get_netem_for(name)` | `get_netem_by_name(name)` |
+
+#### Link Management Methods Now Accept `InterfaceRef`
+The following methods now accept `impl Into<InterfaceRef>` instead of `&str`, allowing both name and index:
+
+- `set_link_up(iface)` / `set_link_down(iface)`
+- `set_link_state(iface, up)`
+- `set_link_mtu(iface, mtu)`
+- `set_link_txqlen(iface, txqlen)`
+- `del_link(iface)`
+
+```rust
+// Both work now:
+conn.set_link_up("eth0").await?;
+conn.set_link_up(InterfaceRef::Index(2)).await?;
+```
+
+### Added
+
+#### New `*_by_index()` Variants for Namespace-Safe Operations
+Added index-based query methods that don't require interface name resolution:
+
+- `get_qdiscs_by_index(ifindex)` - Query qdiscs by interface index
+- `get_classes_by_index(ifindex)` - Query TC classes by interface index
+- `get_filters_by_index(ifindex)` - Query TC filters by interface index
+
+These methods are essential for namespace operations where sysfs-based name resolution would read from the wrong namespace.
+
+#### InterfaceRef Support in GENL Modules
+WireGuard, MACsec, and Ethtool connection methods now accept `impl Into<InterfaceRef>`:
+
+- `Connection<Wireguard>::get_device(iface)` - accepts name or index
+- `Connection<Macsec>::get_device(iface)` - accepts name or index  
+- `Connection<Ethtool>::get_link_state(iface)` - accepts name or index
+- All other ethtool query/set methods similarly updated
+
+### Migration Guide
+
+To migrate from 0.7.x to 0.8.0:
+
+1. **Rename method calls**: Use find-and-replace to update method names:
+   ```
+   get_addresses_for  →  get_addresses_by_name
+   get_neighbors_for  →  get_neighbors_by_name
+   get_qdiscs_for     →  get_qdiscs_by_name
+   get_classes_for    →  get_classes_by_name
+   get_filters_for    →  get_filters_by_name
+   ```
+
+2. **No changes needed** for `set_link_*` methods - existing `&str` arguments work unchanged due to `impl Into<InterfaceRef>`.
+
+3. **For namespace operations**, consider using the new `*_by_index()` methods to avoid sysfs reads from the wrong namespace.
+
+---
+
 ## [0.7.0] - 2026-01-05
 
 ### Added

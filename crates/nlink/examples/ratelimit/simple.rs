@@ -19,7 +19,7 @@ async fn main() -> nlink::Result<()> {
 
     for link in links.iter().filter(|l| !l.is_loopback()) {
         let name = link.name_or("?");
-        let qdiscs = conn.get_qdiscs_for(name).await?;
+        let qdiscs = conn.get_qdiscs_by_name(name).await?;
 
         if !qdiscs.is_empty() {
             println!("Interface: {}", name);

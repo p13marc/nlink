@@ -44,7 +44,7 @@ async fn test_add_netem_qdisc() -> Result<()> {
     conn.add_qdisc("dummy0", netem).await?;
 
     // Verify
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     let netem = qdiscs.iter().find(|q| q.kind() == Some("netem"));
     assert!(netem.is_some(), "netem qdisc should exist");
 
@@ -63,7 +63,7 @@ async fn test_netem_with_loss() -> Result<()> {
     conn.add_qdisc("dummy0", netem).await?;
 
     // Verify netem exists
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     let netem = qdiscs.iter().find(|q| q.kind() == Some("netem"));
     assert!(netem.is_some());
 
@@ -84,7 +84,7 @@ async fn test_remove_netem() -> Result<()> {
     conn.remove_netem("dummy0").await?;
 
     // Verify it's gone (default qdisc should be back)
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     assert!(
         !qdiscs.iter().any(|q| q.kind() == Some("netem")),
         "netem should be removed"
@@ -105,7 +105,7 @@ async fn test_add_htb_qdisc() -> Result<()> {
         .await?;
 
     // Verify
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     let htb = qdiscs.iter().find(|q| q.kind() == Some("htb"));
     assert!(htb.is_some(), "htb qdisc should exist");
     assert!(htb.unwrap().is_root());
@@ -128,7 +128,7 @@ async fn test_add_tbf_qdisc() -> Result<()> {
     conn.add_qdisc("dummy0", tbf).await?;
 
     // Verify
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     let tbf = qdiscs.iter().find(|q| q.kind() == Some("tbf"));
     assert!(tbf.is_some(), "tbf qdisc should exist");
 
@@ -150,7 +150,7 @@ async fn test_add_fq_codel_qdisc() -> Result<()> {
     conn.add_qdisc("dummy0", fqcodel).await?;
 
     // Verify
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     let fq = qdiscs.iter().find(|q| q.kind() == Some("fq_codel"));
     assert!(fq.is_some(), "fq_codel qdisc should exist");
 
@@ -169,7 +169,7 @@ async fn test_add_prio_qdisc() -> Result<()> {
         .await?;
 
     // Verify
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     let prio = qdiscs.iter().find(|q| q.kind() == Some("prio"));
     assert!(prio.is_some(), "prio qdisc should exist");
 
@@ -187,7 +187,7 @@ async fn test_add_sfq_qdisc() -> Result<()> {
     conn.add_qdisc("dummy0", sfq).await?;
 
     // Verify
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     let sfq = qdiscs.iter().find(|q| q.kind() == Some("sfq"));
     assert!(sfq.is_some(), "sfq qdisc should exist");
 
@@ -204,7 +204,7 @@ async fn test_add_ingress_qdisc() -> Result<()> {
     conn.add_qdisc("dummy0", IngressConfig::new()).await?;
 
     // Verify
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     let ingress = qdiscs.iter().find(|q| q.kind() == Some("ingress"));
     assert!(ingress.is_some(), "ingress qdisc should exist");
 
@@ -225,7 +225,7 @@ async fn test_delete_qdisc() -> Result<()> {
     conn.del_qdisc("dummy0", "root").await?;
 
     // Verify
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     assert!(!qdiscs.iter().any(|q| q.kind() == Some("netem")));
 
     Ok(())
@@ -246,7 +246,7 @@ async fn test_replace_qdisc() -> Result<()> {
     conn.replace_qdisc("dummy0", netem2).await?;
 
     // Verify there's still just one netem
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     let netem_count = qdiscs.iter().filter(|q| q.kind() == Some("netem")).count();
     assert_eq!(netem_count, 1);
 
@@ -275,7 +275,7 @@ async fn test_add_htb_class() -> Result<()> {
     conn.add_class_config("dummy0", "1:", "1:10", class).await?;
 
     // Verify
-    let classes = conn.get_classes_for("dummy0").await?;
+    let classes = conn.get_classes_by_name("dummy0").await?;
     assert!(
         !classes.is_empty(),
         "at least one class should exist (may include root)"
@@ -310,7 +310,7 @@ async fn test_htb_class_hierarchy() -> Result<()> {
         .await?;
 
     // Verify
-    let classes = conn.get_classes_for("dummy0").await?;
+    let classes = conn.get_classes_by_name("dummy0").await?;
     assert!(classes.len() >= 3, "should have at least 3 classes");
 
     Ok(())
@@ -335,7 +335,7 @@ async fn test_delete_class() -> Result<()> {
     conn.del_class("dummy0", "1:", "1:10").await?;
 
     // Verify
-    let classes = conn.get_classes_for("dummy0").await?;
+    let classes = conn.get_classes_by_name("dummy0").await?;
     // Check that class 1:10 is gone
     assert!(!classes.iter().any(|c| c.handle() == 0x10010)); // 1:10 = 0x10010
 
@@ -366,7 +366,7 @@ async fn test_add_matchall_filter() -> Result<()> {
     conn.add_filter("dummy0", "1:", filter).await?;
 
     // Verify
-    let filters = conn.get_filters_for("dummy0").await?;
+    let filters = conn.get_filters_by_name("dummy0").await?;
     let matchall = filters.iter().find(|f| f.kind() == Some("matchall"));
     assert!(matchall.is_some(), "matchall filter should exist");
 
@@ -393,7 +393,7 @@ async fn test_add_u32_filter() -> Result<()> {
     conn.add_filter("dummy0", "1:", filter).await?;
 
     // Verify
-    let filters = conn.get_filters_for("dummy0").await?;
+    let filters = conn.get_filters_by_name("dummy0").await?;
     let u32 = filters.iter().find(|f| f.kind() == Some("u32"));
     assert!(u32.is_some(), "u32 filter should exist");
 
@@ -420,7 +420,7 @@ async fn test_add_flower_filter() -> Result<()> {
     conn.add_filter("dummy0", "1:", filter).await?;
 
     // Verify
-    let filters = conn.get_filters_for("dummy0").await?;
+    let filters = conn.get_filters_by_name("dummy0").await?;
     let flower = filters.iter().find(|f| f.kind() == Some("flower"));
     assert!(flower.is_some(), "flower filter should exist");
 
@@ -441,7 +441,7 @@ async fn test_matchall_on_ingress() -> Result<()> {
     conn.add_filter("dummy0", "ingress", filter).await?;
 
     // Verify
-    let filters = conn.get_filters_for("dummy0").await?;
+    let filters = conn.get_filters_by_name("dummy0").await?;
     assert!(!filters.is_empty(), "filter should exist");
 
     Ok(())
@@ -466,7 +466,7 @@ async fn test_matchall_goto_chain() -> Result<()> {
     conn.add_filter("dummy0", "1:", filter).await?;
 
     // Verify
-    let filters = conn.get_filters_for("dummy0").await?;
+    let filters = conn.get_filters_by_name("dummy0").await?;
     assert!(!filters.is_empty(), "filter should exist");
 
     Ok(())
@@ -495,7 +495,7 @@ async fn test_filter_on_ifb() -> Result<()> {
     conn.add_filter("ifb0", "1:", filter).await?;
 
     // Verify
-    let filters = conn.get_filters_for("ifb0").await?;
+    let filters = conn.get_filters_by_name("ifb0").await?;
     assert!(!filters.is_empty(), "filter should exist");
 
     Ok(())
@@ -524,7 +524,7 @@ async fn test_delete_filter() -> Result<()> {
     conn.flush_filters("dummy0", "1:").await?;
 
     // Verify
-    let filters = conn.get_filters_for("dummy0").await?;
+    let filters = conn.get_filters_by_name("dummy0").await?;
     assert!(filters.is_empty(), "filters should be deleted");
 
     Ok(())
@@ -559,7 +559,7 @@ async fn test_replace_filter() -> Result<()> {
     conn.replace_filter("dummy0", "1:", filter2).await?;
 
     // Verify there's still just one matchall filter
-    let filters = conn.get_filters_for("dummy0").await?;
+    let filters = conn.get_filters_by_name("dummy0").await?;
     let matchall_count = filters
         .iter()
         .filter(|f| f.kind() == Some("matchall"))
@@ -584,7 +584,7 @@ async fn test_qdisc_statistics() -> Result<()> {
     conn.add_qdisc("dummy0", netem).await?;
 
     // Get qdiscs and check stats are available
-    let qdiscs = conn.get_qdiscs_for("dummy0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
     let netem = qdiscs.iter().find(|q| q.kind() == Some("netem")).unwrap();
 
     // Check convenience methods work
@@ -610,7 +610,7 @@ async fn test_class_statistics() -> Result<()> {
     conn.add_class_config("dummy0", "1:", "1:10", class).await?;
 
     // Get classes and check stats
-    let classes = conn.get_classes_for("dummy0").await?;
+    let classes = conn.get_classes_by_name("dummy0").await?;
     assert!(!classes.is_empty());
 
     // Check convenience methods work
@@ -692,7 +692,7 @@ async fn test_filter_with_chain() -> Result<()> {
     conn.add_filter("dummy0", "1:", filter).await?;
 
     // Verify filter is in chain
-    let filters = conn.get_filters_for("dummy0").await?;
+    let filters = conn.get_filters_by_name("dummy0").await?;
     // At least one filter should exist
     assert!(!filters.is_empty());
 

@@ -611,7 +611,7 @@ impl Diagnostics {
         let stats = link.stats().cloned().unwrap_or_default();
 
         // Get addresses
-        let addresses = self.conn.get_addresses_for(dev).await?;
+        let addresses = self.conn.get_addresses_by_name(dev).await?;
         let addr_by_ifindex: HashMap<u32, Vec<_>> = {
             let mut map: HashMap<u32, Vec<_>> = HashMap::new();
             for addr in addresses {
@@ -646,7 +646,7 @@ impl Diagnostics {
         let mut issues = self.detect_link_issues(&link, &stats, &addr_by_ifindex, timestamp);
 
         // Get TC diagnostics
-        let qdiscs = self.conn.get_qdiscs_for(dev).await?;
+        let qdiscs = self.conn.get_qdiscs_by_name(dev).await?;
         let tc = qdiscs
             .iter()
             .find(|q| q.is_root())

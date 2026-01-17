@@ -19,11 +19,11 @@ async fn main() -> nlink::Result<()> {
         let name = link.name_or("?");
 
         // Get qdiscs to find filter attach points
-        let qdiscs = conn.get_qdiscs_for(name).await?;
+        let qdiscs = conn.get_qdiscs_by_name(name).await?;
 
         for qdisc in &qdiscs {
             let parent = qdisc.parent_str();
-            let filters = conn.get_filters_for(name, &parent).await?;
+            let filters = conn.get_filters_by_name(name, &parent).await?;
 
             if !filters.is_empty() {
                 println!("Interface: {} (parent {})", name, parent);

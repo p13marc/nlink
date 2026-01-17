@@ -171,7 +171,7 @@ use nlink::netlink::{Connection, Route};
 use nlink::netlink::tc_options::QdiscOptions;
 
 let conn = Connection::<Route>::new()?;
-let qdiscs = conn.get_qdiscs_for("eth0").await?;
+let qdiscs = conn.get_qdiscs_by_name("eth0").await?;
 
 for qdisc in &qdiscs {
     // Quick type checks
@@ -226,7 +226,7 @@ let conn = Connection::<Route>::new()?;
 let mut prev_stats = None;
 
 loop {
-    let qdiscs = conn.get_qdiscs_for("eth0").await?;
+    let qdiscs = conn.get_qdiscs_by_name("eth0").await?;
     
     for qdisc in &qdiscs {
         // Real-time rate from kernel's rate estimator

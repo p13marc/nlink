@@ -331,7 +331,7 @@ impl TcMessage {
     /// # Example
     ///
     /// ```ignore
-    /// let qdisc = conn.get_root_qdisc_for("eth0").await?.map(|q| q.resolve_name());
+    /// let qdisc = conn.get_root_qdisc_by_name("eth0").await?.map(|q| q.resolve_name());
     /// println!("Interface: {}", qdisc.name_or("?"));
     /// ```
     pub fn resolve_name(mut self) -> Self {

@@ -55,7 +55,7 @@ async fn main() -> nlink::netlink::Result<()> {
 }
 
 async fn show_netem(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result<()> {
-    let qdiscs = conn.get_qdiscs_for(dev).await?;
+    let qdiscs = conn.get_qdiscs_by_name(dev).await?;
 
     println!("TC qdiscs on {}:", dev);
     println!("{}", "-".repeat(60));

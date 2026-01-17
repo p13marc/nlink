@@ -193,7 +193,7 @@ async fn test_get_addresses_for_interface() -> Result<()> {
     .await?;
 
     // Get addresses for dummy0 only
-    let addrs = conn.get_addresses_for("dummy0").await?;
+    let addrs = conn.get_addresses_by_name("dummy0").await?;
 
     // Should only have dummy0's address (plus any link-local)
     let ipv4_addrs: Vec<_> = addrs
@@ -322,7 +322,7 @@ async fn test_loopback_address() -> Result<()> {
         .await?;
 
     // Verify
-    let addrs = conn.get_addresses_for("lo").await?;
+    let addrs = conn.get_addresses_by_name("lo").await?;
     let addr = addrs.iter().find(|a| {
         a.address()
             .map(|ip| *ip == IpAddr::V4(target_ip))
@@ -356,7 +356,7 @@ async fn test_address_scope() -> Result<()> {
         .await?;
 
     // Verify both exist
-    let addrs = conn.get_addresses_for("dummy0").await?;
+    let addrs = conn.get_addresses_by_name("dummy0").await?;
     let global = addrs.iter().find(|a| {
         a.address()
             .map(|ip| *ip == IpAddr::V4(global_ip))
