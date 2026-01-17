@@ -432,6 +432,32 @@ impl Connection<Route> {
         self.send_ack(builder).await
     }
 
+    /// Add an IPv4 neighbor entry by interface index.
+    ///
+    /// This is namespace-safe as it doesn't require interface name resolution.
+    pub async fn add_neighbor_v4_by_index(
+        &self,
+        ifindex: u32,
+        destination: Ipv4Addr,
+        lladdr: [u8; 6],
+    ) -> Result<()> {
+        let neigh = Neighbor::with_index_v4(ifindex, destination).lladdr(lladdr);
+        self.add_neighbor(neigh).await
+    }
+
+    /// Add an IPv6 neighbor entry by interface index.
+    ///
+    /// This is namespace-safe as it doesn't require interface name resolution.
+    pub async fn add_neighbor_v6_by_index(
+        &self,
+        ifindex: u32,
+        destination: Ipv6Addr,
+        lladdr: [u8; 6],
+    ) -> Result<()> {
+        let neigh = Neighbor::with_index_v6(ifindex, destination).lladdr(lladdr);
+        self.add_neighbor(neigh).await
+    }
+
     /// Delete an IPv4 neighbor entry.
     ///
     /// # Example
@@ -483,6 +509,32 @@ impl Connection<Route> {
 
         config.write_add(&mut builder, ifindex)?;
         self.send_ack(builder).await
+    }
+
+    /// Replace an IPv4 neighbor entry by interface index.
+    ///
+    /// This is namespace-safe as it doesn't require interface name resolution.
+    pub async fn replace_neighbor_v4_by_index(
+        &self,
+        ifindex: u32,
+        destination: Ipv4Addr,
+        lladdr: [u8; 6],
+    ) -> Result<()> {
+        let neigh = Neighbor::with_index_v4(ifindex, destination).lladdr(lladdr);
+        self.replace_neighbor(neigh).await
+    }
+
+    /// Replace an IPv6 neighbor entry by interface index.
+    ///
+    /// This is namespace-safe as it doesn't require interface name resolution.
+    pub async fn replace_neighbor_v6_by_index(
+        &self,
+        ifindex: u32,
+        destination: Ipv6Addr,
+        lladdr: [u8; 6],
+    ) -> Result<()> {
+        let neigh = Neighbor::with_index_v6(ifindex, destination).lladdr(lladdr);
+        self.replace_neighbor(neigh).await
     }
 
     /// Flush all neighbor entries for an interface.

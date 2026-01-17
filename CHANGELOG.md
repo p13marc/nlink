@@ -37,13 +37,34 @@ conn.set_link_up(InterfaceRef::Index(2)).await?;
 ### Added
 
 #### New `*_by_index()` Variants for Namespace-Safe Operations
-Added index-based query methods that don't require interface name resolution:
+Added index-based query and mutation methods that don't require interface name resolution:
 
+**TC Operations:**
 - `get_qdiscs_by_index(ifindex)` - Query qdiscs by interface index
 - `get_classes_by_index(ifindex)` - Query TC classes by interface index
 - `get_filters_by_index(ifindex)` - Query TC filters by interface index
 
+**Address Operations:**
+- `add_address_by_index(ifindex, address, prefix_len)` - Add IP address by index
+- `replace_address_by_index(ifindex, address, prefix_len)` - Replace IP address by index
+
+**Neighbor Operations:**
+- `add_neighbor_v4_by_index(ifindex, dest, lladdr)` - Add IPv4 neighbor by index
+- `add_neighbor_v6_by_index(ifindex, dest, lladdr)` - Add IPv6 neighbor by index
+- `replace_neighbor_v4_by_index(ifindex, dest, lladdr)` - Replace IPv4 neighbor by index
+- `replace_neighbor_v6_by_index(ifindex, dest, lladdr)` - Replace IPv6 neighbor by index
+
 These methods are essential for namespace operations where sysfs-based name resolution would read from the wrong namespace.
+
+#### Additional Link Methods Now Accept `InterfaceRef`
+Extended `InterfaceRef` support to more link modification methods:
+
+- `set_link_master(iface, master)` - Both interface and master accept name or index
+- `set_link_nomaster(iface)`
+- `set_link_name(iface, new_name)`
+- `set_link_address(iface, mac)`
+- `set_link_netns_pid(iface, pid)`
+- `set_link_netns_fd(iface, fd)`
 
 #### InterfaceRef Support in GENL Modules
 WireGuard, MACsec, and Ethtool connection methods now accept `impl Into<InterfaceRef>`:

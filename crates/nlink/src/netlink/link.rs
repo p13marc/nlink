@@ -3657,14 +3657,17 @@ impl Connection<Route> {
     /// ```ignore
     /// // Add eth0 to bridge br0
     /// conn.set_link_master("eth0", "br0").await?;
+    ///
+    /// // Or by index
+    /// conn.set_link_master(InterfaceRef::Index(5), InterfaceRef::Index(10)).await?;
     /// ```
-    pub async fn set_link_master(&self, ifname: &str, master: &str) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
-        let master_index = self
-            .resolve_interface(&InterfaceRef::Name(master.to_string()))
-            .await?;
+    pub async fn set_link_master(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        master: impl Into<InterfaceRef>,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        let master_index = self.resolve_interface(&master.into()).await?;
         self.set_link_master_by_index(ifindex, master_index).await
     }
 
@@ -3683,16 +3686,16 @@ impl Connection<Route> {
 
     /// Remove an interface from its master device.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// // Remove eth0 from its bridge/bond
     /// conn.set_link_nomaster("eth0").await?;
     /// ```
-    pub async fn set_link_nomaster(&self, ifname: &str) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    pub async fn set_link_nomaster(&self, iface: impl Into<InterfaceRef>) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_nomaster_by_index(ifindex).await
     }
 
@@ -3711,6 +3714,7 @@ impl Connection<Route> {
 
     /// Rename a network interface.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
     /// Note: The interface must be down to be renamed.
     ///
     /// # Example
@@ -3718,10 +3722,12 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.set_link_name("eth0", "lan0").await?;
     /// ```
-    pub async fn set_link_name(&self, ifname: &str, new_name: &str) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    pub async fn set_link_name(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        new_name: &str,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_name_by_index(ifindex, new_name).await
     }
 
@@ -3740,15 +3746,19 @@ impl Connection<Route> {
 
     /// Set the MAC address of a network interface.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// conn.set_link_address("eth0", [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]).await?;
     /// ```
-    pub async fn set_link_address(&self, ifname: &str, address: [u8; 6]) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    pub async fn set_link_address(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        address: [u8; 6],
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_address_by_index(ifindex, address).await
     }
 
@@ -3767,16 +3777,16 @@ impl Connection<Route> {
 
     /// Move a network interface to a different network namespace.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// // Move veth1 to namespace by PID
     /// conn.set_link_netns_pid("veth1", container_pid).await?;
     /// ```
-    pub async fn set_link_netns_pid(&self, ifname: &str, pid: u32) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    pub async fn set_link_netns_pid(&self, iface: impl Into<InterfaceRef>, pid: u32) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_netns_pid_by_index(ifindex, pid).await
     }
 
@@ -3794,10 +3804,10 @@ impl Connection<Route> {
     }
 
     /// Move a network interface to a namespace by file descriptor.
-    pub async fn set_link_netns_fd(&self, ifname: &str, fd: i32) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn set_link_netns_fd(&self, iface: impl Into<InterfaceRef>, fd: i32) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_netns_fd_by_index(ifindex, fd).await
     }
 

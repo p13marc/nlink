@@ -710,6 +710,58 @@ impl Connection<Route> {
         }
     }
 
+    /// Add an IP address to an interface by index.
+    ///
+    /// This is namespace-safe as it doesn't require interface name resolution.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Get interface index via netlink
+    /// let link = conn.get_link_by_name("eth0").await?.unwrap();
+    ///
+    /// // Add address by index
+    /// conn.add_address_by_index(link.ifindex(), "192.168.1.100".parse()?, 24).await?;
+    /// ```
+    pub async fn add_address_by_index(
+        &self,
+        ifindex: u32,
+        address: IpAddr,
+        prefix_len: u8,
+    ) -> Result<()> {
+        match address {
+            IpAddr::V4(addr) => {
+                let config = Ipv4Address::with_index(ifindex, addr, prefix_len);
+                self.add_address(config).await
+            }
+            IpAddr::V6(addr) => {
+                let config = Ipv6Address::with_index(ifindex, addr, prefix_len);
+                self.add_address(config).await
+            }
+        }
+    }
+
+    /// Replace an IP address on an interface by index.
+    ///
+    /// This is namespace-safe as it doesn't require interface name resolution.
+    pub async fn replace_address_by_index(
+        &self,
+        ifindex: u32,
+        address: IpAddr,
+        prefix_len: u8,
+    ) -> Result<()> {
+        match address {
+            IpAddr::V4(addr) => {
+                let config = Ipv4Address::with_index(ifindex, addr, prefix_len);
+                self.replace_address(config).await
+            }
+            IpAddr::V6(addr) => {
+                let config = Ipv6Address::with_index(ifindex, addr, prefix_len);
+                self.replace_address(config).await
+            }
+        }
+    }
+
     /// Delete an IPv4 address from an interface.
     pub async fn del_address_v4(
         &self,
