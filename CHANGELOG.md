@@ -101,6 +101,30 @@ Proof-of-concept ethtool utility demonstrating the library:
 - `Ethtool` protocol now implements `EventSource` trait for consistent event monitoring API
 - Event monitoring uses `subscribe()` + `events()` pattern (consistent with Route, KobjectUevent, etc.)
 
+#### Consistent InterfaceRef Support Across GENL Modules
+All Generic Netlink modules now accept `impl Into<InterfaceRef>` for interface specification,
+allowing both interface names (`"eth0"`) and indices (`5u32`):
+
+- **WireGuard** (`Connection<Wireguard>`)
+  - `get_device()`, `set_device()`, `set_peer()`, `remove_peer()` accept `impl Into<InterfaceRef>`
+  - Added `*_by_name` variants for efficiency when name is already known
+
+- **MACsec** (`Connection<Macsec>`)
+  - `get_device()`, `add_tx_sa()`, `update_tx_sa()`, `del_tx_sa()`, `add_rx_sc()`,
+    `del_rx_sc()`, `add_rx_sa()`, `update_rx_sa()`, `del_rx_sa()` accept `impl Into<InterfaceRef>`
+  - `*_by_index` variants remain for efficiency when index is already known
+
+- **Ethtool** (`Connection<Ethtool>`)
+  - All methods now accept `impl Into<InterfaceRef>`:
+    `get_link_state()`, `get_link_info()`, `get_link_modes()`, `set_link_modes()`,
+    `get_features()`, `set_features()`, `get_rings()`, `set_rings()`,
+    `get_channels()`, `set_channels()`, `get_coalesce()`, `set_coalesce()`,
+    `get_pause()`, `set_pause()`
+  - Added `*_by_name` variants for all methods
+
+This enables namespace-safe operations when working with interface indices obtained
+from netlink queries, avoiding sysfs reads that would access the host namespace.
+
 ## [0.6.0] - 2026-01-04
 
 ### Added
