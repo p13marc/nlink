@@ -22,13 +22,13 @@ nlink is a from-scratch implementation of Linux netlink-based network management
 
 ```toml
 # Core netlink functionality
-nlink = "0.6"
+nlink = "0.8"
 
 # With additional features
-nlink = { version = "0.6", features = ["sockdiag", "tuntap", "tc", "output"] }
+nlink = { version = "0.8", features = ["sockdiag", "tuntap", "tc", "output"] }
 
 # All features
-nlink = { version = "0.6", features = ["full"] }
+nlink = { version = "0.8", features = ["full"] }
 ```
 
 ### Features
