@@ -12,38 +12,36 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use nlink::netlink::{Connection, Macsec, Route};
+//! use nlink::netlink::{Connection, Macsec};
 //! use nlink::netlink::genl::macsec::{MacsecCipherSuite, MacsecSaBuilder};
 //!
 //! # async fn example() -> nlink::Result<()> {
-//! // First get the interface index via a Route connection
-//! let route_conn = Connection::<Route>::new()?;
-//! let link = route_conn.get_link_by_name("macsec0").await?
-//!     .ok_or_else(|| nlink::netlink::Error::InterfaceNotFound { name: "macsec0".into() })?;
-//! let ifindex = link.ifindex();
-//!
 //! // Create a MACsec connection
 //! let conn = Connection::<Macsec>::new_async().await?;
 //!
-//! // Get device information
-//! let device = conn.get_device_by_index(ifindex).await?;
+//! // Get device information (by name - internally resolves via netlink)
+//! let device = conn.get_device("macsec0").await?;
 //! println!("SCI: {:016x}", device.sci);
 //! println!("Cipher: {:?}", device.cipher);
 //! println!("Encrypt: {}", device.encrypt);
 //!
 //! // Add a TX SA
 //! let key = [0u8; 16]; // 128-bit key for GCM-AES-128
-//! conn.add_tx_sa_by_index(ifindex,
+//! conn.add_tx_sa("macsec0",
 //!     MacsecSaBuilder::new(0, &key)
 //!         .active(true)
 //! ).await?;
 //!
 //! // Add an RX SC and SA
 //! let peer_sci: u64 = 0x001122334455_0001;
-//! conn.add_rx_sc_by_index(ifindex, peer_sci).await?;
-//! conn.add_rx_sa_by_index(ifindex, peer_sci,
+//! conn.add_rx_sc("macsec0", peer_sci).await?;
+//! conn.add_rx_sa("macsec0", peer_sci,
 //!     MacsecSaBuilder::new(0, &key)
 //! ).await?;
+//!
+//! // For efficiency with multiple operations, resolve the index once:
+//! // let ifindex = conn.get_device("macsec0").await?.ifindex;
+//! // conn.add_tx_sa_by_index(ifindex, ...).await?;
 //! # Ok(())
 //! # }
 //! ```

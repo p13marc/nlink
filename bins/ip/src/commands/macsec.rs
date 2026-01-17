@@ -66,15 +66,9 @@ impl MacsecCmd {
         let mut devices_info = Vec::new();
 
         if let Some(dev_name) = device {
-            // Show specific device - resolve name to index via Route connection
-            let link = conn.get_link_by_name(dev_name).await?.ok_or_else(|| {
-                nlink::netlink::Error::InterfaceNotFound {
-                    name: dev_name.to_string(),
-                }
-            })?;
-
+            // Show specific device
             if let Some(macsec) = &macsec_conn {
-                match macsec.get_device_by_index(link.ifindex()).await {
+                match macsec.get_device(dev_name).await {
                     Ok(dev) => devices_info.push((dev_name.to_string(), dev)),
                     Err(e) => {
                         return Err(e);
@@ -90,7 +84,7 @@ impl MacsecCmd {
             for link in &macsec_links {
                 let name = link.name_or("?");
                 if let Some(macsec) = &macsec_conn
-                    && let Ok(dev) = macsec.get_device_by_index(link.ifindex()).await
+                    && let Ok(dev) = macsec.get_device(name).await
                 {
                     devices_info.push((name.to_string(), dev));
                 }

@@ -14,8 +14,9 @@ use crate::netlink::builder::MessageBuilder;
 use crate::netlink::connection::Connection;
 use crate::netlink::error::{Error, Result};
 use crate::netlink::genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr};
+use crate::netlink::interface_ref::InterfaceRef;
 use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{ProtocolState, Wireguard};
+use crate::netlink::protocol::{ProtocolState, Route, Wireguard};
 use crate::netlink::socket::NetlinkSocket;
 
 impl Connection<Wireguard> {
@@ -39,10 +40,111 @@ impl Connection<Wireguard> {
         Ok(Self::from_parts(socket, state))
     }
 
+    /// Get the WireGuard family ID.
+    pub fn family_id(&self) -> u16 {
+        self.state().family_id
+    }
+
+    /// Resolve an interface reference to a name.
+    ///
+    /// WireGuard uses interface names in its protocol, so we resolve
+    /// indices back to names when needed.
+    async fn resolve_interface_name(&self, iface: &InterfaceRef) -> Result<String> {
+        match iface {
+            InterfaceRef::Name(name) => Ok(name.clone()),
+            InterfaceRef::Index(idx) => {
+                let route_conn = Connection::<Route>::new()?;
+                route_conn
+                    .get_link_by_index(*idx)
+                    .await?
+                    .and_then(|l| l.name().map(|s| s.to_string()))
+                    .ok_or_else(|| Error::InterfaceNotFound {
+                        name: format!("ifindex {}", idx),
+                    })
+            }
+        }
+    }
+
+    // ========================================================================
+    // Convenience methods that accept InterfaceRef
+    // ========================================================================
+
     /// Get device information.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Wireguard};
+    ///
+    /// let conn = Connection::<Wireguard>::new_async().await?;
+    ///
+    /// // By name
+    /// let device = conn.get_device("wg0").await?;
+    ///
+    /// // By index
+    /// let device = conn.get_device(5u32).await?;
+    /// ```
+    pub async fn get_device(&self, iface: impl Into<InterfaceRef>) -> Result<WgDevice> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_device_by_name(&ifname).await
+    }
+
+    /// Set device configuration.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.set_device("wg0", |dev| {
+    ///     dev.private_key(my_key)
+    ///        .listen_port(51820)
+    /// }).await?;
+    /// ```
+    pub async fn set_device(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        configure: impl FnOnce(WgDeviceBuilder) -> WgDeviceBuilder,
+    ) -> Result<()> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.set_device_by_name(&ifname, configure).await
+    }
+
+    /// Add or update a peer.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn set_peer(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        public_key: [u8; WG_KEY_LEN],
+        configure: impl FnOnce(super::types::WgPeerBuilder) -> super::types::WgPeerBuilder,
+    ) -> Result<()> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.set_peer_by_name(&ifname, public_key, configure).await
+    }
+
+    /// Remove a peer by public key.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn remove_peer(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        public_key: [u8; WG_KEY_LEN],
+    ) -> Result<()> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.remove_peer_by_name(&ifname, public_key).await
+    }
+
+    // ========================================================================
+    // Name-based methods (used internally and for efficiency)
+    // ========================================================================
+
+    /// Get device information by interface name.
+    ///
     /// Returns the current configuration and status of the WireGuard interface.
-    pub async fn get_device(&self, ifname: &str) -> Result<WgDevice> {
+    pub async fn get_device_by_name(&self, ifname: &str) -> Result<WgDevice> {
         let responses = self
             .dump_wg_command(WgCmd::GetDevice as u8, |builder| {
                 builder.append_attr_str(WgDeviceAttr::Ifname as u16, ifname);
@@ -70,22 +172,8 @@ impl Connection<Wireguard> {
         Ok(device)
     }
 
-    /// Set device configuration.
-    ///
-    /// The builder closure allows configuring the device properties.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use nlink::netlink::{Connection, Wireguard};
-    ///
-    /// let conn = Connection::<Wireguard>::new_async().await?;
-    /// conn.set_device("wg0", |dev| {
-    ///     dev.private_key(my_key)
-    ///        .listen_port(51820)
-    /// }).await?;
-    /// ```
-    pub async fn set_device(
+    /// Set device configuration by interface name.
+    pub async fn set_device_by_name(
         &self,
         ifname: &str,
         configure: impl FnOnce(WgDeviceBuilder) -> WgDeviceBuilder,
@@ -94,11 +182,8 @@ impl Connection<Wireguard> {
         self.apply_device_config(ifname, &builder).await
     }
 
-    /// Add or update a peer.
-    ///
-    /// If the peer already exists, its configuration is updated.
-    /// If not, a new peer is added.
-    pub async fn set_peer(
+    /// Add or update a peer by interface name.
+    pub async fn set_peer_by_name(
         &self,
         ifname: &str,
         public_key: [u8; WG_KEY_LEN],
@@ -109,16 +194,15 @@ impl Connection<Wireguard> {
         self.apply_device_config(ifname, &device_builder).await
     }
 
-    /// Remove a peer by public key.
-    pub async fn remove_peer(&self, ifname: &str, public_key: [u8; WG_KEY_LEN]) -> Result<()> {
+    /// Remove a peer by public key using interface name.
+    pub async fn remove_peer_by_name(
+        &self,
+        ifname: &str,
+        public_key: [u8; WG_KEY_LEN],
+    ) -> Result<()> {
         let peer_builder = super::types::WgPeerBuilder::new(public_key).remove();
         let device_builder = WgDeviceBuilder::new().peer(peer_builder);
         self.apply_device_config(ifname, &device_builder).await
-    }
-
-    /// Get the WireGuard family ID.
-    pub fn family_id(&self) -> u16 {
-        self.state().family_id
     }
 
     /// Apply device configuration to the kernel.

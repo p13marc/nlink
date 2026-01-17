@@ -10,8 +10,9 @@ use crate::netlink::builder::MessageBuilder;
 use crate::netlink::connection::Connection;
 use crate::netlink::error::{Error, Result};
 use crate::netlink::genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr};
+use crate::netlink::interface_ref::InterfaceRef;
 use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{Macsec, ProtocolState};
+use crate::netlink::protocol::{Macsec, ProtocolState, Route};
 use crate::netlink::socket::NetlinkSocket;
 use crate::netlink::types::macsec::{
     macsec_attr, macsec_cmd, macsec_offload_attr, macsec_rxsc_attr, macsec_rxsc_stats_attr,
@@ -42,6 +43,47 @@ impl Connection<Macsec> {
     /// Get the MACsec family ID.
     pub fn family_id(&self) -> u16 {
         self.state().family_id
+    }
+
+    /// Resolve an interface reference to an index.
+    ///
+    /// This creates a temporary Route connection to resolve interface names.
+    /// For repeated operations, consider resolving the index once and using
+    /// the `*_by_index` methods directly.
+    async fn resolve_interface(&self, iface: &InterfaceRef) -> Result<u32> {
+        match iface {
+            InterfaceRef::Index(idx) => Ok(*idx),
+            InterfaceRef::Name(name) => {
+                let route_conn = Connection::<Route>::new()?;
+                route_conn
+                    .get_link_by_name(name)
+                    .await?
+                    .map(|l| l.ifindex())
+                    .ok_or_else(|| Error::InterfaceNotFound { name: name.clone() })
+            }
+        }
+    }
+
+    /// Get device information.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Macsec};
+    ///
+    /// let conn = Connection::<Macsec>::new_async().await?;
+    ///
+    /// // By name (convenient)
+    /// let device = conn.get_device("macsec0").await?;
+    ///
+    /// // By index (efficient for repeated operations)
+    /// let device = conn.get_device(5u32).await?;
+    /// ```
+    pub async fn get_device(&self, iface: impl Into<InterfaceRef>) -> Result<MacsecDevice> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.get_device_by_index(ifindex).await
     }
 
     /// Get device information by interface index.
@@ -294,6 +336,99 @@ impl Connection<Macsec> {
         .await?;
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Convenience methods that accept InterfaceRef
+    // ========================================================================
+
+    /// Add a TX Security Association.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let key = [0u8; 16];
+    /// conn.add_tx_sa("macsec0", MacsecSaBuilder::new(0).key(&key).active(true)).await?;
+    /// ```
+    pub async fn add_tx_sa(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        sa: MacsecSaBuilder,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.add_tx_sa_by_index(ifindex, sa).await
+    }
+
+    /// Delete a TX Security Association.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn del_tx_sa(&self, iface: impl Into<InterfaceRef>, an: u8) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.del_tx_sa_by_index(ifindex, an).await
+    }
+
+    /// Update a TX Security Association.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn update_tx_sa(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        sa: MacsecSaBuilder,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.update_tx_sa_by_index(ifindex, sa).await
+    }
+
+    /// Add an RX Secure Channel.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn add_rx_sc(&self, iface: impl Into<InterfaceRef>, sci: u64) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.add_rx_sc_by_index(ifindex, sci).await
+    }
+
+    /// Delete an RX Secure Channel.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn del_rx_sc(&self, iface: impl Into<InterfaceRef>, sci: u64) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.del_rx_sc_by_index(ifindex, sci).await
+    }
+
+    /// Add an RX Security Association.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn add_rx_sa(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        sci: u64,
+        sa: MacsecSaBuilder,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.add_rx_sa_by_index(ifindex, sci, sa).await
+    }
+
+    /// Delete an RX Security Association.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn del_rx_sa(&self, iface: impl Into<InterfaceRef>, sci: u64, an: u8) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.del_rx_sa_by_index(ifindex, sci, an).await
+    }
+
+    /// Update an RX Security Association.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    pub async fn update_rx_sa(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        sci: u64,
+        sa: MacsecSaBuilder,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.update_rx_sa_by_index(ifindex, sci, sa).await
     }
 
     /// Send a MACsec GENL command and wait for ACK.

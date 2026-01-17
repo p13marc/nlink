@@ -32,7 +32,7 @@ async fn main() -> nlink::netlink::Result<()> {
     let mut found_any = false;
 
     for ifname in &interface_names {
-        match conn.get_device(ifname).await {
+        match conn.get_device(*ifname).await {
             Ok(device) => {
                 found_any = true;
                 print_device(&device);

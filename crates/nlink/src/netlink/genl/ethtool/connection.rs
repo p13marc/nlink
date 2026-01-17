@@ -17,8 +17,9 @@ use crate::netlink::error::{Error, Result};
 use crate::netlink::genl::{
     CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
 };
+use crate::netlink::interface_ref::InterfaceRef;
 use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{Ethtool, ProtocolState};
+use crate::netlink::protocol::{Ethtool, ProtocolState, Route};
 use crate::netlink::socket::NetlinkSocket;
 
 impl Connection<Ethtool> {
@@ -56,11 +57,33 @@ impl Connection<Ethtool> {
         self.state().monitor_group_id
     }
 
+    /// Resolve an interface reference to a name.
+    ///
+    /// Ethtool uses interface names in its protocol, so we resolve
+    /// indices back to names when needed.
+    async fn resolve_interface_name(&self, iface: &InterfaceRef) -> Result<String> {
+        match iface {
+            InterfaceRef::Name(name) => Ok(name.clone()),
+            InterfaceRef::Index(idx) => {
+                let route_conn = Connection::<Route>::new()?;
+                route_conn
+                    .get_link_by_index(*idx)
+                    .await?
+                    .and_then(|l| l.name().map(|s| s.to_string()))
+                    .ok_or_else(|| Error::InterfaceNotFound {
+                        name: format!("ifindex {}", idx),
+                    })
+            }
+        }
+    }
+
     // =========================================================================
     // Link State
     // =========================================================================
 
     /// Get link state (carrier detection, signal quality).
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
     ///
     /// # Example
     ///
@@ -68,13 +91,22 @@ impl Connection<Ethtool> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
+    ///
+    /// // By name
     /// let state = conn.get_link_state("eth0").await?;
+    ///
+    /// // By index
+    /// let state = conn.get_link_state(5u32).await?;
+    ///
     /// println!("Link detected: {}", state.link);
-    /// if let Some(sqi) = state.sqi {
-    ///     println!("Signal quality: {}", sqi);
-    /// }
     /// ```
-    pub async fn get_link_state(&self, ifname: &str) -> Result<LinkState> {
+    pub async fn get_link_state(&self, iface: impl Into<InterfaceRef>) -> Result<LinkState> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_link_state_by_name(&ifname).await
+    }
+
+    /// Get link state by interface name.
+    pub async fn get_link_state_by_name(&self, ifname: &str) -> Result<LinkState> {
         let response = self.ethtool_get(EthtoolCmd::LinkstateGet, ifname).await?;
 
         let mut state = LinkState::default();
@@ -130,17 +162,31 @@ impl Connection<Ethtool> {
 
     /// Get link info (port type, transceiver, MDI-X).
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
+    ///
+    /// // By name
     /// let info = conn.get_link_info("eth0").await?;
+    ///
+    /// // By index
+    /// let info = conn.get_link_info(5u32).await?;
+    ///
     /// println!("Port: {:?}", info.port);
     /// println!("Transceiver: {:?}", info.transceiver);
     /// ```
-    pub async fn get_link_info(&self, ifname: &str) -> Result<LinkInfo> {
+    pub async fn get_link_info(&self, iface: impl Into<InterfaceRef>) -> Result<LinkInfo> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_link_info_by_name(&ifname).await
+    }
+
+    /// Get link info by interface name.
+    pub async fn get_link_info_by_name(&self, ifname: &str) -> Result<LinkInfo> {
         let response = self.ethtool_get(EthtoolCmd::LinkinfoGet, ifname).await?;
 
         let mut info = LinkInfo::default();
@@ -196,19 +242,33 @@ impl Connection<Ethtool> {
 
     /// Get link modes (speed, duplex, autonegotiation).
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
+    ///
+    /// // By name
     /// let modes = conn.get_link_modes("eth0").await?;
+    ///
+    /// // By index
+    /// let modes = conn.get_link_modes(5u32).await?;
+    ///
     /// println!("Speed: {:?} Mb/s", modes.speed);
     /// println!("Duplex: {:?}", modes.duplex);
     /// println!("Autoneg: {}", modes.autoneg);
     /// println!("Supported modes: {:?}", modes.supported_modes());
     /// ```
-    pub async fn get_link_modes(&self, ifname: &str) -> Result<LinkModes> {
+    pub async fn get_link_modes(&self, iface: impl Into<InterfaceRef>) -> Result<LinkModes> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_link_modes_by_name(&ifname).await
+    }
+
+    /// Get link modes by interface name.
+    pub async fn get_link_modes_by_name(&self, ifname: &str) -> Result<LinkModes> {
         let response = self.ethtool_get(EthtoolCmd::LinkmodesGet, ifname).await?;
 
         let mut modes = LinkModes::default();
@@ -223,6 +283,8 @@ impl Connection<Ethtool> {
 
     /// Set link modes (speed, duplex, autonegotiation).
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -231,21 +293,31 @@ impl Connection<Ethtool> {
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
     ///
-    /// // Force 1000Mbps full duplex
+    /// // Force 1000Mbps full duplex (by name)
     /// conn.set_link_modes("eth0", |m| {
     ///     m.autoneg(false)
     ///      .speed(1000)
     ///      .duplex(Duplex::Full)
     /// }).await?;
     ///
-    /// // Enable autonegotiation with specific modes
-    /// conn.set_link_modes("eth0", |m| {
+    /// // By index
+    /// conn.set_link_modes(5u32, |m| {
     ///     m.autoneg(true)
     ///      .advertise("1000baseT/Full")
     ///      .advertise("100baseT/Full")
     /// }).await?;
     /// ```
     pub async fn set_link_modes(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        configure: impl FnOnce(LinkModesBuilder) -> LinkModesBuilder,
+    ) -> Result<()> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.set_link_modes_by_name(&ifname, configure).await
+    }
+
+    /// Set link modes by interface name.
+    pub async fn set_link_modes_by_name(
         &self,
         ifname: &str,
         configure: impl FnOnce(LinkModesBuilder) -> LinkModesBuilder,
@@ -334,13 +406,20 @@ impl Connection<Ethtool> {
 
     /// Get device features (offloads).
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
+    ///
+    /// // By name
     /// let features = conn.get_features("eth0").await?;
+    ///
+    /// // By index
+    /// let features = conn.get_features(5u32).await?;
     ///
     /// println!("TSO: {}", features.is_active("tx-tcp-segmentation"));
     /// println!("GRO: {}", features.is_active("rx-gro"));
@@ -349,7 +428,13 @@ impl Connection<Ethtool> {
     ///     println!("{}: {}", name, if enabled { "on" } else { "off" });
     /// }
     /// ```
-    pub async fn get_features(&self, ifname: &str) -> Result<Features> {
+    pub async fn get_features(&self, iface: impl Into<InterfaceRef>) -> Result<Features> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_features_by_name(&ifname).await
+    }
+
+    /// Get device features by interface name.
+    pub async fn get_features_by_name(&self, ifname: &str) -> Result<Features> {
         let response = self.ethtool_get(EthtoolCmd::FeaturesGet, ifname).await?;
 
         let mut features = Features::default();
@@ -364,6 +449,8 @@ impl Connection<Ethtool> {
 
     /// Set device features (offloads).
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -371,12 +458,28 @@ impl Connection<Ethtool> {
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
     ///
+    /// // By name
     /// conn.set_features("eth0", |f| {
     ///     f.enable("tx-checksumming")
     ///      .disable("rx-gro")
     /// }).await?;
+    ///
+    /// // By index
+    /// conn.set_features(5u32, |f| {
+    ///     f.enable("tx-checksumming")
+    /// }).await?;
     /// ```
     pub async fn set_features(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        configure: impl FnOnce(FeaturesBuilder) -> FeaturesBuilder,
+    ) -> Result<()> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.set_features_by_name(&ifname, configure).await
+    }
+
+    /// Set device features by interface name.
+    pub async fn set_features_by_name(
         &self,
         ifname: &str,
         configure: impl FnOnce(FeaturesBuilder) -> FeaturesBuilder,
@@ -433,18 +536,31 @@ impl Connection<Ethtool> {
 
     /// Get ring buffer sizes.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
+    ///
+    /// // By name
     /// let rings = conn.get_rings("eth0").await?;
+    ///
+    /// // By index
+    /// let rings = conn.get_rings(5u32).await?;
     ///
     /// println!("RX: {:?} (max {:?})", rings.rx, rings.rx_max);
     /// println!("TX: {:?} (max {:?})", rings.tx, rings.tx_max);
     /// ```
-    pub async fn get_rings(&self, ifname: &str) -> Result<Rings> {
+    pub async fn get_rings(&self, iface: impl Into<InterfaceRef>) -> Result<Rings> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_rings_by_name(&ifname).await
+    }
+
+    /// Get ring buffer sizes by interface name.
+    pub async fn get_rings_by_name(&self, ifname: &str) -> Result<Rings> {
         let response = self.ethtool_get(EthtoolCmd::RingsGet, ifname).await?;
 
         let mut rings = Rings::default();
@@ -459,6 +575,8 @@ impl Connection<Ethtool> {
 
     /// Set ring buffer sizes.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -466,11 +584,27 @@ impl Connection<Ethtool> {
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
     ///
+    /// // By name
     /// conn.set_rings("eth0", |r| {
+    ///     r.rx(4096).tx(4096)
+    /// }).await?;
+    ///
+    /// // By index
+    /// conn.set_rings(5u32, |r| {
     ///     r.rx(4096).tx(4096)
     /// }).await?;
     /// ```
     pub async fn set_rings(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        configure: impl FnOnce(RingsBuilder) -> RingsBuilder,
+    ) -> Result<()> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.set_rings_by_name(&ifname, configure).await
+    }
+
+    /// Set ring buffer sizes by interface name.
+    pub async fn set_rings_by_name(
         &self,
         ifname: &str,
         configure: impl FnOnce(RingsBuilder) -> RingsBuilder,
@@ -578,19 +712,32 @@ impl Connection<Ethtool> {
 
     /// Get channel counts (RX/TX queues).
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
+    ///
+    /// // By name
     /// let channels = conn.get_channels("eth0").await?;
+    ///
+    /// // By index
+    /// let channels = conn.get_channels(5u32).await?;
     ///
     /// println!("RX: {:?} (max {:?})", channels.rx_count, channels.rx_max);
     /// println!("TX: {:?} (max {:?})", channels.tx_count, channels.tx_max);
     /// println!("Combined: {:?} (max {:?})", channels.combined_count, channels.combined_max);
     /// ```
-    pub async fn get_channels(&self, ifname: &str) -> Result<Channels> {
+    pub async fn get_channels(&self, iface: impl Into<InterfaceRef>) -> Result<Channels> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_channels_by_name(&ifname).await
+    }
+
+    /// Get channel counts by interface name.
+    pub async fn get_channels_by_name(&self, ifname: &str) -> Result<Channels> {
         let response = self.ethtool_get(EthtoolCmd::ChannelsGet, ifname).await?;
 
         let mut channels = Channels::default();
@@ -605,6 +752,8 @@ impl Connection<Ethtool> {
 
     /// Set channel counts.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -612,11 +761,27 @@ impl Connection<Ethtool> {
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
     ///
+    /// // By name
     /// conn.set_channels("eth0", |c| {
+    ///     c.combined(4)
+    /// }).await?;
+    ///
+    /// // By index
+    /// conn.set_channels(5u32, |c| {
     ///     c.combined(4)
     /// }).await?;
     /// ```
     pub async fn set_channels(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        configure: impl FnOnce(ChannelsBuilder) -> ChannelsBuilder,
+    ) -> Result<()> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.set_channels_by_name(&ifname, configure).await
+    }
+
+    /// Set channel counts by interface name.
+    pub async fn set_channels_by_name(
         &self,
         ifname: &str,
         configure: impl FnOnce(ChannelsBuilder) -> ChannelsBuilder,
@@ -709,19 +874,32 @@ impl Connection<Ethtool> {
 
     /// Get interrupt coalescing parameters.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
+    ///
+    /// // By name
     /// let coalesce = conn.get_coalesce("eth0").await?;
+    ///
+    /// // By index
+    /// let coalesce = conn.get_coalesce(5u32).await?;
     ///
     /// println!("RX usecs: {:?}", coalesce.rx_usecs);
     /// println!("TX usecs: {:?}", coalesce.tx_usecs);
     /// println!("Adaptive RX: {:?}", coalesce.use_adaptive_rx);
     /// ```
-    pub async fn get_coalesce(&self, ifname: &str) -> Result<Coalesce> {
+    pub async fn get_coalesce(&self, iface: impl Into<InterfaceRef>) -> Result<Coalesce> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_coalesce_by_name(&ifname).await
+    }
+
+    /// Get interrupt coalescing parameters by interface name.
+    pub async fn get_coalesce_by_name(&self, ifname: &str) -> Result<Coalesce> {
         let response = self.ethtool_get(EthtoolCmd::CoalesceGet, ifname).await?;
 
         let mut coalesce = Coalesce::default();
@@ -736,6 +914,8 @@ impl Connection<Ethtool> {
 
     /// Set interrupt coalescing parameters.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -743,13 +923,29 @@ impl Connection<Ethtool> {
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
     ///
+    /// // By name
     /// conn.set_coalesce("eth0", |c| {
     ///     c.rx_usecs(100)
     ///      .tx_usecs(100)
     ///      .use_adaptive_rx(true)
     /// }).await?;
+    ///
+    /// // By index
+    /// conn.set_coalesce(5u32, |c| {
+    ///     c.rx_usecs(100)
+    /// }).await?;
     /// ```
     pub async fn set_coalesce(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        configure: impl FnOnce(CoalesceBuilder) -> CoalesceBuilder,
+    ) -> Result<()> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.set_coalesce_by_name(&ifname, configure).await
+    }
+
+    /// Set interrupt coalescing parameters by interface name.
+    pub async fn set_coalesce_by_name(
         &self,
         ifname: &str,
         configure: impl FnOnce(CoalesceBuilder) -> CoalesceBuilder,
@@ -882,19 +1078,32 @@ impl Connection<Ethtool> {
 
     /// Get pause/flow control settings.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
+    ///
+    /// // By name
     /// let pause = conn.get_pause("eth0").await?;
+    ///
+    /// // By index
+    /// let pause = conn.get_pause(5u32).await?;
     ///
     /// println!("Autoneg: {:?}", pause.autoneg);
     /// println!("RX pause: {:?}", pause.rx);
     /// println!("TX pause: {:?}", pause.tx);
     /// ```
-    pub async fn get_pause(&self, ifname: &str) -> Result<Pause> {
+    pub async fn get_pause(&self, iface: impl Into<InterfaceRef>) -> Result<Pause> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_pause_by_name(&ifname).await
+    }
+
+    /// Get pause/flow control settings by interface name.
+    pub async fn get_pause_by_name(&self, ifname: &str) -> Result<Pause> {
         let response = self.ethtool_get(EthtoolCmd::PauseGet, ifname).await?;
 
         let mut pause = Pause::default();
@@ -909,6 +1118,8 @@ impl Connection<Ethtool> {
 
     /// Set pause/flow control settings.
     ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -916,13 +1127,29 @@ impl Connection<Ethtool> {
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
     ///
+    /// // By name
     /// conn.set_pause("eth0", |p| {
     ///     p.autoneg(true)
     ///      .rx(true)
     ///      .tx(true)
     /// }).await?;
+    ///
+    /// // By index
+    /// conn.set_pause(5u32, |p| {
+    ///     p.autoneg(true)
+    /// }).await?;
     /// ```
     pub async fn set_pause(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        configure: impl FnOnce(PauseBuilder) -> PauseBuilder,
+    ) -> Result<()> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.set_pause_by_name(&ifname, configure).await
+    }
+
+    /// Set pause/flow control settings by interface name.
+    pub async fn set_pause_by_name(
         &self,
         ifname: &str,
         configure: impl FnOnce(PauseBuilder) -> PauseBuilder,
