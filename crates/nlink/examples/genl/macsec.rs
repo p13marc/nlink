@@ -33,9 +33,11 @@ async fn main() -> nlink::Result<()> {
             } else {
                 for link in &macsec_links {
                     let name = link.name_or("?");
-                    println!("MACsec interface: {}", name);
+                    let ifindex = link.ifindex();
+                    println!("MACsec interface: {} (ifindex {})", name, ifindex);
 
-                    match conn.get_device(name).await {
+                    // Use get_device_by_index for namespace-safe operation
+                    match conn.get_device_by_index(ifindex).await {
                         Ok(device) => {
                             println!("  SCI: {:016x}", device.sci);
                             println!("  Cipher: {:?}", device.cipher_suite);
@@ -94,12 +96,19 @@ async fn main() -> nlink::Result<()> {
     println!("--- Query MACsec device ---");
     println!(
         r#"
-    use nlink::netlink::{{Connection, Macsec}};
+    use nlink::netlink::{{Connection, Macsec, Route}};
 
+    // First resolve interface name to index via Route connection
+    let route_conn = Connection::<Route>::new()?;
+    let link = route_conn.get_link_by_name("macsec0").await?
+        .ok_or("interface not found")?;
+    let ifindex = link.ifindex();
+
+    // Create MACsec connection
     let conn = Connection::<Macsec>::new_async().await?;
 
-    // Get device information
-    let device = conn.get_device("macsec0").await?;
+    // Get device information by index (namespace-safe)
+    let device = conn.get_device_by_index(ifindex).await?;
     println!("SCI: {:016x}", device.sci);
     println!("Cipher: {:?}", device.cipher_suite);
     println!("Encoding SA: {}", device.encoding_sa);
@@ -125,8 +134,9 @@ async fn main() -> nlink::Result<()> {
     use nlink::netlink::genl::macsec::MacsecSaBuilder;
 
     // Add TX SA with key (AN 0-3)
+    // ifindex obtained via route_conn.get_link_by_name() as shown above
     let key = [0u8; 16];  // 128-bit key for GCM-AES-128
-    conn.add_tx_sa("macsec0",
+    conn.add_tx_sa_by_index(ifindex,
         MacsecSaBuilder::new(0)  // AN (Association Number)
             .key(&key)
             .pn(1)              // Initial packet number
@@ -139,13 +149,13 @@ async fn main() -> nlink::Result<()> {
     println!(
         r#"
     // Activate/deactivate SA
-    conn.update_tx_sa("macsec0",
+    conn.update_tx_sa_by_index(ifindex,
         MacsecSaBuilder::new(0)
             .active(false)  // Deactivate
     ).await?;
 
     // Update packet number
-    conn.update_tx_sa("macsec0",
+    conn.update_tx_sa_by_index(ifindex,
         MacsecSaBuilder::new(0)
             .pn(1000000)
     ).await?;
@@ -157,11 +167,11 @@ async fn main() -> nlink::Result<()> {
         r#"
     // Add RX SC for a peer (using their SCI)
     let peer_sci = 0x001122334455_0001u64;  // MAC + port
-    conn.add_rx_sc("macsec0", peer_sci).await?;
+    conn.add_rx_sc_by_index(ifindex, peer_sci).await?;
 
     // Add RX SA for the peer
     let peer_key = [0u8; 16];
-    conn.add_rx_sa("macsec0", peer_sci,
+    conn.add_rx_sa_by_index(ifindex, peer_sci,
         MacsecSaBuilder::new(0)
             .key(&peer_key)
             .pn(1)
@@ -174,13 +184,13 @@ async fn main() -> nlink::Result<()> {
     println!(
         r#"
     // Delete TX SA
-    conn.del_tx_sa("macsec0", 0).await?;
+    conn.del_tx_sa_by_index(ifindex, 0).await?;
 
     // Delete RX SA
-    conn.del_rx_sa("macsec0", peer_sci, 0).await?;
+    conn.del_rx_sa_by_index(ifindex, peer_sci, 0).await?;
 
     // Delete RX SC
-    conn.del_rx_sc("macsec0", peer_sci).await?;
+    conn.del_rx_sc_by_index(ifindex, peer_sci).await?;
 "#
     );
 

@@ -86,6 +86,7 @@ pub mod filter;
 #[cfg(test)]
 mod fixtures;
 pub mod genl;
+mod interface_ref;
 pub mod link;
 pub mod message;
 pub mod messages;
@@ -120,6 +121,7 @@ pub use builder::{MessageBuilder, NestToken};
 pub use connection::{Connection, RtnetlinkGroup};
 pub use error::{Error, Result};
 pub use events::NetworkEvent;
+pub use interface_ref::InterfaceRef;
 pub use message::{MessageIter, NLMSG_HDRLEN, NlMsgHdr, NlMsgType};
 pub use namespace::NamespaceSpec;
 pub use namespace_events::{NamespaceEventSubscriber, NamespaceNetlinkEvent};

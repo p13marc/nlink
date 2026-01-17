@@ -60,6 +60,7 @@ use super::attr::AttrIter;
 use super::builder::MessageBuilder;
 use super::connection::Connection;
 use super::error::{Error, Result};
+use super::interface_ref::InterfaceRef;
 use super::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgType};
 use super::protocol::Route;
 use super::types::link::{
@@ -148,8 +149,7 @@ pub struct BridgeVlanTunnelEntry {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct BridgeVlanTunnelBuilder {
-    dev: Option<String>,
-    ifindex: Option<u32>,
+    dev: Option<InterfaceRef>,
     vid: u16,
     vid_end: Option<u16>,
     tunnel_id: u32,
@@ -175,7 +175,7 @@ impl BridgeVlanTunnelBuilder {
 
     /// Set device name.
     pub fn dev(mut self, dev: impl Into<String>) -> Self {
-        self.dev = Some(dev.into());
+        self.dev = Some(InterfaceRef::Name(dev.into()));
         self
     }
 
@@ -183,8 +183,13 @@ impl BridgeVlanTunnelBuilder {
     ///
     /// Use this instead of `dev()` when operating in a network namespace.
     pub fn ifindex(mut self, ifindex: u32) -> Self {
-        self.ifindex = Some(ifindex);
+        self.dev = Some(InterfaceRef::Index(ifindex));
         self
+    }
+
+    /// Get the device reference.
+    pub fn device_ref(&self) -> Option<&InterfaceRef> {
+        self.dev.as_ref()
     }
 
     /// Set VLAN range end for bulk operations.
@@ -201,34 +206,22 @@ impl BridgeVlanTunnelBuilder {
         self
     }
 
-    /// Resolve interface name to index.
-    fn resolve_ifindex(&self) -> Result<i32> {
-        if let Some(idx) = self.ifindex {
-            Ok(idx as i32)
-        } else if let Some(ref dev) = self.dev {
-            crate::util::get_ifindex(dev)
-                .map(|idx| idx as i32)
-                .map_err(Error::InvalidMessage)
-        } else {
-            Err(Error::InvalidMessage(
-                "device name or ifindex required".into(),
-            ))
-        }
+    /// Write netlink message for adding tunnel mapping.
+    pub(crate) fn write_add(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()> {
+        self.write_message(builder, NlMsgType::RTM_SETLINK, ifindex)
     }
 
-    /// Build netlink message for adding tunnel mapping.
-    pub(crate) fn build_add(&self) -> Result<MessageBuilder> {
-        self.build_message(NlMsgType::RTM_SETLINK)
+    /// Write netlink message for deleting tunnel mapping.
+    pub(crate) fn write_del(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()> {
+        self.write_message(builder, NlMsgType::RTM_DELLINK, ifindex)
     }
 
-    /// Build netlink message for deleting tunnel mapping.
-    pub(crate) fn build_del(&self) -> Result<MessageBuilder> {
-        self.build_message(NlMsgType::RTM_DELLINK)
-    }
-
-    fn build_message(&self, msg_type: u16) -> Result<MessageBuilder> {
-        let ifindex = self.resolve_ifindex()?;
-
+    fn write_message(
+        &self,
+        builder: &mut MessageBuilder,
+        _msg_type: u16,
+        ifindex: u32,
+    ) -> Result<()> {
         // Validate tunnel ID
         if self.tunnel_id > Self::MAX_TUNNEL_ID {
             return Err(Error::InvalidMessage(format!(
@@ -238,12 +231,10 @@ impl BridgeVlanTunnelBuilder {
             )));
         }
 
-        let mut builder = MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_ACK);
-
         // Use AF_BRIDGE family
         let ifinfo = IfInfoMsg::new()
             .with_family(libc::AF_BRIDGE as u8)
-            .with_index(ifindex);
+            .with_index(ifindex as i32);
         builder.append(&ifinfo);
 
         // IFLA_AF_SPEC containing tunnel info
@@ -252,7 +243,7 @@ impl BridgeVlanTunnelBuilder {
         if let Some(vid_end) = self.vid_end {
             // Range operation: emit tunnel entries with RANGE_BEGIN and RANGE_END flags
             self.add_tunnel_entry(
-                &mut builder,
+                builder,
                 self.vid,
                 self.tunnel_id,
                 bridge_vlan_flags::RANGE_BEGIN,
@@ -269,19 +260,19 @@ impl BridgeVlanTunnelBuilder {
             }
 
             self.add_tunnel_entry(
-                &mut builder,
+                builder,
                 vid_end,
                 tunnel_id_end,
                 bridge_vlan_flags::RANGE_END,
             );
         } else {
             // Single mapping
-            self.add_tunnel_entry(&mut builder, self.vid, self.tunnel_id, 0);
+            self.add_tunnel_entry(builder, self.vid, self.tunnel_id, 0);
         }
 
         builder.nest_end(af_spec);
 
-        Ok(builder)
+        Ok(())
     }
 
     /// Add a single tunnel entry to the message.
@@ -318,8 +309,7 @@ impl BridgeVlanTunnelBuilder {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct BridgeVlanBuilder {
-    dev: Option<String>,
-    ifindex: Option<u32>,
+    dev: Option<InterfaceRef>,
     vid: u16,
     vid_end: Option<u16>,
     pvid: bool,
@@ -340,7 +330,7 @@ impl BridgeVlanBuilder {
 
     /// Set device name.
     pub fn dev(mut self, dev: impl Into<String>) -> Self {
-        self.dev = Some(dev.into());
+        self.dev = Some(InterfaceRef::Name(dev.into()));
         self
     }
 
@@ -349,8 +339,13 @@ impl BridgeVlanBuilder {
     /// Use this instead of `dev()` when operating in a network namespace
     /// to avoid reading `/sys/class/net/` from the wrong namespace.
     pub fn ifindex(mut self, ifindex: u32) -> Self {
-        self.ifindex = Some(ifindex);
+        self.dev = Some(InterfaceRef::Index(ifindex));
         self
+    }
+
+    /// Get the device reference.
+    pub fn device_ref(&self) -> Option<&InterfaceRef> {
+        self.dev.as_ref()
     }
 
     /// Set VLAN range end (for bulk operations).
@@ -386,21 +381,6 @@ impl BridgeVlanBuilder {
         self
     }
 
-    /// Resolve interface name to index.
-    fn resolve_ifindex(&self) -> Result<i32> {
-        if let Some(idx) = self.ifindex {
-            Ok(idx as i32)
-        } else if let Some(ref dev) = self.dev {
-            crate::util::get_ifindex(dev)
-                .map(|idx| idx as i32)
-                .map_err(Error::InvalidMessage)
-        } else {
-            Err(Error::InvalidMessage(
-                "device name or ifindex required".into(),
-            ))
-        }
-    }
-
     /// Build the raw flags value.
     fn build_flags(&self) -> u16 {
         let mut flags = 0u16;
@@ -416,25 +396,21 @@ impl BridgeVlanBuilder {
         flags
     }
 
-    /// Build netlink message for adding VLAN.
-    pub(crate) fn build_add(&self) -> Result<MessageBuilder> {
-        self.build_message(NlMsgType::RTM_SETLINK)
+    /// Write netlink message for adding VLAN.
+    pub(crate) fn write_add(&self, builder: &mut MessageBuilder, ifindex: u32) {
+        self.write_message(builder, ifindex);
     }
 
-    /// Build netlink message for deleting VLAN.
-    pub(crate) fn build_del(&self) -> Result<MessageBuilder> {
-        self.build_message(NlMsgType::RTM_DELLINK)
+    /// Write netlink message for deleting VLAN.
+    pub(crate) fn write_del(&self, builder: &mut MessageBuilder, ifindex: u32) {
+        self.write_message(builder, ifindex);
     }
 
-    fn build_message(&self, msg_type: u16) -> Result<MessageBuilder> {
-        let ifindex = self.resolve_ifindex()?;
-
-        let mut builder = MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_ACK);
-
+    fn write_message(&self, builder: &mut MessageBuilder, ifindex: u32) {
         // Use AF_BRIDGE family
         let ifinfo = IfInfoMsg::new()
             .with_family(libc::AF_BRIDGE as u8)
-            .with_index(ifindex);
+            .with_index(ifindex as i32);
         builder.append(&ifinfo);
 
         // IFLA_AF_SPEC containing VLAN info
@@ -461,8 +437,6 @@ impl BridgeVlanBuilder {
         }
 
         builder.nest_end(af_spec);
-
-        Ok(builder)
     }
 }
 
@@ -471,6 +445,29 @@ impl BridgeVlanBuilder {
 // ============================================================================
 
 impl Connection<Route> {
+    /// Resolve BridgeVlanBuilder interface reference.
+    async fn resolve_bridge_vlan_interface(&self, config: &BridgeVlanBuilder) -> Result<u32> {
+        match config.device_ref() {
+            Some(iface) => self.resolve_interface(iface).await,
+            None => Err(Error::InvalidMessage(
+                "device name or ifindex required".into(),
+            )),
+        }
+    }
+
+    /// Resolve BridgeVlanTunnelBuilder interface reference.
+    async fn resolve_bridge_vlan_tunnel_interface(
+        &self,
+        config: &BridgeVlanTunnelBuilder,
+    ) -> Result<u32> {
+        match config.device_ref() {
+            Some(iface) => self.resolve_interface(iface).await,
+            None => Err(Error::InvalidMessage(
+                "device name or ifindex required".into(),
+            )),
+        }
+    }
+
     /// Get VLAN configuration for a bridge port.
     ///
     /// Returns all VLANs configured on the specified interface.
@@ -485,7 +482,9 @@ impl Connection<Route> {
     /// }
     /// ```
     pub async fn get_bridge_vlans(&self, dev: &str) -> Result<Vec<BridgeVlanEntry>> {
-        let ifindex = crate::util::get_ifindex(dev).map_err(Error::InvalidMessage)? as u32;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.get_bridge_vlans_by_index(ifindex).await
     }
 
@@ -519,7 +518,9 @@ impl Connection<Route> {
     /// }
     /// ```
     pub async fn get_bridge_vlans_all(&self, bridge: &str) -> Result<Vec<BridgeVlanEntry>> {
-        let bridge_idx = crate::util::get_ifindex(bridge).map_err(Error::InvalidMessage)? as u32;
+        let bridge_idx = self
+            .resolve_interface(&InterfaceRef::Name(bridge.to_string()))
+            .await?;
         self.get_bridge_vlans_all_by_index(bridge_idx).await
     }
 
@@ -595,7 +596,9 @@ impl Connection<Route> {
     /// ).await?;
     /// ```
     pub async fn add_bridge_vlan(&self, config: BridgeVlanBuilder) -> Result<()> {
-        let builder = config.build_add()?;
+        let ifindex = self.resolve_bridge_vlan_interface(&config).await?;
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_SETLINK, NLM_F_REQUEST | NLM_F_ACK);
+        config.write_add(&mut builder, ifindex);
         self.send_ack(builder).await
     }
 
@@ -607,13 +610,17 @@ impl Connection<Route> {
     /// conn.del_bridge_vlan("eth0", 100).await?;
     /// ```
     pub async fn del_bridge_vlan(&self, dev: &str, vid: u16) -> Result<()> {
-        let builder = BridgeVlanBuilder::new(vid).dev(dev).build_del()?;
-        self.send_ack(builder).await
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
+        self.del_bridge_vlan_by_index(ifindex, vid).await
     }
 
     /// Delete VLAN from a bridge port by interface index.
     pub async fn del_bridge_vlan_by_index(&self, ifindex: u32, vid: u16) -> Result<()> {
-        let builder = BridgeVlanBuilder::new(vid).ifindex(ifindex).build_del()?;
+        let config = BridgeVlanBuilder::new(vid).ifindex(ifindex);
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
+        config.write_del(&mut builder, ifindex);
         self.send_ack(builder).await
     }
 
@@ -630,10 +637,10 @@ impl Connection<Route> {
         vid_start: u16,
         vid_end: u16,
     ) -> Result<()> {
-        let builder = BridgeVlanBuilder::new(vid_start)
-            .dev(dev)
-            .range(vid_end)
-            .build_del()?;
+        let config = BridgeVlanBuilder::new(vid_start).dev(dev).range(vid_end);
+        let ifindex = self.resolve_bridge_vlan_interface(&config).await?;
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
+        config.write_del(&mut builder, ifindex);
         self.send_ack(builder).await
     }
 
@@ -712,7 +719,9 @@ impl Connection<Route> {
     /// }
     /// ```
     pub async fn get_vlan_tunnels(&self, dev: &str) -> Result<Vec<BridgeVlanTunnelEntry>> {
-        let ifindex = crate::util::get_ifindex(dev).map_err(Error::InvalidMessage)? as u32;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.get_vlan_tunnels_by_index(ifindex).await
     }
 
@@ -760,7 +769,9 @@ impl Connection<Route> {
     /// ).await?;
     /// ```
     pub async fn add_vlan_tunnel(&self, config: BridgeVlanTunnelBuilder) -> Result<()> {
-        let builder = config.build_add()?;
+        let ifindex = self.resolve_bridge_vlan_tunnel_interface(&config).await?;
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_SETLINK, NLM_F_REQUEST | NLM_F_ACK);
+        config.write_add(&mut builder, ifindex)?;
         self.send_ack(builder).await
     }
 
@@ -772,16 +783,17 @@ impl Connection<Route> {
     /// conn.del_vlan_tunnel("vxlan0", 100).await?;
     /// ```
     pub async fn del_vlan_tunnel(&self, dev: &str, vid: u16) -> Result<()> {
-        // We need to specify a tunnel_id, but for deletion only vid matters
-        let builder = BridgeVlanTunnelBuilder::new(vid, 0).dev(dev).build_del()?;
-        self.send_ack(builder).await
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
+        self.del_vlan_tunnel_by_index(ifindex, vid).await
     }
 
     /// Delete VLAN-to-tunnel ID mapping by interface index.
     pub async fn del_vlan_tunnel_by_index(&self, ifindex: u32, vid: u16) -> Result<()> {
-        let builder = BridgeVlanTunnelBuilder::new(vid, 0)
-            .ifindex(ifindex)
-            .build_del()?;
+        let config = BridgeVlanTunnelBuilder::new(vid, 0).ifindex(ifindex);
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
+        config.write_del(&mut builder, ifindex)?;
         self.send_ack(builder).await
     }
 
@@ -798,10 +810,12 @@ impl Connection<Route> {
         vid_start: u16,
         vid_end: u16,
     ) -> Result<()> {
-        let builder = BridgeVlanTunnelBuilder::new(vid_start, 0)
+        let config = BridgeVlanTunnelBuilder::new(vid_start, 0)
             .dev(dev)
-            .range(vid_end)
-            .build_del()?;
+            .range(vid_end);
+        let ifindex = self.resolve_bridge_vlan_tunnel_interface(&config).await?;
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
+        config.write_del(&mut builder, ifindex)?;
         self.send_ack(builder).await
     }
 }
@@ -1048,7 +1062,7 @@ mod tests {
             .untagged()
             .master();
 
-        assert_eq!(builder.dev, Some("eth0".to_string()));
+        assert_eq!(builder.dev, Some(InterfaceRef::Name("eth0".to_string())));
         assert!(builder.pvid);
         assert!(builder.untagged);
         assert!(builder.master);
@@ -1065,7 +1079,7 @@ mod tests {
     #[test]
     fn test_builder_ifindex() {
         let builder = BridgeVlanBuilder::new(100).ifindex(5);
-        assert_eq!(builder.ifindex, Some(5));
+        assert_eq!(builder.dev, Some(InterfaceRef::Index(5)));
     }
 
     #[test]
@@ -1089,7 +1103,6 @@ mod tests {
         assert_eq!(builder.vid, 100);
         assert_eq!(builder.tunnel_id, 10000);
         assert!(builder.dev.is_none());
-        assert!(builder.ifindex.is_none());
         assert!(builder.vid_end.is_none());
     }
 
@@ -1099,7 +1112,7 @@ mod tests {
             .dev("vxlan0")
             .range(110);
 
-        assert_eq!(builder.dev, Some("vxlan0".to_string()));
+        assert_eq!(builder.dev, Some(InterfaceRef::Name("vxlan0".to_string())));
         assert_eq!(builder.vid, 100);
         assert_eq!(builder.vid_end, Some(110));
         assert_eq!(builder.tunnel_id, 10000);
@@ -1108,7 +1121,7 @@ mod tests {
     #[test]
     fn test_tunnel_builder_ifindex() {
         let builder = BridgeVlanTunnelBuilder::new(100, 10000).ifindex(5);
-        assert_eq!(builder.ifindex, Some(5));
+        assert_eq!(builder.dev, Some(InterfaceRef::Index(5)));
     }
 
     #[test]

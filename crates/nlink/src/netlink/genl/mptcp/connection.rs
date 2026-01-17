@@ -243,12 +243,8 @@ impl Connection<Mptcp> {
                 append_dest_addr(builder, addr);
             }
 
-            // Interface
+            // Interface (must be provided as ifindex for namespace safety)
             if let Some(ifindex) = subflow.ifindex {
-                builder.append_attr_u32(mptcp_attr::IF_IDX, ifindex);
-            } else if let Some(ref dev) = subflow.dev
-                && let Ok(ifindex) = crate::util::device::get_ifindex(dev)
-            {
                 builder.append_attr_u32(mptcp_attr::IF_IDX, ifindex);
             }
 
@@ -615,12 +611,8 @@ fn append_endpoint_attrs(builder: &mut MessageBuilder, endpoint: &MptcpEndpointB
         builder.append_attr(mptcp_pm_addr_attr::PORT, &port.to_be_bytes());
     }
 
-    // Optional interface index
+    // Optional interface index (must be provided as ifindex for namespace safety)
     if let Some(ifindex) = endpoint.ifindex {
-        builder.append_attr_u32(mptcp_pm_addr_attr::IF_IDX, ifindex);
-    } else if let Some(ref dev) = endpoint.dev
-        && let Ok(ifindex) = crate::util::device::get_ifindex(dev)
-    {
         builder.append_attr_u32(mptcp_pm_addr_attr::IF_IDX, ifindex);
     }
 

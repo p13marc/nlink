@@ -27,12 +27,30 @@
 //! // Delete a neighbor entry
 //! conn.del_neighbor_v4("eth0", Ipv4Addr::new(192, 168, 1, 100)).await?;
 //! ```
+//!
+//! # Namespace-Safe Operations
+//!
+//! When working with network namespaces, use the index-based constructors:
+//!
+//! ```ignore
+//! use nlink::netlink::{Connection, Route, namespace};
+//! use nlink::netlink::neigh::Neighbor;
+//!
+//! let conn = namespace::connection_for("myns")?;
+//! let link = conn.get_link_by_name("eth0").await?.unwrap();
+//!
+//! conn.add_neighbor(
+//!     Neighbor::with_index_v4(link.ifindex(), "10.0.0.1".parse()?)
+//!         .lladdr([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])
+//! ).await?;
+//! ```
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::builder::MessageBuilder;
 use super::connection::Connection;
-use super::error::{Error, Result};
+use super::error::Result;
+use super::interface_ref::InterfaceRef;
 use super::message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType};
 use super::protocol::Route;
 use super::types::neigh::{NdMsg, NdaAttr, NeighborState, ntf, nud};
@@ -41,6 +59,8 @@ use super::types::neigh::{NdMsg, NdaAttr, NeighborState, ntf, nud};
 const NLM_F_CREATE: u16 = 0x400;
 /// NLM_F_EXCL flag
 const NLM_F_EXCL: u16 = 0x200;
+/// NLM_F_REPLACE flag
+const NLM_F_REPLACE: u16 = 0x100;
 
 /// Address families
 const AF_INET: u8 = 2;
@@ -50,15 +70,26 @@ const AF_INET6: u8 = 10;
 pub use super::types::neigh::NeighborState as State;
 
 /// Trait for neighbor configurations that can be added.
+///
+/// This trait separates interface reference from message building.
+/// The Connection is responsible for resolving the interface reference
+/// to an index before calling the write methods.
 pub trait NeighborConfig {
-    /// Get the interface name.
-    fn interface(&self) -> &str;
+    /// Get the interface reference (name or index).
+    fn interface_ref(&self) -> &InterfaceRef;
 
-    /// Build the netlink message for adding this neighbor.
-    fn build(&self) -> Result<MessageBuilder>;
+    /// Get the address family (AF_INET or AF_INET6).
+    fn family(&self) -> u8;
 
-    /// Build a message for deleting this neighbor.
-    fn build_delete(&self) -> Result<MessageBuilder>;
+    /// Write the "add neighbor" message to the builder.
+    ///
+    /// The `ifindex` parameter is the resolved interface index.
+    fn write_add(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()>;
+
+    /// Write the "delete neighbor" message to the builder.
+    ///
+    /// The `ifindex` parameter is the resolved interface index.
+    fn write_delete(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()>;
 }
 
 // ============================================================================
@@ -82,7 +113,7 @@ pub trait NeighborConfig {
 /// ```
 #[derive(Debug, Clone)]
 pub struct Neighbor {
-    interface: String,
+    interface: InterfaceRef,
     /// Destination IP address
     destination: IpAddr,
     /// Link-layer address (MAC address for Ethernet)
@@ -108,7 +139,23 @@ impl Neighbor {
     /// * `destination` - IPv4 address of the neighbor
     pub fn new_v4(interface: impl Into<String>, destination: Ipv4Addr) -> Self {
         Self {
-            interface: interface.into(),
+            interface: InterfaceRef::Name(interface.into()),
+            destination: IpAddr::V4(destination),
+            lladdr: None,
+            state: nud::PERMANENT,
+            flags: 0,
+            vlan: None,
+            vni: None,
+            master: None,
+        }
+    }
+
+    /// Create a new IPv4 neighbor entry with interface index.
+    ///
+    /// Use this constructor for namespace-safe operations.
+    pub fn with_index_v4(ifindex: u32, destination: Ipv4Addr) -> Self {
+        Self {
+            interface: InterfaceRef::Index(ifindex),
             destination: IpAddr::V4(destination),
             lladdr: None,
             state: nud::PERMANENT,
@@ -127,7 +174,23 @@ impl Neighbor {
     /// * `destination` - IPv6 address of the neighbor
     pub fn new_v6(interface: impl Into<String>, destination: Ipv6Addr) -> Self {
         Self {
-            interface: interface.into(),
+            interface: InterfaceRef::Name(interface.into()),
+            destination: IpAddr::V6(destination),
+            lladdr: None,
+            state: nud::PERMANENT,
+            flags: 0,
+            vlan: None,
+            vni: None,
+            master: None,
+        }
+    }
+
+    /// Create a new IPv6 neighbor entry with interface index.
+    ///
+    /// Use this constructor for namespace-safe operations.
+    pub fn with_index_v6(ifindex: u32, destination: Ipv6Addr) -> Self {
+        Self {
+            interface: InterfaceRef::Index(ifindex),
             destination: IpAddr::V6(destination),
             lladdr: None,
             state: nud::PERMANENT,
@@ -141,7 +204,23 @@ impl Neighbor {
     /// Create a new neighbor entry from an IpAddr.
     pub fn new(interface: impl Into<String>, destination: IpAddr) -> Self {
         Self {
-            interface: interface.into(),
+            interface: InterfaceRef::Name(interface.into()),
+            destination,
+            lladdr: None,
+            state: nud::PERMANENT,
+            flags: 0,
+            vlan: None,
+            vni: None,
+            master: None,
+        }
+    }
+
+    /// Create a new neighbor entry from an IpAddr with interface index.
+    ///
+    /// Use this constructor for namespace-safe operations.
+    pub fn with_index(ifindex: u32, destination: IpAddr) -> Self {
+        Self {
+            interface: InterfaceRef::Index(ifindex),
             destination,
             lladdr: None,
             state: nud::PERMANENT,
@@ -224,35 +303,31 @@ impl Neighbor {
         self
     }
 
-    /// Set master device (e.g., for bridge FDB).
-    pub fn master(mut self, master: impl Into<String>) -> Self {
-        if let Ok(idx) = ifname_to_index(&master.into()) {
-            self.master = Some(idx);
-        }
+    /// Set master device index directly.
+    ///
+    /// Use this for namespace-safe operations when you have already
+    /// resolved the master device index.
+    pub fn master_index(mut self, master_ifindex: u32) -> Self {
+        self.master = Some(master_ifindex);
         self
     }
 }
 
 impl NeighborConfig for Neighbor {
-    fn interface(&self) -> &str {
+    fn interface_ref(&self) -> &InterfaceRef {
         &self.interface
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let ifindex = ifname_to_index(&self.interface)?;
-
-        let family = match self.destination {
+    fn family(&self) -> u8 {
+        match self.destination {
             IpAddr::V4(_) => AF_INET,
             IpAddr::V6(_) => AF_INET6,
-        };
+        }
+    }
 
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_NEWNEIGH,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
-        );
-
+    fn write_add(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()> {
         let mut ndmsg = NdMsg::new()
-            .with_family(family)
+            .with_family(self.family())
             .with_ifindex(ifindex as i32);
         ndmsg.ndm_state = self.state;
         ndmsg.ndm_flags = self.flags;
@@ -289,21 +364,12 @@ impl NeighborConfig for Neighbor {
             builder.append_attr_u32(NdaAttr::Master as u16, master);
         }
 
-        Ok(builder)
+        Ok(())
     }
 
-    fn build_delete(&self) -> Result<MessageBuilder> {
-        let ifindex = ifname_to_index(&self.interface)?;
-
-        let family = match self.destination {
-            IpAddr::V4(_) => AF_INET,
-            IpAddr::V6(_) => AF_INET6,
-        };
-
-        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK);
-
+    fn write_delete(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()> {
         let ndmsg = NdMsg::new()
-            .with_family(family)
+            .with_family(self.family())
             .with_ifindex(ifindex as i32);
 
         builder.append(&ndmsg);
@@ -318,23 +384,8 @@ impl NeighborConfig for Neighbor {
             }
         }
 
-        Ok(builder)
+        Ok(())
     }
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Helper function to convert interface name to index.
-fn ifname_to_index(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
 }
 
 // ============================================================================
@@ -343,6 +394,8 @@ fn ifname_to_index(name: &str) -> Result<u32> {
 
 impl Connection<Route> {
     /// Add a neighbor entry.
+    ///
+    /// This method is namespace-safe: interface names are resolved via netlink.
     ///
     /// # Example
     ///
@@ -358,13 +411,24 @@ impl Connection<Route> {
     /// ).await?;
     /// ```
     pub async fn add_neighbor<N: NeighborConfig>(&self, config: N) -> Result<()> {
-        let builder = config.build()?;
+        let ifindex = self.resolve_interface(config.interface_ref()).await?;
+
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWNEIGH,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+
+        config.write_add(&mut builder, ifindex)?;
         self.send_ack(builder).await
     }
 
     /// Delete a neighbor entry using a config.
     pub async fn del_neighbor<N: NeighborConfig>(&self, config: N) -> Result<()> {
-        let builder = config.build_delete()?;
+        let ifindex = self.resolve_interface(config.interface_ref()).await?;
+
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK);
+
+        config.write_delete(&mut builder, ifindex)?;
         self.send_ack(builder).await
     }
 
@@ -380,9 +444,29 @@ impl Connection<Route> {
         self.del_neighbor(neigh).await
     }
 
+    /// Delete an IPv4 neighbor entry by interface index.
+    pub async fn del_neighbor_v4_by_index(
+        &self,
+        ifindex: u32,
+        destination: Ipv4Addr,
+    ) -> Result<()> {
+        let neigh = Neighbor::with_index_v4(ifindex, destination);
+        self.del_neighbor(neigh).await
+    }
+
     /// Delete an IPv6 neighbor entry.
     pub async fn del_neighbor_v6(&self, ifname: &str, destination: Ipv6Addr) -> Result<()> {
         let neigh = Neighbor::new_v6(ifname, destination);
+        self.del_neighbor(neigh).await
+    }
+
+    /// Delete an IPv6 neighbor entry by interface index.
+    pub async fn del_neighbor_v6_by_index(
+        &self,
+        ifindex: u32,
+        destination: Ipv6Addr,
+    ) -> Result<()> {
+        let neigh = Neighbor::with_index_v6(ifindex, destination);
         self.del_neighbor(neigh).await
     }
 
@@ -390,8 +474,14 @@ impl Connection<Route> {
     ///
     /// If the entry exists, it will be updated. Otherwise, it will be created.
     pub async fn replace_neighbor<N: NeighborConfig>(&self, config: N) -> Result<()> {
-        // Similar to add but with REPLACE flag
-        let builder = config.build()?;
+        let ifindex = self.resolve_interface(config.interface_ref()).await?;
+
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWNEIGH,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+        );
+
+        config.write_add(&mut builder, ifindex)?;
         self.send_ack(builder).await
     }
 
@@ -403,7 +493,13 @@ impl Connection<Route> {
     /// conn.flush_neighbors("eth0").await?;
     /// ```
     pub async fn flush_neighbors(&self, ifname: &str) -> Result<()> {
-        let neighbors = self.get_neighbors_for(ifname).await?;
+        let ifindex = self.resolve_interface(&InterfaceRef::name(ifname)).await?;
+        self.flush_neighbors_by_index(ifindex).await
+    }
+
+    /// Flush all neighbor entries for an interface by index.
+    pub async fn flush_neighbors_by_index(&self, ifindex: u32) -> Result<()> {
+        let neighbors = self.get_neighbors_by_index(ifindex).await?;
 
         for neigh in neighbors {
             if let Some(dest) = neigh.destination {
@@ -413,7 +509,7 @@ impl Connection<Route> {
                     continue;
                 }
 
-                if let Err(e) = self.del_neighbor(Neighbor::new(ifname, dest)).await {
+                if let Err(e) = self.del_neighbor(Neighbor::with_index(ifindex, dest)).await {
                     // Ignore "not found" errors (race condition)
                     if !e.is_not_found() {
                         return Err(e);
@@ -437,9 +533,33 @@ impl Connection<Route> {
         self.add_neighbor(neigh).await
     }
 
+    /// Add a proxy ARP entry by interface index.
+    pub async fn add_proxy_arp_by_index(&self, ifindex: u32, destination: Ipv4Addr) -> Result<()> {
+        let neigh = Neighbor::with_index_v4(ifindex, destination).proxy();
+        self.add_neighbor(neigh).await
+    }
+
     /// Delete a proxy ARP entry.
     pub async fn del_proxy_arp(&self, ifname: &str, destination: Ipv4Addr) -> Result<()> {
         let neigh = Neighbor::new_v4(ifname, destination).proxy();
         self.del_neighbor(neigh).await
+    }
+
+    /// Delete a proxy ARP entry by interface index.
+    pub async fn del_proxy_arp_by_index(&self, ifindex: u32, destination: Ipv4Addr) -> Result<()> {
+        let neigh = Neighbor::with_index_v4(ifindex, destination).proxy();
+        self.del_neighbor(neigh).await
+    }
+
+    /// Get neighbor entries for an interface by index.
+    pub async fn get_neighbors_by_index(
+        &self,
+        ifindex: u32,
+    ) -> Result<Vec<super::messages::NeighborMessage>> {
+        let neighbors = self.get_neighbors().await?;
+        Ok(neighbors
+            .into_iter()
+            .filter(|n| n.ifindex() == ifindex)
+            .collect())
     }
 }

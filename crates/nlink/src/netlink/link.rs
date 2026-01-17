@@ -104,7 +104,8 @@ use std::net::Ipv4Addr;
 
 use super::builder::MessageBuilder;
 use super::connection::Connection;
-use super::error::{Error, Result};
+use super::error::Result;
+use super::interface_ref::InterfaceRef;
 use super::message::NlMsgType;
 use super::protocol::Route;
 use super::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
@@ -122,8 +123,19 @@ pub trait LinkConfig {
     /// Get the kind string for this link type (e.g., "dummy", "veth", "bridge").
     fn kind(&self) -> &str;
 
-    /// Build the netlink message for creating this link.
-    fn build(&self) -> Result<MessageBuilder>;
+    /// Get the parent/link interface reference, if any.
+    ///
+    /// Returns `Some(&InterfaceRef)` for link types that require a parent interface
+    /// (VLAN, MACVLAN, VXLAN, etc.), `None` for standalone types (dummy, bridge, etc.).
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        None
+    }
+
+    /// Write the link configuration to the message builder.
+    ///
+    /// The `parent_index` parameter contains the resolved interface index
+    /// for link types that have a parent reference.
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>);
 }
 
 // ============================================================================
@@ -184,8 +196,14 @@ impl LinkConfig for DummyLink {
         "dummy"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        build_simple_link(&self.name, "dummy", self.mtu, self.address.as_ref())
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        write_simple_link(
+            builder,
+            &self.name,
+            "dummy",
+            self.mtu,
+            self.address.as_ref(),
+        );
     }
 }
 
@@ -286,8 +304,9 @@ impl LinkConfig for VethLink {
         "veth"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         // Add optional attributes
         if let Some(mtu) = self.mtu {
@@ -332,8 +351,6 @@ impl LinkConfig for VethLink {
         builder.nest_end(peer);
         builder.nest_end(data);
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -481,8 +498,9 @@ impl LinkConfig for BridgeLink {
         "bridge"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         // Add optional attributes
         if let Some(mtu) = self.mtu {
@@ -538,8 +556,6 @@ impl LinkConfig for BridgeLink {
         }
 
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -563,7 +579,7 @@ impl LinkConfig for BridgeLink {
 #[derive(Debug, Clone)]
 pub struct VlanLink {
     name: String,
-    parent: String,
+    parent: InterfaceRef,
     vlan_id: u16,
     mtu: Option<u32>,
     address: Option<[u8; 6]>,
@@ -604,7 +620,28 @@ impl VlanLink {
     pub fn new(name: impl Into<String>, parent: impl Into<String>, vlan_id: u16) -> Self {
         Self {
             name: name.into(),
-            parent: parent.into(),
+            parent: InterfaceRef::Name(parent.into()),
+            vlan_id,
+            mtu: None,
+            address: None,
+            protocol: None,
+            flags: VlanFlags::default(),
+        }
+    }
+
+    /// Create a new VLAN interface with parent specified by index.
+    ///
+    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name for the VLAN interface
+    /// * `parent_index` - Parent interface index
+    /// * `vlan_id` - VLAN ID (1-4094)
+    pub fn with_parent_index(name: impl Into<String>, parent_index: u32, vlan_id: u16) -> Self {
+        Self {
+            name: name.into(),
+            parent: InterfaceRef::Index(parent_index),
             vlan_id,
             mtu: None,
             address: None,
@@ -685,14 +722,17 @@ impl LinkConfig for VlanLink {
         "vlan"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        // Get parent interface index
-        let parent_index = ifname_to_index(&self.parent)?;
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        Some(&self.parent)
+    }
 
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
-        // Link to parent
-        builder.append_attr_u32(IflaAttr::Link as u16, parent_index as u32);
+        // Link to parent (parent_index is guaranteed to be Some for types with parent_ref)
+        let idx = parent_index.expect("VlanLink requires parent_index");
+        builder.append_attr_u32(IflaAttr::Link as u16, idx);
 
         // Add optional attributes
         if let Some(mtu) = self.mtu {
@@ -730,8 +770,6 @@ impl LinkConfig for VlanLink {
 
         builder.nest_end(data);
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -770,7 +808,7 @@ pub struct VxlanLink {
     /// Multicast group
     group: Option<Ipv4Addr>,
     /// Underlying device
-    dev: Option<String>,
+    dev: Option<InterfaceRef>,
     /// UDP port (default 4789)
     port: Option<u16>,
     /// Port range
@@ -871,9 +909,17 @@ impl VxlanLink {
         self
     }
 
-    /// Set the underlying device.
+    /// Set the underlying device by name.
     pub fn dev(mut self, dev: impl Into<String>) -> Self {
-        self.dev = Some(dev.into());
+        self.dev = Some(InterfaceRef::Name(dev.into()));
+        self
+    }
+
+    /// Set the underlying device by interface index.
+    ///
+    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    pub fn dev_index(mut self, index: u32) -> Self {
+        self.dev = Some(InterfaceRef::Index(index));
         self
     }
 
@@ -947,8 +993,13 @@ impl LinkConfig for VxlanLink {
         "vxlan"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.dev.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         // Add optional attributes
         if let Some(mtu) = self.mtu {
@@ -980,10 +1031,9 @@ impl LinkConfig for VxlanLink {
             builder.append_attr(vxlan::IFLA_VXLAN_GROUP, &addr.octets());
         }
 
-        // Underlying device
-        if let Some(ref dev) = self.dev {
-            let index = ifname_to_index(dev)?;
-            builder.append_attr_u32(vxlan::IFLA_VXLAN_LINK, index as u32);
+        // Underlying device (use resolved parent_index if dev was set)
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(vxlan::IFLA_VXLAN_LINK, idx);
         }
 
         // Port
@@ -1030,8 +1080,6 @@ impl LinkConfig for VxlanLink {
 
         builder.nest_end(data);
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -1071,7 +1119,7 @@ pub enum MacvlanMode {
 #[derive(Debug, Clone)]
 pub struct MacvlanLink {
     name: String,
-    parent: String,
+    parent: InterfaceRef,
     mode: MacvlanMode,
     mtu: Option<u32>,
     address: Option<[u8; 6]>,
@@ -1087,7 +1135,20 @@ impl MacvlanLink {
     pub fn new(name: impl Into<String>, parent: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            parent: parent.into(),
+            parent: InterfaceRef::Name(parent.into()),
+            mode: MacvlanMode::Bridge,
+            mtu: None,
+            address: None,
+        }
+    }
+
+    /// Create a new macvlan interface with parent specified by index.
+    ///
+    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    pub fn with_parent_index(name: impl Into<String>, parent_index: u32) -> Self {
+        Self {
+            name: name.into(),
+            parent: InterfaceRef::Index(parent_index),
             mode: MacvlanMode::Bridge,
             mtu: None,
             address: None,
@@ -1122,13 +1183,17 @@ impl LinkConfig for MacvlanLink {
         "macvlan"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let parent_index = ifname_to_index(&self.parent)?;
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        Some(&self.parent)
+    }
 
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         // Link to parent
-        builder.append_attr_u32(IflaAttr::Link as u16, parent_index as u32);
+        let idx = parent_index.expect("MacvlanLink requires parent_index");
+        builder.append_attr_u32(IflaAttr::Link as u16, idx);
 
         // Add optional attributes
         if let Some(mtu) = self.mtu {
@@ -1148,8 +1213,6 @@ impl LinkConfig for MacvlanLink {
         builder.nest_end(data);
 
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -1196,7 +1259,7 @@ pub enum IpvlanFlags {
 #[derive(Debug, Clone)]
 pub struct IpvlanLink {
     name: String,
-    parent: String,
+    parent: InterfaceRef,
     mode: IpvlanMode,
     flags: IpvlanFlags,
     mtu: Option<u32>,
@@ -1213,7 +1276,20 @@ impl IpvlanLink {
     pub fn new(name: impl Into<String>, parent: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            parent: parent.into(),
+            parent: InterfaceRef::Name(parent.into()),
+            mode: IpvlanMode::L3,
+            flags: IpvlanFlags::Bridge,
+            mtu: None,
+        }
+    }
+
+    /// Create a new ipvlan interface with parent specified by index.
+    ///
+    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    pub fn with_parent_index(name: impl Into<String>, parent_index: u32) -> Self {
+        Self {
+            name: name.into(),
+            parent: InterfaceRef::Index(parent_index),
             mode: IpvlanMode::L3,
             flags: IpvlanFlags::Bridge,
             mtu: None,
@@ -1248,13 +1324,17 @@ impl LinkConfig for IpvlanLink {
         "ipvlan"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let parent_index = ifname_to_index(&self.parent)?;
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        Some(&self.parent)
+    }
 
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         // Link to parent
-        builder.append_attr_u32(IflaAttr::Link as u16, parent_index as u32);
+        let idx = parent_index.expect("IpvlanLink requires parent_index");
+        builder.append_attr_u32(IflaAttr::Link as u16, idx);
 
         // Add optional attributes
         if let Some(mtu) = self.mtu {
@@ -1272,8 +1352,6 @@ impl LinkConfig for IpvlanLink {
         builder.nest_end(data);
 
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -1328,8 +1406,8 @@ impl LinkConfig for IfbLink {
         "ifb"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        build_simple_link(&self.name, "ifb", self.mtu, None)
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        write_simple_link(builder, &self.name, "ifb", self.mtu, None);
     }
 }
 
@@ -1355,7 +1433,7 @@ impl LinkConfig for IfbLink {
 #[derive(Debug, Clone)]
 pub struct MacvtapLink {
     name: String,
-    parent: String,
+    parent: InterfaceRef,
     mode: MacvlanMode,
     mtu: Option<u32>,
     address: Option<[u8; 6]>,
@@ -1366,7 +1444,20 @@ impl MacvtapLink {
     pub fn new(name: impl Into<String>, parent: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            parent: parent.into(),
+            parent: InterfaceRef::Name(parent.into()),
+            mode: MacvlanMode::Bridge,
+            mtu: None,
+            address: None,
+        }
+    }
+
+    /// Create a new macvtap interface with parent specified by index.
+    ///
+    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    pub fn with_parent_index(name: impl Into<String>, parent_index: u32) -> Self {
+        Self {
+            name: name.into(),
+            parent: InterfaceRef::Index(parent_index),
             mode: MacvlanMode::Bridge,
             mtu: None,
             address: None,
@@ -1401,13 +1492,17 @@ impl LinkConfig for MacvtapLink {
         "macvtap"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let parent_index = ifname_to_index(&self.parent)?;
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        Some(&self.parent)
+    }
 
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         // Link to parent
-        builder.append_attr_u32(IflaAttr::Link as u16, parent_index as u32);
+        let idx = parent_index.expect("MacvtapLink requires parent_index");
+        builder.append_attr_u32(IflaAttr::Link as u16, idx);
 
         // Add optional attributes
         if let Some(mtu) = self.mtu {
@@ -1427,8 +1522,6 @@ impl LinkConfig for MacvtapLink {
         builder.nest_end(data);
 
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -1641,8 +1734,9 @@ impl LinkConfig for GeneveLink {
         "geneve"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
@@ -1721,8 +1815,6 @@ impl LinkConfig for GeneveLink {
 
         builder.nest_end(data);
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -1813,8 +1905,9 @@ impl LinkConfig for BareudpLink {
         "bareudp"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
@@ -1845,8 +1938,6 @@ impl LinkConfig for BareudpLink {
 
         builder.nest_end(data);
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -1985,8 +2076,9 @@ impl LinkConfig for NetkitLink {
         "netkit"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
@@ -2033,8 +2125,6 @@ impl LinkConfig for NetkitLink {
 
         builder.nest_end(data);
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -2079,8 +2169,8 @@ impl LinkConfig for NlmonLink {
         "nlmon"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        build_simple_link(&self.name, "nlmon", None, None)
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        write_simple_link(builder, &self.name, "nlmon", None, None);
     }
 }
 
@@ -2105,7 +2195,7 @@ impl LinkConfig for NlmonLink {
 #[derive(Debug, Clone)]
 pub struct VirtWifiLink {
     name: String,
-    link: String,
+    link: InterfaceRef,
 }
 
 impl VirtWifiLink {
@@ -2118,7 +2208,17 @@ impl VirtWifiLink {
     pub fn new(name: impl Into<String>, link: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            link: link.into(),
+            link: InterfaceRef::Name(link.into()),
+        }
+    }
+
+    /// Create a new virtual WiFi interface with underlying link specified by index.
+    ///
+    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    pub fn with_link_index(name: impl Into<String>, link_index: u32) -> Self {
+        Self {
+            name: name.into(),
+            link: InterfaceRef::Index(link_index),
         }
     }
 }
@@ -2132,20 +2232,22 @@ impl LinkConfig for VirtWifiLink {
         "virt_wifi"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let link_index = ifname_to_index(&self.link)?;
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        Some(&self.link)
+    }
 
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         // Set the underlying link
-        builder.append_attr_u32(IflaAttr::Link as u16, link_index as u32);
+        let idx = parent_index.expect("VirtWifiLink requires link index");
+        builder.append_attr_u32(IflaAttr::Link as u16, idx);
 
         // IFLA_LINKINFO
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
         builder.append_attr_str(IflaInfo::Kind as u16, "virt_wifi");
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -2179,7 +2281,7 @@ pub struct VtiLink {
     remote: Option<Ipv4Addr>,
     ikey: Option<u32>,
     okey: Option<u32>,
-    link: Option<String>,
+    link: Option<InterfaceRef>,
 }
 
 /// VTI-specific attributes (IFLA_VTI_*)
@@ -2230,9 +2332,17 @@ impl VtiLink {
         self
     }
 
-    /// Set the underlying link device.
+    /// Set the underlying link device by name.
     pub fn link(mut self, link: impl Into<String>) -> Self {
-        self.link = Some(link.into());
+        self.link = Some(InterfaceRef::Name(link.into()));
+        self
+    }
+
+    /// Set the underlying link device by index.
+    ///
+    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
         self
     }
 }
@@ -2246,13 +2356,17 @@ impl LinkConfig for VtiLink {
         "vti"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         // Set underlying link if specified
-        if let Some(ref link) = self.link {
-            let link_index = ifname_to_index(link)?;
-            builder.append_attr_u32(IflaAttr::Link as u16, link_index as u32);
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(IflaAttr::Link as u16, idx);
         }
 
         // IFLA_LINKINFO
@@ -2277,8 +2391,6 @@ impl LinkConfig for VtiLink {
 
         builder.nest_end(data);
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -2309,7 +2421,7 @@ pub struct Vti6Link {
     remote: Option<std::net::Ipv6Addr>,
     ikey: Option<u32>,
     okey: Option<u32>,
-    link: Option<String>,
+    link: Option<InterfaceRef>,
 }
 
 impl Vti6Link {
@@ -2349,9 +2461,17 @@ impl Vti6Link {
         self
     }
 
-    /// Set the underlying link device.
+    /// Set the underlying link device by name.
     pub fn link(mut self, link: impl Into<String>) -> Self {
-        self.link = Some(link.into());
+        self.link = Some(InterfaceRef::Name(link.into()));
+        self
+    }
+
+    /// Set the underlying link device by index.
+    ///
+    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
         self
     }
 }
@@ -2365,13 +2485,17 @@ impl LinkConfig for Vti6Link {
         "vti6"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         // Set underlying link if specified
-        if let Some(ref link) = self.link {
-            let link_index = ifname_to_index(link)?;
-            builder.append_attr_u32(IflaAttr::Link as u16, link_index as u32);
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(IflaAttr::Link as u16, idx);
         }
 
         // IFLA_LINKINFO
@@ -2396,8 +2520,6 @@ impl LinkConfig for Vti6Link {
 
         builder.nest_end(data);
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -2432,7 +2554,7 @@ pub struct Ip6GreLink {
     encap_limit: Option<u8>,
     flowinfo: Option<u32>,
     flags: Option<u32>,
-    link: Option<String>,
+    link: Option<InterfaceRef>,
 }
 
 /// IP6GRE-specific attributes (IFLA_GRE_*)
@@ -2497,9 +2619,17 @@ impl Ip6GreLink {
         self
     }
 
-    /// Set the underlying link device.
+    /// Set the underlying link device by name.
     pub fn link(mut self, link: impl Into<String>) -> Self {
-        self.link = Some(link.into());
+        self.link = Some(InterfaceRef::Name(link.into()));
+        self
+    }
+
+    /// Set the underlying link device by index.
+    ///
+    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
         self
     }
 }
@@ -2513,8 +2643,13 @@ impl LinkConfig for Ip6GreLink {
         "ip6gre"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         // IFLA_LINKINFO
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
@@ -2523,9 +2658,8 @@ impl LinkConfig for Ip6GreLink {
         // IFLA_INFO_DATA
         let data = builder.nest_start(IflaInfo::Data as u16);
 
-        if let Some(ref link) = self.link {
-            let link_index = ifname_to_index(link)?;
-            builder.append_attr_u32(ip6gre::IFLA_GRE_LINK, link_index as u32);
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(ip6gre::IFLA_GRE_LINK, idx);
         }
         if let Some(local) = self.local {
             builder.append_attr(ip6gre::IFLA_GRE_LOCAL, &local.octets());
@@ -2548,8 +2682,6 @@ impl LinkConfig for Ip6GreLink {
 
         builder.nest_end(data);
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -2583,7 +2715,7 @@ pub struct Ip6GretapLink {
     ttl: Option<u8>,
     encap_limit: Option<u8>,
     flowinfo: Option<u32>,
-    link: Option<String>,
+    link: Option<InterfaceRef>,
 }
 
 impl Ip6GretapLink {
@@ -2630,9 +2762,17 @@ impl Ip6GretapLink {
         self
     }
 
-    /// Set the underlying link device.
+    /// Set the underlying link device by name.
     pub fn link(mut self, link: impl Into<String>) -> Self {
-        self.link = Some(link.into());
+        self.link = Some(InterfaceRef::Name(link.into()));
+        self
+    }
+
+    /// Set the underlying link device by index.
+    ///
+    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
         self
     }
 }
@@ -2646,8 +2786,13 @@ impl LinkConfig for Ip6GretapLink {
         "ip6gretap"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         // IFLA_LINKINFO
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
@@ -2656,9 +2801,8 @@ impl LinkConfig for Ip6GretapLink {
         // IFLA_INFO_DATA - uses same attributes as ip6gre
         let data = builder.nest_start(IflaInfo::Data as u16);
 
-        if let Some(ref link) = self.link {
-            let link_index = ifname_to_index(link)?;
-            builder.append_attr_u32(ip6gre::IFLA_GRE_LINK, link_index as u32);
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(ip6gre::IFLA_GRE_LINK, idx);
         }
         if let Some(local) = self.local {
             builder.append_attr(ip6gre::IFLA_GRE_LOCAL, &local.octets());
@@ -2678,8 +2822,6 @@ impl LinkConfig for Ip6GretapLink {
 
         builder.nest_end(data);
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -2809,8 +2951,9 @@ impl LinkConfig for BondLink {
         "bond"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        // Add interface name
+        write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
@@ -2842,8 +2985,6 @@ impl LinkConfig for BondLink {
         builder.nest_end(data);
 
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -2900,8 +3041,8 @@ impl LinkConfig for VrfLink {
         "vrf"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
@@ -2915,8 +3056,6 @@ impl LinkConfig for VrfLink {
         builder.nest_end(data);
 
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -3016,8 +3155,8 @@ impl LinkConfig for GreLink {
         "gre"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
@@ -3045,8 +3184,6 @@ impl LinkConfig for GreLink {
         builder.nest_end(data);
 
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -3131,8 +3268,8 @@ impl LinkConfig for GretapLink {
         "gretap"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
@@ -3160,8 +3297,6 @@ impl LinkConfig for GretapLink {
         builder.nest_end(data);
 
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -3245,8 +3380,8 @@ impl LinkConfig for IpipLink {
         "ipip"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
@@ -3268,8 +3403,6 @@ impl LinkConfig for IpipLink {
         builder.nest_end(data);
 
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -3348,8 +3481,8 @@ impl LinkConfig for SitLink {
         "sit"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = create_link_message(&self.name);
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
@@ -3371,8 +3504,6 @@ impl LinkConfig for SitLink {
         builder.nest_end(data);
 
         builder.nest_end(linkinfo);
-
-        Ok(builder)
     }
 }
 
@@ -3429,8 +3560,8 @@ impl LinkConfig for WireguardLink {
         "wireguard"
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        build_simple_link(&self.name, "wireguard", self.mtu, None)
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        write_simple_link(builder, &self.name, "wireguard", self.mtu, None);
     }
 }
 
@@ -3438,44 +3569,21 @@ impl LinkConfig for WireguardLink {
 // Helper Functions
 // ============================================================================
 
-/// Helper function to convert interface name to index.
-fn ifname_to_index(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
-}
-
-/// Create the base RTM_NEWLINK message with ifinfomsg header.
-fn create_link_message(name: &str) -> MessageBuilder {
-    use super::message::{NLM_F_ACK, NLM_F_REQUEST};
-
-    let mut builder = MessageBuilder::new(
-        NlMsgType::RTM_NEWLINK,
-        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
-    );
-
-    // Append ifinfomsg header
-    let ifinfo = IfInfoMsg::new();
-    builder.append(&ifinfo);
-
-    // Add interface name
+/// Write the interface name attribute.
+fn write_ifname(builder: &mut MessageBuilder, name: &str) {
     builder.append_attr_str(IflaAttr::Ifname as u16, name);
-
-    builder
 }
 
-/// Build a simple link (like dummy) with just name and optional MTU/address.
-fn build_simple_link(
+/// Write a simple link (like dummy) with just name and optional MTU/address.
+fn write_simple_link(
+    builder: &mut MessageBuilder,
     name: &str,
     kind: &str,
     mtu: Option<u32>,
     address: Option<&[u8; 6]>,
-) -> Result<MessageBuilder> {
-    let mut builder = create_link_message(name);
+) {
+    // Add interface name
+    write_ifname(builder, name);
 
     // Add optional attributes
     if let Some(mtu) = mtu {
@@ -3489,8 +3597,6 @@ fn build_simple_link(
     let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
     builder.append_attr_str(IflaInfo::Kind as u16, kind);
     builder.nest_end(linkinfo);
-
-    Ok(builder)
 }
 
 // ============================================================================
@@ -3513,9 +3619,32 @@ impl Connection<Route> {
     ///
     /// // Create a bridge
     /// conn.add_link(BridgeLink::new("br0").stp(true)).await?;
+    ///
+    /// // Create a VLAN with parent by index (namespace-safe)
+    /// conn.add_link(VlanLink::with_parent_index("vlan100", 5, 100)).await?;
     /// ```
     pub async fn add_link<L: LinkConfig>(&self, config: L) -> Result<()> {
-        let builder = config.build()?;
+        use super::message::{NLM_F_ACK, NLM_F_REQUEST};
+
+        // Resolve parent interface if needed
+        let parent_index = match config.parent_ref() {
+            Some(iface) => Some(self.resolve_interface(iface).await?),
+            None => None,
+        };
+
+        // Build the message
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWLINK,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+
+        // Append ifinfomsg header
+        let ifinfo = IfInfoMsg::new();
+        builder.append(&ifinfo);
+
+        // Write the link configuration
+        config.write_to(&mut builder, parent_index);
+
         self.send_ack(builder).await
     }
 
@@ -3530,8 +3659,12 @@ impl Connection<Route> {
     /// conn.set_link_master("eth0", "br0").await?;
     /// ```
     pub async fn set_link_master(&self, ifname: &str, master: &str) -> Result<()> {
-        let ifindex = ifname_to_index(ifname)?;
-        let master_index = ifname_to_index(master)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
+        let master_index = self
+            .resolve_interface(&InterfaceRef::Name(master.to_string()))
+            .await?;
         self.set_link_master_by_index(ifindex, master_index).await
     }
 
@@ -3557,7 +3690,9 @@ impl Connection<Route> {
     /// conn.set_link_nomaster("eth0").await?;
     /// ```
     pub async fn set_link_nomaster(&self, ifname: &str) -> Result<()> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.set_link_nomaster_by_index(ifindex).await
     }
 
@@ -3584,7 +3719,9 @@ impl Connection<Route> {
     /// conn.set_link_name("eth0", "lan0").await?;
     /// ```
     pub async fn set_link_name(&self, ifname: &str, new_name: &str) -> Result<()> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.set_link_name_by_index(ifindex, new_name).await
     }
 
@@ -3609,7 +3746,9 @@ impl Connection<Route> {
     /// conn.set_link_address("eth0", [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]).await?;
     /// ```
     pub async fn set_link_address(&self, ifname: &str, address: [u8; 6]) -> Result<()> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.set_link_address_by_index(ifindex, address).await
     }
 
@@ -3635,7 +3774,9 @@ impl Connection<Route> {
     /// conn.set_link_netns_pid("veth1", container_pid).await?;
     /// ```
     pub async fn set_link_netns_pid(&self, ifname: &str, pid: u32) -> Result<()> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.set_link_netns_pid_by_index(ifindex, pid).await
     }
 
@@ -3654,7 +3795,9 @@ impl Connection<Route> {
 
     /// Move a network interface to a namespace by file descriptor.
     pub async fn set_link_netns_fd(&self, ifname: &str, fd: i32) -> Result<()> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.set_link_netns_fd_by_index(ifindex, fd).await
     }
 

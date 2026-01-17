@@ -63,6 +63,7 @@ use super::attr::AttrIter;
 use super::builder::MessageBuilder;
 use super::connection::Connection;
 use super::error::{Error, Result};
+use super::interface_ref::InterfaceRef;
 use super::message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgType};
 use super::protocol::Route;
 use super::types::mpls::lwtunnel_encap;
@@ -561,10 +562,8 @@ pub struct Srv6LocalBuilder {
     sid: Ipv6Addr,
     /// Action type.
     action: Srv6Action,
-    /// Output interface name.
-    dev: Option<String>,
-    /// Output interface index.
-    oif: Option<u32>,
+    /// Output interface (by name or index).
+    dev: Option<InterfaceRef>,
 }
 
 impl Srv6LocalBuilder {
@@ -577,7 +576,6 @@ impl Srv6LocalBuilder {
             sid,
             action: Srv6Action::End,
             dev: None,
-            oif: None,
         }
     }
 
@@ -590,7 +588,6 @@ impl Srv6LocalBuilder {
             sid,
             action: Srv6Action::EndX { nexthop },
             dev: None,
-            oif: None,
         }
     }
 
@@ -603,7 +600,6 @@ impl Srv6LocalBuilder {
             sid,
             action: Srv6Action::EndT { table },
             dev: None,
-            oif: None,
         }
     }
 
@@ -615,7 +611,6 @@ impl Srv6LocalBuilder {
             sid,
             action: Srv6Action::EndDX2,
             dev: None,
-            oif: None,
         }
     }
 
@@ -628,7 +623,6 @@ impl Srv6LocalBuilder {
             sid,
             action: Srv6Action::EndDX4 { nexthop: None },
             dev: None,
-            oif: None,
         }
     }
 
@@ -640,7 +634,6 @@ impl Srv6LocalBuilder {
                 nexthop: Some(nexthop),
             },
             dev: None,
-            oif: None,
         }
     }
 
@@ -653,7 +646,6 @@ impl Srv6LocalBuilder {
             sid,
             action: Srv6Action::EndDX6 { nexthop: None },
             dev: None,
-            oif: None,
         }
     }
 
@@ -665,7 +657,6 @@ impl Srv6LocalBuilder {
                 nexthop: Some(nexthop),
             },
             dev: None,
-            oif: None,
         }
     }
 
@@ -678,7 +669,6 @@ impl Srv6LocalBuilder {
             sid,
             action: Srv6Action::EndDT4 { table },
             dev: None,
-            oif: None,
         }
     }
 
@@ -691,7 +681,6 @@ impl Srv6LocalBuilder {
             sid,
             action: Srv6Action::EndDT6 { table },
             dev: None,
-            oif: None,
         }
     }
 
@@ -704,7 +693,6 @@ impl Srv6LocalBuilder {
             sid,
             action: Srv6Action::EndDT46 { table },
             dev: None,
-            oif: None,
         }
     }
 
@@ -718,7 +706,6 @@ impl Srv6LocalBuilder {
                 segments: segments.to_vec(),
             },
             dev: None,
-            oif: None,
         }
     }
 
@@ -732,20 +719,24 @@ impl Srv6LocalBuilder {
                 segments: segments.to_vec(),
             },
             dev: None,
-            oif: None,
         }
     }
 
     /// Set the output interface by name.
     pub fn dev(mut self, dev: impl Into<String>) -> Self {
-        self.dev = Some(dev.into());
+        self.dev = Some(InterfaceRef::Name(dev.into()));
         self
     }
 
     /// Set the output interface by index.
     pub fn oif(mut self, oif: u32) -> Self {
-        self.oif = Some(oif);
+        self.dev = Some(InterfaceRef::Index(oif));
         self
+    }
+
+    /// Get a reference to the interface reference.
+    pub fn device_ref(&self) -> Option<&InterfaceRef> {
+        self.dev.as_ref()
     }
 
     /// Build an SRH for B6 actions.
@@ -768,10 +759,11 @@ impl Srv6LocalBuilder {
         data
     }
 
-    /// Build the netlink message.
-    pub fn build(&self, msg_type: u16, flags: u16) -> Result<MessageBuilder> {
-        let mut builder = MessageBuilder::new(msg_type, flags);
-
+    /// Write the SRv6 local route to a message builder.
+    ///
+    /// The `ifindex` parameter should be the resolved interface index
+    /// (if any interface was specified).
+    pub(crate) fn write_to(&self, builder: &mut MessageBuilder, ifindex: Option<u32>) {
         // SRv6 local routes are IPv6 routes with encap type SEG6_LOCAL
         let rtmsg = RtMsg::new()
             .with_family(AF_INET6)
@@ -784,14 +776,6 @@ impl Srv6LocalBuilder {
         builder.append_attr(RtaAttr::Dst as u16, &self.sid.octets());
 
         // RTA_OIF - output interface
-        let ifindex = if let Some(idx) = self.oif {
-            Some(idx)
-        } else if let Some(ref dev) = self.dev {
-            Some(get_ifindex(dev)?)
-        } else {
-            None
-        };
-
         if let Some(idx) = ifindex {
             builder.append_attr_u32(RtaAttr::Oif as u16, idx);
         }
@@ -844,24 +828,7 @@ impl Srv6LocalBuilder {
         }
 
         builder.nest_end(encap_nest);
-
-        Ok(builder)
     }
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Get interface index from name.
-fn get_ifindex(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
 }
 
 // ============================================================================
@@ -869,6 +836,14 @@ fn get_ifindex(name: &str) -> Result<u32> {
 // ============================================================================
 
 impl Connection<Route> {
+    /// Resolve interface for SRv6 local builder.
+    async fn resolve_srv6_interface(&self, builder: &Srv6LocalBuilder) -> Result<Option<u32>> {
+        match builder.device_ref() {
+            Some(iface_ref) => Ok(Some(self.resolve_interface(iface_ref).await?)),
+            None => Ok(None),
+        }
+    }
+
     /// Get all SRv6 local routes.
     ///
     /// Returns routes that use LWTUNNEL_ENCAP_SEG6_LOCAL encapsulation.
@@ -938,19 +913,23 @@ impl Connection<Route> {
     /// ).await?;
     /// ```
     pub async fn add_srv6_local(&self, builder: Srv6LocalBuilder) -> Result<()> {
-        let msg = builder.build(
+        let ifindex = self.resolve_srv6_interface(&builder).await?;
+        let mut msg = MessageBuilder::new(
             NlMsgType::RTM_NEWROUTE,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
-        )?;
+        );
+        builder.write_to(&mut msg, ifindex);
         self.send_ack(msg).await
     }
 
     /// Replace an SRv6 local route (add or update).
     pub async fn replace_srv6_local(&self, builder: Srv6LocalBuilder) -> Result<()> {
-        let msg = builder.build(
+        let ifindex = self.resolve_srv6_interface(&builder).await?;
+        let mut msg = MessageBuilder::new(
             NlMsgType::RTM_NEWROUTE,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
-        )?;
+        );
+        builder.write_to(&mut msg, ifindex);
         self.send_ack(msg).await
     }
 
@@ -1057,6 +1036,13 @@ mod tests {
     fn test_srv6_local_builder_with_dev() {
         let sid: Ipv6Addr = "fc00:1::1".parse().unwrap();
         let builder = Srv6LocalBuilder::end(sid).dev("eth0");
-        assert_eq!(builder.dev, Some("eth0".to_string()));
+        assert_eq!(builder.dev, Some(InterfaceRef::Name("eth0".to_string())));
+    }
+
+    #[test]
+    fn test_srv6_local_builder_with_oif() {
+        let sid: Ipv6Addr = "fc00:1::1".parse().unwrap();
+        let builder = Srv6LocalBuilder::end(sid).oif(5);
+        assert_eq!(builder.dev, Some(InterfaceRef::Index(5)));
     }
 }

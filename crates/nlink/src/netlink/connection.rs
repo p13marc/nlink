@@ -5,6 +5,7 @@ use std::path::Path;
 
 use super::builder::MessageBuilder;
 use super::error::{Error, Result};
+use super::interface_ref::InterfaceRef;
 use super::message::{
     MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgError, NlMsgHdr,
     NlMsgType,
@@ -500,18 +501,6 @@ use super::messages::{
     AddressMessage, LinkMessage, NeighborMessage, RouteMessage, RuleMessage, TcMessage,
 };
 
-/// Helper function to convert interface name to index.
-/// This is a standalone implementation to avoid dependency on rip-lib.
-pub(crate) fn ifname_to_index(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
-}
-
 impl Connection<Route> {
     /// Get all network interfaces.
     ///
@@ -541,6 +530,55 @@ impl Connection<Route> {
     pub async fn get_link_by_index(&self, index: u32) -> Result<Option<LinkMessage>> {
         let links = self.get_links().await?;
         Ok(links.into_iter().find(|l| l.ifindex() == index))
+    }
+
+    /// Resolve an interface reference to an index.
+    ///
+    /// This method is namespace-safe: it uses netlink to resolve interface names,
+    /// which queries the namespace that this connection is bound to.
+    ///
+    /// - If the reference is already an index, returns it directly.
+    /// - If the reference is a name, queries the kernel via netlink.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InterfaceNotFound`] if the interface name doesn't exist.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Route, InterfaceRef};
+    ///
+    /// let conn = Connection::<Route>::new()?;
+    ///
+    /// // Resolve a name
+    /// let ifindex = conn.resolve_interface(&InterfaceRef::name("eth0")).await?;
+    ///
+    /// // Pass-through an index
+    /// let ifindex = conn.resolve_interface(&InterfaceRef::index(2)).await?;
+    /// assert_eq!(ifindex, 2);
+    /// ```
+    pub async fn resolve_interface(&self, iface: &InterfaceRef) -> Result<u32> {
+        match iface {
+            InterfaceRef::Index(idx) => Ok(*idx),
+            InterfaceRef::Name(name) => {
+                let link = self
+                    .get_link_by_name(name)
+                    .await?
+                    .ok_or_else(|| Error::interface_not_found(name))?;
+                Ok(link.ifindex())
+            }
+        }
+    }
+
+    /// Resolve an optional interface reference.
+    ///
+    /// Returns `None` if the input is `None`, otherwise resolves the reference.
+    pub async fn resolve_interface_opt(&self, iface: Option<&InterfaceRef>) -> Result<Option<u32>> {
+        match iface {
+            Some(iface) => Ok(Some(self.resolve_interface(iface).await?)),
+            None => Ok(None),
+        }
     }
 
     /// Build a map of interface index to name.
@@ -620,7 +658,9 @@ impl Connection<Route> {
 
     /// Get IP addresses for a specific interface by name.
     pub async fn get_addresses_for(&self, ifname: &str) -> Result<Vec<AddressMessage>> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         let addresses = self.get_addresses().await?;
         Ok(addresses
             .into_iter()
@@ -796,7 +836,9 @@ impl Connection<Route> {
 
     /// Get neighbor entries for a specific interface.
     pub async fn get_neighbors_for(&self, ifname: &str) -> Result<Vec<NeighborMessage>> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         let neighbors = self.get_neighbors().await?;
         Ok(neighbors
             .into_iter()
@@ -918,7 +960,9 @@ impl Connection<Route> {
 
     /// Get qdiscs for a specific interface.
     pub async fn get_qdiscs_for(&self, ifname: &str) -> Result<Vec<TcMessage>> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         let qdiscs = self.get_qdiscs().await?;
         Ok(qdiscs
             .into_iter()
@@ -933,7 +977,9 @@ impl Connection<Route> {
 
     /// Get TC classes for a specific interface.
     pub async fn get_classes_for(&self, ifname: &str) -> Result<Vec<TcMessage>> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         let classes = self.get_classes().await?;
         Ok(classes
             .into_iter()
@@ -948,7 +994,9 @@ impl Connection<Route> {
 
     /// Get TC filters for a specific interface.
     pub async fn get_filters_for(&self, ifname: &str) -> Result<Vec<TcMessage>> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         let filters = self.get_filters().await?;
         Ok(filters
             .into_iter()
@@ -970,7 +1018,9 @@ impl Connection<Route> {
     /// }
     /// ```
     pub async fn get_tc_chains(&self, ifname: &str, parent: &str) -> Result<Vec<u32>> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.get_tc_chains_by_index(ifindex, parent).await
     }
 
@@ -1018,7 +1068,9 @@ impl Connection<Route> {
     /// conn.add_tc_chain("eth0", "ingress", 100).await?;
     /// ```
     pub async fn add_tc_chain(&self, ifname: &str, parent: &str, chain: u32) -> Result<()> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.add_tc_chain_by_index(ifindex, parent, chain).await
     }
 
@@ -1055,7 +1107,9 @@ impl Connection<Route> {
     /// conn.del_tc_chain("eth0", "ingress", 100).await?;
     /// ```
     pub async fn del_tc_chain(&self, ifname: &str, parent: &str, chain: u32) -> Result<()> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.del_tc_chain_by_index(ifindex, parent, chain).await
     }
 
@@ -1123,7 +1177,9 @@ impl Connection<Route> {
         ifname: &str,
         handle: &str,
     ) -> Result<Option<TcMessage>> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.get_qdisc_by_handle_index(ifindex, handle).await
     }
 
@@ -1255,7 +1311,9 @@ impl Connection<Route> {
     /// conn.set_link_state("eth0", false).await?;
     /// ```
     pub async fn set_link_state(&self, ifname: &str, up: bool) -> Result<()> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.set_link_state_by_index(ifindex, up).await
     }
 
@@ -1285,7 +1343,9 @@ impl Connection<Route> {
     /// conn.set_link_mtu("eth0", 9000).await?;
     /// ```
     pub async fn set_link_mtu(&self, ifname: &str, mtu: u32) -> Result<()> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.set_link_mtu_by_index(ifindex, mtu).await
     }
 
@@ -1310,7 +1370,9 @@ impl Connection<Route> {
     /// conn.del_link("veth0").await?;
     /// ```
     pub async fn del_link(&self, ifname: &str) -> Result<()> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.del_link_by_index(ifindex).await
     }
 
@@ -1332,7 +1394,9 @@ impl Connection<Route> {
     /// conn.set_link_txqlen("eth0", 1000).await?;
     /// ```
     pub async fn set_link_txqlen(&self, ifname: &str, txqlen: u32) -> Result<()> {
-        let ifindex = ifname_to_index(ifname)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
+            .await?;
         self.set_link_txqlen_by_index(ifindex, txqlen).await
     }
 

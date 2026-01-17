@@ -23,6 +23,12 @@
 //!         .dev("eth0")
 //! ).await?;
 //!
+//! // Add a route via interface index (namespace-safe)
+//! conn.add_route(
+//!     Ipv4Route::new("10.0.0.0", 8)
+//!         .dev_index(5)
+//! ).await?;
+//!
 //! // Add a multipath route (ECMP)
 //! conn.add_route(
 //!     Ipv4Route::new("0.0.0.0", 0)
@@ -46,7 +52,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use super::builder::MessageBuilder;
 use super::connection::Connection;
-use super::error::{Error, Result};
+use super::error::Result;
+use super::interface_ref::InterfaceRef;
 use super::message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType};
 use super::mpls::MplsEncap;
 use super::protocol::Route;
@@ -91,13 +98,34 @@ pub mod rtnh_flags {
     pub const TRAP: u8 = 64;
 }
 
+/// Resolved interface indices for route operations.
+///
+/// This struct holds the resolved interface indices for the main output interface
+/// and any multipath nexthops that have device references.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedRouteInterfaces {
+    /// Main output interface index (for RTA_OIF)
+    pub oif: Option<u32>,
+    /// Multipath nexthop interface indices (in order)
+    pub multipath: Vec<Option<u32>>,
+}
+
 /// Trait for route configurations that can be added.
 pub trait RouteConfig {
-    /// Build the netlink message for adding this route.
-    fn build(&self) -> Result<MessageBuilder>;
+    /// Get the device reference for the main output interface.
+    fn device_ref(&self) -> Option<&InterfaceRef>;
 
-    /// Build a message for deleting this route.
-    fn build_delete(&self) -> Result<MessageBuilder>;
+    /// Get device references for all multipath nexthops.
+    fn multipath_device_refs(&self) -> Vec<Option<&InterfaceRef>>;
+
+    /// Get the address family (AF_INET or AF_INET6).
+    fn family(&self) -> u8;
+
+    /// Write the add message to the builder with resolved interface indices.
+    fn write_add(&self, builder: &mut MessageBuilder, interfaces: &ResolvedRouteInterfaces);
+
+    /// Write the delete message to the builder.
+    fn write_delete(&self, builder: &mut MessageBuilder);
 }
 
 /// Route metrics configuration.
@@ -263,8 +291,8 @@ pub struct NextHop {
     gateway_v4: Option<Ipv4Addr>,
     /// Gateway address (IPv6)
     gateway_v6: Option<Ipv6Addr>,
-    /// Output interface name
-    dev: Option<String>,
+    /// Output interface reference
+    dev: Option<InterfaceRef>,
     /// Weight (for ECMP)
     weight: u8,
     /// Flags
@@ -297,10 +325,21 @@ impl NextHop {
         self
     }
 
-    /// Set output interface.
+    /// Set output interface by name.
     pub fn dev(mut self, dev: impl Into<String>) -> Self {
-        self.dev = Some(dev.into());
+        self.dev = Some(InterfaceRef::Name(dev.into()));
         self
+    }
+
+    /// Set output interface by index (namespace-safe).
+    pub fn dev_index(mut self, ifindex: u32) -> Self {
+        self.dev = Some(InterfaceRef::Index(ifindex));
+        self
+    }
+
+    /// Get the device reference.
+    pub fn device_ref(&self) -> Option<&InterfaceRef> {
+        self.dev.as_ref()
     }
 
     /// Set weight (1-256).
@@ -343,6 +382,11 @@ impl Default for NextHop {
 ///     .dev("eth0")
 ///     .metrics(RouteMetrics::new().mtu(1400));
 ///
+/// // Route with interface by index (namespace-safe)
+/// let route = Ipv4Route::new("10.0.0.0", 8)
+///     .dev_index(5)
+///     .metrics(RouteMetrics::new().mtu(1400));
+///
 /// // Route using a nexthop group (Linux 5.3+)
 /// let route = Ipv4Route::new("10.0.0.0", 8)
 ///     .nexthop_group(100);  // Reference nexthop group ID 100
@@ -357,8 +401,8 @@ pub struct Ipv4Route {
     gateway: Option<Ipv4Addr>,
     /// Preferred source address
     prefsrc: Option<Ipv4Addr>,
-    /// Output interface
-    dev: Option<String>,
+    /// Output interface reference
+    dev: Option<InterfaceRef>,
     /// Route type
     route_type: RouteType,
     /// Route protocol
@@ -449,9 +493,15 @@ impl Ipv4Route {
         self
     }
 
-    /// Set the output interface.
+    /// Set the output interface by name.
     pub fn dev(mut self, dev: impl Into<String>) -> Self {
-        self.dev = Some(dev.into());
+        self.dev = Some(InterfaceRef::Name(dev.into()));
+        self
+    }
+
+    /// Set the output interface by index (namespace-safe).
+    pub fn dev_index(mut self, ifindex: u32) -> Self {
+        self.dev = Some(InterfaceRef::Index(ifindex));
         self
     }
 
@@ -614,12 +664,22 @@ impl Ipv4Route {
 }
 
 impl RouteConfig for Ipv4Route {
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_NEWROUTE,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
-        );
+    fn device_ref(&self) -> Option<&InterfaceRef> {
+        self.dev.as_ref()
+    }
 
+    fn multipath_device_refs(&self) -> Vec<Option<&InterfaceRef>> {
+        match &self.multipath {
+            Some(nexthops) => nexthops.iter().map(|nh| nh.device_ref()).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    fn family(&self) -> u8 {
+        AF_INET
+    }
+
+    fn write_add(&self, builder: &mut MessageBuilder, interfaces: &ResolvedRouteInterfaces) {
         let table_u8 = if self.table > 255 {
             rt_table::UNSPEC
         } else {
@@ -653,10 +713,9 @@ impl RouteConfig for Ipv4Route {
             builder.append_attr(RtaAttr::Prefsrc as u16, &src.octets());
         }
 
-        // RTA_OIF
-        if let Some(ref dev) = self.dev {
-            let ifindex = ifname_to_index(dev)?;
-            builder.append_attr_u32(RtaAttr::Oif as u16, ifindex as u32);
+        // RTA_OIF (from resolved interface)
+        if let Some(ifindex) = interfaces.oif {
+            builder.append_attr_u32(RtaAttr::Oif as u16, ifindex);
         }
 
         // RTA_TABLE (for table > 255)
@@ -678,12 +737,12 @@ impl RouteConfig for Ipv4Route {
         if let Some(ref metrics) = self.metrics
             && metrics.has_any()
         {
-            metrics.write_to(&mut builder);
+            metrics.write_to(builder);
         }
 
         // RTA_MULTIPATH
         if let Some(ref nexthops) = self.multipath {
-            write_multipath_v4(&mut builder, nexthops)?;
+            write_multipath_v4(builder, nexthops, &interfaces.multipath);
         }
 
         // RTA_NH_ID (nexthop group reference, Linux 5.3+)
@@ -693,20 +752,16 @@ impl RouteConfig for Ipv4Route {
 
         // RTA_ENCAP_TYPE + RTA_ENCAP (MPLS encapsulation)
         if let Some(ref encap) = self.mpls_encap {
-            encap.write_to(&mut builder);
+            encap.write_to(builder);
         }
 
         // RTA_ENCAP_TYPE + RTA_ENCAP (SRv6 encapsulation)
         if let Some(ref encap) = self.srv6_encap {
-            encap.write_to(&mut builder);
+            encap.write_to(builder);
         }
-
-        Ok(builder)
     }
 
-    fn build_delete(&self) -> Result<MessageBuilder> {
-        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK);
-
+    fn write_delete(&self, builder: &mut MessageBuilder) {
         let table_u8 = if self.table > 255 {
             rt_table::UNSPEC
         } else {
@@ -729,8 +784,6 @@ impl RouteConfig for Ipv4Route {
         if self.table > 255 {
             builder.append_attr_u32(RtaAttr::Table as u16, self.table);
         }
-
-        Ok(builder)
     }
 }
 
@@ -747,8 +800,8 @@ pub struct Ipv6Route {
     gateway: Option<Ipv6Addr>,
     /// Preferred source address
     prefsrc: Option<Ipv6Addr>,
-    /// Output interface
-    dev: Option<String>,
+    /// Output interface reference
+    dev: Option<InterfaceRef>,
     /// Route type
     route_type: RouteType,
     /// Route protocol
@@ -838,9 +891,15 @@ impl Ipv6Route {
         self
     }
 
-    /// Set the output interface.
+    /// Set the output interface by name.
     pub fn dev(mut self, dev: impl Into<String>) -> Self {
-        self.dev = Some(dev.into());
+        self.dev = Some(InterfaceRef::Name(dev.into()));
+        self
+    }
+
+    /// Set the output interface by index (namespace-safe).
+    pub fn dev_index(mut self, ifindex: u32) -> Self {
+        self.dev = Some(InterfaceRef::Index(ifindex));
         self
     }
 
@@ -980,12 +1039,22 @@ impl Ipv6Route {
 }
 
 impl RouteConfig for Ipv6Route {
-    fn build(&self) -> Result<MessageBuilder> {
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_NEWROUTE,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
-        );
+    fn device_ref(&self) -> Option<&InterfaceRef> {
+        self.dev.as_ref()
+    }
 
+    fn multipath_device_refs(&self) -> Vec<Option<&InterfaceRef>> {
+        match &self.multipath {
+            Some(nexthops) => nexthops.iter().map(|nh| nh.device_ref()).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    fn family(&self) -> u8 {
+        AF_INET6
+    }
+
+    fn write_add(&self, builder: &mut MessageBuilder, interfaces: &ResolvedRouteInterfaces) {
         let table_u8 = if self.table > 255 {
             rt_table::UNSPEC
         } else {
@@ -1019,10 +1088,9 @@ impl RouteConfig for Ipv6Route {
             builder.append_attr(RtaAttr::Prefsrc as u16, &src.octets());
         }
 
-        // RTA_OIF
-        if let Some(ref dev) = self.dev {
-            let ifindex = ifname_to_index(dev)?;
-            builder.append_attr_u32(RtaAttr::Oif as u16, ifindex as u32);
+        // RTA_OIF (from resolved interface)
+        if let Some(ifindex) = interfaces.oif {
+            builder.append_attr_u32(RtaAttr::Oif as u16, ifindex);
         }
 
         // RTA_TABLE
@@ -1049,12 +1117,12 @@ impl RouteConfig for Ipv6Route {
         if let Some(ref metrics) = self.metrics
             && metrics.has_any()
         {
-            metrics.write_to(&mut builder);
+            metrics.write_to(builder);
         }
 
         // RTA_MULTIPATH
         if let Some(ref nexthops) = self.multipath {
-            write_multipath_v6(&mut builder, nexthops)?;
+            write_multipath_v6(builder, nexthops, &interfaces.multipath);
         }
 
         // RTA_NH_ID (nexthop group reference, Linux 5.3+)
@@ -1064,20 +1132,16 @@ impl RouteConfig for Ipv6Route {
 
         // RTA_ENCAP_TYPE + RTA_ENCAP (MPLS encapsulation)
         if let Some(ref encap) = self.mpls_encap {
-            encap.write_to(&mut builder);
+            encap.write_to(builder);
         }
 
         // RTA_ENCAP_TYPE + RTA_ENCAP (SRv6 encapsulation)
         if let Some(ref encap) = self.srv6_encap {
-            encap.write_to(&mut builder);
+            encap.write_to(builder);
         }
-
-        Ok(builder)
     }
 
-    fn build_delete(&self) -> Result<MessageBuilder> {
-        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK);
-
+    fn write_delete(&self, builder: &mut MessageBuilder) {
         let table_u8 = if self.table > 255 {
             rt_table::UNSPEC
         } else {
@@ -1100,8 +1164,6 @@ impl RouteConfig for Ipv6Route {
         if self.table > 255 {
             builder.append_attr_u32(RtaAttr::Table as u16, self.table);
         }
-
-        Ok(builder)
     }
 }
 
@@ -1109,28 +1171,17 @@ impl RouteConfig for Ipv6Route {
 // Helper Functions
 // ============================================================================
 
-/// Helper function to convert interface name to index.
-fn ifname_to_index(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
-}
-
-/// Write IPv4 multipath nexthops.
-fn write_multipath_v4(builder: &mut MessageBuilder, nexthops: &[NextHop]) -> Result<()> {
+/// Write IPv4 multipath nexthops with resolved interface indices.
+fn write_multipath_v4(
+    builder: &mut MessageBuilder,
+    nexthops: &[NextHop],
+    resolved_indices: &[Option<u32>],
+) {
     // Build the multipath attribute payload
     let mut mp_data = Vec::new();
 
-    for nh in nexthops {
-        let ifindex = if let Some(ref dev) = nh.dev {
-            ifname_to_index(dev)?
-        } else {
-            0
-        };
+    for (i, nh) in nexthops.iter().enumerate() {
+        let ifindex = resolved_indices.get(i).copied().flatten().unwrap_or(0);
 
         // Calculate the length of this nexthop entry
         // rtnexthop (8 bytes) + optional RTA_GATEWAY (4 + 4 bytes for IPv4)
@@ -1156,19 +1207,18 @@ fn write_multipath_v4(builder: &mut MessageBuilder, nexthops: &[NextHop]) -> Res
     }
 
     builder.append_attr(RtaAttr::Multipath as u16, &mp_data);
-    Ok(())
 }
 
-/// Write IPv6 multipath nexthops.
-fn write_multipath_v6(builder: &mut MessageBuilder, nexthops: &[NextHop]) -> Result<()> {
+/// Write IPv6 multipath nexthops with resolved interface indices.
+fn write_multipath_v6(
+    builder: &mut MessageBuilder,
+    nexthops: &[NextHop],
+    resolved_indices: &[Option<u32>],
+) {
     let mut mp_data = Vec::new();
 
-    for nh in nexthops {
-        let ifindex = if let Some(ref dev) = nh.dev {
-            ifname_to_index(dev)?
-        } else {
-            0
-        };
+    for (i, nh) in nexthops.iter().enumerate() {
+        let ifindex = resolved_indices.get(i).copied().flatten().unwrap_or(0);
 
         let mut nh_len: u16 = 8;
         if nh.gateway_v6.is_some() {
@@ -1191,14 +1241,40 @@ fn write_multipath_v6(builder: &mut MessageBuilder, nexthops: &[NextHop]) -> Res
     }
 
     builder.append_attr(RtaAttr::Multipath as u16, &mp_data);
-    Ok(())
 }
 
 // ============================================================================
 // Connection Methods
 // ============================================================================
 
+/// NLM_F_REPLACE flag
+const NLM_F_REPLACE: u16 = 0x100;
+
 impl Connection<Route> {
+    /// Resolve all interface references for a route configuration.
+    async fn resolve_route_interfaces<R: RouteConfig>(
+        &self,
+        config: &R,
+    ) -> Result<ResolvedRouteInterfaces> {
+        // Resolve main output interface
+        let oif = match config.device_ref() {
+            Some(iface) => Some(self.resolve_interface(iface).await?),
+            None => None,
+        };
+
+        // Resolve multipath nexthop interfaces
+        let mp_refs = config.multipath_device_refs();
+        let mut multipath = Vec::with_capacity(mp_refs.len());
+        for iface_opt in mp_refs {
+            match iface_opt {
+                Some(iface) => multipath.push(Some(self.resolve_interface(iface).await?)),
+                None => multipath.push(None),
+            }
+        }
+
+        Ok(ResolvedRouteInterfaces { oif, multipath })
+    }
+
     /// Add a route.
     ///
     /// # Example
@@ -1218,15 +1294,27 @@ impl Connection<Route> {
     ///     Ipv6Route::new("2001:db8:2::", 48)
     ///         .gateway("2001:db8::1".parse()?)
     /// ).await?;
+    ///
+    /// // Add route with interface by index (namespace-safe)
+    /// conn.add_route(
+    ///     Ipv4Route::new("10.0.0.0", 8)
+    ///         .dev_index(5)
+    /// ).await?;
     /// ```
     pub async fn add_route<R: RouteConfig>(&self, config: R) -> Result<()> {
-        let builder = config.build()?;
+        let interfaces = self.resolve_route_interfaces(&config).await?;
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWROUTE,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        config.write_add(&mut builder, &interfaces);
         self.send_ack(builder).await
     }
 
     /// Delete a route using a config.
     pub async fn del_route<R: RouteConfig>(&self, config: R) -> Result<()> {
-        let builder = config.build_delete()?;
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK);
+        config.write_delete(&mut builder);
         self.send_ack(builder).await
     }
 
@@ -1252,10 +1340,12 @@ impl Connection<Route> {
     ///
     /// If the route exists, it will be updated. Otherwise, it will be created.
     pub async fn replace_route<R: RouteConfig>(&self, config: R) -> Result<()> {
-        // For replace, we need to modify the flags
-        // This is a simplified version - a proper implementation would
-        // rebuild the message with different flags
-        let builder = config.build()?;
+        let interfaces = self.resolve_route_interfaces(&config).await?;
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWROUTE,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+        );
+        config.write_add(&mut builder, &interfaces);
         self.send_ack(builder).await
     }
 }

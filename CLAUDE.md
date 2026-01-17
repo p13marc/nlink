@@ -2040,14 +2040,20 @@ println!("WireGuard family ID: {}", conn.family_id());
 
 **MACsec (IEEE 802.1AE) configuration via Generic Netlink:**
 ```rust
-use nlink::netlink::{Connection, Macsec};
+use nlink::netlink::{Connection, Macsec, Route};
 use nlink::netlink::genl::macsec::{MacsecSaBuilder, MacsecCipherSuite};
+
+// First resolve interface name to index via Route connection (namespace-safe)
+let route_conn = Connection::<Route>::new()?;
+let link = route_conn.get_link_by_name("macsec0").await?
+    .ok_or_else(|| nlink::netlink::Error::InterfaceNotFound { name: "macsec0".into() })?;
+let ifindex = link.ifindex();
 
 // Create a MACsec connection (async due to GENL family resolution)
 let conn = Connection::<Macsec>::new_async().await?;
 
-// Get device information
-let device = conn.get_device("macsec0").await?;
+// Get device information by index
+let device = conn.get_device_by_index(ifindex).await?;
 println!("SCI: {:016x}", device.sci);
 println!("Cipher: {:?}", device.cipher_suite);
 println!("Encoding SA: {}", device.encoding_sa);
@@ -2067,7 +2073,7 @@ for rxsc in &device.rx_scs {
 
 // Add a TX SA (requires root)
 let key = [0u8; 16]; // 128-bit key for GCM-AES-128
-conn.add_tx_sa("macsec0",
+conn.add_tx_sa_by_index(ifindex,
     MacsecSaBuilder::new(0)  // AN 0-3
         .key(&key)
         .pn(1)
@@ -2075,20 +2081,20 @@ conn.add_tx_sa("macsec0",
 ).await?;
 
 // Update TX SA (activate/deactivate or update PN)
-conn.update_tx_sa("macsec0",
+conn.update_tx_sa_by_index(ifindex,
     MacsecSaBuilder::new(0)
         .active(false)
 ).await?;
 
 // Delete TX SA
-conn.del_tx_sa("macsec0", 0).await?;
+conn.del_tx_sa_by_index(ifindex, 0).await?;
 
 // Add RX SC (peer's SCI)
 let peer_sci = 0x001122334455_0001u64;  // MAC + port
-conn.add_rx_sc("macsec0", peer_sci).await?;
+conn.add_rx_sc_by_index(ifindex, peer_sci).await?;
 
 // Add RX SA for a peer
-conn.add_rx_sa("macsec0", peer_sci,
+conn.add_rx_sa_by_index(ifindex, peer_sci,
     MacsecSaBuilder::new(0)
         .key(&key)
         .pn(1)
@@ -2096,8 +2102,8 @@ conn.add_rx_sa("macsec0", peer_sci,
 ).await?;
 
 // Delete RX SA and SC
-conn.del_rx_sa("macsec0", peer_sci, 0).await?;
-conn.del_rx_sc("macsec0", peer_sci).await?;
+conn.del_rx_sa_by_index(ifindex, peer_sci, 0).await?;
+conn.del_rx_sc_by_index(ifindex, peer_sci).await?;
 
 // Access the resolved GENL family ID if needed
 println!("MACsec family ID: {}", conn.family_id());

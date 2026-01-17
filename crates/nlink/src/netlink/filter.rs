@@ -41,6 +41,7 @@ use super::action::ActionList;
 use super::builder::MessageBuilder;
 use super::connection::{ack_request, create_request, replace_request};
 use super::error::{Error, Result};
+use super::interface_ref::InterfaceRef;
 use super::message::NlMsgType;
 use super::protocol::Route;
 use super::types::tc::filter::{basic, bpf, flower, fw, matchall, u32 as u32_mod};
@@ -1342,10 +1343,10 @@ impl FilterConfig for CgroupFilter {
 ///     .to_realm(10)
 ///     .classid("1:10");
 ///
-/// // Match traffic from realm 5 arriving on eth1
+/// // Match traffic from realm 5 arriving on eth1 (by index for namespace safety)
 /// let filter = RouteFilter::new()
 ///     .from_realm(5)
-///     .from_if("eth1")
+///     .from_if_index(eth1_ifindex)
 ///     .classid("1:20");
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -1356,8 +1357,8 @@ pub struct RouteFilter {
     to_realm: Option<u32>,
     /// Source realm.
     from_realm: Option<u32>,
-    /// Input interface index.
-    from_if: Option<u32>,
+    /// Input interface reference.
+    from_if: Option<InterfaceRef>,
     /// Actions to attach.
     actions: Option<super::action::ActionList>,
     /// Chain index for this filter.
@@ -1388,17 +1389,27 @@ impl RouteFilter {
         self
     }
 
-    /// Match traffic arriving from a specific interface.
-    pub fn from_if(mut self, dev: &str) -> Result<Self> {
-        let ifindex = get_ifindex_internal(dev)?;
-        self.from_if = Some(ifindex as u32);
-        Ok(self)
+    /// Match traffic arriving from a specific interface by name.
+    ///
+    /// Note: The interface name will be resolved when the filter is added.
+    /// For namespace operations, prefer `from_if_index()` with a pre-resolved index.
+    pub fn from_if(mut self, dev: impl Into<String>) -> Self {
+        self.from_if = Some(InterfaceRef::Name(dev.into()));
+        self
     }
 
     /// Match traffic arriving from a specific interface by index.
+    ///
+    /// This is the preferred method for namespace operations as it avoids
+    /// sysfs reads that don't work across namespaces.
     pub fn from_if_index(mut self, ifindex: u32) -> Self {
-        self.from_if = Some(ifindex);
+        self.from_if = Some(InterfaceRef::Index(ifindex));
         self
+    }
+
+    /// Get the interface reference for the input interface filter.
+    pub fn from_if_ref(&self) -> Option<&InterfaceRef> {
+        self.from_if.as_ref()
     }
 
     /// Add an action to the filter.
@@ -1424,17 +1435,6 @@ impl RouteFilter {
     pub fn build(self) -> Self {
         self
     }
-}
-
-/// Internal helper to avoid conflict with get_ifindex in this module.
-fn get_ifindex_internal(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
 }
 
 impl FilterConfig for RouteFilter {
@@ -1465,7 +1465,17 @@ impl FilterConfig for RouteFilter {
             builder.append_attr_u32(route4::TCA_ROUTE4_FROM, realm);
         }
 
-        if let Some(ifindex) = self.from_if {
+        if let Some(ref iface) = self.from_if {
+            let ifindex = match iface {
+                InterfaceRef::Index(idx) => *idx,
+                InterfaceRef::Name(name) => {
+                    return Err(Error::InvalidMessage(format!(
+                        "RouteFilter from_if interface '{}' must be resolved to index before use. \
+                         Use from_if_index() or resolve the name via Connection::get_link_by_name()",
+                        name
+                    )));
+                }
+            };
             builder.append_attr_u32(route4::TCA_ROUTE4_IIF, ifindex);
         }
 
@@ -1807,17 +1817,6 @@ impl FilterConfig for FlowFilter {
 // Helper functions
 // ============================================================================
 
-/// Convert interface name to index.
-fn get_ifindex(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
-}
-
 /// Parse a handle string like "1:0" or "root".
 fn parse_handle(s: &str) -> Result<u32> {
     tc_handle::parse(s).ok_or_else(|| Error::InvalidMessage(format!("invalid handle: {}", s)))
@@ -1871,7 +1870,9 @@ impl Connection<Route> {
         priority: u16,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.add_filter_by_index_full(ifindex, parent, handle, protocol, priority, config)
             .await
     }
@@ -1946,7 +1947,9 @@ impl Connection<Route> {
         parent: &str,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.replace_filter_by_index_full(ifindex, parent, None, 0x0800, 0, config)
             .await
     }
@@ -1961,7 +1964,9 @@ impl Connection<Route> {
         priority: u16,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.replace_filter_by_index_full(ifindex, parent, handle, protocol, priority, config)
             .await
     }
@@ -2036,7 +2041,9 @@ impl Connection<Route> {
         priority: u16,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.change_filter_by_index_full(ifindex, parent, None, protocol, priority, config)
             .await
     }
@@ -2051,7 +2058,9 @@ impl Connection<Route> {
         priority: u16,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.change_filter_by_index_full(ifindex, parent, handle, protocol, priority, config)
             .await
     }
@@ -2121,7 +2130,9 @@ impl Connection<Route> {
         protocol: u16,
         priority: u16,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.del_filter_by_index(ifindex, parent, protocol, priority)
             .await
     }
@@ -2150,7 +2161,9 @@ impl Connection<Route> {
 
     /// Delete all filters from a parent qdisc.
     pub async fn flush_filters(&self, dev: &str, parent: &str) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.flush_filters_by_index(ifindex, parent).await
     }
 

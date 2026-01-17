@@ -15,8 +15,10 @@
 //! // Drop all traffic
 //! let drop = GactAction::drop();
 //!
-//! // Mirror traffic to another interface
-//! let mirror = MirredAction::mirror("eth1")?;
+//! // Mirror traffic to another interface by index (namespace-safe)
+//! // First resolve interface name via route connection:
+//! //   let link = conn.get_link_by_name("eth1").await?.ok_or("not found")?;
+//! let mirror = MirredAction::mirror_by_index(link.ifindex());
 //!
 //! // Rate limit traffic
 //! let police = PoliceAction::new()
@@ -193,14 +195,14 @@ impl ActionConfig for GactAction {
 /// ```ignore
 /// use nlink::netlink::action::MirredAction;
 ///
-/// // Redirect to eth1
-/// let redirect = MirredAction::redirect("eth1")?;
+/// // Redirect to eth1 by index (namespace-safe)
+/// let redirect = MirredAction::redirect_by_index(eth1_ifindex);
 ///
-/// // Mirror to eth2
-/// let mirror = MirredAction::mirror("eth2")?;
+/// // Mirror to eth2 by index
+/// let mirror = MirredAction::mirror_by_index(eth2_ifindex);
 ///
-/// // Redirect on ingress to eth0
-/// let ingress_redirect = MirredAction::ingress_redirect("eth0")?;
+/// // Redirect on ingress to eth0 by index
+/// let ingress_redirect = MirredAction::ingress_redirect_by_index(eth0_ifindex);
 /// ```
 #[derive(Debug, Clone)]
 pub struct MirredAction {
@@ -230,58 +232,34 @@ impl MirredAction {
         }
     }
 
-    /// Create an egress redirect action by interface name.
-    pub fn redirect(dev: &str) -> Result<Self> {
-        let ifindex = get_ifindex(dev)?;
-        Ok(Self::new_with_ifindex(
-            mirred::TCA_EGRESS_REDIR,
-            ifindex as u32,
-        ))
-    }
-
-    /// Create an egress mirror action by interface name.
-    pub fn mirror(dev: &str) -> Result<Self> {
-        let ifindex = get_ifindex(dev)?;
-        Ok(Self::new_with_ifindex(
-            mirred::TCA_EGRESS_MIRROR,
-            ifindex as u32,
-        ))
-    }
-
-    /// Create an ingress redirect action by interface name.
-    pub fn ingress_redirect(dev: &str) -> Result<Self> {
-        let ifindex = get_ifindex(dev)?;
-        Ok(Self::new_with_ifindex(
-            mirred::TCA_INGRESS_REDIR,
-            ifindex as u32,
-        ))
-    }
-
-    /// Create an ingress mirror action by interface name.
-    pub fn ingress_mirror(dev: &str) -> Result<Self> {
-        let ifindex = get_ifindex(dev)?;
-        Ok(Self::new_with_ifindex(
-            mirred::TCA_INGRESS_MIRROR,
-            ifindex as u32,
-        ))
-    }
-
-    /// Create a redirect action by interface index.
+    /// Create an egress redirect action by interface index.
+    ///
+    /// This is the preferred method for namespace operations as it avoids
+    /// sysfs reads that don't work across namespaces.
     pub fn redirect_by_index(ifindex: u32) -> Self {
         Self::new_with_ifindex(mirred::TCA_EGRESS_REDIR, ifindex)
     }
 
-    /// Create a mirror action by interface index.
+    /// Create an egress mirror action by interface index.
+    ///
+    /// This is the preferred method for namespace operations as it avoids
+    /// sysfs reads that don't work across namespaces.
     pub fn mirror_by_index(ifindex: u32) -> Self {
         Self::new_with_ifindex(mirred::TCA_EGRESS_MIRROR, ifindex)
     }
 
     /// Create an ingress redirect action by interface index.
+    ///
+    /// This is the preferred method for namespace operations as it avoids
+    /// sysfs reads that don't work across namespaces.
     pub fn ingress_redirect_by_index(ifindex: u32) -> Self {
         Self::new_with_ifindex(mirred::TCA_INGRESS_REDIR, ifindex)
     }
 
     /// Create an ingress mirror action by interface index.
+    ///
+    /// This is the preferred method for namespace operations as it avoids
+    /// sysfs reads that don't work across namespaces.
     pub fn ingress_mirror_by_index(ifindex: u32) -> Self {
         Self::new_with_ifindex(mirred::TCA_INGRESS_MIRROR, ifindex)
     }
@@ -1115,21 +1093,6 @@ impl ActionConfig for TunnelKeyAction {
 
         Ok(())
     }
-}
-
-// ============================================================================
-// Helper functions
-// ============================================================================
-
-/// Convert interface name to index.
-fn get_ifindex(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
 }
 
 // ============================================================================
@@ -2010,8 +1973,10 @@ impl ActionConfig for PeditAction {
 /// ```ignore
 /// use nlink::netlink::action::{ActionList, GactAction, MirredAction};
 ///
+/// // First resolve interface name to index via route connection:
+/// //   let link = conn.get_link_by_name("eth1").await?.ok_or("not found")?;
 /// let actions = ActionList::new()
-///     .add(MirredAction::mirror("eth1")?)
+///     .add(MirredAction::mirror_by_index(link.ifindex()))
 ///     .add(GactAction::pass())
 ///     .build();
 /// ```

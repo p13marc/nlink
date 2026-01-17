@@ -886,18 +886,24 @@ conn.add_srv6_local(
 ## MACsec Configuration
 
 ```rust
-use nlink::netlink::{Connection, Macsec};
+use nlink::netlink::{Connection, Macsec, Route};
 use nlink::netlink::genl::macsec::MacsecSaBuilder;
+
+// First resolve interface name to index (namespace-safe)
+let route_conn = Connection::<Route>::new()?;
+let link = route_conn.get_link_by_name("macsec0").await?
+    .ok_or("interface not found")?;
+let ifindex = link.ifindex();
 
 let conn = Connection::<Macsec>::new_async().await?;
 
-// Get device information
-let device = conn.get_device("macsec0").await?;
+// Get device information by index
+let device = conn.get_device_by_index(ifindex).await?;
 println!("SCI: {:016x}, cipher: {:?}", device.sci, device.cipher_suite);
 
 // Add TX SA
 let key = [0u8; 16]; // 128-bit key
-conn.add_tx_sa("macsec0",
+conn.add_tx_sa_by_index(ifindex,
     MacsecSaBuilder::new(0)
         .key(&key)
         .pn(1)
@@ -906,8 +912,8 @@ conn.add_tx_sa("macsec0",
 
 // Add RX SC and SA for a peer
 let peer_sci = 0x001122334455_0001u64;
-conn.add_rx_sc("macsec0", peer_sci).await?;
-conn.add_rx_sa("macsec0", peer_sci,
+conn.add_rx_sc_by_index(ifindex, peer_sci).await?;
+conn.add_rx_sa_by_index(ifindex, peer_sci,
     MacsecSaBuilder::new(0)
         .key(&key)
         .pn(1)

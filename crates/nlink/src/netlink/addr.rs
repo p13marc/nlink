@@ -28,12 +28,34 @@
 //! // Delete an address
 //! conn.del_address("eth0", Ipv4Addr::new(192, 168, 1, 100), 24).await?;
 //! ```
+//!
+//! # Namespace-Safe Operations
+//!
+//! When working with network namespaces, use the index-based constructors
+//! to avoid sysfs lookups:
+//!
+//! ```ignore
+//! use nlink::netlink::{Connection, Route, namespace};
+//! use nlink::netlink::addr::Ipv4Address;
+//!
+//! // Create connection to namespace
+//! let conn = namespace::connection_for("myns")?;
+//!
+//! // Get interface index via netlink (namespace-safe)
+//! let link = conn.get_link_by_name("eth0").await?.unwrap();
+//!
+//! // Use index-based constructor
+//! conn.add_address(
+//!     Ipv4Address::with_index(link.ifindex(), "10.0.0.1".parse()?, 24)
+//! ).await?;
+//! ```
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::builder::MessageBuilder;
 use super::connection::Connection;
-use super::error::{Error, Result};
+use super::error::Result;
+use super::interface_ref::InterfaceRef;
 use super::message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType};
 use super::protocol::Route;
 use super::types::addr::{IfAddrMsg, IfaAttr, Scope, ifa_flags};
@@ -50,18 +72,34 @@ pub const AF_INET: u8 = 2;
 pub const AF_INET6: u8 = 10;
 
 /// Trait for address configurations that can be added.
+///
+/// This trait separates interface reference from message building.
+/// The Connection is responsible for resolving the interface reference
+/// to an index before calling the write methods.
 pub trait AddressConfig {
-    /// Get the interface name.
-    fn interface(&self) -> &str;
+    /// Get the interface reference (name or index).
+    fn interface_ref(&self) -> &InterfaceRef;
 
-    /// Build the netlink message for adding this address.
-    fn build(&self) -> Result<MessageBuilder>;
+    /// Get the address family (AF_INET or AF_INET6).
+    fn family(&self) -> u8;
 
-    /// Build a message for replacing this address (add or update).
-    fn build_replace(&self) -> Result<MessageBuilder>;
+    /// Get the prefix length.
+    fn prefix_len(&self) -> u8;
 
-    /// Build a message for deleting this address.
-    fn build_delete(&self) -> Result<MessageBuilder>;
+    /// Write the "add address" message to the builder.
+    ///
+    /// The `ifindex` parameter is the resolved interface index.
+    fn write_add(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()>;
+
+    /// Write the "replace address" message to the builder.
+    ///
+    /// The `ifindex` parameter is the resolved interface index.
+    fn write_replace(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()>;
+
+    /// Write the "delete address" message to the builder.
+    ///
+    /// The `ifindex` parameter is the resolved interface index.
+    fn write_delete(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()>;
 }
 
 /// Cache info structure for address lifetimes.
@@ -102,7 +140,7 @@ pub const INFINITY_LIFE_TIME: u32 = 0xFFFFFFFF;
 /// ```
 #[derive(Debug, Clone)]
 pub struct Ipv4Address {
-    interface: String,
+    interface: InterfaceRef,
     address: Ipv4Addr,
     prefix_len: u8,
     /// Peer address for point-to-point links
@@ -133,7 +171,33 @@ impl Ipv4Address {
     /// * `prefix_len` - Prefix length (0-32)
     pub fn new(interface: impl Into<String>, address: Ipv4Addr, prefix_len: u8) -> Self {
         Self {
-            interface: interface.into(),
+            interface: InterfaceRef::Name(interface.into()),
+            address,
+            prefix_len,
+            peer: None,
+            broadcast: None,
+            label: None,
+            scope: Scope::Universe,
+            flags: 0,
+            preferred_lft: None,
+            valid_lft: None,
+            metric: None,
+        }
+    }
+
+    /// Create a new IPv4 address configuration with interface index.
+    ///
+    /// Use this constructor for namespace-safe operations when you have
+    /// already resolved the interface index via `conn.get_link_by_name()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `ifindex` - Interface index
+    /// * `address` - IPv4 address
+    /// * `prefix_len` - Prefix length (0-32)
+    pub fn with_index(ifindex: u32, address: Ipv4Addr, prefix_len: u8) -> Self {
+        Self {
+            interface: InterfaceRef::Index(ifindex),
             address,
             prefix_len,
             peer: None,
@@ -220,164 +284,109 @@ impl Ipv4Address {
         self.metric = Some(metric);
         self
     }
+
+    /// Write common address attributes to the builder.
+    fn write_common_attrs(&self, builder: &mut MessageBuilder) {
+        // IFA_LOCAL (the actual address on this interface)
+        builder.append_attr(IfaAttr::Local as u16, &self.address.octets());
+
+        // IFA_ADDRESS (peer address for ptp, or same as local)
+        if let Some(peer) = self.peer {
+            builder.append_attr(IfaAttr::Address as u16, &peer.octets());
+        } else {
+            builder.append_attr(IfaAttr::Address as u16, &self.address.octets());
+        }
+
+        // IFA_BROADCAST
+        if let Some(brd) = self.broadcast {
+            builder.append_attr(IfaAttr::Broadcast as u16, &brd.octets());
+        }
+
+        // IFA_LABEL
+        if let Some(ref label) = self.label {
+            builder.append_attr_str(IfaAttr::Label as u16, label);
+        }
+
+        // IFA_FLAGS (extended flags, 32-bit)
+        if self.flags != 0 {
+            builder.append_attr_u32(IfaAttr::Flags as u16, self.flags);
+        }
+
+        // IFA_CACHEINFO (lifetimes)
+        if self.preferred_lft.is_some() || self.valid_lft.is_some() {
+            let cacheinfo = IfaCacheinfo {
+                ifa_prefered: self.preferred_lft.unwrap_or(INFINITY_LIFE_TIME),
+                ifa_valid: self.valid_lft.unwrap_or(INFINITY_LIFE_TIME),
+                cstamp: 0,
+                tstamp: 0,
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &cacheinfo as *const IfaCacheinfo as *const u8,
+                    std::mem::size_of::<IfaCacheinfo>(),
+                )
+            };
+            builder.append_attr(IfaAttr::Cacheinfo as u16, bytes);
+        }
+
+        // IFA_RT_PRIORITY (metric)
+        if let Some(metric) = self.metric {
+            builder.append_attr_u32(IfaAttr::RtPriority as u16, metric);
+        }
+    }
 }
 
 impl AddressConfig for Ipv4Address {
-    fn interface(&self) -> &str {
+    fn interface_ref(&self) -> &InterfaceRef {
         &self.interface
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let ifindex = ifname_to_index(&self.interface)?;
+    fn family(&self) -> u8 {
+        AF_INET
+    }
 
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_NEWADDR,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
-        );
+    fn prefix_len(&self) -> u8 {
+        self.prefix_len
+    }
 
+    fn write_add(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()> {
         // Build ifaddrmsg
         let ifaddr = IfAddrMsg::new()
             .with_family(AF_INET)
             .with_prefixlen(self.prefix_len)
-            .with_index(ifindex as u32)
+            .with_index(ifindex)
             .with_scope(self.scope as u8);
 
         builder.append(&ifaddr);
-
-        // IFA_LOCAL (the actual address on this interface)
-        builder.append_attr(IfaAttr::Local as u16, &self.address.octets());
-
-        // IFA_ADDRESS (peer address for ptp, or same as local)
-        if let Some(peer) = self.peer {
-            builder.append_attr(IfaAttr::Address as u16, &peer.octets());
-        } else {
-            builder.append_attr(IfaAttr::Address as u16, &self.address.octets());
-        }
-
-        // IFA_BROADCAST
-        if let Some(brd) = self.broadcast {
-            builder.append_attr(IfaAttr::Broadcast as u16, &brd.octets());
-        }
-
-        // IFA_LABEL
-        if let Some(ref label) = self.label {
-            builder.append_attr_str(IfaAttr::Label as u16, label);
-        }
-
-        // IFA_FLAGS (extended flags, 32-bit)
-        if self.flags != 0 {
-            builder.append_attr_u32(IfaAttr::Flags as u16, self.flags);
-        }
-
-        // IFA_CACHEINFO (lifetimes)
-        if self.preferred_lft.is_some() || self.valid_lft.is_some() {
-            let cacheinfo = IfaCacheinfo {
-                ifa_prefered: self.preferred_lft.unwrap_or(INFINITY_LIFE_TIME),
-                ifa_valid: self.valid_lft.unwrap_or(INFINITY_LIFE_TIME),
-                cstamp: 0,
-                tstamp: 0,
-            };
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    &cacheinfo as *const IfaCacheinfo as *const u8,
-                    std::mem::size_of::<IfaCacheinfo>(),
-                )
-            };
-            builder.append_attr(IfaAttr::Cacheinfo as u16, bytes);
-        }
-
-        // IFA_RT_PRIORITY (metric)
-        if let Some(metric) = self.metric {
-            builder.append_attr_u32(IfaAttr::RtPriority as u16, metric);
-        }
-
-        Ok(builder)
+        self.write_common_attrs(builder);
+        Ok(())
     }
 
-    fn build_replace(&self) -> Result<MessageBuilder> {
-        let ifindex = ifname_to_index(&self.interface)?;
-
-        // NLM_F_CREATE | NLM_F_REPLACE = add if not exists, update if exists
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_NEWADDR,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
-        );
-
-        // Build ifaddrmsg
+    fn write_replace(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()> {
+        // Same as write_add - the flags are set by the Connection
         let ifaddr = IfAddrMsg::new()
             .with_family(AF_INET)
             .with_prefixlen(self.prefix_len)
-            .with_index(ifindex as u32)
+            .with_index(ifindex)
             .with_scope(self.scope as u8);
 
         builder.append(&ifaddr);
-
-        // IFA_LOCAL (the actual address on this interface)
-        builder.append_attr(IfaAttr::Local as u16, &self.address.octets());
-
-        // IFA_ADDRESS (peer address for ptp, or same as local)
-        if let Some(peer) = self.peer {
-            builder.append_attr(IfaAttr::Address as u16, &peer.octets());
-        } else {
-            builder.append_attr(IfaAttr::Address as u16, &self.address.octets());
-        }
-
-        // IFA_BROADCAST
-        if let Some(brd) = self.broadcast {
-            builder.append_attr(IfaAttr::Broadcast as u16, &brd.octets());
-        }
-
-        // IFA_LABEL
-        if let Some(ref label) = self.label {
-            builder.append_attr_str(IfaAttr::Label as u16, label);
-        }
-
-        // IFA_FLAGS (extended flags, 32-bit)
-        if self.flags != 0 {
-            builder.append_attr_u32(IfaAttr::Flags as u16, self.flags);
-        }
-
-        // IFA_CACHEINFO (lifetimes)
-        if self.preferred_lft.is_some() || self.valid_lft.is_some() {
-            let cacheinfo = IfaCacheinfo {
-                ifa_prefered: self.preferred_lft.unwrap_or(INFINITY_LIFE_TIME),
-                ifa_valid: self.valid_lft.unwrap_or(INFINITY_LIFE_TIME),
-                cstamp: 0,
-                tstamp: 0,
-            };
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    &cacheinfo as *const IfaCacheinfo as *const u8,
-                    std::mem::size_of::<IfaCacheinfo>(),
-                )
-            };
-            builder.append_attr(IfaAttr::Cacheinfo as u16, bytes);
-        }
-
-        // IFA_RT_PRIORITY (metric)
-        if let Some(metric) = self.metric {
-            builder.append_attr_u32(IfaAttr::RtPriority as u16, metric);
-        }
-
-        Ok(builder)
+        self.write_common_attrs(builder);
+        Ok(())
     }
 
-    fn build_delete(&self) -> Result<MessageBuilder> {
-        let ifindex = ifname_to_index(&self.interface)?;
-
-        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELADDR, NLM_F_REQUEST | NLM_F_ACK);
-
+    fn write_delete(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()> {
         let ifaddr = IfAddrMsg::new()
             .with_family(AF_INET)
             .with_prefixlen(self.prefix_len)
-            .with_index(ifindex as u32);
+            .with_index(ifindex);
 
         builder.append(&ifaddr);
 
         // IFA_LOCAL
         builder.append_attr(IfaAttr::Local as u16, &self.address.octets());
 
-        Ok(builder)
+        Ok(())
     }
 }
 
@@ -402,7 +411,7 @@ impl AddressConfig for Ipv4Address {
 /// ```
 #[derive(Debug, Clone)]
 pub struct Ipv6Address {
-    interface: String,
+    interface: InterfaceRef,
     address: Ipv6Addr,
     prefix_len: u8,
     /// Peer address for point-to-point links
@@ -429,7 +438,31 @@ impl Ipv6Address {
     /// * `prefix_len` - Prefix length (0-128)
     pub fn new(interface: impl Into<String>, address: Ipv6Addr, prefix_len: u8) -> Self {
         Self {
-            interface: interface.into(),
+            interface: InterfaceRef::Name(interface.into()),
+            address,
+            prefix_len,
+            peer: None,
+            scope: Scope::Universe,
+            flags: 0,
+            preferred_lft: None,
+            valid_lft: None,
+            metric: None,
+        }
+    }
+
+    /// Create a new IPv6 address configuration with interface index.
+    ///
+    /// Use this constructor for namespace-safe operations when you have
+    /// already resolved the interface index via `conn.get_link_by_name()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `ifindex` - Interface index
+    /// * `address` - IPv6 address
+    /// * `prefix_len` - Prefix length (0-128)
+    pub fn with_index(ifindex: u32, address: Ipv6Addr, prefix_len: u8) -> Self {
+        Self {
+            interface: InterfaceRef::Index(ifindex),
             address,
             prefix_len,
             peer: None,
@@ -504,158 +537,98 @@ impl Ipv6Address {
         self.metric = Some(metric);
         self
     }
+
+    /// Write common address attributes to the builder.
+    fn write_common_attrs(&self, builder: &mut MessageBuilder) {
+        // IFA_LOCAL
+        builder.append_attr(IfaAttr::Local as u16, &self.address.octets());
+
+        // IFA_ADDRESS (peer or same as local)
+        if let Some(peer) = self.peer {
+            builder.append_attr(IfaAttr::Address as u16, &peer.octets());
+        } else {
+            builder.append_attr(IfaAttr::Address as u16, &self.address.octets());
+        }
+
+        // IFA_FLAGS (extended flags, 32-bit)
+        if self.flags != 0 {
+            builder.append_attr_u32(IfaAttr::Flags as u16, self.flags);
+        }
+
+        // IFA_CACHEINFO (lifetimes)
+        if self.preferred_lft.is_some() || self.valid_lft.is_some() {
+            let cacheinfo = IfaCacheinfo {
+                ifa_prefered: self.preferred_lft.unwrap_or(INFINITY_LIFE_TIME),
+                ifa_valid: self.valid_lft.unwrap_or(INFINITY_LIFE_TIME),
+                cstamp: 0,
+                tstamp: 0,
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &cacheinfo as *const IfaCacheinfo as *const u8,
+                    std::mem::size_of::<IfaCacheinfo>(),
+                )
+            };
+            builder.append_attr(IfaAttr::Cacheinfo as u16, bytes);
+        }
+
+        // IFA_RT_PRIORITY (metric)
+        if let Some(metric) = self.metric {
+            builder.append_attr_u32(IfaAttr::RtPriority as u16, metric);
+        }
+    }
 }
 
 impl AddressConfig for Ipv6Address {
-    fn interface(&self) -> &str {
+    fn interface_ref(&self) -> &InterfaceRef {
         &self.interface
     }
 
-    fn build(&self) -> Result<MessageBuilder> {
-        let ifindex = ifname_to_index(&self.interface)?;
+    fn family(&self) -> u8 {
+        AF_INET6
+    }
 
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_NEWADDR,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
-        );
+    fn prefix_len(&self) -> u8 {
+        self.prefix_len
+    }
 
+    fn write_add(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()> {
         let ifaddr = IfAddrMsg::new()
             .with_family(AF_INET6)
             .with_prefixlen(self.prefix_len)
-            .with_index(ifindex as u32)
+            .with_index(ifindex)
             .with_scope(self.scope as u8);
 
         builder.append(&ifaddr);
-
-        // IFA_LOCAL
-        builder.append_attr(IfaAttr::Local as u16, &self.address.octets());
-
-        // IFA_ADDRESS (peer or same as local)
-        if let Some(peer) = self.peer {
-            builder.append_attr(IfaAttr::Address as u16, &peer.octets());
-        } else {
-            builder.append_attr(IfaAttr::Address as u16, &self.address.octets());
-        }
-
-        // IFA_FLAGS (extended flags, 32-bit)
-        if self.flags != 0 {
-            builder.append_attr_u32(IfaAttr::Flags as u16, self.flags);
-        }
-
-        // IFA_CACHEINFO (lifetimes)
-        if self.preferred_lft.is_some() || self.valid_lft.is_some() {
-            let cacheinfo = IfaCacheinfo {
-                ifa_prefered: self.preferred_lft.unwrap_or(INFINITY_LIFE_TIME),
-                ifa_valid: self.valid_lft.unwrap_or(INFINITY_LIFE_TIME),
-                cstamp: 0,
-                tstamp: 0,
-            };
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    &cacheinfo as *const IfaCacheinfo as *const u8,
-                    std::mem::size_of::<IfaCacheinfo>(),
-                )
-            };
-            builder.append_attr(IfaAttr::Cacheinfo as u16, bytes);
-        }
-
-        // IFA_RT_PRIORITY (metric)
-        if let Some(metric) = self.metric {
-            builder.append_attr_u32(IfaAttr::RtPriority as u16, metric);
-        }
-
-        Ok(builder)
+        self.write_common_attrs(builder);
+        Ok(())
     }
 
-    fn build_replace(&self) -> Result<MessageBuilder> {
-        let ifindex = ifname_to_index(&self.interface)?;
-
-        // NLM_F_CREATE | NLM_F_REPLACE = add if not exists, update if exists
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_NEWADDR,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
-        );
-
+    fn write_replace(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()> {
         let ifaddr = IfAddrMsg::new()
             .with_family(AF_INET6)
             .with_prefixlen(self.prefix_len)
-            .with_index(ifindex as u32)
+            .with_index(ifindex)
             .with_scope(self.scope as u8);
 
         builder.append(&ifaddr);
-
-        // IFA_LOCAL
-        builder.append_attr(IfaAttr::Local as u16, &self.address.octets());
-
-        // IFA_ADDRESS (peer or same as local)
-        if let Some(peer) = self.peer {
-            builder.append_attr(IfaAttr::Address as u16, &peer.octets());
-        } else {
-            builder.append_attr(IfaAttr::Address as u16, &self.address.octets());
-        }
-
-        // IFA_FLAGS (extended flags, 32-bit)
-        if self.flags != 0 {
-            builder.append_attr_u32(IfaAttr::Flags as u16, self.flags);
-        }
-
-        // IFA_CACHEINFO (lifetimes)
-        if self.preferred_lft.is_some() || self.valid_lft.is_some() {
-            let cacheinfo = IfaCacheinfo {
-                ifa_prefered: self.preferred_lft.unwrap_or(INFINITY_LIFE_TIME),
-                ifa_valid: self.valid_lft.unwrap_or(INFINITY_LIFE_TIME),
-                cstamp: 0,
-                tstamp: 0,
-            };
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    &cacheinfo as *const IfaCacheinfo as *const u8,
-                    std::mem::size_of::<IfaCacheinfo>(),
-                )
-            };
-            builder.append_attr(IfaAttr::Cacheinfo as u16, bytes);
-        }
-
-        // IFA_RT_PRIORITY (metric)
-        if let Some(metric) = self.metric {
-            builder.append_attr_u32(IfaAttr::RtPriority as u16, metric);
-        }
-
-        Ok(builder)
+        self.write_common_attrs(builder);
+        Ok(())
     }
 
-    fn build_delete(&self) -> Result<MessageBuilder> {
-        let ifindex = ifname_to_index(&self.interface)?;
-
-        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELADDR, NLM_F_REQUEST | NLM_F_ACK);
-
+    fn write_delete(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()> {
         let ifaddr = IfAddrMsg::new()
             .with_family(AF_INET6)
             .with_prefixlen(self.prefix_len)
-            .with_index(ifindex as u32);
+            .with_index(ifindex);
 
         builder.append(&ifaddr);
 
         // IFA_LOCAL
         builder.append_attr(IfaAttr::Local as u16, &self.address.octets());
 
-        Ok(builder)
+        Ok(())
     }
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Helper function to convert interface name to index.
-fn ifname_to_index(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
 }
 
 // ============================================================================
@@ -664,6 +637,9 @@ fn ifname_to_index(name: &str) -> Result<u32> {
 
 impl Connection<Route> {
     /// Add an IP address to an interface.
+    ///
+    /// This method is namespace-safe: interface names are resolved via netlink,
+    /// which queries the namespace that this connection is bound to.
     ///
     /// # Example
     ///
@@ -682,7 +658,14 @@ impl Connection<Route> {
     /// ).await?;
     /// ```
     pub async fn add_address<A: AddressConfig>(&self, config: A) -> Result<()> {
-        let builder = config.build()?;
+        let ifindex = self.resolve_interface(config.interface_ref()).await?;
+
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWADDR,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+
+        config.write_add(&mut builder, ifindex)?;
         self.send_ack(builder).await
     }
 
@@ -697,13 +680,32 @@ impl Connection<Route> {
         match address {
             IpAddr::V4(addr) => {
                 let config = Ipv4Address::new(ifname, addr, prefix_len);
-                let builder = config.build_delete()?;
-                self.send_ack(builder).await
+                self.del_address_config(config).await
             }
             IpAddr::V6(addr) => {
                 let config = Ipv6Address::new(ifname, addr, prefix_len);
-                let builder = config.build_delete()?;
-                self.send_ack(builder).await
+                self.del_address_config(config).await
+            }
+        }
+    }
+
+    /// Delete an IP address from an interface by index.
+    ///
+    /// This is namespace-safe as it doesn't require interface name resolution.
+    pub async fn del_address_by_index(
+        &self,
+        ifindex: u32,
+        address: IpAddr,
+        prefix_len: u8,
+    ) -> Result<()> {
+        match address {
+            IpAddr::V4(addr) => {
+                let config = Ipv4Address::with_index(ifindex, addr, prefix_len);
+                self.del_address_config(config).await
+            }
+            IpAddr::V6(addr) => {
+                let config = Ipv6Address::with_index(ifindex, addr, prefix_len);
+                self.del_address_config(config).await
             }
         }
     }
@@ -716,8 +718,7 @@ impl Connection<Route> {
         prefix_len: u8,
     ) -> Result<()> {
         let config = Ipv4Address::new(ifname, address, prefix_len);
-        let builder = config.build_delete()?;
-        self.send_ack(builder).await
+        self.del_address_config(config).await
     }
 
     /// Delete an IPv6 address from an interface.
@@ -728,13 +729,16 @@ impl Connection<Route> {
         prefix_len: u8,
     ) -> Result<()> {
         let config = Ipv6Address::new(ifname, address, prefix_len);
-        let builder = config.build_delete()?;
-        self.send_ack(builder).await
+        self.del_address_config(config).await
     }
 
     /// Delete an IP address using a typed config.
     pub async fn del_address_config<A: AddressConfig>(&self, config: A) -> Result<()> {
-        let builder = config.build_delete()?;
+        let ifindex = self.resolve_interface(config.interface_ref()).await?;
+
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELADDR, NLM_F_REQUEST | NLM_F_ACK);
+
+        config.write_delete(&mut builder, ifindex)?;
         self.send_ack(builder).await
     }
 
@@ -753,7 +757,14 @@ impl Connection<Route> {
     /// ).await?;
     /// ```
     pub async fn replace_address<A: AddressConfig>(&self, config: A) -> Result<()> {
-        let builder = config.build_replace()?;
+        let ifindex = self.resolve_interface(config.interface_ref()).await?;
+
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWADDR,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+        );
+
+        config.write_replace(&mut builder, ifindex)?;
         self.send_ack(builder).await
     }
 
@@ -765,19 +776,30 @@ impl Connection<Route> {
     /// conn.flush_addresses("eth0").await?;
     /// ```
     pub async fn flush_addresses(&self, ifname: &str) -> Result<()> {
-        let addresses = self.get_addresses_for(ifname).await?;
+        let ifindex = self.resolve_interface(&InterfaceRef::name(ifname)).await?;
+        self.flush_addresses_by_index(ifindex).await
+    }
+
+    /// Flush all addresses from an interface by index.
+    ///
+    /// This is namespace-safe as it doesn't require interface name resolution.
+    pub async fn flush_addresses_by_index(&self, ifindex: u32) -> Result<()> {
+        let addresses = self.get_addresses_by_index(ifindex).await?;
 
         for addr in addresses {
             if let (Some(address), Some(prefix_len)) = (addr.address, Some(addr.prefix_len())) {
-                // Skip loopback addresses on loopback interface
-                if ifname == "lo"
+                // Skip loopback addresses on loopback interface (index 1 is typically lo)
+                if ifindex == 1
                     && (address == IpAddr::V4(Ipv4Addr::LOCALHOST)
                         || address == IpAddr::V6(Ipv6Addr::LOCALHOST))
                 {
                     continue;
                 }
 
-                if let Err(e) = self.del_address(ifname, address, prefix_len).await {
+                if let Err(e) = self
+                    .del_address_by_index(ifindex, address, prefix_len)
+                    .await
+                {
                     // Ignore "not found" errors (race condition)
                     if !e.is_not_found() {
                         return Err(e);

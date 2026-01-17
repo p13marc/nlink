@@ -44,20 +44,23 @@ impl Connection<Macsec> {
         self.state().family_id
     }
 
-    /// Get device information.
+    /// Get device information by interface index.
     ///
     /// Returns the current configuration and status of the MACsec interface.
+    /// This is the preferred method for namespace operations.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let device = conn.get_device("macsec0").await?;
+    /// // Get ifindex via Route connection first
+    /// let route_conn = Connection::<Route>::new()?;
+    /// let link = route_conn.get_link_by_name("macsec0").await?.unwrap();
+    ///
+    /// let macsec_conn = Connection::<Macsec>::new_async().await?;
+    /// let device = macsec_conn.get_device_by_index(link.ifindex()).await?;
     /// println!("SCI: {:016x}", device.sci);
-    /// println!("Cipher: {:?}", device.cipher);
     /// ```
-    pub async fn get_device(&self, ifname: &str) -> Result<MacsecDevice> {
-        let ifindex = get_ifindex(ifname)?;
-
+    pub async fn get_device_by_index(&self, ifindex: u32) -> Result<MacsecDevice> {
         let responses = self
             .dump_macsec_command(macsec_cmd::GET_TXSC, |builder| {
                 builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
@@ -66,7 +69,7 @@ impl Connection<Macsec> {
 
         if responses.is_empty() {
             return Err(Error::InterfaceNotFound {
-                name: ifname.to_string(),
+                name: format!("ifindex {}", ifindex),
             });
         }
 
@@ -84,21 +87,19 @@ impl Connection<Macsec> {
         Ok(device)
     }
 
-    /// Add a TX Security Association.
+    /// Add a TX Security Association by interface index.
     ///
     /// # Example
     ///
     /// ```ignore
     /// let key = [0u8; 16]; // 128-bit key
-    /// conn.add_tx_sa("macsec0",
+    /// conn.add_tx_sa_by_index(ifindex,
     ///     MacsecSaBuilder::new(0, &key)
     ///         .packet_number(1)
     ///         .active(true)
     /// ).await?;
     /// ```
-    pub async fn add_tx_sa(&self, ifname: &str, sa: MacsecSaBuilder) -> Result<()> {
-        let ifindex = get_ifindex(ifname)?;
-
+    pub async fn add_tx_sa_by_index(&self, ifindex: u32, sa: MacsecSaBuilder) -> Result<()> {
         self.macsec_command(macsec_cmd::ADD_TXSA, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
 
@@ -124,15 +125,13 @@ impl Connection<Macsec> {
         Ok(())
     }
 
-    /// Delete a TX Security Association.
+    /// Delete a TX Security Association by interface index.
     ///
     /// # Arguments
     ///
-    /// * `ifname` - Interface name
+    /// * `ifindex` - Interface index
     /// * `an` - Association Number (0-3)
-    pub async fn del_tx_sa(&self, ifname: &str, an: u8) -> Result<()> {
-        let ifindex = get_ifindex(ifname)?;
-
+    pub async fn del_tx_sa_by_index(&self, ifindex: u32, an: u8) -> Result<()> {
         self.macsec_command(macsec_cmd::DEL_TXSA, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
 
@@ -145,12 +144,10 @@ impl Connection<Macsec> {
         Ok(())
     }
 
-    /// Update a TX Security Association.
+    /// Update a TX Security Association by interface index.
     ///
     /// This can be used to activate/deactivate an SA or update the packet number.
-    pub async fn update_tx_sa(&self, ifname: &str, sa: MacsecSaBuilder) -> Result<()> {
-        let ifindex = get_ifindex(ifname)?;
-
+    pub async fn update_tx_sa_by_index(&self, ifindex: u32, sa: MacsecSaBuilder) -> Result<()> {
         self.macsec_command(macsec_cmd::UPD_TXSA, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
 
@@ -171,15 +168,13 @@ impl Connection<Macsec> {
         Ok(())
     }
 
-    /// Add an RX Secure Channel.
+    /// Add an RX Secure Channel by interface index.
     ///
     /// # Arguments
     ///
-    /// * `ifname` - Interface name
+    /// * `ifindex` - Interface index
     /// * `sci` - Secure Channel Identifier (typically peer's MAC + port)
-    pub async fn add_rx_sc(&self, ifname: &str, sci: u64) -> Result<()> {
-        let ifindex = get_ifindex(ifname)?;
-
+    pub async fn add_rx_sc_by_index(&self, ifindex: u32, sci: u64) -> Result<()> {
         self.macsec_command(macsec_cmd::ADD_RXSC, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
 
@@ -193,12 +188,10 @@ impl Connection<Macsec> {
         Ok(())
     }
 
-    /// Delete an RX Secure Channel.
+    /// Delete an RX Secure Channel by interface index.
     ///
     /// This also deletes all associated RX SAs.
-    pub async fn del_rx_sc(&self, ifname: &str, sci: u64) -> Result<()> {
-        let ifindex = get_ifindex(ifname)?;
-
+    pub async fn del_rx_sc_by_index(&self, ifindex: u32, sci: u64) -> Result<()> {
         self.macsec_command(macsec_cmd::DEL_RXSC, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
 
@@ -211,16 +204,19 @@ impl Connection<Macsec> {
         Ok(())
     }
 
-    /// Add an RX Security Association.
+    /// Add an RX Security Association by interface index.
     ///
     /// # Arguments
     ///
-    /// * `ifname` - Interface name
+    /// * `ifindex` - Interface index
     /// * `sci` - Secure Channel Identifier
     /// * `sa` - SA configuration
-    pub async fn add_rx_sa(&self, ifname: &str, sci: u64, sa: MacsecSaBuilder) -> Result<()> {
-        let ifindex = get_ifindex(ifname)?;
-
+    pub async fn add_rx_sa_by_index(
+        &self,
+        ifindex: u32,
+        sci: u64,
+        sa: MacsecSaBuilder,
+    ) -> Result<()> {
         self.macsec_command(macsec_cmd::ADD_RXSA, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
 
@@ -251,10 +247,8 @@ impl Connection<Macsec> {
         Ok(())
     }
 
-    /// Delete an RX Security Association.
-    pub async fn del_rx_sa(&self, ifname: &str, sci: u64, an: u8) -> Result<()> {
-        let ifindex = get_ifindex(ifname)?;
-
+    /// Delete an RX Security Association by interface index.
+    pub async fn del_rx_sa_by_index(&self, ifindex: u32, sci: u64, an: u8) -> Result<()> {
         self.macsec_command(macsec_cmd::DEL_RXSA, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
 
@@ -271,10 +265,13 @@ impl Connection<Macsec> {
         Ok(())
     }
 
-    /// Update an RX Security Association.
-    pub async fn update_rx_sa(&self, ifname: &str, sci: u64, sa: MacsecSaBuilder) -> Result<()> {
-        let ifindex = get_ifindex(ifname)?;
-
+    /// Update an RX Security Association by interface index.
+    pub async fn update_rx_sa_by_index(
+        &self,
+        ifindex: u32,
+        sci: u64,
+        sa: MacsecSaBuilder,
+    ) -> Result<()> {
         self.macsec_command(macsec_cmd::UPD_RXSA, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
 
@@ -464,20 +461,6 @@ async fn resolve_macsec_family(socket: &NetlinkSocket) -> Result<u16> {
     Err(Error::FamilyNotFound {
         name: MACSEC_GENL_NAME.to_string(),
     })
-}
-
-/// Get interface index from name.
-fn get_ifindex(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path).map_err(|_| Error::InterfaceNotFound {
-        name: name.to_string(),
-    })?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InterfaceNotFound {
-            name: name.to_string(),
-        })
 }
 
 /// Parse device attributes from a GENL response.
@@ -712,15 +695,4 @@ fn parse_offload(data: &[u8], device: &mut MacsecDevice) -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_get_ifindex_error() {
-        let result = get_ifindex("nonexistent_interface_12345");
-        assert!(result.is_err());
-    }
 }

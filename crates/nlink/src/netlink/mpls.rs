@@ -65,6 +65,7 @@ use super::attr::AttrIter;
 use super::builder::MessageBuilder;
 use super::connection::Connection;
 use super::error::{Error, Result};
+use super::interface_ref::InterfaceRef;
 use super::message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgType};
 use super::protocol::Route;
 use super::types::mpls::{MplsLabelEntry, lwtunnel_encap, mpls_label, mpls_tunnel};
@@ -434,10 +435,8 @@ pub struct MplsRouteBuilder {
     label: u32,
     /// Outgoing labels (empty for pop).
     out_labels: Vec<u32>,
-    /// Output interface name.
-    dev: Option<String>,
-    /// Output interface index.
-    ifindex: Option<u32>,
+    /// Output interface.
+    dev: Option<InterfaceRef>,
     /// Next hop address.
     via: Option<IpAddr>,
 }
@@ -451,7 +450,6 @@ impl MplsRouteBuilder {
             label,
             out_labels: Vec::new(),
             dev: None,
-            ifindex: None,
             via: None,
         }
     }
@@ -462,7 +460,6 @@ impl MplsRouteBuilder {
             label: in_label,
             out_labels: vec![out_label],
             dev: None,
-            ifindex: None,
             via: None,
         }
     }
@@ -475,21 +472,25 @@ impl MplsRouteBuilder {
             label: in_label,
             out_labels: out_labels.to_vec(),
             dev: None,
-            ifindex: None,
             via: None,
         }
     }
 
     /// Set the output interface by name.
     pub fn dev(mut self, dev: impl Into<String>) -> Self {
-        self.dev = Some(dev.into());
+        self.dev = Some(InterfaceRef::Name(dev.into()));
         self
     }
 
     /// Set the output interface by index.
     pub fn ifindex(mut self, ifindex: u32) -> Self {
-        self.ifindex = Some(ifindex);
+        self.dev = Some(InterfaceRef::Index(ifindex));
         self
+    }
+
+    /// Get the device reference.
+    pub fn device_ref(&self) -> Option<&InterfaceRef> {
+        self.dev.as_ref()
     }
 
     /// Set the next hop address.
@@ -498,10 +499,8 @@ impl MplsRouteBuilder {
         self
     }
 
-    /// Build the netlink message.
-    pub fn build(&self, msg_type: u16, flags: u16) -> Result<MessageBuilder> {
-        let mut builder = MessageBuilder::new(msg_type, flags);
-
+    /// Write the netlink message with resolved interface index.
+    pub(crate) fn write_to(&self, builder: &mut MessageBuilder, ifindex: Option<u32>) {
         // MPLS routes use dst_len = 20 (label bit width)
         let rtmsg = RtMsg::new()
             .with_family(AF_MPLS)
@@ -530,14 +529,6 @@ impl MplsRouteBuilder {
         }
 
         // RTA_OIF - output interface
-        let ifindex = if let Some(idx) = self.ifindex {
-            Some(idx)
-        } else if let Some(ref dev) = self.dev {
-            Some(get_ifindex(dev)?)
-        } else {
-            None
-        };
-
         if let Some(idx) = ifindex {
             builder.append_attr_u32(RtaAttr::Oif as u16, idx);
         }
@@ -557,24 +548,7 @@ impl MplsRouteBuilder {
             }
             builder.append_attr(RtaAttr::Via as u16, &via_data);
         }
-
-        Ok(builder)
     }
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Get interface index from name.
-fn get_ifindex(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
 }
 
 // ============================================================================
@@ -582,6 +556,14 @@ fn get_ifindex(name: &str) -> Result<u32> {
 // ============================================================================
 
 impl Connection<Route> {
+    /// Resolve MplsRouteBuilder interface reference.
+    async fn resolve_mpls_interface(&self, builder: &MplsRouteBuilder) -> Result<Option<u32>> {
+        match builder.device_ref() {
+            Some(iface) => Ok(Some(self.resolve_interface(iface).await?)),
+            None => Ok(None),
+        }
+    }
+
     /// Get all MPLS routes.
     ///
     /// # Example
@@ -630,20 +612,24 @@ impl Connection<Route> {
     ///         .dev("eth0")
     /// ).await?;
     /// ```
-    pub async fn add_mpls_route(&self, builder: MplsRouteBuilder) -> Result<()> {
-        let msg = builder.build(
+    pub async fn add_mpls_route(&self, route_builder: MplsRouteBuilder) -> Result<()> {
+        let ifindex = self.resolve_mpls_interface(&route_builder).await?;
+        let mut msg = MessageBuilder::new(
             NlMsgType::RTM_NEWROUTE,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
-        )?;
+        );
+        route_builder.write_to(&mut msg, ifindex);
         self.send_ack(msg).await
     }
 
     /// Replace an MPLS route (add or update).
-    pub async fn replace_mpls_route(&self, builder: MplsRouteBuilder) -> Result<()> {
-        let msg = builder.build(
+    pub async fn replace_mpls_route(&self, route_builder: MplsRouteBuilder) -> Result<()> {
+        let ifindex = self.resolve_mpls_interface(&route_builder).await?;
+        let mut msg = MessageBuilder::new(
             NlMsgType::RTM_NEWROUTE,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
-        )?;
+        );
+        route_builder.write_to(&mut msg, ifindex);
         self.send_ack(msg).await
     }
 

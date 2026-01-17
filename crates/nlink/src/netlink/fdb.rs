@@ -43,6 +43,7 @@ use std::net::IpAddr;
 use super::builder::MessageBuilder;
 use super::connection::Connection;
 use super::error::{Error, Result};
+use super::interface_ref::InterfaceRef;
 use super::message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgType};
 use super::messages::NeighborMessage;
 use super::protocol::Route;
@@ -183,13 +184,11 @@ impl FdbEntry {
 #[derive(Debug, Clone, Default)]
 pub struct FdbEntryBuilder {
     mac: [u8; 6],
-    dev: Option<String>,
-    ifindex: Option<u32>,
+    dev: Option<InterfaceRef>,
     vlan: Option<u16>,
     dst: Option<IpAddr>,
     vni: Option<u32>,
-    master: Option<String>,
-    master_idx: Option<u32>,
+    master: Option<InterfaceRef>,
     permanent: bool,
     self_flag: bool,
 }
@@ -220,17 +219,22 @@ impl FdbEntryBuilder {
 
     /// Set the device name (bridge port interface).
     pub fn dev(mut self, dev: impl Into<String>) -> Self {
-        self.dev = Some(dev.into());
+        self.dev = Some(InterfaceRef::Name(dev.into()));
         self
     }
 
-    /// Set the interface index directly.
+    /// Set the interface index directly (namespace-safe).
     ///
     /// Use this instead of `dev()` when operating in a network namespace
     /// to avoid reading `/sys/class/net/` from the wrong namespace.
     pub fn ifindex(mut self, ifindex: u32) -> Self {
-        self.ifindex = Some(ifindex);
+        self.dev = Some(InterfaceRef::Index(ifindex));
         self
+    }
+
+    /// Get the device reference.
+    pub fn device_ref(&self) -> Option<&InterfaceRef> {
+        self.dev.as_ref()
     }
 
     /// Set the VLAN ID.
@@ -257,14 +261,19 @@ impl FdbEntryBuilder {
 
     /// Set the master bridge device by name.
     pub fn master(mut self, master: impl Into<String>) -> Self {
-        self.master = Some(master.into());
+        self.master = Some(InterfaceRef::Name(master.into()));
         self
     }
 
-    /// Set the master bridge device by interface index.
+    /// Set the master bridge device by interface index (namespace-safe).
     pub fn master_ifindex(mut self, ifindex: u32) -> Self {
-        self.master_idx = Some(ifindex);
+        self.master = Some(InterfaceRef::Index(ifindex));
         self
+    }
+
+    /// Get the master device reference.
+    pub fn master_ref(&self) -> Option<&InterfaceRef> {
+        self.master.as_ref()
     }
 
     /// Mark entry as permanent (static). This is the default.
@@ -288,36 +297,13 @@ impl FdbEntryBuilder {
         self
     }
 
-    /// Resolve interface name to index.
-    fn resolve_ifindex(&self) -> Result<u32> {
-        if let Some(idx) = self.ifindex {
-            Ok(idx)
-        } else if let Some(ref dev) = self.dev {
-            crate::util::get_ifindex(dev).map_err(Error::InvalidMessage)
-        } else {
-            Err(Error::InvalidMessage(
-                "device name or ifindex required".into(),
-            ))
-        }
-    }
-
-    /// Resolve master interface name to index.
-    fn resolve_master(&self) -> Result<Option<u32>> {
-        if let Some(idx) = self.master_idx {
-            Ok(Some(idx))
-        } else if let Some(ref master) = self.master {
-            let idx = crate::util::get_ifindex(master).map_err(Error::InvalidMessage)?;
-            Ok(Some(idx))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Build a netlink message for adding this FDB entry.
-    pub(crate) fn build_add(&self, flags: u16) -> Result<MessageBuilder> {
-        let ifindex = self.resolve_ifindex()?;
-        let master_idx = self.resolve_master()?;
-
+    /// Write the add message to the builder with resolved interface indices.
+    pub(crate) fn write_add(
+        &self,
+        builder: &mut MessageBuilder,
+        ifindex: u32,
+        master_idx: Option<u32>,
+    ) {
         let state = if self.permanent {
             nud::PERMANENT
         } else {
@@ -335,7 +321,6 @@ impl FdbEntryBuilder {
             .with_state(state)
             .with_flags(ntf_flags);
 
-        let mut builder = MessageBuilder::new(NlMsgType::RTM_NEWNEIGH, flags);
         builder.append(&ndmsg);
 
         // NDA_LLADDR - MAC address (required)
@@ -367,19 +352,14 @@ impl FdbEntryBuilder {
         if let Some(vni) = self.vni {
             builder.append_attr_u32(NdaAttr::Vni as u16, vni);
         }
-
-        Ok(builder)
     }
 
-    /// Build a netlink message for deleting this FDB entry.
-    pub(crate) fn build_delete(&self) -> Result<MessageBuilder> {
-        let ifindex = self.resolve_ifindex()?;
-
+    /// Write the delete message to the builder with resolved interface index.
+    pub(crate) fn write_delete(&self, builder: &mut MessageBuilder, ifindex: u32) {
         let ndmsg = NdMsg::new()
             .with_family(AF_BRIDGE)
             .with_ifindex(ifindex as i32);
 
-        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK);
         builder.append(&ndmsg);
 
         // NDA_LLADDR - MAC address (required for delete)
@@ -389,8 +369,6 @@ impl FdbEntryBuilder {
         if let Some(vlan) = self.vlan {
             builder.append_attr_u16(NdaAttr::Vlan as u16, vlan);
         }
-
-        Ok(builder)
     }
 }
 
@@ -414,7 +392,9 @@ impl Connection<Route> {
     /// }
     /// ```
     pub async fn get_fdb(&self, bridge: &str) -> Result<Vec<FdbEntry>> {
-        let bridge_idx = crate::util::get_ifindex(bridge).map_err(Error::InvalidMessage)? as u32;
+        let bridge_idx = self
+            .resolve_interface(&InterfaceRef::Name(bridge.to_string()))
+            .await?;
         self.get_fdb_by_index(bridge_idx).await
     }
 
@@ -465,8 +445,12 @@ impl Connection<Route> {
     /// let entries = conn.get_fdb_for_port("br0", "veth0").await?;
     /// ```
     pub async fn get_fdb_for_port(&self, bridge: &str, port: &str) -> Result<Vec<FdbEntry>> {
-        let bridge_idx = crate::util::get_ifindex(bridge).map_err(Error::InvalidMessage)? as u32;
-        let port_idx = crate::util::get_ifindex(port).map_err(Error::InvalidMessage)? as u32;
+        let bridge_idx = self
+            .resolve_interface(&InterfaceRef::Name(bridge.to_string()))
+            .await?;
+        let port_idx = self
+            .resolve_interface(&InterfaceRef::Name(port.to_string()))
+            .await?;
 
         let neighbors = self.get_bridge_neighbors().await?;
 
@@ -476,6 +460,25 @@ impl Connection<Route> {
             .filter(|n| n.master() == Some(bridge_idx))
             .filter_map(FdbEntry::from_neighbor)
             .collect())
+    }
+
+    /// Resolve FDB entry interface references.
+    async fn resolve_fdb_interfaces(&self, entry: &FdbEntryBuilder) -> Result<(u32, Option<u32>)> {
+        let ifindex = match entry.device_ref() {
+            Some(iface) => self.resolve_interface(iface).await?,
+            None => {
+                return Err(Error::InvalidMessage(
+                    "device name or ifindex required".into(),
+                ));
+            }
+        };
+
+        let master_idx = match entry.master_ref() {
+            Some(iface) => Some(self.resolve_interface(iface).await?),
+            None => None,
+        };
+
+        Ok((ifindex, master_idx))
     }
 
     /// Add an FDB entry.
@@ -492,9 +495,21 @@ impl Connection<Route> {
     ///         .master("br0")
     ///         .vlan(100)
     /// ).await?;
+    ///
+    /// // Namespace-safe version using interface index
+    /// conn.add_fdb(
+    ///     FdbEntryBuilder::new(mac)
+    ///         .ifindex(5)
+    ///         .master_ifindex(3)
+    /// ).await?;
     /// ```
     pub async fn add_fdb(&self, entry: FdbEntryBuilder) -> Result<()> {
-        let builder = entry.build_add(NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL)?;
+        let (ifindex, master_idx) = self.resolve_fdb_interfaces(&entry).await?;
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWNEIGH,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        entry.write_add(&mut builder, ifindex, master_idx);
         self.send_ack(builder).await
     }
 
@@ -502,7 +517,12 @@ impl Connection<Route> {
     ///
     /// If the entry exists, it will be updated. Otherwise, it will be created.
     pub async fn replace_fdb(&self, entry: FdbEntryBuilder) -> Result<()> {
-        let builder = entry.build_add(NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE)?;
+        let (ifindex, master_idx) = self.resolve_fdb_interfaces(&entry).await?;
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWNEIGH,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+        );
+        entry.write_add(&mut builder, ifindex, master_idx);
         self.send_ack(builder).await
     }
 
@@ -518,12 +538,10 @@ impl Connection<Route> {
     /// conn.del_fdb("veth0", [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], Some(100)).await?;
     /// ```
     pub async fn del_fdb(&self, dev: &str, mac: [u8; 6], vlan: Option<u16>) -> Result<()> {
-        let mut entry = FdbEntryBuilder::new(mac).dev(dev);
-        if let Some(v) = vlan {
-            entry = entry.vlan(v);
-        }
-        let builder = entry.build_delete()?;
-        self.send_ack(builder).await
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
+        self.del_fdb_by_index(ifindex, mac, vlan).await
     }
 
     /// Delete an FDB entry by interface index, MAC address, and optional VLAN.
@@ -539,7 +557,8 @@ impl Connection<Route> {
         if let Some(v) = vlan {
             entry = entry.vlan(v);
         }
-        let builder = entry.build_delete()?;
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK);
+        entry.write_delete(&mut builder, ifindex);
         self.send_ack(builder).await
     }
 
@@ -673,8 +692,8 @@ mod tests {
             .dynamic()
             .self_();
 
-        assert_eq!(builder.dev, Some("veth0".to_string()));
-        assert_eq!(builder.master, Some("br0".to_string()));
+        assert_eq!(builder.dev, Some(InterfaceRef::Name("veth0".to_string())));
+        assert_eq!(builder.master, Some(InterfaceRef::Name("br0".to_string())));
         assert_eq!(builder.vlan, Some(100));
         assert!(!builder.permanent);
         assert!(builder.self_flag);
@@ -684,7 +703,7 @@ mod tests {
     fn test_builder_ifindex() {
         let builder = FdbEntryBuilder::new([0; 6]).ifindex(5).master_ifindex(3);
 
-        assert_eq!(builder.ifindex, Some(5));
-        assert_eq!(builder.master_idx, Some(3));
+        assert_eq!(builder.dev, Some(InterfaceRef::Index(5)));
+        assert_eq!(builder.master, Some(InterfaceRef::Index(3)));
     }
 }

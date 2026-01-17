@@ -57,6 +57,7 @@ use super::attr::AttrIter;
 use super::builder::MessageBuilder;
 use super::connection::Connection;
 use super::error::{Error, Result};
+use super::interface_ref::InterfaceRef;
 use super::message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgType};
 use super::protocol::Route;
 use super::types::nexthop::{NexthopGrp, NhMsg, nha, nha_res_group, nhf, nhg_type};
@@ -313,8 +314,7 @@ impl Nexthop {
 pub struct NexthopBuilder {
     id: u32,
     gateway: Option<IpAddr>,
-    dev: Option<String>,
-    ifindex: Option<u32>,
+    dev: Option<InterfaceRef>,
     blackhole: bool,
     onlink: bool,
     fdb: bool,
@@ -331,7 +331,6 @@ impl NexthopBuilder {
             id,
             gateway: None,
             dev: None,
-            ifindex: None,
             blackhole: false,
             onlink: false,
             fdb: false,
@@ -347,9 +346,9 @@ impl NexthopBuilder {
 
     /// Set the output device by name.
     ///
-    /// The device name will be resolved to an interface index.
+    /// The device name will be resolved to an interface index via netlink.
     pub fn dev(mut self, dev: impl Into<String>) -> Self {
-        self.dev = Some(dev.into());
+        self.dev = Some(InterfaceRef::Name(dev.into()));
         self
     }
 
@@ -357,8 +356,13 @@ impl NexthopBuilder {
     ///
     /// Use this instead of `dev()` when you already have the interface index.
     pub fn ifindex(mut self, ifindex: u32) -> Self {
-        self.ifindex = Some(ifindex);
+        self.dev = Some(InterfaceRef::Index(ifindex));
         self
+    }
+
+    /// Get the device reference.
+    pub fn device_ref(&self) -> Option<&InterfaceRef> {
+        self.dev.as_ref()
     }
 
     /// Make this a blackhole nexthop.
@@ -393,15 +397,8 @@ impl NexthopBuilder {
         self
     }
 
-    /// Build the netlink message.
-    fn build(&self, msg_type: u16, flags: u16) -> Result<MessageBuilder> {
-        // Resolve interface name to index if needed
-        let ifindex = if let Some(ref dev) = self.dev {
-            Some(get_ifindex(dev)?)
-        } else {
-            self.ifindex
-        };
-
+    /// Write the netlink message with resolved interface index.
+    pub(crate) fn write_to(&self, builder: &mut MessageBuilder, ifindex: Option<u32>) {
         // Determine address family
         let family = match &self.gateway {
             Some(IpAddr::V4(_)) => libc::AF_INET as u8,
@@ -419,7 +416,6 @@ impl NexthopBuilder {
             .with_protocol(self.protocol.unwrap_or(4)) // RTPROT_STATIC
             .with_flags(nh_flags);
 
-        let mut builder = MessageBuilder::new(msg_type, flags);
         builder.append(&nhmsg);
 
         // Add nexthop ID
@@ -451,8 +447,6 @@ impl NexthopBuilder {
         if self.fdb {
             builder.append_attr(nha::FDB, &[]);
         }
-
-        Ok(builder)
     }
 }
 
@@ -616,22 +610,18 @@ impl NexthopGroupBuilder {
     }
 }
 
-/// Convert interface name to index.
-fn get_ifindex(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
-}
-
 // ============================================================================
 // Connection methods
 // ============================================================================
 
 impl Connection<Route> {
+    /// Resolve NexthopBuilder interface reference.
+    async fn resolve_nexthop_interface(&self, builder: &NexthopBuilder) -> Result<Option<u32>> {
+        match builder.device_ref() {
+            Some(iface) => Ok(Some(self.resolve_interface(iface).await?)),
+            None => Ok(None),
+        }
+    }
     /// Get all nexthops (including groups).
     ///
     /// # Example
@@ -704,22 +694,26 @@ impl Connection<Route> {
     ///         .dev("eth0")
     /// ).await?;
     /// ```
-    pub async fn add_nexthop(&self, builder: NexthopBuilder) -> Result<()> {
-        let msg = builder.build(
+    pub async fn add_nexthop(&self, nh_builder: NexthopBuilder) -> Result<()> {
+        let ifindex = self.resolve_nexthop_interface(&nh_builder).await?;
+        let mut msg = MessageBuilder::new(
             NlMsgType::RTM_NEWNEXTHOP,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
-        )?;
+        );
+        nh_builder.write_to(&mut msg, ifindex);
         self.send_ack(msg).await
     }
 
     /// Replace a nexthop (add or update).
     ///
     /// If the nexthop exists, it's updated. If it doesn't exist, it's created.
-    pub async fn replace_nexthop(&self, builder: NexthopBuilder) -> Result<()> {
-        let msg = builder.build(
+    pub async fn replace_nexthop(&self, nh_builder: NexthopBuilder) -> Result<()> {
+        let ifindex = self.resolve_nexthop_interface(&nh_builder).await?;
+        let mut msg = MessageBuilder::new(
             NlMsgType::RTM_NEWNEXTHOP,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
-        )?;
+        );
+        nh_builder.write_to(&mut msg, ifindex);
         self.send_ack(msg).await
     }
 
@@ -833,7 +827,7 @@ mod tests {
 
         assert_eq!(nh.id, 42);
         assert!(nh.gateway.is_some());
-        assert_eq!(nh.ifindex, Some(5));
+        assert_eq!(nh.dev, Some(InterfaceRef::Index(5)));
         assert!(nh.onlink);
     }
 

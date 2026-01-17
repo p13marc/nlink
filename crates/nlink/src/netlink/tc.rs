@@ -36,6 +36,7 @@ use super::Connection;
 use super::builder::MessageBuilder;
 use super::connection::{ack_request, create_request, replace_request};
 use super::error::{Error, Result};
+use super::interface_ref::InterfaceRef;
 use super::message::NlMsgType;
 use super::protocol::Route;
 use super::types::tc::qdisc::netem::*;
@@ -3072,17 +3073,6 @@ impl ClassConfig for QfqClassBuilt {
 // Helper functions
 // ============================================================================
 
-/// Convert interface name to index.
-fn get_ifindex(name: &str) -> Result<u32> {
-    let path = format!("/sys/class/net/{}/ifindex", name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| Error::InvalidMessage(format!("interface not found: {}", name)))?;
-    content
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidMessage(format!("invalid ifindex for: {}", name)))
-}
-
 /// Parse a handle string like "1:0" or "root".
 fn parse_handle(s: &str) -> Result<u32> {
     tc_handle::parse(s).ok_or_else(|| Error::InvalidMessage(format!("invalid handle: {}", s)))
@@ -3329,7 +3319,9 @@ impl Connection<Route> {
         handle: Option<&str>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.add_qdisc_by_index_full(ifindex, parent, handle, config)
             .await
     }
@@ -3404,7 +3396,9 @@ impl Connection<Route> {
         parent: &str,
         handle: Option<&str>,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.del_qdisc_by_index_full(ifindex, parent, handle).await
     }
 
@@ -3460,7 +3454,9 @@ impl Connection<Route> {
         handle: Option<&str>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.replace_qdisc_by_index_full(ifindex, parent, handle, config)
             .await
     }
@@ -3533,7 +3529,9 @@ impl Connection<Route> {
         handle: Option<&str>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.change_qdisc_by_index_full(ifindex, parent, handle, config)
             .await
     }
@@ -3667,7 +3665,9 @@ impl Connection<Route> {
         kind: &str,
         params: &[&str],
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.add_class_by_index(ifindex, parent, classid, kind, params)
             .await
     }
@@ -3710,7 +3710,9 @@ impl Connection<Route> {
     /// conn.del_class("eth0", "1:0", "1:10").await?;
     /// ```
     pub async fn del_class(&self, dev: &str, parent: &str, classid: &str) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.del_class_by_index(ifindex, parent, classid).await
     }
 
@@ -3751,7 +3753,9 @@ impl Connection<Route> {
         kind: &str,
         params: &[&str],
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.change_class_by_index(ifindex, parent, classid, kind, params)
             .await
     }
@@ -3799,7 +3803,9 @@ impl Connection<Route> {
         kind: &str,
         params: &[&str],
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.replace_class_by_index(ifindex, parent, classid, kind, params)
             .await
     }
@@ -3867,7 +3873,9 @@ impl Connection<Route> {
         classid: &str,
         config: C,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.add_class_config_by_index(ifindex, parent, classid, config)
             .await
     }
@@ -3921,7 +3929,9 @@ impl Connection<Route> {
         classid: &str,
         config: C,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.change_class_config_by_index(ifindex, parent, classid, config)
             .await
     }
@@ -3972,7 +3982,9 @@ impl Connection<Route> {
         classid: &str,
         config: C,
     ) -> Result<()> {
-        let ifindex = get_ifindex(dev)?;
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
         self.replace_class_config_by_index(ifindex, parent, classid, config)
             .await
     }
