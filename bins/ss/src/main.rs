@@ -120,6 +120,13 @@ struct Cli {
     /// Forcibly close matching sockets (requires CAP_NET_ADMIN).
     #[arg(short = 'K', long)]
     kill: bool,
+
+    /// Filter expression (ss-compatible syntax).
+    ///
+    /// Examples: 'sport = :22', 'dst 192.168.0.0/16 and state established',
+    /// '( sport = :80 or sport = :443 ) and state listening'
+    #[arg(trailing_var_arg = true)]
+    filter_expr: Vec<String>,
 }
 
 #[tokio::main]
@@ -308,6 +315,14 @@ async fn main() -> anyhow::Result<()> {
             })
             .await?;
         all_results.extend(sockets);
+    }
+
+    // Apply expression filter if provided
+    if !cli.filter_expr.is_empty() {
+        let expr_str = cli.filter_expr.join(" ");
+        let expr = nlink::sockdiag::FilterExpr::parse(&expr_str)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        all_results.retain(|sock| expr.matches_socket_info(sock));
     }
 
     // Output results
