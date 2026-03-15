@@ -14,7 +14,7 @@ This is **not** `FuturesUnordered`/`JoinSet` concurrency (which still does 1 mes
 - [x] Implement `BatchOp` with sequence number and serialized message
 - [x] Implement `BatchResults` with `iter()`, `errors()`, `success_count()`, `error_count()`, `all_ok()`
 - [ ] Make `Error` implement `Clone` (may need `Arc<io::Error>`)
-- [ ] Add unit tests for `BatchResults` API
+- [x] Add unit tests for `BatchResults` API
 
 ### Batch Builder Methods
 - [x] Implement route operations: `add_route()`, `del_route()`

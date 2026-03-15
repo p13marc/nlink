@@ -21,7 +21,7 @@ Bond creation via `BondLink` already exists (`link.rs:2829-2989`) with basic att
 - [x] Implement `ArpValidate` enum with `TryFrom<u8>`
 - [x] Implement `AdSelect` enum with `TryFrom<u8>`
 - [x] Deprecate old `bond_mode` raw constants
-- [ ] Add unit tests for all `TryFrom` conversions
+- [x] Add unit tests for all `TryFrom` conversions
 
 ### Extended BondLink Builder
 - [x] Extend `bond_attr` module to all 33 IFLA_BOND_* constants

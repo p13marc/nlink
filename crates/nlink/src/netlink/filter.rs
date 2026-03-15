@@ -2458,4 +2458,38 @@ mod tests {
         assert_eq!(filter.mask, Some(0xff));
         assert_eq!(filter.rshift, Some(8));
     }
+
+    #[test]
+    fn test_bpf_filter_builder() {
+        let filter = BpfFilter::new(42)
+            .name("my_prog")
+            .direct_action()
+            .priority(100)
+            .chain(5);
+
+        assert_eq!(filter.fd, 42);
+        assert_eq!(filter.name.as_deref(), Some("my_prog"));
+        assert!(filter.direct_action);
+        assert_eq!(filter.priority, 100);
+        assert_eq!(filter.chain, Some(5));
+    }
+
+    #[test]
+    fn test_bpf_filter_defaults() {
+        let filter = BpfFilter::new(7);
+
+        assert_eq!(filter.fd, 7);
+        assert!(filter.name.is_none());
+        assert!(!filter.direct_action);
+        assert_eq!(filter.priority, 0);
+        assert_eq!(filter.protocol, 3); // ETH_P_ALL in host byte order
+        assert!(filter.chain.is_none());
+        assert!(filter.classid.is_none());
+    }
+
+    #[test]
+    fn test_bpf_from_pinned_invalid_path() {
+        let result = BpfFilter::from_pinned("/nonexistent/path/to/bpf");
+        assert!(result.is_err());
+    }
 }
