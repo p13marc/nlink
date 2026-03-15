@@ -255,6 +255,221 @@ impl Connection<Nftables> {
     }
 
     // =========================================================================
+    // Sets
+    // =========================================================================
+
+    /// Create an nftables set.
+    pub async fn add_set(&self, set: Set) -> Result<()> {
+        if set.name.is_empty() || set.name.len() > 256 {
+            return Err(Error::InvalidMessage(
+                "set name must be 1-256 characters".into(),
+            ));
+        }
+
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWSET),
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        let nfgenmsg = NfGenMsg::new(set.family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_SET_TABLE, &set.table);
+        builder.append_attr_str(NFTA_SET_NAME, &set.name);
+        builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
+        builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
+        builder.append_attr_u32_be(NFTA_SET_FLAGS, set.flags);
+        // Set ID (arbitrary, used for referencing in same batch)
+        builder.append_attr_u32_be(NFTA_SET_ID, 1);
+
+        self.nft_request_ack(builder).await
+    }
+
+    /// List all sets.
+    pub async fn list_sets(&self, family: Family) -> Result<Vec<SetInfo>> {
+        let mut builder =
+            MessageBuilder::new(nft_msg_type(NFT_MSG_GETSET), NLM_F_REQUEST | NLM_F_DUMP);
+        let nfgenmsg = NfGenMsg::new(family);
+        builder.append(&nfgenmsg);
+
+        let responses = self.nft_dump(builder).await?;
+        let mut sets = Vec::new();
+
+        for (family_byte, payload) in &responses {
+            let family = Family::from_u8(*family_byte).unwrap_or(Family::Inet);
+            if let Some(set) = parse_set(payload, family) {
+                sets.push(set);
+            }
+        }
+
+        Ok(sets)
+    }
+
+    /// Delete a set.
+    pub async fn del_set(&self, table: &str, name: &str, family: Family) -> Result<()> {
+        let mut builder =
+            MessageBuilder::new(nft_msg_type(NFT_MSG_DELSET), NLM_F_REQUEST | NLM_F_ACK);
+        let nfgenmsg = NfGenMsg::new(family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_SET_TABLE, table);
+        builder.append_attr_str(NFTA_SET_NAME, name);
+
+        self.nft_request_ack(builder).await
+    }
+
+    /// Add elements to a set.
+    pub async fn add_set_elements(
+        &self,
+        table: &str,
+        set: &str,
+        family: Family,
+        elements: &[SetElement],
+    ) -> Result<()> {
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWSETELEM),
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
+        );
+        let nfgenmsg = NfGenMsg::new(family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_SET_ELEM_LIST_TABLE, table);
+        builder.append_attr_str(NFTA_SET_ELEM_LIST_SET, set);
+
+        let elems_nest = builder.nest_start(NFTA_SET_ELEM_LIST_ELEMENTS | 0x8000);
+        for elem in elements {
+            let elem_nest = builder.nest_start(NFTA_LIST_ELEM | 0x8000);
+            let key_nest = builder.nest_start(NFTA_SET_ELEM_KEY | 0x8000);
+            builder.append_attr(NFTA_DATA_VALUE, &elem.key);
+            builder.nest_end(key_nest);
+            builder.nest_end(elem_nest);
+        }
+        builder.nest_end(elems_nest);
+
+        self.nft_request_ack(builder).await
+    }
+
+    /// Delete elements from a set.
+    pub async fn del_set_elements(
+        &self,
+        table: &str,
+        set: &str,
+        family: Family,
+        elements: &[SetElement],
+    ) -> Result<()> {
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_DELSETELEM),
+            NLM_F_REQUEST | NLM_F_ACK,
+        );
+        let nfgenmsg = NfGenMsg::new(family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_SET_ELEM_LIST_TABLE, table);
+        builder.append_attr_str(NFTA_SET_ELEM_LIST_SET, set);
+
+        let elems_nest = builder.nest_start(NFTA_SET_ELEM_LIST_ELEMENTS | 0x8000);
+        for elem in elements {
+            let elem_nest = builder.nest_start(NFTA_LIST_ELEM | 0x8000);
+            let key_nest = builder.nest_start(NFTA_SET_ELEM_KEY | 0x8000);
+            builder.append_attr(NFTA_DATA_VALUE, &elem.key);
+            builder.nest_end(key_nest);
+            builder.nest_end(elem_nest);
+        }
+        builder.nest_end(elems_nest);
+
+        self.nft_request_ack(builder).await
+    }
+
+    // =========================================================================
+    // Batch Transactions
+    // =========================================================================
+
+    /// Create a new batch transaction builder.
+    ///
+    /// All operations added to the transaction are applied atomically.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.transaction()
+    ///     .add_table("filter", Family::Inet)
+    ///     .add_chain(chain)
+    ///     .add_rule(rule)
+    ///     .commit(&conn)
+    ///     .await?;
+    /// ```
+    pub fn transaction(&self) -> Transaction {
+        Transaction::new()
+    }
+
+    /// Flush the entire ruleset (all tables, chains, rules, sets).
+    pub async fn flush_ruleset(&self) -> Result<()> {
+        // Delete all tables across all families
+        let tables = self.list_tables().await?;
+        for table in tables {
+            self.del_table(&table.name, table.family).await?;
+        }
+        Ok(())
+    }
+
+    /// Send a batch of messages atomically.
+    async fn send_batch(&self, messages: Vec<Vec<u8>>) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+
+        let mut batch = Vec::new();
+
+        // NFNL_MSG_BATCH_BEGIN
+        let mut begin = MessageBuilder::new(NFNL_MSG_BATCH_BEGIN, NLM_F_REQUEST);
+        let nfgenmsg = NfGenMsg {
+            nfgen_family: 0,
+            version: 0,
+            res_id: 10u16.to_be(), // NFNL_SUBSYS_NFTABLES
+        };
+        begin.append(&nfgenmsg);
+        let seq = self.socket().next_seq();
+        begin.set_seq(seq);
+        begin.set_pid(self.socket().pid());
+        batch.extend_from_slice(&begin.finish());
+
+        // Add all messages with sequential sequence numbers
+        for msg_data in &messages {
+            batch.extend_from_slice(msg_data);
+        }
+
+        // NFNL_MSG_BATCH_END
+        let mut end = MessageBuilder::new(NFNL_MSG_BATCH_END, NLM_F_REQUEST);
+        let nfgenmsg = NfGenMsg {
+            nfgen_family: 0,
+            version: 0,
+            res_id: 10u16.to_be(),
+        };
+        end.append(&nfgenmsg);
+        end.set_seq(self.socket().next_seq());
+        end.set_pid(self.socket().pid());
+        batch.extend_from_slice(&end.finish());
+
+        self.socket().send(&batch).await?;
+
+        // Wait for ACK of the batch
+        loop {
+            let data: Vec<u8> = self.socket().recv_msg().await?;
+
+            for msg_result in MessageIter::new(&data) {
+                let (header, payload) = msg_result?;
+
+                if header.is_error() {
+                    let err = NlMsgError::from_bytes(payload)?;
+                    if err.is_ack() {
+                        return Ok(());
+                    }
+                    return Err(Error::from_errno(err.error));
+                }
+
+                if header.is_done() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // =========================================================================
     // Internal helpers
     // =========================================================================
 
@@ -493,6 +708,56 @@ fn parse_rule(data: &[u8], family: Family) -> Option<RuleInfo> {
     }
 }
 
+fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
+    let mut set = SetInfo {
+        table: String::new(),
+        name: String::new(),
+        family,
+        flags: 0,
+        key_type: 0,
+        key_len: 0,
+        handle: 0,
+    };
+
+    for (attr_type, payload) in AttrIter::new(data) {
+        match attr_type & 0x7FFF {
+            NFTA_SET_TABLE => {
+                set.table = attr_str(payload).unwrap_or_default();
+            }
+            NFTA_SET_NAME => {
+                set.name = attr_str(payload).unwrap_or_default();
+            }
+            NFTA_SET_FLAGS => {
+                if payload.len() >= 4 {
+                    set.flags = u32::from_be_bytes(payload[..4].try_into().unwrap());
+                }
+            }
+            NFTA_SET_KEY_TYPE => {
+                if payload.len() >= 4 {
+                    set.key_type = u32::from_be_bytes(payload[..4].try_into().unwrap());
+                }
+            }
+            NFTA_SET_KEY_LEN => {
+                if payload.len() >= 4 {
+                    set.key_len = u32::from_be_bytes(payload[..4].try_into().unwrap());
+                }
+            }
+            NFTA_SET_HANDLE => {
+                if payload.len() >= 8 {
+                    set.handle = u64::from_be_bytes(payload[..8].try_into().unwrap());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if set.name.is_empty() {
+        None
+    } else {
+        Some(set)
+    }
+}
+
 /// Extract a null-terminated string from attribute payload.
 fn attr_str(payload: &[u8]) -> Option<String> {
     if payload.is_empty() {
@@ -505,5 +770,120 @@ fn attr_str(payload: &[u8]) -> Option<String> {
         None
     } else {
         Some(s.to_string())
+    }
+}
+
+// =============================================================================
+// Batch Transaction
+// =============================================================================
+
+/// Represents a batch of nftables operations to be applied atomically.
+///
+/// All operations are queued and sent in a single batch wrapped with
+/// `NFNL_MSG_BATCH_BEGIN` / `NFNL_MSG_BATCH_END`.
+pub struct Transaction {
+    messages: Vec<Vec<u8>>,
+    seq_counter: u32,
+}
+
+impl Transaction {
+    fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+            seq_counter: 1,
+        }
+    }
+
+    fn next_seq(&mut self) -> u32 {
+        let seq = self.seq_counter;
+        self.seq_counter += 1;
+        seq
+    }
+
+    /// Add a table creation to the batch.
+    pub fn add_table(mut self, name: &str, family: Family) -> Self {
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWTABLE),
+            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        let nfgenmsg = NfGenMsg::new(family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_TABLE_NAME, name);
+        builder.set_seq(self.next_seq());
+        self.messages.push(builder.finish());
+        self
+    }
+
+    /// Add a chain creation to the batch.
+    pub fn add_chain(mut self, chain: Chain) -> Self {
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWCHAIN),
+            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        let nfgenmsg = NfGenMsg::new(chain.family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_CHAIN_TABLE, &chain.table);
+        builder.append_attr_str(NFTA_CHAIN_NAME, &chain.name);
+
+        if let Some(chain_type) = chain.chain_type {
+            builder.append_attr_str(NFTA_CHAIN_TYPE, chain_type.as_str());
+        }
+
+        if let Some(hook) = chain.hook {
+            let hook_nest = builder.nest_start(NFTA_CHAIN_HOOK | 0x8000);
+            builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.to_u32());
+            let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
+            builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
+            builder.nest_end(hook_nest);
+        }
+
+        if let Some(policy) = chain.policy {
+            builder.append_attr_u32_be(NFTA_CHAIN_POLICY, policy.to_u32());
+        }
+
+        builder.set_seq(self.next_seq());
+        self.messages.push(builder.finish());
+        self
+    }
+
+    /// Add a rule to the batch.
+    pub fn add_rule(mut self, rule: Rule) -> Self {
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWRULE),
+            NLM_F_REQUEST | NLM_F_CREATE,
+        );
+        let nfgenmsg = NfGenMsg::new(rule.family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_RULE_TABLE, &rule.table);
+        builder.append_attr_str(NFTA_RULE_CHAIN, &rule.chain);
+
+        if let Some(pos) = rule.position {
+            builder.append_attr_u64_be(NFTA_RULE_POSITION, pos);
+        }
+
+        if !rule.exprs.is_empty() {
+            write_expressions(&mut builder, &rule.exprs);
+        }
+
+        builder.set_seq(self.next_seq());
+        self.messages.push(builder.finish());
+        self
+    }
+
+    /// Add a table deletion to the batch.
+    pub fn del_table(mut self, name: &str, family: Family) -> Self {
+        let mut builder =
+            MessageBuilder::new(nft_msg_type(NFT_MSG_DELTABLE), NLM_F_REQUEST);
+        let nfgenmsg = NfGenMsg::new(family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_TABLE_NAME, name);
+        builder.set_seq(self.next_seq());
+        self.messages.push(builder.finish());
+        self
+    }
+
+    /// Commit the transaction atomically.
+    pub async fn commit(self, conn: &Connection<Nftables>) -> Result<()> {
+        conn.send_batch(self.messages).await
     }
 }

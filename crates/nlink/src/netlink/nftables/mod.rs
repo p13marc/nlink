@@ -183,6 +183,42 @@ pub const NFTA_NAT_FLAGS: u16 = 7;
 pub const NFTA_LOG_PREFIX: u16 = 1;
 pub const NFTA_LOG_GROUP: u16 = 2;
 
+// =============================================================================
+// Set Attributes
+// =============================================================================
+
+pub const NFTA_SET_TABLE: u16 = 1;
+pub const NFTA_SET_NAME: u16 = 2;
+pub const NFTA_SET_FLAGS: u16 = 3;
+pub const NFTA_SET_KEY_TYPE: u16 = 4;
+pub const NFTA_SET_KEY_LEN: u16 = 5;
+pub const NFTA_SET_DATA_TYPE: u16 = 6;
+pub const NFTA_SET_DATA_LEN: u16 = 7;
+pub const NFTA_SET_ID: u16 = 16;
+pub const NFTA_SET_HANDLE: u16 = 17;
+
+// Set element attributes
+pub const NFTA_SET_ELEM_LIST_TABLE: u16 = 1;
+pub const NFTA_SET_ELEM_LIST_SET: u16 = 2;
+pub const NFTA_SET_ELEM_LIST_ELEMENTS: u16 = 3;
+
+pub const NFTA_SET_ELEM_KEY: u16 = 1;
+pub const NFTA_SET_ELEM_DATA: u16 = 2;
+pub const NFTA_SET_ELEM_FLAGS: u16 = 3;
+
+// Lookup expression
+pub const NFTA_LOOKUP_SET: u16 = 1;
+pub const NFTA_LOOKUP_SREG: u16 = 2;
+pub const NFTA_LOOKUP_DREG: u16 = 3;
+pub const NFTA_LOOKUP_SET_ID: u16 = 4;
+pub const NFTA_LOOKUP_FLAGS: u16 = 5;
+
+// Set flags
+pub const NFT_SET_ANONYMOUS: u32 = 0x1;
+pub const NFT_SET_CONSTANT: u32 = 0x2;
+pub const NFT_SET_INTERVAL: u32 = 0x4;
+pub const NFT_SET_MAP: u32 = 0x8;
+
 // Verdict codes
 pub const NF_DROP: i32 = 0;
 pub const NF_ACCEPT: i32 = 1;

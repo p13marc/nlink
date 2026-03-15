@@ -33,7 +33,7 @@ nftables uses a register-based expression system where rules are sequences of ex
 - [ ] Update CLAUDE.md with nftables usage examples
 
 ### Phase 2: NAT + Logging + Rate Limiting
-- [ ] Implement `NatExpr` (snat, dnat, redirect)
+- [x] Implement `NatExpr` (snat, dnat, redirect)
 - [x] Implement `masquerade()` rule method
 - [x] Implement `Log` expression with prefix and group
 - [x] Implement `Limit` expression with rate, unit, burst
@@ -42,14 +42,14 @@ nftables uses a register-based expression system where rules are sequences of ex
 - [ ] Add doc comments with examples
 
 ### Phase 3: Sets + Transactions
-- [ ] Implement `Set` builder with `SetKeyType`
-- [ ] Implement `SetElement` type
-- [ ] Implement set CRUD: `add_set()`, `del_set()`, `add_set_elements()`
-- [ ] Implement `Lookup` expression (set membership match)
-- [ ] Implement `match_saddr_in_set()` convenience method
-- [ ] Implement batch transactions: `transaction()`, `commit()`
-- [ ] Implement `NFNL_MSG_BATCH_BEGIN`/`NFNL_MSG_BATCH_END` wrapping
-- [ ] Implement `flush_ruleset()`
+- [x] Implement `Set` builder with `SetKeyType`
+- [x] Implement `SetElement` type
+- [x] Implement set CRUD: `add_set()`, `del_set()`, `add_set_elements()`
+- [x] Implement `Lookup` expression (set membership match)
+- [x] Implement `match_saddr_in_set()` convenience method
+- [x] Implement batch transactions: `transaction()`, `commit()`
+- [x] Implement `NFNL_MSG_BATCH_BEGIN`/`NFNL_MSG_BATCH_END` wrapping
+- [x] Implement `flush_ruleset()`
 - [ ] Add integration tests for sets
 - [ ] Add integration tests for atomic transactions
 - [ ] Add doc comments with examples

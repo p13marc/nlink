@@ -36,6 +36,10 @@ pub enum Expr {
     },
     /// Masquerade (source NAT).
     Masquerade,
+    /// NAT (snat/dnat) with optional address and port.
+    Nat(NatExpr),
+    /// Redirect (redirect to local machine, dnat to localhost).
+    Redirect { port: Option<u16> },
     /// Log packet.
     Log {
         prefix: Option<String>,
@@ -43,6 +47,11 @@ pub enum Expr {
     },
     /// Connection tracking.
     Ct { dreg: Register, key: CtKey },
+    /// Lookup in a named set.
+    Lookup {
+        set: String,
+        sreg: Register,
+    },
     /// Bitwise operation.
     Bitwise {
         sreg: Register,
@@ -130,6 +139,31 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
             builder.append_attr_str(NFTA_EXPR_NAME, "masq");
             // masq has no data attributes for basic masquerade
         }
+        Expr::Nat(nat) => {
+            // NAT needs to load address/port into registers first via Immediate,
+            // then reference those registers in the nat expression.
+            // The caller should prepend Immediate expressions to load values.
+            // Here we write the nat expression itself.
+            builder.append_attr_str(NFTA_EXPR_NAME, "nat");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_NAT_TYPE, nat.nat_type as u32);
+            builder.append_attr_u32_be(NFTA_NAT_FAMILY, nat.family as u32);
+            if nat.addr.is_some() {
+                builder.append_attr_u32_be(NFTA_NAT_REG_ADDR_MIN, Register::R0 as u32);
+            }
+            if nat.port.is_some() {
+                builder.append_attr_u32_be(NFTA_NAT_REG_PROTO_MIN, Register::R1 as u32);
+            }
+            builder.nest_end(data);
+        }
+        Expr::Redirect { port } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "redir");
+            if port.is_some() {
+                let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+                builder.append_attr_u32_be(NFTA_NAT_REG_PROTO_MIN, Register::R0 as u32);
+                builder.nest_end(data);
+            }
+        }
         Expr::Log { prefix, group } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "log");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
@@ -146,6 +180,13 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             builder.append_attr_u32_be(NFTA_CT_DREG, *dreg as u32);
             builder.append_attr_u32_be(NFTA_CT_KEY, *key as u32);
+            builder.nest_end(data);
+        }
+        Expr::Lookup { set, sreg } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "lookup");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_str(NFTA_LOOKUP_SET, set);
+            builder.append_attr_u32_be(NFTA_LOOKUP_SREG, *sreg as u32);
             builder.nest_end(data);
         }
         Expr::Bitwise {

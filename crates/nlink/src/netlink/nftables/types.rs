@@ -246,6 +246,44 @@ pub enum NatType {
 pub struct NatExpr {
     pub nat_type: NatType,
     pub family: Family,
+    /// IPv4 address to NAT to (loaded into register before nat expr).
+    pub addr: Option<Ipv4Addr>,
+    /// Port to NAT to.
+    pub port: Option<u16>,
+}
+
+impl NatExpr {
+    /// Create a SNAT expression.
+    pub fn snat(family: Family) -> Self {
+        Self {
+            nat_type: NatType::Snat,
+            family,
+            addr: None,
+            port: None,
+        }
+    }
+
+    /// Create a DNAT expression.
+    pub fn dnat(family: Family) -> Self {
+        Self {
+            nat_type: NatType::Dnat,
+            family,
+            addr: None,
+            port: None,
+        }
+    }
+
+    /// Set the NAT destination address.
+    pub fn addr(mut self, addr: Ipv4Addr) -> Self {
+        self.addr = Some(addr);
+        self
+    }
+
+    /// Set the NAT destination port.
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
 }
 
 // =============================================================================
@@ -638,11 +676,106 @@ impl Rule {
         self
     }
 
+    /// Source NAT to an address (and optional port).
+    pub fn snat(mut self, addr: Ipv4Addr, port: Option<u16>) -> Self {
+        use super::expr::Expr;
+        // Load address into R0
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: addr.octets().to_vec(),
+        });
+        // Load port into R1 if specified
+        if let Some(p) = port {
+            self.exprs.push(Expr::Immediate {
+                dreg: Register::R1,
+                data: p.to_be_bytes().to_vec(),
+            });
+        }
+        self.exprs.push(Expr::Nat(NatExpr {
+            nat_type: NatType::Snat,
+            family: self.family,
+            addr: Some(addr),
+            port,
+        }));
+        self
+    }
+
+    /// Destination NAT to an address (and optional port).
+    pub fn dnat(mut self, addr: Ipv4Addr, port: Option<u16>) -> Self {
+        use super::expr::Expr;
+        // Load address into R0
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: addr.octets().to_vec(),
+        });
+        // Load port into R1 if specified
+        if let Some(p) = port {
+            self.exprs.push(Expr::Immediate {
+                dreg: Register::R1,
+                data: p.to_be_bytes().to_vec(),
+            });
+        }
+        self.exprs.push(Expr::Nat(NatExpr {
+            nat_type: NatType::Dnat,
+            family: self.family,
+            addr: Some(addr),
+            port,
+        }));
+        self
+    }
+
+    /// Redirect to a local port (DNAT to localhost).
+    pub fn redirect(mut self, port: Option<u16>) -> Self {
+        use super::expr::Expr;
+        if let Some(p) = port {
+            self.exprs.push(Expr::Immediate {
+                dreg: Register::R0,
+                data: p.to_be_bytes().to_vec(),
+            });
+        }
+        self.exprs.push(Expr::Redirect { port });
+        self
+    }
+
     /// Log packet with optional prefix.
     pub fn log(mut self, prefix: Option<&str>) -> Self {
         self.exprs.push(super::expr::Expr::Log {
             prefix: prefix.map(String::from),
             group: None,
+        });
+        self
+    }
+
+    /// Match source IPv4 address against a named set.
+    pub fn match_saddr_in_set(mut self, set: &str) -> Self {
+        use super::expr::Expr;
+        // Load source IP from network header offset 12
+        self.exprs.push(Expr::Payload {
+            dreg: Register::R0,
+            base: PayloadBase::Network,
+            offset: 12,
+            len: 4,
+        });
+        self.exprs.push(Expr::Lookup {
+            set: set.to_string(),
+            sreg: Register::R0,
+        });
+        self
+    }
+
+    /// Match destination IPv4 address against a named set.
+    pub fn match_daddr_in_set(mut self, set: &str) -> Self {
+        use super::expr::Expr;
+        // Load destination IP from network header offset 16
+        self.exprs.push(Expr::Payload {
+            dreg: Register::R0,
+            base: PayloadBase::Network,
+            offset: 16,
+            len: 4,
+        });
+        self.exprs.push(Expr::Lookup {
+            set: set.to_string(),
+            sreg: Register::R0,
         });
         self
     }
@@ -667,6 +800,148 @@ pub struct RuleInfo {
     pub handle: u64,
     /// Position in chain.
     pub position: Option<u64>,
+}
+
+// =============================================================================
+// Set types
+// =============================================================================
+
+/// Key type for nftables sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetKeyType {
+    /// IPv4 address (4 bytes).
+    Ipv4Addr,
+    /// IPv6 address (16 bytes).
+    Ipv6Addr,
+    /// Ethernet address (6 bytes, padded to 8).
+    EtherAddr,
+    /// Port number (2 bytes).
+    InetService,
+    /// Interface index (4 bytes).
+    IfIndex,
+    /// Mark value (4 bytes).
+    Mark,
+}
+
+impl SetKeyType {
+    /// Kernel type ID (from nf_tables.h NFT_DATA_*).
+    pub fn type_id(self) -> u32 {
+        match self {
+            Self::Ipv4Addr => 7,    // ipv4_addr
+            Self::Ipv6Addr => 8,    // ipv6_addr
+            Self::EtherAddr => 9,   // ether_addr
+            Self::InetService => 13, // inet_service
+            Self::IfIndex => 15,    // ifindex (meta)
+            Self::Mark => 12,       // mark
+        }
+    }
+
+    /// Key length in bytes.
+    pub fn len(self) -> u32 {
+        match self {
+            Self::Ipv4Addr => 4,
+            Self::Ipv6Addr => 16,
+            Self::EtherAddr => 8, // padded to 8
+            Self::InetService => 2,
+            Self::IfIndex => 4,
+            Self::Mark => 4,
+        }
+    }
+}
+
+/// Set builder.
+#[derive(Debug, Clone)]
+pub struct Set {
+    pub(crate) table: String,
+    pub(crate) name: String,
+    pub(crate) family: Family,
+    pub(crate) key_type: SetKeyType,
+    pub(crate) flags: u32,
+}
+
+impl Set {
+    /// Create a new named set.
+    pub fn new(table: &str, name: &str) -> Self {
+        Self {
+            table: table.to_string(),
+            name: name.to_string(),
+            family: Family::Inet,
+            key_type: SetKeyType::Ipv4Addr,
+            flags: 0,
+        }
+    }
+
+    /// Set the address family.
+    pub fn family(mut self, family: Family) -> Self {
+        self.family = family;
+        self
+    }
+
+    /// Set the key type.
+    pub fn key_type(mut self, key_type: SetKeyType) -> Self {
+        self.key_type = key_type;
+        self
+    }
+
+    /// Mark as constant (immutable after creation).
+    pub fn constant(mut self) -> Self {
+        self.flags |= super::NFT_SET_CONSTANT;
+        self
+    }
+}
+
+/// A set element (key + optional data).
+#[derive(Debug, Clone)]
+pub struct SetElement {
+    /// Element key data.
+    pub key: Vec<u8>,
+}
+
+impl SetElement {
+    /// Create from raw bytes.
+    pub fn new(key: Vec<u8>) -> Self {
+        Self { key }
+    }
+
+    /// Create an IPv4 address element.
+    pub fn ipv4(addr: Ipv4Addr) -> Self {
+        Self {
+            key: addr.octets().to_vec(),
+        }
+    }
+
+    /// Create an IPv6 address element.
+    pub fn ipv6(addr: std::net::Ipv6Addr) -> Self {
+        Self {
+            key: addr.octets().to_vec(),
+        }
+    }
+
+    /// Create a port number element.
+    pub fn port(port: u16) -> Self {
+        Self {
+            key: port.to_be_bytes().to_vec(),
+        }
+    }
+}
+
+/// Set info parsed from a dump.
+#[derive(Debug, Clone)]
+pub struct SetInfo {
+    /// Table name.
+    pub table: String,
+    /// Set name.
+    pub name: String,
+    /// Address family.
+    pub family: Family,
+    /// Flags.
+    pub flags: u32,
+    /// Key type ID.
+    pub key_type: u32,
+    /// Key length.
+    pub key_len: u32,
+    /// Kernel handle.
+    pub handle: u64,
 }
 
 /// Convert a prefix length to a network mask (4 bytes).
