@@ -2904,6 +2904,24 @@ pub enum BondMode {
     BalanceAlb = 6,
 }
 
+impl TryFrom<u8> for BondMode {
+    type Error = super::Error;
+    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::BalanceRr),
+            1 => Ok(Self::ActiveBackup),
+            2 => Ok(Self::BalanceXor),
+            3 => Ok(Self::Broadcast),
+            4 => Ok(Self::Lacp),
+            5 => Ok(Self::BalanceTlb),
+            6 => Ok(Self::BalanceAlb),
+            _ => Err(super::Error::InvalidAttribute(format!(
+                "unknown bond mode: {value}"
+            ))),
+        }
+    }
+}
+
 /// Transmit hash policy for XOR/LACP modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -2920,6 +2938,23 @@ pub enum XmitHashPolicy {
     Encap34 = 4,
     /// Hash by VLAN + source MAC.
     VlanSrcMac = 5,
+}
+
+impl TryFrom<u8> for XmitHashPolicy {
+    type Error = super::Error;
+    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Layer2),
+            1 => Ok(Self::Layer34),
+            2 => Ok(Self::Layer23),
+            3 => Ok(Self::Encap23),
+            4 => Ok(Self::Encap34),
+            5 => Ok(Self::VlanSrcMac),
+            _ => Err(super::Error::InvalidAttribute(format!(
+                "unknown xmit hash policy: {value}"
+            ))),
+        }
+    }
 }
 
 /// LACP rate for 802.3ad mode.

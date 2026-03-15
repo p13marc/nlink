@@ -808,6 +808,459 @@ impl LinkMessageBuilder {
     }
 }
 
+// =========================================================================
+// Bond info types
+// =========================================================================
+
+/// Constants for IFLA_BOND_* attributes (from IFLA_INFO_DATA).
+mod bond_info_ids {
+    pub const IFLA_BOND_MODE: u16 = 1;
+    pub const IFLA_BOND_ACTIVE_SLAVE: u16 = 2;
+    pub const IFLA_BOND_MIIMON: u16 = 3;
+    pub const IFLA_BOND_UPDELAY: u16 = 4;
+    pub const IFLA_BOND_DOWNDELAY: u16 = 5;
+    pub const IFLA_BOND_USE_CARRIER: u16 = 6;
+    pub const IFLA_BOND_ARP_INTERVAL: u16 = 7;
+    pub const IFLA_BOND_ARP_VALIDATE: u16 = 9;
+    pub const IFLA_BOND_PRIMARY: u16 = 11;
+    pub const IFLA_BOND_XMIT_HASH_POLICY: u16 = 14;
+    pub const IFLA_BOND_ALL_SLAVES_ACTIVE: u16 = 17;
+    pub const IFLA_BOND_MIN_LINKS: u16 = 18;
+    pub const IFLA_BOND_AD_LACP_RATE: u16 = 21;
+    pub const IFLA_BOND_AD_INFO: u16 = 23;
+}
+
+/// Constants for IFLA_BOND_AD_INFO_* attributes.
+mod bond_ad_info_ids {
+    pub const IFLA_BOND_AD_INFO_AGGREGATOR: u16 = 1;
+    pub const IFLA_BOND_AD_INFO_NUM_PORTS: u16 = 2;
+    pub const IFLA_BOND_AD_INFO_ACTOR_KEY: u16 = 3;
+    pub const IFLA_BOND_AD_INFO_PARTNER_KEY: u16 = 4;
+    pub const IFLA_BOND_AD_INFO_PARTNER_MAC: u16 = 5;
+}
+
+/// Constants for IFLA_BOND_SLAVE_* attributes (from IFLA_INFO_SLAVE_DATA).
+mod bond_slave_ids {
+    pub const IFLA_BOND_SLAVE_STATE: u16 = 1;
+    pub const IFLA_BOND_SLAVE_MII_STATUS: u16 = 2;
+    pub const IFLA_BOND_SLAVE_LINK_FAILURE_COUNT: u16 = 3;
+    pub const IFLA_BOND_SLAVE_PERM_HWADDR: u16 = 4;
+    pub const IFLA_BOND_SLAVE_QUEUE_ID: u16 = 5;
+    pub const IFLA_BOND_SLAVE_AD_AGGREGATOR_ID: u16 = 6;
+    pub const IFLA_BOND_SLAVE_PRIO: u16 = 9;
+}
+
+/// Bond device configuration as reported by the kernel.
+///
+/// Parsed from `IFLA_INFO_DATA` when `kind() == Some("bond")`.
+///
+/// # Example
+///
+/// ```ignore
+/// let link = conn.get_link_by_name("bond0").await?.unwrap();
+/// if let Some(info) = link.bond_info() {
+///     println!("Mode: {:?}, miimon: {}ms", info.mode, info.miimon);
+///     if let Some(ad) = &info.ad_info {
+///         println!("LACP aggregator: {}", ad.aggregator_id);
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct BondInfo {
+    /// Bond mode.
+    pub mode: u8,
+    /// MII monitoring interval in milliseconds.
+    pub miimon: u32,
+    /// Updelay in milliseconds.
+    pub updelay: u32,
+    /// Downdelay in milliseconds.
+    pub downdelay: u32,
+    /// Transmit hash policy.
+    pub xmit_hash_policy: u8,
+    /// Minimum number of active links.
+    pub min_links: u32,
+    /// LACP rate (only for 802.3ad mode).
+    pub lacp_rate: Option<u8>,
+    /// 802.3ad aggregation info.
+    pub ad_info: Option<BondAdInfo>,
+    /// Primary slave ifindex.
+    pub primary: Option<u32>,
+    /// Active slave ifindex.
+    pub active_slave: Option<u32>,
+    /// Use carrier detection.
+    pub use_carrier: bool,
+    /// All slaves active mode.
+    pub all_slaves_active: bool,
+    /// ARP monitoring interval in milliseconds.
+    pub arp_interval: u32,
+    /// ARP validation mode.
+    pub arp_validate: Option<u32>,
+}
+
+impl BondInfo {
+    /// Get the bond mode as a typed enum.
+    pub fn bond_mode(&self) -> Option<crate::netlink::link::BondMode> {
+        crate::netlink::link::BondMode::try_from(self.mode).ok()
+    }
+
+    /// Get the transmit hash policy as a typed enum.
+    pub fn hash_policy(&self) -> Option<crate::netlink::link::XmitHashPolicy> {
+        crate::netlink::link::XmitHashPolicy::try_from(self.xmit_hash_policy).ok()
+    }
+}
+
+/// 802.3ad (LACP) aggregation info.
+#[derive(Debug, Clone)]
+pub struct BondAdInfo {
+    /// Aggregator ID.
+    pub aggregator_id: u16,
+    /// Number of ports in the aggregate.
+    pub num_ports: u16,
+    /// Actor key.
+    pub actor_key: u16,
+    /// Partner key.
+    pub partner_key: u16,
+    /// Partner MAC address.
+    pub partner_mac: [u8; 6],
+}
+
+/// Bond slave status as reported by the kernel.
+///
+/// Parsed from `IFLA_INFO_SLAVE_DATA` when `slave_kind == "bond"`.
+///
+/// # Example
+///
+/// ```ignore
+/// let links = conn.get_links().await?;
+/// for link in &links {
+///     if let Some(slave) = link.bond_slave_info() {
+///         println!("{}: state={:?}, mii={:?}, failures={}",
+///             link.name_or("?"), slave.state, slave.mii_status,
+///             slave.link_failure_count);
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct BondSlaveInfo {
+    /// Slave state (active or backup).
+    pub state: BondSlaveState,
+    /// MII link status.
+    pub mii_status: MiiStatus,
+    /// Number of link failures detected.
+    pub link_failure_count: u32,
+    /// Permanent hardware address.
+    pub perm_hwaddr: Option<[u8; 6]>,
+    /// Queue ID for traffic distribution.
+    pub queue_id: Option<u16>,
+    /// 802.3ad aggregator ID.
+    pub ad_aggregator_id: Option<u16>,
+    /// Slave priority.
+    pub prio: Option<i32>,
+}
+
+/// Bond slave state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BondSlaveState {
+    /// Active slave (transmitting traffic).
+    Active,
+    /// Backup slave (standby).
+    Backup,
+}
+
+/// MII link status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MiiStatus {
+    /// Link is up.
+    Up,
+    /// Link is down.
+    Down,
+}
+
+impl LinkMessage {
+    /// Get bond configuration if this is a bond interface.
+    ///
+    /// Returns `None` if the interface is not a bond.
+    pub fn bond_info(&self) -> Option<BondInfo> {
+        let link_info = self.link_info.as_ref()?;
+        if link_info.kind.as_deref() != Some("bond") {
+            return None;
+        }
+        let data = link_info.data.as_deref()?;
+        Some(parse_bond_info(data))
+    }
+
+    /// Get bond slave info if this interface is a bond slave.
+    ///
+    /// Returns `None` if the interface is not enslaved to a bond.
+    pub fn bond_slave_info(&self) -> Option<BondSlaveInfo> {
+        let link_info = self.link_info.as_ref()?;
+        if link_info.slave_kind.as_deref() != Some("bond") {
+            return None;
+        }
+        let data = link_info.slave_data.as_deref()?;
+        Some(parse_bond_slave_info(data))
+    }
+
+    /// Check if this interface is a bond slave.
+    pub fn is_bond_slave(&self) -> bool {
+        self.link_info
+            .as_ref()
+            .and_then(|i| i.slave_kind.as_deref())
+            == Some("bond")
+    }
+}
+
+/// Parse a u32 from a byte slice (native endian).
+fn parse_u32_ne(data: &[u8]) -> Option<u32> {
+    if data.len() >= 4 {
+        Some(u32::from_ne_bytes([data[0], data[1], data[2], data[3]]))
+    } else {
+        None
+    }
+}
+
+/// Parse a u16 from a byte slice (native endian).
+fn parse_u16_ne(data: &[u8]) -> Option<u16> {
+    if data.len() >= 2 {
+        Some(u16::from_ne_bytes([data[0], data[1]]))
+    } else {
+        None
+    }
+}
+
+/// Parse bond info from raw IFLA_INFO_DATA bytes.
+fn parse_bond_info(data: &[u8]) -> BondInfo {
+    let mut info = BondInfo {
+        mode: 0,
+        miimon: 0,
+        updelay: 0,
+        downdelay: 0,
+        xmit_hash_policy: 0,
+        min_links: 0,
+        lacp_rate: None,
+        ad_info: None,
+        primary: None,
+        active_slave: None,
+        use_carrier: true,
+        all_slaves_active: false,
+        arp_interval: 0,
+        arp_validate: None,
+    };
+
+    let mut pos = 0;
+    while pos + 4 <= data.len() {
+        let len = u16::from_ne_bytes([data[pos], data[pos + 1]]) as usize;
+        let attr_type = u16::from_ne_bytes([data[pos + 2], data[pos + 3]]) & 0x3FFF;
+
+        if len < 4 || pos + len > data.len() {
+            break;
+        }
+
+        let payload = &data[pos + 4..pos + len];
+
+        match attr_type {
+            bond_info_ids::IFLA_BOND_MODE => {
+                if !payload.is_empty() {
+                    info.mode = payload[0];
+                }
+            }
+            bond_info_ids::IFLA_BOND_MIIMON => {
+                if let Some(v) = parse_u32_ne(payload) {
+                    info.miimon = v;
+                }
+            }
+            bond_info_ids::IFLA_BOND_UPDELAY => {
+                if let Some(v) = parse_u32_ne(payload) {
+                    info.updelay = v;
+                }
+            }
+            bond_info_ids::IFLA_BOND_DOWNDELAY => {
+                if let Some(v) = parse_u32_ne(payload) {
+                    info.downdelay = v;
+                }
+            }
+            bond_info_ids::IFLA_BOND_USE_CARRIER => {
+                if !payload.is_empty() {
+                    info.use_carrier = payload[0] != 0;
+                }
+            }
+            bond_info_ids::IFLA_BOND_ARP_INTERVAL => {
+                if let Some(v) = parse_u32_ne(payload) {
+                    info.arp_interval = v;
+                }
+            }
+            bond_info_ids::IFLA_BOND_ARP_VALIDATE => {
+                info.arp_validate = parse_u32_ne(payload);
+            }
+            bond_info_ids::IFLA_BOND_PRIMARY => {
+                info.primary = parse_u32_ne(payload);
+            }
+            bond_info_ids::IFLA_BOND_ACTIVE_SLAVE => {
+                info.active_slave = parse_u32_ne(payload);
+            }
+            bond_info_ids::IFLA_BOND_XMIT_HASH_POLICY => {
+                if !payload.is_empty() {
+                    info.xmit_hash_policy = payload[0];
+                }
+            }
+            bond_info_ids::IFLA_BOND_ALL_SLAVES_ACTIVE => {
+                if !payload.is_empty() {
+                    info.all_slaves_active = payload[0] != 0;
+                }
+            }
+            bond_info_ids::IFLA_BOND_MIN_LINKS => {
+                if let Some(v) = parse_u32_ne(payload) {
+                    info.min_links = v;
+                }
+            }
+            bond_info_ids::IFLA_BOND_AD_LACP_RATE => {
+                if !payload.is_empty() {
+                    info.lacp_rate = Some(payload[0]);
+                }
+            }
+            bond_info_ids::IFLA_BOND_AD_INFO => {
+                info.ad_info = Some(parse_bond_ad_info(payload));
+            }
+            _ => {}
+        }
+
+        pos += (len + 3) & !3;
+    }
+
+    info
+}
+
+/// Parse IFLA_BOND_AD_INFO nested attributes.
+fn parse_bond_ad_info(data: &[u8]) -> BondAdInfo {
+    let mut info = BondAdInfo {
+        aggregator_id: 0,
+        num_ports: 0,
+        actor_key: 0,
+        partner_key: 0,
+        partner_mac: [0; 6],
+    };
+
+    let mut pos = 0;
+    while pos + 4 <= data.len() {
+        let len = u16::from_ne_bytes([data[pos], data[pos + 1]]) as usize;
+        let attr_type = u16::from_ne_bytes([data[pos + 2], data[pos + 3]]) & 0x3FFF;
+
+        if len < 4 || pos + len > data.len() {
+            break;
+        }
+
+        let payload = &data[pos + 4..pos + len];
+
+        match attr_type {
+            bond_ad_info_ids::IFLA_BOND_AD_INFO_AGGREGATOR => {
+                if let Some(v) = parse_u16_ne(payload) {
+                    info.aggregator_id = v;
+                }
+            }
+            bond_ad_info_ids::IFLA_BOND_AD_INFO_NUM_PORTS => {
+                if let Some(v) = parse_u16_ne(payload) {
+                    info.num_ports = v;
+                }
+            }
+            bond_ad_info_ids::IFLA_BOND_AD_INFO_ACTOR_KEY => {
+                if let Some(v) = parse_u16_ne(payload) {
+                    info.actor_key = v;
+                }
+            }
+            bond_ad_info_ids::IFLA_BOND_AD_INFO_PARTNER_KEY => {
+                if let Some(v) = parse_u16_ne(payload) {
+                    info.partner_key = v;
+                }
+            }
+            bond_ad_info_ids::IFLA_BOND_AD_INFO_PARTNER_MAC => {
+                if payload.len() >= 6 {
+                    info.partner_mac.copy_from_slice(&payload[..6]);
+                }
+            }
+            _ => {}
+        }
+
+        pos += (len + 3) & !3;
+    }
+
+    info
+}
+
+/// Parse bond slave info from raw IFLA_INFO_SLAVE_DATA bytes.
+fn parse_bond_slave_info(data: &[u8]) -> BondSlaveInfo {
+    let mut info = BondSlaveInfo {
+        state: BondSlaveState::Backup,
+        mii_status: MiiStatus::Down,
+        link_failure_count: 0,
+        perm_hwaddr: None,
+        queue_id: None,
+        ad_aggregator_id: None,
+        prio: None,
+    };
+
+    let mut pos = 0;
+    while pos + 4 <= data.len() {
+        let len = u16::from_ne_bytes([data[pos], data[pos + 1]]) as usize;
+        let attr_type = u16::from_ne_bytes([data[pos + 2], data[pos + 3]]) & 0x3FFF;
+
+        if len < 4 || pos + len > data.len() {
+            break;
+        }
+
+        let payload = &data[pos + 4..pos + len];
+
+        match attr_type {
+            bond_slave_ids::IFLA_BOND_SLAVE_STATE => {
+                if !payload.is_empty() {
+                    info.state = if payload[0] == 0 {
+                        BondSlaveState::Active
+                    } else {
+                        BondSlaveState::Backup
+                    };
+                }
+            }
+            bond_slave_ids::IFLA_BOND_SLAVE_MII_STATUS => {
+                if !payload.is_empty() {
+                    info.mii_status = if payload[0] == 0 {
+                        MiiStatus::Up
+                    } else {
+                        MiiStatus::Down
+                    };
+                }
+            }
+            bond_slave_ids::IFLA_BOND_SLAVE_LINK_FAILURE_COUNT => {
+                if let Some(v) = parse_u32_ne(payload) {
+                    info.link_failure_count = v;
+                }
+            }
+            bond_slave_ids::IFLA_BOND_SLAVE_PERM_HWADDR => {
+                if payload.len() >= 6 {
+                    let mut addr = [0u8; 6];
+                    addr.copy_from_slice(&payload[..6]);
+                    info.perm_hwaddr = Some(addr);
+                }
+            }
+            bond_slave_ids::IFLA_BOND_SLAVE_QUEUE_ID => {
+                info.queue_id = parse_u16_ne(payload);
+            }
+            bond_slave_ids::IFLA_BOND_SLAVE_AD_AGGREGATOR_ID => {
+                info.ad_aggregator_id = parse_u16_ne(payload);
+            }
+            bond_slave_ids::IFLA_BOND_SLAVE_PRIO => {
+                if payload.len() >= 4 {
+                    info.prio =
+                        Some(i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]));
+                }
+            }
+            _ => {}
+        }
+
+        pos += (len + 3) & !3;
+    }
+
+    info
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

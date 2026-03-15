@@ -706,6 +706,65 @@ impl Connection<Route> {
             .unwrap_or_else(|| default.to_string()))
     }
 
+    /// Get bond information for a bond interface.
+    ///
+    /// Returns the bond configuration as reported by the kernel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the interface doesn't exist or is not a bond.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let info = conn.get_bond_info("bond0").await?;
+    /// println!("Mode: {:?}, miimon: {}ms", info.bond_mode(), info.miimon);
+    /// ```
+    pub async fn get_bond_info(
+        &self,
+        iface: impl Into<InterfaceRef>,
+    ) -> Result<crate::netlink::messages::BondInfo> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        let link = self
+            .get_link_by_index(ifindex)
+            .await?
+            .ok_or_else(|| Error::InvalidMessage("interface not found".into()))?;
+        link.bond_info()
+            .ok_or_else(|| Error::InvalidMessage("not a bond interface".into()))
+    }
+
+    /// List all slaves of a bond interface with their status.
+    ///
+    /// Returns a list of `(LinkMessage, BondSlaveInfo)` pairs for each slave.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let slaves = conn.get_bond_slaves("bond0").await?;
+    /// for (link, info) in &slaves {
+    ///     println!("{}: state={:?}, mii={:?}",
+    ///         link.name_or("?"), info.state, info.mii_status);
+    /// }
+    /// ```
+    pub async fn get_bond_slaves(
+        &self,
+        bond: impl Into<InterfaceRef>,
+    ) -> Result<Vec<(LinkMessage, crate::netlink::messages::BondSlaveInfo)>> {
+        let bond_ifindex = self.resolve_interface(&bond.into()).await?;
+        let all_links = self.get_links().await?;
+        let mut slaves = Vec::new();
+
+        for link in all_links {
+            if link.master() == Some(bond_ifindex) {
+                if let Some(info) = link.bond_slave_info() {
+                    slaves.push((link, info));
+                }
+            }
+        }
+
+        Ok(slaves)
+    }
+
     /// Get all IP addresses.
     ///
     /// # Example

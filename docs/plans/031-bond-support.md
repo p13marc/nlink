@@ -34,26 +34,26 @@ Bond creation via `BondLink` already exists (`link.rs:2829-2989`) with basic att
 - [ ] Update CLAUDE.md with bond usage examples
 
 ### Bond Info Parsing
-- [ ] Implement `BondInfo` struct
-- [ ] Implement `BondAdInfo` struct
-- [ ] Implement `bond_info()` on `LinkMessage`
+- [x] Implement `BondInfo` struct
+- [x] Implement `BondAdInfo` struct
+- [x] Implement `bond_info()` on `LinkMessage`
 - [ ] Add integration test for bond info parsing
 - [ ] Add bond info display in `bins/ip` link show output
-- [ ] Add doc comments with examples
+- [x] Add doc comments with examples
 
 ### Slave Info Parsing
-- [ ] Implement `BondSlaveInfo`, `BondSlaveState`, `MiiStatus` types
-- [ ] Implement `bond_slave_info()` on `LinkMessage`
-- [ ] Implement `is_bond_slave()` helper
+- [x] Implement `BondSlaveInfo`, `BondSlaveState`, `MiiStatus` types
+- [x] Implement `bond_slave_info()` on `LinkMessage`
+- [x] Implement `is_bond_slave()` helper
 - [ ] Add integration test for slave info parsing
 - [ ] Add slave info display in `bins/ip` link show output
-- [ ] Add doc comments with examples
+- [x] Add doc comments with examples
 
 ### High-Level API
-- [ ] Implement `get_bond_info()` on `Connection<Route>`
-- [ ] Implement `get_bond_slaves()` on `Connection<Route>`
+- [x] Implement `get_bond_info()` on `Connection<Route>`
+- [x] Implement `get_bond_slaves()` on `Connection<Route>`
 - [ ] Add integration tests for high-level API
-- [ ] Add doc comments with examples
+- [x] Add doc comments with examples
 
 ### Declarative Config
 - [ ] Complete bond apply logic in `config/apply.rs:482`
