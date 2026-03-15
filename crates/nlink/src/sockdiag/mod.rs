@@ -63,11 +63,13 @@
 //! Each socket type has its own query method and response structure.
 
 pub mod error;
+pub mod expr;
 pub mod filter;
 pub mod socket;
 pub mod types;
 
 pub use error::{Error, Result};
+pub use expr::{Comparison, FilterExpr};
 pub use filter::{InetFilter, SocketFilter, UnixFilter};
 pub use socket::{InetSocket, NetlinkSocket, PacketSocket, SocketInfo, UnixSocket};
 pub use types::{
