@@ -99,6 +99,35 @@ Socket statistics enhancements:
 - `Connection<Ethtool>::subscribe()` for joining monitor multicast group
 - `EthtoolEvent` variants: `LinkStateChanged`, `LinkModesChanged`, `FeaturesChanged`, `CoalesceChanged`, `PauseChanged`
 
+#### New Binaries
+- `nlink-nft` — nftables firewall management CLI
+- `nlink-wifi` — WiFi interface management CLI with monitor mode
+- `nlink-devlink` — Hardware device management CLI with monitor mode
+
+#### Binary Improvements
+- `ip link show`: display bond info (mode, miimon, xmit_hash_policy, min_links) and slave info (state, mii_status, link_failure_count, queue_id)
+- `tc filter show`: display BPF program info (name, tag, id, run_count, jited)
+- `nlink-config example --example bond`: new bond (LACP) example configuration
+- `nlink-wifi monitor`: real-time WiFi event monitoring
+- `nlink-devlink monitor`: real-time devlink event monitoring
+
+#### Declarative Config Enhancements
+- Extended `DeclaredLinkType::Bond` with `miimon`, `xmit_hash_policy`, `min_links` fields
+- Bond mode conversion in declarative config apply
+
+#### Library Additions
+- `FlashProgress` type with `percent()` helper for devlink firmware flash progress tracking
+- `BatchResults::iter()`, `errors()`, `success_count()`, `error_count()`, `all_ok()` API
+
+### Fixed
+- Bond mode conversion in declarative config apply now correctly maps `BondMode` to link builder
+
+### Tests
+- Unit tests for `BatchResults` API (empty, all success, mixed, all errors, iteration)
+- Unit tests for `BondMode::try_from()` and `XmitHashPolicy::try_from()` conversions
+- Unit tests for `BpfFilter` builder, defaults, and `from_pinned()` validation
+- Unit tests for `SocketSummary` display formatting and default values
+
 #### Code Quality (Plan 035)
 - SAFETY comments on all unsafe blocks
 - Optional serde_json dependency cleanup
