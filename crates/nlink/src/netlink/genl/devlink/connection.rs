@@ -229,6 +229,146 @@ impl Connection<Devlink> {
     }
 
     // =========================================================================
+    // Health Reporter Management
+    // =========================================================================
+
+    /// Trigger recovery on a health reporter.
+    pub async fn health_reporter_recover(
+        &self,
+        bus: &str,
+        device: &str,
+        reporter: &str,
+    ) -> Result<()> {
+        let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_HEALTH_REPORTER_RECOVER, bus, device);
+        let nested = builder.nest_start(DEVLINK_ATTR_HEALTH_REPORTER | 0x8000);
+        builder.append_attr_str(DEVLINK_ATTR_HEALTH_REPORTER_NAME, reporter);
+        builder.nest_end(nested);
+        self.devlink_send_ack(builder).await
+    }
+
+    /// Configure a health reporter's settings.
+    pub async fn set_health_reporter(
+        &self,
+        bus: &str,
+        device: &str,
+        reporter: &str,
+        auto_recover: Option<bool>,
+        auto_dump: Option<bool>,
+        graceful_period_ms: Option<u64>,
+    ) -> Result<()> {
+        let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_HEALTH_REPORTER_SET, bus, device);
+        let nested = builder.nest_start(DEVLINK_ATTR_HEALTH_REPORTER | 0x8000);
+        builder.append_attr_str(DEVLINK_ATTR_HEALTH_REPORTER_NAME, reporter);
+        if let Some(v) = auto_recover {
+            builder.append_attr(DEVLINK_ATTR_HEALTH_REPORTER_AUTO_RECOVER, &[u8::from(v)]);
+        }
+        if let Some(v) = auto_dump {
+            builder.append_attr(DEVLINK_ATTR_HEALTH_REPORTER_AUTO_DUMP, &[u8::from(v)]);
+        }
+        if let Some(ms) = graceful_period_ms {
+            builder.append_attr(DEVLINK_ATTR_HEALTH_REPORTER_GRACEFUL_PERIOD, &ms.to_ne_bytes());
+        }
+        builder.nest_end(nested);
+        self.devlink_send_ack(builder).await
+    }
+
+    // =========================================================================
+    // Flash Update
+    // =========================================================================
+
+    /// Flash firmware to a device.
+    ///
+    /// This is a long-running operation. The kernel will send progress
+    /// notifications asynchronously.
+    pub async fn flash_update(
+        &self,
+        bus: &str,
+        device: &str,
+        request: FlashRequest,
+    ) -> Result<()> {
+        let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_FLASH_UPDATE, bus, device);
+        builder.append_attr_str(DEVLINK_ATTR_FLASH_UPDATE_FILE_NAME, &request.file_name);
+        if let Some(component) = &request.component {
+            builder.append_attr_str(DEVLINK_ATTR_FLASH_UPDATE_COMPONENT, component);
+        }
+        self.devlink_send_ack(builder).await
+    }
+
+    // =========================================================================
+    // Reload
+    // =========================================================================
+
+    /// Reload the device with the specified action.
+    pub async fn reload(
+        &self,
+        bus: &str,
+        device: &str,
+        action: ReloadAction,
+    ) -> Result<()> {
+        let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_RELOAD, bus, device);
+        builder.append_attr(DEVLINK_ATTR_RELOAD_ACTION, &[action as u8]);
+        self.devlink_send_ack(builder).await
+    }
+
+    // =========================================================================
+    // Port Split/Unsplit
+    // =========================================================================
+
+    /// Split a port into sub-ports.
+    pub async fn port_split(
+        &self,
+        bus: &str,
+        device: &str,
+        port_index: u32,
+        count: u32,
+    ) -> Result<()> {
+        let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_PORT_SPLIT, bus, device);
+        builder.append_attr_u32(DEVLINK_ATTR_PORT_INDEX, port_index);
+        builder.append_attr_u32(DEVLINK_ATTR_PORT_SPLIT_COUNT, count);
+        self.devlink_send_ack(builder).await
+    }
+
+    /// Unsplit a previously split port.
+    pub async fn port_unsplit(
+        &self,
+        bus: &str,
+        device: &str,
+        port_index: u32,
+    ) -> Result<()> {
+        let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_PORT_UNSPLIT, bus, device);
+        builder.append_attr_u32(DEVLINK_ATTR_PORT_INDEX, port_index);
+        self.devlink_send_ack(builder).await
+    }
+
+    // =========================================================================
+    // Parameter Configuration
+    // =========================================================================
+
+    /// Set a device parameter.
+    pub async fn set_param(
+        &self,
+        bus: &str,
+        device: &str,
+        name: &str,
+        cmode: ConfigMode,
+        data: ParamData,
+    ) -> Result<()> {
+        let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_PARAM_SET, bus, device);
+        builder.append_attr_str(DEVLINK_ATTR_PARAM_NAME, name);
+        builder.append_attr(DEVLINK_ATTR_PARAM_TYPE, &[data.type_id()]);
+
+        // Nested: PARAM_VALUE_CMODE + PARAM_VALUE_DATA
+        let value_list = builder.nest_start(DEVLINK_ATTR_PARAM_VALUES_LIST | 0x8000);
+        let value_entry = builder.nest_start(DEVLINK_ATTR_PARAM_VALUE | 0x8000);
+        builder.append_attr(DEVLINK_ATTR_PARAM_VALUE_CMODE, &[cmode as u8]);
+        builder.append_attr(DEVLINK_ATTR_PARAM_VALUE_DATA, &data.to_bytes());
+        builder.nest_end(value_entry);
+        builder.nest_end(value_list);
+
+        self.devlink_send_ack(builder).await
+    }
+
+    // =========================================================================
     // Internal helpers
     // =========================================================================
 
@@ -331,6 +471,51 @@ impl Connection<Devlink> {
         }
 
         result_payload.ok_or_else(|| Error::InvalidMessage("no response received".into()))
+    }
+
+    /// Build a GENL command message for a device.
+    fn devlink_cmd_builder(&self, cmd: u8, bus: &str, device: &str) -> MessageBuilder {
+        let family_id = self.state().family_id;
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
+        let genl_hdr = GenlMsgHdr::new(cmd, DEVLINK_GENL_VERSION);
+        builder.append(&genl_hdr);
+        builder.append_attr_str(DEVLINK_ATTR_BUS_NAME, bus);
+        builder.append_attr_str(DEVLINK_ATTR_DEV_NAME, device);
+        builder
+    }
+
+    /// Send a command and wait for ACK.
+    async fn devlink_send_ack(&self, mut builder: MessageBuilder) -> Result<()> {
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        loop {
+            let data: Vec<u8> = self.socket().recv_msg().await?;
+
+            for msg_result in MessageIter::new(&data) {
+                let (header, payload) = msg_result?;
+
+                if header.nlmsg_seq != seq {
+                    continue;
+                }
+
+                if header.is_error() {
+                    let err = NlMsgError::from_bytes(payload)?;
+                    if err.is_ack() {
+                        return Ok(());
+                    }
+                    return Err(Error::from_errno(err.error));
+                }
+
+                if header.is_done() {
+                    return Ok(());
+                }
+            }
+        }
     }
 
     /// Collect all responses from a dump request.

@@ -47,14 +47,14 @@ Add devlink Generic Netlink support for hardware device management. Used by mode
 - [ ] Update CLAUDE.md with devlink usage examples
 
 ### Phase 2: Management Operations
-- [ ] Implement `ReloadAction` enum
-- [ ] Implement `health_reporter_recover()`
-- [ ] Implement `set_health_reporter()` (auto_recover, auto_dump, graceful_period)
-- [ ] Implement `FlashRequest` builder and `flash_update()`
+- [x] Implement `ReloadAction` enum
+- [x] Implement `health_reporter_recover()`
+- [x] Implement `set_health_reporter()` (auto_recover, auto_dump, graceful_period)
+- [x] Implement `FlashRequest` builder and `flash_update()`
 - [ ] Implement `FlashProgress` type with `percent()` helper
-- [ ] Implement `reload()` with `ReloadAction`
-- [ ] Implement `port_split()` and `port_unsplit()`
-- [ ] Implement `set_param()` with `ParamData` and `ConfigMode`
+- [x] Implement `reload()` with `ReloadAction`
+- [x] Implement `port_split()` and `port_unsplit()`
+- [x] Implement `set_param()` with `ParamData` and `ConfigMode`
 - [ ] Add integration tests for management operations
 - [ ] Add management commands to binary
 - [ ] Add doc comments with examples

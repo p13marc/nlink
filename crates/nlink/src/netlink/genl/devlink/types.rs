@@ -322,3 +322,66 @@ impl std::fmt::Display for ParamData {
         }
     }
 }
+
+impl ParamData {
+    /// Get the devlink param type ID.
+    pub(crate) fn type_id(&self) -> u8 {
+        match self {
+            ParamData::U8(_) => 1,
+            ParamData::U16(_) => 2,
+            ParamData::U32(_) => 3,
+            ParamData::String(_) => 5,
+            ParamData::Bool(_) => 6,
+        }
+    }
+
+    /// Serialize the value to bytes.
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            ParamData::U8(v) => vec![*v],
+            ParamData::U16(v) => v.to_ne_bytes().to_vec(),
+            ParamData::U32(v) => v.to_ne_bytes().to_vec(),
+            ParamData::String(v) => {
+                let mut bytes = v.as_bytes().to_vec();
+                bytes.push(0);
+                bytes
+            }
+            ParamData::Bool(v) => vec![u8::from(*v)],
+        }
+    }
+}
+
+/// Reload action for `reload()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ReloadAction {
+    /// Reload the driver.
+    DriverReinit = 1,
+    /// Activate stored firmware.
+    FwActivate = 2,
+}
+
+/// Flash update request builder.
+#[derive(Debug, Clone)]
+pub struct FlashRequest {
+    /// Path to firmware file.
+    pub file_name: String,
+    /// Optional component to flash (e.g., "fw.mgmt").
+    pub component: Option<String>,
+}
+
+impl FlashRequest {
+    /// Create a new flash request for the given firmware file.
+    pub fn new(file_name: impl Into<String>) -> Self {
+        Self {
+            file_name: file_name.into(),
+            component: None,
+        }
+    }
+
+    /// Flash only a specific component.
+    pub fn component(mut self, component: impl Into<String>) -> Self {
+        self.component = Some(component.into());
+        self
+    }
+}
