@@ -47,6 +47,7 @@ mod header;
 pub use connection::FamilyInfo;
 pub use header::{GENL_HDRLEN, GenlMsgHdr};
 
+pub mod devlink;
 pub mod ethtool;
 pub mod macsec;
 pub mod mptcp;

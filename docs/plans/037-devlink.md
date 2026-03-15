@@ -24,25 +24,25 @@ Add devlink Generic Netlink support for hardware device management. Used by mode
 ## Progress
 
 ### Phase 1: Read-Only MVP
-- [ ] Create `genl/devlink/mod.rs` with command and attribute constants
-- [ ] Implement `PortType`, `PortFlavour`, `HealthState`, `ConfigMode` enums with `TryFrom`
-- [ ] Implement `Connection<Devlink>` with `new_async()` (resolves family ID)
-- [ ] Implement `DevlinkDevice` type with `path()` helper
-- [ ] Implement `get_devices()`
-- [ ] Implement `DevlinkInfo` type with `running_version()`, `fixed_version()`, `has_pending_update()`
-- [ ] Implement `get_device_info()`
-- [ ] Implement `VersionInfo` type
-- [ ] Implement attribute parsing (`parse_info`, `parse_version_nested`)
-- [ ] Implement `DevlinkPort` type with `path()`, `has_netdev()`, `is_physical()` helpers
-- [ ] Implement `get_ports()`, `get_device_ports()`, `get_port()`, `get_port_by_netdev()`
-- [ ] Implement `HealthReporter` type with `is_error()`, `has_errors()` helpers
-- [ ] Implement `get_health_reporters()`, `get_health_reporter()`, `get_health_errors()`
-- [ ] Implement health reporter attribute parsing (`parse_health_reporter`)
-- [ ] Implement `DevlinkParam`, `ParamValue`, `ParamData` types
-- [ ] Implement `get_params()`, `get_param()`
+- [x] Create `genl/devlink/mod.rs` with command and attribute constants
+- [x] Implement `PortType`, `PortFlavour`, `HealthState`, `ConfigMode` enums with `TryFrom`
+- [x] Implement `Connection<Devlink>` with `new_async()` (resolves family ID)
+- [x] Implement `DevlinkDevice` type with `path()` helper
+- [x] Implement `get_devices()`
+- [x] Implement `DevlinkInfo` type with `running_version()`, `fixed_version()`, `has_pending_update()`
+- [x] Implement `get_device_info()`
+- [x] Implement `VersionInfo` type
+- [x] Implement attribute parsing (`parse_info`, `parse_version_nested`)
+- [x] Implement `DevlinkPort` type with `path()`, `has_netdev()`, `is_physical()` helpers
+- [x] Implement `get_ports()`, `get_device_ports()`, `get_port()`, `get_port_by_netdev()`
+- [x] Implement `HealthReporter` type with `is_error()`, `has_errors()` helpers
+- [x] Implement `get_health_reporters()`, `get_health_reporter()`, `get_health_errors()`
+- [x] Implement health reporter attribute parsing (`parse_health_reporter`)
+- [x] Implement `DevlinkParam`, `ParamValue`, `ParamData` types
+- [x] Implement `get_params()`, `get_param()`
 - [ ] Add integration tests for device listing (requires supported NIC)
 - [ ] Add integration tests for info/port/health parsing
-- [ ] Add doc comments with examples on all public types and methods
+- [x] Add doc comments with examples on all public types and methods
 - [ ] Create `bins/devlink` binary or add devlink commands to existing binary
 - [ ] Update CLAUDE.md with devlink usage examples
 

@@ -260,6 +260,22 @@ impl ProtocolState for Mptcp {
     const PROTOCOL: Protocol = Protocol::Generic;
 }
 
+/// Devlink protocol state.
+///
+/// Used for querying hardware device management via Generic Netlink.
+/// Contains the resolved devlink family ID.
+#[derive(Debug, Default)]
+pub struct Devlink {
+    /// Resolved devlink GENL family ID.
+    pub(crate) family_id: u16,
+}
+
+impl private::Sealed for Devlink {}
+
+impl ProtocolState for Devlink {
+    const PROTOCOL: Protocol = Protocol::Generic;
+}
+
 /// Ethtool protocol state.
 ///
 /// Used for querying and configuring network device settings via Generic Netlink.
