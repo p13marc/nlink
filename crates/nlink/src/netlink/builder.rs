@@ -95,6 +95,11 @@ impl MessageBuilder {
         self.append_attr(attr_type, &value.to_ne_bytes());
     }
 
+    /// Append a u64 attribute (big endian / network order).
+    pub fn append_attr_u64_be(&mut self, attr_type: u16, value: u64) {
+        self.append_attr(attr_type, &value.to_be_bytes());
+    }
+
     /// Append a u16 attribute (big endian / network order).
     pub fn append_attr_u16_be(&mut self, attr_type: u16, value: u16) {
         self.append_attr(attr_type, &value.to_be_bytes());

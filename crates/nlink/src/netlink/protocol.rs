@@ -276,6 +276,19 @@ impl ProtocolState for Devlink {
     const PROTOCOL: Protocol = Protocol::Generic;
 }
 
+/// Nftables protocol state.
+///
+/// Used for nftables firewall management via NETLINK_NETFILTER.
+/// This is a zero-sized type with no additional state.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Nftables;
+
+impl private::Sealed for Nftables {}
+
+impl ProtocolState for Nftables {
+    const PROTOCOL: Protocol = Protocol::Netfilter;
+}
+
 /// nl80211 protocol state.
 ///
 /// Used for WiFi configuration via Generic Netlink.
@@ -343,6 +356,7 @@ mod tests {
         assert_eq!(KobjectUevent::PROTOCOL, Protocol::KobjectUevent);
         assert_eq!(Connector::PROTOCOL, Protocol::Connector);
         assert_eq!(Netfilter::PROTOCOL, Protocol::Netfilter);
+        assert_eq!(Nftables::PROTOCOL, Protocol::Netfilter);
         assert_eq!(Xfrm::PROTOCOL, Protocol::Xfrm);
         assert_eq!(FibLookup::PROTOCOL, Protocol::FibLookup);
         assert_eq!(SELinux::PROTOCOL, Protocol::SELinux);
@@ -358,5 +372,6 @@ mod tests {
         assert_eq!(std::mem::size_of::<FibLookup>(), 0);
         assert_eq!(std::mem::size_of::<SELinux>(), 0);
         assert_eq!(std::mem::size_of::<Audit>(), 0);
+        assert_eq!(std::mem::size_of::<Nftables>(), 0);
     }
 }

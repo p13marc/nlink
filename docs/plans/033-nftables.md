@@ -9,22 +9,22 @@ nftables uses a register-based expression system where rules are sequences of ex
 ## Progress
 
 ### Phase 1: Tables + Chains + Simple Rules
-- [ ] Implement `Connection<Nftables>` protocol type
-- [ ] Implement `NfGenMsg` header (zerocopy, 4 bytes)
-- [ ] Implement `Family`, `Hook`, `ChainType`, `Priority`, `Policy` enums
-- [ ] Implement table CRUD: `add_table()`, `list_tables()`, `del_table()`, `flush_table()`
-- [ ] Implement `Chain` builder with hook, priority, type, policy
-- [ ] Implement chain CRUD: `add_chain()`, `list_chains()`, `del_chain()`
-- [ ] Implement `Verdict` enum (Accept, Drop, Continue, Return, Jump, Goto)
-- [ ] Implement `Expr` enum with Meta, Cmp, Payload, Immediate, Verdict, Counter
-- [ ] Implement `Rule` builder with expression auto-generation
-- [ ] Implement `match_tcp_dport()`, `match_udp_dport()` convenience methods
-- [ ] Implement `match_saddr_v4()`, `match_daddr_v4()` convenience methods
-- [ ] Implement `match_iif()`, `match_oif()` convenience methods
-- [ ] Implement `match_ct_state()` with `CtState` bitflags
-- [ ] Implement `accept()`, `drop()`, `jump()`, `counter()` rule terminations
-- [ ] Implement rule CRUD: `add_rule()`, `list_rules()`, `del_rule()`
-- [ ] Implement expression serialization (`write_expr()`)
+- [x] Implement `Connection<Nftables>` protocol type
+- [x] Implement `NfGenMsg` header (zerocopy, 4 bytes)
+- [x] Implement `Family`, `Hook`, `ChainType`, `Priority`, `Policy` enums
+- [x] Implement table CRUD: `add_table()`, `list_tables()`, `del_table()`, `flush_table()`
+- [x] Implement `Chain` builder with hook, priority, type, policy
+- [x] Implement chain CRUD: `add_chain()`, `list_chains()`, `del_chain()`
+- [x] Implement `Verdict` enum (Accept, Drop, Continue, Return, Jump, Goto)
+- [x] Implement `Expr` enum with Meta, Cmp, Payload, Immediate, Verdict, Counter
+- [x] Implement `Rule` builder with expression auto-generation
+- [x] Implement `match_tcp_dport()`, `match_udp_dport()` convenience methods
+- [x] Implement `match_saddr_v4()`, `match_daddr_v4()` convenience methods
+- [x] Implement `match_iif()`, `match_oif()` convenience methods
+- [x] Implement `match_ct_state()` with `CtState` bitflags
+- [x] Implement `accept()`, `drop()`, `jump()`, `counter()` rule terminations
+- [x] Implement rule CRUD: `add_rule()`, `list_rules()`, `del_rule()`
+- [x] Implement expression serialization (`write_expr()`)
 - [ ] Add integration tests for table CRUD
 - [ ] Add integration tests for chain CRUD with hooks
 - [ ] Add integration tests for simple rules (TCP port match + accept)
@@ -33,10 +33,10 @@ nftables uses a register-based expression system where rules are sequences of ex
 - [ ] Update CLAUDE.md with nftables usage examples
 
 ### Phase 2: NAT + Logging + Rate Limiting
-- [ ] Implement `NatExpr` (snat, dnat, masquerade, redirect)
-- [ ] Implement `masquerade()` rule method
-- [ ] Implement `Log` expression with prefix and group
-- [ ] Implement `Limit` expression with rate, unit, burst
+- [ ] Implement `NatExpr` (snat, dnat, redirect)
+- [x] Implement `masquerade()` rule method
+- [x] Implement `Log` expression with prefix and group
+- [x] Implement `Limit` expression with rate, unit, burst
 - [ ] Add integration tests for NAT rules
 - [ ] Add integration tests for rate limiting
 - [ ] Add doc comments with examples

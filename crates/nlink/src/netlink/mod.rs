@@ -99,6 +99,7 @@ pub mod namespace_watcher;
 pub mod neigh;
 pub mod netfilter;
 pub mod nexthop;
+pub mod nftables;
 pub mod parse;
 mod protocol;
 pub mod ratelimit;
@@ -134,7 +135,7 @@ pub use namespace_watcher::{
 pub use parse::{FromNetlink, ToNetlink};
 pub use protocol::{
     Audit, Connector, Devlink, Ethtool, FibLookup, Generic, KobjectUevent, Macsec, Mptcp,
-    Netfilter, Nl80211, ProtocolState, Route, SELinux, SockDiag, Wireguard, Xfrm,
+    Netfilter, Nftables, Nl80211, ProtocolState, Route, SELinux, SockDiag, Wireguard, Xfrm,
 };
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};
 pub use stream::{EventSource, EventSubscription, OwnedEventStream};
