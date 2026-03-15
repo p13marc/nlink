@@ -12,7 +12,7 @@
 
 ### Pinned Path Support
 - [x] Implement `BpfFilter::from_pinned()` method
-- [ ] Add unit test for `from_pinned()` with valid/invalid paths
+- [x] Add unit test for `from_pinned()` with valid/invalid paths
 - [x] Add doc comments with examples on `from_pinned()`
 
 ### BPF Info Parsing
@@ -31,8 +31,8 @@
 - [x] Implement `detach_bpf()` on `Connection<Route>`
 - [x] Implement `list_bpf_programs()` on `Connection<Route>`
 - [ ] Add integration test for attach/detach/list cycle
-- [ ] Add BPF attachment support to `bins/tc` filter add command
-- [ ] Add doc comments with examples on convenience methods
+- [x] Add BPF attachment support to `bins/tc` filter add command
+- [x] Add doc comments with examples on convenience methods
 - [x] Update CLAUDE.md with BPF/TC usage examples
 
 ## Current State

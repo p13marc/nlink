@@ -318,7 +318,7 @@ let config = NetworkConfig::new()
     .link("vxlan0", |l| l.vxlan(100).local("10.0.0.1".parse()?).dstport(4789))
     
     // Bond with mode and options
-    .link("bond0", |l| l.bond().mode(BondMode::ActiveBackup))
+    .link("bond0", |l| l.bond().bond_mode(BondMode::ActiveBackup).miimon(100).min_links(1))
     
     // Macvlan
     .link("macvlan0", |l| l.macvlan("eth0").mode(MacvlanMode::Bridge));

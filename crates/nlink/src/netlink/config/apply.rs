@@ -477,8 +477,24 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             }
             conn.add_link(config).await?;
         }
-        DeclaredLinkType::Bond { mode } => {
+        DeclaredLinkType::Bond {
+            mode,
+            miimon,
+            xmit_hash_policy,
+            min_links,
+        } => {
             let mut config = BondLink::new(&link.name).mode(convert_bond_mode(*mode));
+            if let Some(ms) = miimon {
+                config = config.miimon(*ms);
+            }
+            if let Some(policy) = xmit_hash_policy {
+                if let Ok(p) = crate::netlink::link::XmitHashPolicy::try_from(*policy) {
+                    config = config.xmit_hash_policy(p);
+                }
+            }
+            if let Some(count) = min_links {
+                config = config.min_links(*count);
+            }
             if let Some(mtu) = link.mtu {
                 config = config.mtu(mtu);
             }

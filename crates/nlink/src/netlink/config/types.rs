@@ -169,7 +169,12 @@ pub enum DeclaredLinkType {
     /// Macvlan interface.
     Macvlan { parent: String, mode: MacvlanMode },
     /// Bond interface.
-    Bond { mode: BondMode },
+    Bond {
+        mode: BondMode,
+        miimon: Option<u32>,
+        xmit_hash_policy: Option<u8>,
+        min_links: Option<u32>,
+    },
     /// IFB (Intermediate Functional Block).
     Ifb,
     /// Existing physical interface (not created, only configured).
@@ -334,14 +339,41 @@ impl LinkBuilder {
     pub fn bond(mut self) -> Self {
         self.link_type = DeclaredLinkType::Bond {
             mode: BondMode::default(),
+            miimon: None,
+            xmit_hash_policy: None,
+            min_links: None,
         };
         self
     }
 
     /// Set the bond mode.
     pub fn bond_mode(mut self, mode: BondMode) -> Self {
-        if let DeclaredLinkType::Bond { .. } = self.link_type {
-            self.link_type = DeclaredLinkType::Bond { mode };
+        if let DeclaredLinkType::Bond { mode: ref mut m, .. } = self.link_type {
+            *m = mode;
+        }
+        self
+    }
+
+    /// Set the MII monitoring interval in milliseconds.
+    pub fn miimon(mut self, ms: u32) -> Self {
+        if let DeclaredLinkType::Bond { miimon, .. } = &mut self.link_type {
+            *miimon = Some(ms);
+        }
+        self
+    }
+
+    /// Set the transmit hash policy (0=Layer2, 1=Layer34, 2=Layer23).
+    pub fn xmit_hash_policy(mut self, policy: u8) -> Self {
+        if let DeclaredLinkType::Bond { xmit_hash_policy, .. } = &mut self.link_type {
+            *xmit_hash_policy = Some(policy);
+        }
+        self
+    }
+
+    /// Set the minimum number of active links.
+    pub fn min_links(mut self, count: u32) -> Self {
+        if let DeclaredLinkType::Bond { min_links, .. } = &mut self.link_type {
+            *min_links = Some(count);
         }
         self
     }

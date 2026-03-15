@@ -57,7 +57,7 @@ Bond creation via `BondLink` already exists (`link.rs:2829-2989`) with basic att
 
 ### Declarative Config
 - [x] Complete bond apply logic in `config/apply.rs:482`
-- [ ] Extend `BondConfigLink` with new typed attributes in `config/types.rs`
+- [x] Extend `BondConfigLink` with new typed attributes in `config/types.rs`
 - [ ] Add integration test for declarative bond config
 - [ ] Add bond examples to `bins/config`
 

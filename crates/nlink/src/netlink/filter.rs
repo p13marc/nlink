@@ -2266,6 +2266,17 @@ impl Connection<Route> {
     }
 
     /// Detach all BPF filters from an interface direction.
+    ///
+    /// Flushes all filters attached to the ingress or egress hook of
+    /// the clsact qdisc.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::filter::BpfDirection;
+    ///
+    /// conn.detach_bpf("eth0", BpfDirection::Ingress).await?;
+    /// ```
     pub async fn detach_bpf(&self, dev: &str, direction: BpfDirection) -> Result<()> {
         let ifindex = self
             .resolve_interface(&InterfaceRef::Name(dev.to_string()))
@@ -2287,6 +2298,18 @@ impl Connection<Route> {
     }
 
     /// List attached BPF programs on an interface (both directions).
+    ///
+    /// Returns [`BpfInfo`] for each BPF filter found on the interface's
+    /// clsact qdisc. Returns an empty vec if no clsact qdisc exists.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let programs = conn.list_bpf_programs("eth0").await?;
+    /// for prog in &programs {
+    ///     println!("BPF: id={:?} name={:?} da={}", prog.id, prog.name, prog.direct_action);
+    /// }
+    /// ```
     pub async fn list_bpf_programs(
         &self,
         dev: &str,
