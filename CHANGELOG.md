@@ -2,6 +2,108 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+#### nftables Support (Plan 033)
+Complete nftables firewall management via `NETLINK_NETFILTER`:
+
+- `Connection<Nftables>` protocol type with `NfGenMsg` header
+- Table CRUD: `add_table()`, `list_tables()`, `del_table()`, `flush_table()`
+- Chain management with hook, priority, type, policy configuration
+- Rule builder with expression auto-generation
+  - `match_tcp_dport()`, `match_udp_dport()` for port matching
+  - `match_saddr_v4()`, `match_daddr_v4()` for address matching
+  - `match_iif()`, `match_oif()` for interface matching
+  - `match_ct_state()` with `CtState` bitflags
+  - `accept()`, `drop()`, `jump()`, `counter()` terminations
+- NAT expressions: `masquerade()`, snat, dnat, redirect
+- `Log` expression with prefix and group
+- `Limit` expression with rate, unit, burst
+- Set support: `add_set()`, `del_set()`, `add_set_elements()`, `Lookup` expression
+- Batch transactions: `transaction()`, `commit()`, `flush_ruleset()`
+
+#### nl80211 WiFi Support (Plan 036)
+WiFi configuration via Generic Netlink:
+
+- `Connection<Nl80211>` with GENL family resolution and multicast group subscription
+- Read-only queries: `get_interfaces()`, `get_wiphy()`, `get_stations()`, `scan_results()`
+- Station mode: `connect()`, `disconnect()`, `set_power_save()`
+- Trigger/abort scans: `trigger_scan()`, `abort_scan()`
+- Event monitoring via `EventSource` trait with `Nl80211Event` enum
+  - `ScanComplete`, `ScanAborted`, `Connect`, `Disconnect`, `NewInterface`, `DelInterface`, `RegChange`
+- Types: `WiphyInfo`, `InterfaceInfo`, `StationInfo`, `ScanResult`, `InterfaceType`, `Band`, `BssInfo`
+
+#### Devlink Support (Plan 037)
+Hardware device management via Generic Netlink:
+
+- `Connection<Devlink>` with GENL family resolution
+- Device queries: `get_devices()`, `get_device_info()`, `get_ports()`, `get_health_reporters()`, `get_params()`
+- Management: `reload()`, `flash()`, `set_param()`
+- Event monitoring via `EventSource` trait with `DevlinkEvent` enum
+  - `NewDevice`, `DelDevice`, `NewPort`, `DelPort`, `HealthEvent`
+- Types: `DevlinkDevice`, `DevlinkInfo`, `DevlinkPort`, `HealthReporter`, `DevlinkParam`, `VersionInfo`
+- Port types, flavours, health states, config modes as typed enums
+
+#### Bond Support (Plan 031)
+Complete bond/team interface management:
+
+- `BondLink` builder with mode, primary, slaves, and advanced options
+- Bond modes: `balance-rr`, `active-backup`, `balance-xor`, `broadcast`, `802.3ad`, `balance-tlb`, `balance-alb`
+- `conn.add_link(BondLink::new("bond0").mode(BondMode::ActiveBackup))` API
+- Slave management: `conn.set_link_master()`, `conn.set_link_nomaster()`
+
+#### Tunnel Link Types (Plan 028)
+Additional tunnel interface types:
+
+- `VtiLink`, `Vti6Link` for route-based IPsec tunnels
+- `Ip6GreLink`, `Ip6GretapLink` for IPv6 GRE tunnels
+- Builder pattern with local/remote/ttl/key configuration
+
+#### Operation Timeouts (Plan 032)
+Configurable timeouts for netlink operations:
+
+- `Connection::with_timeout()` builder for setting default timeout
+- Per-operation timeout overrides
+- `Error::is_timeout()` semantic check
+
+#### Netlink Batching (Plan 030)
+Bulk operations via batched sendmsg:
+
+- `conn.batch()` for grouping multiple operations
+- Per-operation result tracking
+- Reduced syscall overhead for bulk configuration
+
+#### BPF/TC Attachment (Plan 034)
+BPF program attachment to TC hooks:
+
+- `BpfFilter` for attaching BPF programs to TC
+- `conn.add_filter("eth0", "ingress", bpf_filter)` API
+- BPF info parsing from TC filter responses
+
+#### ss Improvements (Plan 026)
+Socket statistics enhancements:
+
+- **Summary mode** (`-s`): `SocketSummary` type, `conn.socket_summary()` API
+- **Kill mode** (`-K`): `conn.destroy_tcp_socket()`, `conn.destroy_matching()` with `DestroyResult`
+- **Netlink socket listing** (`--netlink`): `query_netlink()` via `SOCK_DIAG_BY_FAMILY` with `AF_NETLINK`
+- **Expression filters**: `FilterExpr::parse()` with winnow parser
+  - Port comparisons: `sport = :22`, `dport != :80`, `sport > :1024`
+  - Address/prefix matching: `src 192.168.0.0/16`, `dst 10.0.0.1`
+  - State matching: `state established`, `state listening`
+  - Boolean operators: `and`, `or`, `not`, parenthesized grouping
+  - Trailing filter argument in `ss` binary
+
+#### Ethtool Event Monitoring
+- `Connection<Ethtool>::subscribe()` for joining monitor multicast group
+- `EthtoolEvent` variants: `LinkStateChanged`, `LinkModesChanged`, `FeaturesChanged`, `CoalesceChanged`, `PauseChanged`
+
+#### Code Quality (Plan 035)
+- SAFETY comments on all unsafe blocks
+- Optional serde_json dependency cleanup
+- Unwrap elimination in library code
+
 ## [0.8.0] - 2026-01-17
 
 ### Breaking Changes
