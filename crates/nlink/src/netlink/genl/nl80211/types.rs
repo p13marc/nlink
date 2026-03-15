@@ -410,6 +410,58 @@ impl ScanRequest {
     }
 }
 
+/// nl80211 multicast events.
+#[derive(Debug, Clone)]
+pub enum Nl80211Event {
+    /// Scan completed successfully on an interface.
+    ScanComplete {
+        /// Interface index.
+        ifindex: u32,
+    },
+    /// Scan was aborted.
+    ScanAborted {
+        /// Interface index.
+        ifindex: u32,
+    },
+    /// Connected to a BSS.
+    Connect {
+        /// Interface index.
+        ifindex: u32,
+        /// AP BSSID.
+        bssid: [u8; 6],
+        /// IEEE 802.11 status code.
+        status_code: u16,
+    },
+    /// Disconnected from BSS.
+    Disconnect {
+        /// Interface index.
+        ifindex: u32,
+        /// AP BSSID (if available).
+        bssid: Option<[u8; 6]>,
+        /// IEEE 802.11 reason code.
+        reason_code: u16,
+    },
+    /// New wireless interface appeared.
+    NewInterface {
+        /// Interface index.
+        ifindex: u32,
+        /// Interface name.
+        name: Option<String>,
+        /// Interface type.
+        iftype: InterfaceType,
+    },
+    /// Wireless interface removed.
+    DelInterface {
+        /// Interface index.
+        ifindex: u32,
+    },
+    /// Regulatory domain changed.
+    RegChange {
+        /// Country code (if available).
+        country: Option<String>,
+    },
+}
+
 /// Connect request builder.
 pub struct ConnectRequest {
     /// SSID to connect to.

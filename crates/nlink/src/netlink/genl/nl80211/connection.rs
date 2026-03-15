@@ -7,7 +7,7 @@ use crate::netlink::builder::MessageBuilder;
 use crate::netlink::connection::Connection;
 use crate::netlink::error::{Error, Result};
 use crate::netlink::genl::{
-    CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
+    CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
 };
 use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
 use crate::netlink::protocol::{Nl80211, ProtocolState};
@@ -28,14 +28,59 @@ impl Connection<Nl80211> {
     /// ```
     pub async fn new_async() -> Result<Self> {
         let socket = NetlinkSocket::new(Nl80211::PROTOCOL)?;
-        let family_id = resolve_nl80211_family(&socket).await?;
-        let state = Nl80211 { family_id };
+        let resolved = resolve_nl80211_family(&socket).await?;
+        let state = Nl80211 {
+            family_id: resolved.family_id,
+            scan_group_id: resolved.scan_group_id,
+            mlme_group_id: resolved.mlme_group_id,
+            regulatory_group_id: resolved.regulatory_group_id,
+            config_group_id: resolved.config_group_id,
+        };
         Ok(Self::from_parts(socket, state))
     }
 
     /// Get the nl80211 family ID.
     pub fn family_id(&self) -> u16 {
         self.state().family_id
+    }
+
+    /// Subscribe to nl80211 multicast events (scan, mlme, regulatory, config).
+    ///
+    /// After subscribing, use `events()` or `into_events()` to receive events.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Nl80211};
+    /// use tokio_stream::StreamExt;
+    ///
+    /// let mut conn = Connection::<Nl80211>::new_async().await?;
+    /// conn.subscribe()?;
+    ///
+    /// let mut events = conn.events();
+    /// while let Some(event) = events.next().await {
+    ///     println!("{:?}", event?);
+    /// }
+    /// ```
+    pub fn subscribe(&mut self) -> Result<()> {
+        let scan = self.state().scan_group_id;
+        let mlme = self.state().mlme_group_id;
+        let regulatory = self.state().regulatory_group_id;
+        let config = self.state().config_group_id;
+        let mut subscribed = false;
+
+        for id in [scan, mlme, regulatory, config].into_iter().flatten() {
+            self.socket_mut().add_membership(id)?;
+            subscribed = true;
+        }
+
+        if !subscribed {
+            return Err(Error::InvalidMessage(
+                "no nl80211 multicast groups available".into(),
+            ));
+        }
+
+        Ok(())
     }
 
     // =========================================================================
@@ -1006,8 +1051,16 @@ fn attr_str(payload: &[u8]) -> Option<String> {
     }
 }
 
-/// Resolve the nl80211 GENL family ID.
-async fn resolve_nl80211_family(socket: &NetlinkSocket) -> Result<u16> {
+struct ResolvedNl80211 {
+    family_id: u16,
+    scan_group_id: Option<u32>,
+    mlme_group_id: Option<u32>,
+    regulatory_group_id: Option<u32>,
+    config_group_id: Option<u32>,
+}
+
+/// Resolve the nl80211 GENL family ID and multicast group IDs.
+async fn resolve_nl80211_family(socket: &NetlinkSocket) -> Result<ResolvedNl80211> {
     let mut builder = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK);
     let genl_hdr = GenlMsgHdr::new(CtrlCmd::GetFamily as u8, 1);
     builder.append(&genl_hdr);
@@ -1022,6 +1075,10 @@ async fn resolve_nl80211_family(socket: &NetlinkSocket) -> Result<u16> {
 
     let response: Vec<u8> = socket.recv_msg().await?;
     let mut family_id: Option<u16> = None;
+    let mut scan_group_id: Option<u32> = None;
+    let mut mlme_group_id: Option<u32> = None;
+    let mut regulatory_group_id: Option<u32> = None;
+    let mut config_group_id: Option<u32> = None;
 
     for result in MessageIter::new(&response) {
         let (header, payload) = result?;
@@ -1055,11 +1112,49 @@ async fn resolve_nl80211_family(socket: &NetlinkSocket) -> Result<u16> {
         for (attr_type, attr_payload) in AttrIter::new(attrs_data) {
             if attr_type == CtrlAttr::FamilyId as u16 && attr_payload.len() >= 2 {
                 family_id = Some(u16::from_ne_bytes(attr_payload[..2].try_into().unwrap()));
+            } else if attr_type == CtrlAttr::McastGroups as u16 {
+                for (_idx, grp_data) in AttrIter::new(attr_payload) {
+                    let mut grp_name: Option<String> = None;
+                    let mut grp_id: Option<u32> = None;
+
+                    for (grp_attr_type, grp_attr_payload) in AttrIter::new(grp_data) {
+                        if grp_attr_type == CtrlAttrMcastGrp::Name as u16 {
+                            grp_name = Some(
+                                std::str::from_utf8(grp_attr_payload)
+                                    .unwrap_or("")
+                                    .trim_end_matches('\0')
+                                    .to_string(),
+                            );
+                        } else if grp_attr_type == CtrlAttrMcastGrp::Id as u16
+                            && grp_attr_payload.len() >= 4
+                        {
+                            grp_id = Some(u32::from_ne_bytes(
+                                grp_attr_payload[..4].try_into().unwrap(),
+                            ));
+                        }
+                    }
+
+                    match grp_name.as_deref() {
+                        Some(NL80211_MCGRP_SCAN) => scan_group_id = grp_id,
+                        Some(NL80211_MCGRP_MLME) => mlme_group_id = grp_id,
+                        Some(NL80211_MCGRP_REGULATORY) => regulatory_group_id = grp_id,
+                        Some(NL80211_MCGRP_CONFIG) => config_group_id = grp_id,
+                        _ => {}
+                    }
+                }
             }
         }
     }
 
-    family_id.ok_or_else(|| Error::FamilyNotFound {
-        name: NL80211_GENL_NAME.to_string(),
-    })
+    family_id
+        .map(|id| ResolvedNl80211 {
+            family_id: id,
+            scan_group_id,
+            mlme_group_id,
+            regulatory_group_id,
+            config_group_id,
+        })
+        .ok_or_else(|| Error::FamilyNotFound {
+            name: NL80211_GENL_NAME.to_string(),
+        })
 }

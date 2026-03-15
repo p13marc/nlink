@@ -297,6 +297,11 @@ impl ProtocolState for Nftables {
 pub struct Nl80211 {
     /// Resolved nl80211 GENL family ID.
     pub(crate) family_id: u16,
+    /// Multicast group IDs for event monitoring.
+    pub(crate) scan_group_id: Option<u32>,
+    pub(crate) mlme_group_id: Option<u32>,
+    pub(crate) regulatory_group_id: Option<u32>,
+    pub(crate) config_group_id: Option<u32>,
 }
 
 impl private::Sealed for Nl80211 {}

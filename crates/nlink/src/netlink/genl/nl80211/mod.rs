@@ -62,6 +62,24 @@ pub const NL80211_CMD_DISCONNECT: u8 = 48;
 pub const NL80211_CMD_SET_POWER_SAVE: u8 = 61;
 pub const NL80211_CMD_GET_POWER_SAVE: u8 = 62;
 
+// Notification commands (received via multicast)
+pub const NL80211_CMD_NEW_WIPHY: u8 = 3;
+pub const NL80211_CMD_DEL_WIPHY: u8 = 4;
+pub const NL80211_CMD_NEW_INTERFACE: u8 = 7;
+pub const NL80211_CMD_DEL_INTERFACE: u8 = 8;
+pub const NL80211_CMD_NEW_STATION: u8 = 19;
+pub const NL80211_CMD_REG_CHANGE: u8 = 86;
+pub const NL80211_CMD_REG_BEACON_HINT: u8 = 87;
+
+// =============================================================================
+// Multicast Group Names
+// =============================================================================
+
+pub const NL80211_MCGRP_SCAN: &str = "scan";
+pub const NL80211_MCGRP_MLME: &str = "mlme";
+pub const NL80211_MCGRP_REGULATORY: &str = "regulatory";
+pub const NL80211_MCGRP_CONFIG: &str = "config";
+
 // =============================================================================
 // Top-level Attributes
 // =============================================================================

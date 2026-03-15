@@ -327,7 +327,7 @@ use super::events::NetworkEvent;
 use super::message::NlMsgType;
 use super::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage};
 use super::parse::FromNetlink;
-use super::protocol::{Connector, Ethtool, KobjectUevent, Route, SELinux};
+use super::protocol::{Connector, Ethtool, KobjectUevent, Nl80211, Route, SELinux};
 use super::selinux::SELinuxEvent;
 use super::uevent::Uevent;
 
@@ -510,6 +510,124 @@ fn parse_selinux_event(data: &[u8]) -> Option<SELinuxEvent> {
         }
         _ => None,
     }
+}
+
+// Nl80211 protocol events
+impl private::Sealed for Nl80211 {}
+
+impl EventSource for Nl80211 {
+    type Event = super::genl::nl80211::Nl80211Event;
+
+    fn parse_events(data: &[u8]) -> Vec<Self::Event> {
+        parse_nl80211_events(data)
+    }
+}
+
+fn parse_nl80211_events(data: &[u8]) -> Vec<super::genl::nl80211::Nl80211Event> {
+    use super::genl::nl80211::{
+        NL80211_ATTR_IFINDEX, NL80211_ATTR_IFNAME, NL80211_ATTR_IFTYPE, NL80211_ATTR_MAC,
+        NL80211_ATTR_REASON_CODE, NL80211_ATTR_REG_ALPHA2, NL80211_ATTR_STATUS_CODE,
+        NL80211_CMD_CONNECT, NL80211_CMD_DEL_INTERFACE, NL80211_CMD_DISCONNECT,
+        NL80211_CMD_NEW_INTERFACE, NL80211_CMD_NEW_SCAN_RESULTS, NL80211_CMD_REG_CHANGE,
+        NL80211_CMD_SCAN_ABORTED, Nl80211Event,
+    };
+    use super::genl::nl80211::InterfaceType;
+    use super::genl::{GENL_HDRLEN, GenlMsgHdr};
+
+    let mut events = Vec::new();
+
+    for msg_result in MessageIter::new(data) {
+        let Ok((header, payload)) = msg_result else {
+            continue;
+        };
+
+        if header.is_error() || header.is_done() {
+            continue;
+        }
+
+        if payload.len() < GENL_HDRLEN {
+            continue;
+        }
+
+        let Some(genl_hdr) = GenlMsgHdr::from_bytes(payload) else {
+            continue;
+        };
+
+        let cmd = genl_hdr.cmd;
+        let attrs_data = &payload[GENL_HDRLEN..];
+
+        // Parse common attributes
+        let mut ifindex = 0u32;
+        let mut ifname: Option<String> = None;
+        let mut iftype = InterfaceType::Unspecified;
+        let mut mac: Option<[u8; 6]> = None;
+        let mut reason_code = 0u16;
+        let mut status_code = 0u16;
+        let mut country: Option<String> = None;
+
+        for (attr_type, attr_payload) in super::attr::AttrIter::new(attrs_data) {
+            match attr_type {
+                NL80211_ATTR_IFINDEX if attr_payload.len() >= 4 => {
+                    ifindex = u32::from_ne_bytes(attr_payload[..4].try_into().unwrap());
+                }
+                NL80211_ATTR_IFNAME => {
+                    ifname = std::str::from_utf8(attr_payload)
+                        .ok()
+                        .map(|s| s.trim_end_matches('\0').to_string())
+                        .filter(|s| !s.is_empty());
+                }
+                NL80211_ATTR_IFTYPE if attr_payload.len() >= 4 => {
+                    let val = u32::from_ne_bytes(attr_payload[..4].try_into().unwrap());
+                    iftype = InterfaceType::try_from(val).unwrap_or(InterfaceType::Unspecified);
+                }
+                NL80211_ATTR_MAC if attr_payload.len() >= 6 => {
+                    let mut m = [0u8; 6];
+                    m.copy_from_slice(&attr_payload[..6]);
+                    mac = Some(m);
+                }
+                NL80211_ATTR_REASON_CODE if attr_payload.len() >= 2 => {
+                    reason_code = u16::from_ne_bytes(attr_payload[..2].try_into().unwrap());
+                }
+                NL80211_ATTR_STATUS_CODE if attr_payload.len() >= 2 => {
+                    status_code = u16::from_ne_bytes(attr_payload[..2].try_into().unwrap());
+                }
+                NL80211_ATTR_REG_ALPHA2 => {
+                    country = std::str::from_utf8(attr_payload)
+                        .ok()
+                        .map(|s| s.trim_end_matches('\0').to_string())
+                        .filter(|s| !s.is_empty());
+                }
+                _ => {}
+            }
+        }
+
+        let event = match cmd {
+            NL80211_CMD_NEW_SCAN_RESULTS => Nl80211Event::ScanComplete { ifindex },
+            NL80211_CMD_SCAN_ABORTED => Nl80211Event::ScanAborted { ifindex },
+            NL80211_CMD_CONNECT => Nl80211Event::Connect {
+                ifindex,
+                bssid: mac.unwrap_or([0; 6]),
+                status_code,
+            },
+            NL80211_CMD_DISCONNECT => Nl80211Event::Disconnect {
+                ifindex,
+                bssid: mac,
+                reason_code,
+            },
+            NL80211_CMD_NEW_INTERFACE => Nl80211Event::NewInterface {
+                ifindex,
+                name: ifname,
+                iftype,
+            },
+            NL80211_CMD_DEL_INTERFACE => Nl80211Event::DelInterface { ifindex },
+            NL80211_CMD_REG_CHANGE => Nl80211Event::RegChange { country },
+            _ => continue,
+        };
+
+        events.push(event);
+    }
+
+    events
 }
 
 // Ethtool protocol events
