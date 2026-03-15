@@ -10,6 +10,57 @@ Bond creation via `BondLink` already exists (`link.rs:2829-2989`) with basic att
 4. **Slave info parsing** — Parse per-slave status from `IFLA_INFO_SLAVE_DATA`
 5. **Declarative config** — Complete the TODO in `config/apply.rs:482`
 
+## Progress
+
+### Typed Enums
+- [ ] Implement `BondMode` enum with `TryFrom<u8>`
+- [ ] Implement `XmitHashPolicy` enum with `TryFrom<u8>`
+- [ ] Implement `LacpRate` enum with `TryFrom<u8>`
+- [ ] Implement `PrimaryReselect` enum with `TryFrom<u8>`
+- [ ] Implement `FailOverMac` enum with `TryFrom<u8>`
+- [ ] Implement `ArpValidate` enum with `TryFrom<u8>`
+- [ ] Implement `AdSelect` enum with `TryFrom<u8>`
+- [ ] Deprecate old `bond_mode` raw constants
+- [ ] Add unit tests for all `TryFrom` conversions
+
+### Extended BondLink Builder
+- [ ] Extend `bond_attr` module to all 33 IFLA_BOND_* constants
+- [ ] Extend `BondLink` builder with all attributes
+- [ ] Update `LinkConfig::write_to()` for new attributes
+- [ ] Add integration test for LACP bond creation (`test_bond_lacp`)
+- [ ] Add integration test for active-backup with slaves (`test_bond_active_backup_with_slaves`)
+- [ ] Add `bond` type support to `bins/ip` link add command (all new options)
+- [ ] Add doc comments with examples on `BondLink`
+- [ ] Update CLAUDE.md with bond usage examples
+
+### Bond Info Parsing
+- [ ] Implement `BondInfo` struct
+- [ ] Implement `BondAdInfo` struct
+- [ ] Implement `bond_info()` on `LinkMessage`
+- [ ] Add integration test for bond info parsing
+- [ ] Add bond info display in `bins/ip` link show output
+- [ ] Add doc comments with examples
+
+### Slave Info Parsing
+- [ ] Implement `BondSlaveInfo`, `BondSlaveState`, `MiiStatus` types
+- [ ] Implement `bond_slave_info()` on `LinkMessage`
+- [ ] Implement `is_bond_slave()` helper
+- [ ] Add integration test for slave info parsing
+- [ ] Add slave info display in `bins/ip` link show output
+- [ ] Add doc comments with examples
+
+### High-Level API
+- [ ] Implement `get_bond_info()` on `Connection<Route>`
+- [ ] Implement `get_bond_slaves()` on `Connection<Route>`
+- [ ] Add integration tests for high-level API
+- [ ] Add doc comments with examples
+
+### Declarative Config
+- [ ] Complete bond apply logic in `config/apply.rs:482`
+- [ ] Extend `BondConfigLink` with new typed attributes in `config/types.rs`
+- [ ] Add integration test for declarative bond config
+- [ ] Add bond examples to `bins/config`
+
 ## Current State
 
 ```rust

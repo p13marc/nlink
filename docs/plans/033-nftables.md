@@ -6,6 +6,54 @@ Add nftables (nf_tables) support via `NETLINK_NETFILTER`. nftables replaced ipta
 
 nftables uses a register-based expression system where rules are sequences of expressions that load data into registers, compare values, and emit verdicts. The high-level API hides this complexity behind a typed builder.
 
+## Progress
+
+### Phase 1: Tables + Chains + Simple Rules
+- [ ] Implement `Connection<Nftables>` protocol type
+- [ ] Implement `NfGenMsg` header (zerocopy, 4 bytes)
+- [ ] Implement `Family`, `Hook`, `ChainType`, `Priority`, `Policy` enums
+- [ ] Implement table CRUD: `add_table()`, `list_tables()`, `del_table()`, `flush_table()`
+- [ ] Implement `Chain` builder with hook, priority, type, policy
+- [ ] Implement chain CRUD: `add_chain()`, `list_chains()`, `del_chain()`
+- [ ] Implement `Verdict` enum (Accept, Drop, Continue, Return, Jump, Goto)
+- [ ] Implement `Expr` enum with Meta, Cmp, Payload, Immediate, Verdict, Counter
+- [ ] Implement `Rule` builder with expression auto-generation
+- [ ] Implement `match_tcp_dport()`, `match_udp_dport()` convenience methods
+- [ ] Implement `match_saddr_v4()`, `match_daddr_v4()` convenience methods
+- [ ] Implement `match_iif()`, `match_oif()` convenience methods
+- [ ] Implement `match_ct_state()` with `CtState` bitflags
+- [ ] Implement `accept()`, `drop()`, `jump()`, `counter()` rule terminations
+- [ ] Implement rule CRUD: `add_rule()`, `list_rules()`, `del_rule()`
+- [ ] Implement expression serialization (`write_expr()`)
+- [ ] Add integration tests for table CRUD
+- [ ] Add integration tests for chain CRUD with hooks
+- [ ] Add integration tests for simple rules (TCP port match + accept)
+- [ ] Add doc comments with examples on all public types
+- [ ] Create `bins/nft` binary or add nftables subcommand to existing binary
+- [ ] Update CLAUDE.md with nftables usage examples
+
+### Phase 2: NAT + Logging + Rate Limiting
+- [ ] Implement `NatExpr` (snat, dnat, masquerade, redirect)
+- [ ] Implement `masquerade()` rule method
+- [ ] Implement `Log` expression with prefix and group
+- [ ] Implement `Limit` expression with rate, unit, burst
+- [ ] Add integration tests for NAT rules
+- [ ] Add integration tests for rate limiting
+- [ ] Add doc comments with examples
+
+### Phase 3: Sets + Transactions
+- [ ] Implement `Set` builder with `SetKeyType`
+- [ ] Implement `SetElement` type
+- [ ] Implement set CRUD: `add_set()`, `del_set()`, `add_set_elements()`
+- [ ] Implement `Lookup` expression (set membership match)
+- [ ] Implement `match_saddr_in_set()` convenience method
+- [ ] Implement batch transactions: `transaction()`, `commit()`
+- [ ] Implement `NFNL_MSG_BATCH_BEGIN`/`NFNL_MSG_BATCH_END` wrapping
+- [ ] Implement `flush_ruleset()`
+- [ ] Add integration tests for sets
+- [ ] Add integration tests for atomic transactions
+- [ ] Add doc comments with examples
+
 ## Architecture
 
 nftables uses `NETLINK_NETFILTER` with `NFNL_SUBSYS_NFTABLES = 10` as subsystem. The existing `Connection<Netfilter>` for conntrack uses the same socket protocol.

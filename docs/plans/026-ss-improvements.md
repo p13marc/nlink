@@ -4,6 +4,43 @@
 
 Improve the `nlink-ss` binary with missing features from iproute2's `ss`. All new library-level APIs must be strongly typed, async, and provide good error messages.
 
+## Progress
+
+### Phase 1: Summary Mode
+- [ ] Implement `SocketSummary` and `TcpSummary` types in `sockdiag`
+- [ ] Implement `socket_summary()` on `Connection<SockDiag>`
+- [ ] Add unit tests for `SocketSummary` aggregation
+- [ ] Add integration test querying real sockets
+- [ ] Add `-s` flag to `bins/ss` binary
+- [ ] Add summary output formatting in `bins/ss/src/output.rs`
+- [ ] Add doc comments with examples on all public types
+- [ ] Update CLAUDE.md with `socket_summary()` usage example
+
+### Phase 2: Kill Mode
+- [ ] Implement `destroy_tcp_socket()` on `Connection<SockDiag>`
+- [ ] Implement `destroy_matching()` with `DestroyResult`/`DestroyError`
+- [ ] Add `DestroyResult`, `DestroyError`, `SocketId` types
+- [ ] Add integration test (requires CAP_NET_ADMIN)
+- [ ] Add `-K` flag to `bins/ss` binary
+- [ ] Add doc comments with examples on destroy methods
+- [ ] Update CLAUDE.md with kill mode example
+
+### Phase 3: Netlink Socket Listing
+- [ ] Implement `NetlinkSocketInfo` and `NetlinkProtocol` types
+- [ ] Implement `netlink_sockets()` on `Connection<SockDiag>`
+- [ ] Add integration test for netlink socket listing
+- [ ] Add `--netlink` flag to `bins/ss` binary
+- [ ] Add netlink socket output formatting
+- [ ] Add doc comments with examples
+
+### Phase 4: Expression Filters
+- [ ] Implement `FilterExpr`, `Comparison` types
+- [ ] Implement `FilterExpr::parse()` with winnow
+- [ ] Implement `FilterExpr::matches()` evaluation
+- [ ] Add unit tests for expression parsing and evaluation
+- [ ] Add expression filter argument to `bins/ss` binary
+- [ ] Add doc comments with examples
+
 ## Current State
 
 The `ss` binary already supports:

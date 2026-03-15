@@ -4,6 +4,39 @@
 
 Address code quality findings: make `serde_json` optional, add SAFETY comments to unsafe blocks, fix ip6gre constants, and replace bare `unwrap()` calls.
 
+## Progress
+
+### Make serde_json Optional
+- [ ] Make `serde` and `serde_json` optional in `Cargo.toml`
+- [ ] Add `output` feature flag with `dep:serde` and `dep:serde_json`
+- [ ] Gate `Error::Json` variant behind `#[cfg(feature = "output")]`
+- [ ] Audit library code for serde_json usage outside `output` module
+- [ ] Verify `cargo build -p nlink` succeeds without `output` feature
+- [ ] Verify `cargo build -p nlink --features output` succeeds
+- [ ] Verify all binary crates still compile
+
+### Add SAFETY Comments
+- [ ] Add SAFETY comments to `tuntap/device.rs` (~11 blocks)
+- [ ] Add SAFETY comments to `netlink/socket.rs` (~3 blocks)
+- [ ] Add SAFETY comments to `netlink/namespace.rs` (~3 blocks)
+- [ ] Add SAFETY comments to `netlink/link.rs` unsafe blocks
+- [ ] Add SAFETY comments to `addr.rs` unsafe blocks
+- [ ] Verify all ~35 unsafe blocks have SAFETY comments via `grep`
+
+### Fix ip6gre Constants
+- [ ] Fix IFLA_GRE_ENCAP_LIMIT (12->11)
+- [ ] Fix IFLA_GRE_FLOWINFO (13->12)
+- [ ] Fix IFLA_GRE_FLAGS (14->13)
+- [ ] Add regression test for correct constant values
+- [ ] Verify existing ip6gre integration tests still pass
+
+### Replace unwrap() with expect()
+- [ ] Replace ~15 `unwrap()` calls in `bins/tc/src/commands/action.rs`
+- [ ] Audit `bins/ip/` for bare `unwrap()` calls
+- [ ] Audit `bins/ss/` for bare `unwrap()` calls
+- [ ] Audit `bins/bridge/` for bare `unwrap()` calls
+- [ ] Audit `bins/wg/` for bare `unwrap()` calls
+
 ## Tasks
 
 ### 1. Make `serde_json` Optional

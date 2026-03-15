@@ -21,6 +21,52 @@ Add devlink Generic Netlink support for hardware device management. Used by mode
 - Health reporter recovery/dump
 - Parameter configuration
 
+## Progress
+
+### Phase 1: Read-Only MVP
+- [ ] Create `genl/devlink/mod.rs` with command and attribute constants
+- [ ] Implement `PortType`, `PortFlavour`, `HealthState`, `ConfigMode` enums with `TryFrom`
+- [ ] Implement `Connection<Devlink>` with `new_async()` (resolves family ID)
+- [ ] Implement `DevlinkDevice` type with `path()` helper
+- [ ] Implement `get_devices()`
+- [ ] Implement `DevlinkInfo` type with `running_version()`, `fixed_version()`, `has_pending_update()`
+- [ ] Implement `get_device_info()`
+- [ ] Implement `VersionInfo` type
+- [ ] Implement attribute parsing (`parse_info`, `parse_version_nested`)
+- [ ] Implement `DevlinkPort` type with `path()`, `has_netdev()`, `is_physical()` helpers
+- [ ] Implement `get_ports()`, `get_device_ports()`, `get_port()`, `get_port_by_netdev()`
+- [ ] Implement `HealthReporter` type with `is_error()`, `has_errors()` helpers
+- [ ] Implement `get_health_reporters()`, `get_health_reporter()`, `get_health_errors()`
+- [ ] Implement health reporter attribute parsing (`parse_health_reporter`)
+- [ ] Implement `DevlinkParam`, `ParamValue`, `ParamData` types
+- [ ] Implement `get_params()`, `get_param()`
+- [ ] Add integration tests for device listing (requires supported NIC)
+- [ ] Add integration tests for info/port/health parsing
+- [ ] Add doc comments with examples on all public types and methods
+- [ ] Create `bins/devlink` binary or add devlink commands to existing binary
+- [ ] Update CLAUDE.md with devlink usage examples
+
+### Phase 2: Management Operations
+- [ ] Implement `ReloadAction` enum
+- [ ] Implement `health_reporter_recover()`
+- [ ] Implement `set_health_reporter()` (auto_recover, auto_dump, graceful_period)
+- [ ] Implement `FlashRequest` builder and `flash_update()`
+- [ ] Implement `FlashProgress` type with `percent()` helper
+- [ ] Implement `reload()` with `ReloadAction`
+- [ ] Implement `port_split()` and `port_unsplit()`
+- [ ] Implement `set_param()` with `ParamData` and `ConfigMode`
+- [ ] Add integration tests for management operations
+- [ ] Add management commands to binary
+- [ ] Add doc comments with examples
+
+### Phase 3: Event Monitoring
+- [ ] Implement `DevlinkEvent` enum
+- [ ] Implement `subscribe()` for multicast group
+- [ ] Implement `events()` and `into_events()` stream methods
+- [ ] Add integration test for event monitoring
+- [ ] Add monitor mode to binary
+- [ ] Add doc comments with examples
+
 ## Kernel Constants (verified against linux/devlink.h, kernel 6.19.6)
 
 ### Commands

@@ -6,6 +6,42 @@ Add support for sending multiple netlink messages in a single `sendmsg()` and co
 
 This is **not** `FuturesUnordered`/`JoinSet` concurrency (which still does 1 message per syscall). True batching concatenates messages in a single kernel buffer.
 
+## Progress
+
+### Core Infrastructure
+- [ ] Add `timeout` field to `Connection` (dependency: Plan 032)
+- [ ] Extract `build_*` methods from `connection.rs` (separate from send)
+- [ ] Implement `Batch<'a>` struct with `conn` reference and `ops` buffer
+- [ ] Implement `BatchOp` with sequence number and serialized message
+- [ ] Implement `BatchResults` with `iter()`, `errors()`, `success_count()`, `error_count()`, `all_ok()`
+- [ ] Make `Error` implement `Clone` (may need `Arc<io::Error>`)
+- [ ] Add unit tests for `BatchResults` API
+
+### Batch Builder Methods
+- [ ] Implement route operations: `add_route()`, `del_route()`, `replace_route()`
+- [ ] Implement link operations: `add_link()`, `del_link()`, `set_link_up()`, `set_link_down()`
+- [ ] Implement address operations: `add_address()`, `del_address()`
+- [ ] Implement neighbor operations: `add_neighbor()`, `del_neighbor()`
+- [ ] Implement FDB operations: `add_fdb()`, `del_fdb()`
+- [ ] Implement TC operations: `add_qdisc()`, `del_qdisc()`
+- [ ] Add integration tests for mixed batch operations
+
+### Execute and Auto-Splitting
+- [ ] Implement `send_chunk()` (concatenate + sendmsg + ACK matching)
+- [ ] Implement `execute()` with auto-splitting at `MAX_BATCH_SIZE` (200KB)
+- [ ] Implement `execute_all()` (fail on first error)
+- [ ] Add integration test for bulk route loading (1000+ routes)
+- [ ] Add integration test for auto-splitting behavior
+- [ ] Add timeout integration with Plan 032
+
+### Module Setup and Exports
+- [ ] Create `crates/nlink/src/netlink/batch.rs`
+- [ ] Export `batch` module from `netlink/mod.rs`
+- [ ] Re-export `Batch`, `BatchResults` from `lib.rs`
+- [ ] Add `batch()` method to `Connection<Route>`
+- [ ] Add doc comments with examples on `Batch` and `BatchResults`
+- [ ] Update CLAUDE.md with batch usage examples
+
 ## API
 
 ### Basic Usage

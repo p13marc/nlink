@@ -6,6 +6,39 @@ Add the three most common IP tunnel types missing from nlink, plus fix the ip6gr
 
 **Critical:** GRE/GRETAP use `IFLA_GRE_*` attributes, while IPIP/SIT use `IFLA_IPTUN_*` attributes. These are **separate enum families** in `linux/if_tunnel.h` with different numeric values.
 
+## Progress
+
+### Bug Fix: ip6gre Constants
+- [ ] Fix IFLA_GRE_ENCAP_LIMIT (12→11), FLOWINFO (13→12), FLAGS (14→13)
+- [ ] Rename `ip6gre` module to `gre_attr` (shared constants)
+- [ ] Add regression test verifying correct attribute values
+- [ ] Verify existing ip6gre/ip6gretap tests still pass
+
+### GreLink (GRE/GRETAP)
+- [ ] Add `gre_attr` constants module
+- [ ] Implement `GreLink` builder with `LinkConfig` trait
+- [ ] Implement `GreLink::tap()` constructor for GRETAP
+- [ ] Add integration tests (`test_gre_tunnel`, `test_gretap_tunnel`)
+- [ ] Add `gre` and `gretap` support to `bins/ip` link add command
+- [ ] Add doc comments with examples on `GreLink`
+- [ ] Update CLAUDE.md with GRE/GRETAP usage examples
+
+### IpipLink
+- [ ] Add `iptun_attr` constants module
+- [ ] Implement `IpipLink` builder with `LinkConfig` trait
+- [ ] Add integration test (`test_ipip_tunnel`)
+- [ ] Add `ipip` support to `bins/ip` link add command
+- [ ] Add doc comments with examples on `IpipLink`
+- [ ] Update CLAUDE.md with IPIP usage example
+
+### SitLink
+- [ ] Implement `SitLink` builder with `LinkConfig` trait
+- [ ] Implement `isatap()` support via `SIT_ISATAP` flag
+- [ ] Add integration tests (`test_sit_tunnel`, `test_sit_isatap`)
+- [ ] Add `sit` support to `bins/ip` link add command
+- [ ] Add doc comments with examples on `SitLink`
+- [ ] Update CLAUDE.md with SIT/ISATAP usage examples
+
 ## Current State
 
 | Tunnel Type | Status | Attribute Family |

@@ -4,6 +4,36 @@
 
 Add configurable timeouts for netlink operations. A hung kernel response currently blocks the caller indefinitely with no recourse.
 
+## Progress
+
+### Core Implementation
+- [ ] Add `timeout: Option<Duration>` field to `Connection<P>`
+- [ ] Implement `timeout()` builder method
+- [ ] Implement `no_timeout()` method
+- [ ] Implement `get_timeout()` method
+- [ ] Implement `with_timeout()` internal async helper
+
+### Apply to Operations
+- [ ] Wrap `send_ack()` with `with_timeout()`
+- [ ] Wrap `send_dump()` with `with_timeout()`
+- [ ] Verify GENL connections propagate timeout
+- [ ] Verify batch operations respect timeout (Plan 030)
+
+### Error Variant
+- [ ] Add `Error::Timeout` variant to error enum
+- [ ] Implement `is_timeout()` method on `Error`
+- [ ] Add doc comments with examples on `Error::Timeout`
+
+### Testing
+- [ ] Add test `test_no_timeout_default`
+- [ ] Add test `test_timeout_is_chainable`
+- [ ] Add test `test_timeout_respected` (short timeout)
+- [ ] Add integration test with actual timeout scenario
+
+### Documentation
+- [ ] Add doc comments with examples on `timeout()` and `no_timeout()`
+- [ ] Update CLAUDE.md with timeout usage example
+
 ## Current State
 
 - `socket.rs`: `send()` and `recv_msg()` use tokio `AsyncFd` with no timeout
