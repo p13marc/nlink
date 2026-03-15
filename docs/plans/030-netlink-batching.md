@@ -19,10 +19,10 @@ This is **not** `FuturesUnordered`/`JoinSet` concurrency (which still does 1 mes
 ### Batch Builder Methods
 - [x] Implement route operations: `add_route()`, `del_route()`
 - [x] Implement link operations: `add_link()`, `del_link_by_index()`
-- [ ] Implement address operations: `add_address()`, `del_address()`
-- [ ] Implement neighbor operations: `add_neighbor()`, `del_neighbor()`
-- [ ] Implement FDB operations: `add_fdb()`, `del_fdb()`
-- [ ] Implement TC operations: `add_qdisc()`, `del_qdisc()`
+- [x] Implement address operations: `add_address()`, `del_address()`
+- [x] Implement neighbor operations: `add_neighbor()`, `del_neighbor()`
+- [x] Implement FDB operations: `add_fdb()`, `del_fdb()`
+- [x] Implement TC operations: `add_qdisc()`, `del_qdisc()`
 - [ ] Add integration tests for mixed batch operations
 
 ### Execute and Auto-Splitting

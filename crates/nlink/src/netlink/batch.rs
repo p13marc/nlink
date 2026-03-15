@@ -19,14 +19,21 @@
 //! println!("{} succeeded, {} failed", results.success_count(), results.error_count());
 //! ```
 
+use super::addr::AddressConfig;
 use super::builder::MessageBuilder;
 use super::connection::Connection;
 use super::error::{Error, Result};
-use super::message::{MessageIter, NlMsgError, NlMsgType, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST};
+use super::fdb::FdbEntryBuilder;
+use super::link::LinkConfig;
+use super::message::{
+    MessageIter, NlMsgError, NlMsgType, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST,
+};
+use super::neigh::NeighborConfig;
 use super::protocol::Route;
 use super::route::RouteConfig;
+use super::tc::QdiscConfig;
 use super::types::link::IfInfoMsg;
-use super::link::LinkConfig;
+use super::types::tc::{tc_handle, TcMsg, TcaAttr};
 
 /// Maximum batch size before auto-splitting (200KB).
 const MAX_BATCH_SIZE: usize = 200 * 1024;
@@ -124,6 +131,119 @@ impl<'a> Batch<'a> {
         let mut ifinfo = IfInfoMsg::new();
         ifinfo.ifi_index = ifindex as i32;
         builder.append(&ifinfo);
+        self.push(builder);
+        self
+    }
+
+    /// Add an address in the batch.
+    ///
+    /// Note: Use address types with pre-resolved indices (e.g., `Ipv4Address::with_index()`).
+    pub fn add_address<A: AddressConfig>(mut self, config: A, ifindex: u32) -> Self {
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWADDR,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        if config.write_add(&mut builder, ifindex).is_ok() {
+            self.push(builder);
+        }
+        self
+    }
+
+    /// Delete an address in the batch.
+    pub fn del_address<A: AddressConfig>(mut self, config: A, ifindex: u32) -> Self {
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_DELADDR,
+            NLM_F_REQUEST | NLM_F_ACK,
+        );
+        if config.write_delete(&mut builder, ifindex).is_ok() {
+            self.push(builder);
+        }
+        self
+    }
+
+    /// Add a neighbor in the batch.
+    ///
+    /// Note: Use neighbor types with pre-resolved indices.
+    pub fn add_neighbor<N: NeighborConfig>(mut self, config: N, ifindex: u32) -> Self {
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWNEIGH,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        if config.write_add(&mut builder, ifindex).is_ok() {
+            self.push(builder);
+        }
+        self
+    }
+
+    /// Delete a neighbor in the batch.
+    pub fn del_neighbor<N: NeighborConfig>(mut self, config: N, ifindex: u32) -> Self {
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_DELNEIGH,
+            NLM_F_REQUEST | NLM_F_ACK,
+        );
+        if config.write_delete(&mut builder, ifindex).is_ok() {
+            self.push(builder);
+        }
+        self
+    }
+
+    /// Add an FDB entry in the batch.
+    ///
+    /// Pass the resolved interface index and optional master (bridge) index.
+    pub fn add_fdb(mut self, entry: FdbEntryBuilder, ifindex: u32, master_idx: Option<u32>) -> Self {
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWNEIGH,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        entry.write_add(&mut builder, ifindex, master_idx);
+        self.push(builder);
+        self
+    }
+
+    /// Delete an FDB entry in the batch.
+    pub fn del_fdb(mut self, entry: FdbEntryBuilder, ifindex: u32) -> Self {
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_DELNEIGH,
+            NLM_F_REQUEST | NLM_F_ACK,
+        );
+        entry.write_delete(&mut builder, ifindex);
+        self.push(builder);
+        self
+    }
+
+    /// Add a qdisc in the batch.
+    ///
+    /// `ifindex` is the interface index. The qdisc is added as root.
+    pub fn add_qdisc(mut self, ifindex: u32, config: impl QdiscConfig) -> Self {
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_NEWQDISC,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
+        );
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(tc_handle::ROOT)
+            .with_handle(config.default_handle().unwrap_or(0));
+        builder.append(&tcmsg);
+        builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
+
+        let options_token = builder.nest_start(TcaAttr::Options as u16);
+        if config.write_options(&mut builder).is_ok() {
+            builder.nest_end(options_token);
+            self.push(builder);
+        }
+        self
+    }
+
+    /// Delete a qdisc in the batch (root qdisc).
+    pub fn del_qdisc(mut self, ifindex: u32) -> Self {
+        let mut builder = MessageBuilder::new(
+            NlMsgType::RTM_DELQDISC,
+            NLM_F_REQUEST | NLM_F_ACK,
+        );
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(tc_handle::ROOT);
+        builder.append(&tcmsg);
         self.push(builder);
         self
     }
