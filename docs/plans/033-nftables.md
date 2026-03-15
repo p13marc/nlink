@@ -52,7 +52,7 @@ nftables uses a register-based expression system where rules are sequences of ex
 - [x] Implement `flush_ruleset()`
 - [ ] Add integration tests for sets
 - [ ] Add integration tests for atomic transactions
-- [ ] Add doc comments with examples
+- [x] Add doc comments with examples
 
 ## Architecture
 

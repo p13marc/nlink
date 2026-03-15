@@ -57,7 +57,7 @@ Add devlink Generic Netlink support for hardware device management. Used by mode
 - [x] Implement `set_param()` with `ParamData` and `ConfigMode`
 - [ ] Add integration tests for management operations
 - [x] Add management commands to binary
-- [ ] Add doc comments with examples
+- [x] Add doc comments with examples
 
 ### Phase 3: Event Monitoring
 - [x] Implement `DevlinkEvent` enum
@@ -65,7 +65,7 @@ Add devlink Generic Netlink support for hardware device management. Used by mode
 - [x] Implement `events()` and `into_events()` stream methods
 - [ ] Add integration test for event monitoring
 - [x] Add monitor mode to binary
-- [ ] Add doc comments with examples
+- [x] Add doc comments with examples
 
 ## Kernel Constants (verified against linux/devlink.h, kernel 6.19.6)
 
