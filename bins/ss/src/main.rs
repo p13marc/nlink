@@ -116,6 +116,10 @@ struct Cli {
     /// Print summary statistics.
     #[arg(short = 's', long)]
     summary: bool,
+
+    /// Forcibly close matching sockets (requires CAP_NET_ADMIN).
+    #[arg(short = 'K', long)]
+    kill: bool,
 }
 
 #[tokio::main]
@@ -155,6 +159,11 @@ async fn main() -> anyhow::Result<()> {
     // Handle summary mode
     if cli.summary {
         return run_summary(&conn, format).await;
+    }
+
+    // Handle kill mode
+    if cli.kill {
+        return run_kill(&cli, &conn).await;
     }
 
     // Determine which socket types to query
@@ -309,6 +318,42 @@ async fn main() -> anyhow::Result<()> {
         OutputFormat::Text => {
             output::print_text(&all_results, &opts)?;
         }
+    }
+
+    Ok(())
+}
+
+/// Run kill mode - destroy matching TCP sockets.
+async fn run_kill(cli: &Cli, conn: &Connection<SockDiag>) -> anyhow::Result<()> {
+    use nlink::sockdiag::{InetFilter, TcpState};
+
+    // Build filter from CLI arguments (TCP only - only TCP supports SOCK_DESTROY)
+    let states = if cli.all {
+        TcpState::all_mask()
+    } else if cli.listening {
+        TcpState::Listen.mask()
+    } else {
+        TcpState::connected_mask()
+    };
+
+    let mut filter = InetFilter {
+        protocol: Protocol::Tcp,
+        states,
+        ..Default::default()
+    };
+    apply_inet_filters(cli, &mut filter);
+
+    let result = conn.destroy_matching(&filter).await?;
+
+    if result.destroyed > 0 {
+        eprintln!("Destroyed {} socket(s)", result.destroyed);
+    }
+    for err in &result.errors {
+        eprintln!("Failed to destroy {}: {}", err.socket, err.error);
+    }
+
+    if result.destroyed == 0 && result.errors.is_empty() {
+        eprintln!("No matching sockets found");
     }
 
     Ok(())

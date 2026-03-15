@@ -18,10 +18,10 @@ Improve the `nlink-ss` binary with missing features from iproute2's `ss`. All ne
 
 ### Phase 2: Kill Mode
 - [x] Implement `destroy_tcp_socket()` on `Connection<SockDiag>`
-- [ ] Implement `destroy_matching()` with `DestroyResult`/`DestroyError`
-- [ ] Add `DestroyResult`, `DestroyError`, `SocketId` types
+- [x] Implement `destroy_matching()` with `DestroyResult`/`DestroyError`
+- [x] Add `DestroyResult`, `DestroyError` types
 - [ ] Add integration test (requires CAP_NET_ADMIN)
-- [ ] Add `-K` flag to `bins/ss` binary
+- [x] Add `-K` flag to `bins/ss` binary
 - [x] Add doc comments with examples on destroy methods
 - [ ] Update CLAUDE.md with kill mode example
 

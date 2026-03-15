@@ -34,8 +34,8 @@ pub use crate::sockdiag::filter::{
 };
 pub use crate::sockdiag::socket::{InetSocket, SocketInfo, UnixSocket, UnixType};
 pub use crate::sockdiag::types::{
-    AddressFamily, MemInfo, Protocol as InetProtocol, SocketState, SocketSummary, TcpInfo,
-    TcpState, Timer,
+    AddressFamily, DestroyError, DestroyResult, MemInfo, Protocol as InetProtocol, SocketState,
+    SocketSummary, TcpInfo, TcpState, Timer,
 };
 
 // Netlink constants
@@ -298,6 +298,47 @@ impl Connection<SockDiag> {
         }
 
         Ok(())
+    }
+
+    /// Destroy all TCP sockets matching the given filter.
+    ///
+    /// Queries sockets matching the filter, then destroys each one.
+    /// Returns a `DestroyResult` with the count of destroyed sockets and any errors.
+    /// Requires `CAP_NET_ADMIN`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::sockdiag::{InetFilter, Protocol, TcpState};
+    ///
+    /// let conn = Connection::<SockDiag>::new()?;
+    /// let filter = InetFilter {
+    ///     protocol: Protocol::Tcp,
+    ///     states: TcpState::TimeWait.mask(),
+    ///     ..Default::default()
+    /// };
+    /// let result = conn.destroy_matching(&filter).await?;
+    /// println!("Destroyed {} sockets", result.destroyed);
+    /// ```
+    pub async fn destroy_matching(
+        &self,
+        filter: &InetFilter,
+    ) -> Result<crate::sockdiag::types::DestroyResult> {
+        let sockets = self.query_inet_typed(filter).await?;
+        let mut destroyed = 0u32;
+        let mut errors = Vec::new();
+
+        for sock in &sockets {
+            match self.destroy_tcp_socket(sock).await {
+                Ok(()) => destroyed += 1,
+                Err(e) => errors.push(crate::sockdiag::types::DestroyError {
+                    socket: sock.local,
+                    error: e,
+                }),
+            }
+        }
+
+        Ok(crate::sockdiag::types::DestroyResult { destroyed, errors })
     }
 
     async fn query_inet(&self, filter: &InetFilter) -> Result<Vec<SocketInfo>> {

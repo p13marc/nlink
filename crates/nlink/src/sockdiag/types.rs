@@ -751,6 +751,43 @@ impl fmt::Display for SocketSummary {
     }
 }
 
+/// Result of a batch socket destruction operation.
+///
+/// Contains the count of successfully destroyed sockets and any errors.
+///
+/// # Example
+///
+/// ```ignore
+/// let result = conn.destroy_matching(&filter).await?;
+/// println!("Destroyed {} sockets", result.destroyed);
+/// for err in &result.errors {
+///     eprintln!("Failed to destroy {:?}: {}", err.socket, err.error);
+/// }
+/// ```
+#[derive(Debug)]
+pub struct DestroyResult {
+    /// Number of sockets successfully destroyed.
+    pub destroyed: u32,
+    /// Errors encountered during destruction.
+    pub errors: Vec<DestroyError>,
+}
+
+impl DestroyResult {
+    /// True if all sockets were destroyed successfully.
+    pub fn all_ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+/// Error from destroying a specific socket.
+#[derive(Debug)]
+pub struct DestroyError {
+    /// The socket that failed to be destroyed (local -> remote).
+    pub socket: std::net::SocketAddr,
+    /// The error that occurred.
+    pub error: crate::netlink::Error,
+}
+
 /// TCP socket statistics broken down by state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TcpSummary {
