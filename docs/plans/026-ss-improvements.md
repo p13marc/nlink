@@ -9,7 +9,7 @@ Improve the `nlink-ss` binary with missing features from iproute2's `ss`. All ne
 ### Phase 1: Summary Mode
 - [x] Implement `SocketSummary` and `TcpSummary` types in `sockdiag`
 - [x] Implement `socket_summary()` on `Connection<SockDiag>`
-- [ ] Add unit tests for `SocketSummary` aggregation
+- [x] Add unit tests for `SocketSummary` aggregation
 - [ ] Add integration test querying real sockets
 - [x] Add `-s` flag to `bins/ss` binary
 - [x] Add summary output formatting in `bins/ss/src/output.rs`
