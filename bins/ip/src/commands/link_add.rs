@@ -2,8 +2,9 @@
 
 use clap::{Args, Subcommand};
 use nlink::netlink::link::{
-    BondLink, BridgeLink, DummyLink, GreLink, GretapLink, IpipLink, IpvlanLink, MacvlanLink,
-    MacvtapLink, SitLink, VethLink, VlanLink, VrfLink, VxlanLink, WireguardLink, bond_mode,
+    BondLink, BondMode, BridgeLink, DummyLink, GreLink, GretapLink, IpipLink, IpvlanLink,
+    MacvlanLink, MacvtapLink, SitLink, VethLink, VlanLink, VrfLink, VxlanLink, WireguardLink,
+    XmitHashPolicy,
 };
 use nlink::netlink::{Connection, Result, Route};
 
@@ -653,27 +654,28 @@ fn parse_mac(addr: &str) -> Result<[u8; 6]> {
         .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid MAC address: {}", e)))
 }
 
-fn parse_bond_mode(mode: &str) -> u8 {
+fn parse_bond_mode(mode: &str) -> BondMode {
     match mode.to_lowercase().as_str() {
-        "balance-rr" | "0" => bond_mode::BALANCE_RR,
-        "active-backup" | "1" => bond_mode::ACTIVE_BACKUP,
-        "balance-xor" | "2" => bond_mode::BALANCE_XOR,
-        "broadcast" | "3" => bond_mode::BROADCAST,
-        "802.3ad" | "4" => bond_mode::LACP,
-        "balance-tlb" | "5" => bond_mode::BALANCE_TLB,
-        "balance-alb" | "6" => bond_mode::BALANCE_ALB,
-        _ => bond_mode::BALANCE_RR,
+        "balance-rr" | "0" => BondMode::BalanceRr,
+        "active-backup" | "1" => BondMode::ActiveBackup,
+        "balance-xor" | "2" => BondMode::BalanceXor,
+        "broadcast" | "3" => BondMode::Broadcast,
+        "802.3ad" | "4" => BondMode::Lacp,
+        "balance-tlb" | "5" => BondMode::BalanceTlb,
+        "balance-alb" | "6" => BondMode::BalanceAlb,
+        _ => BondMode::BalanceRr,
     }
 }
 
-fn parse_xmit_hash_policy(policy: &str) -> u8 {
+fn parse_xmit_hash_policy(policy: &str) -> XmitHashPolicy {
     match policy.to_lowercase().as_str() {
-        "layer2" | "0" => 0,
-        "layer3+4" | "1" => 1,
-        "layer2+3" | "2" => 2,
-        "encap2+3" | "3" => 3,
-        "encap3+4" | "4" => 4,
-        _ => 0,
+        "layer2" | "0" => XmitHashPolicy::Layer2,
+        "layer3+4" | "1" => XmitHashPolicy::Layer34,
+        "layer2+3" | "2" => XmitHashPolicy::Layer23,
+        "encap2+3" | "3" => XmitHashPolicy::Encap23,
+        "encap3+4" | "4" => XmitHashPolicy::Encap34,
+        "vlan+srcmac" | "5" => XmitHashPolicy::VlanSrcMac,
+        _ => XmitHashPolicy::Layer2,
     }
 }
 

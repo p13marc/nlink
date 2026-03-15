@@ -13,24 +13,24 @@ Bond creation via `BondLink` already exists (`link.rs:2829-2989`) with basic att
 ## Progress
 
 ### Typed Enums
-- [ ] Implement `BondMode` enum with `TryFrom<u8>`
-- [ ] Implement `XmitHashPolicy` enum with `TryFrom<u8>`
-- [ ] Implement `LacpRate` enum with `TryFrom<u8>`
-- [ ] Implement `PrimaryReselect` enum with `TryFrom<u8>`
-- [ ] Implement `FailOverMac` enum with `TryFrom<u8>`
-- [ ] Implement `ArpValidate` enum with `TryFrom<u8>`
-- [ ] Implement `AdSelect` enum with `TryFrom<u8>`
-- [ ] Deprecate old `bond_mode` raw constants
+- [x] Implement `BondMode` enum with `TryFrom<u8>`
+- [x] Implement `XmitHashPolicy` enum with `TryFrom<u8>`
+- [x] Implement `LacpRate` enum with `TryFrom<u8>`
+- [x] Implement `PrimaryReselect` enum with `TryFrom<u8>`
+- [x] Implement `FailOverMac` enum with `TryFrom<u8>`
+- [x] Implement `ArpValidate` enum with `TryFrom<u8>`
+- [x] Implement `AdSelect` enum with `TryFrom<u8>`
+- [x] Deprecate old `bond_mode` raw constants
 - [ ] Add unit tests for all `TryFrom` conversions
 
 ### Extended BondLink Builder
-- [ ] Extend `bond_attr` module to all 33 IFLA_BOND_* constants
-- [ ] Extend `BondLink` builder with all attributes
-- [ ] Update `LinkConfig::write_to()` for new attributes
-- [ ] Add integration test for LACP bond creation (`test_bond_lacp`)
-- [ ] Add integration test for active-backup with slaves (`test_bond_active_backup_with_slaves`)
-- [ ] Add `bond` type support to `bins/ip` link add command (all new options)
-- [ ] Add doc comments with examples on `BondLink`
+- [x] Extend `bond_attr` module to all 33 IFLA_BOND_* constants
+- [x] Extend `BondLink` builder with all attributes
+- [x] Update `LinkConfig::write_to()` for new attributes
+- [x] Add integration test for LACP bond creation (`test_bond_lacp`)
+- [x] Add integration test for active-backup with slaves (`test_bond_active_backup_with_slaves`)
+- [x] Update `bins/ip` link add command to use typed enums
+- [x] Add doc comments with examples on `BondLink`
 - [ ] Update CLAUDE.md with bond usage examples
 
 ### Bond Info Parsing

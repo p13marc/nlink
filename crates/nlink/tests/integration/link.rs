@@ -4,8 +4,9 @@
 
 use nlink::Result;
 use nlink::netlink::link::{
-    BridgeLink, DummyLink, GreLink, GretapLink, IfbLink, IpipLink, IpvlanLink, MacvlanLink,
-    MacvlanMode, SitLink, VethLink, VlanLink, VrfLink,
+    BondLink, BondMode, BridgeLink, DummyLink, GreLink, GretapLink, IfbLink, IpipLink,
+    IpvlanLink, LacpRate, MacvlanLink, MacvlanMode, SitLink, VethLink, VlanLink, VrfLink,
+    XmitHashPolicy,
 };
 
 use crate::common::TestNamespace;
@@ -565,6 +566,68 @@ async fn test_sit_isatap() -> Result<()> {
     let link = conn.get_link_by_name("isatap0").await?;
     assert!(link.is_some(), "isatap0 should exist");
     assert_eq!(link.unwrap().kind(), Some("sit"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_bond_lacp() -> Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("bond-lacp")?;
+    let conn = ns.connection()?;
+
+    // Create LACP bond with typed enums
+    conn.add_link(
+        BondLink::new("bond0")
+            .mode(BondMode::Lacp)
+            .miimon(100)
+            .lacp_rate(LacpRate::Fast)
+            .xmit_hash_policy(XmitHashPolicy::Layer34)
+            .min_links(1),
+    )
+    .await?;
+
+    let link = conn.get_link_by_name("bond0").await?;
+    assert!(link.is_some(), "bond0 should exist");
+    assert_eq!(link.unwrap().kind(), Some("bond"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_bond_active_backup_with_slaves() -> Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("bond-ab")?;
+    let conn = ns.connection()?;
+
+    // Create active-backup bond
+    conn.add_link(
+        BondLink::new("bond0")
+            .mode(BondMode::ActiveBackup)
+            .miimon(100),
+    )
+    .await?;
+
+    // Create dummy slaves
+    conn.add_link(DummyLink::new("eth0")).await?;
+    conn.add_link(DummyLink::new("eth1")).await?;
+
+    // Enslave to bond
+    conn.set_link_down("eth0").await?;
+    conn.set_link_down("eth1").await?;
+    conn.set_link_master("eth0", "bond0").await?;
+    conn.set_link_master("eth1", "bond0").await?;
+
+    // Verify they are attached
+    let links = conn.get_links().await?;
+    let bond = links.iter().find(|l| l.name() == Some("bond0")).unwrap();
+    let eth0 = links.iter().find(|l| l.name() == Some("eth0")).unwrap();
+    let eth1 = links.iter().find(|l| l.name() == Some("eth1")).unwrap();
+
+    assert_eq!(eth0.master(), Some(bond.ifindex()));
+    assert_eq!(eth1.master(), Some(bond.ifindex()));
 
     Ok(())
 }

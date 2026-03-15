@@ -2870,7 +2870,8 @@ impl LinkConfig for Ip6GretapLink {
 // Bond Link
 // ============================================================================
 
-/// Bond mode constants.
+/// Bond mode constants (deprecated, use `BondMode` enum instead).
+#[deprecated(note = "use `BondMode` enum instead")]
 pub mod bond_mode {
     pub const BALANCE_RR: u8 = 0;
     pub const ACTIVE_BACKUP: u8 = 1;
@@ -2881,61 +2882,260 @@ pub mod bond_mode {
     pub const BALANCE_ALB: u8 = 6;
 }
 
-/// Bond attribute constants.
+/// Bonding mode.
+///
+/// Determines how traffic is distributed across slave interfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BondMode {
+    /// Round-robin: packets transmitted in sequential order.
+    BalanceRr = 0,
+    /// Active-backup: only one slave active, failover on link failure.
+    ActiveBackup = 1,
+    /// XOR: transmit based on hash of source/destination.
+    BalanceXor = 2,
+    /// Broadcast: all packets on all slaves.
+    Broadcast = 3,
+    /// IEEE 802.3ad (LACP): dynamic link aggregation.
+    Lacp = 4,
+    /// Adaptive transmit load balancing.
+    BalanceTlb = 5,
+    /// Adaptive load balancing (RX + TX).
+    BalanceAlb = 6,
+}
+
+/// Transmit hash policy for XOR/LACP modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum XmitHashPolicy {
+    /// Hash by L2 (MAC) addresses.
+    Layer2 = 0,
+    /// Hash by L3+L4 (IP + port).
+    Layer34 = 1,
+    /// Hash by L2+L3 (MAC + IP).
+    Layer23 = 2,
+    /// Hash by encapsulated L2+L3.
+    Encap23 = 3,
+    /// Hash by encapsulated L3+L4.
+    Encap34 = 4,
+    /// Hash by VLAN + source MAC.
+    VlanSrcMac = 5,
+}
+
+/// LACP rate for 802.3ad mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LacpRate {
+    /// Send LACPDUs every 30 seconds.
+    Slow = 0,
+    /// Send LACPDUs every 1 second.
+    Fast = 1,
+}
+
+/// Primary slave reselection policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PrimaryReselect {
+    /// Always reselect when a better slave comes up.
+    Always = 0,
+    /// Reselect only if the new slave is better.
+    Better = 1,
+    /// Reselect only on active slave failure.
+    Failure = 2,
+}
+
+/// Fail-over MAC address policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FailOverMac {
+    /// Don't change MAC on failover.
+    None = 0,
+    /// Set bond MAC to active slave's MAC.
+    Active = 1,
+    /// Follow the current active slave's MAC.
+    Follow = 2,
+}
+
+/// ARP validation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ArpValidate {
+    /// No ARP validation.
+    None = 0,
+    /// Validate only on the active slave.
+    Active = 1,
+    /// Validate only on backup slaves.
+    Backup = 2,
+    /// Validate on all slaves.
+    All = 3,
+    /// Filter and validate on active.
+    FilterActive = 4,
+    /// Filter and validate on backup.
+    FilterBackup = 5,
+}
+
+/// Ad (802.3ad) selection logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AdSelect {
+    /// Select by highest aggregator bandwidth.
+    Stable = 0,
+    /// Select by aggregator bandwidth.
+    Bandwidth = 1,
+    /// Select by number of ports.
+    Count = 2,
+}
+
+/// IFLA_BOND_* attribute constants (verified against linux/if_link.h, kernel 6.19.6).
+#[allow(dead_code)]
 mod bond_attr {
     pub const IFLA_BOND_MODE: u16 = 1;
+    pub const IFLA_BOND_ACTIVE_SLAVE: u16 = 2;
     pub const IFLA_BOND_MIIMON: u16 = 3;
     pub const IFLA_BOND_UPDELAY: u16 = 4;
     pub const IFLA_BOND_DOWNDELAY: u16 = 5;
+    pub const IFLA_BOND_USE_CARRIER: u16 = 6;
+    pub const IFLA_BOND_ARP_INTERVAL: u16 = 7;
+    pub const IFLA_BOND_ARP_IP_TARGET: u16 = 8;
+    pub const IFLA_BOND_ARP_VALIDATE: u16 = 9;
+    pub const IFLA_BOND_ARP_ALL_TARGETS: u16 = 10;
+    pub const IFLA_BOND_PRIMARY: u16 = 11;
+    pub const IFLA_BOND_PRIMARY_RESELECT: u16 = 12;
+    pub const IFLA_BOND_FAIL_OVER_MAC: u16 = 13;
     pub const IFLA_BOND_XMIT_HASH_POLICY: u16 = 14;
+    pub const IFLA_BOND_RESEND_IGMP: u16 = 15;
+    pub const IFLA_BOND_NUM_PEER_NOTIF: u16 = 16;
+    pub const IFLA_BOND_ALL_SLAVES_ACTIVE: u16 = 17;
     pub const IFLA_BOND_MIN_LINKS: u16 = 18;
+    pub const IFLA_BOND_LP_INTERVAL: u16 = 19;
+    pub const IFLA_BOND_PACKETS_PER_SLAVE: u16 = 20;
+    pub const IFLA_BOND_AD_LACP_RATE: u16 = 21;
+    pub const IFLA_BOND_AD_SELECT: u16 = 22;
+    pub const IFLA_BOND_AD_INFO: u16 = 23;
+    pub const IFLA_BOND_AD_ACTOR_SYS_PRIO: u16 = 24;
+    pub const IFLA_BOND_AD_USER_PORT_KEY: u16 = 25;
+    pub const IFLA_BOND_AD_ACTOR_SYSTEM: u16 = 26;
+    pub const IFLA_BOND_TLB_DYNAMIC_LB: u16 = 27;
+    pub const IFLA_BOND_PEER_NOTIF_DELAY: u16 = 28;
+    pub const IFLA_BOND_AD_LACP_ACTIVE: u16 = 29;
+    pub const IFLA_BOND_MISSED_MAX: u16 = 30;
+    pub const IFLA_BOND_NS_IP6_TARGET: u16 = 31;
+    pub const IFLA_BOND_COUPLED_CONTROL: u16 = 32;
 }
 
 /// Configuration for a bonding (link aggregation) interface.
 ///
+/// Supports all 33 kernel IFLA_BOND_* attributes with typed enums.
+///
 /// # Example
 ///
 /// ```ignore
-/// use nlink::netlink::link::{BondLink, bond_mode};
+/// use nlink::netlink::link::{BondLink, BondMode, XmitHashPolicy, LacpRate};
 ///
+/// // LACP bond with fast rate and layer3+4 hashing
 /// let bond = BondLink::new("bond0")
-///     .mode(bond_mode::LACP)
+///     .mode(BondMode::Lacp)
 ///     .miimon(100)
+///     .lacp_rate(LacpRate::Fast)
+///     .xmit_hash_policy(XmitHashPolicy::Layer34)
 ///     .min_links(1);
+/// conn.add_link(bond).await?;
 ///
+/// // Active-backup with ARP monitoring
+/// let bond = BondLink::new("bond1")
+///     .mode(BondMode::ActiveBackup)
+///     .arp_interval(200)
+///     .arp_ip_target(Ipv4Addr::new(192, 168, 1, 1))
+///     .arp_validate(ArpValidate::All);
 /// conn.add_link(bond).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct BondLink {
     name: String,
-    mode: u8,
+    mode: BondMode,
+    mtu: Option<u32>,
+    address: Option<[u8; 6]>,
+
+    // MII monitoring
     miimon: Option<u32>,
     updelay: Option<u32>,
     downdelay: Option<u32>,
+    use_carrier: Option<bool>,
+
+    // ARP monitoring
+    arp_interval: Option<u32>,
+    arp_ip_targets: Vec<Ipv4Addr>,
+    arp_validate: Option<ArpValidate>,
+    arp_all_targets: Option<u32>,
+
+    // Slave selection
+    primary_reselect: Option<PrimaryReselect>,
+    fail_over_mac: Option<FailOverMac>,
+
+    // Hashing / distribution
+    xmit_hash_policy: Option<XmitHashPolicy>,
     min_links: Option<u32>,
-    xmit_hash_policy: Option<u8>,
-    mtu: Option<u32>,
-    address: Option<[u8; 6]>,
+    packets_per_slave: Option<u32>,
+
+    // 802.3ad (LACP) specific
+    lacp_rate: Option<LacpRate>,
+    ad_select: Option<AdSelect>,
+    ad_actor_sys_prio: Option<u16>,
+    ad_user_port_key: Option<u16>,
+    ad_actor_system: Option<[u8; 6]>,
+    lacp_active: Option<bool>,
+
+    // Misc
+    all_slaves_active: Option<bool>,
+    resend_igmp: Option<u32>,
+    num_peer_notif: Option<u8>,
+    lp_interval: Option<u32>,
+    tlb_dynamic_lb: Option<bool>,
+    peer_notif_delay: Option<u32>,
+    missed_max: Option<u8>,
+    coupled_control: Option<bool>,
 }
 
 impl BondLink {
-    /// Create a new bond interface configuration.
-    pub fn new(name: &str) -> Self {
+    /// Create a new bond interface with default mode (balance-rr).
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
-            name: name.to_string(),
-            mode: bond_mode::BALANCE_RR,
+            name: name.into(),
+            mode: BondMode::BalanceRr,
+            mtu: None,
+            address: None,
             miimon: None,
             updelay: None,
             downdelay: None,
-            min_links: None,
+            use_carrier: None,
+            arp_interval: None,
+            arp_ip_targets: Vec::new(),
+            arp_validate: None,
+            arp_all_targets: None,
+            primary_reselect: None,
+            fail_over_mac: None,
             xmit_hash_policy: None,
-            mtu: None,
-            address: None,
+            min_links: None,
+            packets_per_slave: None,
+            lacp_rate: None,
+            ad_select: None,
+            ad_actor_sys_prio: None,
+            ad_user_port_key: None,
+            ad_actor_system: None,
+            lacp_active: None,
+            all_slaves_active: None,
+            resend_igmp: None,
+            num_peer_notif: None,
+            lp_interval: None,
+            tlb_dynamic_lb: None,
+            peer_notif_delay: None,
+            missed_max: None,
+            coupled_control: None,
         }
     }
 
     /// Set the bonding mode.
-    pub fn mode(mut self, mode: u8) -> Self {
+    pub fn mode(mut self, mode: BondMode) -> Self {
         self.mode = mode;
         self
     }
@@ -2958,15 +3158,75 @@ impl BondLink {
         self
     }
 
+    /// Use carrier state for link monitoring instead of MII/ethtool.
+    pub fn use_carrier(mut self, enabled: bool) -> Self {
+        self.use_carrier = Some(enabled);
+        self
+    }
+
     /// Set the minimum number of links for the bond to be up.
     pub fn min_links(mut self, n: u32) -> Self {
         self.min_links = Some(n);
         self
     }
 
-    /// Set the transmit hash policy (0=layer2, 1=layer3+4, 2=layer2+3).
-    pub fn xmit_hash_policy(mut self, policy: u8) -> Self {
+    /// Set the transmit hash policy.
+    pub fn xmit_hash_policy(mut self, policy: XmitHashPolicy) -> Self {
         self.xmit_hash_policy = Some(policy);
+        self
+    }
+
+    /// Set the LACP rate (for 802.3ad mode).
+    pub fn lacp_rate(mut self, rate: LacpRate) -> Self {
+        self.lacp_rate = Some(rate);
+        self
+    }
+
+    /// Set the ad selection logic (for 802.3ad mode).
+    pub fn ad_select(mut self, select: AdSelect) -> Self {
+        self.ad_select = Some(select);
+        self
+    }
+
+    /// Set the ARP monitoring interval in milliseconds.
+    pub fn arp_interval(mut self, ms: u32) -> Self {
+        self.arp_interval = Some(ms);
+        self
+    }
+
+    /// Add an ARP monitoring target IP (up to 16).
+    pub fn arp_ip_target(mut self, addr: Ipv4Addr) -> Self {
+        self.arp_ip_targets.push(addr);
+        self
+    }
+
+    /// Set the ARP validation mode.
+    pub fn arp_validate(mut self, validate: ArpValidate) -> Self {
+        self.arp_validate = Some(validate);
+        self
+    }
+
+    /// Set the primary slave reselection policy.
+    pub fn primary_reselect(mut self, policy: PrimaryReselect) -> Self {
+        self.primary_reselect = Some(policy);
+        self
+    }
+
+    /// Set the fail-over MAC address policy.
+    pub fn fail_over_mac(mut self, policy: FailOverMac) -> Self {
+        self.fail_over_mac = Some(policy);
+        self
+    }
+
+    /// Enable/disable all slaves active (for multicast/broadcast).
+    pub fn all_slaves_active(mut self, enabled: bool) -> Self {
+        self.all_slaves_active = Some(enabled);
+        self
+    }
+
+    /// Enable/disable TLB dynamic load balancing.
+    pub fn tlb_dynamic_lb(mut self, enabled: bool) -> Self {
+        self.tlb_dynamic_lb = Some(enabled);
         self
     }
 
@@ -2981,6 +3241,72 @@ impl BondLink {
         self.address = Some(address);
         self
     }
+
+    /// Set 802.3ad actor system priority.
+    pub fn ad_actor_sys_prio(mut self, prio: u16) -> Self {
+        self.ad_actor_sys_prio = Some(prio);
+        self
+    }
+
+    /// Set 802.3ad user port key.
+    pub fn ad_user_port_key(mut self, key: u16) -> Self {
+        self.ad_user_port_key = Some(key);
+        self
+    }
+
+    /// Set 802.3ad actor system MAC address.
+    pub fn ad_actor_system(mut self, mac: [u8; 6]) -> Self {
+        self.ad_actor_system = Some(mac);
+        self
+    }
+
+    /// Enable/disable LACP active mode (for 802.3ad).
+    pub fn lacp_active(mut self, enabled: bool) -> Self {
+        self.lacp_active = Some(enabled);
+        self
+    }
+
+    /// Set the number of peer notifications after failover.
+    pub fn num_peer_notif(mut self, n: u8) -> Self {
+        self.num_peer_notif = Some(n);
+        self
+    }
+
+    /// Set the IGMP resend count after failover.
+    pub fn resend_igmp(mut self, count: u32) -> Self {
+        self.resend_igmp = Some(count);
+        self
+    }
+
+    /// Set the learning packets interval (ms).
+    pub fn lp_interval(mut self, ms: u32) -> Self {
+        self.lp_interval = Some(ms);
+        self
+    }
+
+    /// Set packets per slave for balance-rr mode.
+    pub fn packets_per_slave(mut self, n: u32) -> Self {
+        self.packets_per_slave = Some(n);
+        self
+    }
+
+    /// Set the peer notification delay (ms).
+    pub fn peer_notif_delay(mut self, ms: u32) -> Self {
+        self.peer_notif_delay = Some(ms);
+        self
+    }
+
+    /// Set the maximum number of missed MII monitoring intervals.
+    pub fn missed_max(mut self, n: u8) -> Self {
+        self.missed_max = Some(n);
+        self
+    }
+
+    /// Enable/disable coupled control (kernel 6.0+).
+    pub fn coupled_control(mut self, enabled: bool) -> Self {
+        self.coupled_control = Some(enabled);
+        self
+    }
 }
 
 impl LinkConfig for BondLink {
@@ -2993,7 +3319,6 @@ impl LinkConfig for BondLink {
     }
 
     fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
-        // Add interface name
         write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
@@ -3007,7 +3332,8 @@ impl LinkConfig for BondLink {
         builder.append_attr_str(IflaInfo::Kind as u16, "bond");
 
         let data = builder.nest_start(IflaInfo::Data as u16);
-        builder.append_attr_u8(bond_attr::IFLA_BOND_MODE, self.mode);
+        builder.append_attr_u8(bond_attr::IFLA_BOND_MODE, self.mode as u8);
+
         if let Some(v) = self.miimon {
             builder.append_attr_u32(bond_attr::IFLA_BOND_MIIMON, v);
         }
@@ -3017,14 +3343,86 @@ impl LinkConfig for BondLink {
         if let Some(v) = self.downdelay {
             builder.append_attr_u32(bond_attr::IFLA_BOND_DOWNDELAY, v);
         }
+        if let Some(v) = self.use_carrier {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_USE_CARRIER, v as u8);
+        }
+        if let Some(v) = self.arp_interval {
+            builder.append_attr_u32(bond_attr::IFLA_BOND_ARP_INTERVAL, v);
+        }
+        if let Some(v) = self.arp_validate {
+            builder.append_attr_u32(bond_attr::IFLA_BOND_ARP_VALIDATE, v as u32);
+        }
+        if let Some(v) = self.arp_all_targets {
+            builder.append_attr_u32(bond_attr::IFLA_BOND_ARP_ALL_TARGETS, v);
+        }
+        if let Some(v) = self.primary_reselect {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_PRIMARY_RESELECT, v as u8);
+        }
+        if let Some(v) = self.fail_over_mac {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_FAIL_OVER_MAC, v as u8);
+        }
+        if let Some(v) = self.xmit_hash_policy {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_XMIT_HASH_POLICY, v as u8);
+        }
+        if let Some(v) = self.resend_igmp {
+            builder.append_attr_u32(bond_attr::IFLA_BOND_RESEND_IGMP, v);
+        }
+        if let Some(v) = self.num_peer_notif {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_NUM_PEER_NOTIF, v);
+        }
+        if let Some(v) = self.all_slaves_active {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_ALL_SLAVES_ACTIVE, v as u8);
+        }
         if let Some(v) = self.min_links {
             builder.append_attr_u32(bond_attr::IFLA_BOND_MIN_LINKS, v);
         }
-        if let Some(v) = self.xmit_hash_policy {
-            builder.append_attr_u8(bond_attr::IFLA_BOND_XMIT_HASH_POLICY, v);
+        if let Some(v) = self.lp_interval {
+            builder.append_attr_u32(bond_attr::IFLA_BOND_LP_INTERVAL, v);
         }
-        builder.nest_end(data);
+        if let Some(v) = self.packets_per_slave {
+            builder.append_attr_u32(bond_attr::IFLA_BOND_PACKETS_PER_SLAVE, v);
+        }
+        if let Some(v) = self.lacp_rate {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_AD_LACP_RATE, v as u8);
+        }
+        if let Some(v) = self.ad_select {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_AD_SELECT, v as u8);
+        }
+        if let Some(v) = self.ad_actor_sys_prio {
+            builder.append_attr_u16(bond_attr::IFLA_BOND_AD_ACTOR_SYS_PRIO, v);
+        }
+        if let Some(v) = self.ad_user_port_key {
+            builder.append_attr_u16(bond_attr::IFLA_BOND_AD_USER_PORT_KEY, v);
+        }
+        if let Some(ref mac) = self.ad_actor_system {
+            builder.append_attr(bond_attr::IFLA_BOND_AD_ACTOR_SYSTEM, mac);
+        }
+        if let Some(v) = self.tlb_dynamic_lb {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_TLB_DYNAMIC_LB, v as u8);
+        }
+        if let Some(v) = self.peer_notif_delay {
+            builder.append_attr_u32(bond_attr::IFLA_BOND_PEER_NOTIF_DELAY, v);
+        }
+        if let Some(v) = self.lacp_active {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_AD_LACP_ACTIVE, v as u8);
+        }
+        if let Some(v) = self.missed_max {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_MISSED_MAX, v);
+        }
+        if let Some(v) = self.coupled_control {
+            builder.append_attr_u8(bond_attr::IFLA_BOND_COUPLED_CONTROL, v as u8);
+        }
 
+        // ARP IP targets (nested)
+        if !self.arp_ip_targets.is_empty() {
+            let targets = builder.nest_start(bond_attr::IFLA_BOND_ARP_IP_TARGET);
+            for (i, addr) in self.arp_ip_targets.iter().enumerate() {
+                builder.append_attr(i as u16, &addr.octets());
+            }
+            builder.nest_end(targets);
+        }
+
+        builder.nest_end(data);
         builder.nest_end(linkinfo);
     }
 }
