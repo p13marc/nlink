@@ -487,11 +487,10 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(ms) = miimon {
                 config = config.miimon(*ms);
             }
-            if let Some(policy) = xmit_hash_policy {
-                if let Ok(p) = crate::netlink::link::XmitHashPolicy::try_from(*policy) {
+            if let Some(policy) = xmit_hash_policy
+                && let Ok(p) = crate::netlink::link::XmitHashPolicy::try_from(*policy) {
                     config = config.xmit_hash_policy(p);
                 }
-            }
             if let Some(count) = min_links {
                 config = config.min_links(*count);
             }

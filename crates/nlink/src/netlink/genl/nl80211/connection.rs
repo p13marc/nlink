@@ -459,12 +459,11 @@ impl Connection<Nl80211> {
                 continue;
             }
             for (attr_type, attr_payload) in AttrIter::new(&payload[GENL_HDRLEN..]) {
-                if attr_type == NL80211_ATTR_PS_STATE {
-                    if attr_payload.len() >= 4 {
+                if attr_type == NL80211_ATTR_PS_STATE
+                    && attr_payload.len() >= 4 {
                         let val = u32::from_ne_bytes(attr_payload[..4].try_into().unwrap());
                         return PowerSaveState::try_from(val);
                     }
-                }
             }
         }
 

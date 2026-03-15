@@ -784,11 +784,10 @@ impl Connection<Route> {
         let mut slaves = Vec::new();
 
         for link in all_links {
-            if link.master() == Some(bond_ifindex) {
-                if let Some(info) = link.bond_slave_info() {
+            if link.master() == Some(bond_ifindex)
+                && let Some(info) = link.bond_slave_info() {
                     slaves.push((link, info));
                 }
-            }
         }
 
         Ok(slaves)

@@ -159,11 +159,10 @@ impl DevlinkInfo {
     /// Check if there's a pending firmware update (stored != running).
     pub fn has_pending_update(&self) -> bool {
         for stored in &self.versions_stored {
-            if let Some(running) = self.running_version(&stored.name) {
-                if running != stored.value {
+            if let Some(running) = self.running_version(&stored.name)
+                && running != stored.value {
                     return true;
                 }
-            }
         }
         false
     }

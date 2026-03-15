@@ -183,24 +183,22 @@ async fn main() -> Result<()> {
                 if let Some(signal) = sta.signal_dbm {
                     println!("  Signal: {signal} dBm");
                 }
-                if let Some(ref rx) = sta.rx_bitrate {
-                    if let Some(mbps) = rx.mbps() {
+                if let Some(ref rx) = sta.rx_bitrate
+                    && let Some(mbps) = rx.mbps() {
                         print!("  RX bitrate: {mbps} Mbps");
                         if let Some(mcs) = rx.mcs {
                             print!(" MCS {mcs}");
                         }
                         println!();
                     }
-                }
-                if let Some(ref tx) = sta.tx_bitrate {
-                    if let Some(mbps) = tx.mbps() {
+                if let Some(ref tx) = sta.tx_bitrate
+                    && let Some(mbps) = tx.mbps() {
                         print!("  TX bitrate: {mbps} Mbps");
                         if let Some(mcs) = tx.mcs {
                             print!(" MCS {mcs}");
                         }
                         println!();
                     }
-                }
                 if let Some(rx_bytes) = sta.rx_bytes {
                     println!("  RX bytes: {rx_bytes}");
                 }

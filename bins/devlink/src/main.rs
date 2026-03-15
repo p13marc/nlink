@@ -179,16 +179,14 @@ async fn main() -> Result<()> {
                 None => (None, None),
             };
             for port in &ports {
-                if let Some(ref b) = filter_bus {
-                    if &port.bus != b {
+                if let Some(ref b) = filter_bus
+                    && &port.bus != b {
                         continue;
                     }
-                }
-                if let Some(ref d) = filter_dev {
-                    if &port.device != d {
+                if let Some(ref d) = filter_dev
+                    && &port.device != d {
                         continue;
                     }
-                }
                 print!("{}", port.path());
                 if let Some(ref name) = port.netdev_name {
                     print!(" netdev {name}");

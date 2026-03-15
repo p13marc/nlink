@@ -1253,11 +1253,10 @@ fn parse_netlink_msg(
     let protocol = u16::from_ne_bytes([payload[2], payload[3]]) as u8;
 
     // Apply protocol filter
-    if let Some(filter_proto) = filter.protocol {
-        if protocol != filter_proto {
+    if let Some(filter_proto) = filter.protocol
+        && protocol != filter_proto {
             return None;
         }
-    }
 
     // state at offset 4..8 (unused for display)
     let portid = u32::from_ne_bytes([payload[8], payload[9], payload[10], payload[11]]);
