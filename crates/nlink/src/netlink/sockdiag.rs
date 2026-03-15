@@ -34,7 +34,7 @@ pub use crate::sockdiag::filter::{
 };
 pub use crate::sockdiag::socket::{InetSocket, SocketInfo, UnixSocket, UnixType};
 pub use crate::sockdiag::types::{
-    AddressFamily, DestroyError, DestroyResult, MemInfo, Protocol as InetProtocol, SocketState,
+    AddressFamily, MemInfo, Protocol as InetProtocol, SocketState,
     SocketSummary, TcpInfo, TcpState, Timer,
 };
 

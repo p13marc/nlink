@@ -7,14 +7,14 @@ use std::time::Duration;
 
 use super::diff::{ConfigDiff, LinkChanges, compute_diff};
 use super::types::{
-    DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredQdiscType,
+    BondMode, DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredQdiscType,
     DeclaredRoute, DeclaredRouteType, MacvlanMode, NetworkConfig, QdiscParent,
 };
 use crate::netlink::addr::{Ipv4Address, Ipv6Address};
 use crate::netlink::connection::Connection;
 use crate::netlink::error::{Error, Result};
 use crate::netlink::link::{
-    BridgeLink, DummyLink, IfbLink, MacvlanLink, VethLink, VlanLink, VxlanLink,
+    BondLink, BridgeLink, DummyLink, IfbLink, MacvlanLink, VethLink, VlanLink, VxlanLink,
 };
 use crate::netlink::protocol::Route;
 use crate::netlink::route::{Ipv4Route, Ipv6Route};
@@ -477,12 +477,15 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             }
             conn.add_link(config).await?;
         }
-        DeclaredLinkType::Bond { mode: _ } => {
-            // Bond creation requires additional work - for now just create basic bond
-            // TODO: Implement full bond support
-            return Err(Error::NotSupported(
-                "Bond creation not yet implemented in declarative config".to_string(),
-            ));
+        DeclaredLinkType::Bond { mode } => {
+            let mut config = BondLink::new(&link.name).mode(convert_bond_mode(*mode));
+            if let Some(mtu) = link.mtu {
+                config = config.mtu(mtu);
+            }
+            if let Some(addr) = link.address {
+                config = config.address(addr);
+            }
+            conn.add_link(config).await?;
         }
         DeclaredLinkType::Ifb => {
             let config = IfbLink::new(&link.name);
@@ -744,5 +747,17 @@ fn convert_macvlan_mode(mode: MacvlanMode) -> crate::netlink::link::MacvlanMode 
         MacvlanMode::Bridge => crate::netlink::link::MacvlanMode::Bridge,
         MacvlanMode::Passthru => crate::netlink::link::MacvlanMode::Passthru,
         MacvlanMode::Source => crate::netlink::link::MacvlanMode::Source,
+    }
+}
+
+fn convert_bond_mode(mode: BondMode) -> crate::netlink::link::BondMode {
+    match mode {
+        BondMode::BalanceRr => crate::netlink::link::BondMode::BalanceRr,
+        BondMode::ActiveBackup => crate::netlink::link::BondMode::ActiveBackup,
+        BondMode::BalanceXor => crate::netlink::link::BondMode::BalanceXor,
+        BondMode::Broadcast => crate::netlink::link::BondMode::Broadcast,
+        BondMode::Ieee802_3ad => crate::netlink::link::BondMode::Lacp,
+        BondMode::BalanceTlb => crate::netlink::link::BondMode::BalanceTlb,
+        BondMode::BalanceAlb => crate::netlink::link::BondMode::BalanceAlb,
     }
 }
