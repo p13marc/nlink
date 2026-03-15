@@ -4,170 +4,123 @@
 
 Add the three most common IP tunnel types missing from nlink, plus fix the ip6gre attribute constant bug. VTI, VTI6, IP6GRE, and IP6GRETAP already exist and serve as implementation templates.
 
-**Critical:** GRE/GRETAP use `IFLA_GRE_*` attributes (defined in `linux/if_tunnel.h`), while IPIP/SIT use `IFLA_IPTUN_*` attributes (same header, different enum). These are **separate attribute families** with different numeric values — do not mix them.
+**Critical:** GRE/GRETAP use `IFLA_GRE_*` attributes, while IPIP/SIT use `IFLA_IPTUN_*` attributes. These are **separate enum families** in `linux/if_tunnel.h` with different numeric values.
 
 ## Current State
 
-| Tunnel Type | Status | Attribute Family | Notes |
-|-------------|--------|------------------|-------|
-| VTI | Done | `IFLA_VTI_*` | `VtiLink` in link.rs |
-| VTI6 | Done | `IFLA_GRE_*` | `Vti6Link` in link.rs |
-| IP6GRE | Done | `IFLA_GRE_*` | `Ip6GreLink` in link.rs (has constant bug) |
-| IP6GRETAP | Done | `IFLA_GRE_*` | `Ip6GretapLink` in link.rs |
-| **GRE** | **Missing** | `IFLA_GRE_*` | Most widely used tunnel type |
-| **GRETAP** | **Missing** | `IFLA_GRE_*` | L2 GRE for bridging |
-| **IPIP** | **Missing** | `IFLA_IPTUN_*` | Simplest tunnel, common in MPLS/SR |
-| **SIT** | **Missing** | `IFLA_IPTUN_*` | 6in4 tunneling (IPv6 over IPv4) |
+| Tunnel Type | Status | Attribute Family |
+|-------------|--------|------------------|
+| VTI | Done | `IFLA_VTI_*` |
+| VTI6 | Done | `IFLA_GRE_*` |
+| IP6GRE | Done (has constant bug) | `IFLA_GRE_*` |
+| IP6GRETAP | Done (has constant bug) | `IFLA_GRE_*` |
+| **GRE** | **Missing** | `IFLA_GRE_*` |
+| **GRETAP** | **Missing** | `IFLA_GRE_*` |
+| **IPIP** | **Missing** | `IFLA_IPTUN_*` |
+| **SIT** | **Missing** | `IFLA_IPTUN_*` |
 
 ## Bug Fix: ip6gre Attribute Constants
 
-The existing `Ip6GreLink` and `Ip6GretapLink` implementations have incorrect attribute constants starting at `IFLA_GRE_ENCAP_LIMIT`. From `linux/if_tunnel.h`:
+The existing `ip6gre` module (`link.rs:2562`) has wrong values. Verified against kernel 6.19.6 headers:
 
-```c
-enum {
-    IFLA_GRE_UNSPEC,        // 0
-    IFLA_GRE_LINK,          // 1
-    IFLA_GRE_IFLAGS,        // 2
-    IFLA_GRE_OFLAGS,        // 3
-    IFLA_GRE_IKEY,          // 4
-    IFLA_GRE_OKEY,          // 5
-    IFLA_GRE_LOCAL,         // 6
-    IFLA_GRE_REMOTE,        // 7
-    IFLA_GRE_TTL,           // 8
-    IFLA_GRE_TOS,           // 9
-    IFLA_GRE_PMTUDISC,      // 10
-    IFLA_GRE_ENCAP_LIMIT,   // 11  ← currently 12 in link.rs (BUG)
-    IFLA_GRE_FLOWINFO,      // 12  ← currently 13
-    IFLA_GRE_FLAGS,         // 13  ← currently 14
-    IFLA_GRE_ENCAP_TYPE,    // 14
-    IFLA_GRE_ENCAP_FLAGS,   // 15
-    IFLA_GRE_ENCAP_SPORT,   // 16
-    IFLA_GRE_ENCAP_DPORT,   // 17
-    IFLA_GRE_COLLECT_METADATA, // 18
-    IFLA_GRE_IGNORE_DF,     // 19
-    IFLA_GRE_FWMARK,        // 20
-    IFLA_GRE_ERSPAN_INDEX,  // 21
-    IFLA_GRE_ERSPAN_VER,    // 22
-    IFLA_GRE_ERSPAN_DIR,    // 23
-    IFLA_GRE_ERSPAN_HWID,   // 24
-};
+```rust
+// Current (WRONG)              // Correct (from linux/if_tunnel.h)
+IFLA_GRE_ENCAP_LIMIT = 12     →  IFLA_GRE_ENCAP_LIMIT = 11
+IFLA_GRE_FLOWINFO    = 13     →  IFLA_GRE_FLOWINFO    = 12
+IFLA_GRE_FLAGS       = 14     →  IFLA_GRE_FLAGS       = 13
 ```
 
-**Fix:** In `link.rs`, change:
-- `IFLA_GRE_ENCAP_LIMIT`: 12 → 11
-- `IFLA_GRE_FLOWINFO`: 13 → 12
-- `IFLA_GRE_FLAGS`: 14 → 13
+Full `IFLA_GRE_*` enum (verified):
+
+| Constant | Value | Type |
+|----------|-------|------|
+| `IFLA_GRE_LINK` | 1 | u32 (ifindex) |
+| `IFLA_GRE_IFLAGS` | 2 | u16 |
+| `IFLA_GRE_OFLAGS` | 3 | u16 |
+| `IFLA_GRE_IKEY` | 4 | u32 |
+| `IFLA_GRE_OKEY` | 5 | u32 |
+| `IFLA_GRE_LOCAL` | 6 | in_addr/in6_addr |
+| `IFLA_GRE_REMOTE` | 7 | in_addr/in6_addr |
+| `IFLA_GRE_TTL` | 8 | u8 |
+| `IFLA_GRE_TOS` | 9 | u8 |
+| `IFLA_GRE_PMTUDISC` | 10 | u8 (bool) |
+| `IFLA_GRE_ENCAP_LIMIT` | 11 | u8 |
+| `IFLA_GRE_FLOWINFO` | 12 | u32 (be) |
+| `IFLA_GRE_FLAGS` | 13 | u32 |
+| `IFLA_GRE_ENCAP_TYPE` | 14 | u16 |
+| `IFLA_GRE_ENCAP_FLAGS` | 15 | u16 |
+| `IFLA_GRE_ENCAP_SPORT` | 16 | u16 |
+| `IFLA_GRE_ENCAP_DPORT` | 17 | u16 |
+| `IFLA_GRE_COLLECT_METADATA` | 18 | flag |
+| `IFLA_GRE_IGNORE_DF` | 19 | u8 |
+| `IFLA_GRE_FWMARK` | 20 | u32 |
 
 ## IFLA_IPTUN_* Attribute Family (for IPIP and SIT)
 
-These are a **separate enum** from `IFLA_GRE_*`:
+Separate enum from `IFLA_GRE_*` (verified against kernel headers):
 
-```c
-enum {
-    IFLA_IPTUN_UNSPEC,           // 0
-    IFLA_IPTUN_LINK,             // 1
-    IFLA_IPTUN_LOCAL,            // 2  (in_addr, 4 bytes)
-    IFLA_IPTUN_REMOTE,           // 3  (in_addr, 4 bytes)
-    IFLA_IPTUN_TTL,              // 4  (u8)
-    IFLA_IPTUN_TOS,              // 5  (u8)
-    IFLA_IPTUN_ENCAP_LIMIT,      // 6  (u8, SIT only)
-    IFLA_IPTUN_FLOWINFO,         // 7  (u32)
-    IFLA_IPTUN_FLAGS,            // 8  (u16)
-    IFLA_IPTUN_PROTO,            // 9  (u8)
-    IFLA_IPTUN_PMTUDISC,         // 10 (u8, bool)
-    IFLA_IPTUN_6RD_PREFIX,       // 11 (in6_addr, SIT 6rd)
-    IFLA_IPTUN_6RD_RELAY_PREFIX, // 12 (in_addr, SIT 6rd)
-    IFLA_IPTUN_6RD_PREFIXLEN,    // 13 (u16, SIT 6rd)
-    IFLA_IPTUN_6RD_RELAY_PREFIXLEN, // 14 (u16, SIT 6rd)
-    IFLA_IPTUN_ENCAP_TYPE,       // 15
-    IFLA_IPTUN_ENCAP_FLAGS,      // 16
-    IFLA_IPTUN_ENCAP_SPORT,      // 17
-    IFLA_IPTUN_ENCAP_DPORT,      // 18
-    IFLA_IPTUN_COLLECT_METADATA, // 19
-    IFLA_IPTUN_FWMARK,           // 20
-};
-```
+| Constant | Value | Type |
+|----------|-------|------|
+| `IFLA_IPTUN_LINK` | 1 | u32 (ifindex) |
+| `IFLA_IPTUN_LOCAL` | 2 | in_addr (4 bytes) |
+| `IFLA_IPTUN_REMOTE` | 3 | in_addr (4 bytes) |
+| `IFLA_IPTUN_TTL` | 4 | u8 |
+| `IFLA_IPTUN_TOS` | 5 | u8 |
+| `IFLA_IPTUN_ENCAP_LIMIT` | 6 | u8 (SIT only) |
+| `IFLA_IPTUN_FLOWINFO` | 7 | u32 |
+| `IFLA_IPTUN_FLAGS` | 8 | u16 |
+| `IFLA_IPTUN_PROTO` | 9 | u8 |
+| `IFLA_IPTUN_PMTUDISC` | 10 | u8 (bool) |
+| `IFLA_IPTUN_6RD_PREFIX` | 11 | in6_addr (SIT 6rd) |
+| `IFLA_IPTUN_6RD_RELAY_PREFIX` | 12 | in_addr (SIT 6rd) |
+| `IFLA_IPTUN_6RD_PREFIXLEN` | 13 | u16 (SIT 6rd) |
+| `IFLA_IPTUN_6RD_RELAY_PREFIXLEN` | 14 | u16 (SIT 6rd) |
+| `IFLA_IPTUN_ENCAP_TYPE` | 15 | u16 |
+| `IFLA_IPTUN_ENCAP_FLAGS` | 16 | u16 |
+| `IFLA_IPTUN_ENCAP_SPORT` | 17 | u16 |
+| `IFLA_IPTUN_ENCAP_DPORT` | 18 | u16 |
+| `IFLA_IPTUN_COLLECT_METADATA` | 19 | flag |
+| `IFLA_IPTUN_FWMARK` | 20 | u32 |
 
-Note: `IFLA_IPTUN_FLAGS` uses `SIT_ISATAP = 0x0001` for ISATAP mode.
+## Implementation
 
-## Implementation Plan
-
-### 1. GRE / GRETAP (IPv4)
-
-IFLA_INFO_KIND: `"gre"` / `"gretap"`
-
-Uses `IFLA_GRE_*` attributes (same family as existing IP6GRE). IPv4 addresses are `in_addr` (4 bytes) vs IPv6 `in6_addr` (16 bytes) for ip6gre.
+### Constants Module
 
 ```rust
-pub struct GreLink {
-    name: String,
-    local: Option<Ipv4Addr>,
-    remote: Option<Ipv4Addr>,
-    ttl: Option<u8>,
-    tos: Option<u8>,
-    ikey: Option<u32>,
-    okey: Option<u32>,
-    pmtudisc: Option<bool>,
-    tap: bool,  // false = "gre", true = "gretap"
+/// IFLA_GRE_* attributes (shared by gre, gretap, ip6gre, ip6gretap, erspan).
+/// Defined in linux/if_tunnel.h.
+#[allow(dead_code)]
+mod gre_attr {
+    pub const IFLA_GRE_LINK: u16 = 1;
+    pub const IFLA_GRE_IFLAGS: u16 = 2;
+    pub const IFLA_GRE_OFLAGS: u16 = 3;
+    pub const IFLA_GRE_IKEY: u16 = 4;
+    pub const IFLA_GRE_OKEY: u16 = 5;
+    pub const IFLA_GRE_LOCAL: u16 = 6;
+    pub const IFLA_GRE_REMOTE: u16 = 7;
+    pub const IFLA_GRE_TTL: u16 = 8;
+    pub const IFLA_GRE_TOS: u16 = 9;
+    pub const IFLA_GRE_PMTUDISC: u16 = 10;
+    pub const IFLA_GRE_ENCAP_LIMIT: u16 = 11;
+    pub const IFLA_GRE_FLOWINFO: u16 = 12;
+    pub const IFLA_GRE_FLAGS: u16 = 13;
+    pub const IFLA_GRE_ENCAP_TYPE: u16 = 14;
+    pub const IFLA_GRE_ENCAP_FLAGS: u16 = 15;
+    pub const IFLA_GRE_ENCAP_SPORT: u16 = 16;
+    pub const IFLA_GRE_ENCAP_DPORT: u16 = 17;
+    pub const IFLA_GRE_COLLECT_METADATA: u16 = 18;
+    pub const IFLA_GRE_IGNORE_DF: u16 = 19;
+    pub const IFLA_GRE_FWMARK: u16 = 20;
+
+    /// GRE_KEY flag for IFLA_GRE_IFLAGS/OFLAGS.
+    pub const GRE_KEY: u16 = 0x2000;
 }
 
-impl GreLink {
-    pub fn new(name: &str) -> Self { /* tap: false */ }
-    pub fn tap(name: &str) -> Self { /* tap: true */ }
-    pub fn local(self, addr: Ipv4Addr) -> Self;
-    pub fn remote(self, addr: Ipv4Addr) -> Self;
-    pub fn ttl(self, ttl: u8) -> Self;
-    pub fn tos(self, tos: u8) -> Self;
-    pub fn ikey(self, key: u32) -> Self;
-    pub fn okey(self, key: u32) -> Self;
-    pub fn key(self, key: u32) -> Self;  // sets both ikey and okey
-    pub fn pmtudisc(self, enabled: bool) -> Self;
-}
-
-impl LinkConfig for GreLink {
-    fn kind(&self) -> &str {
-        if self.tap { "gretap" } else { "gre" }
-    }
-
-    fn write_to(&self, builder: &mut MessageBuilder) {
-        // IFLA_GRE_LOCAL (6) — 4-byte in_addr (not 16-byte like ip6gre)
-        if let Some(addr) = self.local {
-            builder.append_attr(IFLA_GRE_LOCAL, &addr.octets());
-        }
-        if let Some(addr) = self.remote {
-            builder.append_attr(IFLA_GRE_REMOTE, &addr.octets());
-        }
-        if let Some(ttl) = self.ttl {
-            builder.append_attr_u8(IFLA_GRE_TTL, ttl);
-        }
-        if let Some(tos) = self.tos {
-            builder.append_attr_u8(IFLA_GRE_TOS, tos);
-        }
-        if let Some(key) = self.ikey {
-            builder.append_attr_u16(IFLA_GRE_IFLAGS, libc::GRE_KEY as u16);
-            builder.append_attr_u32(IFLA_GRE_IKEY, key);
-        }
-        if let Some(key) = self.okey {
-            builder.append_attr_u16(IFLA_GRE_OFLAGS, libc::GRE_KEY as u16);
-            builder.append_attr_u32(IFLA_GRE_OKEY, key);
-        }
-        if let Some(pmtu) = self.pmtudisc {
-            builder.append_attr_u8(IFLA_GRE_PMTUDISC, pmtu as u8);
-        }
-    }
-}
-```
-
-### 2. IPIP (IP-in-IP)
-
-IFLA_INFO_KIND: `"ipip"`
-
-Uses `IFLA_IPTUN_*` attributes — **different from IFLA_GRE_***. Must define a separate constant module.
-
-```rust
-/// IFLA_IPTUN_* constants (for IPIP and SIT tunnels).
-/// These are separate from IFLA_GRE_* despite similar names.
-mod iptun {
+/// IFLA_IPTUN_* attributes (for ipip and sit tunnels).
+/// Separate enum from IFLA_GRE_* — different numeric values.
+/// Defined in linux/if_tunnel.h.
+#[allow(dead_code)]
+mod iptun_attr {
     pub const IFLA_IPTUN_LINK: u16 = 1;
     pub const IFLA_IPTUN_LOCAL: u16 = 2;
     pub const IFLA_IPTUN_REMOTE: u16 = 3;
@@ -178,8 +131,190 @@ mod iptun {
     pub const IFLA_IPTUN_FLAGS: u16 = 8;
     pub const IFLA_IPTUN_PROTO: u16 = 9;
     pub const IFLA_IPTUN_PMTUDISC: u16 = 10;
+    pub const IFLA_IPTUN_ENCAP_TYPE: u16 = 15;
+    pub const IFLA_IPTUN_ENCAP_FLAGS: u16 = 16;
+    pub const IFLA_IPTUN_ENCAP_SPORT: u16 = 17;
+    pub const IFLA_IPTUN_ENCAP_DPORT: u16 = 18;
+    pub const IFLA_IPTUN_COLLECT_METADATA: u16 = 19;
+    pub const IFLA_IPTUN_FWMARK: u16 = 20;
+
+    /// ISATAP flag for SIT tunnels (IFLA_IPTUN_FLAGS).
+    pub const SIT_ISATAP: u16 = 0x0001;
+}
+```
+
+### 1. GreLink (GRE / GRETAP)
+
+IFLA_INFO_KIND: `"gre"` or `"gretap"`. Uses `IFLA_GRE_*` with 4-byte `in_addr`.
+
+```rust
+/// Configuration for a GRE or GRETAP tunnel interface.
+///
+/// GRE creates a point-to-point (L3) tunnel. GRETAP creates an Ethernet (L2)
+/// tunnel suitable for bridging.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::GreLink;
+/// use std::net::Ipv4Addr;
+///
+/// // Point-to-point GRE tunnel
+/// let gre = GreLink::new("gre1")
+///     .local(Ipv4Addr::new(10, 0, 0, 1))
+///     .remote(Ipv4Addr::new(10, 0, 0, 2))
+///     .ttl(64)
+///     .key(100);
+/// conn.add_link(gre).await?;
+///
+/// // Layer 2 GRE tunnel (for bridging)
+/// let gretap = GreLink::tap("gretap1")
+///     .local(Ipv4Addr::new(10, 0, 0, 1))
+///     .remote(Ipv4Addr::new(10, 0, 0, 2));
+/// conn.add_link(gretap).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct GreLink {
+    name: String,
+    local: Option<Ipv4Addr>,
+    remote: Option<Ipv4Addr>,
+    ttl: Option<u8>,
+    tos: Option<u8>,
+    ikey: Option<u32>,
+    okey: Option<u32>,
+    pmtudisc: Option<bool>,
+    ignore_df: Option<bool>,
+    fwmark: Option<u32>,
+    link: Option<InterfaceRef>,
+    tap: bool,
 }
 
+impl GreLink {
+    /// Create a point-to-point GRE tunnel (L3).
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            tap: false,
+            local: None, remote: None, ttl: None, tos: None,
+            ikey: None, okey: None, pmtudisc: None, ignore_df: None,
+            fwmark: None, link: None,
+        }
+    }
+
+    /// Create a GRETAP tunnel (L2, Ethernet-over-GRE).
+    pub fn tap(name: impl Into<String>) -> Self {
+        Self { tap: true, ..Self::new(name) }
+    }
+
+    pub fn local(mut self, addr: Ipv4Addr) -> Self { self.local = Some(addr); self }
+    pub fn remote(mut self, addr: Ipv4Addr) -> Self { self.remote = Some(addr); self }
+    pub fn ttl(mut self, ttl: u8) -> Self { self.ttl = Some(ttl); self }
+    pub fn tos(mut self, tos: u8) -> Self { self.tos = Some(tos); self }
+
+    /// Set the input GRE key. Automatically enables GRE_KEY flag.
+    pub fn ikey(mut self, key: u32) -> Self { self.ikey = Some(key); self }
+
+    /// Set the output GRE key. Automatically enables GRE_KEY flag.
+    pub fn okey(mut self, key: u32) -> Self { self.okey = Some(key); self }
+
+    /// Set both input and output GRE key.
+    pub fn key(self, key: u32) -> Self { self.ikey(key).okey(key) }
+
+    /// Enable/disable Path MTU Discovery.
+    pub fn pmtudisc(mut self, enabled: bool) -> Self { self.pmtudisc = Some(enabled); self }
+
+    /// Ignore the Don't Fragment flag on inner packets.
+    pub fn ignore_df(mut self, enabled: bool) -> Self { self.ignore_df = Some(enabled); self }
+
+    /// Set firewall mark.
+    pub fn fwmark(mut self, mark: u32) -> Self { self.fwmark = Some(mark); self }
+
+    /// Set the underlay interface.
+    pub fn link(mut self, iface: impl Into<String>) -> Self {
+        self.link = Some(InterfaceRef::Name(iface.into()));
+        self
+    }
+
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
+        self
+    }
+}
+
+impl LinkConfig for GreLink {
+    fn name(&self) -> &str { &self.name }
+    fn kind(&self) -> &str { if self.tap { "gretap" } else { "gre" } }
+    fn parent_ref(&self) -> Option<&InterfaceRef> { self.link.as_ref() }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(IflaAttr::Link as u16, idx);
+        }
+
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, self.kind());
+
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        if let Some(addr) = self.local {
+            builder.append_attr(gre_attr::IFLA_GRE_LOCAL, &addr.octets());
+        }
+        if let Some(addr) = self.remote {
+            builder.append_attr(gre_attr::IFLA_GRE_REMOTE, &addr.octets());
+        }
+        if let Some(ttl) = self.ttl {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_TTL, ttl);
+        }
+        if let Some(tos) = self.tos {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_TOS, tos);
+        }
+        if let Some(key) = self.ikey {
+            builder.append_attr_u16(gre_attr::IFLA_GRE_IFLAGS, gre_attr::GRE_KEY);
+            builder.append_attr_u32(gre_attr::IFLA_GRE_IKEY, key);
+        }
+        if let Some(key) = self.okey {
+            builder.append_attr_u16(gre_attr::IFLA_GRE_OFLAGS, gre_attr::GRE_KEY);
+            builder.append_attr_u32(gre_attr::IFLA_GRE_OKEY, key);
+        }
+        if let Some(pmtu) = self.pmtudisc {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_PMTUDISC, pmtu as u8);
+        }
+        if let Some(ignore) = self.ignore_df {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_IGNORE_DF, ignore as u8);
+        }
+        if let Some(mark) = self.fwmark {
+            builder.append_attr_u32(gre_attr::IFLA_GRE_FWMARK, mark);
+        }
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+    }
+}
+```
+
+### 2. IpipLink (IP-in-IP)
+
+IFLA_INFO_KIND: `"ipip"`. Uses `IFLA_IPTUN_*` attributes.
+
+```rust
+/// Configuration for an IPIP (IP-in-IP) tunnel interface.
+///
+/// The simplest IP tunnel type. Encapsulates IPv4 in IPv4 with minimal
+/// overhead (20 bytes). Commonly used for MPLS and Segment Routing.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::IpipLink;
+/// use std::net::Ipv4Addr;
+///
+/// let ipip = IpipLink::new("ipip1")
+///     .local(Ipv4Addr::new(10, 0, 0, 1))
+///     .remote(Ipv4Addr::new(10, 0, 0, 2))
+///     .ttl(64)
+///     .pmtudisc(true);
+/// conn.add_link(ipip).await?;
+/// ```
+#[derive(Debug, Clone)]
 pub struct IpipLink {
     name: String,
     local: Option<Ipv4Addr>,
@@ -187,48 +322,105 @@ pub struct IpipLink {
     ttl: Option<u8>,
     tos: Option<u8>,
     pmtudisc: Option<bool>,
+    fwmark: Option<u32>,
+    link: Option<InterfaceRef>,
 }
 
 impl IpipLink {
-    pub fn new(name: &str) -> Self;
-    pub fn local(self, addr: Ipv4Addr) -> Self;
-    pub fn remote(self, addr: Ipv4Addr) -> Self;
-    pub fn ttl(self, ttl: u8) -> Self;
-    pub fn tos(self, tos: u8) -> Self;
-    pub fn pmtudisc(self, enabled: bool) -> Self;
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            local: None, remote: None, ttl: None, tos: None,
+            pmtudisc: None, fwmark: None, link: None,
+        }
+    }
+
+    pub fn local(mut self, addr: Ipv4Addr) -> Self { self.local = Some(addr); self }
+    pub fn remote(mut self, addr: Ipv4Addr) -> Self { self.remote = Some(addr); self }
+    pub fn ttl(mut self, ttl: u8) -> Self { self.ttl = Some(ttl); self }
+    pub fn tos(mut self, tos: u8) -> Self { self.tos = Some(tos); self }
+    pub fn pmtudisc(mut self, enabled: bool) -> Self { self.pmtudisc = Some(enabled); self }
+    pub fn fwmark(mut self, mark: u32) -> Self { self.fwmark = Some(mark); self }
+
+    pub fn link(mut self, iface: impl Into<String>) -> Self {
+        self.link = Some(InterfaceRef::Name(iface.into()));
+        self
+    }
+
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
+        self
+    }
 }
 
 impl LinkConfig for IpipLink {
+    fn name(&self) -> &str { &self.name }
     fn kind(&self) -> &str { "ipip" }
+    fn parent_ref(&self) -> Option<&InterfaceRef> { self.link.as_ref() }
 
-    fn write_to(&self, builder: &mut MessageBuilder) {
-        // Uses IFLA_IPTUN_* constants, NOT IFLA_GRE_*
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(IflaAttr::Link as u16, idx);
+        }
+
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "ipip");
+
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        // Uses IFLA_IPTUN_* — NOT IFLA_GRE_*
         if let Some(addr) = self.local {
-            builder.append_attr(iptun::IFLA_IPTUN_LOCAL, &addr.octets());
+            builder.append_attr(iptun_attr::IFLA_IPTUN_LOCAL, &addr.octets());
         }
         if let Some(addr) = self.remote {
-            builder.append_attr(iptun::IFLA_IPTUN_REMOTE, &addr.octets());
+            builder.append_attr(iptun_attr::IFLA_IPTUN_REMOTE, &addr.octets());
         }
         if let Some(ttl) = self.ttl {
-            builder.append_attr_u8(iptun::IFLA_IPTUN_TTL, ttl);
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_TTL, ttl);
         }
         if let Some(tos) = self.tos {
-            builder.append_attr_u8(iptun::IFLA_IPTUN_TOS, tos);
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_TOS, tos);
         }
         if let Some(pmtu) = self.pmtudisc {
-            builder.append_attr_u8(iptun::IFLA_IPTUN_PMTUDISC, pmtu as u8);
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_PMTUDISC, pmtu as u8);
         }
+        if let Some(mark) = self.fwmark {
+            builder.append_attr_u32(iptun_attr::IFLA_IPTUN_FWMARK, mark);
+        }
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
     }
 }
 ```
 
-### 3. SIT (Simple Internet Transition — 6in4)
+### 3. SitLink (6in4)
 
-IFLA_INFO_KIND: `"sit"`
-
-Also uses `IFLA_IPTUN_*` attributes (shared with IPIP). Adds ISATAP support via `IFLA_IPTUN_FLAGS`.
+IFLA_INFO_KIND: `"sit"`. Uses `IFLA_IPTUN_*` (shared with IPIP), adds ISATAP flag.
 
 ```rust
+/// Configuration for a SIT (Simple Internet Transition) tunnel interface.
+///
+/// SIT tunnels carry IPv6 over IPv4 (6in4). Used for IPv6 transition
+/// mechanisms and ISATAP (Intra-Site Automatic Tunnel Addressing Protocol).
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::SitLink;
+/// use std::net::Ipv4Addr;
+///
+/// // Standard 6in4 tunnel
+/// let sit = SitLink::new("sit1")
+///     .local(Ipv4Addr::new(198, 51, 100, 1))
+///     .remote(Ipv4Addr::new(192, 0, 2, 1))
+///     .ttl(64);
+/// conn.add_link(sit).await?;
+///
+/// // ISATAP tunnel
+/// let isatap = SitLink::new("isatap0").isatap();
+/// conn.add_link(isatap).await?;
+/// ```
+#[derive(Debug, Clone)]
 pub struct SitLink {
     name: String,
     local: Option<Ipv4Addr>,
@@ -236,127 +428,113 @@ pub struct SitLink {
     ttl: Option<u8>,
     tos: Option<u8>,
     pmtudisc: Option<bool>,
+    fwmark: Option<u32>,
     isatap: bool,
+    link: Option<InterfaceRef>,
 }
 
-const SIT_ISATAP: u16 = 0x0001;
-
 impl SitLink {
-    pub fn new(name: &str) -> Self;
-    pub fn local(self, addr: Ipv4Addr) -> Self;
-    pub fn remote(self, addr: Ipv4Addr) -> Self;
-    pub fn ttl(self, ttl: u8) -> Self;
-    pub fn tos(self, tos: u8) -> Self;
-    pub fn pmtudisc(self, enabled: bool) -> Self;
-    pub fn isatap(self) -> Self;  // Enable ISATAP mode
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            local: None, remote: None, ttl: None, tos: None,
+            pmtudisc: None, fwmark: None, isatap: false, link: None,
+        }
+    }
+
+    pub fn local(mut self, addr: Ipv4Addr) -> Self { self.local = Some(addr); self }
+    pub fn remote(mut self, addr: Ipv4Addr) -> Self { self.remote = Some(addr); self }
+    pub fn ttl(mut self, ttl: u8) -> Self { self.ttl = Some(ttl); self }
+    pub fn tos(mut self, tos: u8) -> Self { self.tos = Some(tos); self }
+    pub fn pmtudisc(mut self, enabled: bool) -> Self { self.pmtudisc = Some(enabled); self }
+    pub fn fwmark(mut self, mark: u32) -> Self { self.fwmark = Some(mark); self }
+
+    /// Enable ISATAP (Intra-Site Automatic Tunnel Addressing Protocol) mode.
+    pub fn isatap(mut self) -> Self { self.isatap = true; self }
+
+    pub fn link(mut self, iface: impl Into<String>) -> Self {
+        self.link = Some(InterfaceRef::Name(iface.into()));
+        self
+    }
+
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
+        self
+    }
 }
 
 impl LinkConfig for SitLink {
+    fn name(&self) -> &str { &self.name }
     fn kind(&self) -> &str { "sit" }
+    fn parent_ref(&self) -> Option<&InterfaceRef> { self.link.as_ref() }
 
-    fn write_to(&self, builder: &mut MessageBuilder) {
-        // Same IFLA_IPTUN_* constants as IPIP
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(IflaAttr::Link as u16, idx);
+        }
+
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "sit");
+
+        let data = builder.nest_start(IflaInfo::Data as u16);
         if let Some(addr) = self.local {
-            builder.append_attr(iptun::IFLA_IPTUN_LOCAL, &addr.octets());
+            builder.append_attr(iptun_attr::IFLA_IPTUN_LOCAL, &addr.octets());
         }
         if let Some(addr) = self.remote {
-            builder.append_attr(iptun::IFLA_IPTUN_REMOTE, &addr.octets());
+            builder.append_attr(iptun_attr::IFLA_IPTUN_REMOTE, &addr.octets());
         }
         if let Some(ttl) = self.ttl {
-            builder.append_attr_u8(iptun::IFLA_IPTUN_TTL, ttl);
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_TTL, ttl);
         }
         if let Some(tos) = self.tos {
-            builder.append_attr_u8(iptun::IFLA_IPTUN_TOS, tos);
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_TOS, tos);
         }
         if let Some(pmtu) = self.pmtudisc {
-            builder.append_attr_u8(iptun::IFLA_IPTUN_PMTUDISC, pmtu as u8);
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_PMTUDISC, pmtu as u8);
+        }
+        if let Some(mark) = self.fwmark {
+            builder.append_attr_u32(iptun_attr::IFLA_IPTUN_FWMARK, mark);
         }
         if self.isatap {
-            builder.append_attr_u16(iptun::IFLA_IPTUN_FLAGS, SIT_ISATAP);
+            builder.append_attr_u16(iptun_attr::IFLA_IPTUN_FLAGS, iptun_attr::SIT_ISATAP);
         }
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
     }
 }
 ```
 
-## Usage Examples
+## Migration
 
-```rust
-use nlink::netlink::{Connection, Route};
-use nlink::netlink::link::{GreLink, IpipLink, SitLink};
-use std::net::Ipv4Addr;
-
-let conn = Connection::<Route>::new()?;
-
-// GRE tunnel
-conn.add_link(
-    GreLink::new("gre1")
-        .local(Ipv4Addr::new(10, 0, 0, 1))
-        .remote(Ipv4Addr::new(10, 0, 0, 2))
-        .ttl(64)
-        .key(100)  // sets both ikey and okey
-).await?;
-
-// GRETAP (Layer 2 GRE, for bridging)
-conn.add_link(
-    GreLink::tap("gretap1")
-        .local(Ipv4Addr::new(10, 0, 0, 1))
-        .remote(Ipv4Addr::new(10, 0, 0, 2))
-).await?;
-
-// IPIP tunnel
-conn.add_link(
-    IpipLink::new("ipip1")
-        .local(Ipv4Addr::new(10, 0, 0, 1))
-        .remote(Ipv4Addr::new(10, 0, 0, 2))
-        .ttl(64)
-        .pmtudisc(true)
-).await?;
-
-// SIT tunnel (6in4)
-conn.add_link(
-    SitLink::new("sit1")
-        .local(Ipv4Addr::new(198, 51, 100, 1))
-        .remote(Ipv4Addr::new(192, 0, 2, 1))
-        .ttl(64)
-).await?;
-
-// SIT with ISATAP
-conn.add_link(
-    SitLink::new("isatap0")
-        .isatap()
-).await?;
-```
+The existing `ip6gre` module should be renamed to `gre_attr` and shared with the new `GreLink`. The ip6gre-specific types (`Ip6GreLink`, `Ip6GretapLink`) reuse the same constants but with 16-byte `in6_addr` payloads.
 
 ## Files to Modify
 
-1. `crates/nlink/src/netlink/link.rs`:
-   - Fix `IFLA_GRE_ENCAP_LIMIT` (12 → 11), `IFLA_GRE_FLOWINFO` (13 → 12), `IFLA_GRE_FLAGS` (14 → 13)
-   - Add `mod iptun` with `IFLA_IPTUN_*` constants
-   - Add `GreLink` builder (reuses existing `IFLA_GRE_*` constants)
-   - Add `IpipLink` builder (uses `IFLA_IPTUN_*` constants)
-   - Add `SitLink` builder (uses `IFLA_IPTUN_*` constants)
+| File | Changes |
+|------|---------|
+| `crates/nlink/src/netlink/link.rs` | Fix ip6gre constants; rename `ip6gre` → `gre_attr` (shared); add `iptun_attr` module; add `GreLink`, `IpipLink`, `SitLink` |
 
 ## Integration Tests
 
+Each test runs in an isolated network namespace.
+
 ```rust
 #[tokio::test]
-async fn test_create_gre_tunnel() {
+async fn test_gre_tunnel() {
     let (conn, _ns) = setup_namespace("test_gre").await;
     conn.add_link(
         GreLink::new("gre1")
             .local(Ipv4Addr::new(10, 0, 0, 1))
             .remote(Ipv4Addr::new(10, 0, 0, 2))
-            .ttl(64)
-            .ikey(100)
-            .okey(200)
+            .ttl(64).ikey(100).okey(200)
     ).await.unwrap();
     let link = conn.get_link_by_name("gre1").await.unwrap().unwrap();
     assert_eq!(link.name_or(""), "gre1");
-    conn.del_link("gre1").await.unwrap();
 }
 
 #[tokio::test]
-async fn test_create_gretap_tunnel() {
+async fn test_gretap_tunnel() {
     let (conn, _ns) = setup_namespace("test_gretap").await;
     conn.add_link(
         GreLink::tap("gretap1")
@@ -365,11 +543,10 @@ async fn test_create_gretap_tunnel() {
     ).await.unwrap();
     let link = conn.get_link_by_name("gretap1").await.unwrap().unwrap();
     assert_eq!(link.name_or(""), "gretap1");
-    conn.del_link("gretap1").await.unwrap();
 }
 
 #[tokio::test]
-async fn test_create_ipip_tunnel() {
+async fn test_ipip_tunnel() {
     let (conn, _ns) = setup_namespace("test_ipip").await;
     conn.add_link(
         IpipLink::new("ipip1")
@@ -379,33 +556,22 @@ async fn test_create_ipip_tunnel() {
     ).await.unwrap();
     let link = conn.get_link_by_name("ipip1").await.unwrap().unwrap();
     assert_eq!(link.name_or(""), "ipip1");
-    conn.del_link("ipip1").await.unwrap();
 }
 
 #[tokio::test]
-async fn test_create_sit_tunnel() {
+async fn test_sit_tunnel() {
     let (conn, _ns) = setup_namespace("test_sit").await;
-    conn.add_link(
-        SitLink::new("sit1")
-            .local(Ipv4Addr::new(10, 0, 0, 1))
-            .remote(Ipv4Addr::new(10, 0, 0, 2))
-            .ttl(64)
-    ).await.unwrap();
+    conn.add_link(SitLink::new("sit1").ttl(64)).await.unwrap();
     let link = conn.get_link_by_name("sit1").await.unwrap().unwrap();
     assert_eq!(link.name_or(""), "sit1");
-    conn.del_link("sit1").await.unwrap();
 }
 
 #[tokio::test]
-async fn test_create_sit_isatap() {
+async fn test_sit_isatap() {
     let (conn, _ns) = setup_namespace("test_isatap").await;
-    conn.add_link(
-        SitLink::new("isatap0")
-            .isatap()
-    ).await.unwrap();
+    conn.add_link(SitLink::new("isatap0").isatap()).await.unwrap();
     let link = conn.get_link_by_name("isatap0").await.unwrap().unwrap();
     assert_eq!(link.name_or(""), "isatap0");
-    conn.del_link("isatap0").await.unwrap();
 }
 ```
 
@@ -413,19 +579,10 @@ async fn test_create_sit_isatap() {
 
 | Task | Effort |
 |------|--------|
-| Fix ip6gre constants | 15 min |
-| Add `mod iptun` constants | 15 min |
-| GRE + GRETAP builder | 2 hours |
-| IPIP builder | 1 hour |
-| SIT builder | 1 hour |
+| Fix ip6gre constants + rename module | 30 min |
+| Add `iptun_attr` constants | 15 min |
+| `GreLink` builder | 2 hours |
+| `IpipLink` builder | 1 hour |
+| `SitLink` builder | 1 hour |
 | Integration tests | 2 hours |
 | **Total** | ~7 hours |
-
-## Notes
-
-- GRE keys require setting `GRE_KEY` flag in `IFLA_GRE_IFLAGS`/`IFLA_GRE_OFLAGS` (value `0x2000`)
-- `libc::GRE_KEY` provides this constant
-- GRETAP creates an Ethernet device (has MAC address), GRE creates a point-to-point device
-- IPIP and SIT share the `IFLA_IPTUN_*` family but SIT adds ISATAP flag support
-- The existing `Ip6GreLink` uses `IFLA_GRE_*` with 16-byte `in6_addr`; new `GreLink` uses same constants with 4-byte `in_addr`
-- Follow `VtiLink` (link.rs:2287-2395) as the closest implementation template

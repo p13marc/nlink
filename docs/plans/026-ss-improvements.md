@@ -2,30 +2,20 @@
 
 ## Overview
 
-Improve the `nlink-ss` binary with missing features from iproute2's `ss`.
+Improve the `nlink-ss` binary with missing features from iproute2's `ss`. All new library-level APIs must be strongly typed, async, and provide good error messages.
 
 ## Current State
 
 The `ss` binary already supports:
 - TCP, UDP, Unix, Raw, SCTP, MPTCP sockets
-- State filters (-l, -a)
-- Process info (-p), extended info (-e), memory (-m), TCP info (-i)
-- Address/port filters (--src, --dst, --sport, --dport)
-- JSON output (-j)
-
-## Missing Features
-
-| Feature | Priority | Effort |
-|---------|----------|--------|
-| `-s/--summary` | High | Small |
-| `-K/--kill` | Medium | Medium |
-| Netlink sockets | Low | Small |
-| Expression filters | Low | Large |
-| DCCP/VSOCK/TIPC | Low | Medium |
+- State filters (`-l`, `-a`)
+- Process info (`-p`), extended info (`-e`), memory (`-m`), TCP info (`-i`)
+- Address/port filters (`--src`, `--dst`, `--sport`, `--dport`)
+- JSON output (`-j`)
 
 ## Implementation Plan
 
-### 1. Add Summary Mode (`-s`)
+### Phase 1: Summary Mode (`-s`)
 
 Show socket statistics summary without listing individual sockets.
 
@@ -42,36 +32,66 @@ RAW:   2
 UNIX:  175
 ```
 
+**Library API** — Add a typed `SocketSummary` struct to `sockdiag`:
+
 ```rust
-#[derive(Args)]
-pub struct SsArgs {
-    // ... existing args ...
-    
-    /// Show socket summary
-    #[arg(short = 's', long)]
-    summary: bool,
+/// Aggregated socket statistics.
+#[derive(Debug, Clone, Default)]
+pub struct SocketSummary {
+    pub tcp: TcpSummary,
+    pub udp: u32,
+    pub raw: u32,
+    pub unix: u32,
 }
 
-async fn run_summary(conn: &Connection<SockDiag>) -> Result<()> {
-    let tcp = conn.tcp_sockets().all().query().await?;
-    let udp = conn.udp_sockets().all().query().await?;
-    let unix = conn.unix_sockets().all().query().await?;
-    
-    let tcp_estab = tcp.iter().filter(|s| s.state == TcpState::Established).count();
-    let tcp_timewait = tcp.iter().filter(|s| s.state == TcpState::TimeWait).count();
-    
-    println!("Total: {}", tcp.len() + udp.len() + unix.len());
-    println!("TCP:   {} (estab {}, timewait {})", tcp.len(), tcp_estab, tcp_timewait);
-    println!("UDP:   {}", udp.len());
-    println!("UNIX:  {}", unix.len());
-    
-    Ok(())
+#[derive(Debug, Clone, Default)]
+pub struct TcpSummary {
+    pub total: u32,
+    pub established: u32,
+    pub syn_sent: u32,
+    pub syn_recv: u32,
+    pub fin_wait1: u32,
+    pub fin_wait2: u32,
+    pub time_wait: u32,
+    pub close: u32,
+    pub close_wait: u32,
+    pub last_ack: u32,
+    pub listen: u32,
+    pub closing: u32,
+}
+
+impl Connection<SockDiag> {
+    /// Get aggregated socket statistics across all families.
+    pub async fn socket_summary(&self) -> Result<SocketSummary> {
+        let tcp = self.tcp_sockets().all().query().await?;
+        let udp = self.udp_sockets().all().query().await?;
+        let unix = self.unix_sockets().all().query().await?;
+
+        let mut summary = SocketSummary {
+            udp: udp.len() as u32,
+            unix: unix.len() as u32,
+            ..Default::default()
+        };
+
+        summary.tcp.total = tcp.len() as u32;
+        for sock in &tcp {
+            match sock.state {
+                TcpState::Established => summary.tcp.established += 1,
+                TcpState::TimeWait => summary.tcp.time_wait += 1,
+                TcpState::Listen => summary.tcp.listen += 1,
+                // ... other states
+                _ => {}
+            }
+        }
+
+        Ok(summary)
+    }
 }
 ```
 
-### 2. Add Kill Mode (`-K`)
+### Phase 2: Kill Mode (`-K`)
 
-Force close matching sockets (requires root, uses `SOCK_DESTROY`).
+Force close matching sockets using `SOCK_DESTROY` (Linux 4.9+, requires `CAP_NET_ADMIN`).
 
 ```bash
 sudo ss -K dst 192.168.1.100
@@ -79,59 +99,126 @@ sudo ss -K sport = 8080
 sudo ss -K state time-wait
 ```
 
-```rust
-#[derive(Args)]
-pub struct SsArgs {
-    // ... existing args ...
-    
-    /// Kill matching sockets
-    #[arg(short = 'K', long)]
-    kill: bool,
-}
+**Library API** — Add `destroy_socket()` to `Connection<SockDiag>`:
 
-// In sockdiag module, add destroy capability
+```rust
+/// Request to destroy (force-close) a socket.
+///
+/// The kernel sends a RST to the remote peer. Requires `CAP_NET_ADMIN`.
+/// Only TCP sockets can be destroyed.
+///
+/// # Errors
+///
+/// Returns `Error::Kernel` with `EPERM` if insufficient privileges.
+/// Returns `Error::Kernel` with `EOPNOTSUPP` if the socket type doesn't
+/// support destruction.
 impl Connection<SockDiag> {
-    pub async fn destroy_socket(&self, socket: &TcpSocket) -> Result<()> {
-        // Send SOCK_DESTROY message
-        let mut builder = self.create_request(SOCK_DESTROY)?;
-        // ... build destroy request ...
+    pub async fn destroy_tcp_socket(&self, socket: &TcpSocketInfo) -> Result<()> {
+        let mut builder = self.build_destroy_request(socket)?;
         self.request_ack(builder).await
     }
+
+    /// Destroy all TCP sockets matching the given filter.
+    /// Returns the number of sockets destroyed.
+    pub async fn destroy_matching(
+        &self,
+        filter: &SocketFilter,
+    ) -> Result<DestroyResult> {
+        let sockets = self.tcp_sockets().filter(filter).query().await?;
+        let mut destroyed = 0u32;
+        let mut errors = Vec::new();
+
+        for sock in &sockets {
+            match self.destroy_tcp_socket(sock).await {
+                Ok(()) => destroyed += 1,
+                Err(e) => errors.push(DestroyError {
+                    socket: sock.id(),
+                    error: e,
+                }),
+            }
+        }
+
+        Ok(DestroyResult { destroyed, errors })
+    }
+}
+
+/// Result of a batch socket destruction operation.
+#[derive(Debug)]
+pub struct DestroyResult {
+    pub destroyed: u32,
+    pub errors: Vec<DestroyError>,
+}
+
+#[derive(Debug)]
+pub struct DestroyError {
+    pub socket: SocketId,
+    pub error: Error,
 }
 ```
 
-**Note:** Socket destruction requires `CAP_NET_ADMIN` and kernel support.
+Wire format: `SOCK_DESTROY` uses the same `inet_diag_req_v2` structure as `SOCK_DIAG_BY_FAMILY`, but with message type `SOCK_DESTROY_TCP` (= 21).
 
-### 3. Add Netlink Socket Listing
+### Phase 3: Netlink Socket Listing
 
 List netlink sockets (useful for debugging netlink applications).
 
 ```bash
 ss --netlink
-ss -n --netlink
 ```
+
+**Library API** — Add `NetlinkSocketInfo` to `sockdiag`:
 
 ```rust
-#[derive(Args)]
-pub struct SsArgs {
-    // ... existing args ...
-    
-    /// Show netlink sockets
-    #[arg(long)]
-    netlink: bool,
+/// Information about an open netlink socket.
+#[derive(Debug, Clone)]
+pub struct NetlinkSocketInfo {
+    pub family: u8,
+    pub protocol: NetlinkProtocol,
+    pub port_id: u32,
+    pub dst_port_id: u32,
+    pub groups: u32,
+    pub inode: u32,
+    pub uid: u32,
 }
 
-// Netlink sockets use NETLINK_SOCK_DIAG with AF_NETLINK
+/// Netlink protocol family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetlinkProtocol {
+    Route,        // 0
+    Unused,       // 1
+    Usersock,     // 2
+    Firewall,     // 3
+    SockDiag,     // 4
+    Nflog,        // 5
+    Xfrm,         // 6
+    SELinux,      // 7
+    Iscsi,        // 8
+    Audit,        // 9
+    FibLookup,    // 10
+    Connector,    // 11
+    Netfilter,    // 12
+    Ip6Fw,        // 13
+    Dnrt,         // 14
+    KobjectUevent, // 15
+    Generic,      // 16
+    ScsitTransport, // 18
+    Ecryptfs,     // 19
+    Rdma,         // 20
+    Crypto,       // 21
+    Smc,          // 22
+    Unknown(u8),
+}
+
+impl Connection<SockDiag> {
+    /// List all open netlink sockets.
+    pub async fn netlink_sockets(&self) -> Result<Vec<NetlinkSocketInfo>> {
+        // Uses NETLINK_SOCK_DIAG with AF_NETLINK family
+        todo!()
+    }
+}
 ```
 
-Output:
-```
-Netlink   Recv-Q Send-Q   Local Address:Port   Peer Address:Port
-nl        0      0        rtnl:1234            *
-nl        0      0        generic:5678         *
-```
-
-### 4. Expression Filters (Future)
+### Phase 4: Expression Filters (Future)
 
 Full boolean expression support like iproute2:
 
@@ -141,22 +228,35 @@ ss 'dst 192.168.0.0/16 and state established'
 ss '( sport = :80 or sport = :443 ) and state listening'
 ```
 
-This requires implementing a mini expression parser.
+**Library API** — Typed filter expression AST:
 
 ```rust
-// Expression AST
-enum Expr {
+/// Socket filter expression.
+#[derive(Debug, Clone)]
+pub enum FilterExpr {
+    /// Match source port.
     Sport(Comparison, u16),
+    /// Match destination port.
     Dport(Comparison, u16),
+    /// Match source address/prefix.
     Src(IpNetwork),
+    /// Match destination address/prefix.
     Dst(IpNetwork),
+    /// Match TCP state.
     State(TcpState),
-    And(Box<Expr>, Box<Expr>),
-    Or(Box<Expr>, Box<Expr>),
-    Not(Box<Expr>),
+    /// Match process name.
+    Process(String),
+    /// Logical AND.
+    And(Box<FilterExpr>, Box<FilterExpr>),
+    /// Logical OR.
+    Or(Box<FilterExpr>, Box<FilterExpr>),
+    /// Logical NOT.
+    Not(Box<FilterExpr>),
 }
 
-enum Comparison {
+/// Comparison operator for port filters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comparison {
     Eq,
     Ne,
     Lt,
@@ -165,69 +265,63 @@ enum Comparison {
     Ge,
 }
 
-fn parse_filter(input: &str) -> Result<Expr> {
-    // Use winnow or nom to parse expressions
+impl FilterExpr {
+    /// Parse a filter expression string (ss-compatible syntax).
+    pub fn parse(input: &str) -> Result<Self> {
+        // Use winnow for expression parsing
+        todo!()
+    }
+
+    /// Evaluate this expression against a socket.
+    pub fn matches(&self, socket: &TcpSocketInfo) -> bool {
+        match self {
+            Self::Sport(cmp, port) => cmp.apply(socket.local_port, *port),
+            Self::Dport(cmp, port) => cmp.apply(socket.remote_port, *port),
+            Self::State(state) => socket.state == *state,
+            Self::And(a, b) => a.matches(socket) && b.matches(socket),
+            Self::Or(a, b) => a.matches(socket) || b.matches(socket),
+            Self::Not(inner) => !inner.matches(socket),
+            _ => true,
+        }
+    }
 }
 
-fn matches(socket: &TcpSocket, expr: &Expr) -> bool {
-    match expr {
-        Expr::Sport(cmp, port) => compare(socket.local_port, *cmp, *port),
-        Expr::And(a, b) => matches(socket, a) && matches(socket, b),
-        Expr::Or(a, b) => matches(socket, a) || matches(socket, b),
-        // ...
+impl Comparison {
+    fn apply(&self, lhs: u16, rhs: u16) -> bool {
+        match self {
+            Self::Eq => lhs == rhs,
+            Self::Ne => lhs != rhs,
+            Self::Lt => lhs < rhs,
+            Self::Le => lhs <= rhs,
+            Self::Gt => lhs > rhs,
+            Self::Ge => lhs >= rhs,
+        }
     }
 }
 ```
 
-**Effort:** Large - requires expression parser and evaluator.
-
-## Implementation Order
-
-### Phase 1 (Quick)
-
-1. Add `-s/--summary` flag
-2. Update help text and documentation
-
-### Phase 2 (Medium)
-
-3. Add `--netlink` flag for netlink sockets
-4. Add `-K/--kill` for socket destruction
-
-### Phase 3 (Future)
-
-5. Expression filter parser
-6. DCCP/VSOCK/TIPC socket types
-
 ## Files to Modify
 
-1. `bins/ss/src/main.rs` - Add new flags
-2. `bins/ss/src/output.rs` - Summary output format
-3. `crates/nlink/src/sockdiag/mod.rs` - Add destroy, netlink queries
-
-## Testing
-
-```bash
-# Summary
-./target/release/ss -s
-
-# Kill (requires root)
-sudo ./target/release/ss -K state time-wait
-
-# Netlink sockets
-./target/release/ss --netlink
-```
+| File | Changes |
+|------|---------|
+| `crates/nlink/src/sockdiag/mod.rs` | `SocketSummary`, `socket_summary()`, `destroy_tcp_socket()`, `netlink_sockets()` |
+| `crates/nlink/src/sockdiag/filter.rs` (new) | `FilterExpr`, `Comparison`, parser |
+| `bins/ss/src/main.rs` | `-s`, `-K`, `--netlink` flags |
+| `bins/ss/src/output.rs` | Summary output formatting |
 
 ## Estimated Effort
 
-| Feature | Effort |
-|---------|--------|
-| Summary mode | 2 hours |
-| Kill mode | 4 hours |
-| Netlink sockets | 3 hours |
-| Expression filters | 1-2 days |
-| Total (Phase 1-2) | 1 day |
+| Phase | Feature | Effort |
+|-------|---------|--------|
+| 1 | Summary mode (`-s`) | 2 hours |
+| 2 | Kill mode (`-K`) | 4 hours |
+| 3 | Netlink socket listing | 3 hours |
+| 4 | Expression filters (future) | 1-2 days |
+| | **Total (Phase 1-3)** | ~1 day |
 
-## Dependencies
+## Notes
 
-- `nlink::sockdiag` module
-- Kernel support for `SOCK_DESTROY` (Linux 4.9+)
+- `SOCK_DESTROY` requires `CAP_NET_ADMIN` and Linux 4.9+
+- Only TCP sockets support destruction; UDP/Unix sockets cannot be force-closed
+- Netlink socket diagnostics use `AF_NETLINK` family in `SOCK_DIAG_BY_FAMILY`
+- Expression parser should use winnow (consistent with the rest of nlink)
