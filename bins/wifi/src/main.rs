@@ -6,6 +6,7 @@
 use clap::{Parser, Subcommand};
 use nlink::netlink::genl::nl80211::{ConnectRequest, ScanRequest};
 use nlink::netlink::{Connection, Nl80211, Result};
+use tokio_stream::StreamExt;
 
 #[derive(Parser)]
 #[command(name = "wifi", version, about = "WiFi management utility")]
@@ -66,6 +67,9 @@ enum Command {
         interface: String,
     },
 
+    /// Monitor WiFi events (scan, connect, disconnect, regulatory).
+    Monitor,
+
     /// Get or set power save mode.
     Powersave {
         /// Interface name.
@@ -85,6 +89,20 @@ fn format_mac(mac: &[u8; 6]) -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Command::Monitor) {
+        let mut conn = Connection::<Nl80211>::new_async().await?;
+        conn.subscribe()?;
+        eprintln!("Monitoring WiFi events (Ctrl+C to stop)...");
+        let mut events = conn.events();
+        while let Some(result) = events.next().await {
+            match result {
+                Ok(event) => println!("{event:?}"),
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
+        return Ok(());
+    }
+
     let conn = Connection::<Nl80211>::new_async().await?;
 
     match cli.command {
@@ -234,6 +252,8 @@ async fn main() -> Result<()> {
             conn.disconnect(&interface).await?;
             eprintln!("Disconnected from {interface}");
         }
+
+        Command::Monitor => unreachable!(),
 
         Command::Powersave { interface, mode } => {
             if let Some(mode) = mode {

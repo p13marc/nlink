@@ -64,7 +64,7 @@ Add devlink Generic Netlink support for hardware device management. Used by mode
 - [x] Implement `subscribe()` for multicast group
 - [x] Implement `events()` and `into_events()` stream methods
 - [ ] Add integration test for event monitoring
-- [ ] Add monitor mode to binary
+- [x] Add monitor mode to binary
 - [ ] Add doc comments with examples
 
 ## Kernel Constants (verified against linux/devlink.h, kernel 6.19.6)

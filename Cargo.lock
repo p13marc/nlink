@@ -449,6 +449,7 @@ dependencies = [
  "clap",
  "nlink",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
@@ -546,6 +547,7 @@ dependencies = [
  "clap",
  "nlink",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

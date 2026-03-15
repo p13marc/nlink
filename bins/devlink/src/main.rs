@@ -6,6 +6,7 @@
 use clap::{Parser, Subcommand};
 use nlink::netlink::genl::devlink::{ConfigMode, FlashRequest, ParamData, ReloadAction};
 use nlink::netlink::{Connection, Devlink, Result};
+use tokio_stream::StreamExt;
 
 #[derive(Parser)]
 #[command(name = "devlink", version, about = "Devlink device management utility")]
@@ -60,6 +61,9 @@ enum Command {
         #[arg(long)]
         component: Option<String>,
     },
+
+    /// Monitor devlink events.
+    Monitor,
 
     /// Reload a device.
     Reload {
@@ -142,6 +146,21 @@ enum ParamAction {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Monitor needs a mutable connection for subscribe()
+    if matches!(cli.command, Command::Monitor) {
+        let mut conn = Connection::<Devlink>::new_async().await?;
+        conn.subscribe()?;
+        eprintln!("Monitoring devlink events (Ctrl+C to stop)...");
+        let mut events = conn.events();
+        while let Some(result) = events.next().await {
+            match result {
+                Ok(event) => println!("{event:?}"),
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
+        return Ok(());
+    }
+
     let conn = Connection::<Devlink>::new_async().await?;
 
     match cli.command {
@@ -296,6 +315,8 @@ async fn main() -> Result<()> {
             conn.flash_update(&bus, &device, request).await?;
             eprintln!("Flash update initiated");
         }
+
+        Command::Monitor => unreachable!(),
 
         Command::Reload {
             bus,
