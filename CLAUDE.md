@@ -1971,6 +1971,36 @@ conn.get_vlan_tunnels_by_index(link.ifindex()).await?;
 conn.del_vlan_tunnel_by_index(link.ifindex(), 100).await?;
 ```
 
+**Operation timeouts:**
+```rust
+use nlink::{Connection, Route};
+use std::time::Duration;
+
+// Set a default timeout for all operations
+let conn = Connection::<Route>::new()?
+    .timeout(Duration::from_secs(5));
+
+// All operations now respect the 5s timeout
+let links = conn.get_links().await?;  // Returns Error::Timeout after 5s
+
+// Handle timeout errors
+match conn.get_routes().await {
+    Ok(routes) => { /* ... */ }
+    Err(e) if e.is_timeout() => eprintln!("kernel not responding"),
+    Err(e) => return Err(e),
+}
+
+// Clear timeout (operations wait indefinitely)
+let conn = conn.no_timeout();
+
+// Check configured timeout
+assert_eq!(conn.get_timeout(), None);
+
+// No timeout is the default (backward compatible)
+let conn = Connection::<Route>::new()?;
+assert_eq!(conn.get_timeout(), None);
+```
+
 **Error handling:**
 ```rust
 use nlink::netlink::{Connection, Protocol, Error};

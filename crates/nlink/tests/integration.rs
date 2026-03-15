@@ -56,3 +56,6 @@ mod ratelimit;
 
 #[path = "integration/diagnostics.rs"]
 mod diagnostics;
+
+#[path = "integration/timeout.rs"]
+mod timeout;

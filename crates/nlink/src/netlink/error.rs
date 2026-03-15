@@ -115,6 +115,29 @@ pub enum Error {
         /// The family name that was not found.
         name: String,
     },
+
+    /// Operation timed out.
+    ///
+    /// The configured timeout expired before the kernel responded.
+    /// This typically indicates a kernel bug or an extremely loaded system.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::{Connection, Route};
+    /// use std::time::Duration;
+    ///
+    /// let conn = Connection::<Route>::new()?
+    ///     .timeout(Duration::from_secs(5));
+    ///
+    /// match conn.get_links().await {
+    ///     Err(e) if e.is_timeout() => eprintln!("kernel not responding"),
+    ///     Err(e) => return Err(e),
+    ///     Ok(links) => { /* ... */ }
+    /// }
+    /// ```
+    #[error("operation timed out")]
+    Timeout,
 }
 
 /// Structured validation error information.
@@ -325,9 +348,12 @@ impl Error {
         self.errno() == Some(libc::ENETUNREACH)
     }
 
-    /// Check if this is a "connection timed out" error (ETIMEDOUT).
+    /// Check if this is a timeout error.
+    ///
+    /// Returns `true` for both the [`Error::Timeout`] variant (from
+    /// [`Connection::timeout`]) and kernel ETIMEDOUT errors.
     pub fn is_timeout(&self) -> bool {
-        self.errno() == Some(libc::ETIMEDOUT)
+        matches!(self, Self::Timeout) || self.errno() == Some(libc::ETIMEDOUT)
     }
 
     /// Check if this is an "address already in use" error (EADDRINUSE).
@@ -449,6 +475,17 @@ mod tests {
     fn test_is_busy() {
         assert!(Error::from_errno(-16).is_busy()); // EBUSY
         assert!(!Error::from_errno(-1).is_busy()); // EPERM is not busy
+    }
+
+    #[test]
+    fn test_timeout() {
+        let err = Error::Timeout;
+        assert!(err.is_timeout());
+        assert_eq!(err.to_string(), "operation timed out");
+
+        // Kernel ETIMEDOUT should also match
+        let err = Error::from_errno(-(libc::ETIMEDOUT));
+        assert!(err.is_timeout());
     }
 
     #[test]

@@ -7,32 +7,32 @@ Add configurable timeouts for netlink operations. A hung kernel response current
 ## Progress
 
 ### Core Implementation
-- [ ] Add `timeout: Option<Duration>` field to `Connection<P>`
-- [ ] Implement `timeout()` builder method
-- [ ] Implement `no_timeout()` method
-- [ ] Implement `get_timeout()` method
-- [ ] Implement `with_timeout()` internal async helper
+- [x] Add `timeout: Option<Duration>` field to `Connection<P>`
+- [x] Implement `timeout()` builder method
+- [x] Implement `no_timeout()` method
+- [x] Implement `get_timeout()` method
+- [x] Implement `with_timeout()` internal async helper
 
 ### Apply to Operations
-- [ ] Wrap `send_ack()` with `with_timeout()`
-- [ ] Wrap `send_dump()` with `with_timeout()`
-- [ ] Verify GENL connections propagate timeout
+- [x] Wrap `send_ack()` with `with_timeout()`
+- [x] Wrap `send_dump()` with `with_timeout()`
+- [x] Verify GENL connections propagate timeout
 - [ ] Verify batch operations respect timeout (Plan 030)
 
 ### Error Variant
-- [ ] Add `Error::Timeout` variant to error enum
-- [ ] Implement `is_timeout()` method on `Error`
-- [ ] Add doc comments with examples on `Error::Timeout`
+- [x] Add `Error::Timeout` variant to error enum
+- [x] Implement `is_timeout()` method on `Error`
+- [x] Add doc comments with examples on `Error::Timeout`
 
 ### Testing
-- [ ] Add test `test_no_timeout_default`
-- [ ] Add test `test_timeout_is_chainable`
-- [ ] Add test `test_timeout_respected` (short timeout)
-- [ ] Add integration test with actual timeout scenario
+- [x] Add test `test_no_timeout_default`
+- [x] Add test `test_timeout_is_chainable`
+- [x] Add test `test_timeout_respected` (short timeout)
+- [x] Add integration test with actual timeout scenario
 
 ### Documentation
-- [ ] Add doc comments with examples on `timeout()` and `no_timeout()`
-- [ ] Update CLAUDE.md with timeout usage example
+- [x] Add doc comments with examples on `timeout()` and `no_timeout()`
+- [x] Update CLAUDE.md with timeout usage example
 
 ## Current State
 

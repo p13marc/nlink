@@ -2,6 +2,7 @@
 
 use std::os::unix::io::RawFd;
 use std::path::Path;
+use std::time::Duration;
 
 use super::builder::MessageBuilder;
 use super::error::{Error, Result};
@@ -38,6 +39,7 @@ use super::socket::NetlinkSocket;
 pub struct Connection<P: ProtocolState> {
     socket: NetlinkSocket,
     state: P,
+    timeout: Option<Duration>,
 }
 
 // ============================================================================
@@ -63,6 +65,7 @@ impl<P: ProtocolState + Default> Connection<P> {
         Ok(Self {
             socket: NetlinkSocket::new(P::PROTOCOL)?,
             state: P::default(),
+            timeout: None,
         })
     }
 
@@ -88,6 +91,7 @@ impl<P: ProtocolState + Default> Connection<P> {
         Ok(Self {
             socket: NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?,
             state: P::default(),
+            timeout: None,
         })
     }
 
@@ -111,6 +115,7 @@ impl<P: ProtocolState + Default> Connection<P> {
         Ok(Self {
             socket: NetlinkSocket::new_in_namespace_path(P::PROTOCOL, ns_path)?,
             state: P::default(),
+            timeout: None,
         })
     }
 }
@@ -135,24 +140,93 @@ impl<P: ProtocolState> Connection<P> {
         &self.state
     }
 
+    /// Set a default timeout for all netlink operations.
+    ///
+    /// Operations that exceed the timeout return [`Error::Timeout`].
+    /// By default, no timeout is set and operations wait indefinitely.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::{Connection, Route};
+    /// use std::time::Duration;
+    ///
+    /// let conn = Connection::<Route>::new()?
+    ///     .timeout(Duration::from_secs(5));
+    /// ```
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Clear the timeout (operations will wait indefinitely).
+    pub fn no_timeout(mut self) -> Self {
+        self.timeout = None;
+        self
+    }
+
+    /// Get the configured timeout.
+    pub fn get_timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    /// Wrap a future with the configured timeout.
+    ///
+    /// If no timeout is set, the future runs without time limit.
+    /// On timeout, returns [`Error::Timeout`].
+    pub(crate) async fn with_timeout<F, T>(&self, fut: F) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        match self.timeout {
+            Some(dur) => tokio::time::timeout(dur, fut)
+                .await
+                .map_err(|_| Error::Timeout)?,
+            None => fut.await,
+        }
+    }
+
     /// Create a connection from its parts.
     ///
     /// This is primarily used internally for protocols that require
     /// async initialization (like WireGuard which needs family ID resolution).
     pub(crate) fn from_parts(socket: NetlinkSocket, state: P) -> Self {
-        Self { socket, state }
+        Self {
+            socket,
+            state,
+            timeout: None,
+        }
     }
 
     // ========================================================================
     // Internal request methods (pub(crate) - not part of public API)
     // ========================================================================
 
-    /// Send a request and wait for a single response or ACK.
     /// Send a request and wait for a response.
     ///
-    /// This is a low-level method. Prefer using typed methods like `get_links()`,
-    /// `add_route()`, etc. when available.
-    pub(crate) async fn send_request(&self, mut builder: MessageBuilder) -> Result<Vec<u8>> {
+    /// Respects the configured timeout. This is a low-level method.
+    /// Prefer using typed methods like `get_links()`, `add_route()`, etc.
+    pub(crate) async fn send_request(&self, builder: MessageBuilder) -> Result<Vec<u8>> {
+        self.with_timeout(self.send_request_inner(builder)).await
+    }
+
+    /// Send a request that expects an ACK only (no data response).
+    ///
+    /// Respects the configured timeout. This is a low-level method.
+    /// Prefer using typed methods like `add_link()`, `del_route()`, etc.
+    pub(crate) async fn send_ack(&self, builder: MessageBuilder) -> Result<()> {
+        self.with_timeout(self.send_ack_inner(builder)).await
+    }
+
+    /// Send a dump request and collect all responses.
+    ///
+    /// Respects the configured timeout. This is a low-level method.
+    /// Prefer using typed methods like `get_links()`, `get_routes()`, etc.
+    pub(crate) async fn send_dump(&self, builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
+        self.with_timeout(self.send_dump_inner(builder)).await
+    }
+
+    async fn send_request_inner(&self, mut builder: MessageBuilder) -> Result<Vec<u8>> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -160,18 +234,13 @@ impl<P: ProtocolState> Connection<P> {
         let msg = builder.finish();
         self.socket.send(&msg).await?;
 
-        // Receive response
         let response = self.socket.recv_msg().await?;
         self.process_response(&response, seq)?;
 
         Ok(response)
     }
 
-    /// Send a request that expects an ACK only (no data response).
-    ///
-    /// This is a low-level method. Prefer using typed methods like `add_link()`,
-    /// `del_route()`, etc. when available.
-    pub(crate) async fn send_ack(&self, mut builder: MessageBuilder) -> Result<()> {
+    async fn send_ack_inner(&self, mut builder: MessageBuilder) -> Result<()> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -179,18 +248,13 @@ impl<P: ProtocolState> Connection<P> {
         let msg = builder.finish();
         self.socket.send(&msg).await?;
 
-        // Receive ACK
         let response = self.socket.recv_msg().await?;
         self.process_ack(&response, seq)?;
 
         Ok(())
     }
 
-    /// Send a dump request and collect all responses.
-    ///
-    /// This is a low-level method. Prefer using typed methods like `get_links()`,
-    /// `get_routes()`, etc. when available.
-    pub(crate) async fn send_dump(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
+    async fn send_dump_inner(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
