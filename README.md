@@ -22,13 +22,13 @@ nlink is a from-scratch implementation of Linux netlink-based network management
 
 ```toml
 # Core netlink functionality
-nlink = "0.8"
+nlink = "0.9"
 
 # With additional features
-nlink = { version = "0.8", features = ["sockdiag", "tuntap", "tc", "output"] }
+nlink = { version = "0.9", features = ["sockdiag", "tuntap", "tc", "output"] }
 
 # All features
-nlink = { version = "0.8", features = ["full"] }
+nlink = { version = "0.9", features = ["full"] }
 ```
 
 ### Features
@@ -158,7 +158,7 @@ if let Some(bottleneck) = diag.find_bottleneck().await? {
 | `nlink::netlink::config` | Declarative network configuration |
 | `nlink::netlink::ratelimit` | High-level rate limiting API |
 | `nlink::netlink::diagnostics` | Network diagnostics and issue detection |
-| `nlink::netlink::genl` | Generic Netlink: WireGuard, MACsec, MPTCP |
+| `nlink::netlink::genl` | Generic Netlink: WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink |
 | `nlink::netlink::nexthop` | Nexthop objects and ECMP groups (Linux 5.3+) |
 | `nlink::netlink::mpls` | MPLS routes and encapsulation |
 | `nlink::netlink::srv6` | SRv6 segment routing |
@@ -200,6 +200,15 @@ The library API is production-ready for network monitoring and configuration.
 - Rate limiting DSL
 - Network diagnostics
 - VRF and XFRM/IPSec support
+- Bond interface management with typed modes and slave info
+- nftables firewall management (tables, chains, rules, sets, NAT)
+- nl80211 WiFi management (scan, connect, monitor)
+- Devlink hardware device management (ports, health, firmware flash)
+- BPF program attachment to TC hooks
+- Socket statistics: summary mode, kill mode, expression filters
+- Netlink batching for bulk operations
+- Operation timeouts
+- Ethtool configuration and event monitoring
 
 ## Building
 
