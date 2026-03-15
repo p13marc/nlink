@@ -7,22 +7,22 @@ Improve the `nlink-ss` binary with missing features from iproute2's `ss`. All ne
 ## Progress
 
 ### Phase 1: Summary Mode
-- [ ] Implement `SocketSummary` and `TcpSummary` types in `sockdiag`
-- [ ] Implement `socket_summary()` on `Connection<SockDiag>`
+- [x] Implement `SocketSummary` and `TcpSummary` types in `sockdiag`
+- [x] Implement `socket_summary()` on `Connection<SockDiag>`
 - [ ] Add unit tests for `SocketSummary` aggregation
 - [ ] Add integration test querying real sockets
-- [ ] Add `-s` flag to `bins/ss` binary
-- [ ] Add summary output formatting in `bins/ss/src/output.rs`
-- [ ] Add doc comments with examples on all public types
+- [x] Add `-s` flag to `bins/ss` binary
+- [x] Add summary output formatting in `bins/ss/src/output.rs`
+- [x] Add doc comments with examples on all public types
 - [ ] Update CLAUDE.md with `socket_summary()` usage example
 
 ### Phase 2: Kill Mode
-- [ ] Implement `destroy_tcp_socket()` on `Connection<SockDiag>`
+- [x] Implement `destroy_tcp_socket()` on `Connection<SockDiag>`
 - [ ] Implement `destroy_matching()` with `DestroyResult`/`DestroyError`
 - [ ] Add `DestroyResult`, `DestroyError`, `SocketId` types
 - [ ] Add integration test (requires CAP_NET_ADMIN)
 - [ ] Add `-K` flag to `bins/ss` binary
-- [ ] Add doc comments with examples on destroy methods
+- [x] Add doc comments with examples on destroy methods
 - [ ] Update CLAUDE.md with kill mode example
 
 ### Phase 3: Netlink Socket Listing

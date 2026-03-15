@@ -34,7 +34,8 @@ pub use crate::sockdiag::filter::{
 };
 pub use crate::sockdiag::socket::{InetSocket, SocketInfo, UnixSocket, UnixType};
 pub use crate::sockdiag::types::{
-    AddressFamily, MemInfo, Protocol as InetProtocol, SocketState, TcpInfo, TcpState, Timer,
+    AddressFamily, MemInfo, Protocol as InetProtocol, SocketState, SocketSummary, TcpInfo,
+    TcpState, Timer,
 };
 
 // Netlink constants
@@ -47,7 +48,9 @@ const NLM_F_DUMP: u16 = NLM_F_ROOT | NLM_F_MATCH;
 
 // Socket diagnostics constants
 const SOCK_DIAG_BY_FAMILY: u16 = 20;
+const SOCK_DESTROY: u16 = 21;
 const TCPDIAG_GETSOCK: u16 = 18;
+const NLM_F_ACK: u16 = 0x04;
 
 // Inet diag extensions
 const INET_DIAG_MEMINFO: u16 = 1;
@@ -127,6 +130,174 @@ impl Connection<SockDiag> {
     pub async fn query_unix_sockets(&self) -> Result<Vec<UnixSocket>> {
         let filter = UnixFilter::default();
         self.query_unix_typed(&filter).await
+    }
+
+    /// Get aggregated socket statistics across all families.
+    ///
+    /// Queries TCP, UDP, raw, and Unix sockets and aggregates the counts
+    /// by state. This is equivalent to `ss -s`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, SockDiag};
+    ///
+    /// let conn = Connection::<SockDiag>::new()?;
+    /// let summary = conn.socket_summary().await?;
+    /// println!("{}", summary);
+    /// // Total: 234
+    /// // TCP:   45 (estab 23, closed 12, orphaned 0, timewait 8)
+    /// // UDP:   12
+    /// // RAW:   2
+    /// // UNIX:  175
+    /// ```
+    pub async fn socket_summary(&self) -> Result<SocketSummary> {
+        use crate::sockdiag::types::{SocketSummary, TcpSummary};
+
+        let tcp_filter = InetFilter {
+            protocol: InetProtocol::Tcp,
+            states: TcpState::all_mask(),
+            ..Default::default()
+        };
+        let tcp_sockets = self.query_inet_typed(&tcp_filter).await?;
+
+        let udp_filter = InetFilter {
+            protocol: InetProtocol::Udp,
+            ..Default::default()
+        };
+        let udp_sockets = self.query_inet_typed(&udp_filter).await?;
+
+        let raw_filter = InetFilter {
+            protocol: InetProtocol::Raw,
+            ..Default::default()
+        };
+        let raw_sockets = self.query_inet_typed(&raw_filter).await.unwrap_or_default();
+
+        let unix_sockets = self.query_unix_sockets().await?;
+
+        let mut tcp = TcpSummary {
+            total: tcp_sockets.len() as u32,
+            ..Default::default()
+        };
+
+        for sock in &tcp_sockets {
+            match sock.state {
+                SocketState::Tcp(TcpState::Established) => tcp.established += 1,
+                SocketState::Tcp(TcpState::SynSent) => tcp.syn_sent += 1,
+                SocketState::Tcp(TcpState::SynRecv) => tcp.syn_recv += 1,
+                SocketState::Tcp(TcpState::FinWait1) => tcp.fin_wait1 += 1,
+                SocketState::Tcp(TcpState::FinWait2) => tcp.fin_wait2 += 1,
+                SocketState::Tcp(TcpState::TimeWait) => tcp.time_wait += 1,
+                SocketState::Tcp(TcpState::Close) => tcp.close += 1,
+                SocketState::Tcp(TcpState::CloseWait) => tcp.close_wait += 1,
+                SocketState::Tcp(TcpState::LastAck) => tcp.last_ack += 1,
+                SocketState::Tcp(TcpState::Listen) => tcp.listen += 1,
+                SocketState::Tcp(TcpState::Closing) => tcp.closing += 1,
+                _ => {}
+            }
+        }
+
+        Ok(SocketSummary {
+            tcp,
+            udp: udp_sockets.len() as u32,
+            raw: raw_sockets.len() as u32,
+            unix: unix_sockets.len() as u32,
+        })
+    }
+
+    /// Force-close a TCP socket by sending `SOCK_DESTROY`.
+    ///
+    /// The kernel sends a RST to the remote peer. Requires `CAP_NET_ADMIN`
+    /// and Linux 4.9+. Only TCP sockets can be destroyed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Kernel` with `EPERM` if insufficient privileges.
+    /// Returns `Error::Kernel` with `EOPNOTSUPP` if the socket type doesn't
+    /// support destruction.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let sockets = conn.query_tcp().await?;
+    /// for sock in &sockets {
+    ///     if sock.remote.port() == 8080 {
+    ///         conn.destroy_tcp_socket(sock).await?;
+    ///     }
+    /// }
+    /// ```
+    pub async fn destroy_tcp_socket(&self, socket: &InetSocket) -> Result<()> {
+        let seq = self.socket().next_seq();
+        let pid = self.socket().pid();
+
+        let mut buf = Vec::with_capacity(128);
+
+        // Netlink header (16 bytes)
+        buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (filled later)
+        buf.extend_from_slice(&SOCK_DESTROY.to_ne_bytes()); // nlmsg_type
+        buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes()); // nlmsg_flags
+        buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
+        buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
+
+        // inet_diag_req_v2 (56 bytes)
+        buf.push(socket.family as u8); // sdiag_family
+        buf.push(socket.protocol.number()); // sdiag_protocol
+        buf.push(0); // idiag_ext
+        buf.push(0); // pad
+        buf.extend_from_slice(&0u32.to_ne_bytes()); // idiag_states (unused for destroy)
+
+        // inet_diag_sockid (48 bytes)
+        buf.extend_from_slice(&socket.local.port().to_be_bytes()); // idiag_sport
+        buf.extend_from_slice(&socket.remote.port().to_be_bytes()); // idiag_dport
+
+        // Source address (16 bytes, IPv4 in first 4 bytes)
+        match socket.local.ip() {
+            std::net::IpAddr::V4(v4) => {
+                buf.extend_from_slice(&v4.octets());
+                buf.extend_from_slice(&[0u8; 12]);
+            }
+            std::net::IpAddr::V6(v6) => {
+                buf.extend_from_slice(&v6.octets());
+            }
+        }
+
+        // Destination address (16 bytes)
+        match socket.remote.ip() {
+            std::net::IpAddr::V4(v4) => {
+                buf.extend_from_slice(&v4.octets());
+                buf.extend_from_slice(&[0u8; 12]);
+            }
+            std::net::IpAddr::V6(v6) => {
+                buf.extend_from_slice(&v6.octets());
+            }
+        }
+
+        buf.extend_from_slice(&socket.interface.to_ne_bytes()); // idiag_if
+        buf.extend_from_slice(&socket.cookie.to_ne_bytes()); // idiag_cookie
+
+        // Update length
+        let len = buf.len() as u32;
+        buf[0..4].copy_from_slice(&len.to_ne_bytes());
+
+        // Send request
+        self.socket().send(&buf).await?;
+
+        // Wait for ACK
+        let data: Vec<u8> = self.socket().recv_msg().await?;
+        if data.len() >= 20 {
+            let msg_type = u16::from_ne_bytes([data[4], data[5]]);
+            if msg_type == NLMSG_ERROR {
+                let errno = i32::from_ne_bytes([data[16], data[17], data[18], data[19]]);
+                if errno != 0 {
+                    return Err(crate::netlink::Error::Kernel {
+                        errno: -errno,
+                        message: format!("SOCK_DESTROY failed: {}", std::io::Error::from_raw_os_error(-errno)),
+                    });
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn query_inet(&self, filter: &InetFilter) -> Result<Vec<SocketInfo>> {

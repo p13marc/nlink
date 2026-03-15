@@ -70,4 +70,7 @@ pub mod types;
 pub use error::{Error, Result};
 pub use filter::{InetFilter, SocketFilter, UnixFilter};
 pub use socket::{InetSocket, NetlinkSocket, PacketSocket, SocketInfo, UnixSocket};
-pub use types::{AddressFamily, InetExtension, Protocol, SocketState, TcpInfo, TcpState, UnixShow};
+pub use types::{
+    AddressFamily, InetExtension, Protocol, SocketState, SocketSummary, TcpInfo, TcpState,
+    TcpSummary, UnixShow,
+};

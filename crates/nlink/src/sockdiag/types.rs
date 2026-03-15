@@ -4,6 +4,7 @@
 //! address families, protocols, and diagnostic information.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Socket address family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -710,4 +711,71 @@ impl Timer {
             _ => Self::Off,
         }
     }
+}
+
+/// Aggregated socket statistics across all families.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::{Connection, SockDiag};
+///
+/// let conn = Connection::<SockDiag>::new()?;
+/// let summary = conn.socket_summary().await?;
+/// println!("{}", summary);
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SocketSummary {
+    /// TCP socket summary.
+    pub tcp: TcpSummary,
+    /// Total UDP sockets.
+    pub udp: u32,
+    /// Total raw sockets.
+    pub raw: u32,
+    /// Total Unix domain sockets.
+    pub unix: u32,
+}
+
+impl fmt::Display for SocketSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let total = self.tcp.total + self.udp + self.raw + self.unix;
+        writeln!(f, "Total: {total}")?;
+        writeln!(
+            f,
+            "TCP:   {} (estab {}, closed {}, orphaned 0, timewait {})",
+            self.tcp.total, self.tcp.established, self.tcp.close, self.tcp.time_wait
+        )?;
+        writeln!(f, "UDP:   {}", self.udp)?;
+        writeln!(f, "RAW:   {}", self.raw)?;
+        write!(f, "UNIX:  {}", self.unix)
+    }
+}
+
+/// TCP socket statistics broken down by state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TcpSummary {
+    /// Total TCP sockets.
+    pub total: u32,
+    /// ESTABLISHED state.
+    pub established: u32,
+    /// SYN-SENT state.
+    pub syn_sent: u32,
+    /// SYN-RECV state.
+    pub syn_recv: u32,
+    /// FIN-WAIT-1 state.
+    pub fin_wait1: u32,
+    /// FIN-WAIT-2 state.
+    pub fin_wait2: u32,
+    /// TIME-WAIT state.
+    pub time_wait: u32,
+    /// CLOSE state.
+    pub close: u32,
+    /// CLOSE-WAIT state.
+    pub close_wait: u32,
+    /// LAST-ACK state.
+    pub last_ack: u32,
+    /// LISTEN state.
+    pub listen: u32,
+    /// CLOSING state.
+    pub closing: u32,
 }
