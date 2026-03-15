@@ -292,6 +292,21 @@ fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
         obj["chain"] = serde_json::json!(chain);
     }
 
+    if let Some(bpf) = filter.bpf_info() {
+        let mut bpf_obj = serde_json::Map::new();
+        if let Some(id) = bpf.id {
+            bpf_obj.insert("id".into(), serde_json::json!(id));
+        }
+        if let Some(ref name) = bpf.name {
+            bpf_obj.insert("name".into(), serde_json::json!(name));
+        }
+        if let Some(tag) = bpf.tag_hex() {
+            bpf_obj.insert("tag".into(), serde_json::json!(tag));
+        }
+        bpf_obj.insert("direct_action".into(), serde_json::json!(bpf.direct_action));
+        obj["bpf"] = serde_json::Value::Object(bpf_obj);
+    }
+
     obj
 }
 
@@ -321,6 +336,22 @@ fn print_filter_text(
     }
 
     write!(w, "dev {}", dev)?;
+
+    // Show BPF program info if present
+    if let Some(bpf) = filter.bpf_info() {
+        if let Some(ref name) = bpf.name {
+            write!(w, " [{name}]")?;
+        }
+        if let Some(id) = bpf.id {
+            write!(w, " id {id}")?;
+        }
+        if let Some(tag) = bpf.tag_hex() {
+            write!(w, " tag {tag}")?;
+        }
+        if bpf.direct_action {
+            write!(w, " direct-action")?;
+        }
+    }
 
     writeln!(w)?;
 

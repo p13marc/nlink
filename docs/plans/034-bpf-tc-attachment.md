@@ -21,7 +21,7 @@
 - [x] Implement `tag_hex()` method
 - [x] Implement `bpf_info()` on `TcMessage`
 - [ ] Add integration test for BPF info parsing
-- [ ] Add BPF info display in `bins/tc` filter show output
+- [x] Add BPF info display in `bins/tc` filter show output
 - [x] Add doc comments with examples
 
 ### Convenience Helpers
@@ -33,7 +33,7 @@
 - [ ] Add integration test for attach/detach/list cycle
 - [ ] Add BPF attachment support to `bins/tc` filter add command
 - [ ] Add doc comments with examples on convenience methods
-- [ ] Update CLAUDE.md with BPF/TC usage examples
+- [x] Update CLAUDE.md with BPF/TC usage examples
 
 ## Current State
 

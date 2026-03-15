@@ -2746,6 +2746,43 @@ println!("{}", mem_info.format_skmem_compact());
 // Output: "skmem:(rb131072,tb16384)"
 ```
 
+## BPF/TC Attachment
+
+Attach BPF programs to TC ingress/egress hooks:
+
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::filter::{BpfFilter, BpfDirection};
+
+let conn = Connection::<Route>::new()?;
+
+// Attach BPF from pinned path (standard clsact pattern)
+let filter = BpfFilter::from_pinned("/sys/fs/bpf/my_prog")?
+    .direct_action();
+conn.attach_bpf("eth0", BpfDirection::Ingress, filter).await?;
+
+// Attach by index (namespace-safe)
+conn.attach_bpf_by_index(ifindex, BpfDirection::Egress, filter).await?;
+
+// List attached BPF programs
+let programs = conn.list_bpf_programs("eth0").await?;
+for prog in &programs {
+    println!("BPF: id={:?} name={:?} tag={:?} da={}",
+        prog.id, prog.name, prog.tag_hex(), prog.direct_action);
+}
+
+// Detach all BPF from ingress
+conn.detach_bpf("eth0", BpfDirection::Ingress).await?;
+
+// Low-level: read BPF info from TC filter dump
+let filters = conn.get_filters_by_name("eth0", "ingress").await?;
+for filter in &filters {
+    if let Some(bpf) = filter.bpf_info() {
+        println!("Program ID: {:?}", bpf.id);
+    }
+}
+```
+
 ## nftables (Netfilter Tables)
 
 nftables firewall management via `NETLINK_NETFILTER`. Supports tables, chains, rules, sets,
