@@ -114,6 +114,19 @@ crates/nlink/src/
         types.rs      # LinkState, LinkModes, Features, Rings, Channels, builders
         bitset.rs     # EthtoolBitset parsing (compact and verbose formats)
         connection.rs # Connection<Ethtool> API
+      nl80211/        # WiFi configuration via nl80211 GENL
+        mod.rs        # nl80211 command/attribute constants
+        types.rs      # WirelessInterface, ScanResult, StationInfo, PhyInfo
+        connection.rs # Connection<Nl80211> API
+      devlink/        # Devlink device management GENL
+        mod.rs        # Devlink command/attribute constants
+        types.rs      # DevlinkDevice, DevlinkInfo, DevlinkPort, HealthReporter
+        connection.rs # Connection<Devlink> API
+    nftables/         # nftables firewall (NETLINK_NETFILTER)
+      mod.rs          # nftables constants
+      types.rs        # Table, Chain, Rule, Set, Family, Verdict
+      expr.rs         # Expression types (Meta, Cmp, Payload, Nat, etc.)
+      connection.rs   # Connection<Nftables> API
     messages/         # Strongly-typed message structs
     types/            # RTNetlink message structures (link, addr, route, neigh, rule, tc)
   util/               # Shared utilities (always available)
@@ -144,6 +157,9 @@ crates/nlink/src/
 - `bins/ip/` - Network configuration (depends on `nlink` with `output` feature)
 - `bins/tc/` - Traffic control (depends on `nlink` with `tc`, `output` features)
 - `bins/ss/` - Socket statistics (depends on `nlink` with `sockdiag`, `output` features)
+- `bins/nft/` - nftables firewall management (depends on `nlink` with `output` feature)
+- `bins/wifi/` - WiFi management via nl80211 (depends on `nlink` with `output` feature)
+- `bins/devlink/` - Devlink device management (depends on `nlink` with `output` feature)
 
 ## Crate Root Re-exports
 
@@ -2728,6 +2744,366 @@ println!("{}", mem_info.format_skmem());
 // Compact version (only non-zero values)
 println!("{}", mem_info.format_skmem_compact());
 // Output: "skmem:(rb131072,tb16384)"
+```
+
+## nftables (Netfilter Tables)
+
+nftables firewall management via `NETLINK_NETFILTER`. Supports tables, chains, rules, sets,
+NAT, and atomic transactions.
+
+**Basic firewall setup:**
+```rust
+use nlink::netlink::{Connection, Nftables};
+use nlink::netlink::nftables::{Family, Chain, Hook, ChainType, Priority, Policy, Rule, CtState};
+
+let conn = Connection::<Nftables>::new()?;
+
+// Create a table
+conn.add_table("filter", Family::Inet).await?;
+
+// Create an input chain with drop policy
+conn.add_chain(
+    Chain::new("filter", "input")
+        .family(Family::Inet)
+        .hook(Hook::Input)
+        .chain_type(ChainType::Filter)
+        .priority(Priority::Filter)
+        .policy(Policy::Drop)
+).await?;
+
+// Allow established/related connections
+conn.add_rule(
+    Rule::new("filter", "input")
+        .family(Family::Inet)
+        .match_ct_state(CtState::ESTABLISHED | CtState::RELATED)
+        .accept()
+).await?;
+
+// Allow SSH
+conn.add_rule(
+    Rule::new("filter", "input")
+        .family(Family::Inet)
+        .match_tcp_dport(22)
+        .counter()
+        .accept()
+).await?;
+
+// Allow HTTP/HTTPS from specific subnet
+use std::net::Ipv4Addr;
+conn.add_rule(
+    Rule::new("filter", "input")
+        .family(Family::Inet)
+        .match_saddr_v4(Ipv4Addr::new(10, 0, 0, 0), 8)
+        .match_tcp_dport(443)
+        .accept()
+).await?;
+
+// List rules
+let rules = conn.list_rules("filter", Family::Inet).await?;
+for rule in &rules {
+    println!("Rule handle={} chain={}", rule.handle, rule.chain);
+}
+
+// Delete a rule by handle
+conn.del_rule("filter", "input", Family::Inet, rule_handle).await?;
+
+// Flush all rules in a table
+conn.flush_table("filter", Family::Inet).await?;
+```
+
+**NAT configuration:**
+```rust
+use nlink::netlink::nftables::{Chain, Hook, ChainType, Priority, Rule, Family};
+
+// Create NAT chains
+conn.add_chain(
+    Chain::new("nat", "postrouting")
+        .family(Family::Ip)
+        .hook(Hook::Postrouting)
+        .chain_type(ChainType::Nat)
+        .priority(Priority::SrcNat)
+).await?;
+
+// Masquerade (dynamic SNAT)
+conn.add_rule(
+    Rule::new("nat", "postrouting")
+        .family(Family::Ip)
+        .match_oif("eth0")
+        .masquerade()
+).await?;
+
+// Static DNAT
+conn.add_rule(
+    Rule::new("nat", "prerouting")
+        .family(Family::Ip)
+        .match_tcp_dport(80)
+        .dnat(Ipv4Addr::new(192, 168, 1, 100), Some(8080))
+).await?;
+```
+
+**Sets (IP/port lists):**
+```rust
+use nlink::netlink::nftables::{Set, SetKeyType, SetElement};
+
+// Create a set of blocked IPs
+conn.add_set(
+    Set::new("filter", "blocked")
+        .family(Family::Inet)
+        .key_type(SetKeyType::Ipv4Addr)
+).await?;
+
+// Add elements
+conn.add_set_elements("filter", "blocked", Family::Inet, &[
+    SetElement::ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+    SetElement::ipv4(Ipv4Addr::new(10, 0, 0, 2)),
+]).await?;
+
+// Match against set in a rule
+conn.add_rule(
+    Rule::new("filter", "input")
+        .family(Family::Inet)
+        .match_saddr_in_set("blocked")
+        .drop()
+).await?;
+```
+
+**Atomic transactions:**
+```rust
+use nlink::netlink::nftables::Transaction;
+
+// Build and commit atomically (all-or-nothing)
+Transaction::new()
+    .add_table("filter", Family::Inet)
+    .add_chain(Chain::new("filter", "input")
+        .family(Family::Inet)
+        .hook(Hook::Input)
+        .chain_type(ChainType::Filter)
+        .priority(Priority::Filter)
+        .policy(Policy::Drop))
+    .add_rule(Rule::new("filter", "input")
+        .family(Family::Inet)
+        .match_ct_state(CtState::ESTABLISHED | CtState::RELATED)
+        .accept())
+    .commit(&conn)
+    .await?;
+
+// Flush entire ruleset
+conn.flush_ruleset().await?;
+```
+
+## nl80211 WiFi Configuration
+
+WiFi management via the nl80211 Generic Netlink family.
+
+```rust
+use nlink::netlink::{Connection, Nl80211};
+use nlink::netlink::genl::nl80211::{ScanRequest, ConnectRequest};
+
+let conn = Connection::<Nl80211>::new_async().await?;
+
+// List wireless interfaces
+let interfaces = conn.get_interfaces().await?;
+for iface in &interfaces {
+    let name = iface.name.as_deref().unwrap_or("?");
+    println!("{name}: {:?} mac={:?}", iface.iftype, iface.mac_str());
+}
+
+// Get specific interface
+let iface = conn.get_interface("wlan0").await?;
+
+// Trigger a scan
+let request = ScanRequest::default().ssid("MyNetwork".as_bytes().to_vec());
+conn.trigger_scan("wlan0", &request).await?;
+
+// Get scan results
+let results = conn.get_scan_results("wlan0").await?;
+for r in &results {
+    println!("{} {:?} {} MHz {} dBm {}",
+        r.bssid_str(),
+        r.ssid,
+        r.frequency,
+        r.signal_dbm(),
+        if r.is_privacy() { "[secured]" } else { "" });
+}
+
+// Get station info (connected AP)
+let stations = conn.get_stations("wlan0").await?;
+for sta in &stations {
+    println!("Signal: {:?} dBm", sta.signal_dbm);
+    if let Some(rx) = &sta.rx_bitrate {
+        println!("RX: {:?} Mbps", rx.mbps());
+    }
+}
+
+// Physical device capabilities
+let phys = conn.get_phys().await?;
+for phy in &phys {
+    println!("phy#{}: {} ({} bands)", phy.index, phy.name, phy.bands.len());
+}
+
+// Regulatory domain
+let reg = conn.get_regulatory().await?;
+println!("Country: {}", reg.country);
+
+// Connect to a network
+conn.connect("wlan0", ConnectRequest::new("MyNetwork")).await?;
+
+// Disconnect
+conn.disconnect("wlan0").await?;
+
+// Power save
+conn.set_power_save("wlan0", true).await?;
+let state = conn.get_power_save("wlan0").await?;
+
+// Monitor events
+use tokio_stream::StreamExt;
+let mut conn = Connection::<Nl80211>::new_async().await?;
+conn.subscribe()?;
+let mut events = conn.events();
+while let Some(result) = events.next().await {
+    println!("{:?}", result?);
+}
+```
+
+## Devlink Device Management
+
+Hardware device management via devlink Generic Netlink. Used by modern NIC drivers
+(mlx5, ice, bnxt) for firmware info, health monitoring, and configuration.
+
+```rust
+use nlink::netlink::{Connection, Devlink};
+use nlink::netlink::genl::devlink::{ReloadAction, FlashRequest, ConfigMode, ParamData};
+
+let conn = Connection::<Devlink>::new_async().await?;
+
+// List devices
+let devices = conn.get_devices().await?;
+for dev in &devices {
+    println!("{}", dev.path());  // e.g., "pci/0000:03:00.0"
+}
+
+// Get firmware/driver info
+let info = conn.get_device_info("pci", "0000:03:00.0").await?;
+println!("Driver: {}", info.driver);
+for v in &info.versions_running {
+    println!("  {}: {}", v.name, v.value);
+}
+if info.has_pending_update() {
+    println!("Pending firmware update!");
+}
+
+// List ports
+let ports = conn.get_ports().await?;
+for port in &ports {
+    println!("{} {:?} netdev={:?}", port.path(), port.flavour, port.netdev_name);
+}
+
+// Health reporters
+let reporters = conn.get_health_reporters("pci", "0000:03:00.0").await?;
+for r in &reporters {
+    println!("{}: {:?} errors={}", r.name, r.state, r.error_count);
+}
+conn.health_reporter_recover("pci", "0000:03:00.0", "fw_fatal").await?;
+
+// Device parameters
+let params = conn.get_params("pci", "0000:03:00.0").await?;
+conn.set_param("pci", "0000:03:00.0", "enable_sriov",
+    ConfigMode::Driverinit, ParamData::Bool(true)).await?;
+
+// Flash firmware
+conn.flash_update("pci", "0000:03:00.0",
+    FlashRequest::new("/lib/firmware/mlx5.mfa2")).await?;
+
+// Reload device
+conn.reload("pci", "0000:03:00.0", ReloadAction::DriverReinit).await?;
+
+// Monitor events
+use tokio_stream::StreamExt;
+let mut conn = Connection::<Devlink>::new_async().await?;
+conn.subscribe()?;
+let mut events = conn.events();
+while let Some(result) = events.next().await {
+    println!("{:?}", result?);
+}
+```
+
+## Bond Interface Management
+
+Create and configure bonded (link aggregation) interfaces:
+
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::link::{BondLink, BondMode, XmitHashPolicy, LacpRate};
+use std::net::Ipv4Addr;
+
+let conn = Connection::<Route>::new()?;
+
+// Create LACP bond
+conn.add_link(
+    BondLink::new("bond0")
+        .mode(BondMode::Lacp)
+        .miimon(100)
+        .lacp_rate(LacpRate::Fast)
+        .xmit_hash_policy(XmitHashPolicy::Layer34)
+        .min_links(1)
+).await?;
+
+// Create active-backup bond
+conn.add_link(
+    BondLink::new("bond1")
+        .mode(BondMode::ActiveBackup)
+        .miimon(100)
+        .updelay(200)
+        .downdelay(200)
+).await?;
+
+// Create balance-rr bond with ARP monitoring
+conn.add_link(
+    BondLink::new("bond2")
+        .mode(BondMode::BalanceRr)
+        .arp_interval(1000)
+        .arp_ip_target(Ipv4Addr::new(192, 168, 1, 1))
+).await?;
+
+// Add slaves to the bond
+conn.set_link_master("eth0", "bond0").await?;
+conn.set_link_master("eth1", "bond0").await?;
+conn.set_link_up("bond0").await?;
+```
+
+## Netlink Batching
+
+Execute multiple netlink operations in a single batch for better performance:
+
+```rust
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::route::Ipv4Route;
+use nlink::netlink::link::DummyLink;
+use std::net::Ipv4Addr;
+
+let conn = Connection::<Route>::new()?;
+
+// Build a batch of operations
+let results = conn.batch()
+    .add_route(Ipv4Route::new("10.0.0.0", 8).gateway(Ipv4Addr::new(192, 168, 1, 1)))
+    .add_route(Ipv4Route::new("10.1.0.0", 16).gateway(Ipv4Addr::new(192, 168, 1, 2)))
+    .add_route(Ipv4Route::new("10.2.0.0", 16).gateway(Ipv4Addr::new(192, 168, 1, 3)))
+    .add_link(DummyLink::new("dummy0"))
+    .execute()
+    .await?;
+
+// Check results
+println!("{}/{} succeeded", results.success_count(), results.len());
+for (i, err) in results.errors() {
+    eprintln!("Operation {i} failed: {err}");
+}
+
+// Or use execute_all() to fail on first error
+conn.batch()
+    .add_route(Ipv4Route::new("10.0.0.0", 8).gateway(Ipv4Addr::new(192, 168, 1, 1)))
+    .del_route(Ipv4Route::new("10.1.0.0", 16))
+    .execute_all()
+    .await?;
 ```
 
 ## Publishing

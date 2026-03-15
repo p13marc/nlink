@@ -31,7 +31,7 @@ Bond creation via `BondLink` already exists (`link.rs:2829-2989`) with basic att
 - [x] Add integration test for active-backup with slaves (`test_bond_active_backup_with_slaves`)
 - [x] Update `bins/ip` link add command to use typed enums
 - [x] Add doc comments with examples on `BondLink`
-- [ ] Update CLAUDE.md with bond usage examples
+- [x] Update CLAUDE.md with bond usage examples
 
 ### Bond Info Parsing
 - [x] Implement `BondInfo` struct

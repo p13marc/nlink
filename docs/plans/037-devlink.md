@@ -44,7 +44,7 @@ Add devlink Generic Netlink support for hardware device management. Used by mode
 - [ ] Add integration tests for info/port/health parsing
 - [x] Add doc comments with examples on all public types and methods
 - [x] Create `bins/devlink` binary or add devlink commands to existing binary
-- [ ] Update CLAUDE.md with devlink usage examples
+- [x] Update CLAUDE.md with devlink usage examples
 
 ### Phase 2: Management Operations
 - [x] Implement `ReloadAction` enum

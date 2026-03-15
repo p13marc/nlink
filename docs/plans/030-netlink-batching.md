@@ -39,7 +39,7 @@ This is **not** `FuturesUnordered`/`JoinSet` concurrency (which still does 1 mes
 - [x] Re-export `Batch`, `BatchResults` from `netlink/mod.rs`
 - [x] Add `batch()` method to `Connection<Route>`
 - [x] Add doc comments with examples on `Batch` and `BatchResults`
-- [ ] Update CLAUDE.md with batch usage examples
+- [x] Update CLAUDE.md with batch usage examples
 
 ## API
 
