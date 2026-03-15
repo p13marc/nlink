@@ -4545,3 +4545,47 @@ impl Connection<Route> {
         self.send_ack(builder).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bond_mode_try_from() {
+        assert!(matches!(BondMode::try_from(0u8), Ok(BondMode::BalanceRr)));
+        assert!(matches!(BondMode::try_from(1u8), Ok(BondMode::ActiveBackup)));
+        assert!(matches!(BondMode::try_from(2u8), Ok(BondMode::BalanceXor)));
+        assert!(matches!(BondMode::try_from(3u8), Ok(BondMode::Broadcast)));
+        assert!(matches!(BondMode::try_from(4u8), Ok(BondMode::Lacp)));
+        assert!(matches!(BondMode::try_from(5u8), Ok(BondMode::BalanceTlb)));
+        assert!(matches!(BondMode::try_from(6u8), Ok(BondMode::BalanceAlb)));
+        assert!(BondMode::try_from(7u8).is_err());
+        assert!(BondMode::try_from(255u8).is_err());
+    }
+
+    #[test]
+    fn test_xmit_hash_policy_try_from() {
+        assert!(matches!(XmitHashPolicy::try_from(0u8), Ok(XmitHashPolicy::Layer2)));
+        assert!(matches!(XmitHashPolicy::try_from(1u8), Ok(XmitHashPolicy::Layer34)));
+        assert!(matches!(XmitHashPolicy::try_from(2u8), Ok(XmitHashPolicy::Layer23)));
+        assert!(matches!(XmitHashPolicy::try_from(3u8), Ok(XmitHashPolicy::Encap23)));
+        assert!(matches!(XmitHashPolicy::try_from(4u8), Ok(XmitHashPolicy::Encap34)));
+        assert!(matches!(XmitHashPolicy::try_from(5u8), Ok(XmitHashPolicy::VlanSrcMac)));
+        assert!(XmitHashPolicy::try_from(6u8).is_err());
+        assert!(XmitHashPolicy::try_from(255u8).is_err());
+    }
+
+    #[test]
+    fn test_bond_mode_debug_format() {
+        assert_eq!(format!("{:?}", BondMode::BalanceRr), "BalanceRr");
+        assert_eq!(format!("{:?}", BondMode::Lacp), "Lacp");
+        assert_eq!(format!("{:?}", BondMode::BalanceAlb), "BalanceAlb");
+    }
+
+    #[test]
+    fn test_xmit_hash_policy_debug_format() {
+        assert_eq!(format!("{:?}", XmitHashPolicy::Layer2), "Layer2");
+        assert_eq!(format!("{:?}", XmitHashPolicy::Layer34), "Layer34");
+        assert_eq!(format!("{:?}", XmitHashPolicy::VlanSrcMac), "VlanSrcMac");
+    }
+}

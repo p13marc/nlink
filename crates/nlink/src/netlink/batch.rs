@@ -408,3 +408,74 @@ impl BatchResults {
         self.results.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_results(results: Vec<std::result::Result<(), Error>>) -> BatchResults {
+        BatchResults { results }
+    }
+
+    #[test]
+    fn test_empty_results() {
+        let r = make_results(vec![]);
+        assert!(r.is_empty());
+        assert!(r.all_ok());
+        assert_eq!(r.len(), 0);
+        assert_eq!(r.success_count(), 0);
+        assert_eq!(r.error_count(), 0);
+        assert_eq!(r.errors().count(), 0);
+    }
+
+    #[test]
+    fn test_all_success() {
+        let r = make_results(vec![Ok(()), Ok(()), Ok(())]);
+        assert!(r.all_ok());
+        assert_eq!(r.len(), 3);
+        assert_eq!(r.success_count(), 3);
+        assert_eq!(r.error_count(), 0);
+        assert_eq!(r.errors().count(), 0);
+    }
+
+    #[test]
+    fn test_mixed_results() {
+        let r = make_results(vec![
+            Ok(()),
+            Err(Error::from_errno(-2)), // ENOENT
+            Ok(()),
+            Err(Error::from_errno(-1)), // EPERM
+        ]);
+        assert!(!r.all_ok());
+        assert_eq!(r.len(), 4);
+        assert_eq!(r.success_count(), 2);
+        assert_eq!(r.error_count(), 2);
+
+        let errors: Vec<_> = r.errors().collect();
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].0, 1); // index of first error
+        assert!(errors[0].1.is_not_found());
+        assert_eq!(errors[1].0, 3); // index of second error
+        assert!(errors[1].1.is_permission_denied());
+    }
+
+    #[test]
+    fn test_all_errors() {
+        let r = make_results(vec![
+            Err(Error::from_errno(-17)), // EEXIST
+            Err(Error::from_errno(-16)), // EBUSY
+        ]);
+        assert!(!r.all_ok());
+        assert_eq!(r.success_count(), 0);
+        assert_eq!(r.error_count(), 2);
+    }
+
+    #[test]
+    fn test_iter() {
+        let r = make_results(vec![Ok(()), Err(Error::from_errno(-1))]);
+        let items: Vec<_> = r.iter().collect();
+        assert_eq!(items.len(), 2);
+        assert!(items[0].is_ok());
+        assert!(items[1].is_err());
+    }
+}
