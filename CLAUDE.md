@@ -2746,6 +2746,55 @@ println!("{}", mem_info.format_skmem_compact());
 // Output: "skmem:(rb131072,tb16384)"
 ```
 
+**Socket summary (aggregated statistics):**
+```rust
+use nlink::netlink::{Connection, SockDiag};
+
+let conn = Connection::<SockDiag>::new()?;
+let summary = conn.socket_summary().await?;
+println!("{}", summary);
+// Total: 234
+// TCP:   45 (estab 23, closed 12, orphaned 0, timewait 8)
+// UDP:   12
+// RAW:   2
+// UNIX:  175
+
+// Access individual counts
+println!("Established: {}", summary.tcp.established);
+println!("Time-wait: {}", summary.tcp.time_wait);
+println!("Listening: {}", summary.tcp.listen);
+```
+
+**Force-close sockets (kill mode, requires CAP_NET_ADMIN):**
+```rust
+use nlink::netlink::{Connection, SockDiag};
+use nlink::sockdiag::{InetFilter, InetProtocol, TcpState};
+
+let conn = Connection::<SockDiag>::new()?;
+
+// Destroy a specific TCP socket
+let sockets = conn.query_tcp().await?;
+for sock in &sockets {
+    if sock.remote.port() == 8080 {
+        conn.destroy_tcp_socket(sock).await?;
+    }
+}
+
+// Destroy all sockets matching a filter
+let filter = InetFilter {
+    protocol: InetProtocol::Tcp,
+    states: TcpState::all_mask(),
+    ..Default::default()
+};
+let result = conn.destroy_matching(&filter).await?;
+println!("Destroyed {} sockets", result.destroyed);
+if !result.all_ok() {
+    for err in &result.errors {
+        eprintln!("Failed: {:?}: {}", err.socket, err.error);
+    }
+}
+```
+
 ## BPF/TC Attachment
 
 Attach BPF programs to TC ingress/egress hooks:

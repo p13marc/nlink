@@ -14,7 +14,7 @@ Improve the `nlink-ss` binary with missing features from iproute2's `ss`. All ne
 - [x] Add `-s` flag to `bins/ss` binary
 - [x] Add summary output formatting in `bins/ss/src/output.rs`
 - [x] Add doc comments with examples on all public types
-- [ ] Update CLAUDE.md with `socket_summary()` usage example
+- [x] Update CLAUDE.md with `socket_summary()` usage example
 
 ### Phase 2: Kill Mode
 - [x] Implement `destroy_tcp_socket()` on `Connection<SockDiag>`
@@ -23,7 +23,7 @@ Improve the `nlink-ss` binary with missing features from iproute2's `ss`. All ne
 - [ ] Add integration test (requires CAP_NET_ADMIN)
 - [x] Add `-K` flag to `bins/ss` binary
 - [x] Add doc comments with examples on destroy methods
-- [ ] Update CLAUDE.md with kill mode example
+- [x] Update CLAUDE.md with kill mode example
 
 ### Phase 3: Netlink Socket Listing
 - [x] Implement `NetlinkSocketInfo` and `NetlinkProtocol` types
