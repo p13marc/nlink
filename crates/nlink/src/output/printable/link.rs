@@ -82,6 +82,46 @@ impl Printable for LinkMessage {
         }
         writeln!(w)?;
 
+        // Line 3 (optional): bond info
+        if let Some(bond) = self.bond_info() {
+            let mode_name = bond
+                .bond_mode()
+                .map(|m| format!("{:?}", m))
+                .unwrap_or_else(|| format!("mode {}", bond.mode));
+            write!(w, "    bond mode {} miimon {}ms", mode_name, bond.miimon)?;
+            if bond.min_links > 0 {
+                write!(w, " min_links {}", bond.min_links)?;
+            }
+            if let Some(policy) = bond.hash_policy() {
+                write!(w, " xmit_hash {:?}", policy)?;
+            }
+            if let Some(rate) = bond.lacp_rate {
+                write!(
+                    w,
+                    " lacp_rate {}",
+                    if rate == 0 { "slow" } else { "fast" }
+                )?;
+            }
+            if let Some(ref ad) = bond.ad_info {
+                write!(
+                    w,
+                    " ad_aggregator {} ad_ports {}",
+                    ad.aggregator_id, ad.num_ports
+                )?;
+            }
+            writeln!(w)?;
+        }
+
+        // Line 3/4 (optional): bond slave info
+        if let Some(slave) = self.bond_slave_info() {
+            write!(w, "    bond_slave state {:?}", slave.state)?;
+            write!(w, " mii {:?}", slave.mii_status)?;
+            if slave.link_failure_count > 0 {
+                write!(w, " failures {}", slave.link_failure_count)?;
+            }
+            writeln!(w)?;
+        }
+
         Ok(())
     }
 
@@ -112,6 +152,40 @@ impl Printable for LinkMessage {
         }
         if let Some(group) = self.group {
             obj["group"] = serde_json::json!(group_name(group));
+        }
+
+        if let Some(bond) = self.bond_info() {
+            let mut bond_obj = serde_json::Map::new();
+            bond_obj.insert(
+                "mode".into(),
+                serde_json::json!(bond
+                    .bond_mode()
+                    .map(|m| format!("{:?}", m))
+                    .unwrap_or_else(|| bond.mode.to_string())),
+            );
+            bond_obj.insert("miimon".into(), serde_json::json!(bond.miimon));
+            bond_obj.insert("min_links".into(), serde_json::json!(bond.min_links));
+            if let Some(policy) = bond.hash_policy() {
+                bond_obj
+                    .insert("xmit_hash_policy".into(), serde_json::json!(format!("{:?}", policy)));
+            }
+            if let Some(ref ad) = bond.ad_info {
+                bond_obj.insert("ad_aggregator_id".into(), serde_json::json!(ad.aggregator_id));
+                bond_obj.insert("ad_num_ports".into(), serde_json::json!(ad.num_ports));
+            }
+            obj["bond"] = serde_json::Value::Object(bond_obj);
+        }
+
+        if let Some(slave) = self.bond_slave_info() {
+            let mut slave_obj = serde_json::Map::new();
+            slave_obj.insert("state".into(), serde_json::json!(format!("{:?}", slave.state)));
+            slave_obj
+                .insert("mii_status".into(), serde_json::json!(format!("{:?}", slave.mii_status)));
+            slave_obj.insert(
+                "link_failure_count".into(),
+                serde_json::json!(slave.link_failure_count),
+            );
+            obj["bond_slave"] = serde_json::Value::Object(slave_obj);
         }
 
         obj

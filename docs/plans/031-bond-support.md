@@ -38,7 +38,7 @@ Bond creation via `BondLink` already exists (`link.rs:2829-2989`) with basic att
 - [x] Implement `BondAdInfo` struct
 - [x] Implement `bond_info()` on `LinkMessage`
 - [ ] Add integration test for bond info parsing
-- [ ] Add bond info display in `bins/ip` link show output
+- [x] Add bond info display in `bins/ip` link show output
 - [x] Add doc comments with examples
 
 ### Slave Info Parsing
@@ -46,7 +46,7 @@ Bond creation via `BondLink` already exists (`link.rs:2829-2989`) with basic att
 - [x] Implement `bond_slave_info()` on `LinkMessage`
 - [x] Implement `is_bond_slave()` helper
 - [ ] Add integration test for slave info parsing
-- [ ] Add slave info display in `bins/ip` link show output
+- [x] Add slave info display in `bins/ip` link show output
 - [x] Add doc comments with examples
 
 ### High-Level API
