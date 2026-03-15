@@ -27,8 +27,8 @@ Address code quality findings: make `serde_json` optional, add SAFETY comments t
 - [x] Fix IFLA_GRE_ENCAP_LIMIT (12->11)
 - [x] Fix IFLA_GRE_FLOWINFO (13->12)
 - [x] Fix IFLA_GRE_FLAGS (14->13)
-- [ ] Add regression test for correct constant values
-- [ ] Verify existing ip6gre integration tests still pass
+- [x] Add regression test for correct constant values
+- [x] Verify existing ip6gre integration tests still pass
 
 ### Replace unwrap() with expect()
 - [x] Replace `unwrap()` calls in `bins/tc/` (chain.rs)

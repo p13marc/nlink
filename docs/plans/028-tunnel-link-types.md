@@ -9,35 +9,35 @@ Add the three most common IP tunnel types missing from nlink, plus fix the ip6gr
 ## Progress
 
 ### Bug Fix: ip6gre Constants
-- [ ] Fix IFLA_GRE_ENCAP_LIMIT (12→11), FLOWINFO (13→12), FLAGS (14→13)
-- [ ] Rename `ip6gre` module to `gre_attr` (shared constants)
-- [ ] Add regression test verifying correct attribute values
-- [ ] Verify existing ip6gre/ip6gretap tests still pass
+- [x] Fix IFLA_GRE_ENCAP_LIMIT (12→11), FLOWINFO (13→12), FLAGS (14→13)
+- [x] Rename `ip6gre` module to `gre_attr` (shared constants)
+- [x] Add regression test verifying correct attribute values
+- [x] Verify existing ip6gre/ip6gretap tests still pass
 
 ### GreLink (GRE/GRETAP)
-- [ ] Add `gre_attr` constants module
-- [ ] Implement `GreLink` builder with `LinkConfig` trait
-- [ ] Implement `GreLink::tap()` constructor for GRETAP
-- [ ] Add integration tests (`test_gre_tunnel`, `test_gretap_tunnel`)
+- [x] Add `gre_attr` constants module
+- [x] Implement `GreLink` builder with `LinkConfig` trait
+- [x] Implement `GretapLink` builder with `LinkConfig` trait
+- [x] Add integration tests (`test_gre_tunnel`, `test_gretap_tunnel`)
 - [ ] Add `gre` and `gretap` support to `bins/ip` link add command
-- [ ] Add doc comments with examples on `GreLink`
-- [ ] Update CLAUDE.md with GRE/GRETAP usage examples
+- [x] Add doc comments with examples on `GreLink`
+- [x] Update CLAUDE.md with GRE/GRETAP usage examples
 
 ### IpipLink
-- [ ] Add `iptun_attr` constants module
-- [ ] Implement `IpipLink` builder with `LinkConfig` trait
-- [ ] Add integration test (`test_ipip_tunnel`)
+- [x] Add `iptun_attr` constants module
+- [x] Implement `IpipLink` builder with `LinkConfig` trait
+- [x] Add integration test (`test_ipip_tunnel`)
 - [ ] Add `ipip` support to `bins/ip` link add command
-- [ ] Add doc comments with examples on `IpipLink`
-- [ ] Update CLAUDE.md with IPIP usage example
+- [x] Add doc comments with examples on `IpipLink`
+- [x] Update CLAUDE.md with IPIP usage example
 
 ### SitLink
-- [ ] Implement `SitLink` builder with `LinkConfig` trait
-- [ ] Implement `isatap()` support via `SIT_ISATAP` flag
-- [ ] Add integration tests (`test_sit_tunnel`, `test_sit_isatap`)
+- [x] Implement `SitLink` builder with `LinkConfig` trait
+- [x] Implement `isatap()` support via `SIT_ISATAP` flag
+- [x] Add integration tests (`test_sit_tunnel`, `test_sit_isatap`)
 - [ ] Add `sit` support to `bins/ip` link add command
-- [ ] Add doc comments with examples on `SitLink`
-- [ ] Update CLAUDE.md with SIT/ISATAP usage examples
+- [x] Add doc comments with examples on `SitLink`
+- [x] Update CLAUDE.md with SIT/ISATAP usage examples
 
 ## Current State
 

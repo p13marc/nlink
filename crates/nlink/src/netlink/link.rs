@@ -2560,9 +2560,10 @@ pub struct Ip6GreLink {
     link: Option<InterfaceRef>,
 }
 
-/// IP6GRE-specific attributes (IFLA_GRE_*)
+/// IFLA_GRE_* attributes (shared by gre, gretap, ip6gre, ip6gretap, erspan).
+/// Verified against linux/if_tunnel.h (kernel 6.19.6).
 #[allow(dead_code)]
-mod ip6gre {
+mod gre_attr {
     pub const IFLA_GRE_LINK: u16 = 1;
     pub const IFLA_GRE_IFLAGS: u16 = 2;
     pub const IFLA_GRE_OFLAGS: u16 = 3;
@@ -2576,6 +2577,42 @@ mod ip6gre {
     pub const IFLA_GRE_ENCAP_LIMIT: u16 = 11;
     pub const IFLA_GRE_FLOWINFO: u16 = 12;
     pub const IFLA_GRE_FLAGS: u16 = 13;
+    pub const IFLA_GRE_ENCAP_TYPE: u16 = 14;
+    pub const IFLA_GRE_ENCAP_FLAGS: u16 = 15;
+    pub const IFLA_GRE_ENCAP_SPORT: u16 = 16;
+    pub const IFLA_GRE_ENCAP_DPORT: u16 = 17;
+    pub const IFLA_GRE_COLLECT_METADATA: u16 = 18;
+    pub const IFLA_GRE_IGNORE_DF: u16 = 19;
+    pub const IFLA_GRE_FWMARK: u16 = 20;
+
+    /// GRE_KEY flag for IFLA_GRE_IFLAGS/OFLAGS.
+    pub const GRE_KEY: u16 = 0x2000;
+}
+
+/// IFLA_IPTUN_* attributes (for ipip and sit tunnels).
+/// Separate enum from IFLA_GRE_* — different numeric values.
+/// Verified against linux/if_tunnel.h (kernel 6.19.6).
+#[allow(dead_code)]
+mod iptun_attr {
+    pub const IFLA_IPTUN_LINK: u16 = 1;
+    pub const IFLA_IPTUN_LOCAL: u16 = 2;
+    pub const IFLA_IPTUN_REMOTE: u16 = 3;
+    pub const IFLA_IPTUN_TTL: u16 = 4;
+    pub const IFLA_IPTUN_TOS: u16 = 5;
+    pub const IFLA_IPTUN_ENCAP_LIMIT: u16 = 6;
+    pub const IFLA_IPTUN_FLOWINFO: u16 = 7;
+    pub const IFLA_IPTUN_FLAGS: u16 = 8;
+    pub const IFLA_IPTUN_PROTO: u16 = 9;
+    pub const IFLA_IPTUN_PMTUDISC: u16 = 10;
+    pub const IFLA_IPTUN_ENCAP_TYPE: u16 = 15;
+    pub const IFLA_IPTUN_ENCAP_FLAGS: u16 = 16;
+    pub const IFLA_IPTUN_ENCAP_SPORT: u16 = 17;
+    pub const IFLA_IPTUN_ENCAP_DPORT: u16 = 18;
+    pub const IFLA_IPTUN_COLLECT_METADATA: u16 = 19;
+    pub const IFLA_IPTUN_FWMARK: u16 = 20;
+
+    /// ISATAP flag for SIT tunnels (IFLA_IPTUN_FLAGS).
+    pub const SIT_ISATAP: u16 = 0x0001;
 }
 
 impl Ip6GreLink {
@@ -2663,25 +2700,25 @@ impl LinkConfig for Ip6GreLink {
         let data = builder.nest_start(IflaInfo::Data as u16);
 
         if let Some(idx) = parent_index {
-            builder.append_attr_u32(ip6gre::IFLA_GRE_LINK, idx);
+            builder.append_attr_u32(gre_attr::IFLA_GRE_LINK, idx);
         }
         if let Some(local) = self.local {
-            builder.append_attr(ip6gre::IFLA_GRE_LOCAL, &local.octets());
+            builder.append_attr(gre_attr::IFLA_GRE_LOCAL, &local.octets());
         }
         if let Some(remote) = self.remote {
-            builder.append_attr(ip6gre::IFLA_GRE_REMOTE, &remote.octets());
+            builder.append_attr(gre_attr::IFLA_GRE_REMOTE, &remote.octets());
         }
         if let Some(ttl) = self.ttl {
-            builder.append_attr_u8(ip6gre::IFLA_GRE_TTL, ttl);
+            builder.append_attr_u8(gre_attr::IFLA_GRE_TTL, ttl);
         }
         if let Some(limit) = self.encap_limit {
-            builder.append_attr_u8(ip6gre::IFLA_GRE_ENCAP_LIMIT, limit);
+            builder.append_attr_u8(gre_attr::IFLA_GRE_ENCAP_LIMIT, limit);
         }
         if let Some(flowinfo) = self.flowinfo {
-            builder.append_attr_u32_be(ip6gre::IFLA_GRE_FLOWINFO, flowinfo);
+            builder.append_attr_u32_be(gre_attr::IFLA_GRE_FLOWINFO, flowinfo);
         }
         if let Some(flags) = self.flags {
-            builder.append_attr_u32(ip6gre::IFLA_GRE_FLAGS, flags);
+            builder.append_attr_u32(gre_attr::IFLA_GRE_FLAGS, flags);
         }
 
         builder.nest_end(data);
@@ -2806,22 +2843,22 @@ impl LinkConfig for Ip6GretapLink {
         let data = builder.nest_start(IflaInfo::Data as u16);
 
         if let Some(idx) = parent_index {
-            builder.append_attr_u32(ip6gre::IFLA_GRE_LINK, idx);
+            builder.append_attr_u32(gre_attr::IFLA_GRE_LINK, idx);
         }
         if let Some(local) = self.local {
-            builder.append_attr(ip6gre::IFLA_GRE_LOCAL, &local.octets());
+            builder.append_attr(gre_attr::IFLA_GRE_LOCAL, &local.octets());
         }
         if let Some(remote) = self.remote {
-            builder.append_attr(ip6gre::IFLA_GRE_REMOTE, &remote.octets());
+            builder.append_attr(gre_attr::IFLA_GRE_REMOTE, &remote.octets());
         }
         if let Some(ttl) = self.ttl {
-            builder.append_attr_u8(ip6gre::IFLA_GRE_TTL, ttl);
+            builder.append_attr_u8(gre_attr::IFLA_GRE_TTL, ttl);
         }
         if let Some(limit) = self.encap_limit {
-            builder.append_attr_u8(ip6gre::IFLA_GRE_ENCAP_LIMIT, limit);
+            builder.append_attr_u8(gre_attr::IFLA_GRE_ENCAP_LIMIT, limit);
         }
         if let Some(flowinfo) = self.flowinfo {
-            builder.append_attr_u32_be(ip6gre::IFLA_GRE_FLOWINFO, flowinfo);
+            builder.append_attr_u32_be(gre_attr::IFLA_GRE_FLOWINFO, flowinfo);
         }
 
         builder.nest_end(data);
@@ -3067,20 +3104,6 @@ impl LinkConfig for VrfLink {
 // GRE Link (IPv4)
 // ============================================================================
 
-/// GRE tunnel attribute constants.
-mod gre_attr {
-    pub const IFLA_GRE_LOCAL: u16 = 1;
-    pub const IFLA_GRE_REMOTE: u16 = 2;
-    pub const IFLA_GRE_TTL: u16 = 4;
-    pub const IFLA_GRE_IKEY: u16 = 5;
-    pub const IFLA_GRE_OKEY: u16 = 6;
-    pub const IFLA_GRE_IFLAGS: u16 = 7;
-    pub const IFLA_GRE_OFLAGS: u16 = 8;
-}
-
-/// GRE key flag.
-const GRE_KEY: u16 = 0x2000;
-
 /// Configuration for a GRE tunnel interface.
 ///
 /// # Example
@@ -3102,20 +3125,32 @@ pub struct GreLink {
     local: Option<Ipv4Addr>,
     remote: Option<Ipv4Addr>,
     ttl: Option<u8>,
-    key: Option<u32>,
+    tos: Option<u8>,
+    ikey: Option<u32>,
+    okey: Option<u32>,
+    pmtudisc: Option<bool>,
+    ignore_df: Option<bool>,
+    fwmark: Option<u32>,
     mtu: Option<u32>,
+    link: Option<InterfaceRef>,
 }
 
 impl GreLink {
     /// Create a new GRE tunnel configuration.
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
-            name: name.to_string(),
+            name: name.into(),
             local: None,
             remote: None,
             ttl: None,
-            key: None,
+            tos: None,
+            ikey: None,
+            okey: None,
+            pmtudisc: None,
+            ignore_df: None,
+            fwmark: None,
             mtu: None,
+            link: None,
         }
     }
 
@@ -3137,15 +3172,62 @@ impl GreLink {
         self
     }
 
-    /// Set the tunnel key.
-    pub fn key(mut self, key: u32) -> Self {
-        self.key = Some(key);
+    /// Set the TOS.
+    pub fn tos(mut self, tos: u8) -> Self {
+        self.tos = Some(tos);
+        self
+    }
+
+    /// Set the input GRE key. Automatically enables GRE_KEY flag.
+    pub fn ikey(mut self, key: u32) -> Self {
+        self.ikey = Some(key);
+        self
+    }
+
+    /// Set the output GRE key. Automatically enables GRE_KEY flag.
+    pub fn okey(mut self, key: u32) -> Self {
+        self.okey = Some(key);
+        self
+    }
+
+    /// Set both input and output GRE key.
+    pub fn key(self, key: u32) -> Self {
+        self.ikey(key).okey(key)
+    }
+
+    /// Enable/disable Path MTU Discovery.
+    pub fn pmtudisc(mut self, enabled: bool) -> Self {
+        self.pmtudisc = Some(enabled);
+        self
+    }
+
+    /// Ignore the Don't Fragment flag on inner packets.
+    pub fn ignore_df(mut self, enabled: bool) -> Self {
+        self.ignore_df = Some(enabled);
+        self
+    }
+
+    /// Set firewall mark.
+    pub fn fwmark(mut self, mark: u32) -> Self {
+        self.fwmark = Some(mark);
         self
     }
 
     /// Set the MTU.
     pub fn mtu(mut self, mtu: u32) -> Self {
         self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the underlay interface by name.
+    pub fn link(mut self, iface: impl Into<String>) -> Self {
+        self.link = Some(InterfaceRef::Name(iface.into()));
+        self
+    }
+
+    /// Set the underlay interface by index.
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
         self
     }
 }
@@ -3159,31 +3241,52 @@ impl LinkConfig for GreLink {
         "gre"
     }
 
-    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
         write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(IflaAttr::Link as u16, idx);
         }
 
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
         builder.append_attr_str(IflaInfo::Kind as u16, "gre");
 
         let data = builder.nest_start(IflaInfo::Data as u16);
-        if let Some(addr) = self.remote {
-            builder.append_attr(gre_attr::IFLA_GRE_REMOTE, &addr.octets());
-        }
         if let Some(addr) = self.local {
             builder.append_attr(gre_attr::IFLA_GRE_LOCAL, &addr.octets());
+        }
+        if let Some(addr) = self.remote {
+            builder.append_attr(gre_attr::IFLA_GRE_REMOTE, &addr.octets());
         }
         if let Some(ttl) = self.ttl {
             builder.append_attr_u8(gre_attr::IFLA_GRE_TTL, ttl);
         }
-        if let Some(key) = self.key {
+        if let Some(tos) = self.tos {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_TOS, tos);
+        }
+        if let Some(key) = self.ikey {
+            builder.append_attr_u16(gre_attr::IFLA_GRE_IFLAGS, gre_attr::GRE_KEY);
             builder.append_attr_u32(gre_attr::IFLA_GRE_IKEY, key);
+        }
+        if let Some(key) = self.okey {
+            builder.append_attr_u16(gre_attr::IFLA_GRE_OFLAGS, gre_attr::GRE_KEY);
             builder.append_attr_u32(gre_attr::IFLA_GRE_OKEY, key);
-            builder.append_attr_u16(gre_attr::IFLA_GRE_IFLAGS, GRE_KEY);
-            builder.append_attr_u16(gre_attr::IFLA_GRE_OFLAGS, GRE_KEY);
+        }
+        if let Some(pmtu) = self.pmtudisc {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_PMTUDISC, pmtu as u8);
+        }
+        if let Some(ignore) = self.ignore_df {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_IGNORE_DF, ignore as u8);
+        }
+        if let Some(mark) = self.fwmark {
+            builder.append_attr_u32(gre_attr::IFLA_GRE_FWMARK, mark);
         }
         builder.nest_end(data);
 
@@ -3215,20 +3318,30 @@ pub struct GretapLink {
     local: Option<Ipv4Addr>,
     remote: Option<Ipv4Addr>,
     ttl: Option<u8>,
-    key: Option<u32>,
+    tos: Option<u8>,
+    ikey: Option<u32>,
+    okey: Option<u32>,
+    pmtudisc: Option<bool>,
+    fwmark: Option<u32>,
     mtu: Option<u32>,
+    link: Option<InterfaceRef>,
 }
 
 impl GretapLink {
     /// Create a new GRETAP tunnel configuration.
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
-            name: name.to_string(),
+            name: name.into(),
             local: None,
             remote: None,
             ttl: None,
-            key: None,
+            tos: None,
+            ikey: None,
+            okey: None,
+            pmtudisc: None,
+            fwmark: None,
             mtu: None,
+            link: None,
         }
     }
 
@@ -3250,15 +3363,56 @@ impl GretapLink {
         self
     }
 
-    /// Set the tunnel key.
-    pub fn key(mut self, key: u32) -> Self {
-        self.key = Some(key);
+    /// Set the TOS.
+    pub fn tos(mut self, tos: u8) -> Self {
+        self.tos = Some(tos);
+        self
+    }
+
+    /// Set the input GRE key.
+    pub fn ikey(mut self, key: u32) -> Self {
+        self.ikey = Some(key);
+        self
+    }
+
+    /// Set the output GRE key.
+    pub fn okey(mut self, key: u32) -> Self {
+        self.okey = Some(key);
+        self
+    }
+
+    /// Set both input and output GRE key.
+    pub fn key(self, key: u32) -> Self {
+        self.ikey(key).okey(key)
+    }
+
+    /// Enable/disable Path MTU Discovery.
+    pub fn pmtudisc(mut self, enabled: bool) -> Self {
+        self.pmtudisc = Some(enabled);
+        self
+    }
+
+    /// Set firewall mark.
+    pub fn fwmark(mut self, mark: u32) -> Self {
+        self.fwmark = Some(mark);
         self
     }
 
     /// Set the MTU.
     pub fn mtu(mut self, mtu: u32) -> Self {
         self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the underlay interface by name.
+    pub fn link(mut self, iface: impl Into<String>) -> Self {
+        self.link = Some(InterfaceRef::Name(iface.into()));
+        self
+    }
+
+    /// Set the underlay interface by index.
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
         self
     }
 }
@@ -3272,31 +3426,49 @@ impl LinkConfig for GretapLink {
         "gretap"
     }
 
-    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
         write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(IflaAttr::Link as u16, idx);
         }
 
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
         builder.append_attr_str(IflaInfo::Kind as u16, "gretap");
 
         let data = builder.nest_start(IflaInfo::Data as u16);
-        if let Some(addr) = self.remote {
-            builder.append_attr(gre_attr::IFLA_GRE_REMOTE, &addr.octets());
-        }
         if let Some(addr) = self.local {
             builder.append_attr(gre_attr::IFLA_GRE_LOCAL, &addr.octets());
+        }
+        if let Some(addr) = self.remote {
+            builder.append_attr(gre_attr::IFLA_GRE_REMOTE, &addr.octets());
         }
         if let Some(ttl) = self.ttl {
             builder.append_attr_u8(gre_attr::IFLA_GRE_TTL, ttl);
         }
-        if let Some(key) = self.key {
+        if let Some(tos) = self.tos {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_TOS, tos);
+        }
+        if let Some(key) = self.ikey {
+            builder.append_attr_u16(gre_attr::IFLA_GRE_IFLAGS, gre_attr::GRE_KEY);
             builder.append_attr_u32(gre_attr::IFLA_GRE_IKEY, key);
+        }
+        if let Some(key) = self.okey {
+            builder.append_attr_u16(gre_attr::IFLA_GRE_OFLAGS, gre_attr::GRE_KEY);
             builder.append_attr_u32(gre_attr::IFLA_GRE_OKEY, key);
-            builder.append_attr_u16(gre_attr::IFLA_GRE_IFLAGS, GRE_KEY);
-            builder.append_attr_u16(gre_attr::IFLA_GRE_OFLAGS, GRE_KEY);
+        }
+        if let Some(pmtu) = self.pmtudisc {
+            builder.append_attr_u8(gre_attr::IFLA_GRE_PMTUDISC, pmtu as u8);
+        }
+        if let Some(mark) = self.fwmark {
+            builder.append_attr_u32(gre_attr::IFLA_GRE_FWMARK, mark);
         }
         builder.nest_end(data);
 
@@ -3307,13 +3479,6 @@ impl LinkConfig for GretapLink {
 // ============================================================================
 // IPIP Link
 // ============================================================================
-
-/// IPIP tunnel attribute constants.
-mod iptun_attr {
-    pub const IFLA_IPTUN_LOCAL: u16 = 1;
-    pub const IFLA_IPTUN_REMOTE: u16 = 2;
-    pub const IFLA_IPTUN_TTL: u16 = 4;
-}
 
 /// Configuration for an IPIP (IP-in-IP) tunnel interface.
 ///
@@ -3335,18 +3500,26 @@ pub struct IpipLink {
     local: Option<Ipv4Addr>,
     remote: Option<Ipv4Addr>,
     ttl: Option<u8>,
+    tos: Option<u8>,
+    pmtudisc: Option<bool>,
+    fwmark: Option<u32>,
     mtu: Option<u32>,
+    link: Option<InterfaceRef>,
 }
 
 impl IpipLink {
     /// Create a new IPIP tunnel configuration.
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
-            name: name.to_string(),
+            name: name.into(),
             local: None,
             remote: None,
             ttl: None,
+            tos: None,
+            pmtudisc: None,
+            fwmark: None,
             mtu: None,
+            link: None,
         }
     }
 
@@ -3368,9 +3541,39 @@ impl IpipLink {
         self
     }
 
+    /// Set the TOS.
+    pub fn tos(mut self, tos: u8) -> Self {
+        self.tos = Some(tos);
+        self
+    }
+
+    /// Enable/disable Path MTU Discovery.
+    pub fn pmtudisc(mut self, enabled: bool) -> Self {
+        self.pmtudisc = Some(enabled);
+        self
+    }
+
+    /// Set firewall mark.
+    pub fn fwmark(mut self, mark: u32) -> Self {
+        self.fwmark = Some(mark);
+        self
+    }
+
     /// Set the MTU.
     pub fn mtu(mut self, mtu: u32) -> Self {
         self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the underlay interface by name.
+    pub fn link(mut self, iface: impl Into<String>) -> Self {
+        self.link = Some(InterfaceRef::Name(iface.into()));
+        self
+    }
+
+    /// Set the underlay interface by index.
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
         self
     }
 }
@@ -3384,25 +3587,41 @@ impl LinkConfig for IpipLink {
         "ipip"
     }
 
-    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
         write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(IflaAttr::Link as u16, idx);
         }
 
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
         builder.append_attr_str(IflaInfo::Kind as u16, "ipip");
 
         let data = builder.nest_start(IflaInfo::Data as u16);
-        if let Some(addr) = self.remote {
-            builder.append_attr(iptun_attr::IFLA_IPTUN_REMOTE, &addr.octets());
-        }
         if let Some(addr) = self.local {
             builder.append_attr(iptun_attr::IFLA_IPTUN_LOCAL, &addr.octets());
         }
+        if let Some(addr) = self.remote {
+            builder.append_attr(iptun_attr::IFLA_IPTUN_REMOTE, &addr.octets());
+        }
         if let Some(ttl) = self.ttl {
             builder.append_attr_u8(iptun_attr::IFLA_IPTUN_TTL, ttl);
+        }
+        if let Some(tos) = self.tos {
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_TOS, tos);
+        }
+        if let Some(pmtu) = self.pmtudisc {
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_PMTUDISC, pmtu as u8);
+        }
+        if let Some(mark) = self.fwmark {
+            builder.append_attr_u32(iptun_attr::IFLA_IPTUN_FWMARK, mark);
         }
         builder.nest_end(data);
 
@@ -3436,18 +3655,28 @@ pub struct SitLink {
     local: Option<Ipv4Addr>,
     remote: Option<Ipv4Addr>,
     ttl: Option<u8>,
+    tos: Option<u8>,
+    pmtudisc: Option<bool>,
+    fwmark: Option<u32>,
+    isatap: bool,
     mtu: Option<u32>,
+    link: Option<InterfaceRef>,
 }
 
 impl SitLink {
     /// Create a new SIT tunnel configuration.
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
-            name: name.to_string(),
+            name: name.into(),
             local: None,
             remote: None,
             ttl: None,
+            tos: None,
+            pmtudisc: None,
+            fwmark: None,
+            isatap: false,
             mtu: None,
+            link: None,
         }
     }
 
@@ -3469,9 +3698,45 @@ impl SitLink {
         self
     }
 
+    /// Set the TOS.
+    pub fn tos(mut self, tos: u8) -> Self {
+        self.tos = Some(tos);
+        self
+    }
+
+    /// Enable/disable Path MTU Discovery.
+    pub fn pmtudisc(mut self, enabled: bool) -> Self {
+        self.pmtudisc = Some(enabled);
+        self
+    }
+
+    /// Set firewall mark.
+    pub fn fwmark(mut self, mark: u32) -> Self {
+        self.fwmark = Some(mark);
+        self
+    }
+
+    /// Enable ISATAP (Intra-Site Automatic Tunnel Addressing Protocol) mode.
+    pub fn isatap(mut self) -> Self {
+        self.isatap = true;
+        self
+    }
+
     /// Set the MTU.
     pub fn mtu(mut self, mtu: u32) -> Self {
         self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the underlay interface by name.
+    pub fn link(mut self, iface: impl Into<String>) -> Self {
+        self.link = Some(InterfaceRef::Name(iface.into()));
+        self
+    }
+
+    /// Set the underlay interface by index.
+    pub fn link_index(mut self, index: u32) -> Self {
+        self.link = Some(InterfaceRef::Index(index));
         self
     }
 }
@@ -3485,25 +3750,44 @@ impl LinkConfig for SitLink {
         "sit"
     }
 
-    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        self.link.as_ref()
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
         write_ifname(builder, &self.name);
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(idx) = parent_index {
+            builder.append_attr_u32(IflaAttr::Link as u16, idx);
         }
 
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
         builder.append_attr_str(IflaInfo::Kind as u16, "sit");
 
         let data = builder.nest_start(IflaInfo::Data as u16);
-        if let Some(addr) = self.remote {
-            builder.append_attr(iptun_attr::IFLA_IPTUN_REMOTE, &addr.octets());
-        }
         if let Some(addr) = self.local {
             builder.append_attr(iptun_attr::IFLA_IPTUN_LOCAL, &addr.octets());
         }
+        if let Some(addr) = self.remote {
+            builder.append_attr(iptun_attr::IFLA_IPTUN_REMOTE, &addr.octets());
+        }
         if let Some(ttl) = self.ttl {
             builder.append_attr_u8(iptun_attr::IFLA_IPTUN_TTL, ttl);
+        }
+        if let Some(tos) = self.tos {
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_TOS, tos);
+        }
+        if let Some(pmtu) = self.pmtudisc {
+            builder.append_attr_u8(iptun_attr::IFLA_IPTUN_PMTUDISC, pmtu as u8);
+        }
+        if let Some(mark) = self.fwmark {
+            builder.append_attr_u32(iptun_attr::IFLA_IPTUN_FWMARK, mark);
+        }
+        if self.isatap {
+            builder.append_attr_u16(iptun_attr::IFLA_IPTUN_FLAGS, iptun_attr::SIT_ISATAP);
         }
         builder.nest_end(data);
 

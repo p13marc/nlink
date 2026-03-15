@@ -4,8 +4,8 @@
 
 use nlink::Result;
 use nlink::netlink::link::{
-    BridgeLink, DummyLink, IfbLink, IpvlanLink, MacvlanLink, MacvlanMode, VethLink, VlanLink,
-    VrfLink,
+    BridgeLink, DummyLink, GreLink, GretapLink, IfbLink, IpipLink, IpvlanLink, MacvlanLink,
+    MacvlanMode, SitLink, VethLink, VlanLink, VrfLink,
 };
 
 use crate::common::TestNamespace;
@@ -451,6 +451,120 @@ async fn test_loopback_exists() -> Result<()> {
 
     let lo = lo.unwrap();
     assert!(lo.is_loopback());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_gre_tunnel() -> Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("gre")?;
+    let conn = ns.connection()?;
+
+    // Create GRE tunnel with key
+    conn.add_link(
+        GreLink::new("gre1")
+            .local(std::net::Ipv4Addr::new(10, 0, 0, 1))
+            .remote(std::net::Ipv4Addr::new(10, 0, 0, 2))
+            .ttl(64)
+            .key(100),
+    )
+    .await?;
+
+    let link = conn.get_link_by_name("gre1").await?;
+    assert!(link.is_some(), "gre1 should exist");
+    assert_eq!(link.unwrap().kind(), Some("gre"));
+
+    // Delete it
+    conn.del_link("gre1").await?;
+    let link = conn.get_link_by_name("gre1").await?;
+    assert!(link.is_none(), "gre1 should be deleted");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_gretap_tunnel() -> Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("gretap")?;
+    let conn = ns.connection()?;
+
+    // Create GRETAP (L2) tunnel
+    conn.add_link(
+        GretapLink::new("gretap1")
+            .local(std::net::Ipv4Addr::new(10, 0, 0, 1))
+            .remote(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+    )
+    .await?;
+
+    let link = conn.get_link_by_name("gretap1").await?;
+    assert!(link.is_some(), "gretap1 should exist");
+    assert_eq!(link.unwrap().kind(), Some("gretap"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ipip_tunnel() -> Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("ipip")?;
+    let conn = ns.connection()?;
+
+    // Create IPIP tunnel with PMTU discovery
+    conn.add_link(
+        IpipLink::new("ipip1")
+            .local(std::net::Ipv4Addr::new(10, 0, 0, 1))
+            .remote(std::net::Ipv4Addr::new(10, 0, 0, 2))
+            .ttl(64)
+            .pmtudisc(true),
+    )
+    .await?;
+
+    let link = conn.get_link_by_name("ipip1").await?;
+    assert!(link.is_some(), "ipip1 should exist");
+    assert_eq!(link.unwrap().kind(), Some("ipip"));
+
+    // Delete it
+    conn.del_link("ipip1").await?;
+    let link = conn.get_link_by_name("ipip1").await?;
+    assert!(link.is_none(), "ipip1 should be deleted");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sit_tunnel() -> Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("sit")?;
+    let conn = ns.connection()?;
+
+    // Create SIT (6in4) tunnel
+    conn.add_link(SitLink::new("sit1").ttl(64)).await?;
+
+    let link = conn.get_link_by_name("sit1").await?;
+    assert!(link.is_some(), "sit1 should exist");
+    assert_eq!(link.unwrap().kind(), Some("sit"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sit_isatap() -> Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("isatap")?;
+    let conn = ns.connection()?;
+
+    // Create SIT tunnel with ISATAP mode
+    conn.add_link(SitLink::new("isatap0").isatap()).await?;
+
+    let link = conn.get_link_by_name("isatap0").await?;
+    assert!(link.is_some(), "isatap0 should exist");
+    assert_eq!(link.unwrap().kind(), Some("sit"));
 
     Ok(())
 }
