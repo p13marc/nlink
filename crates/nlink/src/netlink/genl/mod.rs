@@ -51,6 +51,7 @@ pub mod devlink;
 pub mod ethtool;
 pub mod macsec;
 pub mod mptcp;
+pub mod nl80211;
 pub mod wireguard;
 
 // Control family constants (fixed, not dynamically assigned)

@@ -276,6 +276,22 @@ impl ProtocolState for Devlink {
     const PROTOCOL: Protocol = Protocol::Generic;
 }
 
+/// nl80211 protocol state.
+///
+/// Used for WiFi configuration via Generic Netlink.
+/// Contains the resolved nl80211 family ID.
+#[derive(Debug, Default)]
+pub struct Nl80211 {
+    /// Resolved nl80211 GENL family ID.
+    pub(crate) family_id: u16,
+}
+
+impl private::Sealed for Nl80211 {}
+
+impl ProtocolState for Nl80211 {
+    const PROTOCOL: Protocol = Protocol::Generic;
+}
+
 /// Ethtool protocol state.
 ///
 /// Used for querying and configuring network device settings via Generic Netlink.
@@ -323,6 +339,7 @@ mod tests {
         assert_eq!(Macsec::PROTOCOL, Protocol::Generic);
         assert_eq!(Mptcp::PROTOCOL, Protocol::Generic);
         assert_eq!(Ethtool::PROTOCOL, Protocol::Generic);
+        assert_eq!(Nl80211::PROTOCOL, Protocol::Generic);
         assert_eq!(KobjectUevent::PROTOCOL, Protocol::KobjectUevent);
         assert_eq!(Connector::PROTOCOL, Protocol::Connector);
         assert_eq!(Netfilter::PROTOCOL, Protocol::Netfilter);
