@@ -74,6 +74,14 @@ const UNIX_DIAG_MEMINFO: u16 = 5;
 const UNIX_DIAG_SHUTDOWN: u16 = 6;
 const UNIX_DIAG_UID: u16 = 7;
 
+// Netlink diag show flags
+const NDIAG_SHOW_MEMINFO: u32 = 0x01;
+const NDIAG_SHOW_GROUPS: u32 = 0x02;
+
+// Netlink diag attributes
+const NETLINK_DIAG_MEMINFO: u16 = 0;
+const NETLINK_DIAG_GROUPS: u16 = 1;
+
 impl Connection<SockDiag> {
     /// Query sockets matching the given filter.
     ///
@@ -130,6 +138,14 @@ impl Connection<SockDiag> {
     pub async fn query_unix_sockets(&self) -> Result<Vec<UnixSocket>> {
         let filter = UnixFilter::default();
         self.query_unix_typed(&filter).await
+    }
+
+    /// Query Netlink sockets with default filter.
+    pub async fn query_netlink_sockets(
+        &self,
+    ) -> Result<Vec<crate::sockdiag::socket::NetlinkSocket>> {
+        let filter = NetlinkFilter::default();
+        self.query_netlink_typed(&filter).await
     }
 
     /// Get aggregated socket statistics across all families.
@@ -546,9 +562,100 @@ impl Connection<SockDiag> {
         }
     }
 
-    async fn query_netlink(&self, _filter: &NetlinkFilter) -> Result<Vec<SocketInfo>> {
-        // Netlink socket diagnostics - simplified for now
-        Ok(Vec::new())
+    async fn query_netlink(&self, filter: &NetlinkFilter) -> Result<Vec<SocketInfo>> {
+        let sockets = self.query_netlink_typed(filter).await?;
+        Ok(sockets.into_iter().map(SocketInfo::Netlink).collect())
+    }
+
+    async fn query_netlink_typed(
+        &self,
+        filter: &NetlinkFilter,
+    ) -> Result<Vec<crate::sockdiag::socket::NetlinkSocket>> {
+        let seq = self.socket().next_seq();
+        let pid = self.socket().pid();
+
+        // Build netlink_diag_req
+        let mut buf = Vec::with_capacity(64);
+
+        // Netlink header (16 bytes)
+        buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
+        buf.extend_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes()); // nlmsg_type
+        buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes()); // nlmsg_flags
+        buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
+        buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
+
+        // netlink_diag_req structure (24 bytes)
+        buf.push(libc::AF_NETLINK as u8); // sdiag_family
+        buf.push(filter.protocol.unwrap_or(0xff)); // sdiag_protocol (0xff = all)
+        buf.extend_from_slice(&0u16.to_ne_bytes()); // pad
+
+        buf.extend_from_slice(&0u32.to_ne_bytes()); // ndiag_ino
+        let mut show: u32 = 0;
+        if filter.show_meminfo {
+            show |= NDIAG_SHOW_MEMINFO;
+        }
+        if filter.show_groups {
+            show |= NDIAG_SHOW_GROUPS;
+        }
+        buf.extend_from_slice(&show.to_ne_bytes()); // ndiag_show
+        buf.extend_from_slice(&[0u8; 8]); // ndiag_cookie
+
+        // Update length
+        let len = buf.len() as u32;
+        buf[0..4].copy_from_slice(&len.to_ne_bytes());
+
+        // Send request
+        self.socket().send(&buf).await?;
+
+        // Receive responses
+        let mut sockets = Vec::new();
+
+        loop {
+            let data: Vec<u8> = self.socket().recv_msg().await?;
+
+            let mut offset = 0;
+            while offset + 16 <= data.len() {
+                let nlmsg_len = u32::from_ne_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]) as usize;
+
+                let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
+
+                if nlmsg_len < 16 || offset + nlmsg_len > data.len() {
+                    break;
+                }
+
+                match nlmsg_type {
+                    NLMSG_DONE => return Ok(sockets),
+                    NLMSG_ERROR => {
+                        if nlmsg_len >= 20 {
+                            let errno = i32::from_ne_bytes([
+                                data[offset + 16],
+                                data[offset + 17],
+                                data[offset + 18],
+                                data[offset + 19],
+                            ]);
+                            if errno != 0 {
+                                return Err(super::error::Error::from_errno(-errno));
+                            }
+                        }
+                    }
+                    SOCK_DIAG_BY_FAMILY => {
+                        if let Some(sock) =
+                            parse_netlink_msg(&data[offset..offset + nlmsg_len], filter)
+                        {
+                            sockets.push(sock);
+                        }
+                    }
+                    _ => {}
+                }
+
+                offset += (nlmsg_len + 3) & !3;
+            }
+        }
     }
 
     async fn query_packet(&self, _filter: &PacketFilter) -> Result<Vec<SocketInfo>> {
@@ -1114,6 +1221,149 @@ fn parse_unix_msg(data: &[u8]) -> Option<UnixSocket> {
                         attr_data[2],
                         attr_data[3],
                     ]));
+                }
+            }
+            _ => {}
+        }
+
+        attr_offset += (attr_len + 3) & !3;
+    }
+
+    Some(sock)
+}
+
+fn parse_netlink_msg(
+    data: &[u8],
+    filter: &NetlinkFilter,
+) -> Option<crate::sockdiag::socket::NetlinkSocket> {
+    // netlink_diag_msg: family(1) + type(1) + protocol(2) + state(4) +
+    //                   portid(4) + dst_portid(4) + dst_group(4) + ino(4) + cookie(8) = 32 bytes
+    if data.len() < 16 + 32 {
+        return None;
+    }
+
+    let payload = &data[16..];
+
+    let family = payload[0];
+    if family != libc::AF_NETLINK as u8 {
+        return None;
+    }
+
+    // payload[1] is ndiag_type (SOCK_RAW / SOCK_DGRAM)
+    let protocol = u16::from_ne_bytes([payload[2], payload[3]]) as u8;
+
+    // Apply protocol filter
+    if let Some(filter_proto) = filter.protocol {
+        if protocol != filter_proto {
+            return None;
+        }
+    }
+
+    // state at offset 4..8 (unused for display)
+    let portid = u32::from_ne_bytes([payload[8], payload[9], payload[10], payload[11]]);
+    let dst_portid = u32::from_ne_bytes([payload[12], payload[13], payload[14], payload[15]]);
+    let dst_group = u32::from_ne_bytes([payload[16], payload[17], payload[18], payload[19]]);
+    let inode = u32::from_ne_bytes([payload[20], payload[21], payload[22], payload[23]]);
+    let cookie = u64::from_ne_bytes([
+        payload[24], payload[25], payload[26], payload[27], payload[28], payload[29], payload[30],
+        payload[31],
+    ]);
+
+    let mut sock = crate::sockdiag::socket::NetlinkSocket {
+        protocol,
+        portid,
+        dst_portid,
+        dst_group,
+        groups: 0,
+        inode,
+        cookie,
+        recv_q: None,
+        send_q: None,
+        mem_info: None,
+    };
+
+    // Parse attributes
+    let mut attr_offset = 16 + 32;
+    while attr_offset + 4 <= data.len() {
+        let attr_len = u16::from_ne_bytes([data[attr_offset], data[attr_offset + 1]]) as usize;
+        let attr_type = u16::from_ne_bytes([data[attr_offset + 2], data[attr_offset + 3]]);
+
+        if attr_len < 4 || attr_offset + attr_len > data.len() {
+            break;
+        }
+
+        let attr_data = &data[attr_offset + 4..attr_offset + attr_len];
+
+        match attr_type {
+            NETLINK_DIAG_MEMINFO => {
+                if attr_data.len() >= 36 {
+                    sock.mem_info = Some(MemInfo {
+                        rmem_alloc: u32::from_ne_bytes([
+                            attr_data[0],
+                            attr_data[1],
+                            attr_data[2],
+                            attr_data[3],
+                        ]),
+                        rcvbuf: u32::from_ne_bytes([
+                            attr_data[4],
+                            attr_data[5],
+                            attr_data[6],
+                            attr_data[7],
+                        ]),
+                        wmem_alloc: u32::from_ne_bytes([
+                            attr_data[8],
+                            attr_data[9],
+                            attr_data[10],
+                            attr_data[11],
+                        ]),
+                        sndbuf: u32::from_ne_bytes([
+                            attr_data[12],
+                            attr_data[13],
+                            attr_data[14],
+                            attr_data[15],
+                        ]),
+                        fwd_alloc: u32::from_ne_bytes([
+                            attr_data[16],
+                            attr_data[17],
+                            attr_data[18],
+                            attr_data[19],
+                        ]),
+                        wmem_queued: u32::from_ne_bytes([
+                            attr_data[20],
+                            attr_data[21],
+                            attr_data[22],
+                            attr_data[23],
+                        ]),
+                        optmem: u32::from_ne_bytes([
+                            attr_data[24],
+                            attr_data[25],
+                            attr_data[26],
+                            attr_data[27],
+                        ]),
+                        backlog: u32::from_ne_bytes([
+                            attr_data[28],
+                            attr_data[29],
+                            attr_data[30],
+                            attr_data[31],
+                        ]),
+                        drops: u32::from_ne_bytes([
+                            attr_data[32],
+                            attr_data[33],
+                            attr_data[34],
+                            attr_data[35],
+                        ]),
+                    });
+                }
+            }
+            NETLINK_DIAG_GROUPS => {
+                // Groups bitmask - first 4 bytes give us the basic groups u32
+                if attr_data.len() >= 4 {
+                    sock.groups = u32::from_ne_bytes([
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                    ]);
                 }
             }
             _ => {}
