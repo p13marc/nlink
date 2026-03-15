@@ -19,7 +19,7 @@ Add the three most common IP tunnel types missing from nlink, plus fix the ip6gr
 - [x] Implement `GreLink` builder with `LinkConfig` trait
 - [x] Implement `GretapLink` builder with `LinkConfig` trait
 - [x] Add integration tests (`test_gre_tunnel`, `test_gretap_tunnel`)
-- [ ] Add `gre` and `gretap` support to `bins/ip` link add command
+- [x] Add `gre` and `gretap` support to `bins/ip` link add command
 - [x] Add doc comments with examples on `GreLink`
 - [x] Update CLAUDE.md with GRE/GRETAP usage examples
 
@@ -27,7 +27,7 @@ Add the three most common IP tunnel types missing from nlink, plus fix the ip6gr
 - [x] Add `iptun_attr` constants module
 - [x] Implement `IpipLink` builder with `LinkConfig` trait
 - [x] Add integration test (`test_ipip_tunnel`)
-- [ ] Add `ipip` support to `bins/ip` link add command
+- [x] Add `ipip` support to `bins/ip` link add command
 - [x] Add doc comments with examples on `IpipLink`
 - [x] Update CLAUDE.md with IPIP usage example
 
@@ -35,7 +35,7 @@ Add the three most common IP tunnel types missing from nlink, plus fix the ip6gr
 - [x] Implement `SitLink` builder with `LinkConfig` trait
 - [x] Implement `isatap()` support via `SIT_ISATAP` flag
 - [x] Add integration tests (`test_sit_tunnel`, `test_sit_isatap`)
-- [ ] Add `sit` support to `bins/ip` link add command
+- [x] Add `sit` support to `bins/ip` link add command
 - [x] Add doc comments with examples on `SitLink`
 - [x] Update CLAUDE.md with SIT/ISATAP usage examples
 
