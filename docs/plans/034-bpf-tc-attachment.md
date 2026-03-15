@@ -11,25 +11,25 @@
 ## Progress
 
 ### Pinned Path Support
-- [ ] Implement `BpfFilter::from_pinned()` method
+- [x] Implement `BpfFilter::from_pinned()` method
 - [ ] Add unit test for `from_pinned()` with valid/invalid paths
-- [ ] Add doc comments with examples on `from_pinned()`
+- [x] Add doc comments with examples on `from_pinned()`
 
 ### BPF Info Parsing
-- [ ] Add `TCA_BPF_*` constants (1-11)
-- [ ] Implement `BpfInfo` struct with id, name, tag, direct_action, classid
-- [ ] Implement `tag_hex()` method
-- [ ] Implement `bpf_info()` on `TcMessage`
+- [x] Add `TCA_BPF_*` constants (1-11)
+- [x] Implement `BpfInfo` struct with id, name, tag, direct_action, classid
+- [x] Implement `tag_hex()` method
+- [x] Implement `bpf_info()` on `TcMessage`
 - [ ] Add integration test for BPF info parsing
 - [ ] Add BPF info display in `bins/tc` filter show output
-- [ ] Add doc comments with examples
+- [x] Add doc comments with examples
 
 ### Convenience Helpers
-- [ ] Implement `BpfDirection` enum (Ingress/Egress)
-- [ ] Implement `attach_bpf()` on `Connection<Route>`
-- [ ] Implement `attach_bpf_by_index()` (namespace-safe)
-- [ ] Implement `detach_bpf()` on `Connection<Route>`
-- [ ] Implement `list_bpf_programs()` on `Connection<Route>`
+- [x] Implement `BpfDirection` enum (Ingress/Egress)
+- [x] Implement `attach_bpf()` on `Connection<Route>`
+- [x] Implement `attach_bpf_by_index()` (namespace-safe)
+- [x] Implement `detach_bpf()` on `Connection<Route>`
+- [x] Implement `list_bpf_programs()` on `Connection<Route>`
 - [ ] Add integration test for attach/detach/list cycle
 - [ ] Add BPF attachment support to `bins/tc` filter add command
 - [ ] Add doc comments with examples on convenience methods

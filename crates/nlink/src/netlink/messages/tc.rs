@@ -483,6 +483,130 @@ impl TcMessage {
     pub fn parent_str(&self) -> String {
         crate::netlink::types::tc::tc_handle::format(self.header.tcm_parent)
     }
+
+    /// Get BPF program info if this is a BPF filter.
+    ///
+    /// Returns `None` if the filter kind is not "bpf" or if no options are present.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let filters = conn.get_filters_by_name("eth0", "ingress").await?;
+    /// for filter in &filters {
+    ///     if let Some(bpf) = filter.bpf_info() {
+    ///         println!("BPF: id={:?} name={:?} tag={:?} da={}",
+    ///             bpf.id, bpf.name, bpf.tag_hex(), bpf.direct_action);
+    ///     }
+    /// }
+    /// ```
+    pub fn bpf_info(&self) -> Option<BpfInfo> {
+        if self.kind() != Some("bpf") {
+            return None;
+        }
+
+        let options = self.options.as_deref()?;
+
+        use crate::netlink::types::tc::filter::bpf;
+
+        let mut info = BpfInfo {
+            id: None,
+            name: None,
+            tag: None,
+            direct_action: false,
+            classid: None,
+        };
+
+        // Parse nested attributes from options data
+        let mut pos = 0;
+        while pos + 4 <= options.len() {
+            let len = u16::from_ne_bytes([options[pos], options[pos + 1]]) as usize;
+            let attr_type = u16::from_ne_bytes([options[pos + 2], options[pos + 3]]) & 0x3FFF;
+
+            if len < 4 || pos + len > options.len() {
+                break;
+            }
+
+            let payload = &options[pos + 4..pos + len];
+
+            match attr_type {
+                bpf::TCA_BPF_ID => {
+                    if payload.len() >= 4 {
+                        info.id = Some(u32::from_ne_bytes([
+                            payload[0],
+                            payload[1],
+                            payload[2],
+                            payload[3],
+                        ]));
+                    }
+                }
+                bpf::TCA_BPF_NAME => {
+                    let name = std::str::from_utf8(payload)
+                        .ok()
+                        .map(|s| s.trim_end_matches('\0').to_string());
+                    info.name = name;
+                }
+                bpf::TCA_BPF_TAG => {
+                    if payload.len() >= 8 {
+                        let mut tag = [0u8; 8];
+                        tag.copy_from_slice(&payload[..8]);
+                        info.tag = Some(tag);
+                    }
+                }
+                bpf::TCA_BPF_FLAGS => {
+                    if payload.len() >= 4 {
+                        let flags = u32::from_ne_bytes([
+                            payload[0],
+                            payload[1],
+                            payload[2],
+                            payload[3],
+                        ]);
+                        info.direct_action = (flags & bpf::TCA_BPF_FLAG_ACT_DIRECT) != 0;
+                    }
+                }
+                bpf::TCA_BPF_CLASSID => {
+                    if payload.len() >= 4 {
+                        info.classid = Some(u32::from_ne_bytes([
+                            payload[0],
+                            payload[1],
+                            payload[2],
+                            payload[3],
+                        ]));
+                    }
+                }
+                _ => {}
+            }
+
+            // Align to 4 bytes
+            pos += (len + 3) & !3;
+        }
+
+        Some(info)
+    }
+}
+
+/// Information about an attached BPF program.
+///
+/// Parsed from `TCA_BPF_*` attributes in TC filter dump responses.
+#[derive(Debug, Clone)]
+pub struct BpfInfo {
+    /// BPF program ID (stable kernel identifier).
+    pub id: Option<u32>,
+    /// BPF program name (set by the loader).
+    pub name: Option<String>,
+    /// BPF program tag (8-byte SHA-1 truncation of instructions).
+    pub tag: Option<[u8; 8]>,
+    /// Whether direct action mode is enabled.
+    pub direct_action: bool,
+    /// TC classid (for non-DA mode).
+    pub classid: Option<u32>,
+}
+
+impl BpfInfo {
+    /// Format the tag as a hex string (e.g., "a1b2c3d4e5f6a7b8").
+    pub fn tag_hex(&self) -> Option<String> {
+        self.tag
+            .map(|t| t.iter().map(|b| format!("{b:02x}")).collect())
+    }
 }
 
 impl FromNetlink for TcMessage {

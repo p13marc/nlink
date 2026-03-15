@@ -1050,6 +1050,27 @@ impl BpfFilter {
         }
     }
 
+    /// Create a BPF filter from a pinned program path.
+    ///
+    /// Opens the pinned BPF program at the given path and uses the
+    /// resulting file descriptor. The program must be pinned via
+    /// `bpf_obj_pin()` or `bpftool prog pin`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::filter::BpfFilter;
+    ///
+    /// let filter = BpfFilter::from_pinned("/sys/fs/bpf/my_prog")?
+    ///     .direct_action();
+    /// conn.add_filter("eth0", "ingress", filter).await?;
+    /// ```
+    pub fn from_pinned(path: impl AsRef<std::path::Path>) -> crate::netlink::Result<Self> {
+        use std::os::unix::io::IntoRawFd;
+        let file = std::fs::File::open(path.as_ref())?;
+        Ok(Self::new(file.into_raw_fd()))
+    }
+
     /// Set the program name.
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
@@ -2192,6 +2213,122 @@ impl Connection<Route> {
 
         Ok(())
     }
+
+    /// Attach a BPF program to ingress or egress using clsact.
+    ///
+    /// Creates the clsact qdisc if it doesn't exist, then attaches the
+    /// BPF filter. This is the standard pattern for BPF TC programs.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::filter::{BpfFilter, BpfDirection};
+    ///
+    /// let filter = BpfFilter::from_pinned("/sys/fs/bpf/my_prog")?
+    ///     .direct_action();
+    /// conn.attach_bpf("eth0", BpfDirection::Ingress, filter).await?;
+    /// ```
+    pub async fn attach_bpf(
+        &self,
+        dev: &str,
+        direction: BpfDirection,
+        filter: BpfFilter,
+    ) -> Result<()> {
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
+        self.attach_bpf_by_index(ifindex, direction, filter).await
+    }
+
+    /// Attach a BPF program by interface index (namespace-safe).
+    pub async fn attach_bpf_by_index(
+        &self,
+        ifindex: u32,
+        direction: BpfDirection,
+        filter: BpfFilter,
+    ) -> Result<()> {
+        // Add clsact qdisc (ignore EEXIST)
+        match self
+            .add_qdisc_by_index(ifindex, crate::netlink::tc::ClsactConfig::new())
+            .await
+        {
+            Ok(()) => {}
+            Err(e) if e.is_already_exists() => {}
+            Err(e) => return Err(e),
+        }
+
+        let parent = match direction {
+            BpfDirection::Ingress => "ingress",
+            BpfDirection::Egress => "egress",
+        };
+
+        self.add_filter_by_index(ifindex, parent, filter).await
+    }
+
+    /// Detach all BPF filters from an interface direction.
+    pub async fn detach_bpf(&self, dev: &str, direction: BpfDirection) -> Result<()> {
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
+        self.detach_bpf_by_index(ifindex, direction).await
+    }
+
+    /// Detach all BPF filters from an interface direction by index.
+    pub async fn detach_bpf_by_index(
+        &self,
+        ifindex: u32,
+        direction: BpfDirection,
+    ) -> Result<()> {
+        let parent = match direction {
+            BpfDirection::Ingress => "ingress",
+            BpfDirection::Egress => "egress",
+        };
+        self.flush_filters_by_index(ifindex, parent).await
+    }
+
+    /// List attached BPF programs on an interface (both directions).
+    pub async fn list_bpf_programs(
+        &self,
+        dev: &str,
+    ) -> Result<Vec<crate::netlink::messages::BpfInfo>> {
+        let ifindex = self
+            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
+            .await?;
+        self.list_bpf_programs_by_index(ifindex).await
+    }
+
+    /// List attached BPF programs by interface index.
+    pub async fn list_bpf_programs_by_index(
+        &self,
+        ifindex: u32,
+    ) -> Result<Vec<crate::netlink::messages::BpfInfo>> {
+        let mut programs = Vec::new();
+
+        let all_filters = match self.get_filters_by_index(ifindex).await {
+            Ok(f) => f,
+            Err(e) if e.is_not_found() || e.is_invalid_argument() => {
+                return Ok(programs);
+            }
+            Err(e) => return Err(e),
+        };
+
+        for filter in &all_filters {
+            if let Some(info) = filter.bpf_info() {
+                programs.push(info);
+            }
+        }
+
+        Ok(programs)
+    }
+}
+
+/// Direction for BPF program attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BpfDirection {
+    /// Ingress (clsact ingress hook).
+    Ingress,
+    /// Egress (clsact egress hook).
+    Egress,
 }
 
 #[cfg(test)]
