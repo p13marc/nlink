@@ -36,6 +36,8 @@ pub enum ExampleType {
     Qos,
     /// Container networking
     Container,
+    /// Bond (LACP) aggregation
+    Bond,
 }
 
 pub fn run(args: ExampleArgs) -> Result<()> {
@@ -48,6 +50,7 @@ pub fn run(args: ExampleArgs) -> Result<()> {
             ExampleType::Vxlan => VXLAN_EXAMPLE,
             ExampleType::Qos => QOS_EXAMPLE,
             ExampleType::Container => CONTAINER_EXAMPLE,
+            ExampleType::Bond => BOND_EXAMPLE,
         }
     };
 
@@ -250,6 +253,49 @@ routes:
 #   ip addr add 172.17.0.2/16 dev veth-c1
 #   ip link set veth-c1 up
 #   ip route add default via 172.17.0.1
+"#;
+
+const BOND_EXAMPLE: &str = r#"# Bond (LACP) aggregation
+# This example shows a bond with 802.3ad (LACP) mode and two member interfaces
+
+links:
+  # Create a bond with LACP
+  - name: bond0
+    kind: bond
+    state: up
+    mtu: 9000
+    options:
+      mode: 802.3ad
+      miimon: 100
+      min_links: 1
+      xmit_hash_policy: layer3+4
+
+  # Member interfaces (enslaved to the bond)
+  # In practice these would be physical NICs (e.g., eth0, eth1)
+  - name: veth-bond0
+    kind: veth
+    state: up
+    master: bond0
+    options:
+      peer: veth-bond0-br
+
+  - name: veth-bond1
+    kind: veth
+    state: up
+    master: bond0
+    options:
+      peer: veth-bond1-br
+
+addresses:
+  # Assign an IP to the bond
+  - dev: bond0
+    address: 10.0.0.1/24
+
+routes:
+  # Route traffic via the bond
+  - destination: 10.1.0.0/16
+    gateway: 10.0.0.254
+    dev: bond0
 "#;
 
 const FULL_EXAMPLE: &str = r#"# Full network configuration example

@@ -816,3 +816,81 @@ pub struct TcpSummary {
     /// CLOSING state.
     pub closing: u32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_socket_summary_is_all_zeros() {
+        let summary = SocketSummary::default();
+        assert_eq!(summary.tcp.total, 0);
+        assert_eq!(summary.tcp.established, 0);
+        assert_eq!(summary.tcp.syn_sent, 0);
+        assert_eq!(summary.tcp.syn_recv, 0);
+        assert_eq!(summary.tcp.fin_wait1, 0);
+        assert_eq!(summary.tcp.fin_wait2, 0);
+        assert_eq!(summary.tcp.time_wait, 0);
+        assert_eq!(summary.tcp.close, 0);
+        assert_eq!(summary.tcp.close_wait, 0);
+        assert_eq!(summary.tcp.last_ack, 0);
+        assert_eq!(summary.tcp.listen, 0);
+        assert_eq!(summary.tcp.closing, 0);
+        assert_eq!(summary.udp, 0);
+        assert_eq!(summary.raw, 0);
+        assert_eq!(summary.unix, 0);
+    }
+
+    #[test]
+    fn display_format_matches_expected_output() {
+        let summary = SocketSummary {
+            tcp: TcpSummary {
+                total: 15,
+                established: 8,
+                syn_sent: 1,
+                syn_recv: 0,
+                fin_wait1: 0,
+                fin_wait2: 1,
+                time_wait: 3,
+                close: 2,
+                close_wait: 0,
+                last_ack: 0,
+                listen: 0,
+                closing: 0,
+            },
+            udp: 5,
+            raw: 1,
+            unix: 10,
+        };
+
+        let output = format!("{}", summary);
+        let lines: Vec<&str> = output.lines().collect();
+
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0], "Total: 31");
+        assert_eq!(
+            lines[1],
+            "TCP:   15 (estab 8, closed 2, orphaned 0, timewait 3)"
+        );
+        assert_eq!(lines[2], "UDP:   5");
+        assert_eq!(lines[3], "RAW:   1");
+        assert_eq!(lines[4], "UNIX:  10");
+    }
+
+    #[test]
+    fn display_total_is_sum_of_all_socket_types() {
+        let summary = SocketSummary {
+            tcp: TcpSummary {
+                total: 10,
+                ..Default::default()
+            },
+            udp: 20,
+            raw: 3,
+            unix: 7,
+        };
+
+        let output = format!("{}", summary);
+        let first_line = output.lines().next().unwrap();
+        assert_eq!(first_line, "Total: 40");
+    }
+}
