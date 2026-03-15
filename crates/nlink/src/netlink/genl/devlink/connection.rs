@@ -7,7 +7,7 @@ use crate::netlink::builder::MessageBuilder;
 use crate::netlink::connection::Connection;
 use crate::netlink::error::{Error, Result};
 use crate::netlink::genl::{
-    CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
+    CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
 };
 use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
 use crate::netlink::protocol::{Devlink, ProtocolState};
@@ -28,14 +28,29 @@ impl Connection<Devlink> {
     /// ```
     pub async fn new_async() -> Result<Self> {
         let socket = NetlinkSocket::new(Devlink::PROTOCOL)?;
-        let family_id = resolve_devlink_family(&socket).await?;
-        let state = Devlink { family_id };
+        let (family_id, monitor_group_id) = resolve_devlink_family(&socket).await?;
+        let state = Devlink {
+            family_id,
+            monitor_group_id,
+        };
         Ok(Self::from_parts(socket, state))
     }
 
     /// Get the devlink family ID.
     pub fn family_id(&self) -> u16 {
         self.state().family_id
+    }
+
+    /// Subscribe to devlink multicast events.
+    ///
+    /// After subscribing, use `events()` or `into_events()` to receive events.
+    pub fn subscribe(&mut self) -> Result<()> {
+        let group_id = self
+            .state()
+            .monitor_group_id
+            .ok_or_else(|| Error::InvalidMessage("devlink monitor group not available".into()))?;
+        self.socket_mut().add_membership(group_id)?;
+        Ok(())
     }
 
     // =========================================================================
@@ -964,8 +979,8 @@ fn attr_str(payload: &[u8]) -> Option<String> {
     }
 }
 
-/// Resolve the devlink GENL family ID.
-async fn resolve_devlink_family(socket: &NetlinkSocket) -> Result<u16> {
+/// Resolve the devlink GENL family ID and multicast group ID.
+async fn resolve_devlink_family(socket: &NetlinkSocket) -> Result<(u16, Option<u32>)> {
     let mut builder = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK);
     let genl_hdr = GenlMsgHdr::new(CtrlCmd::GetFamily as u8, 1);
     builder.append(&genl_hdr);
@@ -980,6 +995,7 @@ async fn resolve_devlink_family(socket: &NetlinkSocket) -> Result<u16> {
 
     let response: Vec<u8> = socket.recv_msg().await?;
     let mut family_id: Option<u16> = None;
+    let mut monitor_group_id: Option<u32> = None;
 
     for result in MessageIter::new(&response) {
         let (header, payload) = result?;
@@ -1013,11 +1029,40 @@ async fn resolve_devlink_family(socket: &NetlinkSocket) -> Result<u16> {
         for (attr_type, attr_payload) in AttrIter::new(attrs_data) {
             if attr_type == CtrlAttr::FamilyId as u16 && attr_payload.len() >= 2 {
                 family_id = Some(u16::from_ne_bytes(attr_payload[..2].try_into().unwrap()));
+            } else if attr_type == CtrlAttr::McastGroups as u16 {
+                for (_idx, grp_data) in AttrIter::new(attr_payload) {
+                    let mut grp_name: Option<String> = None;
+                    let mut grp_id: Option<u32> = None;
+
+                    for (grp_attr_type, grp_attr_payload) in AttrIter::new(grp_data) {
+                        if grp_attr_type == CtrlAttrMcastGrp::Name as u16 {
+                            grp_name = Some(
+                                std::str::from_utf8(grp_attr_payload)
+                                    .unwrap_or("")
+                                    .trim_end_matches('\0')
+                                    .to_string(),
+                            );
+                        } else if grp_attr_type == CtrlAttrMcastGrp::Id as u16
+                            && grp_attr_payload.len() >= 4
+                        {
+                            grp_id = Some(u32::from_ne_bytes(
+                                grp_attr_payload[..4].try_into().unwrap(),
+                            ));
+                        }
+                    }
+
+                    if grp_name.as_deref() == Some(DEVLINK_MCGRP_NAME) {
+                        monitor_group_id = grp_id;
+                    }
+                }
             }
         }
     }
 
-    family_id.ok_or_else(|| Error::FamilyNotFound {
-        name: DEVLINK_GENL_NAME.to_string(),
-    })
+    match family_id {
+        Some(id) => Ok((id, monitor_group_id)),
+        None => Err(Error::FamilyNotFound {
+            name: DEVLINK_GENL_NAME.to_string(),
+        }),
+    }
 }

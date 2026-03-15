@@ -104,3 +104,10 @@ pub const DEVLINK_ATTR_PARAM_VALUES_LIST: u16 = 84;
 pub const DEVLINK_ATTR_PARAM_VALUE: u16 = 85;
 pub const DEVLINK_ATTR_PARAM_VALUE_DATA: u16 = 86;
 pub const DEVLINK_ATTR_PARAM_VALUE_CMODE: u16 = 87;
+
+// Notification commands (received via multicast)
+pub const DEVLINK_CMD_PORT_NEW: u8 = 6;
+pub const DEVLINK_CMD_PORT_DEL: u8 = 7;
+
+/// Devlink multicast group name.
+pub const DEVLINK_MCGRP_NAME: &str = "devlink";

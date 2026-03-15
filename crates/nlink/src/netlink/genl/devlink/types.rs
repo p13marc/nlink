@@ -351,6 +351,54 @@ impl ParamData {
     }
 }
 
+/// Devlink event received from the multicast group.
+#[derive(Debug, Clone)]
+pub enum DevlinkEvent {
+    /// New devlink device appeared.
+    NewDevice {
+        /// Bus name.
+        bus: String,
+        /// Device name.
+        device: String,
+    },
+    /// Devlink device removed.
+    DelDevice {
+        /// Bus name.
+        bus: String,
+        /// Device name.
+        device: String,
+    },
+    /// New devlink port appeared.
+    NewPort {
+        /// Bus name.
+        bus: String,
+        /// Device name.
+        device: String,
+        /// Port index.
+        port_index: u32,
+        /// Network device name (if mapped).
+        netdev_name: Option<String>,
+    },
+    /// Devlink port removed.
+    DelPort {
+        /// Bus name.
+        bus: String,
+        /// Device name.
+        device: String,
+        /// Port index.
+        port_index: u32,
+    },
+    /// Health reporter state changed.
+    HealthEvent {
+        /// Bus name.
+        bus: String,
+        /// Device name.
+        device: String,
+        /// Reporter name.
+        reporter: Option<String>,
+    },
+}
+
 /// Reload action for `reload()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

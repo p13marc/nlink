@@ -327,7 +327,7 @@ use super::events::NetworkEvent;
 use super::message::NlMsgType;
 use super::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage};
 use super::parse::FromNetlink;
-use super::protocol::{Connector, Ethtool, KobjectUevent, Nl80211, Route, SELinux};
+use super::protocol::{Connector, Devlink, Ethtool, KobjectUevent, Nl80211, Route, SELinux};
 use super::selinux::SELinuxEvent;
 use super::uevent::Uevent;
 
@@ -510,6 +510,130 @@ fn parse_selinux_event(data: &[u8]) -> Option<SELinuxEvent> {
         }
         _ => None,
     }
+}
+
+// Devlink protocol events
+impl private::Sealed for Devlink {}
+
+impl EventSource for Devlink {
+    type Event = super::genl::devlink::DevlinkEvent;
+
+    fn parse_events(data: &[u8]) -> Vec<Self::Event> {
+        parse_devlink_events(data)
+    }
+}
+
+fn parse_devlink_events(data: &[u8]) -> Vec<super::genl::devlink::DevlinkEvent> {
+    use super::genl::devlink::{
+        DEVLINK_ATTR_BUS_NAME, DEVLINK_ATTR_DEV_NAME, DEVLINK_ATTR_HEALTH_REPORTER,
+        DEVLINK_ATTR_HEALTH_REPORTER_NAME, DEVLINK_ATTR_PORT_INDEX,
+        DEVLINK_ATTR_PORT_NETDEV_NAME, DEVLINK_CMD_GET, DEVLINK_CMD_HEALTH_REPORTER_RECOVER,
+        DEVLINK_CMD_PORT_DEL, DEVLINK_CMD_PORT_NEW, DevlinkEvent,
+    };
+    use super::genl::{GENL_HDRLEN, GenlMsgHdr};
+
+    let mut events = Vec::new();
+
+    for msg_result in MessageIter::new(data) {
+        let Ok((header, payload)) = msg_result else {
+            continue;
+        };
+
+        if header.is_error() || header.is_done() {
+            continue;
+        }
+
+        if payload.len() < GENL_HDRLEN {
+            continue;
+        }
+
+        let Some(genl_hdr) = GenlMsgHdr::from_bytes(payload) else {
+            continue;
+        };
+
+        let cmd = genl_hdr.cmd;
+        let attrs_data = &payload[GENL_HDRLEN..];
+
+        let mut bus = String::new();
+        let mut device = String::new();
+        let mut port_index = 0u32;
+        let mut netdev_name: Option<String> = None;
+        let mut reporter_name: Option<String> = None;
+
+        for (attr_type, attr_payload) in super::attr::AttrIter::new(attrs_data) {
+            match attr_type {
+                DEVLINK_ATTR_BUS_NAME => {
+                    bus = std::str::from_utf8(attr_payload)
+                        .unwrap_or("")
+                        .trim_end_matches('\0')
+                        .to_string();
+                }
+                DEVLINK_ATTR_DEV_NAME => {
+                    device = std::str::from_utf8(attr_payload)
+                        .unwrap_or("")
+                        .trim_end_matches('\0')
+                        .to_string();
+                }
+                DEVLINK_ATTR_PORT_INDEX if attr_payload.len() >= 4 => {
+                    port_index = u32::from_ne_bytes(attr_payload[..4].try_into().unwrap());
+                }
+                DEVLINK_ATTR_PORT_NETDEV_NAME => {
+                    netdev_name = Some(
+                        std::str::from_utf8(attr_payload)
+                            .unwrap_or("")
+                            .trim_end_matches('\0')
+                            .to_string(),
+                    );
+                }
+                DEVLINK_ATTR_HEALTH_REPORTER => {
+                    // Parse nested reporter to get name
+                    for (inner_type, inner_payload) in
+                        super::attr::AttrIter::new(attr_payload)
+                    {
+                        if inner_type == DEVLINK_ATTR_HEALTH_REPORTER_NAME {
+                            reporter_name = Some(
+                                std::str::from_utf8(inner_payload)
+                                    .unwrap_or("")
+                                    .trim_end_matches('\0')
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Devlink uses CMD_GET (1) for both new/del device notifications
+        // Port notifications use CMD_PORT_NEW (6) and CMD_PORT_DEL (7)
+        let event = match cmd {
+            DEVLINK_CMD_GET => {
+                // Device new notification
+                DevlinkEvent::NewDevice { bus, device }
+            }
+            DEVLINK_CMD_PORT_NEW => DevlinkEvent::NewPort {
+                bus,
+                device,
+                port_index,
+                netdev_name,
+            },
+            DEVLINK_CMD_PORT_DEL => DevlinkEvent::DelPort {
+                bus,
+                device,
+                port_index,
+            },
+            DEVLINK_CMD_HEALTH_REPORTER_RECOVER => DevlinkEvent::HealthEvent {
+                bus,
+                device,
+                reporter: reporter_name,
+            },
+            _ => continue,
+        };
+
+        events.push(event);
+    }
+
+    events
 }
 
 // Nl80211 protocol events

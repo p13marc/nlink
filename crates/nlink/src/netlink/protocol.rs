@@ -268,6 +268,8 @@ impl ProtocolState for Mptcp {
 pub struct Devlink {
     /// Resolved devlink GENL family ID.
     pub(crate) family_id: u16,
+    /// Multicast group ID for event notifications.
+    pub(crate) monitor_group_id: Option<u32>,
 }
 
 impl private::Sealed for Devlink {}

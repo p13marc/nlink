@@ -60,9 +60,9 @@ Add devlink Generic Netlink support for hardware device management. Used by mode
 - [ ] Add doc comments with examples
 
 ### Phase 3: Event Monitoring
-- [ ] Implement `DevlinkEvent` enum
-- [ ] Implement `subscribe()` for multicast group
-- [ ] Implement `events()` and `into_events()` stream methods
+- [x] Implement `DevlinkEvent` enum
+- [x] Implement `subscribe()` for multicast group
+- [x] Implement `events()` and `into_events()` stream methods
 - [ ] Add integration test for event monitoring
 - [ ] Add monitor mode to binary
 - [ ] Add doc comments with examples
