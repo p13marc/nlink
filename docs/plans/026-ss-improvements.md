@@ -26,20 +26,20 @@ Improve the `nlink-ss` binary with missing features from iproute2's `ss`. All ne
 - [ ] Update CLAUDE.md with kill mode example
 
 ### Phase 3: Netlink Socket Listing
-- [ ] Implement `NetlinkSocketInfo` and `NetlinkProtocol` types
-- [ ] Implement `netlink_sockets()` on `Connection<SockDiag>`
+- [x] Implement `NetlinkSocketInfo` and `NetlinkProtocol` types
+- [x] Implement `netlink_sockets()` on `Connection<SockDiag>`
 - [ ] Add integration test for netlink socket listing
-- [ ] Add `--netlink` flag to `bins/ss` binary
-- [ ] Add netlink socket output formatting
-- [ ] Add doc comments with examples
+- [x] Add `--netlink` flag to `bins/ss` binary
+- [x] Add netlink socket output formatting
+- [x] Add doc comments with examples
 
 ### Phase 4: Expression Filters
-- [ ] Implement `FilterExpr`, `Comparison` types
-- [ ] Implement `FilterExpr::parse()` with winnow
-- [ ] Implement `FilterExpr::matches()` evaluation
-- [ ] Add unit tests for expression parsing and evaluation
-- [ ] Add expression filter argument to `bins/ss` binary
-- [ ] Add doc comments with examples
+- [x] Implement `FilterExpr`, `Comparison` types
+- [x] Implement `FilterExpr::parse()` with winnow
+- [x] Implement `FilterExpr::matches()` evaluation
+- [x] Add unit tests for expression parsing and evaluation
+- [x] Add expression filter argument to `bins/ss` binary
+- [x] Add doc comments with examples
 
 ## Current State
 

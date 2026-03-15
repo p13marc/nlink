@@ -29,7 +29,7 @@ nftables uses a register-based expression system where rules are sequences of ex
 - [ ] Add integration tests for chain CRUD with hooks
 - [ ] Add integration tests for simple rules (TCP port match + accept)
 - [ ] Add doc comments with examples on all public types
-- [ ] Create `bins/nft` binary or add nftables subcommand to existing binary
+- [x] Create `bins/nft` binary or add nftables subcommand to existing binary
 - [ ] Update CLAUDE.md with nftables usage examples
 
 ### Phase 2: NAT + Logging + Rate Limiting

@@ -443,6 +443,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nlink-devlink"
+version = "0.8.0"
+dependencies = [
+ "clap",
+ "nlink",
+ "tokio",
+]
+
+[[package]]
 name = "nlink-diag"
 version = "0.8.0"
 dependencies = [
@@ -479,6 +488,15 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nlink-nft"
+version = "0.8.0"
+dependencies = [
+ "clap",
+ "nlink",
+ "tokio",
 ]
 
 [[package]]
@@ -519,6 +537,15 @@ dependencies = [
  "rand",
  "tokio",
  "x25519-dalek",
+]
+
+[[package]]
+name = "nlink-wifi"
+version = "0.8.0"
+dependencies = [
+ "clap",
+ "nlink",
+ "tokio",
 ]
 
 [[package]]

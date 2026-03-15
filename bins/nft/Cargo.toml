@@ -1,0 +1,16 @@
+[package]
+name = "nlink-nft"
+description = "nftables firewall management utility"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "nft"
+path = "src/main.rs"
+
+[dependencies]
+nlink = { workspace = true, features = ["output"] }
+tokio = { workspace = true }
+clap = { workspace = true }

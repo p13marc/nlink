@@ -1,0 +1,16 @@
+[package]
+name = "nlink-wifi"
+description = "WiFi management utility via nl80211"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "wifi"
+path = "src/main.rs"
+
+[dependencies]
+nlink = { workspace = true, features = ["output"] }
+tokio = { workspace = true }
+clap = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "nlink-devlink"
+description = "Devlink device management utility"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "devlink"
+path = "src/main.rs"
+
+[dependencies]
+nlink = { workspace = true, features = ["output"] }
+tokio = { workspace = true }
+clap = { workspace = true }
