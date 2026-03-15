@@ -233,7 +233,7 @@ impl VrfCmd {
 fn extract_vrf_table(data: &[u8]) -> u32 {
     for (attr_type, attr_data) in AttrIter::new(data) {
         if attr_type == IFLA_VRF_TABLE && attr_data.len() >= 4 {
-            return u32::from_ne_bytes(attr_data[..4].try_into().unwrap());
+            return u32::from_ne_bytes(attr_data[..4].try_into().expect("4-byte attribute data"));
         }
     }
     0

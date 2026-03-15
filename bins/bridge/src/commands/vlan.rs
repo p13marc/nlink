@@ -228,9 +228,9 @@ fn print_vlans_json(
         .collect();
 
     let output = if opts.pretty {
-        serde_json::to_string_pretty(&json_output).unwrap()
+        serde_json::to_string_pretty(&json_output).expect("JSON serialization")
     } else {
-        serde_json::to_string(&json_output).unwrap()
+        serde_json::to_string(&json_output).expect("JSON serialization")
     };
     println!("{}", output);
 }

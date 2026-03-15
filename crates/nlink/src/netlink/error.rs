@@ -17,6 +17,7 @@ pub enum Error {
     Io(#[from] io::Error),
 
     /// JSON serialization error.
+    #[cfg(feature = "output")]
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 

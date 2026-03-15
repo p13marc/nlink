@@ -109,9 +109,9 @@ fn print_chains_json(dev: &str, parent: &str, chains: &[u32], opts: &OutputOptio
     });
 
     let output = if opts.pretty {
-        serde_json::to_string_pretty(&obj).unwrap()
+        serde_json::to_string_pretty(&obj).expect("JSON serialization")
     } else {
-        serde_json::to_string(&obj).unwrap()
+        serde_json::to_string(&obj).expect("JSON serialization")
     };
     println!("{}", output);
 }

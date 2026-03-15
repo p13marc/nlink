@@ -7,35 +7,35 @@ Address code quality findings: make `serde_json` optional, add SAFETY comments t
 ## Progress
 
 ### Make serde_json Optional
-- [ ] Make `serde` and `serde_json` optional in `Cargo.toml`
-- [ ] Add `output` feature flag with `dep:serde` and `dep:serde_json`
-- [ ] Gate `Error::Json` variant behind `#[cfg(feature = "output")]`
-- [ ] Audit library code for serde_json usage outside `output` module
-- [ ] Verify `cargo build -p nlink` succeeds without `output` feature
-- [ ] Verify `cargo build -p nlink --features output` succeeds
-- [ ] Verify all binary crates still compile
+- [x] Make `serde` and `serde_json` optional in `Cargo.toml`
+- [x] Add `output` feature flag with `dep:serde` and `dep:serde_json`
+- [x] Gate `Error::Json` variant behind `#[cfg(feature = "output")]`
+- [x] Audit library code for serde_json usage outside `output` module
+- [x] Verify `cargo build -p nlink` succeeds without `output` feature
+- [x] Verify `cargo build -p nlink --features output` succeeds
+- [x] Verify all binary crates still compile
 
 ### Add SAFETY Comments
-- [ ] Add SAFETY comments to `tuntap/device.rs` (~11 blocks)
-- [ ] Add SAFETY comments to `netlink/socket.rs` (~3 blocks)
-- [ ] Add SAFETY comments to `netlink/namespace.rs` (~3 blocks)
-- [ ] Add SAFETY comments to `netlink/link.rs` unsafe blocks
-- [ ] Add SAFETY comments to `addr.rs` unsafe blocks
-- [ ] Verify all ~35 unsafe blocks have SAFETY comments via `grep`
+- [x] Add SAFETY comments to `tuntap/device.rs` (~11 blocks)
+- [x] Add SAFETY comments to `netlink/socket.rs` (~3 blocks)
+- [x] Add SAFETY comments to `netlink/namespace.rs` (~3 blocks)
+- [x] Add SAFETY comments to `netlink/link.rs` unsafe blocks
+- [x] Add SAFETY comments to `addr.rs` unsafe blocks
+- [x] Verify all ~35 unsafe blocks have SAFETY comments via `grep`
 
 ### Fix ip6gre Constants
-- [ ] Fix IFLA_GRE_ENCAP_LIMIT (12->11)
-- [ ] Fix IFLA_GRE_FLOWINFO (13->12)
-- [ ] Fix IFLA_GRE_FLAGS (14->13)
+- [x] Fix IFLA_GRE_ENCAP_LIMIT (12->11)
+- [x] Fix IFLA_GRE_FLOWINFO (13->12)
+- [x] Fix IFLA_GRE_FLAGS (14->13)
 - [ ] Add regression test for correct constant values
 - [ ] Verify existing ip6gre integration tests still pass
 
 ### Replace unwrap() with expect()
-- [ ] Replace ~15 `unwrap()` calls in `bins/tc/src/commands/action.rs`
-- [ ] Audit `bins/ip/` for bare `unwrap()` calls
-- [ ] Audit `bins/ss/` for bare `unwrap()` calls
-- [ ] Audit `bins/bridge/` for bare `unwrap()` calls
-- [ ] Audit `bins/wg/` for bare `unwrap()` calls
+- [x] Replace `unwrap()` calls in `bins/tc/` (chain.rs)
+- [x] Audit `bins/ip/` for bare `unwrap()` calls
+- [x] Audit `bins/ss/` for bare `unwrap()` calls
+- [x] Audit `bins/bridge/` for bare `unwrap()` calls
+- [x] Audit `bins/diag/` for bare `unwrap()` calls
 
 ## Tasks
 

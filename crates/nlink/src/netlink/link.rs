@@ -759,6 +759,8 @@ impl LinkConfig for VlanLink {
 
         // Flags (if any set)
         if self.flags.mask != 0 {
+            // SAFETY: VlanFlags is a #[repr(C)] struct of two u32 fields with no padding.
+            // The pointer and size are valid for the lifetime of `self.flags`.
             let flags_bytes = unsafe {
                 std::slice::from_raw_parts(
                     &self.flags as *const VlanFlags as *const u8,
@@ -1044,6 +1046,7 @@ impl LinkConfig for VxlanLink {
         // Port range
         if let Some((low, high)) = self.port_range {
             let range = [low.to_be(), high.to_be()];
+            // SAFETY: [u16; 2] is 4 bytes with no padding; pointer is valid for the array lifetime.
             let range_bytes = unsafe { std::slice::from_raw_parts(range.as_ptr() as *const u8, 4) };
             builder.append_attr(vxlan::IFLA_VXLAN_PORT_RANGE, range_bytes);
         }
@@ -2569,9 +2572,10 @@ mod ip6gre {
     pub const IFLA_GRE_REMOTE: u16 = 7;
     pub const IFLA_GRE_TTL: u16 = 8;
     pub const IFLA_GRE_TOS: u16 = 9;
-    pub const IFLA_GRE_ENCAP_LIMIT: u16 = 12;
-    pub const IFLA_GRE_FLOWINFO: u16 = 13;
-    pub const IFLA_GRE_FLAGS: u16 = 14;
+    pub const IFLA_GRE_PMTUDISC: u16 = 10;
+    pub const IFLA_GRE_ENCAP_LIMIT: u16 = 11;
+    pub const IFLA_GRE_FLOWINFO: u16 = 12;
+    pub const IFLA_GRE_FLAGS: u16 = 13;
 }
 
 impl Ip6GreLink {

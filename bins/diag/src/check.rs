@@ -40,7 +40,7 @@ pub async fn run(args: CheckArgs, json: bool) -> Result<()> {
                 })
             }).collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        println!("{}", serde_json::to_string_pretty(&output).expect("JSON serialization"));
     } else {
         println!("Connectivity Check: {}", report.destination);
         println!();

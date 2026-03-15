@@ -228,9 +228,9 @@ fn print_fdb_json(
         .collect();
 
     let output = if opts.pretty {
-        serde_json::to_string_pretty(&json_entries).unwrap()
+        serde_json::to_string_pretty(&json_entries).expect("JSON serialization")
     } else {
-        serde_json::to_string(&json_entries).unwrap()
+        serde_json::to_string(&json_entries).expect("JSON serialization")
     };
     println!("{}", output);
 }

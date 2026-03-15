@@ -22,7 +22,7 @@ tuntap-async = ["tuntap"]
 # Traffic control utilities
 tc = []
 # Output formatting (JSON/text)
-output = ["dep:serde"]
+output = ["dep:serde", "dep:serde_json"]
 # Namespace watcher (inotify-based)
 namespace_watcher = ["dep:inotify"]
 # All features
@@ -39,7 +39,7 @@ tracing = { workspace = true }
 bytes = { workspace = true }
 libc = { workspace = true }
 winnow = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, optional = true }
 zerocopy = { workspace = true }
 tokio-stream = { workspace = true }
 

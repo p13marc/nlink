@@ -220,9 +220,9 @@ fn print_endpoints_json(endpoints: &[MptcpEndpoint], opts: &nlink::output::Outpu
         .collect();
 
     let output = if opts.pretty {
-        serde_json::to_string_pretty(&json_endpoints).unwrap()
+        serde_json::to_string_pretty(&json_endpoints).expect("JSON serialization")
     } else {
-        serde_json::to_string(&json_endpoints).unwrap()
+        serde_json::to_string(&json_endpoints).expect("JSON serialization")
     };
     println!("{}", output);
 }
@@ -291,9 +291,9 @@ fn print_limits_json(limits: &MptcpLimits, opts: &nlink::output::OutputOptions) 
     });
 
     let output = if opts.pretty {
-        serde_json::to_string_pretty(&obj).unwrap()
+        serde_json::to_string_pretty(&obj).expect("JSON serialization")
     } else {
-        serde_json::to_string(&obj).unwrap()
+        serde_json::to_string(&obj).expect("JSON serialization")
     };
     println!("{}", output);
 }

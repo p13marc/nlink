@@ -202,8 +202,8 @@ fn add_namespace(name: &str) -> Result<()> {
             }
 
             // Mount our namespace to the file
-            let proc_path = std::ffi::CString::new("/proc/self/ns/net").unwrap();
-            let mount_path = std::ffi::CString::new(netns_path.to_str().unwrap()).unwrap();
+            let proc_path = std::ffi::CString::new("/proc/self/ns/net").expect("valid C string");
+            let mount_path = std::ffi::CString::new(netns_path.to_str().expect("valid UTF-8 path")).expect("valid C string");
 
             if libc::mount(
                 proc_path.as_ptr(),
@@ -381,7 +381,7 @@ fn monitor_namespaces() -> Result<()> {
     create_netns_dir()?;
 
     // Watch the netns directory
-    let path_cstr = std::ffi::CString::new(NETNS_RUN_DIR).unwrap();
+    let path_cstr = std::ffi::CString::new(NETNS_RUN_DIR).expect("valid C string");
     let wd = unsafe {
         libc::inotify_add_watch(
             inotify_fd,
@@ -507,8 +507,8 @@ fn attach_namespace(name: &str, pid: u32) -> Result<()> {
     drop(file);
 
     // Bind mount the process namespace to our file
-    let proc_cstr = std::ffi::CString::new(proc_ns_path.clone()).unwrap();
-    let mount_cstr = std::ffi::CString::new(netns_path.to_str().unwrap()).unwrap();
+    let proc_cstr = std::ffi::CString::new(proc_ns_path.clone()).expect("valid C string");
+    let mount_cstr = std::ffi::CString::new(netns_path.to_str().expect("valid UTF-8 path")).expect("valid C string");
 
     let result = unsafe {
         libc::mount(

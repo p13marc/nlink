@@ -467,13 +467,13 @@ fn extract_tunnel_info(
             match attr_type {
                 t if t == gre_attrs::IFLA_GRE_REMOTE => {
                     if attr_data.len() >= 4 {
-                        let bytes: [u8; 4] = attr_data[..4].try_into().unwrap();
+                        let bytes: [u8; 4] = attr_data[..4].try_into().expect("4-byte attribute data");
                         remote = Some(Ipv4Addr::from(bytes));
                     }
                 }
                 t if t == gre_attrs::IFLA_GRE_LOCAL => {
                     if attr_data.len() >= 4 {
-                        let bytes: [u8; 4] = attr_data[..4].try_into().unwrap();
+                        let bytes: [u8; 4] = attr_data[..4].try_into().expect("4-byte attribute data");
                         local = Some(Ipv4Addr::from(bytes));
                     }
                 }
@@ -484,7 +484,7 @@ fn extract_tunnel_info(
                 }
                 t if t == gre_attrs::IFLA_GRE_IKEY => {
                     if attr_data.len() >= 4 {
-                        let bytes: [u8; 4] = attr_data[..4].try_into().unwrap();
+                        let bytes: [u8; 4] = attr_data[..4].try_into().expect("4-byte attribute data");
                         key = Some(u32::from_be_bytes(bytes));
                     }
                 }
@@ -495,13 +495,13 @@ fn extract_tunnel_info(
             match attr_type {
                 t if t == iptun_attrs::IFLA_IPTUN_REMOTE => {
                     if attr_data.len() >= 4 {
-                        let bytes: [u8; 4] = attr_data[..4].try_into().unwrap();
+                        let bytes: [u8; 4] = attr_data[..4].try_into().expect("4-byte attribute data");
                         remote = Some(Ipv4Addr::from(bytes));
                     }
                 }
                 t if t == iptun_attrs::IFLA_IPTUN_LOCAL => {
                     if attr_data.len() >= 4 {
-                        let bytes: [u8; 4] = attr_data[..4].try_into().unwrap();
+                        let bytes: [u8; 4] = attr_data[..4].try_into().expect("4-byte attribute data");
                         local = Some(Ipv4Addr::from(bytes));
                     }
                 }

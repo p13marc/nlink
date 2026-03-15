@@ -320,6 +320,8 @@ impl Ipv4Address {
                 cstamp: 0,
                 tstamp: 0,
             };
+            // SAFETY: IfaCacheinfo is a #[repr(C)] struct of u32 fields with no padding.
+            // The pointer and size are valid for the lifetime of `cacheinfo`.
             let bytes = unsafe {
                 std::slice::from_raw_parts(
                     &cacheinfo as *const IfaCacheinfo as *const u8,
@@ -563,6 +565,8 @@ impl Ipv6Address {
                 cstamp: 0,
                 tstamp: 0,
             };
+            // SAFETY: IfaCacheinfo is a #[repr(C)] struct of u32 fields with no padding.
+            // The pointer and size are valid for the lifetime of `cacheinfo`.
             let bytes = unsafe {
                 std::slice::from_raw_parts(
                     &cacheinfo as *const IfaCacheinfo as *const u8,
