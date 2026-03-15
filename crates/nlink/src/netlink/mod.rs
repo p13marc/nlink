@@ -72,6 +72,7 @@ pub mod action;
 pub mod addr;
 pub mod attr;
 pub mod audit;
+pub mod batch;
 pub mod bridge_vlan;
 mod builder;
 pub mod config;
@@ -117,6 +118,7 @@ pub mod uevent;
 pub mod xfrm;
 
 pub use attr::{AttrIter, NlAttr};
+pub use batch::{Batch, BatchResults};
 pub use builder::{MessageBuilder, NestToken};
 pub use connection::{Connection, RtnetlinkGroup};
 pub use error::{Error, Result};

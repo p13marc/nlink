@@ -558,6 +558,35 @@ pub(crate) fn replace_request(msg_type: u16) -> MessageBuilder {
 }
 
 // ============================================================================
+// Batch Operations
+// ============================================================================
+
+impl Connection<Route> {
+    /// Create a batch for executing multiple operations in minimal syscalls.
+    ///
+    /// Operations are buffered and sent as concatenated messages in a single
+    /// `sendmsg()`. The kernel processes them sequentially and returns one
+    /// ACK per message.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Route};
+    /// use nlink::netlink::route::Ipv4Route;
+    ///
+    /// let conn = Connection::<Route>::new()?;
+    /// let results = conn.batch()
+    ///     .add_route(Ipv4Route::new("10.0.0.0", 8).dev_index(5))
+    ///     .add_route(Ipv4Route::new("10.1.0.0", 16).dev_index(5))
+    ///     .execute()
+    ///     .await?;
+    /// ```
+    pub fn batch(&self) -> super::batch::Batch<'_> {
+        super::batch::Batch::new(self)
+    }
+}
+
+// ============================================================================
 // Convenience Query Methods
 // ============================================================================
 
