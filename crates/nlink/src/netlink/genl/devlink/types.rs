@@ -397,6 +397,54 @@ pub enum DevlinkEvent {
         /// Reporter name.
         reporter: Option<String>,
     },
+    /// Flash update progress notification.
+    FlashUpdate(FlashProgress),
+}
+
+/// Flash update progress notification.
+///
+/// Received via devlink multicast events during a firmware flash operation.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::genl::devlink::FlashProgress;
+///
+/// let progress = FlashProgress {
+///     message: Some("Flashing firmware".into()),
+///     component: Some("fw.mgmt".into()),
+///     done: 50,
+///     total: 100,
+/// };
+/// assert_eq!(progress.percent(), 50.0);
+/// assert!(!progress.is_complete());
+/// ```
+#[derive(Debug, Clone)]
+pub struct FlashProgress {
+    /// Status message from the driver.
+    pub message: Option<String>,
+    /// Component being flashed.
+    pub component: Option<String>,
+    /// Bytes/units completed.
+    pub done: u64,
+    /// Total bytes/units.
+    pub total: u64,
+}
+
+impl FlashProgress {
+    /// Progress as a percentage (0.0 to 100.0).
+    pub fn percent(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.done as f64 / self.total as f64) * 100.0
+        }
+    }
+
+    /// Whether the flash operation is complete.
+    pub fn is_complete(&self) -> bool {
+        self.total > 0 && self.done >= self.total
+    }
 }
 
 /// Reload action for `reload()`.

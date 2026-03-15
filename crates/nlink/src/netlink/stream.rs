@@ -525,10 +525,13 @@ impl EventSource for Devlink {
 
 fn parse_devlink_events(data: &[u8]) -> Vec<super::genl::devlink::DevlinkEvent> {
     use super::genl::devlink::{
-        DEVLINK_ATTR_BUS_NAME, DEVLINK_ATTR_DEV_NAME, DEVLINK_ATTR_HEALTH_REPORTER,
+        DEVLINK_ATTR_BUS_NAME, DEVLINK_ATTR_DEV_NAME, DEVLINK_ATTR_FLASH_UPDATE_COMPONENT,
+        DEVLINK_ATTR_FLASH_UPDATE_STATUS_DONE, DEVLINK_ATTR_FLASH_UPDATE_STATUS_MSG,
+        DEVLINK_ATTR_FLASH_UPDATE_STATUS_TOTAL, DEVLINK_ATTR_HEALTH_REPORTER,
         DEVLINK_ATTR_HEALTH_REPORTER_NAME, DEVLINK_ATTR_PORT_INDEX,
-        DEVLINK_ATTR_PORT_NETDEV_NAME, DEVLINK_CMD_GET, DEVLINK_CMD_HEALTH_REPORTER_RECOVER,
-        DEVLINK_CMD_PORT_DEL, DEVLINK_CMD_PORT_NEW, DevlinkEvent,
+        DEVLINK_ATTR_PORT_NETDEV_NAME, DEVLINK_CMD_FLASH_UPDATE_STATUS, DEVLINK_CMD_GET,
+        DEVLINK_CMD_HEALTH_REPORTER_RECOVER, DEVLINK_CMD_PORT_DEL, DEVLINK_CMD_PORT_NEW,
+        DevlinkEvent, FlashProgress,
     };
     use super::genl::{GENL_HDRLEN, GenlMsgHdr};
 
@@ -559,6 +562,10 @@ fn parse_devlink_events(data: &[u8]) -> Vec<super::genl::devlink::DevlinkEvent> 
         let mut port_index = 0u32;
         let mut netdev_name: Option<String> = None;
         let mut reporter_name: Option<String> = None;
+        let mut flash_msg: Option<String> = None;
+        let mut flash_component: Option<String> = None;
+        let mut flash_done: u64 = 0;
+        let mut flash_total: u64 = 0;
 
         for (attr_type, attr_payload) in super::attr::AttrIter::new(attrs_data) {
             match attr_type {
@@ -600,6 +607,28 @@ fn parse_devlink_events(data: &[u8]) -> Vec<super::genl::devlink::DevlinkEvent> 
                         }
                     }
                 }
+                DEVLINK_ATTR_FLASH_UPDATE_STATUS_MSG => {
+                    flash_msg = Some(
+                        std::str::from_utf8(attr_payload)
+                            .unwrap_or("")
+                            .trim_end_matches('\0')
+                            .to_string(),
+                    );
+                }
+                DEVLINK_ATTR_FLASH_UPDATE_COMPONENT => {
+                    flash_component = Some(
+                        std::str::from_utf8(attr_payload)
+                            .unwrap_or("")
+                            .trim_end_matches('\0')
+                            .to_string(),
+                    );
+                }
+                DEVLINK_ATTR_FLASH_UPDATE_STATUS_DONE if attr_payload.len() >= 8 => {
+                    flash_done = u64::from_ne_bytes(attr_payload[..8].try_into().unwrap());
+                }
+                DEVLINK_ATTR_FLASH_UPDATE_STATUS_TOTAL if attr_payload.len() >= 8 => {
+                    flash_total = u64::from_ne_bytes(attr_payload[..8].try_into().unwrap());
+                }
                 _ => {}
             }
         }
@@ -627,6 +656,12 @@ fn parse_devlink_events(data: &[u8]) -> Vec<super::genl::devlink::DevlinkEvent> 
                 device,
                 reporter: reporter_name,
             },
+            DEVLINK_CMD_FLASH_UPDATE_STATUS => DevlinkEvent::FlashUpdate(FlashProgress {
+                message: flash_msg,
+                component: flash_component,
+                done: flash_done,
+                total: flash_total,
+            }),
             _ => continue,
         };
 

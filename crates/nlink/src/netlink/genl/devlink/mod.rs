@@ -91,6 +91,9 @@ pub const DEVLINK_ATTR_HEALTH_REPORTER_AUTO_DUMP: u16 = 136;
 // Flash update attributes
 pub const DEVLINK_ATTR_FLASH_UPDATE_FILE_NAME: u16 = 122;
 pub const DEVLINK_ATTR_FLASH_UPDATE_COMPONENT: u16 = 123;
+pub const DEVLINK_ATTR_FLASH_UPDATE_STATUS_MSG: u16 = 128;
+pub const DEVLINK_ATTR_FLASH_UPDATE_STATUS_DONE: u16 = 129;
+pub const DEVLINK_ATTR_FLASH_UPDATE_STATUS_TOTAL: u16 = 130;
 
 // Reload attributes
 pub const DEVLINK_ATTR_RELOAD_ACTION: u16 = 153;
@@ -108,6 +111,7 @@ pub const DEVLINK_ATTR_PARAM_VALUE_CMODE: u16 = 87;
 // Notification commands (received via multicast)
 pub const DEVLINK_CMD_PORT_NEW: u8 = 6;
 pub const DEVLINK_CMD_PORT_DEL: u8 = 7;
+pub const DEVLINK_CMD_FLASH_UPDATE_STATUS: u8 = 60;
 
 /// Devlink multicast group name.
 pub const DEVLINK_MCGRP_NAME: &str = "devlink";
