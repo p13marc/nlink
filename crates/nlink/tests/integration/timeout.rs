@@ -4,14 +4,14 @@ use nlink::netlink::Connection;
 use nlink::Route;
 use std::time::Duration;
 
-#[test]
-fn test_no_timeout_default() {
+#[tokio::test]
+async fn test_no_timeout_default() {
     let conn = Connection::<Route>::new().unwrap();
     assert_eq!(conn.get_timeout(), None);
 }
 
-#[test]
-fn test_timeout_is_chainable() {
+#[tokio::test]
+async fn test_timeout_is_chainable() {
     let conn = Connection::<Route>::new()
         .unwrap()
         .timeout(Duration::from_secs(5));
