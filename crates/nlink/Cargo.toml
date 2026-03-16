@@ -216,3 +216,48 @@ path = "examples/selinux/selinux_monitor_stream.rs"
 [[example]]
 name = "events_multi_source"
 path = "examples/events/multi_source.rs"
+
+# nftables examples
+[[example]]
+name = "nftables_firewall"
+path = "examples/nftables/firewall.rs"
+
+# nl80211 WiFi examples
+[[example]]
+name = "genl_nl80211"
+path = "examples/genl/nl80211.rs"
+
+# Devlink examples
+[[example]]
+name = "genl_devlink"
+path = "examples/genl/devlink.rs"
+
+# Bond interface examples
+[[example]]
+name = "route_bond"
+path = "examples/route/bond.rs"
+
+# BPF/TC attachment examples
+[[example]]
+name = "route_tc_bpf"
+path = "examples/route/tc/bpf.rs"
+
+# Socket diagnostics - summary and kill
+[[example]]
+name = "sockdiag_summary"
+path = "examples/sockdiag/summary.rs"
+required-features = ["sockdiag"]
+
+[[example]]
+name = "sockdiag_kill"
+path = "examples/sockdiag/kill.rs"
+required-features = ["sockdiag"]
+
+# Batching and timeout examples
+[[example]]
+name = "route_batch"
+path = "examples/route/batch.rs"
+
+[[example]]
+name = "route_timeout"
+path = "examples/route/timeout.rs"
