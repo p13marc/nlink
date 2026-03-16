@@ -1,7 +1,7 @@
 //! `bridge vlan` command implementation.
 
 use clap::{Args, Subcommand};
-use nlink::netlink::bridge_vlan::{BridgeVlanBuilder, BridgeVlanEntry};
+use nlink::netlink::bridge_vlan::{BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanTunnelBuilder};
 use nlink::netlink::{Connection, Error, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions};
 
@@ -27,6 +27,11 @@ enum VlanCommand {
     Del(VlanDelArgs),
     /// Set PVID for a port
     Set(VlanSetArgs),
+    /// Manage VLAN-to-tunnel (VNI) mappings
+    Tunnel {
+        #[command(subcommand)]
+        command: TunnelCommand,
+    },
 }
 
 #[derive(Args)]
@@ -70,6 +75,56 @@ struct VlanSetArgs {
     dev: String,
 }
 
+#[derive(Subcommand)]
+enum TunnelCommand {
+    /// Show VLAN tunnel mappings
+    #[command(visible_alias = "list", visible_alias = "ls")]
+    Show {
+        /// Port device
+        #[arg(long)]
+        dev: String,
+    },
+    /// Add VLAN-to-VNI tunnel mapping
+    Add(TunnelAddArgs),
+    /// Delete VLAN-to-VNI tunnel mapping
+    #[command(visible_alias = "delete")]
+    Del(TunnelDelArgs),
+}
+
+#[derive(Args)]
+struct TunnelAddArgs {
+    /// VLAN ID
+    #[arg(long)]
+    vid: u16,
+
+    /// Tunnel ID (VNI)
+    #[arg(long)]
+    tunnel_id: u32,
+
+    /// Port device
+    #[arg(long)]
+    dev: String,
+
+    /// End of VLAN range (maps VID..range_end to VNI..VNI+(range_end-vid))
+    #[arg(long)]
+    range: Option<u16>,
+}
+
+#[derive(Args)]
+struct TunnelDelArgs {
+    /// VLAN ID
+    #[arg(long)]
+    vid: u16,
+
+    /// Port device
+    #[arg(long)]
+    dev: String,
+
+    /// End of VLAN range
+    #[arg(long)]
+    range: Option<u16>,
+}
+
 impl VlanCmd {
     pub async fn run(
         self,
@@ -86,6 +141,11 @@ impl VlanCmd {
             Some(VlanCommand::Add(args)) => add_vlan(conn, args).await,
             Some(VlanCommand::Del(args)) => del_vlan(conn, args).await,
             Some(VlanCommand::Set(args)) => set_pvid(conn, args).await,
+            Some(VlanCommand::Tunnel { command }) => match command {
+                TunnelCommand::Show { dev } => show_tunnels(conn, &dev, format, opts).await,
+                TunnelCommand::Add(args) => add_tunnel(conn, args).await,
+                TunnelCommand::Del(args) => del_tunnel(conn, args).await,
+            },
         }
     }
 }
@@ -267,4 +327,62 @@ async fn del_vlan(conn: &Connection<Route>, args: VlanDelArgs) -> Result<()> {
 
 async fn set_pvid(conn: &Connection<Route>, args: VlanSetArgs) -> Result<()> {
     conn.set_bridge_pvid(&args.dev, args.pvid).await
+}
+
+async fn show_tunnels(
+    conn: &Connection<Route>,
+    dev: &str,
+    format: OutputFormat,
+    opts: &OutputOptions,
+) -> Result<()> {
+    let tunnels = conn.get_vlan_tunnels(dev).await?;
+
+    match format {
+        OutputFormat::Json => {
+            let json_output: Vec<serde_json::Value> = tunnels
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "vid": t.vid,
+                        "tunnel_id": t.tunnel_id,
+                    })
+                })
+                .collect();
+
+            let output = if opts.pretty {
+                serde_json::to_string_pretty(&json_output).expect("JSON serialization")
+            } else {
+                serde_json::to_string(&json_output).expect("JSON serialization")
+            };
+            println!("{}", output);
+        }
+        OutputFormat::Text => {
+            let header = format!("{:<8} {:<12} {}", "port", "vlan-id", "tunnel-id");
+            println!("{header}");
+            for (i, t) in tunnels.iter().enumerate() {
+                let port_col = if i == 0 { dev } else { "" };
+                println!("{:<8} {:<12} {}", port_col, t.vid, t.tunnel_id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn add_tunnel(conn: &Connection<Route>, args: TunnelAddArgs) -> Result<()> {
+    let mut builder = BridgeVlanTunnelBuilder::new(args.vid, args.tunnel_id).dev(&args.dev);
+
+    if let Some(end) = args.range {
+        builder = builder.range(end);
+    }
+
+    conn.add_vlan_tunnel(builder).await
+}
+
+async fn del_tunnel(conn: &Connection<Route>, args: TunnelDelArgs) -> Result<()> {
+    if let Some(end) = args.range {
+        conn.del_vlan_tunnel_range(&args.dev, args.vid, end).await
+    } else {
+        conn.del_vlan_tunnel(&args.dev, args.vid).await
+    }
 }

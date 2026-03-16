@@ -3,8 +3,11 @@
 //! Manages nftables tables, chains, rules, and sets via NETLINK_NETFILTER.
 
 use clap::{Parser, Subcommand};
-use nlink::netlink::nftables::{Chain, ChainType, Family, Hook, Policy, Priority, Rule};
+use nlink::netlink::nftables::{
+    Chain, ChainType, Family, Hook, Policy, Priority, Rule, Set, SetElement, SetKeyType,
+};
 use nlink::netlink::{Connection, Nftables, Result};
+use std::net::Ipv4Addr;
 
 #[derive(Parser)]
 #[command(name = "nft", version, about = "nftables firewall management utility")]
@@ -104,6 +107,32 @@ enum AddWhat {
         #[arg(trailing_var_arg = true)]
         spec: Vec<String>,
     },
+    /// Add a named set.
+    Set {
+        /// Address family.
+        family: String,
+        /// Table name.
+        table: String,
+        /// Set name.
+        name: String,
+        /// Key type: ipv4_addr, ipv6_addr, ether_addr, inet_service, ifindex, mark.
+        #[arg(long, default_value = "ipv4_addr")]
+        key_type: String,
+    },
+    /// Add elements to a set.
+    Element {
+        /// Address family.
+        family: String,
+        /// Table name.
+        table: String,
+        /// Set name.
+        set: String,
+        /// Elements to add (comma-separated, e.g., "10.0.0.1,10.0.0.2" or "80,443").
+        elements: String,
+        /// Key type hint for parsing: ip, port.
+        #[arg(long, default_value = "ip")]
+        key_type: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -134,6 +163,15 @@ enum DeleteWhat {
         chain: String,
         /// Rule handle.
         handle: u64,
+    },
+    /// Delete a set.
+    Set {
+        /// Address family.
+        family: String,
+        /// Table name.
+        table: String,
+        /// Set name.
+        name: String,
     },
 }
 
@@ -324,6 +362,86 @@ async fn main() -> Result<()> {
                         "masquerade" => {
                             rule = rule.masquerade();
                         }
+                        "dnat" if tokens.get(i + 1) == Some(&"to") => {
+                            if let Some(target) = tokens.get(i + 2) {
+                                let (addr, port) = parse_nat_target(target);
+                                if let Some(ip) = addr {
+                                    rule = rule.dnat(ip, port);
+                                    i += 3;
+                                    continue;
+                                }
+                            }
+                        }
+                        "snat" if tokens.get(i + 1) == Some(&"to") => {
+                            if let Some(target) = tokens.get(i + 2) {
+                                let (addr, port) = parse_nat_target(target);
+                                if let Some(ip) = addr {
+                                    rule = rule.snat(ip, port);
+                                    i += 3;
+                                    continue;
+                                }
+                            }
+                        }
+                        "redirect" if tokens.get(i + 1) == Some(&"to") => {
+                            if let Some(port) = tokens.get(i + 2).and_then(|s| s.parse().ok()) {
+                                rule = rule.redirect(Some(port));
+                                i += 3;
+                                continue;
+                            }
+                        }
+                        "redirect" => {
+                            rule = rule.redirect(None);
+                        }
+                        "iif" | "iifname" => {
+                            if let Some(name) = tokens.get(i + 1) {
+                                rule = rule.match_iif(name);
+                                i += 2;
+                                continue;
+                            }
+                        }
+                        "oif" | "oifname" => {
+                            if let Some(name) = tokens.get(i + 1) {
+                                rule = rule.match_oif(name);
+                                i += 2;
+                                continue;
+                            }
+                        }
+                        "ct" if tokens.get(i + 1) == Some(&"state") => {
+                            if let Some(state_str) = tokens.get(i + 2) {
+                                use nlink::netlink::nftables::CtState;
+                                let mut state = CtState(0);
+                                for s in state_str.split(',') {
+                                    match s.trim() {
+                                        "established" => state |= CtState::ESTABLISHED,
+                                        "related" => state |= CtState::RELATED,
+                                        "new" => state |= CtState::NEW,
+                                        "invalid" => state |= CtState::INVALID,
+                                        _ => {}
+                                    }
+                                }
+                                rule = rule.match_ct_state(state);
+                                i += 3;
+                                continue;
+                            }
+                        }
+                        "ip" if tokens.get(i + 1) == Some(&"saddr") => {
+                            if let Some(addr_str) = tokens.get(i + 2)
+                                && let Some((ip, prefix)) = parse_cidr(addr_str)
+                            {
+                                rule = rule.match_saddr_v4(ip, prefix);
+                                i += 3;
+                                continue;
+                            }
+                        }
+                        "ip" if tokens.get(i + 1) == Some(&"daddr") => {
+                            if let Some(addr_str) = tokens.get(i + 2)
+                                && let Some((ip, prefix)) = parse_cidr(addr_str)
+                            {
+                                rule = rule.match_daddr_v4(ip, prefix);
+                                i += 3;
+                                continue;
+                            }
+                        }
                         _ => {}
                     }
                     i += 1;
@@ -331,6 +449,30 @@ async fn main() -> Result<()> {
 
                 conn.add_rule(rule).await?;
                 eprintln!("Rule added");
+            }
+            AddWhat::Set {
+                family,
+                table,
+                name,
+                key_type,
+            } => {
+                let family = parse_family(&family)?;
+                let kt = parse_key_type(&key_type)?;
+                conn.add_set(Set::new(&table, &name).family(family).key_type(kt))
+                    .await?;
+                eprintln!("Set {name} added");
+            }
+            AddWhat::Element {
+                family,
+                table,
+                set,
+                elements,
+                key_type,
+            } => {
+                let family = parse_family(&family)?;
+                let elems = parse_elements(&elements, &key_type)?;
+                conn.add_set_elements(&table, &set, family, &elems).await?;
+                eprintln!("Elements added to set {set}");
             }
         },
 
@@ -359,6 +501,15 @@ async fn main() -> Result<()> {
                 conn.del_rule(&table, &chain, family, handle).await?;
                 eprintln!("Rule deleted");
             }
+            DeleteWhat::Set {
+                family,
+                table,
+                name,
+            } => {
+                let family = parse_family(&family)?;
+                conn.del_set(&table, &name, family).await?;
+                eprintln!("Set {name} deleted");
+            }
         },
 
         Command::Flush { what } => match what {
@@ -375,4 +526,62 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_key_type(s: &str) -> Result<SetKeyType> {
+    match s {
+        "ipv4_addr" | "ipv4" => Ok(SetKeyType::Ipv4Addr),
+        "ipv6_addr" | "ipv6" => Ok(SetKeyType::Ipv6Addr),
+        "ether_addr" | "mac" => Ok(SetKeyType::EtherAddr),
+        "inet_service" | "port" => Ok(SetKeyType::InetService),
+        "ifindex" => Ok(SetKeyType::IfIndex),
+        "mark" => Ok(SetKeyType::Mark),
+        _ => Err(nlink::netlink::Error::InvalidAttribute(format!(
+            "unknown key type: {s}"
+        ))),
+    }
+}
+
+fn parse_elements(s: &str, key_type: &str) -> Result<Vec<SetElement>> {
+    s.split(',')
+        .map(|elem| {
+            let elem = elem.trim();
+            match key_type {
+                "ip" | "ipv4" => {
+                    let ip: Ipv4Addr = elem.parse().map_err(|_| {
+                        nlink::netlink::Error::InvalidAttribute(format!("invalid IP: {elem}"))
+                    })?;
+                    Ok(SetElement::ipv4(ip))
+                }
+                "port" => {
+                    let port: u16 = elem.parse().map_err(|_| {
+                        nlink::netlink::Error::InvalidAttribute(format!("invalid port: {elem}"))
+                    })?;
+                    Ok(SetElement::port(port))
+                }
+                _ => {
+                    let ip: Ipv4Addr = elem.parse().map_err(|_| {
+                        nlink::netlink::Error::InvalidAttribute(format!("invalid element: {elem}"))
+                    })?;
+                    Ok(SetElement::ipv4(ip))
+                }
+            }
+        })
+        .collect()
+}
+
+fn parse_nat_target(s: &str) -> (Option<Ipv4Addr>, Option<u16>) {
+    if let Some((addr, port)) = s.split_once(':') {
+        (addr.parse().ok(), port.parse().ok())
+    } else {
+        (s.parse().ok(), None)
+    }
+}
+
+fn parse_cidr(s: &str) -> Option<(Ipv4Addr, u8)> {
+    if let Some((addr, prefix)) = s.split_once('/') {
+        Some((addr.parse().ok()?, prefix.parse().ok()?))
+    } else {
+        Some((s.parse().ok()?, 32))
+    }
 }

@@ -56,6 +56,90 @@ enum Commands {
         /// Device name
         device: String,
     },
+    /// Set ring buffer sizes
+    #[command(short_flag = 'G')]
+    SetRings {
+        /// Device name
+        device: String,
+        /// RX ring size
+        #[arg(long)]
+        rx: Option<u32>,
+        /// TX ring size
+        #[arg(long)]
+        tx: Option<u32>,
+    },
+    /// Set channel counts
+    #[command(short_flag = 'L')]
+    SetChannels {
+        /// Device name
+        device: String,
+        /// RX channels
+        #[arg(long)]
+        rx: Option<u32>,
+        /// TX channels
+        #[arg(long)]
+        tx: Option<u32>,
+        /// Combined channels
+        #[arg(long)]
+        combined: Option<u32>,
+        /// Other channels
+        #[arg(long)]
+        other: Option<u32>,
+    },
+    /// Set coalesce parameters
+    #[command(short_flag = 'C')]
+    SetCoalesce {
+        /// Device name
+        device: String,
+        /// RX microseconds
+        #[arg(long)]
+        rx_usecs: Option<u32>,
+        /// TX microseconds
+        #[arg(long)]
+        tx_usecs: Option<u32>,
+        /// RX max frames
+        #[arg(long)]
+        rx_frames: Option<u32>,
+        /// TX max frames
+        #[arg(long)]
+        tx_frames: Option<u32>,
+        /// Adaptive RX (on/off)
+        #[arg(long)]
+        adaptive_rx: Option<bool>,
+        /// Adaptive TX (on/off)
+        #[arg(long)]
+        adaptive_tx: Option<bool>,
+    },
+    /// Set pause parameters
+    #[command(short_flag = 'A')]
+    SetPause {
+        /// Device name
+        device: String,
+        /// Autonegotiate (on/off)
+        #[arg(long)]
+        autoneg: Option<bool>,
+        /// RX pause (on/off)
+        #[arg(long)]
+        rx: Option<bool>,
+        /// TX pause (on/off)
+        #[arg(long)]
+        tx: Option<bool>,
+    },
+    /// Set link speed/duplex/autoneg
+    #[command(short_flag = 's')]
+    SetSpeed {
+        /// Device name
+        device: String,
+        /// Speed in Mb/s
+        #[arg(long)]
+        speed: Option<u32>,
+        /// Duplex: full or half
+        #[arg(long)]
+        duplex: Option<String>,
+        /// Autonegotiation (on/off)
+        #[arg(long)]
+        autoneg: Option<bool>,
+    },
     /// Monitor ethtool events
     Monitor,
 }
@@ -83,6 +167,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Channels { device } => show_channels(&device).await?,
         Commands::Coalesce { device } => show_coalesce(&device).await?,
         Commands::Pause { device } => show_pause(&device).await?,
+        Commands::SetRings { device, rx, tx } => set_rings(&device, rx, tx).await?,
+        Commands::SetChannels { device, rx, tx, combined, other } => {
+            set_channels(&device, rx, tx, combined, other).await?
+        }
+        Commands::SetCoalesce { device, rx_usecs, tx_usecs, rx_frames, tx_frames, adaptive_rx, adaptive_tx } => {
+            set_coalesce(&device, rx_usecs, tx_usecs, rx_frames, tx_frames, adaptive_rx, adaptive_tx).await?
+        }
+        Commands::SetPause { device, autoneg, rx, tx } => {
+            set_pause(&device, autoneg, rx, tx).await?
+        }
+        Commands::SetSpeed { device, speed, duplex, autoneg } => {
+            set_speed(&device, speed, duplex, autoneg).await?
+        }
         Commands::Monitor => monitor_events().await?,
     }
 
@@ -310,6 +407,98 @@ async fn show_pause(device: &str) -> nlink::Result<()> {
         println!("\tTX:\t\t{}", if v { "on" } else { "off" });
     }
 
+    Ok(())
+}
+
+async fn set_rings(device: &str, rx: Option<u32>, tx: Option<u32>) -> nlink::Result<()> {
+    let conn = Connection::<Ethtool>::new_async().await?;
+    conn.set_rings(device, |mut r| {
+        if let Some(v) = rx { r = r.rx(v); }
+        if let Some(v) = tx { r = r.tx(v); }
+        r
+    }).await?;
+    eprintln!("Ring parameters set for {}", device);
+    Ok(())
+}
+
+async fn set_channels(
+    device: &str,
+    rx: Option<u32>,
+    tx: Option<u32>,
+    combined: Option<u32>,
+    other: Option<u32>,
+) -> nlink::Result<()> {
+    let conn = Connection::<Ethtool>::new_async().await?;
+    conn.set_channels(device, |mut c| {
+        if let Some(v) = rx { c = c.rx(v); }
+        if let Some(v) = tx { c = c.tx(v); }
+        if let Some(v) = combined { c = c.combined(v); }
+        if let Some(v) = other { c = c.other(v); }
+        c
+    }).await?;
+    eprintln!("Channel parameters set for {}", device);
+    Ok(())
+}
+
+async fn set_coalesce(
+    device: &str,
+    rx_usecs: Option<u32>,
+    tx_usecs: Option<u32>,
+    rx_frames: Option<u32>,
+    tx_frames: Option<u32>,
+    adaptive_rx: Option<bool>,
+    adaptive_tx: Option<bool>,
+) -> nlink::Result<()> {
+    let conn = Connection::<Ethtool>::new_async().await?;
+    conn.set_coalesce(device, |mut c| {
+        if let Some(v) = rx_usecs { c = c.rx_usecs(v); }
+        if let Some(v) = tx_usecs { c = c.tx_usecs(v); }
+        if let Some(v) = rx_frames { c = c.rx_max_frames(v); }
+        if let Some(v) = tx_frames { c = c.tx_max_frames(v); }
+        if let Some(v) = adaptive_rx { c = c.use_adaptive_rx(v); }
+        if let Some(v) = adaptive_tx { c = c.use_adaptive_tx(v); }
+        c
+    }).await?;
+    eprintln!("Coalesce parameters set for {}", device);
+    Ok(())
+}
+
+async fn set_pause(
+    device: &str,
+    autoneg: Option<bool>,
+    rx: Option<bool>,
+    tx: Option<bool>,
+) -> nlink::Result<()> {
+    let conn = Connection::<Ethtool>::new_async().await?;
+    conn.set_pause(device, |mut p| {
+        if let Some(v) = autoneg { p = p.autoneg(v); }
+        if let Some(v) = rx { p = p.rx(v); }
+        if let Some(v) = tx { p = p.tx(v); }
+        p
+    }).await?;
+    eprintln!("Pause parameters set for {}", device);
+    Ok(())
+}
+
+async fn set_speed(
+    device: &str,
+    speed: Option<u32>,
+    duplex: Option<String>,
+    autoneg: Option<bool>,
+) -> nlink::Result<()> {
+    let conn = Connection::<Ethtool>::new_async().await?;
+    conn.set_link_modes(device, |mut m| {
+        if let Some(v) = speed { m = m.speed(v); }
+        if let Some(ref d) = duplex {
+            m = m.duplex(match d.as_str() {
+                "half" => Duplex::Half,
+                _ => Duplex::Full,
+            });
+        }
+        if let Some(v) = autoneg { m = m.autoneg(v); }
+        m
+    }).await?;
+    eprintln!("Link modes set for {}", device);
     Ok(())
 }
 

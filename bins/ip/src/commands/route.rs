@@ -3,7 +3,9 @@
 //! This module uses the strongly-typed RouteMessage API from rip-netlink.
 
 use clap::{Args, Subcommand};
+use nlink::netlink::mpls::MplsEncap;
 use nlink::netlink::route::{Ipv4Route, Ipv6Route, RouteMetrics};
+use nlink::netlink::srv6::Srv6Encap;
 use nlink::netlink::types::route::{RouteProtocol, RouteScope};
 use nlink::netlink::{Connection, Result, Route};
 use nlink::output::{OutputFormat, OutputOptions, print_all};
@@ -56,6 +58,14 @@ enum RouteAction {
         /// MTU for route.
         #[arg(long)]
         mtu: Option<u32>,
+
+        /// MPLS encapsulation labels (comma-separated, e.g., "100" or "100,200,300").
+        #[arg(long)]
+        encap_mpls: Option<String>,
+
+        /// SRv6 encapsulation segments (comma-separated IPv6 addresses).
+        #[arg(long)]
+        encap_seg6: Option<String>,
     },
 
     /// Replace a route (add or update).
@@ -122,6 +132,8 @@ impl RouteCmd {
                 src,
                 scope,
                 mtu,
+                encap_mpls,
+                encap_seg6,
             } => {
                 Self::add(
                     conn,
@@ -133,6 +145,8 @@ impl RouteCmd {
                     src.as_deref(),
                     scope.as_deref(),
                     mtu,
+                    encap_mpls.as_deref(),
+                    encap_seg6.as_deref(),
                     false,
                 )
                 .await
@@ -153,6 +167,8 @@ impl RouteCmd {
                     &table,
                     metric,
                     src.as_deref(),
+                    None,
+                    None,
                     None,
                     None,
                     true,
@@ -199,6 +215,8 @@ impl RouteCmd {
         src: Option<&str>,
         scope: Option<&str>,
         mtu: Option<u32>,
+        encap_mpls: Option<&str>,
+        encap_seg6: Option<&str>,
         replace: bool,
     ) -> Result<()> {
         use nlink::util::addr::parse_prefix;
@@ -267,6 +285,14 @@ impl RouteCmd {
                 route = route.metrics(met);
             }
 
+            if let Some(labels) = encap_mpls {
+                route = route.mpls_encap(parse_mpls_encap(labels)?);
+            }
+
+            if let Some(segs) = encap_seg6 {
+                route = route.srv6_encap(parse_srv6_encap(segs)?);
+            }
+
             if replace {
                 conn.replace_route(route).await
             } else {
@@ -313,6 +339,14 @@ impl RouteCmd {
 
             if let Some(met) = metrics {
                 route = route.metrics(met);
+            }
+
+            if let Some(labels) = encap_mpls {
+                route = route.mpls_encap(parse_mpls_encap(labels)?);
+            }
+
+            if let Some(segs) = encap_seg6 {
+                route = route.srv6_encap(parse_srv6_encap(segs)?);
             }
 
             if replace {
@@ -382,4 +416,28 @@ impl RouteCmd {
 
         Ok(())
     }
+}
+
+/// Parse comma-separated MPLS labels into an MplsEncap.
+fn parse_mpls_encap(labels: &str) -> Result<MplsEncap> {
+    let mut encap = MplsEncap::new();
+    for label_str in labels.split(',') {
+        let label: u32 = label_str.trim().parse().map_err(|_| {
+            nlink::netlink::Error::InvalidMessage(format!("invalid MPLS label: {}", label_str))
+        })?;
+        encap = encap.label(label);
+    }
+    Ok(encap)
+}
+
+/// Parse comma-separated IPv6 addresses into an Srv6Encap.
+fn parse_srv6_encap(segments: &str) -> Result<Srv6Encap> {
+    let mut encap = Srv6Encap::encap();
+    for seg_str in segments.split(',') {
+        let addr: Ipv6Addr = seg_str.trim().parse().map_err(|_| {
+            nlink::netlink::Error::InvalidMessage(format!("invalid SRv6 segment: {}", seg_str))
+        })?;
+        encap = encap.segment(addr);
+    }
+    Ok(encap)
 }

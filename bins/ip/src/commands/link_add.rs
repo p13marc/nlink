@@ -2,9 +2,9 @@
 
 use clap::{Args, Subcommand};
 use nlink::netlink::link::{
-    BondLink, BondMode, BridgeLink, DummyLink, GreLink, GretapLink, IpipLink, IpvlanLink,
-    MacvlanLink, MacvtapLink, SitLink, VethLink, VlanLink, VrfLink, VxlanLink, WireguardLink,
-    XmitHashPolicy,
+    BondLink, BondMode, BridgeLink, DummyLink, GreLink, GretapLink, Ip6GreLink, Ip6GretapLink,
+    IpipLink, IpvlanLink, LacpRate, MacvlanLink, MacvtapLink, SitLink, VethLink, VlanLink,
+    VrfLink, VtiLink, Vti6Link, VxlanLink, WireguardLink, XmitHashPolicy,
 };
 use nlink::netlink::{Connection, Result, Route};
 
@@ -105,6 +105,15 @@ pub enum LinkAddType {
         /// Hash policy: layer2, layer3+4, layer2+3, encap2+3, encap3+4.
         #[arg(long)]
         xmit_hash_policy: Option<String>,
+        /// ARP monitoring interval in milliseconds.
+        #[arg(long)]
+        arp_interval: Option<u32>,
+        /// ARP monitoring IP target.
+        #[arg(long)]
+        arp_ip_target: Option<String>,
+        /// LACP rate: slow or fast (802.3ad mode only).
+        #[arg(long)]
+        lacp_rate: Option<String>,
         #[command(flatten)]
         common: CommonLinkArgs,
     },
@@ -285,6 +294,80 @@ pub enum LinkAddType {
         common: CommonLinkArgs,
     },
 
+    /// Create a VTI (Virtual Tunnel Interface) for route-based IPsec.
+    Vti {
+        /// Interface name.
+        name: String,
+        /// Local endpoint address.
+        #[arg(long)]
+        local: Option<String>,
+        /// Remote endpoint address.
+        #[arg(long)]
+        remote: Option<String>,
+        /// Input key (SPI).
+        #[arg(long)]
+        ikey: Option<u32>,
+        /// Output key (SPI).
+        #[arg(long)]
+        okey: Option<u32>,
+        #[command(flatten)]
+        common: CommonLinkArgs,
+    },
+
+    /// Create a VTI6 (IPv6 Virtual Tunnel Interface).
+    Vti6 {
+        /// Interface name.
+        name: String,
+        /// Local IPv6 endpoint address.
+        #[arg(long)]
+        local: Option<String>,
+        /// Remote IPv6 endpoint address.
+        #[arg(long)]
+        remote: Option<String>,
+        /// Input key (SPI).
+        #[arg(long)]
+        ikey: Option<u32>,
+        /// Output key (SPI).
+        #[arg(long)]
+        okey: Option<u32>,
+        #[command(flatten)]
+        common: CommonLinkArgs,
+    },
+
+    /// Create an IPv6 GRE tunnel.
+    Ip6gre {
+        /// Interface name.
+        name: String,
+        /// Local IPv6 endpoint address.
+        #[arg(long)]
+        local: Option<String>,
+        /// Remote IPv6 endpoint address.
+        #[arg(long)]
+        remote: Option<String>,
+        /// TTL value.
+        #[arg(long)]
+        ttl: Option<u8>,
+        #[command(flatten)]
+        common: CommonLinkArgs,
+    },
+
+    /// Create an IPv6 GRE TAP tunnel (Ethernet over IPv6 GRE).
+    Ip6gretap {
+        /// Interface name.
+        name: String,
+        /// Local IPv6 endpoint address.
+        #[arg(long)]
+        local: Option<String>,
+        /// Remote IPv6 endpoint address.
+        #[arg(long)]
+        remote: Option<String>,
+        /// TTL value.
+        #[arg(long)]
+        ttl: Option<u8>,
+        #[command(flatten)]
+        common: CommonLinkArgs,
+    },
+
     /// Create a WireGuard interface.
     Wireguard {
         /// Interface name.
@@ -373,6 +456,9 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             downdelay,
             min_links,
             xmit_hash_policy,
+            arp_interval,
+            arp_ip_target,
+            lacp_rate,
             common,
         } => {
             let mode_val = parse_bond_mode(&mode);
@@ -392,6 +478,17 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             if let Some(ref policy) = xmit_hash_policy {
                 let p = parse_xmit_hash_policy(policy);
                 link = link.xmit_hash_policy(p);
+            }
+            if let Some(v) = arp_interval {
+                link = link.arp_interval(v);
+            }
+            if let Some(ref target) = arp_ip_target
+                && let Ok(ip) = target.parse::<std::net::Ipv4Addr>()
+            {
+                link = link.arp_ip_target(ip);
+            }
+            if let Some(ref rate) = lacp_rate {
+                link = link.lacp_rate(parse_lacp_rate(rate));
             }
             if let Some(mtu) = common.mtu {
                 link = link.mtu(mtu);
@@ -639,6 +736,114 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             conn.add_link(link).await
         }
 
+        LinkAddType::Vti {
+            name,
+            local,
+            remote,
+            ikey,
+            okey,
+            common,
+        } => {
+            let mut link = VtiLink::new(&name);
+            if let Some(ref addr) = local
+                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
+            {
+                link = link.local(ip);
+            }
+            if let Some(ref addr) = remote
+                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
+            {
+                link = link.remote(ip);
+            }
+            if let Some(k) = ikey {
+                link = link.ikey(k);
+            }
+            if let Some(k) = okey {
+                link = link.okey(k);
+            }
+            let _ = common; // VTI doesn't support MTU in link creation
+            conn.add_link(link).await
+        }
+
+        LinkAddType::Vti6 {
+            name,
+            local,
+            remote,
+            ikey,
+            okey,
+            common,
+        } => {
+            let mut link = Vti6Link::new(&name);
+            if let Some(ref addr) = local
+                && let Ok(ip) = addr.parse::<std::net::Ipv6Addr>()
+            {
+                link = link.local(ip);
+            }
+            if let Some(ref addr) = remote
+                && let Ok(ip) = addr.parse::<std::net::Ipv6Addr>()
+            {
+                link = link.remote(ip);
+            }
+            if let Some(k) = ikey {
+                link = link.ikey(k);
+            }
+            if let Some(k) = okey {
+                link = link.okey(k);
+            }
+            let _ = common;
+            conn.add_link(link).await
+        }
+
+        LinkAddType::Ip6gre {
+            name,
+            local,
+            remote,
+            ttl,
+            common,
+        } => {
+            let mut link = Ip6GreLink::new(&name);
+            if let Some(ref addr) = local
+                && let Ok(ip) = addr.parse::<std::net::Ipv6Addr>()
+            {
+                link = link.local(ip);
+            }
+            if let Some(ref addr) = remote
+                && let Ok(ip) = addr.parse::<std::net::Ipv6Addr>()
+            {
+                link = link.remote(ip);
+            }
+            if let Some(t) = ttl {
+                link = link.ttl(t);
+            }
+            let _ = common;
+            conn.add_link(link).await
+        }
+
+        LinkAddType::Ip6gretap {
+            name,
+            local,
+            remote,
+            ttl,
+            common,
+        } => {
+            let mut link = Ip6GretapLink::new(&name);
+            if let Some(ref addr) = local
+                && let Ok(ip) = addr.parse::<std::net::Ipv6Addr>()
+            {
+                link = link.local(ip);
+            }
+            if let Some(ref addr) = remote
+                && let Ok(ip) = addr.parse::<std::net::Ipv6Addr>()
+            {
+                link = link.remote(ip);
+            }
+            if let Some(t) = ttl {
+                link = link.ttl(t);
+            }
+            let _ = common;
+            conn.add_link(link).await
+        }
+
         LinkAddType::Wireguard { name, common } => {
             let mut link = WireguardLink::new(&name);
             if let Some(mtu) = common.mtu {
@@ -676,6 +881,14 @@ fn parse_xmit_hash_policy(policy: &str) -> XmitHashPolicy {
         "encap3+4" | "4" => XmitHashPolicy::Encap34,
         "vlan+srcmac" | "5" => XmitHashPolicy::VlanSrcMac,
         _ => XmitHashPolicy::Layer2,
+    }
+}
+
+fn parse_lacp_rate(rate: &str) -> LacpRate {
+    match rate.to_lowercase().as_str() {
+        "fast" | "1" => LacpRate::Fast,
+        "slow" | "0" => LacpRate::Slow,
+        _ => LacpRate::Slow,
     }
 }
 
