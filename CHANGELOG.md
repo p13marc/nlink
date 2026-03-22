@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-03-22
+
+### Added
+
+#### Sysctl Management
+Namespace-aware sysctl read/write support via `/proc/sys/` filesystem operations:
+
+- `sysctl::get()`, `sysctl::set()`, `sysctl::set_many()` for current namespace
+- `namespace::get_sysctl()`, `namespace::set_sysctl()`, `namespace::set_sysctls()` for named namespaces
+- Path-based variants: `namespace::get_sysctl_path()`, `namespace::set_sysctl_path()`, `namespace::set_sysctls_path()`
+- Path traversal validation: rejects keys containing `..`, `/`, or null bytes
+
+#### Namespace Process Spawning
+Spawn child processes inside network namespaces without shelling out to `ip netns exec`:
+
+- `namespace::spawn(name, cmd)` — spawn via `pre_exec` + `setns` (parent unaffected)
+- `namespace::spawn_output(name, cmd)` — spawn and collect stdout/stderr
+- `namespace::spawn_path(path, cmd)` / `namespace::spawn_output_path(path, cmd)` — path-based variants
+- `NamespaceSpec::spawn()` / `NamespaceSpec::spawn_output()` — unified API across Named/Path/Pid
+
+#### API Improvements
+- `CtState::empty()` const fn and `Default` impl for ergonomic flag building
+- Re-export `Nftables` and `Wireguard` protocol types at crate root (alongside `Route` and `Generic`)
+
 ## [0.9.0] - 2026-03-15
 
 ### Added
