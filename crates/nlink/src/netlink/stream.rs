@@ -528,10 +528,9 @@ fn parse_devlink_events(data: &[u8]) -> Vec<super::genl::devlink::DevlinkEvent> 
         DEVLINK_ATTR_BUS_NAME, DEVLINK_ATTR_DEV_NAME, DEVLINK_ATTR_FLASH_UPDATE_COMPONENT,
         DEVLINK_ATTR_FLASH_UPDATE_STATUS_DONE, DEVLINK_ATTR_FLASH_UPDATE_STATUS_MSG,
         DEVLINK_ATTR_FLASH_UPDATE_STATUS_TOTAL, DEVLINK_ATTR_HEALTH_REPORTER,
-        DEVLINK_ATTR_HEALTH_REPORTER_NAME, DEVLINK_ATTR_PORT_INDEX,
-        DEVLINK_ATTR_PORT_NETDEV_NAME, DEVLINK_CMD_FLASH_UPDATE_STATUS, DEVLINK_CMD_GET,
-        DEVLINK_CMD_HEALTH_REPORTER_RECOVER, DEVLINK_CMD_PORT_DEL, DEVLINK_CMD_PORT_NEW,
-        DevlinkEvent, FlashProgress,
+        DEVLINK_ATTR_HEALTH_REPORTER_NAME, DEVLINK_ATTR_PORT_INDEX, DEVLINK_ATTR_PORT_NETDEV_NAME,
+        DEVLINK_CMD_FLASH_UPDATE_STATUS, DEVLINK_CMD_GET, DEVLINK_CMD_HEALTH_REPORTER_RECOVER,
+        DEVLINK_CMD_PORT_DEL, DEVLINK_CMD_PORT_NEW, DevlinkEvent, FlashProgress,
     };
     use super::genl::{GENL_HDRLEN, GenlMsgHdr};
 
@@ -594,9 +593,7 @@ fn parse_devlink_events(data: &[u8]) -> Vec<super::genl::devlink::DevlinkEvent> 
                 }
                 DEVLINK_ATTR_HEALTH_REPORTER => {
                     // Parse nested reporter to get name
-                    for (inner_type, inner_payload) in
-                        super::attr::AttrIter::new(attr_payload)
-                    {
+                    for (inner_type, inner_payload) in super::attr::AttrIter::new(attr_payload) {
                         if inner_type == DEVLINK_ATTR_HEALTH_REPORTER_NAME {
                             reporter_name = Some(
                                 std::str::from_utf8(inner_payload)
@@ -683,6 +680,7 @@ impl EventSource for Nl80211 {
 }
 
 fn parse_nl80211_events(data: &[u8]) -> Vec<super::genl::nl80211::Nl80211Event> {
+    use super::genl::nl80211::InterfaceType;
     use super::genl::nl80211::{
         NL80211_ATTR_IFINDEX, NL80211_ATTR_IFNAME, NL80211_ATTR_IFTYPE, NL80211_ATTR_MAC,
         NL80211_ATTR_REASON_CODE, NL80211_ATTR_REG_ALPHA2, NL80211_ATTR_STATUS_CODE,
@@ -690,7 +688,6 @@ fn parse_nl80211_events(data: &[u8]) -> Vec<super::genl::nl80211::Nl80211Event> 
         NL80211_CMD_NEW_INTERFACE, NL80211_CMD_NEW_SCAN_RESULTS, NL80211_CMD_REG_CHANGE,
         NL80211_CMD_SCAN_ABORTED, Nl80211Event,
     };
-    use super::genl::nl80211::InterfaceType;
     use super::genl::{GENL_HDRLEN, GenlMsgHdr};
 
     let mut events = Vec::new();

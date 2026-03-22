@@ -81,7 +81,10 @@ async fn main() -> nlink::netlink::Result<()> {
             Ok(reporters) if !reporters.is_empty() => {
                 println!("  Health reporters:");
                 for r in &reporters {
-                    println!("    {}: state={:?} errors={}", r.name, r.state, r.error_count);
+                    println!(
+                        "    {}: state={:?} errors={}",
+                        r.name, r.state, r.error_count
+                    );
                 }
             }
             Ok(_) => {}

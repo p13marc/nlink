@@ -34,8 +34,8 @@ pub use crate::sockdiag::filter::{
 };
 pub use crate::sockdiag::socket::{InetSocket, SocketInfo, UnixSocket, UnixType};
 pub use crate::sockdiag::types::{
-    AddressFamily, MemInfo, Protocol as InetProtocol, SocketState,
-    SocketSummary, TcpInfo, TcpState, Timer,
+    AddressFamily, MemInfo, Protocol as InetProtocol, SocketState, SocketSummary, TcpInfo,
+    TcpState, Timer,
 };
 
 // Netlink constants
@@ -307,7 +307,10 @@ impl Connection<SockDiag> {
                 if errno != 0 {
                     return Err(crate::netlink::Error::Kernel {
                         errno: -errno,
-                        message: format!("SOCK_DESTROY failed: {}", std::io::Error::from_raw_os_error(-errno)),
+                        message: format!(
+                            "SOCK_DESTROY failed: {}",
+                            std::io::Error::from_raw_os_error(-errno)
+                        ),
                     });
                 }
             }
@@ -1254,9 +1257,10 @@ fn parse_netlink_msg(
 
     // Apply protocol filter
     if let Some(filter_proto) = filter.protocol
-        && protocol != filter_proto {
-            return None;
-        }
+        && protocol != filter_proto
+    {
+        return None;
+    }
 
     // state at offset 4..8 (unused for display)
     let portid = u32::from_ne_bytes([payload[8], payload[9], payload[10], payload[11]]);
@@ -1264,7 +1268,13 @@ fn parse_netlink_msg(
     let dst_group = u32::from_ne_bytes([payload[16], payload[17], payload[18], payload[19]]);
     let inode = u32::from_ne_bytes([payload[20], payload[21], payload[22], payload[23]]);
     let cookie = u64::from_ne_bytes([
-        payload[24], payload[25], payload[26], payload[27], payload[28], payload[29], payload[30],
+        payload[24],
+        payload[25],
+        payload[26],
+        payload[27],
+        payload[28],
+        payload[29],
+        payload[30],
         payload[31],
     ]);
 

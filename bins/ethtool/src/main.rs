@@ -168,18 +168,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Coalesce { device } => show_coalesce(&device).await?,
         Commands::Pause { device } => show_pause(&device).await?,
         Commands::SetRings { device, rx, tx } => set_rings(&device, rx, tx).await?,
-        Commands::SetChannels { device, rx, tx, combined, other } => {
-            set_channels(&device, rx, tx, combined, other).await?
+        Commands::SetChannels {
+            device,
+            rx,
+            tx,
+            combined,
+            other,
+        } => set_channels(&device, rx, tx, combined, other).await?,
+        Commands::SetCoalesce {
+            device,
+            rx_usecs,
+            tx_usecs,
+            rx_frames,
+            tx_frames,
+            adaptive_rx,
+            adaptive_tx,
+        } => {
+            set_coalesce(
+                &device,
+                rx_usecs,
+                tx_usecs,
+                rx_frames,
+                tx_frames,
+                adaptive_rx,
+                adaptive_tx,
+            )
+            .await?
         }
-        Commands::SetCoalesce { device, rx_usecs, tx_usecs, rx_frames, tx_frames, adaptive_rx, adaptive_tx } => {
-            set_coalesce(&device, rx_usecs, tx_usecs, rx_frames, tx_frames, adaptive_rx, adaptive_tx).await?
-        }
-        Commands::SetPause { device, autoneg, rx, tx } => {
-            set_pause(&device, autoneg, rx, tx).await?
-        }
-        Commands::SetSpeed { device, speed, duplex, autoneg } => {
-            set_speed(&device, speed, duplex, autoneg).await?
-        }
+        Commands::SetPause {
+            device,
+            autoneg,
+            rx,
+            tx,
+        } => set_pause(&device, autoneg, rx, tx).await?,
+        Commands::SetSpeed {
+            device,
+            speed,
+            duplex,
+            autoneg,
+        } => set_speed(&device, speed, duplex, autoneg).await?,
         Commands::Monitor => monitor_events().await?,
     }
 
@@ -413,10 +440,15 @@ async fn show_pause(device: &str) -> nlink::Result<()> {
 async fn set_rings(device: &str, rx: Option<u32>, tx: Option<u32>) -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
     conn.set_rings(device, |mut r| {
-        if let Some(v) = rx { r = r.rx(v); }
-        if let Some(v) = tx { r = r.tx(v); }
+        if let Some(v) = rx {
+            r = r.rx(v);
+        }
+        if let Some(v) = tx {
+            r = r.tx(v);
+        }
         r
-    }).await?;
+    })
+    .await?;
     eprintln!("Ring parameters set for {}", device);
     Ok(())
 }
@@ -430,12 +462,21 @@ async fn set_channels(
 ) -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
     conn.set_channels(device, |mut c| {
-        if let Some(v) = rx { c = c.rx(v); }
-        if let Some(v) = tx { c = c.tx(v); }
-        if let Some(v) = combined { c = c.combined(v); }
-        if let Some(v) = other { c = c.other(v); }
+        if let Some(v) = rx {
+            c = c.rx(v);
+        }
+        if let Some(v) = tx {
+            c = c.tx(v);
+        }
+        if let Some(v) = combined {
+            c = c.combined(v);
+        }
+        if let Some(v) = other {
+            c = c.other(v);
+        }
         c
-    }).await?;
+    })
+    .await?;
     eprintln!("Channel parameters set for {}", device);
     Ok(())
 }
@@ -451,14 +492,27 @@ async fn set_coalesce(
 ) -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
     conn.set_coalesce(device, |mut c| {
-        if let Some(v) = rx_usecs { c = c.rx_usecs(v); }
-        if let Some(v) = tx_usecs { c = c.tx_usecs(v); }
-        if let Some(v) = rx_frames { c = c.rx_max_frames(v); }
-        if let Some(v) = tx_frames { c = c.tx_max_frames(v); }
-        if let Some(v) = adaptive_rx { c = c.use_adaptive_rx(v); }
-        if let Some(v) = adaptive_tx { c = c.use_adaptive_tx(v); }
+        if let Some(v) = rx_usecs {
+            c = c.rx_usecs(v);
+        }
+        if let Some(v) = tx_usecs {
+            c = c.tx_usecs(v);
+        }
+        if let Some(v) = rx_frames {
+            c = c.rx_max_frames(v);
+        }
+        if let Some(v) = tx_frames {
+            c = c.tx_max_frames(v);
+        }
+        if let Some(v) = adaptive_rx {
+            c = c.use_adaptive_rx(v);
+        }
+        if let Some(v) = adaptive_tx {
+            c = c.use_adaptive_tx(v);
+        }
         c
-    }).await?;
+    })
+    .await?;
     eprintln!("Coalesce parameters set for {}", device);
     Ok(())
 }
@@ -471,11 +525,18 @@ async fn set_pause(
 ) -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
     conn.set_pause(device, |mut p| {
-        if let Some(v) = autoneg { p = p.autoneg(v); }
-        if let Some(v) = rx { p = p.rx(v); }
-        if let Some(v) = tx { p = p.tx(v); }
+        if let Some(v) = autoneg {
+            p = p.autoneg(v);
+        }
+        if let Some(v) = rx {
+            p = p.rx(v);
+        }
+        if let Some(v) = tx {
+            p = p.tx(v);
+        }
         p
-    }).await?;
+    })
+    .await?;
     eprintln!("Pause parameters set for {}", device);
     Ok(())
 }
@@ -488,16 +549,21 @@ async fn set_speed(
 ) -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
     conn.set_link_modes(device, |mut m| {
-        if let Some(v) = speed { m = m.speed(v); }
+        if let Some(v) = speed {
+            m = m.speed(v);
+        }
         if let Some(ref d) = duplex {
             m = m.duplex(match d.as_str() {
                 "half" => Duplex::Half,
                 _ => Duplex::Full,
             });
         }
-        if let Some(v) = autoneg { m = m.autoneg(v); }
+        if let Some(v) = autoneg {
+            m = m.autoneg(v);
+        }
         m
-    }).await?;
+    })
+    .await?;
     eprintln!("Link modes set for {}", device);
     Ok(())
 }

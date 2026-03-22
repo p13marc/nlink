@@ -180,13 +180,15 @@ async fn main() -> Result<()> {
             };
             for port in &ports {
                 if let Some(ref b) = filter_bus
-                    && &port.bus != b {
-                        continue;
-                    }
+                    && &port.bus != b
+                {
+                    continue;
+                }
                 if let Some(ref d) = filter_dev
-                    && &port.device != d {
-                        continue;
-                    }
+                    && &port.device != d
+                {
+                    continue;
+                }
                 print!("{}", port.path());
                 if let Some(ref name) = port.netdev_name {
                     print!(" netdev {name}");
@@ -239,10 +241,7 @@ async fn main() -> Result<()> {
                     if r.recover_count > 0 {
                         print!(" recoveries={}", r.recover_count);
                     }
-                    print!(
-                        " auto_recover={} auto_dump={}",
-                        r.auto_recover, r.auto_dump
-                    );
+                    print!(" auto_recover={} auto_dump={}", r.auto_recover, r.auto_dump);
                     println!();
                 }
             }
@@ -325,9 +324,7 @@ async fn main() -> Result<()> {
                 "driver_reinit" => ReloadAction::DriverReinit,
                 "fw_activate" => ReloadAction::FwActivate,
                 _ => {
-                    eprintln!(
-                        "Unknown action: {action}. Use driver_reinit or fw_activate."
-                    );
+                    eprintln!("Unknown action: {action}. Use driver_reinit or fw_activate.");
                     std::process::exit(1);
                 }
             };

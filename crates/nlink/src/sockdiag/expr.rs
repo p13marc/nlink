@@ -299,9 +299,8 @@ fn parse_port_value(input: &mut &str) -> PResult<u16> {
 }
 
 fn parse_ip_prefix(input: &mut &str) -> PResult<(IpAddr, u8)> {
-    let addr_str: &str =
-        take_while(1.., |c: char| c.is_ascii_hexdigit() || c == '.' || c == ':')
-            .parse_next(input)?;
+    let addr_str: &str = take_while(1.., |c: char| c.is_ascii_hexdigit() || c == '.' || c == ':')
+        .parse_next(input)?;
 
     let addr: IpAddr = addr_str
         .parse()
@@ -326,8 +325,10 @@ fn parse_ip_prefix(input: &mut &str) -> PResult<(IpAddr, u8)> {
 }
 
 fn parse_state(input: &mut &str) -> PResult<SocketState> {
-    let word: &str = take_while(1.., |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        .parse_next(input)?;
+    let word: &str = take_while(1.., |c: char| {
+        c.is_ascii_alphanumeric() || c == '-' || c == '_'
+    })
+    .parse_next(input)?;
     match word.to_ascii_lowercase().as_str() {
         "established" | "estab" => Ok(SocketState::Tcp(TcpState::Established)),
         "syn-sent" | "syn_sent" => Ok(SocketState::Tcp(TcpState::SynSent)),

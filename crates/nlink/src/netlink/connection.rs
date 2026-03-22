@@ -785,9 +785,10 @@ impl Connection<Route> {
 
         for link in all_links {
             if link.master() == Some(bond_ifindex)
-                && let Some(info) = link.bond_slave_info() {
-                    slaves.push((link, info));
-                }
+                && let Some(info) = link.bond_slave_info()
+            {
+                slaves.push((link, info));
+            }
         }
 
         Ok(slaves)

@@ -97,7 +97,16 @@ impl TestNamespace {
     ) -> Result<()> {
         // Create veth pair in this namespace using namespace::spawn
         let mut cmd = Command::new("ip");
-        cmd.args(["link", "add", local_name, "type", "veth", "peer", "name", remote_name]);
+        cmd.args([
+            "link",
+            "add",
+            local_name,
+            "type",
+            "veth",
+            "peer",
+            "name",
+            remote_name,
+        ]);
         let output = namespace::spawn_output(&self.name, cmd)?;
         if !output.status.success() {
             return Err(nlink::Error::InvalidMessage(

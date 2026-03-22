@@ -532,10 +532,7 @@ impl TcMessage {
                 bpf::TCA_BPF_ID => {
                     if payload.len() >= 4 {
                         info.id = Some(u32::from_ne_bytes([
-                            payload[0],
-                            payload[1],
-                            payload[2],
-                            payload[3],
+                            payload[0], payload[1], payload[2], payload[3],
                         ]));
                     }
                 }
@@ -554,22 +551,15 @@ impl TcMessage {
                 }
                 bpf::TCA_BPF_FLAGS => {
                     if payload.len() >= 4 {
-                        let flags = u32::from_ne_bytes([
-                            payload[0],
-                            payload[1],
-                            payload[2],
-                            payload[3],
-                        ]);
+                        let flags =
+                            u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
                         info.direct_action = (flags & bpf::TCA_BPF_FLAG_ACT_DIRECT) != 0;
                     }
                 }
                 bpf::TCA_BPF_CLASSID => {
                     if payload.len() >= 4 {
                         info.classid = Some(u32::from_ne_bytes([
-                            payload[0],
-                            payload[1],
-                            payload[2],
-                            payload[3],
+                            payload[0], payload[1], payload[2], payload[3],
                         ]));
                     }
                 }

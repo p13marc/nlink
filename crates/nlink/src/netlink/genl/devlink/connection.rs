@@ -126,11 +126,7 @@ impl Connection<Devlink> {
     }
 
     /// List ports for a specific device.
-    pub async fn get_device_ports(
-        &self,
-        bus: &str,
-        device: &str,
-    ) -> Result<Vec<DevlinkPort>> {
+    pub async fn get_device_ports(&self, bus: &str, device: &str) -> Result<Vec<DevlinkPort>> {
         let ports = self.get_ports().await?;
         Ok(ports
             .into_iter()
@@ -196,11 +192,7 @@ impl Connection<Devlink> {
     }
 
     /// List health reporters that are in error state.
-    pub async fn get_health_errors(
-        &self,
-        bus: &str,
-        device: &str,
-    ) -> Result<Vec<HealthReporter>> {
+    pub async fn get_health_errors(&self, bus: &str, device: &str) -> Result<Vec<HealthReporter>> {
         let reporters = self.get_health_reporters(bus, device).await?;
         Ok(reporters.into_iter().filter(|r| r.is_error()).collect())
     }
@@ -210,11 +202,7 @@ impl Connection<Devlink> {
     // =========================================================================
 
     /// List all parameters for a device.
-    pub async fn get_params(
-        &self,
-        bus: &str,
-        device: &str,
-    ) -> Result<Vec<DevlinkParam>> {
+    pub async fn get_params(&self, bus: &str, device: &str) -> Result<Vec<DevlinkParam>> {
         let responses = self
             .devlink_dump_with_device(DEVLINK_CMD_PARAM_GET, bus, device)
             .await?;
@@ -254,7 +242,8 @@ impl Connection<Devlink> {
         device: &str,
         reporter: &str,
     ) -> Result<()> {
-        let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_HEALTH_REPORTER_RECOVER, bus, device);
+        let mut builder =
+            self.devlink_cmd_builder(DEVLINK_CMD_HEALTH_REPORTER_RECOVER, bus, device);
         let nested = builder.nest_start(DEVLINK_ATTR_HEALTH_REPORTER | 0x8000);
         builder.append_attr_str(DEVLINK_ATTR_HEALTH_REPORTER_NAME, reporter);
         builder.nest_end(nested);
@@ -281,7 +270,10 @@ impl Connection<Devlink> {
             builder.append_attr(DEVLINK_ATTR_HEALTH_REPORTER_AUTO_DUMP, &[u8::from(v)]);
         }
         if let Some(ms) = graceful_period_ms {
-            builder.append_attr(DEVLINK_ATTR_HEALTH_REPORTER_GRACEFUL_PERIOD, &ms.to_ne_bytes());
+            builder.append_attr(
+                DEVLINK_ATTR_HEALTH_REPORTER_GRACEFUL_PERIOD,
+                &ms.to_ne_bytes(),
+            );
         }
         builder.nest_end(nested);
         self.devlink_send_ack(builder).await
@@ -295,12 +287,7 @@ impl Connection<Devlink> {
     ///
     /// This is a long-running operation. The kernel will send progress
     /// notifications asynchronously.
-    pub async fn flash_update(
-        &self,
-        bus: &str,
-        device: &str,
-        request: FlashRequest,
-    ) -> Result<()> {
+    pub async fn flash_update(&self, bus: &str, device: &str, request: FlashRequest) -> Result<()> {
         let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_FLASH_UPDATE, bus, device);
         builder.append_attr_str(DEVLINK_ATTR_FLASH_UPDATE_FILE_NAME, &request.file_name);
         if let Some(component) = &request.component {
@@ -314,12 +301,7 @@ impl Connection<Devlink> {
     // =========================================================================
 
     /// Reload the device with the specified action.
-    pub async fn reload(
-        &self,
-        bus: &str,
-        device: &str,
-        action: ReloadAction,
-    ) -> Result<()> {
+    pub async fn reload(&self, bus: &str, device: &str, action: ReloadAction) -> Result<()> {
         let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_RELOAD, bus, device);
         builder.append_attr(DEVLINK_ATTR_RELOAD_ACTION, &[action as u8]);
         self.devlink_send_ack(builder).await
@@ -344,12 +326,7 @@ impl Connection<Devlink> {
     }
 
     /// Unsplit a previously split port.
-    pub async fn port_unsplit(
-        &self,
-        bus: &str,
-        device: &str,
-        port_index: u32,
-    ) -> Result<()> {
+    pub async fn port_unsplit(&self, bus: &str, device: &str, port_index: u32) -> Result<()> {
         let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_PORT_UNSPLIT, bus, device);
         builder.append_attr_u32(DEVLINK_ATTR_PORT_INDEX, port_index);
         self.devlink_send_ack(builder).await
@@ -738,14 +715,12 @@ fn parse_port(data: &[u8]) -> Option<DevlinkPort> {
             }
             DEVLINK_ATTR_PORT_SPLIT_SUBPORT_NUMBER => {
                 if payload.len() >= 4 {
-                    port.split_subport =
-                        Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                    port.split_subport = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
             }
             DEVLINK_ATTR_PORT_SPLIT_GROUP => {
                 if payload.len() >= 4 {
-                    port.split_group =
-                        Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                    port.split_group = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
             }
             DEVLINK_ATTR_PORT_PCI_PF_NUMBER => {
@@ -765,26 +740,17 @@ fn parse_port(data: &[u8]) -> Option<DevlinkPort> {
             }
             DEVLINK_ATTR_PORT_CONTROLLER_NUMBER => {
                 if payload.len() >= 4 {
-                    port.controller =
-                        Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                    port.controller = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
             }
             _ => {}
         }
     }
 
-    if has_index {
-        Some(port)
-    } else {
-        None
-    }
+    if has_index { Some(port) } else { None }
 }
 
-fn parse_health_response(
-    bus: &str,
-    device: &str,
-    data: &[u8],
-) -> Option<HealthReporter> {
+fn parse_health_response(bus: &str, device: &str, data: &[u8]) -> Option<HealthReporter> {
     for (attr_type, payload) in AttrIter::new(data) {
         if attr_type == DEVLINK_ATTR_HEALTH_REPORTER {
             return parse_health_reporter(bus, device, payload);
@@ -793,11 +759,7 @@ fn parse_health_response(
     None
 }
 
-fn parse_health_reporter(
-    bus: &str,
-    device: &str,
-    data: &[u8],
-) -> Option<HealthReporter> {
+fn parse_health_reporter(bus: &str, device: &str, data: &[u8]) -> Option<HealthReporter> {
     let mut reporter = HealthReporter {
         bus: bus.to_string(),
         device: device.to_string(),
@@ -824,14 +786,12 @@ fn parse_health_reporter(
             }
             DEVLINK_ATTR_HEALTH_REPORTER_ERR_COUNT => {
                 if payload.len() >= 8 {
-                    reporter.error_count =
-                        u64::from_ne_bytes(payload[..8].try_into().unwrap());
+                    reporter.error_count = u64::from_ne_bytes(payload[..8].try_into().unwrap());
                 }
             }
             DEVLINK_ATTR_HEALTH_REPORTER_RECOVER_COUNT => {
                 if payload.len() >= 8 {
-                    reporter.recover_count =
-                        u64::from_ne_bytes(payload[..8].try_into().unwrap());
+                    reporter.recover_count = u64::from_ne_bytes(payload[..8].try_into().unwrap());
                 }
             }
             DEVLINK_ATTR_HEALTH_REPORTER_AUTO_RECOVER => {
@@ -867,11 +827,7 @@ fn parse_health_reporter(
     }
 }
 
-fn parse_param_response(
-    bus: &str,
-    device: &str,
-    data: &[u8],
-) -> Option<DevlinkParam> {
+fn parse_param_response(bus: &str, device: &str, data: &[u8]) -> Option<DevlinkParam> {
     for (attr_type, payload) in AttrIter::new(data) {
         if attr_type == DEVLINK_ATTR_PARAM {
             return parse_param(bus, device, payload);

@@ -52,7 +52,10 @@ pub async fn run(args: WatchArgs, json: bool) -> Result<()> {
                 "details": issue.details,
                 "interface": issue.interface,
             });
-            println!("{}", serde_json::to_string(&output).expect("JSON serialization"));
+            println!(
+                "{}",
+                serde_json::to_string(&output).expect("JSON serialization")
+            );
         } else {
             let icon = match issue.severity {
                 Severity::Info => "[INFO]",

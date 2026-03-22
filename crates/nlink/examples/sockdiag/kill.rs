@@ -43,7 +43,10 @@ async fn main() -> nlink::netlink::Result<()> {
         }
     }
 
-    println!("\nDestroyed {} socket(s) with remote port {}", destroyed, port);
+    println!(
+        "\nDestroyed {} socket(s) with remote port {}",
+        destroyed, port
+    );
 
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Integration tests for operation timeouts (Plan 032).
 
-use nlink::netlink::Connection;
 use nlink::Route;
+use nlink::netlink::Connection;
 use std::time::Duration;
 
 #[tokio::test]

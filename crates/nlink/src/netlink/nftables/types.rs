@@ -636,8 +636,7 @@ impl Rule {
 
     /// Accept the packet.
     pub fn accept(mut self) -> Self {
-        self.exprs
-            .push(super::expr::Expr::Verdict(Verdict::Accept));
+        self.exprs.push(super::expr::Expr::Verdict(Verdict::Accept));
         self
     }
 
@@ -650,18 +649,14 @@ impl Rule {
     /// Jump to another chain.
     pub fn jump(mut self, chain: &str) -> Self {
         self.exprs
-            .push(super::expr::Expr::Verdict(Verdict::Jump(
-                chain.to_string(),
-            )));
+            .push(super::expr::Expr::Verdict(Verdict::Jump(chain.to_string())));
         self
     }
 
     /// Goto another chain (no return).
     pub fn goto(mut self, chain: &str) -> Self {
         self.exprs
-            .push(super::expr::Expr::Verdict(Verdict::Goto(
-                chain.to_string(),
-            )));
+            .push(super::expr::Expr::Verdict(Verdict::Goto(chain.to_string())));
         self
     }
 
@@ -838,12 +833,12 @@ impl SetKeyType {
     /// Kernel type ID (from nf_tables.h NFT_DATA_*).
     pub fn type_id(self) -> u32 {
         match self {
-            Self::Ipv4Addr => 7,    // ipv4_addr
-            Self::Ipv6Addr => 8,    // ipv6_addr
-            Self::EtherAddr => 9,   // ether_addr
+            Self::Ipv4Addr => 7,     // ipv4_addr
+            Self::Ipv6Addr => 8,     // ipv6_addr
+            Self::EtherAddr => 9,    // ether_addr
             Self::InetService => 13, // inet_service
-            Self::IfIndex => 15,    // ifindex (meta)
-            Self::Mark => 12,       // mark
+            Self::IfIndex => 15,     // ifindex (meta)
+            Self::Mark => 12,        // mark
         }
     }
 

@@ -1248,8 +1248,9 @@ fn parse_bond_slave_info(data: &[u8]) -> BondSlaveInfo {
             }
             bond_slave_ids::IFLA_BOND_SLAVE_PRIO => {
                 if payload.len() >= 4 {
-                    info.prio =
-                        Some(i32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]));
+                    info.prio = Some(i32::from_ne_bytes([
+                        payload[0], payload[1], payload[2], payload[3],
+                    ]));
                 }
             }
             _ => {}

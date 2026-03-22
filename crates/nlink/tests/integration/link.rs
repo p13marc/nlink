@@ -4,9 +4,8 @@
 
 use nlink::Result;
 use nlink::netlink::link::{
-    BondLink, BondMode, BridgeLink, DummyLink, GreLink, GretapLink, IfbLink, IpipLink,
-    IpvlanLink, LacpRate, MacvlanLink, MacvlanMode, SitLink, VethLink, VlanLink, VrfLink,
-    XmitHashPolicy,
+    BondLink, BondMode, BridgeLink, DummyLink, GreLink, GretapLink, IfbLink, IpipLink, IpvlanLink,
+    LacpRate, MacvlanLink, MacvlanMode, SitLink, VethLink, VlanLink, VrfLink, XmitHashPolicy,
 };
 
 use crate::common::TestNamespace;

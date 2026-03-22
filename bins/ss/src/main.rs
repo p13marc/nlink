@@ -320,8 +320,8 @@ async fn main() -> anyhow::Result<()> {
     // Apply expression filter if provided
     if !cli.filter_expr.is_empty() {
         let expr_str = cli.filter_expr.join(" ");
-        let expr = nlink::sockdiag::FilterExpr::parse(&expr_str)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let expr =
+            nlink::sockdiag::FilterExpr::parse(&expr_str).map_err(|e| anyhow::anyhow!("{e}"))?;
         all_results.retain(|sock| expr.matches_socket_info(sock));
     }
 

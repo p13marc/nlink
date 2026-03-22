@@ -78,7 +78,10 @@ pub async fn run(args: InterfaceArgs, json: bool) -> Result<()> {
                     })
                 }).collect::<Vec<_>>(),
             });
-            println!("{}", serde_json::to_string_pretty(&output).expect("JSON serialization"));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).expect("JSON serialization")
+            );
         } else {
             if args.watch {
                 // Clear screen for watch mode

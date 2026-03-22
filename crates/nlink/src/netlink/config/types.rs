@@ -348,7 +348,10 @@ impl LinkBuilder {
 
     /// Set the bond mode.
     pub fn bond_mode(mut self, mode: BondMode) -> Self {
-        if let DeclaredLinkType::Bond { mode: ref mut m, .. } = self.link_type {
+        if let DeclaredLinkType::Bond {
+            mode: ref mut m, ..
+        } = self.link_type
+        {
             *m = mode;
         }
         self
@@ -364,7 +367,10 @@ impl LinkBuilder {
 
     /// Set the transmit hash policy (0=Layer2, 1=Layer34, 2=Layer23).
     pub fn xmit_hash_policy(mut self, policy: u8) -> Self {
-        if let DeclaredLinkType::Bond { xmit_hash_policy, .. } = &mut self.link_type {
+        if let DeclaredLinkType::Bond {
+            xmit_hash_policy, ..
+        } = &mut self.link_type
+        {
             *xmit_hash_policy = Some(policy);
         }
         self

@@ -48,10 +48,7 @@ pub enum Expr {
     /// Connection tracking.
     Ct { dreg: Register, key: CtKey },
     /// Lookup in a named set.
-    Lookup {
-        set: String,
-        sreg: Register,
-    },
+    Lookup { set: String, sreg: Register },
     /// Bitwise operation.
     Bitwise {
         sreg: Register,

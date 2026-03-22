@@ -44,7 +44,12 @@ async fn main() -> nlink::netlink::Result<()> {
     println!("\n=== Physical Devices ===\n");
     let phys = conn.get_phys().await?;
     for phy in &phys {
-        println!("  phy#{}: {} ({} bands)", phy.index, phy.name, phy.bands.len());
+        println!(
+            "  phy#{}: {} ({} bands)",
+            phy.index,
+            phy.name,
+            phy.bands.len()
+        );
     }
 
     // Get station info (connected AP) for first interface

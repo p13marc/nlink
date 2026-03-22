@@ -7,7 +7,9 @@ use crate::netlink::attr::AttrIter;
 use crate::netlink::builder::MessageBuilder;
 use crate::netlink::connection::Connection;
 use crate::netlink::error::{Error, Result};
-use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST, NlMsgError};
+use crate::netlink::message::{
+    MessageIter, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST, NlMsgError,
+};
 use crate::netlink::protocol::Nftables;
 
 impl Connection<Nftables> {
@@ -29,8 +31,10 @@ impl Connection<Nftables> {
             ));
         }
 
-        let mut builder =
-            MessageBuilder::new(nft_msg_type(NFT_MSG_NEWTABLE), NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL);
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWTABLE),
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_TABLE_NAME, name);
@@ -111,8 +115,10 @@ impl Connection<Nftables> {
             ));
         }
 
-        let mut builder =
-            MessageBuilder::new(nft_msg_type(NFT_MSG_NEWCHAIN), NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL);
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWCHAIN),
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
         let nfgenmsg = NfGenMsg::new(chain.family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_CHAIN_TABLE, &chain.table);
@@ -211,11 +217,7 @@ impl Connection<Nftables> {
     }
 
     /// List all rules in a table.
-    pub async fn list_rules(
-        &self,
-        table: &str,
-        family: Family,
-    ) -> Result<Vec<RuleInfo>> {
+    pub async fn list_rules(&self, table: &str, family: Family) -> Result<Vec<RuleInfo>> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_GETRULE), NLM_F_REQUEST | NLM_F_DUMP);
         let nfgenmsg = NfGenMsg::new(family);
@@ -353,10 +355,8 @@ impl Connection<Nftables> {
         family: Family,
         elements: &[SetElement],
     ) -> Result<()> {
-        let mut builder = MessageBuilder::new(
-            nft_msg_type(NFT_MSG_DELSETELEM),
-            NLM_F_REQUEST | NLM_F_ACK,
-        );
+        let mut builder =
+            MessageBuilder::new(nft_msg_type(NFT_MSG_DELSETELEM), NLM_F_REQUEST | NLM_F_ACK);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_SET_ELEM_LIST_TABLE, table);
@@ -635,16 +635,14 @@ fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
                     match hook_attr & 0x7FFF {
                         NFTA_HOOK_HOOKNUM => {
                             if hook_payload.len() >= 4 {
-                                chain.hook = Some(u32::from_be_bytes(
-                                    hook_payload[..4].try_into().unwrap(),
-                                ));
+                                chain.hook =
+                                    Some(u32::from_be_bytes(hook_payload[..4].try_into().unwrap()));
                             }
                         }
                         NFTA_HOOK_PRIORITY => {
                             if hook_payload.len() >= 4 {
-                                chain.priority = Some(i32::from_be_bytes(
-                                    hook_payload[..4].try_into().unwrap(),
-                                ));
+                                chain.priority =
+                                    Some(i32::from_be_bytes(hook_payload[..4].try_into().unwrap()));
                             }
                         }
                         _ => {}
@@ -751,11 +749,7 @@ fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
         }
     }
 
-    if set.name.is_empty() {
-        None
-    } else {
-        Some(set)
-    }
+    if set.name.is_empty() { None } else { Some(set) }
 }
 
 /// Extract a null-terminated string from attribute payload.
@@ -848,10 +842,8 @@ impl Transaction {
 
     /// Add a rule to the batch.
     pub fn add_rule(mut self, rule: Rule) -> Self {
-        let mut builder = MessageBuilder::new(
-            nft_msg_type(NFT_MSG_NEWRULE),
-            NLM_F_REQUEST | NLM_F_CREATE,
-        );
+        let mut builder =
+            MessageBuilder::new(nft_msg_type(NFT_MSG_NEWRULE), NLM_F_REQUEST | NLM_F_CREATE);
         let nfgenmsg = NfGenMsg::new(rule.family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_RULE_TABLE, &rule.table);
@@ -872,8 +864,7 @@ impl Transaction {
 
     /// Add a table deletion to the batch.
     pub fn del_table(mut self, name: &str, family: Family) -> Self {
-        let mut builder =
-            MessageBuilder::new(nft_msg_type(NFT_MSG_DELTABLE), NLM_F_REQUEST);
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELTABLE), NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_TABLE_NAME, name);

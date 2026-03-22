@@ -240,7 +240,11 @@ impl ScanResult {
     pub fn bssid_str(&self) -> String {
         format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            self.bssid[0], self.bssid[1], self.bssid[2], self.bssid[3], self.bssid[4],
+            self.bssid[0],
+            self.bssid[1],
+            self.bssid[2],
+            self.bssid[3],
+            self.bssid[4],
             self.bssid[5]
         )
     }

@@ -23,8 +23,12 @@ async fn main() -> nlink::netlink::Result<()> {
 
     match args.get(1).map(|s| s.as_str()) {
         Some("attach") => {
-            let iface = args.get(2).expect("usage: attach <iface> <pinned_path> [ingress|egress]");
-            let path = args.get(3).expect("usage: attach <iface> <pinned_path> [ingress|egress]");
+            let iface = args
+                .get(2)
+                .expect("usage: attach <iface> <pinned_path> [ingress|egress]");
+            let path = args
+                .get(3)
+                .expect("usage: attach <iface> <pinned_path> [ingress|egress]");
             let direction = match args.get(4).map(|s| s.as_str()) {
                 Some("egress") => BpfDirection::Egress,
                 _ => BpfDirection::Ingress,

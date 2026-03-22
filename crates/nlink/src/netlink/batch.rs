@@ -26,14 +26,14 @@ use super::error::{Error, Result};
 use super::fdb::FdbEntryBuilder;
 use super::link::LinkConfig;
 use super::message::{
-    MessageIter, NlMsgError, NlMsgType, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST,
+    MessageIter, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, NlMsgError, NlMsgType,
 };
 use super::neigh::NeighborConfig;
 use super::protocol::Route;
 use super::route::RouteConfig;
 use super::tc::QdiscConfig;
 use super::types::link::IfInfoMsg;
-use super::types::tc::{tc_handle, TcMsg, TcaAttr};
+use super::types::tc::{TcMsg, TcaAttr, tc_handle};
 
 /// Maximum batch size before auto-splitting (200KB).
 const MAX_BATCH_SIZE: usize = 200 * 1024;
@@ -97,10 +97,7 @@ impl<'a> Batch<'a> {
 
     /// Delete a route in the batch.
     pub fn del_route<R: RouteConfig>(mut self, config: R) -> Self {
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_DELROUTE,
-            NLM_F_REQUEST | NLM_F_ACK,
-        );
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK);
         config.write_delete(&mut builder);
         self.push(builder);
         self
@@ -124,10 +121,7 @@ impl<'a> Batch<'a> {
 
     /// Delete a link by index in the batch.
     pub fn del_link_by_index(mut self, ifindex: u32) -> Self {
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_DELLINK,
-            NLM_F_REQUEST | NLM_F_ACK,
-        );
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
         let mut ifinfo = IfInfoMsg::new();
         ifinfo.ifi_index = ifindex as i32;
         builder.append(&ifinfo);
@@ -151,10 +145,7 @@ impl<'a> Batch<'a> {
 
     /// Delete an address in the batch.
     pub fn del_address<A: AddressConfig>(mut self, config: A, ifindex: u32) -> Self {
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_DELADDR,
-            NLM_F_REQUEST | NLM_F_ACK,
-        );
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELADDR, NLM_F_REQUEST | NLM_F_ACK);
         if config.write_delete(&mut builder, ifindex).is_ok() {
             self.push(builder);
         }
@@ -177,10 +168,7 @@ impl<'a> Batch<'a> {
 
     /// Delete a neighbor in the batch.
     pub fn del_neighbor<N: NeighborConfig>(mut self, config: N, ifindex: u32) -> Self {
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_DELNEIGH,
-            NLM_F_REQUEST | NLM_F_ACK,
-        );
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK);
         if config.write_delete(&mut builder, ifindex).is_ok() {
             self.push(builder);
         }
@@ -190,7 +178,12 @@ impl<'a> Batch<'a> {
     /// Add an FDB entry in the batch.
     ///
     /// Pass the resolved interface index and optional master (bridge) index.
-    pub fn add_fdb(mut self, entry: FdbEntryBuilder, ifindex: u32, master_idx: Option<u32>) -> Self {
+    pub fn add_fdb(
+        mut self,
+        entry: FdbEntryBuilder,
+        ifindex: u32,
+        master_idx: Option<u32>,
+    ) -> Self {
         let mut builder = MessageBuilder::new(
             NlMsgType::RTM_NEWNEIGH,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
@@ -202,10 +195,7 @@ impl<'a> Batch<'a> {
 
     /// Delete an FDB entry in the batch.
     pub fn del_fdb(mut self, entry: FdbEntryBuilder, ifindex: u32) -> Self {
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_DELNEIGH,
-            NLM_F_REQUEST | NLM_F_ACK,
-        );
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK);
         entry.write_delete(&mut builder, ifindex);
         self.push(builder);
         self
@@ -236,10 +226,7 @@ impl<'a> Batch<'a> {
 
     /// Delete a qdisc in the batch (root qdisc).
     pub fn del_qdisc(mut self, ifindex: u32) -> Self {
-        let mut builder = MessageBuilder::new(
-            NlMsgType::RTM_DELQDISC,
-            NLM_F_REQUEST | NLM_F_ACK,
-        );
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_DELQDISC, NLM_F_REQUEST | NLM_F_ACK);
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
             .with_parent(tc_handle::ROOT);
@@ -308,7 +295,9 @@ impl<'a> Batch<'a> {
         let results = self.execute().await?;
         for result in &results.results {
             if let Err(e) = result {
-                return Err(Error::InvalidMessage(format!("batch operation failed: {e}")));
+                return Err(Error::InvalidMessage(format!(
+                    "batch operation failed: {e}"
+                )));
             }
         }
         Ok(())
@@ -355,10 +344,7 @@ impl<'a> Batch<'a> {
             }
         }
 
-        Ok(results
-            .into_iter()
-            .map(|r| r.unwrap_or(Ok(())))
-            .collect())
+        Ok(results.into_iter().map(|r| r.unwrap_or(Ok(()))).collect())
     }
 }
 

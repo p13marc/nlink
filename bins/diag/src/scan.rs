@@ -98,7 +98,10 @@ pub async fn run(args: ScanArgs, json: bool, verbose: bool) -> Result<()> {
             },
             "issues": report.issues.iter().map(issue_to_json).collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&output).expect("JSON serialization"));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).expect("JSON serialization")
+        );
     } else {
         // Text output
         println!("Network Diagnostic Report");

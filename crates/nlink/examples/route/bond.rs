@@ -51,7 +51,12 @@ async fn main() -> nlink::netlink::Result<()> {
             let name = args.get(2).expect("usage: show <name>");
             match conn.get_link_by_name(name).await? {
                 Some(link) => {
-                    println!("{}: mtu={:?} state={}", name, link.mtu(), if link.is_up() { "UP" } else { "DOWN" });
+                    println!(
+                        "{}: mtu={:?} state={}",
+                        name,
+                        link.mtu(),
+                        if link.is_up() { "UP" } else { "DOWN" }
+                    );
                 }
                 None => println!("Bond {} not found", name),
             }
@@ -63,7 +68,9 @@ async fn main() -> nlink::netlink::Result<()> {
         }
         _ => {
             println!("Usage:");
-            println!("  create <name> [mode]       - Create bond (modes: balance-rr, active-backup, balance-xor, broadcast, 802.3ad, balance-tlb, balance-alb)");
+            println!(
+                "  create <name> [mode]       - Create bond (modes: balance-rr, active-backup, balance-xor, broadcast, 802.3ad, balance-tlb, balance-alb)"
+            );
             println!("  add-slave <bond> <iface>   - Add interface as slave");
             println!("  show <name>                - Show bond info");
             println!("  del <name>                 - Delete bond");

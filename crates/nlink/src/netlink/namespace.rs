@@ -129,10 +129,7 @@ impl<'a> NamespaceSpec<'a> {
     /// Spawn a process and collect its output in this namespace.
     ///
     /// See [`spawn_output`] for details.
-    pub fn spawn_output(
-        &self,
-        cmd: std::process::Command,
-    ) -> Result<std::process::Output> {
+    pub fn spawn_output(&self, cmd: std::process::Command) -> Result<std::process::Output> {
         match self {
             NamespaceSpec::Default => {
                 let mut cmd = cmd;
@@ -690,10 +687,7 @@ pub fn set_sysctls_path<P: AsRef<Path>>(path: P, entries: &[(&str, &str)]) -> Re
 /// let mut child = namespace::spawn("myns", Command::new("ip").arg("link"))?;
 /// child.wait()?;
 /// ```
-pub fn spawn(
-    ns_name: &str,
-    cmd: std::process::Command,
-) -> Result<std::process::Child> {
+pub fn spawn(ns_name: &str, cmd: std::process::Command) -> Result<std::process::Child> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(ns_name);
     if !path.exists() {
         return Err(Error::NamespaceNotFound {
@@ -717,10 +711,7 @@ pub fn spawn(
 /// let output = namespace::spawn_output("myns", Command::new("ip").arg("addr"))?;
 /// println!("{}", String::from_utf8_lossy(&output.stdout));
 /// ```
-pub fn spawn_output(
-    ns_name: &str,
-    mut cmd: std::process::Command,
-) -> Result<std::process::Output> {
+pub fn spawn_output(ns_name: &str, mut cmd: std::process::Command) -> Result<std::process::Output> {
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     let child = spawn(ns_name, cmd)?;

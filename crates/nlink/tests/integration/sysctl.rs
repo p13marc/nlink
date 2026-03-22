@@ -48,12 +48,18 @@ async fn test_sysctl_set_many() -> Result<()> {
 
     let ns = TestNamespace::new("sysctl-many")?;
 
-    namespace::set_sysctls(ns.name(), &[
-        ("net.ipv4.ip_forward", "1"),
-        ("net.ipv6.conf.all.forwarding", "1"),
-    ])?;
+    namespace::set_sysctls(
+        ns.name(),
+        &[
+            ("net.ipv4.ip_forward", "1"),
+            ("net.ipv6.conf.all.forwarding", "1"),
+        ],
+    )?;
 
-    assert_eq!(namespace::get_sysctl(ns.name(), "net.ipv4.ip_forward")?, "1");
+    assert_eq!(
+        namespace::get_sysctl(ns.name(), "net.ipv4.ip_forward")?,
+        "1"
+    );
     assert_eq!(
         namespace::get_sysctl(ns.name(), "net.ipv6.conf.all.forwarding")?,
         "1"

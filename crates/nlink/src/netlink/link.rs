@@ -4553,7 +4553,10 @@ mod tests {
     #[test]
     fn test_bond_mode_try_from() {
         assert!(matches!(BondMode::try_from(0u8), Ok(BondMode::BalanceRr)));
-        assert!(matches!(BondMode::try_from(1u8), Ok(BondMode::ActiveBackup)));
+        assert!(matches!(
+            BondMode::try_from(1u8),
+            Ok(BondMode::ActiveBackup)
+        ));
         assert!(matches!(BondMode::try_from(2u8), Ok(BondMode::BalanceXor)));
         assert!(matches!(BondMode::try_from(3u8), Ok(BondMode::Broadcast)));
         assert!(matches!(BondMode::try_from(4u8), Ok(BondMode::Lacp)));
@@ -4565,12 +4568,30 @@ mod tests {
 
     #[test]
     fn test_xmit_hash_policy_try_from() {
-        assert!(matches!(XmitHashPolicy::try_from(0u8), Ok(XmitHashPolicy::Layer2)));
-        assert!(matches!(XmitHashPolicy::try_from(1u8), Ok(XmitHashPolicy::Layer34)));
-        assert!(matches!(XmitHashPolicy::try_from(2u8), Ok(XmitHashPolicy::Layer23)));
-        assert!(matches!(XmitHashPolicy::try_from(3u8), Ok(XmitHashPolicy::Encap23)));
-        assert!(matches!(XmitHashPolicy::try_from(4u8), Ok(XmitHashPolicy::Encap34)));
-        assert!(matches!(XmitHashPolicy::try_from(5u8), Ok(XmitHashPolicy::VlanSrcMac)));
+        assert!(matches!(
+            XmitHashPolicy::try_from(0u8),
+            Ok(XmitHashPolicy::Layer2)
+        ));
+        assert!(matches!(
+            XmitHashPolicy::try_from(1u8),
+            Ok(XmitHashPolicy::Layer34)
+        ));
+        assert!(matches!(
+            XmitHashPolicy::try_from(2u8),
+            Ok(XmitHashPolicy::Layer23)
+        ));
+        assert!(matches!(
+            XmitHashPolicy::try_from(3u8),
+            Ok(XmitHashPolicy::Encap23)
+        ));
+        assert!(matches!(
+            XmitHashPolicy::try_from(4u8),
+            Ok(XmitHashPolicy::Encap34)
+        ));
+        assert!(matches!(
+            XmitHashPolicy::try_from(5u8),
+            Ok(XmitHashPolicy::VlanSrcMac)
+        ));
         assert!(XmitHashPolicy::try_from(6u8).is_err());
         assert!(XmitHashPolicy::try_from(255u8).is_err());
     }

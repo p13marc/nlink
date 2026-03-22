@@ -2285,11 +2285,7 @@ impl Connection<Route> {
     }
 
     /// Detach all BPF filters from an interface direction by index.
-    pub async fn detach_bpf_by_index(
-        &self,
-        ifindex: u32,
-        direction: BpfDirection,
-    ) -> Result<()> {
+    pub async fn detach_bpf_by_index(&self, ifindex: u32, direction: BpfDirection) -> Result<()> {
         let parent = match direction {
             BpfDirection::Ingress => "ingress",
             BpfDirection::Egress => "egress",
