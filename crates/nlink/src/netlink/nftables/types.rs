@@ -847,7 +847,8 @@ impl SetKeyType {
         }
     }
 
-    /// Key length in bytes.
+    /// Key length in bytes (always non-zero for all variants).
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(self) -> u32 {
         match self {
             Self::Ipv4Addr => 4,
