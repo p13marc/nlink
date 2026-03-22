@@ -140,8 +140,19 @@ impl CtState {
     pub const NEW: Self = Self(8);
     pub const UNTRACKED: Self = Self(64);
 
+    /// Create an empty state with no flags set.
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
     pub fn bits(self) -> u32 {
         self.0
+    }
+}
+
+impl Default for CtState {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 

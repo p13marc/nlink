@@ -142,7 +142,7 @@ pub mod output;
 pub use netlink::{Connection, Error, Protocol, Result};
 
 // Protocol state types
-pub use netlink::{Generic, Route};
+pub use netlink::{Generic, Nftables, Route, Wireguard};
 
 // Event types
 pub use netlink::NetworkEvent;
