@@ -7,7 +7,6 @@ use nlink::Result;
 use nlink::Route;
 use nlink::netlink::Connection;
 use nlink::netlink::namespace;
-use std::io;
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -46,19 +45,7 @@ impl TestNamespace {
     /// that includes the process ID and a counter.
     pub fn new(prefix: &str) -> Result<Self> {
         let name = unique_ns_name(prefix);
-
-        let status = Command::new("ip")
-            .args(["netns", "add", &name])
-            .status()
-            .map_err(|e| nlink::Error::Io(io::Error::from(e.kind())))?;
-
-        if !status.success() {
-            return Err(nlink::Error::InvalidMessage(format!(
-                "failed to create namespace: {}",
-                name
-            )));
-        }
-
+        namespace::create(&name)?;
         Ok(Self { name })
     }
 
@@ -74,12 +61,12 @@ impl TestNamespace {
     }
 
     /// Run a command in the namespace and return its output.
+    ///
+    /// Uses `namespace::spawn_output()` with `setns()` — no `ip netns exec` shelling.
     pub fn exec(&self, cmd: &str, args: &[&str]) -> Result<String> {
-        let output = Command::new("ip")
-            .args(["netns", "exec", &self.name, cmd])
-            .args(args)
-            .output()
-            .map_err(|e| nlink::Error::Io(io::Error::from(e.kind())))?;
+        let mut command = Command::new(cmd);
+        command.args(args);
+        let output = namespace::spawn_output(&self.name, command)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -94,10 +81,9 @@ impl TestNamespace {
 
     /// Run a command in the namespace, ignoring errors.
     pub fn exec_ignore(&self, cmd: &str, args: &[&str]) {
-        let _ = Command::new("ip")
-            .args(["netns", "exec", &self.name, cmd])
-            .args(args)
-            .output();
+        let mut command = Command::new(cmd);
+        command.args(args);
+        let _ = namespace::spawn_output(&self.name, command);
     }
 
     /// Add a veth pair with one end in this namespace and the other in another.
@@ -109,48 +95,21 @@ impl TestNamespace {
         local_name: &str,
         remote_name: &str,
     ) -> Result<()> {
-        // Create veth pair in this namespace
-        let status = Command::new("ip")
-            .args([
-                "netns",
-                "exec",
-                &self.name,
-                "ip",
-                "link",
-                "add",
-                local_name,
-                "type",
-                "veth",
-                "peer",
-                "name",
-                remote_name,
-            ])
-            .status()
-            .map_err(|e| nlink::Error::Io(io::Error::from(e.kind())))?;
-
-        if !status.success() {
+        // Create veth pair in this namespace using namespace::spawn
+        let mut cmd = Command::new("ip");
+        cmd.args(["link", "add", local_name, "type", "veth", "peer", "name", remote_name]);
+        let output = namespace::spawn_output(&self.name, cmd)?;
+        if !output.status.success() {
             return Err(nlink::Error::InvalidMessage(
                 "failed to create veth pair".into(),
             ));
         }
 
         // Move the peer to the other namespace
-        let status = Command::new("ip")
-            .args([
-                "netns",
-                "exec",
-                &self.name,
-                "ip",
-                "link",
-                "set",
-                remote_name,
-                "netns",
-                &other.name,
-            ])
-            .status()
-            .map_err(|e| nlink::Error::Io(io::Error::from(e.kind())))?;
-
-        if !status.success() {
+        let mut cmd = Command::new("ip");
+        cmd.args(["link", "set", remote_name, "netns", &other.name]);
+        let output = namespace::spawn_output(&self.name, cmd)?;
+        if !output.status.success() {
             return Err(nlink::Error::InvalidMessage(
                 "failed to move veth peer".into(),
             ));
@@ -180,10 +139,7 @@ impl TestNamespace {
 
 impl Drop for TestNamespace {
     fn drop(&mut self) {
-        // Clean up the namespace
-        let _ = Command::new("ip")
-            .args(["netns", "del", &self.name])
-            .status();
+        let _ = namespace::delete(&self.name);
     }
 }
 

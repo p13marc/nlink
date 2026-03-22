@@ -111,6 +111,7 @@ mod sockdiag;
 mod socket;
 pub mod srv6;
 pub mod stats;
+pub mod sysctl;
 mod stream;
 pub mod tc;
 pub mod tc_options;

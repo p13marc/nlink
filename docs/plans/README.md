@@ -8,32 +8,15 @@ Each plan includes a **Progress** section with checkboxes tracking:
 - Documentation (doc comments with examples, CLAUDE.md updates)
 - Binary integration (`bins/ip`, `bins/tc`, `bins/ss`, etc.)
 
-## Plan Index
+## Active Plans
 
-### Tier 1: Quick Wins (Days)
+These plans must be completed before starting nlink-lab development.
+See [NLINK_LAB_READINESS_REPORT.md](../NLINK_LAB_READINESS_REPORT.md) for context.
 
-| Plan | Target | Description | Tasks | Effort |
-|------|--------|-------------|-------|--------|
-| [028](028-tunnel-link-types.md) | Library + `ip` | GRE/GRETAP, IPIP, SIT tunnel link types | 0/23 | 1 day |
-| [032](032-operation-timeouts.md) | Library | Configurable timeouts for netlink operations | 0/18 | 1 day |
-| [035](035-code-quality.md) | Library + Bins | SAFETY comments, optional serde_json, ip6gre fix, unwrap cleanup | 0/23 | 1 day |
-
-### Tier 2: Medium-Term (Weeks)
-
-| Plan | Target | Description | Tasks | Effort |
-|------|--------|-------------|-------|--------|
-| [026](026-ss-improvements.md) | Library + `ss` | Summary, kill mode, netlink sockets, expression filters | 0/27 | 1 week |
-| [030](030-netlink-batching.md) | Library | Bulk operations via batched sendmsg with per-op results | 0/26 | 1.5 weeks |
-| [031](031-bond-support.md) | Library + `ip` | Complete bond mode/slave management with typed enums | 0/37 | 1 week |
-| [034](034-bpf-tc-attachment.md) | Library + `tc` | BPF program attachment to TC hooks, info parsing | 0/19 | 1 week |
-
-### Tier 3: Strategic (Months)
-
-| Plan | Target | Description | Tasks | Effort |
-|------|--------|-------------|-------|--------|
-| [033](033-nftables.md) | Library + new bin | nftables firewall (tables, chains, rules, expressions) | 0/40 | 4+ weeks |
-| [036](036-nl80211-wifi.md) | Library + new bin | WiFi configuration via nl80211 GENL | 0/34 | 2-3 weeks |
-| [037](037-devlink.md) | Library + new bin | Hardware device management via devlink GENL | 0/38 | 2-3 weeks |
+| Plan | Target | Description | Effort |
+|------|--------|-------------|--------|
+| [038](038-sysctl-management.md) | Library | Namespace-aware sysctl read/write via /proc/sys/ | 1-2 days |
+| [039](039-namespace-process-spawning.md) | Library | Spawn child processes in network namespaces | 2-3 days |
 
 ## Deliverables Checklist (per feature)
 
@@ -69,5 +52,5 @@ All plans follow these principles:
 
 ## Completed Plans (removed)
 
-Plans 000-025 have been implemented and their files removed.
+Plans 000-037 have been implemented and their files removed.
 See git history for reference.

@@ -2660,6 +2660,68 @@ for ns in namespace::list()? {
 }
 ```
 
+## Sysctl Management
+
+Read and write kernel parameters (`/proc/sys/`) with namespace support:
+
+```rust
+use nlink::netlink::sysctl;
+use nlink::netlink::namespace;
+
+// Read/write in the current namespace
+let val = sysctl::get("net.ipv4.ip_forward")?;
+sysctl::set("net.ipv4.ip_forward", "1")?;
+
+// Batch set multiple values
+sysctl::set_many(&[
+    ("net.ipv4.ip_forward", "1"),
+    ("net.ipv6.conf.all.forwarding", "1"),
+])?;
+
+// Namespace-aware operations
+namespace::set_sysctl("myns", "net.ipv4.ip_forward", "1")?;
+let val = namespace::get_sysctl("myns", "net.ipv4.ip_forward")?;
+namespace::set_sysctls("myns", &[
+    ("net.ipv4.ip_forward", "1"),
+    ("net.ipv6.conf.all.forwarding", "1"),
+])?;
+
+// Path-based namespace variants
+namespace::set_sysctl_path("/proc/1234/ns/net", "net.ipv4.ip_forward", "1")?;
+```
+
+## Namespace Process Spawning
+
+Spawn processes inside network namespaces without shelling out to `ip netns exec`:
+
+```rust
+use nlink::netlink::namespace;
+use nlink::netlink::namespace::NamespaceSpec;
+use std::process::Command;
+
+// Spawn in a named namespace (returns std::process::Child)
+let mut cmd = Command::new("iperf3");
+cmd.arg("-s");
+let mut child = namespace::spawn("myns", cmd)?;
+child.kill()?;
+
+// Spawn and collect output
+let mut cmd = Command::new("ip");
+cmd.arg("addr");
+let output = namespace::spawn_output("myns", cmd)?;
+println!("{}", String::from_utf8_lossy(&output.stdout));
+
+// Spawn by path
+let mut cmd = Command::new("ip");
+cmd.arg("link");
+let child = namespace::spawn_path("/proc/1234/ns/net", cmd)?;
+
+// Via NamespaceSpec
+let spec = NamespaceSpec::Named("myns");
+let mut child = spec.spawn(Command::new("nginx"))?;
+let output = spec.spawn_output(Command::new("hostname"))?;
+```
+
 ## Route Classification Helpers
 
 RouteMessage includes helpers for filtering routes by type:

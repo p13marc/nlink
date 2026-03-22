@@ -59,3 +59,9 @@ mod diagnostics;
 
 #[path = "integration/timeout.rs"]
 mod timeout;
+
+#[path = "integration/sysctl.rs"]
+mod sysctl;
+
+#[path = "integration/namespace_spawn.rs"]
+mod namespace_spawn;

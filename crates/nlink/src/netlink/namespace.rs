@@ -95,6 +95,60 @@ impl<'a> NamespaceSpec<'a> {
     pub fn is_default(&self) -> bool {
         matches!(self, NamespaceSpec::Default)
     }
+
+    /// Spawn a process in this namespace.
+    ///
+    /// For [`NamespaceSpec::Default`], the command is spawned normally without
+    /// any namespace switching.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::namespace::NamespaceSpec;
+    /// use std::process::Command;
+    ///
+    /// let spec = NamespaceSpec::Named("myns");
+    /// let mut child = spec.spawn(Command::new("ip").arg("link"))?;
+    /// child.wait()?;
+    /// ```
+    pub fn spawn(&self, cmd: std::process::Command) -> Result<std::process::Child> {
+        match self {
+            NamespaceSpec::Default => {
+                let mut cmd = cmd;
+                cmd.spawn().map_err(Error::Io)
+            }
+            NamespaceSpec::Named(name) => spawn(name, cmd),
+            NamespaceSpec::Path(path) => spawn_path(path, cmd),
+            NamespaceSpec::Pid(pid) => {
+                let path = format!("/proc/{}/ns/net", pid);
+                spawn_path(&path, cmd)
+            }
+        }
+    }
+
+    /// Spawn a process and collect its output in this namespace.
+    ///
+    /// See [`spawn_output`] for details.
+    pub fn spawn_output(
+        &self,
+        cmd: std::process::Command,
+    ) -> Result<std::process::Output> {
+        match self {
+            NamespaceSpec::Default => {
+                let mut cmd = cmd;
+                cmd.stdout(std::process::Stdio::piped());
+                cmd.stderr(std::process::Stdio::piped());
+                let child = cmd.spawn().map_err(Error::Io)?;
+                child.wait_with_output().map_err(Error::Io)
+            }
+            NamespaceSpec::Named(name) => spawn_output(name, cmd),
+            NamespaceSpec::Path(path) => spawn_output_path(path, cmd),
+            NamespaceSpec::Pid(pid) => {
+                let path = format!("/proc/{}/ns/net", pid);
+                spawn_output_path(&path, cmd)
+            }
+        }
+    }
 }
 
 /// The runtime directory where named network namespaces are stored.
@@ -539,6 +593,193 @@ pub fn list() -> Result<Vec<String>> {
 
     names.sort();
     Ok(names)
+}
+
+// ─────────────────────────────────────────────────
+// Sysctl operations (namespace-aware)
+// ─────────────────────────────────────────────────
+
+/// Read a sysctl value inside a named namespace.
+///
+/// Temporarily enters the namespace, reads the value from `/proc/sys/`,
+/// and restores the original namespace.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::namespace;
+///
+/// let val = namespace::get_sysctl("myns", "net.ipv4.ip_forward")?;
+/// assert!(val == "0" || val == "1");
+/// ```
+pub fn get_sysctl(ns_name: &str, key: &str) -> Result<String> {
+    execute_in(ns_name, || super::sysctl::get(key))?
+}
+
+/// Set a sysctl value inside a named namespace.
+///
+/// Temporarily enters the namespace, writes the value to `/proc/sys/`,
+/// and restores the original namespace. Requires root or `CAP_SYS_ADMIN`.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::namespace;
+///
+/// namespace::set_sysctl("myns", "net.ipv4.ip_forward", "1")?;
+/// ```
+pub fn set_sysctl(ns_name: &str, key: &str, value: &str) -> Result<()> {
+    execute_in(ns_name, || super::sysctl::set(key, value))?
+}
+
+/// Set multiple sysctl values inside a named namespace.
+///
+/// Enters the namespace once and applies all entries. If any entry fails,
+/// returns the error immediately without applying remaining entries.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::namespace;
+///
+/// namespace::set_sysctls("myns", &[
+///     ("net.ipv4.ip_forward", "1"),
+///     ("net.ipv6.conf.all.forwarding", "1"),
+/// ])?;
+/// ```
+pub fn set_sysctls(ns_name: &str, entries: &[(&str, &str)]) -> Result<()> {
+    execute_in(ns_name, || super::sysctl::set_many(entries))?
+}
+
+/// Read a sysctl value inside a namespace specified by path.
+///
+/// See [`get_sysctl`] for details.
+pub fn get_sysctl_path<P: AsRef<Path>>(path: P, key: &str) -> Result<String> {
+    execute_in_path(path, || super::sysctl::get(key))?
+}
+
+/// Set a sysctl value inside a namespace specified by path.
+///
+/// See [`set_sysctl`] for details.
+pub fn set_sysctl_path<P: AsRef<Path>>(path: P, key: &str, value: &str) -> Result<()> {
+    execute_in_path(path, || super::sysctl::set(key, value))?
+}
+
+/// Set multiple sysctl values inside a namespace specified by path.
+///
+/// See [`set_sysctls`] for details.
+pub fn set_sysctls_path<P: AsRef<Path>>(path: P, entries: &[(&str, &str)]) -> Result<()> {
+    execute_in_path(path, || super::sysctl::set_many(entries))?
+}
+
+// ─────────────────────────────────────────────────
+// Process spawning (namespace-aware)
+// ─────────────────────────────────────────────────
+
+/// Spawn a process inside a named network namespace.
+///
+/// Uses `pre_exec` + `setns()` to switch the child process into the target
+/// namespace between `fork()` and `exec()`. The parent process is unaffected.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::namespace;
+/// use std::process::Command;
+///
+/// let mut child = namespace::spawn("myns", Command::new("ip").arg("link"))?;
+/// child.wait()?;
+/// ```
+pub fn spawn(
+    ns_name: &str,
+    cmd: std::process::Command,
+) -> Result<std::process::Child> {
+    let path = PathBuf::from(NETNS_RUN_DIR).join(ns_name);
+    if !path.exists() {
+        return Err(Error::NamespaceNotFound {
+            name: ns_name.to_string(),
+        });
+    }
+    spawn_path(&path, cmd)
+}
+
+/// Spawn a process and collect its output inside a named namespace.
+///
+/// This is a convenience wrapper that spawns the process with stdout and
+/// stderr captured, waits for it to complete, and returns the output.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::namespace;
+/// use std::process::Command;
+///
+/// let output = namespace::spawn_output("myns", Command::new("ip").arg("addr"))?;
+/// println!("{}", String::from_utf8_lossy(&output.stdout));
+/// ```
+pub fn spawn_output(
+    ns_name: &str,
+    mut cmd: std::process::Command,
+) -> Result<std::process::Output> {
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = spawn(ns_name, cmd)?;
+    child.wait_with_output().map_err(Error::Io)
+}
+
+/// Spawn a process inside a namespace specified by path.
+///
+/// See [`spawn`] for details.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::namespace;
+/// use std::process::Command;
+///
+/// let child = namespace::spawn_path(
+///     "/proc/1234/ns/net",
+///     Command::new("ip").arg("link"),
+/// )?;
+/// ```
+pub fn spawn_path<P: AsRef<Path>>(
+    path: P,
+    mut cmd: std::process::Command,
+) -> Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+
+    let ns_fd = open_path(path)?;
+    let raw_fd = ns_fd.as_raw_fd();
+
+    // SAFETY: setns is async-signal-safe (it's a syscall). pre_exec runs in
+    // the child process after fork() but before exec(). The fd is valid
+    // because ns_fd is kept alive until after spawn() returns — the closure
+    // captures raw_fd by value, and ns_fd is dropped only after spawn().
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::setns(raw_fd, libc::CLONE_NEWNET) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let child = cmd.spawn().map_err(Error::Io)?;
+    drop(ns_fd);
+    Ok(child)
+}
+
+/// Spawn a process and collect its output inside a namespace specified by path.
+///
+/// See [`spawn_output`] for details.
+pub fn spawn_output_path<P: AsRef<Path>>(
+    path: P,
+    mut cmd: std::process::Command,
+) -> Result<std::process::Output> {
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = spawn_path(path, cmd)?;
+    child.wait_with_output().map_err(Error::Io)
 }
 
 #[cfg(test)]
