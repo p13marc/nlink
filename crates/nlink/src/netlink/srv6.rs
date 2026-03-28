@@ -922,7 +922,9 @@ impl Connection<Route> {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         );
         builder.write_to(&mut msg, ifindex);
-        self.send_ack(msg).await
+        self.send_ack(msg)
+            .await
+            .map_err(|e| e.with_context("add_srv6_local"))
     }
 
     /// Replace an SRv6 local route (add or update).
@@ -933,7 +935,9 @@ impl Connection<Route> {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
         );
         builder.write_to(&mut msg, ifindex);
-        self.send_ack(msg).await
+        self.send_ack(msg)
+            .await
+            .map_err(|e| e.with_context("replace_srv6_local"))
     }
 
     /// Delete an SRv6 local route by SID.
@@ -952,7 +956,9 @@ impl Connection<Route> {
         // RTA_DST with SID
         builder.append_attr(RtaAttr::Dst as u16, &sid.octets());
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_srv6_local"))
     }
 }
 

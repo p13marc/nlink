@@ -123,6 +123,7 @@
 
 // Core modules (always available)
 pub mod netlink;
+pub mod prelude;
 pub mod util;
 
 // Feature-gated modules

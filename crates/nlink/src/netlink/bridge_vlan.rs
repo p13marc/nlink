@@ -603,7 +603,9 @@ impl Connection<Route> {
         let ifindex = self.resolve_bridge_vlan_interface(&config).await?;
         let mut builder = MessageBuilder::new(NlMsgType::RTM_SETLINK, NLM_F_REQUEST | NLM_F_ACK);
         config.write_add(&mut builder, ifindex);
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_bridge_vlan"))
     }
 
     /// Delete VLAN from a bridge port.
@@ -623,7 +625,9 @@ impl Connection<Route> {
         let config = BridgeVlanBuilder::new(vid).ifindex(ifindex);
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
         config.write_del(&mut builder, ifindex);
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_bridge_vlan"))
     }
 
     /// Delete a range of VLANs from a bridge port.
@@ -645,7 +649,9 @@ impl Connection<Route> {
             .range(vid_end);
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
         config.write_del(&mut builder, ifindex);
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_bridge_vlan_range"))
     }
 
     /// Set PVID for a bridge port.
@@ -793,7 +799,9 @@ impl Connection<Route> {
         let ifindex = self.resolve_bridge_vlan_tunnel_interface(&config).await?;
         let mut builder = MessageBuilder::new(NlMsgType::RTM_SETLINK, NLM_F_REQUEST | NLM_F_ACK);
         config.write_add(&mut builder, ifindex)?;
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_vlan_tunnel"))
     }
 
     /// Delete VLAN-to-tunnel ID mapping.
@@ -813,7 +821,9 @@ impl Connection<Route> {
         let config = BridgeVlanTunnelBuilder::new(vid, 0).ifindex(ifindex);
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
         config.write_del(&mut builder, ifindex)?;
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_vlan_tunnel"))
     }
 
     /// Delete a range of VLAN-to-tunnel ID mappings.
@@ -835,7 +845,9 @@ impl Connection<Route> {
             .range(vid_end);
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
         config.write_del(&mut builder, ifindex)?;
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_vlan_tunnel_range"))
     }
 }
 

@@ -1063,7 +1063,9 @@ impl Connection<Route> {
     /// ```
     pub async fn add_rule(&self, rule: super::rule::RuleBuilder) -> Result<()> {
         let builder = rule.build()?;
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_rule"))
     }
 
     /// Delete a routing rule.
@@ -1080,7 +1082,9 @@ impl Connection<Route> {
     /// ```
     pub async fn del_rule(&self, rule: super::rule::RuleBuilder) -> Result<()> {
         let builder = rule.build_delete()?;
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_rule"))
     }
 
     /// Delete a rule by priority.
@@ -1287,7 +1291,9 @@ impl Connection<Route> {
         builder.append(&tcmsg);
         builder.append_attr_u32(TcaAttr::Chain as u16, chain);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_tc_chain"))
     }
 
     /// Delete a TC filter chain.
@@ -1329,7 +1335,9 @@ impl Connection<Route> {
         builder.append(&tcmsg);
         builder.append_attr_u32(TcaAttr::Chain as u16, chain);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_tc_chain"))
     }
 
     /// Get the root qdisc for an interface (parent == ROOT).
@@ -1576,7 +1584,9 @@ impl Connection<Route> {
         builder.append(&ifinfo);
         builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_link_mtu"))
     }
 
     /// Delete a network interface.
@@ -1637,7 +1647,9 @@ impl Connection<Route> {
         builder.append(&ifinfo);
         builder.append_attr_u32(IflaAttr::TxqLen as u16, txqlen);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_link_txqlen"))
     }
 }
 

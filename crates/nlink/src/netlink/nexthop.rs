@@ -704,7 +704,9 @@ impl Connection<Route> {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         );
         nh_builder.write_to(&mut msg, ifindex);
-        self.send_ack(msg).await
+        self.send_ack(msg)
+            .await
+            .map_err(|e| e.with_context("add_nexthop"))
     }
 
     /// Replace a nexthop (add or update).
@@ -717,7 +719,9 @@ impl Connection<Route> {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
         );
         nh_builder.write_to(&mut msg, ifindex);
-        self.send_ack(msg).await
+        self.send_ack(msg)
+            .await
+            .map_err(|e| e.with_context("replace_nexthop"))
     }
 
     /// Delete a nexthop by ID.
@@ -730,7 +734,9 @@ impl Connection<Route> {
         builder.append(&nhmsg);
         builder.append_attr_u32(nha::ID, id);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_nexthop"))
     }
 
     /// Add a nexthop group.
@@ -769,7 +775,9 @@ impl Connection<Route> {
             NlMsgType::RTM_NEWNEXTHOP,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         )?;
-        self.send_ack(msg).await
+        self.send_ack(msg)
+            .await
+            .map_err(|e| e.with_context("add_nexthop_group"))
     }
 
     /// Replace a nexthop group (add or update).
@@ -778,7 +786,9 @@ impl Connection<Route> {
             NlMsgType::RTM_NEWNEXTHOP,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
         )?;
-        self.send_ack(msg).await
+        self.send_ack(msg)
+            .await
+            .map_err(|e| e.with_context("replace_nexthop_group"))
     }
 
     /// Delete a nexthop group by ID.

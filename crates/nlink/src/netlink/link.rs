@@ -4459,7 +4459,9 @@ impl Connection<Route> {
         builder.append(&ifinfo);
         builder.append_attr_u32(IflaAttr::Master as u16, master_index);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_link_master"))
     }
 
     /// Enslave an interface to a bond or bridge.
@@ -4522,7 +4524,9 @@ impl Connection<Route> {
         builder.append(&ifinfo);
         builder.append_attr_u32(IflaAttr::Master as u16, 0);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_link_nomaster"))
     }
 
     /// Rename a network interface.
@@ -4557,7 +4561,9 @@ impl Connection<Route> {
         builder.append(&ifinfo);
         builder.append_attr_str(IflaAttr::Ifname as u16, new_name);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_link_name"))
     }
 
     /// Set the MAC address of a network interface.
@@ -4588,7 +4594,9 @@ impl Connection<Route> {
         builder.append(&ifinfo);
         builder.append_attr(IflaAttr::Address as u16, &address);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_link_address"))
     }
 
     /// Move a network interface to a different network namespace.
@@ -4616,7 +4624,9 @@ impl Connection<Route> {
         builder.append(&ifinfo);
         builder.append_attr_u32(IflaAttr::NetNsPid as u16, pid);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_link_netns"))
     }
 
     /// Move a network interface to a namespace by file descriptor.
@@ -4637,7 +4647,9 @@ impl Connection<Route> {
         builder.append(&ifinfo);
         builder.append_attr_u32(IflaAttr::NetNsFd as u16, fd as u32);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_link_netns"))
     }
 }
 

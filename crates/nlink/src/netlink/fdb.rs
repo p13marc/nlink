@@ -509,7 +509,9 @@ impl Connection<Route> {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
         );
         entry.write_add(&mut builder, ifindex, master_idx);
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_fdb"))
     }
 
     /// Replace an FDB entry (add or update).
@@ -522,7 +524,9 @@ impl Connection<Route> {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
         );
         entry.write_add(&mut builder, ifindex, master_idx);
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("replace_fdb"))
     }
 
     /// Delete an FDB entry by device name, MAC address, and optional VLAN.
@@ -561,7 +565,9 @@ impl Connection<Route> {
         }
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK);
         entry.write_delete(&mut builder, ifindex);
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_fdb"))
     }
 
     /// Flush all dynamic FDB entries for a bridge.

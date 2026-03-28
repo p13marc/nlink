@@ -1953,7 +1953,9 @@ impl Connection<Route> {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_filter"))
     }
 
     /// Replace a filter on an interface (create if not exists).
@@ -2042,7 +2044,9 @@ impl Connection<Route> {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("replace_filter"))
     }
 
     /// Change an existing filter's parameters.
@@ -2134,7 +2138,9 @@ impl Connection<Route> {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("change_filter"))
     }
 
     /// Delete a filter from an interface.
@@ -2175,7 +2181,9 @@ impl Connection<Route> {
         let mut builder = create_request(NlMsgType::RTM_DELTFILTER);
         builder.append(&tcmsg);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_filter"))
     }
 
     /// Delete all filters from a parent qdisc.

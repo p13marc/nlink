@@ -3377,7 +3377,9 @@ impl Connection<Route> {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_qdisc"))
     }
 
     /// Delete a qdisc from an interface.
@@ -3509,7 +3511,9 @@ impl Connection<Route> {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("replace_qdisc"))
     }
 
     /// Change a qdisc's parameters.
@@ -3721,7 +3725,9 @@ impl Connection<Route> {
         let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
         add_class_options(&mut builder, kind, &params)?;
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_class"))
     }
 
     /// Delete a TC class.
@@ -3759,7 +3765,9 @@ impl Connection<Route> {
         let mut builder = ack_request(NlMsgType::RTM_DELTCLASS);
         builder.append(&tcmsg);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_class"))
     }
 
     /// Change a TC class's parameters.
@@ -3807,7 +3815,9 @@ impl Connection<Route> {
         let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
         add_class_options(&mut builder, kind, &params)?;
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("change_class"))
     }
 
     /// Replace a TC class (add or update).
@@ -3855,7 +3865,9 @@ impl Connection<Route> {
         let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
         add_class_options(&mut builder, kind, &params)?;
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("replace_class"))
     }
 
     // ========================================================================
@@ -3926,7 +3938,9 @@ impl Connection<Route> {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_class"))
     }
 
     /// Change a TC class with typed configuration.
@@ -3977,7 +3991,9 @@ impl Connection<Route> {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("change_class"))
     }
 
     /// Replace a TC class with typed configuration (add or update).
@@ -4028,7 +4044,9 @@ impl Connection<Route> {
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("replace_class"))
     }
 }
 

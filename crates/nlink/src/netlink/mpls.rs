@@ -621,7 +621,9 @@ impl Connection<Route> {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         );
         route_builder.write_to(&mut msg, ifindex);
-        self.send_ack(msg).await
+        self.send_ack(msg)
+            .await
+            .map_err(|e| e.with_context("add_mpls_route"))
     }
 
     /// Replace an MPLS route (add or update).
@@ -632,7 +634,9 @@ impl Connection<Route> {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
         );
         route_builder.write_to(&mut msg, ifindex);
-        self.send_ack(msg).await
+        self.send_ack(msg)
+            .await
+            .map_err(|e| e.with_context("replace_mpls_route"))
     }
 
     /// Delete an MPLS route by label.
@@ -652,7 +656,9 @@ impl Connection<Route> {
         let label_entry = MplsLabelEntry::bottom(label, 0);
         builder.append_attr(RtaAttr::Dst as u16, label_entry.as_bytes());
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_mpls_route"))
     }
 }
 

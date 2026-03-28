@@ -419,7 +419,9 @@ impl Connection<Route> {
         );
 
         config.write_add(&mut builder, ifindex)?;
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_neighbor"))
     }
 
     /// Delete a neighbor entry using a config.
@@ -429,7 +431,9 @@ impl Connection<Route> {
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK);
 
         config.write_delete(&mut builder, ifindex)?;
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_neighbor"))
     }
 
     /// Add an IPv4 neighbor entry by interface index.
@@ -518,7 +522,9 @@ impl Connection<Route> {
         );
 
         config.write_add(&mut builder, ifindex)?;
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("replace_neighbor"))
     }
 
     /// Replace an IPv4 neighbor entry by interface index.

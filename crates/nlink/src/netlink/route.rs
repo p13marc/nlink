@@ -1308,14 +1308,18 @@ impl Connection<Route> {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
         );
         config.write_add(&mut builder, &interfaces);
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_route"))
     }
 
     /// Delete a route using a config.
     pub async fn del_route<R: RouteConfig>(&self, config: R) -> Result<()> {
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK);
         config.write_delete(&mut builder);
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_route"))
     }
 
     /// Delete an IPv4 route by destination.
@@ -1346,6 +1350,8 @@ impl Connection<Route> {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
         );
         config.write_add(&mut builder, &interfaces);
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("replace_route"))
     }
 }
