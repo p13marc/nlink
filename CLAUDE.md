@@ -250,6 +250,10 @@ conn.set_link_mtu("eth0", 9000).await?;
 
 // Delete a virtual interface
 conn.del_link("veth0").await?;
+
+// Enslave to bond/bridge (handles down/master/up sequence)
+conn.enslave("eth0", "bond0").await?;
+conn.enslave_by_index(5, 10).await?;
 ```
 
 **Declarative network configuration:**
@@ -491,6 +495,11 @@ let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net"
 
 // Generic connections work too (e.g., for WireGuard in a namespace)
 let genl: Connection<Generic> = namespace::connection_for("myns")?;
+
+// GENL protocols (WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink)
+// need async family resolution — use connection_for_async:
+let wg: Connection<Wireguard> = namespace::connection_for_async("myns").await?;
+let eth: Connection<Ethtool> = namespace::connection_for_pid_async(1234).await?;
 
 // List available namespaces
 for ns in namespace::list()? {
@@ -1122,7 +1131,11 @@ let netem = NetemConfig::new()
     .build();
 conn.add_qdisc_by_index(ifindex, netem).await?;
 
-// Address operations
+// Address operations — by name (resolves internally) or by index
+conn.add_address_by_name("eth0", "10.0.0.1".parse()?, 24).await?;
+conn.replace_address_by_name("eth0", "10.0.0.1".parse()?, 24).await?;
+
+// Or by index (namespace-safe, no name resolution)
 conn.add_address_by_index(ifindex, "10.0.0.1".parse()?, 24).await?;
 conn.replace_address_by_index(ifindex, "10.0.0.1".parse()?, 24).await?;
 
@@ -2038,6 +2051,16 @@ match conn.del_qdisc("eth0", "root").await {
     Err(e) if e.is_timeout() => println!("Operation timed out"),
     Err(e) => return Err(e),
 }
+
+// Typed error variants for common not-found cases
+match conn.change_qdisc("eth0", "root", netem).await {
+    Ok(()) => {}
+    Err(Error::QdiscNotFound { .. }) => conn.add_qdisc("eth0", netem).await?,
+    Err(e) => return Err(e),
+}
+
+// Operations include context in errors (KernelWithContext)
+// e.g., "add_link(veth0, kind=veth): File exists (errno 17)"
 
 // Get errno for detailed handling
 if let Some(errno) = err.errno() {
@@ -2957,6 +2980,24 @@ conn.del_rule("filter", "input", Family::Inet, rule_handle).await?;
 
 // Flush all rules in a table
 conn.flush_table("filter", Family::Inet).await?;
+
+// Additional match expressions:
+// Protocol matching (ICMP=1, TCP=6, UDP=17)
+Rule::new("filter", "input").match_l4proto(1).accept()  // Allow all ICMP
+// ICMP type matching
+Rule::new("filter", "input").match_icmp_type(8).accept()  // echo-request
+Rule::new("filter", "input").match_icmpv6_type(135).accept()  // neighbor solicitation
+// Source port matching
+Rule::new("filter", "input").match_tcp_sport(22).drop()
+// Negation (!=)
+Rule::new("filter", "input").match_saddr_v4_not(Ipv4Addr::new(10, 0, 0, 0), 8).drop()
+Rule::new("filter", "input").match_tcp_dport_not(443).drop()
+// Packet mark matching
+Rule::new("filter", "input").match_mark(0x42).accept()
+// Rate limiting
+Rule::new("filter", "input").match_tcp_dport(80).limit(100, LimitUnit::Second).accept()
+// Logging
+Rule::new("filter", "input").match_tcp_dport(22).log(Some("SSH: ")).accept()
 ```
 
 **NAT configuration:**
@@ -3213,9 +3254,9 @@ conn.add_link(
         .arp_ip_target(Ipv4Addr::new(192, 168, 1, 1))
 ).await?;
 
-// Add slaves to the bond
-conn.set_link_master("eth0", "bond0").await?;
-conn.set_link_master("eth1", "bond0").await?;
+// Add slaves using enslave() (handles down/master/up automatically)
+conn.enslave("eth0", "bond0").await?;
+conn.enslave("eth1", "bond0").await?;
 conn.set_link_up("bond0").await?;
 ```
 
