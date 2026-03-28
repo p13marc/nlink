@@ -377,7 +377,7 @@ wg.set_peer("wg0", peer_pubkey, |peer| {
 }).await?;
 
 // Remove a peer
-wg.remove_peer("wg0", peer_pubkey).await?;
+wg.del_peer("wg0", peer_pubkey).await?;
 ```
 
 ## Error Handling

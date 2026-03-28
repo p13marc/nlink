@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-03-28
+
+### Breaking Changes
+
+- **Interface parameter unification**: ~56 methods now accept `impl Into<InterfaceRef>` instead
+  of `&str` for interface names. Existing `&str` callers continue to work via `From<&str>`.
+  Affected: TC operations, address operations, FDB, bridge VLAN, neighbor, filter methods.
+- **Renamed `remove_*` to `del_*`**: `remove_netem` → `del_netem`, `remove_netem_by_index` →
+  `del_netem_by_index`, `remove_peer` → `del_peer`, `remove_peer_by_name` → `del_peer_by_name`,
+  `remove_addr` → `del_addr`
+- **LinkStats fields now public**: All 10 fields changed from `pub(crate)` to `pub`
+- **Send + Sync bounds on config traits**: `LinkConfig`, `AddressConfig`, `RouteConfig`,
+  `NeighborConfig` now require `Send + Sync`
+- **`#[non_exhaustive]` on 43 API enums**: `NetworkEvent`, `Error`, `OperState`, and 40 others.
+  Match expressions must include a wildcard arm.
+
 ### Added
 
 #### Convenience API (Plan A)
@@ -40,6 +56,11 @@ Negation variants:
 - Implemented for all 6 GENL protocols: Wireguard, Macsec, Mptcp, Ethtool, Nl80211, Devlink
 - `namespace::connection_for_async()` — create GENL connections in foreign namespaces
 - `namespace::connection_for_path_async()` / `connection_for_pid_async()` — path and PID variants
+
+#### API Hardening
+- `#[must_use]` on all 62 builder structs to catch unused builders at compile time
+- Error context on all 46 mutation operations via `KernelWithContext`
+- `nlink::prelude` module for convenient imports
 
 ## [0.10.0] - 2026-03-22
 

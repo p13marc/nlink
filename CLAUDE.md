@@ -507,6 +507,11 @@ for ns in namespace::list()? {
 }
 ```
 
+**Quick imports via prelude:**
+```rust
+use nlink::prelude::*;  // Connection, Error, Result, Route, Generic, NetworkEvent, etc.
+```
+
 **Parsing TC options:**
 ```rust
 use nlink::netlink::tc_options::{parse_qdisc_options, QdiscOptions};
@@ -610,8 +615,8 @@ conn.apply_netem("eth0", netem).await?;
 conn.apply_netem_by_index(ifindex, netem).await?;
 
 // Remove netem (restores default qdisc)
-conn.remove_netem("eth0").await?;
-conn.remove_netem_by_index(ifindex).await?;
+conn.del_netem("eth0").await?;
+conn.del_netem_by_index(ifindex).await?;
 
 // Look up a qdisc by handle
 if let Some(qdisc) = conn.get_qdisc_by_handle("eth0", "1:").await? {
@@ -2118,7 +2123,7 @@ conn.set_peer("wg0", peer_pubkey, |peer| {
 }).await?;
 
 // Remove a peer
-conn.remove_peer("wg0", peer_pubkey).await?;
+conn.del_peer("wg0", peer_pubkey).await?;
 
 // Access the resolved GENL family ID if needed
 println!("WireGuard family ID: {}", conn.family_id());
@@ -2280,7 +2285,7 @@ conn.announce_addr(
 ).await?;
 
 // Remove an address announcement
-conn.remove_addr(connection_token, 2).await?;
+conn.del_addr(connection_token, 2).await?;
 ```
 
 **Ethtool configuration via Generic Netlink (Linux 5.6+):**
