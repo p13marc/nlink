@@ -33,7 +33,8 @@ use std::path::{Path, PathBuf};
 
 use super::connection::Connection;
 use super::error::{Error, Result};
-use super::protocol::ProtocolState;
+use super::protocol::{AsyncProtocolInit, ProtocolState};
+use super::socket::NetlinkSocket;
 
 /// Specification for which network namespace to use.
 ///
@@ -209,6 +210,44 @@ pub fn connection_for_path<P: ProtocolState + Default, T: AsRef<Path>>(
 pub fn connection_for_pid<P: ProtocolState + Default>(pid: u32) -> Result<Connection<P>> {
     let path = format!("/proc/{}/ns/net", pid);
     connection_for_path(&path)
+}
+
+/// Get an async-initialized connection for a named network namespace.
+///
+/// This is for GENL protocols (WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink)
+/// that need async family ID resolution after socket creation. The socket is created
+/// in the target namespace, then the GENL family is resolved through that socket.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::{Connection, Wireguard, namespace};
+///
+/// let conn: Connection<Wireguard> = namespace::connection_for_async("myns").await?;
+/// let device = conn.get_device("wg0").await?;
+/// ```
+pub async fn connection_for_async<P: AsyncProtocolInit>(name: &str) -> Result<Connection<P>> {
+    let path = PathBuf::from(NETNS_RUN_DIR).join(name);
+    connection_for_path_async(&path).await
+}
+
+/// Get an async-initialized connection for a namespace specified by path.
+///
+/// See [`connection_for_async`] for details.
+pub async fn connection_for_path_async<P: AsyncProtocolInit, T: AsRef<Path>>(
+    path: T,
+) -> Result<Connection<P>> {
+    let socket = NetlinkSocket::new_in_namespace_path(P::PROTOCOL, path)?;
+    let state = P::resolve_async(&socket).await?;
+    Ok(Connection::from_parts(socket, state))
+}
+
+/// Get an async-initialized connection for a process's network namespace.
+///
+/// See [`connection_for_async`] for details.
+pub async fn connection_for_pid_async<P: AsyncProtocolInit>(pid: u32) -> Result<Connection<P>> {
+    let path = format!("/proc/{}/ns/net", pid);
+    connection_for_path_async(&path).await
 }
 
 /// Open a namespace file and return its file descriptor.

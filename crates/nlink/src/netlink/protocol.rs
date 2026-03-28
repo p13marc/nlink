@@ -30,8 +30,9 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use super::error::Result;
 use super::genl::FamilyInfo;
-use super::socket::Protocol;
+use super::socket::{NetlinkSocket, Protocol};
 
 /// Sealed trait module to prevent external implementations.
 mod private {
@@ -50,6 +51,26 @@ mod private {
 pub trait ProtocolState: private::Sealed {
     /// The netlink protocol for this state type.
     const PROTOCOL: Protocol;
+}
+
+/// Async initialization trait for protocols requiring async setup.
+///
+/// GENL protocols (WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink) need
+/// to resolve their family ID asynchronously after the socket is created.
+/// This trait enables `namespace::connection_for_async()` to create connections
+/// in foreign namespaces for these protocols.
+///
+/// This trait is sealed and cannot be implemented outside this crate.
+pub trait AsyncProtocolInit: ProtocolState {
+    /// Resolve protocol-specific state from an already-connected socket.
+    ///
+    /// The socket has already been created in the target namespace.
+    /// This method performs the async GENL family resolution through that socket.
+    fn resolve_async(
+        socket: &NetlinkSocket,
+    ) -> impl std::future::Future<Output = Result<Self>> + Send
+    where
+        Self: Sized;
 }
 
 /// Route protocol state (RTNetlink).

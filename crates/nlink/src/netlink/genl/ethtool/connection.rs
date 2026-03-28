@@ -19,8 +19,18 @@ use crate::netlink::genl::{
 };
 use crate::netlink::interface_ref::InterfaceRef;
 use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{Ethtool, ProtocolState, Route};
+use crate::netlink::protocol::{AsyncProtocolInit, Ethtool, ProtocolState, Route};
 use crate::netlink::socket::NetlinkSocket;
+
+impl AsyncProtocolInit for Ethtool {
+    async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
+        let (family_id, monitor_group_id) = resolve_ethtool_family(socket).await?;
+        Ok(Self {
+            family_id,
+            monitor_group_id,
+        })
+    }
+}
 
 impl Connection<Ethtool> {
     /// Create a new ethtool connection.

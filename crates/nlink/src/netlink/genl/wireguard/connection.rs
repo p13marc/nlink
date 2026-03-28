@@ -16,8 +16,15 @@ use crate::netlink::error::{Error, Result};
 use crate::netlink::genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr};
 use crate::netlink::interface_ref::InterfaceRef;
 use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{ProtocolState, Route, Wireguard};
+use crate::netlink::protocol::{AsyncProtocolInit, ProtocolState, Route, Wireguard};
 use crate::netlink::socket::NetlinkSocket;
+
+impl AsyncProtocolInit for Wireguard {
+    async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
+        let family_id = resolve_wireguard_family(socket).await?;
+        Ok(Self { family_id })
+    }
+}
 
 impl Connection<Wireguard> {
     /// Create a new WireGuard connection.

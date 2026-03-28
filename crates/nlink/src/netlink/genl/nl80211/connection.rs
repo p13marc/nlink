@@ -10,8 +10,21 @@ use crate::netlink::genl::{
     CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
 };
 use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{Nl80211, ProtocolState};
+use crate::netlink::protocol::{AsyncProtocolInit, Nl80211, ProtocolState};
 use crate::netlink::socket::NetlinkSocket;
+
+impl AsyncProtocolInit for Nl80211 {
+    async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
+        let resolved = resolve_nl80211_family(socket).await?;
+        Ok(Self {
+            family_id: resolved.family_id,
+            scan_group_id: resolved.scan_group_id,
+            mlme_group_id: resolved.mlme_group_id,
+            regulatory_group_id: resolved.regulatory_group_id,
+            config_group_id: resolved.config_group_id,
+        })
+    }
+}
 
 impl Connection<Nl80211> {
     /// Create a new nl80211 connection.

@@ -10,8 +10,15 @@ use crate::netlink::connection::Connection;
 use crate::netlink::error::{Error, Result};
 use crate::netlink::genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr};
 use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{Mptcp, ProtocolState};
+use crate::netlink::protocol::{AsyncProtocolInit, Mptcp, ProtocolState};
 use crate::netlink::socket::NetlinkSocket;
+
+impl AsyncProtocolInit for Mptcp {
+    async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
+        let family_id = resolve_mptcp_family(socket).await?;
+        Ok(Self { family_id })
+    }
+}
 use crate::netlink::types::mptcp::{mptcp_pm_addr_attr, mptcp_pm_attr, mptcp_pm_cmd};
 
 impl Connection<Mptcp> {

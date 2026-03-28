@@ -35,6 +35,12 @@ Negation variants:
 - `match_saddr_v4_not()` / `match_daddr_v4_not()` — negated IP address matching
 - `match_tcp_dport_not()` / `match_udp_dport_not()` — negated port matching
 
+#### Async GENL Namespace Connections (Plan C)
+- `AsyncProtocolInit` trait for protocols requiring async initialization (GENL family resolution)
+- Implemented for all 6 GENL protocols: Wireguard, Macsec, Mptcp, Ethtool, Nl80211, Devlink
+- `namespace::connection_for_async()` — create GENL connections in foreign namespaces
+- `namespace::connection_for_path_async()` / `connection_for_pid_async()` — path and PID variants
+
 ## [0.10.0] - 2026-03-22
 
 ### Added

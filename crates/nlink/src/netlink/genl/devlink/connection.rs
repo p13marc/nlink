@@ -10,8 +10,18 @@ use crate::netlink::genl::{
     CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
 };
 use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{Devlink, ProtocolState};
+use crate::netlink::protocol::{AsyncProtocolInit, Devlink, ProtocolState};
 use crate::netlink::socket::NetlinkSocket;
+
+impl AsyncProtocolInit for Devlink {
+    async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
+        let (family_id, monitor_group_id) = resolve_devlink_family(socket).await?;
+        Ok(Self {
+            family_id,
+            monitor_group_id,
+        })
+    }
+}
 
 impl Connection<Devlink> {
     /// Create a new devlink connection.
