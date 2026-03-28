@@ -48,6 +48,11 @@ let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net"
 // Generic connections work too (e.g., for WireGuard in a namespace)
 let genl: Connection<Generic> = namespace::connection_for("myns")?;
 
+// GENL protocols need async family resolution — use connection_for_async:
+use nlink::netlink::Wireguard;
+let wg: Connection<Wireguard> = namespace::connection_for_async("myns").await?;
+// Also works with: Macsec, Mptcp, Ethtool, Nl80211, Devlink
+
 // List available namespaces
 for ns in namespace::list()? {
     println!("Namespace: {}", ns);
@@ -392,9 +397,24 @@ match conn.del_qdisc("eth0", "root").await {
     Err(e) => return Err(e),
 }
 
-// Semantic error types provide clear messages
-// Error::InterfaceNotFound { name: "eth99" } -> "interface not found: eth99"
-// Error::NamespaceNotFound { name: "myns" } -> "namespace not found: myns"
+// Typed error variants for common not-found cases
+// del_link/set_link_up/down promote ENOENT to InterfaceNotFound
+// change_qdisc/del_qdisc promote ENOENT to QdiscNotFound
+match conn.change_qdisc("eth0", "root", netem).await {
+    Ok(()) => {}
+    Err(Error::QdiscNotFound { .. }) => {
+        // Qdisc doesn't exist yet — add instead of change
+        conn.add_qdisc("eth0", netem).await?;
+    }
+    Err(e) => return Err(e),
+}
+
+// Errors include operation context (KernelWithContext)
+// e.g., "add_link(veth0, kind=veth): File exists (errno 17)"
+
+// Interface name validation catches bad names early
+// e.g., names > 15 chars, containing '/' or whitespace
+// Returns Error::Interface before sending to kernel
 
 // Automatic error conversion from util types
 use nlink::util::parse::get_rate;
@@ -970,7 +990,8 @@ conn.set_limits(
 | `nlink::netlink::nexthop` | Nexthop objects and ECMP groups |
 | `nlink::netlink::mpls` | MPLS routes and encapsulation |
 | `nlink::netlink::srv6` | SRv6 segment routing |
-| `nlink::netlink::genl` | Generic Netlink (WireGuard, MACsec, MPTCP) |
+| `nlink::netlink::nftables` | nftables firewall (tables, chains, rules, sets, NAT) |
+| `nlink::netlink::genl` | Generic Netlink (WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink) |
 | `nlink::util` | Parsing utilities, address helpers, name resolution |
 | `nlink::sockdiag` | Socket diagnostics (feature: `sockdiag`) |
 | `nlink::tuntap` | TUN/TAP devices (feature: `tuntap`) |

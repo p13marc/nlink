@@ -22,13 +22,13 @@ nlink is a from-scratch implementation of Linux netlink-based network management
 
 ```toml
 # Core netlink functionality
-nlink = "0.9"
+nlink = "0.10"
 
 # With additional features
-nlink = { version = "0.9", features = ["sockdiag", "tuntap", "tc", "output"] }
+nlink = { version = "0.10", features = ["sockdiag", "tuntap", "tc", "output"] }
 
 # All features
-nlink = { version = "0.9", features = ["full"] }
+nlink = { version = "0.10", features = ["full"] }
 ```
 
 ### Features
@@ -201,7 +201,7 @@ The library API is production-ready for network monitoring and configuration.
 - Network diagnostics
 - VRF and XFRM/IPSec support
 - Bond interface management with typed modes and slave info
-- nftables firewall management (tables, chains, rules, sets, NAT)
+- nftables firewall management (tables, chains, rules, sets, NAT, match expressions)
 - nl80211 WiFi management (scan, connect, monitor)
 - Devlink hardware device management (ports, health, firmware flash)
 - BPF program attachment to TC hooks
@@ -209,6 +209,11 @@ The library API is production-ready for network monitoring and configuration.
 - Netlink batching for bulk operations
 - Operation timeouts
 - Ethtool configuration and event monitoring
+- Async GENL namespace connections (WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink)
+- Interface name validation in link builders
+- Typed error promotion (InterfaceNotFound, QdiscNotFound) with operation context
+- Name-based address operations (add_address_by_name, replace_address_by_name)
+- Bond/bridge enslavement helper (enslave/enslave_by_index)
 
 ## Building
 
