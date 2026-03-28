@@ -199,8 +199,8 @@ async fn add_netem(
 }
 
 async fn del_netem(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result<()> {
-    // Use remove_netem convenience method
-    match conn.remove_netem(dev).await {
+    // Use del_netem convenience method
+    match conn.del_netem(dev).await {
         Ok(()) => println!("Removed netem from {}", dev),
         Err(e) if e.is_not_found() => println!("No netem qdisc on {}", dev),
         Err(e) => return Err(e),

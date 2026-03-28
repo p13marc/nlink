@@ -363,9 +363,9 @@ impl Connection<Mptcp> {
     ///
     /// ```ignore
     /// // Remove address ID 1 from the connection
-    /// conn.remove_addr(connection_token, 1).await?;
+    /// conn.del_addr(connection_token, 1).await?;
     /// ```
-    pub async fn remove_addr(&self, token: u32, addr_id: u8) -> Result<()> {
+    pub async fn del_addr(&self, token: u32, addr_id: u8) -> Result<()> {
         use crate::netlink::types::mptcp::mptcp_attr;
 
         self.mptcp_command(mptcp_pm_cmd::REMOVE, |builder| {

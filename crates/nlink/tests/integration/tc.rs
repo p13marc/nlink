@@ -71,7 +71,7 @@ async fn test_netem_with_loss() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_remove_netem() -> Result<()> {
+async fn test_del_netem() -> Result<()> {
     require_root!();
 
     let (_ns, conn) = setup_tc_ns("netemrm").await?;
@@ -81,7 +81,7 @@ async fn test_remove_netem() -> Result<()> {
     conn.add_qdisc("dummy0", netem).await?;
 
     // Remove it
-    conn.remove_netem("dummy0").await?;
+    conn.del_netem("dummy0").await?;
 
     // Verify it's gone (default qdisc should be back)
     let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;

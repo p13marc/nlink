@@ -3643,14 +3643,14 @@ impl Connection<Route> {
     /// # Example
     ///
     /// ```ignore
-    /// conn.remove_netem("eth0").await?;
+    /// conn.del_netem("eth0").await?;
     /// ```
-    pub async fn remove_netem(&self, dev: &str) -> Result<()> {
+    pub async fn del_netem(&self, dev: &str) -> Result<()> {
         self.del_qdisc(dev, "root").await
     }
 
     /// Remove netem configuration by interface index.
-    pub async fn remove_netem_by_index(&self, ifindex: u32) -> Result<()> {
+    pub async fn del_netem_by_index(&self, ifindex: u32) -> Result<()> {
         self.del_qdisc_by_index(ifindex, "root").await
     }
 

@@ -135,13 +135,13 @@ impl Connection<Wireguard> {
     /// Remove a peer by public key.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
-    pub async fn remove_peer(
+    pub async fn del_peer(
         &self,
         iface: impl Into<InterfaceRef>,
         public_key: [u8; WG_KEY_LEN],
     ) -> Result<()> {
         let ifname = self.resolve_interface_name(&iface.into()).await?;
-        self.remove_peer_by_name(&ifname, public_key).await
+        self.del_peer_by_name(&ifname, public_key).await
     }
 
     // ========================================================================
@@ -202,7 +202,7 @@ impl Connection<Wireguard> {
     }
 
     /// Remove a peer by public key using interface name.
-    pub async fn remove_peer_by_name(
+    pub async fn del_peer_by_name(
         &self,
         ifname: &str,
         public_key: [u8; WG_KEY_LEN],

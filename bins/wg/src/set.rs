@@ -79,7 +79,7 @@ pub async fn run(args: SetArgs) -> Result<()> {
         let peer_key = parse_public_key(peer_key_str)?;
 
         if args.remove {
-            conn.remove_peer(&args.interface, peer_key).await?;
+            conn.del_peer(&args.interface, peer_key).await?;
         } else {
             // Parse preshared key if provided
             let psk = if let Some(ref path) = args.preshared_key {
