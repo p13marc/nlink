@@ -4361,8 +4361,7 @@ impl Connection<Route> {
         use super::message::{NLM_F_ACK, NLM_F_REQUEST};
 
         // Validate interface name(s) before sending to kernel
-        crate::util::ifname::validate(config.name())
-            .map_err(super::error::Error::Interface)?;
+        crate::util::ifname::validate(config.name()).map_err(super::error::Error::Interface)?;
         if let Some(peer) = config.peer_name() {
             crate::util::ifname::validate(peer).map_err(super::error::Error::Interface)?;
         }
@@ -4516,8 +4515,7 @@ impl Connection<Route> {
         use super::connection::ack_request;
 
         // Validate the new name before sending to kernel
-        crate::util::ifname::validate(new_name)
-            .map_err(super::error::Error::Interface)?;
+        crate::util::ifname::validate(new_name).map_err(super::error::Error::Interface)?;
 
         let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 

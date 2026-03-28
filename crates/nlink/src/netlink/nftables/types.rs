@@ -1069,8 +1069,7 @@ impl Rule {
 
     /// Reject the packet (send ICMP unreachable / TCP RST).
     pub fn reject(mut self) -> Self {
-        self.exprs
-            .push(super::expr::Expr::Verdict(Verdict::Drop));
+        self.exprs.push(super::expr::Expr::Verdict(Verdict::Drop));
         self
     }
 

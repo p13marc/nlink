@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+#### Convenience API (Plan A)
+Based on nlink-lab feedback report:
+
+- `OperState`: `Display` impl and `display_name()` for lowercase output ("up", "down", etc.)
+- `add_address_by_name()` / `replace_address_by_name()` — resolve interface name internally,
+  eliminating the resolve-then-act pattern for address operations
+- `enslave()` / `enslave_by_index()` — handle the down/master/up sequence for bond and bridge
+  enslavement in a single call
+
+#### Defensive Validation (Plan B)
+- Interface name validation in `add_link()` and `set_link_name()` — validates names before
+  sending to kernel, preventing cryptic EINVAL from invalid names (too long, contains `/`, etc.)
+- `peer_name()` on `LinkConfig` trait — VethLink and NetkitLink now expose peer names for validation
+- Promote kernel ENOENT to typed errors: `del_link` → `InterfaceNotFound`,
+  `del_qdisc`/`change_qdisc` → `QdiscNotFound`, `set_link_up/down` → `InterfaceNotFound`
+- `KernelWithContext` enrichment for `add_link`, `del_link`, `set_link_state`, `del_qdisc`,
+  `change_qdisc` — errors now include the operation name and target
+
+#### nftables Match Expressions (Plan D)
+New match methods on `Rule`:
+- `match_l4proto(proto)` — generic L4 protocol matching (TCP/UDP/ICMP/etc.)
+- `match_tcp_sport(port)` / `match_udp_sport(port)` — source port matching
+- `match_icmp_type(type)` / `match_icmpv6_type(type)` — ICMP type matching
+- `match_mark(mark)` — packet mark/fwmark matching
+
+Negation variants:
+- `match_saddr_v4_not()` / `match_daddr_v4_not()` — negated IP address matching
+- `match_tcp_dport_not()` / `match_udp_dport_not()` — negated port matching
+
 ## [0.10.0] - 2026-03-22
 
 ### Added

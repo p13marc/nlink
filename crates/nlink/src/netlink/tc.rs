@@ -3591,9 +3591,7 @@ impl Connection<Route> {
                     interface: format!("ifindex {ifindex}"),
                 }
             } else {
-                e.with_context(format!(
-                    "change_qdisc(ifindex {ifindex}, parent={parent})"
-                ))
+                e.with_context(format!("change_qdisc(ifindex {ifindex}, parent={parent})"))
             }
         })
     }
