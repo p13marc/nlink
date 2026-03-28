@@ -116,7 +116,7 @@ const NLM_F_CREATE: u16 = 0x400;
 const NLM_F_EXCL: u16 = 0x200;
 
 /// Trait for link configurations that can be added to the system.
-pub trait LinkConfig {
+pub trait LinkConfig: Send + Sync {
     /// Get the name of this interface.
     fn name(&self) -> &str;
 

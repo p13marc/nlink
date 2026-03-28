@@ -111,7 +111,7 @@ pub struct ResolvedRouteInterfaces {
 }
 
 /// Trait for route configurations that can be added.
-pub trait RouteConfig {
+pub trait RouteConfig: Send + Sync {
     /// Get the device reference for the main output interface.
     fn device_ref(&self) -> Option<&InterfaceRef>;
 

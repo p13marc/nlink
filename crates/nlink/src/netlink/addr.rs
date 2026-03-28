@@ -76,7 +76,7 @@ pub const AF_INET6: u8 = 10;
 /// This trait separates interface reference from message building.
 /// The Connection is responsible for resolving the interface reference
 /// to an index before calling the write methods.
-pub trait AddressConfig {
+pub trait AddressConfig: Send + Sync {
     /// Get the interface reference (name or index).
     fn interface_ref(&self) -> &InterfaceRef;
 
