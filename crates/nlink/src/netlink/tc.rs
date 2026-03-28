@@ -3428,7 +3428,16 @@ impl Connection<Route> {
         let mut builder = ack_request(NlMsgType::RTM_DELQDISC);
         builder.append(&tcmsg);
 
-        self.send_ack(builder).await
+        self.send_ack(builder).await.map_err(|e| {
+            if e.is_not_found() {
+                Error::QdiscNotFound {
+                    kind: handle.unwrap_or(parent).to_string(),
+                    interface: format!("ifindex {ifindex}"),
+                }
+            } else {
+                e.with_context(format!("del_qdisc(ifindex {ifindex}, parent={parent})"))
+            }
+        })
     }
 
     /// Replace a qdisc (add or update).
@@ -3566,15 +3575,27 @@ impl Connection<Route> {
             .with_parent(parent_handle)
             .with_handle(qdisc_handle);
 
+        let kind = config.kind().to_string();
         let mut builder = ack_request(NlMsgType::RTM_NEWQDISC);
         builder.append(&tcmsg);
-        builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
+        builder.append_attr_str(TcaAttr::Kind as u16, &kind);
 
         let options_token = builder.nest_start(TcaAttr::Options as u16);
         config.write_options(&mut builder)?;
         builder.nest_end(options_token);
 
-        self.send_ack(builder).await
+        self.send_ack(builder).await.map_err(|e| {
+            if e.is_not_found() {
+                Error::QdiscNotFound {
+                    kind,
+                    interface: format!("ifindex {ifindex}"),
+                }
+            } else {
+                e.with_context(format!(
+                    "change_qdisc(ifindex {ifindex}, parent={parent})"
+                ))
+            }
+        })
     }
 
     /// Apply a netem configuration to an interface.

@@ -123,6 +123,11 @@ pub trait LinkConfig {
     /// Get the kind string for this link type (e.g., "dummy", "veth", "bridge").
     fn kind(&self) -> &str;
 
+    /// Get the peer interface name, if this is a paired link type (veth, netkit).
+    fn peer_name(&self) -> Option<&str> {
+        None
+    }
+
     /// Get the parent/link interface reference, if any.
     ///
     /// Returns `Some(&InterfaceRef)` for link types that require a parent interface
@@ -302,6 +307,10 @@ impl LinkConfig for VethLink {
 
     fn kind(&self) -> &str {
         "veth"
+    }
+
+    fn peer_name(&self) -> Option<&str> {
+        Some(&self.peer_name)
     }
 
     fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
@@ -2077,6 +2086,10 @@ impl LinkConfig for NetkitLink {
 
     fn kind(&self) -> &str {
         "netkit"
+    }
+
+    fn peer_name(&self) -> Option<&str> {
+        Some(&self.peer_name)
     }
 
     fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
@@ -4347,6 +4360,13 @@ impl Connection<Route> {
     pub async fn add_link<L: LinkConfig>(&self, config: L) -> Result<()> {
         use super::message::{NLM_F_ACK, NLM_F_REQUEST};
 
+        // Validate interface name(s) before sending to kernel
+        crate::util::ifname::validate(config.name())
+            .map_err(super::error::Error::Interface)?;
+        if let Some(peer) = config.peer_name() {
+            crate::util::ifname::validate(peer).map_err(super::error::Error::Interface)?;
+        }
+
         // Resolve parent interface if needed
         let parent_index = match config.parent_ref() {
             Some(iface) => Some(self.resolve_interface(iface).await?),
@@ -4364,9 +4384,13 @@ impl Connection<Route> {
         builder.append(&ifinfo);
 
         // Write the link configuration
+        let link_name = config.name().to_string();
+        let link_kind = config.kind().to_string();
         config.write_to(&mut builder, parent_index);
 
-        self.send_ack(builder).await
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context(format!("add_link({link_name}, kind={link_kind})")))
     }
 
     /// Set the master (controller) device for an interface.
@@ -4490,6 +4514,10 @@ impl Connection<Route> {
     /// Rename a network interface by index.
     pub async fn set_link_name_by_index(&self, ifindex: u32, new_name: &str) -> Result<()> {
         use super::connection::ack_request;
+
+        // Validate the new name before sending to kernel
+        crate::util::ifname::validate(new_name)
+            .map_err(super::error::Error::Interface)?;
 
         let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 

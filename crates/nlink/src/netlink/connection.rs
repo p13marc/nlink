@@ -1519,7 +1519,16 @@ impl Connection<Route> {
         let mut builder = ack_request(NlMsgType::RTM_SETLINK);
         builder.append(&ifinfo);
 
-        self.send_ack(builder).await
+        let state = if up { "up" } else { "down" };
+        self.send_ack(builder).await.map_err(|e| {
+            if e.is_not_found() {
+                Error::InterfaceNotFound {
+                    name: format!("ifindex {ifindex}"),
+                }
+            } else {
+                e.with_context(format!("set_link_{state}(ifindex {ifindex})"))
+            }
+        })
     }
 
     /// Set the MTU of a network interface.
@@ -1572,7 +1581,15 @@ impl Connection<Route> {
         let mut builder = ack_request(NlMsgType::RTM_DELLINK);
         builder.append(&ifinfo);
 
-        self.send_ack(builder).await
+        self.send_ack(builder).await.map_err(|e| {
+            if e.is_not_found() {
+                Error::InterfaceNotFound {
+                    name: format!("ifindex {ifindex}"),
+                }
+            } else {
+                e.with_context(format!("del_link(ifindex {ifindex})"))
+            }
+        })
     }
 
     /// Set the TX queue length of a network interface.
