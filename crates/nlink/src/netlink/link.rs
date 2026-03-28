@@ -4405,6 +4405,41 @@ impl Connection<Route> {
         self.send_ack(builder).await
     }
 
+    /// Enslave an interface to a bond or bridge.
+    ///
+    /// This convenience method handles the required down/master/up sequence:
+    /// the member interface must be brought down before enslaving, then brought
+    /// back up afterward.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Enslave eth0 to bond0 (handles down/master/up automatically)
+    /// conn.enslave("eth0", "bond0").await?;
+    /// ```
+    pub async fn enslave(
+        &self,
+        member: impl Into<InterfaceRef>,
+        master: impl Into<InterfaceRef>,
+    ) -> Result<()> {
+        let member = member.into();
+        let master = master.into();
+        let member_idx = self.resolve_interface(&member).await?;
+        let master_idx = self.resolve_interface(&master).await?;
+        self.set_link_down_by_index(member_idx).await?;
+        self.set_link_master_by_index(member_idx, master_idx)
+            .await?;
+        self.set_link_up_by_index(member_idx).await
+    }
+
+    /// Enslave an interface to a bond or bridge by index.
+    pub async fn enslave_by_index(&self, member_index: u32, master_index: u32) -> Result<()> {
+        self.set_link_down_by_index(member_index).await?;
+        self.set_link_master_by_index(member_index, master_index)
+            .await?;
+        self.set_link_up_by_index(member_index).await
+    }
+
     /// Remove an interface from its master device.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].

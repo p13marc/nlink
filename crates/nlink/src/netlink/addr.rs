@@ -766,6 +766,47 @@ impl Connection<Route> {
         }
     }
 
+    /// Add an IP address to an interface by name.
+    ///
+    /// This is a convenience method that resolves the interface name internally.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.add_address_by_name("eth0", "192.168.1.100".parse()?, 24).await?;
+    /// ```
+    pub async fn add_address_by_name(
+        &self,
+        ifname: &str,
+        address: IpAddr,
+        prefix_len: u8,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&InterfaceRef::name(ifname)).await?;
+        self.add_address_by_index(ifindex, address, prefix_len)
+            .await
+    }
+
+    /// Replace an IP address on an interface by name.
+    ///
+    /// This is a convenience method that resolves the interface name internally.
+    /// If the address exists, it will be updated; otherwise it will be created.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.replace_address_by_name("eth0", "192.168.1.100".parse()?, 24).await?;
+    /// ```
+    pub async fn replace_address_by_name(
+        &self,
+        ifname: &str,
+        address: IpAddr,
+        prefix_len: u8,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&InterfaceRef::name(ifname)).await?;
+        self.replace_address_by_index(ifindex, address, prefix_len)
+            .await
+    }
+
     /// Delete an IPv4 address from an interface.
     pub async fn del_address_v4(
         &self,

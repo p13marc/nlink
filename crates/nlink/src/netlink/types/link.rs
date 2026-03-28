@@ -288,6 +288,25 @@ impl OperState {
             Self::Up => "UP",
         }
     }
+
+    /// Get a lowercase display name suitable for metrics and logging.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::NotPresent => "not_present",
+            Self::Down => "down",
+            Self::LowerLayerDown => "lower_layer_down",
+            Self::Testing => "testing",
+            Self::Dormant => "dormant",
+            Self::Up => "up",
+        }
+    }
+}
+
+impl std::fmt::Display for OperState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.display_name())
+    }
 }
 
 /// Link statistics (struct rtnl_link_stats64).
