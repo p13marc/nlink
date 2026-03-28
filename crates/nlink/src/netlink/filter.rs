@@ -1865,7 +1865,7 @@ impl Connection<Route> {
     /// ```
     pub async fn add_filter(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         config: impl FilterConfig,
     ) -> Result<()> {
@@ -1884,16 +1884,14 @@ impl Connection<Route> {
     /// * `config` - Filter configuration
     pub async fn add_filter_full(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         handle: Option<&str>,
         protocol: u16,
         priority: u16,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.add_filter_by_index_full(ifindex, parent, handle, protocol, priority, config)
             .await
     }
@@ -1964,13 +1962,11 @@ impl Connection<Route> {
     /// ```
     pub async fn replace_filter(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.replace_filter_by_index_full(ifindex, parent, None, 0x0800, 0, config)
             .await
     }
@@ -1978,16 +1974,14 @@ impl Connection<Route> {
     /// Replace a filter with explicit parameters.
     pub async fn replace_filter_full(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         handle: Option<&str>,
         protocol: u16,
         priority: u16,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.replace_filter_by_index_full(ifindex, parent, handle, protocol, priority, config)
             .await
     }
@@ -2056,15 +2050,13 @@ impl Connection<Route> {
     /// ```
     pub async fn change_filter(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         protocol: u16,
         priority: u16,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.change_filter_by_index_full(ifindex, parent, None, protocol, priority, config)
             .await
     }
@@ -2072,16 +2064,14 @@ impl Connection<Route> {
     /// Change a filter with explicit handle.
     pub async fn change_filter_full(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         handle: Option<&str>,
         protocol: u16,
         priority: u16,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.change_filter_by_index_full(ifindex, parent, handle, protocol, priority, config)
             .await
     }
@@ -2146,14 +2136,12 @@ impl Connection<Route> {
     /// ```
     pub async fn del_filter(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         protocol: u16,
         priority: u16,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.del_filter_by_index(ifindex, parent, protocol, priority)
             .await
     }
@@ -2181,10 +2169,8 @@ impl Connection<Route> {
     }
 
     /// Delete all filters from a parent qdisc.
-    pub async fn flush_filters(&self, dev: &str, parent: &str) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+    pub async fn flush_filters(&self, dev: impl Into<InterfaceRef>, parent: &str) -> Result<()> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.flush_filters_by_index(ifindex, parent).await
     }
 
@@ -2230,13 +2216,11 @@ impl Connection<Route> {
     /// ```
     pub async fn attach_bpf(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         direction: BpfDirection,
         filter: BpfFilter,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.attach_bpf_by_index(ifindex, direction, filter).await
     }
 
@@ -2277,10 +2261,12 @@ impl Connection<Route> {
     ///
     /// conn.detach_bpf("eth0", BpfDirection::Ingress).await?;
     /// ```
-    pub async fn detach_bpf(&self, dev: &str, direction: BpfDirection) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+    pub async fn detach_bpf(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        direction: BpfDirection,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.detach_bpf_by_index(ifindex, direction).await
     }
 
@@ -2308,11 +2294,9 @@ impl Connection<Route> {
     /// ```
     pub async fn list_bpf_programs(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
     ) -> Result<Vec<crate::netlink::messages::BpfInfo>> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.list_bpf_programs_by_index(ifindex).await
     }
 

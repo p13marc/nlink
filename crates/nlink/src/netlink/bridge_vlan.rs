@@ -481,10 +481,11 @@ impl Connection<Route> {
     ///         vlan.vid, vlan.flags.pvid, vlan.flags.untagged);
     /// }
     /// ```
-    pub async fn get_bridge_vlans(&self, dev: &str) -> Result<Vec<BridgeVlanEntry>> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+    pub async fn get_bridge_vlans(
+        &self,
+        dev: impl Into<InterfaceRef>,
+    ) -> Result<Vec<BridgeVlanEntry>> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.get_bridge_vlans_by_index(ifindex).await
     }
 
@@ -517,10 +518,11 @@ impl Connection<Route> {
     ///     println!("ifindex {}: VLAN {}", vlan.ifindex, vlan.vid);
     /// }
     /// ```
-    pub async fn get_bridge_vlans_all(&self, bridge: &str) -> Result<Vec<BridgeVlanEntry>> {
-        let bridge_idx = self
-            .resolve_interface(&InterfaceRef::Name(bridge.to_string()))
-            .await?;
+    pub async fn get_bridge_vlans_all(
+        &self,
+        bridge: impl Into<InterfaceRef>,
+    ) -> Result<Vec<BridgeVlanEntry>> {
+        let bridge_idx = self.resolve_interface(&bridge.into()).await?;
         self.get_bridge_vlans_all_by_index(bridge_idx).await
     }
 
@@ -609,10 +611,8 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_bridge_vlan("eth0", 100).await?;
     /// ```
-    pub async fn del_bridge_vlan(&self, dev: &str, vid: u16) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+    pub async fn del_bridge_vlan(&self, dev: impl Into<InterfaceRef>, vid: u16) -> Result<()> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.del_bridge_vlan_by_index(ifindex, vid).await
     }
 
@@ -633,12 +633,14 @@ impl Connection<Route> {
     /// ```
     pub async fn del_bridge_vlan_range(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         vid_start: u16,
         vid_end: u16,
     ) -> Result<()> {
-        let config = BridgeVlanBuilder::new(vid_start).dev(dev).range(vid_end);
-        let ifindex = self.resolve_bridge_vlan_interface(&config).await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
+        let config = BridgeVlanBuilder::new(vid_start)
+            .ifindex(ifindex)
+            .range(vid_end);
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
         config.write_del(&mut builder, ifindex);
         self.send_ack(builder).await
@@ -654,9 +656,15 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.set_bridge_pvid("eth0", 100).await?;
     /// ```
-    pub async fn set_bridge_pvid(&self, dev: &str, vid: u16) -> Result<()> {
-        self.add_bridge_vlan(BridgeVlanBuilder::new(vid).dev(dev).pvid().untagged())
-            .await
+    pub async fn set_bridge_pvid(&self, dev: impl Into<InterfaceRef>, vid: u16) -> Result<()> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
+        self.add_bridge_vlan(
+            BridgeVlanBuilder::new(vid)
+                .ifindex(ifindex)
+                .pvid()
+                .untagged(),
+        )
+        .await
     }
 
     /// Set PVID for a bridge port by interface index.
@@ -679,8 +687,13 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.add_bridge_vlan_tagged("eth0", 200).await?;
     /// ```
-    pub async fn add_bridge_vlan_tagged(&self, dev: &str, vid: u16) -> Result<()> {
-        self.add_bridge_vlan(BridgeVlanBuilder::new(vid).dev(dev))
+    pub async fn add_bridge_vlan_tagged(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        vid: u16,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
+        self.add_bridge_vlan(BridgeVlanBuilder::new(vid).ifindex(ifindex))
             .await
     }
 
@@ -693,12 +706,17 @@ impl Connection<Route> {
     /// ```
     pub async fn add_bridge_vlan_range(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         vid_start: u16,
         vid_end: u16,
     ) -> Result<()> {
-        self.add_bridge_vlan(BridgeVlanBuilder::new(vid_start).dev(dev).range(vid_end))
-            .await
+        let ifindex = self.resolve_interface(&dev.into()).await?;
+        self.add_bridge_vlan(
+            BridgeVlanBuilder::new(vid_start)
+                .ifindex(ifindex)
+                .range(vid_end),
+        )
+        .await
     }
 
     // ========================================================================
@@ -718,10 +736,11 @@ impl Connection<Route> {
     ///     println!("VLAN {} -> VNI {}", t.vid, t.tunnel_id);
     /// }
     /// ```
-    pub async fn get_vlan_tunnels(&self, dev: &str) -> Result<Vec<BridgeVlanTunnelEntry>> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+    pub async fn get_vlan_tunnels(
+        &self,
+        dev: impl Into<InterfaceRef>,
+    ) -> Result<Vec<BridgeVlanTunnelEntry>> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.get_vlan_tunnels_by_index(ifindex).await
     }
 
@@ -782,10 +801,8 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_vlan_tunnel("vxlan0", 100).await?;
     /// ```
-    pub async fn del_vlan_tunnel(&self, dev: &str, vid: u16) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+    pub async fn del_vlan_tunnel(&self, dev: impl Into<InterfaceRef>, vid: u16) -> Result<()> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.del_vlan_tunnel_by_index(ifindex, vid).await
     }
 
@@ -806,14 +823,14 @@ impl Connection<Route> {
     /// ```
     pub async fn del_vlan_tunnel_range(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         vid_start: u16,
         vid_end: u16,
     ) -> Result<()> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         let config = BridgeVlanTunnelBuilder::new(vid_start, 0)
-            .dev(dev)
+            .ifindex(ifindex)
             .range(vid_end);
-        let ifindex = self.resolve_bridge_vlan_tunnel_interface(&config).await?;
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
         config.write_del(&mut builder, ifindex)?;
         self.send_ack(builder).await

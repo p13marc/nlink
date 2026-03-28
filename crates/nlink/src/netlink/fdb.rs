@@ -391,10 +391,8 @@ impl Connection<Route> {
     ///         entry.mac_str(), entry.ifindex, entry.vlan);
     /// }
     /// ```
-    pub async fn get_fdb(&self, bridge: &str) -> Result<Vec<FdbEntry>> {
-        let bridge_idx = self
-            .resolve_interface(&InterfaceRef::Name(bridge.to_string()))
-            .await?;
+    pub async fn get_fdb(&self, bridge: impl Into<InterfaceRef>) -> Result<Vec<FdbEntry>> {
+        let bridge_idx = self.resolve_interface(&bridge.into()).await?;
         self.get_fdb_by_index(bridge_idx).await
     }
 
@@ -444,13 +442,13 @@ impl Connection<Route> {
     /// ```ignore
     /// let entries = conn.get_fdb_for_port("br0", "veth0").await?;
     /// ```
-    pub async fn get_fdb_for_port(&self, bridge: &str, port: &str) -> Result<Vec<FdbEntry>> {
-        let bridge_idx = self
-            .resolve_interface(&InterfaceRef::Name(bridge.to_string()))
-            .await?;
-        let port_idx = self
-            .resolve_interface(&InterfaceRef::Name(port.to_string()))
-            .await?;
+    pub async fn get_fdb_for_port(
+        &self,
+        bridge: impl Into<InterfaceRef>,
+        port: impl Into<InterfaceRef>,
+    ) -> Result<Vec<FdbEntry>> {
+        let bridge_idx = self.resolve_interface(&bridge.into()).await?;
+        let port_idx = self.resolve_interface(&port.into()).await?;
 
         let neighbors = self.get_bridge_neighbors().await?;
 
@@ -537,10 +535,13 @@ impl Connection<Route> {
     /// // Delete entry with specific VLAN
     /// conn.del_fdb("veth0", [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], Some(100)).await?;
     /// ```
-    pub async fn del_fdb(&self, dev: &str, mac: [u8; 6], vlan: Option<u16>) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+    pub async fn del_fdb(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        mac: [u8; 6],
+        vlan: Option<u16>,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.del_fdb_by_index(ifindex, mac, vlan).await
     }
 
@@ -571,7 +572,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.flush_fdb("br0").await?;
     /// ```
-    pub async fn flush_fdb(&self, bridge: &str) -> Result<()> {
+    pub async fn flush_fdb(&self, bridge: impl Into<InterfaceRef>) -> Result<()> {
         let entries = self.get_fdb(bridge).await?;
 
         for entry in entries {

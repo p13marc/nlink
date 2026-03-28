@@ -612,9 +612,20 @@ impl Connection<Route> {
     /// Get a network interface by name.
     ///
     /// Returns `None` if the interface doesn't exist.
-    pub async fn get_link_by_name(&self, name: &str) -> Result<Option<LinkMessage>> {
-        let links = self.get_links().await?;
-        Ok(links.into_iter().find(|l| l.name.as_deref() == Some(name)))
+    pub async fn get_link_by_name(
+        &self,
+        name: impl Into<InterfaceRef>,
+    ) -> Result<Option<LinkMessage>> {
+        let iface = name.into();
+        match iface {
+            InterfaceRef::Name(ref name_str) => {
+                let links = self.get_links().await?;
+                Ok(links
+                    .into_iter()
+                    .find(|l| l.name.as_deref() == Some(name_str)))
+            }
+            InterfaceRef::Index(idx) => self.get_link_by_index(idx).await,
+        }
     }
 
     /// Get a network interface by index.
@@ -1193,10 +1204,12 @@ impl Connection<Route> {
     ///     println!("Chain: {}", chain);
     /// }
     /// ```
-    pub async fn get_tc_chains(&self, ifname: &str, parent: &str) -> Result<Vec<u32>> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    pub async fn get_tc_chains(
+        &self,
+        ifname: impl Into<InterfaceRef>,
+        parent: &str,
+    ) -> Result<Vec<u32>> {
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
         self.get_tc_chains_by_index(ifindex, parent).await
     }
 
@@ -1243,10 +1256,13 @@ impl Connection<Route> {
     /// // Create chain 100 on ingress qdisc
     /// conn.add_tc_chain("eth0", "ingress", 100).await?;
     /// ```
-    pub async fn add_tc_chain(&self, ifname: &str, parent: &str, chain: u32) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    pub async fn add_tc_chain(
+        &self,
+        ifname: impl Into<InterfaceRef>,
+        parent: &str,
+        chain: u32,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
         self.add_tc_chain_by_index(ifindex, parent, chain).await
     }
 
@@ -1282,10 +1298,13 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_tc_chain("eth0", "ingress", 100).await?;
     /// ```
-    pub async fn del_tc_chain(&self, ifname: &str, parent: &str, chain: u32) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
-            .await?;
+    pub async fn del_tc_chain(
+        &self,
+        ifname: impl Into<InterfaceRef>,
+        parent: &str,
+        chain: u32,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
         self.del_tc_chain_by_index(ifindex, parent, chain).await
     }
 

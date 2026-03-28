@@ -3307,21 +3307,23 @@ impl Connection<Route> {
     ///
     /// conn.add_qdisc("eth0", netem).await?;
     /// ```
-    pub async fn add_qdisc(&self, dev: &str, config: impl QdiscConfig) -> Result<()> {
+    pub async fn add_qdisc(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        config: impl QdiscConfig,
+    ) -> Result<()> {
         self.add_qdisc_full(dev, "root", None, config).await
     }
 
     /// Add a qdisc with explicit parent and handle.
     pub async fn add_qdisc_full(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         handle: Option<&str>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.add_qdisc_by_index_full(ifindex, parent, handle, config)
             .await
     }
@@ -3385,20 +3387,18 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_qdisc("eth0", "root").await?;
     /// ```
-    pub async fn del_qdisc(&self, dev: &str, parent: &str) -> Result<()> {
+    pub async fn del_qdisc(&self, dev: impl Into<InterfaceRef>, parent: &str) -> Result<()> {
         self.del_qdisc_full(dev, parent, None).await
     }
 
     /// Delete a qdisc with explicit handle.
     pub async fn del_qdisc_full(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         handle: Option<&str>,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.del_qdisc_by_index_full(ifindex, parent, handle).await
     }
 
@@ -3451,21 +3451,23 @@ impl Connection<Route> {
     ///
     /// conn.replace_qdisc("eth0", netem).await?;
     /// ```
-    pub async fn replace_qdisc(&self, dev: &str, config: impl QdiscConfig) -> Result<()> {
+    pub async fn replace_qdisc(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        config: impl QdiscConfig,
+    ) -> Result<()> {
         self.replace_qdisc_full(dev, "root", None, config).await
     }
 
     /// Replace a qdisc with explicit parent and handle.
     pub async fn replace_qdisc_full(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         handle: Option<&str>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.replace_qdisc_by_index_full(ifindex, parent, handle, config)
             .await
     }
@@ -3523,7 +3525,7 @@ impl Connection<Route> {
     /// ```
     pub async fn change_qdisc(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         config: impl QdiscConfig,
     ) -> Result<()> {
@@ -3533,14 +3535,12 @@ impl Connection<Route> {
     /// Change a qdisc with explicit handle.
     pub async fn change_qdisc_full(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         handle: Option<&str>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.change_qdisc_by_index_full(ifindex, parent, handle, config)
             .await
     }
@@ -3615,8 +3615,13 @@ impl Connection<Route> {
     ///
     /// conn.apply_netem("eth0", netem).await?;
     /// ```
-    pub async fn apply_netem(&self, dev: &str, config: NetemConfig) -> Result<()> {
-        match self.replace_qdisc(dev, config.clone()).await {
+    pub async fn apply_netem(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        config: NetemConfig,
+    ) -> Result<()> {
+        let dev = dev.into();
+        match self.replace_qdisc(dev.clone(), config.clone()).await {
             Ok(()) => Ok(()),
             Err(e) if e.is_not_found() => self.add_qdisc(dev, config).await,
             Err(e) => Err(e),
@@ -3645,7 +3650,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_netem("eth0").await?;
     /// ```
-    pub async fn del_netem(&self, dev: &str) -> Result<()> {
+    pub async fn del_netem(&self, dev: impl Into<InterfaceRef>) -> Result<()> {
         self.del_qdisc(dev, "root").await
     }
 
@@ -3678,15 +3683,13 @@ impl Connection<Route> {
     /// ```
     pub async fn add_class(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         classid: &str,
         kind: &str,
         params: &[&str],
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.add_class_by_index(ifindex, parent, classid, kind, params)
             .await
     }
@@ -3728,10 +3731,13 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_class("eth0", "1:0", "1:10").await?;
     /// ```
-    pub async fn del_class(&self, dev: &str, parent: &str, classid: &str) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+    pub async fn del_class(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        parent: &str,
+        classid: &str,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.del_class_by_index(ifindex, parent, classid).await
     }
 
@@ -3766,15 +3772,13 @@ impl Connection<Route> {
     /// ```
     pub async fn change_class(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         classid: &str,
         kind: &str,
         params: &[&str],
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.change_class_by_index(ifindex, parent, classid, kind, params)
             .await
     }
@@ -3816,15 +3820,13 @@ impl Connection<Route> {
     /// ```
     pub async fn replace_class(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         classid: &str,
         kind: &str,
         params: &[&str],
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.replace_class_by_index(ifindex, parent, classid, kind, params)
             .await
     }
@@ -3887,14 +3889,12 @@ impl Connection<Route> {
     /// ```
     pub async fn add_class_config<C: ClassConfig>(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         classid: &str,
         config: C,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.add_class_config_by_index(ifindex, parent, classid, config)
             .await
     }
@@ -3943,14 +3943,12 @@ impl Connection<Route> {
     /// ```
     pub async fn change_class_config<C: ClassConfig>(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         classid: &str,
         config: C,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.change_class_config_by_index(ifindex, parent, classid, config)
             .await
     }
@@ -3996,14 +3994,12 @@ impl Connection<Route> {
     /// ```
     pub async fn replace_class_config<C: ClassConfig>(
         &self,
-        dev: &str,
+        dev: impl Into<InterfaceRef>,
         parent: &str,
         classid: &str,
         config: C,
     ) -> Result<()> {
-        let ifindex = self
-            .resolve_interface(&InterfaceRef::Name(dev.to_string()))
-            .await?;
+        let ifindex = self.resolve_interface(&dev.into()).await?;
         self.replace_class_config_by_index(ifindex, parent, classid, config)
             .await
     }

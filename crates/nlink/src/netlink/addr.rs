@@ -680,17 +680,15 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_address("eth0", IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 24).await?;
     /// ```
-    pub async fn del_address(&self, ifname: &str, address: IpAddr, prefix_len: u8) -> Result<()> {
-        match address {
-            IpAddr::V4(addr) => {
-                let config = Ipv4Address::new(ifname, addr, prefix_len);
-                self.del_address_config(config).await
-            }
-            IpAddr::V6(addr) => {
-                let config = Ipv6Address::new(ifname, addr, prefix_len);
-                self.del_address_config(config).await
-            }
-        }
+    pub async fn del_address(
+        &self,
+        ifname: impl Into<InterfaceRef>,
+        address: IpAddr,
+        prefix_len: u8,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
+        self.del_address_by_index(ifindex, address, prefix_len)
+            .await
     }
 
     /// Delete an IP address from an interface by index.
@@ -777,11 +775,11 @@ impl Connection<Route> {
     /// ```
     pub async fn add_address_by_name(
         &self,
-        ifname: &str,
+        ifname: impl Into<InterfaceRef>,
         address: IpAddr,
         prefix_len: u8,
     ) -> Result<()> {
-        let ifindex = self.resolve_interface(&InterfaceRef::name(ifname)).await?;
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
         self.add_address_by_index(ifindex, address, prefix_len)
             .await
     }
@@ -798,11 +796,11 @@ impl Connection<Route> {
     /// ```
     pub async fn replace_address_by_name(
         &self,
-        ifname: &str,
+        ifname: impl Into<InterfaceRef>,
         address: IpAddr,
         prefix_len: u8,
     ) -> Result<()> {
-        let ifindex = self.resolve_interface(&InterfaceRef::name(ifname)).await?;
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
         self.replace_address_by_index(ifindex, address, prefix_len)
             .await
     }
@@ -810,22 +808,24 @@ impl Connection<Route> {
     /// Delete an IPv4 address from an interface.
     pub async fn del_address_v4(
         &self,
-        ifname: &str,
+        ifname: impl Into<InterfaceRef>,
         address: Ipv4Addr,
         prefix_len: u8,
     ) -> Result<()> {
-        let config = Ipv4Address::new(ifname, address, prefix_len);
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
+        let config = Ipv4Address::with_index(ifindex, address, prefix_len);
         self.del_address_config(config).await
     }
 
     /// Delete an IPv6 address from an interface.
     pub async fn del_address_v6(
         &self,
-        ifname: &str,
+        ifname: impl Into<InterfaceRef>,
         address: Ipv6Addr,
         prefix_len: u8,
     ) -> Result<()> {
-        let config = Ipv6Address::new(ifname, address, prefix_len);
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
+        let config = Ipv6Address::with_index(ifindex, address, prefix_len);
         self.del_address_config(config).await
     }
 
@@ -872,8 +872,8 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.flush_addresses("eth0").await?;
     /// ```
-    pub async fn flush_addresses(&self, ifname: &str) -> Result<()> {
-        let ifindex = self.resolve_interface(&InterfaceRef::name(ifname)).await?;
+    pub async fn flush_addresses(&self, ifname: impl Into<InterfaceRef>) -> Result<()> {
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
         self.flush_addresses_by_index(ifindex).await
     }
 

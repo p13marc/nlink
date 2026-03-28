@@ -465,8 +465,13 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_neighbor_v4("eth0", Ipv4Addr::new(192, 168, 1, 100)).await?;
     /// ```
-    pub async fn del_neighbor_v4(&self, ifname: &str, destination: Ipv4Addr) -> Result<()> {
-        let neigh = Neighbor::new_v4(ifname, destination);
+    pub async fn del_neighbor_v4(
+        &self,
+        ifname: impl Into<InterfaceRef>,
+        destination: Ipv4Addr,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
+        let neigh = Neighbor::with_index_v4(ifindex, destination);
         self.del_neighbor(neigh).await
     }
 
@@ -481,8 +486,13 @@ impl Connection<Route> {
     }
 
     /// Delete an IPv6 neighbor entry.
-    pub async fn del_neighbor_v6(&self, ifname: &str, destination: Ipv6Addr) -> Result<()> {
-        let neigh = Neighbor::new_v6(ifname, destination);
+    pub async fn del_neighbor_v6(
+        &self,
+        ifname: impl Into<InterfaceRef>,
+        destination: Ipv6Addr,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
+        let neigh = Neighbor::with_index_v6(ifindex, destination);
         self.del_neighbor(neigh).await
     }
 
@@ -544,8 +554,8 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.flush_neighbors("eth0").await?;
     /// ```
-    pub async fn flush_neighbors(&self, ifname: &str) -> Result<()> {
-        let ifindex = self.resolve_interface(&InterfaceRef::name(ifname)).await?;
+    pub async fn flush_neighbors(&self, ifname: impl Into<InterfaceRef>) -> Result<()> {
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
         self.flush_neighbors_by_index(ifindex).await
     }
 
@@ -580,8 +590,13 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.add_proxy_arp("eth0", Ipv4Addr::new(192, 168, 1, 100)).await?;
     /// ```
-    pub async fn add_proxy_arp(&self, ifname: &str, destination: Ipv4Addr) -> Result<()> {
-        let neigh = Neighbor::new_v4(ifname, destination).proxy();
+    pub async fn add_proxy_arp(
+        &self,
+        ifname: impl Into<InterfaceRef>,
+        destination: Ipv4Addr,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
+        let neigh = Neighbor::with_index_v4(ifindex, destination).proxy();
         self.add_neighbor(neigh).await
     }
 
@@ -592,8 +607,13 @@ impl Connection<Route> {
     }
 
     /// Delete a proxy ARP entry.
-    pub async fn del_proxy_arp(&self, ifname: &str, destination: Ipv4Addr) -> Result<()> {
-        let neigh = Neighbor::new_v4(ifname, destination).proxy();
+    pub async fn del_proxy_arp(
+        &self,
+        ifname: impl Into<InterfaceRef>,
+        destination: Ipv4Addr,
+    ) -> Result<()> {
+        let ifindex = self.resolve_interface(&ifname.into()).await?;
+        let neigh = Neighbor::with_index_v4(ifindex, destination).proxy();
         self.del_neighbor(neigh).await
     }
 

@@ -202,11 +202,7 @@ impl Connection<Wireguard> {
     }
 
     /// Remove a peer by public key using interface name.
-    pub async fn del_peer_by_name(
-        &self,
-        ifname: &str,
-        public_key: [u8; WG_KEY_LEN],
-    ) -> Result<()> {
+    pub async fn del_peer_by_name(&self, ifname: &str, public_key: [u8; WG_KEY_LEN]) -> Result<()> {
         let peer_builder = super::types::WgPeerBuilder::new(public_key).remove();
         let device_builder = WgDeviceBuilder::new().peer(peer_builder);
         self.apply_device_config(ifname, &device_builder).await
