@@ -48,7 +48,7 @@ bytes = "1"
 libc = "0.2"
 
 # Parser combinators
-winnow = "0.7"
+winnow = "1.0"
 
 # Zero-copy serialization
 zerocopy = { version = "0.8", features = ["derive"] }
