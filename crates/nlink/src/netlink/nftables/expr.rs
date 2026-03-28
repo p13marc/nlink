@@ -6,6 +6,7 @@ use crate::netlink::builder::MessageBuilder;
 
 /// A single nftables expression.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Expr {
     /// Load metadata into a register.
     Meta { dreg: Register, key: MetaKey },

@@ -56,6 +56,9 @@ async fn main() -> nlink::Result<()> {
                 SELinuxEvent::PolicyLoad { seqno } => {
                     println!("[POLICYLOAD] SELinux policy loaded (seqno: {})", seqno);
                 }
+                _ => {
+                    println!("[UNKNOWN] Unrecognized SELinux event: {:?}", event);
+                }
             },
             Err(e) => {
                 eprintln!("Error receiving event: {}", e);

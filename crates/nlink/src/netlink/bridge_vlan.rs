@@ -148,6 +148,7 @@ pub struct BridgeVlanTunnelEntry {
 ///     .range(210);
 /// ```
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct BridgeVlanTunnelBuilder {
     dev: Option<InterfaceRef>,
     vid: u16,
@@ -308,6 +309,7 @@ impl BridgeVlanTunnelBuilder {
 ///     .range(210);
 /// ```
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct BridgeVlanBuilder {
     dev: Option<InterfaceRef>,
     vid: u16,

@@ -98,6 +98,7 @@ pub trait FilterConfig: Send + Sync {
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct U32Filter {
     /// Target class ID.
     classid: Option<u32>,
@@ -319,6 +320,7 @@ impl FilterConfig for U32Filter {
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct FlowerFilter {
     /// Target class ID.
     classid: Option<u32>,
@@ -763,6 +765,7 @@ impl FilterConfig for FlowerFilter {
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct MatchallFilter {
     /// Target class ID.
     classid: Option<u32>,
@@ -911,6 +914,7 @@ impl FilterConfig for MatchallFilter {
 ///     .build();
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct FwFilter {
     /// Mask for the mark.
     mask: u32,
@@ -1019,6 +1023,7 @@ impl FilterConfig for FwFilter {
 ///     .build();
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct BpfFilter {
     /// BPF program file descriptor.
     fd: i32,
@@ -1177,6 +1182,7 @@ impl FilterConfig for BpfFilter {
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct BasicFilter {
     /// Target class ID.
     classid: Option<u32>,
@@ -1281,6 +1287,7 @@ impl FilterConfig for BasicFilter {
 ///     .with_action(GactAction::drop());
 /// ```
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct CgroupFilter {
     /// Actions to attach.
     actions: Option<super::action::ActionList>,
@@ -1371,6 +1378,7 @@ impl FilterConfig for CgroupFilter {
 ///     .classid("1:20");
 /// ```
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct RouteFilter {
     /// Target class ID.
     classid: Option<u32>,
@@ -1542,6 +1550,7 @@ impl FilterConfig for RouteFilter {
 ///     .build();
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct FlowFilter {
     /// Key mask (which fields to use).
     keys: u32,
@@ -1573,6 +1582,7 @@ pub struct FlowFilter {
 
 /// Flow filter keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FlowKey {
     /// Source address.
     Src,
@@ -2327,6 +2337,7 @@ impl Connection<Route> {
 
 /// Direction for BPF program attachment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BpfDirection {
     /// Ingress (clsact ingress hook).
     Ingress,

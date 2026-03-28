@@ -163,6 +163,7 @@ pub trait LinkConfig: Send + Sync {
 /// conn.add_link(dummy).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct DummyLink {
     name: String,
     mtu: Option<u32>,
@@ -233,6 +234,7 @@ impl LinkConfig for DummyLink {
 /// // Now veth0 and veth1 are connected
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct VethLink {
     name: String,
     peer_name: String,
@@ -383,6 +385,7 @@ impl LinkConfig for VethLink {
 /// conn.add_link(bridge).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct BridgeLink {
     name: String,
     mtu: Option<u32>,
@@ -586,6 +589,7 @@ impl LinkConfig for BridgeLink {
 /// conn.add_link(vlan).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct VlanLink {
     name: String,
     parent: InterfaceRef,
@@ -807,6 +811,7 @@ impl LinkConfig for VlanLink {
 /// conn.add_link(vxlan).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct VxlanLink {
     name: String,
     vni: u32,
@@ -1101,6 +1106,7 @@ impl LinkConfig for VxlanLink {
 
 /// Macvlan mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MacvlanMode {
     /// Private mode - no communication with other macvlans
     Private = 1,
@@ -1129,6 +1135,7 @@ pub enum MacvlanMode {
 /// conn.add_link(macvlan).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct MacvlanLink {
     name: String,
     parent: InterfaceRef,
@@ -1234,6 +1241,7 @@ impl LinkConfig for MacvlanLink {
 
 /// Ipvlan mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IpvlanMode {
     /// L2 mode
     L2 = 0,
@@ -1245,6 +1253,7 @@ pub enum IpvlanMode {
 
 /// Ipvlan flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IpvlanFlags {
     /// Bridge mode
     Bridge = 0,
@@ -1269,6 +1278,7 @@ pub enum IpvlanFlags {
 /// conn.add_link(ipvlan).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct IpvlanLink {
     name: String,
     parent: InterfaceRef,
@@ -1388,6 +1398,7 @@ impl LinkConfig for IpvlanLink {
 /// // Then redirect ingress traffic to ifb0 for shaping
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct IfbLink {
     name: String,
     mtu: Option<u32>,
@@ -1443,6 +1454,7 @@ impl LinkConfig for IfbLink {
 /// conn.add_link(macvtap).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct MacvtapLink {
     name: String,
     parent: InterfaceRef,
@@ -1559,6 +1571,7 @@ impl LinkConfig for MacvtapLink {
 /// conn.add_link(geneve).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct GeneveLink {
     name: String,
     vni: u32,
@@ -1593,6 +1606,7 @@ pub struct GeneveLink {
 
 /// Geneve DF (Don't Fragment) setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GeneveDf {
     /// Don't set DF
     Unset = 0,
@@ -1849,6 +1863,7 @@ impl LinkConfig for GeneveLink {
 /// conn.add_link(bareudp).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct BareudpLink {
     name: String,
     /// UDP destination port
@@ -1974,6 +1989,7 @@ impl LinkConfig for BareudpLink {
 /// conn.add_link(netkit).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct NetkitLink {
     name: String,
     peer_name: String,
@@ -1987,6 +2003,7 @@ pub struct NetkitLink {
 
 /// Netkit operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NetkitMode {
     /// L2 mode (Ethernet frames)
     L2 = 0,
@@ -1996,6 +2013,7 @@ pub enum NetkitMode {
 
 /// Netkit default policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NetkitPolicy {
     /// Forward packets (default)
     Forward = 0,
@@ -2165,6 +2183,7 @@ impl LinkConfig for NetkitLink {
 /// // tcpdump -i nlmon0 -w netlink.pcap
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct NlmonLink {
     name: String,
 }
@@ -2209,6 +2228,7 @@ impl LinkConfig for NlmonLink {
 /// conn.add_link(vwifi).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct VirtWifiLink {
     name: String,
     link: InterfaceRef,
@@ -2291,6 +2311,7 @@ impl LinkConfig for VirtWifiLink {
 /// conn.add_link(vti).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct VtiLink {
     name: String,
     local: Option<Ipv4Addr>,
@@ -2431,6 +2452,7 @@ impl LinkConfig for VtiLink {
 /// conn.add_link(vti6).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct Vti6Link {
     name: String,
     local: Option<std::net::Ipv6Addr>,
@@ -2562,6 +2584,7 @@ impl LinkConfig for Vti6Link {
 /// conn.add_link(gre).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct Ip6GreLink {
     name: String,
     local: Option<std::net::Ipv6Addr>,
@@ -2762,6 +2785,7 @@ impl LinkConfig for Ip6GreLink {
 /// conn.add_link(gretap).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct Ip6GretapLink {
     name: String,
     local: Option<std::net::Ipv6Addr>,
@@ -2900,6 +2924,7 @@ pub mod bond_mode {
 /// Determines how traffic is distributed across slave interfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum BondMode {
     /// Round-robin: packets transmitted in sequential order.
     BalanceRr = 0,
@@ -2938,6 +2963,7 @@ impl TryFrom<u8> for BondMode {
 /// Transmit hash policy for XOR/LACP modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum XmitHashPolicy {
     /// Hash by L2 (MAC) addresses.
     Layer2 = 0,
@@ -2973,6 +2999,7 @@ impl TryFrom<u8> for XmitHashPolicy {
 /// LACP rate for 802.3ad mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum LacpRate {
     /// Send LACPDUs every 30 seconds.
     Slow = 0,
@@ -3098,6 +3125,7 @@ mod bond_attr {
 /// conn.add_link(bond).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct BondLink {
     name: String,
     mode: BondMode,
@@ -3496,6 +3524,7 @@ mod vrf_attr {
 /// conn.add_link(vrf).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct VrfLink {
     name: String,
     table: u32,
@@ -3566,6 +3595,7 @@ impl LinkConfig for VrfLink {
 /// conn.add_link(gre).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct GreLink {
     name: String,
     local: Option<Ipv4Addr>,
@@ -3759,6 +3789,7 @@ impl LinkConfig for GreLink {
 /// conn.add_link(gretap).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct GretapLink {
     name: String,
     local: Option<Ipv4Addr>,
@@ -3941,6 +3972,7 @@ impl LinkConfig for GretapLink {
 /// conn.add_link(ipip).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct IpipLink {
     name: String,
     local: Option<Ipv4Addr>,
@@ -4096,6 +4128,7 @@ impl LinkConfig for IpipLink {
 /// conn.add_link(sit).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct SitLink {
     name: String,
     local: Option<Ipv4Addr>,
@@ -4264,6 +4297,7 @@ impl LinkConfig for SitLink {
 /// wg_conn.set_device("wg0", |dev| dev.private_key(key)).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct WireguardLink {
     name: String,
     mtu: Option<u32>,

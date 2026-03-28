@@ -62,6 +62,7 @@ const NLMSG_HDRLEN: usize = 16;
 
 /// A process lifecycle event.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ProcEvent {
     /// No event (acknowledgment).
     None,

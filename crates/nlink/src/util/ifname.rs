@@ -5,6 +5,7 @@ pub const IFNAMSIZ: usize = 16;
 
 /// Error type for interface operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum IfError {
     #[error("interface not found: {0}")]
     NotFound(String),

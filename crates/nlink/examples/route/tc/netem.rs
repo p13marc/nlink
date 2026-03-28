@@ -140,6 +140,7 @@ async fn show_netem(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Resu
                                 println!("  loss model: Gilbert-Elliot (2-state)");
                                 println!("    p={:.2}% r={:.2}% h={:.2}% k1={:.2}%", p, r, h, k1);
                             }
+                            _ => {}
                         }
                     }
                 }

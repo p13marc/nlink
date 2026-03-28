@@ -36,6 +36,7 @@ use super::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage
 /// which event types to receive, then use [`Connection::events`](super::Connection::events)
 /// to get a stream of events.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum NetworkEvent {
     // Link events
     /// A new link was created or an existing link changed.

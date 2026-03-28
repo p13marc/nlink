@@ -287,6 +287,7 @@ impl LinkModes {
 
 /// Builder for setting link modes.
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct LinkModesBuilder {
     pub(crate) autoneg: Option<bool>,
     pub(crate) speed: Option<u32>,
@@ -392,6 +393,7 @@ impl Features {
 
 /// Builder for setting features.
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct FeaturesBuilder {
     pub(crate) enable: Vec<String>,
     pub(crate) disable: Vec<String>,
@@ -457,6 +459,7 @@ pub struct Rings {
 
 /// Builder for setting ring sizes.
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct RingsBuilder {
     pub(crate) rx: Option<u32>,
     pub(crate) rx_mini: Option<u32>,
@@ -528,6 +531,7 @@ pub struct Channels {
 
 /// Builder for setting channel counts.
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct ChannelsBuilder {
     pub(crate) rx: Option<u32>,
     pub(crate) tx: Option<u32>,
@@ -609,6 +613,7 @@ pub struct Coalesce {
 
 /// Builder for setting coalescing parameters.
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct CoalesceBuilder {
     pub(crate) rx_usecs: Option<u32>,
     pub(crate) rx_max_frames: Option<u32>,
@@ -693,6 +698,7 @@ pub struct PauseStats {
 
 /// Builder for setting pause parameters.
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct PauseBuilder {
     pub(crate) autoneg: Option<bool>,
     pub(crate) rx: Option<bool>,
@@ -757,6 +763,7 @@ impl StringSet {
 
 /// Ethtool event received from the monitor multicast group.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum EthtoolEvent {
     /// Link info changed.
     LinkInfoChanged {

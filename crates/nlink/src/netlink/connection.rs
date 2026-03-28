@@ -366,6 +366,7 @@ impl<P: ProtocolState> Connection<P> {
 /// let mut events = conn.events();
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RtnetlinkGroup {
     /// Link (interface) state changes (RTM_NEWLINK, RTM_DELLINK).
     Link,

@@ -249,6 +249,7 @@ pub mod iff {
 
 /// Operational state (IF_OPER_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 #[repr(u8)]
 pub enum OperState {
     Unknown = 0,

@@ -182,6 +182,7 @@ impl FdbEntry {
 ///     .dst(Ipv4Addr::new(192, 168, 1, 100).into());
 /// ```
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct FdbEntryBuilder {
     mac: [u8; 6],
     dev: Option<InterfaceRef>,

@@ -303,6 +303,7 @@ pub struct ParamValue {
 
 /// Parameter data variants.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ParamData {
     U8(u8),
     U16(u16),
@@ -353,6 +354,7 @@ impl ParamData {
 
 /// Devlink event received from the multicast group.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum DevlinkEvent {
     /// New devlink device appeared.
     NewDevice {
@@ -450,6 +452,7 @@ impl FlashProgress {
 /// Reload action for `reload()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum ReloadAction {
     /// Reload the driver.
     DriverReinit = 1,

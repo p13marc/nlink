@@ -70,6 +70,7 @@ pub struct SelnlMsgPolicyload {
 
 /// SELinux event received from the kernel.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SELinuxEvent {
     /// SELinux enforcement mode changed.
     SetEnforce {

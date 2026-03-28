@@ -168,6 +168,9 @@ fn print_nexthop(nh: &Nexthop) {
                         }
                     }
                 }
+                _ => {
+                    print!("type unknown ");
+                }
             }
         }
     } else {
@@ -251,6 +254,7 @@ fn nexthops_to_json(nexthops: &[Nexthop]) -> Vec<serde_json::Value> {
                     obj["type"] = match gt {
                         nlink::netlink::nexthop::NexthopGroupType::Multipath => "mpath".into(),
                         nlink::netlink::nexthop::NexthopGroupType::Resilient => "resilient".into(),
+                        _ => "unknown".into(),
                     };
                 }
                 if let Some(ref res) = nh.resilient {

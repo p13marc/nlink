@@ -197,6 +197,7 @@ async fn main() -> nlink::netlink::Result<()> {
                     fdb.vlan
                 );
             }
+            _ => {}
         }
     }
 

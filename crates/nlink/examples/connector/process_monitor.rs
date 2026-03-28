@@ -91,6 +91,7 @@ async fn main() -> nlink::Result<()> {
             ProcEvent::Unknown { what, .. } => {
                 println!("UNKNOWN: event type 0x{:08x}", what);
             }
+            _ => {}
         }
     }
 }

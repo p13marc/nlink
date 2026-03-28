@@ -105,6 +105,7 @@ impl MptcpEndpoint {
 
 /// Builder for MPTCP endpoint configuration.
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct MptcpEndpointBuilder {
     /// Endpoint ID (optional, kernel assigns if not set).
     pub(crate) id: Option<u8>,
@@ -298,6 +299,7 @@ impl From<std::net::SocketAddr> for MptcpAddress {
 ///     .remote_port(80);
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct MptcpSubflowBuilder {
     /// Connection token (identifies the MPTCP connection).
     pub(crate) token: u32,
@@ -410,6 +412,7 @@ impl MptcpSubflowBuilder {
 ///     .address(Ipv4Addr::new(192, 168, 2, 1).into());
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct MptcpAnnounceBuilder {
     /// Connection token.
     pub(crate) token: u32,

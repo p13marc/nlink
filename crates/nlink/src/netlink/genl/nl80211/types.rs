@@ -416,6 +416,7 @@ impl ScanRequest {
 
 /// nl80211 multicast events.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Nl80211Event {
     /// Scan completed successfully on an interface.
     ScanComplete {

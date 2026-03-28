@@ -54,6 +54,7 @@ use std::fmt;
 /// let from_u32: InterfaceRef = 2u32.into();
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum InterfaceRef {
     /// Interface specified by name (will be resolved via netlink).
     Name(String),

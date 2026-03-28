@@ -90,6 +90,7 @@ pub async fn run(args: CheckArgs, json: bool) -> Result<()> {
                     nlink::netlink::diagnostics::Severity::Warning => "[WARN]",
                     nlink::netlink::diagnostics::Severity::Error => "[ERROR]",
                     nlink::netlink::diagnostics::Severity::Critical => "[CRIT]",
+                    _ => "[????]",
                 };
                 println!("  {} {}", icon, issue.message);
                 if let Some(ref details) = issue.details {

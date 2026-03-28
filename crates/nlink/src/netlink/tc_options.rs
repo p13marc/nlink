@@ -30,6 +30,7 @@ use super::messages::TcMessage;
 
 /// Parsed qdisc options, strongly typed by qdisc kind.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum QdiscOptions {
     /// fq_codel - Fair Queue Controlled Delay
     FqCodel(FqCodelOptions),
@@ -304,6 +305,7 @@ pub struct NetemOptions {
 
 /// Netem loss model configuration.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum NetemLossModel {
     /// Gilbert-Intuitive 4-state loss model.
     ///

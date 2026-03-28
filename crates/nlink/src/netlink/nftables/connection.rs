@@ -775,6 +775,7 @@ fn attr_str(payload: &[u8]) -> Option<String> {
 ///
 /// All operations are queued and sent in a single batch wrapped with
 /// `NFNL_MSG_BATCH_BEGIN` / `NFNL_MSG_BATCH_END`.
+#[must_use = "builders do nothing unless used"]
 pub struct Transaction {
     messages: Vec<Vec<u8>>,
     seq_counter: u32,

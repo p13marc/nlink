@@ -82,6 +82,7 @@ const AF_INET6: u8 = 10;
 
 /// SRv6 encapsulation modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Srv6Mode {
     /// Inline mode: insert SRH into existing IPv6 packet.
     Inline,
@@ -127,6 +128,7 @@ impl Srv6Mode {
 
 /// SRv6 local action types.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Srv6Action {
     /// End: regular SID, pop and continue.
     End,
@@ -557,6 +559,7 @@ impl Srv6LocalRoute {
 ///     .dev("eth0");
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct Srv6LocalBuilder {
     /// Local SID.
     sid: Ipv6Addr,

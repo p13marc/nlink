@@ -30,6 +30,7 @@ const PARENT_DIR: &str = "/var/run";
 
 /// Events emitted when named namespaces change.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NamespaceEvent {
     /// A named namespace was created in /var/run/netns/
     Created { name: String },

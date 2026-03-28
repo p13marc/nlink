@@ -120,6 +120,7 @@ impl Policy {
 
 /// Rule verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Verdict {
     Accept,
     Drop,
@@ -322,6 +323,7 @@ pub struct Table {
 
 /// Chain configuration builder.
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct Chain {
     pub(crate) table: String,
     pub(crate) name: String,
@@ -407,6 +409,7 @@ pub struct ChainInfo {
 /// The builder automatically generates nftables expression sequences
 /// from high-level match/action methods.
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct Rule {
     pub(crate) table: String,
     pub(crate) chain: String,
@@ -1145,6 +1148,7 @@ impl SetKeyType {
 
 /// Set builder.
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct Set {
     pub(crate) table: String,
     pub(crate) name: String,

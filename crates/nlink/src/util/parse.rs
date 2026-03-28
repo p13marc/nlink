@@ -4,6 +4,7 @@ use std::time::Duration;
 
 /// Error type for parsing.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ParseError {
     #[error("invalid number: {0}")]
     InvalidNumber(String),

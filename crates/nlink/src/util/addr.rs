@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Error type for address parsing.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AddrError {
     #[error("invalid address: {0}")]
     InvalidAddress(String),

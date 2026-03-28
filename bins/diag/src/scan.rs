@@ -221,6 +221,7 @@ fn severity_icon(severity: Severity) -> &'static str {
         Severity::Warning => "[WARN]",
         Severity::Error => "[ERROR]",
         Severity::Critical => "[CRIT]",
+        _ => "[????]",
     }
 }
 

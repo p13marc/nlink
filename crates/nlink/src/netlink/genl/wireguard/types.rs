@@ -39,6 +39,7 @@ impl WgDevice {
 
 /// Builder for WgDevice configuration.
 #[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
 pub struct WgDeviceBuilder {
     private_key: Option<[u8; WG_KEY_LEN]>,
     listen_port: Option<u16>,
@@ -167,6 +168,7 @@ pub enum WgPeerFlags {
 
 /// Builder for configuring a WireGuard peer.
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct WgPeerBuilder {
     public_key: [u8; WG_KEY_LEN],
     preshared_key: Option<[u8; WG_KEY_LEN]>,

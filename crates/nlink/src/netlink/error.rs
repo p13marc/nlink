@@ -11,6 +11,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur during netlink operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// I/O error from socket operations.
     #[error("I/O error: {0}")]

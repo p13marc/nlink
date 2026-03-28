@@ -69,6 +69,7 @@ const NLM_F_REPLACE: u16 = 0x100;
 
 /// Nexthop group types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum NexthopGroupType {
     /// Multipath group with hash-threshold algorithm (default).
     #[default]
@@ -311,6 +312,7 @@ impl Nexthop {
 ///     .onlink();
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct NexthopBuilder {
     id: u32,
     gateway: Option<IpAddr>,
@@ -476,6 +478,7 @@ impl NexthopBuilder {
 ///     .idle_timer(120);
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct NexthopGroupBuilder {
     id: u32,
     group_type: NexthopGroupType,

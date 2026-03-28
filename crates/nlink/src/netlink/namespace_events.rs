@@ -39,6 +39,7 @@ use super::types::nsid::{RTM_DELNSID, RTM_NEWNSID, RTNLGRP_NSID};
 
 /// Namespace-related netlink events.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NamespaceNetlinkEvent {
     /// A new namespace ID was assigned.
     NewNsId {

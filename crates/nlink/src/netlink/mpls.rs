@@ -284,6 +284,7 @@ impl MplsEncap {
 
 /// MPLS forwarding action.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MplsAction {
     /// Pop the label and forward as IP.
     Pop,
@@ -430,6 +431,7 @@ impl MplsRoute {
 ///     .dev("eth0");
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct MplsRouteBuilder {
     /// Incoming label.
     label: u32,

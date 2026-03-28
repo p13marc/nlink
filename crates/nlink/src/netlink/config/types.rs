@@ -155,6 +155,7 @@ impl DeclaredLink {
 
 /// Link type for declared configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DeclaredLinkType {
     /// Dummy interface.
     Dummy,
@@ -200,6 +201,7 @@ impl DeclaredLinkType {
 
 /// Link state (up or down).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum LinkState {
     /// Interface should be up.
     Up,
@@ -212,6 +214,7 @@ pub enum LinkState {
 
 /// Macvlan mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum MacvlanMode {
     /// Private mode (no communication between macvlans).
     Private,
@@ -228,6 +231,7 @@ pub enum MacvlanMode {
 
 /// Bond mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum BondMode {
     /// Round-robin (balance-rr).
     #[default]
@@ -248,6 +252,7 @@ pub enum BondMode {
 
 /// Builder for link configuration.
 #[derive(Debug)]
+#[must_use = "builders do nothing unless used"]
 pub struct LinkBuilder {
     name: String,
     link_type: DeclaredLinkType,
@@ -583,6 +588,7 @@ impl DeclaredRoute {
 
 /// Route type for declared configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum DeclaredRouteType {
     /// Normal unicast route.
     #[default]
@@ -617,6 +623,7 @@ pub enum RouteParseError {
 
 /// Builder for route configuration.
 #[derive(Debug)]
+#[must_use = "builders do nothing unless used"]
 pub struct RouteBuilder {
     destination: IpAddr,
     prefix_len: u8,
@@ -758,6 +765,7 @@ pub enum QdiscParent {
 
 /// Qdisc type for declared configuration.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum DeclaredQdiscType {
     /// Network emulator.
     Netem {
@@ -808,6 +816,7 @@ impl DeclaredQdiscType {
 
 /// Builder for qdisc configuration.
 #[derive(Debug)]
+#[must_use = "builders do nothing unless used"]
 pub struct QdiscBuilder {
     dev: String,
     parent: QdiscParent,

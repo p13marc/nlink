@@ -132,6 +132,7 @@ fn print_event(event: &EthtoolEvent) {
         EthtoolEvent::Unknown { cmd } => {
             println!("[?] Unknown event: cmd={}", cmd);
         }
+        _ => {}
     }
     println!();
 }

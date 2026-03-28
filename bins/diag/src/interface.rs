@@ -166,6 +166,7 @@ pub async fn run(args: InterfaceArgs, json: bool) -> Result<()> {
                         Severity::Warning => "[WARN]",
                         Severity::Error => "[ERROR]",
                         Severity::Critical => "[CRIT]",
+                        _ => "[????]",
                     };
                     println!("  {} {}", icon, issue.message);
                     if let Some(ref details) = issue.details {

@@ -531,6 +531,7 @@ pub struct HostRule {
 
 /// Match condition for per-host limiting.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum HostMatch {
     /// Match a specific IP address.
     Ip(IpAddr),

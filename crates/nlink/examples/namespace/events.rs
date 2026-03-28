@@ -34,6 +34,7 @@ async fn main() -> nlink::netlink::Result<()> {
             NamespaceNetlinkEvent::DelNsId { nsid } => {
                 println!("[-] Deleted namespace ID: {}", nsid);
             }
+            _ => {}
         }
     }
 

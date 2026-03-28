@@ -62,6 +62,7 @@ pub async fn run(args: WatchArgs, json: bool) -> Result<()> {
                 Severity::Warning => "[WARN]",
                 Severity::Error => "[ERROR]",
                 Severity::Critical => "[CRIT]",
+                _ => "[????]",
             };
 
             let iface = issue

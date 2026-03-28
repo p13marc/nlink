@@ -239,6 +239,7 @@ pub struct MacsecRxSa {
 ///     .active(true);
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct MacsecSaBuilder {
     /// Association Number (0-3).
     an: u8,
@@ -380,6 +381,6 @@ mod tests {
     #[should_panic(expected = "Association Number must be 0-3")]
     fn test_sa_builder_invalid_an() {
         let key = [0u8; 16];
-        MacsecSaBuilder::new(4, &key);
+        let _ = MacsecSaBuilder::new(4, &key);
     }
 }

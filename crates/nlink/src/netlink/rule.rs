@@ -46,6 +46,7 @@ const AF_INET6: u8 = 10;
 
 /// Builder for routing rules.
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct RuleBuilder {
     family: u8,
     priority: Option<u32>,

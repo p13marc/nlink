@@ -15,6 +15,7 @@ use super::error::{Error, Result};
 
 /// Netlink protocol families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Protocol {
     /// Routing/device hook (ip, tc, etc.)
     Route,

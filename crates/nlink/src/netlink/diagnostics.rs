@@ -229,6 +229,7 @@ impl fmt::Display for Issue {
 
 /// Issue severity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum Severity {
     /// Informational message.
     Info,
@@ -253,6 +254,7 @@ impl fmt::Display for Severity {
 
 /// Category of detected issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum IssueCategory {
     /// Interface is down.
     LinkDown,
@@ -353,6 +355,7 @@ pub struct Bottleneck {
 
 /// Type of bottleneck detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BottleneckType {
     /// Qdisc is dropping packets.
     QdiscDrops,
@@ -384,6 +387,7 @@ impl fmt::Display for BottleneckType {
 
 /// Configuration for issue detection thresholds.
 #[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
 pub struct DiagnosticsConfig {
     /// Packet loss threshold as fraction (default: 0.01 = 1%).
     pub packet_loss_threshold: f64,
