@@ -43,8 +43,8 @@ async fn main() -> nlink::netlink::Result<()> {
         Some("add-slave") => {
             let bond = args.get(2).expect("usage: add-slave <bond> <iface>");
             let iface = args.get(3).expect("usage: add-slave <bond> <iface>");
-            conn.set_link_down(iface.as_str()).await?;
-            conn.set_link_master(iface.as_str(), bond.as_str()).await?;
+            // enslave() handles the required down/master/up sequence automatically
+            conn.enslave(iface.as_str(), bond.as_str()).await?;
             println!("Added {} as slave of {}", iface, bond);
         }
         Some("show") => {

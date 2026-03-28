@@ -8,7 +8,8 @@
 //! Requires root privileges.
 
 use nlink::netlink::nftables::{
-    Chain, ChainType, CtState, Family, Hook, Policy, Priority, Rule, Set, SetElement, SetKeyType,
+    Chain, ChainType, CtState, Family, Hook, LimitUnit, Policy, Priority, Rule, Set, SetElement,
+    SetKeyType,
 };
 use nlink::netlink::{Connection, Nftables};
 use std::net::Ipv4Addr;
@@ -61,6 +62,59 @@ async fn main() -> nlink::netlink::Result<()> {
     )
     .await?;
     println!("Added rule: allow SSH (port 22)");
+
+    // Allow ICMP echo requests (ping)
+    conn.add_rule(
+        Rule::new("example", "input")
+            .family(Family::Inet)
+            .match_icmp_type(8) // echo-request
+            .accept(),
+    )
+    .await?;
+    println!("Added rule: allow ICMP echo-request");
+
+    // Allow ICMPv6 neighbor discovery
+    conn.add_rule(
+        Rule::new("example", "input")
+            .family(Family::Inet)
+            .match_icmpv6_type(135) // neighbor solicitation
+            .accept(),
+    )
+    .await?;
+    println!("Added rule: allow ICMPv6 neighbor solicitation");
+
+    // Rate-limit HTTP traffic
+    conn.add_rule(
+        Rule::new("example", "input")
+            .family(Family::Inet)
+            .match_tcp_dport(80)
+            .limit(100, LimitUnit::Second)
+            .accept(),
+    )
+    .await?;
+    println!("Added rule: rate-limit HTTP (100/sec)");
+
+    // Block traffic NOT from 10.0.0.0/8 on port 443
+    conn.add_rule(
+        Rule::new("example", "input")
+            .family(Family::Inet)
+            .match_saddr_v4_not(Ipv4Addr::new(10, 0, 0, 0), 8)
+            .match_tcp_dport(443)
+            .log(Some("blocked-https: "))
+            .drop(),
+    )
+    .await?;
+    println!("Added rule: block non-10.0.0.0/8 on HTTPS");
+
+    // Match by packet mark
+    conn.add_rule(
+        Rule::new("example", "input")
+            .family(Family::Inet)
+            .match_mark(0x42)
+            .accept(),
+    )
+    .await?;
+    println!("Added rule: accept marked packets (0x42)");
 
     // Create a set of allowed IPs
     conn.add_set(

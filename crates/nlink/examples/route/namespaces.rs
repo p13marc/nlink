@@ -3,6 +3,10 @@
 //! This example demonstrates how to list namespaces and query
 //! interfaces within a specific namespace.
 //!
+//! For sync protocols (Route, Nftables, etc.), use `connection_for()`.
+//! For GENL protocols (WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink),
+//! use `connection_for_async()` which handles async family resolution.
+//!
 //! Run with: cargo run -p nlink --example namespaces
 //!
 //! Query a specific namespace:
@@ -110,7 +114,11 @@ async fn print_interfaces(conn: &Connection<Route>) -> nlink::netlink::Result<()
 
     for link in &links {
         let name = link.name_or("?");
-        let state = if link.is_up() { "UP" } else { "DOWN" };
+        // OperState implements Display (lowercase: "up", "down", "unknown", etc.)
+        let state = link
+            .operstate()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "?".into());
 
         // Collect addresses for this interface
         let link_addrs: Vec<String> = addrs
