@@ -786,6 +786,294 @@ impl Rule {
         self
     }
 
+    /// Match layer-4 protocol (e.g., TCP=6, UDP=17, ICMP=1).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Match ICMP traffic
+    /// rule.match_l4proto(1)
+    /// // Match TCP traffic
+    /// rule.match_l4proto(6)
+    /// ```
+    pub fn match_l4proto(mut self, proto: u8) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key: MetaKey::L4Proto,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: vec![proto],
+        });
+        self
+    }
+
+    /// Match TCP source port.
+    pub fn match_tcp_sport(mut self, port: u16) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key: MetaKey::L4Proto,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: vec![6u8], // IPPROTO_TCP
+        });
+        self.exprs.push(Expr::Payload {
+            dreg: Register::R0,
+            base: PayloadBase::Transport,
+            offset: 0, // source port is at offset 0
+            len: 2,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: port.to_be_bytes().to_vec(),
+        });
+        self
+    }
+
+    /// Match UDP source port.
+    pub fn match_udp_sport(mut self, port: u16) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key: MetaKey::L4Proto,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: vec![17u8], // IPPROTO_UDP
+        });
+        self.exprs.push(Expr::Payload {
+            dreg: Register::R0,
+            base: PayloadBase::Transport,
+            offset: 0,
+            len: 2,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: port.to_be_bytes().to_vec(),
+        });
+        self
+    }
+
+    /// Match ICMP type (IPv4).
+    ///
+    /// Common types: echo-reply=0, echo-request=8, dest-unreachable=3,
+    /// time-exceeded=11, redirect=5.
+    pub fn match_icmp_type(mut self, icmp_type: u8) -> Self {
+        use super::expr::Expr;
+        // First ensure it's ICMP
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key: MetaKey::L4Proto,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: vec![1u8], // IPPROTO_ICMP
+        });
+        // Load ICMP type (first byte of transport header)
+        self.exprs.push(Expr::Payload {
+            dreg: Register::R0,
+            base: PayloadBase::Transport,
+            offset: 0,
+            len: 1,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: vec![icmp_type],
+        });
+        self
+    }
+
+    /// Match ICMPv6 type.
+    ///
+    /// Common types: echo-request=128, echo-reply=129, neighbor-solicitation=135,
+    /// neighbor-advertisement=136, router-solicitation=133, router-advertisement=134.
+    pub fn match_icmpv6_type(mut self, icmp_type: u8) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key: MetaKey::L4Proto,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: vec![58u8], // IPPROTO_ICMPV6
+        });
+        self.exprs.push(Expr::Payload {
+            dreg: Register::R0,
+            base: PayloadBase::Transport,
+            offset: 0,
+            len: 1,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: vec![icmp_type],
+        });
+        self
+    }
+
+    /// Match source IPv4 address not equal to the given address/prefix.
+    pub fn match_saddr_v4_not(mut self, addr: Ipv4Addr, prefix: u8) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Payload {
+            dreg: Register::R0,
+            base: PayloadBase::Network,
+            offset: 12,
+            len: 4,
+        });
+        if prefix == 32 {
+            self.exprs.push(Expr::Cmp {
+                sreg: Register::R0,
+                op: CmpOp::Neq,
+                data: addr.octets().to_vec(),
+            });
+        } else {
+            let mask = prefix_to_mask_v4(prefix);
+            self.exprs.push(Expr::Bitwise {
+                sreg: Register::R0,
+                dreg: Register::R0,
+                len: 4,
+                mask: mask.to_vec(),
+                xor: vec![0; 4],
+            });
+            let masked_addr: Vec<u8> = addr
+                .octets()
+                .iter()
+                .zip(mask.iter())
+                .map(|(a, m)| a & m)
+                .collect();
+            self.exprs.push(Expr::Cmp {
+                sreg: Register::R0,
+                op: CmpOp::Neq,
+                data: masked_addr,
+            });
+        }
+        self
+    }
+
+    /// Match destination IPv4 address not equal to the given address/prefix.
+    pub fn match_daddr_v4_not(mut self, addr: Ipv4Addr, prefix: u8) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Payload {
+            dreg: Register::R0,
+            base: PayloadBase::Network,
+            offset: 16,
+            len: 4,
+        });
+        if prefix == 32 {
+            self.exprs.push(Expr::Cmp {
+                sreg: Register::R0,
+                op: CmpOp::Neq,
+                data: addr.octets().to_vec(),
+            });
+        } else {
+            let mask = prefix_to_mask_v4(prefix);
+            self.exprs.push(Expr::Bitwise {
+                sreg: Register::R0,
+                dreg: Register::R0,
+                len: 4,
+                mask: mask.to_vec(),
+                xor: vec![0; 4],
+            });
+            let masked_addr: Vec<u8> = addr
+                .octets()
+                .iter()
+                .zip(mask.iter())
+                .map(|(a, m)| a & m)
+                .collect();
+            self.exprs.push(Expr::Cmp {
+                sreg: Register::R0,
+                op: CmpOp::Neq,
+                data: masked_addr,
+            });
+        }
+        self
+    }
+
+    /// Match TCP destination port not equal to the given port.
+    pub fn match_tcp_dport_not(mut self, port: u16) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key: MetaKey::L4Proto,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: vec![6u8],
+        });
+        self.exprs.push(Expr::Payload {
+            dreg: Register::R0,
+            base: PayloadBase::Transport,
+            offset: 2,
+            len: 2,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Neq,
+            data: port.to_be_bytes().to_vec(),
+        });
+        self
+    }
+
+    /// Match UDP destination port not equal to the given port.
+    pub fn match_udp_dport_not(mut self, port: u16) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key: MetaKey::L4Proto,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: vec![17u8],
+        });
+        self.exprs.push(Expr::Payload {
+            dreg: Register::R0,
+            base: PayloadBase::Transport,
+            offset: 2,
+            len: 2,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Neq,
+            data: port.to_be_bytes().to_vec(),
+        });
+        self
+    }
+
+    /// Match packet mark (nfmark/fwmark).
+    pub fn match_mark(mut self, mark: u32) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key: MetaKey::Mark,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: mark.to_ne_bytes().to_vec(),
+        });
+        self
+    }
+
+    /// Reject the packet (send ICMP unreachable / TCP RST).
+    pub fn reject(mut self) -> Self {
+        self.exprs
+            .push(super::expr::Expr::Verdict(Verdict::Drop));
+        self
+    }
+
     /// Use raw expressions (advanced).
     pub fn expressions(mut self, exprs: Vec<super::expr::Expr>) -> Self {
         self.exprs = exprs;
