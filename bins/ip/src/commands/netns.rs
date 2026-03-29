@@ -202,7 +202,8 @@ fn add_namespace(name: &str) -> Result<()> {
             }
 
             // Mount our namespace to the file
-            let proc_path = std::ffi::CString::new("/proc/thread-self/ns/net").expect("valid C string");
+            let proc_path =
+                std::ffi::CString::new("/proc/thread-self/ns/net").expect("valid C string");
             let mount_path = std::ffi::CString::new(netns_path.to_str().expect("valid UTF-8 path"))
                 .expect("valid C string");
 
