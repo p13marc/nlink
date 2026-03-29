@@ -184,7 +184,7 @@ fn add_namespace(name: &str) -> Result<()> {
     // Use unshare to create a new network namespace
     // We need to fork a process that:
     // 1. Calls unshare(CLONE_NEWNET)
-    // 2. Bind mounts /proc/self/ns/net to the netns file
+    // 2. Bind mounts /proc/thread-self/ns/net to the netns file
 
     // For safety, use the ip command's approach: fork and use setns
     let result = unsafe {
@@ -202,7 +202,7 @@ fn add_namespace(name: &str) -> Result<()> {
             }
 
             // Mount our namespace to the file
-            let proc_path = std::ffi::CString::new("/proc/self/ns/net").expect("valid C string");
+            let proc_path = std::ffi::CString::new("/proc/thread-self/ns/net").expect("valid C string");
             let mount_path = std::ffi::CString::new(netns_path.to_str().expect("valid UTF-8 path"))
                 .expect("valid C string");
 

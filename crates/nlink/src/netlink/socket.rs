@@ -112,7 +112,7 @@ impl NetlinkSocket {
     /// ```
     pub fn new_in_namespace(protocol: Protocol, ns_fd: RawFd) -> Result<Self> {
         // Save the current namespace so we can restore it
-        let current_ns = File::open("/proc/self/ns/net")
+        let current_ns = File::open("/proc/thread-self/ns/net")
             .map_err(|e| Error::InvalidMessage(format!("cannot open current namespace: {}", e)))?;
         let current_ns_fd = current_ns.as_raw_fd();
 
@@ -129,7 +129,7 @@ impl NetlinkSocket {
 
         // Restore the original namespace (best effort - log but don't fail)
         // SAFETY: libc::setns restores the original namespace. current_ns_fd
-        // is valid (opened from /proc/self/ns/net above).
+        // is valid (opened from /proc/thread-self/ns/net above).
         let restore_ret = unsafe { libc::setns(current_ns_fd, libc::CLONE_NEWNET) };
         if restore_ret < 0 {
             // We successfully created the socket but failed to restore namespace.

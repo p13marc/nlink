@@ -338,7 +338,7 @@ pub fn enter(name: &str) -> Result<NamespaceGuard> {
 /// Enter a network namespace by path.
 pub fn enter_path<P: AsRef<Path>>(path: P) -> Result<NamespaceGuard> {
     // Save the current namespace
-    let original = File::open("/proc/self/ns/net")
+    let original = File::open("/proc/thread-self/ns/net")
         .map_err(|e| Error::InvalidMessage(format!("cannot open current namespace: {}", e)))?;
 
     // Open and enter the target namespace
@@ -378,7 +378,7 @@ impl NamespaceGuard {
 
     fn do_restore(&self) -> Result<()> {
         // SAFETY: libc::setns restores the original namespace. The fd is valid
-        // (opened from /proc/self/ns/net when the guard was created).
+        // (opened from /proc/thread-self/ns/net when the guard was created).
         let ret = unsafe { libc::setns(self.original.as_raw_fd(), libc::CLONE_NEWNET) };
         if ret < 0 {
             return Err(Error::Io(std::io::Error::last_os_error()));
@@ -460,7 +460,7 @@ pub fn create(name: &str) -> Result<()> {
     // Save the current namespace so we can restore after unshare.
     // Without this, unshare(CLONE_NEWNET) permanently changes the calling
     // thread's namespace, breaking subsequent namespace operations.
-    let original_ns = File::open("/proc/self/ns/net").map_err(|e| {
+    let original_ns = File::open("/proc/thread-self/ns/net").map_err(|e| {
         let _ = std::fs::remove_file(&ns_path);
         Error::InvalidMessage(format!("cannot save current namespace: {}", e))
     })?;
@@ -482,7 +482,7 @@ pub fn create(name: &str) -> Result<()> {
             Error::InvalidMessage("invalid namespace path".to_string())
         })?;
 
-    let self_ns = std::ffi::CString::new("/proc/self/ns/net").unwrap();
+    let self_ns = std::ffi::CString::new("/proc/thread-self/ns/net").unwrap();
 
     // SAFETY: mount is a standard Linux syscall. We're bind-mounting the current
     // process's network namespace (which we just created) to the namespace file.
