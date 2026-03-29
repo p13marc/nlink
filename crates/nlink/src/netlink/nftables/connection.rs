@@ -474,38 +474,16 @@ impl Connection<Nftables> {
     // =========================================================================
 
     /// Send a request and wait for ACK.
+    ///
+    /// All nftables mutation messages are wrapped in a batch
+    /// (NFNL_MSG_BATCH_BEGIN / NFNL_MSG_BATCH_END) because the kernel
+    /// requires batch wrapping for mutation operations since Linux 4.6.
     async fn nft_request_ack(&self, mut builder: MessageBuilder) -> Result<()> {
         let seq = self.socket().next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
-        let msg = builder.finish();
-        self.socket().send(&msg).await?;
-
-        // Wait for ACK
-        loop {
-            let data: Vec<u8> = self.socket().recv_msg().await?;
-
-            for msg_result in MessageIter::new(&data) {
-                let (header, payload) = msg_result?;
-
-                if header.nlmsg_seq != seq {
-                    continue;
-                }
-
-                if header.is_error() {
-                    let err = NlMsgError::from_bytes(payload)?;
-                    if err.is_ack() {
-                        return Ok(());
-                    }
-                    return Err(Error::from_errno(err.error));
-                }
-
-                if header.is_done() {
-                    return Ok(());
-                }
-            }
-        }
+        self.send_batch(vec![builder.finish()]).await
     }
 
     /// Send a dump request and collect responses.
