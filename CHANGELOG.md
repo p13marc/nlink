@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-03-30
+
+### Fixed
+
+- Correct `NFNL_MSG_BATCH_BEGIN`/`NFNL_MSG_BATCH_END` constants from `0x10 << 8` (4096) to
+  `0x10` (16). These are raw `nlmsg_type` values (`NLMSG_MIN_TYPE`), not subsystem-shifted
+  message types. The wrong values caused the kernel to not recognize batch delimiters.
+
 ## [0.11.3] - 2026-03-30
 
 ### Fixed
