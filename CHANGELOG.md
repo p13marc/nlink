@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-03-30
+
+### Fixed
+
+- Use `/proc/thread-self/ns/net` instead of `/proc/self/ns/net` in all namespace operations.
+  `/proc/self` resolves to the thread group leader (main thread), not the calling thread. After
+  `unshare(CLONE_NEWNET)` on a non-main thread, this caused `namespace::create()` to bind-mount
+  the wrong namespace, silently targeting the root namespace instead. Affects `create()`,
+  `enter_path()`, and `new_in_namespace()`. Requires Linux 3.17+.
+
 ## [0.11.1] - 2026-03-29
 
 ### Fixed
