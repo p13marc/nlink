@@ -457,6 +457,14 @@ pub fn create(name: &str) -> Result<()> {
         Error::InvalidMessage(format!("cannot create namespace file '{}': {}", name, e))
     })?;
 
+    // Save the current namespace so we can restore after unshare.
+    // Without this, unshare(CLONE_NEWNET) permanently changes the calling
+    // thread's namespace, breaking subsequent namespace operations.
+    let original_ns = File::open("/proc/self/ns/net").map_err(|e| {
+        let _ = std::fs::remove_file(&ns_path);
+        Error::InvalidMessage(format!("cannot save current namespace: {}", e))
+    })?;
+
     // Create a new network namespace
     // SAFETY: unshare is a standard Linux syscall. CLONE_NEWNET creates a new
     // network namespace for the current process.
@@ -490,9 +498,24 @@ pub fn create(name: &str) -> Result<()> {
 
     if ret < 0 {
         let err = std::io::Error::last_os_error();
-        // Clean up on failure
+        // Try to restore original namespace before returning
+        unsafe { libc::setns(original_ns.as_raw_fd(), libc::CLONE_NEWNET) };
         let _ = std::fs::remove_file(&ns_path);
         return Err(Error::Io(err));
+    }
+
+    // Restore the calling thread to its original namespace.
+    // SAFETY: setns is a standard Linux syscall. original_ns is a valid FD
+    // to the namespace we opened before unshare().
+    let ret = unsafe { libc::setns(original_ns.as_raw_fd(), libc::CLONE_NEWNET) };
+    if ret < 0 {
+        // The namespace was created and persisted via bind mount, but we
+        // failed to restore. Log a warning — this is a serious issue.
+        return Err(Error::InvalidMessage(format!(
+            "namespace '{}' created but failed to restore original namespace: {}",
+            name,
+            std::io::Error::last_os_error()
+        )));
     }
 
     Ok(())
