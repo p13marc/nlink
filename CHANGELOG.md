@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-03-29
+
+### Fixed
+
+- `namespace::create()` now restores the calling thread's network namespace after creating a new
+  one. Previously, `unshare(CLONE_NEWNET)` permanently changed the thread's namespace, causing
+  subsequent operations (`connection_for()`, `setns()`, veth creation) to silently operate in the
+  wrong namespace context. This caused `EEXIST` on veth creation in loops and `EPERM` on SELinux
+  systems.
+
 ## [0.11.0] - 2026-03-28
 
 ### Breaking Changes
