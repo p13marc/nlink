@@ -47,10 +47,13 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 /// nftables subsystem ID within NETLINK_NETFILTER.
 pub const NFNL_SUBSYS_NFTABLES: u16 = 10;
 
-/// Batch begin message (subsystem 16).
-pub const NFNL_MSG_BATCH_BEGIN: u16 = 0x10 << 8;
-/// Batch end message (subsystem 16).
-pub const NFNL_MSG_BATCH_END: u16 = (0x10 << 8) | 1;
+/// Batch begin message type (NLMSG_MIN_TYPE = 0x10).
+///
+/// This is a raw nlmsg_type, NOT shifted by subsystem. The kernel defines
+/// `NFNL_MSG_BATCH_BEGIN` as `NLMSG_MIN_TYPE` (16) in nfnetlink.h.
+pub const NFNL_MSG_BATCH_BEGIN: u16 = 0x10;
+/// Batch end message type (NLMSG_MIN_TYPE + 1 = 0x11).
+pub const NFNL_MSG_BATCH_END: u16 = 0x11;
 
 // =============================================================================
 // NFT_MSG_* Message Types (shifted by subsystem)
