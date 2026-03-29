@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-03-30
+
+### Fixed
+
+- Wrap all nftables mutation operations (`add_table`, `add_chain`, `add_rule`, `del_*`,
+  `flush_table`) in `NFNL_MSG_BATCH_BEGIN`/`NFNL_MSG_BATCH_END` messages. Since Linux 4.6,
+  the kernel requires batch wrapping for nftables mutations; standalone messages failed with
+  `EINVAL`. The `Transaction` API was not affected.
+
 ## [0.11.2] - 2026-03-30
 
 ### Fixed
