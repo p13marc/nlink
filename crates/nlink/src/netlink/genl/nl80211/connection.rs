@@ -475,6 +475,78 @@ impl Connection<Nl80211> {
     }
 
     // =========================================================================
+    // PHY namespace movement
+    // =========================================================================
+
+    /// Move a wireless PHY to a different network namespace.
+    ///
+    /// The PHY is identified by its wiphy index (from [`get_phys()`]).
+    /// The target namespace is specified by file descriptor (from
+    /// [`namespace::open()`](crate::netlink::namespace::open) or
+    /// [`NamespaceFd`](crate::netlink::namespace::NamespaceFd)).
+    ///
+    /// After the move, all interfaces on this PHY appear inside the
+    /// target namespace. The PHY can only be in one namespace at a time.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Nl80211, namespace};
+    ///
+    /// let nl = Connection::<Nl80211>::new_async().await?;
+    /// let phys = nl.get_phys().await?;
+    /// let ns_fd = namespace::open("my-namespace")?;
+    ///
+    /// // Move phy0 to the namespace
+    /// nl.set_wiphy_netns(phys[0].index, ns_fd.as_raw_fd()).await?;
+    /// ```
+    pub async fn set_wiphy_netns(&self, wiphy: u32, netns_fd: i32) -> Result<()> {
+        let family_id = self.state().family_id;
+
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
+        let genl_hdr = GenlMsgHdr::new(NL80211_CMD_SET_WIPHY, NL80211_GENL_VERSION);
+        builder.append(&genl_hdr);
+        builder.append_attr_u32(NL80211_ATTR_WIPHY, wiphy);
+        builder.append_attr_u32(NL80211_ATTR_NETNS_FD, netns_fd as u32);
+
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        self.wait_ack(seq)
+            .await
+            .map_err(|e| e.with_context("set_wiphy_netns"))
+    }
+
+    /// Move a wireless PHY to the network namespace of a given process.
+    ///
+    /// This is a convenience variant that uses the process PID instead of
+    /// a namespace file descriptor.
+    pub async fn set_wiphy_netns_pid(&self, wiphy: u32, pid: u32) -> Result<()> {
+        let family_id = self.state().family_id;
+
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
+        let genl_hdr = GenlMsgHdr::new(NL80211_CMD_SET_WIPHY, NL80211_GENL_VERSION);
+        builder.append(&genl_hdr);
+        builder.append_attr_u32(NL80211_ATTR_WIPHY, wiphy);
+        builder.append_attr_u32(NL80211_ATTR_PID, pid);
+
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        self.wait_ack(seq)
+            .await
+            .map_err(|e| e.with_context("set_wiphy_netns_pid"))
+    }
+
+    // =========================================================================
     // Internal helpers
     // =========================================================================
 

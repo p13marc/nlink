@@ -106,7 +106,9 @@ pub const NL80211_ATTR_BSS: u16 = 47;
 pub const NL80211_ATTR_SSID: u16 = 52;
 pub const NL80211_ATTR_AUTH_TYPE: u16 = 53;
 pub const NL80211_ATTR_REASON_CODE: u16 = 54;
+pub const NL80211_ATTR_NETNS_FD: u16 = 69;
 pub const NL80211_ATTR_STATUS_CODE: u16 = 72;
+pub const NL80211_ATTR_PID: u16 = 82;
 pub const NL80211_ATTR_PS_STATE: u16 = 91;
 
 // =============================================================================

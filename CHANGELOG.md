@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `Connection<Nl80211>::set_wiphy_netns(wiphy, fd)` — move a wireless PHY to a different
+  network namespace by file descriptor (equivalent to `iw phy <name> set netns name <ns>`)
+- `Connection<Nl80211>::set_wiphy_netns_pid(wiphy, pid)` — move by process PID
+
 ## [0.12.0] - 2026-03-30
 
 ### Added
