@@ -712,7 +712,7 @@ impl Connection<Route> {
     /// Get interface name by index.
     ///
     /// This is a convenience method for getting a single interface name.
-    /// For looking up multiple names, prefer [`get_interface_names()`]
+    /// For looking up multiple names, prefer [`Connection::get_interface_names()`]
     /// to build a lookup map.
     ///
     /// Returns `None` if no interface with that index exists.

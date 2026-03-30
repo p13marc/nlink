@@ -630,3 +630,35 @@ async fn test_bond_active_backup_with_slaves() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_enslave_convenience() -> Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("enslave")?;
+    let conn = ns.connection()?;
+
+    // Create bond and two dummy interfaces
+    conn.add_link(BondLink::new("bond0").mode(BondMode::BalanceRr))
+        .await?;
+    conn.add_link(DummyLink::new("eth0")).await?;
+    conn.add_link(DummyLink::new("eth1")).await?;
+
+    // enslave() handles down/master/up automatically
+    conn.enslave("eth0", "bond0").await?;
+    conn.enslave("eth1", "bond0").await?;
+
+    // Verify slaves are attached
+    let links = conn.get_links().await?;
+    let bond = links.iter().find(|l| l.name() == Some("bond0")).unwrap();
+    let eth0 = links.iter().find(|l| l.name() == Some("eth0")).unwrap();
+    let eth1 = links.iter().find(|l| l.name() == Some("eth1")).unwrap();
+    assert_eq!(eth0.master(), Some(bond.ifindex()));
+    assert_eq!(eth1.master(), Some(bond.ifindex()));
+
+    // Verify slaves are up (enslave brings them back up)
+    assert!(eth0.is_up(), "eth0 should be up after enslave");
+    assert!(eth1.is_up(), "eth1 should be up after enslave");
+
+    Ok(())
+}

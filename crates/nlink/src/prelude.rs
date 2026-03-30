@@ -7,5 +7,6 @@
 //! ```
 
 pub use crate::netlink::messages::LinkMessage;
+pub use crate::netlink::route::{Ipv4Route, Ipv6Route};
 pub use crate::netlink::{Connection, Error, Result, Route};
 pub use crate::{Generic, NetworkEvent, RtnetlinkGroup};

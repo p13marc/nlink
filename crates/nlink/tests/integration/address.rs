@@ -373,3 +373,53 @@ async fn test_address_scope() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_add_address_by_name() -> Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("addr-name")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(DummyLink::new("dummy0")).await?;
+    conn.set_link_up("dummy0").await?;
+
+    // Use the by_name convenience method (resolves internally)
+    let ip: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
+    conn.add_address_by_name("dummy0", ip, 24).await?;
+
+    // Verify
+    let addrs = conn.get_addresses().await?;
+    let found = addrs
+        .iter()
+        .any(|a| a.address().map(|addr| *addr == ip).unwrap_or(false));
+    assert!(found, "address 10.0.0.1 should exist on dummy0");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_replace_address_by_name() -> Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("addr-repl")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(DummyLink::new("dummy0")).await?;
+    conn.set_link_up("dummy0").await?;
+
+    let ip: IpAddr = Ipv4Addr::new(10, 0, 0, 2).into();
+
+    // Add, then replace (should not error on second call)
+    conn.add_address_by_name("dummy0", ip, 24).await?;
+    conn.replace_address_by_name("dummy0", ip, 24).await?;
+
+    // Verify still exists
+    let addrs = conn.get_addresses().await?;
+    let found = addrs
+        .iter()
+        .any(|a| a.address().map(|addr| *addr == ip).unwrap_or(false));
+    assert!(found, "address 10.0.0.2 should exist after replace");
+
+    Ok(())
+}

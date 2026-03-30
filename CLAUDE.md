@@ -3164,6 +3164,12 @@ conn.disconnect("wlan0").await?;
 conn.set_power_save("wlan0", true).await?;
 let state = conn.get_power_save("wlan0").await?;
 
+// Move PHY to a different namespace (requires root)
+let ns_fd = namespace::open("myns")?;
+conn.set_wiphy_netns(phy.index, ns_fd.as_raw_fd()).await?;
+// Or by PID:
+conn.set_wiphy_netns_pid(phy.index, 1234).await?;
+
 // Monitor events
 use tokio_stream::StreamExt;
 let mut conn = Connection::<Nl80211>::new_async().await?;

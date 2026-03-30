@@ -2299,7 +2299,7 @@ impl Connection<Route> {
 
     /// List attached BPF programs on an interface (both directions).
     ///
-    /// Returns [`BpfInfo`] for each BPF filter found on the interface's
+    /// Returns BPF program info for each BPF filter found on the interface's
     /// clsact qdisc. Returns an empty vec if no clsact qdisc exists.
     ///
     /// # Example

@@ -352,8 +352,8 @@ impl Error {
 
     /// Check if this is a timeout error.
     ///
-    /// Returns `true` for both the [`Error::Timeout`] variant (from
-    /// [`Connection::timeout`]) and kernel ETIMEDOUT errors.
+    /// Returns `true` for both the [`Error::Timeout`] variant and
+    /// kernel ETIMEDOUT errors.
     pub fn is_timeout(&self) -> bool {
         matches!(self, Self::Timeout) || self.errno() == Some(libc::ETIMEDOUT)
     }

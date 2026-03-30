@@ -480,7 +480,7 @@ impl Connection<Nl80211> {
 
     /// Move a wireless PHY to a different network namespace.
     ///
-    /// The PHY is identified by its wiphy index (from [`get_phys()`]).
+    /// The PHY is identified by its wiphy index (from `get_phys()`).
     /// The target namespace is specified by file descriptor (from
     /// [`namespace::open()`](crate::netlink::namespace::open) or
     /// [`NamespaceFd`](crate::netlink::namespace::NamespaceFd)).

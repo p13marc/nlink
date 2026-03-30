@@ -1,4 +1,4 @@
-//! Connection<Mptcp> implementation.
+//! `Connection<Mptcp>` implementation.
 
 use std::net::IpAddr;
 
