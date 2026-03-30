@@ -147,6 +147,50 @@ impl<'a> NamespaceSpec<'a> {
             }
         }
     }
+
+    /// Spawn a process with `/etc/netns/` file overlays.
+    ///
+    /// See [`spawn_with_etc`] for details. For [`NamespaceSpec::Path`] and
+    /// [`NamespaceSpec::Pid`], falls back to regular [`spawn_path`] (no overlay).
+    pub fn spawn_with_etc(&self, cmd: std::process::Command) -> Result<std::process::Child> {
+        match self {
+            NamespaceSpec::Default => {
+                let mut cmd = cmd;
+                cmd.spawn().map_err(Error::Io)
+            }
+            NamespaceSpec::Named(name) => spawn_with_etc(name, cmd),
+            NamespaceSpec::Path(path) => spawn_path(path, cmd),
+            NamespaceSpec::Pid(pid) => {
+                let path = format!("/proc/{}/ns/net", pid);
+                spawn_path(&path, cmd)
+            }
+        }
+    }
+
+    /// Spawn a process and collect its output with `/etc/netns/` file overlays.
+    ///
+    /// See [`spawn_with_etc`] for details. For [`NamespaceSpec::Path`] and
+    /// [`NamespaceSpec::Pid`], falls back to regular [`spawn_output_path`] (no overlay).
+    pub fn spawn_output_with_etc(
+        &self,
+        cmd: std::process::Command,
+    ) -> Result<std::process::Output> {
+        match self {
+            NamespaceSpec::Default => {
+                let mut cmd = cmd;
+                cmd.stdout(std::process::Stdio::piped());
+                cmd.stderr(std::process::Stdio::piped());
+                let child = cmd.spawn().map_err(Error::Io)?;
+                child.wait_with_output().map_err(Error::Io)
+            }
+            NamespaceSpec::Named(name) => spawn_output_with_etc(name, cmd),
+            NamespaceSpec::Path(path) => spawn_output_path(path, cmd),
+            NamespaceSpec::Pid(pid) => {
+                let path = format!("/proc/{}/ns/net", pid);
+                spawn_output_path(&path, cmd)
+            }
+        }
+    }
 }
 
 /// The runtime directory where named network namespaces are stored.
@@ -832,6 +876,204 @@ pub fn spawn_output_path<P: AsRef<Path>>(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     let child = spawn_path(path, cmd)?;
+    child.wait_with_output().map_err(Error::Io)
+}
+
+// ============================================================================
+// Process spawning with /etc/netns/ overlay (mirrors `ip netns exec`)
+// ============================================================================
+
+/// Pre-compute bind mount pairs from `/etc/netns/<name>/`.
+///
+/// This runs in the parent process where memory allocation is safe.
+/// The returned `CString` pairs are captured by the `pre_exec` closure
+/// so that only raw syscalls (no allocations) happen after fork.
+fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::CString)>> {
+    let etc_netns = PathBuf::from("/etc/netns").join(ns_name);
+
+    let entries = match std::fs::read_dir(&etc_netns) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(Error::Io(e)),
+    };
+
+    let mut binds = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(Error::Io)?;
+        let file_name = entry.file_name();
+        let src = entry.path();
+        let dst = Path::new("/etc").join(&file_name);
+
+        // Only overlay if the target exists (can't bind-mount over nothing)
+        if !dst.exists() {
+            continue;
+        }
+
+        let src_c = std::ffi::CString::new(src.as_os_str().as_encoded_bytes())
+            .map_err(|_| Error::InvalidMessage("null byte in path".into()))?;
+        let dst_c = std::ffi::CString::new(dst.as_os_str().as_encoded_bytes())
+            .map_err(|_| Error::InvalidMessage("null byte in path".into()))?;
+
+        binds.push((src_c, dst_c));
+    }
+
+    Ok(binds)
+}
+
+/// Spawn a process in a network namespace with `/etc/netns/` file overlays.
+///
+/// Like [`spawn`], but also creates a private mount namespace in the child and:
+/// 1. Bind-mounts files from `/etc/netns/<ns_name>/` over `/etc/`
+/// 2. Remounts `/sys` (sysfs) to reflect the new network namespace
+///
+/// This mirrors the behavior of `ip netns exec <name> <cmd>`.
+///
+/// If `/etc/netns/<ns_name>/` does not exist, the mount overlay step is skipped
+/// and behavior is identical to [`spawn`].
+///
+/// Requires `CAP_SYS_ADMIN` (for `unshare(CLONE_NEWNS)`).
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::namespace;
+/// use std::process::Command;
+///
+/// // Create /etc/netns/myns/hosts with custom DNS entries, then:
+/// let output = namespace::spawn_output_with_etc("myns", Command::new("cat").arg("/etc/hosts"))?;
+/// // The process sees the custom /etc/hosts, not the host's
+/// ```
+pub fn spawn_with_etc(ns_name: &str, cmd: std::process::Command) -> Result<std::process::Child> {
+    let path = PathBuf::from(NETNS_RUN_DIR).join(ns_name);
+    if !path.exists() {
+        return Err(Error::NamespaceNotFound {
+            name: ns_name.to_string(),
+        });
+    }
+    spawn_path_with_etc(&path, ns_name, cmd)
+}
+
+/// Spawn a process and collect its output with `/etc/netns/` file overlays.
+///
+/// See [`spawn_with_etc`] for details.
+pub fn spawn_output_with_etc(
+    ns_name: &str,
+    mut cmd: std::process::Command,
+) -> Result<std::process::Output> {
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = spawn_with_etc(ns_name, cmd)?;
+    child.wait_with_output().map_err(Error::Io)
+}
+
+/// Spawn a process in a namespace specified by path with `/etc/netns/` file overlays.
+///
+/// The `ns_name` parameter is needed to locate the `/etc/netns/<name>/` directory.
+///
+/// See [`spawn_with_etc`] for details.
+pub fn spawn_path_with_etc<P: AsRef<Path>>(
+    path: P,
+    ns_name: &str,
+    mut cmd: std::process::Command,
+) -> Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+
+    let ns_fd = open_path(path)?;
+    let raw_fd = ns_fd.as_raw_fd();
+
+    // Pre-compute ALL data before fork — no allocations in pre_exec.
+    let bind_mounts = prepare_etc_binds(ns_name)?;
+    let ns_name_c = std::ffi::CString::new(ns_name)
+        .map_err(|_| Error::InvalidMessage("null byte in namespace name".into()))?;
+
+    // Pre-computed string literals for syscalls (avoid allocation after fork).
+    let c_root = std::ffi::CString::new("/").unwrap();
+    let c_none = std::ffi::CString::new("none").unwrap();
+    let c_sys = std::ffi::CString::new("/sys").unwrap();
+    let c_sysfs = std::ffi::CString::new("sysfs").unwrap();
+
+    // SAFETY: All operations in pre_exec use only raw syscalls (setns, unshare,
+    // mount, umount2). No memory allocation occurs — all CStrings are pre-computed
+    // above and captured by the closure. This is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(move || {
+            // 1. Enter network namespace
+            if libc::setns(raw_fd, libc::CLONE_NEWNET) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            // 2. If no /etc overlay files, skip mount namespace setup entirely
+            if bind_mounts.is_empty() {
+                return Ok(());
+            }
+
+            // 3. Create private mount namespace for the child
+            if libc::unshare(libc::CLONE_NEWNS) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            // 4. Make mount tree slave to prevent propagation back to host.
+            //    MS_SLAVE (not MS_PRIVATE) so parent->child propagation still works.
+            if libc::mount(
+                c_none.as_ptr(),
+                c_root.as_ptr(),
+                std::ptr::null(),
+                libc::MS_SLAVE | libc::MS_REC,
+                std::ptr::null(),
+            ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            // 5. Remount /sys so sysfs reflects the new network namespace.
+            //    Without this, /sys/class/net/ shows the host's interfaces.
+            libc::umount2(c_sys.as_ptr(), libc::MNT_DETACH);
+            if libc::mount(
+                ns_name_c.as_ptr(),
+                c_sys.as_ptr(),
+                c_sysfs.as_ptr(),
+                0,
+                std::ptr::null(),
+            ) != 0
+            {
+                // Non-fatal: sysfs remount may fail in nested namespaces
+                // or restricted environments. Continue with /etc overlays.
+            }
+
+            // 6. Apply pre-computed /etc bind mounts
+            for (src, dst) in &bind_mounts {
+                if libc::mount(
+                    src.as_ptr(),
+                    dst.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND,
+                    std::ptr::null(),
+                ) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+
+            Ok(())
+        });
+    }
+
+    let child = cmd.spawn().map_err(Error::Io)?;
+    drop(ns_fd);
+    Ok(child)
+}
+
+/// Spawn a process and collect output in a namespace by path with `/etc/netns/` overlays.
+///
+/// See [`spawn_path_with_etc`] for details.
+pub fn spawn_output_path_with_etc<P: AsRef<Path>>(
+    path: P,
+    ns_name: &str,
+    mut cmd: std::process::Command,
+) -> Result<std::process::Output> {
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = spawn_path_with_etc(path, ns_name, cmd)?;
     child.wait_with_output().map_err(Error::Io)
 }
 

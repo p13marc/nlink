@@ -2750,6 +2750,21 @@ let mut child = spec.spawn(Command::new("nginx"))?;
 let output = spec.spawn_output(Command::new("hostname"))?;
 ```
 
+**Spawn with `/etc/netns/` overlay (mirrors `ip netns exec`):**
+```rust
+use nlink::netlink::namespace;
+use std::process::Command;
+
+// Create /etc/netns/myns/hosts with custom DNS entries first, then:
+let mut cmd = Command::new("cat");
+cmd.arg("/etc/hosts");
+let output = namespace::spawn_output_with_etc("myns", cmd)?;
+// The process sees custom /etc/hosts + remounted /sys for the namespace
+
+// No-op if /etc/netns/myns/ doesn't exist (behaves like regular spawn)
+let output = namespace::spawn_output_with_etc("myns", Command::new("hostname"))?;
+```
+
 ## Route Classification Helpers
 
 RouteMessage includes helpers for filtering routes by type:

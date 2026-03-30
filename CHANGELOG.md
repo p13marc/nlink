@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+#### Mount Namespace Support in Spawn Functions
+- `spawn_with_etc()` / `spawn_output_with_etc()` — spawn processes with `/etc/netns/<name>/`
+  file overlays and `/sys` remount, mirroring `ip netns exec` behavior
+- `spawn_path_with_etc()` / `spawn_output_path_with_etc()` — path-based variants
+- `NamespaceSpec::spawn_with_etc()` / `spawn_output_with_etc()` — integrated methods
+- Pre-computes all bind mount paths before `fork()` to ensure async-signal-safety
+  (no allocations in `pre_exec()`, safe under tokio multi-thread runtime)
+- Uses `MS_SLAVE | MS_REC` for mount propagation to match iproute2
+- Skips overlay silently if `/etc/netns/<name>/` doesn't exist (no-op)
+
 ## [0.11.4] - 2026-03-30
 
 ### Fixed
