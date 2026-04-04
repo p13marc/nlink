@@ -48,7 +48,7 @@
 //! - Interface name ([`set_link_name()`](Connection::set_link_name))
 //! - MAC address ([`set_link_address()`](Connection::set_link_address))
 //! - Master device ([`set_link_master()`](Connection::set_link_master))
-//! - Network namespace ([`set_link_netns_pid()`](Connection::set_link_netns_pid))
+//! - Network namespace ([`set_link_netns()`](Connection::set_link_netns), [`set_link_netns_pid()`](Connection::set_link_netns_pid))
 //!
 //! ## What Cannot Be Changed (requires delete + recreate)
 //!
@@ -233,7 +233,7 @@ impl LinkConfig for DummyLink {
 ///
 /// // Now veth0 and veth1 are connected
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[must_use = "builders do nothing unless used"]
 pub struct VethLink {
     name: String,
@@ -243,6 +243,8 @@ pub struct VethLink {
     peer_address: Option<[u8; 6]>,
     peer_netns_fd: Option<i32>,
     peer_netns_pid: Option<u32>,
+    /// Owned namespace FD kept alive for the duration of the builder.
+    _peer_netns_owned: Option<super::namespace::NamespaceFd>,
 }
 
 impl VethLink {
@@ -261,6 +263,7 @@ impl VethLink {
             peer_address: None,
             peer_netns_fd: None,
             peer_netns_pid: None,
+            _peer_netns_owned: None,
         }
     }
 
@@ -294,6 +297,25 @@ impl VethLink {
         self.peer_netns_pid = Some(pid);
         self.peer_netns_fd = None;
         self
+    }
+
+    /// Move the peer interface to a named network namespace.
+    ///
+    /// Opens the namespace by name (from `/var/run/netns/<name>`) and stores
+    /// the file descriptor for use during link creation.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let veth = VethLink::new("veth0", "veth1").peer_netns("my-ns")?;
+    /// conn.add_link(veth).await?;
+    /// ```
+    pub fn peer_netns(mut self, ns_name: &str) -> Result<Self> {
+        let ns_fd = super::namespace::open(ns_name)?;
+        self.peer_netns_fd = Some(ns_fd.as_raw_fd());
+        self.peer_netns_pid = None;
+        self._peer_netns_owned = Some(ns_fd);
+        Ok(self)
     }
 }
 
@@ -4650,6 +4672,34 @@ impl Connection<Route> {
         self.send_ack(builder)
             .await
             .map_err(|e| e.with_context("set_link_netns"))
+    }
+
+    /// Move a network interface to a named network namespace.
+    ///
+    /// This is a convenience wrapper that opens the namespace by name
+    /// (from `/var/run/netns/<name>`) and calls [`set_link_netns_fd()`](Self::set_link_netns_fd).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// conn.set_link_netns("eth0", "my-ns").await?;
+    /// ```
+    pub async fn set_link_netns(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        ns_name: &str,
+    ) -> Result<()> {
+        let ns_fd = super::namespace::open(ns_name)?;
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.set_link_netns_fd_by_index(ifindex, ns_fd.as_raw_fd()).await
+    }
+
+    /// Move a network interface to a named network namespace (by index).
+    ///
+    /// See [`set_link_netns()`](Self::set_link_netns) for details.
+    pub async fn set_link_netns_by_index(&self, ifindex: u32, ns_name: &str) -> Result<()> {
+        let ns_fd = super::namespace::open(ns_name)?;
+        self.set_link_netns_fd_by_index(ifindex, ns_fd.as_raw_fd()).await
     }
 }
 

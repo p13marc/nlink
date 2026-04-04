@@ -145,6 +145,11 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
             builder.append_attr_str(NFTA_EXPR_NAME, "nat");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             builder.append_attr_u32_be(NFTA_NAT_TYPE, nat.nat_type as u32);
+            debug_assert!(
+                matches!(nat.family, Family::Ip | Family::Ip6),
+                "NAT family must be Ip or Ip6, got {:?} (Inet is not valid for NAT expressions)",
+                nat.family
+            );
             builder.append_attr_u32_be(NFTA_NAT_FAMILY, nat.family as u32);
             if nat.addr.is_some() {
                 builder.append_attr_u32_be(NFTA_NAT_REG_ADDR_MIN, Register::R0 as u32);

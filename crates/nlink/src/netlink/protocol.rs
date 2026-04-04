@@ -137,6 +137,8 @@ impl ProtocolState for Generic {
 ///
 /// Used for WireGuard device configuration via Generic Netlink.
 /// Contains the resolved WireGuard family ID.
+///
+/// Construct with `Connection::<Wireguard>::new_async().await?`, not `Connection::new()`.
 #[derive(Debug, Default)]
 pub struct Wireguard {
     /// Resolved WireGuard GENL family ID.
@@ -253,6 +255,8 @@ impl ProtocolState for Audit {
 ///
 /// Used for MACsec (IEEE 802.1AE) device configuration via Generic Netlink.
 /// Contains the resolved MACsec family ID.
+///
+/// Construct with `Connection::<Macsec>::new_async().await?`, not `Connection::new()`.
 #[derive(Debug, Default)]
 pub struct Macsec {
     /// Resolved MACsec GENL family ID.
@@ -269,6 +273,8 @@ impl ProtocolState for Macsec {
 ///
 /// Used for MPTCP (Multipath TCP) endpoint configuration via Generic Netlink.
 /// Contains the resolved MPTCP Path Manager family ID.
+///
+/// Construct with `Connection::<Mptcp>::new_async().await?`, not `Connection::new()`.
 #[derive(Debug, Default)]
 pub struct Mptcp {
     /// Resolved MPTCP PM GENL family ID.
@@ -285,6 +291,8 @@ impl ProtocolState for Mptcp {
 ///
 /// Used for querying hardware device management via Generic Netlink.
 /// Contains the resolved devlink family ID.
+///
+/// Construct with `Connection::<Devlink>::new_async().await?`, not `Connection::new()`.
 #[derive(Debug, Default)]
 pub struct Devlink {
     /// Resolved devlink GENL family ID.
@@ -316,6 +324,8 @@ impl ProtocolState for Nftables {
 ///
 /// Used for WiFi configuration via Generic Netlink.
 /// Contains the resolved nl80211 family ID.
+///
+/// Construct with `Connection::<Nl80211>::new_async().await?`, not `Connection::new()`.
 #[derive(Debug, Default)]
 pub struct Nl80211 {
     /// Resolved nl80211 GENL family ID.
@@ -337,6 +347,8 @@ impl ProtocolState for Nl80211 {
 ///
 /// Used for querying and configuring network device settings via Generic Netlink.
 /// Contains the resolved ethtool family ID and monitor group ID.
+///
+/// Construct with `Connection::<Ethtool>::new_async().await?`, not `Connection::new()`.
 #[derive(Debug, Default)]
 pub struct Ethtool {
     /// Resolved ethtool GENL family ID.

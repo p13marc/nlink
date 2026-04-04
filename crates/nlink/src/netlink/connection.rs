@@ -23,18 +23,31 @@ use super::socket::NetlinkSocket;
 /// - [`Connection<Route>`]: RTNetlink for interfaces, addresses, routes, TC
 /// - [`Connection<Generic>`]: Generic netlink for WireGuard, MACsec, etc.
 ///
+/// # Construction
+///
+/// **Sync protocols** — use [`Connection::new()`]:
+/// `Route`, `SockDiag`, `Generic`, `Nftables`
+///
+/// **GENL protocols** — use `Connection::new_async().await`:
+/// `Wireguard`, `Macsec`, `Mptcp`, `Ethtool`, `Nl80211`, `Devlink`
+///
+/// These require async construction to resolve their Generic Netlink family ID.
+/// While `Connection::new()` compiles for them (they implement `Default`), the
+/// resulting connection will have an unresolved family ID and will not work.
+///
+/// **Other protocols** have their own constructors (e.g., `Connector`, `KobjectUevent`).
+///
 /// # Example
 ///
 /// ```ignore
-/// use nlink::netlink::{Connection, Route, Generic};
+/// use nlink::netlink::{Connection, Route, Generic, Wireguard};
 ///
-/// // Route protocol connection
+/// // Sync construction (Route, Generic, Nftables, SockDiag)
 /// let route = Connection::<Route>::new()?;
-/// route.get_links().await?;
-///
-/// // Generic netlink connection
 /// let genl = Connection::<Generic>::new()?;
-/// genl.get_family("wireguard").await?;
+///
+/// // Async construction (Wireguard, Macsec, Mptcp, Ethtool, Nl80211, Devlink)
+/// let wg = Connection::<Wireguard>::new_async().await?;
 /// ```
 pub struct Connection<P: ProtocolState> {
     socket: NetlinkSocket,
@@ -49,9 +62,16 @@ pub struct Connection<P: ProtocolState> {
 impl<P: ProtocolState + Default> Connection<P> {
     /// Create a new connection for this protocol type.
     ///
-    /// This is available for protocols that implement `Default`.
-    /// For protocols that require special initialization (like `Connector`,
-    /// `KobjectUevent`, or `Wireguard`), use their specific constructors.
+    /// This is available for protocols that implement `Default`, but should
+    /// only be used for sync protocol types (`Route`, `SockDiag`, `Generic`,
+    /// `Nftables`).
+    ///
+    /// # Important
+    ///
+    /// **Do not use this for GENL protocol types** (`Wireguard`, `Macsec`,
+    /// `Mptcp`, `Ethtool`, `Nl80211`, `Devlink`). While it compiles, the
+    /// connection will have an unresolved family ID (0) and operations will
+    /// fail. Use `Connection::<Wireguard>::new_async().await?` instead.
     ///
     /// # Example
     ///

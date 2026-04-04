@@ -1156,6 +1156,10 @@ conn.set_link_up(InterfaceRef::Index(ifindex)).await?;
 conn.set_link_mtu(InterfaceRef::Index(ifindex), 9000).await?;
 conn.set_link_master(InterfaceRef::Index(ifindex), InterfaceRef::Index(br_ifindex)).await?;
 
+// Move interface to a named namespace (convenience — no manual FD management)
+conn.set_link_netns("veth1", "other-ns").await?;
+conn.set_link_netns_by_index(ifindex, "other-ns").await?;
+
 // All TC methods have *_by_index variants:
 // - add_qdisc_by_index / del_qdisc_by_index / replace_qdisc_by_index
 // - add_class_by_index / del_class_by_index
@@ -1331,6 +1335,9 @@ conn.add_link(DummyLink::new("dummy0")).await?;
 
 // Veth pair
 conn.add_link(VethLink::new("veth0", "veth1")).await?;
+
+// Veth pair with peer in a different namespace
+conn.add_link(VethLink::new("veth0", "veth1").peer_netns("my-ns")?).await?;
 
 // IFB (Intermediate Functional Block) for ingress shaping
 conn.add_link(IfbLink::new("ifb0")).await?;

@@ -266,6 +266,10 @@ pub struct NatExpr {
 
 impl NatExpr {
     /// Create a SNAT expression.
+    ///
+    /// `family` must be [`Family::Ip`] or [`Family::Ip6`] — the kernel rejects
+    /// `Family::Inet` with `EAFNOSUPPORT`. Use the concrete family matching
+    /// the address type being NAT'd.
     pub fn snat(family: Family) -> Self {
         Self {
             nat_type: NatType::Snat,
@@ -276,6 +280,10 @@ impl NatExpr {
     }
 
     /// Create a DNAT expression.
+    ///
+    /// `family` must be [`Family::Ip`] or [`Family::Ip6`] — the kernel rejects
+    /// `Family::Inet` with `EAFNOSUPPORT`. Use the concrete family matching
+    /// the address type being NAT'd.
     pub fn dnat(family: Family) -> Self {
         Self {
             nat_type: NatType::Dnat,
@@ -702,7 +710,7 @@ impl Rule {
         }
         self.exprs.push(Expr::Nat(NatExpr {
             nat_type: NatType::Snat,
-            family: self.family,
+            family: Family::Ip,
             addr: Some(addr),
             port,
         }));
@@ -726,7 +734,7 @@ impl Rule {
         }
         self.exprs.push(Expr::Nat(NatExpr {
             nat_type: NatType::Dnat,
-            family: self.family,
+            family: Family::Ip,
             addr: Some(addr),
             port,
         }));
@@ -1249,4 +1257,56 @@ fn prefix_to_mask_v4(prefix: u8) -> [u8; 4] {
     }
     let mask = !0u32 << (32 - prefix.min(32));
     mask.to_be_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find_nat_expr(rule: &Rule) -> Option<&NatExpr> {
+        rule.exprs.iter().find_map(|e| match e {
+            super::super::expr::Expr::Nat(n) => Some(n),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn dnat_inet_table_uses_ip_family() {
+        let rule = Rule::new("nat", "prerouting")
+            .family(Family::Inet)
+            .dnat("10.0.0.1".parse().unwrap(), Some(8080));
+        let nat = find_nat_expr(&rule).expect("should have NAT expr");
+        assert_eq!(nat.family, Family::Ip);
+        assert_eq!(nat.nat_type, NatType::Dnat);
+    }
+
+    #[test]
+    fn snat_inet_table_uses_ip_family() {
+        let rule = Rule::new("nat", "postrouting")
+            .family(Family::Inet)
+            .snat("10.0.0.1".parse().unwrap(), None);
+        let nat = find_nat_expr(&rule).expect("should have NAT expr");
+        assert_eq!(nat.family, Family::Ip);
+        assert_eq!(nat.nat_type, NatType::Snat);
+    }
+
+    #[test]
+    fn dnat_ip_table_uses_ip_family() {
+        let rule = Rule::new("nat", "prerouting")
+            .family(Family::Ip)
+            .dnat("192.168.1.1".parse().unwrap(), Some(80));
+        let nat = find_nat_expr(&rule).expect("should have NAT expr");
+        assert_eq!(nat.family, Family::Ip);
+    }
+
+    #[test]
+    fn snat_with_port() {
+        let rule = Rule::new("nat", "postrouting")
+            .family(Family::Inet)
+            .snat("192.168.1.1".parse().unwrap(), Some(1024));
+        let nat = find_nat_expr(&rule).expect("should have NAT expr");
+        assert_eq!(nat.family, Family::Ip);
+        assert_eq!(nat.port, Some(1024));
+        assert_eq!(nat.addr, Some("192.168.1.1".parse().unwrap()));
+    }
 }

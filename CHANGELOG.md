@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-04-04
+
+### Fixed
+
+- **DNAT/SNAT rules fail with EAFNOSUPPORT in inet family tables** — `Rule::dnat()` and
+  `Rule::snat()` passed the table's `Family::Inet` (value 1) to the kernel's `NFTA_NAT_FAMILY`
+  attribute, but the kernel NAT expression only accepts `Family::Ip` (2) or `Family::Ip6` (10).
+  Now always uses `Family::Ip` since these methods accept `Ipv4Addr`. Added `debug_assert!` in
+  expression encoding to catch future misuse.
+
+### Added
+
+- `Connection<Route>::set_link_netns(iface, ns_name)` — move an interface to a named network
+  namespace without manual FD management (convenience wrapper over `set_link_netns_fd`)
+- `Connection<Route>::set_link_netns_by_index(ifindex, ns_name)` — index-based variant for
+  namespace-safe operations
+- `VethLink::peer_netns(ns_name)` — move the peer interface to a named namespace at creation
+  time (returns `Result<Self>` since opening the namespace can fail)
+
+### Improved
+
+- Documented sync vs async `Connection::new()` construction — `Connection` struct doc, `new()`
+  method doc, and all six GENL protocol type docs (`Wireguard`, `Macsec`, `Mptcp`, `Ethtool`,
+  `Nl80211`, `Devlink`) now clearly state that `new_async().await` is required
+- Added doc warnings on `NatExpr::snat()` and `NatExpr::dnat()` that `Family::Inet` is invalid
+
 ## [0.12.1] - 2026-03-30
 
 ### Added
