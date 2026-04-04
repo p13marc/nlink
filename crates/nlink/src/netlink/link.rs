@@ -4691,7 +4691,8 @@ impl Connection<Route> {
     ) -> Result<()> {
         let ns_fd = super::namespace::open(ns_name)?;
         let ifindex = self.resolve_interface(&iface.into()).await?;
-        self.set_link_netns_fd_by_index(ifindex, ns_fd.as_raw_fd()).await
+        self.set_link_netns_fd_by_index(ifindex, ns_fd.as_raw_fd())
+            .await
     }
 
     /// Move a network interface to a named network namespace (by index).
@@ -4699,7 +4700,8 @@ impl Connection<Route> {
     /// See [`set_link_netns()`](Self::set_link_netns) for details.
     pub async fn set_link_netns_by_index(&self, ifindex: u32, ns_name: &str) -> Result<()> {
         let ns_fd = super::namespace::open(ns_name)?;
-        self.set_link_netns_fd_by_index(ifindex, ns_fd.as_raw_fd()).await
+        self.set_link_netns_fd_by_index(ifindex, ns_fd.as_raw_fd())
+            .await
     }
 }
 
