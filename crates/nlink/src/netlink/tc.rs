@@ -2252,25 +2252,20 @@ impl HtbClassConfig {
         self
     }
 
-    /// Build the configuration.
-    pub fn build(self) -> HtbClassBuilt {
-        HtbClassBuilt(self)
+    /// Build the configuration. No-op marker for "I'm done"; the
+    /// builder is already usable as a `ClassConfig` without it.
+    pub fn build(self) -> Self {
+        self
     }
 }
 
-/// Built HTB class configuration, ready to be applied.
-///
-/// This is the result of calling `HtbClassConfig::build()`.
-#[derive(Debug, Clone)]
-pub struct HtbClassBuilt(HtbClassConfig);
-
-impl ClassConfig for HtbClassBuilt {
+impl ClassConfig for HtbClassConfig {
     fn kind(&self) -> &'static str {
         "htb"
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
-        let cfg = &self.0;
+        let cfg = self;
         let rate = cfg.rate.as_bytes_per_sec();
         let ceil = cfg.ceil.unwrap_or(cfg.rate).as_bytes_per_sec();
 
@@ -2467,17 +2462,14 @@ impl HfscClassConfig {
         self
     }
 
-    /// Build the configuration.
-    pub fn build(self) -> HfscClassBuilt {
-        HfscClassBuilt(self)
+    /// Build the configuration. No-op marker for "I'm done"; the
+    /// builder is already usable as a `ClassConfig` without it.
+    pub fn build(self) -> Self {
+        self
     }
 }
 
-/// Built HFSC class configuration, ready to be applied.
-#[derive(Debug, Clone)]
-pub struct HfscClassBuilt(HfscClassConfig);
-
-impl ClassConfig for HfscClassBuilt {
+impl ClassConfig for HfscClassConfig {
     fn kind(&self) -> &'static str {
         "hfsc"
     }
@@ -2485,7 +2477,7 @@ impl ClassConfig for HfscClassBuilt {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::hfsc::{TCA_HFSC_FSC, TCA_HFSC_RSC, TCA_HFSC_USC};
 
-        let cfg = &self.0;
+        let cfg = self;
 
         if let Some(ref rsc) = cfg.rsc {
             builder.append_attr(TCA_HFSC_RSC, rsc.as_bytes());
@@ -2561,17 +2553,14 @@ impl DrrClassConfig {
         self
     }
 
-    /// Build the configuration.
-    pub fn build(self) -> DrrClassBuilt {
-        DrrClassBuilt(self)
+    /// Build the configuration. No-op marker for "I'm done"; the
+    /// builder is already usable as a `ClassConfig` without it.
+    pub fn build(self) -> Self {
+        self
     }
 }
 
-/// Built DRR class configuration, ready to be applied.
-#[derive(Debug, Clone)]
-pub struct DrrClassBuilt(DrrClassConfig);
-
-impl ClassConfig for DrrClassBuilt {
+impl ClassConfig for DrrClassConfig {
     fn kind(&self) -> &'static str {
         "drr"
     }
@@ -2579,7 +2568,7 @@ impl ClassConfig for DrrClassBuilt {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::drr::TCA_DRR_QUANTUM;
 
-        if let Some(quantum) = self.0.quantum {
+        if let Some(quantum) = self.quantum {
             builder.append_attr_u32(TCA_DRR_QUANTUM, quantum.as_u32_saturating());
         }
 
@@ -2657,17 +2646,14 @@ impl QfqClassConfig {
         self
     }
 
-    /// Build the configuration.
-    pub fn build(self) -> QfqClassBuilt {
-        QfqClassBuilt(self)
+    /// Build the configuration. No-op marker for "I'm done"; the
+    /// builder is already usable as a `ClassConfig` without it.
+    pub fn build(self) -> Self {
+        self
     }
 }
 
-/// Built QFQ class configuration, ready to be applied.
-#[derive(Debug, Clone)]
-pub struct QfqClassBuilt(QfqClassConfig);
-
-impl ClassConfig for QfqClassBuilt {
+impl ClassConfig for QfqClassConfig {
     fn kind(&self) -> &'static str {
         "qfq"
     }
@@ -2675,11 +2661,11 @@ impl ClassConfig for QfqClassBuilt {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::qfq::{TCA_QFQ_LMAX, TCA_QFQ_WEIGHT};
 
-        if let Some(weight) = self.0.weight {
+        if let Some(weight) = self.weight {
             builder.append_attr_u32(TCA_QFQ_WEIGHT, weight);
         }
 
-        if let Some(lmax) = self.0.lmax {
+        if let Some(lmax) = self.lmax {
             builder.append_attr_u32(TCA_QFQ_LMAX, lmax.as_u32_saturating());
         }
 
@@ -3827,10 +3813,10 @@ mod tests {
             .quantum(1500)
             .build();
 
-        assert_eq!(config.0.rate, Rate::mbit(100));
-        assert_eq!(config.0.ceil, Some(Rate::mbit(500)));
-        assert_eq!(config.0.prio, Some(1));
-        assert_eq!(config.0.quantum, Some(1500));
+        assert_eq!(config.rate, Rate::mbit(100));
+        assert_eq!(config.ceil, Some(Rate::mbit(500)));
+        assert_eq!(config.prio, Some(1));
+        assert_eq!(config.quantum, Some(1500));
         assert_eq!(config.kind(), "htb");
     }
 
@@ -3843,9 +3829,9 @@ mod tests {
             .prio(2)
             .build();
 
-        assert_eq!(config.0.rate, Rate::mbit(100));
-        assert_eq!(config.0.ceil, Some(Rate::mbit(500)));
-        assert_eq!(config.0.prio, Some(2));
+        assert_eq!(config.rate, Rate::mbit(100));
+        assert_eq!(config.ceil, Some(Rate::mbit(500)));
+        assert_eq!(config.prio, Some(2));
         assert_eq!(config.kind(), "htb");
     }
 
@@ -3860,11 +3846,11 @@ mod tests {
             .overhead(14)
             .build();
 
-        assert_eq!(config.0.burst, Some(Bytes::new(16384)));
-        assert_eq!(config.0.cburst, Some(Bytes::new(32768)));
-        assert_eq!(config.0.mtu, 9000);
-        assert_eq!(config.0.mpu, 64);
-        assert_eq!(config.0.overhead, 14);
+        assert_eq!(config.burst, Some(Bytes::new(16384)));
+        assert_eq!(config.cburst, Some(Bytes::new(32768)));
+        assert_eq!(config.mtu, 9000);
+        assert_eq!(config.mpu, 64);
+        assert_eq!(config.overhead, 14);
     }
 
     #[test]
@@ -3874,7 +3860,7 @@ mod tests {
             .prio(100) // Should clamp to 7
             .build();
 
-        assert_eq!(config.0.prio, Some(7));
+        assert_eq!(config.prio, Some(7));
     }
 
     #[test]
@@ -3883,14 +3869,14 @@ mod tests {
         let config = HtbClassConfig::new(Rate::bytes_per_sec(1_000_000)).build();
 
         // ceil defaults to rate
-        assert_eq!(config.0.ceil, None);
+        assert_eq!(config.ceil, None);
         // Other defaults
-        assert_eq!(config.0.burst, None);
-        assert_eq!(config.0.cburst, None);
-        assert_eq!(config.0.prio, None);
-        assert_eq!(config.0.quantum, None);
-        assert_eq!(config.0.mtu, 1600);
-        assert_eq!(config.0.mpu, 0);
-        assert_eq!(config.0.overhead, 0);
+        assert_eq!(config.burst, None);
+        assert_eq!(config.cburst, None);
+        assert_eq!(config.prio, None);
+        assert_eq!(config.quantum, None);
+        assert_eq!(config.mtu, 1600);
+        assert_eq!(config.mpu, 0);
+        assert_eq!(config.overhead, 0);
     }
 }
