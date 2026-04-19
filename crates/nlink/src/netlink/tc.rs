@@ -2684,18 +2684,17 @@ impl ClassConfig for HtbClassBuilt {
             .cburst
             .unwrap_or_else(|| (ceil / hz + cfg.mtu as u64) as u32);
 
-        // Calculate buffer time (in ticks)
-        let buffer = if rate > 0 {
-            ((burst as u64 * 1_000_000) / rate) as u32
-        } else {
-            burst
-        };
+        // Calculate buffer time (in ticks). Falls back to the raw burst
+        // size when the rate would cause a divide-by-zero.
+        let buffer = (burst as u64 * 1_000_000)
+            .checked_div(rate)
+            .map(|v| v as u32)
+            .unwrap_or(burst);
 
-        let cbuffer = if ceil > 0 {
-            ((cburst as u64 * 1_000_000) / ceil) as u32
-        } else {
-            cburst
-        };
+        let cbuffer = (cburst as u64 * 1_000_000)
+            .checked_div(ceil)
+            .map(|v| v as u32)
+            .unwrap_or(cburst);
 
         // Build the tc_htb_opt structure
         let opt = htb::TcHtbOpt {
@@ -3206,18 +3205,17 @@ fn add_htb_class_options(builder: &mut MessageBuilder, params: &[String]) -> Res
         cburst = (ceil64 / hz + mtu as u64) as u32;
     }
 
-    // Calculate buffer time (in ticks)
-    let buffer = if rate64 > 0 {
-        ((burst as u64 * 1_000_000) / rate64) as u32
-    } else {
-        burst
-    };
+    // Calculate buffer time (in ticks). Falls back to the raw burst size
+    // when the rate would cause a divide-by-zero.
+    let buffer = (burst as u64 * 1_000_000)
+        .checked_div(rate64)
+        .map(|v| v as u32)
+        .unwrap_or(burst);
 
-    let cbuffer = if ceil64 > 0 {
-        ((cburst as u64 * 1_000_000) / ceil64) as u32
-    } else {
-        cburst
-    };
+    let cbuffer = (cburst as u64 * 1_000_000)
+        .checked_div(ceil64)
+        .map(|v| v as u32)
+        .unwrap_or(cburst);
 
     // Build the tc_htb_opt structure
     let opt = htb::TcHtbOpt {

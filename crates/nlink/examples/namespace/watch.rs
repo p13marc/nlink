@@ -47,6 +47,10 @@ async fn main() -> nlink::netlink::Result<()> {
             NamespaceEvent::DirectoryDeleted => {
                 println!("[*] /var/run/netns/ directory deleted");
             }
+            // The enum is non_exhaustive — handle future variants gracefully.
+            other => {
+                println!("[?] Unknown event: {:?}", other);
+            }
         }
     }
 

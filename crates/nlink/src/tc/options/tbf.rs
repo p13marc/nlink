@@ -1,8 +1,9 @@
 //! TBF (Token Bucket Filter) qdisc options.
 
-use crate::netlink::types::tc::qdisc::TcRateSpec;
-use crate::netlink::types::tc::qdisc::tbf::*;
-use crate::netlink::{Error, MessageBuilder, Result};
+use crate::netlink::{
+    Error, MessageBuilder, Result,
+    types::tc::qdisc::{TcRateSpec, tbf::*},
+};
 
 /// Build TBF qdisc options from parameters.
 ///
@@ -81,12 +82,12 @@ pub fn build(builder: &mut MessageBuilder, params: &[String]) -> Result<()> {
         }
     }
 
-    // Calculate buffer time (in ticks)
-    let buffer = if rate > 0 {
-        (burst as u64 * 1_000_000 / rate) as u32
-    } else {
-        burst
-    };
+    // Calculate buffer time (in ticks). Falls back to the raw burst size
+    // when the rate would cause a divide-by-zero.
+    let buffer = (burst as u64 * 1_000_000)
+        .checked_div(rate)
+        .map(|v| v as u32)
+        .unwrap_or(burst);
 
     // Build the tc_tbf_qopt structure
     let qopt = TcTbfQopt {

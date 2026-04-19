@@ -2,10 +2,12 @@
 //!
 //! This module provides high-level builders for creating class netlink messages.
 
-use crate::netlink::connection::{ack_request, create_request, replace_request};
-use crate::netlink::message::NlMsgType;
-use crate::netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
-use crate::netlink::{Connection, MessageBuilder, Result, Route};
+use crate::netlink::{
+    Connection, MessageBuilder, Result, Route,
+    connection::{ack_request, create_request, replace_request},
+    message::NlMsgType,
+    types::tc::{TcMsg, TcaAttr, tc_handle},
+};
 
 /// Build a TcMsg with common fields for class operations.
 fn build_tcmsg(dev: &str, parent: &str, classid: &str) -> Result<TcMsg> {
@@ -150,8 +152,7 @@ pub async fn replace(
 
 /// Add HTB class options.
 fn add_htb_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()> {
-    use crate::netlink::types::tc::qdisc::TcRateSpec;
-    use crate::netlink::types::tc::qdisc::htb::*;
+    use crate::netlink::types::tc::qdisc::{TcRateSpec, htb::*};
 
     let mut rate64: u64 = 0;
     let mut ceil64: u64 = 0;
@@ -247,18 +248,17 @@ fn add_htb_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()
         cburst = (ceil64 / hz + mtu as u64) as u32;
     }
 
-    // Calculate buffer time (in ticks)
-    let buffer = if rate64 > 0 {
-        ((burst as u64 * 1_000_000) / rate64) as u32
-    } else {
-        burst
-    };
+    // Calculate buffer time (in ticks). Falls back to the raw burst size
+    // when the rate would cause a divide-by-zero.
+    let buffer = (burst as u64 * 1_000_000)
+        .checked_div(rate64)
+        .map(|v| v as u32)
+        .unwrap_or(burst);
 
-    let cbuffer = if ceil64 > 0 {
-        ((cburst as u64 * 1_000_000) / ceil64) as u32
-    } else {
-        cburst
-    };
+    let cbuffer = (cburst as u64 * 1_000_000)
+        .checked_div(ceil64)
+        .map(|v| v as u32)
+        .unwrap_or(cburst);
 
     // Build the tc_htb_opt structure
     let opt = TcHtbOpt {
