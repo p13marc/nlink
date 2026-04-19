@@ -1,7 +1,6 @@
 //! PRIO qdisc options.
 
-use crate::netlink::types::tc::qdisc::prio::*;
-use crate::netlink::{Error, MessageBuilder, Result};
+use crate::netlink::{Error, MessageBuilder, Result, types::tc::qdisc::prio::*};
 
 /// Build PRIO qdisc options from parameters.
 ///

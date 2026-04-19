@@ -24,9 +24,12 @@
 //! }
 //! ```
 
+use std::{
+    io::{self, Write},
+    time::SystemTime,
+};
+
 use super::{OutputFormat, OutputOptions};
-use std::io::{self, Write};
-use std::time::SystemTime;
 
 /// Configuration for monitor output.
 #[derive(Debug, Clone, Default)]

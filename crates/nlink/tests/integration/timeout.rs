@@ -1,8 +1,8 @@
 //! Integration tests for operation timeouts (Plan 032).
 
-use nlink::Route;
-use nlink::netlink::Connection;
 use std::time::Duration;
+
+use nlink::{Route, netlink::Connection};
 
 #[tokio::test]
 async fn test_no_timeout_default() {

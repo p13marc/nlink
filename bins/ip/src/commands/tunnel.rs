@@ -6,13 +6,17 @@
 //! Modern tunnels are created via `ip link add type <type>`, but this command
 //! provides compatibility with the classic `ip tunnel` syntax.
 
+use std::{io::Write, net::Ipv4Addr};
+
 use clap::{Args, Subcommand};
-use nlink::netlink::attr::AttrIter;
-use nlink::netlink::link::{GreLink, GretapLink, IpipLink, SitLink, VtiLink};
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
-use std::io::Write;
-use std::net::Ipv4Addr;
+use nlink::{
+    netlink::{
+        Connection, Result, Route,
+        attr::AttrIter,
+        link::{GreLink, GretapLink, IpipLink, SitLink, VtiLink},
+    },
+    output::{OutputFormat, OutputOptions, Printable, print_all},
+};
 
 /// IFLA_GRE_* attribute constants
 mod gre_attrs {

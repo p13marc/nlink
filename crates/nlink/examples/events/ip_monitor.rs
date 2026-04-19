@@ -12,8 +12,7 @@
 //!   sudo ip route add 192.168.100.0/24 dev dummy0
 //!   sudo ip link del dummy0
 
-use nlink::netlink::types::link::iff;
-use nlink::netlink::{Connection, NetworkEvent, Route, RtnetlinkGroup};
+use nlink::netlink::{Connection, NetworkEvent, Route, RtnetlinkGroup, types::link::iff};
 use tokio_stream::StreamExt;
 
 #[tokio::main]

@@ -8,8 +8,7 @@
 //! First create a namespace: sudo ip netns add myns
 //! Then make changes: sudo ip netns exec myns ip link add dummy0 type dummy
 
-use std::env;
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 
 use nlink::netlink::{Connection, NetworkEvent, Route, RtnetlinkGroup};
 use tokio_stream::StreamExt;

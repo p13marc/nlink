@@ -1,8 +1,11 @@
 //! Message builder for constructing netlink messages.
 
-use super::attr::{NLA_F_NESTED, NlAttr, nla_align};
-use super::message::{NLMSG_HDRLEN, NlMsgHdr, nlmsg_align};
 use zerocopy::{Immutable, IntoBytes};
+
+use super::{
+    attr::{NLA_F_NESTED, NlAttr, nla_align},
+    message::{NLMSG_HDRLEN, NlMsgHdr, nlmsg_align},
+};
 
 /// Token returned when starting a nested attribute.
 /// Used to finalize the nested attribute length.
@@ -173,8 +176,7 @@ impl MessageBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::netlink::attr::NLA_HDRLEN;
-    use crate::netlink::message::NLM_F_REQUEST;
+    use crate::netlink::{attr::NLA_HDRLEN, message::NLM_F_REQUEST};
 
     #[test]
     fn test_simple_message() {

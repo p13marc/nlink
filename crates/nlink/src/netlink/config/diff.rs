@@ -2,19 +2,22 @@
 //!
 //! This module computes the difference between desired and current network state.
 
-use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::{
+    collections::{HashMap, HashSet},
+    net::IpAddr,
+};
 
 use super::types::{
     DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredRoute, LinkState,
     NetworkConfig, QdiscParent,
 };
-use crate::netlink::connection::Connection;
-use crate::netlink::error::Result;
-use crate::netlink::messages::{AddressMessage, LinkMessage, RouteMessage, TcMessage};
-use crate::netlink::protocol::Route;
-use crate::netlink::types::link::OperState;
-use crate::netlink::types::route::RouteType;
+use crate::netlink::{
+    connection::Connection,
+    error::Result,
+    messages::{AddressMessage, LinkMessage, RouteMessage, TcMessage},
+    protocol::Route,
+    types::{link::OperState, route::RouteType},
+};
 
 /// Difference between desired and current network state.
 #[derive(Debug, Default)]

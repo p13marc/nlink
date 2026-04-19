@@ -5,8 +5,10 @@
 //!
 //! Run with: cargo run -p nlink --features sockdiag --example sockdiag_tcp_connections
 
-use nlink::netlink::{Connection, SockDiag};
-use nlink::sockdiag::{SocketFilter, TcpState};
+use nlink::{
+    netlink::{Connection, SockDiag},
+    sockdiag::{SocketFilter, TcpState},
+};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {

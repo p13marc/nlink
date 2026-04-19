@@ -2,12 +2,15 @@
 //!
 //! This module provides high-level builders for creating qdisc netlink messages.
 
-use crate::netlink::connection::{ack_request, create_request, replace_request};
-use crate::netlink::message::NlMsgType;
-use crate::netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
-use crate::netlink::{Connection, MessageBuilder, Result, Route};
-
-use crate::tc::options::{cake, codel, fq, fq_codel, htb, netem, prio, sfq, tbf};
+use crate::{
+    netlink::{
+        Connection, MessageBuilder, Result, Route,
+        connection::{ack_request, create_request, replace_request},
+        message::NlMsgType,
+        types::tc::{TcMsg, TcaAttr, tc_handle},
+    },
+    tc::options::{cake, codel, fq, fq_codel, htb, netem, prio, sfq, tbf},
+};
 
 /// Build a TcMsg with common fields for qdisc operations.
 fn build_tcmsg(dev: &str, parent: &str, handle: Option<&str>) -> Result<TcMsg> {

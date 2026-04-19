@@ -35,10 +35,12 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use super::builder::MessageBuilder;
-use super::error::Result;
-use super::message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, NlMsgType};
-use super::types::rule::{FibRuleAction, FibRuleHdr, FraAttr};
+use super::{
+    builder::MessageBuilder,
+    error::Result,
+    message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, NlMsgType},
+    types::rule::{FibRuleAction, FibRuleHdr, FraAttr},
+};
 
 /// Address family constants.
 const AF_INET: u8 = 2;

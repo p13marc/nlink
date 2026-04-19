@@ -1,7 +1,6 @@
 //! Output formatting utilities for WireGuard.
 
 use base64::prelude::*;
-
 // Re-export formatting utilities from nlink library
 pub use nlink::output::formatting::{format_bytes, format_time_ago};
 

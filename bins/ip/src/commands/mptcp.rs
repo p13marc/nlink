@@ -3,9 +3,13 @@
 use std::net::IpAddr;
 
 use clap::{Args, Subcommand};
-use nlink::netlink::genl::mptcp::{MptcpEndpoint, MptcpEndpointBuilder, MptcpLimits};
-use nlink::netlink::{Connection, Error, Mptcp, Result};
-use nlink::output::OutputFormat;
+use nlink::{
+    netlink::{
+        Connection, Error, Mptcp, Result,
+        genl::mptcp::{MptcpEndpoint, MptcpEndpointBuilder, MptcpLimits},
+    },
+    output::OutputFormat,
+};
 
 #[derive(Args)]
 pub struct MptcpCmd {

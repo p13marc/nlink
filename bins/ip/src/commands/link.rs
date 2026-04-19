@@ -3,10 +3,10 @@
 //! This module uses the strongly-typed LinkMessage API from rip-netlink.
 
 use clap::{Args, Subcommand};
-use nlink::netlink::message::NlMsgType;
-use nlink::netlink::messages::LinkMessage;
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions, print_all};
+use nlink::{
+    netlink::{Connection, Result, Route, message::NlMsgType, messages::LinkMessage},
+    output::{OutputFormat, OutputOptions, print_all},
+};
 
 use super::link_add::{LinkAddType, add_link};
 

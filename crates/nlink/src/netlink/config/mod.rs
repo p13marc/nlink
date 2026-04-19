@@ -51,9 +51,7 @@ pub use apply::{ApplyOptions, ApplyResult};
 pub use diff::ConfigDiff;
 pub use types::*;
 
-use super::connection::Connection;
-use super::error::Result;
-use super::protocol::Route;
+use super::{connection::Connection, error::Result, protocol::Route};
 
 impl NetworkConfig {
     /// Compute the difference between desired and current state.

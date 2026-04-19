@@ -50,25 +50,28 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
-use std::fmt;
-use std::net::IpAddr;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::Instant;
+use std::{
+    collections::HashMap,
+    fmt,
+    net::IpAddr,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Instant,
+};
 
 use tokio::sync::Mutex;
 use tokio_stream::Stream;
 
-use crate::netlink::connection::Connection;
-use crate::netlink::error::Result;
-use crate::netlink::events::NetworkEvent;
-use crate::netlink::messages::{AddressMessage, LinkMessage, LinkStats, RouteMessage, TcMessage};
-use crate::netlink::protocol::Route;
-use crate::netlink::stream::OwnedEventStream;
-use crate::netlink::types::link::OperState;
-use crate::netlink::types::neigh::NeighborState;
+use crate::netlink::{
+    connection::Connection,
+    error::Result,
+    events::NetworkEvent,
+    messages::{AddressMessage, LinkMessage, LinkStats, RouteMessage, TcMessage},
+    protocol::Route,
+    stream::OwnedEventStream,
+    types::{link::OperState, neigh::NeighborState},
+};
 
 // ============================================================================
 // Core Types

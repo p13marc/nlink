@@ -1,7 +1,6 @@
 //! FQ (Fair Queue) qdisc options.
 
-use crate::netlink::types::tc::qdisc::fq::*;
-use crate::netlink::{Error, MessageBuilder, Result};
+use crate::netlink::{Error, MessageBuilder, Result, types::tc::qdisc::fq::*};
 
 /// Build FQ qdisc options from parameters.
 ///

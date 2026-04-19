@@ -1,8 +1,9 @@
 //! JSON output formatting.
 
+use std::io::Write;
+
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::io::Write;
 
 /// JSON output helper.
 pub struct JsonOutput<W: Write> {

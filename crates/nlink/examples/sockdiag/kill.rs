@@ -10,8 +10,9 @@
 //! Examples:
 //!   sudo cargo run -p nlink --example sockdiag_kill --features sockdiag -- 8080
 
-use nlink::netlink::{Connection, SockDiag};
 use std::env;
+
+use nlink::netlink::{Connection, SockDiag};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {

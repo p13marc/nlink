@@ -2,14 +2,19 @@
 //!
 //! This module uses the strongly-typed RouteMessage API from rip-netlink.
 
-use clap::{Args, Subcommand};
-use nlink::netlink::mpls::MplsEncap;
-use nlink::netlink::route::{Ipv4Route, Ipv6Route, RouteMetrics};
-use nlink::netlink::srv6::Srv6Encap;
-use nlink::netlink::types::route::{RouteProtocol, RouteScope};
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions, print_all};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+use clap::{Args, Subcommand};
+use nlink::{
+    netlink::{
+        Connection, Result, Route,
+        mpls::MplsEncap,
+        route::{Ipv4Route, Ipv6Route, RouteMetrics},
+        srv6::Srv6Encap,
+        types::route::{RouteProtocol, RouteScope},
+    },
+    output::{OutputFormat, OutputOptions, print_all},
+};
 
 #[derive(Args)]
 pub struct RouteCmd {

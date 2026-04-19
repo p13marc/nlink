@@ -10,10 +10,8 @@
 
 use std::collections::HashMap;
 
-use crate::netlink::attr::AttrIter;
-use crate::netlink::error::Result;
-
 use super::{EthtoolBitsetAttr, EthtoolBitsetBitAttr};
+use crate::netlink::{attr::AttrIter, error::Result};
 
 /// An ethtool bitset.
 ///

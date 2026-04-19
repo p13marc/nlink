@@ -3,11 +3,13 @@
 //! Virtual Routing and Forwarding (VRF) device management.
 //! VRFs provide network isolation by creating separate routing domains.
 
-use clap::{Args, Subcommand};
-use nlink::netlink::attr::AttrIter;
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::io::Write;
+
+use clap::{Args, Subcommand};
+use nlink::{
+    netlink::{Connection, Result, Route, attr::AttrIter},
+    output::{OutputFormat, OutputOptions, Printable, print_all},
+};
 
 /// IFLA_VRF_TABLE attribute constant.
 const IFLA_VRF_TABLE: u16 = 1;
@@ -138,8 +140,7 @@ impl VrfCmd {
     }
 
     fn exec(&self, name: &str, command: &[String]) -> Result<()> {
-        use std::os::unix::process::CommandExt;
-        use std::process::Command;
+        use std::{os::unix::process::CommandExt, process::Command};
 
         if command.is_empty() {
             return Err(nlink::netlink::Error::InvalidMessage(

@@ -4,8 +4,10 @@
 //! and manages connections via Generic Netlink.
 
 use clap::{Parser, Subcommand};
-use nlink::netlink::genl::nl80211::{ConnectRequest, ScanRequest};
-use nlink::netlink::{Connection, Nl80211, Result};
+use nlink::netlink::{
+    Connection, Nl80211, Result,
+    genl::nl80211::{ConnectRequest, ScanRequest},
+};
 use tokio_stream::StreamExt;
 
 #[derive(Parser)]

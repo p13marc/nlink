@@ -2,14 +2,12 @@
 //!
 //! Tests for spawning processes inside network namespaces.
 
-use nlink::Result;
-use nlink::netlink::link::DummyLink;
-use nlink::netlink::namespace;
-use nlink::netlink::namespace::NamespaceSpec;
-use std::process::Command;
+use std::{fs, path::PathBuf, process::Command};
 
-use std::fs;
-use std::path::PathBuf;
+use nlink::{
+    Result,
+    netlink::{link::DummyLink, namespace, namespace::NamespaceSpec},
+};
 
 use crate::common::TestNamespace;
 

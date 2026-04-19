@@ -2,10 +2,13 @@
 //!
 //! Tests for link creation, modification, and deletion using network namespaces.
 
-use nlink::Result;
-use nlink::netlink::link::{
-    BondLink, BondMode, BridgeLink, DummyLink, GreLink, GretapLink, IfbLink, IpipLink, IpvlanLink,
-    LacpRate, MacvlanLink, MacvlanMode, SitLink, VethLink, VlanLink, VrfLink, XmitHashPolicy,
+use nlink::{
+    Result,
+    netlink::link::{
+        BondLink, BondMode, BridgeLink, DummyLink, GreLink, GretapLink, IfbLink, IpipLink,
+        IpvlanLink, LacpRate, MacvlanLink, MacvlanMode, SitLink, VethLink, VlanLink, VrfLink,
+        XmitHashPolicy,
+    },
 };
 
 use crate::common::TestNamespace;

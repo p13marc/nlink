@@ -1,9 +1,9 @@
 //! Check command - check connectivity to a destination.
 
-use clap::Args;
-use nlink::netlink::diagnostics::Diagnostics;
-use nlink::netlink::{Connection, Result, Route};
 use std::net::IpAddr;
+
+use clap::Args;
+use nlink::netlink::{Connection, Result, Route, diagnostics::Diagnostics};
 
 #[derive(Args)]
 pub struct CheckArgs {

@@ -1,8 +1,9 @@
 //! Key generation commands for WireGuard.
 
+use std::io::{self, Read};
+
 use nlink::netlink::{Error, Result};
 use rand::RngCore;
-use std::io::{self, Read};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::output::{base64_decode, base64_encode};

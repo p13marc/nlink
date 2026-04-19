@@ -5,11 +5,14 @@
 //!
 //! Run: cargo run -p nlink --example config_declarative
 
-use nlink::netlink::config::{
-    AddressConfig, ApplyOptions, LinkConfig, LinkType, NetworkConfig, QdiscConfig, RouteConfig,
-};
-use nlink::netlink::{Connection, Route};
 use std::net::Ipv4Addr;
+
+use nlink::netlink::{
+    Connection, Route,
+    config::{
+        AddressConfig, ApplyOptions, LinkConfig, LinkType, NetworkConfig, QdiscConfig, RouteConfig,
+    },
+};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {

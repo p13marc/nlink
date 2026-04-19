@@ -5,8 +5,9 @@
 //!
 //! Run with: cargo run -p nlink --example route_timeout
 
-use nlink::netlink::{Connection, Route};
 use std::time::Duration;
+
+use nlink::netlink::{Connection, Route};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {

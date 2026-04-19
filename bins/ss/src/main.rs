@@ -6,9 +6,11 @@
 mod output;
 
 use clap::Parser;
-use nlink::netlink::{Connection, SockDiag};
-use nlink::output::OutputFormat;
-use nlink::sockdiag::{InetFilter, Protocol, SocketFilter, TcpState, UnixFilter};
+use nlink::{
+    netlink::{Connection, SockDiag},
+    output::OutputFormat,
+    sockdiag::{InetFilter, Protocol, SocketFilter, TcpState, UnixFilter},
+};
 
 #[derive(Parser)]
 #[command(name = "ss", version, about = "Socket statistics utility")]

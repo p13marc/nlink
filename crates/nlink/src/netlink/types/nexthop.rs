@@ -1,7 +1,8 @@
 //! Nexthop message types (Linux 5.3+).
 
-use crate::netlink::error::{Error, Result};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+use crate::netlink::error::{Error, Result};
 
 /// Nexthop message header (struct nhmsg).
 #[repr(C)]

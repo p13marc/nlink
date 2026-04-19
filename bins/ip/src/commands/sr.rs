@@ -2,10 +2,13 @@
 //!
 //! This module implements Segment Routing (SRv6) management commands.
 
-use clap::{Args, Subcommand};
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions};
 use std::net::Ipv6Addr;
+
+use clap::{Args, Subcommand};
+use nlink::{
+    netlink::{Connection, Result, Route},
+    output::{OutputFormat, OutputOptions},
+};
 
 #[derive(Args)]
 pub struct SrCmd {

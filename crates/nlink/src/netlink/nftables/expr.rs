@@ -1,7 +1,6 @@
 //! nftables expression types and serialization.
 
-use super::types::*;
-use super::*;
+use super::{types::*, *};
 use crate::netlink::builder::MessageBuilder;
 
 /// A single nftables expression.

@@ -1,8 +1,11 @@
 //! Netlink message header and parsing.
 
-use super::attr::AttrIter;
-use super::error::{Error, Result};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+use super::{
+    attr::AttrIter,
+    error::{Error, Result},
+};
 
 /// Netlink message header alignment.
 pub const NLMSG_ALIGNTO: usize = 4;

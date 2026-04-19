@@ -1,12 +1,14 @@
 //! Link type subcommands for `ip link add`.
 
 use clap::{Args, Subcommand};
-use nlink::netlink::link::{
-    BondLink, BondMode, BridgeLink, DummyLink, GreLink, GretapLink, Ip6GreLink, Ip6GretapLink,
-    IpipLink, IpvlanLink, LacpRate, MacvlanLink, MacvtapLink, SitLink, VethLink, VlanLink, VrfLink,
-    Vti6Link, VtiLink, VxlanLink, WireguardLink, XmitHashPolicy,
+use nlink::netlink::{
+    Connection, Result, Route,
+    link::{
+        BondLink, BondMode, BridgeLink, DummyLink, GreLink, GretapLink, Ip6GreLink, Ip6GretapLink,
+        IpipLink, IpvlanLink, LacpRate, MacvlanLink, MacvtapLink, SitLink, VethLink, VlanLink,
+        VrfLink, Vti6Link, VtiLink, VxlanLink, WireguardLink, XmitHashPolicy,
+    },
 };
-use nlink::netlink::{Connection, Result, Route};
 
 /// Common options for all link types.
 #[derive(Args, Debug)]

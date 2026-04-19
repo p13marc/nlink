@@ -1,8 +1,9 @@
 //! HTB (Hierarchical Token Bucket) qdisc options.
 
-use crate::netlink::types::tc::qdisc::htb::*;
-use crate::netlink::{Error, MessageBuilder, Result};
-use crate::tc::handle::parse_handle;
+use crate::{
+    netlink::{Error, MessageBuilder, Result, types::tc::qdisc::htb::*},
+    tc::handle::parse_handle,
+};
 
 /// Build HTB qdisc options from parameters.
 ///

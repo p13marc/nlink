@@ -16,6 +16,7 @@
 //! ```
 
 use std::mem;
+
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Generic Netlink message header.

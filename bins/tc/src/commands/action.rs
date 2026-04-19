@@ -6,21 +6,27 @@
 //! - mirred: Mirror or redirect to another interface
 //! - police: Rate limiting with token bucket
 
-use clap::{Args, Subcommand};
-use nlink::netlink::attr::AttrIter;
-use nlink::netlink::message::NLMSG_HDRLEN;
-use nlink::netlink::types::tc::action::{
-    self, TCA_ACT_KIND, TCA_ACT_OPTIONS,
-    gact::{TCA_GACT_PARMS, TcGact},
-    mirred::{self, TCA_MIRRED_PARMS, TcMirred},
-    police::{TCA_POLICE_TBF, TcPolice},
-};
-use nlink::netlink::types::tc::{TCA_ACT_TAB, TcMsg};
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::formatting::format_rate_bps;
-use nlink::output::{OutputFormat, OutputOptions};
-use nlink::tc::builders::action as action_builder;
 use std::io::{self, Write};
+
+use clap::{Args, Subcommand};
+use nlink::{
+    netlink::{
+        Connection, Result, Route,
+        attr::AttrIter,
+        message::NLMSG_HDRLEN,
+        types::tc::{
+            TCA_ACT_TAB, TcMsg,
+            action::{
+                self, TCA_ACT_KIND, TCA_ACT_OPTIONS,
+                gact::{TCA_GACT_PARMS, TcGact},
+                mirred::{self, TCA_MIRRED_PARMS, TcMirred},
+                police::{TCA_POLICE_TBF, TcPolice},
+            },
+        },
+    },
+    output::{OutputFormat, OutputOptions, formatting::format_rate_bps},
+    tc::builders::action as action_builder,
+};
 
 #[derive(Args)]
 pub struct ActionCmd {

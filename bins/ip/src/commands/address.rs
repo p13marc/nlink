@@ -2,14 +2,21 @@
 //!
 //! This module uses the strongly-typed AddressMessage API from rip-netlink.
 
+use std::{
+    io::{self, Write},
+    net::IpAddr,
+};
+
 use clap::{Args, Subcommand};
-use nlink::netlink::addr::{Ipv4Address, Ipv6Address};
-use nlink::netlink::messages::AddressMessage;
-use nlink::netlink::types::addr::Scope;
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions};
-use std::io::{self, Write};
-use std::net::IpAddr;
+use nlink::{
+    netlink::{
+        Connection, Result, Route,
+        addr::{Ipv4Address, Ipv6Address},
+        messages::AddressMessage,
+        types::addr::Scope,
+    },
+    output::{OutputFormat, OutputOptions},
+};
 
 #[derive(Args)]
 pub struct AddressCmd {

@@ -4,8 +4,10 @@
 //! via Generic Netlink.
 
 use clap::{Parser, Subcommand};
-use nlink::netlink::genl::devlink::{ConfigMode, FlashRequest, ParamData, ReloadAction};
-use nlink::netlink::{Connection, Devlink, Result};
+use nlink::netlink::{
+    Connection, Devlink, Result,
+    genl::devlink::{ConfigMode, FlashRequest, ParamData, ReloadAction},
+};
 use tokio_stream::StreamExt;
 
 #[derive(Parser)]

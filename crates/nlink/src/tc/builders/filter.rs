@@ -2,10 +2,12 @@
 //!
 //! This module provides high-level builders for creating filter netlink messages.
 
-use crate::netlink::connection::{ack_request, create_request, replace_request};
-use crate::netlink::message::NlMsgType;
-use crate::netlink::types::tc::{TcMsg, TcaAttr, tc_handle};
-use crate::netlink::{Connection, MessageBuilder, Result, Route};
+use crate::netlink::{
+    Connection, MessageBuilder, Result, Route,
+    connection::{ack_request, create_request, replace_request},
+    message::NlMsgType,
+    types::tc::{TcMsg, TcaAttr, tc_handle},
+};
 
 /// Build a TcMsg with common fields for filter operations.
 fn build_tcmsg(dev: &str, parent: &str, protocol: u16, priority: u16) -> Result<TcMsg> {
@@ -1124,8 +1126,10 @@ fn add_fw_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()>
 /// This builder only attaches already-loaded programs via their file descriptor
 /// or pinned path.
 fn add_bpf_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()> {
-    use crate::netlink::types::tc::filter::bpf::*;
-    use crate::netlink::types::tc::filter::flower::{TCA_CLS_FLAGS_SKIP_HW, TCA_CLS_FLAGS_SKIP_SW};
+    use crate::netlink::types::tc::filter::{
+        bpf::*,
+        flower::{TCA_CLS_FLAGS_SKIP_HW, TCA_CLS_FLAGS_SKIP_SW},
+    };
 
     let mut i = 0;
     let mut has_da = false;

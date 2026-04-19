@@ -1,8 +1,10 @@
 //! Watch command - monitor network issues in real-time.
 
 use clap::Args;
-use nlink::netlink::diagnostics::{Diagnostics, Severity};
-use nlink::netlink::{Connection, Result, Route};
+use nlink::netlink::{
+    Connection, Result, Route,
+    diagnostics::{Diagnostics, Severity},
+};
 use tokio_stream::StreamExt;
 
 #[derive(Args)]

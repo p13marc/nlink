@@ -16,8 +16,7 @@
 
 use std::env;
 
-use nlink::netlink::namespace;
-use nlink::netlink::{Connection, Route};
+use nlink::netlink::{Connection, Route, namespace};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {

@@ -3,15 +3,22 @@
 //! Network namespaces provide isolation of network resources.
 //! Each namespace has its own interfaces, routing tables, firewall rules, etc.
 
+use std::{
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
 use clap::{Args, Subcommand};
-use nlink::netlink::Result;
-use nlink::netlink::namespace::{self, NETNS_RUN_DIR};
-use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use nlink::{
+    netlink::{
+        Result,
+        namespace::{self, NETNS_RUN_DIR},
+    },
+    output::{OutputFormat, OutputOptions, Printable, print_all},
+};
 
 /// Namespace information for display.
 #[derive(Debug)]

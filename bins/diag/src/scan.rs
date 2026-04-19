@@ -1,8 +1,10 @@
 //! Scan command - full system diagnostics scan.
 
 use clap::Args;
-use nlink::netlink::diagnostics::{Diagnostics, DiagnosticsConfig, Issue, Severity};
-use nlink::netlink::{Connection, Result, Route};
+use nlink::netlink::{
+    Connection, Result, Route,
+    diagnostics::{Diagnostics, DiagnosticsConfig, Issue, Severity},
+};
 
 #[derive(Args)]
 pub struct ScanArgs {

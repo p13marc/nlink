@@ -7,8 +7,7 @@
 //!
 //! Try running commands in another terminal to see events.
 
-use nlink::netlink::connector::ProcEvent;
-use nlink::netlink::{Connection, Connector};
+use nlink::netlink::{Connection, Connector, connector::ProcEvent};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {

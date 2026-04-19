@@ -27,12 +27,13 @@
 //! genl.get_family("wireguard").await?;
 //! ```
 
-use std::collections::HashMap;
-use std::sync::RwLock;
+use std::{collections::HashMap, sync::RwLock};
 
-use super::error::Result;
-use super::genl::FamilyInfo;
-use super::socket::{NetlinkSocket, Protocol};
+use super::{
+    error::Result,
+    genl::FamilyInfo,
+    socket::{NetlinkSocket, Protocol},
+};
 
 /// Sealed trait module to prevent external implementations.
 mod private {

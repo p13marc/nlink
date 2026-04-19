@@ -5,8 +5,10 @@
 //!
 //! Run: cargo run -p nlink --example diagnostics_scan
 
-use nlink::netlink::diagnostics::{Diagnostics, DiagnosticsConfig, Severity};
-use nlink::netlink::{Connection, Route};
+use nlink::netlink::{
+    Connection, Route,
+    diagnostics::{Diagnostics, DiagnosticsConfig, Severity},
+};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {

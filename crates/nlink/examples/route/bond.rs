@@ -13,9 +13,12 @@
 //!   sudo cargo run -p nlink --example route_bond -- show bond0
 //!   sudo cargo run -p nlink --example route_bond -- del bond0
 
-use nlink::netlink::link::{BondLink, BondMode};
-use nlink::netlink::{Connection, Route};
 use std::env;
+
+use nlink::netlink::{
+    Connection, Route,
+    link::{BondLink, BondMode},
+};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {

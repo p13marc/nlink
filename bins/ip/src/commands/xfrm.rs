@@ -3,12 +3,13 @@
 //! IPSec/XFRM transformation management.
 //! Manages Security Associations (SAs) and Security Policies (SPs).
 
+use std::{fs, io::Write, net::IpAddr};
+
 use clap::{Args, Subcommand};
-use nlink::netlink::Result;
-use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
-use std::fs;
-use std::io::Write;
-use std::net::IpAddr;
+use nlink::{
+    netlink::Result,
+    output::{OutputFormat, OutputOptions, Printable, print_all},
+};
 
 #[derive(Args)]
 pub struct XfrmCmd {

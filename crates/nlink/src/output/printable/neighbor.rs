@@ -2,10 +2,10 @@
 
 use std::io::Write;
 
-use crate::netlink::messages::NeighborMessage;
-use crate::netlink::types::neigh::nud_state_name;
-
-use crate::output::{OutputOptions, Printable};
+use crate::{
+    netlink::{messages::NeighborMessage, types::neigh::nud_state_name},
+    output::{OutputOptions, Printable},
+};
 
 impl Printable for NeighborMessage {
     fn print_text<W: Write>(&self, w: &mut W, _opts: &OutputOptions) -> std::io::Result<()> {

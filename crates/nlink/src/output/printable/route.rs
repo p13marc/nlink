@@ -2,10 +2,13 @@
 
 use std::io::Write;
 
-use crate::netlink::messages::RouteMessage;
-use crate::netlink::types::route::{RouteProtocol, RouteScope};
-
-use crate::output::{OutputOptions, Printable};
+use crate::{
+    netlink::{
+        messages::RouteMessage,
+        types::route::{RouteProtocol, RouteScope},
+    },
+    output::{OutputOptions, Printable},
+};
 
 impl Printable for RouteMessage {
     fn print_text<W: Write>(&self, w: &mut W, _opts: &OutputOptions) -> std::io::Result<()> {

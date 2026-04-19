@@ -1,15 +1,16 @@
 //! Low-level async netlink socket operations.
 
-use std::fs::File;
-use std::os::unix::io::{AsRawFd, RawFd};
-use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::task::{Context, Poll};
+use std::{
+    fs::File,
+    os::unix::io::{AsRawFd, RawFd},
+    path::Path,
+    sync::atomic::{AtomicU32, Ordering},
+    task::{Context, Poll},
+};
 
 use bytes::BytesMut;
 use netlink_sys::{Socket, SocketAddr, protocols};
-use tokio::io::Interest;
-use tokio::io::unix::AsyncFd;
+use tokio::io::{Interest, unix::AsyncFd};
 
 use super::error::{Error, Result};
 

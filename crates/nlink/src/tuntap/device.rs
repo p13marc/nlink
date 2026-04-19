@@ -1,13 +1,17 @@
 //! TUN/TAP device implementation.
 
-use super::TUN_DEVICE_PATH;
-use super::error::{Error, Result};
+use std::{
+    ffi::CString,
+    fs::{File, OpenOptions},
+    io::{self, Read, Write},
+    mem::MaybeUninit,
+    os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
+};
 
-use std::ffi::CString;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
-use std::mem::MaybeUninit;
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use super::{
+    TUN_DEVICE_PATH,
+    error::{Error, Result},
+};
 
 // TUN/TAP ioctl constants
 const TUNSETIFF: libc::c_ulong = 0x400454ca;

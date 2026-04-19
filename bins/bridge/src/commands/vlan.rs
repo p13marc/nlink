@@ -1,9 +1,13 @@
 //! `bridge vlan` command implementation.
 
 use clap::{Args, Subcommand};
-use nlink::netlink::bridge_vlan::{BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanTunnelBuilder};
-use nlink::netlink::{Connection, Error, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions};
+use nlink::{
+    netlink::{
+        Connection, Error, Result, Route,
+        bridge_vlan::{BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanTunnelBuilder},
+    },
+    output::{OutputFormat, OutputOptions},
+};
 
 #[derive(Args)]
 pub struct VlanCmd {

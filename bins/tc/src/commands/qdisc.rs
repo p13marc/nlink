@@ -1,11 +1,11 @@
 //! tc qdisc command implementation.
 
 use clap::{Args, Subcommand};
-use nlink::netlink::message::NlMsgType;
-use nlink::netlink::messages::TcMessage;
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions, print_all};
-use nlink::tc::builders::qdisc as qdisc_builder;
+use nlink::{
+    netlink::{Connection, Result, Route, message::NlMsgType, messages::TcMessage},
+    output::{OutputFormat, OutputOptions, print_all},
+    tc::builders::qdisc as qdisc_builder,
+};
 
 #[derive(Args)]
 pub struct QdiscCmd {

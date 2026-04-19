@@ -1,11 +1,16 @@
 //! ip rule command implementation.
 
-use clap::{Args, Subcommand};
-use nlink::netlink::rule::RuleBuilder;
-use nlink::netlink::types::rule::{FibRuleAction, FibRulePortRange, FibRuleUidRange};
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
 use std::io::Write;
+
+use clap::{Args, Subcommand};
+use nlink::{
+    netlink::{
+        Connection, Result, Route,
+        rule::RuleBuilder,
+        types::rule::{FibRuleAction, FibRulePortRange, FibRuleUidRange},
+    },
+    output::{OutputFormat, OutputOptions, Printable, print_all},
+};
 
 #[derive(Args)]
 pub struct RuleCmd {

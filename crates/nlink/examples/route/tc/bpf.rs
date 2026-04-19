@@ -12,9 +12,12 @@
 //!   sudo cargo run -p nlink --example route_tc_bpf -- list eth0
 //!   sudo cargo run -p nlink --example route_tc_bpf -- detach eth0
 
-use nlink::netlink::filter::{BpfDirection, BpfFilter};
-use nlink::netlink::{Connection, Route};
 use std::env;
+
+use nlink::netlink::{
+    Connection, Route,
+    filter::{BpfDirection, BpfFilter},
+};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {

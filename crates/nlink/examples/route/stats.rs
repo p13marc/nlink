@@ -7,8 +7,10 @@
 
 use std::time::Duration;
 
-use nlink::netlink::stats::{StatsSnapshot, StatsTracker};
-use nlink::netlink::{Connection, Route};
+use nlink::netlink::{
+    Connection, Route,
+    stats::{StatsSnapshot, StatsTracker},
+};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {

@@ -5,10 +5,12 @@
 //!
 //! Run: cargo run -p nlink --example diagnostics_connectivity
 
-use nlink::netlink::diagnostics::{Diagnostics, Severity};
-use nlink::netlink::{Connection, Route};
-use std::env;
-use std::net::IpAddr;
+use std::{env, net::IpAddr};
+
+use nlink::netlink::{
+    Connection, Route,
+    diagnostics::{Diagnostics, Severity},
+};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {

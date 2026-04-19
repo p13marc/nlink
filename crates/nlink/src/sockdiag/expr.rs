@@ -12,14 +12,18 @@
 
 use std::net::IpAddr;
 
-use winnow::ascii::{digit1, multispace0, multispace1};
-use winnow::combinator::opt;
-use winnow::error::{ContextError, ErrMode};
-use winnow::prelude::*;
-use winnow::token::take_while;
+use winnow::{
+    ascii::{digit1, multispace0, multispace1},
+    combinator::opt,
+    error::{ContextError, ErrMode},
+    prelude::*,
+    token::take_while,
+};
 
-use super::socket::{InetSocket, SocketInfo};
-use super::types::{SocketState, TcpState};
+use super::{
+    socket::{InetSocket, SocketInfo},
+    types::{SocketState, TcpState},
+};
 
 /// Socket filter expression AST.
 #[derive(Debug, Clone)]
@@ -347,9 +351,10 @@ fn parse_state(input: &mut &str) -> PResult<SocketState> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use super::*;
     use crate::sockdiag::types::{AddressFamily, Protocol, Timer};
-    use std::net::SocketAddr;
 
     fn tcp_state(state: TcpState) -> SocketState {
         SocketState::Tcp(state)

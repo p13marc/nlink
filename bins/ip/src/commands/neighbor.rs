@@ -2,12 +2,13 @@
 //!
 //! This module uses the strongly-typed NeighborMessage API from rip-netlink.
 
-use clap::{Args, Subcommand};
-use nlink::netlink::neigh::Neighbor;
-use nlink::netlink::types::neigh::NeighborState;
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions, print_all};
 use std::net::IpAddr;
+
+use clap::{Args, Subcommand};
+use nlink::{
+    netlink::{Connection, Result, Route, neigh::Neighbor, types::neigh::NeighborState},
+    output::{OutputFormat, OutputOptions, print_all},
+};
 
 #[derive(Args)]
 pub struct NeighborCmd {

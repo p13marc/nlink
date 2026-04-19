@@ -4,12 +4,12 @@
 //! event monitoring with Stream trait support.
 
 use clap::{Args, ValueEnum};
-use nlink::netlink::types::link::iff;
-
-use nlink::netlink::{Connection, NetworkEvent, Result, Route, RtnetlinkGroup};
-use nlink::output::{
-    AddressEvent, IpEvent, LinkEvent, MonitorConfig, NeighborEvent, OutputFormat, OutputOptions,
-    RouteEvent, print_event, print_monitor_start,
+use nlink::{
+    netlink::{Connection, NetworkEvent, Result, Route, RtnetlinkGroup, types::link::iff},
+    output::{
+        AddressEvent, IpEvent, LinkEvent, MonitorConfig, NeighborEvent, OutputFormat,
+        OutputOptions, RouteEvent, print_event, print_monitor_start,
+    },
 };
 use tokio_stream::StreamExt;
 

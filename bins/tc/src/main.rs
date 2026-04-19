@@ -3,17 +3,17 @@
 //! Manages queuing disciplines (qdiscs), classes, and filters.
 
 use clap::{Parser, Subcommand};
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions};
+use nlink::{
+    netlink::{Connection, Result, Route},
+    output::{OutputFormat, OutputOptions},
+};
 
 mod commands;
 
-use commands::action::ActionCmd;
-use commands::chain::ChainCmd;
-use commands::class::ClassCmd;
-use commands::filter::FilterCmd;
-use commands::monitor::MonitorCmd;
-use commands::qdisc::QdiscCmd;
+use commands::{
+    action::ActionCmd, chain::ChainCmd, class::ClassCmd, filter::FilterCmd, monitor::MonitorCmd,
+    qdisc::QdiscCmd,
+};
 
 #[derive(Parser)]
 #[command(name = "tc")]

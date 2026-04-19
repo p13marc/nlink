@@ -8,28 +8,33 @@
 //! - mirred: Mirror or redirect to another interface
 //! - police: Rate limiting with token bucket
 
-use crate::netlink::message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_REQUEST, NlMsgType};
-use crate::netlink::types::tc::TCA_ACT_TAB;
-use crate::netlink::types::tc::TcMsg;
-use crate::netlink::types::tc::action::{
-    self, TC_ACT_PIPE, TC_ACT_STOLEN, TCA_ACT_KIND, TCA_ACT_OPTIONS,
-    gact::{PGACT_DETERM, PGACT_NETRAND, TCA_GACT_PARMS, TCA_GACT_PROB, TcGact, TcGactP},
-    mirred::{
-        TCA_EGRESS_MIRROR, TCA_EGRESS_REDIR, TCA_INGRESS_MIRROR, TCA_INGRESS_REDIR,
-        TCA_MIRRED_PARMS, TcMirred,
-    },
-    police::{TCA_POLICE_AVRATE, TCA_POLICE_RATE64, TCA_POLICE_RESULT, TCA_POLICE_TBF, TcPolice},
-    skbedit::{
-        TCA_SKBEDIT_MARK, TCA_SKBEDIT_MASK, TCA_SKBEDIT_PARMS, TCA_SKBEDIT_PRIORITY,
-        TCA_SKBEDIT_PTYPE, TCA_SKBEDIT_QUEUE_MAPPING, TcSkbedit,
-    },
-    vlan::{
-        ETH_P_8021AD, ETH_P_8021Q, TCA_VLAN_ACT_MODIFY, TCA_VLAN_ACT_POP, TCA_VLAN_ACT_PUSH,
-        TCA_VLAN_PARMS, TCA_VLAN_PUSH_VLAN_ID, TCA_VLAN_PUSH_VLAN_PRIORITY,
-        TCA_VLAN_PUSH_VLAN_PROTOCOL, TcVlan,
+use crate::netlink::{
+    Connection, MessageBuilder, Result, Route,
+    message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_REQUEST, NlMsgType},
+    types::tc::{
+        TCA_ACT_TAB, TcMsg,
+        action::{
+            self, TC_ACT_PIPE, TC_ACT_STOLEN, TCA_ACT_KIND, TCA_ACT_OPTIONS,
+            gact::{PGACT_DETERM, PGACT_NETRAND, TCA_GACT_PARMS, TCA_GACT_PROB, TcGact, TcGactP},
+            mirred::{
+                TCA_EGRESS_MIRROR, TCA_EGRESS_REDIR, TCA_INGRESS_MIRROR, TCA_INGRESS_REDIR,
+                TCA_MIRRED_PARMS, TcMirred,
+            },
+            police::{
+                TCA_POLICE_AVRATE, TCA_POLICE_RATE64, TCA_POLICE_RESULT, TCA_POLICE_TBF, TcPolice,
+            },
+            skbedit::{
+                TCA_SKBEDIT_MARK, TCA_SKBEDIT_MASK, TCA_SKBEDIT_PARMS, TCA_SKBEDIT_PRIORITY,
+                TCA_SKBEDIT_PTYPE, TCA_SKBEDIT_QUEUE_MAPPING, TcSkbedit,
+            },
+            vlan::{
+                ETH_P_8021AD, ETH_P_8021Q, TCA_VLAN_ACT_MODIFY, TCA_VLAN_ACT_POP,
+                TCA_VLAN_ACT_PUSH, TCA_VLAN_PARMS, TCA_VLAN_PUSH_VLAN_ID,
+                TCA_VLAN_PUSH_VLAN_PRIORITY, TCA_VLAN_PUSH_VLAN_PROTOCOL, TcVlan,
+            },
+        },
     },
 };
-use crate::netlink::{Connection, MessageBuilder, Result, Route};
 
 /// Add a new action.
 ///
@@ -100,8 +105,7 @@ pub async fn del(conn: &Connection<Route>, kind: &str, index: Option<u32>) -> Re
 ///
 /// Returns raw netlink messages that can be parsed by the caller.
 pub async fn dump(conn: &Connection<Route>, kind: &str) -> Result<Vec<Vec<u8>>> {
-    use crate::netlink::connection::dump_request;
-    use crate::netlink::message::NlMsgType;
+    use crate::netlink::{connection::dump_request, message::NlMsgType};
 
     let mut builder = dump_request(NlMsgType::RTM_GETACTION);
 

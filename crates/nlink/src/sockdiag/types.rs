@@ -3,8 +3,9 @@
 //! This module provides strongly-typed representations of socket states,
 //! address families, protocols, and diagnostic information.
 
-use serde::{Deserialize, Serialize};
 use std::fmt;
+
+use serde::{Deserialize, Serialize};
 
 /// Socket address family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

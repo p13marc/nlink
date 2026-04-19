@@ -1,7 +1,6 @@
 //! SFQ (Stochastic Fairness Queueing) qdisc options.
 
-use crate::netlink::types::tc::qdisc::sfq::*;
-use crate::netlink::{Error, MessageBuilder, Result};
+use crate::netlink::{Error, MessageBuilder, Result, types::tc::qdisc::sfq::*};
 
 /// Build SFQ qdisc options from parameters.
 ///

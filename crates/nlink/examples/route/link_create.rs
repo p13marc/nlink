@@ -15,8 +15,10 @@
 
 use std::env;
 
-use nlink::netlink::link::{BridgeLink, DummyLink, VethLink};
-use nlink::netlink::{Connection, Route};
+use nlink::netlink::{
+    Connection, Route,
+    link::{BridgeLink, DummyLink, VethLink},
+};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {

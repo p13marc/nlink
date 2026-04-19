@@ -1,11 +1,13 @@
 //! Set command implementation for WireGuard.
 
+use std::{
+    fs,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
+
 use clap::Args;
-use nlink::netlink::genl::wireguard::AllowedIp;
-use nlink::netlink::{Connection, Error, Result, Wireguard};
-use std::fs;
-use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use nlink::netlink::{Connection, Error, Result, Wireguard, genl::wireguard::AllowedIp};
 
 use crate::output::base64_decode;
 

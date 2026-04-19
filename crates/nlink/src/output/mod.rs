@@ -6,6 +6,8 @@ pub mod monitor;
 mod printable;
 mod text;
 
+use std::io::Write;
+
 pub use formatting::{
     format_bytes, format_duration, format_duration_compact, format_hex, format_ipv4, format_mac,
     format_percent, format_rate_bps, format_rate_bytes, format_tc_handle, format_time_ago,
@@ -16,8 +18,6 @@ pub use monitor::{
     TcEvent, print_event, print_monitor_start, write_timestamp,
 };
 pub use text::TextOutput;
-
-use std::io::Write;
 
 /// Output format options.
 #[derive(Debug, Clone, Copy, Default)]

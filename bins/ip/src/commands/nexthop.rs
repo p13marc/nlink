@@ -3,9 +3,13 @@
 use std::net::IpAddr;
 
 use clap::{Args, Subcommand};
-use nlink::netlink::nexthop::{Nexthop, NexthopBuilder, NexthopGroupBuilder};
-use nlink::netlink::{Connection, Error, Result, Route};
-use nlink::output::OutputFormat;
+use nlink::{
+    netlink::{
+        Connection, Error, Result, Route,
+        nexthop::{Nexthop, NexthopBuilder, NexthopGroupBuilder},
+    },
+    output::OutputFormat,
+};
 
 #[derive(Args)]
 pub struct NexthopCmd {

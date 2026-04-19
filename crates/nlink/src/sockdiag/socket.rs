@@ -3,9 +3,11 @@
 //! This module provides strongly-typed representations of socket information
 //! returned by the kernel's SOCK_DIAG interface.
 
-use super::types::{AddressFamily, MemInfo, Protocol, SocketState, TcpInfo, TcpState, Timer};
-use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+use serde::{Deserialize, Serialize};
+
+use super::types::{AddressFamily, MemInfo, Protocol, SocketState, TcpInfo, TcpState, Timer};
 
 /// Common socket information.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,8 +3,10 @@
 mod commands;
 
 use clap::{Parser, Subcommand};
-use nlink::netlink::{Connection, Route};
-use nlink::output::OutputFormat;
+use nlink::{
+    netlink::{Connection, Route},
+    output::OutputFormat,
+};
 
 #[derive(Parser)]
 #[command(name = "ip", version, about = "Network configuration tool")]

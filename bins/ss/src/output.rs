@@ -1,9 +1,14 @@
 //! Output formatting for ss command.
 
-use nlink::output::formatting::format_rate_bps;
-use nlink::sockdiag::{InetSocket, SocketInfo, UnixSocket};
-use std::io::{self, Write};
-use std::net::SocketAddr;
+use std::{
+    io::{self, Write},
+    net::SocketAddr,
+};
+
+use nlink::{
+    output::formatting::format_rate_bps,
+    sockdiag::{InetSocket, SocketInfo, UnixSocket},
+};
 
 /// Display options for socket output.
 #[allow(dead_code)]

@@ -2,13 +2,13 @@
 
 use std::net::IpAddr;
 
-use winnow::binary::le_u16;
-use winnow::prelude::*;
-use winnow::token::take;
+use winnow::{binary::le_u16, prelude::*, token::take};
 use zerocopy::FromBytes;
 
-use crate::netlink::parse::{FromNetlink, PResult, parse_ip_addr};
-use crate::netlink::types::rule::{FibRuleAction, FibRuleHdr, FibRulePortRange, FibRuleUidRange};
+use crate::netlink::{
+    parse::{FromNetlink, PResult, parse_ip_addr},
+    types::rule::{FibRuleAction, FibRuleHdr, FibRulePortRange, FibRuleUidRange},
+};
 
 /// Attribute IDs for FRA_* constants.
 mod attr_ids {

@@ -2,8 +2,7 @@
 //!
 //! Parses RTM_NEWNSID and RTM_DELNSID netlink messages.
 
-use crate::netlink::attr::AttrIter;
-use crate::netlink::types::nsid::netnsa;
+use crate::netlink::{attr::AttrIter, types::nsid::netnsa};
 
 /// Parsed namespace ID message from RTM_NEWNSID/RTM_DELNSID.
 #[derive(Debug, Clone, Default)]

@@ -24,18 +24,17 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use super::connection::Connection;
-use super::error::Result;
-use super::protocol::SockDiag;
-
+use super::{connection::Connection, error::Result, protocol::SockDiag};
 // Re-export sockdiag types that are needed for the API
 pub use crate::sockdiag::filter::{
     FilterKind, InetFilter, NetlinkFilter, PacketFilter, SocketFilter, UnixFilter,
 };
-pub use crate::sockdiag::socket::{InetSocket, SocketInfo, UnixSocket, UnixType};
-pub use crate::sockdiag::types::{
-    AddressFamily, MemInfo, Protocol as InetProtocol, SocketState, SocketSummary, TcpInfo,
-    TcpState, Timer,
+pub use crate::sockdiag::{
+    socket::{InetSocket, SocketInfo, UnixSocket, UnixType},
+    types::{
+        AddressFamily, MemInfo, Protocol as InetProtocol, SocketState, SocketSummary, TcpInfo,
+        TcpState, Timer,
+    },
 };
 
 // Netlink constants

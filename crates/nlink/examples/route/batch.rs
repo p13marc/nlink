@@ -7,10 +7,9 @@
 //!
 //! Requires root privileges.
 
-use nlink::netlink::link::DummyLink;
-use nlink::netlink::route::Ipv4Route;
-use nlink::netlink::{Connection, Route};
 use std::net::{IpAddr, Ipv4Addr};
+
+use nlink::netlink::{Connection, Route, link::DummyLink, route::Ipv4Route};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {

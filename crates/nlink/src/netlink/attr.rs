@@ -1,7 +1,8 @@
 //! Netlink attribute (rtattr/nlattr) handling.
 
-use super::error::{Error, Result};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+use super::error::{Error, Result};
 
 /// Netlink attribute alignment.
 pub const NLA_ALIGNTO: usize = 4;

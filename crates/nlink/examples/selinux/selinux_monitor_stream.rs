@@ -10,8 +10,7 @@
 //!   sudo setenforce 0
 //!   sudo setenforce 1
 
-use nlink::netlink::selinux::SELinuxEvent;
-use nlink::netlink::{Connection, SELinux};
+use nlink::netlink::{Connection, SELinux, selinux::SELinuxEvent};
 use tokio_stream::StreamExt;
 
 #[tokio::main]

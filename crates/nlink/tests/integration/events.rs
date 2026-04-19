@@ -2,13 +2,15 @@
 //!
 //! Tests for netlink event subscription and monitoring using network namespaces.
 
-use nlink::Result;
-use nlink::netlink::addr::Ipv4Address;
-use nlink::netlink::link::DummyLink;
-use nlink::netlink::tc::NetemConfig;
-use nlink::netlink::{NetworkEvent, RtnetlinkGroup};
-use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    time::Duration,
+};
+
+use nlink::{
+    Result,
+    netlink::{NetworkEvent, RtnetlinkGroup, addr::Ipv4Address, link::DummyLink, tc::NetemConfig},
+};
 use tokio_stream::StreamExt;
 
 use crate::common::TestNamespace;
@@ -348,8 +350,9 @@ async fn test_ipv6_address_events() -> Result<()> {
 
     // Add IPv6 address
     {
-        use nlink::netlink::addr::Ipv6Address;
         use std::net::Ipv6Addr;
+
+        use nlink::netlink::addr::Ipv6Address;
 
         let conn2 = ns.connection()?;
         let ip: Ipv6Addr = "fd00::1".parse().unwrap();

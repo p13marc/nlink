@@ -1,8 +1,10 @@
 //! Show command implementation for WireGuard.
 
 use clap::{Args, ValueEnum};
-use nlink::netlink::genl::wireguard::{WgDevice, WgPeer};
-use nlink::netlink::{Connection, Result, Route, Wireguard};
+use nlink::netlink::{
+    Connection, Result, Route, Wireguard,
+    genl::wireguard::{WgDevice, WgPeer},
+};
 
 use crate::output::{base64_encode, format_bytes, format_time_ago};
 

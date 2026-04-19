@@ -3,13 +3,18 @@
 //! Multicast address management. Shows link-layer and IP multicast addresses
 //! that are subscribed on interfaces.
 
+use std::{
+    collections::HashMap,
+    fs,
+    io::Write,
+    net::{Ipv4Addr, Ipv6Addr},
+};
+
 use clap::{Args, Subcommand};
-use nlink::netlink::Result;
-use nlink::output::{OutputFormat, OutputOptions, Printable, print_all};
-use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use nlink::{
+    netlink::Result,
+    output::{OutputFormat, OutputOptions, Printable, print_all},
+};
 
 #[derive(Args)]
 pub struct MaddressCmd {

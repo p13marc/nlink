@@ -32,10 +32,12 @@
 //! }
 //! ```
 
-use super::error::Result;
-use super::messages::NsIdMessage;
-use super::socket::{NetlinkSocket, Protocol};
-use super::types::nsid::{RTM_DELNSID, RTM_NEWNSID, RTNLGRP_NSID};
+use super::{
+    error::Result,
+    messages::NsIdMessage,
+    socket::{NetlinkSocket, Protocol},
+    types::nsid::{RTM_DELNSID, RTM_NEWNSID, RTNLGRP_NSID},
+};
 
 /// Namespace-related netlink events.
 #[derive(Debug, Clone, PartialEq, Eq)]

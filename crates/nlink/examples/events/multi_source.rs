@@ -11,10 +11,9 @@
 //!
 //! Try plugging in a USB device or running commands to see events.
 
-use nlink::netlink::connector::ProcEvent;
-use nlink::netlink::uevent::Uevent;
-use nlink::netlink::{Connection, Connector, KobjectUevent};
 use std::pin::pin;
+
+use nlink::netlink::{Connection, Connector, KobjectUevent, connector::ProcEvent, uevent::Uevent};
 use tokio_stream::StreamExt;
 
 #[tokio::main]

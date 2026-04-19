@@ -2,12 +2,17 @@
 //!
 //! Tests for route management using network namespaces.
 
-use nlink::netlink::addr::Ipv4Address;
-use nlink::netlink::link::DummyLink;
-use nlink::netlink::route::{Ipv4Route, Ipv6Route, NextHop, RouteMetrics};
-use nlink::netlink::types::route::RouteType;
-use nlink::{Connection, Result, Route};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+use nlink::{
+    Connection, Result, Route,
+    netlink::{
+        addr::Ipv4Address,
+        link::DummyLink,
+        route::{Ipv4Route, Ipv6Route, NextHop, RouteMetrics},
+        types::route::RouteType,
+    },
+};
 
 use crate::common::TestNamespace;
 

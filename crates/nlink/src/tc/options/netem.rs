@@ -1,7 +1,6 @@
 //! Netem (Network Emulator) qdisc options.
 
-use crate::netlink::types::tc::qdisc::netem::*;
-use crate::netlink::{Error, MessageBuilder, Result};
+use crate::netlink::{Error, MessageBuilder, Result, types::tc::qdisc::netem::*};
 
 /// Build netem qdisc options from parameters.
 ///

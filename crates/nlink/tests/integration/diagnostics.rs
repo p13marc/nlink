@@ -1,9 +1,10 @@
 //! Integration tests for the diagnostics module.
 
-use crate::common::TestNamespace;
 use nlink::netlink::diagnostics::{
     BottleneckType, Diagnostics, DiagnosticsConfig, IssueCategory, LinkRates, Severity,
 };
+
+use crate::common::TestNamespace;
 
 // ============================================================================
 // Unit Tests (no network namespace required)

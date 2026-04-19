@@ -1,7 +1,6 @@
 //! CoDel qdisc options.
 
-use crate::netlink::types::tc::qdisc::codel::*;
-use crate::netlink::{Error, MessageBuilder, Result};
+use crate::netlink::{Error, MessageBuilder, Result, types::tc::qdisc::codel::*};
 
 /// Build CoDel qdisc options from parameters.
 ///

@@ -26,8 +26,10 @@
 //! }
 //! ```
 
-use super::fdb::FdbEntry;
-use super::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage};
+use super::{
+    fdb::FdbEntry,
+    messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage},
+};
 
 /// Network events that can be received from the kernel.
 ///

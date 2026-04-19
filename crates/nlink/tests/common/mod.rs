@@ -3,12 +3,15 @@
 //! Provides `TestNamespace` for isolated network namespace testing
 //! and helper macros for conditional test execution.
 
-use nlink::Result;
-use nlink::Route;
-use nlink::netlink::Connection;
-use nlink::netlink::namespace;
-use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::{
+    process::Command,
+    sync::atomic::{AtomicU32, Ordering},
+};
+
+use nlink::{
+    Result, Route,
+    netlink::{Connection, namespace},
+};
 
 /// Global counter for unique namespace names.
 static NAMESPACE_COUNTER: AtomicU32 = AtomicU32::new(0);

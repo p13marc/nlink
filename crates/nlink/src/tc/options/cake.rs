@@ -1,7 +1,6 @@
 //! CAKE qdisc options.
 
-use crate::netlink::types::tc::qdisc::cake::*;
-use crate::netlink::{Error, MessageBuilder, Result};
+use crate::netlink::{Error, MessageBuilder, Result, types::tc::qdisc::cake::*};
 
 /// Build CAKE qdisc options from parameters.
 ///

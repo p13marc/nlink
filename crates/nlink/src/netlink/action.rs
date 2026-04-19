@@ -30,10 +30,12 @@
 
 use std::net::Ipv4Addr;
 
-use super::builder::MessageBuilder;
-use super::error::{Error, Result};
-use super::types::tc::action::{
-    self, TcGen, connmark, csum, ct, gact, mirred, nat, pedit, police, sample, tunnel_key, vlan,
+use super::{
+    builder::MessageBuilder,
+    error::{Error, Result},
+    types::tc::action::{
+        self, TcGen, connmark, csum, ct, gact, mirred, nat, pedit, police, sample, tunnel_key, vlan,
+    },
 };
 
 // ============================================================================

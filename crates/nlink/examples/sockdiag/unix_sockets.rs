@@ -4,8 +4,10 @@
 //!
 //! Run with: cargo run -p nlink --features sockdiag --example sockdiag_unix_sockets
 
-use nlink::netlink::{Connection, SockDiag};
-use nlink::sockdiag::SocketFilter;
+use nlink::{
+    netlink::{Connection, SockDiag},
+    sockdiag::SocketFilter,
+};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {

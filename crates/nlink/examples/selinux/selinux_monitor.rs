@@ -13,8 +13,7 @@
 //! Or reload the policy:
 //!   sudo semodule -r some_module && sudo semodule -i some_module.pp
 
-use nlink::netlink::selinux::SELinuxEvent;
-use nlink::netlink::{Connection, SELinux};
+use nlink::netlink::{Connection, SELinux, selinux::SELinuxEvent};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {

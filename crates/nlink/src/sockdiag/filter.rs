@@ -3,8 +3,9 @@
 //! This module provides builder-pattern APIs for constructing socket queries
 //! with various filter criteria.
 
-use super::types::{AddressFamily, InetExtension, Protocol, TcpState, UnixShow};
 use std::net::IpAddr;
+
+use super::types::{AddressFamily, InetExtension, Protocol, TcpState, UnixShow};
 
 /// Socket filter builder.
 ///

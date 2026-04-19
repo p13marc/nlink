@@ -2,9 +2,10 @@
 
 use std::io::Write;
 
-use crate::netlink::messages::LinkMessage;
-
-use crate::output::{OutputOptions, Printable};
+use crate::{
+    netlink::messages::LinkMessage,
+    output::{OutputOptions, Printable},
+};
 
 impl Printable for LinkMessage {
     fn print_text<W: Write>(&self, w: &mut W, _opts: &OutputOptions) -> std::io::Result<()> {

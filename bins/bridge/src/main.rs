@@ -5,11 +5,11 @@
 mod commands;
 
 use clap::{Parser, Subcommand};
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions};
-
-use commands::fdb::FdbCmd;
-use commands::vlan::VlanCmd;
+use commands::{fdb::FdbCmd, vlan::VlanCmd};
+use nlink::{
+    netlink::{Connection, Result, Route},
+    output::{OutputFormat, OutputOptions},
+};
 
 #[derive(Parser)]
 #[command(name = "bridge")]

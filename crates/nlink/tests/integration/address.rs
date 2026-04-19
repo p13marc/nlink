@@ -2,10 +2,15 @@
 //!
 //! Tests for IP address management using network namespaces.
 
-use nlink::Result;
-use nlink::netlink::addr::{Ipv4Address, Ipv6Address};
-use nlink::netlink::link::DummyLink;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+use nlink::{
+    Result,
+    netlink::{
+        addr::{Ipv4Address, Ipv6Address},
+        link::DummyLink,
+    },
+};
 
 use crate::common::TestNamespace;
 

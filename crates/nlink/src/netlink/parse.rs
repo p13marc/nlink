@@ -19,13 +19,17 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use winnow::binary::{le_u8, le_u16, le_u32};
-use winnow::error::ContextError;
-use winnow::prelude::*;
-use winnow::token::take;
+use winnow::{
+    binary::{le_u8, le_u16, le_u32},
+    error::ContextError,
+    prelude::*,
+    token::take,
+};
 
-use super::error::{Error, Result};
-use super::message::NlMsgHdr;
+use super::{
+    error::{Error, Result},
+    message::NlMsgHdr,
+};
 
 /// Result type for winnow parsers.
 pub type PResult<T> = core::result::Result<T, winnow::error::ErrMode<ContextError>>;

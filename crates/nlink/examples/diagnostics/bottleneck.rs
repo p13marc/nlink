@@ -5,8 +5,7 @@
 //!
 //! Run: cargo run -p nlink --example diagnostics_bottleneck
 
-use nlink::netlink::diagnostics::Diagnostics;
-use nlink::netlink::{Connection, Route};
+use nlink::netlink::{Connection, Route, diagnostics::Diagnostics};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {

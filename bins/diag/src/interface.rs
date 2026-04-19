@@ -1,10 +1,15 @@
 //! Interface command - diagnose a specific interface.
 
-use clap::Args;
-use nlink::netlink::diagnostics::{Diagnostics, Severity};
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::formatting::{format_bytes, format_rate_bps};
 use std::time::Duration;
+
+use clap::Args;
+use nlink::{
+    netlink::{
+        Connection, Result, Route,
+        diagnostics::{Diagnostics, Severity},
+    },
+    output::formatting::{format_bytes, format_rate_bps},
+};
 
 #[derive(Args)]
 pub struct InterfaceArgs {

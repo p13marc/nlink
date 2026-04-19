@@ -2,9 +2,10 @@
 //!
 //! Tests for sysctl read/write operations inside network namespaces.
 
-use nlink::Result;
-use nlink::netlink::namespace;
-use nlink::netlink::sysctl;
+use nlink::{
+    Result,
+    netlink::{namespace, sysctl},
+};
 
 use crate::common::TestNamespace;
 

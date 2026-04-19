@@ -20,8 +20,7 @@
 //! - Linux kernel 5.6+ with ethtool netlink support
 //! - No special privileges required for monitoring
 
-use nlink::netlink::genl::ethtool::EthtoolEvent;
-use nlink::netlink::{Connection, Ethtool};
+use nlink::netlink::{Connection, Ethtool, genl::ethtool::EthtoolEvent};
 use tokio_stream::StreamExt;
 
 #[tokio::main]

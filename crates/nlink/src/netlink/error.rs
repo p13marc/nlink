@@ -2,9 +2,7 @@
 
 use std::io;
 
-use crate::util::addr::AddrError;
-use crate::util::ifname::IfError;
-use crate::util::parse::ParseError;
+use crate::util::{addr::AddrError, ifname::IfError, parse::ParseError};
 
 /// Result type for netlink operations.
 pub type Result<T> = std::result::Result<T, Error>;

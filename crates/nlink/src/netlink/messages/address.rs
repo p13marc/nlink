@@ -2,15 +2,13 @@
 
 use std::net::IpAddr;
 
-use winnow::binary::le_u16;
-use winnow::prelude::*;
-use winnow::token::take;
+use winnow::{binary::le_u16, prelude::*, token::take};
 
-use crate::netlink::error::Result;
-use crate::netlink::parse::{
-    FromNetlink, PResult, ToNetlink, parse_ip_addr, parse_string_from_bytes,
+use crate::netlink::{
+    error::Result,
+    parse::{FromNetlink, PResult, ToNetlink, parse_ip_addr, parse_string_from_bytes},
+    types::addr::{IfAddrMsg, IfaCacheinfo, Scope},
 };
-use crate::netlink::types::addr::{IfAddrMsg, IfaCacheinfo, Scope};
 
 /// Attribute IDs for IFA_* constants.
 mod attr_ids {
@@ -442,8 +440,9 @@ impl AddressMessageBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::net::Ipv4Addr;
+
+    use super::*;
 
     #[test]
     fn test_builder() {

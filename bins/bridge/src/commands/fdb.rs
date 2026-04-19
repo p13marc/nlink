@@ -3,9 +3,13 @@
 use std::net::IpAddr;
 
 use clap::{Args, Subcommand};
-use nlink::netlink::fdb::{FdbEntry, FdbEntryBuilder};
-use nlink::netlink::{Connection, Error, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions};
+use nlink::{
+    netlink::{
+        Connection, Error, Result, Route,
+        fdb::{FdbEntry, FdbEntryBuilder},
+    },
+    output::{OutputFormat, OutputOptions},
+};
 
 #[derive(Args)]
 pub struct FdbCmd {

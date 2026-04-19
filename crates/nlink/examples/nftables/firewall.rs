@@ -7,12 +7,15 @@
 //!
 //! Requires root privileges.
 
-use nlink::netlink::nftables::{
-    Chain, ChainType, CtState, Family, Hook, LimitUnit, Policy, Priority, Rule, Set, SetElement,
-    SetKeyType,
-};
-use nlink::netlink::{Connection, Nftables};
 use std::net::Ipv4Addr;
+
+use nlink::netlink::{
+    Connection, Nftables,
+    nftables::{
+        Chain, ChainType, CtState, Family, Hook, LimitUnit, Policy, Priority, Rule, Set,
+        SetElement, SetKeyType,
+    },
+};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {

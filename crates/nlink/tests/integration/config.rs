@@ -1,8 +1,12 @@
 //! Integration tests for declarative network configuration.
 
-use nlink::Result;
-use nlink::netlink::config::{ApplyOptions, DeclaredLinkType, LinkState, NetworkConfig};
-use nlink::netlink::link::DummyLink;
+use nlink::{
+    Result,
+    netlink::{
+        config::{ApplyOptions, DeclaredLinkType, LinkState, NetworkConfig},
+        link::DummyLink,
+    },
+};
 
 use crate::common::TestNamespace;
 

@@ -2,12 +2,15 @@
 //!
 //! Manages nftables tables, chains, rules, and sets via NETLINK_NETFILTER.
 
-use clap::{Parser, Subcommand};
-use nlink::netlink::nftables::{
-    Chain, ChainType, Family, Hook, Policy, Priority, Rule, Set, SetElement, SetKeyType,
-};
-use nlink::netlink::{Connection, Nftables, Result};
 use std::net::Ipv4Addr;
+
+use clap::{Parser, Subcommand};
+use nlink::netlink::{
+    Connection, Nftables, Result,
+    nftables::{
+        Chain, ChainType, Family, Hook, Policy, Priority, Rule, Set, SetElement, SetKeyType,
+    },
+};
 
 #[derive(Parser)]
 #[command(name = "nft", version, about = "nftables firewall management utility")]
