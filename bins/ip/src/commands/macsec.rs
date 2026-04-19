@@ -3,11 +3,13 @@
 //! This module implements MACsec device information display.
 
 use clap::{Args, Subcommand};
-use nlink::netlink::genl::macsec::{
-    MacsecCipherSuite, MacsecDevice, MacsecOffload, MacsecValidate,
+use nlink::{
+    netlink::{
+        Connection, Macsec, Result, Route,
+        genl::macsec::{MacsecCipherSuite, MacsecDevice, MacsecOffload, MacsecValidate},
+    },
+    output::{OutputFormat, OutputOptions},
 };
-use nlink::netlink::{Connection, Macsec, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions};
 
 #[derive(Args)]
 pub struct MacsecCmd {
@@ -337,6 +339,7 @@ fn cipher_str(cipher: MacsecCipherSuite) -> &'static str {
         MacsecCipherSuite::GcmAes256 => "GCM-AES-256",
         MacsecCipherSuite::GcmAesXpn128 => "GCM-AES-XPN-128",
         MacsecCipherSuite::GcmAesXpn256 => "GCM-AES-XPN-256",
+        _ => "unknown",
     }
 }
 
@@ -345,6 +348,7 @@ fn validate_str(validate: MacsecValidate) -> &'static str {
         MacsecValidate::Disabled => "disabled",
         MacsecValidate::Check => "check",
         MacsecValidate::Strict => "strict",
+        _ => "unknown",
     }
 }
 
@@ -353,5 +357,6 @@ fn offload_str(offload: MacsecOffload) -> &'static str {
         MacsecOffload::Off => "off",
         MacsecOffload::Phy => "phy",
         MacsecOffload::Mac => "mac",
+        _ => "unknown",
     }
 }

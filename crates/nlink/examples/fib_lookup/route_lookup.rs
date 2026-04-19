@@ -17,11 +17,12 @@
 //! - Prefix length of the matching route
 //! - Routing table where the route was found
 
-use std::env;
-use std::net::Ipv4Addr;
+use std::{env, net::Ipv4Addr};
 
-use nlink::netlink::fib_lookup::{RouteScope, RouteType};
-use nlink::netlink::{Connection, FibLookup};
+use nlink::netlink::{
+    Connection, FibLookup,
+    fib_lookup::{RouteScope, RouteType},
+};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
@@ -127,6 +128,7 @@ fn route_type_name(rt: &RouteType) -> &'static str {
         RouteType::Nat => "nat",
         RouteType::XResolve => "xresolve",
         RouteType::Unknown(_) => "unknown",
+        _ => "unknown",
     }
 }
 
@@ -138,5 +140,6 @@ fn route_scope_name(scope: &RouteScope) -> &'static str {
         RouteScope::Host => "host",
         RouteScope::Nowhere => "nowhere",
         RouteScope::Unknown(_) => "unknown",
+        _ => "unknown",
     }
 }

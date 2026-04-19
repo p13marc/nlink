@@ -7,6 +7,7 @@ use crate::netlink::error::{Error, Result};
 /// Maps to `NL80211_IFTYPE_*` kernel constants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum InterfaceType {
     /// Not specified.
     Unspecified = 0,
@@ -61,6 +62,7 @@ impl TryFrom<u32> for InterfaceType {
 /// BSS connection status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum BssStatus {
     /// Not authenticated.
     NotAuthenticated = 0,
@@ -90,6 +92,7 @@ impl TryFrom<u32> for BssStatus {
 /// Power save state for a wireless interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum PowerSaveState {
     Disabled = 0,
     Enabled = 1,
@@ -111,6 +114,7 @@ impl TryFrom<u32> for PowerSaveState {
 /// Authentication type for connect/associate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum AuthType {
     OpenSystem = 0,
     SharedKey = 1,
@@ -125,6 +129,7 @@ pub enum AuthType {
 /// Channel width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum ChannelWidth {
     Width20NoHt = 0,
     Width20 = 1,

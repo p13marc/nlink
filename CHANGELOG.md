@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (BC break) — Plan 132: API cleanup
+
+- **`*Built` wrapper types are gone from class builders.**
+  `HtbClassConfig::build()`, `HfscClassConfig::build()`,
+  `DrrClassConfig::build()`, and `QfqClassConfig::build()` now return
+  `Self` instead of a distinct `*Built(Self)` newtype. The
+  `HtbClassBuilt`, `HfscClassBuilt`, `DrrClassBuilt`, and
+  `QfqClassBuilt` types are removed entirely. Code that named these
+  types explicitly needs to use the underlying `*Config` type. Code
+  that just chained `.build()` and passed the result to
+  `add_class_config(...)` continues to work unchanged.
+
+- **95 public enums are now `#[non_exhaustive]`.** All kernel-defined
+  attribute enums (`*Attr`), state enums (`NeighborState`,
+  `BondSlaveState`, etc.), type enums (`RouteType`, `RouteScope`,
+  `RouteProtocol`, `Family`, `IpProtocol`, `XfrmMode`, etc.), GENL
+  command/attribute enums (WireGuard, MACsec, MPTCP, ethtool, nl80211,
+  devlink), and nftables enums (`Hook`, `ChainType`, `Priority`,
+  `Policy`, `MetaKey`, `CtKey`, etc.) are now non-exhaustive. This
+  locks down the API for 1.0: future kernel additions can become new
+  variants without breaking downstream code, but exhaustive `match`es
+  on these enums now require a wildcard `_ => ...` arm. Adding
+  `#[non_exhaustive]` post-1.0 is itself a breaking change, so 1.0 is
+  the right moment to err on the side of marking.
+
 ### Changed (BC break) — Plan 130: typed TC handles
 
 - **TC handles and parents are now strongly typed via `nlink::TcHandle`

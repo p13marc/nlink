@@ -19,10 +19,12 @@
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use super::connection::Connection;
-use super::error::{Error, Result};
-use super::protocol::{Audit, ProtocolState};
-use super::socket::NetlinkSocket;
+use super::{
+    connection::Connection,
+    error::{Error, Result},
+    protocol::{Audit, ProtocolState},
+    socket::NetlinkSocket,
+};
 
 // Netlink constants
 const NLMSG_ERROR: u16 = 2;
@@ -175,6 +177,7 @@ impl AuditStatus {
 
 /// Audit failure mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AuditFailureMode {
     /// Silent - discard failed audit messages.
     Silent,
@@ -283,6 +286,7 @@ pub struct AuditSignalInfo {
 
 /// Audit event type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AuditEventType {
     /// Syscall event.
     Syscall,

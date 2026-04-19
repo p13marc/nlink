@@ -5,6 +5,7 @@ use std::net::Ipv4Addr;
 /// nftables address family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum Family {
     /// IPv4 only.
     Ip = 2,
@@ -36,6 +37,7 @@ impl Family {
 
 /// Netfilter hook point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Hook {
     Prerouting,
     Input,
@@ -60,6 +62,7 @@ impl Hook {
 
 /// Chain type string for the kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChainType {
     Filter,
     Nat,
@@ -78,6 +81,7 @@ impl ChainType {
 
 /// Chain priority (determines ordering).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Priority {
     Raw,
     Mangle,
@@ -104,6 +108,7 @@ impl Priority {
 
 /// Default policy for a base chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Policy {
     Accept,
     Drop,
@@ -172,6 +177,7 @@ impl std::ops::BitOrAssign for CtState {
 
 /// Rate limit unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LimitUnit {
     Second,
     Minute,
@@ -192,6 +198,7 @@ impl LimitUnit {
 
 /// nftables register (internal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Register {
     Verdict = 0,
     R0 = 8,
@@ -202,6 +209,7 @@ pub enum Register {
 
 /// Comparison operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CmpOp {
     Eq = 0,
     Neq = 1,
@@ -213,6 +221,7 @@ pub enum CmpOp {
 
 /// Payload base header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PayloadBase {
     LinkLayer = 0,
     Network = 1,
@@ -221,6 +230,7 @@ pub enum PayloadBase {
 
 /// Meta key for loading metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MetaKey {
     Len = 0,
     Protocol = 1,
@@ -238,6 +248,7 @@ pub enum MetaKey {
 
 /// Conntrack key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CtKey {
     State = 0,
     Direction = 1,
@@ -248,6 +259,7 @@ pub enum CtKey {
 
 /// NAT type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NatType {
     Snat = 0,
     Dnat = 1,
@@ -1112,6 +1124,7 @@ pub struct RuleInfo {
 
 /// Key type for nftables sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SetKeyType {
     /// IPv4 address (4 bytes).
     Ipv4Addr,

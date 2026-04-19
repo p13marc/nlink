@@ -12,8 +12,10 @@
 //!
 //! Note: Reading audit status typically requires CAP_AUDIT_READ or root.
 
-use nlink::netlink::audit::{AuditFailureMode, AuditFeatures, AuditStatus, AuditTtyStatus};
-use nlink::netlink::{Audit, Connection};
+use nlink::netlink::{
+    Audit, Connection,
+    audit::{AuditFailureMode, AuditFeatures, AuditStatus, AuditTtyStatus},
+};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
@@ -95,6 +97,7 @@ fn format_failure_mode(mode: AuditFailureMode) -> &'static str {
         AuditFailureMode::Printk => "printk (log to syslog)",
         AuditFailureMode::Panic => "panic (kernel panic)",
         AuditFailureMode::Unknown(_) => "unknown",
+        _ => "unknown",
     }
 }
 

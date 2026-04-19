@@ -24,14 +24,15 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use winnow::binary::be_u16;
-use winnow::prelude::*;
+use winnow::{binary::be_u16, prelude::*};
 
-use super::connection::Connection;
-use super::error::Result;
-use super::parse::PResult;
-use super::protocol::{Netfilter, ProtocolState};
-use super::socket::NetlinkSocket;
+use super::{
+    connection::Connection,
+    error::Result,
+    parse::PResult,
+    protocol::{Netfilter, ProtocolState},
+    socket::NetlinkSocket,
+};
 
 // Netlink constants
 const NLMSG_DONE: u16 = 3;
@@ -87,6 +88,7 @@ const NLMSG_HDRLEN: usize = 16;
 
 /// IP protocol numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IpProtocol {
     /// TCP (6)
     Tcp,
@@ -125,6 +127,7 @@ impl IpProtocol {
 
 /// TCP connection tracking state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TcpConntrackState {
     None,
     SynSent,

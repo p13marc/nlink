@@ -10,9 +10,7 @@
 
 use std::env;
 
-use nlink::netlink::messages::NeighborMessage;
-use nlink::netlink::neigh::State as NeighborState;
-use nlink::netlink::{Connection, Route};
+use nlink::netlink::{Connection, Route, messages::NeighborMessage, neigh::State as NeighborState};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
@@ -108,6 +106,7 @@ fn neighbor_state_str(state: NeighborState) -> &'static str {
         NeighborState::Noarp => "NOARP",
         NeighborState::Permanent => "PERMANENT",
         NeighborState::None => "NONE",
+        _ => "UNKNOWN",
     }
 }
 

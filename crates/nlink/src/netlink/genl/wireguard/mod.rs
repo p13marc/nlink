@@ -74,6 +74,7 @@ pub const WG_GENL_VERSION: u8 = 1;
 /// WireGuard GENL commands.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WgCmd {
     GetDevice = 0,
     SetDevice = 1,
@@ -82,6 +83,7 @@ pub enum WgCmd {
 /// WireGuard device attributes.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WgDeviceAttr {
     Unspec = 0,
     Ifindex = 1,
@@ -97,6 +99,7 @@ pub enum WgDeviceAttr {
 /// WireGuard peer attributes.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WgPeerAttr {
     Unspec = 0,
     PublicKey = 1,
@@ -114,6 +117,7 @@ pub enum WgPeerAttr {
 /// WireGuard allowed IP attributes.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WgAllowedIpAttr {
     Unspec = 0,
     Family = 1,
@@ -124,6 +128,7 @@ pub enum WgAllowedIpAttr {
 /// WireGuard device flags.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WgDeviceFlag {
     /// Replace all peers instead of adding
     ReplacePeers = 1 << 0,

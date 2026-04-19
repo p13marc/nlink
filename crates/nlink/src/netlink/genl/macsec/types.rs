@@ -4,6 +4,7 @@ use crate::netlink::types::macsec::{macsec_cipher, macsec_offload, macsec_valida
 
 /// MACsec cipher suite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum MacsecCipherSuite {
     /// GCM-AES-128 (default, 16-byte key).
     #[default]
@@ -54,6 +55,7 @@ impl MacsecCipherSuite {
 
 /// MACsec validation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum MacsecValidate {
     /// Validation disabled.
     Disabled,
@@ -87,6 +89,7 @@ impl MacsecValidate {
 
 /// MACsec offload type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum MacsecOffload {
     /// No offload (software).
     #[default]

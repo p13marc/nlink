@@ -1,7 +1,8 @@
 //! Neighbor (ARP/NDP) message types.
 
-use crate::netlink::error::{Error, Result};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+use crate::netlink::error::{Error, Result};
 
 /// Neighbor message (struct ndmsg).
 #[repr(C)]
@@ -75,6 +76,7 @@ impl NdMsg {
 /// Neighbor attributes (NDA_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum NdaAttr {
     Unspec = 0,
     Dst = 1,
@@ -150,6 +152,7 @@ pub fn nud_state_name(state: u16) -> &'static str {
 /// Neighbor state as an enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum NeighborState {
     None = 0x00,
     Incomplete = 0x01,

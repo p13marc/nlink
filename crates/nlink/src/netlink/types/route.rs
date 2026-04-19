@@ -1,7 +1,8 @@
 //! Route message types.
 
-use crate::netlink::error::{Error, Result};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+use crate::netlink::error::{Error, Result};
 
 /// Route message (struct rtmsg).
 #[repr(C)]
@@ -91,6 +92,7 @@ impl RtMsg {
 /// Route attributes (RTA_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum RtaAttr {
     Unspec = 0,
     Dst = 1,
@@ -165,6 +167,7 @@ impl From<u16> for RtaAttr {
 /// Route types (RTN_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum RouteType {
     Unspec = 0,
     Unicast = 1,
@@ -223,6 +226,7 @@ impl RouteType {
 /// Route protocols (RTPROT_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum RouteProtocol {
     Unspec = 0,
     Redirect = 1,
@@ -312,6 +316,7 @@ impl RouteProtocol {
 /// Route scope (RT_SCOPE_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum RouteScope {
     Universe = 0,
     Site = 200,

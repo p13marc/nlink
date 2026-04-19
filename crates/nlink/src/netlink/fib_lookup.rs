@@ -21,10 +21,12 @@ use std::net::Ipv4Addr;
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use super::connection::Connection;
-use super::error::{Error, Result};
-use super::protocol::{FibLookup, ProtocolState};
-use super::socket::NetlinkSocket;
+use super::{
+    connection::Connection,
+    error::{Error, Result},
+    protocol::{FibLookup, ProtocolState},
+    socket::NetlinkSocket,
+};
 
 // Netlink constants
 const NLMSG_ERROR: u16 = 2;
@@ -99,6 +101,7 @@ impl FibResultNl {
 
 /// Route type from FIB lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RouteType {
     /// Unknown or unspecified.
     Unspec,
@@ -169,6 +172,7 @@ impl RouteType {
 
 /// Route scope from FIB lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RouteScope {
     /// Universe (global) scope.
     Universe,

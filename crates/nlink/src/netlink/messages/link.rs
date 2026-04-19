@@ -1,12 +1,12 @@
 //! Strongly-typed link message.
 
-use winnow::binary::le_u16;
-use winnow::prelude::*;
-use winnow::token::take;
+use winnow::{binary::le_u16, prelude::*, token::take};
 
-use crate::netlink::error::Result;
-use crate::netlink::parse::{FromNetlink, PResult, ToNetlink, parse_string_from_bytes};
-use crate::netlink::types::link::{IfInfoMsg, LinkStats64, OperState};
+use crate::netlink::{
+    error::Result,
+    parse::{FromNetlink, PResult, ToNetlink, parse_string_from_bytes},
+    types::link::{IfInfoMsg, LinkStats64, OperState},
+};
 
 /// Attribute IDs for IFLA_* constants.
 mod attr_ids {
@@ -935,6 +935,7 @@ pub struct BondSlaveInfo {
 
 /// Bond slave state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BondSlaveState {
     /// Active slave (transmitting traffic).
     Active,
@@ -944,6 +945,7 @@ pub enum BondSlaveState {
 
 /// MII link status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MiiStatus {
     /// Link is up.
     Up,

@@ -1,7 +1,8 @@
 //! Traffic control message types.
 
-use crate::netlink::error::{Error, Result};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+use crate::netlink::error::{Error, Result};
 
 /// Traffic control message (struct tcmsg).
 #[repr(C)]
@@ -77,6 +78,7 @@ impl TcMsg {
 /// Traffic control attributes (TCA_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum TcaAttr {
     Unspec = 0,
     Kind = 1,
@@ -255,6 +257,7 @@ pub struct GnetStatsQueue {
 /// TCA_STATS2 nested attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum TcaStats {
     Unspec = 0,
     Basic = 1,

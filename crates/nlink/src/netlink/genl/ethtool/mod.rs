@@ -85,6 +85,7 @@ pub const ETHTOOL_MCGRP_MONITOR: &str = "monitor";
 /// and `Act` perform actions.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolCmd {
     /// Get string set (enumerate available options).
     StrsetGet = 1,
@@ -183,6 +184,7 @@ pub enum EthtoolCmd {
 /// Attributes for the request header (nested under ETHTOOL_A_HEADER).
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolHeaderAttr {
     Unspec = 0,
     /// Device interface index (u32).
@@ -198,6 +200,7 @@ pub enum EthtoolHeaderAttr {
 /// Request flags for ethtool commands.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolFlag {
     /// Use compact bitset format in reply.
     CompactBitsets = 1 << 0,
@@ -214,6 +217,7 @@ pub enum EthtoolFlag {
 /// Attributes for bitset encoding.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolBitsetAttr {
     Unspec = 0,
     /// Bitset is a list of bit names (flag).
@@ -231,6 +235,7 @@ pub enum EthtoolBitsetAttr {
 /// Attributes for individual bits in a bitset.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolBitsetBitAttr {
     Unspec = 0,
     /// Bit index (u32).
@@ -248,6 +253,7 @@ pub enum EthtoolBitsetBitAttr {
 /// Attributes for string set queries.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolStrsetAttr {
     Unspec = 0,
     /// Request header (nested).
@@ -261,6 +267,7 @@ pub enum EthtoolStrsetAttr {
 /// Attributes for individual string sets.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolStringsetAttr {
     Unspec = 0,
     /// String set ID (u32).
@@ -274,6 +281,7 @@ pub enum EthtoolStringsetAttr {
 /// Attributes for individual strings.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolStringAttr {
     Unspec = 0,
     /// String index (u32).
@@ -285,6 +293,7 @@ pub enum EthtoolStringAttr {
 /// String set IDs.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolStringSet {
     /// Test strings.
     Test = 0,
@@ -337,6 +346,7 @@ pub enum EthtoolStringSet {
 /// Attributes for link info.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolLinkinfoAttr {
     Unspec = 0,
     /// Request header (nested).
@@ -360,6 +370,7 @@ pub enum EthtoolLinkinfoAttr {
 /// Attributes for link modes.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolLinkmodesAttr {
     Unspec = 0,
     /// Request header (nested).
@@ -393,6 +404,7 @@ pub enum EthtoolLinkmodesAttr {
 /// Attributes for link state.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolLinkstateAttr {
     Unspec = 0,
     /// Request header (nested).
@@ -418,6 +430,7 @@ pub enum EthtoolLinkstateAttr {
 /// Attributes for device features.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolFeaturesAttr {
     Unspec = 0,
     /// Request header (nested).
@@ -439,6 +452,7 @@ pub enum EthtoolFeaturesAttr {
 /// Attributes for ring buffer sizes.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolRingsAttr {
     Unspec = 0,
     /// Request header (nested).
@@ -482,6 +496,7 @@ pub enum EthtoolRingsAttr {
 /// Attributes for channel counts.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolChannelsAttr {
     Unspec = 0,
     /// Request header (nested).
@@ -511,6 +526,7 @@ pub enum EthtoolChannelsAttr {
 /// Attributes for interrupt coalescing.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolCoalesceAttr {
     Unspec = 0,
     /// Request header (nested).
@@ -578,6 +594,7 @@ pub enum EthtoolCoalesceAttr {
 /// Attributes for pause/flow control.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolPauseAttr {
     Unspec = 0,
     /// Request header (nested).
@@ -601,6 +618,7 @@ pub enum EthtoolPauseAttr {
 /// Attributes for statistics.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EthtoolStatsAttr {
     Unspec = 0,
     /// Request header (nested).

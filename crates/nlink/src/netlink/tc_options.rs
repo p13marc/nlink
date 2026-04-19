@@ -356,6 +356,7 @@ pub struct NetemSlotOptions {
 
 /// Netem parameters that can be configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum NetemParameter {
     /// Delay is configured (delay_ns > 0).
     Delay,

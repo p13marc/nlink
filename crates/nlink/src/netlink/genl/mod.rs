@@ -60,6 +60,7 @@ pub const GENL_ID_CTRL: u16 = 0x10;
 /// Control family commands
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CtrlCmd {
     Unspec = 0,
     NewFamily = 1,
@@ -77,6 +78,7 @@ pub enum CtrlCmd {
 /// Control family attributes
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CtrlAttr {
     Unspec = 0,
     FamilyId = 1,
@@ -94,6 +96,7 @@ pub enum CtrlAttr {
 /// Control family multicast group attributes
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CtrlAttrMcastGrp {
     Unspec = 0,
     Name = 1,

@@ -1,7 +1,8 @@
 //! Address message types.
 
-use crate::netlink::error::{Error, Result};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+use crate::netlink::error::{Error, Result};
 
 /// Interface address message (struct ifaddrmsg).
 #[repr(C)]
@@ -71,6 +72,7 @@ impl IfAddrMsg {
 /// Interface address attributes (IFA_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum IfaAttr {
     Unspec = 0,
     Address = 1,
@@ -126,6 +128,7 @@ pub mod ifa_flags {
 /// Address scope values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum Scope {
     Universe = 0,
     Site = 200,

@@ -102,13 +102,15 @@
 
 use std::net::Ipv4Addr;
 
-use super::builder::MessageBuilder;
-use super::connection::Connection;
-use super::error::Result;
-use super::interface_ref::InterfaceRef;
-use super::message::NlMsgType;
-use super::protocol::Route;
-use super::types::link::{IfInfoMsg, IflaAttr, IflaInfo};
+use super::{
+    builder::MessageBuilder,
+    connection::Connection,
+    error::Result,
+    interface_ref::InterfaceRef,
+    message::NlMsgType,
+    protocol::Route,
+    types::link::{IfInfoMsg, IflaAttr, IflaInfo},
+};
 
 /// NLM_F_CREATE flag
 const NLM_F_CREATE: u16 = 0x400;
@@ -2045,6 +2047,7 @@ pub enum NetkitPolicy {
 
 /// Netkit scrub mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NetkitScrub {
     /// No scrubbing
     None = 0,
@@ -3032,6 +3035,7 @@ pub enum LacpRate {
 /// Primary slave reselection policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum PrimaryReselect {
     /// Always reselect when a better slave comes up.
     Always = 0,
@@ -3044,6 +3048,7 @@ pub enum PrimaryReselect {
 /// Fail-over MAC address policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum FailOverMac {
     /// Don't change MAC on failover.
     None = 0,
@@ -3056,6 +3061,7 @@ pub enum FailOverMac {
 /// ARP validation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum ArpValidate {
     /// No ARP validation.
     None = 0,
@@ -3074,6 +3080,7 @@ pub enum ArpValidate {
 /// Ad (802.3ad) selection logic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum AdSelect {
     /// Select by highest aggregator bandwidth.
     Stable = 0,

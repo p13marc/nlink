@@ -21,11 +21,11 @@
 //! }
 //! ```
 
-use crate::netlink::Error;
-use crate::netlink::error::ValidationErrorInfo;
+use crate::netlink::{Error, error::ValidationErrorInfo};
 
 /// Severity of a validation issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ValidationSeverity {
     /// Will definitely fail at kernel level.
     Error,

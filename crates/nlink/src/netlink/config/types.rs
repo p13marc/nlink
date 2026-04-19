@@ -508,6 +508,7 @@ impl DeclaredAddress {
 
 /// Error parsing an address.
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum AddressParseError {
     /// Address is missing prefix (no "/").
     #[error("address missing prefix: {0} (expected format: 192.168.1.1/24)")]
@@ -603,6 +604,7 @@ pub enum DeclaredRouteType {
 
 /// Error parsing a route.
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum RouteParseError {
     /// Destination is missing prefix.
     #[error("destination missing prefix: {0} (expected format: 10.0.0.0/8)")]
@@ -755,6 +757,7 @@ impl DeclaredQdisc {
 
 /// Qdisc parent location.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum QdiscParent {
     /// Root qdisc.
     #[default]

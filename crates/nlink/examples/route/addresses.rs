@@ -9,12 +9,13 @@
 //!   cargo run -p nlink --example addresses -- add 10.0.0.1/24 eth0
 //!   cargo run -p nlink --example addresses -- del 10.0.0.1/24 eth0
 
-use std::env;
-use std::net::IpAddr;
+use std::{env, net::IpAddr};
 
-use nlink::netlink::addr::{Ipv4Address, Ipv6Address};
-use nlink::netlink::types::addr::Scope;
-use nlink::netlink::{Connection, Route};
+use nlink::netlink::{
+    Connection, Route,
+    addr::{Ipv4Address, Ipv6Address},
+    types::addr::Scope,
+};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
@@ -89,6 +90,7 @@ async fn list_addresses(conn: &Connection<Route>) -> nlink::netlink::Result<()> 
             Scope::Host => " host",
             Scope::Site => " site",
             Scope::Nowhere => " nowhere",
+            _ => "",
         };
 
         println!(

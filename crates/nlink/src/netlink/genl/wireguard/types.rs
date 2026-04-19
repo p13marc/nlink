@@ -1,7 +1,9 @@
 //! WireGuard type definitions.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 /// Size of a WireGuard key in bytes.
 pub const WG_KEY_LEN: usize = 32;
@@ -157,6 +159,7 @@ impl WgPeer {
 /// Peer flags for SET_DEVICE operations.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WgPeerFlags {
     /// Remove this peer.
     RemoveMe = 1 << 0,

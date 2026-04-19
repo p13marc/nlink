@@ -24,6 +24,7 @@ pub use tc::{TcMsg, TcaAttr};
 /// Address families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum AddressFamily {
     Unspec = 0,
     Unix = 1,

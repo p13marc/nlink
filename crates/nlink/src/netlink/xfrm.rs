@@ -29,10 +29,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use super::connection::Connection;
-use super::error::Result;
-use super::protocol::{ProtocolState, Xfrm};
-use super::socket::NetlinkSocket;
+use super::{
+    connection::Connection,
+    error::Result,
+    protocol::{ProtocolState, Xfrm},
+    socket::NetlinkSocket,
+};
 
 // Netlink constants
 const NLMSG_DONE: u16 = 3;
@@ -335,6 +337,7 @@ pub struct XfrmMark {
 
 /// IPsec protocol type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IpsecProtocol {
     /// Encapsulating Security Payload.
     Esp,
@@ -369,6 +372,7 @@ impl IpsecProtocol {
 
 /// XFRM mode (transport, tunnel, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum XfrmMode {
     /// Transport mode.
     Transport,
@@ -393,6 +397,7 @@ impl XfrmMode {
 
 /// Policy direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PolicyDirection {
     /// Incoming traffic.
     In,
@@ -417,6 +422,7 @@ impl PolicyDirection {
 
 /// Policy action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PolicyAction {
     /// Allow traffic.
     Allow,

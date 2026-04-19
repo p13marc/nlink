@@ -8,8 +8,10 @@
 //!
 //! Note: Requires conntrack to be enabled in the kernel.
 
-use nlink::netlink::netfilter::{IpProtocol, TcpConntrackState};
-use nlink::netlink::{Connection, Netfilter};
+use nlink::netlink::{
+    Connection, Netfilter,
+    netfilter::{IpProtocol, TcpConntrackState},
+};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
@@ -42,6 +44,7 @@ async fn main() -> nlink::Result<()> {
                     }
                     "other"
                 }
+                _ => "?",
             };
 
             let src = format!(

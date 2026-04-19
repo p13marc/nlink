@@ -4,8 +4,10 @@
 //! to be a full replacement for the standard ethtool command.
 
 use clap::{Parser, Subcommand};
-use nlink::netlink::genl::ethtool::{Duplex, EthtoolEvent};
-use nlink::netlink::{Connection, Ethtool};
+use nlink::netlink::{
+    Connection, Ethtool,
+    genl::ethtool::{Duplex, EthtoolEvent},
+};
 
 #[derive(Parser)]
 #[command(name = "nlink-ethtool")]
@@ -234,6 +236,7 @@ async fn show_device(device: &str) -> nlink::Result<()> {
             Duplex::Full => "Full",
             Duplex::Half => "Half",
             Duplex::Unknown => "Unknown",
+            _ => "?",
         };
         println!("\tDuplex: {}", duplex_str);
     }

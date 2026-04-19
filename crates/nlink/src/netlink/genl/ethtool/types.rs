@@ -12,6 +12,7 @@ use super::EthtoolBitset;
 
 /// Duplex mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Duplex {
     /// Half duplex.
     Half,
@@ -44,6 +45,7 @@ impl Duplex {
 
 /// Port type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Port {
     /// Twisted pair (RJ45).
     Tp,
@@ -82,6 +84,7 @@ impl Port {
 
 /// Transceiver type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Transceiver {
     /// Internal transceiver.
     Internal,
@@ -105,6 +108,7 @@ impl Transceiver {
 
 /// MDI-X status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum MdiX {
     /// MDI (straight-through).
     Mdi,
@@ -131,6 +135,7 @@ impl MdiX {
 
 /// Extended link state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum LinkExtState {
     /// Link is up.
     #[default]

@@ -1,7 +1,8 @@
 //! Link (network interface) message types.
 
-use crate::netlink::error::{Error, Result};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+use crate::netlink::error::{Error, Result};
 
 /// Interface info message (struct ifinfomsg).
 #[repr(C)]
@@ -61,6 +62,7 @@ impl IfInfoMsg {
 /// Interface link attributes (IFLA_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum IflaAttr {
     Unspec = 0,
     Address = 1,
@@ -202,6 +204,7 @@ impl From<u16> for IflaAttr {
 /// IFLA_LINKINFO nested attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum IflaInfo {
     Unspec = 0,
     Kind = 1,

@@ -5,6 +5,7 @@ use crate::netlink::error::{Error, Result};
 /// Devlink port type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum PortType {
     NotSet = 0,
     Auto = 1,
@@ -30,6 +31,7 @@ impl TryFrom<u16> for PortType {
 /// Devlink port flavour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum PortFlavour {
     Physical = 0,
     Cpu = 1,
@@ -61,6 +63,7 @@ impl TryFrom<u16> for PortFlavour {
 /// Health reporter state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum HealthState {
     Healthy = 0,
     Error = 1,
@@ -82,6 +85,7 @@ impl TryFrom<u8> for HealthState {
 /// Configuration mode for device parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum ConfigMode {
     Runtime = 0,
     Driverinit = 1,

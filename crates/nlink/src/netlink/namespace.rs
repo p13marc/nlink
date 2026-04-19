@@ -27,14 +27,18 @@
 //! let conn: Connection<Route> = spec.connection()?;
 //! ```
 
-use std::fs::File;
-use std::os::unix::io::{AsRawFd, RawFd};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    os::unix::io::{AsRawFd, RawFd},
+    path::{Path, PathBuf},
+};
 
-use super::connection::Connection;
-use super::error::{Error, Result};
-use super::protocol::{AsyncProtocolInit, ProtocolState};
-use super::socket::NetlinkSocket;
+use super::{
+    connection::Connection,
+    error::{Error, Result},
+    protocol::{AsyncProtocolInit, ProtocolState},
+    socket::NetlinkSocket,
+};
 
 /// Specification for which network namespace to use.
 ///
@@ -58,6 +62,7 @@ use super::socket::NetlinkSocket;
 /// let conn: Connection<Route> = named.connection()?;
 /// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum NamespaceSpec<'a> {
     /// Use the current/default namespace.
     Default,

@@ -14,8 +14,10 @@
 //! - Requires CAP_NET_ADMIN or root privileges to query XFRM state
 //! - IPsec must be configured (e.g., with strongSwan, Libreswan, or iproute2)
 
-use nlink::netlink::xfrm::{IpsecProtocol, PolicyDirection, XfrmMode};
-use nlink::netlink::{Connection, Xfrm};
+use nlink::netlink::{
+    Connection, Xfrm,
+    xfrm::{IpsecProtocol, PolicyDirection, XfrmMode},
+};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
@@ -50,6 +52,7 @@ async fn main() -> nlink::Result<()> {
                         println!("  Protocol number: {}", n);
                         "OTHER"
                     }
+                    _ => "?",
                 }
             );
             println!(
@@ -62,6 +65,7 @@ async fn main() -> nlink::Result<()> {
                         println!("  Mode number: {}", n);
                         "other"
                     }
+                    _ => "?",
                 }
             );
             println!("  ReqID: {}", sa.reqid);
@@ -111,6 +115,7 @@ async fn main() -> nlink::Result<()> {
                         println!("  Direction number: {}", n);
                         "?"
                     }
+                    _ => "?",
                 },
                 pol.index
             );
@@ -124,6 +129,7 @@ async fn main() -> nlink::Result<()> {
                         println!("  Action number: {}", n);
                         "?"
                     }
+                    _ => "?",
                 }
             );
 

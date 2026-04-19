@@ -1,7 +1,8 @@
 //! Routing rule message types.
 
-use crate::netlink::error::{Error, Result};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+use crate::netlink::error::{Error, Result};
 
 /// FIB rule header (struct fib_rule_hdr).
 #[repr(C)]
@@ -61,6 +62,7 @@ impl FibRuleHdr {
 /// FIB rule attributes (FRA_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum FraAttr {
     Unspec = 0,
     Dst = 1,
@@ -121,6 +123,7 @@ impl From<u16> for FraAttr {
 /// FIB rule actions (FR_ACT_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum FibRuleAction {
     Unspec = 0,
     ToTbl = 1,
