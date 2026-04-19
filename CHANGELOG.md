@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 134: tracing instrumentation
+
+- nlink now emits `tracing` spans on its high-value entry points:
+  `Connection::new` / `new_in_namespace` / `new_in_namespace_path`
+  (INFO), `Connection::subscribe` (INFO with the subscribed groups),
+  the netlink request/ack/dump inner loops (TRACE with sequence
+  numbers + dump response counts + kernel `errno` on failure), and
+  the recipe helpers `RateLimiter::{apply,remove}`,
+  `PerHostLimiter::{apply,remove}`, `PerPeerImpairer::{apply,clear}`
+  (INFO with the device, rule count, and clear-vs-apply intent).
+  Wire up a `tracing-subscriber` to see the events:
+  `tracing_subscriber::fmt().with_env_filter("nlink=debug").init()`.
+  Spans cost a single relaxed atomic load when no subscriber is
+  attached (the `tracing` library guarantee).
+
 ### Changed (BC break) — Plan 132: API cleanup
 
 - **`*Built` wrapper types are gone from class builders.**

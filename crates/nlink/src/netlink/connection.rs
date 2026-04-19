@@ -2,6 +2,8 @@
 
 use std::{os::unix::io::RawFd, path::Path, time::Duration};
 
+use tracing::{instrument, warn};
+
 use super::{
     builder::MessageBuilder,
     error::{Error, Result},
@@ -82,6 +84,7 @@ impl<P: ProtocolState + Default> Connection<P> {
     /// let route = Connection::<Route>::new()?;
     /// let genl = Connection::<Generic>::new()?;
     /// ```
+    #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>()))]
     pub fn new() -> Result<Self> {
         Ok(Self {
             socket: NetlinkSocket::new(P::PROTOCOL)?,
@@ -108,6 +111,7 @@ impl<P: ProtocolState + Default> Connection<P> {
     /// // All operations now occur in the "myns" namespace
     /// let links = conn.get_links().await?;
     /// ```
+    #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_fd))]
     pub fn new_in_namespace(ns_fd: RawFd) -> Result<Self> {
         Ok(Self {
             socket: NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?,
@@ -132,6 +136,7 @@ impl<P: ProtocolState + Default> Connection<P> {
     /// // Query interfaces in that namespace
     /// let links = conn.get_links().await?;
     /// ```
+    #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_path = %ns_path.as_ref().display()))]
     pub fn new_in_namespace_path<T: AsRef<Path>>(ns_path: T) -> Result<Self> {
         Ok(Self {
             socket: NetlinkSocket::new_in_namespace_path(P::PROTOCOL, ns_path)?,
@@ -247,38 +252,48 @@ impl<P: ProtocolState> Connection<P> {
         self.with_timeout(self.send_dump_inner(builder)).await
     }
 
+    #[instrument(level = "trace", skip_all, fields(seq))]
     async fn send_request_inner(&self, mut builder: MessageBuilder) -> Result<Vec<u8>> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
+        tracing::Span::current().record("seq", seq);
 
         let msg = builder.finish();
         self.socket.send(&msg).await?;
 
         let response = self.socket.recv_msg().await?;
-        self.process_response(&response, seq)?;
+        self.process_response(&response, seq).inspect_err(|e| {
+            warn!(errno = ?e.errno(), "kernel returned error for request");
+        })?;
 
         Ok(response)
     }
 
+    #[instrument(level = "trace", skip_all, fields(seq))]
     async fn send_ack_inner(&self, mut builder: MessageBuilder) -> Result<()> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
+        tracing::Span::current().record("seq", seq);
 
         let msg = builder.finish();
         self.socket.send(&msg).await?;
 
         let response = self.socket.recv_msg().await?;
-        self.process_ack(&response, seq)?;
+        self.process_ack(&response, seq).inspect_err(|e| {
+            warn!(errno = ?e.errno(), "kernel returned error for ack");
+        })?;
 
         Ok(())
     }
 
+    #[instrument(level = "trace", skip_all, fields(seq, responses))]
     async fn send_dump_inner(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
+        tracing::Span::current().record("seq", seq);
 
         let msg = builder.finish();
         self.socket.send(&msg).await?;
@@ -324,6 +339,7 @@ impl<P: ProtocolState> Connection<P> {
             }
         }
 
+        tracing::Span::current().record("responses", responses.len());
         Ok(responses)
     }
 
@@ -469,6 +485,7 @@ impl Connection<Route> {
     /// let mut conn = Connection::<Route>::new()?;
     /// conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
     /// ```
+    #[instrument(level = "info", skip(self), fields(groups = ?groups))]
     pub fn subscribe(&mut self, groups: &[RtnetlinkGroup]) -> Result<()> {
         for group in groups {
             self.socket.add_membership(group.to_group())?;

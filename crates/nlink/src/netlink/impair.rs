@@ -312,6 +312,7 @@ impl PerPeerImpairer {
     // ---- apply / clear ----
 
     /// Apply the impairment, replacing any existing root qdisc on the device.
+    #[tracing::instrument(level = "info", skip_all, fields(target = ?self.target, rules = self.rules.len()))]
     pub async fn apply(&self, conn: &Connection<Route>) -> Result<()> {
         let ifindex = conn.resolve_interface(&self.target).await?;
         let link_rate = self.assumed_link_rate;
@@ -394,6 +395,7 @@ impl PerPeerImpairer {
     /// Remove the impairment by deleting the root qdisc.
     ///
     /// Idempotent: a missing root qdisc is treated as success.
+    #[tracing::instrument(level = "info", skip_all, fields(target = ?self.target))]
     pub async fn clear(&self, conn: &Connection<Route>) -> Result<()> {
         let ifindex = conn.resolve_interface(&self.target).await?;
         match conn.del_qdisc_by_index(ifindex, TcHandle::ROOT).await {

@@ -199,6 +199,7 @@ impl RateLimiter {
     ///
     /// This configures the TC (Traffic Control) subsystem to enforce the
     /// specified rate limits.
+    #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev, egress = self.egress.is_some(), ingress = self.ingress.is_some()))]
     pub async fn apply(&self, conn: &Connection<Route>) -> Result<()> {
         // Apply egress rate limiting
         if let Some(ref egress) = self.egress {
@@ -214,6 +215,7 @@ impl RateLimiter {
     }
 
     /// Remove all rate limits from the interface.
+    #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev))]
     pub async fn remove(&self, conn: &Connection<Route>) -> Result<()> {
         // Remove egress qdisc (this removes all egress TC config)
         let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
@@ -644,6 +646,7 @@ impl PerHostLimiter {
     }
 
     /// Apply the per-host rate limits.
+    #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev, rules = self.rules.len()))]
     pub async fn apply(&self, conn: &Connection<Route>) -> Result<()> {
         // Remove existing root qdisc
         let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
@@ -715,6 +718,7 @@ impl PerHostLimiter {
     }
 
     /// Remove the per-host rate limits.
+    #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev))]
     pub async fn remove(&self, conn: &Connection<Route>) -> Result<()> {
         let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
         Ok(())
