@@ -54,6 +54,9 @@ mod config;
 #[path = "integration/ratelimit.rs"]
 mod ratelimit;
 
+#[path = "integration/impair.rs"]
+mod impair;
+
 #[path = "integration/diagnostics.rs"]
 mod diagnostics;
 

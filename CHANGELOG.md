@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `nlink::netlink::impair` — new module exposing `PerPeerImpairer`,
+  `PeerImpairment`, `PeerMatch`, and `DEFAULT_ASSUMED_LINK_RATE_BPS`. Per-peer
+  netem impairment helper for shared L2 segments (bridges, multipoint radio
+  fabrics). Builds an HTB + flower + netem leaf tree under the device's root
+  qdisc, with optional per-rule rate caps and a configurable default catch-all.
+  Supports destination and source matching by IP, subnet, and MAC.
+- `Connection<Route>::get_filters_by_parent(iface, parent)` and
+  `get_filters_by_parent_index(ifindex, parent)` — client-side filter dump
+  variants that filter by parent handle. Useful for reconcile-style consumers
+  doing targeted teardown.
+- `docs/recipes/per-peer-impairment.md` — recipe documentation, including a
+  hand-rolled equivalent for users who need a custom topology.
+
 ## [0.12.2] - 2026-04-04
 
 ### Fixed

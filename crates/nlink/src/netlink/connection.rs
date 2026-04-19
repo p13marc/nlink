@@ -1,19 +1,19 @@
 //! High-level netlink connection with request/response handling.
 
-use std::os::unix::io::RawFd;
-use std::path::Path;
-use std::time::Duration;
+use std::{os::unix::io::RawFd, path::Path, time::Duration};
 
-use super::builder::MessageBuilder;
-use super::error::{Error, Result};
-use super::interface_ref::InterfaceRef;
-use super::message::{
-    MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgError, NlMsgHdr,
-    NlMsgType,
+use super::{
+    builder::MessageBuilder,
+    error::{Error, Result},
+    interface_ref::InterfaceRef,
+    message::{
+        MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgError, NlMsgHdr,
+        NlMsgType,
+    },
+    parse::FromNetlink,
+    protocol::{ProtocolState, Route},
+    socket::NetlinkSocket,
 };
-use super::parse::FromNetlink;
-use super::protocol::{ProtocolState, Route};
-use super::socket::NetlinkSocket;
 
 /// High-level netlink connection parameterized by protocol state.
 ///
@@ -1216,6 +1216,42 @@ impl Connection<Route> {
             .collect())
     }
 
+    /// Get TC filters for a specific interface, filtered by parent handle.
+    ///
+    /// Equivalent to `get_filters_by_name(...).await?` followed by a
+    /// client-side `.filter(|f| f.parent() == parsed_parent)`. Useful for
+    /// reconcile-style consumers that need targeted teardown without
+    /// scanning every filter on the interface.
+    ///
+    /// `parent` accepts the standard `tc` handle syntax: `"1:"`, `"1:5"`,
+    /// `"root"`, `"ingress"`, `"clsact"`. Returns `Error::InvalidMessage`
+    /// for unparseable handles.
+    pub async fn get_filters_by_parent(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        parent: &str,
+    ) -> Result<Vec<TcMessage>> {
+        let ifindex = self.resolve_interface(&iface.into()).await?;
+        self.get_filters_by_parent_index(ifindex, parent).await
+    }
+
+    /// Get TC filters by interface index, filtered by parent handle.
+    ///
+    /// Namespace-safe variant of [`Connection::get_filters_by_parent`].
+    pub async fn get_filters_by_parent_index(
+        &self,
+        ifindex: u32,
+        parent: &str,
+    ) -> Result<Vec<TcMessage>> {
+        let parent_handle = crate::netlink::types::tc::tc_handle::parse(parent)
+            .ok_or_else(|| Error::InvalidMessage(format!("invalid handle: {parent}")))?;
+        let filters = self.get_filters_by_index(ifindex).await?;
+        Ok(filters
+            .into_iter()
+            .filter(|f| f.parent() == parent_handle)
+            .collect())
+    }
+
     /// Get all TC filter chains for an interface.
     ///
     /// Filter chains provide logical grouping of filters for better
@@ -1677,8 +1713,10 @@ impl Connection<Route> {
 // Namespace ID Queries
 // ============================================================================
 
-use super::messages::NsIdMessage;
-use super::types::nsid::{RTM_GETNSID, RtGenMsg, netnsa};
+use super::{
+    messages::NsIdMessage,
+    types::nsid::{RTM_GETNSID, RtGenMsg, netnsa},
+};
 
 impl Connection<Route> {
     /// Get the namespace ID for a given file descriptor.
@@ -1772,11 +1810,14 @@ impl Connection<Route> {
 // Generic Netlink protocol methods
 // ============================================================================
 
-use super::genl::{
-    CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, FamilyInfo, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
-};
-use super::protocol::Generic;
 use std::collections::HashMap;
+
+use super::{
+    genl::{
+        CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, FamilyInfo, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
+    },
+    protocol::Generic,
+};
 
 impl Connection<Generic> {
     /// Get information about a Generic Netlink family.

@@ -92,6 +92,7 @@ crates/nlink/src/
     selinux.rs        # SELinux event notifications
     config/           # Declarative network configuration (NetworkConfig, diff, apply)
     ratelimit.rs      # High-level rate limiting DSL (RateLimiter, PerHostLimiter)
+    impair.rs         # Per-peer netem impairment helper (PerPeerImpairer, PeerImpairment, PeerMatch)
     diagnostics.rs    # Network diagnostics (Diagnostics, DiagnosticReport, Issue, Bottleneck)
     genl/             # Generic Netlink (GENL) support
       mod.rs          # GENL module entry, control family constants
@@ -409,6 +410,83 @@ PerHostLimiter::new("eth0", "10mbit")?  // Default rate for unmatched traffic
 PerHostLimiter::new("eth0", "10mbit")?
     .remove(&conn)
     .await?;
+```
+
+**Per-peer netem impairment (PerPeerImpairer):**
+
+For shared L2 segments (bridges, multipoint radio fabrics) where each
+peer-to-peer path needs different RTT/loss characteristics. See
+`docs/recipes/per-peer-impairment.md` for the full recipe.
+
+```rust
+use nlink::netlink::{Connection, Route, namespace};
+use nlink::netlink::impair::{PerPeerImpairer, PeerImpairment};
+use nlink::netlink::tc::NetemConfig;
+use std::time::Duration;
+
+let conn: Connection<Route> = namespace::connection_for("lab-mgmt")?;
+
+PerPeerImpairer::new("vethA-br")
+    // Close peer (15ms RTT, 1% loss)
+    .impair_dst_ip(
+        "172.100.3.18".parse()?,
+        NetemConfig::new()
+            .delay(Duration::from_millis(15))
+            .loss(1.0)
+            .build(),
+    )
+    // Far peer with a 100 Mbps cap
+    .impair_dst_ip(
+        "172.100.3.19".parse()?,
+        PeerImpairment::new(
+            NetemConfig::new()
+                .delay(Duration::from_millis(40))
+                .loss(5.0)
+                .build(),
+        )
+        .rate_cap("100mbit")?,
+    )
+    // Subnet match for everything else
+    .impair_dst_subnet(
+        "172.100.4.0/24",
+        NetemConfig::new().delay(Duration::from_millis(80)).build(),
+    )?
+    // Optional default impairment for unmatched traffic
+    .default_impairment(NetemConfig::new().delay(Duration::from_millis(2)).build())
+    .apply(&conn).await?;
+
+// Remove
+PerPeerImpairer::new("vethA-br").clear(&conn).await?;
+
+// Source-side matching (impair packets *from* this peer)
+PerPeerImpairer::new("vethA-br")
+    .impair_src_ip("10.0.0.5".parse()?, netem_for_peer)
+    .apply(&conn).await?;
+
+// MAC-based matching (no L3 addressing required)
+PerPeerImpairer::new("vethA-br")
+    .impair_dst_mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56], netem_for_peer)
+    .apply(&conn).await?;
+
+// For namespace-aware operations, construct by ifindex to skip a /sys read
+let link = conn.get_link_by_name("vethA-br").await?.unwrap();
+PerPeerImpairer::new_by_index(link.ifindex())
+    .impair_dst_ip(addr, netem)
+    .apply(&conn).await?;
+```
+
+The helper installs a classful HTB tree at the device's root qdisc and
+routes per-destination via `cls_flower` filters into per-peer netem
+leaves. `apply()` is destructive: it removes any existing root qdisc
+first. Filters match egress; symmetric pair impairment requires
+applying on both ends of the path.
+
+**Filter dump by parent:**
+
+```rust
+// All filters whose parent is "1:" (e.g., the root of an HTB tree)
+let filters = conn.get_filters_by_parent("eth0", "1:").await?;
+let filters = conn.get_filters_by_parent_index(ifindex, "1:").await?;
 ```
 
 **Network diagnostics (Diagnostics):**
