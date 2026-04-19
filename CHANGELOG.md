@@ -4,6 +4,71 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (BC break) — Plan 130: typed TC handles
+
+- **TC handles and parents are now strongly typed via `nlink::TcHandle`
+  throughout the public API.** Connection methods, filter builders, and
+  `TcMessage` accessors no longer take or return `&str`/`u32` for the
+  `(major, minor)` packed values the kernel uses to identify qdiscs,
+  classes, and filters. The wire-format integer remains accessible via
+  `TcHandle::as_raw()` and `TcMessage::handle_raw()` /
+  `TcMessage::parent_raw()` for cases like `HashMap` keys.
+
+  | Old                                                         | New                                                         |
+  |---|---|
+  | `conn.add_qdisc_full("eth0", "root", Some("1:"), x)`        | `conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), x)` |
+  | `conn.add_class_config("eth0", "1:0", "1:1", x)`            | `conn.add_class_config("eth0", TcHandle::major_only(1), TcHandle::new(1, 1), x)` |
+  | `conn.add_filter("eth0", "1:", x)` / `"ingress"` / `"egress"` | `conn.add_filter("eth0", TcHandle::major_only(1), x)` / `TcHandle::INGRESS` / `TcHandle::from_raw(0xFFFF_FFF3)` |
+  | `conn.del_qdisc("eth0", "root")`                            | `conn.del_qdisc("eth0", TcHandle::ROOT)`                    |
+  | `conn.add_tc_chain("eth0", "ingress", N)`                   | `conn.add_tc_chain("eth0", TcHandle::INGRESS, N)`           |
+  | `conn.get_filters_by_parent(iface, "1:")`                   | `conn.get_filters_by_parent(iface, TcHandle::major_only(1))` |
+  | `conn.get_qdisc_by_handle("eth0", "1:")`                    | `conn.get_qdisc_by_handle("eth0", TcHandle::major_only(1))` |
+  | `U32Filter::new().classid("1:10")` / `.classid_raw(0x10010)` | `.classid(TcHandle::new(1, 0x10))` / `.classid(TcHandle::from_raw(0x10010))` |
+  | `FlowerFilter::new().classid(...)` / `MatchallFilter` / `FwFilter` / `BpfFilter` / `BasicFilter` / `RouteFilter` | same — all `.classid(TcHandle)` now, no `.classid_raw()` variant |
+  | `FlowFilter::new().baseclass("1:10")` / `.baseclass_id(u32)` | `.baseclass(TcHandle::new(1, 0x10))` (single setter)        |
+  | `qdisc.handle() -> u32` (and same for `parent()`)           | `-> TcHandle`. Use `handle_raw()` / `parent_raw()` for the `u32`. |
+  | Comparing `c.parent() == 0xffffffff`                        | `c.parent().is_root()` (similarly `is_ingress()`, `is_clsact()`, `is_unspec()`) |
+
+- **The vestigial `.parent(impl Into<String>)` and `.handle(impl
+  Into<String>)` setters were removed from all 17 qdisc config
+  builders** (`NetemConfig`, `FqCodelConfig`, `TbfConfig`,
+  `HtbQdiscConfig`, `PrioConfig`, `SfqConfig`, `RedConfig`, `PieConfig`,
+  `PfifoConfig`, `BfifoConfig`, `DrrConfig`, `QfqConfig`, `PlugConfig`,
+  `MqprioConfig`, `TaprioConfig`, `HfscConfig`, `EtfConfig`). These
+  setters stored values that nothing read — the actual parent and handle
+  reach the kernel through the explicit `add_qdisc_full(dev, parent,
+  handle, config)` arguments. Old code calling `.handle("1:")` was a
+  silent no-op; now it's a compile error pointing you at
+  `add_qdisc_full`.
+
+- **`Connection::resolve_parent` is gone** — parsing happens at the call
+  site via `TcHandle::from_str` (or the `TcHandle::ROOT` / `INGRESS` /
+  `CLSACT` constants), with errors surfaced at parse time instead of as
+  generic `Error::InvalidMessage` deep inside the connection plumbing.
+
+- **Bug fix as a side effect of typing:** the BPF clsact attach path
+  used to call `tc_handle::parse("egress")`, which returned `None`, so
+  egress BPF programs attached at the wrong handle. `BpfDirection::Egress`
+  now uses `TcHandle::from_raw(0xFFFF_FFF3)` (the kernel's
+  `TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_EGRESS)`) directly.
+
+### Added — Plan 130
+
+- `nlink::TcHandle` — typed `(major, minor)` packed handle. Constructors
+  `new(major, minor)`, `major_only(major)`, `from_raw(u32)`. Constants
+  `ROOT`, `INGRESS`, `CLSACT`, `UNSPEC`. Inspectors `major()`, `minor()`,
+  `as_raw()`, `is_root()`, `is_ingress()`, `is_clsact()`, `is_unspec()`.
+  `FromStr` accepts `"root"`, `"ingress"`, `"clsact"`, `"none"`, `"1:"`,
+  `"1:a"`. `Display` round-trips. Re-exported at crate root and from
+  `prelude`.
+- `nlink::FilterPriority` — typed `u16` filter priority with documented
+  bands (operator: 1..=49, recipe: 100..=199, app: 200..=999, system:
+  1000..). Helpers in this crate (`PerPeerImpairer`, `PerHostLimiter`)
+  install in the recipe band so they don't fight with operator filters.
+- `TcMessage::handle_raw()` / `TcMessage::parent_raw()` — escape-hatch
+  accessors that return the raw `u32` for callers that genuinely need
+  the integer (e.g. as a `HashMap` key).
+
 ### Changed (BC break) — Plan 129: typed units
 
 - **TC rates, byte counts, and percentages are now strongly typed via
