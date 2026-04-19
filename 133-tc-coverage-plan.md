@@ -2,9 +2,9 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: TC coverage gaps — sch_fq_pie + actions polish + cls_basic ematch
-target version: 0.13.0
+target version: 0.14.0 (revised 2026-04-19, was "0.13.0")
 date: 2026-04-19
-status: draft, post-verification (2026-04-19) — cake clarified as legacy-only; typed CakeConfig added to scope
+status: draft, post-verification (2026-04-19) — cake clarified as legacy-only; typed CakeConfig added to scope; retargeted to 0.14.0 after 0.13.0 shipped
 verified: codebase audit complete; kernel attribute lists from training memory
 ---
 

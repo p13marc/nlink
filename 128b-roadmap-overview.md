@@ -1,14 +1,21 @@
 ---
 to: nlink maintainers
 from: nlink maintainers
-subject: nlink 1.0 roadmap — overview and sequencing
-target version: 1.0 (or 0.13.0 → 0.14.0 → 1.0 depending on ambition)
+subject: nlink roadmap — 0.13 (shipped) → 0.14 (next), 1.0 deferred
+target version: 0.13.0 (shipped 2026-04-19) → 0.14.0 (next)
 date: 2026-04-19
 status: draft, post-verification consolidation (2026-04-19)
 related: plans 129-135 (the seven detailed plans this overview indexes)
 ---
 
-# nlink 1.0 Roadmap — Overview
+# nlink Roadmap — Overview
+
+> **Status (2026-04-19):** 0.13.0 shipped. Plans 131 + 133 + 135 are
+> the remaining work, folded into a single 0.14.0 milestone. The "1.0"
+> milestone is deferred indefinitely — we'll cut it when downstream
+> consumption validates the API, not on a calendar.
+
+## Original framing (kept for context)
 
 ## 0. What this is
 
@@ -21,8 +28,8 @@ release.
 The plans came out of the discussion that followed
 `128-nlink-per-peer-impairer.md` (per-peer netem helper) and the bug
 class it surfaced (`HtbClassConfig::new("100mbit")` shaped at 800 Mbps
-because bits/sec got silently treated as bytes/sec). The 1.0 release
-is the natural moment to fix that class of issue at the type level.
+because bits/sec got silently treated as bytes/sec). 0.13.0 fixed
+that class of issue at the type level.
 
 ---
 
@@ -33,7 +40,7 @@ is the natural moment to fix that class of issue at the type level.
 | 129 | [Rate / Bytes / Percent newtypes](129-rate-bytes-percent-newtypes-plan.md) | 1 (foundation) | ~1300 | Major | Eliminates the unit-confusion bug class permanently. ~45 method signatures change. |
 | 130 | [TcHandle / FilterPriority newtypes](130-tc-handle-priority-newtypes-plan.md) | 1 (foundation) | ~1200 | Major | Replaces `&str`/`u32` handles across **52 connection methods**. |
 | 131 | [Reconcile pattern for recipes](131-reconcile-plan.md) | 1 (foundation) | ~1750 | Additive | Non-destructive `reconcile()` for `PerHostLimiter` and `PerPeerImpairer`. Idempotent. |
-| 132 | [API cleanup (builders + non_exhaustive)](132-api-cleanup-plan.md) | 2 (polish) | ~600 | Major (small) | Locks down ~85 of 96 unmarked enums for 1.0; collapses `*Built` wrapper types. |
+| 132 | [API cleanup (builders + non_exhaustive)](132-api-cleanup-plan.md) | 2 (polish) | ~600 | Major (small) | Locks down 95 of 96 unmarked enums; collapses `*Built` wrapper types. |
 | 133 | [TC coverage (cake-typed + fq_pie + cls_basic ematch + act_bpf)](133-tc-coverage-plan.md) | 3 (additive) | ~1800 | Additive | Brings cake to typed-builder parity, adds fq_pie, makes cls_basic actually useful. |
 | 134 | [Tracing instrumentation](134-tracing-instrumentation-plan.md) | 3 (additive) | ~600 | Additive | Wire up the unused `tracing` dep; INFO/DEBUG/TRACE convention. |
 | 135 | [More recipes + public lab module](135-recipes-and-lab-helpers-plan.md) | 3 (additive) | ~2300 | Additive | 7 new recipes + promote `TestNamespace` → public `nlink::lab`. |
@@ -47,7 +54,7 @@ substance is in the design decisions in plans 129/130/131.
 
 ```text
                     ┌─────────────────────┐
-                    │ 129 Rate/Bytes/%    │ ◄──── headline 1.0 change
+                    │ 129 Rate/Bytes/%    │ ◄──── headline 0.13.0 change
                     │ (foundation)        │
                     └──────────┬──────────┘
                                │ enables typed Rate args in
@@ -110,39 +117,49 @@ Land all seven plans in one go. ~9500 LOC. Reviewable but heavy.
 Pros: clean version story, one BC migration for downstream. Cons:
 long-running branch, hard to merge.
 
-### Option B: 0.13 → 0.14 → 1.0 staged (recommended)
+### Option B: 0.13 → 0.14 staged (recommended; revised 2026-04-19)
 
-**0.13.0** (the next minor; can break BC since pre-1.0):
+**0.13.0 — SHIPPED 2026-04-19** (live on crates.io):
 - Plan 129: Rate / Bytes / Percent newtypes
 - Plan 130: TcHandle / FilterPriority newtypes
 - Plan 132: API cleanup (builder uniformity + non_exhaustive audit)
 - Plan 134: Tracing instrumentation
 
-This bundles all the BC-breaking type-level work plus the
-free-standing tracing wins. Total ~3700 LOC.
+Bundled all the BC-breaking type-level work plus the free-standing
+tracing wins. Total ~3700 LOC.
 
-**0.14.0** (additive):
+**0.14.0** (next; mostly additive — was previously split across
+"0.14.0" and "1.0"):
 - Plan 131: Reconcile pattern
 - Plan 133: TC coverage gaps (cake-typed, fq_pie, cls_basic ematch,
   act_bpf, simple action)
 - Plan 135: Recipes + public lab module
 
-Total ~5800 LOC. Mostly additive; minimal further BC.
+Total ~5800 LOC. Mostly additive; minimal further BC. Plan 135 was
+originally tagged for 1.0 but the work is independent of any 1.0
+guarantee — promoting `TestNamespace` to a public module and adding
+recipes is value the lab team and downstream users want now, not at
+some indefinite future "1.0 moment". Folding it into 0.14.0 collapses
+the milestone count and removes the artificial "1.0 release planning"
+bookkeeping.
 
-**1.0**: Whichever cycle is the right "we're done with major API
-churn" moment. May be 0.14 itself if we feel solid; may be a 0.15
-hardening cycle.
+**1.0**: deferred indefinitely. We'll declare 1.0 when the API has
+demonstrated stability through real downstream use, not on a
+schedule. The `non_exhaustive` lockdown in Plan 132 and the typed
+units in Plan 129 already give us the most important 1.0 guarantees;
+the rest is "let the API marinate, then bless it".
 
-### Option C: Plans 129/130 only as a 1.0 cut
+### Option C: Plans 129/130 only as a 1.0 cut (rejected)
 
 Minimal-scope 1.0 with just the type-safety foundations. Everything
 else continues iterating in 1.x. Pros: fastest to 1.0 with the most
 important fix. Cons: leaves the unused `tracing` dep and the missing
 `reconcile` path on the table for "later."
 
-**Recommendation: Option B.** 0.13 carries the headline work and is
-defensible as a major version step; 0.14 stabilizes; 1.0 declares
-done. Three milestones, each shippable.
+**Decision: Option B (revised).** 0.13 (shipped) carried the headline
+type-safety work and the tracing wins. 0.14 will land reconcile +
+TC coverage + lab module + recipes. 1.0 deferred until we have
+downstream feedback validating the API.
 
 ---
 
@@ -278,27 +295,17 @@ add_class_config("eth0", "1:0", "1:1", cfg);     // strings parsed at every call
 
 ## 7. CHANGELOG strategy across releases
 
-If we go with Option B (recommended):
+### `## [0.13.0]` — SHIPPED 2026-04-19
 
-### `## [0.13.0]` (target tag: 2026-Q3)
+Live in CHANGELOG.md under that heading. The actual entries follow
+the structure sketched in the original draft, augmented with the
+detailed migration tables (per-method old-vs-new for both the
+`Rate`/`Bytes`/`Percent` migration and the `TcHandle` migration) and
+the bug fixes folded in as side effects (8× HTB rate, IPv6/L4-port
+filter dispatch in `PerHostLimiter`, BPF clsact egress attach using
+an unparseable string handle).
 
-```markdown
-### Changed (BC break)
-
-- TC rates and sizes are now strongly typed via `Rate`, `Bytes`, `Percent`.
-- TC handles are now strongly typed via `TcHandle`.
-- Filter priorities are now strongly typed via `FilterPriority`.
-- HTB rate parsing from strings now correctly converts bits/sec → bytes/sec
-  (the 8× bug from 0.12.x is impossible to reintroduce).
-- ~85 of 96 previously-unmarked public enums are now `#[non_exhaustive]`.
-- Class builder `*Built` wrapper types removed; `.build()` returns Self.
-
-### Added
-
-- Public API instrumented with `tracing`. See `docs/observability.md`.
-```
-
-### `## [0.14.0]` (target tag: 2026-Q4)
+### `## [0.14.0]` (next)
 
 ```markdown
 ### Added
@@ -315,13 +322,18 @@ If we go with Option B (recommended):
   multi-namespace events, lab setup.
 ```
 
-### `## [1.0.0]` (target: when stable)
+(Plan 135's lab module + recipes were originally tagged for a
+separate "1.0" milestone but folded into 0.14.0 — see §3 Option B
+revision.)
 
-```markdown
-### Stable
+### `## [1.0.0]`
 
-API surface declared stable. No further BC breaks without a 2.0.
-```
+Deferred indefinitely. We'll declare 1.0 when the API has
+demonstrated stability through real downstream use, not on a
+schedule. The `non_exhaustive` lockdown in Plan 132 (95 enums) and
+the typed units / handles in Plans 129–130 already give us the most
+important 1.0 guarantees; the rest is "let the API marinate, then
+bless it".
 
 ---
 

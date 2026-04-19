@@ -2,9 +2,9 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: More cookbook recipes + public lab/test helpers
-target version: 0.13.0
+target version: 0.14.0 (revised 2026-04-19; originally split between "0.14.0" and "1.0", now folded into 0.14.0)
 date: 2026-04-19
-status: draft, awaiting review
+status: draft, awaiting review; retargeted to 0.14.0 after 0.13.0 shipped
 ---
 
 # Recipes & Lab Helpers Plan

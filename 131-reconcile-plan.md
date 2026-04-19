@@ -2,9 +2,9 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: Reconcile pattern for ratelimit and impair recipes
-target version: 0.13.0 / 1.0
+target version: 0.14.0 (revised 2026-04-19, was "0.13.0 / 1.0")
 date: 2026-04-19
-status: draft, post-verification (2026-04-19) — QdiscOptions coverage gap noted
+status: draft, post-verification (2026-04-19) — QdiscOptions coverage gap noted; retargeted to 0.14.0 after 0.13.0 shipped
 verified: codebase audit complete
 ---
 
