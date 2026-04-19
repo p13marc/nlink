@@ -2,14 +2,19 @@
 //!
 //! Tests for qdisc, class, and filter management using network namespaces.
 
-use nlink::netlink::filter::{FlowerFilter, MatchallFilter, U32Filter};
-use nlink::netlink::link::{DummyLink, IfbLink};
-use nlink::netlink::tc::{
-    FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig, NetemConfig, PrioConfig,
-    SfqConfig, TbfConfig,
-};
-use nlink::{Connection, Result, Route};
 use std::time::Duration;
+
+use nlink::{
+    Connection, Result, Route,
+    netlink::{
+        filter::{FlowerFilter, MatchallFilter, U32Filter},
+        link::{DummyLink, IfbLink},
+        tc::{
+            FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig, NetemConfig, PrioConfig,
+            SfqConfig, TbfConfig,
+        },
+    },
+};
 
 use crate::common::TestNamespace;
 
@@ -269,8 +274,8 @@ async fn test_add_htb_class() -> Result<()> {
         .await?;
 
     // Add class
-    let class = HtbClassConfig::new("10mbit")?
-        .ceil_bps(100_000_000) // 100 Mbps
+    let class = HtbClassConfig::new(nlink::Rate::mbit(10))
+        .ceil(nlink::Rate::mbit(800)) // 800 Mbps (was buggy 100_000_000 bytes/sec = 800 Mbps)
         .build();
     conn.add_class_config("dummy0", "1:", "1:10", class).await?;
 
@@ -296,16 +301,20 @@ async fn test_htb_class_hierarchy() -> Result<()> {
         .await?;
 
     // Add root class
-    let root_class = HtbClassConfig::new("100mbit")?.build();
+    let root_class = HtbClassConfig::new(nlink::Rate::mbit(100)).build();
     conn.add_class_config("dummy0", "1:", "1:1", root_class)
         .await?;
 
     // Add child classes
-    let child1 = HtbClassConfig::new("50mbit")?.ceil_bps(100_000_000).build();
+    let child1 = HtbClassConfig::new(nlink::Rate::mbit(50))
+        .ceil(nlink::Rate::mbit(800))
+        .build();
     conn.add_class_config("dummy0", "1:1", "1:10", child1)
         .await?;
 
-    let child2 = HtbClassConfig::new("30mbit")?.ceil_bps(100_000_000).build();
+    let child2 = HtbClassConfig::new(nlink::Rate::mbit(30))
+        .ceil(nlink::Rate::mbit(800))
+        .build();
     conn.add_class_config("dummy0", "1:1", "1:20", child2)
         .await?;
 
@@ -328,7 +337,7 @@ async fn test_delete_class() -> Result<()> {
         .await?;
 
     // Add class
-    let class = HtbClassConfig::new("10mbit")?.build();
+    let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
     conn.add_class_config("dummy0", "1:", "1:10", class).await?;
 
     // Delete it
@@ -358,7 +367,7 @@ async fn test_add_matchall_filter() -> Result<()> {
         .await?;
 
     // Add class
-    let class = HtbClassConfig::new("10mbit")?.build();
+    let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
     conn.add_class_config("dummy0", "1:", "1:10", class).await?;
 
     // Add matchall filter
@@ -385,7 +394,7 @@ async fn test_add_u32_filter() -> Result<()> {
         .await?;
 
     // Add class
-    let class = HtbClassConfig::new("10mbit")?.build();
+    let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
     conn.add_class_config("dummy0", "1:", "1:10", class).await?;
 
     // Add u32 filter matching destination port 80
@@ -412,7 +421,7 @@ async fn test_add_flower_filter() -> Result<()> {
         .await?;
 
     // Add class
-    let class = HtbClassConfig::new("10mbit")?.build();
+    let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
     conn.add_class_config("dummy0", "1:", "1:10", class).await?;
 
     // Add flower filter
@@ -487,7 +496,7 @@ async fn test_filter_on_ifb() -> Result<()> {
     conn.add_qdisc_full("ifb0", "root", Some("1:"), htb).await?;
 
     // Add class
-    let class = HtbClassConfig::new("10mbit")?.build();
+    let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
     conn.add_class_config("ifb0", "1:", "1:10", class).await?;
 
     // Add matchall filter
@@ -513,7 +522,7 @@ async fn test_delete_filter() -> Result<()> {
         .await?;
 
     // Add class
-    let class = HtbClassConfig::new("10mbit")?.build();
+    let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
     conn.add_class_config("dummy0", "1:", "1:10", class).await?;
 
     // Add filter
@@ -542,11 +551,11 @@ async fn test_replace_filter() -> Result<()> {
         .await?;
 
     // Add classes
-    let class1 = HtbClassConfig::new("10mbit")?.build();
+    let class1 = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
     conn.add_class_config("dummy0", "1:", "1:10", class1)
         .await?;
 
-    let class2 = HtbClassConfig::new("20mbit")?.build();
+    let class2 = HtbClassConfig::new(nlink::Rate::mbit(20)).build();
     conn.add_class_config("dummy0", "1:", "1:20", class2)
         .await?;
 
@@ -606,7 +615,7 @@ async fn test_class_statistics() -> Result<()> {
     conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
         .await?;
 
-    let class = HtbClassConfig::new("10mbit")?.build();
+    let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
     conn.add_class_config("dummy0", "1:", "1:10", class).await?;
 
     // Get classes and check stats
@@ -681,7 +690,7 @@ async fn test_filter_with_chain() -> Result<()> {
         .await?;
 
     // Add class
-    let class = HtbClassConfig::new("10mbit")?.build();
+    let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
     conn.add_class_config("dummy0", "1:", "1:10", class).await?;
 
     // Add chain

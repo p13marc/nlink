@@ -304,23 +304,23 @@ impl RateLimiter {
         conn.add_qdisc(&self.dev, htb).await?;
 
         // Add root class (1:1) for the rate limit
-        let mut class_config = HtbClassConfig::from_bps(limit.rate);
+        let mut class_config = HtbClassConfig::new(crate::util::Rate::bytes_per_sec(limit.rate));
         if let Some(ceil) = limit.ceil {
-            class_config = class_config.ceil_bps(ceil);
+            class_config = class_config.ceil(crate::util::Rate::bytes_per_sec(ceil));
         }
         if let Some(burst) = limit.burst {
-            class_config = class_config.burst_bytes(burst);
+            class_config = class_config.burst(crate::util::Bytes::new(burst as u64));
         }
         conn.add_class_config(&self.dev, "1:0", "1:1", class_config.build())
             .await?;
 
         // Add default class (1:10) under the root class
-        let mut default_config = HtbClassConfig::from_bps(limit.rate);
+        let mut default_config = HtbClassConfig::new(crate::util::Rate::bytes_per_sec(limit.rate));
         if let Some(ceil) = limit.ceil {
-            default_config = default_config.ceil_bps(ceil);
+            default_config = default_config.ceil(crate::util::Rate::bytes_per_sec(ceil));
         }
         if let Some(burst) = limit.burst {
-            default_config = default_config.burst_bytes(burst);
+            default_config = default_config.burst(crate::util::Bytes::new(burst as u64));
         }
         conn.add_class_config(&self.dev, "1:1", "1:10", default_config.build())
             .await?;
@@ -371,23 +371,23 @@ impl RateLimiter {
         conn.add_qdisc(&ifb_name, htb).await?;
 
         // Add root class (1:1) for the rate limit
-        let mut class_config = HtbClassConfig::from_bps(limit.rate);
+        let mut class_config = HtbClassConfig::new(crate::util::Rate::bytes_per_sec(limit.rate));
         if let Some(ceil) = limit.ceil {
-            class_config = class_config.ceil_bps(ceil);
+            class_config = class_config.ceil(crate::util::Rate::bytes_per_sec(ceil));
         }
         if let Some(burst) = limit.burst {
-            class_config = class_config.burst_bytes(burst);
+            class_config = class_config.burst(crate::util::Bytes::new(burst as u64));
         }
         conn.add_class_config(&ifb_name, "1:0", "1:1", class_config.build())
             .await?;
 
         // Add default class (1:10) under the root class
-        let mut default_config = HtbClassConfig::from_bps(limit.rate);
+        let mut default_config = HtbClassConfig::new(crate::util::Rate::bytes_per_sec(limit.rate));
         if let Some(ceil) = limit.ceil {
-            default_config = default_config.ceil_bps(ceil);
+            default_config = default_config.ceil(crate::util::Rate::bytes_per_sec(ceil));
         }
         if let Some(burst) = limit.burst {
-            default_config = default_config.burst_bytes(burst);
+            default_config = default_config.burst(crate::util::Bytes::new(burst as u64));
         }
         conn.add_class_config(&ifb_name, "1:1", "1:10", default_config.build())
             .await?;
@@ -679,22 +679,18 @@ impl PerHostLimiter {
         conn.add_qdisc(&self.dev, htb).await?;
 
         // Add root class (1:1) with sum of all rates as ceiling
-        let total_rate = self.default_rate + self.rules.iter().map(|r| r.rate).sum::<u64>();
-        let root_config = HtbClassConfig::from_bps(total_rate)
-            .ceil_bps(total_rate)
-            .build();
+        let total_rate_bps = self.default_rate + self.rules.iter().map(|r| r.rate).sum::<u64>();
+        let total_rate = crate::util::Rate::bytes_per_sec(total_rate_bps);
+        let root_config = HtbClassConfig::new(total_rate).ceil(total_rate).build();
         conn.add_class_config(&self.dev, "1:0", "1:1", root_config)
             .await?;
 
         // Add classes for each rule
         for (i, rule) in self.rules.iter().enumerate() {
             let classid = format!("1:{:x}", i + 2); // Start from 1:2
-            let mut class_config = HtbClassConfig::from_bps(rule.rate);
-            if let Some(ceil) = rule.ceil {
-                class_config = class_config.ceil_bps(ceil);
-            } else {
-                class_config = class_config.ceil_bps(rule.rate);
-            }
+            let rate = crate::util::Rate::bytes_per_sec(rule.rate);
+            let ceil = crate::util::Rate::bytes_per_sec(rule.ceil.unwrap_or(rule.rate));
+            let class_config = HtbClassConfig::new(rate).ceil(ceil);
             conn.add_class_config(&self.dev, "1:1", &classid, class_config.build())
                 .await?;
 
@@ -713,9 +709,8 @@ impl PerHostLimiter {
 
         // Add default class for unmatched traffic
         let default_classid = format!("1:{:x}", self.rules.len() + 2);
-        let default_config = HtbClassConfig::from_bps(self.default_rate)
-            .ceil_bps(self.default_rate)
-            .build();
+        let default_rate = crate::util::Rate::bytes_per_sec(self.default_rate);
+        let default_config = HtbClassConfig::new(default_rate).ceil(default_rate).build();
         conn.add_class_config(&self.dev, "1:1", &default_classid, default_config)
             .await?;
 

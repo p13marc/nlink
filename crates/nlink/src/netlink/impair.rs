@@ -341,10 +341,8 @@ impl PerPeerImpairer {
         // Parent class 1:1 with rate covering the sum of all children. With
         // each child borrowing from this parent up to their ceil, this lets
         // any child use its full configured rate without contention.
-        let total_rate = self.total_rate_bps();
-        let root_cls = HtbClassConfig::from_bps(total_rate)
-            .ceil_bps(total_rate)
-            .build();
+        let total_rate = crate::util::Rate::bytes_per_sec(self.total_rate_bps());
+        let root_cls = HtbClassConfig::new(total_rate).ceil(total_rate).build();
         conn.add_class_config_by_index(ifindex, "1:0", "1:1", root_cls)
             .await
             .map_err(|e| e.with_context("PerPeerImpairer: add HTB parent class 1:1"))?;
@@ -353,11 +351,10 @@ impl PerPeerImpairer {
         for (i, rule) in self.rules.iter().enumerate() {
             let classid = format!("1:{:x}", i + 2);
             let leaf_handle = format!("{:x}:", i + 10);
-            let class_rate = rule.impairment.rate_cap_bps.unwrap_or(link_rate);
+            let class_rate =
+                crate::util::Rate::bytes_per_sec(rule.impairment.rate_cap_bps.unwrap_or(link_rate));
 
-            let cls = HtbClassConfig::from_bps(class_rate)
-                .ceil_bps(class_rate)
-                .build();
+            let cls = HtbClassConfig::new(class_rate).ceil(class_rate).build();
             conn.add_class_config_by_index(ifindex, "1:1", &classid, cls)
                 .await
                 .map_err(|e| e.with_context(format!("PerPeerImpairer: add class {classid}")))?;
@@ -378,14 +375,13 @@ impl PerPeerImpairer {
         // Default class — receives whatever no filter matched.
         let default_classid = format!("1:{:x}", n + 2);
         let default_leaf_handle = format!("{:x}:", n + 10);
-        let default_rate = self
-            .default_impairment
-            .as_ref()
-            .and_then(|d| d.rate_cap_bps)
-            .unwrap_or(link_rate);
-        let default_cls = HtbClassConfig::from_bps(default_rate)
-            .ceil_bps(default_rate)
-            .build();
+        let default_rate = crate::util::Rate::bytes_per_sec(
+            self.default_impairment
+                .as_ref()
+                .and_then(|d| d.rate_cap_bps)
+                .unwrap_or(link_rate),
+        );
+        let default_cls = HtbClassConfig::new(default_rate).ceil(default_rate).build();
         conn.add_class_config_by_index(ifindex, "1:1", &default_classid, default_cls)
             .await
             .map_err(|e| e.with_context("PerPeerImpairer: add default class"))?;

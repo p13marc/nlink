@@ -2479,6 +2479,7 @@ pub trait ClassConfig: Send + Sync {
 /// ```ignore
 /// use nlink::netlink::{Connection, Route};
 /// use nlink::netlink::tc::{HtbQdiscConfig, HtbClassConfig};
+/// use nlink::Rate;
 ///
 /// let conn = Connection::<Route>::new()?;
 ///
@@ -2488,29 +2489,29 @@ pub trait ClassConfig: Send + Sync {
 ///
 /// // Add root class (total bandwidth)
 /// conn.add_class_config("eth0", "1:0", "1:1",
-///     HtbClassConfig::new("1gbit")?
-///         .ceil("1gbit")?
+///     HtbClassConfig::new(Rate::gbit(1))
+///         .ceil(Rate::gbit(1))
 ///         .build()
 /// ).await?;
 ///
 /// // Add child class with guaranteed and ceiling rates
 /// conn.add_class_config("eth0", "1:1", "1:10",
-///     HtbClassConfig::new("100mbit")?
-///         .ceil("500mbit")?
+///     HtbClassConfig::new(Rate::mbit(100))
+///         .ceil(Rate::mbit(500))
 ///         .prio(1)
 ///         .build()
 /// ).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct HtbClassConfig {
-    /// Guaranteed rate in bytes/sec.
-    rate: u64,
-    /// Maximum rate (ceil) in bytes/sec.
-    ceil: Option<u64>,
-    /// Burst size in bytes.
-    burst: Option<u32>,
-    /// Ceil burst size in bytes.
-    cburst: Option<u32>,
+    /// Guaranteed rate.
+    rate: crate::util::Rate,
+    /// Maximum rate (ceil).
+    ceil: Option<crate::util::Rate>,
+    /// Burst size.
+    burst: Option<crate::util::Bytes>,
+    /// Ceil burst size.
+    cburst: Option<crate::util::Bytes>,
     /// Priority (0-7, lower is higher priority).
     prio: Option<u32>,
     /// Quantum for round-robin.
@@ -2524,33 +2525,17 @@ pub struct HtbClassConfig {
 }
 
 impl HtbClassConfig {
-    /// Create a new HTB class configuration with rate parsed from a string.
-    ///
-    /// The rate string is parsed as bits per second (e.g., `"100mbit"`,
-    /// `"1gbit"`, `"10mbps"`) and stored internally as bytes per second to
-    /// match the kernel's `tc_ratespec.rate` semantics.
+    /// Create a new HTB class configuration with the given rate.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let config = HtbClassConfig::new("100mbit")?;
-    /// // Internal rate is 12_500_000 bytes/sec = 100 Mbps.
+    /// use nlink::Rate;
+    /// let config = HtbClassConfig::new(Rate::mbit(100));
+    /// // Or parse a tc-style string:
+    /// let config = HtbClassConfig::new("100mbit".parse()?);
     /// ```
-    pub fn new(rate: &str) -> Result<Self> {
-        let bits_per_sec = crate::util::parse::get_rate(rate)?;
-        Ok(Self::from_bps(crate::util::rate::bits_to_bytes(
-            bits_per_sec,
-        )))
-    }
-
-    /// Create a new HTB class configuration with rate in bytes per second.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let config = HtbClassConfig::from_bps(12_500_000); // 100 Mbps
-    /// ```
-    pub fn from_bps(rate: u64) -> Self {
+    pub fn new(rate: crate::util::Rate) -> Self {
         Self {
             rate,
             ceil: None,
@@ -2564,48 +2549,28 @@ impl HtbClassConfig {
         }
     }
 
-    /// Set the ceiling rate from a string (e.g., `"500mbit"`).
+    /// Set the ceiling rate.
     ///
-    /// Parses bits per second; stores bytes per second.
     /// The ceiling rate is the maximum rate the class can use when borrowing
     /// from parent classes.
-    pub fn ceil(mut self, ceil: &str) -> Result<Self> {
-        let bits_per_sec = crate::util::parse::get_rate(ceil)?;
-        self.ceil = Some(crate::util::rate::bits_to_bytes(bits_per_sec));
-        Ok(self)
-    }
-
-    /// Set the ceiling rate in bytes per second.
-    pub fn ceil_bps(mut self, ceil: u64) -> Self {
+    pub fn ceil(mut self, ceil: crate::util::Rate) -> Self {
         self.ceil = Some(ceil);
         self
     }
 
-    /// Set the burst size from a string (e.g., "15k", "64kb").
+    /// Set the burst size.
     ///
     /// The burst is the amount of data that can be sent at hardware speed
     /// before rate limiting kicks in.
-    pub fn burst(mut self, burst: &str) -> Result<Self> {
-        self.burst = Some(crate::util::parse::get_size(burst)? as u32);
-        Ok(self)
-    }
-
-    /// Set the burst size in bytes.
-    pub fn burst_bytes(mut self, burst: u32) -> Self {
+    pub fn burst(mut self, burst: crate::util::Bytes) -> Self {
         self.burst = Some(burst);
         self
     }
 
-    /// Set the ceil burst size from a string.
+    /// Set the ceil burst size.
     ///
     /// The cburst is the burst for the ceiling rate.
-    pub fn cburst(mut self, cburst: &str) -> Result<Self> {
-        self.cburst = Some(crate::util::parse::get_size(cburst)? as u32);
-        Ok(self)
-    }
-
-    /// Set the ceil burst size in bytes.
-    pub fn cburst_bytes(mut self, cburst: u32) -> Self {
+    pub fn cburst(mut self, cburst: crate::util::Bytes) -> Self {
         self.cburst = Some(cburst);
         self
     }
@@ -2670,8 +2635,8 @@ impl ClassConfig for HtbClassBuilt {
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         let cfg = &self.0;
-        let rate = cfg.rate;
-        let ceil = cfg.ceil.unwrap_or(rate);
+        let rate = cfg.rate.as_bytes_per_sec();
+        let ceil = cfg.ceil.unwrap_or(cfg.rate).as_bytes_per_sec();
 
         // Get HZ for time calculations (typically 1000 on Linux)
         let hz: u64 = 1000;
@@ -2679,9 +2644,11 @@ impl ClassConfig for HtbClassBuilt {
         // Calculate burst from rate if not specified
         let burst = cfg
             .burst
+            .map(|b| b.as_u32_saturating())
             .unwrap_or_else(|| (rate / hz + cfg.mtu as u64) as u32);
         let cburst = cfg
             .cburst
+            .map(|b| b.as_u32_saturating())
             .unwrap_or_else(|| (ceil / hz + cfg.mtu as u64) as u32);
 
         // Calculate buffer time (in ticks). Falls back to the raw burst
@@ -3900,8 +3867,8 @@ impl Connection<Route> {
     ///
     /// // Add a class with guaranteed 100mbit, ceiling 500mbit
     /// conn.add_class_config("eth0", "1:0", "1:10",
-    ///     HtbClassConfig::new("100mbit")?
-    ///         .ceil("500mbit")?
+    ///     HtbClassConfig::new(Rate::mbit(100))
+    ///         .ceil(Rate::mbit(500))
     ///         .prio(1)
     ///         .build()
     /// ).await?;
@@ -3957,8 +3924,8 @@ impl Connection<Route> {
     /// ```ignore
     /// // Update an existing class's rate
     /// conn.change_class_config("eth0", "1:0", "1:10",
-    ///     HtbClassConfig::new("200mbit")?
-    ///         .ceil("800mbit")?
+    ///     HtbClassConfig::new(Rate::mbit(200))
+    ///         .ceil(Rate::mbit(800))
     ///         .build()
     /// ).await?;
     /// ```
@@ -4010,8 +3977,8 @@ impl Connection<Route> {
     /// ```ignore
     /// // Create or update a class
     /// conn.replace_class_config("eth0", "1:0", "1:10",
-    ///     HtbClassConfig::new("100mbit")?
-    ///         .ceil("500mbit")?
+    ///     HtbClassConfig::new(Rate::mbit(100))
+    ///         .ceil(Rate::mbit(500))
     ///         .build()
     /// ).await?;
     /// ```
@@ -4216,49 +4183,49 @@ mod tests {
     }
 
     #[test]
-    fn test_htb_class_config_from_bps() {
-        let config = HtbClassConfig::from_bps(12_500_000) // 100 Mbps
-            .ceil_bps(62_500_000) // 500 Mbps
+    fn test_htb_class_config_typed() {
+        use crate::util::Rate;
+        let config = HtbClassConfig::new(Rate::mbit(100))
+            .ceil(Rate::mbit(500))
             .prio(1)
             .quantum(1500)
             .build();
 
-        assert_eq!(config.0.rate, 12_500_000);
-        assert_eq!(config.0.ceil, Some(62_500_000));
+        assert_eq!(config.0.rate, Rate::mbit(100));
+        assert_eq!(config.0.ceil, Some(Rate::mbit(500)));
         assert_eq!(config.0.prio, Some(1));
         assert_eq!(config.0.quantum, Some(1500));
         assert_eq!(config.kind(), "htb");
     }
 
     #[test]
-    fn test_htb_class_config_new() {
-        let config = HtbClassConfig::new("100mbit")
-            .unwrap()
-            .ceil("500mbit")
-            .unwrap()
+    fn test_htb_class_config_from_string() {
+        use crate::util::Rate;
+        // Parse via FromStr first, then construct.
+        let config = HtbClassConfig::new("100mbit".parse::<Rate>().unwrap())
+            .ceil("500mbit".parse::<Rate>().unwrap())
             .prio(2)
             .build();
 
-        // 100 Mbps = 12_500_000 bytes/sec (kernel tc_ratespec is bytes/sec)
-        assert_eq!(config.0.rate, 12_500_000);
-        // 500 Mbps = 62_500_000 bytes/sec
-        assert_eq!(config.0.ceil, Some(62_500_000));
+        assert_eq!(config.0.rate, Rate::mbit(100));
+        assert_eq!(config.0.ceil, Some(Rate::mbit(500)));
         assert_eq!(config.0.prio, Some(2));
         assert_eq!(config.kind(), "htb");
     }
 
     #[test]
     fn test_htb_class_config_burst() {
-        let config = HtbClassConfig::from_bps(1_000_000)
-            .burst_bytes(16384)
-            .cburst_bytes(32768)
+        use crate::util::{Bytes, Rate};
+        let config = HtbClassConfig::new(Rate::bytes_per_sec(1_000_000))
+            .burst(Bytes::new(16384))
+            .cburst(Bytes::new(32768))
             .mtu(9000)
             .mpu(64)
             .overhead(14)
             .build();
 
-        assert_eq!(config.0.burst, Some(16384));
-        assert_eq!(config.0.cburst, Some(32768));
+        assert_eq!(config.0.burst, Some(Bytes::new(16384)));
+        assert_eq!(config.0.cburst, Some(Bytes::new(32768)));
         assert_eq!(config.0.mtu, 9000);
         assert_eq!(config.0.mpu, 64);
         assert_eq!(config.0.overhead, 14);
@@ -4266,7 +4233,8 @@ mod tests {
 
     #[test]
     fn test_htb_class_config_prio_clamp() {
-        let config = HtbClassConfig::from_bps(1_000_000)
+        use crate::util::Rate;
+        let config = HtbClassConfig::new(Rate::bytes_per_sec(1_000_000))
             .prio(100) // Should clamp to 7
             .build();
 
@@ -4275,7 +4243,8 @@ mod tests {
 
     #[test]
     fn test_htb_class_config_defaults() {
-        let config = HtbClassConfig::from_bps(1_000_000).build();
+        use crate::util::Rate;
+        let config = HtbClassConfig::new(Rate::bytes_per_sec(1_000_000)).build();
 
         // ceil defaults to rate
         assert_eq!(config.0.ceil, None);
