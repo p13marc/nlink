@@ -240,7 +240,7 @@ async fn dump_tree(conn: &Connection<Route>, ifindex: u32) -> nlink::Result<()> 
     println!("  --- HTB classes ---");
     let classes = conn.get_classes_by_index(ifindex).await?;
     for c in classes.iter().filter(|c| c.kind() == Some("htb")) {
-        let parent = if c.parent() == 0 {
+        let parent = if c.parent().is_unspec() {
             "root".to_string()
         } else {
             c.parent_str()

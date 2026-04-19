@@ -2,10 +2,10 @@
 
 use std::io::Write;
 
-use crate::netlink::messages::TcMessage;
-use crate::netlink::types::tc::tc_handle;
-
-use crate::output::{OutputOptions, Printable};
+use crate::{
+    netlink::messages::TcMessage,
+    output::{OutputOptions, Printable},
+};
 
 impl Printable for TcMessage {
     fn print_text<W: Write>(&self, w: &mut W, opts: &OutputOptions) -> std::io::Result<()> {
@@ -15,16 +15,17 @@ impl Printable for TcMessage {
             w,
             "qdisc {} {} dev {} ",
             self.kind().unwrap_or(""),
-            tc_handle::format(self.handle()),
+            self.handle(),
             dev
         )?;
 
-        if self.parent() == tc_handle::ROOT {
+        let parent = self.parent();
+        if parent.is_root() {
             write!(w, "root ")?;
-        } else if self.parent() == tc_handle::INGRESS {
+        } else if parent.is_ingress() {
             write!(w, "ingress ")?;
-        } else if self.parent() != 0 {
-            write!(w, "parent {} ", tc_handle::format(self.parent()))?;
+        } else if !parent.is_unspec() {
+            write!(w, "parent {} ", parent)?;
         }
 
         write!(w, "refcnt 2")?; // placeholder
@@ -53,8 +54,8 @@ impl Printable for TcMessage {
         serde_json::json!({
             "dev": dev,
             "kind": self.kind().unwrap_or(""),
-            "handle": tc_handle::format(self.handle()),
-            "parent": tc_handle::format(self.parent()),
+            "handle": self.handle().to_string(),
+            "parent": self.parent().to_string(),
             "bytes": self.bytes(),
             "packets": self.packets(),
             "drops": self.drops(),

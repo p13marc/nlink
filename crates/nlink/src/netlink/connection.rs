@@ -1244,11 +1244,10 @@ impl Connection<Route> {
         ifindex: u32,
         parent: TcHandle,
     ) -> Result<Vec<TcMessage>> {
-        let parent_handle = parent.as_raw();
         let filters = self.get_filters_by_index(ifindex).await?;
         Ok(filters
             .into_iter()
-            .filter(|f| f.parent() == parent_handle)
+            .filter(|f| f.parent() == parent)
             .collect())
     }
 
@@ -1454,11 +1453,10 @@ impl Connection<Route> {
         ifindex: u32,
         handle: TcHandle,
     ) -> Result<Option<TcMessage>> {
-        let target_handle = handle.as_raw();
         let qdiscs = self.get_qdiscs().await?;
         Ok(qdiscs
             .into_iter()
-            .find(|q| q.ifindex() == ifindex && q.handle() == target_handle))
+            .find(|q| q.ifindex() == ifindex && q.handle() == handle))
     }
 
     /// Get netem options for an interface, if a netem qdisc is configured at root.

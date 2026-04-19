@@ -143,10 +143,10 @@ pub fn neighbor_arp() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::netlink::messages::{
-        AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage,
+    use crate::netlink::{
+        messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage},
+        parse::FromNetlink,
     };
-    use crate::netlink::parse::FromNetlink;
 
     #[test]
     fn test_parse_link_loopback() {
@@ -225,7 +225,7 @@ mod tests {
 
         assert_eq!(tc.ifindex(), 2);
         assert_eq!(tc.kind(), Some("fq_codel"));
-        assert_eq!(tc.parent(), 0xffffffff); // TC_H_ROOT
+        assert_eq!(tc.parent(), crate::TcHandle::ROOT);
     }
 
     #[test]

@@ -9,12 +9,13 @@
 //!   cargo run -p nlink --features tc --example tc_stats
 //!   cargo run -p nlink --features tc --example tc_stats -- eth0
 
-use std::collections::HashMap;
-use std::env;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    env,
+    time::{Duration, Instant},
+};
 
-use nlink::netlink::messages::TcMessage;
-use nlink::netlink::{Connection, Route};
+use nlink::netlink::{Connection, Route, messages::TcMessage};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
@@ -57,10 +58,10 @@ async fn main() -> nlink::netlink::Result<()> {
                 .unwrap_or("?");
 
             let kind = qdisc.kind().unwrap_or("?");
-            let handle = format!("{:x}:{:x}", qdisc.handle() >> 16, qdisc.handle() & 0xffff);
+            let handle = qdisc.handle().to_string();
 
             // Calculate rates from deltas
-            let key = (qdisc.ifindex(), qdisc.handle());
+            let key = (qdisc.ifindex(), qdisc.handle_raw());
             let current = QdiscStats::from_message(qdisc);
 
             let (bps, pps) = if let Some(prev) = prev_stats.get(&key) {

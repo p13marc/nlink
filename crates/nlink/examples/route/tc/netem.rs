@@ -64,7 +64,7 @@ async fn show_netem(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Resu
         } else if qdisc.is_ingress() {
             "ingress".to_string()
         } else {
-            format!("{:x}:{:x}", qdisc.parent() >> 16, qdisc.parent() & 0xffff)
+            qdisc.parent().to_string()
         };
 
         println!("qdisc {} parent {}", kind, parent);

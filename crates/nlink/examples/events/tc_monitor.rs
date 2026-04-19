@@ -10,7 +10,6 @@
 //!   sudo tc qdisc change dev lo root netem delay 50ms
 //!   sudo tc qdisc del dev lo root
 
-use nlink::netlink::types::tc::tc_handle;
 use nlink::netlink::{Connection, NetworkEvent, Route, RtnetlinkGroup};
 use tokio_stream::StreamExt;
 
@@ -33,7 +32,7 @@ async fn main() -> nlink::netlink::Result<()> {
         match event {
             NetworkEvent::NewQdisc(tc) | NetworkEvent::DelQdisc(tc) => {
                 let parent = format_parent(tc.parent());
-                let handle = tc_handle::format(tc.handle());
+                let handle = tc.handle().to_string();
                 println!(
                     "[qdisc {}] dev {} parent {} handle {} {}",
                     action,
@@ -75,7 +74,7 @@ async fn main() -> nlink::netlink::Result<()> {
 
             NetworkEvent::NewClass(tc) | NetworkEvent::DelClass(tc) => {
                 let parent = format_parent(tc.parent());
-                let handle = tc_handle::format(tc.handle());
+                let handle = tc.handle().to_string();
                 println!(
                     "[class {}] dev {} parent {} classid {} {}",
                     action,
@@ -110,12 +109,12 @@ async fn main() -> nlink::netlink::Result<()> {
     Ok(())
 }
 
-fn format_parent(parent: u32) -> String {
-    if parent == tc_handle::ROOT {
+fn format_parent(parent: nlink::TcHandle) -> String {
+    if parent.is_root() {
         "root".to_string()
-    } else if parent == tc_handle::INGRESS {
+    } else if parent.is_ingress() {
         "ingress".to_string()
     } else {
-        tc_handle::format(parent)
+        parent.to_string()
     }
 }

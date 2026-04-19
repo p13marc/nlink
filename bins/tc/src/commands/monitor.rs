@@ -4,10 +4,11 @@
 //! event monitoring with Stream trait support.
 
 use clap::{Args, ValueEnum};
-use nlink::netlink::types::tc::tc_handle;
-use nlink::netlink::{Connection, NetworkEvent, Result, Route, RtnetlinkGroup};
-use nlink::output::{
-    MonitorConfig, OutputFormat, OutputOptions, TcEvent, print_event, print_monitor_start,
+use nlink::{
+    netlink::{Connection, NetworkEvent, Result, Route, RtnetlinkGroup},
+    output::{
+        MonitorConfig, OutputFormat, OutputOptions, TcEvent, print_event, print_monitor_start,
+    },
 };
 use tokio_stream::StreamExt;
 
@@ -118,19 +119,13 @@ fn convert_event(
         .name_or(&format!("if{}", tc_msg.ifindex()))
         .to_string();
 
-    let parent = if tc_msg.parent() == tc_handle::ROOT {
-        "root".to_string()
-    } else if tc_msg.parent() == tc_handle::INGRESS {
-        "ingress".to_string()
-    } else {
-        tc_handle::format(tc_msg.parent())
-    };
+    let parent = tc_msg.parent().to_string();
 
     Some(TcEvent {
         object,
         action,
         kind: tc_msg.kind().unwrap_or("").to_string(),
-        handle: tc_handle::format(tc_msg.handle()),
+        handle: tc_msg.handle().to_string(),
         parent,
         dev,
         ifindex: tc_msg.ifindex(),

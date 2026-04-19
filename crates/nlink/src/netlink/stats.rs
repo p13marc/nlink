@@ -38,8 +38,7 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use super::messages::{LinkMessage, TcMessage};
 
@@ -262,14 +261,14 @@ impl StatsSnapshot {
             let stats = TcStats::from_tc_message(qdisc);
             snapshot
                 .qdiscs
-                .insert((qdisc.ifindex(), qdisc.handle()), stats);
+                .insert((qdisc.ifindex(), qdisc.handle_raw()), stats);
         }
 
         for class in classes {
             let stats = TcStats::from_tc_message(class);
             snapshot
                 .classes
-                .insert((class.ifindex(), class.handle()), stats);
+                .insert((class.ifindex(), class.handle_raw()), stats);
         }
 
         snapshot
@@ -287,7 +286,8 @@ impl StatsSnapshot {
     pub fn add_qdiscs(&mut self, qdiscs: &[TcMessage]) {
         for qdisc in qdiscs {
             let stats = TcStats::from_tc_message(qdisc);
-            self.qdiscs.insert((qdisc.ifindex(), qdisc.handle()), stats);
+            self.qdiscs
+                .insert((qdisc.ifindex(), qdisc.handle_raw()), stats);
         }
     }
 
@@ -296,7 +296,7 @@ impl StatsSnapshot {
         for class in classes {
             let stats = TcStats::from_tc_message(class);
             self.classes
-                .insert((class.ifindex(), class.handle()), stats);
+                .insert((class.ifindex(), class.handle_raw()), stats);
         }
     }
 

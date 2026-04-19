@@ -1,11 +1,13 @@
 //! Capture command - capture current network state as configuration.
 
-use clap::{Args, ValueEnum};
-use nlink::netlink::types::route::RouteType;
-use nlink::netlink::types::rule::FibRuleAction;
-use nlink::netlink::{Connection, Result, Route};
-use serde::Serialize;
 use std::collections::BTreeMap;
+
+use clap::{Args, ValueEnum};
+use nlink::netlink::{
+    Connection, Result, Route,
+    types::{route::RouteType, rule::FibRuleAction},
+};
+use serde::Serialize;
 
 #[derive(Args)]
 pub struct CaptureArgs {
@@ -372,7 +374,7 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
             };
 
             let kind = qdisc.kind().unwrap_or("unknown").to_string();
-            let handle = if qdisc.handle() != 0 {
+            let handle = if !qdisc.handle().is_unspec() {
                 Some(qdisc.handle_str())
             } else {
                 None

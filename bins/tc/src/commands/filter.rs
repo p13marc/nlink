@@ -1,13 +1,15 @@
 //! tc filter command implementation.
 
-use clap::{Args, Subcommand};
-use nlink::netlink::message::NlMsgType;
-use nlink::netlink::messages::TcMessage;
-use nlink::netlink::types::tc::tc_handle;
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions, print_items};
-use nlink::tc::builders::filter as filter_builder;
 use std::io::{self, Write};
+
+use clap::{Args, Subcommand};
+use nlink::{
+    netlink::{
+        Connection, Result, Route, message::NlMsgType, messages::TcMessage, types::tc::tc_handle,
+    },
+    output::{OutputFormat, OutputOptions, print_items},
+    tc::builders::filter as filter_builder,
+};
 
 #[derive(Args)]
 pub struct FilterCmd {
@@ -227,9 +229,11 @@ impl FilterCmd {
         let ifindex =
             nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
 
-        let parent_handle = tc_handle::parse(parent).ok_or_else(|| {
-            nlink::netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
-        })?;
+        let parent_handle = tc_handle::parse(parent)
+            .map(nlink::TcHandle::from_raw)
+            .ok_or_else(|| {
+                nlink::netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
+            })?;
 
         let proto_filter = protocol_filter
             .map(filter_builder::parse_protocol)
@@ -279,13 +283,13 @@ fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
     let mut obj = serde_json::json!({
         "dev": dev,
         "kind": filter.kind().unwrap_or(""),
-        "parent": tc_handle::format(filter.parent()),
+        "parent": filter.parent().to_string(),
         "protocol": filter_builder::format_protocol(filter.protocol()),
         "pref": filter.priority(),
     });
 
-    if filter.handle() != 0 {
-        obj["handle"] = serde_json::json!(format!("{:x}", filter.handle()));
+    if !filter.handle().is_unspec() {
+        obj["handle"] = serde_json::json!(format!("{:x}", filter.handle_raw()));
     }
 
     if let Some(chain) = filter.chain() {
@@ -321,7 +325,7 @@ fn print_filter_text(
     write!(
         w,
         "filter parent {} protocol {} pref {} {} ",
-        tc_handle::format(filter.parent()),
+        filter.parent(),
         filter_builder::format_protocol(filter.protocol()),
         filter.priority(),
         filter.kind().unwrap_or("")
@@ -331,8 +335,8 @@ fn print_filter_text(
         write!(w, "chain {} ", chain)?;
     }
 
-    if filter.handle() != 0 {
-        write!(w, "handle {:x} ", filter.handle())?;
+    if !filter.handle().is_unspec() {
+        write!(w, "handle {:x} ", filter.handle_raw())?;
     }
 
     write!(w, "dev {}", dev)?;

@@ -11,8 +11,7 @@
 
 use std::env;
 
-use nlink::netlink::tc_options::QdiscOptions;
-use nlink::netlink::{Connection, Route};
+use nlink::netlink::{Connection, Route, tc_options::QdiscOptions};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
@@ -55,7 +54,7 @@ async fn show_htb(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result
 
         if kind == "htb" {
             found_htb = true;
-            println!("qdisc htb handle {:x}:", qdisc.handle() >> 16);
+            println!("qdisc htb handle {}", qdisc.handle());
 
             if let Some(QdiscOptions::Htb(htb)) = qdisc.options() {
                 println!("  default class: {:x}", htb.default_class);
@@ -76,7 +75,7 @@ async fn show_htb(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Result
             let parent = if qdisc.is_root() {
                 "root".to_string()
             } else {
-                format!("{:x}:{:x}", qdisc.parent() >> 16, qdisc.parent() & 0xffff)
+                qdisc.parent().to_string()
             };
             println!("qdisc {} parent {}", kind, parent);
         }
@@ -105,12 +104,12 @@ async fn show_classes(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Re
     for class in &classes {
         let kind = class.kind().unwrap_or("?");
 
-        let classid = format!("{:x}:{:x}", class.handle() >> 16, class.handle() & 0xffff);
+        let classid = class.handle().to_string();
 
-        let parent = if class.parent() == 0xffffffff {
+        let parent = if class.parent().is_root() {
             "root".to_string()
         } else {
-            format!("{:x}:{:x}", class.parent() >> 16, class.parent() & 0xffff)
+            class.parent().to_string()
         };
 
         let rate = if class.bps() > 0 {

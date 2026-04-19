@@ -2164,11 +2164,10 @@ impl Connection<Route> {
     pub async fn flush_filters_by_index(&self, ifindex: u32, parent: TcHandle) -> Result<()> {
         // Get all filters
         let filters = self.get_filters().await?;
-        let parent_handle = parent.as_raw();
 
         // Delete each filter that matches the parent and interface
         for filter in filters {
-            if filter.ifindex() == ifindex && filter.parent() == parent_handle {
+            if filter.ifindex() == ifindex && filter.parent() == parent {
                 let protocol = filter.protocol();
                 let priority = filter.priority();
                 if let Err(e) = self

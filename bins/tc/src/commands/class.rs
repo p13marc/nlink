@@ -1,12 +1,13 @@
 //! tc class command implementation.
 
 use clap::{Args, Subcommand};
-use nlink::netlink::message::NlMsgType;
-use nlink::netlink::messages::TcMessage;
-use nlink::netlink::types::tc::tc_handle;
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions, print_all};
-use nlink::tc::builders::class as class_builder;
+use nlink::{
+    netlink::{
+        Connection, Result, Route, message::NlMsgType, messages::TcMessage, types::tc::tc_handle,
+    },
+    output::{OutputFormat, OutputOptions, print_all},
+    tc::builders::class as class_builder,
+};
 
 #[derive(Args)]
 pub struct ClassCmd {
@@ -200,8 +201,12 @@ impl ClassCmd {
         let ifindex =
             nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
 
-        let parent_filter = parent.and_then(tc_handle::parse);
-        let classid_filter = classid.and_then(tc_handle::parse);
+        let parent_filter = parent
+            .and_then(tc_handle::parse)
+            .map(nlink::TcHandle::from_raw);
+        let classid_filter = classid
+            .and_then(tc_handle::parse)
+            .map(nlink::TcHandle::from_raw);
 
         // Fetch all classes using typed API
         let all_classes: Vec<TcMessage> = conn.dump_typed(NlMsgType::RTM_GETTCLASS).await?;

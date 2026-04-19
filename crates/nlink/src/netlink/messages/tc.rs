@@ -1,11 +1,11 @@
 //! Strongly-typed traffic control messages.
 
-use winnow::binary::le_u16;
-use winnow::prelude::*;
-use winnow::token::take;
+use winnow::{binary::le_u16, prelude::*, token::take};
 
-use crate::netlink::parse::{FromNetlink, PResult, parse_string_from_bytes};
-use crate::netlink::types::tc::TcMsg;
+use crate::netlink::{
+    parse::{FromNetlink, PResult, parse_string_from_bytes},
+    types::tc::TcMsg,
+};
 
 /// Attribute IDs for TCA_* constants.
 mod attr_ids {
@@ -163,13 +163,32 @@ impl TcMessage {
         self.header.tcm_ifindex as u32
     }
 
-    /// Get the handle (qdisc/class ID).
-    pub fn handle(&self) -> u32 {
+    /// Get the handle (qdisc/class ID) as a typed [`TcHandle`].
+    ///
+    /// For the raw `u32` (e.g. for use as a `HashMap` key), call
+    /// [`handle_raw`](Self::handle_raw).
+    pub fn handle(&self) -> crate::TcHandle {
+        crate::TcHandle::from_raw(self.header.tcm_handle)
+    }
+
+    /// Get the raw `u32` handle the kernel returned, without wrapping it in
+    /// a [`TcHandle`]. Prefer [`handle`](Self::handle) unless you need the
+    /// raw integer (e.g. as a `HashMap` key).
+    pub fn handle_raw(&self) -> u32 {
         self.header.tcm_handle
     }
 
-    /// Get the parent handle.
-    pub fn parent(&self) -> u32 {
+    /// Get the parent handle as a typed [`TcHandle`].
+    ///
+    /// For the raw `u32`, call [`parent_raw`](Self::parent_raw).
+    pub fn parent(&self) -> crate::TcHandle {
+        crate::TcHandle::from_raw(self.header.tcm_parent)
+    }
+
+    /// Get the raw `u32` parent the kernel returned, without wrapping it in
+    /// a [`TcHandle`]. Prefer [`parent`](Self::parent) unless you need the
+    /// raw integer.
+    pub fn parent_raw(&self) -> u32 {
         self.header.tcm_parent
     }
 
@@ -814,8 +833,8 @@ mod tests {
     fn test_tc_message_default() {
         let msg = TcMessage::new();
         assert_eq!(msg.ifindex(), 0);
-        assert_eq!(msg.handle(), 0);
-        assert_eq!(msg.parent(), 0);
+        assert_eq!(msg.handle(), crate::TcHandle::UNSPEC);
+        assert_eq!(msg.parent(), crate::TcHandle::UNSPEC);
         assert!(msg.kind().is_none());
     }
 

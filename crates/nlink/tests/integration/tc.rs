@@ -369,7 +369,7 @@ async fn test_delete_class() -> Result<()> {
     // Verify
     let classes = conn.get_classes_by_name("dummy0").await?;
     // Check that class 1:10 is gone
-    assert!(!classes.iter().any(|c| c.handle() == 0x10010)); // 1:10 = 0x10010
+    assert!(!classes.iter().any(|c| c.handle() == TcHandle::new(1, 0x10)));
 
     Ok(())
 }
@@ -400,7 +400,9 @@ async fn test_add_matchall_filter() -> Result<()> {
     .await?;
 
     // Add matchall filter
-    let filter = MatchallFilter::new().classid(TcHandle::new(1, 0x10)).build();
+    let filter = MatchallFilter::new()
+        .classid(TcHandle::new(1, 0x10))
+        .build();
     conn.add_filter("dummy0", TcHandle::major_only(1), filter)
         .await?;
 
@@ -434,7 +436,10 @@ async fn test_add_u32_filter() -> Result<()> {
     .await?;
 
     // Add u32 filter matching destination port 80
-    let filter = U32Filter::new().classid(TcHandle::new(1, 0x10)).match_dst_port(80).build();
+    let filter = U32Filter::new()
+        .classid(TcHandle::new(1, 0x10))
+        .match_dst_port(80)
+        .build();
     conn.add_filter("dummy0", TcHandle::major_only(1), filter)
         .await?;
 
@@ -468,7 +473,10 @@ async fn test_add_flower_filter() -> Result<()> {
     .await?;
 
     // Add flower filter
-    let filter = FlowerFilter::new().classid(TcHandle::new(1, 0x10)).ip_proto_tcp().build();
+    let filter = FlowerFilter::new()
+        .classid(TcHandle::new(1, 0x10))
+        .ip_proto_tcp()
+        .build();
     conn.add_filter("dummy0", TcHandle::major_only(1), filter)
         .await?;
 
@@ -548,7 +556,9 @@ async fn test_filter_on_ifb() -> Result<()> {
         .await?;
 
     // Add matchall filter
-    let filter = MatchallFilter::new().classid(TcHandle::new(1, 0x10)).build();
+    let filter = MatchallFilter::new()
+        .classid(TcHandle::new(1, 0x10))
+        .build();
     conn.add_filter("ifb0", TcHandle::major_only(1), filter)
         .await?;
 
@@ -581,7 +591,9 @@ async fn test_delete_filter() -> Result<()> {
     .await?;
 
     // Add filter
-    let filter = MatchallFilter::new().classid(TcHandle::new(1, 0x10)).build();
+    let filter = MatchallFilter::new()
+        .classid(TcHandle::new(1, 0x10))
+        .build();
     conn.add_filter("dummy0", TcHandle::major_only(1), filter)
         .await?;
 
@@ -627,12 +639,16 @@ async fn test_replace_filter() -> Result<()> {
     .await?;
 
     // Add filter pointing to 1:10
-    let filter = MatchallFilter::new().classid(TcHandle::new(1, 0x10)).build();
+    let filter = MatchallFilter::new()
+        .classid(TcHandle::new(1, 0x10))
+        .build();
     conn.add_filter("dummy0", TcHandle::major_only(1), filter)
         .await?;
 
     // Replace to point to 1:20
-    let filter2 = MatchallFilter::new().classid(TcHandle::new(1, 0x20)).build();
+    let filter2 = MatchallFilter::new()
+        .classid(TcHandle::new(1, 0x20))
+        .build();
     conn.replace_filter("dummy0", TcHandle::major_only(1), filter2)
         .await?;
 
@@ -786,7 +802,10 @@ async fn test_filter_with_chain() -> Result<()> {
         .await?;
 
     // Add filter in chain 5
-    let filter = MatchallFilter::new().classid(TcHandle::new(1, 0x10)).chain(5).build();
+    let filter = MatchallFilter::new()
+        .classid(TcHandle::new(1, 0x10))
+        .chain(5)
+        .build();
     conn.add_filter("dummy0", TcHandle::major_only(1), filter)
         .await?;
 
