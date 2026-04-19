@@ -72,8 +72,23 @@ where
         .map_err(|e| ParseError::InvalidNumber(format!("{}", e)))
 }
 
-/// Parse a rate (bits per second).
-/// Supports suffixes: bit, kbit, mbit, gbit, tbit, bps, kbps, mbps, gbps, tbps
+/// Parse a rate string and return the value in **bits per second**.
+///
+/// Supports tc-style suffixes: `bit`, `kbit`, `mbit`, `gbit`, `tbit`,
+/// `bps`, `kbps`, `mbps`, `gbps`, `tbps`, `kibit`/`mibit`/`gibit`/`tibit`
+/// (binary), `k`/`m`/`g`/`t` (decimal shortcuts).
+///
+/// # New code: prefer [`crate::util::Rate`]
+///
+/// This function returns an unchecked `u64` in bits/sec — the historical
+/// 8× HTB rate bug existed because callers fed this output to APIs that
+/// stored it as bytes/sec. Use [`Rate::parse`](crate::util::Rate::parse)
+/// (or `"100mbit".parse::<Rate>()?`) instead — it returns a typed `Rate`
+/// that handles the unit conversion at construction.
+///
+/// This function remains as the underlying parser for the legacy raw
+/// `&[String]` TC API (`Connection::add_class("eth0", parent, classid,
+/// "htb", &["rate", "100mbit", ...])`) and for `Rate::parse` itself.
 pub fn get_rate(s: &str) -> Result<u64> {
     let s = s.trim().to_lowercase();
 
@@ -100,8 +115,18 @@ pub fn get_rate(s: &str) -> Result<u64> {
     Ok((num * multiplier as f64) as u64)
 }
 
-/// Parse a size (bytes).
-/// Supports suffixes: b, k, kb, m, mb, g, gb, t, tb
+/// Parse a size string and return the value in **bytes**.
+///
+/// Supports tc-style suffixes (binary base for `k`/`m`/`g`/`t`): `b`,
+/// `k`, `kb`, `m`, `mb`, `g`, `gb`, `t`, `tb`. Bit-suffixes (`kbit`/
+/// `mbit`/`gbit`) are accepted and divided by 8 to yield bytes.
+///
+/// # New code: prefer [`crate::util::Bytes`]
+///
+/// Use [`Bytes::parse`](crate::util::Bytes::parse) (or
+/// `"32kib".parse::<Bytes>()?`) instead — it returns a typed `Bytes`
+/// value with explicit decimal/binary constructors and a `Display`
+/// that round-trips.
 pub fn get_size(s: &str) -> Result<u64> {
     let s = s.trim().to_lowercase();
 

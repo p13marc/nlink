@@ -4,6 +4,65 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (BC break) — Plan 129: typed units
+
+- **TC rates, byte counts, and percentages are now strongly typed via
+  `nlink::Rate`, `nlink::Bytes`, and `nlink::Percent` newtypes.** This
+  replaces a mix of `u64` (sometimes bits/sec, sometimes bytes/sec),
+  `u32` (sometimes packets, sometimes bytes), and `f64` (clamped 0..=100)
+  with three concrete types whose constructors are explicit about units
+  and whose accessors don't lie. The 8× HTB rate bug fixed in 0.12.x is
+  now a compile error.
+
+  | Old                                                | New                                                |
+  |---|---|
+  | `HtbClassConfig::from_bps(12_500_000)`             | `HtbClassConfig::new(Rate::mbit(100))`             |
+  | `HtbClassConfig::new("100mbit")?`                  | `HtbClassConfig::new("100mbit".parse()?)` or `Rate::mbit(100)` |
+  | `HtbClassConfig::ceil_bps(u64)` / `.ceil("...")?`  | `.ceil(Rate)`                                      |
+  | `HtbClassConfig::burst_bytes(u32)` / `.burst("...")?` | `.burst(Bytes)`                                 |
+  | `NetemConfig::rate(bytes_per_sec)` / `rate_bps(bits_per_sec)` / `rate_kbps(_)` / `rate_mbps(_)` / `rate_gbps(_)` | `.rate(Rate)` |
+  | `NetemConfig::loss(f64)` / `.duplicate(f64)` / `.corrupt(f64)` / `.reorder(f64)` and the four `*_correlation` methods | `.loss(Percent)` etc. |
+  | `RateLimit::new(u64)` / `parse(&str)?`             | `RateLimit::new(Rate)` (parse via `Rate::parse`/`FromStr`) |
+  | `RateLimit::ceil(u64)` / `.burst(u32)`             | `.ceil(Rate)` / `.burst(Bytes)`                    |
+  | `RateLimiter::egress(&str)?` / `egress_bps(u64)` and the same shape for `ingress` / `burst_to` / `burst_size` | `.egress(Rate)` / `.ingress(Rate)` / `.burst_to(Rate)` / `.burst_size(Bytes)` |
+  | `PerHostLimiter::new(dev, &str)?` / `new_bps(dev, u64)` | `PerHostLimiter::new(dev, Rate)` (infallible) |
+  | `PerHostLimiter::limit_*(..., &str)?`              | `.limit_*(..., Rate)` — most variants now infallible (only `*_subnet` keep `Result` for subnet parse) |
+  | `PerPeerImpairer::assumed_link_rate_bps(u64)`      | `.assumed_link_rate(Rate)`                         |
+  | `DEFAULT_ASSUMED_LINK_RATE_BPS: u64`               | `DEFAULT_ASSUMED_LINK_RATE: Rate`                  |
+  | `PeerImpairment::rate_cap_bps(u64)` / `.rate_cap(&str)?` | `.rate_cap(Rate)`                             |
+  | `PeerImpairment::cap_bps()`                        | `.cap()`                                           |
+  | `TbfConfig::rate(u64)` / `rate_bps(u64)` / `peakrate(u64)` | `.rate(Rate)` / `.peakrate(Rate)`         |
+  | `TbfConfig::burst(u32)` / `limit(u32)`             | `.burst(Bytes)` / `.limit(Bytes)`                  |
+  | `HfscClassConfig::{rt_rate,ls_rate,ul_rate}(u32)`  | `…(Rate)` (saturating-cast to u32 for HFSC's 32-bit kernel field) |
+  | `DrrClassConfig::quantum(u32)`                     | `.quantum(Bytes)` (saturating-cast)                |
+  | `QfqClassConfig::lmax(u32)`                        | `.lmax(Bytes)` (saturating-cast)                   |
+
+  All `*Built` wrapper types (e.g., `HtbClassBuilt`) are unchanged in
+  this round — see Plan 132 (API cleanup) for the wrapper removal.
+
+  `nlink::util::parse::get_rate` and `get_size` remain as the underlying
+  parsers and as the public API for the legacy raw-string TC interface
+  (`Connection::add_class("eth0", parent, classid, "htb", &["rate",
+  "100mbit", ...])`). Their docs now recommend `Rate::parse` /
+  `Bytes::parse` for new code.
+
+### Added — Plan 129
+
+- `nlink::Rate` — typed bandwidth (internally bytes/sec). Constructors
+  `bytes_per_sec`, `bits_per_sec`, `kbit`, `mbit`, `gbit`, `kibit`,
+  `mibit`, `gibit`, `kib_per_sec`, `mib_per_sec`. `Rate::parse` and
+  `FromStr` accept tc-style strings (`"100mbit"`, `"1.5gibit"`).
+  `Display` round-trips. Saturating arithmetic. `Rate * Duration ->
+  Bytes`, `Bytes / Duration -> Rate`. `as_u32_bytes_per_sec_saturating`
+  for kernel u32 fields.
+- `nlink::Bytes` — typed byte count. `kb`/`mb`/`gb` (decimal),
+  `kib`/`mib`/`gib` (binary). `Bytes::parse` / `FromStr` for tc-style
+  strings. `as_u32_saturating` for kernel u32 fields.
+- `nlink::Percent` — clamped 0..=100 percentage. Construction clamps;
+  arithmetic saturates. `as_kernel_probability()` returns `u32` for
+  netem qopt fields. `FromStr` accepts `"50%"` / `"50"` / `"0.5"`.
+- All three types re-exported at crate root and from `nlink::prelude`.
+
 ### Fixed (behavior change)
 
 - **HTB rates from string parsing were 8× too high.** `HtbClassConfig::new(rate)`,
