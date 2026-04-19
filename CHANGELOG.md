@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-04-19
+
+The 0.13.0 release lands the four foundation plans from the 1.0
+roadmap (`128b-roadmap-overview.md`): typed units (Rate / Bytes /
+Percent), typed TC handles (TcHandle / FilterPriority), API cleanup
+(class-builder wrapper removal + 95-enum non_exhaustive lockdown),
+and tracing instrumentation across the whole public surface.
+
 ### Added — Plan 134: tracing instrumentation
 
 - nlink now emits `tracing` spans on its high-value entry points:
@@ -18,6 +26,17 @@ All notable changes to this project will be documented in this file.
   `tracing_subscriber::fmt().with_env_filter("nlink=debug").init()`.
   Spans cost a single relaxed atomic load when no subscriber is
   attached (the `tracing` library guarantee).
+- A follow-up pass extended instrumentation to the long tail: every
+  `pub async fn` on `Connection<Route>`, `Connection<Generic>`, and
+  the GENL protocol-specific `Connection<*>` types now carries an
+  `#[instrument(level = "debug", skip_all, fields(method = "..."))]`
+  (~318 spans total). Filterable via tracing-subscriber's env-filter:
+  `RUST_LOG="nlink[method=add_qdisc]=debug"`. Plus INFO span on
+  `Connection::<Generic>::get_family` (with `cached` boolean), DEBUG
+  span on `Batch::execute` (with `ops` count), and TRACE event on
+  every multicast batch parsed by `EventSubscription` /
+  `OwnedEventStream`. See `docs/observability.md` for the full
+  level conventions and common queries.
 
 ### Changed (BC break) — Plan 132: API cleanup
 
