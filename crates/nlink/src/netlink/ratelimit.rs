@@ -731,7 +731,7 @@ impl PerHostLimiter {
         const ETH_P_IP: u16 = 0x0800;
         const ETH_P_IPV6: u16 = 0x86DD;
 
-        let classid = format!("1:{:x}", index + 2);
+        let classid = TcHandle::new(1, (index + 2) as u16);
         let priority = (index + 1) as u16;
 
         match &rule.match_ {
@@ -750,7 +750,7 @@ impl PerHostLimiter {
                 match ip {
                     IpAddr::V4(addr) => {
                         let filter = FlowerFilter::new()
-                            .classid(&classid)
+                            .classid(classid)
                             .priority(priority)
                             .dst_ipv4(*addr, prefix)
                             .build();
@@ -766,7 +766,7 @@ impl PerHostLimiter {
                     }
                     IpAddr::V6(addr) => {
                         let filter = FlowerFilter::new()
-                            .classid(&classid)
+                            .classid(classid)
                             .priority(priority)
                             .dst_ipv6(*addr, prefix)
                             .build();
@@ -797,7 +797,7 @@ impl PerHostLimiter {
                 match ip {
                     IpAddr::V4(addr) => {
                         let filter = FlowerFilter::new()
-                            .classid(&classid)
+                            .classid(classid)
                             .priority(priority)
                             .src_ipv4(*addr, prefix)
                             .build();
@@ -813,7 +813,7 @@ impl PerHostLimiter {
                     }
                     IpAddr::V6(addr) => {
                         let filter = FlowerFilter::new()
-                            .classid(&classid)
+                            .classid(classid)
                             .priority(priority)
                             .src_ipv6(*addr, prefix)
                             .build();
@@ -833,7 +833,7 @@ impl PerHostLimiter {
                 // Match both TCP and UDP. L4 port matching at the IP layer
                 // dispatches under ETH_P_IP.
                 let tcp_filter = FlowerFilter::new()
-                    .classid(&classid)
+                    .classid(classid)
                     .priority(priority)
                     .ip_proto_tcp()
                     .dst_port(*port)
@@ -849,7 +849,7 @@ impl PerHostLimiter {
                 .await?;
 
                 let udp_filter = FlowerFilter::new()
-                    .classid(&classid)
+                    .classid(classid)
                     .priority(priority + 100) // Different priority to avoid conflict
                     .ip_proto_udp()
                     .dst_port(*port)
@@ -871,7 +871,7 @@ impl PerHostLimiter {
                 if *end - *start <= 10 {
                     for port in *start..=*end {
                         let filter = FlowerFilter::new()
-                            .classid(&classid)
+                            .classid(classid)
                             .priority(priority)
                             .ip_proto_tcp()
                             .dst_port(port)

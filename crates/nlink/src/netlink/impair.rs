@@ -433,7 +433,7 @@ impl PerPeerImpairer {
     ) -> Result<()> {
         let priority = filter_priority(index);
         let protocol = protocol_for(match_);
-        let filter = build_flower(&classid.to_string(), priority, match_);
+        let filter = build_flower(classid, priority, match_);
 
         // Filter parent is the root HTB qdisc (1:).
         conn.add_filter_by_index_full(
@@ -483,7 +483,7 @@ fn filter_priority(index: usize) -> u16 {
     100u16.saturating_add(u16::try_from(index).unwrap_or(u16::MAX - 100))
 }
 
-fn build_flower(classid: &str, priority: u16, match_: &PeerMatch) -> FlowerFilter {
+fn build_flower(classid: TcHandle, priority: u16, match_: &PeerMatch) -> FlowerFilter {
     let mut f = FlowerFilter::new().classid(classid).priority(priority);
     match *match_ {
         PeerMatch::DstIp(IpAddr::V4(addr)) => f = f.dst_ipv4(addr, 32),
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn build_flower_dst_ip_v4_classid() {
         let f = build_flower(
-            "1:2",
+            TcHandle::new(1, 2),
             100,
             &PeerMatch::DstIp(Ipv4Addr::new(10, 0, 0, 1).into()),
         );
@@ -807,7 +807,7 @@ mod tests {
         // Prefix > 32 should be clamped silently rather than panic in the
         // ipv4 mask helper.
         let _ = build_flower(
-            "1:2",
+            TcHandle::new(1, 2),
             100,
             &PeerMatch::DstSubnet(Ipv4Addr::new(10, 0, 0, 0).into(), 99),
         );

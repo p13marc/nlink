@@ -8,30 +8,31 @@
 //! ```ignore
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::filter::{U32Filter, FlowerFilter, MatchallFilter};
+//! use nlink::TcHandle;
 //! use std::net::Ipv4Addr;
 //!
 //! let conn = Connection::<Route>::new()?;
 //!
 //! // Add a u32 filter to match destination port 80
 //! let filter = U32Filter::new()
-//!     .classid("1:10")
+//!     .classid(TcHandle::new(1, 0x10))
 //!     .match_dst_port(80)
 //!     .build();
-//! conn.add_filter("eth0", "1:", filter).await?;
+//! conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
 //!
 //! // Add a flower filter to match TCP traffic to 10.0.0.0/8
 //! let filter = FlowerFilter::new()
-//!     .classid("1:20")
+//!     .classid(TcHandle::new(1, 0x20))
 //!     .ip_proto_tcp()
 //!     .dst_ipv4(Ipv4Addr::new(10, 0, 0, 0), 8)
 //!     .build();
-//! conn.add_filter("eth0", "1:", filter).await?;
+//! conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
 //!
 //! // Add a matchall filter with an action
 //! let filter = MatchallFilter::new()
-//!     .classid("1:30")
+//!     .classid(TcHandle::new(1, 0x30))
 //!     .build();
-//! conn.add_filter("eth0", "1:", filter).await?;
+//! conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
 //! ```
 
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -49,7 +50,6 @@ use super::{
     types::tc::{
         TcMsg, TcaAttr,
         filter::{basic, bpf, flower, fw, matchall, u32 as u32_mod},
-        tc_handle,
     },
 };
 
@@ -93,13 +93,13 @@ pub trait FilterConfig: Send + Sync {
 ///
 /// // Match destination port 80 (HTTP)
 /// let filter = U32Filter::new()
-///     .classid("1:10")
+///     .classid(nlink::TcHandle::new(1, 0x10))
 ///     .match_dst_port(80)
 ///     .build();
 ///
 /// // Match source IP 192.168.1.0/24
 /// let filter = U32Filter::new()
-///     .classid("1:20")
+///     .classid(nlink::TcHandle::new(1, 0x20))
 ///     .match_src_ipv4("192.168.1.0".parse().unwrap(), 24)
 ///     .build();
 /// ```
@@ -134,15 +134,9 @@ impl U32Filter {
         }
     }
 
-    /// Set the target class ID (e.g., "1:10").
-    pub fn classid(mut self, classid: &str) -> Self {
-        self.classid = tc_handle::parse(classid);
-        self
-    }
-
-    /// Set the target class ID from raw value.
-    pub fn classid_raw(mut self, classid: u32) -> Self {
-        self.classid = Some(classid);
+    /// Set the target class ID.
+    pub fn classid(mut self, classid: TcHandle) -> Self {
+        self.classid = Some(classid.as_raw());
         self
     }
 
@@ -319,7 +313,7 @@ impl FilterConfig for U32Filter {
 ///
 /// // Match TCP traffic to 10.0.0.0/8 on port 80
 /// let filter = FlowerFilter::new()
-///     .classid("1:10")
+///     .classid(nlink::TcHandle::new(1, 0x10))
 ///     .ip_proto_tcp()
 ///     .dst_ipv4(Ipv4Addr::new(10, 0, 0, 0), 8)
 ///     .dst_port(80)
@@ -381,15 +375,9 @@ impl FlowerFilter {
         }
     }
 
-    /// Set the target class ID (e.g., "1:10").
-    pub fn classid(mut self, classid: &str) -> Self {
-        self.classid = tc_handle::parse(classid);
-        self
-    }
-
-    /// Set the target class ID from raw value.
-    pub fn classid_raw(mut self, classid: u32) -> Self {
-        self.classid = Some(classid);
+    /// Set the target class ID.
+    pub fn classid(mut self, classid: TcHandle) -> Self {
+        self.classid = Some(classid.as_raw());
         self
     }
 
@@ -768,7 +756,7 @@ impl FilterConfig for FlowerFilter {
 /// use nlink::netlink::filter::MatchallFilter;
 ///
 /// let filter = MatchallFilter::new()
-///     .classid("1:10")
+///     .classid(nlink::TcHandle::new(1, 0x10))
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -798,14 +786,8 @@ impl MatchallFilter {
     }
 
     /// Set the target class ID.
-    pub fn classid(mut self, classid: &str) -> Self {
-        self.classid = tc_handle::parse(classid);
-        self
-    }
-
-    /// Set the target class ID from raw value.
-    pub fn classid_raw(mut self, classid: u32) -> Self {
-        self.classid = Some(classid);
+    pub fn classid(mut self, classid: TcHandle) -> Self {
+        self.classid = Some(classid.as_raw());
         self
     }
 
@@ -919,7 +901,7 @@ impl FilterConfig for MatchallFilter {
 ///
 /// // Match packets with fwmark 10
 /// let filter = FwFilter::new(10)
-///     .classid("1:10")
+///     .classid(nlink::TcHandle::new(1, 0x10))
 ///     .build();
 /// ```
 #[derive(Debug, Clone)]
@@ -953,14 +935,8 @@ impl FwFilter {
     }
 
     /// Set the target class ID.
-    pub fn classid(mut self, classid: &str) -> Self {
-        self.classid = tc_handle::parse(classid);
-        self
-    }
-
-    /// Set the target class ID from raw value.
-    pub fn classid_raw(mut self, classid: u32) -> Self {
-        self.classid = Some(classid);
+    pub fn classid(mut self, classid: TcHandle) -> Self {
+        self.classid = Some(classid.as_raw());
         self
     }
 
@@ -1101,8 +1077,8 @@ impl BpfFilter {
     }
 
     /// Set the target class ID (for non-direct-action mode).
-    pub fn classid(mut self, classid: &str) -> Self {
-        self.classid = tc_handle::parse(classid);
+    pub fn classid(mut self, classid: TcHandle) -> Self {
+        self.classid = Some(classid.as_raw());
         self
     }
 
@@ -1187,7 +1163,7 @@ impl FilterConfig for BpfFilter {
 /// use nlink::netlink::filter::BasicFilter;
 ///
 /// let filter = BasicFilter::new()
-///     .classid("1:10")
+///     .classid(nlink::TcHandle::new(1, 0x10))
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -1213,14 +1189,8 @@ impl BasicFilter {
     }
 
     /// Set the target class ID.
-    pub fn classid(mut self, classid: &str) -> Self {
-        self.classid = tc_handle::parse(classid);
-        self
-    }
-
-    /// Set the target class ID from raw value.
-    pub fn classid_raw(mut self, classid: u32) -> Self {
-        self.classid = Some(classid);
+    pub fn classid(mut self, classid: TcHandle) -> Self {
+        self.classid = Some(classid.as_raw());
         self
     }
 
@@ -1378,13 +1348,13 @@ impl FilterConfig for CgroupFilter {
 /// // Match traffic to realm 10
 /// let filter = RouteFilter::new()
 ///     .to_realm(10)
-///     .classid("1:10");
+///     .classid(nlink::TcHandle::new(1, 0x10));
 ///
 /// // Match traffic from realm 5 arriving on eth1 (by index for namespace safety)
 /// let filter = RouteFilter::new()
 ///     .from_realm(5)
 ///     .from_if_index(eth1_ifindex)
-///     .classid("1:20");
+///     .classid(nlink::TcHandle::new(1, 0x20));
 /// ```
 #[derive(Debug, Clone, Default)]
 #[must_use = "builders do nothing unless used"]
@@ -1410,8 +1380,8 @@ impl RouteFilter {
     }
 
     /// Set the target class ID.
-    pub fn classid(mut self, classid: &str) -> Self {
-        self.classid = tc_handle::parse(classid);
+    pub fn classid(mut self, classid: TcHandle) -> Self {
+        self.classid = Some(classid.as_raw());
         self
     }
 
@@ -1546,16 +1516,16 @@ impl FilterConfig for RouteFilter {
 ///     .keys(&[FlowKey::Src, FlowKey::Dst])
 ///     .mode_hash()
 ///     .divisor(256)
-///     .baseclass("1:10")
+///     .baseclass(nlink::TcHandle::new(1, 0x10))
 ///     .build();
 ///
-/// conn.add_filter("eth0", "1:", filter).await?;
+/// conn.add_filter("eth0", nlink::TcHandle::major_only(1), filter).await?;
 ///
 /// // Map mode: direct mapping without hashing
 /// let filter = FlowFilter::new()
 ///     .key(FlowKey::Mark)
 ///     .mode_map()
-///     .baseclass("1:0")
+///     .baseclass(nlink::TcHandle::major_only(1))
 ///     .build();
 /// ```
 #[derive(Debug, Clone)]
@@ -1713,14 +1683,8 @@ impl FlowFilter {
     }
 
     /// Set the base class ID.
-    pub fn baseclass(mut self, classid: &str) -> Self {
-        self.baseclass = tc_handle::parse(classid);
-        self
-    }
-
-    /// Set the base class ID directly.
-    pub fn baseclass_id(mut self, classid: u32) -> Self {
-        self.baseclass = Some(classid);
+    pub fn baseclass(mut self, classid: TcHandle) -> Self {
+        self.baseclass = Some(classid.as_raw());
         self
     }
 
@@ -2368,12 +2332,12 @@ mod tests {
     #[test]
     fn test_u32_filter_builder() {
         let filter = U32Filter::new()
-            .classid("1:10")
+            .classid(TcHandle::new(1, 0x10))
             .match_dst_ipv4(Ipv4Addr::new(192, 168, 1, 0), 24)
             .priority(100)
             .build();
 
-        assert_eq!(filter.classid, Some(tc_handle::make(1, 0x10)));
+        assert_eq!(filter.classid, Some(TcHandle::new(1, 0x10).as_raw()));
         assert_eq!(filter.priority, 100);
         assert_eq!(filter.keys.len(), 1);
     }
@@ -2381,13 +2345,13 @@ mod tests {
     #[test]
     fn test_flower_filter_builder() {
         let filter = FlowerFilter::new()
-            .classid("1:20")
+            .classid(TcHandle::new(1, 0x20))
             .ip_proto_tcp()
             .dst_ipv4(Ipv4Addr::new(10, 0, 0, 0), 8)
             .dst_port(80)
             .build();
 
-        assert_eq!(filter.classid, Some(tc_handle::make(1, 0x20)));
+        assert_eq!(filter.classid, Some(TcHandle::new(1, 0x20).as_raw()));
         assert_eq!(filter.ip_proto, Some(flower::IPPROTO_TCP));
         assert_eq!(filter.dst_ipv4, Some((Ipv4Addr::new(10, 0, 0, 0), 8)));
         assert_eq!(filter.dst_port, Some(80));
@@ -2396,18 +2360,24 @@ mod tests {
 
     #[test]
     fn test_matchall_filter_builder() {
-        let filter = MatchallFilter::new().classid("1:30").skip_hw().build();
+        let filter = MatchallFilter::new()
+            .classid(TcHandle::new(1, 0x30))
+            .skip_hw()
+            .build();
 
-        assert_eq!(filter.classid, Some(tc_handle::make(1, 0x30)));
+        assert_eq!(filter.classid, Some(TcHandle::new(1, 0x30).as_raw()));
         assert!(filter.flags & flower::TCA_CLS_FLAGS_SKIP_HW != 0);
     }
 
     #[test]
     fn test_fw_filter_builder() {
-        let filter = FwFilter::new().classid("1:10").mask(0xFF).build();
+        let filter = FwFilter::new()
+            .classid(TcHandle::new(1, 0x10))
+            .mask(0xFF)
+            .build();
 
         assert_eq!(filter.mask, 0xFF);
-        assert_eq!(filter.classid, Some(tc_handle::make(1, 0x10)));
+        assert_eq!(filter.classid, Some(TcHandle::new(1, 0x10).as_raw()));
     }
 
     #[test]
@@ -2449,13 +2419,13 @@ mod tests {
         let filter = RouteFilter::new()
             .to_realm(10)
             .from_realm(5)
-            .classid("1:10")
+            .classid(TcHandle::new(1, 0x10))
             .build();
 
         assert_eq!(FilterConfig::kind(&filter), "route");
         assert_eq!(filter.to_realm, Some(10));
         assert_eq!(filter.from_realm, Some(5));
-        assert_eq!(filter.classid, Some(tc_handle::make(1, 0x10)));
+        assert_eq!(filter.classid, Some(TcHandle::new(1, 0x10).as_raw()));
     }
 
     #[test]
@@ -2466,14 +2436,14 @@ mod tests {
             .keys(&[FlowKey::Src, FlowKey::Dst])
             .mode_hash()
             .divisor(256)
-            .baseclass("1:10")
+            .baseclass(TcHandle::new(1, 0x10))
             .build();
 
         assert_eq!(FilterConfig::kind(&filter), "flow");
         assert_eq!(filter.keys, flow::FLOW_KEY_SRC | flow::FLOW_KEY_DST);
         assert_eq!(filter.mode, flow::FLOW_MODE_HASH);
         assert_eq!(filter.divisor, Some(256));
-        assert_eq!(filter.baseclass, Some(tc_handle::make(1, 0x10)));
+        assert_eq!(filter.baseclass, Some(TcHandle::new(1, 0x10).as_raw()));
 
         // Test single key
         let filter = FlowFilter::new()
