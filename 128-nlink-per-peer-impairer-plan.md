@@ -733,16 +733,30 @@ Order of work inside the PR:
 
 ## 14. Definition of done
 
-- [ ] `PerPeerImpairer` lives at `nlink::netlink::impair` with the API in §4.1
-- [ ] `get_filters_by_parent` lives in `Connection<Route>`
-- [ ] `docs/recipes/per-peer-impairment.md` exists
-- [ ] `crates/nlink/CLAUDE.md` includes the new recipe in its patterns section
-- [ ] Unit tests pass (no root)
-- [ ] Integration tests pass under `sudo ./target/debug/deps/integration-* --test-threads=1`
-- [ ] Lint/format clean: `clippy --all-features --deny warnings`, `taplo fmt --check`, `rustfmt --check`, `cargo machete`
-- [ ] CHANGELOG updated under `## [0.13.0]`
-- [ ] Open questions in §10 answered and any resulting API changes folded back in
+- [x] `PerPeerImpairer` lives at `nlink::netlink::impair` with the API in §4.1 (extended per §10a with `PeerImpairment`, source matchers, rate caps)
+- [x] `get_filters_by_parent` (and `_by_index` variant) live on `Connection<Route>` — implemented in `connection.rs` rather than the plan's `filter.rs` for proximity to `get_filters_by_index`
+- [x] `docs/recipes/per-peer-impairment.md` exists
+- [x] `CLAUDE.md` includes the new recipe in its patterns section — added to the **root** `CLAUDE.md` (the per-crate `crates/nlink/CLAUDE.md` referenced in the plan does not exist in this repo)
+- [x] Unit tests pass (no root) — 31 tests in `impair::tests`
+- [~] Integration tests authored — 10 root-required tests in `tests/integration/impair.rs` compile cleanly. Cannot exercise under `sudo` in the current sandbox (the same env-level "namespace restoration: Operation not permitted" that affects the existing `ratelimit` integration tests blocks them too).
+- [x] Lint/format clean: `cargo clippy --workspace --all-targets --all-features -- --deny warnings` passes; `rustfmt +nightly` applied with project config. `taplo` is not installed in this sandbox so not run; `cargo machete` reports only the pre-existing `tracing` unused dep that was already present before this work.
+- [x] CHANGELOG updated under `## [Unreleased]` — used `Unreleased` rather than `## [0.13.0]` because no release is tagged yet; entry will roll into the 0.13.0 section at release time.
+- [x] Open questions in §10 answered and folded into §10a; API and recipe updated accordingly.
+- [x] Crate-root re-export per §4.3: `pub use netlink::impair::{PeerImpairment, PeerMatch, PerPeerImpairer}` in `lib.rs`. Not added to `prelude` per §4.4 (mirrors `PerHostLimiter`).
+- [x] Runnable example: `crates/nlink/examples/impair/per_peer.rs` (`cargo run -p nlink --example impair_per_peer`). Default mode prints topology + builder snippet + caveats; `--apply` (root) creates a temp namespace, applies a 3-peer impairment, dumps the tree, and cleans up.
+- [x] README mention added in the "Per-Peer Impairment" subsection alongside the existing rate-limiting / diagnostics highlights.
+
+### Items not done (and why)
+
+- `test_partial_failure_path_is_recoverable` (planned in §7.2) — the failure modes currently reachable by the builder (invalid prefix, unparseable subnet) are caught at builder time, not during `apply()`. Inducing a mid-`apply()` failure requires kernel-level injection (e.g., revoke `cls_flower` between class creation and filter addition), which is out of scope for a reproducible test. Skipped.
+- Bins (`ip`, `tc`, `ss`, `nft`, `wifi`, `devlink`) — none updated. `PerPeerImpairer` is a library helper; bins are CLI passthroughs to the underlying primitives. No bin currently exposes `tc`-recipe-style commands.
+- `taplo fmt --check` — toolchain not present in this sandbox; no `Cargo.toml` formatting deltas were introduced beyond a single new `[[example]]` entry that follows the existing block style.
 
 ---
 
-End of plan. Awaiting answers to §10 before opening the PR.
+End of plan. PR landed in three commits:
+- `feat(impair): add PerPeerImpairer recipe for per-destination netem`
+- `fix(tc,ratelimit): correct HTB rate units and IPv6 filter dispatch`
+- `docs(impair): add runnable PerPeerImpairer example`
+
+…plus a follow-up clippy cleanup commit.

@@ -140,23 +140,24 @@ pub mod tc;
 pub mod output;
 
 // Re-export common types at crate root for convenience
-pub use netlink::{Connection, Error, Protocol, Result};
-
-// Protocol state types
-pub use netlink::{Generic, Nftables, Route, Wireguard};
-
-// Event types
-pub use netlink::NetworkEvent;
-
-// Stream-based event API
-pub use netlink::{EventSource, EventSubscription, OwnedEventStream};
-
-// Route protocol multicast groups
-pub use netlink::RtnetlinkGroup;
-
 // Namespace types
 pub use netlink::NamespaceSpec;
-
+// Event types
+pub use netlink::NetworkEvent;
+// Route protocol multicast groups
+pub use netlink::RtnetlinkGroup;
+// Bridge VLAN types
+pub use netlink::bridge_vlan::{BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanFlags};
+// Diagnostics types
+pub use netlink::diagnostics::{
+    Bottleneck, BottleneckType, ConnectivityReport, DiagnosticReport, Diagnostics,
+    DiagnosticsConfig, InterfaceDiag, Issue, IssueCategory, IssueStream, LinkRates, RouteDiag,
+    RouteInfo, Severity, TcDiag,
+};
+// FDB types
+pub use netlink::fdb::{FdbEntry, FdbEntryBuilder};
+// Per-peer impairment helper
+pub use netlink::impair::{PeerImpairment, PeerMatch, PerPeerImpairer};
 // Message types (commonly used)
 pub use netlink::messages::{
     AddressMessage,
@@ -170,16 +171,8 @@ pub use netlink::messages::{
     RuleMessage,
     TcMessage,
 };
-
-// FDB types
-pub use netlink::fdb::{FdbEntry, FdbEntryBuilder};
-
-// Bridge VLAN types
-pub use netlink::bridge_vlan::{BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanFlags};
-
-// Diagnostics types
-pub use netlink::diagnostics::{
-    Bottleneck, BottleneckType, ConnectivityReport, DiagnosticReport, Diagnostics,
-    DiagnosticsConfig, InterfaceDiag, Issue, IssueCategory, IssueStream, LinkRates, RouteDiag,
-    RouteInfo, Severity, TcDiag,
-};
+pub use netlink::{Connection, Error, Protocol, Result};
+// Stream-based event API
+pub use netlink::{EventSource, EventSubscription, OwnedEventStream};
+// Protocol state types
+pub use netlink::{Generic, Nftables, Route, Wireguard};

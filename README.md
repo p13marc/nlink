@@ -120,6 +120,33 @@ let limiter = PerHostLimiter::new("eth0", "10mbit")?
 limiter.apply(&conn).await?;
 ```
 
+### Per-Peer Impairment
+
+Different netem (delay/loss) settings per destination, for emulating
+shared L2 segments where each peer-to-peer path needs distinct RTT
+and loss characteristics. Recipe at
+[`docs/recipes/per-peer-impairment.md`](docs/recipes/per-peer-impairment.md).
+
+```rust
+use nlink::netlink::impair::{PerPeerImpairer, PeerImpairment};
+use nlink::netlink::tc::NetemConfig;
+use std::time::Duration;
+
+PerPeerImpairer::new("vethA-br")
+    .impair_dst_ip(
+        "172.100.3.18".parse()?,
+        NetemConfig::new().delay(Duration::from_millis(15)).loss(1.0).build(),
+    )
+    .impair_dst_ip(
+        "172.100.3.19".parse()?,
+        PeerImpairment::new(
+            NetemConfig::new().delay(Duration::from_millis(40)).loss(5.0).build(),
+        )
+        .rate_cap("100mbit")?,
+    )
+    .apply(&conn).await?;
+```
+
 ### Network Diagnostics
 
 Scan for issues, check connectivity, find bottlenecks:

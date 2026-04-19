@@ -790,6 +790,26 @@ mod tests {
     }
 
     #[test]
+    fn clone_roundtrip_preserves_state() {
+        let original = PerPeerImpairer::new("eth0")
+            .assumed_link_rate_bps(2_500_000)
+            .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
+            .impair_dst_subnet("2001:db8::/32", netem_50ms())
+            .expect("subnet parses")
+            .impair_dst_mac([1, 2, 3, 4, 5, 6], netem_50ms())
+            .default_impairment(PeerImpairment::new(netem_50ms()).rate_cap_bps(123_456));
+        let clone = original.clone();
+        assert_eq!(clone.rule_count(), original.rule_count());
+        assert_eq!(clone.assumed_link_rate_bps, original.assumed_link_rate_bps);
+        assert_eq!(
+            clone.default_impairment.as_ref().and_then(|d| d.cap_bps()),
+            Some(123_456)
+        );
+        assert_eq!(clone.target().as_name(), original.target().as_name());
+        assert_eq!(clone.total_rate_bps(), original.total_rate_bps());
+    }
+
+    #[test]
     fn build_flower_dst_subnet_clamps_prefix() {
         // Prefix > 32 should be clamped silently rather than panic in the
         // ipv4 mask helper.
