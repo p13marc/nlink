@@ -141,7 +141,6 @@ pub mod output;
 
 // Re-export common types at crate root for convenience
 // Namespace types
-pub use netlink::NamespaceSpec;
 // Event types
 pub use netlink::NetworkEvent;
 // Route protocol multicast groups
@@ -171,8 +170,12 @@ pub use netlink::messages::{
     RuleMessage,
     TcMessage,
 };
-pub use netlink::{Connection, Error, Protocol, Result};
+pub use netlink::{Connection, Error, NamespaceSpec, Protocol, Result};
 // Stream-based event API
 pub use netlink::{EventSource, EventSubscription, OwnedEventStream};
 // Protocol state types
 pub use netlink::{Generic, Nftables, Route, Wireguard};
+// Strongly-typed unit types (rate, byte, percent values used at TC API
+// boundaries). Use these in new code; the kernel's unit confusion (bits/sec
+// vs bytes/sec, decimal vs binary) is handled at type construction.
+pub use util::{Bytes, Percent, Rate};
