@@ -415,42 +415,38 @@ impl Connection<Netfilter> {
                         entry.reply = tuple;
                     }
                 }
-                CTA_STATUS
-                    if attr_data.len() >= 4 => {
-                        entry.status = Some(u32::from_be_bytes([
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                        ]));
-                    }
-                CTA_TIMEOUT
-                    if attr_data.len() >= 4 => {
-                        entry.timeout = Some(u32::from_be_bytes([
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                        ]));
-                    }
-                CTA_MARK
-                    if attr_data.len() >= 4 => {
-                        entry.mark = Some(u32::from_be_bytes([
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                        ]));
-                    }
-                CTA_ID
-                    if attr_data.len() >= 4 => {
-                        entry.id = Some(u32::from_be_bytes([
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                        ]));
-                    }
+                CTA_STATUS if attr_data.len() >= 4 => {
+                    entry.status = Some(u32::from_be_bytes([
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                    ]));
+                }
+                CTA_TIMEOUT if attr_data.len() >= 4 => {
+                    entry.timeout = Some(u32::from_be_bytes([
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                    ]));
+                }
+                CTA_MARK if attr_data.len() >= 4 => {
+                    entry.mark = Some(u32::from_be_bytes([
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                    ]));
+                }
+                CTA_ID if attr_data.len() >= 4 => {
+                    entry.id = Some(u32::from_be_bytes([
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                    ]));
+                }
                 CTA_PROTOINFO => {
                     entry.tcp_state = parse_protoinfo(attr_data);
                 }
@@ -531,36 +527,32 @@ fn parse_tuple_ip(data: &[u8], tuple: &mut ConntrackTuple) {
     while input.len() >= 4 {
         if let Some((attr_type, attr_data)) = parse_nla(&mut input) {
             match attr_type {
-                CTA_IP_V4_SRC
-                    if attr_data.len() >= 4 => {
-                        tuple.src_ip = Some(IpAddr::V4(Ipv4Addr::new(
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                        )));
-                    }
-                CTA_IP_V4_DST
-                    if attr_data.len() >= 4 => {
-                        tuple.dst_ip = Some(IpAddr::V4(Ipv4Addr::new(
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                        )));
-                    }
-                CTA_IP_V6_SRC
-                    if attr_data.len() >= 16 => {
-                        let mut octets = [0u8; 16];
-                        octets.copy_from_slice(&attr_data[..16]);
-                        tuple.src_ip = Some(IpAddr::V6(Ipv6Addr::from(octets)));
-                    }
-                CTA_IP_V6_DST
-                    if attr_data.len() >= 16 => {
-                        let mut octets = [0u8; 16];
-                        octets.copy_from_slice(&attr_data[..16]);
-                        tuple.dst_ip = Some(IpAddr::V6(Ipv6Addr::from(octets)));
-                    }
+                CTA_IP_V4_SRC if attr_data.len() >= 4 => {
+                    tuple.src_ip = Some(IpAddr::V4(Ipv4Addr::new(
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                    )));
+                }
+                CTA_IP_V4_DST if attr_data.len() >= 4 => {
+                    tuple.dst_ip = Some(IpAddr::V4(Ipv4Addr::new(
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                    )));
+                }
+                CTA_IP_V6_SRC if attr_data.len() >= 16 => {
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(&attr_data[..16]);
+                    tuple.src_ip = Some(IpAddr::V6(Ipv6Addr::from(octets)));
+                }
+                CTA_IP_V6_DST if attr_data.len() >= 16 => {
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(&attr_data[..16]);
+                    tuple.dst_ip = Some(IpAddr::V6(Ipv6Addr::from(octets)));
+                }
                 _ => {}
             }
         } else {
@@ -577,30 +569,24 @@ fn parse_tuple_proto(data: &[u8], tuple: &mut ConntrackTuple) -> IpProtocol {
     while input.len() >= 4 {
         if let Some((attr_type, attr_data)) = parse_nla(&mut input) {
             match attr_type {
-                CTA_PROTO_NUM
-                    if !attr_data.is_empty() => {
-                        proto = IpProtocol::from_u8(attr_data[0]);
-                    }
-                CTA_PROTO_SRC_PORT
-                    if attr_data.len() >= 2 => {
-                        tuple.src_port = Some(u16::from_be_bytes([attr_data[0], attr_data[1]]));
-                    }
-                CTA_PROTO_DST_PORT
-                    if attr_data.len() >= 2 => {
-                        tuple.dst_port = Some(u16::from_be_bytes([attr_data[0], attr_data[1]]));
-                    }
-                CTA_PROTO_ICMP_ID
-                    if attr_data.len() >= 2 => {
-                        tuple.icmp_id = Some(u16::from_be_bytes([attr_data[0], attr_data[1]]));
-                    }
-                CTA_PROTO_ICMP_TYPE
-                    if !attr_data.is_empty() => {
-                        tuple.icmp_type = Some(attr_data[0]);
-                    }
-                CTA_PROTO_ICMP_CODE
-                    if !attr_data.is_empty() => {
-                        tuple.icmp_code = Some(attr_data[0]);
-                    }
+                CTA_PROTO_NUM if !attr_data.is_empty() => {
+                    proto = IpProtocol::from_u8(attr_data[0]);
+                }
+                CTA_PROTO_SRC_PORT if attr_data.len() >= 2 => {
+                    tuple.src_port = Some(u16::from_be_bytes([attr_data[0], attr_data[1]]));
+                }
+                CTA_PROTO_DST_PORT if attr_data.len() >= 2 => {
+                    tuple.dst_port = Some(u16::from_be_bytes([attr_data[0], attr_data[1]]));
+                }
+                CTA_PROTO_ICMP_ID if attr_data.len() >= 2 => {
+                    tuple.icmp_id = Some(u16::from_be_bytes([attr_data[0], attr_data[1]]));
+                }
+                CTA_PROTO_ICMP_TYPE if !attr_data.is_empty() => {
+                    tuple.icmp_type = Some(attr_data[0]);
+                }
+                CTA_PROTO_ICMP_CODE if !attr_data.is_empty() => {
+                    tuple.icmp_code = Some(attr_data[0]);
+                }
                 _ => {}
             }
         } else {
@@ -644,32 +630,30 @@ fn parse_counters(data: &[u8]) -> Option<ConntrackCounters> {
     while input.len() >= 4 {
         if let Some((attr_type, attr_data)) = parse_nla(&mut input) {
             match attr_type {
-                CTA_COUNTERS_PACKETS
-                    if attr_data.len() >= 8 => {
-                        counters.packets = u64::from_be_bytes([
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                            attr_data[4],
-                            attr_data[5],
-                            attr_data[6],
-                            attr_data[7],
-                        ]);
-                    }
-                CTA_COUNTERS_BYTES
-                    if attr_data.len() >= 8 => {
-                        counters.bytes = u64::from_be_bytes([
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                            attr_data[4],
-                            attr_data[5],
-                            attr_data[6],
-                            attr_data[7],
-                        ]);
-                    }
+                CTA_COUNTERS_PACKETS if attr_data.len() >= 8 => {
+                    counters.packets = u64::from_be_bytes([
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                        attr_data[4],
+                        attr_data[5],
+                        attr_data[6],
+                        attr_data[7],
+                    ]);
+                }
+                CTA_COUNTERS_BYTES if attr_data.len() >= 8 => {
+                    counters.bytes = u64::from_be_bytes([
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                        attr_data[4],
+                        attr_data[5],
+                        attr_data[6],
+                        attr_data[7],
+                    ]);
+                }
                 _ => {}
             }
         } else {

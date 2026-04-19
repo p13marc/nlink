@@ -529,36 +529,32 @@ impl TcMessage {
             let payload = &options[pos + 4..pos + len];
 
             match attr_type {
-                bpf::TCA_BPF_ID
-                    if payload.len() >= 4 => {
-                        info.id = Some(u32::from_ne_bytes([
-                            payload[0], payload[1], payload[2], payload[3],
-                        ]));
-                    }
+                bpf::TCA_BPF_ID if payload.len() >= 4 => {
+                    info.id = Some(u32::from_ne_bytes([
+                        payload[0], payload[1], payload[2], payload[3],
+                    ]));
+                }
                 bpf::TCA_BPF_NAME => {
                     let name = std::str::from_utf8(payload)
                         .ok()
                         .map(|s| s.trim_end_matches('\0').to_string());
                     info.name = name;
                 }
-                bpf::TCA_BPF_TAG
-                    if payload.len() >= 8 => {
-                        let mut tag = [0u8; 8];
-                        tag.copy_from_slice(&payload[..8]);
-                        info.tag = Some(tag);
-                    }
-                bpf::TCA_BPF_FLAGS
-                    if payload.len() >= 4 => {
-                        let flags =
-                            u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                        info.direct_action = (flags & bpf::TCA_BPF_FLAG_ACT_DIRECT) != 0;
-                    }
-                bpf::TCA_BPF_CLASSID
-                    if payload.len() >= 4 => {
-                        info.classid = Some(u32::from_ne_bytes([
-                            payload[0], payload[1], payload[2], payload[3],
-                        ]));
-                    }
+                bpf::TCA_BPF_TAG if payload.len() >= 8 => {
+                    let mut tag = [0u8; 8];
+                    tag.copy_from_slice(&payload[..8]);
+                    info.tag = Some(tag);
+                }
+                bpf::TCA_BPF_FLAGS if payload.len() >= 4 => {
+                    let flags =
+                        u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    info.direct_action = (flags & bpf::TCA_BPF_FLAG_ACT_DIRECT) != 0;
+                }
+                bpf::TCA_BPF_CLASSID if payload.len() >= 4 => {
+                    info.classid = Some(u32::from_ne_bytes([
+                        payload[0], payload[1], payload[2], payload[3],
+                    ]));
+                }
                 _ => {}
             }
 
@@ -653,24 +649,19 @@ impl FromNetlink for TcMessage {
                 attr_ids::TCA_XSTATS => {
                     msg.xstats = Some(attr_data.to_vec());
                 }
-                attr_ids::TCA_CHAIN
-                    if attr_data.len() >= 4 => {
-                        msg.chain = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::TCA_HW_OFFLOAD
-                    if !attr_data.is_empty() => {
-                        msg.hw_offload = Some(attr_data[0]);
-                    }
-                attr_ids::TCA_INGRESS_BLOCK
-                    if attr_data.len() >= 4 => {
-                        msg.ingress_block =
-                            Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::TCA_EGRESS_BLOCK
-                    if attr_data.len() >= 4 => {
-                        msg.egress_block =
-                            Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
+                attr_ids::TCA_CHAIN if attr_data.len() >= 4 => {
+                    msg.chain = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::TCA_HW_OFFLOAD if !attr_data.is_empty() => {
+                    msg.hw_offload = Some(attr_data[0]);
+                }
+                attr_ids::TCA_INGRESS_BLOCK if attr_data.len() >= 4 => {
+                    msg.ingress_block =
+                        Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::TCA_EGRESS_BLOCK if attr_data.len() >= 4 => {
+                    msg.egress_block = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
                 attr_ids::TCA_STATS2 => {
                     parse_stats2(&mut msg, attr_data);
                 }

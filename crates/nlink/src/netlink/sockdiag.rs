@@ -452,18 +452,17 @@ impl Connection<SockDiag> {
 
                 match nlmsg_type {
                     NLMSG_DONE => return Ok(sockets),
-                    NLMSG_ERROR
-                        if nlmsg_len >= 20 => {
-                            let errno = i32::from_ne_bytes([
-                                data[offset + 16],
-                                data[offset + 17],
-                                data[offset + 18],
-                                data[offset + 19],
-                            ]);
-                            if errno != 0 {
-                                return Err(super::error::Error::from_errno(-errno));
-                            }
+                    NLMSG_ERROR if nlmsg_len >= 20 => {
+                        let errno = i32::from_ne_bytes([
+                            data[offset + 16],
+                            data[offset + 17],
+                            data[offset + 18],
+                            data[offset + 19],
+                        ]);
+                        if errno != 0 {
+                            return Err(super::error::Error::from_errno(-errno));
                         }
+                    }
                     SOCK_DIAG_BY_FAMILY | TCPDIAG_GETSOCK => {
                         if let Some(sock) =
                             parse_inet_msg(&data[offset..offset + nlmsg_len], filter.protocol)
@@ -538,18 +537,17 @@ impl Connection<SockDiag> {
 
                 match nlmsg_type {
                     NLMSG_DONE => return Ok(sockets),
-                    NLMSG_ERROR
-                        if nlmsg_len >= 20 => {
-                            let errno = i32::from_ne_bytes([
-                                data[offset + 16],
-                                data[offset + 17],
-                                data[offset + 18],
-                                data[offset + 19],
-                            ]);
-                            if errno != 0 {
-                                return Err(super::error::Error::from_errno(-errno));
-                            }
+                    NLMSG_ERROR if nlmsg_len >= 20 => {
+                        let errno = i32::from_ne_bytes([
+                            data[offset + 16],
+                            data[offset + 17],
+                            data[offset + 18],
+                            data[offset + 19],
+                        ]);
+                        if errno != 0 {
+                            return Err(super::error::Error::from_errno(-errno));
                         }
+                    }
                     SOCK_DIAG_BY_FAMILY => {
                         if let Some(sock) = parse_unix_msg(&data[offset..offset + nlmsg_len]) {
                             sockets.push(sock);
@@ -631,18 +629,17 @@ impl Connection<SockDiag> {
 
                 match nlmsg_type {
                     NLMSG_DONE => return Ok(sockets),
-                    NLMSG_ERROR
-                        if nlmsg_len >= 20 => {
-                            let errno = i32::from_ne_bytes([
-                                data[offset + 16],
-                                data[offset + 17],
-                                data[offset + 18],
-                                data[offset + 19],
-                            ]);
-                            if errno != 0 {
-                                return Err(super::error::Error::from_errno(-errno));
-                            }
+                    NLMSG_ERROR if nlmsg_len >= 20 => {
+                        let errno = i32::from_ne_bytes([
+                            data[offset + 16],
+                            data[offset + 17],
+                            data[offset + 18],
+                            data[offset + 19],
+                        ]);
+                        if errno != 0 {
+                            return Err(super::error::Error::from_errno(-errno));
                         }
+                    }
                     SOCK_DIAG_BY_FAMILY => {
                         if let Some(sock) =
                             parse_netlink_msg(&data[offset..offset + nlmsg_len], filter)
@@ -781,36 +778,35 @@ fn parse_inet_msg(data: &[u8], protocol: InetProtocol) -> Option<InetSocket> {
         let attr_data = &data[attr_offset + 4..attr_offset + attr_len];
 
         match attr_type {
-            INET_DIAG_MEMINFO
-                if attr_data.len() >= 16 => {
-                    sock.mem_info = Some(MemInfo {
-                        rmem_alloc: u32::from_ne_bytes([
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                        ]),
-                        wmem_alloc: u32::from_ne_bytes([
-                            attr_data[4],
-                            attr_data[5],
-                            attr_data[6],
-                            attr_data[7],
-                        ]),
-                        fwd_alloc: u32::from_ne_bytes([
-                            attr_data[8],
-                            attr_data[9],
-                            attr_data[10],
-                            attr_data[11],
-                        ]),
-                        wmem_queued: u32::from_ne_bytes([
-                            attr_data[12],
-                            attr_data[13],
-                            attr_data[14],
-                            attr_data[15],
-                        ]),
-                        ..Default::default()
-                    });
-                }
+            INET_DIAG_MEMINFO if attr_data.len() >= 16 => {
+                sock.mem_info = Some(MemInfo {
+                    rmem_alloc: u32::from_ne_bytes([
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                    ]),
+                    wmem_alloc: u32::from_ne_bytes([
+                        attr_data[4],
+                        attr_data[5],
+                        attr_data[6],
+                        attr_data[7],
+                    ]),
+                    fwd_alloc: u32::from_ne_bytes([
+                        attr_data[8],
+                        attr_data[9],
+                        attr_data[10],
+                        attr_data[11],
+                    ]),
+                    wmem_queued: u32::from_ne_bytes([
+                        attr_data[12],
+                        attr_data[13],
+                        attr_data[14],
+                        attr_data[15],
+                    ]),
+                    ..Default::default()
+                });
+            }
             INET_DIAG_INFO => {
                 sock.tcp_info = Some(parse_tcp_info(attr_data));
             }
@@ -819,103 +815,96 @@ fn parse_inet_msg(data: &[u8], protocol: InetProtocol) -> Option<InetSocket> {
                     sock.congestion = Some(s.trim_end_matches('\0').to_string());
                 }
             }
-            INET_DIAG_TOS
-                if !attr_data.is_empty() => {
-                    sock.tos = Some(attr_data[0]);
-                }
-            INET_DIAG_TCLASS
-                if !attr_data.is_empty() => {
-                    sock.tclass = Some(attr_data[0]);
-                }
-            INET_DIAG_SKMEMINFO
-                if attr_data.len() >= 36 => {
-                    sock.mem_info = Some(MemInfo {
-                        rmem_alloc: u32::from_ne_bytes([
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                        ]),
-                        rcvbuf: u32::from_ne_bytes([
-                            attr_data[4],
-                            attr_data[5],
-                            attr_data[6],
-                            attr_data[7],
-                        ]),
-                        wmem_alloc: u32::from_ne_bytes([
-                            attr_data[8],
-                            attr_data[9],
-                            attr_data[10],
-                            attr_data[11],
-                        ]),
-                        sndbuf: u32::from_ne_bytes([
-                            attr_data[12],
-                            attr_data[13],
-                            attr_data[14],
-                            attr_data[15],
-                        ]),
-                        fwd_alloc: u32::from_ne_bytes([
-                            attr_data[16],
-                            attr_data[17],
-                            attr_data[18],
-                            attr_data[19],
-                        ]),
-                        wmem_queued: u32::from_ne_bytes([
-                            attr_data[20],
-                            attr_data[21],
-                            attr_data[22],
-                            attr_data[23],
-                        ]),
-                        optmem: u32::from_ne_bytes([
-                            attr_data[24],
-                            attr_data[25],
-                            attr_data[26],
-                            attr_data[27],
-                        ]),
-                        backlog: u32::from_ne_bytes([
-                            attr_data[28],
-                            attr_data[29],
-                            attr_data[30],
-                            attr_data[31],
-                        ]),
-                        drops: u32::from_ne_bytes([
-                            attr_data[32],
-                            attr_data[33],
-                            attr_data[34],
-                            attr_data[35],
-                        ]),
-                    });
-                }
-            INET_DIAG_SHUTDOWN
-                if !attr_data.is_empty() => {
-                    sock.shutdown = Some(attr_data[0]);
-                }
-            INET_DIAG_MARK
-                if attr_data.len() >= 4 => {
-                    sock.mark = Some(u32::from_ne_bytes([
+            INET_DIAG_TOS if !attr_data.is_empty() => {
+                sock.tos = Some(attr_data[0]);
+            }
+            INET_DIAG_TCLASS if !attr_data.is_empty() => {
+                sock.tclass = Some(attr_data[0]);
+            }
+            INET_DIAG_SKMEMINFO if attr_data.len() >= 36 => {
+                sock.mem_info = Some(MemInfo {
+                    rmem_alloc: u32::from_ne_bytes([
                         attr_data[0],
                         attr_data[1],
                         attr_data[2],
                         attr_data[3],
-                    ]));
-                }
-            INET_DIAG_CGROUP_ID
-                if attr_data.len() >= 8 => {
-                    sock.cgroup_id = Some(u64::from_ne_bytes([
-                        attr_data[0],
-                        attr_data[1],
-                        attr_data[2],
-                        attr_data[3],
+                    ]),
+                    rcvbuf: u32::from_ne_bytes([
                         attr_data[4],
                         attr_data[5],
                         attr_data[6],
                         attr_data[7],
-                    ]));
-                }
-            INET_DIAG_SKV6ONLY
-                if !attr_data.is_empty() => {
-                    sock.v6only = Some(attr_data[0] != 0);
-                }
+                    ]),
+                    wmem_alloc: u32::from_ne_bytes([
+                        attr_data[8],
+                        attr_data[9],
+                        attr_data[10],
+                        attr_data[11],
+                    ]),
+                    sndbuf: u32::from_ne_bytes([
+                        attr_data[12],
+                        attr_data[13],
+                        attr_data[14],
+                        attr_data[15],
+                    ]),
+                    fwd_alloc: u32::from_ne_bytes([
+                        attr_data[16],
+                        attr_data[17],
+                        attr_data[18],
+                        attr_data[19],
+                    ]),
+                    wmem_queued: u32::from_ne_bytes([
+                        attr_data[20],
+                        attr_data[21],
+                        attr_data[22],
+                        attr_data[23],
+                    ]),
+                    optmem: u32::from_ne_bytes([
+                        attr_data[24],
+                        attr_data[25],
+                        attr_data[26],
+                        attr_data[27],
+                    ]),
+                    backlog: u32::from_ne_bytes([
+                        attr_data[28],
+                        attr_data[29],
+                        attr_data[30],
+                        attr_data[31],
+                    ]),
+                    drops: u32::from_ne_bytes([
+                        attr_data[32],
+                        attr_data[33],
+                        attr_data[34],
+                        attr_data[35],
+                    ]),
+                });
+            }
+            INET_DIAG_SHUTDOWN if !attr_data.is_empty() => {
+                sock.shutdown = Some(attr_data[0]);
+            }
+            INET_DIAG_MARK if attr_data.len() >= 4 => {
+                sock.mark = Some(u32::from_ne_bytes([
+                    attr_data[0],
+                    attr_data[1],
+                    attr_data[2],
+                    attr_data[3],
+                ]));
+            }
+            INET_DIAG_CGROUP_ID if attr_data.len() >= 8 => {
+                sock.cgroup_id = Some(u64::from_ne_bytes([
+                    attr_data[0],
+                    attr_data[1],
+                    attr_data[2],
+                    attr_data[3],
+                    attr_data[4],
+                    attr_data[5],
+                    attr_data[6],
+                    attr_data[7],
+                ]));
+            }
+            INET_DIAG_SKV6ONLY if !attr_data.is_empty() => {
+                sock.v6only = Some(attr_data[0] != 0);
+            }
             _ => {}
         }
 
@@ -1070,41 +1059,38 @@ fn parse_unix_msg(data: &[u8]) -> Option<UnixSocket> {
         let attr_data = &data[attr_offset + 4..attr_offset + attr_len];
 
         match attr_type {
-            UNIX_DIAG_NAME
-                if !attr_data.is_empty() => {
-                    if attr_data[0] == 0 {
-                        // Abstract socket
-                        if let Ok(s) = std::str::from_utf8(&attr_data[1..]) {
-                            sock.abstract_name = Some(s.trim_end_matches('\0').to_string());
-                        }
-                    } else if let Ok(s) = std::str::from_utf8(attr_data) {
-                        sock.path = Some(s.trim_end_matches('\0').to_string());
+            UNIX_DIAG_NAME if !attr_data.is_empty() => {
+                if attr_data[0] == 0 {
+                    // Abstract socket
+                    if let Ok(s) = std::str::from_utf8(&attr_data[1..]) {
+                        sock.abstract_name = Some(s.trim_end_matches('\0').to_string());
                     }
+                } else if let Ok(s) = std::str::from_utf8(attr_data) {
+                    sock.path = Some(s.trim_end_matches('\0').to_string());
                 }
-            UNIX_DIAG_VFS
-                if attr_data.len() >= 8 => {
-                    sock.vfs_inode = Some(u32::from_ne_bytes([
-                        attr_data[0],
-                        attr_data[1],
-                        attr_data[2],
-                        attr_data[3],
-                    ]));
-                    sock.vfs_dev = Some(u32::from_ne_bytes([
-                        attr_data[4],
-                        attr_data[5],
-                        attr_data[6],
-                        attr_data[7],
-                    ]));
-                }
-            UNIX_DIAG_PEER
-                if attr_data.len() >= 4 => {
-                    sock.peer_inode = Some(u32::from_ne_bytes([
-                        attr_data[0],
-                        attr_data[1],
-                        attr_data[2],
-                        attr_data[3],
-                    ]));
-                }
+            }
+            UNIX_DIAG_VFS if attr_data.len() >= 8 => {
+                sock.vfs_inode = Some(u32::from_ne_bytes([
+                    attr_data[0],
+                    attr_data[1],
+                    attr_data[2],
+                    attr_data[3],
+                ]));
+                sock.vfs_dev = Some(u32::from_ne_bytes([
+                    attr_data[4],
+                    attr_data[5],
+                    attr_data[6],
+                    attr_data[7],
+                ]));
+            }
+            UNIX_DIAG_PEER if attr_data.len() >= 4 => {
+                sock.peer_inode = Some(u32::from_ne_bytes([
+                    attr_data[0],
+                    attr_data[1],
+                    attr_data[2],
+                    attr_data[3],
+                ]));
+            }
             UNIX_DIAG_ICONS => {
                 let mut icons = Vec::new();
                 let mut i = 0;
@@ -1121,93 +1107,89 @@ fn parse_unix_msg(data: &[u8]) -> Option<UnixSocket> {
                     sock.pending_connections = Some(icons);
                 }
             }
-            UNIX_DIAG_RQLEN
-                if attr_data.len() >= 8 => {
-                    sock.recv_q = Some(u32::from_ne_bytes([
+            UNIX_DIAG_RQLEN if attr_data.len() >= 8 => {
+                sock.recv_q = Some(u32::from_ne_bytes([
+                    attr_data[0],
+                    attr_data[1],
+                    attr_data[2],
+                    attr_data[3],
+                ]));
+                sock.send_q = Some(u32::from_ne_bytes([
+                    attr_data[4],
+                    attr_data[5],
+                    attr_data[6],
+                    attr_data[7],
+                ]));
+            }
+            UNIX_DIAG_MEMINFO if attr_data.len() >= 36 => {
+                sock.mem_info = Some(MemInfo {
+                    rmem_alloc: u32::from_ne_bytes([
                         attr_data[0],
                         attr_data[1],
                         attr_data[2],
                         attr_data[3],
-                    ]));
-                    sock.send_q = Some(u32::from_ne_bytes([
+                    ]),
+                    rcvbuf: u32::from_ne_bytes([
                         attr_data[4],
                         attr_data[5],
                         attr_data[6],
                         attr_data[7],
-                    ]));
-                }
-            UNIX_DIAG_MEMINFO
-                if attr_data.len() >= 36 => {
-                    sock.mem_info = Some(MemInfo {
-                        rmem_alloc: u32::from_ne_bytes([
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                        ]),
-                        rcvbuf: u32::from_ne_bytes([
-                            attr_data[4],
-                            attr_data[5],
-                            attr_data[6],
-                            attr_data[7],
-                        ]),
-                        wmem_alloc: u32::from_ne_bytes([
-                            attr_data[8],
-                            attr_data[9],
-                            attr_data[10],
-                            attr_data[11],
-                        ]),
-                        sndbuf: u32::from_ne_bytes([
-                            attr_data[12],
-                            attr_data[13],
-                            attr_data[14],
-                            attr_data[15],
-                        ]),
-                        fwd_alloc: u32::from_ne_bytes([
-                            attr_data[16],
-                            attr_data[17],
-                            attr_data[18],
-                            attr_data[19],
-                        ]),
-                        wmem_queued: u32::from_ne_bytes([
-                            attr_data[20],
-                            attr_data[21],
-                            attr_data[22],
-                            attr_data[23],
-                        ]),
-                        optmem: u32::from_ne_bytes([
-                            attr_data[24],
-                            attr_data[25],
-                            attr_data[26],
-                            attr_data[27],
-                        ]),
-                        backlog: u32::from_ne_bytes([
-                            attr_data[28],
-                            attr_data[29],
-                            attr_data[30],
-                            attr_data[31],
-                        ]),
-                        drops: u32::from_ne_bytes([
-                            attr_data[32],
-                            attr_data[33],
-                            attr_data[34],
-                            attr_data[35],
-                        ]),
-                    });
-                }
-            UNIX_DIAG_SHUTDOWN
-                if !attr_data.is_empty() => {
-                    sock.shutdown = Some(attr_data[0]);
-                }
-            UNIX_DIAG_UID
-                if attr_data.len() >= 4 => {
-                    sock.uid = Some(u32::from_ne_bytes([
-                        attr_data[0],
-                        attr_data[1],
-                        attr_data[2],
-                        attr_data[3],
-                    ]));
-                }
+                    ]),
+                    wmem_alloc: u32::from_ne_bytes([
+                        attr_data[8],
+                        attr_data[9],
+                        attr_data[10],
+                        attr_data[11],
+                    ]),
+                    sndbuf: u32::from_ne_bytes([
+                        attr_data[12],
+                        attr_data[13],
+                        attr_data[14],
+                        attr_data[15],
+                    ]),
+                    fwd_alloc: u32::from_ne_bytes([
+                        attr_data[16],
+                        attr_data[17],
+                        attr_data[18],
+                        attr_data[19],
+                    ]),
+                    wmem_queued: u32::from_ne_bytes([
+                        attr_data[20],
+                        attr_data[21],
+                        attr_data[22],
+                        attr_data[23],
+                    ]),
+                    optmem: u32::from_ne_bytes([
+                        attr_data[24],
+                        attr_data[25],
+                        attr_data[26],
+                        attr_data[27],
+                    ]),
+                    backlog: u32::from_ne_bytes([
+                        attr_data[28],
+                        attr_data[29],
+                        attr_data[30],
+                        attr_data[31],
+                    ]),
+                    drops: u32::from_ne_bytes([
+                        attr_data[32],
+                        attr_data[33],
+                        attr_data[34],
+                        attr_data[35],
+                    ]),
+                });
+            }
+            UNIX_DIAG_SHUTDOWN if !attr_data.is_empty() => {
+                sock.shutdown = Some(attr_data[0]);
+            }
+            UNIX_DIAG_UID if attr_data.len() >= 4 => {
+                sock.uid = Some(u32::from_ne_bytes([
+                    attr_data[0],
+                    attr_data[1],
+                    attr_data[2],
+                    attr_data[3],
+                ]));
+            }
             _ => {}
         }
 

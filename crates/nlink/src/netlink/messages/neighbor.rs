@@ -251,40 +251,32 @@ impl FromNetlink for NeighborMessage {
                 attr_ids::NDA_LLADDR => {
                     msg.lladdr = Some(attr_data.to_vec());
                 }
-                attr_ids::NDA_PROBES
-                    if attr_data.len() >= 4 => {
-                        msg.probes = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::NDA_VLAN
-                    if attr_data.len() >= 2 => {
-                        msg.vlan = Some(u16::from_ne_bytes(attr_data[..2].try_into().unwrap()));
-                    }
-                attr_ids::NDA_PORT
-                    if attr_data.len() >= 2 => {
-                        msg.port = Some(u16::from_be_bytes(attr_data[..2].try_into().unwrap()));
-                    }
-                attr_ids::NDA_VNI
-                    if attr_data.len() >= 4 => {
-                        msg.vni = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::NDA_IFINDEX
-                    if attr_data.len() >= 4 => {
-                        msg.ifindex_attr =
-                            Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::NDA_MASTER
-                    if attr_data.len() >= 4 => {
-                        msg.master = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::NDA_CACHEINFO
-                    if attr_data.len() >= 16 => {
-                        msg.cache_info = Some(NeighborCacheInfo {
-                            confirmed: u32::from_ne_bytes(attr_data[0..4].try_into().unwrap()),
-                            used: u32::from_ne_bytes(attr_data[4..8].try_into().unwrap()),
-                            updated: u32::from_ne_bytes(attr_data[8..12].try_into().unwrap()),
-                            refcnt: u32::from_ne_bytes(attr_data[12..16].try_into().unwrap()),
-                        });
-                    }
+                attr_ids::NDA_PROBES if attr_data.len() >= 4 => {
+                    msg.probes = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::NDA_VLAN if attr_data.len() >= 2 => {
+                    msg.vlan = Some(u16::from_ne_bytes(attr_data[..2].try_into().unwrap()));
+                }
+                attr_ids::NDA_PORT if attr_data.len() >= 2 => {
+                    msg.port = Some(u16::from_be_bytes(attr_data[..2].try_into().unwrap()));
+                }
+                attr_ids::NDA_VNI if attr_data.len() >= 4 => {
+                    msg.vni = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::NDA_IFINDEX if attr_data.len() >= 4 => {
+                    msg.ifindex_attr = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::NDA_MASTER if attr_data.len() >= 4 => {
+                    msg.master = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::NDA_CACHEINFO if attr_data.len() >= 16 => {
+                    msg.cache_info = Some(NeighborCacheInfo {
+                        confirmed: u32::from_ne_bytes(attr_data[0..4].try_into().unwrap()),
+                        used: u32::from_ne_bytes(attr_data[4..8].try_into().unwrap()),
+                        updated: u32::from_ne_bytes(attr_data[8..12].try_into().unwrap()),
+                        refcnt: u32::from_ne_bytes(attr_data[12..16].try_into().unwrap()),
+                    });
+                }
                 _ => {} // Ignore unknown attributes
             }
         }

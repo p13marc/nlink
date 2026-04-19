@@ -376,12 +376,11 @@ impl Connection<Wireguard> {
                 t if t == WgDeviceAttr::Ifname as u16 => {
                     device.ifname = Some(get::string(payload)?.to_string());
                 }
-                t if t == WgDeviceAttr::PublicKey as u16
-                    && payload.len() >= WG_KEY_LEN => {
-                        let mut key = [0u8; WG_KEY_LEN];
-                        key.copy_from_slice(&payload[..WG_KEY_LEN]);
-                        device.public_key = Some(key);
-                    }
+                t if t == WgDeviceAttr::PublicKey as u16 && payload.len() >= WG_KEY_LEN => {
+                    let mut key = [0u8; WG_KEY_LEN];
+                    key.copy_from_slice(&payload[..WG_KEY_LEN]);
+                    device.public_key = Some(key);
+                }
                 t if t == WgDeviceAttr::ListenPort as u16 => {
                     device.listen_port = Some(get::u16_ne(payload)?);
                 }
@@ -412,19 +411,17 @@ impl Connection<Wireguard> {
 
         for (attr_type, payload) in AttrIter::new(data) {
             match attr_type {
-                t if t == WgPeerAttr::PublicKey as u16
-                    && payload.len() >= WG_KEY_LEN => {
-                        peer.public_key.copy_from_slice(&payload[..WG_KEY_LEN]);
+                t if t == WgPeerAttr::PublicKey as u16 && payload.len() >= WG_KEY_LEN => {
+                    peer.public_key.copy_from_slice(&payload[..WG_KEY_LEN]);
+                }
+                t if t == WgPeerAttr::PresharedKey as u16 && payload.len() >= WG_KEY_LEN => {
+                    let mut key = [0u8; WG_KEY_LEN];
+                    key.copy_from_slice(&payload[..WG_KEY_LEN]);
+                    // Only set if not all zeros (kernel returns zeros if not set)
+                    if key.iter().any(|&b| b != 0) {
+                        peer.preshared_key = Some(key);
                     }
-                t if t == WgPeerAttr::PresharedKey as u16
-                    && payload.len() >= WG_KEY_LEN => {
-                        let mut key = [0u8; WG_KEY_LEN];
-                        key.copy_from_slice(&payload[..WG_KEY_LEN]);
-                        // Only set if not all zeros (kernel returns zeros if not set)
-                        if key.iter().any(|&b| b != 0) {
-                            peer.preshared_key = Some(key);
-                        }
-                    }
+                }
                 t if t == WgPeerAttr::Endpoint as u16 => {
                     peer.endpoint = parse_sockaddr(payload);
                 }

@@ -84,10 +84,10 @@ pub mod events;
 pub mod fdb;
 pub mod fib_lookup;
 pub mod filter;
-pub mod impair;
 #[cfg(test)]
 mod fixtures;
 pub mod genl;
+pub mod impair;
 mod interface_ref;
 pub mod link;
 pub mod message;

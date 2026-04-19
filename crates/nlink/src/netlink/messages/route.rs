@@ -337,40 +337,34 @@ impl FromNetlink for RouteMessage {
                         msg.source = Some(addr);
                     }
                 }
-                attr_ids::RTA_IIF
-                    if attr_data.len() >= 4 => {
-                        msg.iif = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::RTA_OIF
-                    if attr_data.len() >= 4 => {
-                        msg.oif = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
+                attr_ids::RTA_IIF if attr_data.len() >= 4 => {
+                    msg.iif = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::RTA_OIF if attr_data.len() >= 4 => {
+                    msg.oif = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
                 attr_ids::RTA_GATEWAY => {
                     if let Ok(addr) = parse_ip_addr(attr_data, header.rtm_family) {
                         msg.gateway = Some(addr);
                     }
                 }
-                attr_ids::RTA_PRIORITY
-                    if attr_data.len() >= 4 => {
-                        msg.priority = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
+                attr_ids::RTA_PRIORITY if attr_data.len() >= 4 => {
+                    msg.priority = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
                 attr_ids::RTA_PREFSRC => {
                     if let Ok(addr) = parse_ip_addr(attr_data, header.rtm_family) {
                         msg.prefsrc = Some(addr);
                     }
                 }
-                attr_ids::RTA_TABLE
-                    if attr_data.len() >= 4 => {
-                        msg.table = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::RTA_PREF
-                    if !attr_data.is_empty() => {
-                        msg.pref = Some(attr_data[0]);
-                    }
-                attr_ids::RTA_EXPIRES
-                    if attr_data.len() >= 4 => {
-                        msg.expires = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
+                attr_ids::RTA_TABLE if attr_data.len() >= 4 => {
+                    msg.table = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::RTA_PREF if !attr_data.is_empty() => {
+                    msg.pref = Some(attr_data[0]);
+                }
+                attr_ids::RTA_EXPIRES if attr_data.len() >= 4 => {
+                    msg.expires = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
                 _ => {} // Ignore unknown attributes
             }
         }

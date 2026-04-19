@@ -984,18 +984,21 @@ fn parse_af_spec_tunnels(data: &[u8], ifindex: u32, entries: &mut Vec<BridgeVlan
             for (tunnel_attr, tunnel_payload) in AttrIter::new(payload) {
                 match tunnel_attr {
                     t if t == bridge_vlan_tunnel::IFLA_BRIDGE_VLAN_TUNNEL_ID
-                        && tunnel_payload.len() >= 4 => {
-                            tunnel_id =
-                                Some(u32::from_ne_bytes(tunnel_payload[..4].try_into().unwrap()));
-                        }
+                        && tunnel_payload.len() >= 4 =>
+                    {
+                        tunnel_id =
+                            Some(u32::from_ne_bytes(tunnel_payload[..4].try_into().unwrap()));
+                    }
                     t if t == bridge_vlan_tunnel::IFLA_BRIDGE_VLAN_TUNNEL_VID
-                        && tunnel_payload.len() >= 2 => {
-                            vid = Some(u16::from_ne_bytes(tunnel_payload[..2].try_into().unwrap()));
-                        }
+                        && tunnel_payload.len() >= 2 =>
+                    {
+                        vid = Some(u16::from_ne_bytes(tunnel_payload[..2].try_into().unwrap()));
+                    }
                     t if t == bridge_vlan_tunnel::IFLA_BRIDGE_VLAN_TUNNEL_FLAGS
-                        && tunnel_payload.len() >= 2 => {
-                            flags = u16::from_ne_bytes(tunnel_payload[..2].try_into().unwrap());
-                        }
+                        && tunnel_payload.len() >= 2 =>
+                    {
+                        flags = u16::from_ne_bytes(tunnel_payload[..2].try_into().unwrap());
+                    }
                     _ => {}
                 }
             }

@@ -190,10 +190,9 @@ impl FromNetlink for RuleMessage {
             let attr_type_masked = attr_type & 0x7fff;
 
             match attr_type_masked {
-                attr_ids::FRA_PRIORITY
-                    if attr_data.len() >= 4 => {
-                        msg.priority = u32::from_ne_bytes(attr_data[..4].try_into().unwrap());
-                    }
+                attr_ids::FRA_PRIORITY if attr_data.len() >= 4 => {
+                    msg.priority = u32::from_ne_bytes(attr_data[..4].try_into().unwrap());
+                }
                 attr_ids::FRA_SRC => {
                     if let Ok(addr) = parse_ip_addr(attr_data, msg.header.family) {
                         msg.source = Some(addr);
@@ -210,57 +209,46 @@ impl FromNetlink for RuleMessage {
                 attr_ids::FRA_OIFNAME => {
                     msg.oifname = parse_string(attr_data);
                 }
-                attr_ids::FRA_FWMARK
-                    if attr_data.len() >= 4 => {
-                        msg.fwmark = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::FRA_FWMASK
-                    if attr_data.len() >= 4 => {
-                        msg.fwmask = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::FRA_TABLE
-                    if attr_data.len() >= 4 => {
-                        msg.table = u32::from_ne_bytes(attr_data[..4].try_into().unwrap());
-                    }
-                attr_ids::FRA_GOTO
-                    if attr_data.len() >= 4 => {
-                        msg.goto = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::FRA_FLOW
-                    if attr_data.len() >= 4 => {
-                        msg.flow = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::FRA_TUN_ID
-                    if attr_data.len() >= 8 => {
-                        msg.tun_id = Some(u64::from_be_bytes(attr_data[..8].try_into().unwrap()));
-                    }
-                attr_ids::FRA_SUPPRESS_IFGROUP
-                    if attr_data.len() >= 4 => {
-                        msg.suppress_ifgroup =
-                            Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::FRA_SUPPRESS_PREFIXLEN
-                    if attr_data.len() >= 4 => {
-                        msg.suppress_prefixlen =
-                            Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
-                    }
-                attr_ids::FRA_L3MDEV
-                    if !attr_data.is_empty() => {
-                        msg.l3mdev = Some(attr_data[0]);
-                    }
+                attr_ids::FRA_FWMARK if attr_data.len() >= 4 => {
+                    msg.fwmark = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::FRA_FWMASK if attr_data.len() >= 4 => {
+                    msg.fwmask = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::FRA_TABLE if attr_data.len() >= 4 => {
+                    msg.table = u32::from_ne_bytes(attr_data[..4].try_into().unwrap());
+                }
+                attr_ids::FRA_GOTO if attr_data.len() >= 4 => {
+                    msg.goto = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::FRA_FLOW if attr_data.len() >= 4 => {
+                    msg.flow = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::FRA_TUN_ID if attr_data.len() >= 8 => {
+                    msg.tun_id = Some(u64::from_be_bytes(attr_data[..8].try_into().unwrap()));
+                }
+                attr_ids::FRA_SUPPRESS_IFGROUP if attr_data.len() >= 4 => {
+                    msg.suppress_ifgroup =
+                        Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::FRA_SUPPRESS_PREFIXLEN if attr_data.len() >= 4 => {
+                    msg.suppress_prefixlen =
+                        Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::FRA_L3MDEV if !attr_data.is_empty() => {
+                    msg.l3mdev = Some(attr_data[0]);
+                }
                 attr_ids::FRA_UID_RANGE => {
                     if let Some(range) = FibRuleUidRange::from_bytes(attr_data) {
                         msg.uid_range = Some(*range);
                     }
                 }
-                attr_ids::FRA_PROTOCOL
-                    if !attr_data.is_empty() => {
-                        msg.protocol = Some(attr_data[0]);
-                    }
-                attr_ids::FRA_IP_PROTO
-                    if !attr_data.is_empty() => {
-                        msg.ip_proto = Some(attr_data[0]);
-                    }
+                attr_ids::FRA_PROTOCOL if !attr_data.is_empty() => {
+                    msg.protocol = Some(attr_data[0]);
+                }
+                attr_ids::FRA_IP_PROTO if !attr_data.is_empty() => {
+                    msg.ip_proto = Some(attr_data[0]);
+                }
                 attr_ids::FRA_SPORT_RANGE => {
                     if let Some(range) = FibRulePortRange::from_bytes(attr_data) {
                         msg.sport_range = Some(*range);

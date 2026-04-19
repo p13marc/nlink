@@ -50,10 +50,9 @@ impl EthtoolBitset {
                 t if t == EthtoolBitsetAttr::Nomask as u16 => {
                     is_nomask = true;
                 }
-                t if t == EthtoolBitsetAttr::Size as u16
-                    && payload.len() >= 4 => {
-                        bitset.size = u32::from_ne_bytes(payload[..4].try_into().unwrap());
-                    }
+                t if t == EthtoolBitsetAttr::Size as u16 && payload.len() >= 4 => {
+                    bitset.size = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+                }
                 t if t == EthtoolBitsetAttr::Value as u16 => {
                     compact_value = Some(payload);
                 }
@@ -85,10 +84,9 @@ impl EthtoolBitset {
 
             for (attr_type, payload) in AttrIter::new(bit_data) {
                 match attr_type {
-                    t if t == EthtoolBitsetBitAttr::Index as u16
-                        && payload.len() >= 4 => {
-                            index = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
-                        }
+                    t if t == EthtoolBitsetBitAttr::Index as u16 && payload.len() >= 4 => {
+                        index = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                    }
                     t if t == EthtoolBitsetBitAttr::Name as u16 => {
                         name = Some(
                             std::str::from_utf8(payload)

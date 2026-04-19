@@ -688,60 +688,48 @@ fn parse_port(data: &[u8]) -> Option<DevlinkPort> {
             DEVLINK_ATTR_DEV_NAME => {
                 port.device = attr_str(payload).unwrap_or_default();
             }
-            DEVLINK_ATTR_PORT_INDEX
-                if payload.len() >= 4 => {
-                    port.index = u32::from_ne_bytes(payload[..4].try_into().unwrap());
-                    has_index = true;
-                }
-            DEVLINK_ATTR_PORT_TYPE
-                if payload.len() >= 2 => {
-                    let v = u16::from_ne_bytes(payload[..2].try_into().unwrap());
-                    port.port_type = PortType::try_from(v).unwrap_or(PortType::NotSet);
-                }
-            DEVLINK_ATTR_PORT_NETDEV_IFINDEX
-                if payload.len() >= 4 => {
-                    port.netdev_ifindex =
-                        Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
-                }
+            DEVLINK_ATTR_PORT_INDEX if payload.len() >= 4 => {
+                port.index = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+                has_index = true;
+            }
+            DEVLINK_ATTR_PORT_TYPE if payload.len() >= 2 => {
+                let v = u16::from_ne_bytes(payload[..2].try_into().unwrap());
+                port.port_type = PortType::try_from(v).unwrap_or(PortType::NotSet);
+            }
+            DEVLINK_ATTR_PORT_NETDEV_IFINDEX if payload.len() >= 4 => {
+                port.netdev_ifindex = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
             DEVLINK_ATTR_PORT_NETDEV_NAME => {
                 port.netdev_name = attr_str(payload);
             }
             DEVLINK_ATTR_PORT_IBDEV_NAME => {
                 port.ibdev_name = attr_str(payload);
             }
-            DEVLINK_ATTR_PORT_FLAVOUR
-                if payload.len() >= 2 => {
-                    let v = u16::from_ne_bytes(payload[..2].try_into().unwrap());
-                    port.flavour = PortFlavour::try_from(v).ok();
-                }
-            DEVLINK_ATTR_PORT_NUMBER
-                if payload.len() >= 4 => {
-                    port.number = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
-                }
-            DEVLINK_ATTR_PORT_SPLIT_SUBPORT_NUMBER
-                if payload.len() >= 4 => {
-                    port.split_subport = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
-                }
-            DEVLINK_ATTR_PORT_SPLIT_GROUP
-                if payload.len() >= 4 => {
-                    port.split_group = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
-                }
-            DEVLINK_ATTR_PORT_PCI_PF_NUMBER
-                if payload.len() >= 2 => {
-                    port.pci_pf = Some(u16::from_ne_bytes(payload[..2].try_into().unwrap()));
-                }
-            DEVLINK_ATTR_PORT_PCI_VF_NUMBER
-                if payload.len() >= 2 => {
-                    port.pci_vf = Some(u16::from_ne_bytes(payload[..2].try_into().unwrap()));
-                }
-            DEVLINK_ATTR_PORT_PCI_SF_NUMBER
-                if payload.len() >= 4 => {
-                    port.pci_sf = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
-                }
-            DEVLINK_ATTR_PORT_CONTROLLER_NUMBER
-                if payload.len() >= 4 => {
-                    port.controller = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
-                }
+            DEVLINK_ATTR_PORT_FLAVOUR if payload.len() >= 2 => {
+                let v = u16::from_ne_bytes(payload[..2].try_into().unwrap());
+                port.flavour = PortFlavour::try_from(v).ok();
+            }
+            DEVLINK_ATTR_PORT_NUMBER if payload.len() >= 4 => {
+                port.number = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            DEVLINK_ATTR_PORT_SPLIT_SUBPORT_NUMBER if payload.len() >= 4 => {
+                port.split_subport = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            DEVLINK_ATTR_PORT_SPLIT_GROUP if payload.len() >= 4 => {
+                port.split_group = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            DEVLINK_ATTR_PORT_PCI_PF_NUMBER if payload.len() >= 2 => {
+                port.pci_pf = Some(u16::from_ne_bytes(payload[..2].try_into().unwrap()));
+            }
+            DEVLINK_ATTR_PORT_PCI_VF_NUMBER if payload.len() >= 2 => {
+                port.pci_vf = Some(u16::from_ne_bytes(payload[..2].try_into().unwrap()));
+            }
+            DEVLINK_ATTR_PORT_PCI_SF_NUMBER if payload.len() >= 4 => {
+                port.pci_sf = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            DEVLINK_ATTR_PORT_CONTROLLER_NUMBER if payload.len() >= 4 => {
+                port.controller = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
             _ => {}
         }
     }
@@ -777,37 +765,29 @@ fn parse_health_reporter(bus: &str, device: &str, data: &[u8]) -> Option<HealthR
             DEVLINK_ATTR_HEALTH_REPORTER_NAME => {
                 reporter.name = attr_str(payload).unwrap_or_default();
             }
-            DEVLINK_ATTR_HEALTH_REPORTER_STATE
-                if !payload.is_empty() => {
-                    reporter.state =
-                        HealthState::try_from(payload[0]).unwrap_or(HealthState::Healthy);
-                }
-            DEVLINK_ATTR_HEALTH_REPORTER_ERR_COUNT
-                if payload.len() >= 8 => {
-                    reporter.error_count = u64::from_ne_bytes(payload[..8].try_into().unwrap());
-                }
-            DEVLINK_ATTR_HEALTH_REPORTER_RECOVER_COUNT
-                if payload.len() >= 8 => {
-                    reporter.recover_count = u64::from_ne_bytes(payload[..8].try_into().unwrap());
-                }
-            DEVLINK_ATTR_HEALTH_REPORTER_AUTO_RECOVER
-                if !payload.is_empty() => {
-                    reporter.auto_recover = payload[0] != 0;
-                }
-            DEVLINK_ATTR_HEALTH_REPORTER_AUTO_DUMP
-                if !payload.is_empty() => {
-                    reporter.auto_dump = payload[0] != 0;
-                }
-            DEVLINK_ATTR_HEALTH_REPORTER_GRACEFUL_PERIOD
-                if payload.len() >= 8 => {
-                    reporter.graceful_period_ms =
-                        Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
-                }
-            DEVLINK_ATTR_HEALTH_REPORTER_DUMP_TS
-                if payload.len() >= 8 => {
-                    reporter.dump_ts_jiffies =
-                        Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
-                }
+            DEVLINK_ATTR_HEALTH_REPORTER_STATE if !payload.is_empty() => {
+                reporter.state = HealthState::try_from(payload[0]).unwrap_or(HealthState::Healthy);
+            }
+            DEVLINK_ATTR_HEALTH_REPORTER_ERR_COUNT if payload.len() >= 8 => {
+                reporter.error_count = u64::from_ne_bytes(payload[..8].try_into().unwrap());
+            }
+            DEVLINK_ATTR_HEALTH_REPORTER_RECOVER_COUNT if payload.len() >= 8 => {
+                reporter.recover_count = u64::from_ne_bytes(payload[..8].try_into().unwrap());
+            }
+            DEVLINK_ATTR_HEALTH_REPORTER_AUTO_RECOVER if !payload.is_empty() => {
+                reporter.auto_recover = payload[0] != 0;
+            }
+            DEVLINK_ATTR_HEALTH_REPORTER_AUTO_DUMP if !payload.is_empty() => {
+                reporter.auto_dump = payload[0] != 0;
+            }
+            DEVLINK_ATTR_HEALTH_REPORTER_GRACEFUL_PERIOD if payload.len() >= 8 => {
+                reporter.graceful_period_ms =
+                    Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
+            }
+            DEVLINK_ATTR_HEALTH_REPORTER_DUMP_TS if payload.len() >= 8 => {
+                reporter.dump_ts_jiffies =
+                    Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
+            }
             _ => {}
         }
     }
@@ -847,10 +827,9 @@ fn parse_param(bus: &str, device: &str, data: &[u8]) -> Option<DevlinkParam> {
             DEVLINK_ATTR_PARAM_GENERIC => {
                 param.generic = true; // Flag attribute — presence means true
             }
-            DEVLINK_ATTR_PARAM_TYPE
-                if !payload.is_empty() => {
-                    param_type = Some(payload[0]);
-                }
+            DEVLINK_ATTR_PARAM_TYPE if !payload.is_empty() => {
+                param_type = Some(payload[0]);
+            }
             DEVLINK_ATTR_PARAM_VALUES_LIST => {
                 // Parse nested value entries
                 for (_idx, value_data) in AttrIter::new(payload) {
@@ -876,10 +855,9 @@ fn parse_param_value(data: &[u8], param_type: Option<u8>) -> Option<ParamValue> 
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
-            DEVLINK_ATTR_PARAM_VALUE_CMODE
-                if !payload.is_empty() => {
-                    cmode = ConfigMode::try_from(payload[0]).ok();
-                }
+            DEVLINK_ATTR_PARAM_VALUE_CMODE if !payload.is_empty() => {
+                cmode = ConfigMode::try_from(payload[0]).ok();
+            }
             DEVLINK_ATTR_PARAM_VALUE_DATA => {
                 value_data = Some(payload);
             }

@@ -465,49 +465,37 @@ fn extract_tunnel_info(
     for (attr_type, attr_data) in AttrIter::new(data) {
         if kind == "gre" || kind == "gretap" {
             match attr_type {
-                t if t == gre_attrs::IFLA_GRE_REMOTE
-                    && attr_data.len() >= 4 => {
-                        let bytes: [u8; 4] =
-                            attr_data[..4].try_into().expect("4-byte attribute data");
-                        remote = Some(Ipv4Addr::from(bytes));
-                    }
-                t if t == gre_attrs::IFLA_GRE_LOCAL
-                    && attr_data.len() >= 4 => {
-                        let bytes: [u8; 4] =
-                            attr_data[..4].try_into().expect("4-byte attribute data");
-                        local = Some(Ipv4Addr::from(bytes));
-                    }
-                t if t == gre_attrs::IFLA_GRE_TTL
-                    && !attr_data.is_empty() => {
-                        ttl = Some(attr_data[0]);
-                    }
-                t if t == gre_attrs::IFLA_GRE_IKEY
-                    && attr_data.len() >= 4 => {
-                        let bytes: [u8; 4] =
-                            attr_data[..4].try_into().expect("4-byte attribute data");
-                        key = Some(u32::from_be_bytes(bytes));
-                    }
+                t if t == gre_attrs::IFLA_GRE_REMOTE && attr_data.len() >= 4 => {
+                    let bytes: [u8; 4] = attr_data[..4].try_into().expect("4-byte attribute data");
+                    remote = Some(Ipv4Addr::from(bytes));
+                }
+                t if t == gre_attrs::IFLA_GRE_LOCAL && attr_data.len() >= 4 => {
+                    let bytes: [u8; 4] = attr_data[..4].try_into().expect("4-byte attribute data");
+                    local = Some(Ipv4Addr::from(bytes));
+                }
+                t if t == gre_attrs::IFLA_GRE_TTL && !attr_data.is_empty() => {
+                    ttl = Some(attr_data[0]);
+                }
+                t if t == gre_attrs::IFLA_GRE_IKEY && attr_data.len() >= 4 => {
+                    let bytes: [u8; 4] = attr_data[..4].try_into().expect("4-byte attribute data");
+                    key = Some(u32::from_be_bytes(bytes));
+                }
                 _ => {}
             }
         } else {
             // IPIP/SIT/VTI
             match attr_type {
-                t if t == iptun_attrs::IFLA_IPTUN_REMOTE
-                    && attr_data.len() >= 4 => {
-                        let bytes: [u8; 4] =
-                            attr_data[..4].try_into().expect("4-byte attribute data");
-                        remote = Some(Ipv4Addr::from(bytes));
-                    }
-                t if t == iptun_attrs::IFLA_IPTUN_LOCAL
-                    && attr_data.len() >= 4 => {
-                        let bytes: [u8; 4] =
-                            attr_data[..4].try_into().expect("4-byte attribute data");
-                        local = Some(Ipv4Addr::from(bytes));
-                    }
-                t if t == iptun_attrs::IFLA_IPTUN_TTL
-                    && !attr_data.is_empty() => {
-                        ttl = Some(attr_data[0]);
-                    }
+                t if t == iptun_attrs::IFLA_IPTUN_REMOTE && attr_data.len() >= 4 => {
+                    let bytes: [u8; 4] = attr_data[..4].try_into().expect("4-byte attribute data");
+                    remote = Some(Ipv4Addr::from(bytes));
+                }
+                t if t == iptun_attrs::IFLA_IPTUN_LOCAL && attr_data.len() >= 4 => {
+                    let bytes: [u8; 4] = attr_data[..4].try_into().expect("4-byte attribute data");
+                    local = Some(Ipv4Addr::from(bytes));
+                }
+                t if t == iptun_attrs::IFLA_IPTUN_TTL && !attr_data.is_empty() => {
+                    ttl = Some(attr_data[0]);
+                }
                 _ => {}
             }
         }

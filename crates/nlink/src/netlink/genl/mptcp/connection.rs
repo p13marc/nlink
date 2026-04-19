@@ -654,39 +654,33 @@ fn parse_endpoint_attrs(data: &[u8]) -> Result<MptcpEndpoint> {
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
-            t if t == mptcp_pm_addr_attr::ID
-                && !payload.is_empty() => {
-                    endpoint.id = payload[0];
+            t if t == mptcp_pm_addr_attr::ID && !payload.is_empty() => {
+                endpoint.id = payload[0];
+            }
+            t if t == mptcp_pm_addr_attr::ADDR4 && payload.len() >= 4 => {
+                let octets: [u8; 4] = payload[..4].try_into().unwrap();
+                endpoint.address = IpAddr::V4(octets.into());
+            }
+            t if t == mptcp_pm_addr_attr::ADDR6 && payload.len() >= 16 => {
+                let octets: [u8; 16] = payload[..16].try_into().unwrap();
+                endpoint.address = IpAddr::V6(octets.into());
+            }
+            t if t == mptcp_pm_addr_attr::PORT && payload.len() >= 2 => {
+                let port = u16::from_be_bytes(payload[..2].try_into().unwrap());
+                if port != 0 {
+                    endpoint.port = Some(port);
                 }
-            t if t == mptcp_pm_addr_attr::ADDR4
-                && payload.len() >= 4 => {
-                    let octets: [u8; 4] = payload[..4].try_into().unwrap();
-                    endpoint.address = IpAddr::V4(octets.into());
+            }
+            t if t == mptcp_pm_addr_attr::FLAGS && payload.len() >= 4 => {
+                let flags = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+                endpoint.flags = MptcpFlags::from_raw(flags);
+            }
+            t if t == mptcp_pm_addr_attr::IF_IDX && payload.len() >= 4 => {
+                let ifindex = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+                if ifindex != 0 {
+                    endpoint.ifindex = Some(ifindex);
                 }
-            t if t == mptcp_pm_addr_attr::ADDR6
-                && payload.len() >= 16 => {
-                    let octets: [u8; 16] = payload[..16].try_into().unwrap();
-                    endpoint.address = IpAddr::V6(octets.into());
-                }
-            t if t == mptcp_pm_addr_attr::PORT
-                && payload.len() >= 2 => {
-                    let port = u16::from_be_bytes(payload[..2].try_into().unwrap());
-                    if port != 0 {
-                        endpoint.port = Some(port);
-                    }
-                }
-            t if t == mptcp_pm_addr_attr::FLAGS
-                && payload.len() >= 4 => {
-                    let flags = u32::from_ne_bytes(payload[..4].try_into().unwrap());
-                    endpoint.flags = MptcpFlags::from_raw(flags);
-                }
-            t if t == mptcp_pm_addr_attr::IF_IDX
-                && payload.len() >= 4 => {
-                    let ifindex = u32::from_ne_bytes(payload[..4].try_into().unwrap());
-                    if ifindex != 0 {
-                        endpoint.ifindex = Some(ifindex);
-                    }
-                }
+            }
             _ => {}
         }
     }
@@ -707,18 +701,15 @@ fn parse_limits_response(payload: &[u8]) -> Result<Option<MptcpLimits>> {
 
     for (attr_type, attr_payload) in AttrIter::new(data) {
         match attr_type {
-            t if t == mptcp_pm_attr::SUBFLOWS
-                && attr_payload.len() >= 4 => {
-                    limits.subflows =
-                        Some(u32::from_ne_bytes(attr_payload[..4].try_into().unwrap()));
-                    found = true;
-                }
-            t if t == mptcp_pm_attr::RCV_ADD_ADDRS
-                && attr_payload.len() >= 4 => {
-                    limits.add_addr_accepted =
-                        Some(u32::from_ne_bytes(attr_payload[..4].try_into().unwrap()));
-                    found = true;
-                }
+            t if t == mptcp_pm_attr::SUBFLOWS && attr_payload.len() >= 4 => {
+                limits.subflows = Some(u32::from_ne_bytes(attr_payload[..4].try_into().unwrap()));
+                found = true;
+            }
+            t if t == mptcp_pm_attr::RCV_ADD_ADDRS && attr_payload.len() >= 4 => {
+                limits.add_addr_accepted =
+                    Some(u32::from_ne_bytes(attr_payload[..4].try_into().unwrap()));
+                found = true;
+            }
             _ => {}
         }
     }

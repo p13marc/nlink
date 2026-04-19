@@ -557,18 +557,15 @@ fn parse_table(data: &[u8], family: Family) -> Option<Table> {
             NFTA_TABLE_NAME => {
                 table.name = attr_str(payload)?;
             }
-            NFTA_TABLE_FLAGS
-                if payload.len() >= 4 => {
-                    table.flags = u32::from_be_bytes(payload[..4].try_into().unwrap());
-                }
-            NFTA_TABLE_USE
-                if payload.len() >= 4 => {
-                    table.use_count = u32::from_be_bytes(payload[..4].try_into().unwrap());
-                }
-            NFTA_TABLE_HANDLE
-                if payload.len() >= 8 => {
-                    table.handle = u64::from_be_bytes(payload[..8].try_into().unwrap());
-                }
+            NFTA_TABLE_FLAGS if payload.len() >= 4 => {
+                table.flags = u32::from_be_bytes(payload[..4].try_into().unwrap());
+            }
+            NFTA_TABLE_USE if payload.len() >= 4 => {
+                table.use_count = u32::from_be_bytes(payload[..4].try_into().unwrap());
+            }
+            NFTA_TABLE_HANDLE if payload.len() >= 8 => {
+                table.handle = u64::from_be_bytes(payload[..8].try_into().unwrap());
+            }
             _ => {}
         }
     }
@@ -600,31 +597,27 @@ fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
             NFTA_CHAIN_NAME => {
                 chain.name = attr_str(payload).unwrap_or_default();
             }
-            NFTA_CHAIN_HANDLE
-                if payload.len() >= 8 => {
-                    chain.handle = u64::from_be_bytes(payload[..8].try_into().unwrap());
-                }
+            NFTA_CHAIN_HANDLE if payload.len() >= 8 => {
+                chain.handle = u64::from_be_bytes(payload[..8].try_into().unwrap());
+            }
             NFTA_CHAIN_HOOK => {
                 for (hook_attr, hook_payload) in AttrIter::new(payload) {
                     match hook_attr & 0x7FFF {
-                        NFTA_HOOK_HOOKNUM
-                            if hook_payload.len() >= 4 => {
-                                chain.hook =
-                                    Some(u32::from_be_bytes(hook_payload[..4].try_into().unwrap()));
-                            }
-                        NFTA_HOOK_PRIORITY
-                            if hook_payload.len() >= 4 => {
-                                chain.priority =
-                                    Some(i32::from_be_bytes(hook_payload[..4].try_into().unwrap()));
-                            }
+                        NFTA_HOOK_HOOKNUM if hook_payload.len() >= 4 => {
+                            chain.hook =
+                                Some(u32::from_be_bytes(hook_payload[..4].try_into().unwrap()));
+                        }
+                        NFTA_HOOK_PRIORITY if hook_payload.len() >= 4 => {
+                            chain.priority =
+                                Some(i32::from_be_bytes(hook_payload[..4].try_into().unwrap()));
+                        }
                         _ => {}
                     }
                 }
             }
-            NFTA_CHAIN_POLICY
-                if payload.len() >= 4 => {
-                    chain.policy = Some(u32::from_be_bytes(payload[..4].try_into().unwrap()));
-                }
+            NFTA_CHAIN_POLICY if payload.len() >= 4 => {
+                chain.policy = Some(u32::from_be_bytes(payload[..4].try_into().unwrap()));
+            }
             NFTA_CHAIN_TYPE => {
                 chain.chain_type = attr_str(payload);
             }
@@ -656,14 +649,12 @@ fn parse_rule(data: &[u8], family: Family) -> Option<RuleInfo> {
             NFTA_RULE_CHAIN => {
                 rule.chain = attr_str(payload).unwrap_or_default();
             }
-            NFTA_RULE_HANDLE
-                if payload.len() >= 8 => {
-                    rule.handle = u64::from_be_bytes(payload[..8].try_into().unwrap());
-                }
-            NFTA_RULE_POSITION
-                if payload.len() >= 8 => {
-                    rule.position = Some(u64::from_be_bytes(payload[..8].try_into().unwrap()));
-                }
+            NFTA_RULE_HANDLE if payload.len() >= 8 => {
+                rule.handle = u64::from_be_bytes(payload[..8].try_into().unwrap());
+            }
+            NFTA_RULE_POSITION if payload.len() >= 8 => {
+                rule.position = Some(u64::from_be_bytes(payload[..8].try_into().unwrap()));
+            }
             _ => {}
         }
     }
@@ -694,22 +685,18 @@ fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
             NFTA_SET_NAME => {
                 set.name = attr_str(payload).unwrap_or_default();
             }
-            NFTA_SET_FLAGS
-                if payload.len() >= 4 => {
-                    set.flags = u32::from_be_bytes(payload[..4].try_into().unwrap());
-                }
-            NFTA_SET_KEY_TYPE
-                if payload.len() >= 4 => {
-                    set.key_type = u32::from_be_bytes(payload[..4].try_into().unwrap());
-                }
-            NFTA_SET_KEY_LEN
-                if payload.len() >= 4 => {
-                    set.key_len = u32::from_be_bytes(payload[..4].try_into().unwrap());
-                }
-            NFTA_SET_HANDLE
-                if payload.len() >= 8 => {
-                    set.handle = u64::from_be_bytes(payload[..8].try_into().unwrap());
-                }
+            NFTA_SET_FLAGS if payload.len() >= 4 => {
+                set.flags = u32::from_be_bytes(payload[..4].try_into().unwrap());
+            }
+            NFTA_SET_KEY_TYPE if payload.len() >= 4 => {
+                set.key_type = u32::from_be_bytes(payload[..4].try_into().unwrap());
+            }
+            NFTA_SET_KEY_LEN if payload.len() >= 4 => {
+                set.key_len = u32::from_be_bytes(payload[..4].try_into().unwrap());
+            }
+            NFTA_SET_HANDLE if payload.len() >= 8 => {
+                set.handle = u64::from_be_bytes(payload[..8].try_into().unwrap());
+            }
             _ => {}
         }
     }

@@ -784,31 +784,28 @@ pub fn parse_htb_class_options(data: &[u8]) -> Option<HtbClassOptions> {
         let payload = &input[4..len];
 
         match attr_type & 0x3FFF {
-            TCA_HTB_PARMS
-                if payload.len() >= std::mem::size_of::<TcHtbOpt>() => {
-                    // Parse TcHtbOpt structure
-                    // Rate spec starts at offset 0, ceil at offset 12
-                    let rate = u32::from_ne_bytes(payload[8..12].try_into().ok()?);
-                    let ceil = u32::from_ne_bytes(payload[20..24].try_into().ok()?);
-                    opts.rate = rate as u64;
-                    opts.ceil = ceil as u64;
+            TCA_HTB_PARMS if payload.len() >= std::mem::size_of::<TcHtbOpt>() => {
+                // Parse TcHtbOpt structure
+                // Rate spec starts at offset 0, ceil at offset 12
+                let rate = u32::from_ne_bytes(payload[8..12].try_into().ok()?);
+                let ceil = u32::from_ne_bytes(payload[20..24].try_into().ok()?);
+                opts.rate = rate as u64;
+                opts.ceil = ceil as u64;
 
-                    if payload.len() >= 44 {
-                        opts.burst = u32::from_ne_bytes(payload[24..28].try_into().ok()?);
-                        opts.cburst = u32::from_ne_bytes(payload[28..32].try_into().ok()?);
-                        opts.quantum = u32::from_ne_bytes(payload[32..36].try_into().ok()?);
-                        opts.level = u32::from_ne_bytes(payload[36..40].try_into().ok()?);
-                        opts.priority = u32::from_ne_bytes(payload[40..44].try_into().ok()?);
-                    }
+                if payload.len() >= 44 {
+                    opts.burst = u32::from_ne_bytes(payload[24..28].try_into().ok()?);
+                    opts.cburst = u32::from_ne_bytes(payload[28..32].try_into().ok()?);
+                    opts.quantum = u32::from_ne_bytes(payload[32..36].try_into().ok()?);
+                    opts.level = u32::from_ne_bytes(payload[36..40].try_into().ok()?);
+                    opts.priority = u32::from_ne_bytes(payload[40..44].try_into().ok()?);
                 }
-            TCA_HTB_RATE64
-                if payload.len() >= 8 => {
-                    rate64 = Some(u64::from_ne_bytes(payload[..8].try_into().ok()?));
-                }
-            TCA_HTB_CEIL64
-                if payload.len() >= 8 => {
-                    ceil64 = Some(u64::from_ne_bytes(payload[..8].try_into().ok()?));
-                }
+            }
+            TCA_HTB_RATE64 if payload.len() >= 8 => {
+                rate64 = Some(u64::from_ne_bytes(payload[..8].try_into().ok()?));
+            }
+            TCA_HTB_CEIL64 if payload.len() >= 8 => {
+                ceil64 = Some(u64::from_ne_bytes(payload[..8].try_into().ok()?));
+            }
             _ => {}
         }
 
@@ -877,44 +874,33 @@ fn parse_fq_codel_options(data: &[u8]) -> FqCodelOptions {
         let payload = &input[4..len];
 
         match attr_type & 0x3FFF {
-            TCA_FQ_CODEL_TARGET
-                if payload.len() >= 4 => {
-                    opts.target_us = u32::from_ne_bytes(payload[..4].try_into().unwrap());
-                }
-            TCA_FQ_CODEL_LIMIT
-                if payload.len() >= 4 => {
-                    opts.limit = u32::from_ne_bytes(payload[..4].try_into().unwrap());
-                }
-            TCA_FQ_CODEL_INTERVAL
-                if payload.len() >= 4 => {
-                    opts.interval_us = u32::from_ne_bytes(payload[..4].try_into().unwrap());
-                }
-            TCA_FQ_CODEL_ECN
-                if payload.len() >= 4 => {
-                    opts.ecn = u32::from_ne_bytes(payload[..4].try_into().unwrap()) != 0;
-                }
-            TCA_FQ_CODEL_FLOWS
-                if payload.len() >= 4 => {
-                    opts.flows = u32::from_ne_bytes(payload[..4].try_into().unwrap());
-                }
-            TCA_FQ_CODEL_QUANTUM
-                if payload.len() >= 4 => {
-                    opts.quantum = u32::from_ne_bytes(payload[..4].try_into().unwrap());
-                }
-            TCA_FQ_CODEL_CE_THRESHOLD
-                if payload.len() >= 4 => {
-                    opts.ce_threshold_us =
-                        Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
-                }
-            TCA_FQ_CODEL_DROP_BATCH_SIZE
-                if payload.len() >= 4 => {
-                    opts.drop_batch_size =
-                        Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
-                }
-            TCA_FQ_CODEL_MEMORY_LIMIT
-                if payload.len() >= 4 => {
-                    opts.memory_limit = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
-                }
+            TCA_FQ_CODEL_TARGET if payload.len() >= 4 => {
+                opts.target_us = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+            }
+            TCA_FQ_CODEL_LIMIT if payload.len() >= 4 => {
+                opts.limit = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+            }
+            TCA_FQ_CODEL_INTERVAL if payload.len() >= 4 => {
+                opts.interval_us = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+            }
+            TCA_FQ_CODEL_ECN if payload.len() >= 4 => {
+                opts.ecn = u32::from_ne_bytes(payload[..4].try_into().unwrap()) != 0;
+            }
+            TCA_FQ_CODEL_FLOWS if payload.len() >= 4 => {
+                opts.flows = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+            }
+            TCA_FQ_CODEL_QUANTUM if payload.len() >= 4 => {
+                opts.quantum = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+            }
+            TCA_FQ_CODEL_CE_THRESHOLD if payload.len() >= 4 => {
+                opts.ce_threshold_us = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            TCA_FQ_CODEL_DROP_BATCH_SIZE if payload.len() >= 4 => {
+                opts.drop_batch_size = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            TCA_FQ_CODEL_MEMORY_LIMIT if payload.len() >= 4 => {
+                opts.memory_limit = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
             _ => {}
         }
 
@@ -958,16 +944,14 @@ fn parse_htb_options(data: &[u8]) -> HtbOptions {
         let payload = &input[4..len];
 
         match attr_type & 0x3FFF {
-            TCA_HTB_INIT
-                if payload.len() >= TcHtbGlob::SIZE => {
-                    opts.version = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
-                    opts.rate2quantum = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
-                    opts.default_class = u32::from_ne_bytes(payload[8..12].try_into().unwrap());
-                }
-            TCA_HTB_DIRECT_QLEN
-                if payload.len() >= 4 => {
-                    opts.direct_qlen = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
-                }
+            TCA_HTB_INIT if payload.len() >= TcHtbGlob::SIZE => {
+                opts.version = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
+                opts.rate2quantum = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
+                opts.default_class = u32::from_ne_bytes(payload[8..12].try_into().unwrap());
+            }
+            TCA_HTB_DIRECT_QLEN if payload.len() >= 4 => {
+                opts.direct_qlen = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
             _ => {}
         }
 
