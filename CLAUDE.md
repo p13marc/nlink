@@ -3526,6 +3526,37 @@ conn.batch()
     .await?;
 ```
 
+## Observability (tracing)
+
+`nlink` emits structured `tracing` spans on every public Connection
+method, on the netlink request/ack/dump cycle (TRACE), on connection
+lifecycle (INFO), on GENL family resolution (INFO), on multicast
+event delivery (TRACE), and on recipe helpers like
+`PerHostLimiter::apply` and `PerPeerImpairer::apply` (INFO).
+
+Wire up a subscriber in your binary and filter by module/method:
+
+```rust
+tracing_subscriber::fmt()
+    .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+    .init();
+```
+
+```bash
+# All recipe-helper INFO spans + every kernel error WARN
+RUST_LOG=nlink::netlink::impair=info,nlink::netlink::ratelimit=info,nlink::netlink::connection=warn
+
+# A single Connection method by name
+RUST_LOG="nlink[method=add_qdisc]=debug"
+
+# Everything including per-message TRACE
+RUST_LOG=nlink=trace
+```
+
+Spans cost nothing when no subscriber is attached. See
+[`docs/observability.md`](docs/observability.md) for the full level
+conventions and what fields each span carries.
+
 ## Publishing
 
 The `nlink` crate is the only publishable crate. All binaries have `publish = false`.
