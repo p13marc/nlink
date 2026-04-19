@@ -142,7 +142,6 @@ pub mod output;
 // Re-export common types at crate root for convenience
 // Namespace types
 // Event types
-pub use netlink::NetworkEvent;
 // Route protocol multicast groups
 pub use netlink::RtnetlinkGroup;
 // Bridge VLAN types
@@ -170,7 +169,10 @@ pub use netlink::messages::{
     RuleMessage,
     TcMessage,
 };
-pub use netlink::{Connection, Error, NamespaceSpec, Protocol, Result};
+// Strongly-typed TC handle and filter priority — use these in new code at
+// public boundaries instead of raw &str / u16.
+pub use netlink::tc_handle::{FilterPriority, TcHandle, TcHandleParseError};
+pub use netlink::{Connection, Error, NamespaceSpec, NetworkEvent, Protocol, Result};
 // Stream-based event API
 pub use netlink::{EventSource, EventSubscription, OwnedEventStream};
 // Protocol state types

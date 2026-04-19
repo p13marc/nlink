@@ -7,7 +7,7 @@
 //! ```
 
 pub use crate::{
-    Generic, NetworkEvent, RtnetlinkGroup,
+    FilterPriority, Generic, NetworkEvent, RtnetlinkGroup, TcHandle,
     netlink::{
         Connection, Error, Result, Route,
         messages::LinkMessage,

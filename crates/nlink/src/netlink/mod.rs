@@ -115,6 +115,7 @@ pub mod stats;
 mod stream;
 pub mod sysctl;
 pub mod tc;
+pub mod tc_handle;
 pub mod tc_options;
 pub mod types;
 pub mod uevent;
