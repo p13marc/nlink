@@ -2742,8 +2742,11 @@ impl HfscClassConfig {
     }
 
     /// Set the real-time curve as a simple rate.
-    pub fn rt_rate(mut self, rate_bps: u32) -> Self {
-        self.rsc = Some(TcServiceCurve::rate(rate_bps));
+    ///
+    /// HFSC's `tc_service_curve.m1`/`.m2` are 32-bit fields in the kernel
+    /// UAPI. The `Rate` is saturating-cast to `u32` (max ≈4 GB/s ≈ 32 Gbps).
+    pub fn rt_rate(mut self, rate: crate::util::Rate) -> Self {
+        self.rsc = Some(TcServiceCurve::rate(rate.as_u32_bytes_per_sec_saturating()));
         self
     }
 
@@ -2756,9 +2759,10 @@ impl HfscClassConfig {
         self
     }
 
-    /// Set the link-share curve as a simple rate.
-    pub fn ls_rate(mut self, rate_bps: u32) -> Self {
-        self.fsc = Some(TcServiceCurve::rate(rate_bps));
+    /// Set the link-share curve as a simple rate. See [`Self::rt_rate`] for
+    /// the 32-bit saturating-cast caveat.
+    pub fn ls_rate(mut self, rate: crate::util::Rate) -> Self {
+        self.fsc = Some(TcServiceCurve::rate(rate.as_u32_bytes_per_sec_saturating()));
         self
     }
 
@@ -2771,9 +2775,10 @@ impl HfscClassConfig {
         self
     }
 
-    /// Set the upper-limit curve as a simple rate.
-    pub fn ul_rate(mut self, rate_bps: u32) -> Self {
-        self.usc = Some(TcServiceCurve::rate(rate_bps));
+    /// Set the upper-limit curve as a simple rate. See [`Self::rt_rate`] for
+    /// the 32-bit saturating-cast caveat.
+    pub fn ul_rate(mut self, rate: crate::util::Rate) -> Self {
+        self.usc = Some(TcServiceCurve::rate(rate.as_u32_bytes_per_sec_saturating()));
         self
     }
 
@@ -2851,7 +2856,7 @@ impl ClassConfig for HfscClassBuilt {
 #[derive(Debug, Clone, Default)]
 pub struct DrrClassConfig {
     /// Quantum in bytes (bandwidth share).
-    quantum: Option<u32>,
+    quantum: Option<crate::util::Bytes>,
 }
 
 impl DrrClassConfig {
@@ -2860,13 +2865,14 @@ impl DrrClassConfig {
         Self::default()
     }
 
-    /// Set the quantum in bytes.
+    /// Set the quantum.
     ///
     /// The quantum determines how many bytes this class can send per round.
     /// Classes with larger quanta get proportionally more bandwidth.
-    /// If not set, defaults to the interface MTU.
-    pub fn quantum(mut self, bytes: u32) -> Self {
-        self.quantum = Some(bytes);
+    /// If not set, defaults to the interface MTU. Saturates at u32::MAX
+    /// because the kernel field is 32 bits.
+    pub fn quantum(mut self, q: crate::util::Bytes) -> Self {
+        self.quantum = Some(q);
         self
     }
 
@@ -2889,7 +2895,7 @@ impl ClassConfig for DrrClassBuilt {
         use super::types::tc::qdisc::drr::TCA_DRR_QUANTUM;
 
         if let Some(quantum) = self.0.quantum {
-            builder.append_attr_u32(TCA_DRR_QUANTUM, quantum);
+            builder.append_attr_u32(TCA_DRR_QUANTUM, quantum.as_u32_saturating());
         }
 
         Ok(())
@@ -2937,7 +2943,7 @@ pub struct QfqClassConfig {
     /// Weight (bandwidth share).
     weight: Option<u32>,
     /// Maximum packet length.
-    lmax: Option<u32>,
+    lmax: Option<crate::util::Bytes>,
 }
 
 impl QfqClassConfig {
@@ -2959,9 +2965,10 @@ impl QfqClassConfig {
     /// Set the maximum packet length.
     ///
     /// This is used for internal scheduling calculations. Should be at
-    /// least the interface MTU. Default is typically 2048.
-    pub fn lmax(mut self, bytes: u32) -> Self {
-        self.lmax = Some(bytes);
+    /// least the interface MTU. Default is typically 2048. Saturates at
+    /// u32::MAX because the kernel field is 32 bits.
+    pub fn lmax(mut self, b: crate::util::Bytes) -> Self {
+        self.lmax = Some(b);
         self
     }
 
@@ -2988,7 +2995,7 @@ impl ClassConfig for QfqClassBuilt {
         }
 
         if let Some(lmax) = self.0.lmax {
-            builder.append_attr_u32(TCA_QFQ_LMAX, lmax);
+            builder.append_attr_u32(TCA_QFQ_LMAX, lmax.as_u32_saturating());
         }
 
         Ok(())
