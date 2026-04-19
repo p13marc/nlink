@@ -538,16 +538,16 @@ impl QdiscConfig for FqCodelConfig {
 /// ```
 #[derive(Debug, Clone)]
 pub struct TbfConfig {
-    /// Rate in bytes/sec.
-    pub rate: u64,
-    /// Peak rate in bytes/sec (optional).
-    pub peakrate: Option<u64>,
-    /// Burst size in bytes.
-    pub burst: u32,
+    /// Rate.
+    pub rate: crate::util::Rate,
+    /// Peak rate (optional).
+    pub peakrate: Option<crate::util::Rate>,
+    /// Burst size.
+    pub burst: crate::util::Bytes,
     /// MTU / peak burst.
     pub mtu: u32,
-    /// Buffer limit in bytes.
-    pub limit: u32,
+    /// Buffer limit.
+    pub limit: crate::util::Bytes,
     /// Parent handle.
     pub parent: String,
     /// Qdisc handle.
@@ -564,11 +564,11 @@ impl TbfConfig {
     /// Create a new tbf configuration builder.
     pub fn new() -> Self {
         Self {
-            rate: 0,
+            rate: crate::util::Rate::ZERO,
             peakrate: None,
-            burst: 0,
+            burst: crate::util::Bytes::ZERO,
             mtu: 1514,
-            limit: 0,
+            limit: crate::util::Bytes::ZERO,
             parent: "root".to_string(),
             handle: None,
         }
@@ -586,27 +586,21 @@ impl TbfConfig {
         self
     }
 
-    /// Set the rate in bytes per second.
-    pub fn rate(mut self, bytes_per_sec: u64) -> Self {
-        self.rate = bytes_per_sec;
+    /// Set the rate.
+    pub fn rate(mut self, rate: crate::util::Rate) -> Self {
+        self.rate = rate;
         self
     }
 
-    /// Set the rate in bits per second.
-    pub fn rate_bps(mut self, bits_per_sec: u64) -> Self {
-        self.rate = bits_per_sec / 8;
+    /// Set the peak rate.
+    pub fn peakrate(mut self, rate: crate::util::Rate) -> Self {
+        self.peakrate = Some(rate);
         self
     }
 
-    /// Set the peak rate in bytes per second.
-    pub fn peakrate(mut self, bytes_per_sec: u64) -> Self {
-        self.peakrate = Some(bytes_per_sec);
-        self
-    }
-
-    /// Set the burst size in bytes.
-    pub fn burst(mut self, bytes: u32) -> Self {
-        self.burst = bytes;
+    /// Set the burst size.
+    pub fn burst(mut self, b: crate::util::Bytes) -> Self {
+        self.burst = b;
         self
     }
 
@@ -616,9 +610,9 @@ impl TbfConfig {
         self
     }
 
-    /// Set the buffer limit in bytes.
-    pub fn limit(mut self, bytes: u32) -> Self {
-        self.limit = bytes;
+    /// Set the buffer limit.
+    pub fn limit(mut self, b: crate::util::Bytes) -> Self {
+        self.limit = b;
         self
     }
 
@@ -634,25 +628,26 @@ impl QdiscConfig for TbfConfig {
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        let rate_bps = self.rate.as_bytes_per_sec();
+        let peakrate_bps = self.peakrate.map(|p| p.as_bytes_per_sec());
         // Build TcTbfQopt
         let qopt = tbf::TcTbfQopt {
-            rate: TcRateSpec::new(self.rate.min(u32::MAX as u64) as u32),
-            peakrate: self
-                .peakrate
+            rate: TcRateSpec::new(rate_bps.min(u32::MAX as u64) as u32),
+            peakrate: peakrate_bps
                 .map(|pr| TcRateSpec::new(pr.min(u32::MAX as u64) as u32))
                 .unwrap_or_default(),
-            limit: self.limit,
-            buffer: self.burst,
+            limit: self.limit.as_u32_saturating(),
+            buffer: self.burst.as_u32_saturating(),
             mtu: self.mtu,
         };
 
         builder.append_attr(tbf::TCA_TBF_PARMS, qopt.as_bytes());
 
         // Add 64-bit rate if needed
-        if self.rate > u32::MAX as u64 {
-            builder.append_attr(tbf::TCA_TBF_RATE64, &self.rate.to_ne_bytes());
+        if rate_bps > u32::MAX as u64 {
+            builder.append_attr(tbf::TCA_TBF_RATE64, &rate_bps.to_ne_bytes());
         }
-        if let Some(pr) = self.peakrate
+        if let Some(pr) = peakrate_bps
             && pr > u32::MAX as u64
         {
             builder.append_attr(tbf::TCA_TBF_PRATE64, &pr.to_ne_bytes());
@@ -4019,15 +4014,16 @@ mod tests {
 
     #[test]
     fn test_tbf_builder() {
+        use crate::util::{Bytes, Rate};
         let config = TbfConfig::new()
-            .rate(1_000_000)
-            .burst(32 * 1024)
-            .limit(100 * 1024)
+            .rate(Rate::bytes_per_sec(1_000_000))
+            .burst(Bytes::kib(32))
+            .limit(Bytes::kib(100))
             .build();
 
-        assert_eq!(config.rate, 1_000_000);
-        assert_eq!(config.burst, 32 * 1024);
-        assert_eq!(config.limit, 100 * 1024);
+        assert_eq!(config.rate, Rate::bytes_per_sec(1_000_000));
+        assert_eq!(config.burst, Bytes::kib(32));
+        assert_eq!(config.limit, Bytes::kib(100));
         assert_eq!(config.kind(), "tbf");
     }
 

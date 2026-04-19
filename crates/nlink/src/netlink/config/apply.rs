@@ -715,9 +715,11 @@ async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()
             burst_bytes,
             limit_bytes,
         } => {
-            let mut config = TbfConfig::new().rate(*rate_bps).burst(*burst_bytes);
+            let mut config = TbfConfig::new()
+                .rate(crate::util::Rate::bytes_per_sec(*rate_bps))
+                .burst(crate::util::Bytes::new(*burst_bytes as u64));
             if let Some(limit) = limit_bytes {
-                config = config.limit(*limit);
+                config = config.limit(crate::util::Bytes::new(*limit as u64));
             }
             conn.add_qdisc(&qdisc.dev, config).await
         }

@@ -126,9 +126,9 @@ async fn test_add_tbf_qdisc() -> Result<()> {
 
     // Add TBF qdisc (token bucket filter)
     let tbf = TbfConfig::new()
-        .rate(1_000_000) // 1 Mbps
-        .burst(10000)
-        .limit(100000)
+        .rate(nlink::Rate::bytes_per_sec(1_000_000)) // 8 Mbps
+        .burst(nlink::Bytes::new(10000))
+        .limit(nlink::Bytes::new(100000))
         .build();
     conn.add_qdisc("dummy0", tbf).await?;
 
