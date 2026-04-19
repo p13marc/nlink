@@ -77,7 +77,7 @@ use super::{
     protocol::Route,
     tc::{HtbClassConfig, HtbQdiscConfig, NetemConfig},
 };
-use crate::util::parse::get_rate;
+use crate::util::Rate;
 
 // ETH_P_* values used in tcm_info when adding filters. These match the
 // classifier dispatch table that the kernel walks before flower's own
@@ -91,7 +91,7 @@ const ETH_P_ALL: u16 = 0x0003;
 ///
 /// 10 GB/s ≈ 80 Gbps. Large enough to be a no-op for any realistic interface,
 /// small enough to leave headroom in HTB's internal arithmetic.
-pub const DEFAULT_ASSUMED_LINK_RATE_BPS: u64 = 10_000_000_000;
+pub const DEFAULT_ASSUMED_LINK_RATE: Rate = Rate::bytes_per_sec(10_000_000_000);
 
 // ============================================================================
 // PeerMatch
@@ -129,7 +129,7 @@ pub enum PeerMatch {
 #[derive(Debug, Clone)]
 pub struct PeerImpairment {
     netem: NetemConfig,
-    rate_cap_bps: Option<u64>,
+    rate_cap: Option<Rate>,
 }
 
 impl PeerImpairment {
@@ -137,27 +137,14 @@ impl PeerImpairment {
     pub fn new(netem: NetemConfig) -> Self {
         Self {
             netem,
-            rate_cap_bps: None,
+            rate_cap: None,
         }
     }
 
-    /// Set a rate cap in bytes per second.
-    ///
-    /// `bps` is the unit HTB writes to the kernel's `tc_ratespec`. The
-    /// `_bps` suffix here means **bytes per second** (matches
-    /// [`super::tc::HtbClassConfig::from_bps`]).
-    pub fn rate_cap_bps(mut self, bytes_per_sec: u64) -> Self {
-        self.rate_cap_bps = Some(bytes_per_sec);
+    /// Set a rate cap on the per-peer pipe.
+    pub fn rate_cap(mut self, rate: Rate) -> Self {
+        self.rate_cap = Some(rate);
         self
-    }
-
-    /// Set a rate cap from a string (e.g., `"100mbit"`).
-    ///
-    /// The string is parsed as bits per second (`mbit` = megabits per
-    /// second, etc.) and converted to bytes per second internally.
-    pub fn rate_cap(self, rate: &str) -> Result<Self> {
-        let bits_per_sec = get_rate(rate)?;
-        Ok(self.rate_cap_bps(bits_per_sec / 8))
     }
 
     /// Borrow the netem leaf configuration.
@@ -165,9 +152,9 @@ impl PeerImpairment {
         &self.netem
     }
 
-    /// Get the rate cap, if any, in bytes per second.
-    pub fn cap_bps(&self) -> Option<u64> {
-        self.rate_cap_bps
+    /// Get the rate cap, if any.
+    pub fn cap(&self) -> Option<Rate> {
+        self.rate_cap
     }
 }
 
@@ -201,7 +188,7 @@ pub struct PerPeerImpairer {
     target: InterfaceRef,
     rules: Vec<PeerRule>,
     default_impairment: Option<PeerImpairment>,
-    assumed_link_rate_bps: u64,
+    assumed_link_rate: Rate,
 }
 
 impl PerPeerImpairer {
@@ -224,7 +211,7 @@ impl PerPeerImpairer {
             target,
             rules: Vec::new(),
             default_impairment: None,
-            assumed_link_rate_bps: DEFAULT_ASSUMED_LINK_RATE_BPS,
+            assumed_link_rate: DEFAULT_ASSUMED_LINK_RATE,
         }
     }
 
@@ -241,8 +228,12 @@ impl PerPeerImpairer {
     ///
     /// The value is clamped to `>= 1` to satisfy HTB's positive-rate
     /// requirement.
-    pub fn assumed_link_rate_bps(mut self, bps: u64) -> Self {
-        self.assumed_link_rate_bps = bps.max(1);
+    pub fn assumed_link_rate(mut self, rate: Rate) -> Self {
+        self.assumed_link_rate = if rate.is_zero() {
+            Rate::bytes_per_sec(1)
+        } else {
+            rate
+        };
         self
     }
 
@@ -322,7 +313,7 @@ impl PerPeerImpairer {
     /// Apply the impairment, replacing any existing root qdisc on the device.
     pub async fn apply(&self, conn: &Connection<Route>) -> Result<()> {
         let ifindex = conn.resolve_interface(&self.target).await?;
-        let link_rate = self.assumed_link_rate_bps;
+        let link_rate = self.assumed_link_rate;
         let n = self.rules.len();
         let default_classid_minor = (n + 2) as u32;
 
@@ -341,7 +332,7 @@ impl PerPeerImpairer {
         // Parent class 1:1 with rate covering the sum of all children. With
         // each child borrowing from this parent up to their ceil, this lets
         // any child use its full configured rate without contention.
-        let total_rate = crate::util::Rate::bytes_per_sec(self.total_rate_bps());
+        let total_rate = self.total_rate();
         let root_cls = HtbClassConfig::new(total_rate).ceil(total_rate).build();
         conn.add_class_config_by_index(ifindex, "1:0", "1:1", root_cls)
             .await
@@ -351,8 +342,7 @@ impl PerPeerImpairer {
         for (i, rule) in self.rules.iter().enumerate() {
             let classid = format!("1:{:x}", i + 2);
             let leaf_handle = format!("{:x}:", i + 10);
-            let class_rate =
-                crate::util::Rate::bytes_per_sec(rule.impairment.rate_cap_bps.unwrap_or(link_rate));
+            let class_rate = rule.impairment.rate_cap.unwrap_or(link_rate);
 
             let cls = HtbClassConfig::new(class_rate).ceil(class_rate).build();
             conn.add_class_config_by_index(ifindex, "1:1", &classid, cls)
@@ -375,12 +365,11 @@ impl PerPeerImpairer {
         // Default class — receives whatever no filter matched.
         let default_classid = format!("1:{:x}", n + 2);
         let default_leaf_handle = format!("{:x}:", n + 10);
-        let default_rate = crate::util::Rate::bytes_per_sec(
-            self.default_impairment
-                .as_ref()
-                .and_then(|d| d.rate_cap_bps)
-                .unwrap_or(link_rate),
-        );
+        let default_rate = self
+            .default_impairment
+            .as_ref()
+            .and_then(|d| d.rate_cap)
+            .unwrap_or(link_rate);
         let default_cls = HtbClassConfig::new(default_rate).ceil(default_rate).build();
         conn.add_class_config_by_index(ifindex, "1:1", &default_classid, default_cls)
             .await
@@ -412,19 +401,23 @@ impl PerPeerImpairer {
         }
     }
 
-    fn total_rate_bps(&self) -> u64 {
-        let link_rate = self.assumed_link_rate_bps;
-        let mut total: u64 = 0;
+    fn total_rate(&self) -> Rate {
+        let link_rate = self.assumed_link_rate;
+        let mut total = Rate::ZERO;
         for rule in &self.rules {
-            total = total.saturating_add(rule.impairment.rate_cap_bps.unwrap_or(link_rate));
+            total = total.saturating_add(rule.impairment.rate_cap.unwrap_or(link_rate));
         }
         total = total.saturating_add(
             self.default_impairment
                 .as_ref()
-                .and_then(|d| d.rate_cap_bps)
+                .and_then(|d| d.rate_cap)
                 .unwrap_or(link_rate),
         );
-        total.max(1)
+        if total.is_zero() {
+            Rate::bytes_per_sec(1)
+        } else {
+            total
+        }
     }
 
     async fn add_filter(
@@ -624,62 +617,53 @@ mod tests {
 
     #[test]
     fn assumed_link_rate_clamps_to_one() {
-        let imp = PerPeerImpairer::new("eth0").assumed_link_rate_bps(0);
-        assert_eq!(imp.assumed_link_rate_bps, 1);
+        let imp = PerPeerImpairer::new("eth0").assumed_link_rate(Rate::ZERO);
+        assert_eq!(imp.assumed_link_rate, Rate::bytes_per_sec(1));
     }
 
     #[test]
     fn peer_impairment_from_netem() {
         let imp: PeerImpairment = netem_50ms().into();
-        assert!(imp.cap_bps().is_none());
+        assert!(imp.cap().is_none());
     }
 
     #[test]
-    fn peer_impairment_rate_cap_bps_sets_cap() {
-        let imp = PeerImpairment::new(netem_50ms()).rate_cap_bps(12_500_000);
-        assert_eq!(imp.cap_bps(), Some(12_500_000));
+    fn peer_impairment_rate_cap_sets_cap() {
+        let imp = PeerImpairment::new(netem_50ms()).rate_cap(Rate::bytes_per_sec(12_500_000));
+        assert_eq!(imp.cap(), Some(Rate::bytes_per_sec(12_500_000)));
     }
 
     #[test]
-    fn peer_impairment_rate_cap_string() {
-        let imp = PeerImpairment::new(netem_50ms())
-            .rate_cap("100mbit")
-            .expect("rate parses");
-        // 100 Mbps -> 12.5 MB/s
-        assert_eq!(imp.cap_bps(), Some(12_500_000));
-    }
-
-    #[test]
-    fn peer_impairment_rate_cap_rejects_garbage() {
-        assert!(
-            PeerImpairment::new(netem_50ms())
-                .rate_cap("definitely-not-a-rate")
-                .is_err()
-        );
+    fn peer_impairment_rate_cap_typed_units() {
+        // Rate::mbit(100) == 12.5 MB/s
+        let imp = PeerImpairment::new(netem_50ms()).rate_cap(Rate::mbit(100));
+        assert_eq!(imp.cap(), Some(Rate::bytes_per_sec(12_500_000)));
     }
 
     #[test]
     fn total_rate_uses_link_rate_when_no_caps() {
         let imp = PerPeerImpairer::new("eth0")
-            .assumed_link_rate_bps(1_000)
+            .assumed_link_rate(Rate::bytes_per_sec(1_000))
             .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
             .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 2).into(), netem_50ms());
         // 2 rules + default => 3 * 1_000
-        assert_eq!(imp.total_rate_bps(), 3_000);
+        assert_eq!(imp.total_rate(), Rate::bytes_per_sec(3_000));
     }
 
     #[test]
     fn total_rate_sums_caps_and_defaults() {
         let imp = PerPeerImpairer::new("eth0")
-            .assumed_link_rate_bps(5_000)
+            .assumed_link_rate(Rate::bytes_per_sec(5_000))
             .impair_dst_ip(
                 Ipv4Addr::new(10, 0, 0, 1).into(),
-                PeerImpairment::new(netem_50ms()).rate_cap_bps(100),
+                PeerImpairment::new(netem_50ms()).rate_cap(Rate::bytes_per_sec(100)),
             )
             .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 2).into(), netem_50ms())
-            .default_impairment(PeerImpairment::new(netem_50ms()).rate_cap_bps(50));
+            .default_impairment(
+                PeerImpairment::new(netem_50ms()).rate_cap(Rate::bytes_per_sec(50)),
+            );
         // 100 (capped) + 5_000 (default link rate) + 50 (default cap)
-        assert_eq!(imp.total_rate_bps(), 5_150);
+        assert_eq!(imp.total_rate(), Rate::bytes_per_sec(5_150));
     }
 
     #[test]
@@ -687,13 +671,13 @@ mod tests {
         let imp = PerPeerImpairer::new("eth0")
             .impair_dst_ip(
                 Ipv4Addr::new(10, 0, 0, 1).into(),
-                PeerImpairment::new(netem_50ms()).rate_cap_bps(u64::MAX),
+                PeerImpairment::new(netem_50ms()).rate_cap(Rate::MAX),
             )
             .impair_dst_ip(
                 Ipv4Addr::new(10, 0, 0, 2).into(),
-                PeerImpairment::new(netem_50ms()).rate_cap_bps(u64::MAX),
+                PeerImpairment::new(netem_50ms()).rate_cap(Rate::MAX),
             );
-        assert_eq!(imp.total_rate_bps(), u64::MAX);
+        assert_eq!(imp.total_rate(), Rate::MAX);
     }
 
     #[test]
@@ -788,21 +772,23 @@ mod tests {
     #[test]
     fn clone_roundtrip_preserves_state() {
         let original = PerPeerImpairer::new("eth0")
-            .assumed_link_rate_bps(2_500_000)
+            .assumed_link_rate(Rate::bytes_per_sec(2_500_000))
             .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
             .impair_dst_subnet("2001:db8::/32", netem_50ms())
             .expect("subnet parses")
             .impair_dst_mac([1, 2, 3, 4, 5, 6], netem_50ms())
-            .default_impairment(PeerImpairment::new(netem_50ms()).rate_cap_bps(123_456));
+            .default_impairment(
+                PeerImpairment::new(netem_50ms()).rate_cap(Rate::bytes_per_sec(123_456)),
+            );
         let clone = original.clone();
         assert_eq!(clone.rule_count(), original.rule_count());
-        assert_eq!(clone.assumed_link_rate_bps, original.assumed_link_rate_bps);
+        assert_eq!(clone.assumed_link_rate, original.assumed_link_rate);
         assert_eq!(
-            clone.default_impairment.as_ref().and_then(|d| d.cap_bps()),
-            Some(123_456)
+            clone.default_impairment.as_ref().and_then(|d| d.cap()),
+            Some(Rate::bytes_per_sec(123_456))
         );
         assert_eq!(clone.target().as_name(), original.target().as_name());
-        assert_eq!(clone.total_rate_bps(), original.total_rate_bps());
+        assert_eq!(clone.total_rate(), original.total_rate());
     }
 
     #[test]

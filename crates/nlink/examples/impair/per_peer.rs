@@ -92,7 +92,7 @@ async fn main() -> nlink::Result<()> {
                         .loss(nlink::Percent::new(7.5))
                         .build(),
                 )
-                .rate_cap("100mbit")?,
+                .rate_cap(nlink::Rate::mbit(100)),
             )
             .impair_dst_subnet(
                 "10.0.99.0/24",

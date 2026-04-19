@@ -57,13 +57,6 @@ use super::{
     protocol::Route,
     tc::{FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig},
 };
-use crate::util::{parse::get_rate, rate::bits_to_bytes};
-
-/// Parse a rate string (e.g., `"100mbit"`) and return bytes per second,
-/// the unit the kernel's `tc_ratespec.rate` actually uses.
-fn parse_rate_bytes(s: &str) -> Result<u64> {
-    Ok(bits_to_bytes(get_rate(s)?))
-}
 
 // ============================================================================
 // RateLimit
@@ -72,19 +65,19 @@ fn parse_rate_bytes(s: &str) -> Result<u64> {
 /// Rate limit configuration.
 #[derive(Debug, Clone)]
 pub struct RateLimit {
-    /// Guaranteed rate in bytes per second.
-    pub rate: u64,
-    /// Maximum burst rate in bytes per second (ceiling).
-    pub ceil: Option<u64>,
-    /// Burst size in bytes.
-    pub burst: Option<u32>,
+    /// Guaranteed rate.
+    pub rate: crate::util::Rate,
+    /// Maximum burst rate (ceiling).
+    pub ceil: Option<crate::util::Rate>,
+    /// Burst size.
+    pub burst: Option<crate::util::Bytes>,
     /// Latency target for AQM (Active Queue Management).
     pub latency: Option<Duration>,
 }
 
 impl RateLimit {
-    /// Create a new rate limit with the specified rate in bytes per second.
-    pub fn new(rate: u64) -> Self {
+    /// Create a new rate limit with the specified rate.
+    pub fn new(rate: crate::util::Rate) -> Self {
         Self {
             rate,
             ceil: None,
@@ -93,22 +86,14 @@ impl RateLimit {
         }
     }
 
-    /// Create a rate limit from a rate string (e.g., `"100mbit"`, `"1gbit"`).
-    ///
-    /// The string is parsed as bits per second and stored as bytes per
-    /// second to match the kernel's `tc_ratespec` semantics.
-    pub fn parse(rate: &str) -> Result<Self> {
-        Ok(Self::new(parse_rate_bytes(rate)?))
-    }
-
     /// Set the ceiling rate (maximum burst rate).
-    pub fn ceil(mut self, ceil: u64) -> Self {
+    pub fn ceil(mut self, ceil: crate::util::Rate) -> Self {
         self.ceil = Some(ceil);
         self
     }
 
-    /// Set the burst size in bytes.
-    pub fn burst(mut self, burst: u32) -> Self {
+    /// Set the burst size.
+    pub fn burst(mut self, burst: crate::util::Bytes) -> Self {
         self.burst = Some(burst);
         self
     }
@@ -164,44 +149,20 @@ impl RateLimiter {
         }
     }
 
-    /// Set the egress (upload) rate limit from a string (e.g., "100mbit").
-    pub fn egress(mut self, rate: &str) -> Result<Self> {
-        self.egress = Some(RateLimit::parse(rate)?);
-        Ok(self)
-    }
-
-    /// Set the egress (upload) rate limit in bytes per second.
-    pub fn egress_bps(mut self, rate: u64) -> Self {
+    /// Set the egress (upload) rate limit.
+    pub fn egress(mut self, rate: crate::util::Rate) -> Self {
         self.egress = Some(RateLimit::new(rate));
         self
     }
 
-    /// Set the ingress (download) rate limit from a string (e.g., "1gbit").
-    pub fn ingress(mut self, rate: &str) -> Result<Self> {
-        self.ingress = Some(RateLimit::parse(rate)?);
-        Ok(self)
-    }
-
-    /// Set the ingress (download) rate limit in bytes per second.
-    pub fn ingress_bps(mut self, rate: u64) -> Self {
+    /// Set the ingress (download) rate limit.
+    pub fn ingress(mut self, rate: crate::util::Rate) -> Self {
         self.ingress = Some(RateLimit::new(rate));
         self
     }
 
     /// Set the ceiling rate for bursting (applies to both egress and ingress).
-    pub fn burst_to(mut self, ceil: &str) -> Result<Self> {
-        let ceil_bytes_per_sec = parse_rate_bytes(ceil)?;
-        if let Some(ref mut egress) = self.egress {
-            egress.ceil = Some(ceil_bytes_per_sec);
-        }
-        if let Some(ref mut ingress) = self.ingress {
-            ingress.ceil = Some(ceil_bytes_per_sec);
-        }
-        Ok(self)
-    }
-
-    /// Set the ceiling rate for bursting in bytes per second.
-    pub fn burst_to_bps(mut self, ceil: u64) -> Self {
+    pub fn burst_to(mut self, ceil: crate::util::Rate) -> Self {
         if let Some(ref mut egress) = self.egress {
             egress.ceil = Some(ceil);
         }
@@ -212,19 +173,7 @@ impl RateLimiter {
     }
 
     /// Set the burst buffer size (applies to both egress and ingress).
-    pub fn burst_size(mut self, size: &str) -> Result<Self> {
-        let size_bytes = crate::util::parse::get_size(size)? as u32;
-        if let Some(ref mut egress) = self.egress {
-            egress.burst = Some(size_bytes);
-        }
-        if let Some(ref mut ingress) = self.ingress {
-            ingress.burst = Some(size_bytes);
-        }
-        Ok(self)
-    }
-
-    /// Set the burst buffer size in bytes.
-    pub fn burst_size_bytes(mut self, size: u32) -> Self {
+    pub fn burst_size(mut self, size: crate::util::Bytes) -> Self {
         if let Some(ref mut egress) = self.egress {
             egress.burst = Some(size);
         }
@@ -304,23 +253,23 @@ impl RateLimiter {
         conn.add_qdisc(&self.dev, htb).await?;
 
         // Add root class (1:1) for the rate limit
-        let mut class_config = HtbClassConfig::new(crate::util::Rate::bytes_per_sec(limit.rate));
+        let mut class_config = HtbClassConfig::new(limit.rate);
         if let Some(ceil) = limit.ceil {
-            class_config = class_config.ceil(crate::util::Rate::bytes_per_sec(ceil));
+            class_config = class_config.ceil(ceil);
         }
         if let Some(burst) = limit.burst {
-            class_config = class_config.burst(crate::util::Bytes::new(burst as u64));
+            class_config = class_config.burst(burst);
         }
         conn.add_class_config(&self.dev, "1:0", "1:1", class_config.build())
             .await?;
 
         // Add default class (1:10) under the root class
-        let mut default_config = HtbClassConfig::new(crate::util::Rate::bytes_per_sec(limit.rate));
+        let mut default_config = HtbClassConfig::new(limit.rate);
         if let Some(ceil) = limit.ceil {
-            default_config = default_config.ceil(crate::util::Rate::bytes_per_sec(ceil));
+            default_config = default_config.ceil(ceil);
         }
         if let Some(burst) = limit.burst {
-            default_config = default_config.burst(crate::util::Bytes::new(burst as u64));
+            default_config = default_config.burst(burst);
         }
         conn.add_class_config(&self.dev, "1:1", "1:10", default_config.build())
             .await?;
@@ -371,23 +320,23 @@ impl RateLimiter {
         conn.add_qdisc(&ifb_name, htb).await?;
 
         // Add root class (1:1) for the rate limit
-        let mut class_config = HtbClassConfig::new(crate::util::Rate::bytes_per_sec(limit.rate));
+        let mut class_config = HtbClassConfig::new(limit.rate);
         if let Some(ceil) = limit.ceil {
-            class_config = class_config.ceil(crate::util::Rate::bytes_per_sec(ceil));
+            class_config = class_config.ceil(ceil);
         }
         if let Some(burst) = limit.burst {
-            class_config = class_config.burst(crate::util::Bytes::new(burst as u64));
+            class_config = class_config.burst(burst);
         }
         conn.add_class_config(&ifb_name, "1:0", "1:1", class_config.build())
             .await?;
 
         // Add default class (1:10) under the root class
-        let mut default_config = HtbClassConfig::new(crate::util::Rate::bytes_per_sec(limit.rate));
+        let mut default_config = HtbClassConfig::new(limit.rate);
         if let Some(ceil) = limit.ceil {
-            default_config = default_config.ceil(crate::util::Rate::bytes_per_sec(ceil));
+            default_config = default_config.ceil(ceil);
         }
         if let Some(burst) = limit.burst {
-            default_config = default_config.burst(crate::util::Bytes::new(burst as u64));
+            default_config = default_config.burst(burst);
         }
         conn.add_class_config(&ifb_name, "1:1", "1:10", default_config.build())
             .await?;
@@ -525,8 +474,8 @@ impl RateLimiter {
 pub struct PerHostLimiter {
     /// Target interface name.
     dev: String,
-    /// Default rate in bytes per second.
-    default_rate: u64,
+    /// Default rate.
+    default_rate: crate::util::Rate,
     /// Per-host rules.
     rules: Vec<HostRule>,
     /// Latency target for AQM.
@@ -538,10 +487,10 @@ pub struct PerHostLimiter {
 pub struct HostRule {
     /// Match condition.
     match_: HostMatch,
-    /// Rate limit in bytes per second.
-    rate: u64,
-    /// Ceiling rate in bytes per second.
-    ceil: Option<u64>,
+    /// Rate limit.
+    rate: crate::util::Rate,
+    /// Ceiling rate.
+    ceil: Option<crate::util::Rate>,
 }
 
 /// Match condition for per-host limiting.
@@ -563,21 +512,9 @@ pub enum HostMatch {
 }
 
 impl PerHostLimiter {
-    /// Create a new per-host rate limiter with a default rate.
-    ///
-    /// `default_rate` is a string in `tc`-style notation (e.g.,
-    /// `"10mbit"`). Parsed as bits per second; stored as bytes per second.
-    pub fn new(dev: &str, default_rate: &str) -> Result<Self> {
-        Ok(Self {
-            dev: dev.to_string(),
-            default_rate: parse_rate_bytes(default_rate)?,
-            rules: Vec::new(),
-            latency: None,
-        })
-    }
-
-    /// Create a new per-host rate limiter with rate in bytes per second.
-    pub fn new_bps(dev: &str, default_rate: u64) -> Self {
+    /// Create a new per-host rate limiter with a default rate for unmatched
+    /// traffic.
+    pub fn new(dev: &str, default_rate: crate::util::Rate) -> Self {
         Self {
             dev: dev.to_string(),
             default_rate,
@@ -587,75 +524,80 @@ impl PerHostLimiter {
     }
 
     /// Add a rate limit for a specific IP address.
-    pub fn limit_ip(mut self, ip: IpAddr, rate: &str) -> Result<Self> {
+    pub fn limit_ip(mut self, ip: IpAddr, rate: crate::util::Rate) -> Self {
         self.rules.push(HostRule {
             match_: HostMatch::Ip(ip),
-            rate: parse_rate_bytes(rate)?,
+            rate,
             ceil: None,
         });
-        Ok(self)
+        self
     }
 
     /// Add a rate limit for a specific IP address with ceiling.
-    pub fn limit_ip_with_ceil(mut self, ip: IpAddr, rate: &str, ceil: &str) -> Result<Self> {
+    pub fn limit_ip_with_ceil(
+        mut self,
+        ip: IpAddr,
+        rate: crate::util::Rate,
+        ceil: crate::util::Rate,
+    ) -> Self {
         self.rules.push(HostRule {
             match_: HostMatch::Ip(ip),
-            rate: parse_rate_bytes(rate)?,
-            ceil: Some(parse_rate_bytes(ceil)?),
+            rate,
+            ceil: Some(ceil),
         });
-        Ok(self)
+        self
     }
 
     /// Add a rate limit for a subnet.
-    pub fn limit_subnet(mut self, subnet: &str, rate: &str) -> Result<Self> {
+    pub fn limit_subnet(mut self, subnet: &str, rate: crate::util::Rate) -> Result<Self> {
         let (addr, prefix) = parse_subnet(subnet)?;
         self.rules.push(HostRule {
             match_: HostMatch::Subnet(addr, prefix),
-            rate: parse_rate_bytes(rate)?,
+            rate,
             ceil: None,
         });
         Ok(self)
     }
 
     /// Add a rate limit for a source IP address.
-    pub fn limit_src_ip(mut self, ip: IpAddr, rate: &str) -> Result<Self> {
+    pub fn limit_src_ip(mut self, ip: IpAddr, rate: crate::util::Rate) -> Self {
         self.rules.push(HostRule {
             match_: HostMatch::SrcIp(ip),
-            rate: parse_rate_bytes(rate)?,
+            rate,
             ceil: None,
         });
-        Ok(self)
+        self
     }
 
     /// Add a rate limit for a source subnet.
-    pub fn limit_src_subnet(mut self, subnet: &str, rate: &str) -> Result<Self> {
+    pub fn limit_src_subnet(mut self, subnet: &str, rate: crate::util::Rate) -> Result<Self> {
         let (addr, prefix) = parse_subnet(subnet)?;
         self.rules.push(HostRule {
             match_: HostMatch::SrcSubnet(addr, prefix),
-            rate: parse_rate_bytes(rate)?,
+            rate,
             ceil: None,
         });
         Ok(self)
     }
 
     /// Add a rate limit for a destination port.
-    pub fn limit_port(mut self, port: u16, rate: &str) -> Result<Self> {
+    pub fn limit_port(mut self, port: u16, rate: crate::util::Rate) -> Self {
         self.rules.push(HostRule {
             match_: HostMatch::Port(port),
-            rate: parse_rate_bytes(rate)?,
+            rate,
             ceil: None,
         });
-        Ok(self)
+        self
     }
 
     /// Add a rate limit for a port range.
-    pub fn limit_port_range(mut self, start: u16, end: u16, rate: &str) -> Result<Self> {
+    pub fn limit_port_range(mut self, start: u16, end: u16, rate: crate::util::Rate) -> Self {
         self.rules.push(HostRule {
             match_: HostMatch::PortRange(start, end),
-            rate: parse_rate_bytes(rate)?,
+            rate,
             ceil: None,
         });
-        Ok(self)
+        self
     }
 
     /// Set the latency target for AQM.
@@ -679,8 +621,8 @@ impl PerHostLimiter {
         conn.add_qdisc(&self.dev, htb).await?;
 
         // Add root class (1:1) with sum of all rates as ceiling
-        let total_rate_bps = self.default_rate + self.rules.iter().map(|r| r.rate).sum::<u64>();
-        let total_rate = crate::util::Rate::bytes_per_sec(total_rate_bps);
+        let total_rate: crate::util::Rate =
+            self.default_rate + self.rules.iter().map(|r| r.rate).sum::<crate::util::Rate>();
         let root_config = HtbClassConfig::new(total_rate).ceil(total_rate).build();
         conn.add_class_config(&self.dev, "1:0", "1:1", root_config)
             .await?;
@@ -688,9 +630,7 @@ impl PerHostLimiter {
         // Add classes for each rule
         for (i, rule) in self.rules.iter().enumerate() {
             let classid = format!("1:{:x}", i + 2); // Start from 1:2
-            let rate = crate::util::Rate::bytes_per_sec(rule.rate);
-            let ceil = crate::util::Rate::bytes_per_sec(rule.ceil.unwrap_or(rule.rate));
-            let class_config = HtbClassConfig::new(rate).ceil(ceil);
+            let class_config = HtbClassConfig::new(rule.rate).ceil(rule.ceil.unwrap_or(rule.rate));
             conn.add_class_config(&self.dev, "1:1", &classid, class_config.build())
                 .await?;
 
@@ -709,8 +649,9 @@ impl PerHostLimiter {
 
         // Add default class for unmatched traffic
         let default_classid = format!("1:{:x}", self.rules.len() + 2);
-        let default_rate = crate::util::Rate::bytes_per_sec(self.default_rate);
-        let default_config = HtbClassConfig::new(default_rate).ceil(default_rate).build();
+        let default_config = HtbClassConfig::new(self.default_rate)
+            .ceil(self.default_rate)
+            .build();
         conn.add_class_config(&self.dev, "1:1", &default_classid, default_config)
             .await?;
 
@@ -907,36 +848,50 @@ mod tests {
 
     #[test]
     fn test_rate_limit_new() {
-        let limit = RateLimit::new(1_000_000);
-        assert_eq!(limit.rate, 1_000_000);
+        use crate::util::Rate;
+        let limit = RateLimit::new(Rate::bytes_per_sec(1_000_000));
+        assert_eq!(limit.rate, Rate::bytes_per_sec(1_000_000));
         assert!(limit.ceil.is_none());
         assert!(limit.burst.is_none());
     }
 
     #[test]
-    fn test_rate_limit_parse() {
-        // Parsed as bits/sec, stored as bytes/sec (kernel tc_ratespec).
-        let limit = RateLimit::parse("100mbit").unwrap();
-        assert_eq!(limit.rate, 12_500_000); // 100 Mbps = 12.5 MB/s
+    fn test_rate_limit_typed_units() {
+        use crate::util::Rate;
+        let limit = RateLimit::new(Rate::mbit(100));
+        assert_eq!(limit.rate.as_bytes_per_sec(), 12_500_000);
 
-        let limit = RateLimit::parse("1gbit").unwrap();
-        assert_eq!(limit.rate, 125_000_000); // 1 Gbps = 125 MB/s
+        let limit = RateLimit::new(Rate::gbit(1));
+        assert_eq!(limit.rate.as_bytes_per_sec(), 125_000_000);
     }
 
     #[test]
     fn test_rate_limiter_builder() {
+        use crate::util::Rate;
         let limiter = RateLimiter::new("eth0")
-            .egress_bps(1_000_000)
-            .ingress_bps(2_000_000)
-            .burst_to_bps(3_000_000);
+            .egress(Rate::bytes_per_sec(1_000_000))
+            .ingress(Rate::bytes_per_sec(2_000_000))
+            .burst_to(Rate::bytes_per_sec(3_000_000));
 
         assert_eq!(limiter.dev, "eth0");
         assert!(limiter.egress.is_some());
         assert!(limiter.ingress.is_some());
-        assert_eq!(limiter.egress.as_ref().unwrap().rate, 1_000_000);
-        assert_eq!(limiter.egress.as_ref().unwrap().ceil, Some(3_000_000));
-        assert_eq!(limiter.ingress.as_ref().unwrap().rate, 2_000_000);
-        assert_eq!(limiter.ingress.as_ref().unwrap().ceil, Some(3_000_000));
+        assert_eq!(
+            limiter.egress.as_ref().unwrap().rate,
+            Rate::bytes_per_sec(1_000_000)
+        );
+        assert_eq!(
+            limiter.egress.as_ref().unwrap().ceil,
+            Some(Rate::bytes_per_sec(3_000_000))
+        );
+        assert_eq!(
+            limiter.ingress.as_ref().unwrap().rate,
+            Rate::bytes_per_sec(2_000_000)
+        );
+        assert_eq!(
+            limiter.ingress.as_ref().unwrap().ceil,
+            Some(Rate::bytes_per_sec(3_000_000))
+        );
     }
 
     #[test]
@@ -969,23 +924,21 @@ mod tests {
 
     #[test]
     fn test_per_host_limiter_builder() {
-        let limiter = PerHostLimiter::new("eth0", "10mbit").unwrap();
+        use crate::util::Rate;
+        let limiter = PerHostLimiter::new("eth0", Rate::mbit(10));
         assert_eq!(limiter.dev, "eth0");
-        // 10 Mbps = 1.25 MB/s (stored as bytes/sec).
-        assert_eq!(limiter.default_rate, 1_250_000);
+        assert_eq!(limiter.default_rate, Rate::mbit(10));
         assert!(limiter.rules.is_empty());
     }
 
     #[test]
     fn test_per_host_limiter_with_rules() {
-        let limiter = PerHostLimiter::new("eth0", "10mbit")
+        use crate::util::Rate;
+        let limiter = PerHostLimiter::new("eth0", Rate::mbit(10))
+            .limit_ip("192.168.1.100".parse().unwrap(), Rate::mbit(100))
+            .limit_subnet("10.0.0.0/8", Rate::mbit(50))
             .unwrap()
-            .limit_ip("192.168.1.100".parse().unwrap(), "100mbit")
-            .unwrap()
-            .limit_subnet("10.0.0.0/8", "50mbit")
-            .unwrap()
-            .limit_port(80, "500mbit")
-            .unwrap();
+            .limit_port(80, Rate::mbit(500));
 
         assert_eq!(limiter.rules.len(), 3);
     }

@@ -300,7 +300,7 @@ async fn test_rate_cap_per_rule() -> nlink::Result<()> {
     PerPeerImpairer::new("test0")
         .impair_dst_ip(
             Ipv4Addr::new(10, 0, 0, 1).into(),
-            PeerImpairment::new(netem_50ms()).rate_cap("100mbit")?,
+            PeerImpairment::new(netem_50ms()).rate_cap(nlink::Rate::mbit(100)),
         )
         .apply(&conn)
         .await?;
