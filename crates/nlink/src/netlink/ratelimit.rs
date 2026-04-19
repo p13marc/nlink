@@ -48,15 +48,22 @@
 //!   eth0 ingress -> matchall filter -> mirred redirect -> ifb_eth0 -> HTB -> fq_codel
 //! ```
 
-use std::net::IpAddr;
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
 
-use super::Connection;
-use super::error::{Error, Result};
-use super::link::IfbLink;
-use super::protocol::Route;
-use super::tc::{FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig};
-use crate::util::parse::get_rate;
+use super::{
+    Connection,
+    error::{Error, Result},
+    link::IfbLink,
+    protocol::Route,
+    tc::{FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig},
+};
+use crate::util::{parse::get_rate, rate::bits_to_bytes};
+
+/// Parse a rate string (e.g., `"100mbit"`) and return bytes per second,
+/// the unit the kernel's `tc_ratespec.rate` actually uses.
+fn parse_rate_bytes(s: &str) -> Result<u64> {
+    Ok(bits_to_bytes(get_rate(s)?))
+}
 
 // ============================================================================
 // RateLimit
@@ -86,9 +93,12 @@ impl RateLimit {
         }
     }
 
-    /// Create a rate limit from a rate string (e.g., "100mbit", "1gbit").
+    /// Create a rate limit from a rate string (e.g., `"100mbit"`, `"1gbit"`).
+    ///
+    /// The string is parsed as bits per second and stored as bytes per
+    /// second to match the kernel's `tc_ratespec` semantics.
     pub fn parse(rate: &str) -> Result<Self> {
-        Ok(Self::new(get_rate(rate)?))
+        Ok(Self::new(parse_rate_bytes(rate)?))
     }
 
     /// Set the ceiling rate (maximum burst rate).
@@ -180,12 +190,12 @@ impl RateLimiter {
 
     /// Set the ceiling rate for bursting (applies to both egress and ingress).
     pub fn burst_to(mut self, ceil: &str) -> Result<Self> {
-        let ceil_bps = get_rate(ceil)?;
+        let ceil_bytes_per_sec = parse_rate_bytes(ceil)?;
         if let Some(ref mut egress) = self.egress {
-            egress.ceil = Some(ceil_bps);
+            egress.ceil = Some(ceil_bytes_per_sec);
         }
         if let Some(ref mut ingress) = self.ingress {
-            ingress.ceil = Some(ceil_bps);
+            ingress.ceil = Some(ceil_bytes_per_sec);
         }
         Ok(self)
     }
@@ -413,11 +423,16 @@ impl RateLimiter {
         conn: &Connection<Route>,
         ifb_ifindex: u32,
     ) -> Result<()> {
-        use super::connection::ack_request;
-        use super::message::NlMsgType;
-        use super::types::tc::action::{self, mirred};
-        use super::types::tc::filter::u32 as u32_mod;
-        use super::types::tc::{TcMsg, TcaAttr, tc_handle};
+        use super::{
+            connection::ack_request,
+            message::NlMsgType,
+            types::tc::{
+                TcMsg, TcaAttr,
+                action::{self, mirred},
+                filter::u32 as u32_mod,
+                tc_handle,
+            },
+        };
 
         // Get interface index
         let link = conn
@@ -549,10 +564,13 @@ pub enum HostMatch {
 
 impl PerHostLimiter {
     /// Create a new per-host rate limiter with a default rate.
+    ///
+    /// `default_rate` is a string in `tc`-style notation (e.g.,
+    /// `"10mbit"`). Parsed as bits per second; stored as bytes per second.
     pub fn new(dev: &str, default_rate: &str) -> Result<Self> {
         Ok(Self {
             dev: dev.to_string(),
-            default_rate: get_rate(default_rate)?,
+            default_rate: parse_rate_bytes(default_rate)?,
             rules: Vec::new(),
             latency: None,
         })
@@ -572,7 +590,7 @@ impl PerHostLimiter {
     pub fn limit_ip(mut self, ip: IpAddr, rate: &str) -> Result<Self> {
         self.rules.push(HostRule {
             match_: HostMatch::Ip(ip),
-            rate: get_rate(rate)?,
+            rate: parse_rate_bytes(rate)?,
             ceil: None,
         });
         Ok(self)
@@ -582,8 +600,8 @@ impl PerHostLimiter {
     pub fn limit_ip_with_ceil(mut self, ip: IpAddr, rate: &str, ceil: &str) -> Result<Self> {
         self.rules.push(HostRule {
             match_: HostMatch::Ip(ip),
-            rate: get_rate(rate)?,
-            ceil: Some(get_rate(ceil)?),
+            rate: parse_rate_bytes(rate)?,
+            ceil: Some(parse_rate_bytes(ceil)?),
         });
         Ok(self)
     }
@@ -593,7 +611,7 @@ impl PerHostLimiter {
         let (addr, prefix) = parse_subnet(subnet)?;
         self.rules.push(HostRule {
             match_: HostMatch::Subnet(addr, prefix),
-            rate: get_rate(rate)?,
+            rate: parse_rate_bytes(rate)?,
             ceil: None,
         });
         Ok(self)
@@ -603,7 +621,7 @@ impl PerHostLimiter {
     pub fn limit_src_ip(mut self, ip: IpAddr, rate: &str) -> Result<Self> {
         self.rules.push(HostRule {
             match_: HostMatch::SrcIp(ip),
-            rate: get_rate(rate)?,
+            rate: parse_rate_bytes(rate)?,
             ceil: None,
         });
         Ok(self)
@@ -614,7 +632,7 @@ impl PerHostLimiter {
         let (addr, prefix) = parse_subnet(subnet)?;
         self.rules.push(HostRule {
             match_: HostMatch::SrcSubnet(addr, prefix),
-            rate: get_rate(rate)?,
+            rate: parse_rate_bytes(rate)?,
             ceil: None,
         });
         Ok(self)
@@ -624,7 +642,7 @@ impl PerHostLimiter {
     pub fn limit_port(mut self, port: u16, rate: &str) -> Result<Self> {
         self.rules.push(HostRule {
             match_: HostMatch::Port(port),
-            rate: get_rate(rate)?,
+            rate: parse_rate_bytes(rate)?,
             ceil: None,
         });
         Ok(self)
@@ -634,7 +652,7 @@ impl PerHostLimiter {
     pub fn limit_port_range(mut self, start: u16, end: u16, rate: &str) -> Result<Self> {
         self.rules.push(HostRule {
             match_: HostMatch::PortRange(start, end),
-            rate: get_rate(rate)?,
+            rate: parse_rate_bytes(rate)?,
             ceil: None,
         });
         Ok(self)
@@ -735,6 +753,13 @@ impl PerHostLimiter {
     ) -> Result<()> {
         use super::filter::FlowerFilter;
 
+        // tcm_info etherproto values. The kernel walks the per-protocol
+        // dispatch table before flower's own KEY_ETH_TYPE attribute is
+        // consulted, so passing the wrong value here means the filter
+        // never matches its intended packets.
+        const ETH_P_IP: u16 = 0x0800;
+        const ETH_P_IPV6: u16 = 0x86DD;
+
         let classid = format!("1:{:x}", index + 2);
         let priority = (index + 1) as u16;
 
@@ -758,7 +783,8 @@ impl PerHostLimiter {
                             .priority(priority)
                             .dst_ipv4(*addr, prefix)
                             .build();
-                        conn.add_filter(&self.dev, "1:", filter).await?;
+                        conn.add_filter_full(&self.dev, "1:", None, ETH_P_IP, priority, filter)
+                            .await?;
                     }
                     IpAddr::V6(addr) => {
                         let filter = FlowerFilter::new()
@@ -766,7 +792,8 @@ impl PerHostLimiter {
                             .priority(priority)
                             .dst_ipv6(*addr, prefix)
                             .build();
-                        conn.add_filter(&self.dev, "1:", filter).await?;
+                        conn.add_filter_full(&self.dev, "1:", None, ETH_P_IPV6, priority, filter)
+                            .await?;
                     }
                 }
             }
@@ -789,7 +816,8 @@ impl PerHostLimiter {
                             .priority(priority)
                             .src_ipv4(*addr, prefix)
                             .build();
-                        conn.add_filter(&self.dev, "1:", filter).await?;
+                        conn.add_filter_full(&self.dev, "1:", None, ETH_P_IP, priority, filter)
+                            .await?;
                     }
                     IpAddr::V6(addr) => {
                         let filter = FlowerFilter::new()
@@ -797,19 +825,22 @@ impl PerHostLimiter {
                             .priority(priority)
                             .src_ipv6(*addr, prefix)
                             .build();
-                        conn.add_filter(&self.dev, "1:", filter).await?;
+                        conn.add_filter_full(&self.dev, "1:", None, ETH_P_IPV6, priority, filter)
+                            .await?;
                     }
                 }
             }
             HostMatch::Port(port) => {
-                // Match both TCP and UDP
+                // Match both TCP and UDP. L4 port matching at the IP layer
+                // dispatches under ETH_P_IP.
                 let tcp_filter = FlowerFilter::new()
                     .classid(&classid)
                     .priority(priority)
                     .ip_proto_tcp()
                     .dst_port(*port)
                     .build();
-                conn.add_filter(&self.dev, "1:", tcp_filter).await?;
+                conn.add_filter_full(&self.dev, "1:", None, ETH_P_IP, priority, tcp_filter)
+                    .await?;
 
                 let udp_filter = FlowerFilter::new()
                     .classid(&classid)
@@ -817,7 +848,8 @@ impl PerHostLimiter {
                     .ip_proto_udp()
                     .dst_port(*port)
                     .build();
-                conn.add_filter(&self.dev, "1:", udp_filter).await?;
+                conn.add_filter_full(&self.dev, "1:", None, ETH_P_IP, priority + 100, udp_filter)
+                    .await?;
             }
             HostMatch::PortRange(start, end) => {
                 // For port ranges, we need to add individual filters or use u32
@@ -831,7 +863,9 @@ impl PerHostLimiter {
                             .ip_proto_tcp()
                             .dst_port(port)
                             .build();
-                        let _ = conn.add_filter(&self.dev, "1:", filter).await;
+                        let _ = conn
+                            .add_filter_full(&self.dev, "1:", None, ETH_P_IP, priority, filter)
+                            .await;
                     }
                 }
                 // For larger ranges, we'd need u32 filter with masks
@@ -886,11 +920,12 @@ mod tests {
 
     #[test]
     fn test_rate_limit_parse() {
+        // Parsed as bits/sec, stored as bytes/sec (kernel tc_ratespec).
         let limit = RateLimit::parse("100mbit").unwrap();
-        assert_eq!(limit.rate, 100_000_000); // 100 Mbps in bits/sec
+        assert_eq!(limit.rate, 12_500_000); // 100 Mbps = 12.5 MB/s
 
         let limit = RateLimit::parse("1gbit").unwrap();
-        assert_eq!(limit.rate, 1_000_000_000); // 1 Gbps in bits/sec
+        assert_eq!(limit.rate, 125_000_000); // 1 Gbps = 125 MB/s
     }
 
     #[test]
@@ -941,7 +976,8 @@ mod tests {
     fn test_per_host_limiter_builder() {
         let limiter = PerHostLimiter::new("eth0", "10mbit").unwrap();
         assert_eq!(limiter.dev, "eth0");
-        assert_eq!(limiter.default_rate, 10_000_000); // 10 Mbps in bits/sec
+        // 10 Mbps = 1.25 MB/s (stored as bytes/sec).
+        assert_eq!(limiter.default_rate, 1_250_000);
         assert!(limiter.rules.is_empty());
     }
 

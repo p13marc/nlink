@@ -81,14 +81,15 @@ async fn main() -> nlink::Result<()> {
         r#"
     use nlink::netlink::ratelimit::RateLimit;
 
-    // Parse rate from string
+    // Parse a tc-style rate string. Internally stored as bytes/sec
+    // to match the kernel's tc_ratespec.
     let limit = RateLimit::parse("100mbit")?;
-    assert_eq!(limit.rate, 100_000_000);  // bits/sec
+    assert_eq!(limit.rate, 12_500_000);  // bytes/sec = 100 Mbps
 
-    // Build with options
-    let limit = RateLimit::new(100_000_000)  // 100 Mbps
-        .ceil(200_000_000)      // Burst up to 200 Mbps
-        .burst(32000);          // 32KB burst bucket
+    // Or build directly in bytes/sec
+    let limit = RateLimit::new(12_500_000)   // 100 Mbps
+        .ceil(25_000_000)        // Burst up to 200 Mbps
+        .burst(32000);           // 32KB burst bucket
 
     // Use with RateLimiter
     let limiter = RateLimiter::new("eth0")

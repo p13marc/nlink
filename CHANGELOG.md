@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed (behavior change)
+
+- **HTB rates from string parsing were 8× too high.** `HtbClassConfig::new(rate)`,
+  `HtbClassConfig::ceil(rate)`, `RateLimit::parse(rate)`, `RateLimiter::{egress,
+  ingress, burst_to}(rate)`, and `PerHostLimiter::{new, limit_*}(rate)` parsed
+  values like `"100mbit"` as bits/sec but stored them in fields the kernel reads
+  as bytes/sec — so a "100mbit" rate actually shaped at ~800 Mbps. All affected
+  call sites now divide by 8 to convert to bytes/sec, matching the kernel's
+  `tc_ratespec.rate` semantics. **Callers who relied on the buggy 8× rate must
+  multiply their input by 8 to keep the same wire behavior.**
+- **`PerHostLimiter` IPv6 / port-match filters were never matched.** The flower
+  filter for `HostMatch::Ip(IpAddr::V6(_))`, `HostMatch::SrcIp(IpAddr::V6(_))`,
+  `HostMatch::SrcSubnet(IpAddr::V6(_), _)`, and the L4 port matchers were added
+  with `tcm_info` etherproto = `ETH_P_IP` (0x0800) regardless of the address
+  family. The kernel dispatches filters per protocol bucket *before* consulting
+  flower's own `KEY_ETH_TYPE` attribute, so IPv6 packets never reached IPv6
+  filters. Now passes `ETH_P_IPV6` for v6 and `ETH_P_IP` for v4 / L4 port
+  filters explicitly via `add_filter_full`.
+
 ### Added
 
 - `nlink::netlink::impair` — new module exposing `PerPeerImpairer`,

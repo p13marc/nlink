@@ -23,14 +23,16 @@ fn test_rate_limit_new() {
 
 #[test]
 fn test_rate_limit_parse() {
+    // Parsed as bits/sec, stored as bytes/sec to match the kernel's
+    // tc_ratespec.rate field.
     let limit = RateLimit::parse("100mbit").unwrap();
-    assert_eq!(limit.rate, 100_000_000); // 100 Mbps in bits/sec
+    assert_eq!(limit.rate, 12_500_000); // 100 Mbps = 12.5 MB/s
 
     let limit = RateLimit::parse("1gbit").unwrap();
-    assert_eq!(limit.rate, 1_000_000_000); // 1 Gbps in bits/sec
+    assert_eq!(limit.rate, 125_000_000); // 1 Gbps = 125 MB/s
 
     let limit = RateLimit::parse("10mbps").unwrap();
-    assert_eq!(limit.rate, 10_000_000); // 10 Mbps in bits/sec
+    assert_eq!(limit.rate, 1_250_000); // 10 Mbps = 1.25 MB/s
 }
 
 #[test]

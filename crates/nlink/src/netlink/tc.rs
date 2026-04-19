@@ -32,20 +32,23 @@
 
 use std::time::Duration;
 
-use super::Connection;
-use super::builder::MessageBuilder;
-use super::connection::{ack_request, create_request, replace_request};
-use super::error::{Error, Result};
-use super::interface_ref::InterfaceRef;
-use super::message::NlMsgType;
-use super::protocol::Route;
-use super::types::tc::qdisc::netem::*;
-use super::types::tc::qdisc::{TcRateSpec, fq_codel, htb, prio, sfq, tbf};
-use super::types::tc::{TcMsg, TcaAttr, tc_handle};
-
 // Re-export for convenience
 pub use super::types::tc::qdisc::hfsc::TcServiceCurve;
 pub use super::types::tc::qdisc::taprio::TaprioSchedEntry;
+use super::{
+    Connection,
+    builder::MessageBuilder,
+    connection::{ack_request, create_request, replace_request},
+    error::{Error, Result},
+    interface_ref::InterfaceRef,
+    message::NlMsgType,
+    protocol::Route,
+    types::tc::{
+        TcMsg, TcaAttr,
+        qdisc::{TcRateSpec, fq_codel, htb, netem::*, prio, sfq, tbf},
+        tc_handle,
+    },
+};
 
 // ============================================================================
 // QdiscConfig trait
@@ -2135,8 +2138,7 @@ impl QdiscConfig for TaprioConfig {
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
-        use super::types::tc::qdisc::mqprio::TcMqprioQopt;
-        use super::types::tc::qdisc::taprio::*;
+        use super::types::tc::qdisc::{mqprio::TcMqprioQopt, taprio::*};
 
         // Write the mqprio-style priomap
         let mut qopt = TcMqprioQopt::new().with_num_tc(self.num_tc).with_hw(false);
@@ -2524,16 +2526,21 @@ pub struct HtbClassConfig {
 impl HtbClassConfig {
     /// Create a new HTB class configuration with rate parsed from a string.
     ///
-    /// The rate string supports common formats like "100mbit", "1gbit", "10mbps".
+    /// The rate string is parsed as bits per second (e.g., `"100mbit"`,
+    /// `"1gbit"`, `"10mbps"`) and stored internally as bytes per second to
+    /// match the kernel's `tc_ratespec.rate` semantics.
     ///
     /// # Example
     ///
     /// ```ignore
     /// let config = HtbClassConfig::new("100mbit")?;
+    /// // Internal rate is 12_500_000 bytes/sec = 100 Mbps.
     /// ```
     pub fn new(rate: &str) -> Result<Self> {
-        let rate_bps = crate::util::parse::get_rate(rate)?;
-        Ok(Self::from_bps(rate_bps))
+        let bits_per_sec = crate::util::parse::get_rate(rate)?;
+        Ok(Self::from_bps(crate::util::rate::bits_to_bytes(
+            bits_per_sec,
+        )))
     }
 
     /// Create a new HTB class configuration with rate in bytes per second.
@@ -2557,12 +2564,14 @@ impl HtbClassConfig {
         }
     }
 
-    /// Set the ceiling rate from a string (e.g., "500mbit").
+    /// Set the ceiling rate from a string (e.g., `"500mbit"`).
     ///
+    /// Parses bits per second; stores bytes per second.
     /// The ceiling rate is the maximum rate the class can use when borrowing
     /// from parent classes.
     pub fn ceil(mut self, ceil: &str) -> Result<Self> {
-        self.ceil = Some(crate::util::parse::get_rate(ceil)?);
+        let bits_per_sec = crate::util::parse::get_rate(ceil)?;
+        self.ceil = Some(crate::util::rate::bits_to_bytes(bits_per_sec));
         Ok(self)
     }
 
@@ -4232,10 +4241,10 @@ mod tests {
             .prio(2)
             .build();
 
-        // 100 Mbps = 100,000,000 bits/sec (get_rate returns bits/sec)
-        assert_eq!(config.0.rate, 100_000_000);
-        // 500 Mbps = 500,000,000 bits/sec
-        assert_eq!(config.0.ceil, Some(500_000_000));
+        // 100 Mbps = 12_500_000 bytes/sec (kernel tc_ratespec is bytes/sec)
+        assert_eq!(config.0.rate, 12_500_000);
+        // 500 Mbps = 62_500_000 bytes/sec
+        assert_eq!(config.0.ceil, Some(62_500_000));
         assert_eq!(config.0.prio, Some(2));
         assert_eq!(config.kind(), "htb");
     }
