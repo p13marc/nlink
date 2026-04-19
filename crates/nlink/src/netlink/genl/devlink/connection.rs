@@ -1,17 +1,16 @@
 //! Devlink connection implementation for `Connection<Devlink>`.
 
-use super::types::*;
-use super::*;
-use crate::netlink::attr::AttrIter;
-use crate::netlink::builder::MessageBuilder;
-use crate::netlink::connection::Connection;
-use crate::netlink::error::{Error, Result};
-use crate::netlink::genl::{
-    CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
+use super::{types::*, *};
+use crate::netlink::{
+    attr::AttrIter,
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    genl::{CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr},
+    message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
+    protocol::{AsyncProtocolInit, Devlink, ProtocolState},
+    socket::NetlinkSocket,
 };
-use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{AsyncProtocolInit, Devlink, ProtocolState};
-use crate::netlink::socket::NetlinkSocket;
 
 impl AsyncProtocolInit for Devlink {
     async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
@@ -36,6 +35,7 @@ impl Connection<Devlink> {
     /// let conn = Connection::<Devlink>::new_async().await?;
     /// let devices = conn.get_devices().await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "new_async"))]
     pub async fn new_async() -> Result<Self> {
         let socket = NetlinkSocket::new(Devlink::PROTOCOL)?;
         let (family_id, monitor_group_id) = resolve_devlink_family(&socket).await?;
@@ -77,6 +77,7 @@ impl Connection<Devlink> {
     ///     println!("{}", dev.path());
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_devices"))]
     pub async fn get_devices(&self) -> Result<Vec<DevlinkDevice>> {
         let responses = self.devlink_dump(DEVLINK_CMD_GET).await?;
         let mut devices = Vec::new();
@@ -104,6 +105,7 @@ impl Connection<Devlink> {
     ///     println!("  {}: {}", v.name, v.value);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_device_info"))]
     pub async fn get_device_info(&self, bus: &str, device: &str) -> Result<DevlinkInfo> {
         let response = self.devlink_get(DEVLINK_CMD_INFO_GET, bus, device).await?;
 
@@ -119,6 +121,7 @@ impl Connection<Devlink> {
     // =========================================================================
 
     /// List all ports across all devices.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_ports"))]
     pub async fn get_ports(&self) -> Result<Vec<DevlinkPort>> {
         let responses = self.devlink_dump(DEVLINK_CMD_PORT_GET).await?;
         let mut ports = Vec::new();
@@ -136,6 +139,7 @@ impl Connection<Devlink> {
     }
 
     /// List ports for a specific device.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_device_ports"))]
     pub async fn get_device_ports(&self, bus: &str, device: &str) -> Result<Vec<DevlinkPort>> {
         let ports = self.get_ports().await?;
         Ok(ports
@@ -145,6 +149,7 @@ impl Connection<Devlink> {
     }
 
     /// Get a specific port by device and index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_port"))]
     pub async fn get_port(
         &self,
         bus: &str,
@@ -156,6 +161,7 @@ impl Connection<Devlink> {
     }
 
     /// Find the port associated with a network interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_port_by_netdev"))]
     pub async fn get_port_by_netdev(&self, netdev: &str) -> Result<Option<DevlinkPort>> {
         let ports = self.get_ports().await?;
         Ok(ports
@@ -168,6 +174,7 @@ impl Connection<Devlink> {
     // =========================================================================
 
     /// List all health reporters for a device.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_health_reporters"))]
     pub async fn get_health_reporters(
         &self,
         bus: &str,
@@ -191,6 +198,7 @@ impl Connection<Devlink> {
     }
 
     /// Get a specific health reporter by name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_health_reporter"))]
     pub async fn get_health_reporter(
         &self,
         bus: &str,
@@ -202,6 +210,7 @@ impl Connection<Devlink> {
     }
 
     /// List health reporters that are in error state.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_health_errors"))]
     pub async fn get_health_errors(&self, bus: &str, device: &str) -> Result<Vec<HealthReporter>> {
         let reporters = self.get_health_reporters(bus, device).await?;
         Ok(reporters.into_iter().filter(|r| r.is_error()).collect())
@@ -212,6 +221,7 @@ impl Connection<Devlink> {
     // =========================================================================
 
     /// List all parameters for a device.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_params"))]
     pub async fn get_params(&self, bus: &str, device: &str) -> Result<Vec<DevlinkParam>> {
         let responses = self
             .devlink_dump_with_device(DEVLINK_CMD_PARAM_GET, bus, device)
@@ -231,6 +241,7 @@ impl Connection<Devlink> {
     }
 
     /// Get a specific parameter by name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_param"))]
     pub async fn get_param(
         &self,
         bus: &str,
@@ -246,6 +257,7 @@ impl Connection<Devlink> {
     // =========================================================================
 
     /// Trigger recovery on a health reporter.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "health_reporter_recover"))]
     pub async fn health_reporter_recover(
         &self,
         bus: &str,
@@ -261,6 +273,7 @@ impl Connection<Devlink> {
     }
 
     /// Configure a health reporter's settings.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_health_reporter"))]
     pub async fn set_health_reporter(
         &self,
         bus: &str,
@@ -297,6 +310,7 @@ impl Connection<Devlink> {
     ///
     /// This is a long-running operation. The kernel will send progress
     /// notifications asynchronously.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flash_update"))]
     pub async fn flash_update(&self, bus: &str, device: &str, request: FlashRequest) -> Result<()> {
         let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_FLASH_UPDATE, bus, device);
         builder.append_attr_str(DEVLINK_ATTR_FLASH_UPDATE_FILE_NAME, &request.file_name);
@@ -311,6 +325,7 @@ impl Connection<Devlink> {
     // =========================================================================
 
     /// Reload the device with the specified action.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "reload"))]
     pub async fn reload(&self, bus: &str, device: &str, action: ReloadAction) -> Result<()> {
         let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_RELOAD, bus, device);
         builder.append_attr(DEVLINK_ATTR_RELOAD_ACTION, &[action as u8]);
@@ -322,6 +337,7 @@ impl Connection<Devlink> {
     // =========================================================================
 
     /// Split a port into sub-ports.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "port_split"))]
     pub async fn port_split(
         &self,
         bus: &str,
@@ -336,6 +352,7 @@ impl Connection<Devlink> {
     }
 
     /// Unsplit a previously split port.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "port_unsplit"))]
     pub async fn port_unsplit(&self, bus: &str, device: &str, port_index: u32) -> Result<()> {
         let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_PORT_UNSPLIT, bus, device);
         builder.append_attr_u32(DEVLINK_ATTR_PORT_INDEX, port_index);
@@ -347,6 +364,7 @@ impl Connection<Devlink> {
     // =========================================================================
 
     /// Set a device parameter.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_param"))]
     pub async fn set_param(
         &self,
         bus: &str,

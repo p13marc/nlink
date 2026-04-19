@@ -4468,6 +4468,7 @@ impl Connection<Route> {
     /// // Or by index
     /// conn.set_link_master(InterfaceRef::Index(5), InterfaceRef::Index(10)).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_master"))]
     pub async fn set_link_master(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -4479,6 +4480,7 @@ impl Connection<Route> {
     }
 
     /// Set the master device by interface indices.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_master_by_index"))]
     pub async fn set_link_master_by_index(&self, ifindex: u32, master_index: u32) -> Result<()> {
         use super::connection::ack_request;
 
@@ -4505,6 +4507,7 @@ impl Connection<Route> {
     /// // Enslave eth0 to bond0 (handles down/master/up automatically)
     /// conn.enslave("eth0", "bond0").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "enslave"))]
     pub async fn enslave(
         &self,
         member: impl Into<InterfaceRef>,
@@ -4521,6 +4524,7 @@ impl Connection<Route> {
     }
 
     /// Enslave an interface to a bond or bridge by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "enslave_by_index"))]
     pub async fn enslave_by_index(&self, member_index: u32, master_index: u32) -> Result<()> {
         self.set_link_down_by_index(member_index).await?;
         self.set_link_master_by_index(member_index, master_index)
@@ -4538,12 +4542,18 @@ impl Connection<Route> {
     /// // Remove eth0 from its bridge/bond
     /// conn.set_link_nomaster("eth0").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_nomaster"))]
     pub async fn set_link_nomaster(&self, iface: impl Into<InterfaceRef>) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_nomaster_by_index(ifindex).await
     }
 
     /// Remove an interface from its master by index.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "set_link_nomaster_by_index")
+    )]
     pub async fn set_link_nomaster_by_index(&self, ifindex: u32) -> Result<()> {
         use super::connection::ack_request;
 
@@ -4568,6 +4578,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.set_link_name("eth0", "lan0").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_name"))]
     pub async fn set_link_name(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -4578,6 +4589,7 @@ impl Connection<Route> {
     }
 
     /// Rename a network interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_name_by_index"))]
     pub async fn set_link_name_by_index(&self, ifindex: u32, new_name: &str) -> Result<()> {
         use super::connection::ack_request;
 
@@ -4604,6 +4616,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.set_link_address("eth0", [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_address"))]
     pub async fn set_link_address(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -4614,6 +4627,11 @@ impl Connection<Route> {
     }
 
     /// Set the MAC address by interface index.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "set_link_address_by_index")
+    )]
     pub async fn set_link_address_by_index(&self, ifindex: u32, address: [u8; 6]) -> Result<()> {
         use super::connection::ack_request;
 
@@ -4638,12 +4656,18 @@ impl Connection<Route> {
     /// // Move veth1 to namespace by PID
     /// conn.set_link_netns_pid("veth1", container_pid).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_netns_pid"))]
     pub async fn set_link_netns_pid(&self, iface: impl Into<InterfaceRef>, pid: u32) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_netns_pid_by_index(ifindex, pid).await
     }
 
     /// Move a network interface to a namespace by PID (by index).
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "set_link_netns_pid_by_index")
+    )]
     pub async fn set_link_netns_pid_by_index(&self, ifindex: u32, pid: u32) -> Result<()> {
         use super::connection::ack_request;
 
@@ -4661,12 +4685,18 @@ impl Connection<Route> {
     /// Move a network interface to a namespace by file descriptor.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_netns_fd"))]
     pub async fn set_link_netns_fd(&self, iface: impl Into<InterfaceRef>, fd: i32) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_netns_fd_by_index(ifindex, fd).await
     }
 
     /// Move a network interface to a namespace by fd (by index).
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "set_link_netns_fd_by_index")
+    )]
     pub async fn set_link_netns_fd_by_index(&self, ifindex: u32, fd: i32) -> Result<()> {
         use super::connection::ack_request;
 
@@ -4691,6 +4721,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.set_link_netns("eth0", "my-ns").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_netns"))]
     pub async fn set_link_netns(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -4705,6 +4736,7 @@ impl Connection<Route> {
     /// Move a network interface to a named network namespace (by index).
     ///
     /// See [`set_link_netns()`](Self::set_link_netns) for details.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_netns_by_index"))]
     pub async fn set_link_netns_by_index(&self, ifindex: u32, ns_name: &str) -> Result<()> {
         let ns_fd = super::namespace::open(ns_name)?;
         self.set_link_netns_fd_by_index(ifindex, ns_fd.as_raw_fd())

@@ -47,13 +47,15 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use super::builder::MessageBuilder;
-use super::connection::Connection;
-use super::error::Result;
-use super::interface_ref::InterfaceRef;
-use super::message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType};
-use super::protocol::Route;
-use super::types::neigh::{NdMsg, NdaAttr, NeighborState, ntf, nud};
+use super::{
+    builder::MessageBuilder,
+    connection::Connection,
+    error::Result,
+    interface_ref::InterfaceRef,
+    message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType},
+    protocol::Route,
+    types::neigh::{NdMsg, NdaAttr, NeighborState, ntf, nud},
+};
 
 /// NLM_F_CREATE flag
 const NLM_F_CREATE: u16 = 0x400;
@@ -439,6 +441,7 @@ impl Connection<Route> {
     /// Add an IPv4 neighbor entry by interface index.
     ///
     /// This is namespace-safe as it doesn't require interface name resolution.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_neighbor_v4_by_index"))]
     pub async fn add_neighbor_v4_by_index(
         &self,
         ifindex: u32,
@@ -452,6 +455,7 @@ impl Connection<Route> {
     /// Add an IPv6 neighbor entry by interface index.
     ///
     /// This is namespace-safe as it doesn't require interface name resolution.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_neighbor_v6_by_index"))]
     pub async fn add_neighbor_v6_by_index(
         &self,
         ifindex: u32,
@@ -469,6 +473,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_neighbor_v4("eth0", Ipv4Addr::new(192, 168, 1, 100)).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_neighbor_v4"))]
     pub async fn del_neighbor_v4(
         &self,
         ifname: impl Into<InterfaceRef>,
@@ -480,6 +485,7 @@ impl Connection<Route> {
     }
 
     /// Delete an IPv4 neighbor entry by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_neighbor_v4_by_index"))]
     pub async fn del_neighbor_v4_by_index(
         &self,
         ifindex: u32,
@@ -490,6 +496,7 @@ impl Connection<Route> {
     }
 
     /// Delete an IPv6 neighbor entry.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_neighbor_v6"))]
     pub async fn del_neighbor_v6(
         &self,
         ifname: impl Into<InterfaceRef>,
@@ -501,6 +508,7 @@ impl Connection<Route> {
     }
 
     /// Delete an IPv6 neighbor entry by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_neighbor_v6_by_index"))]
     pub async fn del_neighbor_v6_by_index(
         &self,
         ifindex: u32,
@@ -530,6 +538,11 @@ impl Connection<Route> {
     /// Replace an IPv4 neighbor entry by interface index.
     ///
     /// This is namespace-safe as it doesn't require interface name resolution.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "replace_neighbor_v4_by_index")
+    )]
     pub async fn replace_neighbor_v4_by_index(
         &self,
         ifindex: u32,
@@ -543,6 +556,11 @@ impl Connection<Route> {
     /// Replace an IPv6 neighbor entry by interface index.
     ///
     /// This is namespace-safe as it doesn't require interface name resolution.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "replace_neighbor_v6_by_index")
+    )]
     pub async fn replace_neighbor_v6_by_index(
         &self,
         ifindex: u32,
@@ -560,12 +578,14 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.flush_neighbors("eth0").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_neighbors"))]
     pub async fn flush_neighbors(&self, ifname: impl Into<InterfaceRef>) -> Result<()> {
         let ifindex = self.resolve_interface(&ifname.into()).await?;
         self.flush_neighbors_by_index(ifindex).await
     }
 
     /// Flush all neighbor entries for an interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_neighbors_by_index"))]
     pub async fn flush_neighbors_by_index(&self, ifindex: u32) -> Result<()> {
         let neighbors = self.get_neighbors_by_index(ifindex).await?;
 
@@ -596,6 +616,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.add_proxy_arp("eth0", Ipv4Addr::new(192, 168, 1, 100)).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_proxy_arp"))]
     pub async fn add_proxy_arp(
         &self,
         ifname: impl Into<InterfaceRef>,
@@ -607,12 +628,14 @@ impl Connection<Route> {
     }
 
     /// Add a proxy ARP entry by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_proxy_arp_by_index"))]
     pub async fn add_proxy_arp_by_index(&self, ifindex: u32, destination: Ipv4Addr) -> Result<()> {
         let neigh = Neighbor::with_index_v4(ifindex, destination).proxy();
         self.add_neighbor(neigh).await
     }
 
     /// Delete a proxy ARP entry.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_proxy_arp"))]
     pub async fn del_proxy_arp(
         &self,
         ifname: impl Into<InterfaceRef>,
@@ -624,12 +647,14 @@ impl Connection<Route> {
     }
 
     /// Delete a proxy ARP entry by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_proxy_arp_by_index"))]
     pub async fn del_proxy_arp_by_index(&self, ifindex: u32, destination: Ipv4Addr) -> Result<()> {
         let neigh = Neighbor::with_index_v4(ifindex, destination).proxy();
         self.del_neighbor(neigh).await
     }
 
     /// Get neighbor entries for an interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_neighbors_by_index"))]
     pub async fn get_neighbors_by_index(
         &self,
         ifindex: u32,

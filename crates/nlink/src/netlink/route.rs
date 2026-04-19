@@ -50,15 +50,17 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use super::builder::MessageBuilder;
-use super::connection::Connection;
-use super::error::Result;
-use super::interface_ref::InterfaceRef;
-use super::message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType};
-use super::mpls::MplsEncap;
-use super::protocol::Route;
-use super::srv6::Srv6Encap;
-use super::types::route::{RouteProtocol, RouteScope, RouteType, RtMsg, RtaAttr, rt_table};
+use super::{
+    builder::MessageBuilder,
+    connection::Connection,
+    error::Result,
+    interface_ref::InterfaceRef,
+    message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType},
+    mpls::MplsEncap,
+    protocol::Route,
+    srv6::Srv6Encap,
+    types::route::{RouteProtocol, RouteScope, RouteType, RtMsg, RtaAttr, rt_table},
+};
 
 /// NLM_F_CREATE flag
 const NLM_F_CREATE: u16 = 0x400;
@@ -1329,12 +1331,14 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_route_v4("192.168.2.0", 24).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_route_v4"))]
     pub async fn del_route_v4(&self, destination: &str, prefix_len: u8) -> Result<()> {
         let route = Ipv4Route::new(destination, prefix_len);
         self.del_route(route).await
     }
 
     /// Delete an IPv6 route by destination.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_route_v6"))]
     pub async fn del_route_v6(&self, destination: &str, prefix_len: u8) -> Result<()> {
         let route = Ipv6Route::new(destination, prefix_len);
         self.del_route(route).await

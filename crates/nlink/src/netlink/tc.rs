@@ -2901,6 +2901,7 @@ impl Connection<Route> {
     ///
     /// conn.add_qdisc("eth0", netem).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_qdisc"))]
     pub async fn add_qdisc(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -2910,6 +2911,7 @@ impl Connection<Route> {
     }
 
     /// Add a qdisc with explicit parent and handle.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_qdisc_full"))]
     pub async fn add_qdisc_full(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -2942,12 +2944,14 @@ impl Connection<Route> {
     ///
     /// conn.add_qdisc_by_index(link.ifindex(), netem).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_qdisc_by_index"))]
     pub async fn add_qdisc_by_index(&self, ifindex: u32, config: impl QdiscConfig) -> Result<()> {
         self.add_qdisc_by_index_full(ifindex, TcHandle::ROOT, None, config)
             .await
     }
 
     /// Add a qdisc by interface index with explicit parent and handle.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_qdisc_by_index_full"))]
     pub async fn add_qdisc_by_index_full(
         &self,
         ifindex: u32,
@@ -2983,11 +2987,13 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_qdisc("eth0", "root").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_qdisc"))]
     pub async fn del_qdisc(&self, dev: impl Into<InterfaceRef>, parent: TcHandle) -> Result<()> {
         self.del_qdisc_full(dev, parent, None).await
     }
 
     /// Delete a qdisc with explicit handle.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_qdisc_full"))]
     pub async fn del_qdisc_full(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -3002,11 +3008,13 @@ impl Connection<Route> {
     ///
     /// This is useful for namespace-aware operations where you've already
     /// resolved the interface index via `conn.get_link_by_name()`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_qdisc_by_index"))]
     pub async fn del_qdisc_by_index(&self, ifindex: u32, parent: TcHandle) -> Result<()> {
         self.del_qdisc_by_index_full(ifindex, parent, None).await
     }
 
     /// Delete a qdisc by interface index with explicit handle.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_qdisc_by_index_full"))]
     pub async fn del_qdisc_by_index_full(
         &self,
         ifindex: u32,
@@ -3047,6 +3055,7 @@ impl Connection<Route> {
     ///
     /// conn.replace_qdisc("eth0", netem).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_qdisc"))]
     pub async fn replace_qdisc(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -3057,6 +3066,7 @@ impl Connection<Route> {
     }
 
     /// Replace a qdisc with explicit parent and handle.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_qdisc_full"))]
     pub async fn replace_qdisc_full(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -3073,6 +3083,7 @@ impl Connection<Route> {
     ///
     /// This is useful for namespace-aware operations where you've already
     /// resolved the interface index via `conn.get_link_by_name()`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_qdisc_by_index"))]
     pub async fn replace_qdisc_by_index(
         &self,
         ifindex: u32,
@@ -3083,6 +3094,11 @@ impl Connection<Route> {
     }
 
     /// Replace a qdisc by interface index with explicit parent and handle.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "replace_qdisc_by_index_full")
+    )]
     pub async fn replace_qdisc_by_index_full(
         &self,
         ifindex: u32,
@@ -3122,6 +3138,7 @@ impl Connection<Route> {
     ///
     /// conn.change_qdisc("eth0", "root", netem).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "change_qdisc"))]
     pub async fn change_qdisc(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -3132,6 +3149,7 @@ impl Connection<Route> {
     }
 
     /// Change a qdisc with explicit handle.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "change_qdisc_full"))]
     pub async fn change_qdisc_full(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -3148,6 +3166,7 @@ impl Connection<Route> {
     ///
     /// This is useful for namespace-aware operations where you've already
     /// resolved the interface index via `conn.get_link_by_name()`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "change_qdisc_by_index"))]
     pub async fn change_qdisc_by_index(
         &self,
         ifindex: u32,
@@ -3159,6 +3178,11 @@ impl Connection<Route> {
     }
 
     /// Change a qdisc by interface index with explicit handle.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "change_qdisc_by_index_full")
+    )]
     pub async fn change_qdisc_by_index_full(
         &self,
         ifindex: u32,
@@ -3217,6 +3241,7 @@ impl Connection<Route> {
     ///
     /// conn.apply_netem("eth0", netem).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "apply_netem"))]
     pub async fn apply_netem(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -3235,6 +3260,7 @@ impl Connection<Route> {
     /// This is useful for namespace-aware operations where you've already
     /// resolved the interface index via `conn.get_link_by_name()`.
     /// If no root qdisc exists, it creates one.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "apply_netem_by_index"))]
     pub async fn apply_netem_by_index(&self, ifindex: u32, config: NetemConfig) -> Result<()> {
         match self.replace_qdisc_by_index(ifindex, config.clone()).await {
             Ok(()) => Ok(()),
@@ -3252,11 +3278,13 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_netem("eth0").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_netem"))]
     pub async fn del_netem(&self, dev: impl Into<InterfaceRef>) -> Result<()> {
         self.del_qdisc(dev, TcHandle::ROOT).await
     }
 
     /// Remove netem configuration by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_netem_by_index"))]
     pub async fn del_netem_by_index(&self, ifindex: u32) -> Result<()> {
         self.del_qdisc_by_index(ifindex, TcHandle::ROOT).await
     }
@@ -3283,6 +3311,7 @@ impl Connection<Route> {
     /// conn.add_class("eth0", "1:0", "1:10", "htb",
     ///     &["rate", "10mbit", "ceil", "100mbit"]).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_class"))]
     pub async fn add_class(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -3300,6 +3329,7 @@ impl Connection<Route> {
     ///
     /// This is useful for namespace-aware operations where you've already
     /// resolved the interface index via `conn.get_link_by_name()`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_class_by_index"))]
     pub async fn add_class_by_index(
         &self,
         ifindex: u32,
@@ -3335,6 +3365,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_class("eth0", "1:0", "1:10").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_class"))]
     pub async fn del_class(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -3346,6 +3377,7 @@ impl Connection<Route> {
     }
 
     /// Delete a TC class by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_class_by_index"))]
     pub async fn del_class_by_index(
         &self,
         ifindex: u32,
@@ -3376,6 +3408,7 @@ impl Connection<Route> {
     /// conn.change_class("eth0", "1:0", "1:10", "htb",
     ///     &["rate", "20mbit", "ceil", "100mbit"]).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "change_class"))]
     pub async fn change_class(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -3390,6 +3423,7 @@ impl Connection<Route> {
     }
 
     /// Change a TC class by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "change_class_by_index"))]
     pub async fn change_class_by_index(
         &self,
         ifindex: u32,
@@ -3426,6 +3460,7 @@ impl Connection<Route> {
     /// conn.replace_class("eth0", "1:0", "1:10", "htb",
     ///     &["rate", "10mbit", "ceil", "100mbit"]).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_class"))]
     pub async fn replace_class(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -3440,6 +3475,7 @@ impl Connection<Route> {
     }
 
     /// Replace a TC class by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_class_by_index"))]
     pub async fn replace_class_by_index(
         &self,
         ifindex: u32,

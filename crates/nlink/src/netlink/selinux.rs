@@ -34,10 +34,12 @@
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use super::connection::Connection;
-use super::error::{Error, Result};
-use super::protocol::{ProtocolState, SELinux};
-use super::socket::NetlinkSocket;
+use super::{
+    connection::Connection,
+    error::{Error, Result},
+    protocol::{ProtocolState, SELinux},
+    socket::NetlinkSocket,
+};
 
 // Netlink header size
 const NLMSG_HDRLEN: usize = 16;
@@ -133,6 +135,7 @@ impl Connection<SELinux> {
     ///     }
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "recv"))]
     pub async fn recv(&self) -> Result<SELinuxEvent> {
         loop {
             let data = self.socket().recv_msg().await?;

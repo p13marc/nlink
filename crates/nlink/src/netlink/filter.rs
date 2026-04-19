@@ -1837,6 +1837,7 @@ impl Connection<Route> {
     ///
     /// conn.add_filter("eth0", "1:", filter).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_filter"))]
     pub async fn add_filter(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -1856,6 +1857,7 @@ impl Connection<Route> {
     /// * `protocol` - Ethernet protocol (e.g., 0x0800 for IPv4)
     /// * `priority` - Filter priority (lower = higher priority)
     /// * `config` - Filter configuration
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_filter_full"))]
     pub async fn add_filter_full(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -1871,6 +1873,7 @@ impl Connection<Route> {
     }
 
     /// Add a filter by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_filter_by_index"))]
     pub async fn add_filter_by_index(
         &self,
         ifindex: u32,
@@ -1882,6 +1885,7 @@ impl Connection<Route> {
     }
 
     /// Add a filter by interface index with explicit parameters.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_filter_by_index_full"))]
     pub async fn add_filter_by_index_full(
         &self,
         ifindex: u32,
@@ -1936,6 +1940,7 @@ impl Connection<Route> {
     ///     .build();
     /// conn.replace_filter("eth0", "1:", filter).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_filter"))]
     pub async fn replace_filter(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -1948,6 +1953,7 @@ impl Connection<Route> {
     }
 
     /// Replace a filter with explicit parameters.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_filter_full"))]
     pub async fn replace_filter_full(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -1963,6 +1969,7 @@ impl Connection<Route> {
     }
 
     /// Replace a filter by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_filter_by_index"))]
     pub async fn replace_filter_by_index(
         &self,
         ifindex: u32,
@@ -1974,6 +1981,11 @@ impl Connection<Route> {
     }
 
     /// Replace a filter by interface index with explicit parameters.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "replace_filter_by_index_full")
+    )]
     pub async fn replace_filter_by_index_full(
         &self,
         ifindex: u32,
@@ -2026,6 +2038,7 @@ impl Connection<Route> {
     ///     .build();
     /// conn.change_filter("eth0", "1:", 0x0800, 100, filter).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "change_filter"))]
     pub async fn change_filter(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -2040,6 +2053,7 @@ impl Connection<Route> {
     }
 
     /// Change a filter with explicit handle.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "change_filter_full"))]
     pub async fn change_filter_full(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -2055,6 +2069,7 @@ impl Connection<Route> {
     }
 
     /// Change a filter by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "change_filter_by_index"))]
     pub async fn change_filter_by_index(
         &self,
         ifindex: u32,
@@ -2068,6 +2083,11 @@ impl Connection<Route> {
     }
 
     /// Change a filter by interface index with explicit handle.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "change_filter_by_index_full")
+    )]
     pub async fn change_filter_by_index_full(
         &self,
         ifindex: u32,
@@ -2114,6 +2134,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_filter("eth0", "1:", 0x0800, 100).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_filter"))]
     pub async fn del_filter(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -2127,6 +2148,7 @@ impl Connection<Route> {
     }
 
     /// Delete a filter by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_filter_by_index"))]
     pub async fn del_filter_by_index(
         &self,
         ifindex: u32,
@@ -2151,6 +2173,7 @@ impl Connection<Route> {
     }
 
     /// Delete all filters from a parent qdisc.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_filters"))]
     pub async fn flush_filters(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -2161,6 +2184,7 @@ impl Connection<Route> {
     }
 
     /// Delete all filters from a parent qdisc by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_filters_by_index"))]
     pub async fn flush_filters_by_index(&self, ifindex: u32, parent: TcHandle) -> Result<()> {
         // Get all filters
         let filters = self.get_filters().await?;
@@ -2199,6 +2223,7 @@ impl Connection<Route> {
     ///     .direct_action();
     /// conn.attach_bpf("eth0", BpfDirection::Ingress, filter).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "attach_bpf"))]
     pub async fn attach_bpf(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -2210,6 +2235,7 @@ impl Connection<Route> {
     }
 
     /// Attach a BPF program by interface index (namespace-safe).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "attach_bpf_by_index"))]
     pub async fn attach_bpf_by_index(
         &self,
         ifindex: u32,
@@ -2248,6 +2274,7 @@ impl Connection<Route> {
     ///
     /// conn.detach_bpf("eth0", BpfDirection::Ingress).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "detach_bpf"))]
     pub async fn detach_bpf(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -2258,6 +2285,7 @@ impl Connection<Route> {
     }
 
     /// Detach all BPF filters from an interface direction by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "detach_bpf_by_index"))]
     pub async fn detach_bpf_by_index(&self, ifindex: u32, direction: BpfDirection) -> Result<()> {
         // Clsact filter parent: ingress = TC_H_MAKE(CLSACT, MIN_INGRESS) = 0xFFFFFFF2,
         // egress = TC_H_MAKE(CLSACT, MIN_EGRESS) = 0xFFFFFFF3.
@@ -2281,6 +2309,7 @@ impl Connection<Route> {
     ///     println!("BPF: id={:?} name={:?} da={}", prog.id, prog.name, prog.direct_action);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_bpf_programs"))]
     pub async fn list_bpf_programs(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -2290,6 +2319,11 @@ impl Connection<Route> {
     }
 
     /// List attached BPF programs by interface index.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "list_bpf_programs_by_index")
+    )]
     pub async fn list_bpf_programs_by_index(
         &self,
         ifindex: u32,

@@ -40,14 +40,16 @@
 
 use std::net::IpAddr;
 
-use super::builder::MessageBuilder;
-use super::connection::Connection;
-use super::error::{Error, Result};
-use super::interface_ref::InterfaceRef;
-use super::message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgType};
-use super::messages::NeighborMessage;
-use super::protocol::Route;
-use super::types::neigh::{NdMsg, NdaAttr, NeighborState};
+use super::{
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    interface_ref::InterfaceRef,
+    message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgType},
+    messages::NeighborMessage,
+    protocol::Route,
+    types::neigh::{NdMsg, NdaAttr, NeighborState},
+};
 
 /// NLM_F_CREATE flag
 const NLM_F_CREATE: u16 = 0x400;
@@ -392,6 +394,7 @@ impl Connection<Route> {
     ///         entry.mac_str(), entry.ifindex, entry.vlan);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_fdb"))]
     pub async fn get_fdb(&self, bridge: impl Into<InterfaceRef>) -> Result<Vec<FdbEntry>> {
         let bridge_idx = self.resolve_interface(&bridge.into()).await?;
         self.get_fdb_by_index(bridge_idx).await
@@ -401,6 +404,7 @@ impl Connection<Route> {
     ///
     /// Use this method when operating in a network namespace to avoid
     /// reading `/sys/class/net/` from the wrong namespace.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_fdb_by_index"))]
     pub async fn get_fdb_by_index(&self, bridge_idx: u32) -> Result<Vec<FdbEntry>> {
         // Query neighbors with AF_BRIDGE family to get FDB entries
         let neighbors = self.get_bridge_neighbors().await?;
@@ -414,8 +418,7 @@ impl Connection<Route> {
 
     /// Get all bridge neighbor entries (AF_BRIDGE FDB dump).
     async fn get_bridge_neighbors(&self) -> Result<Vec<NeighborMessage>> {
-        use super::message::NLMSG_HDRLEN;
-        use super::parse::FromNetlink;
+        use super::{message::NLMSG_HDRLEN, parse::FromNetlink};
 
         let ndmsg = NdMsg::new().with_family(AF_BRIDGE);
         let mut builder = MessageBuilder::new(NlMsgType::RTM_GETNEIGH, NLM_F_REQUEST | NLM_F_DUMP);
@@ -443,6 +446,7 @@ impl Connection<Route> {
     /// ```ignore
     /// let entries = conn.get_fdb_for_port("br0", "veth0").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_fdb_for_port"))]
     pub async fn get_fdb_for_port(
         &self,
         bridge: impl Into<InterfaceRef>,
@@ -502,6 +506,7 @@ impl Connection<Route> {
     ///         .master_ifindex(3)
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_fdb"))]
     pub async fn add_fdb(&self, entry: FdbEntryBuilder) -> Result<()> {
         let (ifindex, master_idx) = self.resolve_fdb_interfaces(&entry).await?;
         let mut builder = MessageBuilder::new(
@@ -517,6 +522,7 @@ impl Connection<Route> {
     /// Replace an FDB entry (add or update).
     ///
     /// If the entry exists, it will be updated. Otherwise, it will be created.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_fdb"))]
     pub async fn replace_fdb(&self, entry: FdbEntryBuilder) -> Result<()> {
         let (ifindex, master_idx) = self.resolve_fdb_interfaces(&entry).await?;
         let mut builder = MessageBuilder::new(
@@ -540,6 +546,7 @@ impl Connection<Route> {
     /// // Delete entry with specific VLAN
     /// conn.del_fdb("veth0", [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], Some(100)).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_fdb"))]
     pub async fn del_fdb(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -553,6 +560,7 @@ impl Connection<Route> {
     /// Delete an FDB entry by interface index, MAC address, and optional VLAN.
     ///
     /// Use this method when operating in a network namespace.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_fdb_by_index"))]
     pub async fn del_fdb_by_index(
         &self,
         ifindex: u32,
@@ -579,6 +587,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.flush_fdb("br0").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_fdb"))]
     pub async fn flush_fdb(&self, bridge: impl Into<InterfaceRef>) -> Result<()> {
         let entries = self.get_fdb(bridge).await?;
 

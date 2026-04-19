@@ -19,21 +19,25 @@
 //! println!("{} succeeded, {} failed", results.success_count(), results.error_count());
 //! ```
 
-use super::addr::AddressConfig;
-use super::builder::MessageBuilder;
-use super::connection::Connection;
-use super::error::{Error, Result};
-use super::fdb::FdbEntryBuilder;
-use super::link::LinkConfig;
-use super::message::{
-    MessageIter, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, NlMsgError, NlMsgType,
+use super::{
+    addr::AddressConfig,
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    fdb::FdbEntryBuilder,
+    link::LinkConfig,
+    message::{
+        MessageIter, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, NlMsgError, NlMsgType,
+    },
+    neigh::NeighborConfig,
+    protocol::Route,
+    route::RouteConfig,
+    tc::QdiscConfig,
+    types::{
+        link::IfInfoMsg,
+        tc::{TcMsg, TcaAttr, tc_handle},
+    },
 };
-use super::neigh::NeighborConfig;
-use super::protocol::Route;
-use super::route::RouteConfig;
-use super::tc::QdiscConfig;
-use super::types::link::IfInfoMsg;
-use super::types::tc::{TcMsg, TcaAttr, tc_handle};
 
 /// Maximum batch size before auto-splitting (200KB).
 const MAX_BATCH_SIZE: usize = 200 * 1024;
@@ -258,6 +262,7 @@ impl<'a> Batch<'a> {
     /// Auto-splits into chunks if the total size exceeds 200KB.
     /// Only returns `Err` for transport-level errors (socket failure).
     /// Individual operation failures are captured in `BatchResults`.
+    #[tracing::instrument(level = "debug", skip_all, fields(ops = self.ops.len()))]
     pub async fn execute(self) -> Result<BatchResults> {
         if self.ops.is_empty() {
             return Ok(BatchResults {

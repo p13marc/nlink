@@ -31,11 +31,13 @@
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use super::connection::Connection;
-use super::error::Result;
-use super::parse::{PResult, parse_string_from_bytes, parse_u32_ne, parse_u64_ne};
-use super::protocol::{Connector, ProtocolState};
-use super::socket::NetlinkSocket;
+use super::{
+    connection::Connection,
+    error::Result,
+    parse::{PResult, parse_string_from_bytes, parse_u32_ne, parse_u64_ne},
+    protocol::{Connector, ProtocolState},
+    socket::NetlinkSocket,
+};
 
 // Connector constants
 const CN_IDX_PROC: u32 = 1;
@@ -398,6 +400,7 @@ impl Connection<Connector> {
     ///
     /// let conn = Connection::<Connector>::new().await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "new"))]
     pub async fn new() -> Result<Self> {
         let mut socket = NetlinkSocket::new(Connector::PROTOCOL)?;
 
@@ -415,6 +418,7 @@ impl Connection<Connector> {
     /// Unregister from process events.
     ///
     /// After calling this, no more events will be received.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "unregister"))]
     pub async fn unregister(&self) -> Result<()> {
         self.send_proc_control(PROC_CN_MCAST_IGNORE).await
     }
@@ -472,6 +476,7 @@ impl Connection<Connector> {
     ///     }
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "recv"))]
     pub async fn recv(&self) -> Result<ProcEvent> {
         loop {
             let data = self.socket().recv_msg().await?;

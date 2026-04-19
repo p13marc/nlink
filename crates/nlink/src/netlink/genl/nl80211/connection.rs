@@ -1,17 +1,16 @@
 //! nl80211 connection implementation for `Connection<Nl80211>`.
 
-use super::types::*;
-use super::*;
-use crate::netlink::attr::AttrIter;
-use crate::netlink::builder::MessageBuilder;
-use crate::netlink::connection::Connection;
-use crate::netlink::error::{Error, Result};
-use crate::netlink::genl::{
-    CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
+use super::{types::*, *};
+use crate::netlink::{
+    attr::AttrIter,
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    genl::{CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr},
+    message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
+    protocol::{AsyncProtocolInit, Nl80211, ProtocolState},
+    socket::NetlinkSocket,
 };
-use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{AsyncProtocolInit, Nl80211, ProtocolState};
-use crate::netlink::socket::NetlinkSocket;
 
 impl AsyncProtocolInit for Nl80211 {
     async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
@@ -39,6 +38,7 @@ impl Connection<Nl80211> {
     /// let conn = Connection::<Nl80211>::new_async().await?;
     /// let ifaces = conn.get_interfaces().await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "new_async"))]
     pub async fn new_async() -> Result<Self> {
         let socket = NetlinkSocket::new(Nl80211::PROTOCOL)?;
         let resolved = resolve_nl80211_family(&socket).await?;
@@ -110,6 +110,7 @@ impl Connection<Nl80211> {
     ///     println!("{}: {:?}", iface.name.as_deref().unwrap_or("?"), iface.iftype);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_interfaces"))]
     pub async fn get_interfaces(&self) -> Result<Vec<WirelessInterface>> {
         let responses = self.nl80211_dump(NL80211_CMD_GET_INTERFACE).await?;
         let mut interfaces = Vec::new();
@@ -125,12 +126,14 @@ impl Connection<Nl80211> {
     }
 
     /// Get a specific wireless interface by name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_interface"))]
     pub async fn get_interface(&self, name: &str) -> Result<Option<WirelessInterface>> {
         let ifaces = self.get_interfaces().await?;
         Ok(ifaces.into_iter().find(|i| i.name.as_deref() == Some(name)))
     }
 
     /// Get a specific wireless interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_interface_by_index"))]
     pub async fn get_interface_by_index(&self, ifindex: u32) -> Result<Option<WirelessInterface>> {
         let ifaces = self.get_interfaces().await?;
         Ok(ifaces.into_iter().find(|i| i.ifindex == ifindex))
@@ -148,12 +151,14 @@ impl Connection<Nl80211> {
     /// # Errors
     ///
     /// Returns `Error::Kernel` with `EBUSY` if a scan is already in progress.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "trigger_scan"))]
     pub async fn trigger_scan(&self, iface: &str, request: &ScanRequest) -> Result<()> {
         let ifindex = self.resolve_ifindex(iface).await?;
         self.trigger_scan_by_index(ifindex, request).await
     }
 
     /// Trigger a scan by interface index (namespace-safe).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "trigger_scan_by_index"))]
     pub async fn trigger_scan_by_index(&self, ifindex: u32, request: &ScanRequest) -> Result<()> {
         let family_id = self.state().family_id;
 
@@ -193,12 +198,18 @@ impl Connection<Nl80211> {
     ///
     /// Returns the most recent scan results. Call `trigger_scan()` first
     /// to ensure fresh results.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_scan_results"))]
     pub async fn get_scan_results(&self, iface: &str) -> Result<Vec<ScanResult>> {
         let ifindex = self.resolve_ifindex(iface).await?;
         self.get_scan_results_by_index(ifindex).await
     }
 
     /// Get scan results by interface index (namespace-safe).
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "get_scan_results_by_index")
+    )]
     pub async fn get_scan_results_by_index(&self, ifindex: u32) -> Result<Vec<ScanResult>> {
         let family_id = self.state().family_id;
 
@@ -237,24 +248,28 @@ impl Connection<Nl80211> {
     // =========================================================================
 
     /// Get station info for the currently associated AP.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_station"))]
     pub async fn get_station(&self, iface: &str) -> Result<Option<StationInfo>> {
         let stations = self.get_stations(iface).await?;
         Ok(stations.into_iter().next())
     }
 
     /// Get station info by interface index (namespace-safe).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_station_by_index"))]
     pub async fn get_station_by_index(&self, ifindex: u32) -> Result<Option<StationInfo>> {
         let stations = self.get_stations_by_index(ifindex).await?;
         Ok(stations.into_iter().next())
     }
 
     /// List all stations (useful in AP mode).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_stations"))]
     pub async fn get_stations(&self, iface: &str) -> Result<Vec<StationInfo>> {
         let ifindex = self.resolve_ifindex(iface).await?;
         self.get_stations_by_index(ifindex).await
     }
 
     /// List all stations by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_stations_by_index"))]
     pub async fn get_stations_by_index(&self, ifindex: u32) -> Result<Vec<StationInfo>> {
         let family_id = self.state().family_id;
 
@@ -288,6 +303,7 @@ impl Connection<Nl80211> {
     // =========================================================================
 
     /// List all physical wireless devices.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_phys"))]
     pub async fn get_phys(&self) -> Result<Vec<PhyInfo>> {
         let responses = self.nl80211_dump(NL80211_CMD_GET_WIPHY).await?;
         let mut phys = Vec::new();
@@ -303,6 +319,7 @@ impl Connection<Nl80211> {
     }
 
     /// Get capabilities of a specific physical device.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_phy"))]
     pub async fn get_phy(&self, wiphy: u32) -> Result<Option<PhyInfo>> {
         let phys = self.get_phys().await?;
         Ok(phys.into_iter().find(|p| p.index == wiphy))
@@ -313,6 +330,7 @@ impl Connection<Nl80211> {
     // =========================================================================
 
     /// Get the current regulatory domain.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_regulatory"))]
     pub async fn get_regulatory(&self) -> Result<RegulatoryDomain> {
         let family_id = self.state().family_id;
 
@@ -353,12 +371,14 @@ impl Connection<Nl80211> {
     /// # Errors
     ///
     /// Returns `Error::Kernel` with `EALREADY` if already connected.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "connect"))]
     pub async fn connect(&self, iface: &str, request: ConnectRequest) -> Result<()> {
         let ifindex = self.resolve_ifindex(iface).await?;
         self.connect_by_index(ifindex, request).await
     }
 
     /// Connect by interface index (namespace-safe).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "connect_by_index"))]
     pub async fn connect_by_index(&self, ifindex: u32, request: ConnectRequest) -> Result<()> {
         let family_id = self.state().family_id;
 
@@ -387,12 +407,14 @@ impl Connection<Nl80211> {
     }
 
     /// Disconnect from the current network.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "disconnect"))]
     pub async fn disconnect(&self, iface: &str) -> Result<()> {
         let ifindex = self.resolve_ifindex(iface).await?;
         self.disconnect_by_index(ifindex).await
     }
 
     /// Disconnect by interface index (namespace-safe).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "disconnect_by_index"))]
     pub async fn disconnect_by_index(&self, ifindex: u32) -> Result<()> {
         let family_id = self.state().family_id;
 
@@ -413,6 +435,7 @@ impl Connection<Nl80211> {
     }
 
     /// Set power save mode.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_power_save"))]
     pub async fn set_power_save(&self, iface: &str, enabled: bool) -> Result<()> {
         let ifindex = self.resolve_ifindex(iface).await?;
         let family_id = self.state().family_id;
@@ -441,6 +464,7 @@ impl Connection<Nl80211> {
     }
 
     /// Get power save mode.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_power_save"))]
     pub async fn get_power_save(&self, iface: &str) -> Result<PowerSaveState> {
         let ifindex = self.resolve_ifindex(iface).await?;
         let family_id = self.state().family_id;
@@ -500,6 +524,7 @@ impl Connection<Nl80211> {
     /// // Move phy0 to the namespace
     /// nl.set_wiphy_netns(phys[0].index, ns_fd.as_raw_fd()).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wiphy_netns"))]
     pub async fn set_wiphy_netns(&self, wiphy: u32, netns_fd: i32) -> Result<()> {
         let family_id = self.state().family_id;
 
@@ -525,6 +550,7 @@ impl Connection<Nl80211> {
     ///
     /// This is a convenience variant that uses the process PID instead of
     /// a namespace file descriptor.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wiphy_netns_pid"))]
     pub async fn set_wiphy_netns_pid(&self, wiphy: u32, pid: u32) -> Result<()> {
         let family_id = self.state().family_id;
 

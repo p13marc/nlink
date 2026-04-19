@@ -59,16 +59,20 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use super::attr::AttrIter;
-use super::builder::MessageBuilder;
-use super::connection::Connection;
-use super::error::{Error, Result};
-use super::interface_ref::InterfaceRef;
-use super::message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgType};
-use super::protocol::Route;
-use super::types::mpls::lwtunnel_encap;
-use super::types::route::{RtMsg, RtaAttr};
-use super::types::srv6::{Ipv6SrHdr, seg6_iptunnel, seg6_local, seg6_local_action, seg6_mode};
+use super::{
+    attr::AttrIter,
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    interface_ref::InterfaceRef,
+    message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgType},
+    protocol::Route,
+    types::{
+        mpls::lwtunnel_encap,
+        route::{RtMsg, RtaAttr},
+        srv6::{Ipv6SrHdr, seg6_iptunnel, seg6_local, seg6_local_action, seg6_mode},
+    },
+};
 
 /// NLM_F_REPLACE flag.
 const NLM_F_REPLACE: u16 = 0x100;
@@ -841,6 +845,7 @@ impl Connection<Route> {
     ///     println!("SID {:?}: {:?}", route.sid, route.action);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_srv6_local_routes"))]
     pub async fn get_srv6_local_routes(&self) -> Result<Vec<Srv6LocalRoute>> {
         let rtmsg = RtMsg::new().with_family(AF_INET6);
 
@@ -897,6 +902,7 @@ impl Connection<Route> {
     ///         .dev("eth0")
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_srv6_local"))]
     pub async fn add_srv6_local(&self, builder: Srv6LocalBuilder) -> Result<()> {
         let ifindex = self.resolve_srv6_interface(&builder).await?;
         let mut msg = MessageBuilder::new(
@@ -910,6 +916,7 @@ impl Connection<Route> {
     }
 
     /// Replace an SRv6 local route (add or update).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_srv6_local"))]
     pub async fn replace_srv6_local(&self, builder: Srv6LocalBuilder) -> Result<()> {
         let ifindex = self.resolve_srv6_interface(&builder).await?;
         let mut msg = MessageBuilder::new(
@@ -929,6 +936,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_srv6_local("fc00:1::100".parse()?).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_srv6_local"))]
     pub async fn del_srv6_local(&self, sid: Ipv6Addr) -> Result<()> {
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK);
 

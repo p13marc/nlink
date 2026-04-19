@@ -290,6 +290,7 @@ impl Connection<FibLookup> {
     ///         result.route_type, result.table_id, result.prefix_len);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "lookup"))]
     pub async fn lookup(&self, addr: Ipv4Addr) -> Result<FibLookupResult> {
         self.lookup_with_options(FibResultNl::for_addr(addr)).await
     }
@@ -306,6 +307,7 @@ impl Connection<FibLookup> {
     /// // Look up in table 254 (main)
     /// let result = conn.lookup_in_table(Ipv4Addr::new(10, 0, 0, 1), 254).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "lookup_in_table"))]
     pub async fn lookup_in_table(&self, addr: Ipv4Addr, table: u8) -> Result<FibLookupResult> {
         self.lookup_with_options(FibResultNl::for_addr_in_table(addr, table))
             .await
@@ -324,6 +326,7 @@ impl Connection<FibLookup> {
     /// let conn = Connection::<FibLookup>::new()?;
     /// let result = conn.lookup_with_mark(Ipv4Addr::new(8, 8, 8, 8), 0x100).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "lookup_with_mark"))]
     pub async fn lookup_with_mark(&self, addr: Ipv4Addr, mark: u32) -> Result<FibLookupResult> {
         self.lookup_with_options(FibResultNl::for_addr_with_mark(addr, mark))
             .await
@@ -348,6 +351,7 @@ impl Connection<FibLookup> {
     /// };
     /// let result = conn.lookup_with_options(request).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "lookup_with_options"))]
     pub async fn lookup_with_options(&self, request: FibResultNl) -> Result<FibLookupResult> {
         let seq = self.socket().next_seq();
         let pid = self.socket().pid();

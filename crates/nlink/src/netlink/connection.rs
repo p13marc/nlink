@@ -644,6 +644,7 @@ impl Connection<Route> {
     ///     println!("{}: {}", link.ifindex(), link.name.as_deref().unwrap_or("?"));
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_links"))]
     pub async fn get_links(&self) -> Result<Vec<LinkMessage>> {
         self.dump_typed(NlMsgType::RTM_GETLINK).await
     }
@@ -651,6 +652,7 @@ impl Connection<Route> {
     /// Get a network interface by name.
     ///
     /// Returns `None` if the interface doesn't exist.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_by_name"))]
     pub async fn get_link_by_name(
         &self,
         name: impl Into<InterfaceRef>,
@@ -670,6 +672,7 @@ impl Connection<Route> {
     /// Get a network interface by index.
     ///
     /// Returns `None` if the interface doesn't exist.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_by_index"))]
     pub async fn get_link_by_index(&self, index: u32) -> Result<Option<LinkMessage>> {
         let links = self.get_links().await?;
         Ok(links.into_iter().find(|l| l.ifindex() == index))
@@ -701,6 +704,7 @@ impl Connection<Route> {
     /// let ifindex = conn.resolve_interface(&InterfaceRef::index(2)).await?;
     /// assert_eq!(ifindex, 2);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "resolve_interface"))]
     pub async fn resolve_interface(&self, iface: &InterfaceRef) -> Result<u32> {
         match iface {
             InterfaceRef::Index(idx) => Ok(*idx),
@@ -717,6 +721,7 @@ impl Connection<Route> {
     /// Resolve an optional interface reference.
     ///
     /// Returns `None` if the input is `None`, otherwise resolves the reference.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "resolve_interface_opt"))]
     pub async fn resolve_interface_opt(&self, iface: Option<&InterfaceRef>) -> Result<Option<u32>> {
         match iface {
             Some(iface) => Ok(Some(self.resolve_interface(iface).await?)),
@@ -739,6 +744,7 @@ impl Connection<Route> {
     ///     println!("{}: {:?}", name, addr.address);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_interface_names"))]
     pub async fn get_interface_names(&self) -> Result<std::collections::HashMap<u32, String>> {
         let links = self.get_links().await?;
         Ok(links
@@ -762,6 +768,7 @@ impl Connection<Route> {
     ///     println!("Route via {}", name);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "interface_name"))]
     pub async fn interface_name(&self, ifindex: u32) -> Result<Option<String>> {
         let link = self.get_link_by_index(ifindex).await?;
         Ok(link.and_then(|l| l.name))
@@ -778,6 +785,7 @@ impl Connection<Route> {
     /// let dev = conn.interface_name_or(route.oif.unwrap_or(0), "-").await?;
     /// println!("Route via {}", dev);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "interface_name_or"))]
     pub async fn interface_name_or(&self, ifindex: u32, default: &str) -> Result<String> {
         Ok(self
             .interface_name(ifindex)
@@ -799,6 +807,7 @@ impl Connection<Route> {
     /// let info = conn.get_bond_info("bond0").await?;
     /// println!("Mode: {:?}, miimon: {}ms", info.bond_mode(), info.miimon);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_bond_info"))]
     pub async fn get_bond_info(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -825,6 +834,7 @@ impl Connection<Route> {
     ///         link.name_or("?"), info.state, info.mii_status);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_bond_slaves"))]
     pub async fn get_bond_slaves(
         &self,
         bond: impl Into<InterfaceRef>,
@@ -854,6 +864,7 @@ impl Connection<Route> {
     ///     println!("{:?}/{} on idx {}", addr.address, addr.prefix_len(), addr.ifindex());
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_addresses"))]
     pub async fn get_addresses(&self) -> Result<Vec<AddressMessage>> {
         self.dump_typed(NlMsgType::RTM_GETADDR).await
     }
@@ -861,6 +872,7 @@ impl Connection<Route> {
     /// Get IP addresses for a specific interface.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_addresses_by_name"))]
     pub async fn get_addresses_by_name(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -870,6 +882,7 @@ impl Connection<Route> {
     }
 
     /// Get IP addresses for a specific interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_addresses_by_index"))]
     pub async fn get_addresses_by_index(&self, ifindex: u32) -> Result<Vec<AddressMessage>> {
         let addresses = self.get_addresses().await?;
         Ok(addresses
@@ -892,6 +905,7 @@ impl Connection<Route> {
     ///     println!("Found on interface index {}", addr.ifindex());
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_address_by_ip"))]
     pub async fn get_address_by_ip(
         &self,
         addr: std::net::IpAddr,
@@ -910,11 +924,13 @@ impl Connection<Route> {
     ///     println!("{:?}/{}", route.destination(), route.dst_len());
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_routes"))]
     pub async fn get_routes(&self) -> Result<Vec<RouteMessage>> {
         self.dump_typed(NlMsgType::RTM_GETROUTE).await
     }
 
     /// Get routes for a specific table.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_routes_for_table"))]
     pub async fn get_routes_for_table(&self, table_id: u32) -> Result<Vec<RouteMessage>> {
         let routes = self.get_routes().await?;
         Ok(routes
@@ -940,6 +956,7 @@ impl Connection<Route> {
     ///     println!("Gateway: {:?}", route.gateway);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_route_v4"))]
     pub async fn get_route_v4(
         &self,
         destination: std::net::Ipv4Addr,
@@ -991,6 +1008,7 @@ impl Connection<Route> {
     ///     println!("Gateway: {:?}", route.gateway);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_route_v6"))]
     pub async fn get_route_v6(
         &self,
         destination: std::net::Ipv6Addr,
@@ -1031,6 +1049,7 @@ impl Connection<Route> {
     ///     println!("{:?} -> {:?}", neigh.destination, neigh.lladdr);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_neighbors"))]
     pub async fn get_neighbors(&self) -> Result<Vec<NeighborMessage>> {
         self.dump_typed(NlMsgType::RTM_GETNEIGH).await
     }
@@ -1040,6 +1059,7 @@ impl Connection<Route> {
     /// Accepts either an interface name or index via [`InterfaceRef`].
     ///
     /// See also [`get_neighbors_by_index`](Self::get_neighbors_by_index) in the neighbor module.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_neighbors_by_name"))]
     pub async fn get_neighbors_by_name(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -1058,6 +1078,7 @@ impl Connection<Route> {
     ///     println!("{}: {:?} -> table {}", rule.priority, rule.source, rule.table);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules"))]
     pub async fn get_rules(&self) -> Result<Vec<RuleMessage>> {
         self.dump_typed(NlMsgType::RTM_GETRULE).await
     }
@@ -1067,17 +1088,20 @@ impl Connection<Route> {
     /// # Arguments
     ///
     /// * `family` - Address family: `libc::AF_INET` for IPv4, `libc::AF_INET6` for IPv6
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_for_family"))]
     pub async fn get_rules_for_family(&self, family: u8) -> Result<Vec<RuleMessage>> {
         let rules = self.get_rules().await?;
         Ok(rules.into_iter().filter(|r| r.family() == family).collect())
     }
 
     /// Get IPv4 routing rules.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_v4"))]
     pub async fn get_rules_v4(&self) -> Result<Vec<RuleMessage>> {
         self.get_rules_for_family(libc::AF_INET as u8).await
     }
 
     /// Get IPv6 routing rules.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_v6"))]
     pub async fn get_rules_v6(&self) -> Result<Vec<RuleMessage>> {
         self.get_rules_for_family(libc::AF_INET6 as u8).await
     }
@@ -1099,6 +1123,7 @@ impl Connection<Route> {
     ///         .table(100)
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_rule"))]
     pub async fn add_rule(&self, rule: super::rule::RuleBuilder) -> Result<()> {
         let builder = rule.build()?;
         self.send_ack(builder)
@@ -1118,6 +1143,7 @@ impl Connection<Route> {
     ///         .priority(100)
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rule"))]
     pub async fn del_rule(&self, rule: super::rule::RuleBuilder) -> Result<()> {
         let builder = rule.build_delete()?;
         self.send_ack(builder)
@@ -1126,6 +1152,7 @@ impl Connection<Route> {
     }
 
     /// Delete a rule by priority.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rule_by_priority"))]
     pub async fn del_rule_by_priority(&self, family: u8, priority: u32) -> Result<()> {
         let rule = super::rule::RuleBuilder::new(family).priority(priority);
         self.del_rule(rule).await
@@ -1134,6 +1161,7 @@ impl Connection<Route> {
     /// Flush all non-default routing rules for a family.
     ///
     /// This deletes all rules except the default ones (priority 0, 32766, 32767).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_rules"))]
     pub async fn flush_rules(&self, family: u8) -> Result<()> {
         let rules = self.get_rules_for_family(family).await?;
 
@@ -1160,6 +1188,7 @@ impl Connection<Route> {
     ///     println!("{}: {}", qdisc.ifindex(), qdisc.kind().unwrap_or("?"));
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_qdiscs"))]
     pub async fn get_qdiscs(&self) -> Result<Vec<TcMessage>> {
         self.dump_typed(NlMsgType::RTM_GETQDISC).await
     }
@@ -1167,6 +1196,7 @@ impl Connection<Route> {
     /// Get qdiscs for a specific interface.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_qdiscs_by_name"))]
     pub async fn get_qdiscs_by_name(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -1176,6 +1206,7 @@ impl Connection<Route> {
     }
 
     /// Get qdiscs for a specific interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_qdiscs_by_index"))]
     pub async fn get_qdiscs_by_index(&self, ifindex: u32) -> Result<Vec<TcMessage>> {
         let qdiscs = self.get_qdiscs().await?;
         Ok(qdiscs
@@ -1185,6 +1216,7 @@ impl Connection<Route> {
     }
 
     /// Get all TC classes.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_classes"))]
     pub async fn get_classes(&self) -> Result<Vec<TcMessage>> {
         self.dump_typed(NlMsgType::RTM_GETTCLASS).await
     }
@@ -1192,6 +1224,7 @@ impl Connection<Route> {
     /// Get TC classes for a specific interface.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_classes_by_name"))]
     pub async fn get_classes_by_name(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -1201,6 +1234,7 @@ impl Connection<Route> {
     }
 
     /// Get TC classes for a specific interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_classes_by_index"))]
     pub async fn get_classes_by_index(&self, ifindex: u32) -> Result<Vec<TcMessage>> {
         let classes = self.get_classes().await?;
         Ok(classes
@@ -1210,6 +1244,7 @@ impl Connection<Route> {
     }
 
     /// Get all TC filters.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_filters"))]
     pub async fn get_filters(&self) -> Result<Vec<TcMessage>> {
         self.dump_typed(NlMsgType::RTM_GETTFILTER).await
     }
@@ -1217,6 +1252,7 @@ impl Connection<Route> {
     /// Get TC filters for a specific interface.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_filters_by_name"))]
     pub async fn get_filters_by_name(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -1226,6 +1262,7 @@ impl Connection<Route> {
     }
 
     /// Get TC filters for a specific interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_filters_by_index"))]
     pub async fn get_filters_by_index(&self, ifindex: u32) -> Result<Vec<TcMessage>> {
         let filters = self.get_filters().await?;
         Ok(filters
@@ -1244,6 +1281,7 @@ impl Connection<Route> {
     /// `parent` accepts the standard `tc` handle syntax: `"1:"`, `"1:5"`,
     /// `"root"`, `"ingress"`, `"clsact"`. Returns `Error::InvalidMessage`
     /// for unparseable handles.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_filters_by_parent"))]
     pub async fn get_filters_by_parent(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -1256,6 +1294,11 @@ impl Connection<Route> {
     /// Get TC filters by interface index, filtered by parent handle.
     ///
     /// Namespace-safe variant of [`Connection::get_filters_by_parent`].
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "get_filters_by_parent_index")
+    )]
     pub async fn get_filters_by_parent_index(
         &self,
         ifindex: u32,
@@ -1281,6 +1324,7 @@ impl Connection<Route> {
     ///     println!("Chain: {}", chain);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_tc_chains"))]
     pub async fn get_tc_chains(
         &self,
         ifname: impl Into<InterfaceRef>,
@@ -1291,6 +1335,7 @@ impl Connection<Route> {
     }
 
     /// Get all TC filter chains for an interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_tc_chains_by_index"))]
     pub async fn get_tc_chains_by_index(&self, ifindex: u32, parent: TcHandle) -> Result<Vec<u32>> {
         use super::types::tc::TcMsg;
 
@@ -1330,6 +1375,7 @@ impl Connection<Route> {
     /// // Create chain 100 on ingress qdisc
     /// conn.add_tc_chain("eth0", "ingress", 100).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_tc_chain"))]
     pub async fn add_tc_chain(
         &self,
         ifname: impl Into<InterfaceRef>,
@@ -1341,6 +1387,7 @@ impl Connection<Route> {
     }
 
     /// Add a TC filter chain by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_tc_chain_by_index"))]
     pub async fn add_tc_chain_by_index(
         &self,
         ifindex: u32,
@@ -1371,6 +1418,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_tc_chain("eth0", "ingress", 100).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_tc_chain"))]
     pub async fn del_tc_chain(
         &self,
         ifname: impl Into<InterfaceRef>,
@@ -1382,6 +1430,7 @@ impl Connection<Route> {
     }
 
     /// Delete a TC filter chain by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_tc_chain_by_index"))]
     pub async fn del_tc_chain_by_index(
         &self,
         ifindex: u32,
@@ -1416,6 +1465,7 @@ impl Connection<Route> {
     ///     println!("Root qdisc: {}", root.kind().unwrap_or("?"));
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_root_qdisc_by_name"))]
     pub async fn get_root_qdisc_by_name(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -1427,6 +1477,7 @@ impl Connection<Route> {
     /// Get the root qdisc for an interface by index.
     ///
     /// Returns `None` if no root qdisc is configured.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_root_qdisc_by_index"))]
     pub async fn get_root_qdisc_by_index(&self, ifindex: u32) -> Result<Option<TcMessage>> {
         let qdiscs = self.get_qdiscs().await?;
         Ok(qdiscs
@@ -1444,6 +1495,7 @@ impl Connection<Route> {
     ///     println!("Found qdisc: {}", qdisc.kind().unwrap_or("?"));
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_qdisc_by_handle"))]
     pub async fn get_qdisc_by_handle(
         &self,
         ifname: &str,
@@ -1465,6 +1517,11 @@ impl Connection<Route> {
     ///     println!("Found qdisc: {}", qdisc.kind().unwrap_or("?"));
     /// }
     /// ```
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "get_qdisc_by_handle_index")
+    )]
     pub async fn get_qdisc_by_handle_index(
         &self,
         ifindex: u32,
@@ -1498,6 +1555,7 @@ impl Connection<Route> {
     ///     }
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_netem_by_name"))]
     pub async fn get_netem_by_name(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -1509,6 +1567,7 @@ impl Connection<Route> {
     /// Get netem options for an interface by index.
     ///
     /// Returns `None` if no netem qdisc is configured at root.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_netem_by_index"))]
     pub async fn get_netem_by_index(
         &self,
         ifindex: u32,
@@ -1539,12 +1598,14 @@ impl Connection<Route> {
     /// conn.set_link_up("eth0").await?;
     /// conn.set_link_up(5u32).await?;  // by index
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_up"))]
     pub async fn set_link_up(&self, iface: impl Into<InterfaceRef>) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_up_by_index(ifindex).await
     }
 
     /// Bring a network interface up by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_up_by_index"))]
     pub async fn set_link_up_by_index(&self, ifindex: u32) -> Result<()> {
         self.set_link_state_by_index(ifindex, true).await
     }
@@ -1559,12 +1620,14 @@ impl Connection<Route> {
     /// conn.set_link_down("eth0").await?;
     /// conn.set_link_down(5u32).await?;  // by index
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_down"))]
     pub async fn set_link_down(&self, iface: impl Into<InterfaceRef>) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_down_by_index(ifindex).await
     }
 
     /// Bring a network interface down by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_down_by_index"))]
     pub async fn set_link_down_by_index(&self, ifindex: u32) -> Result<()> {
         self.set_link_state_by_index(ifindex, false).await
     }
@@ -1587,12 +1650,14 @@ impl Connection<Route> {
     /// // Bring interface down by index
     /// conn.set_link_state(5u32, false).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_state"))]
     pub async fn set_link_state(&self, iface: impl Into<InterfaceRef>, up: bool) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_state_by_index(ifindex, up).await
     }
 
     /// Set the state of a network interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_state_by_index"))]
     pub async fn set_link_state_by_index(&self, ifindex: u32, up: bool) -> Result<()> {
         let mut ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
@@ -1629,12 +1694,14 @@ impl Connection<Route> {
     /// conn.set_link_mtu("eth0", 9000).await?;
     /// conn.set_link_mtu(5u32, 9000).await?;  // by index
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_mtu"))]
     pub async fn set_link_mtu(&self, iface: impl Into<InterfaceRef>, mtu: u32) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_mtu_by_index(ifindex, mtu).await
     }
 
     /// Set the MTU of a network interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_mtu_by_index"))]
     pub async fn set_link_mtu_by_index(&self, ifindex: u32, mtu: u32) -> Result<()> {
         use super::types::link::IflaAttr;
 
@@ -1659,12 +1726,14 @@ impl Connection<Route> {
     /// conn.del_link("veth0").await?;
     /// conn.del_link(5u32).await?;  // by index
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_link"))]
     pub async fn del_link(&self, iface: impl Into<InterfaceRef>) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.del_link_by_index(ifindex).await
     }
 
     /// Delete a network interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_link_by_index"))]
     pub async fn del_link_by_index(&self, ifindex: u32) -> Result<()> {
         let ifinfo = IfInfoMsg::new().with_index(ifindex as i32);
 
@@ -1692,12 +1761,14 @@ impl Connection<Route> {
     /// conn.set_link_txqlen("eth0", 1000).await?;
     /// conn.set_link_txqlen(5u32, 1000).await?;  // by index
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_txqlen"))]
     pub async fn set_link_txqlen(&self, iface: impl Into<InterfaceRef>, txqlen: u32) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.set_link_txqlen_by_index(ifindex, txqlen).await
     }
 
     /// Set the TX queue length of a network interface by index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_txqlen_by_index"))]
     pub async fn set_link_txqlen_by_index(&self, ifindex: u32, txqlen: u32) -> Result<()> {
         use super::types::link::IflaAttr;
 
@@ -1742,6 +1813,7 @@ impl Connection<Route> {
     /// let nsid = conn.get_nsid(ns_file.as_raw_fd()).await?;
     /// println!("Namespace ID: {}", nsid);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_nsid"))]
     pub async fn get_nsid(&self, ns_fd: RawFd) -> Result<u32> {
         let mut builder = ack_request(RTM_GETNSID);
 
@@ -1782,6 +1854,7 @@ impl Connection<Route> {
     /// let nsid = conn.get_nsid_for_pid(1234).await?;
     /// println!("Namespace ID for PID 1234: {}", nsid);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_nsid_for_pid"))]
     pub async fn get_nsid_for_pid(&self, pid: u32) -> Result<u32> {
         let mut builder = ack_request(RTM_GETNSID);
 
@@ -1838,17 +1911,24 @@ impl Connection<Generic> {
     /// let wg = conn.get_family("wireguard").await?;
     /// println!("WireGuard family ID: {}", wg.id);
     /// ```
+    #[instrument(level = "info", skip(self), fields(family = %name, id, cached))]
     pub async fn get_family(&self, name: &str) -> Result<FamilyInfo> {
         // Check cache first
         {
             let cache = self.state.cache.read().unwrap();
             if let Some(info) = cache.get(name) {
+                let span = tracing::Span::current();
+                span.record("id", info.id);
+                span.record("cached", true);
                 return Ok(info.clone());
             }
         }
 
         // Query kernel for family info
         let info = self.query_family(name).await?;
+        let span = tracing::Span::current();
+        span.record("id", info.id);
+        span.record("cached", false);
 
         // Cache the result
         {
@@ -1862,6 +1942,7 @@ impl Connection<Generic> {
     /// Get the family ID for a given family name.
     ///
     /// This is a convenience method that returns just the ID.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_family_id"))]
     pub async fn get_family_id(&self, name: &str) -> Result<u16> {
         Ok(self.get_family(name).await?.id)
     }
@@ -2025,6 +2106,7 @@ impl Connection<Generic> {
     ///
     /// This is a low-level method for sending arbitrary GENL commands.
     /// Family-specific wrappers (like `Connection<Wireguard>`) should use this.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "command"))]
     pub async fn command(
         &self,
         family_id: u16,
@@ -2057,6 +2139,7 @@ impl Connection<Generic> {
     }
 
     /// Send a GENL dump command and collect all responses.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "dump_command"))]
     pub async fn dump_command(
         &self,
         family_id: u16,

@@ -52,15 +52,14 @@
 //! }
 //! ```
 
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use tokio_stream::Stream;
 
-use super::connection::Connection;
-use super::error::Result;
-use super::message::MessageIter;
-use super::protocol::ProtocolState;
+use super::{connection::Connection, error::Result, message::MessageIter, protocol::ProtocolState};
 
 /// Sealed trait module to prevent external implementations.
 mod private {
@@ -147,6 +146,11 @@ impl<P: EventSource> Stream for EventSubscription<'_, P> {
 
                     // Parse all events from the buffer
                     this.pending = P::parse_events(&this.buffer);
+                    tracing::trace!(
+                        protocol = std::any::type_name::<P>(),
+                        events = this.pending.len(),
+                        "delivered multicast batch"
+                    );
 
                     // Reverse so we pop in the correct order
                     this.pending.reverse();
@@ -238,6 +242,11 @@ impl<P: EventSource> Stream for OwnedEventStream<P> {
 
                     // Parse all events from the buffer
                     this.pending = P::parse_events(&this.buffer);
+                    tracing::trace!(
+                        protocol = std::any::type_name::<P>(),
+                        events = this.pending.len(),
+                        "delivered multicast batch (owned stream)"
+                    );
 
                     // Reverse so we pop in the correct order
                     this.pending.reverse();
@@ -322,14 +331,16 @@ impl<P: EventSource> Connection<P> {
 // EventSource implementations
 // ============================================================================
 
-use super::connector::ProcEvent;
-use super::events::NetworkEvent;
-use super::message::NlMsgType;
-use super::messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage};
-use super::parse::FromNetlink;
-use super::protocol::{Connector, Devlink, Ethtool, KobjectUevent, Nl80211, Route, SELinux};
-use super::selinux::SELinuxEvent;
-use super::uevent::Uevent;
+use super::{
+    connector::ProcEvent,
+    events::NetworkEvent,
+    message::NlMsgType,
+    messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage},
+    parse::FromNetlink,
+    protocol::{Connector, Devlink, Ethtool, KobjectUevent, Nl80211, Route, SELinux},
+    selinux::SELinuxEvent,
+    uevent::Uevent,
+};
 
 // Route protocol events
 impl private::Sealed for Route {}
@@ -483,8 +494,9 @@ impl EventSource for SELinux {
 }
 
 fn parse_selinux_event(data: &[u8]) -> Option<SELinuxEvent> {
-    use super::selinux::{SelnlMsgPolicyload, SelnlMsgSetenforce};
     use zerocopy::FromBytes;
+
+    use super::selinux::{SelnlMsgPolicyload, SelnlMsgSetenforce};
 
     const NLMSG_HDRLEN: usize = 16;
     const SELNL_MSG_SETENFORCE: u16 = 0x10;
@@ -524,15 +536,18 @@ impl EventSource for Devlink {
 }
 
 fn parse_devlink_events(data: &[u8]) -> Vec<super::genl::devlink::DevlinkEvent> {
-    use super::genl::devlink::{
-        DEVLINK_ATTR_BUS_NAME, DEVLINK_ATTR_DEV_NAME, DEVLINK_ATTR_FLASH_UPDATE_COMPONENT,
-        DEVLINK_ATTR_FLASH_UPDATE_STATUS_DONE, DEVLINK_ATTR_FLASH_UPDATE_STATUS_MSG,
-        DEVLINK_ATTR_FLASH_UPDATE_STATUS_TOTAL, DEVLINK_ATTR_HEALTH_REPORTER,
-        DEVLINK_ATTR_HEALTH_REPORTER_NAME, DEVLINK_ATTR_PORT_INDEX, DEVLINK_ATTR_PORT_NETDEV_NAME,
-        DEVLINK_CMD_FLASH_UPDATE_STATUS, DEVLINK_CMD_GET, DEVLINK_CMD_HEALTH_REPORTER_RECOVER,
-        DEVLINK_CMD_PORT_DEL, DEVLINK_CMD_PORT_NEW, DevlinkEvent, FlashProgress,
+    use super::genl::{
+        GENL_HDRLEN, GenlMsgHdr,
+        devlink::{
+            DEVLINK_ATTR_BUS_NAME, DEVLINK_ATTR_DEV_NAME, DEVLINK_ATTR_FLASH_UPDATE_COMPONENT,
+            DEVLINK_ATTR_FLASH_UPDATE_STATUS_DONE, DEVLINK_ATTR_FLASH_UPDATE_STATUS_MSG,
+            DEVLINK_ATTR_FLASH_UPDATE_STATUS_TOTAL, DEVLINK_ATTR_HEALTH_REPORTER,
+            DEVLINK_ATTR_HEALTH_REPORTER_NAME, DEVLINK_ATTR_PORT_INDEX,
+            DEVLINK_ATTR_PORT_NETDEV_NAME, DEVLINK_CMD_FLASH_UPDATE_STATUS, DEVLINK_CMD_GET,
+            DEVLINK_CMD_HEALTH_REPORTER_RECOVER, DEVLINK_CMD_PORT_DEL, DEVLINK_CMD_PORT_NEW,
+            DevlinkEvent, FlashProgress,
+        },
     };
-    use super::genl::{GENL_HDRLEN, GenlMsgHdr};
 
     let mut events = Vec::new();
 
@@ -680,15 +695,16 @@ impl EventSource for Nl80211 {
 }
 
 fn parse_nl80211_events(data: &[u8]) -> Vec<super::genl::nl80211::Nl80211Event> {
-    use super::genl::nl80211::InterfaceType;
-    use super::genl::nl80211::{
-        NL80211_ATTR_IFINDEX, NL80211_ATTR_IFNAME, NL80211_ATTR_IFTYPE, NL80211_ATTR_MAC,
-        NL80211_ATTR_REASON_CODE, NL80211_ATTR_REG_ALPHA2, NL80211_ATTR_STATUS_CODE,
-        NL80211_CMD_CONNECT, NL80211_CMD_DEL_INTERFACE, NL80211_CMD_DISCONNECT,
-        NL80211_CMD_NEW_INTERFACE, NL80211_CMD_NEW_SCAN_RESULTS, NL80211_CMD_REG_CHANGE,
-        NL80211_CMD_SCAN_ABORTED, Nl80211Event,
+    use super::genl::{
+        GENL_HDRLEN, GenlMsgHdr,
+        nl80211::{
+            InterfaceType, NL80211_ATTR_IFINDEX, NL80211_ATTR_IFNAME, NL80211_ATTR_IFTYPE,
+            NL80211_ATTR_MAC, NL80211_ATTR_REASON_CODE, NL80211_ATTR_REG_ALPHA2,
+            NL80211_ATTR_STATUS_CODE, NL80211_CMD_CONNECT, NL80211_CMD_DEL_INTERFACE,
+            NL80211_CMD_DISCONNECT, NL80211_CMD_NEW_INTERFACE, NL80211_CMD_NEW_SCAN_RESULTS,
+            NL80211_CMD_REG_CHANGE, NL80211_CMD_SCAN_ABORTED, Nl80211Event,
+        },
     };
-    use super::genl::{GENL_HDRLEN, GenlMsgHdr};
 
     let mut events = Vec::new();
 
@@ -832,14 +848,16 @@ fn parse_ethtool_events(data: &[u8]) -> Vec<super::genl::ethtool::EthtoolEvent> 
 }
 
 fn parse_ethtool_event(cmd: u8, data: &[u8]) -> Option<super::genl::ethtool::EthtoolEvent> {
-    use super::attr::AttrIter;
-    use super::genl::ethtool::{
-        Channels, Coalesce, EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolEvent,
-        EthtoolFeaturesAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr,
-        EthtoolLinkstateAttr, EthtoolPauseAttr, EthtoolRingsAttr, Features, LinkExtState, LinkInfo,
-        LinkModes, LinkState, Pause, Rings,
+    use super::{
+        attr::AttrIter,
+        genl::ethtool::{
+            Channels, Coalesce, Duplex, EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr,
+            EthtoolEvent, EthtoolFeaturesAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr,
+            EthtoolLinkmodesAttr, EthtoolLinkstateAttr, EthtoolPauseAttr, EthtoolRingsAttr,
+            Features, LinkExtState, LinkInfo, LinkModes, LinkState, MdiX, Pause, Port, Rings,
+            Transceiver,
+        },
     };
-    use super::genl::ethtool::{Duplex, MdiX, Port, Transceiver};
 
     // Helper to parse header
     fn parse_header(data: &[u8]) -> (Option<String>, Option<u32>) {

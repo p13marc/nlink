@@ -577,6 +577,11 @@ impl Connection<Xfrm> {
     ///         sa.src_addr, sa.dst_addr, sa.spi, sa.protocol);
     /// }
     /// ```
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "get_security_associations")
+    )]
     pub async fn get_security_associations(&self) -> Result<Vec<SecurityAssociation>> {
         let seq = self.socket().next_seq();
         let pid = self.socket().pid();
@@ -666,6 +671,7 @@ impl Connection<Xfrm> {
     ///         pol.direction, pol.action, pol.priority);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_security_policies"))]
     pub async fn get_security_policies(&self) -> Result<Vec<SecurityPolicy>> {
         let seq = self.socket().next_seq();
         let pid = self.socket().pid();

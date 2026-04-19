@@ -61,15 +61,19 @@
 
 use std::net::IpAddr;
 
-use super::attr::AttrIter;
-use super::builder::MessageBuilder;
-use super::connection::Connection;
-use super::error::{Error, Result};
-use super::interface_ref::InterfaceRef;
-use super::message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgType};
-use super::protocol::Route;
-use super::types::mpls::{MplsLabelEntry, lwtunnel_encap, mpls_label, mpls_tunnel};
-use super::types::route::{RtMsg, RtaAttr};
+use super::{
+    attr::AttrIter,
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    interface_ref::InterfaceRef,
+    message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgType},
+    protocol::Route,
+    types::{
+        mpls::{MplsLabelEntry, lwtunnel_encap, mpls_label, mpls_tunnel},
+        route::{RtMsg, RtaAttr},
+    },
+};
 
 /// AF_MPLS address family.
 const AF_MPLS: u8 = 28;
@@ -574,6 +578,7 @@ impl Connection<Route> {
     ///     println!("Label {}: {:?}", route.label.0, route.action);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_mpls_routes"))]
     pub async fn get_mpls_routes(&self) -> Result<Vec<MplsRoute>> {
         let rtmsg = RtMsg::new().with_family(AF_MPLS);
 
@@ -612,6 +617,7 @@ impl Connection<Route> {
     ///         .dev("eth0")
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_mpls_route"))]
     pub async fn add_mpls_route(&self, route_builder: MplsRouteBuilder) -> Result<()> {
         let ifindex = self.resolve_mpls_interface(&route_builder).await?;
         let mut msg = MessageBuilder::new(
@@ -625,6 +631,7 @@ impl Connection<Route> {
     }
 
     /// Replace an MPLS route (add or update).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_mpls_route"))]
     pub async fn replace_mpls_route(&self, route_builder: MplsRouteBuilder) -> Result<()> {
         let ifindex = self.resolve_mpls_interface(&route_builder).await?;
         let mut msg = MessageBuilder::new(
@@ -644,6 +651,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_mpls_route(100).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_mpls_route"))]
     pub async fn del_mpls_route(&self, label: u32) -> Result<()> {
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK);
 

@@ -2,16 +2,20 @@
 
 use std::net::IpAddr;
 
-use super::types::{MptcpEndpoint, MptcpEndpointBuilder, MptcpFlags, MptcpLimits};
-use super::{MPTCP_PM_GENL_NAME, MPTCP_PM_GENL_VERSION};
-use crate::netlink::attr::{AttrIter, NLA_F_NESTED, get};
-use crate::netlink::builder::MessageBuilder;
-use crate::netlink::connection::Connection;
-use crate::netlink::error::{Error, Result};
-use crate::netlink::genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr};
-use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{AsyncProtocolInit, Mptcp, ProtocolState};
-use crate::netlink::socket::NetlinkSocket;
+use super::{
+    MPTCP_PM_GENL_NAME, MPTCP_PM_GENL_VERSION,
+    types::{MptcpEndpoint, MptcpEndpointBuilder, MptcpFlags, MptcpLimits},
+};
+use crate::netlink::{
+    attr::{AttrIter, NLA_F_NESTED, get},
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr},
+    message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
+    protocol::{AsyncProtocolInit, Mptcp, ProtocolState},
+    socket::NetlinkSocket,
+};
 
 impl AsyncProtocolInit for Mptcp {
     async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
@@ -34,6 +38,7 @@ impl Connection<Mptcp> {
     /// let conn = Connection::<Mptcp>::new_async().await?;
     /// let endpoints = conn.get_endpoints().await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "new_async"))]
     pub async fn new_async() -> Result<Self> {
         let socket = NetlinkSocket::new(Mptcp::PROTOCOL)?;
         let family_id = resolve_mptcp_family(&socket).await?;
@@ -57,6 +62,7 @@ impl Connection<Mptcp> {
     ///     println!("Endpoint {}: {} flags={:?}", ep.id, ep.address, ep.flags);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_endpoints"))]
     pub async fn get_endpoints(&self) -> Result<Vec<MptcpEndpoint>> {
         let responses = self
             .dump_mptcp_command(mptcp_pm_cmd::GET_ADDR, |_builder| {})
@@ -87,6 +93,7 @@ impl Connection<Mptcp> {
     ///         .signal()
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_endpoint"))]
     pub async fn add_endpoint(&self, endpoint: MptcpEndpointBuilder) -> Result<()> {
         self.mptcp_command(mptcp_pm_cmd::ADD_ADDR, |builder| {
             let addr_token = builder.nest_start(mptcp_pm_attr::ADDR | NLA_F_NESTED);
@@ -105,6 +112,7 @@ impl Connection<Mptcp> {
     /// ```ignore
     /// conn.del_endpoint(1).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_endpoint"))]
     pub async fn del_endpoint(&self, id: u8) -> Result<()> {
         self.mptcp_command(mptcp_pm_cmd::DEL_ADDR, |builder| {
             let addr_token = builder.nest_start(mptcp_pm_attr::ADDR | NLA_F_NESTED);
@@ -123,6 +131,7 @@ impl Connection<Mptcp> {
     /// ```ignore
     /// conn.flush_endpoints().await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_endpoints"))]
     pub async fn flush_endpoints(&self) -> Result<()> {
         self.mptcp_command(mptcp_pm_cmd::FLUSH_ADDRS, |_builder| {})
             .await?;
@@ -139,6 +148,7 @@ impl Connection<Mptcp> {
     /// println!("Max subflows: {:?}", limits.subflows);
     /// println!("Max add_addr_accepted: {:?}", limits.add_addr_accepted);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_limits"))]
     pub async fn get_limits(&self) -> Result<MptcpLimits> {
         let response = self
             .mptcp_query(mptcp_pm_cmd::GET_LIMITS, |_builder| {})
@@ -164,6 +174,7 @@ impl Connection<Mptcp> {
     ///         .add_addr_accepted(4)
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_limits"))]
     pub async fn set_limits(&self, limits: MptcpLimits) -> Result<()> {
         self.mptcp_command(mptcp_pm_cmd::SET_LIMITS, |builder| {
             if let Some(subflows) = limits.subflows {
@@ -188,6 +199,7 @@ impl Connection<Mptcp> {
     /// // Mark endpoint 1 as backup
     /// conn.set_endpoint_flags(1, MptcpFlags { backup: true, ..Default::default() }).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_endpoint_flags"))]
     pub async fn set_endpoint_flags(&self, id: u8, flags: MptcpFlags) -> Result<()> {
         self.mptcp_command(mptcp_pm_cmd::SET_FLAGS, |builder| {
             let addr_token = builder.nest_start(mptcp_pm_attr::ADDR | NLA_F_NESTED);
@@ -223,6 +235,7 @@ impl Connection<Mptcp> {
     ///         .remote_port(80)
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "create_subflow"))]
     pub async fn create_subflow(&self, subflow: super::types::MptcpSubflowBuilder) -> Result<()> {
         use crate::netlink::types::mptcp::mptcp_attr;
 
@@ -284,6 +297,7 @@ impl Connection<Mptcp> {
     ///         .remote_port(80)
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "destroy_subflow"))]
     pub async fn destroy_subflow(&self, subflow: super::types::MptcpSubflowBuilder) -> Result<()> {
         use crate::netlink::types::mptcp::mptcp_attr;
 
@@ -333,6 +347,7 @@ impl Connection<Mptcp> {
     ///         .address(Ipv4Addr::new(192, 168, 2, 1).into())
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "announce_addr"))]
     pub async fn announce_addr(&self, announce: super::types::MptcpAnnounceBuilder) -> Result<()> {
         use crate::netlink::types::mptcp::mptcp_attr;
 
@@ -365,6 +380,7 @@ impl Connection<Mptcp> {
     /// // Remove address ID 1 from the connection
     /// conn.del_addr(connection_token, 1).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_addr"))]
     pub async fn del_addr(&self, token: u32, addr_id: u8) -> Result<()> {
         use crate::netlink::types::mptcp::mptcp_attr;
 

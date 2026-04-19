@@ -1,16 +1,16 @@
 //! nftables connection implementation for `Connection<Nftables>`.
 
-use super::expr::write_expressions;
-use super::types::*;
-use super::*;
-use crate::netlink::attr::AttrIter;
-use crate::netlink::builder::MessageBuilder;
-use crate::netlink::connection::Connection;
-use crate::netlink::error::{Error, Result};
-use crate::netlink::message::{
-    MessageIter, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST, NlMsgError,
+use super::{expr::write_expressions, types::*, *};
+use crate::netlink::{
+    attr::AttrIter,
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    message::{
+        MessageIter, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST, NlMsgError,
+    },
+    protocol::Nftables,
 };
-use crate::netlink::protocol::Nftables;
 
 impl Connection<Nftables> {
     // =========================================================================
@@ -24,6 +24,7 @@ impl Connection<Nftables> {
     /// ```ignore
     /// conn.add_table("filter", Family::Inet).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_table"))]
     pub async fn add_table(&self, name: &str, family: Family) -> Result<()> {
         if name.is_empty() || name.len() > 256 {
             return Err(Error::InvalidMessage(
@@ -43,6 +44,7 @@ impl Connection<Nftables> {
     }
 
     /// List all nftables tables.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_tables"))]
     pub async fn list_tables(&self) -> Result<Vec<Table>> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_GETTABLE), NLM_F_REQUEST | NLM_F_DUMP);
@@ -67,6 +69,7 @@ impl Connection<Nftables> {
     }
 
     /// Delete an nftables table.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_table"))]
     pub async fn del_table(&self, name: &str, family: Family) -> Result<()> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_DELTABLE), NLM_F_REQUEST | NLM_F_ACK);
@@ -78,6 +81,7 @@ impl Connection<Nftables> {
     }
 
     /// Flush all rules from a table (keeps chains).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_table"))]
     pub async fn flush_table(&self, name: &str, family: Family) -> Result<()> {
         // Flush is done by deleting all rules in the table
         let mut builder =
@@ -107,6 +111,7 @@ impl Connection<Nftables> {
     ///         .chain_type(ChainType::Filter)
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_chain"))]
     pub async fn add_chain(&self, chain: Chain) -> Result<()> {
         // Validate: base chains require type
         if chain.hook.is_some() && chain.chain_type.is_none() {
@@ -144,6 +149,7 @@ impl Connection<Nftables> {
     }
 
     /// List all chains.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_chains"))]
     pub async fn list_chains(&self) -> Result<Vec<ChainInfo>> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_GETCHAIN), NLM_F_REQUEST | NLM_F_DUMP);
@@ -168,6 +174,7 @@ impl Connection<Nftables> {
     }
 
     /// Delete a chain.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_chain"))]
     pub async fn del_chain(&self, table: &str, name: &str, family: Family) -> Result<()> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_DELCHAIN), NLM_F_REQUEST | NLM_F_ACK);
@@ -195,6 +202,7 @@ impl Connection<Nftables> {
     ///         .accept()
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_rule"))]
     pub async fn add_rule(&self, rule: Rule) -> Result<()> {
         let mut builder = MessageBuilder::new(
             nft_msg_type(NFT_MSG_NEWRULE),
@@ -217,6 +225,7 @@ impl Connection<Nftables> {
     }
 
     /// List all rules in a table.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_rules"))]
     pub async fn list_rules(&self, table: &str, family: Family) -> Result<Vec<RuleInfo>> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_GETRULE), NLM_F_REQUEST | NLM_F_DUMP);
@@ -238,6 +247,7 @@ impl Connection<Nftables> {
     }
 
     /// Delete a rule by handle.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rule"))]
     pub async fn del_rule(
         &self,
         table: &str,
@@ -261,6 +271,7 @@ impl Connection<Nftables> {
     // =========================================================================
 
     /// Create an nftables set.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_set"))]
     pub async fn add_set(&self, set: Set) -> Result<()> {
         if set.name.is_empty() || set.name.len() > 256 {
             return Err(Error::InvalidMessage(
@@ -286,6 +297,7 @@ impl Connection<Nftables> {
     }
 
     /// List all sets.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_sets"))]
     pub async fn list_sets(&self, family: Family) -> Result<Vec<SetInfo>> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_GETSET), NLM_F_REQUEST | NLM_F_DUMP);
@@ -306,6 +318,7 @@ impl Connection<Nftables> {
     }
 
     /// Delete a set.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_set"))]
     pub async fn del_set(&self, table: &str, name: &str, family: Family) -> Result<()> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_DELSET), NLM_F_REQUEST | NLM_F_ACK);
@@ -318,6 +331,7 @@ impl Connection<Nftables> {
     }
 
     /// Add elements to a set.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_set_elements"))]
     pub async fn add_set_elements(
         &self,
         table: &str,
@@ -348,6 +362,7 @@ impl Connection<Nftables> {
     }
 
     /// Delete elements from a set.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_set_elements"))]
     pub async fn del_set_elements(
         &self,
         table: &str,
@@ -398,6 +413,7 @@ impl Connection<Nftables> {
     }
 
     /// Flush the entire ruleset (all tables, chains, rules, sets).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_ruleset"))]
     pub async fn flush_ruleset(&self) -> Result<()> {
         // Delete all tables across all families
         let tables = self.list_tables().await?;
@@ -827,6 +843,7 @@ impl Transaction {
     }
 
     /// Commit the transaction atomically.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "commit"))]
     pub async fn commit(self, conn: &Connection<Nftables>) -> Result<()> {
         conn.send_batch(self.messages).await
     }

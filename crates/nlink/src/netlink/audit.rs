@@ -401,6 +401,7 @@ impl Connection<Audit> {
     /// println!("Backlog: {}/{}", status.backlog, status.backlog_limit);
     /// println!("Lost messages: {}", status.lost);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_status"))]
     pub async fn get_status(&self) -> Result<AuditStatus> {
         let seq = self.socket().next_seq();
         let pid = self.socket().pid();
@@ -506,6 +507,7 @@ impl Connection<Audit> {
     /// println!("TTY auditing enabled: {}", tty_status.enabled != 0);
     /// println!("Log passwords: {}", tty_status.log_passwd != 0);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_tty_status"))]
     pub async fn get_tty_status(&self) -> Result<AuditTtyStatus> {
         let seq = self.socket().next_seq();
         let pid = self.socket().pid();
@@ -582,6 +584,7 @@ impl Connection<Audit> {
     /// println!("Features: 0x{:08x}", features.features);
     /// println!("Mask: 0x{:08x}", features.mask);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_features"))]
     pub async fn get_features(&self) -> Result<AuditFeatures> {
         let seq = self.socket().next_seq();
         let pid = self.socket().pid();

@@ -52,13 +52,15 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use super::builder::MessageBuilder;
-use super::connection::Connection;
-use super::error::Result;
-use super::interface_ref::InterfaceRef;
-use super::message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType};
-use super::protocol::Route;
-use super::types::addr::{IfAddrMsg, IfaAttr, Scope, ifa_flags};
+use super::{
+    builder::MessageBuilder,
+    connection::Connection,
+    error::Result,
+    interface_ref::InterfaceRef,
+    message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType},
+    protocol::Route,
+    types::addr::{IfAddrMsg, IfaAttr, Scope, ifa_flags},
+};
 
 /// NLM_F_CREATE flag
 const NLM_F_CREATE: u16 = 0x400;
@@ -682,6 +684,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_address("eth0", IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 24).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_address"))]
     pub async fn del_address(
         &self,
         ifname: impl Into<InterfaceRef>,
@@ -696,6 +699,7 @@ impl Connection<Route> {
     /// Delete an IP address from an interface by index.
     ///
     /// This is namespace-safe as it doesn't require interface name resolution.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_address_by_index"))]
     pub async fn del_address_by_index(
         &self,
         ifindex: u32,
@@ -727,6 +731,7 @@ impl Connection<Route> {
     /// // Add address by index
     /// conn.add_address_by_index(link.ifindex(), "192.168.1.100".parse()?, 24).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_address_by_index"))]
     pub async fn add_address_by_index(
         &self,
         ifindex: u32,
@@ -748,6 +753,7 @@ impl Connection<Route> {
     /// Replace an IP address on an interface by index.
     ///
     /// This is namespace-safe as it doesn't require interface name resolution.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_address_by_index"))]
     pub async fn replace_address_by_index(
         &self,
         ifindex: u32,
@@ -775,6 +781,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.add_address_by_name("eth0", "192.168.1.100".parse()?, 24).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_address_by_name"))]
     pub async fn add_address_by_name(
         &self,
         ifname: impl Into<InterfaceRef>,
@@ -796,6 +803,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.replace_address_by_name("eth0", "192.168.1.100".parse()?, 24).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_address_by_name"))]
     pub async fn replace_address_by_name(
         &self,
         ifname: impl Into<InterfaceRef>,
@@ -808,6 +816,7 @@ impl Connection<Route> {
     }
 
     /// Delete an IPv4 address from an interface.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_address_v4"))]
     pub async fn del_address_v4(
         &self,
         ifname: impl Into<InterfaceRef>,
@@ -820,6 +829,7 @@ impl Connection<Route> {
     }
 
     /// Delete an IPv6 address from an interface.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_address_v6"))]
     pub async fn del_address_v6(
         &self,
         ifname: impl Into<InterfaceRef>,
@@ -878,6 +888,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.flush_addresses("eth0").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_addresses"))]
     pub async fn flush_addresses(&self, ifname: impl Into<InterfaceRef>) -> Result<()> {
         let ifindex = self.resolve_interface(&ifname.into()).await?;
         self.flush_addresses_by_index(ifindex).await
@@ -886,6 +897,7 @@ impl Connection<Route> {
     /// Flush all addresses from an interface by index.
     ///
     /// This is namespace-safe as it doesn't require interface name resolution.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_addresses_by_index"))]
     pub async fn flush_addresses_by_index(&self, ifindex: u32) -> Result<()> {
         let addresses = self.get_addresses_by_index(ifindex).await?;
 

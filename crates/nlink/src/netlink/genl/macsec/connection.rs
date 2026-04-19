@@ -1,19 +1,23 @@
 //! MACsec connection implementation for `Connection<Macsec>`.
 
-use super::types::{
-    MacsecCipherSuite, MacsecDevice, MacsecOffload, MacsecRxSa, MacsecRxSc, MacsecSaBuilder,
-    MacsecTxSa, MacsecTxSc, MacsecValidate,
+use super::{
+    MACSEC_GENL_NAME, MACSEC_GENL_VERSION,
+    types::{
+        MacsecCipherSuite, MacsecDevice, MacsecOffload, MacsecRxSa, MacsecRxSc, MacsecSaBuilder,
+        MacsecTxSa, MacsecTxSc, MacsecValidate,
+    },
 };
-use super::{MACSEC_GENL_NAME, MACSEC_GENL_VERSION};
-use crate::netlink::attr::{AttrIter, NLA_F_NESTED, get};
-use crate::netlink::builder::MessageBuilder;
-use crate::netlink::connection::Connection;
-use crate::netlink::error::{Error, Result};
-use crate::netlink::genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr};
-use crate::netlink::interface_ref::InterfaceRef;
-use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{AsyncProtocolInit, Macsec, ProtocolState, Route};
-use crate::netlink::socket::NetlinkSocket;
+use crate::netlink::{
+    attr::{AttrIter, NLA_F_NESTED, get},
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr},
+    interface_ref::InterfaceRef,
+    message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
+    protocol::{AsyncProtocolInit, Macsec, ProtocolState, Route},
+    socket::NetlinkSocket,
+};
 
 impl AsyncProtocolInit for Macsec {
     async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
@@ -39,6 +43,7 @@ impl Connection<Macsec> {
     /// let conn = Connection::<Macsec>::new_async().await?;
     /// let device = conn.get_device("macsec0").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "new_async"))]
     pub async fn new_async() -> Result<Self> {
         let socket = NetlinkSocket::new(Macsec::PROTOCOL)?;
         let family_id = resolve_macsec_family(&socket).await?;
@@ -88,6 +93,7 @@ impl Connection<Macsec> {
     /// // By index (efficient for repeated operations)
     /// let device = conn.get_device(5u32).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_device"))]
     pub async fn get_device(&self, iface: impl Into<InterfaceRef>) -> Result<MacsecDevice> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.get_device_by_index(ifindex).await
@@ -109,6 +115,7 @@ impl Connection<Macsec> {
     /// let device = macsec_conn.get_device_by_index(link.ifindex()).await?;
     /// println!("SCI: {:016x}", device.sci);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_device_by_index"))]
     pub async fn get_device_by_index(&self, ifindex: u32) -> Result<MacsecDevice> {
         let responses = self
             .dump_macsec_command(macsec_cmd::GET_TXSC, |builder| {
@@ -148,6 +155,7 @@ impl Connection<Macsec> {
     ///         .active(true)
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_tx_sa_by_index"))]
     pub async fn add_tx_sa_by_index(&self, ifindex: u32, sa: MacsecSaBuilder) -> Result<()> {
         self.macsec_command(macsec_cmd::ADD_TXSA, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
@@ -180,6 +188,7 @@ impl Connection<Macsec> {
     ///
     /// * `ifindex` - Interface index
     /// * `an` - Association Number (0-3)
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_tx_sa_by_index"))]
     pub async fn del_tx_sa_by_index(&self, ifindex: u32, an: u8) -> Result<()> {
         self.macsec_command(macsec_cmd::DEL_TXSA, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
@@ -196,6 +205,7 @@ impl Connection<Macsec> {
     /// Update a TX Security Association by interface index.
     ///
     /// This can be used to activate/deactivate an SA or update the packet number.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "update_tx_sa_by_index"))]
     pub async fn update_tx_sa_by_index(&self, ifindex: u32, sa: MacsecSaBuilder) -> Result<()> {
         self.macsec_command(macsec_cmd::UPD_TXSA, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
@@ -223,6 +233,7 @@ impl Connection<Macsec> {
     ///
     /// * `ifindex` - Interface index
     /// * `sci` - Secure Channel Identifier (typically peer's MAC + port)
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_rx_sc_by_index"))]
     pub async fn add_rx_sc_by_index(&self, ifindex: u32, sci: u64) -> Result<()> {
         self.macsec_command(macsec_cmd::ADD_RXSC, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
@@ -240,6 +251,7 @@ impl Connection<Macsec> {
     /// Delete an RX Secure Channel by interface index.
     ///
     /// This also deletes all associated RX SAs.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rx_sc_by_index"))]
     pub async fn del_rx_sc_by_index(&self, ifindex: u32, sci: u64) -> Result<()> {
         self.macsec_command(macsec_cmd::DEL_RXSC, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
@@ -260,6 +272,7 @@ impl Connection<Macsec> {
     /// * `ifindex` - Interface index
     /// * `sci` - Secure Channel Identifier
     /// * `sa` - SA configuration
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_rx_sa_by_index"))]
     pub async fn add_rx_sa_by_index(
         &self,
         ifindex: u32,
@@ -297,6 +310,7 @@ impl Connection<Macsec> {
     }
 
     /// Delete an RX Security Association by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rx_sa_by_index"))]
     pub async fn del_rx_sa_by_index(&self, ifindex: u32, sci: u64, an: u8) -> Result<()> {
         self.macsec_command(macsec_cmd::DEL_RXSA, |builder| {
             builder.append_attr_u32(macsec_attr::IFINDEX, ifindex);
@@ -315,6 +329,7 @@ impl Connection<Macsec> {
     }
 
     /// Update an RX Security Association by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "update_rx_sa_by_index"))]
     pub async fn update_rx_sa_by_index(
         &self,
         ifindex: u32,
@@ -359,6 +374,7 @@ impl Connection<Macsec> {
     /// let key = [0u8; 16];
     /// conn.add_tx_sa("macsec0", MacsecSaBuilder::new(0).key(&key).active(true)).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_tx_sa"))]
     pub async fn add_tx_sa(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -371,6 +387,7 @@ impl Connection<Macsec> {
     /// Delete a TX Security Association.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_tx_sa"))]
     pub async fn del_tx_sa(&self, iface: impl Into<InterfaceRef>, an: u8) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.del_tx_sa_by_index(ifindex, an).await
@@ -379,6 +396,7 @@ impl Connection<Macsec> {
     /// Update a TX Security Association.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "update_tx_sa"))]
     pub async fn update_tx_sa(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -391,6 +409,7 @@ impl Connection<Macsec> {
     /// Add an RX Secure Channel.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_rx_sc"))]
     pub async fn add_rx_sc(&self, iface: impl Into<InterfaceRef>, sci: u64) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.add_rx_sc_by_index(ifindex, sci).await
@@ -399,6 +418,7 @@ impl Connection<Macsec> {
     /// Delete an RX Secure Channel.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rx_sc"))]
     pub async fn del_rx_sc(&self, iface: impl Into<InterfaceRef>, sci: u64) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.del_rx_sc_by_index(ifindex, sci).await
@@ -407,6 +427,7 @@ impl Connection<Macsec> {
     /// Add an RX Security Association.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_rx_sa"))]
     pub async fn add_rx_sa(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -420,6 +441,7 @@ impl Connection<Macsec> {
     /// Delete an RX Security Association.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rx_sa"))]
     pub async fn del_rx_sa(&self, iface: impl Into<InterfaceRef>, sci: u64, an: u8) -> Result<()> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.del_rx_sa_by_index(ifindex, sci, an).await
@@ -428,6 +450,7 @@ impl Connection<Macsec> {
     /// Update an RX Security Association.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "update_rx_sa"))]
     pub async fn update_rx_sa(
         &self,
         iface: impl Into<InterfaceRef>,

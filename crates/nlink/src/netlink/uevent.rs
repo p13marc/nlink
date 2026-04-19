@@ -19,10 +19,12 @@
 
 use std::collections::HashMap;
 
-use super::connection::Connection;
-use super::error::{Error, Result};
-use super::protocol::{KobjectUevent, ProtocolState};
-use super::socket::NetlinkSocket;
+use super::{
+    connection::Connection,
+    error::{Error, Result},
+    protocol::{KobjectUevent, ProtocolState},
+    socket::NetlinkSocket,
+};
 
 /// Multicast group for kernel uevents.
 const UEVENT_GROUP: u32 = 1;
@@ -194,6 +196,7 @@ impl Connection<KobjectUevent> {
     ///     }
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "recv"))]
     pub async fn recv(&self) -> Result<Uevent> {
         loop {
             let data = self.socket().recv_msg().await?;

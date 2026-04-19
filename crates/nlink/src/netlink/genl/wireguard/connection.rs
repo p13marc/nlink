@@ -5,19 +5,21 @@
 
 use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use super::types::{AllowedIp, WG_KEY_LEN, WgDevice, WgDeviceBuilder, WgPeer, parse_timespec};
 use super::{
     WG_GENL_NAME, WG_GENL_VERSION, WgAllowedIpAttr, WgCmd, WgDeviceAttr, WgDeviceFlag, WgPeerAttr,
+    types::{AllowedIp, WG_KEY_LEN, WgDevice, WgDeviceBuilder, WgPeer, parse_timespec},
 };
-use crate::netlink::attr::{AttrIter, NLA_F_NESTED, get};
-use crate::netlink::builder::MessageBuilder;
-use crate::netlink::connection::Connection;
-use crate::netlink::error::{Error, Result};
-use crate::netlink::genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr};
-use crate::netlink::interface_ref::InterfaceRef;
-use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{AsyncProtocolInit, ProtocolState, Route, Wireguard};
-use crate::netlink::socket::NetlinkSocket;
+use crate::netlink::{
+    attr::{AttrIter, NLA_F_NESTED, get},
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr},
+    interface_ref::InterfaceRef,
+    message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
+    protocol::{AsyncProtocolInit, ProtocolState, Route, Wireguard},
+    socket::NetlinkSocket,
+};
 
 impl AsyncProtocolInit for Wireguard {
     async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
@@ -39,6 +41,7 @@ impl Connection<Wireguard> {
     /// let conn = Connection::<Wireguard>::new().await?;
     /// let device = conn.get_device("wg0").await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "new_async"))]
     pub async fn new_async() -> Result<Self> {
         let socket = NetlinkSocket::new(Wireguard::PROTOCOL)?;
         let family_id = resolve_wireguard_family(&socket).await?;
@@ -93,6 +96,7 @@ impl Connection<Wireguard> {
     /// // By index
     /// let device = conn.get_device(5u32).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_device"))]
     pub async fn get_device(&self, iface: impl Into<InterfaceRef>) -> Result<WgDevice> {
         let ifname = self.resolve_interface_name(&iface.into()).await?;
         self.get_device_by_name(&ifname).await
@@ -110,6 +114,7 @@ impl Connection<Wireguard> {
     ///        .listen_port(51820)
     /// }).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_device"))]
     pub async fn set_device(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -122,6 +127,7 @@ impl Connection<Wireguard> {
     /// Add or update a peer.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_peer"))]
     pub async fn set_peer(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -135,6 +141,7 @@ impl Connection<Wireguard> {
     /// Remove a peer by public key.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_peer"))]
     pub async fn del_peer(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -151,6 +158,7 @@ impl Connection<Wireguard> {
     /// Get device information by interface name.
     ///
     /// Returns the current configuration and status of the WireGuard interface.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_device_by_name"))]
     pub async fn get_device_by_name(&self, ifname: &str) -> Result<WgDevice> {
         let responses = self
             .dump_wg_command(WgCmd::GetDevice as u8, |builder| {
@@ -180,6 +188,7 @@ impl Connection<Wireguard> {
     }
 
     /// Set device configuration by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_device_by_name"))]
     pub async fn set_device_by_name(
         &self,
         ifname: &str,
@@ -190,6 +199,7 @@ impl Connection<Wireguard> {
     }
 
     /// Add or update a peer by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_peer_by_name"))]
     pub async fn set_peer_by_name(
         &self,
         ifname: &str,
@@ -202,6 +212,7 @@ impl Connection<Wireguard> {
     }
 
     /// Remove a peer by public key using interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_peer_by_name"))]
     pub async fn del_peer_by_name(&self, ifname: &str, public_key: [u8; WG_KEY_LEN]) -> Result<()> {
         let peer_builder = super::types::WgPeerBuilder::new(public_key).remove();
         let device_builder = WgDeviceBuilder::new().peer(peer_builder);
@@ -673,8 +684,9 @@ fn parse_sockaddr(data: &[u8]) -> Option<SocketAddr> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use super::*;
 
     #[test]
     fn test_sockaddr_v4_roundtrip() {

@@ -53,14 +53,16 @@
 
 use std::net::IpAddr;
 
-use super::attr::AttrIter;
-use super::builder::MessageBuilder;
-use super::connection::Connection;
-use super::error::{Error, Result};
-use super::interface_ref::InterfaceRef;
-use super::message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgType};
-use super::protocol::Route;
-use super::types::nexthop::{NexthopGrp, NhMsg, nha, nha_res_group, nhf, nhg_type};
+use super::{
+    attr::AttrIter,
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    interface_ref::InterfaceRef,
+    message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgType},
+    protocol::Route,
+    types::nexthop::{NexthopGrp, NhMsg, nha, nha_res_group, nhf, nhg_type},
+};
 
 /// NLM_F_CREATE flag
 const NLM_F_CREATE: u16 = 0x400;
@@ -627,6 +629,7 @@ impl Connection<Route> {
     ///     }
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_nexthops"))]
     pub async fn get_nexthops(&self) -> Result<Vec<Nexthop>> {
         let nhmsg = NhMsg::new().with_family(libc::AF_UNSPEC as u8);
 
@@ -652,6 +655,7 @@ impl Connection<Route> {
     /// Get a specific nexthop by ID.
     ///
     /// Returns `None` if the nexthop doesn't exist.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_nexthop"))]
     pub async fn get_nexthop(&self, id: u32) -> Result<Option<Nexthop>> {
         let nhmsg = NhMsg::new().with_family(libc::AF_UNSPEC as u8);
 
@@ -685,6 +689,7 @@ impl Connection<Route> {
     ///         .dev("eth0")
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_nexthop"))]
     pub async fn add_nexthop(&self, nh_builder: NexthopBuilder) -> Result<()> {
         let ifindex = self.resolve_nexthop_interface(&nh_builder).await?;
         let mut msg = MessageBuilder::new(
@@ -700,6 +705,7 @@ impl Connection<Route> {
     /// Replace a nexthop (add or update).
     ///
     /// If the nexthop exists, it's updated. If it doesn't exist, it's created.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_nexthop"))]
     pub async fn replace_nexthop(&self, nh_builder: NexthopBuilder) -> Result<()> {
         let ifindex = self.resolve_nexthop_interface(&nh_builder).await?;
         let mut msg = MessageBuilder::new(
@@ -715,6 +721,7 @@ impl Connection<Route> {
     /// Delete a nexthop by ID.
     ///
     /// Note: Deleting a nexthop that is in use by routes or groups will fail.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_nexthop"))]
     pub async fn del_nexthop(&self, id: u32) -> Result<()> {
         let nhmsg = NhMsg::new().with_family(libc::AF_UNSPEC as u8);
 
@@ -758,6 +765,7 @@ impl Connection<Route> {
     ///         .idle_timer(120)
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_nexthop_group"))]
     pub async fn add_nexthop_group(&self, builder: NexthopGroupBuilder) -> Result<()> {
         let msg = builder.build(
             NlMsgType::RTM_NEWNEXTHOP,
@@ -769,6 +777,7 @@ impl Connection<Route> {
     }
 
     /// Replace a nexthop group (add or update).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_nexthop_group"))]
     pub async fn replace_nexthop_group(&self, builder: NexthopGroupBuilder) -> Result<()> {
         let msg = builder.build(
             NlMsgType::RTM_NEWNEXTHOP,
@@ -782,6 +791,7 @@ impl Connection<Route> {
     /// Delete a nexthop group by ID.
     ///
     /// Note: Deleting a group that is in use by routes will fail.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_nexthop_group"))]
     pub async fn del_nexthop_group(&self, id: u32) -> Result<()> {
         // Groups and individual nexthops share the same ID space,
         // so we use the same delete operation
@@ -789,6 +799,7 @@ impl Connection<Route> {
     }
 
     /// Get only nexthop groups (not individual nexthops).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_nexthop_groups"))]
     pub async fn get_nexthop_groups(&self) -> Result<Vec<Nexthop>> {
         let nhmsg = NhMsg::new().with_family(libc::AF_UNSPEC as u8);
 

@@ -56,16 +56,18 @@
 //! }
 //! ```
 
-use super::attr::AttrIter;
-use super::builder::MessageBuilder;
-use super::connection::Connection;
-use super::error::{Error, Result};
-use super::interface_ref::InterfaceRef;
-use super::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgType};
-use super::protocol::Route;
-use super::types::link::{
-    BridgeVlanInfo, IfInfoMsg, IflaAttr, bridge_af, bridge_vlan_flags, bridge_vlan_tunnel,
-    rtext_filter,
+use super::{
+    attr::AttrIter,
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    interface_ref::InterfaceRef,
+    message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgType},
+    protocol::Route,
+    types::link::{
+        BridgeVlanInfo, IfInfoMsg, IflaAttr, bridge_af, bridge_vlan_flags, bridge_vlan_tunnel,
+        rtext_filter,
+    },
 };
 
 /// VLAN flags for bridge port configuration.
@@ -483,6 +485,7 @@ impl Connection<Route> {
     ///         vlan.vid, vlan.flags.pvid, vlan.flags.untagged);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_bridge_vlans"))]
     pub async fn get_bridge_vlans(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -494,6 +497,11 @@ impl Connection<Route> {
     /// Get VLAN configuration for a bridge port by interface index.
     ///
     /// Use this method when operating in a network namespace.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "get_bridge_vlans_by_index")
+    )]
     pub async fn get_bridge_vlans_by_index(&self, ifindex: u32) -> Result<Vec<BridgeVlanEntry>> {
         // Request link with BRVLAN filter
         let mut builder = MessageBuilder::new(NlMsgType::RTM_GETLINK, NLM_F_REQUEST);
@@ -520,6 +528,7 @@ impl Connection<Route> {
     ///     println!("ifindex {}: VLAN {}", vlan.ifindex, vlan.vid);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_bridge_vlans_all"))]
     pub async fn get_bridge_vlans_all(
         &self,
         bridge: impl Into<InterfaceRef>,
@@ -529,6 +538,11 @@ impl Connection<Route> {
     }
 
     /// Get VLAN configuration for all ports of a bridge by interface index.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "get_bridge_vlans_all_by_index")
+    )]
     pub async fn get_bridge_vlans_all_by_index(
         &self,
         bridge_idx: u32,
@@ -599,6 +613,7 @@ impl Connection<Route> {
     ///         .range(210)
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_bridge_vlan"))]
     pub async fn add_bridge_vlan(&self, config: BridgeVlanBuilder) -> Result<()> {
         let ifindex = self.resolve_bridge_vlan_interface(&config).await?;
         let mut builder = MessageBuilder::new(NlMsgType::RTM_SETLINK, NLM_F_REQUEST | NLM_F_ACK);
@@ -615,12 +630,14 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_bridge_vlan("eth0", 100).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_bridge_vlan"))]
     pub async fn del_bridge_vlan(&self, dev: impl Into<InterfaceRef>, vid: u16) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
         self.del_bridge_vlan_by_index(ifindex, vid).await
     }
 
     /// Delete VLAN from a bridge port by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_bridge_vlan_by_index"))]
     pub async fn del_bridge_vlan_by_index(&self, ifindex: u32, vid: u16) -> Result<()> {
         let config = BridgeVlanBuilder::new(vid).ifindex(ifindex);
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
@@ -637,6 +654,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_bridge_vlan_range("eth0", 200, 210).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_bridge_vlan_range"))]
     pub async fn del_bridge_vlan_range(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -664,6 +682,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.set_bridge_pvid("eth0", 100).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_bridge_pvid"))]
     pub async fn set_bridge_pvid(&self, dev: impl Into<InterfaceRef>, vid: u16) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
         self.add_bridge_vlan(
@@ -676,6 +695,7 @@ impl Connection<Route> {
     }
 
     /// Set PVID for a bridge port by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_bridge_pvid_by_index"))]
     pub async fn set_bridge_pvid_by_index(&self, ifindex: u32, vid: u16) -> Result<()> {
         self.add_bridge_vlan(
             BridgeVlanBuilder::new(vid)
@@ -695,6 +715,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.add_bridge_vlan_tagged("eth0", 200).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_bridge_vlan_tagged"))]
     pub async fn add_bridge_vlan_tagged(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -712,6 +733,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.add_bridge_vlan_range("eth0", 200, 210).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_bridge_vlan_range"))]
     pub async fn add_bridge_vlan_range(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -744,6 +766,7 @@ impl Connection<Route> {
     ///     println!("VLAN {} -> VNI {}", t.vid, t.tunnel_id);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_vlan_tunnels"))]
     pub async fn get_vlan_tunnels(
         &self,
         dev: impl Into<InterfaceRef>,
@@ -755,6 +778,11 @@ impl Connection<Route> {
     /// Get VLAN-to-tunnel ID mappings by interface index.
     ///
     /// Use this method when operating in a network namespace.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "get_vlan_tunnels_by_index")
+    )]
     pub async fn get_vlan_tunnels_by_index(
         &self,
         ifindex: u32,
@@ -795,6 +823,7 @@ impl Connection<Route> {
     ///         .range(210)
     /// ).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_vlan_tunnel"))]
     pub async fn add_vlan_tunnel(&self, config: BridgeVlanTunnelBuilder) -> Result<()> {
         let ifindex = self.resolve_bridge_vlan_tunnel_interface(&config).await?;
         let mut builder = MessageBuilder::new(NlMsgType::RTM_SETLINK, NLM_F_REQUEST | NLM_F_ACK);
@@ -811,12 +840,14 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_vlan_tunnel("vxlan0", 100).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_vlan_tunnel"))]
     pub async fn del_vlan_tunnel(&self, dev: impl Into<InterfaceRef>, vid: u16) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
         self.del_vlan_tunnel_by_index(ifindex, vid).await
     }
 
     /// Delete VLAN-to-tunnel ID mapping by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_vlan_tunnel_by_index"))]
     pub async fn del_vlan_tunnel_by_index(&self, ifindex: u32, vid: u16) -> Result<()> {
         let config = BridgeVlanTunnelBuilder::new(vid, 0).ifindex(ifindex);
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELLINK, NLM_F_REQUEST | NLM_F_ACK);
@@ -833,6 +864,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_vlan_tunnel_range("vxlan0", 200, 210).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_vlan_tunnel_range"))]
     pub async fn del_vlan_tunnel_range(
         &self,
         dev: impl Into<InterfaceRef>,

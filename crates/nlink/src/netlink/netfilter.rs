@@ -294,11 +294,13 @@ impl Connection<Netfilter> {
     ///         entry.orig.dst_ip);
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_conntrack"))]
     pub async fn get_conntrack(&self) -> Result<Vec<ConntrackEntry>> {
         self.get_conntrack_family(libc::AF_INET as u8).await
     }
 
     /// Get connection tracking entries for IPv6.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_conntrack_v6"))]
     pub async fn get_conntrack_v6(&self) -> Result<Vec<ConntrackEntry>> {
         self.get_conntrack_family(libc::AF_INET6 as u8).await
     }

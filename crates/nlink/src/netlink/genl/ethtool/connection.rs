@@ -3,24 +3,23 @@
 //! This module provides methods for querying and configuring network device
 //! settings using the ethtool netlink interface.
 
-use super::bitset::EthtoolBitset;
-use super::types::*;
 use super::{
     ETHTOOL_GENL_NAME, ETHTOOL_GENL_VERSION, ETHTOOL_MCGRP_MONITOR, EthtoolChannelsAttr,
     EthtoolCmd, EthtoolCoalesceAttr, EthtoolFeaturesAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr,
     EthtoolLinkmodesAttr, EthtoolLinkstateAttr, EthtoolPauseAttr, EthtoolRingsAttr,
+    bitset::EthtoolBitset, types::*,
 };
-use crate::netlink::attr::{AttrIter, NLA_F_NESTED};
-use crate::netlink::builder::MessageBuilder;
-use crate::netlink::connection::Connection;
-use crate::netlink::error::{Error, Result};
-use crate::netlink::genl::{
-    CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr,
+use crate::netlink::{
+    attr::{AttrIter, NLA_F_NESTED},
+    builder::MessageBuilder,
+    connection::Connection,
+    error::{Error, Result},
+    genl::{CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr},
+    interface_ref::InterfaceRef,
+    message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
+    protocol::{AsyncProtocolInit, Ethtool, ProtocolState, Route},
+    socket::NetlinkSocket,
 };
-use crate::netlink::interface_ref::InterfaceRef;
-use crate::netlink::message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError};
-use crate::netlink::protocol::{AsyncProtocolInit, Ethtool, ProtocolState, Route};
-use crate::netlink::socket::NetlinkSocket;
 
 impl AsyncProtocolInit for Ethtool {
     async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
@@ -46,6 +45,7 @@ impl Connection<Ethtool> {
     /// let state = conn.get_link_state("eth0").await?;
     /// println!("Link: {}", if state.link { "up" } else { "down" });
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "new_async"))]
     pub async fn new_async() -> Result<Self> {
         let socket = NetlinkSocket::new(Ethtool::PROTOCOL)?;
         let (family_id, monitor_group_id) = resolve_ethtool_family(&socket).await?;
@@ -110,12 +110,14 @@ impl Connection<Ethtool> {
     ///
     /// println!("Link detected: {}", state.link);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_state"))]
     pub async fn get_link_state(&self, iface: impl Into<InterfaceRef>) -> Result<LinkState> {
         let ifname = self.resolve_interface_name(&iface.into()).await?;
         self.get_link_state_by_name(&ifname).await
     }
 
     /// Get link state by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_state_by_name"))]
     pub async fn get_link_state_by_name(&self, ifname: &str) -> Result<LinkState> {
         let response = self.ethtool_get(EthtoolCmd::LinkstateGet, ifname).await?;
 
@@ -180,12 +182,14 @@ impl Connection<Ethtool> {
     /// println!("Port: {:?}", info.port);
     /// println!("Transceiver: {:?}", info.transceiver);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_info"))]
     pub async fn get_link_info(&self, iface: impl Into<InterfaceRef>) -> Result<LinkInfo> {
         let ifname = self.resolve_interface_name(&iface.into()).await?;
         self.get_link_info_by_name(&ifname).await
     }
 
     /// Get link info by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_info_by_name"))]
     pub async fn get_link_info_by_name(&self, ifname: &str) -> Result<LinkInfo> {
         let response = self.ethtool_get(EthtoolCmd::LinkinfoGet, ifname).await?;
 
@@ -252,12 +256,14 @@ impl Connection<Ethtool> {
     /// println!("Autoneg: {}", modes.autoneg);
     /// println!("Supported modes: {:?}", modes.supported_modes());
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_modes"))]
     pub async fn get_link_modes(&self, iface: impl Into<InterfaceRef>) -> Result<LinkModes> {
         let ifname = self.resolve_interface_name(&iface.into()).await?;
         self.get_link_modes_by_name(&ifname).await
     }
 
     /// Get link modes by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_modes_by_name"))]
     pub async fn get_link_modes_by_name(&self, ifname: &str) -> Result<LinkModes> {
         let response = self.ethtool_get(EthtoolCmd::LinkmodesGet, ifname).await?;
 
@@ -297,6 +303,7 @@ impl Connection<Ethtool> {
     ///      .advertise("100baseT/Full")
     /// }).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_modes"))]
     pub async fn set_link_modes(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -307,6 +314,7 @@ impl Connection<Ethtool> {
     }
 
     /// Set link modes by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_modes_by_name"))]
     pub async fn set_link_modes_by_name(
         &self,
         ifname: &str,
@@ -406,12 +414,14 @@ impl Connection<Ethtool> {
     ///     println!("{}: {}", name, if enabled { "on" } else { "off" });
     /// }
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_features"))]
     pub async fn get_features(&self, iface: impl Into<InterfaceRef>) -> Result<Features> {
         let ifname = self.resolve_interface_name(&iface.into()).await?;
         self.get_features_by_name(&ifname).await
     }
 
     /// Get device features by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_features_by_name"))]
     pub async fn get_features_by_name(&self, ifname: &str) -> Result<Features> {
         let response = self.ethtool_get(EthtoolCmd::FeaturesGet, ifname).await?;
 
@@ -447,6 +457,7 @@ impl Connection<Ethtool> {
     ///     f.enable("tx-checksumming")
     /// }).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_features"))]
     pub async fn set_features(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -457,6 +468,7 @@ impl Connection<Ethtool> {
     }
 
     /// Set device features by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_features_by_name"))]
     pub async fn set_features_by_name(
         &self,
         ifname: &str,
@@ -532,12 +544,14 @@ impl Connection<Ethtool> {
     /// println!("RX: {:?} (max {:?})", rings.rx, rings.rx_max);
     /// println!("TX: {:?} (max {:?})", rings.tx, rings.tx_max);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rings"))]
     pub async fn get_rings(&self, iface: impl Into<InterfaceRef>) -> Result<Rings> {
         let ifname = self.resolve_interface_name(&iface.into()).await?;
         self.get_rings_by_name(&ifname).await
     }
 
     /// Get ring buffer sizes by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rings_by_name"))]
     pub async fn get_rings_by_name(&self, ifname: &str) -> Result<Rings> {
         let response = self.ethtool_get(EthtoolCmd::RingsGet, ifname).await?;
 
@@ -572,6 +586,7 @@ impl Connection<Ethtool> {
     ///     r.rx(4096).tx(4096)
     /// }).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_rings"))]
     pub async fn set_rings(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -582,6 +597,7 @@ impl Connection<Ethtool> {
     }
 
     /// Set ring buffer sizes by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_rings_by_name"))]
     pub async fn set_rings_by_name(
         &self,
         ifname: &str,
@@ -682,12 +698,14 @@ impl Connection<Ethtool> {
     /// println!("TX: {:?} (max {:?})", channels.tx_count, channels.tx_max);
     /// println!("Combined: {:?} (max {:?})", channels.combined_count, channels.combined_max);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_channels"))]
     pub async fn get_channels(&self, iface: impl Into<InterfaceRef>) -> Result<Channels> {
         let ifname = self.resolve_interface_name(&iface.into()).await?;
         self.get_channels_by_name(&ifname).await
     }
 
     /// Get channel counts by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_channels_by_name"))]
     pub async fn get_channels_by_name(&self, ifname: &str) -> Result<Channels> {
         let response = self.ethtool_get(EthtoolCmd::ChannelsGet, ifname).await?;
 
@@ -722,6 +740,7 @@ impl Connection<Ethtool> {
     ///     c.combined(4)
     /// }).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_channels"))]
     pub async fn set_channels(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -732,6 +751,7 @@ impl Connection<Ethtool> {
     }
 
     /// Set channel counts by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_channels_by_name"))]
     pub async fn set_channels_by_name(
         &self,
         ifname: &str,
@@ -823,12 +843,14 @@ impl Connection<Ethtool> {
     /// println!("TX usecs: {:?}", coalesce.tx_usecs);
     /// println!("Adaptive RX: {:?}", coalesce.use_adaptive_rx);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_coalesce"))]
     pub async fn get_coalesce(&self, iface: impl Into<InterfaceRef>) -> Result<Coalesce> {
         let ifname = self.resolve_interface_name(&iface.into()).await?;
         self.get_coalesce_by_name(&ifname).await
     }
 
     /// Get interrupt coalescing parameters by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_coalesce_by_name"))]
     pub async fn get_coalesce_by_name(&self, ifname: &str) -> Result<Coalesce> {
         let response = self.ethtool_get(EthtoolCmd::CoalesceGet, ifname).await?;
 
@@ -865,6 +887,7 @@ impl Connection<Ethtool> {
     ///     c.rx_usecs(100)
     /// }).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_coalesce"))]
     pub async fn set_coalesce(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -875,6 +898,7 @@ impl Connection<Ethtool> {
     }
 
     /// Set interrupt coalescing parameters by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_coalesce_by_name"))]
     pub async fn set_coalesce_by_name(
         &self,
         ifname: &str,
@@ -997,12 +1021,14 @@ impl Connection<Ethtool> {
     /// println!("RX pause: {:?}", pause.rx);
     /// println!("TX pause: {:?}", pause.tx);
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_pause"))]
     pub async fn get_pause(&self, iface: impl Into<InterfaceRef>) -> Result<Pause> {
         let ifname = self.resolve_interface_name(&iface.into()).await?;
         self.get_pause_by_name(&ifname).await
     }
 
     /// Get pause/flow control settings by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_pause_by_name"))]
     pub async fn get_pause_by_name(&self, ifname: &str) -> Result<Pause> {
         let response = self.ethtool_get(EthtoolCmd::PauseGet, ifname).await?;
 
@@ -1039,6 +1065,7 @@ impl Connection<Ethtool> {
     ///     p.autoneg(true)
     /// }).await?;
     /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_pause"))]
     pub async fn set_pause(
         &self,
         iface: impl Into<InterfaceRef>,
@@ -1049,6 +1076,7 @@ impl Connection<Ethtool> {
     }
 
     /// Set pause/flow control settings by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_pause_by_name"))]
     pub async fn set_pause_by_name(
         &self,
         ifname: &str,
