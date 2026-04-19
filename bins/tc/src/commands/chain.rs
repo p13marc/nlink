@@ -1,8 +1,10 @@
 //! `tc chain` command implementation.
 
 use clap::{Args, Subcommand};
-use nlink::netlink::{Connection, Result, Route};
-use nlink::output::{OutputFormat, OutputOptions};
+use nlink::{
+    netlink::{Connection, Result, Route},
+    output::{OutputFormat, OutputOptions},
+};
 
 #[derive(Args)]
 pub struct ChainCmd {
@@ -85,7 +87,11 @@ async fn show_chains(
     format: OutputFormat,
     opts: &OutputOptions,
 ) -> Result<()> {
-    let chains = conn.get_tc_chains(&args.dev, &args.parent).await?;
+    let parent = args
+        .parent
+        .parse::<nlink::TcHandle>()
+        .map_err(|e| nlink::Error::InvalidMessage(e.to_string()))?;
+    let chains = conn.get_tc_chains(&args.dev, parent).await?;
 
     match format {
         OutputFormat::Json => print_chains_json(&args.dev, &args.parent, &chains, opts),
@@ -117,9 +123,17 @@ fn print_chains_json(dev: &str, parent: &str, chains: &[u32], opts: &OutputOptio
 }
 
 async fn add_chain(conn: &Connection<Route>, args: ChainAddArgs) -> Result<()> {
-    conn.add_tc_chain(&args.dev, &args.parent, args.chain).await
+    let parent = args
+        .parent
+        .parse::<nlink::TcHandle>()
+        .map_err(|e| nlink::Error::InvalidMessage(e.to_string()))?;
+    conn.add_tc_chain(&args.dev, parent, args.chain).await
 }
 
 async fn del_chain(conn: &Connection<Route>, args: ChainDelArgs) -> Result<()> {
-    conn.del_tc_chain(&args.dev, &args.parent, args.chain).await
+    let parent = args
+        .parent
+        .parse::<nlink::TcHandle>()
+        .map_err(|e| nlink::Error::InvalidMessage(e.to_string()))?;
+    conn.del_tc_chain(&args.dev, parent, args.chain).await
 }

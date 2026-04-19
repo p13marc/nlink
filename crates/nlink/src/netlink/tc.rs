@@ -43,10 +43,10 @@ use super::{
     interface_ref::InterfaceRef,
     message::NlMsgType,
     protocol::Route,
+    tc_handle::TcHandle,
     types::tc::{
         TcMsg, TcaAttr,
         qdisc::{TcRateSpec, fq_codel, htb, netem::*, prio, sfq, tbf},
-        tc_handle,
     },
 };
 
@@ -3003,15 +3003,6 @@ impl ClassConfig for QfqClassBuilt {
 }
 
 // ============================================================================
-// Helper functions
-// ============================================================================
-
-/// Parse a handle string like "1:0" or "root".
-fn parse_handle(s: &str) -> Result<u32> {
-    tc_handle::parse(s).ok_or_else(|| Error::InvalidMessage(format!("invalid handle: {}", s)))
-}
-
-// ============================================================================
 // Class option helpers
 // ============================================================================
 
@@ -3244,15 +3235,15 @@ impl Connection<Route> {
         dev: impl Into<InterfaceRef>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        self.add_qdisc_full(dev, "root", None, config).await
+        self.add_qdisc_full(dev, TcHandle::ROOT, None, config).await
     }
 
     /// Add a qdisc with explicit parent and handle.
     pub async fn add_qdisc_full(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
         config: impl QdiscConfig,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
@@ -3281,7 +3272,7 @@ impl Connection<Route> {
     /// conn.add_qdisc_by_index(link.ifindex(), netem).await?;
     /// ```
     pub async fn add_qdisc_by_index(&self, ifindex: u32, config: impl QdiscConfig) -> Result<()> {
-        self.add_qdisc_by_index_full(ifindex, "root", None, config)
+        self.add_qdisc_by_index_full(ifindex, TcHandle::ROOT, None, config)
             .await
     }
 
@@ -3289,12 +3280,12 @@ impl Connection<Route> {
     pub async fn add_qdisc_by_index_full(
         &self,
         ifindex: u32,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let qdisc_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
+        let parent_handle = parent.as_raw();
+        let qdisc_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -3321,7 +3312,7 @@ impl Connection<Route> {
     /// ```ignore
     /// conn.del_qdisc("eth0", "root").await?;
     /// ```
-    pub async fn del_qdisc(&self, dev: impl Into<InterfaceRef>, parent: &str) -> Result<()> {
+    pub async fn del_qdisc(&self, dev: impl Into<InterfaceRef>, parent: TcHandle) -> Result<()> {
         self.del_qdisc_full(dev, parent, None).await
     }
 
@@ -3329,8 +3320,8 @@ impl Connection<Route> {
     pub async fn del_qdisc_full(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
         self.del_qdisc_by_index_full(ifindex, parent, handle).await
@@ -3340,7 +3331,7 @@ impl Connection<Route> {
     ///
     /// This is useful for namespace-aware operations where you've already
     /// resolved the interface index via `conn.get_link_by_name()`.
-    pub async fn del_qdisc_by_index(&self, ifindex: u32, parent: &str) -> Result<()> {
+    pub async fn del_qdisc_by_index(&self, ifindex: u32, parent: TcHandle) -> Result<()> {
         self.del_qdisc_by_index_full(ifindex, parent, None).await
     }
 
@@ -3348,11 +3339,11 @@ impl Connection<Route> {
     pub async fn del_qdisc_by_index_full(
         &self,
         ifindex: u32,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let qdisc_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
+        let parent_handle = parent.as_raw();
+        let qdisc_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -3369,7 +3360,7 @@ impl Connection<Route> {
                     interface: format!("ifindex {ifindex}"),
                 }
             } else {
-                e.with_context(format!("del_qdisc(ifindex {ifindex}, parent={parent})"))
+                e.with_context(format!("del_qdisc(ifindex {ifindex}, parent={})", parent))
             }
         })
     }
@@ -3390,15 +3381,16 @@ impl Connection<Route> {
         dev: impl Into<InterfaceRef>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        self.replace_qdisc_full(dev, "root", None, config).await
+        self.replace_qdisc_full(dev, TcHandle::ROOT, None, config)
+            .await
     }
 
     /// Replace a qdisc with explicit parent and handle.
     pub async fn replace_qdisc_full(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
         config: impl QdiscConfig,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
@@ -3415,7 +3407,7 @@ impl Connection<Route> {
         ifindex: u32,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        self.replace_qdisc_by_index_full(ifindex, "root", None, config)
+        self.replace_qdisc_by_index_full(ifindex, TcHandle::ROOT, None, config)
             .await
     }
 
@@ -3423,12 +3415,12 @@ impl Connection<Route> {
     pub async fn replace_qdisc_by_index_full(
         &self,
         ifindex: u32,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let qdisc_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
+        let parent_handle = parent.as_raw();
+        let qdisc_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -3462,7 +3454,7 @@ impl Connection<Route> {
     pub async fn change_qdisc(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
+        parent: TcHandle,
         config: impl QdiscConfig,
     ) -> Result<()> {
         self.change_qdisc_full(dev, parent, None, config).await
@@ -3472,8 +3464,8 @@ impl Connection<Route> {
     pub async fn change_qdisc_full(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
         config: impl QdiscConfig,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
@@ -3488,7 +3480,7 @@ impl Connection<Route> {
     pub async fn change_qdisc_by_index(
         &self,
         ifindex: u32,
-        parent: &str,
+        parent: TcHandle,
         config: impl QdiscConfig,
     ) -> Result<()> {
         self.change_qdisc_by_index_full(ifindex, parent, None, config)
@@ -3499,12 +3491,12 @@ impl Connection<Route> {
     pub async fn change_qdisc_by_index_full(
         &self,
         ifindex: u32,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let qdisc_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
+        let parent_handle = parent.as_raw();
+        let qdisc_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -3527,7 +3519,10 @@ impl Connection<Route> {
                     interface: format!("ifindex {ifindex}"),
                 }
             } else {
-                e.with_context(format!("change_qdisc(ifindex {ifindex}, parent={parent})"))
+                e.with_context(format!(
+                    "change_qdisc(ifindex {ifindex}, parent={})",
+                    parent
+                ))
             }
         })
     }
@@ -3587,12 +3582,12 @@ impl Connection<Route> {
     /// conn.del_netem("eth0").await?;
     /// ```
     pub async fn del_netem(&self, dev: impl Into<InterfaceRef>) -> Result<()> {
-        self.del_qdisc(dev, "root").await
+        self.del_qdisc(dev, TcHandle::ROOT).await
     }
 
     /// Remove netem configuration by interface index.
     pub async fn del_netem_by_index(&self, ifindex: u32) -> Result<()> {
-        self.del_qdisc_by_index(ifindex, "root").await
+        self.del_qdisc_by_index(ifindex, TcHandle::ROOT).await
     }
 
     // ========================================================================
@@ -3620,8 +3615,8 @@ impl Connection<Route> {
     pub async fn add_class(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
         kind: &str,
         params: &[&str],
     ) -> Result<()> {
@@ -3637,13 +3632,13 @@ impl Connection<Route> {
     pub async fn add_class_by_index(
         &self,
         ifindex: u32,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
         kind: &str,
         params: &[&str],
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let class_handle = parse_handle(classid)?;
+        let parent_handle = parent.as_raw();
+        let class_handle = classid.as_raw();
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -3672,8 +3667,8 @@ impl Connection<Route> {
     pub async fn del_class(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
         self.del_class_by_index(ifindex, parent, classid).await
@@ -3683,11 +3678,11 @@ impl Connection<Route> {
     pub async fn del_class_by_index(
         &self,
         ifindex: u32,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let class_handle = parse_handle(classid)?;
+        let parent_handle = parent.as_raw();
+        let class_handle = classid.as_raw();
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -3713,8 +3708,8 @@ impl Connection<Route> {
     pub async fn change_class(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
         kind: &str,
         params: &[&str],
     ) -> Result<()> {
@@ -3727,13 +3722,13 @@ impl Connection<Route> {
     pub async fn change_class_by_index(
         &self,
         ifindex: u32,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
         kind: &str,
         params: &[&str],
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let class_handle = parse_handle(classid)?;
+        let parent_handle = parent.as_raw();
+        let class_handle = classid.as_raw();
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -3763,8 +3758,8 @@ impl Connection<Route> {
     pub async fn replace_class(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
         kind: &str,
         params: &[&str],
     ) -> Result<()> {
@@ -3777,13 +3772,13 @@ impl Connection<Route> {
     pub async fn replace_class_by_index(
         &self,
         ifindex: u32,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
         kind: &str,
         params: &[&str],
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let class_handle = parse_handle(classid)?;
+        let parent_handle = parent.as_raw();
+        let class_handle = classid.as_raw();
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -3834,8 +3829,8 @@ impl Connection<Route> {
     pub async fn add_class_config<C: ClassConfig>(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
         config: C,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
@@ -3850,12 +3845,12 @@ impl Connection<Route> {
     pub async fn add_class_config_by_index<C: ClassConfig>(
         &self,
         ifindex: u32,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
         config: C,
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let class_handle = parse_handle(classid)?;
+        let parent_handle = parent.as_raw();
+        let class_handle = classid.as_raw();
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -3890,8 +3885,8 @@ impl Connection<Route> {
     pub async fn change_class_config<C: ClassConfig>(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
         config: C,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
@@ -3903,12 +3898,12 @@ impl Connection<Route> {
     pub async fn change_class_config_by_index<C: ClassConfig>(
         &self,
         ifindex: u32,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
         config: C,
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let class_handle = parse_handle(classid)?;
+        let parent_handle = parent.as_raw();
+        let class_handle = classid.as_raw();
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -3943,8 +3938,8 @@ impl Connection<Route> {
     pub async fn replace_class_config<C: ClassConfig>(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
         config: C,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
@@ -3956,12 +3951,12 @@ impl Connection<Route> {
     pub async fn replace_class_config_by_index<C: ClassConfig>(
         &self,
         ifindex: u32,
-        parent: &str,
-        classid: &str,
+        parent: TcHandle,
+        classid: TcHandle,
         config: C,
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let class_handle = parse_handle(classid)?;
+        let parent_handle = parent.as_raw();
+        let class_handle = classid.as_raw();
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)

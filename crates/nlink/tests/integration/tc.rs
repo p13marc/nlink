@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use nlink::{
-    Connection, Result, Route,
+    Connection, Result, Route, TcHandle,
     netlink::{
         filter::{FlowerFilter, MatchallFilter, U32Filter},
         link::{DummyLink, IfbLink},
@@ -106,7 +106,7 @@ async fn test_add_htb_qdisc() -> Result<()> {
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Verify
@@ -170,8 +170,13 @@ async fn test_add_prio_qdisc() -> Result<()> {
 
     // Add prio qdisc
     let prio = PrioConfig::new().bands(3).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), prio)
-        .await?;
+    conn.add_qdisc_full(
+        "dummy0",
+        TcHandle::ROOT,
+        Some(TcHandle::major_only(1)),
+        prio,
+    )
+    .await?;
 
     // Verify
     let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
@@ -227,7 +232,7 @@ async fn test_delete_qdisc() -> Result<()> {
     conn.add_qdisc("dummy0", netem).await?;
 
     // Delete it
-    conn.del_qdisc("dummy0", "root").await?;
+    conn.del_qdisc("dummy0", TcHandle::ROOT).await?;
 
     // Verify
     let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
@@ -270,14 +275,20 @@ async fn test_add_htb_class() -> Result<()> {
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10))
         .ceil(nlink::Rate::mbit(800)) // 800 Mbps (was buggy 100_000_000 bytes/sec = 800 Mbps)
         .build();
-    conn.add_class_config("dummy0", "1:", "1:10", class).await?;
+    conn.add_class_config(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 10),
+        class,
+    )
+    .await?;
 
     // Verify
     let classes = conn.get_classes_by_name("dummy0").await?;
@@ -297,25 +308,30 @@ async fn test_htb_class_hierarchy() -> Result<()> {
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Add root class
     let root_class = HtbClassConfig::new(nlink::Rate::mbit(100)).build();
-    conn.add_class_config("dummy0", "1:", "1:1", root_class)
-        .await?;
+    conn.add_class_config(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 1),
+        root_class,
+    )
+    .await?;
 
     // Add child classes
     let child1 = HtbClassConfig::new(nlink::Rate::mbit(50))
         .ceil(nlink::Rate::mbit(800))
         .build();
-    conn.add_class_config("dummy0", "1:1", "1:10", child1)
+    conn.add_class_config("dummy0", TcHandle::new(1, 1), TcHandle::new(1, 10), child1)
         .await?;
 
     let child2 = HtbClassConfig::new(nlink::Rate::mbit(30))
         .ceil(nlink::Rate::mbit(800))
         .build();
-    conn.add_class_config("dummy0", "1:1", "1:20", child2)
+    conn.add_class_config("dummy0", TcHandle::new(1, 1), TcHandle::new(1, 20), child2)
         .await?;
 
     // Verify
@@ -333,15 +349,22 @@ async fn test_delete_class() -> Result<()> {
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config("dummy0", "1:", "1:10", class).await?;
+    conn.add_class_config(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 10),
+        class,
+    )
+    .await?;
 
     // Delete it
-    conn.del_class("dummy0", "1:", "1:10").await?;
+    conn.del_class("dummy0", TcHandle::major_only(1), TcHandle::new(1, 10))
+        .await?;
 
     // Verify
     let classes = conn.get_classes_by_name("dummy0").await?;
@@ -363,16 +386,23 @@ async fn test_add_matchall_filter() -> Result<()> {
 
     // Add HTB qdisc first
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config("dummy0", "1:", "1:10", class).await?;
+    conn.add_class_config(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 10),
+        class,
+    )
+    .await?;
 
     // Add matchall filter
     let filter = MatchallFilter::new().classid("1:10").build();
-    conn.add_filter("dummy0", "1:", filter).await?;
+    conn.add_filter("dummy0", TcHandle::major_only(1), filter)
+        .await?;
 
     // Verify
     let filters = conn.get_filters_by_name("dummy0").await?;
@@ -390,16 +420,23 @@ async fn test_add_u32_filter() -> Result<()> {
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config("dummy0", "1:", "1:10", class).await?;
+    conn.add_class_config(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 10),
+        class,
+    )
+    .await?;
 
     // Add u32 filter matching destination port 80
     let filter = U32Filter::new().classid("1:10").match_dst_port(80).build();
-    conn.add_filter("dummy0", "1:", filter).await?;
+    conn.add_filter("dummy0", TcHandle::major_only(1), filter)
+        .await?;
 
     // Verify
     let filters = conn.get_filters_by_name("dummy0").await?;
@@ -417,16 +454,23 @@ async fn test_add_flower_filter() -> Result<()> {
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config("dummy0", "1:", "1:10", class).await?;
+    conn.add_class_config(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 10),
+        class,
+    )
+    .await?;
 
     // Add flower filter
     let filter = FlowerFilter::new().classid("1:10").ip_proto_tcp().build();
-    conn.add_filter("dummy0", "1:", filter).await?;
+    conn.add_filter("dummy0", TcHandle::major_only(1), filter)
+        .await?;
 
     // Verify
     let filters = conn.get_filters_by_name("dummy0").await?;
@@ -447,7 +491,7 @@ async fn test_matchall_on_ingress() -> Result<()> {
 
     // Add matchall filter on ingress (without actions - just classifying)
     let filter = MatchallFilter::new().build();
-    conn.add_filter("dummy0", "ingress", filter).await?;
+    conn.add_filter("dummy0", TcHandle::INGRESS, filter).await?;
 
     // Verify
     let filters = conn.get_filters_by_name("dummy0").await?;
@@ -464,15 +508,17 @@ async fn test_matchall_goto_chain() -> Result<()> {
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Add chain 10
-    conn.add_tc_chain("dummy0", "1:", 10).await?;
+    conn.add_tc_chain("dummy0", TcHandle::major_only(1), 10)
+        .await?;
 
     // Add matchall filter with goto_chain
     let filter = MatchallFilter::new().goto_chain(10).build();
-    conn.add_filter("dummy0", "1:", filter).await?;
+    conn.add_filter("dummy0", TcHandle::major_only(1), filter)
+        .await?;
 
     // Verify
     let filters = conn.get_filters_by_name("dummy0").await?;
@@ -493,15 +539,18 @@ async fn test_filter_on_ifb() -> Result<()> {
 
     // Add HTB qdisc on IFB
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("ifb0", "root", Some("1:"), htb).await?;
+    conn.add_qdisc_full("ifb0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
+        .await?;
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config("ifb0", "1:", "1:10", class).await?;
+    conn.add_class_config("ifb0", TcHandle::major_only(1), TcHandle::new(1, 10), class)
+        .await?;
 
     // Add matchall filter
     let filter = MatchallFilter::new().classid("1:10").build();
-    conn.add_filter("ifb0", "1:", filter).await?;
+    conn.add_filter("ifb0", TcHandle::major_only(1), filter)
+        .await?;
 
     // Verify
     let filters = conn.get_filters_by_name("ifb0").await?;
@@ -518,19 +567,27 @@ async fn test_delete_filter() -> Result<()> {
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config("dummy0", "1:", "1:10", class).await?;
+    conn.add_class_config(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 10),
+        class,
+    )
+    .await?;
 
     // Add filter
     let filter = MatchallFilter::new().classid("1:10").build();
-    conn.add_filter("dummy0", "1:", filter).await?;
+    conn.add_filter("dummy0", TcHandle::major_only(1), filter)
+        .await?;
 
     // Flush filters
-    conn.flush_filters("dummy0", "1:").await?;
+    conn.flush_filters("dummy0", TcHandle::major_only(1))
+        .await?;
 
     // Verify
     let filters = conn.get_filters_by_name("dummy0").await?;
@@ -547,25 +604,37 @@ async fn test_replace_filter() -> Result<()> {
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Add classes
     let class1 = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config("dummy0", "1:", "1:10", class1)
-        .await?;
+    conn.add_class_config(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 10),
+        class1,
+    )
+    .await?;
 
     let class2 = HtbClassConfig::new(nlink::Rate::mbit(20)).build();
-    conn.add_class_config("dummy0", "1:", "1:20", class2)
-        .await?;
+    conn.add_class_config(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 20),
+        class2,
+    )
+    .await?;
 
     // Add filter pointing to 1:10
     let filter = MatchallFilter::new().classid("1:10").build();
-    conn.add_filter("dummy0", "1:", filter).await?;
+    conn.add_filter("dummy0", TcHandle::major_only(1), filter)
+        .await?;
 
     // Replace to point to 1:20
     let filter2 = MatchallFilter::new().classid("1:20").build();
-    conn.replace_filter("dummy0", "1:", filter2).await?;
+    conn.replace_filter("dummy0", TcHandle::major_only(1), filter2)
+        .await?;
 
     // Verify there's still just one matchall filter
     let filters = conn.get_filters_by_name("dummy0").await?;
@@ -612,11 +681,17 @@ async fn test_class_statistics() -> Result<()> {
 
     // Add HTB qdisc and class
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config("dummy0", "1:", "1:10", class).await?;
+    conn.add_class_config(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 10),
+        class,
+    )
+    .await?;
 
     // Get classes and check stats
     let classes = conn.get_classes_by_name("dummy0").await?;
@@ -643,14 +718,17 @@ async fn test_add_tc_chain() -> Result<()> {
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Add a chain
-    conn.add_tc_chain("dummy0", "1:", 10).await?;
+    conn.add_tc_chain("dummy0", TcHandle::major_only(1), 10)
+        .await?;
 
     // Get chains
-    let chains = conn.get_tc_chains("dummy0", "1:").await?;
+    let chains = conn
+        .get_tc_chains("dummy0", TcHandle::major_only(1))
+        .await?;
     assert!(chains.contains(&10), "chain 10 should exist");
 
     Ok(())
@@ -664,15 +742,19 @@ async fn test_delete_tc_chain() -> Result<()> {
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Add and delete chain
-    conn.add_tc_chain("dummy0", "1:", 20).await?;
-    conn.del_tc_chain("dummy0", "1:", 20).await?;
+    conn.add_tc_chain("dummy0", TcHandle::major_only(1), 20)
+        .await?;
+    conn.del_tc_chain("dummy0", TcHandle::major_only(1), 20)
+        .await?;
 
     // Verify it's gone
-    let chains = conn.get_tc_chains("dummy0", "1:").await?;
+    let chains = conn
+        .get_tc_chains("dummy0", TcHandle::major_only(1))
+        .await?;
     assert!(!chains.contains(&20), "chain 20 should be deleted");
 
     Ok(())
@@ -686,19 +768,27 @@ async fn test_filter_with_chain() -> Result<()> {
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    conn.add_qdisc_full("dummy0", "root", Some("1:"), htb)
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config("dummy0", "1:", "1:10", class).await?;
+    conn.add_class_config(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 10),
+        class,
+    )
+    .await?;
 
     // Add chain
-    conn.add_tc_chain("dummy0", "1:", 5).await?;
+    conn.add_tc_chain("dummy0", TcHandle::major_only(1), 5)
+        .await?;
 
     // Add filter in chain 5
     let filter = MatchallFilter::new().classid("1:10").chain(5).build();
-    conn.add_filter("dummy0", "1:", filter).await?;
+    conn.add_filter("dummy0", TcHandle::major_only(1), filter)
+        .await?;
 
     // Verify filter is in chain
     let filters = conn.get_filters_by_name("dummy0").await?;

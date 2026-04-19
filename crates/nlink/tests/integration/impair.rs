@@ -62,7 +62,9 @@ async fn test_apply_creates_full_tree() -> nlink::Result<()> {
     );
 
     // 3 flower filters at parent 1:.
-    let filters = conn.get_filters_by_parent_index(ifindex, "1:").await?;
+    let filters = conn
+        .get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(1))
+        .await?;
     let flower_filters = filters
         .iter()
         .filter(|f| f.kind() == Some("flower"))
@@ -145,7 +147,7 @@ async fn test_apply_idempotent() -> nlink::Result<()> {
 
     imp.apply(&conn).await?;
     let first_filter_count = conn
-        .get_filters_by_parent_index(ifindex, "1:")
+        .get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(1))
         .await?
         .iter()
         .filter(|f| f.kind() == Some("flower"))
@@ -154,7 +156,7 @@ async fn test_apply_idempotent() -> nlink::Result<()> {
     // Apply again — should give the same shape.
     imp.apply(&conn).await?;
     let second_filter_count = conn
-        .get_filters_by_parent_index(ifindex, "1:")
+        .get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(1))
         .await?
         .iter()
         .filter(|f| f.kind() == Some("flower"))
@@ -223,7 +225,9 @@ async fn test_apply_with_ipv6_match() -> nlink::Result<()> {
         .apply(&conn)
         .await?;
 
-    let filters = conn.get_filters_by_parent_index(ifindex, "1:").await?;
+    let filters = conn
+        .get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(1))
+        .await?;
     let flower_filters: Vec<_> = filters
         .iter()
         .filter(|f| f.kind() == Some("flower"))
@@ -250,7 +254,9 @@ async fn test_apply_with_dst_mac_match() -> nlink::Result<()> {
         .apply(&conn)
         .await?;
 
-    let filters = conn.get_filters_by_parent_index(ifindex, "1:").await?;
+    let filters = conn
+        .get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(1))
+        .await?;
     assert!(
         filters.iter().any(|f| f.kind() == Some("flower")),
         "flower filter for MAC match should exist"
@@ -332,12 +338,16 @@ async fn test_get_filters_by_parent_filters_correctly() -> nlink::Result<()> {
         .await?;
 
     // All filters at parent 1: should be the helper's flower filters.
-    let at_root = conn.get_filters_by_parent_index(ifindex, "1:").await?;
+    let at_root = conn
+        .get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(1))
+        .await?;
     assert_eq!(at_root.len(), 2, "expected 2 filters at parent 1:");
     assert!(at_root.iter().all(|f| f.kind() == Some("flower")));
 
     // No filters at parent 2: (a parent that doesn't exist).
-    let at_other = conn.get_filters_by_parent_index(ifindex, "2:").await?;
+    let at_other = conn
+        .get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(2))
+        .await?;
     assert!(at_other.is_empty(), "no filters expected at parent 2:");
 
     Ok(())

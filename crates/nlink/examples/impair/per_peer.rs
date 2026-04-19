@@ -215,7 +215,7 @@ fn print_overview() {
     println!(
         r#"    // Filter the dump server-side by parent handle.
     let helper_filters = conn.get_filters_by_parent("vethA-br", "1:").await?;
-    let by_index = conn.get_filters_by_parent_index(ifindex, "1:").await?;
+    let by_index = conn.get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(1)).await?;
 "#
     );
 }
@@ -253,7 +253,9 @@ async fn dump_tree(conn: &Connection<Route>, ifindex: u32) -> nlink::Result<()> 
 
     println!();
     println!("  --- Filters at parent 1: ---");
-    let filters = conn.get_filters_by_parent_index(ifindex, "1:").await?;
+    let filters = conn
+        .get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(1))
+        .await?;
     for f in &filters {
         let kind = f.kind().unwrap_or("?");
         println!(

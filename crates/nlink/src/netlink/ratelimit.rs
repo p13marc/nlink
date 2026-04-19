@@ -56,6 +56,7 @@ use super::{
     link::IfbLink,
     protocol::Route,
     tc::{FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig},
+    tc_handle::TcHandle,
 };
 
 // ============================================================================
@@ -215,10 +216,10 @@ impl RateLimiter {
     /// Remove all rate limits from the interface.
     pub async fn remove(&self, conn: &Connection<Route>) -> Result<()> {
         // Remove egress qdisc (this removes all egress TC config)
-        let _ = conn.del_qdisc(&self.dev, "root").await;
+        let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
 
         // Remove ingress qdisc
-        let _ = conn.del_qdisc(&self.dev, "ingress").await;
+        let _ = conn.del_qdisc(&self.dev, TcHandle::INGRESS).await;
 
         // Remove IFB device if it exists
         let ifb_name = self.ifb_name();
@@ -243,7 +244,7 @@ impl RateLimiter {
     /// Apply egress rate limiting using HTB.
     async fn apply_egress(&self, conn: &Connection<Route>, limit: &RateLimit) -> Result<()> {
         // Remove existing root qdisc (ignore errors if none exists)
-        let _ = conn.del_qdisc(&self.dev, "root").await;
+        let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
 
         // Add HTB qdisc at root
         let htb = HtbQdiscConfig::new()
@@ -260,8 +261,13 @@ impl RateLimiter {
         if let Some(burst) = limit.burst {
             class_config = class_config.burst(burst);
         }
-        conn.add_class_config(&self.dev, "1:0", "1:1", class_config.build())
-            .await?;
+        conn.add_class_config(
+            &self.dev,
+            TcHandle::major_only(1),
+            TcHandle::new(1, 1),
+            class_config.build(),
+        )
+        .await?;
 
         // Add default class (1:10) under the root class
         let mut default_config = HtbClassConfig::new(limit.rate);
@@ -271,16 +277,26 @@ impl RateLimiter {
         if let Some(burst) = limit.burst {
             default_config = default_config.burst(burst);
         }
-        conn.add_class_config(&self.dev, "1:1", "1:10", default_config.build())
-            .await?;
+        conn.add_class_config(
+            &self.dev,
+            TcHandle::new(1, 1),
+            TcHandle::new(1, 10),
+            default_config.build(),
+        )
+        .await?;
 
         // Add fq_codel as leaf qdisc for AQM
         let mut fq_codel = FqCodelConfig::new().parent("1:10").handle("10:");
         if let Some(latency) = limit.latency {
             fq_codel = fq_codel.target(latency);
         }
-        conn.add_qdisc_full(&self.dev, "1:10", Some("10:"), fq_codel.build())
-            .await?;
+        conn.add_qdisc_full(
+            &self.dev,
+            TcHandle::new(1, 10),
+            Some(TcHandle::major_only(10)),
+            fq_codel.build(),
+        )
+        .await?;
 
         Ok(())
     }
@@ -298,10 +314,10 @@ impl RateLimiter {
         conn.set_link_up(&ifb_name).await?;
 
         // Remove existing ingress qdisc on the main interface
-        let _ = conn.del_qdisc(&self.dev, "ingress").await;
+        let _ = conn.del_qdisc(&self.dev, TcHandle::INGRESS).await;
 
         // Add ingress qdisc to the main interface
-        conn.add_qdisc_full(&self.dev, "ingress", None, IngressConfig::new())
+        conn.add_qdisc_full(&self.dev, TcHandle::INGRESS, None, IngressConfig::new())
             .await?;
 
         // Add filter to redirect ingress traffic to IFB
@@ -310,7 +326,7 @@ impl RateLimiter {
 
         // Now configure HTB on the IFB device
         // Remove existing root qdisc on IFB
-        let _ = conn.del_qdisc(&ifb_name, "root").await;
+        let _ = conn.del_qdisc(&ifb_name, TcHandle::ROOT).await;
 
         // Add HTB qdisc at root of IFB
         let htb = HtbQdiscConfig::new()
@@ -327,8 +343,13 @@ impl RateLimiter {
         if let Some(burst) = limit.burst {
             class_config = class_config.burst(burst);
         }
-        conn.add_class_config(&ifb_name, "1:0", "1:1", class_config.build())
-            .await?;
+        conn.add_class_config(
+            &ifb_name,
+            TcHandle::major_only(1),
+            TcHandle::new(1, 1),
+            class_config.build(),
+        )
+        .await?;
 
         // Add default class (1:10) under the root class
         let mut default_config = HtbClassConfig::new(limit.rate);
@@ -338,16 +359,26 @@ impl RateLimiter {
         if let Some(burst) = limit.burst {
             default_config = default_config.burst(burst);
         }
-        conn.add_class_config(&ifb_name, "1:1", "1:10", default_config.build())
-            .await?;
+        conn.add_class_config(
+            &ifb_name,
+            TcHandle::new(1, 1),
+            TcHandle::new(1, 10),
+            default_config.build(),
+        )
+        .await?;
 
         // Add fq_codel as leaf qdisc for AQM
         let mut fq_codel = FqCodelConfig::new().parent("1:10").handle("10:");
         if let Some(latency) = limit.latency {
             fq_codel = fq_codel.target(latency);
         }
-        conn.add_qdisc_full(&ifb_name, "1:10", Some("10:"), fq_codel.build())
-            .await?;
+        conn.add_qdisc_full(
+            &ifb_name,
+            TcHandle::new(1, 10),
+            Some(TcHandle::major_only(10)),
+            fq_codel.build(),
+        )
+        .await?;
 
         Ok(())
     }
@@ -609,7 +640,7 @@ impl PerHostLimiter {
     /// Apply the per-host rate limits.
     pub async fn apply(&self, conn: &Connection<Route>) -> Result<()> {
         // Remove existing root qdisc
-        let _ = conn.del_qdisc(&self.dev, "root").await;
+        let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
 
         // Add HTB qdisc at root
         // Default class will be the last one (for unmatched traffic)
@@ -621,26 +652,30 @@ impl PerHostLimiter {
         conn.add_qdisc(&self.dev, htb).await?;
 
         // Add root class (1:1) with sum of all rates as ceiling
+        let parent_classid = TcHandle::new(1, 1);
+        let major_only_1 = TcHandle::major_only(1);
         let total_rate: crate::util::Rate =
             self.default_rate + self.rules.iter().map(|r| r.rate).sum::<crate::util::Rate>();
         let root_config = HtbClassConfig::new(total_rate).ceil(total_rate).build();
-        conn.add_class_config(&self.dev, "1:0", "1:1", root_config)
+        conn.add_class_config(&self.dev, major_only_1, parent_classid, root_config)
             .await?;
 
         // Add classes for each rule
         for (i, rule) in self.rules.iter().enumerate() {
-            let classid = format!("1:{:x}", i + 2); // Start from 1:2
+            let classid = TcHandle::new(1, (i + 2) as u16);
+            let leaf_handle = TcHandle::major_only((i + 10) as u16);
             let class_config = HtbClassConfig::new(rule.rate).ceil(rule.ceil.unwrap_or(rule.rate));
-            conn.add_class_config(&self.dev, "1:1", &classid, class_config.build())
+            conn.add_class_config(&self.dev, parent_classid, classid, class_config.build())
                 .await?;
 
             // Add fq_codel leaf qdisc
-            let handle = format!("{:x}:", i + 10);
-            let mut fq_codel = FqCodelConfig::new().parent(&classid).handle(&handle);
+            let mut fq_codel = FqCodelConfig::new()
+                .parent(classid.to_string())
+                .handle(leaf_handle.to_string());
             if let Some(latency) = self.latency {
                 fq_codel = fq_codel.target(latency);
             }
-            conn.add_qdisc_full(&self.dev, &classid, Some(&handle), fq_codel.build())
+            conn.add_qdisc_full(&self.dev, classid, Some(leaf_handle), fq_codel.build())
                 .await?;
 
             // Add flower filter to classify traffic to this class
@@ -648,25 +683,25 @@ impl PerHostLimiter {
         }
 
         // Add default class for unmatched traffic
-        let default_classid = format!("1:{:x}", self.rules.len() + 2);
+        let default_classid = TcHandle::new(1, (self.rules.len() + 2) as u16);
+        let default_handle = TcHandle::major_only((self.rules.len() + 10) as u16);
         let default_config = HtbClassConfig::new(self.default_rate)
             .ceil(self.default_rate)
             .build();
-        conn.add_class_config(&self.dev, "1:1", &default_classid, default_config)
+        conn.add_class_config(&self.dev, parent_classid, default_classid, default_config)
             .await?;
 
         // Add fq_codel leaf for default class
-        let default_handle = format!("{:x}:", self.rules.len() + 10);
         let mut fq_codel = FqCodelConfig::new()
-            .parent(&default_classid)
-            .handle(&default_handle);
+            .parent(default_classid.to_string())
+            .handle(default_handle.to_string());
         if let Some(latency) = self.latency {
             fq_codel = fq_codel.target(latency);
         }
         conn.add_qdisc_full(
             &self.dev,
-            &default_classid,
-            Some(&default_handle),
+            default_classid,
+            Some(default_handle),
             fq_codel.build(),
         )
         .await?;
@@ -676,7 +711,7 @@ impl PerHostLimiter {
 
     /// Remove the per-host rate limits.
     pub async fn remove(&self, conn: &Connection<Route>) -> Result<()> {
-        let _ = conn.del_qdisc(&self.dev, "root").await;
+        let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
         Ok(())
     }
 
@@ -719,8 +754,15 @@ impl PerHostLimiter {
                             .priority(priority)
                             .dst_ipv4(*addr, prefix)
                             .build();
-                        conn.add_filter_full(&self.dev, "1:", None, ETH_P_IP, priority, filter)
-                            .await?;
+                        conn.add_filter_full(
+                            &self.dev,
+                            TcHandle::major_only(1),
+                            None,
+                            ETH_P_IP,
+                            priority,
+                            filter,
+                        )
+                        .await?;
                     }
                     IpAddr::V6(addr) => {
                         let filter = FlowerFilter::new()
@@ -728,8 +770,15 @@ impl PerHostLimiter {
                             .priority(priority)
                             .dst_ipv6(*addr, prefix)
                             .build();
-                        conn.add_filter_full(&self.dev, "1:", None, ETH_P_IPV6, priority, filter)
-                            .await?;
+                        conn.add_filter_full(
+                            &self.dev,
+                            TcHandle::major_only(1),
+                            None,
+                            ETH_P_IPV6,
+                            priority,
+                            filter,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -752,8 +801,15 @@ impl PerHostLimiter {
                             .priority(priority)
                             .src_ipv4(*addr, prefix)
                             .build();
-                        conn.add_filter_full(&self.dev, "1:", None, ETH_P_IP, priority, filter)
-                            .await?;
+                        conn.add_filter_full(
+                            &self.dev,
+                            TcHandle::major_only(1),
+                            None,
+                            ETH_P_IP,
+                            priority,
+                            filter,
+                        )
+                        .await?;
                     }
                     IpAddr::V6(addr) => {
                         let filter = FlowerFilter::new()
@@ -761,8 +817,15 @@ impl PerHostLimiter {
                             .priority(priority)
                             .src_ipv6(*addr, prefix)
                             .build();
-                        conn.add_filter_full(&self.dev, "1:", None, ETH_P_IPV6, priority, filter)
-                            .await?;
+                        conn.add_filter_full(
+                            &self.dev,
+                            TcHandle::major_only(1),
+                            None,
+                            ETH_P_IPV6,
+                            priority,
+                            filter,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -775,8 +838,15 @@ impl PerHostLimiter {
                     .ip_proto_tcp()
                     .dst_port(*port)
                     .build();
-                conn.add_filter_full(&self.dev, "1:", None, ETH_P_IP, priority, tcp_filter)
-                    .await?;
+                conn.add_filter_full(
+                    &self.dev,
+                    TcHandle::major_only(1),
+                    None,
+                    ETH_P_IP,
+                    priority,
+                    tcp_filter,
+                )
+                .await?;
 
                 let udp_filter = FlowerFilter::new()
                     .classid(&classid)
@@ -784,8 +854,15 @@ impl PerHostLimiter {
                     .ip_proto_udp()
                     .dst_port(*port)
                     .build();
-                conn.add_filter_full(&self.dev, "1:", None, ETH_P_IP, priority + 100, udp_filter)
-                    .await?;
+                conn.add_filter_full(
+                    &self.dev,
+                    TcHandle::major_only(1),
+                    None,
+                    ETH_P_IP,
+                    priority + 100,
+                    udp_filter,
+                )
+                .await?;
             }
             HostMatch::PortRange(start, end) => {
                 // For port ranges, we need to add individual filters or use u32
@@ -800,7 +877,14 @@ impl PerHostLimiter {
                             .dst_port(port)
                             .build();
                         let _ = conn
-                            .add_filter_full(&self.dev, "1:", None, ETH_P_IP, priority, filter)
+                            .add_filter_full(
+                                &self.dev,
+                                TcHandle::major_only(1),
+                                None,
+                                ETH_P_IP,
+                                priority,
+                                filter,
+                            )
                             .await;
                     }
                 }

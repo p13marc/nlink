@@ -36,16 +36,22 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use super::Connection;
-use super::action::ActionList;
-use super::builder::MessageBuilder;
-use super::connection::{ack_request, create_request, replace_request};
-use super::error::{Error, Result};
-use super::interface_ref::InterfaceRef;
-use super::message::NlMsgType;
-use super::protocol::Route;
-use super::types::tc::filter::{basic, bpf, flower, fw, matchall, u32 as u32_mod};
-use super::types::tc::{TcMsg, TcaAttr, tc_handle};
+use super::{
+    Connection,
+    action::ActionList,
+    builder::MessageBuilder,
+    connection::{ack_request, create_request, replace_request},
+    error::{Error, Result},
+    interface_ref::InterfaceRef,
+    message::NlMsgType,
+    protocol::Route,
+    tc_handle::TcHandle,
+    types::tc::{
+        TcMsg, TcaAttr,
+        filter::{basic, bpf, flower, fw, matchall, u32 as u32_mod},
+        tc_handle,
+    },
+};
 
 /// Ethernet protocol: all protocols.
 const ETH_P_ALL: u16 = 0x0003;
@@ -725,9 +731,10 @@ impl FilterConfig for FlowerFilter {
 
         // Add goto_chain action if set
         if let Some(chain) = self.goto_chain {
-            use super::action::{ActionConfig, GactAction};
-            use super::types::tc::action;
-            use super::types::tc::filter::flower::TCA_FLOWER_ACT;
+            use super::{
+                action::{ActionConfig, GactAction},
+                types::tc::{action, filter::flower::TCA_FLOWER_ACT},
+            };
 
             let goto = GactAction::goto_chain(chain);
             let act_token = builder.nest_start(TCA_FLOWER_ACT);
@@ -874,8 +881,10 @@ impl FilterConfig for MatchallFilter {
 
         // Add goto_chain action if set
         if let Some(chain) = self.goto_chain {
-            use super::action::{ActionConfig, GactAction};
-            use super::types::tc::action;
+            use super::{
+                action::{ActionConfig, GactAction},
+                types::tc::action,
+            };
 
             let goto = GactAction::goto_chain(chain);
             let act_token = builder.nest_start(matchall::TCA_MATCHALL_ACT);
@@ -1845,15 +1854,6 @@ impl FilterConfig for FlowFilter {
 }
 
 // ============================================================================
-// Helper functions
-// ============================================================================
-
-/// Parse a handle string like "1:0" or "root".
-fn parse_handle(s: &str) -> Result<u32> {
-    tc_handle::parse(s).ok_or_else(|| Error::InvalidMessage(format!("invalid handle: {}", s)))
-}
-
-// ============================================================================
 // Connection extension methods for filters
 // ============================================================================
 
@@ -1876,7 +1876,7 @@ impl Connection<Route> {
     pub async fn add_filter(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
+        parent: TcHandle,
         config: impl FilterConfig,
     ) -> Result<()> {
         self.add_filter_full(dev, parent, None, 0x0800, 0, config)
@@ -1895,8 +1895,8 @@ impl Connection<Route> {
     pub async fn add_filter_full(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
         protocol: u16,
         priority: u16,
         config: impl FilterConfig,
@@ -1910,7 +1910,7 @@ impl Connection<Route> {
     pub async fn add_filter_by_index(
         &self,
         ifindex: u32,
-        parent: &str,
+        parent: TcHandle,
         config: impl FilterConfig,
     ) -> Result<()> {
         self.add_filter_by_index_full(ifindex, parent, None, 0x0800, 0, config)
@@ -1921,14 +1921,14 @@ impl Connection<Route> {
     pub async fn add_filter_by_index_full(
         &self,
         ifindex: u32,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
         protocol: u16,
         priority: u16,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let filter_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
+        let parent_handle = parent.as_raw();
+        let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
         // tcm_info = (protocol << 16) | priority
         let info = ((protocol as u32) << 16) | (priority as u32);
@@ -1975,7 +1975,7 @@ impl Connection<Route> {
     pub async fn replace_filter(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
+        parent: TcHandle,
         config: impl FilterConfig,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
@@ -1987,8 +1987,8 @@ impl Connection<Route> {
     pub async fn replace_filter_full(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
         protocol: u16,
         priority: u16,
         config: impl FilterConfig,
@@ -2002,7 +2002,7 @@ impl Connection<Route> {
     pub async fn replace_filter_by_index(
         &self,
         ifindex: u32,
-        parent: &str,
+        parent: TcHandle,
         config: impl FilterConfig,
     ) -> Result<()> {
         self.replace_filter_by_index_full(ifindex, parent, None, 0x0800, 0, config)
@@ -2013,14 +2013,14 @@ impl Connection<Route> {
     pub async fn replace_filter_by_index_full(
         &self,
         ifindex: u32,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
         protocol: u16,
         priority: u16,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let filter_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
+        let parent_handle = parent.as_raw();
+        let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
         let info = ((protocol as u32) << 16) | (priority as u32);
 
@@ -2065,7 +2065,7 @@ impl Connection<Route> {
     pub async fn change_filter(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
+        parent: TcHandle,
         protocol: u16,
         priority: u16,
         config: impl FilterConfig,
@@ -2079,8 +2079,8 @@ impl Connection<Route> {
     pub async fn change_filter_full(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
         protocol: u16,
         priority: u16,
         config: impl FilterConfig,
@@ -2094,7 +2094,7 @@ impl Connection<Route> {
     pub async fn change_filter_by_index(
         &self,
         ifindex: u32,
-        parent: &str,
+        parent: TcHandle,
         protocol: u16,
         priority: u16,
         config: impl FilterConfig,
@@ -2107,14 +2107,14 @@ impl Connection<Route> {
     pub async fn change_filter_by_index_full(
         &self,
         ifindex: u32,
-        parent: &str,
-        handle: Option<&str>,
+        parent: TcHandle,
+        handle: Option<TcHandle>,
         protocol: u16,
         priority: u16,
         config: impl FilterConfig,
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
-        let filter_handle = handle.map(parse_handle).transpose()?.unwrap_or(0);
+        let parent_handle = parent.as_raw();
+        let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
         let info = ((protocol as u32) << 16) | (priority as u32);
 
@@ -2153,7 +2153,7 @@ impl Connection<Route> {
     pub async fn del_filter(
         &self,
         dev: impl Into<InterfaceRef>,
-        parent: &str,
+        parent: TcHandle,
         protocol: u16,
         priority: u16,
     ) -> Result<()> {
@@ -2166,11 +2166,11 @@ impl Connection<Route> {
     pub async fn del_filter_by_index(
         &self,
         ifindex: u32,
-        parent: &str,
+        parent: TcHandle,
         protocol: u16,
         priority: u16,
     ) -> Result<()> {
-        let parent_handle = parse_handle(parent)?;
+        let parent_handle = parent.as_raw();
         let info = ((protocol as u32) << 16) | (priority as u32);
 
         let tcmsg = TcMsg::new()
@@ -2187,16 +2187,20 @@ impl Connection<Route> {
     }
 
     /// Delete all filters from a parent qdisc.
-    pub async fn flush_filters(&self, dev: impl Into<InterfaceRef>, parent: &str) -> Result<()> {
+    pub async fn flush_filters(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        parent: TcHandle,
+    ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
         self.flush_filters_by_index(ifindex, parent).await
     }
 
     /// Delete all filters from a parent qdisc by interface index.
-    pub async fn flush_filters_by_index(&self, ifindex: u32, parent: &str) -> Result<()> {
+    pub async fn flush_filters_by_index(&self, ifindex: u32, parent: TcHandle) -> Result<()> {
         // Get all filters
         let filters = self.get_filters().await?;
-        let parent_handle = parse_handle(parent)?;
+        let parent_handle = parent.as_raw();
 
         // Delete each filter that matches the parent and interface
         for filter in filters {
@@ -2259,9 +2263,11 @@ impl Connection<Route> {
             Err(e) => return Err(e),
         }
 
+        // Clsact filter parent: ingress = TC_H_MAKE(CLSACT, MIN_INGRESS) = 0xFFFFFFF2,
+        // egress = TC_H_MAKE(CLSACT, MIN_EGRESS) = 0xFFFFFFF3.
         let parent = match direction {
-            BpfDirection::Ingress => "ingress",
-            BpfDirection::Egress => "egress",
+            BpfDirection::Ingress => TcHandle::CLSACT,
+            BpfDirection::Egress => TcHandle::from_raw(0xFFFF_FFF3),
         };
 
         self.add_filter_by_index(ifindex, parent, filter).await
@@ -2290,9 +2296,11 @@ impl Connection<Route> {
 
     /// Detach all BPF filters from an interface direction by index.
     pub async fn detach_bpf_by_index(&self, ifindex: u32, direction: BpfDirection) -> Result<()> {
+        // Clsact filter parent: ingress = TC_H_MAKE(CLSACT, MIN_INGRESS) = 0xFFFFFFF2,
+        // egress = TC_H_MAKE(CLSACT, MIN_EGRESS) = 0xFFFFFFF3.
         let parent = match direction {
-            BpfDirection::Ingress => "ingress",
-            BpfDirection::Egress => "egress",
+            BpfDirection::Ingress => TcHandle::CLSACT,
+            BpfDirection::Egress => TcHandle::from_raw(0xFFFF_FFF3),
         };
         self.flush_filters_by_index(ifindex, parent).await
     }

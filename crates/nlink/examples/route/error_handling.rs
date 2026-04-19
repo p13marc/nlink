@@ -35,7 +35,7 @@ async fn main() -> nlink::netlink::Result<()> {
 
     // Pattern 3: Idempotent operations (delete if exists)
     println!("\n3. Idempotent delete:");
-    match conn.del_qdisc("lo", "root").await {
+    match conn.del_qdisc("lo", nlink::TcHandle::ROOT).await {
         Ok(()) => println!("   Deleted root qdisc"),
         Err(e) if e.is_not_found() => println!("   No qdisc to delete (OK)"),
         Err(e) => println!("   Error: {}", e),

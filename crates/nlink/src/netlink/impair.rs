@@ -76,6 +76,7 @@ use super::{
     interface_ref::InterfaceRef,
     protocol::Route,
     tc::{HtbClassConfig, HtbQdiscConfig, NetemConfig},
+    tc_handle::TcHandle,
 };
 use crate::util::Rate;
 
@@ -318,68 +319,70 @@ impl PerPeerImpairer {
         let default_classid_minor = (n + 2) as u32;
 
         // Clean slate. A missing root qdisc is fine.
-        let _ = conn.del_qdisc_by_index(ifindex, "root").await;
+        let _ = conn.del_qdisc_by_index(ifindex, TcHandle::ROOT).await;
 
-        // Root HTB.
+        // Root HTB at handle 1:.
+        let root_handle = TcHandle::major_only(1);
         let htb_root = HtbQdiscConfig::new()
             .handle("1:")
             .default_class(default_classid_minor)
             .build();
-        conn.add_qdisc_by_index_full(ifindex, "root", Some("1:"), htb_root)
+        conn.add_qdisc_by_index_full(ifindex, TcHandle::ROOT, Some(root_handle), htb_root)
             .await
             .map_err(|e| e.with_context("PerPeerImpairer: add HTB root"))?;
 
         // Parent class 1:1 with rate covering the sum of all children. With
         // each child borrowing from this parent up to their ceil, this lets
         // any child use its full configured rate without contention.
+        let parent_classid = TcHandle::new(1, 1);
         let total_rate = self.total_rate();
         let root_cls = HtbClassConfig::new(total_rate).ceil(total_rate).build();
-        conn.add_class_config_by_index(ifindex, "1:0", "1:1", root_cls)
+        conn.add_class_config_by_index(ifindex, TcHandle::major_only(1), parent_classid, root_cls)
             .await
             .map_err(|e| e.with_context("PerPeerImpairer: add HTB parent class 1:1"))?;
 
         // Per-rule classes + netem leaves + flower filters.
         for (i, rule) in self.rules.iter().enumerate() {
-            let classid = format!("1:{:x}", i + 2);
-            let leaf_handle = format!("{:x}:", i + 10);
+            let classid = TcHandle::new(1, (i + 2) as u16);
+            let leaf_handle = TcHandle::major_only((i + 10) as u16);
             let class_rate = rule.impairment.rate_cap.unwrap_or(link_rate);
 
             let cls = HtbClassConfig::new(class_rate).ceil(class_rate).build();
-            conn.add_class_config_by_index(ifindex, "1:1", &classid, cls)
+            conn.add_class_config_by_index(ifindex, parent_classid, classid, cls)
                 .await
                 .map_err(|e| e.with_context(format!("PerPeerImpairer: add class {classid}")))?;
 
             conn.add_qdisc_by_index_full(
                 ifindex,
-                &classid,
-                Some(&leaf_handle),
+                classid,
+                Some(leaf_handle),
                 rule.impairment.netem.clone(),
             )
             .await
             .map_err(|e| e.with_context(format!("PerPeerImpairer: add netem leaf at {classid}")))?;
 
-            self.add_filter(conn, ifindex, i, &rule.match_, &classid)
+            self.add_filter(conn, ifindex, i, &rule.match_, classid)
                 .await?;
         }
 
         // Default class — receives whatever no filter matched.
-        let default_classid = format!("1:{:x}", n + 2);
-        let default_leaf_handle = format!("{:x}:", n + 10);
+        let default_classid = TcHandle::new(1, (n + 2) as u16);
+        let default_leaf_handle = TcHandle::major_only((n + 10) as u16);
         let default_rate = self
             .default_impairment
             .as_ref()
             .and_then(|d| d.rate_cap)
             .unwrap_or(link_rate);
         let default_cls = HtbClassConfig::new(default_rate).ceil(default_rate).build();
-        conn.add_class_config_by_index(ifindex, "1:1", &default_classid, default_cls)
+        conn.add_class_config_by_index(ifindex, parent_classid, default_classid, default_cls)
             .await
             .map_err(|e| e.with_context("PerPeerImpairer: add default class"))?;
 
         if let Some(default) = &self.default_impairment {
             conn.add_qdisc_by_index_full(
                 ifindex,
-                &default_classid,
-                Some(&default_leaf_handle),
+                default_classid,
+                Some(default_leaf_handle),
                 default.netem.clone(),
             )
             .await
@@ -394,7 +397,7 @@ impl PerPeerImpairer {
     /// Idempotent: a missing root qdisc is treated as success.
     pub async fn clear(&self, conn: &Connection<Route>) -> Result<()> {
         let ifindex = conn.resolve_interface(&self.target).await?;
-        match conn.del_qdisc_by_index(ifindex, "root").await {
+        match conn.del_qdisc_by_index(ifindex, TcHandle::ROOT).await {
             Ok(()) => Ok(()),
             Err(e) if e.is_not_found() || matches!(&e, Error::QdiscNotFound { .. }) => Ok(()),
             Err(e) => Err(e),
@@ -426,26 +429,34 @@ impl PerPeerImpairer {
         ifindex: u32,
         index: usize,
         match_: &PeerMatch,
-        classid: &str,
+        classid: TcHandle,
     ) -> Result<()> {
         let priority = filter_priority(index);
         let protocol = protocol_for(match_);
-        let filter = build_flower(classid, priority, match_);
+        let filter = build_flower(&classid.to_string(), priority, match_);
 
-        conn.add_filter_by_index_full(ifindex, "1:", None, protocol, priority, filter)
-            .await
-            .map_err(|e| {
-                if e.is_not_supported() {
-                    Error::NotSupported(format!(
-                        "cls_flower not loaded in target namespace; \
-                         try `modprobe cls_flower` (underlying: {e})"
-                    ))
-                } else {
-                    e.with_context(format!(
-                        "PerPeerImpairer: add filter for {match_:?} -> {classid}"
-                    ))
-                }
-            })
+        // Filter parent is the root HTB qdisc (1:).
+        conn.add_filter_by_index_full(
+            ifindex,
+            TcHandle::major_only(1),
+            None,
+            protocol,
+            priority,
+            filter,
+        )
+        .await
+        .map_err(|e| {
+            if e.is_not_supported() {
+                Error::NotSupported(format!(
+                    "cls_flower not loaded in target namespace; \
+                     try `modprobe cls_flower` (underlying: {e})"
+                ))
+            } else {
+                e.with_context(format!(
+                    "PerPeerImpairer: add filter for {match_:?} -> {classid}"
+                ))
+            }
+        })
     }
 }
 

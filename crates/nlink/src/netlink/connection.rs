@@ -13,6 +13,7 @@ use super::{
     parse::FromNetlink,
     protocol::{ProtocolState, Route},
     socket::NetlinkSocket,
+    tc_handle::TcHandle,
 };
 
 /// High-level netlink connection parameterized by protocol state.
@@ -1229,7 +1230,7 @@ impl Connection<Route> {
     pub async fn get_filters_by_parent(
         &self,
         iface: impl Into<InterfaceRef>,
-        parent: &str,
+        parent: TcHandle,
     ) -> Result<Vec<TcMessage>> {
         let ifindex = self.resolve_interface(&iface.into()).await?;
         self.get_filters_by_parent_index(ifindex, parent).await
@@ -1241,10 +1242,9 @@ impl Connection<Route> {
     pub async fn get_filters_by_parent_index(
         &self,
         ifindex: u32,
-        parent: &str,
+        parent: TcHandle,
     ) -> Result<Vec<TcMessage>> {
-        let parent_handle = crate::netlink::types::tc::tc_handle::parse(parent)
-            .ok_or_else(|| Error::InvalidMessage(format!("invalid handle: {parent}")))?;
+        let parent_handle = parent.as_raw();
         let filters = self.get_filters_by_index(ifindex).await?;
         Ok(filters
             .into_iter()
@@ -1268,22 +1268,19 @@ impl Connection<Route> {
     pub async fn get_tc_chains(
         &self,
         ifname: impl Into<InterfaceRef>,
-        parent: &str,
+        parent: TcHandle,
     ) -> Result<Vec<u32>> {
         let ifindex = self.resolve_interface(&ifname.into()).await?;
         self.get_tc_chains_by_index(ifindex, parent).await
     }
 
     /// Get all TC filter chains for an interface by index.
-    pub async fn get_tc_chains_by_index(&self, ifindex: u32, parent: &str) -> Result<Vec<u32>> {
-        use super::types::tc::{TcMsg, tc_handle};
-
-        let parent_handle = tc_handle::parse(parent)
-            .ok_or_else(|| Error::InvalidMessage(format!("invalid parent handle: {}", parent)))?;
+    pub async fn get_tc_chains_by_index(&self, ifindex: u32, parent: TcHandle) -> Result<Vec<u32>> {
+        use super::types::tc::TcMsg;
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
-            .with_parent(parent_handle);
+            .with_parent(parent.as_raw());
 
         let mut builder = dump_request(NlMsgType::RTM_GETCHAIN);
         builder.append(&tcmsg);
@@ -1320,7 +1317,7 @@ impl Connection<Route> {
     pub async fn add_tc_chain(
         &self,
         ifname: impl Into<InterfaceRef>,
-        parent: &str,
+        parent: TcHandle,
         chain: u32,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&ifname.into()).await?;
@@ -1331,17 +1328,14 @@ impl Connection<Route> {
     pub async fn add_tc_chain_by_index(
         &self,
         ifindex: u32,
-        parent: &str,
+        parent: TcHandle,
         chain: u32,
     ) -> Result<()> {
-        use super::types::tc::{TcMsg, TcaAttr, tc_handle};
-
-        let parent_handle = tc_handle::parse(parent)
-            .ok_or_else(|| Error::InvalidMessage(format!("invalid parent handle: {}", parent)))?;
+        use super::types::tc::{TcMsg, TcaAttr};
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
-            .with_parent(parent_handle);
+            .with_parent(parent.as_raw());
 
         let mut builder = create_request(NlMsgType::RTM_NEWCHAIN);
         builder.append(&tcmsg);
@@ -1364,7 +1358,7 @@ impl Connection<Route> {
     pub async fn del_tc_chain(
         &self,
         ifname: impl Into<InterfaceRef>,
-        parent: &str,
+        parent: TcHandle,
         chain: u32,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&ifname.into()).await?;
@@ -1375,17 +1369,14 @@ impl Connection<Route> {
     pub async fn del_tc_chain_by_index(
         &self,
         ifindex: u32,
-        parent: &str,
+        parent: TcHandle,
         chain: u32,
     ) -> Result<()> {
-        use super::types::tc::{TcMsg, TcaAttr, tc_handle};
-
-        let parent_handle = tc_handle::parse(parent)
-            .ok_or_else(|| Error::InvalidMessage(format!("invalid parent handle: {}", parent)))?;
+        use super::types::tc::{TcMsg, TcaAttr};
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
-            .with_parent(parent_handle);
+            .with_parent(parent.as_raw());
 
         let mut builder = create_request(NlMsgType::RTM_DELCHAIN);
         builder.append(&tcmsg);
@@ -1440,7 +1431,7 @@ impl Connection<Route> {
     pub async fn get_qdisc_by_handle(
         &self,
         ifname: &str,
-        handle: &str,
+        handle: TcHandle,
     ) -> Result<Option<TcMessage>> {
         let ifindex = self
             .resolve_interface(&InterfaceRef::Name(ifname.to_string()))
@@ -1454,18 +1445,16 @@ impl Connection<Route> {
     ///
     /// ```ignore
     /// // Get the qdisc with handle 1:0 on interface index 2
-    /// if let Some(qdisc) = conn.get_qdisc_by_handle_index(2, "1:").await? {
+    /// if let Some(qdisc) = conn.get_qdisc_by_handle_index(2, TcHandle::major_only(1)).await? {
     ///     println!("Found qdisc: {}", qdisc.kind().unwrap_or("?"));
     /// }
     /// ```
     pub async fn get_qdisc_by_handle_index(
         &self,
         ifindex: u32,
-        handle: &str,
+        handle: TcHandle,
     ) -> Result<Option<TcMessage>> {
-        use super::types::tc::tc_handle;
-        let target_handle = tc_handle::parse(handle)
-            .ok_or_else(|| Error::InvalidMessage(format!("invalid handle: {}", handle)))?;
+        let target_handle = handle.as_raw();
         let qdiscs = self.get_qdiscs().await?;
         Ok(qdiscs
             .into_iter()

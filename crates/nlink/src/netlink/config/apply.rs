@@ -299,11 +299,11 @@ pub async fn apply_diff(
                 result.summary.push(format!("Would {}", op));
                 result.changes_made += 1;
             } else {
-                let parent_str = match parent {
-                    QdiscParent::Root => "root",
-                    QdiscParent::Ingress => "ingress",
+                let parent_handle = match parent {
+                    QdiscParent::Root => crate::TcHandle::ROOT,
+                    QdiscParent::Ingress => crate::TcHandle::INGRESS,
                 };
-                match conn.del_qdisc(dev, parent_str).await {
+                match conn.del_qdisc(dev, parent_handle).await {
                     Ok(()) => {
                         result.summary.push(format!("Removed qdisc on {}", dev));
                         result.changes_made += 1;
@@ -690,8 +690,13 @@ async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()
         }
         DeclaredQdiscType::Htb { default_class } => {
             let config = HtbQdiscConfig::new().default_class(*default_class);
-            conn.add_qdisc_full(&qdisc.dev, "root", Some("1:"), config)
-                .await
+            conn.add_qdisc_full(
+                &qdisc.dev,
+                crate::TcHandle::ROOT,
+                Some(crate::TcHandle::major_only(1)),
+                config,
+            )
+            .await
         }
         DeclaredQdiscType::FqCodel {
             limit,
@@ -744,13 +749,13 @@ async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()
 
 async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()> {
     // First try to delete the existing qdisc
-    let parent_str = match qdisc.parent {
-        QdiscParent::Root => "root",
-        QdiscParent::Ingress => "ingress",
+    let parent_handle = match qdisc.parent {
+        QdiscParent::Root => crate::TcHandle::ROOT,
+        QdiscParent::Ingress => crate::TcHandle::INGRESS,
     };
 
     // Ignore not found errors when deleting
-    match conn.del_qdisc(&qdisc.dev, parent_str).await {
+    match conn.del_qdisc(&qdisc.dev, parent_handle).await {
         Ok(()) => {}
         Err(e) if e.is_not_found() => {}
         Err(e) => return Err(e),
