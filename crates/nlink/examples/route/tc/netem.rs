@@ -13,12 +13,9 @@
 //!   sudo cargo run -p nlink --features tc --example tc_netem -- add eth0 loss 1%
 //!   sudo cargo run -p nlink --features tc --example tc_netem -- del eth0
 
-use std::env;
-use std::time::Duration;
+use std::{env, time::Duration};
 
-use nlink::netlink::tc::NetemConfig;
-use nlink::netlink::tc_options::QdiscOptions;
-use nlink::netlink::{Connection, Route};
+use nlink::netlink::{Connection, Route, tc::NetemConfig, tc_options::QdiscOptions};
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
@@ -177,15 +174,21 @@ async fn add_netem(
         }
         "loss" => {
             let pct = parse_percent(value)?;
-            NetemConfig::new().loss(pct as f64).build()
+            NetemConfig::new()
+                .loss(nlink::Percent::new(pct as f64))
+                .build()
         }
         "corrupt" => {
             let pct = parse_percent(value)?;
-            NetemConfig::new().corrupt(pct as f64).build()
+            NetemConfig::new()
+                .corrupt(nlink::Percent::new(pct as f64))
+                .build()
         }
         "duplicate" => {
             let pct = parse_percent(value)?;
-            NetemConfig::new().duplicate(pct as f64).build()
+            NetemConfig::new()
+                .duplicate(nlink::Percent::new(pct as f64))
+                .build()
         }
         _ => {
             return Err(Error::not_supported(format!("unknown effect: {}", effect)));

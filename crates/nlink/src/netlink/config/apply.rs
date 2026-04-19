@@ -2,25 +2,27 @@
 //!
 //! This module applies the computed diff to achieve the desired network state.
 
-use std::net::IpAddr;
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
 
-use super::diff::{ConfigDiff, LinkChanges, compute_diff};
-use super::types::{
-    BondMode, DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredQdiscType,
-    DeclaredRoute, DeclaredRouteType, MacvlanMode, NetworkConfig, QdiscParent,
+use super::{
+    diff::{ConfigDiff, LinkChanges, compute_diff},
+    types::{
+        BondMode, DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc,
+        DeclaredQdiscType, DeclaredRoute, DeclaredRouteType, MacvlanMode, NetworkConfig,
+        QdiscParent,
+    },
 };
-use crate::netlink::addr::{Ipv4Address, Ipv6Address};
-use crate::netlink::connection::Connection;
-use crate::netlink::error::{Error, Result};
-use crate::netlink::link::{
-    BondLink, BridgeLink, DummyLink, IfbLink, MacvlanLink, VethLink, VlanLink, VxlanLink,
-};
-use crate::netlink::protocol::Route;
-use crate::netlink::route::{Ipv4Route, Ipv6Route};
-use crate::netlink::tc::{
-    ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, NetemConfig, PrioConfig, SfqConfig,
-    TbfConfig,
+use crate::netlink::{
+    addr::{Ipv4Address, Ipv6Address},
+    connection::Connection,
+    error::{Error, Result},
+    link::{BondLink, BridgeLink, DummyLink, IfbLink, MacvlanLink, VethLink, VlanLink, VxlanLink},
+    protocol::Route,
+    route::{Ipv4Route, Ipv6Route},
+    tc::{
+        ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, NetemConfig, PrioConfig,
+        SfqConfig, TbfConfig,
+    },
 };
 
 /// Options for applying configuration.
@@ -679,7 +681,7 @@ async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()
                 config = config.jitter(Duration::from_micros(*jitter as u64));
             }
             if let Some(loss) = loss_percent {
-                config = config.loss(*loss);
+                config = config.loss(crate::util::Percent::new(*loss));
             }
             if let Some(lim) = limit {
                 config = config.limit(*lim);

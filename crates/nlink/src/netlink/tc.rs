@@ -99,28 +99,28 @@ pub struct NetemConfig {
     pub delay: Option<Duration>,
     /// Delay jitter (variation).
     pub jitter: Option<Duration>,
-    /// Delay correlation (0-100%).
-    pub delay_correlation: f64,
-    /// Packet loss percentage (0-100%).
-    pub loss: f64,
-    /// Loss correlation (0-100%).
-    pub loss_correlation: f64,
-    /// Packet duplication percentage (0-100%).
-    pub duplicate: f64,
-    /// Duplication correlation (0-100%).
-    pub duplicate_correlation: f64,
-    /// Packet corruption percentage (0-100%).
-    pub corrupt: f64,
-    /// Corruption correlation (0-100%).
-    pub corrupt_correlation: f64,
-    /// Packet reordering percentage (0-100%).
-    pub reorder: f64,
-    /// Reordering correlation (0-100%).
-    pub reorder_correlation: f64,
+    /// Delay correlation.
+    pub delay_correlation: crate::util::Percent,
+    /// Packet loss percentage.
+    pub loss: crate::util::Percent,
+    /// Loss correlation.
+    pub loss_correlation: crate::util::Percent,
+    /// Packet duplication percentage.
+    pub duplicate: crate::util::Percent,
+    /// Duplication correlation.
+    pub duplicate_correlation: crate::util::Percent,
+    /// Packet corruption percentage.
+    pub corrupt: crate::util::Percent,
+    /// Corruption correlation.
+    pub corrupt_correlation: crate::util::Percent,
+    /// Packet reordering percentage.
+    pub reorder: crate::util::Percent,
+    /// Reordering correlation.
+    pub reorder_correlation: crate::util::Percent,
     /// Reorder gap.
     pub gap: u32,
-    /// Rate limit in bytes/sec.
-    pub rate: Option<u64>,
+    /// Rate limit.
+    pub rate: Option<crate::util::Rate>,
     /// Queue limit in packets.
     pub limit: u32,
     /// Parent handle.
@@ -163,59 +163,59 @@ impl NetemConfig {
         self
     }
 
-    /// Set the delay correlation (0-100%).
-    pub fn delay_correlation(mut self, corr: f64) -> Self {
-        self.delay_correlation = corr.clamp(0.0, 100.0);
+    /// Set the delay correlation.
+    pub fn delay_correlation(mut self, corr: crate::util::Percent) -> Self {
+        self.delay_correlation = corr;
         self
     }
 
-    /// Set the packet loss percentage (0-100%).
-    pub fn loss(mut self, percent: f64) -> Self {
-        self.loss = percent.clamp(0.0, 100.0);
+    /// Set the packet loss percentage.
+    pub fn loss(mut self, percent: crate::util::Percent) -> Self {
+        self.loss = percent;
         self
     }
 
-    /// Set the loss correlation (0-100%).
-    pub fn loss_correlation(mut self, corr: f64) -> Self {
-        self.loss_correlation = corr.clamp(0.0, 100.0);
+    /// Set the loss correlation.
+    pub fn loss_correlation(mut self, corr: crate::util::Percent) -> Self {
+        self.loss_correlation = corr;
         self
     }
 
-    /// Set the packet duplication percentage (0-100%).
-    pub fn duplicate(mut self, percent: f64) -> Self {
-        self.duplicate = percent.clamp(0.0, 100.0);
+    /// Set the packet duplication percentage.
+    pub fn duplicate(mut self, percent: crate::util::Percent) -> Self {
+        self.duplicate = percent;
         self
     }
 
-    /// Set the duplication correlation (0-100%).
-    pub fn duplicate_correlation(mut self, corr: f64) -> Self {
-        self.duplicate_correlation = corr.clamp(0.0, 100.0);
+    /// Set the duplication correlation.
+    pub fn duplicate_correlation(mut self, corr: crate::util::Percent) -> Self {
+        self.duplicate_correlation = corr;
         self
     }
 
-    /// Set the packet corruption percentage (0-100%).
-    pub fn corrupt(mut self, percent: f64) -> Self {
-        self.corrupt = percent.clamp(0.0, 100.0);
+    /// Set the packet corruption percentage.
+    pub fn corrupt(mut self, percent: crate::util::Percent) -> Self {
+        self.corrupt = percent;
         self
     }
 
-    /// Set the corruption correlation (0-100%).
-    pub fn corrupt_correlation(mut self, corr: f64) -> Self {
-        self.corrupt_correlation = corr.clamp(0.0, 100.0);
+    /// Set the corruption correlation.
+    pub fn corrupt_correlation(mut self, corr: crate::util::Percent) -> Self {
+        self.corrupt_correlation = corr;
         self
     }
 
-    /// Set the packet reordering percentage (0-100%).
+    /// Set the packet reordering percentage.
     ///
     /// Note: Reordering requires delay to be set.
-    pub fn reorder(mut self, percent: f64) -> Self {
-        self.reorder = percent.clamp(0.0, 100.0);
+    pub fn reorder(mut self, percent: crate::util::Percent) -> Self {
+        self.reorder = percent;
         self
     }
 
-    /// Set the reordering correlation (0-100%).
-    pub fn reorder_correlation(mut self, corr: f64) -> Self {
-        self.reorder_correlation = corr.clamp(0.0, 100.0);
+    /// Set the reordering correlation.
+    pub fn reorder_correlation(mut self, corr: crate::util::Percent) -> Self {
+        self.reorder_correlation = corr;
         self
     }
 
@@ -225,55 +225,10 @@ impl NetemConfig {
         self
     }
 
-    /// Set the rate limit in bytes per second.
-    pub fn rate(mut self, bytes_per_sec: u64) -> Self {
-        self.rate = Some(bytes_per_sec);
+    /// Set the rate limit.
+    pub fn rate(mut self, rate: crate::util::Rate) -> Self {
+        self.rate = Some(rate);
         self
-    }
-
-    /// Set the rate limit from a bit rate (e.g., 1_000_000 for 1 Mbps).
-    pub fn rate_bps(mut self, bits_per_sec: u64) -> Self {
-        self.rate = Some(bits_per_sec / 8);
-        self
-    }
-
-    /// Set the rate limit in kilobits per second.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let config = NetemConfig::new()
-    ///     .rate_kbps(1000)  // 1 Mbps
-    ///     .build();
-    /// ```
-    pub fn rate_kbps(self, kbps: u64) -> Self {
-        self.rate(crate::util::rate::kbps_to_bytes(kbps))
-    }
-
-    /// Set the rate limit in megabits per second.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let config = NetemConfig::new()
-    ///     .rate_mbps(100)  // 100 Mbps
-    ///     .build();
-    /// ```
-    pub fn rate_mbps(self, mbps: u64) -> Self {
-        self.rate(crate::util::rate::mbps_to_bytes(mbps))
-    }
-
-    /// Set the rate limit in gigabits per second.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let config = NetemConfig::new()
-    ///     .rate_gbps(1)  // 1 Gbps
-    ///     .build();
-    /// ```
-    pub fn rate_gbps(self, gbps: u64) -> Self {
-        self.rate(crate::util::rate::gbps_to_bytes(gbps))
     }
 
     /// Set the queue limit in packets.
@@ -295,7 +250,7 @@ impl QdiscConfig for NetemConfig {
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         // Validate: reorder requires delay
-        if self.reorder > 0.0 && self.delay.is_none() {
+        if !self.reorder.is_zero() && self.delay.is_none() {
             return Err(Error::InvalidMessage(
                 "netem: reorder requires delay to be set".into(),
             ));
@@ -312,13 +267,13 @@ impl QdiscConfig for NetemConfig {
         if let Some(jitter) = self.jitter {
             qopt.jitter = jitter.as_micros() as u32;
         }
-        if self.loss > 0.0 {
-            qopt.loss = percent_to_prob(self.loss);
+        if !self.loss.is_zero() {
+            qopt.loss = self.loss.as_kernel_probability();
         }
-        if self.duplicate > 0.0 {
-            qopt.duplicate = percent_to_prob(self.duplicate);
+        if !self.duplicate.is_zero() {
+            qopt.duplicate = self.duplicate.as_kernel_probability();
         }
-        if self.reorder > 0.0 && self.gap == 0 {
+        if !self.reorder.is_zero() && self.gap == 0 {
             qopt.gap = 1; // Default gap if reorder is set
         } else {
             qopt.gap = self.gap;
@@ -340,45 +295,46 @@ impl QdiscConfig for NetemConfig {
         }
 
         // Add correlation if any set
-        if self.delay_correlation > 0.0
-            || self.loss_correlation > 0.0
-            || self.duplicate_correlation > 0.0
+        if !self.delay_correlation.is_zero()
+            || !self.loss_correlation.is_zero()
+            || !self.duplicate_correlation.is_zero()
         {
             let corr = TcNetemCorr {
-                delay_corr: percent_to_prob(self.delay_correlation),
-                loss_corr: percent_to_prob(self.loss_correlation),
-                dup_corr: percent_to_prob(self.duplicate_correlation),
+                delay_corr: self.delay_correlation.as_kernel_probability(),
+                loss_corr: self.loss_correlation.as_kernel_probability(),
+                dup_corr: self.duplicate_correlation.as_kernel_probability(),
             };
             builder.append_attr(TCA_NETEM_CORR, corr.as_bytes());
         }
 
         // Add reorder if set
-        if self.reorder > 0.0 {
+        if !self.reorder.is_zero() {
             let reorder = TcNetemReorder {
-                probability: percent_to_prob(self.reorder),
-                correlation: percent_to_prob(self.reorder_correlation),
+                probability: self.reorder.as_kernel_probability(),
+                correlation: self.reorder_correlation.as_kernel_probability(),
             };
             builder.append_attr(TCA_NETEM_REORDER, reorder.as_bytes());
         }
 
         // Add corrupt if set
-        if self.corrupt > 0.0 {
+        if !self.corrupt.is_zero() {
             let corrupt = TcNetemCorrupt {
-                probability: percent_to_prob(self.corrupt),
-                correlation: percent_to_prob(self.corrupt_correlation),
+                probability: self.corrupt.as_kernel_probability(),
+                correlation: self.corrupt_correlation.as_kernel_probability(),
             };
             builder.append_attr(TCA_NETEM_CORRUPT, corrupt.as_bytes());
         }
 
         // Add rate limit if set
         if let Some(rate) = self.rate {
+            let bytes_per_sec = rate.as_bytes_per_sec();
             let mut rate_struct = TcNetemRate::default();
-            if rate > u32::MAX as u64 {
+            if bytes_per_sec > u32::MAX as u64 {
                 rate_struct.rate = u32::MAX;
                 builder.append_attr(TCA_NETEM_RATE, rate_struct.as_bytes());
-                builder.append_attr(TCA_NETEM_RATE64, &rate.to_ne_bytes());
+                builder.append_attr(TCA_NETEM_RATE64, &bytes_per_sec.to_ne_bytes());
             } else {
-                rate_struct.rate = rate as u32;
+                rate_struct.rate = bytes_per_sec as u32;
                 builder.append_attr(TCA_NETEM_RATE, rate_struct.as_bytes());
             }
         }
@@ -4030,17 +3986,18 @@ mod tests {
 
     #[test]
     fn test_netem_builder() {
+        use crate::util::Percent;
         let config = NetemConfig::new()
             .delay(Duration::from_millis(100))
             .jitter(Duration::from_millis(10))
-            .delay_correlation(25.0)
-            .loss(1.0)
+            .delay_correlation(Percent::new(25.0))
+            .loss(Percent::new(1.0))
             .build();
 
         assert_eq!(config.delay, Some(Duration::from_millis(100)));
         assert_eq!(config.jitter, Some(Duration::from_millis(10)));
-        assert_eq!(config.delay_correlation, 25.0);
-        assert_eq!(config.loss, 1.0);
+        assert_eq!(config.delay_correlation.as_percent(), 25.0);
+        assert_eq!(config.loss.as_percent(), 1.0);
         assert_eq!(config.kind(), "netem");
     }
 
@@ -4076,13 +4033,14 @@ mod tests {
 
     #[test]
     fn test_netem_clamp() {
+        use crate::util::Percent;
         let config = NetemConfig::new()
-            .loss(150.0) // Should clamp to 100
-            .delay_correlation(-10.0) // Should clamp to 0
+            .loss(Percent::new(150.0)) // Should clamp to 100
+            .delay_correlation(Percent::new(-10.0)) // Should clamp to 0
             .build();
 
-        assert_eq!(config.loss, 100.0);
-        assert_eq!(config.delay_correlation, 0.0);
+        assert_eq!(config.loss.as_percent(), 100.0);
+        assert_eq!(config.delay_correlation.as_percent(), 0.0);
     }
 
     #[test]

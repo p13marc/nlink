@@ -673,11 +673,11 @@ impl NetemOptions {
         // Check if any currently-set parameters would be removed by the new config
         let removes_delay = self.delay().is_some() && new_config.delay.is_none();
         let removes_jitter = self.jitter().is_some() && new_config.jitter.is_none();
-        let removes_loss = self.loss().is_some() && new_config.loss <= 0.0;
-        let removes_duplicate = self.duplicate().is_some() && new_config.duplicate <= 0.0;
+        let removes_loss = self.loss().is_some() && new_config.loss.is_zero();
+        let removes_duplicate = self.duplicate().is_some() && new_config.duplicate.is_zero();
         let removes_reorder =
-            self.reorder().is_some() && new_config.reorder <= 0.0 && new_config.gap == 0;
-        let removes_corrupt = self.corrupt().is_some() && new_config.corrupt <= 0.0;
+            self.reorder().is_some() && new_config.reorder.is_zero() && new_config.gap == 0;
+        let removes_corrupt = self.corrupt().is_some() && new_config.corrupt.is_zero();
         let removes_rate = self.rate_bps().is_some() && new_config.rate.is_none();
 
         removes_delay
@@ -1436,8 +1436,9 @@ mod tests {
 
     #[test]
     fn test_netem_parse_basic() {
-        use super::super::types::tc::qdisc::netem::*;
         use std::time::Duration;
+
+        use super::super::types::tc::qdisc::netem::*;
 
         // Build TcNetemQopt with 100ms delay, 1000 packet limit, 1% loss
         let mut qopt = TcNetemQopt::new();
@@ -1461,8 +1462,9 @@ mod tests {
 
     #[test]
     fn test_netem_parse_with_correlation() {
-        use super::super::types::tc::qdisc::netem::*;
         use std::time::Duration;
+
+        use super::super::types::tc::qdisc::netem::*;
 
         // Build base options
         let mut qopt = TcNetemQopt::new();
@@ -1609,8 +1611,9 @@ mod tests {
 
     #[test]
     fn test_netem_parse_multiple_attrs() {
-        use super::super::types::tc::qdisc::netem::*;
         use std::time::Duration;
+
+        use super::super::types::tc::qdisc::netem::*;
 
         // Build a complete netem config with multiple attributes
         let mut qopt = TcNetemQopt::new();
@@ -1661,8 +1664,9 @@ mod tests {
 
     #[test]
     fn test_netem_parse_with_64bit_delay() {
-        use super::super::types::tc::qdisc::netem::*;
         use std::time::Duration;
+
+        use super::super::types::tc::qdisc::netem::*;
 
         let mut qopt = TcNetemQopt::new();
         qopt.latency = 100_000; // Will be overridden by 64-bit value
@@ -1905,8 +1909,9 @@ mod tests {
 
     #[test]
     fn test_requires_recreation_removing_delay() {
-        use super::super::tc::NetemConfig;
         use std::time::Duration;
+
+        use super::super::tc::NetemConfig;
 
         let current = NetemOptions {
             delay_ns: 100_000_000, // 100ms
@@ -1924,8 +1929,9 @@ mod tests {
 
     #[test]
     fn test_requires_recreation_removing_loss() {
-        use super::super::tc::NetemConfig;
         use std::time::Duration;
+
+        use super::super::tc::NetemConfig;
 
         let current = NetemOptions {
             delay_ns: 100_000_000,
@@ -1940,15 +1946,16 @@ mod tests {
         // Keeping both doesn't require recreation
         let new_config = NetemConfig::new()
             .delay(Duration::from_millis(50))
-            .loss(0.5)
+            .loss(crate::util::Percent::new(0.5))
             .build();
         assert!(!current.requires_recreation_for(&new_config));
     }
 
     #[test]
     fn test_requires_recreation_removing_jitter() {
-        use super::super::tc::NetemConfig;
         use std::time::Duration;
+
+        use super::super::tc::NetemConfig;
 
         let current = NetemOptions {
             delay_ns: 100_000_000,
@@ -1970,8 +1977,9 @@ mod tests {
 
     #[test]
     fn test_requires_recreation_removing_rate() {
-        use super::super::tc::NetemConfig;
         use std::time::Duration;
+
+        use super::super::tc::NetemConfig;
 
         let current = NetemOptions {
             delay_ns: 100_000_000,
@@ -1986,7 +1994,7 @@ mod tests {
         // Keeping both doesn't require recreation
         let new_config = NetemConfig::new()
             .delay(Duration::from_millis(100))
-            .rate(500_000)
+            .rate(crate::util::Rate::bytes_per_sec(500_000))
             .build();
         assert!(!current.requires_recreation_for(&new_config));
     }
@@ -2005,14 +2013,17 @@ mod tests {
         assert!(current.requires_recreation_for(&new_config));
 
         // Keeping it doesn't require recreation
-        let new_config = NetemConfig::new().duplicate(0.5).build();
+        let new_config = NetemConfig::new()
+            .duplicate(crate::util::Percent::new(0.5))
+            .build();
         assert!(!current.requires_recreation_for(&new_config));
     }
 
     #[test]
     fn test_requires_recreation_removing_reorder() {
-        use super::super::tc::NetemConfig;
         use std::time::Duration;
+
+        use super::super::tc::NetemConfig;
 
         let current = NetemOptions {
             delay_ns: 100_000_000,
@@ -2028,7 +2039,7 @@ mod tests {
         // Keeping both doesn't require recreation
         let new_config = NetemConfig::new()
             .delay(Duration::from_millis(100))
-            .reorder(2.0)
+            .reorder(crate::util::Percent::new(2.0))
             .gap(3)
             .build();
         assert!(!current.requires_recreation_for(&new_config));
@@ -2048,14 +2059,17 @@ mod tests {
         assert!(current.requires_recreation_for(&new_config));
 
         // Keeping it doesn't require recreation
-        let new_config = NetemConfig::new().corrupt(0.05).build();
+        let new_config = NetemConfig::new()
+            .corrupt(crate::util::Percent::new(0.05))
+            .build();
         assert!(!current.requires_recreation_for(&new_config));
     }
 
     #[test]
     fn test_requires_recreation_no_current_params() {
-        use super::super::tc::NetemConfig;
         use std::time::Duration;
+
+        use super::super::tc::NetemConfig;
 
         // No current params set
         let current = NetemOptions::default();
@@ -2063,15 +2077,16 @@ mod tests {
         // Adding new params doesn't require recreation
         let new_config = NetemConfig::new()
             .delay(Duration::from_millis(100))
-            .loss(1.0)
+            .loss(crate::util::Percent::new(1.0))
             .build();
         assert!(!current.requires_recreation_for(&new_config));
     }
 
     #[test]
     fn test_requires_recreation_multiple_params() {
-        use super::super::tc::NetemConfig;
         use std::time::Duration;
+
+        use super::super::tc::NetemConfig;
 
         let current = NetemOptions {
             delay_ns: 100_000_000,
@@ -2085,7 +2100,7 @@ mod tests {
         let new_config = NetemConfig::new()
             .delay(Duration::from_millis(100))
             .jitter(Duration::from_millis(10))
-            .loss(1.0)
+            .loss(crate::util::Percent::new(1.0))
             // rate removed
             .build();
         assert!(current.requires_recreation_for(&new_config));
@@ -2094,8 +2109,8 @@ mod tests {
         let new_config = NetemConfig::new()
             .delay(Duration::from_millis(50))
             .jitter(Duration::from_millis(5))
-            .loss(0.5)
-            .rate(500_000)
+            .loss(crate::util::Percent::new(0.5))
+            .rate(crate::util::Rate::bytes_per_sec(500_000))
             .build();
         assert!(!current.requires_recreation_for(&new_config));
     }
@@ -2120,7 +2135,9 @@ mod tests {
 
         // Adding regular loss doesn't count as keeping the loss model,
         // but has_loss() check in requires_recreation_for looks at loss_percent in new_config
-        let new_config = NetemConfig::new().loss(1.0).build();
+        let new_config = NetemConfig::new()
+            .loss(crate::util::Percent::new(1.0))
+            .build();
         assert!(!current.requires_recreation_for(&new_config));
     }
 }

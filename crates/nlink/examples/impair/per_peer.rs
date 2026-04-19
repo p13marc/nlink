@@ -80,7 +80,7 @@ async fn main() -> nlink::Result<()> {
                 NetemConfig::new()
                     .delay(Duration::from_millis(15))
                     .jitter(Duration::from_millis(3))
-                    .loss(1.0)
+                    .loss(nlink::Percent::new(1.0))
                     .build(),
             )
             .impair_dst_ip(
@@ -89,7 +89,7 @@ async fn main() -> nlink::Result<()> {
                     NetemConfig::new()
                         .delay(Duration::from_millis(120))
                         .jitter(Duration::from_millis(40))
-                        .loss(7.5)
+                        .loss(nlink::Percent::new(7.5))
                         .build(),
                 )
                 .rate_cap("100mbit")?,

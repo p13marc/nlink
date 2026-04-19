@@ -63,7 +63,7 @@ async fn test_netem_with_loss() -> Result<()> {
     let (_ns, conn) = setup_tc_ns("netemloss").await?;
 
     // Add netem with packet loss
-    let netem = NetemConfig::new().loss(1.0).build();
+    let netem = NetemConfig::new().loss(nlink::Percent::new(1.0)).build();
 
     conn.add_qdisc("dummy0", netem).await?;
 
