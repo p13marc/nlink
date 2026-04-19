@@ -37,6 +37,11 @@ All notable changes to this project will be documented in this file.
   doing targeted teardown.
 - `docs/recipes/per-peer-impairment.md` — recipe documentation, including a
   hand-rolled equivalent for users who need a custom topology.
+- `examples/impair/per_peer.rs` (`cargo run -p nlink --example impair_per_peer`)
+  — runnable demo. Default mode prints the topology + usage patterns; with
+  `--apply` (root) it creates a temporary namespace, applies a 3-peer
+  impairment with mixed configs (delay/loss, per-rule rate cap, subnet match,
+  default), dumps the resulting tree, then cleans up.
 
 ## [0.12.2] - 2026-04-04
 

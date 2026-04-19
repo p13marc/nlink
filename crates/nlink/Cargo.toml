@@ -261,3 +261,8 @@ path = "examples/route/batch.rs"
 [[example]]
 name = "route_timeout"
 path = "examples/route/timeout.rs"
+
+# Per-peer impairment helper
+[[example]]
+name = "impair_per_peer"
+path = "examples/impair/per_peer.rs"
