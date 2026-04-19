@@ -76,7 +76,12 @@ use super::{
     interface_ref::InterfaceRef,
     protocol::Route,
     tc::{HtbClassConfig, HtbQdiscConfig, NetemConfig},
-    tc_handle::TcHandle,
+    tc_handle::{FilterPriority, TcHandle},
+    tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject},
+    tc_recipe_internals::{
+        LiveTree, dump_live_tree, flower_classid, htb_class_rates_match, netem_matches,
+        root_htb_options,
+    },
 };
 use crate::util::Rate;
 
@@ -403,6 +408,564 @@ impl PerPeerImpairer {
             Err(e) if e.is_not_found() || matches!(&e, Error::QdiscNotFound { .. }) => Ok(()),
             Err(e) => Err(e),
         }
+    }
+
+    // ---- reconcile ----
+
+    /// Non-destructively converge the live TC tree to match this
+    /// impairer's desired state.
+    ///
+    /// Unlike [`apply()`], `reconcile()` dumps the existing tree, diffs
+    /// it against what the helper would build, and emits the minimum
+    /// set of `add_*` / `change_*` / `del_*` operations to converge.
+    /// Calling `reconcile()` twice in a row with no other changes makes
+    /// **zero** kernel calls on the second invocation
+    /// ([`ReconcileReport::is_noop()`] returns `true`).
+    ///
+    /// Returns a structured [`ReconcileReport`] describing what changed.
+    ///
+    /// If the live root qdisc is the wrong kind (not HTB), reconcile
+    /// returns an error by default. Pass [`ReconcileOptions::with_fallback_to_apply(true)`]
+    /// to instead trigger a destructive rebuild via [`apply()`].
+    ///
+    /// [`apply()`]: Self::apply
+    #[tracing::instrument(level = "info", skip_all, fields(target = ?self.target, rules = self.rules.len()))]
+    pub async fn reconcile(&self, conn: &Connection<Route>) -> Result<ReconcileReport> {
+        self.reconcile_with_options(conn, ReconcileOptions::new())
+            .await
+    }
+
+    /// Compute what [`reconcile()`] would do without making kernel calls.
+    ///
+    /// The returned report's `dry_run` field is `true` and `changes_made`
+    /// counts the operations that *would* have been issued.
+    ///
+    /// [`reconcile()`]: Self::reconcile
+    #[tracing::instrument(level = "info", skip_all, fields(target = ?self.target, rules = self.rules.len()))]
+    pub async fn reconcile_dry_run(&self, conn: &Connection<Route>) -> Result<ReconcileReport> {
+        self.reconcile_with_options(conn, ReconcileOptions::new().with_dry_run(true))
+            .await
+    }
+
+    /// [`reconcile()`] with explicit [`ReconcileOptions`].
+    ///
+    /// [`reconcile()`]: Self::reconcile
+    #[tracing::instrument(level = "info", skip_all, fields(target = ?self.target, rules = self.rules.len(), dry_run = opts.dry_run, fallback = opts.fallback_to_apply))]
+    pub async fn reconcile_with_options(
+        &self,
+        conn: &Connection<Route>,
+        opts: ReconcileOptions,
+    ) -> Result<ReconcileReport> {
+        let ifindex = conn.resolve_interface(&self.target).await?;
+        self.reconcile_inner(conn, ifindex, opts).await
+    }
+
+    async fn reconcile_inner(
+        &self,
+        conn: &Connection<Route>,
+        ifindex: u32,
+        opts: ReconcileOptions,
+    ) -> Result<ReconcileReport> {
+        let mut report = ReconcileReport {
+            dry_run: opts.dry_run,
+            ..ReconcileReport::default()
+        };
+
+        let tree = dump_live_tree(conn, ifindex).await?;
+
+        let n = self.rules.len();
+        let link_rate = self.assumed_link_rate;
+        let total_rate = self.total_rate();
+        let parent_classid = TcHandle::new(1, 1);
+        let root_handle = TcHandle::major_only(1);
+        let default_minor = (n + 2) as u16;
+        let default_classid = TcHandle::new(1, default_minor);
+        let default_leaf_handle = TcHandle::major_only((n + 10) as u16);
+        let default_rate = self
+            .default_impairment
+            .as_ref()
+            .and_then(|d| d.rate_cap)
+            .unwrap_or(link_rate);
+
+        // 1. Root HTB qdisc.
+        match tree.root_qdisc.as_ref() {
+            None => {
+                // No root qdisc — full build path. Add it.
+                if !opts.dry_run {
+                    let cfg = HtbQdiscConfig::new()
+                        .default_class(default_minor as u32)
+                        .build();
+                    conn.add_qdisc_by_index_full(ifindex, TcHandle::ROOT, Some(root_handle), cfg)
+                        .await
+                        .map_err(|e| e.with_context("PerPeerImpairer::reconcile: add HTB root"))?;
+                }
+                report.changes_made += 1;
+                report.root_modified = true;
+            }
+            Some(q) => {
+                let kind_ok = q.kind() == Some("htb") && q.handle() == root_handle;
+                if !kind_ok {
+                    if opts.fallback_to_apply {
+                        if opts.dry_run {
+                            // In dry-run with fallback: just report it
+                            // would be a full rebuild.
+                            report.changes_made += 1;
+                            report.root_modified = true;
+                            // We can't usefully diff the rest of the
+                            // tree under a non-HTB root.
+                            return Ok(report);
+                        }
+                        // Destructive fallback.
+                        return self.apply_as_reconcile(conn).await;
+                    }
+                    return Err(Error::InvalidMessage(format!(
+                        "PerPeerImpairer::reconcile: root qdisc on ifindex {ifindex} is \
+                         {:?} (handle {}), not HTB at 1:; pass \
+                         ReconcileOptions::with_fallback_to_apply(true) to rebuild",
+                        q.kind(),
+                        q.handle()
+                    )));
+                }
+                // Same kind/handle — check default class minor.
+                let default_ok = root_htb_options(&tree)
+                    .map(|opts| opts.default_class == default_minor as u32)
+                    .unwrap_or(false);
+                if !default_ok {
+                    if !opts.dry_run {
+                        let cfg = HtbQdiscConfig::new()
+                            .default_class(default_minor as u32)
+                            .build();
+                        conn.change_qdisc_by_index_full(
+                            ifindex,
+                            TcHandle::ROOT,
+                            Some(root_handle),
+                            cfg,
+                        )
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerPeerImpairer::reconcile: update HTB root")
+                        })?;
+                    }
+                    report.changes_made += 1;
+                    report.root_modified = true;
+                }
+            }
+        }
+
+        // 2. Parent class 1:1.
+        let total_bps = total_rate.as_bytes_per_sec();
+        match tree.class(parent_classid) {
+            None => {
+                if !opts.dry_run {
+                    let cfg = HtbClassConfig::new(total_rate).ceil(total_rate).build();
+                    conn.add_class_config_by_index(ifindex, root_handle, parent_classid, cfg)
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerPeerImpairer::reconcile: add parent class 1:1")
+                        })?;
+                }
+                report.changes_made += 1;
+                report.root_modified = true;
+            }
+            Some(c) => {
+                if !htb_class_rates_match(c, total_bps, total_bps) {
+                    if !opts.dry_run {
+                        let cfg = HtbClassConfig::new(total_rate).ceil(total_rate).build();
+                        conn.change_class_config_by_index(
+                            ifindex,
+                            root_handle,
+                            parent_classid,
+                            cfg,
+                        )
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerPeerImpairer::reconcile: update parent class 1:1")
+                        })?;
+                    }
+                    report.changes_made += 1;
+                    report.root_modified = true;
+                }
+            }
+        }
+
+        // 3. Per-rule classes + leaves + filters.
+        for (i, rule) in self.rules.iter().enumerate() {
+            let classid = TcHandle::new(1, (i + 2) as u16);
+            let leaf_handle = TcHandle::major_only((i + 10) as u16);
+            let class_rate = rule.impairment.rate_cap.unwrap_or(link_rate);
+            let class_bps = class_rate.as_bytes_per_sec();
+            let priority = filter_priority(i);
+            let protocol = protocol_for(&rule.match_);
+
+            let mut rule_added = false;
+            let mut rule_modified = false;
+
+            // 3a. Class.
+            match tree.class(classid) {
+                None => {
+                    if !opts.dry_run {
+                        let cfg = HtbClassConfig::new(class_rate).ceil(class_rate).build();
+                        conn.add_class_config_by_index(ifindex, parent_classid, classid, cfg)
+                            .await
+                            .map_err(|e| {
+                                e.with_context(format!(
+                                    "PerPeerImpairer::reconcile: add class {classid}"
+                                ))
+                            })?;
+                    }
+                    report.changes_made += 1;
+                    rule_added = true;
+                }
+                Some(c) => {
+                    if !htb_class_rates_match(c, class_bps, class_bps) {
+                        if !opts.dry_run {
+                            let cfg = HtbClassConfig::new(class_rate).ceil(class_rate).build();
+                            conn.change_class_config_by_index(
+                                ifindex,
+                                parent_classid,
+                                classid,
+                                cfg,
+                            )
+                            .await
+                            .map_err(|e| {
+                                e.with_context(format!(
+                                    "PerPeerImpairer::reconcile: update class {classid}"
+                                ))
+                            })?;
+                        }
+                        report.changes_made += 1;
+                        rule_modified = true;
+                    }
+                }
+            }
+
+            // 3b. Leaf netem qdisc (parent = classid).
+            match tree.leaf_for(classid) {
+                None => {
+                    if !opts.dry_run {
+                        conn.add_qdisc_by_index_full(
+                            ifindex,
+                            classid,
+                            Some(leaf_handle),
+                            rule.impairment.netem.clone(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            e.with_context(format!(
+                                "PerPeerImpairer::reconcile: add netem leaf at {classid}"
+                            ))
+                        })?;
+                    }
+                    report.changes_made += 1;
+                    if !rule_added {
+                        rule_modified = true;
+                    }
+                }
+                Some(q) => {
+                    if q.kind() != Some("netem") || !netem_matches(&rule.impairment.netem, q) {
+                        // Replace, not change_qdisc, because the leaf may
+                        // need a different handle if its kind changed.
+                        if !opts.dry_run {
+                            conn.replace_qdisc_by_index_full(
+                                ifindex,
+                                classid,
+                                Some(leaf_handle),
+                                rule.impairment.netem.clone(),
+                            )
+                            .await
+                            .map_err(|e| {
+                                e.with_context(format!(
+                                    "PerPeerImpairer::reconcile: update netem leaf at {classid}"
+                                ))
+                            })?;
+                        }
+                        report.changes_made += 1;
+                        if !rule_added {
+                            rule_modified = true;
+                        }
+                    }
+                }
+            }
+
+            // 3c. Flower filter at root parent (1:) priority 100+i.
+            let filter_ok = tree
+                .filter_at_priority(priority)
+                .map(|f| f.kind() == Some("flower") && flower_classid(f) == Some(classid))
+                .unwrap_or(false);
+            if !filter_ok {
+                if !opts.dry_run {
+                    // Best-effort delete of any stale filter at this prio
+                    // first; ignore not-found.
+                    if let Some(stale) = tree.filter_at_priority(priority) {
+                        let stale_proto = stale.protocol();
+                        let _ = conn
+                            .del_filter_by_index(ifindex, root_handle, stale_proto, priority)
+                            .await;
+                    }
+                    let filter = build_flower(classid, priority, &rule.match_);
+                    conn.add_filter_by_index_full(
+                        ifindex,
+                        root_handle,
+                        None,
+                        protocol,
+                        priority,
+                        filter,
+                    )
+                    .await
+                    .map_err(|e| {
+                        if e.is_not_supported() {
+                            Error::NotSupported(format!(
+                                "cls_flower not loaded in target namespace; \
+                                 try `modprobe cls_flower` (underlying: {e})"
+                            ))
+                        } else {
+                            e.with_context(format!(
+                                "PerPeerImpairer::reconcile: add filter for \
+                                 {:?} -> {classid}",
+                                rule.match_
+                            ))
+                        }
+                    })?;
+                }
+                report.changes_made += 1;
+                if !rule_added {
+                    rule_modified = true;
+                }
+            }
+
+            if rule_added {
+                report.rules_added += 1;
+            } else if rule_modified {
+                report.rules_modified += 1;
+            }
+        }
+
+        // 4. Default class.
+        let default_bps = default_rate.as_bytes_per_sec();
+        match tree.class(default_classid) {
+            None => {
+                if !opts.dry_run {
+                    let cfg = HtbClassConfig::new(default_rate).ceil(default_rate).build();
+                    conn.add_class_config_by_index(ifindex, parent_classid, default_classid, cfg)
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerPeerImpairer::reconcile: add default class")
+                        })?;
+                }
+                report.changes_made += 1;
+                report.default_modified = true;
+            }
+            Some(c) => {
+                if !htb_class_rates_match(c, default_bps, default_bps) {
+                    if !opts.dry_run {
+                        let cfg = HtbClassConfig::new(default_rate).ceil(default_rate).build();
+                        conn.change_class_config_by_index(
+                            ifindex,
+                            parent_classid,
+                            default_classid,
+                            cfg,
+                        )
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerPeerImpairer::reconcile: update default class")
+                        })?;
+                    }
+                    report.changes_made += 1;
+                    report.default_modified = true;
+                }
+            }
+        }
+
+        // 4b. Default leaf netem (only if default_impairment is set).
+        match (&self.default_impairment, tree.leaf_for(default_classid)) {
+            (Some(default), None) => {
+                if !opts.dry_run {
+                    conn.add_qdisc_by_index_full(
+                        ifindex,
+                        default_classid,
+                        Some(default_leaf_handle),
+                        default.netem.clone(),
+                    )
+                    .await
+                    .map_err(|e| {
+                        e.with_context("PerPeerImpairer::reconcile: add default netem leaf")
+                    })?;
+                }
+                report.changes_made += 1;
+                report.default_modified = true;
+            }
+            (Some(default), Some(q)) => {
+                if q.kind() != Some("netem") || !netem_matches(&default.netem, q) {
+                    if !opts.dry_run {
+                        conn.replace_qdisc_by_index_full(
+                            ifindex,
+                            default_classid,
+                            Some(default_leaf_handle),
+                            default.netem.clone(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerPeerImpairer::reconcile: update default netem leaf")
+                        })?;
+                    }
+                    report.changes_made += 1;
+                    report.default_modified = true;
+                }
+            }
+            (None, Some(q)) => {
+                // Live tree has a leaf where we no longer want one.
+                let stale_handle = q.handle();
+                if !opts.dry_run {
+                    let _ = conn
+                        .del_qdisc_by_index_full(ifindex, default_classid, Some(stale_handle))
+                        .await;
+                }
+                report.changes_made += 1;
+                report.default_modified = true;
+                report.stale_removed.push(StaleObject {
+                    kind: "qdisc",
+                    handle: stale_handle,
+                    priority: None,
+                });
+            }
+            (None, None) => {}
+        }
+
+        // 5. Stale removal — anything in our handle range that no
+        // desired rule maps to. Walk the live tree.
+        self.collect_stale_and_unmanaged(&tree, &mut report, conn, ifindex, opts)
+            .await?;
+
+        Ok(report)
+    }
+
+    /// Run the destructive [`apply()`] but return a [`ReconcileReport`]
+    /// summarizing it (used for `fallback_to_apply` reconcile path).
+    async fn apply_as_reconcile(&self, conn: &Connection<Route>) -> Result<ReconcileReport> {
+        self.apply(conn).await?;
+        let n = self.rules.len();
+        Ok(ReconcileReport {
+            // Count: 1 root + 1 parent + 3 per rule (class+leaf+filter)
+            // + 1 default class + (1 if default leaf).
+            changes_made: 2 + 3 * n + 1 + usize::from(self.default_impairment.is_some()),
+            rules_added: n,
+            root_modified: true,
+            default_modified: true,
+            ..ReconcileReport::default()
+        })
+    }
+
+    /// Walk the live tree for objects in our managed handle range that
+    /// aren't in the desired set (mark stale + remove) and objects
+    /// outside (mark unmanaged, leave alone).
+    async fn collect_stale_and_unmanaged(
+        &self,
+        tree: &LiveTree,
+        report: &mut ReconcileReport,
+        conn: &Connection<Route>,
+        ifindex: u32,
+        opts: ReconcileOptions,
+    ) -> Result<()> {
+        let n = self.rules.len();
+        let parent_classid = TcHandle::new(1, 1);
+        let root_handle = TcHandle::major_only(1);
+        let default_classid = TcHandle::new(1, (n + 2) as u16);
+        let max_minor = (n + 2) as u16;
+
+        // Stale classes: `1:M` for M >= 2 outside [2..=max_minor], OR
+        // M == max_minor when we don't want a default class. Also
+        // delete leaf qdiscs first.
+        // Collect stale classes (don't mutate during iteration).
+        let mut stale_classes: Vec<TcHandle> = Vec::new();
+        for (handle, _class) in tree.classes.iter() {
+            if handle.major() != 1 {
+                continue; // outside our root major
+            }
+            let minor = handle.minor();
+            if minor == 0 || minor == 1 {
+                continue; // 1: and 1:1 are our root + parent
+            }
+            // In our managed range when minor in 2..=max_minor.
+            if minor >= 2 && minor <= max_minor {
+                continue; // wanted
+            }
+            // Otherwise, in major 1 but outside our minor range — stale.
+            stale_classes.push(*handle);
+        }
+        for handle in &stale_classes {
+            // Drop the leaf qdisc first if any (kernel removes leaves
+            // with the class, but explicit del avoids surprises).
+            if let Some(q) = tree.leaf_for(*handle) {
+                let leaf_handle = q.handle();
+                if !opts.dry_run {
+                    let _ = conn
+                        .del_qdisc_by_index_full(ifindex, *handle, Some(leaf_handle))
+                        .await;
+                }
+            }
+            if !opts.dry_run
+                && let Err(e) = conn
+                    .del_class_by_index(ifindex, parent_classid, *handle)
+                    .await
+                && !e.is_not_found()
+            {
+                return Err(e.with_context(format!(
+                    "PerPeerImpairer::reconcile: remove stale class {handle}"
+                )));
+            }
+            report.changes_made += 1;
+            report.rules_removed += 1;
+            report.stale_removed.push(StaleObject {
+                kind: "class",
+                handle: *handle,
+                priority: None,
+            });
+        }
+
+        // Stale filters: filters at root parent priority in our band
+        // [100, 100+n) where the desired rule's classid disagrees, OR
+        // priorities >= 100+n that are still installed.
+        let recipe_band = FilterPriority::RECIPE_BAND_START..FilterPriority::APP_BAND_START;
+        let mut stale_filters: Vec<(u16, u16, TcHandle)> = Vec::new();
+        for f in &tree.root_filters {
+            let prio = f.priority();
+            // Recipe band priority assignments are 100 + i for i in 0..n.
+            if !recipe_band.contains(&prio) {
+                // Outside recipe band → unmanaged.
+                report.unmanaged.push(UnmanagedObject {
+                    kind: "filter",
+                    handle: f.parent(),
+                    priority: Some(FilterPriority::new(prio)),
+                });
+                continue;
+            }
+            let i_opt: Option<usize> =
+                (prio as usize).checked_sub(FilterPriority::RECIPE_BAND_START as usize);
+            let in_desired_range = i_opt.map(|i| i < n).unwrap_or(false);
+            if !in_desired_range {
+                stale_filters.push((prio, f.protocol(), f.parent()));
+            }
+        }
+        for (prio, proto, parent) in stale_filters {
+            if !opts.dry_run {
+                let _ = conn
+                    .del_filter_by_index(ifindex, root_handle, proto, prio)
+                    .await;
+            }
+            report.changes_made += 1;
+            report.stale_removed.push(StaleObject {
+                kind: "filter",
+                handle: parent,
+                priority: Some(FilterPriority::new(prio)),
+            });
+        }
+
+        // Default-class stale handling: if the desired default class is
+        // not present in the live tree, that's covered above. If a
+        // class at minor != max_minor is sitting where the default
+        // should be, the stale-class loop above already removed it.
+        let _ = default_classid;
+        Ok(())
     }
 
     fn total_rate(&self) -> Rate {

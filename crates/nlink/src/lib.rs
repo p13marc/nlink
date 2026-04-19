@@ -171,6 +171,8 @@ pub use netlink::messages::{
 // Strongly-typed TC handle and filter priority — use these in new code at
 // public boundaries instead of raw &str / u16.
 pub use netlink::tc_handle::{FilterPriority, TcHandle, TcHandleParseError};
+// Reconcile-pattern types shared by recipe helpers.
+pub use netlink::tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject};
 pub use netlink::{
     Connection, Error, NamespaceSpec, NetworkEvent, Protocol, Result, RtnetlinkGroup,
 };

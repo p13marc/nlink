@@ -10,10 +10,11 @@ related: plans 129-135 (the seven detailed plans this overview indexes)
 
 # nlink Roadmap — Overview
 
-> **Status (2026-04-19):** 0.13.0 shipped. Plans 131 + 133 + 135 are
-> the remaining work, folded into a single 0.14.0 milestone. The "1.0"
-> milestone is deferred indefinitely — we'll cut it when downstream
-> consumption validates the API, not on a calendar.
+> **Status (2026-04-19):** 0.13.0 shipped. Plan 131 (reconcile
+> pattern) has landed on `master` under `[Unreleased]`. Plans 133 +
+> 135 are the remaining 0.14.0 work. The "1.0" milestone is deferred
+> indefinitely — we'll cut it when downstream consumption validates
+> the API, not on a calendar.
 
 ## Original framing (kept for context)
 
@@ -128,9 +129,15 @@ long-running branch, hard to merge.
 Bundled all the BC-breaking type-level work plus the free-standing
 tracing wins. Total ~3700 LOC.
 
-**0.14.0** (next; mostly additive — was previously split across
-"0.14.0" and "1.0"):
-- Plan 131: Reconcile pattern
+**0.14.0** (in progress; mostly additive — was previously split
+across "0.14.0" and "1.0"):
+- Plan 131: Reconcile pattern — **landed** on `master` (post-0.13
+  `[Unreleased]`). `PerPeerImpairer::reconcile` and
+  `PerHostLimiter::reconcile`, `ReconcileReport` / `ReconcileOptions`
+  / `StaleObject` / `UnmanagedObject`, idempotent-by-construction,
+  dry-run mode, optional fallback-to-apply for wrong-root-kind drift.
+  Internals (`tc_recipe_internals`) parse netem / HTB-class /
+  fq_codel / flower attributes for diff comparisons.
 - Plan 133: TC coverage gaps (cake-typed, fq_pie, cls_basic ematch,
   act_bpf, simple action)
 - Plan 135: Recipes + public lab module
@@ -307,11 +314,16 @@ an unparseable string handle).
 
 ### `## [0.14.0]` (next)
 
+> Plan 131 has landed under `[Unreleased]` on `master`. The full
+> entry it added is reproduced in `CHANGELOG.md`; the bullets below
+> sketch what 0.14.0 will look like once Plans 133 + 135 land too.
+
 ```markdown
 ### Added
 
 - `PerHostLimiter::reconcile()` and `PerPeerImpairer::reconcile()` —
-  non-destructive convergence pattern.
+  non-destructive convergence pattern. (✅ shipped under Unreleased,
+  Plan 131)
 - Typed `CakeConfig` builder + per-tin stats.
 - `FqPieConfig` qdisc.
 - `BasicFilter` with `ematch` (cmp/u32/meta).

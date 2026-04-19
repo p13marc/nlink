@@ -56,7 +56,12 @@ use super::{
     link::IfbLink,
     protocol::Route,
     tc::{FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig},
-    tc_handle::TcHandle,
+    tc_handle::{FilterPriority, TcHandle},
+    tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject},
+    tc_recipe_internals::{
+        LiveTree, dump_live_tree, flower_classid, fq_codel_target_matches, htb_class_rates_match,
+        root_htb_options,
+    },
 };
 
 // ============================================================================
@@ -721,6 +726,668 @@ impl PerHostLimiter {
     #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev))]
     pub async fn remove(&self, conn: &Connection<Route>) -> Result<()> {
         let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
+        Ok(())
+    }
+
+    // ---- reconcile ----
+
+    /// Non-destructively converge the live TC tree to match this
+    /// limiter's desired state.
+    ///
+    /// Unlike [`apply()`], `reconcile()` dumps the existing tree, diffs
+    /// it against what the helper would build, and emits the minimum
+    /// set of `add_*` / `change_*` / `del_*` operations to converge.
+    /// Calling `reconcile()` twice in a row with no other changes makes
+    /// **zero** kernel calls on the second invocation.
+    ///
+    /// If the live root qdisc is the wrong kind (not HTB), reconcile
+    /// returns an error by default. Pass [`ReconcileOptions::with_fallback_to_apply(true)`]
+    /// to instead trigger a destructive rebuild via [`apply()`].
+    ///
+    /// [`apply()`]: Self::apply
+    #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev, rules = self.rules.len()))]
+    pub async fn reconcile(&self, conn: &Connection<Route>) -> Result<ReconcileReport> {
+        self.reconcile_with_options(conn, ReconcileOptions::new())
+            .await
+    }
+
+    /// Compute what [`reconcile()`] would do without making kernel calls.
+    ///
+    /// [`reconcile()`]: Self::reconcile
+    #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev, rules = self.rules.len()))]
+    pub async fn reconcile_dry_run(&self, conn: &Connection<Route>) -> Result<ReconcileReport> {
+        self.reconcile_with_options(conn, ReconcileOptions::new().with_dry_run(true))
+            .await
+    }
+
+    /// [`reconcile()`] with explicit [`ReconcileOptions`].
+    ///
+    /// [`reconcile()`]: Self::reconcile
+    #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev, rules = self.rules.len(), dry_run = opts.dry_run, fallback = opts.fallback_to_apply))]
+    pub async fn reconcile_with_options(
+        &self,
+        conn: &Connection<Route>,
+        opts: ReconcileOptions,
+    ) -> Result<ReconcileReport> {
+        // Resolve interface for typed-by-index calls.
+        let link = conn
+            .get_link_by_name(&self.dev)
+            .await?
+            .ok_or_else(|| Error::InvalidMessage(format!("interface not found: {}", self.dev)))?;
+        let ifindex = link.ifindex();
+        self.reconcile_inner(conn, ifindex, opts).await
+    }
+
+    async fn reconcile_inner(
+        &self,
+        conn: &Connection<Route>,
+        ifindex: u32,
+        opts: ReconcileOptions,
+    ) -> Result<ReconcileReport> {
+        let mut report = ReconcileReport {
+            dry_run: opts.dry_run,
+            ..ReconcileReport::default()
+        };
+
+        let tree = dump_live_tree(conn, ifindex).await?;
+
+        let n = self.rules.len();
+        let parent_classid = TcHandle::new(1, 1);
+        let root_handle = TcHandle::major_only(1);
+        let default_minor = (n + 2) as u16;
+        let default_classid = TcHandle::new(1, default_minor);
+        let default_leaf_handle = TcHandle::major_only((n + 10) as u16);
+        let total_rate: crate::util::Rate =
+            self.default_rate + self.rules.iter().map(|r| r.rate).sum::<crate::util::Rate>();
+        let target_us = self.latency.map(|d| d.as_micros() as u32);
+
+        // 1. Root HTB qdisc.
+        match tree.root_qdisc.as_ref() {
+            None => {
+                if !opts.dry_run {
+                    let cfg = HtbQdiscConfig::new()
+                        .default_class(default_minor as u32)
+                        .build();
+                    conn.add_qdisc_by_index_full(ifindex, TcHandle::ROOT, Some(root_handle), cfg)
+                        .await
+                        .map_err(|e| e.with_context("PerHostLimiter::reconcile: add HTB root"))?;
+                }
+                report.changes_made += 1;
+                report.root_modified = true;
+            }
+            Some(q) => {
+                let kind_ok = q.kind() == Some("htb") && q.handle() == root_handle;
+                if !kind_ok {
+                    if opts.fallback_to_apply {
+                        if opts.dry_run {
+                            report.changes_made += 1;
+                            report.root_modified = true;
+                            return Ok(report);
+                        }
+                        return self.apply_as_reconcile(conn).await;
+                    }
+                    return Err(Error::InvalidMessage(format!(
+                        "PerHostLimiter::reconcile: root qdisc on {} is {:?} (handle {}), \
+                         not HTB at 1:; pass ReconcileOptions::with_fallback_to_apply(true) \
+                         to rebuild",
+                        self.dev,
+                        q.kind(),
+                        q.handle()
+                    )));
+                }
+                let default_ok = root_htb_options(&tree)
+                    .map(|opts| opts.default_class == default_minor as u32)
+                    .unwrap_or(false);
+                if !default_ok {
+                    if !opts.dry_run {
+                        let cfg = HtbQdiscConfig::new()
+                            .default_class(default_minor as u32)
+                            .build();
+                        conn.change_qdisc_by_index_full(
+                            ifindex,
+                            TcHandle::ROOT,
+                            Some(root_handle),
+                            cfg,
+                        )
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerHostLimiter::reconcile: update HTB root")
+                        })?;
+                    }
+                    report.changes_made += 1;
+                    report.root_modified = true;
+                }
+            }
+        }
+
+        // 2. Parent class 1:1 with rate=ceil=total_rate.
+        let total_bps = total_rate.as_bytes_per_sec();
+        match tree.class(parent_classid) {
+            None => {
+                if !opts.dry_run {
+                    let cfg = HtbClassConfig::new(total_rate).ceil(total_rate).build();
+                    conn.add_class_config_by_index(ifindex, root_handle, parent_classid, cfg)
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerHostLimiter::reconcile: add parent class 1:1")
+                        })?;
+                }
+                report.changes_made += 1;
+                report.root_modified = true;
+            }
+            Some(c) => {
+                if !htb_class_rates_match(c, total_bps, total_bps) {
+                    if !opts.dry_run {
+                        let cfg = HtbClassConfig::new(total_rate).ceil(total_rate).build();
+                        conn.change_class_config_by_index(
+                            ifindex,
+                            root_handle,
+                            parent_classid,
+                            cfg,
+                        )
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerHostLimiter::reconcile: update parent class 1:1")
+                        })?;
+                    }
+                    report.changes_made += 1;
+                    report.root_modified = true;
+                }
+            }
+        }
+
+        // 3. Per-rule classes + fq_codel leaves + filters.
+        for (i, rule) in self.rules.iter().enumerate() {
+            let classid = TcHandle::new(1, (i + 2) as u16);
+            let leaf_handle = TcHandle::major_only((i + 10) as u16);
+            let class_rate = rule.rate;
+            let class_ceil = rule.ceil.unwrap_or(rule.rate);
+            let class_rate_bps = class_rate.as_bytes_per_sec();
+            let class_ceil_bps = class_ceil.as_bytes_per_sec();
+
+            let mut rule_added = false;
+            let mut rule_modified = false;
+
+            // 3a. Class.
+            match tree.class(classid) {
+                None => {
+                    if !opts.dry_run {
+                        let cfg = HtbClassConfig::new(class_rate).ceil(class_ceil).build();
+                        conn.add_class_config_by_index(ifindex, parent_classid, classid, cfg)
+                            .await
+                            .map_err(|e| {
+                                e.with_context(format!(
+                                    "PerHostLimiter::reconcile: add class {classid}"
+                                ))
+                            })?;
+                    }
+                    report.changes_made += 1;
+                    rule_added = true;
+                }
+                Some(c) => {
+                    if !htb_class_rates_match(c, class_rate_bps, class_ceil_bps) {
+                        if !opts.dry_run {
+                            let cfg = HtbClassConfig::new(class_rate).ceil(class_ceil).build();
+                            conn.change_class_config_by_index(
+                                ifindex,
+                                parent_classid,
+                                classid,
+                                cfg,
+                            )
+                            .await
+                            .map_err(|e| {
+                                e.with_context(format!(
+                                    "PerHostLimiter::reconcile: update class {classid}"
+                                ))
+                            })?;
+                        }
+                        report.changes_made += 1;
+                        rule_modified = true;
+                    }
+                }
+            }
+
+            // 3b. fq_codel leaf.
+            match tree.leaf_for(classid) {
+                None => {
+                    if !opts.dry_run {
+                        let mut leaf = FqCodelConfig::new();
+                        if let Some(latency) = self.latency {
+                            leaf = leaf.target(latency);
+                        }
+                        conn.add_qdisc_by_index_full(
+                            ifindex,
+                            classid,
+                            Some(leaf_handle),
+                            leaf.build(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            e.with_context(format!(
+                                "PerHostLimiter::reconcile: add fq_codel leaf at {classid}"
+                            ))
+                        })?;
+                    }
+                    report.changes_made += 1;
+                    if !rule_added {
+                        rule_modified = true;
+                    }
+                }
+                Some(q) => {
+                    if !fq_codel_target_matches(target_us, q) {
+                        if !opts.dry_run {
+                            let mut leaf = FqCodelConfig::new();
+                            if let Some(latency) = self.latency {
+                                leaf = leaf.target(latency);
+                            }
+                            conn.replace_qdisc_by_index_full(
+                                ifindex,
+                                classid,
+                                Some(leaf_handle),
+                                leaf.build(),
+                            )
+                            .await
+                            .map_err(|e| {
+                                e.with_context(format!(
+                                    "PerHostLimiter::reconcile: update fq_codel leaf at \
+                                     {classid}"
+                                ))
+                            })?;
+                        }
+                        report.changes_made += 1;
+                        if !rule_added {
+                            rule_modified = true;
+                        }
+                    }
+                }
+            }
+
+            // 3c. Filter(s) at root parent. Plain matches use one
+            // priority (i+1); Port matches use two (i+1 and i+1+100).
+            self.reconcile_filter_for_rule(
+                conn,
+                ifindex,
+                &tree,
+                i,
+                rule,
+                classid,
+                opts,
+                &mut rule_added,
+                &mut rule_modified,
+                &mut report,
+            )
+            .await?;
+
+            if rule_added {
+                report.rules_added += 1;
+            } else if rule_modified {
+                report.rules_modified += 1;
+            }
+        }
+
+        // 4. Default class — always present in the desired tree.
+        let default_bps = self.default_rate.as_bytes_per_sec();
+        match tree.class(default_classid) {
+            None => {
+                if !opts.dry_run {
+                    let cfg = HtbClassConfig::new(self.default_rate)
+                        .ceil(self.default_rate)
+                        .build();
+                    conn.add_class_config_by_index(ifindex, parent_classid, default_classid, cfg)
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerHostLimiter::reconcile: add default class")
+                        })?;
+                }
+                report.changes_made += 1;
+                report.default_modified = true;
+            }
+            Some(c) => {
+                if !htb_class_rates_match(c, default_bps, default_bps) {
+                    if !opts.dry_run {
+                        let cfg = HtbClassConfig::new(self.default_rate)
+                            .ceil(self.default_rate)
+                            .build();
+                        conn.change_class_config_by_index(
+                            ifindex,
+                            parent_classid,
+                            default_classid,
+                            cfg,
+                        )
+                        .await
+                        .map_err(|e| {
+                            e.with_context("PerHostLimiter::reconcile: update default class")
+                        })?;
+                    }
+                    report.changes_made += 1;
+                    report.default_modified = true;
+                }
+            }
+        }
+
+        // 4b. Default fq_codel leaf — always present.
+        match tree.leaf_for(default_classid) {
+            None => {
+                if !opts.dry_run {
+                    let mut leaf = FqCodelConfig::new();
+                    if let Some(latency) = self.latency {
+                        leaf = leaf.target(latency);
+                    }
+                    conn.add_qdisc_by_index_full(
+                        ifindex,
+                        default_classid,
+                        Some(default_leaf_handle),
+                        leaf.build(),
+                    )
+                    .await
+                    .map_err(|e| {
+                        e.with_context("PerHostLimiter::reconcile: add default fq_codel leaf")
+                    })?;
+                }
+                report.changes_made += 1;
+                report.default_modified = true;
+            }
+            Some(q) => {
+                if !fq_codel_target_matches(target_us, q) {
+                    if !opts.dry_run {
+                        let mut leaf = FqCodelConfig::new();
+                        if let Some(latency) = self.latency {
+                            leaf = leaf.target(latency);
+                        }
+                        conn.replace_qdisc_by_index_full(
+                            ifindex,
+                            default_classid,
+                            Some(default_leaf_handle),
+                            leaf.build(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            e.with_context(
+                                "PerHostLimiter::reconcile: update default fq_codel leaf",
+                            )
+                        })?;
+                    }
+                    report.changes_made += 1;
+                    report.default_modified = true;
+                }
+            }
+        }
+
+        // 5. Stale removal.
+        self.collect_stale_and_unmanaged(&tree, &mut report, conn, ifindex, opts)
+            .await?;
+
+        Ok(report)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn reconcile_filter_for_rule(
+        &self,
+        conn: &Connection<Route>,
+        ifindex: u32,
+        tree: &LiveTree,
+        index: usize,
+        rule: &HostRule,
+        classid: TcHandle,
+        opts: ReconcileOptions,
+        rule_added: &mut bool,
+        rule_modified: &mut bool,
+        report: &mut ReconcileReport,
+    ) -> Result<()> {
+        use super::filter::FlowerFilter;
+
+        const ETH_P_IP: u16 = 0x0800;
+        const ETH_P_IPV6: u16 = 0x86DD;
+
+        let priority = (index + 1) as u16;
+        let root_handle = TcHandle::major_only(1);
+
+        // For each filter we want to install for this rule, check vs
+        // the live tree at that priority.
+        let want: Vec<(u16, u16, FlowerFilter)> = match &rule.match_ {
+            HostMatch::Ip(ip) | HostMatch::Subnet(ip, _) => {
+                let prefix = match &rule.match_ {
+                    HostMatch::Subnet(_, p) => *p,
+                    _ => {
+                        if ip.is_ipv4() {
+                            32
+                        } else {
+                            128
+                        }
+                    }
+                };
+                match ip {
+                    IpAddr::V4(addr) => vec![(
+                        ETH_P_IP,
+                        priority,
+                        FlowerFilter::new()
+                            .classid(classid)
+                            .priority(priority)
+                            .dst_ipv4(*addr, prefix)
+                            .build(),
+                    )],
+                    IpAddr::V6(addr) => vec![(
+                        ETH_P_IPV6,
+                        priority,
+                        FlowerFilter::new()
+                            .classid(classid)
+                            .priority(priority)
+                            .dst_ipv6(*addr, prefix)
+                            .build(),
+                    )],
+                }
+            }
+            HostMatch::SrcIp(ip) | HostMatch::SrcSubnet(ip, _) => {
+                let prefix = match &rule.match_ {
+                    HostMatch::SrcSubnet(_, p) => *p,
+                    _ => {
+                        if ip.is_ipv4() {
+                            32
+                        } else {
+                            128
+                        }
+                    }
+                };
+                match ip {
+                    IpAddr::V4(addr) => vec![(
+                        ETH_P_IP,
+                        priority,
+                        FlowerFilter::new()
+                            .classid(classid)
+                            .priority(priority)
+                            .src_ipv4(*addr, prefix)
+                            .build(),
+                    )],
+                    IpAddr::V6(addr) => vec![(
+                        ETH_P_IPV6,
+                        priority,
+                        FlowerFilter::new()
+                            .classid(classid)
+                            .priority(priority)
+                            .src_ipv6(*addr, prefix)
+                            .build(),
+                    )],
+                }
+            }
+            HostMatch::Port(port) => vec![
+                (
+                    ETH_P_IP,
+                    priority,
+                    FlowerFilter::new()
+                        .classid(classid)
+                        .priority(priority)
+                        .ip_proto_tcp()
+                        .dst_port(*port)
+                        .build(),
+                ),
+                (
+                    ETH_P_IP,
+                    priority + 100,
+                    FlowerFilter::new()
+                        .classid(classid)
+                        .priority(priority + 100)
+                        .ip_proto_udp()
+                        .dst_port(*port)
+                        .build(),
+                ),
+            ],
+            HostMatch::PortRange(_, _) => {
+                // Port ranges are intentionally complex (multiple
+                // filters); skip incremental reconcile for them and
+                // require apply() instead. A full reconcile of these
+                // rules is a follow-up.
+                Vec::new()
+            }
+        };
+
+        for (proto, prio, filter) in want {
+            let live = tree.filter_at_priority(prio);
+            let ok = live
+                .map(|f| f.kind() == Some("flower") && flower_classid(f) == Some(classid))
+                .unwrap_or(false);
+            if !ok {
+                if !opts.dry_run {
+                    if let Some(stale) = live {
+                        let _ = conn
+                            .del_filter_by_index(ifindex, root_handle, stale.protocol(), prio)
+                            .await;
+                    }
+                    conn.add_filter_by_index_full(ifindex, root_handle, None, proto, prio, filter)
+                        .await
+                        .map_err(|e| {
+                            e.with_context(format!(
+                                "PerHostLimiter::reconcile: add filter prio={prio} \
+                             classid={classid}"
+                            ))
+                        })?;
+                }
+                report.changes_made += 1;
+                if !*rule_added {
+                    *rule_modified = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_as_reconcile(&self, conn: &Connection<Route>) -> Result<ReconcileReport> {
+        self.apply(conn).await?;
+        let n = self.rules.len();
+        Ok(ReconcileReport {
+            // 1 root + 1 parent + 3 per rule (class+leaf+filter, +1 for
+            // Port matches' UDP companion) + 1 default class + 1 default
+            // leaf. Estimate; off-by-one for Port matches is ok.
+            changes_made: 2 + 3 * n + 2,
+            rules_added: n,
+            root_modified: true,
+            default_modified: true,
+            ..ReconcileReport::default()
+        })
+    }
+
+    async fn collect_stale_and_unmanaged(
+        &self,
+        tree: &LiveTree,
+        report: &mut ReconcileReport,
+        conn: &Connection<Route>,
+        ifindex: u32,
+        opts: ReconcileOptions,
+    ) -> Result<()> {
+        let n = self.rules.len();
+        let parent_classid = TcHandle::new(1, 1);
+        let root_handle = TcHandle::major_only(1);
+        let max_minor = (n + 2) as u16;
+
+        // Stale classes in major 1:.
+        let mut stale_classes: Vec<TcHandle> = Vec::new();
+        for (handle, _class) in tree.classes.iter() {
+            if handle.major() != 1 {
+                continue;
+            }
+            let minor = handle.minor();
+            if minor == 0 || minor == 1 {
+                continue;
+            }
+            if minor >= 2 && minor <= max_minor {
+                continue;
+            }
+            stale_classes.push(*handle);
+        }
+        for handle in &stale_classes {
+            if let Some(q) = tree.leaf_for(*handle) {
+                let leaf_handle = q.handle();
+                if !opts.dry_run {
+                    let _ = conn
+                        .del_qdisc_by_index_full(ifindex, *handle, Some(leaf_handle))
+                        .await;
+                }
+            }
+            if !opts.dry_run
+                && let Err(e) = conn
+                    .del_class_by_index(ifindex, parent_classid, *handle)
+                    .await
+                && !e.is_not_found()
+            {
+                return Err(e.with_context(format!(
+                    "PerHostLimiter::reconcile: remove stale class {handle}"
+                )));
+            }
+            report.changes_made += 1;
+            report.rules_removed += 1;
+            report.stale_removed.push(StaleObject {
+                kind: "class",
+                handle: *handle,
+                priority: None,
+            });
+        }
+
+        // Stale filters at root parent. PerHostLimiter installs in the
+        // operator band (priority i+1, i in 0..n) and recipe-band
+        // companions (priority i+1+100 for Port matches). To stay
+        // conservative, only treat priority `1..=n` and `101..=100+n`
+        // as managed; anything else is unmanaged.
+        let mut stale_filters: Vec<(u16, u16, TcHandle)> = Vec::new();
+        for f in &tree.root_filters {
+            let prio = f.priority();
+            // Managed bands.
+            let in_low = prio >= 1 && (prio as usize) <= n;
+            let in_high = prio >= 101 && (prio as usize) <= 100 + n;
+            // Out-of-band entries are unmanaged (left alone).
+            if !in_low && !in_high {
+                report.unmanaged.push(UnmanagedObject {
+                    kind: "filter",
+                    handle: f.parent(),
+                    priority: Some(FilterPriority::new(prio)),
+                });
+                continue;
+            }
+            // In a managed band but no desired rule maps here? The
+            // simplest rule: every prio in [1, n] should map to a rule;
+            // every prio in [101, 100+n] only exists when that rule's
+            // match_ is `Port`. We can't easily tell here without
+            // knowing the rule's match shape, so we *only* delete a
+            // high-band entry that has no rule index assigned — i.e.
+            // (prio - 100 - 1) > n. The same for low-band.
+            let i_low = (prio as usize).checked_sub(1);
+            let i_high = (prio as usize).checked_sub(101);
+            let mapped_index = i_high.filter(|&i| i < n).or(i_low.filter(|&i| i < n));
+            if mapped_index.is_none() {
+                stale_filters.push((prio, f.protocol(), f.parent()));
+            }
+        }
+        for (prio, proto, parent) in stale_filters {
+            if !opts.dry_run {
+                let _ = conn
+                    .del_filter_by_index(ifindex, root_handle, proto, prio)
+                    .await;
+            }
+            report.changes_made += 1;
+            report.stale_removed.push(StaleObject {
+                kind: "filter",
+                handle: parent,
+                priority: Some(FilterPriority::new(prio)),
+            });
+        }
         Ok(())
     }
 

@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 131: reconcile pattern
+
+- `PerPeerImpairer::reconcile` and `PerHostLimiter::reconcile` —
+  non-destructive convergence to the desired TC tree. Dumps the live
+  qdiscs / classes / filters on the target interface, diffs against
+  the tree the helper would build, and emits the minimum
+  `add_*` / `change_*` / `replace_*` / `del_*` operations to
+  converge. Calling `reconcile()` twice in a row with no other
+  changes makes **zero** kernel calls on the second invocation
+  (`ReconcileReport::is_noop()` returns `true`).
+- `reconcile_dry_run()` for previewing the change set without
+  mutating kernel state, and `reconcile_with_options()` accepting a
+  `ReconcileOptions { fallback_to_apply, dry_run }` for finer
+  control. By default a wrong-kind root qdisc returns an error;
+  `with_fallback_to_apply(true)` opts in to a destructive rebuild
+  via `apply()`.
+- `ReconcileReport` (re-exported at the crate root) carries
+  `changes_made`, `rules_added` / `rules_modified` / `rules_removed`,
+  `default_modified`, `root_modified`, `dry_run`, and the
+  drift-detection lists `stale_removed: Vec<StaleObject>` and
+  `unmanaged: Vec<UnmanagedObject>`. Stale = objects in the helper's
+  deterministic handle range that the desired tree no longer
+  references (removed). Unmanaged = objects outside that range
+  (left alone, surfaced for audit).
+- New module `nlink::netlink::tc_recipe` (public types) and
+  `tc_recipe_internals` (internal scaffolding: `LiveTree` dump,
+  `netem_matches`, `fq_codel_target_matches`,
+  `htb_class_rates_match`, `flower_classid`).
+
+`apply()` keeps its destructive contract — recommend new code use
+`reconcile()` for repeated calls (k8s operators, lab controllers,
+config-tick loops). See `docs/recipes/per-peer-impairment.md` and
+the reconcile-loop snippet in `CLAUDE.md`.
+
 ## [0.13.0] - 2026-04-19
 
 The 0.13.0 release lands the four foundation plans from the 1.0

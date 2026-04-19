@@ -274,3 +274,87 @@ async fn test_rate_limiter_remove_nonexistent() -> nlink::Result<()> {
 
     Ok(())
 }
+
+// ============================================================================
+// Reconcile tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_per_host_reconcile_first_call_creates_tree() -> nlink::Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("rl_reconcile_first")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(nlink::netlink::link::DummyLink::new("test0"))
+        .await?;
+    conn.set_link_up("test0").await?;
+
+    let report = PerHostLimiter::new("test0", Rate::mbit(10))
+        .limit_ip("10.0.0.1".parse().unwrap(), Rate::mbit(100))
+        .limit_ip("10.0.0.2".parse().unwrap(), Rate::mbit(50))
+        .reconcile(&conn)
+        .await?;
+
+    assert!(report.changes_made > 0);
+    assert_eq!(report.rules_added, 2);
+    assert!(report.root_modified);
+
+    let qdiscs = conn.get_qdiscs_by_name("test0").await?;
+    assert!(
+        qdiscs
+            .iter()
+            .any(|q| q.kind() == Some("htb") && q.is_root())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_per_host_reconcile_idempotent() -> nlink::Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("rl_reconcile_idem")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(nlink::netlink::link::DummyLink::new("test0"))
+        .await?;
+    conn.set_link_up("test0").await?;
+
+    let limiter = PerHostLimiter::new("test0", Rate::mbit(10))
+        .limit_ip("10.0.0.1".parse().unwrap(), Rate::mbit(100));
+
+    let r1 = limiter.reconcile(&conn).await?;
+    assert!(r1.changes_made > 0);
+    let r2 = limiter.reconcile(&conn).await?;
+    assert!(
+        r2.is_noop(),
+        "second reconcile should be a no-op (got {} changes)",
+        r2.changes_made,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_per_host_reconcile_dry_run() -> nlink::Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("rl_reconcile_dry")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(nlink::netlink::link::DummyLink::new("test0"))
+        .await?;
+    conn.set_link_up("test0").await?;
+
+    let report = PerHostLimiter::new("test0", Rate::mbit(10))
+        .limit_ip("10.0.0.1".parse().unwrap(), Rate::mbit(100))
+        .reconcile_dry_run(&conn)
+        .await?;
+
+    assert!(report.dry_run);
+    assert!(report.changes_made > 0);
+
+    // Nothing actually installed.
+    let qdiscs = conn.get_qdiscs_by_name("test0").await?;
+    assert!(qdiscs.iter().all(|q| q.kind() != Some("htb")));
+    Ok(())
+}

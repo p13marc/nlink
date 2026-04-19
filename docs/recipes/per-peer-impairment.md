@@ -165,6 +165,55 @@ helper's filters use priorities `100..` to stay clear of the
 conventional operator priority range (1..50), but coexistence is not
 guaranteed.
 
+### Use `reconcile()` for repeated calls
+
+For long-running consumers (k8s operators, lab controllers,
+config-tick loops) prefer **`reconcile()`** over re-running `apply()`.
+It dumps the live tree, diffs against the desired one, and emits the
+minimum set of `add_*` / `change_*` / `del_*` operations. When nothing
+has changed, it makes **zero** kernel calls; when only one peer's
+delay changes, it `change_qdisc`'s a single leaf.
+
+```rust
+loop {
+    let desired = build_impairer_from_config(&latest_config);
+    let report = desired.reconcile(&conn).await?;
+    if !report.is_noop() {
+        info!(
+            "reconcile: +{} ~{} -{} (root_modified={}, default_modified={})",
+            report.rules_added,
+            report.rules_modified,
+            report.rules_removed,
+            report.root_modified,
+            report.default_modified,
+        );
+        for stale in &report.stale_removed {
+            info!("removed stale {}: {}", stale.kind, stale.handle);
+        }
+        for um in &report.unmanaged {
+            warn!("unmanaged {}: {} (left alone)", um.kind, um.handle);
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(10)).await;
+}
+```
+
+Key contract differences from `apply()`:
+
+- **`apply()`**: destructive rebuild. Brief packet-drop window. Use
+  for "set up from scratch", typically once per interface lifetime.
+- **`reconcile()`**: non-destructive convergence. Idempotent.
+  Preferred for reconcile loops.
+
+If the live root qdisc is the wrong kind (someone else installed a
+non-HTB root), `reconcile()` returns an error by default. Pass
+`ReconcileOptions::with_fallback_to_apply(true)` to instead trigger a
+destructive rebuild via `apply()` — opt-in because surprising
+auto-destruction is a bad default for a reconcile-loop verb.
+
+`reconcile_dry_run()` returns the same `ReconcileReport` without
+making kernel calls — useful for preview/validation in CI.
+
 ### Helper resolves ifindex once
 
 When constructed via `PerPeerImpairer::new(name)`, the interface name

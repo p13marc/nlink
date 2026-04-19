@@ -597,6 +597,47 @@ leaves. `apply()` is destructive: it removes any existing root qdisc
 first. Filters match egress; symmetric pair impairment requires
 applying on both ends of the path.
 
+**Reconcile pattern (PerPeerImpairer / PerHostLimiter):**
+
+For long-running consumers that re-apply on a tick (k8s operators,
+lab controllers), prefer **`reconcile()`** over re-running `apply()`.
+It diffs the live tree against the desired tree and emits the
+minimum set of mutations. When nothing has changed, it makes **zero**
+kernel calls — no packet-drop hiccup. When one peer's delay changes,
+it `change_qdisc`'s a single leaf.
+
+```rust
+use nlink::ReconcileOptions;
+
+loop {
+    let desired = build_impairer_from_config(&latest_config);
+    let report = desired.reconcile(&conn).await?;
+    if !report.is_noop() {
+        info!(
+            "impair: +{} ~{} -{}",
+            report.rules_added, report.rules_modified, report.rules_removed,
+        );
+    }
+    tokio::time::sleep(Duration::from_secs(10)).await;
+}
+
+// Preview without mutating kernel state
+let preview = desired.reconcile_dry_run(&conn).await?;
+println!("would issue {} kernel calls", preview.changes_made);
+
+// If the live root qdisc is the wrong kind, default = error.
+// Opt in to a destructive rebuild via apply():
+desired
+    .reconcile_with_options(&conn,
+        ReconcileOptions::new().with_fallback_to_apply(true))
+    .await?;
+```
+
+`apply()` keeps its destructive contract — use it for "set up from
+scratch" (typically once per interface lifetime). `reconcile()` is
+the verb for repeated calls. See `docs/recipes/per-peer-impairment.md`
+for the full apply-vs-reconcile guidance.
+
 **Filter dump by parent:**
 
 ```rust

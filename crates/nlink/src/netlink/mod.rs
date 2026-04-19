@@ -117,6 +117,8 @@ pub mod sysctl;
 pub mod tc;
 pub mod tc_handle;
 pub mod tc_options;
+pub mod tc_recipe;
+pub(crate) mod tc_recipe_internals;
 pub mod types;
 pub mod uevent;
 pub mod xfrm;

@@ -319,6 +319,228 @@ async fn test_rate_cap_per_rule() -> nlink::Result<()> {
     Ok(())
 }
 
+// ============================================================================
+// Reconcile tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_reconcile_first_call_creates_tree() -> nlink::Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("impair_reconcile_first")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(DummyLink::new("test0")).await?;
+    conn.set_link_up("test0").await?;
+    let link = conn.get_link_by_name("test0").await?.expect("dummy exists");
+    let ifindex = link.ifindex();
+
+    let report = PerPeerImpairer::new("test0")
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 2).into(), netem_50ms())
+        .reconcile(&conn)
+        .await?;
+
+    assert!(report.changes_made > 0, "first reconcile must mutate");
+    assert_eq!(report.rules_added, 2);
+    assert!(report.root_modified);
+
+    // Tree exists.
+    let qdiscs = conn.get_qdiscs_by_index(ifindex).await?;
+    assert!(
+        qdiscs
+            .iter()
+            .any(|q| q.kind() == Some("htb") && q.is_root())
+    );
+    assert_eq!(
+        qdiscs.iter().filter(|q| q.kind() == Some("netem")).count(),
+        2,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_reconcile_idempotent() -> nlink::Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("impair_reconcile_idem")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(DummyLink::new("test0")).await?;
+    conn.set_link_up("test0").await?;
+
+    let imp = PerPeerImpairer::new("test0")
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 2).into(), netem_50ms());
+
+    let r1 = imp.reconcile(&conn).await?;
+    assert!(r1.changes_made > 0);
+
+    let r2 = imp.reconcile(&conn).await?;
+    assert!(
+        r2.is_noop(),
+        "second reconcile should be a no-op (got {} changes: {:?})",
+        r2.changes_made,
+        r2,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_reconcile_modify_netem() -> nlink::Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("impair_reconcile_mod")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(DummyLink::new("test0")).await?;
+    conn.set_link_up("test0").await?;
+
+    let imp_a = PerPeerImpairer::new("test0")
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms());
+    imp_a.reconcile(&conn).await?;
+
+    // Now bump the delay and reconcile.
+    let imp_b = PerPeerImpairer::new("test0").impair_dst_ip(
+        Ipv4Addr::new(10, 0, 0, 1).into(),
+        NetemConfig::new().delay(Duration::from_millis(120)).build(),
+    );
+    let r = imp_b.reconcile(&conn).await?;
+    assert_eq!(
+        r.rules_modified, 1,
+        "rule should be modified, not added/removed (report: {:?})",
+        r,
+    );
+    assert_eq!(r.rules_added, 0);
+    assert_eq!(r.rules_removed, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_reconcile_remove_rule() -> nlink::Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("impair_reconcile_rm")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(DummyLink::new("test0")).await?;
+    conn.set_link_up("test0").await?;
+
+    PerPeerImpairer::new("test0")
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 2).into(), netem_50ms())
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 3).into(), netem_50ms())
+        .reconcile(&conn)
+        .await?;
+
+    // Reconcile a 2-rule version — should remove the third.
+    let r = PerPeerImpairer::new("test0")
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 2).into(), netem_50ms())
+        .reconcile(&conn)
+        .await?;
+    assert!(
+        r.rules_removed >= 1,
+        "expected at least 1 rule removed: {r:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_reconcile_dry_run_makes_no_changes() -> nlink::Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("impair_reconcile_dry")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(DummyLink::new("test0")).await?;
+    conn.set_link_up("test0").await?;
+    let link = conn.get_link_by_name("test0").await?.expect("dummy exists");
+    let ifindex = link.ifindex();
+
+    let report = PerPeerImpairer::new("test0")
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
+        .reconcile_dry_run(&conn)
+        .await?;
+
+    assert!(report.dry_run);
+    assert!(report.changes_made > 0, "would-do count should be > 0");
+
+    // No qdisc was actually installed.
+    let qdiscs = conn.get_qdiscs_by_index(ifindex).await?;
+    assert!(
+        qdiscs.iter().all(|q| q.kind() != Some("htb")),
+        "dry-run installed an HTB qdisc",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_reconcile_wrong_root_kind_errors() -> nlink::Result<()> {
+    require_root!();
+    use nlink::netlink::tc::PrioConfig;
+
+    let ns = TestNamespace::new("impair_reconcile_wrongroot")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(DummyLink::new("test0")).await?;
+    conn.set_link_up("test0").await?;
+
+    // Install a non-HTB qdisc at root manually.
+    conn.add_qdisc_full(
+        "test0",
+        nlink::TcHandle::ROOT,
+        Some(nlink::TcHandle::major_only(1)),
+        PrioConfig::new().build(),
+    )
+    .await?;
+
+    let r = PerPeerImpairer::new("test0")
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
+        .reconcile(&conn)
+        .await;
+    assert!(r.is_err(), "expected error for wrong root kind, got {r:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_reconcile_with_fallback_to_apply() -> nlink::Result<()> {
+    require_root!();
+    use nlink::ReconcileOptions;
+    use nlink::netlink::tc::PrioConfig;
+
+    let ns = TestNamespace::new("impair_reconcile_fallback")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(DummyLink::new("test0")).await?;
+    conn.set_link_up("test0").await?;
+    let link = conn.get_link_by_name("test0").await?.expect("dummy exists");
+    let ifindex = link.ifindex();
+
+    // Wrong root.
+    conn.add_qdisc_full(
+        "test0",
+        nlink::TcHandle::ROOT,
+        Some(nlink::TcHandle::major_only(1)),
+        PrioConfig::new().build(),
+    )
+    .await?;
+
+    PerPeerImpairer::new("test0")
+        .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
+        .reconcile_with_options(&conn, ReconcileOptions::new().with_fallback_to_apply(true))
+        .await?;
+
+    let qdiscs = conn.get_qdiscs_by_index(ifindex).await?;
+    assert!(
+        qdiscs
+            .iter()
+            .any(|q| q.kind() == Some("htb") && q.is_root()),
+        "fallback should have rebuilt the HTB tree",
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_get_filters_by_parent_filters_correctly() -> nlink::Result<()> {
     require_root!();
