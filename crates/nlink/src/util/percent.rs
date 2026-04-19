@@ -18,7 +18,8 @@
 //!
 //! // Convert to a fraction or to the kernel's 32-bit probability form:
 //! assert_eq!(Percent::new(50.0).as_fraction(), 0.5);
-//! assert_eq!(Percent::new(50.0).as_kernel_probability(), u32::MAX / 2 + 1);
+//! // 50% rounds to ~u32::MAX / 2 (within 1 due to f64 precision):
+//! assert!(Percent::new(50.0).as_kernel_probability().abs_diff(u32::MAX / 2) <= 1);
 //! ```
 
 use core::{fmt, str::FromStr};

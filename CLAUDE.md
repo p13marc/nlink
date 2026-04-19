@@ -245,6 +245,61 @@ boundaries. Earlier nlink versions had a long-standing bug where
 bits-per-second got silently treated as bytes-per-second. With `Rate`,
 that mistake is a compile error.
 
+## Type-safe TC handles (TcHandle / FilterPriority)
+
+The TC API takes typed handles instead of `&str`/`u32`. A `TcHandle`
+is a packed `(major, minor)` pair plus the kernel constants `ROOT`,
+`INGRESS`, `CLSACT`, and `UNSPEC`. Round-trips with `tc(8)` notation
+via `FromStr` and `Display`.
+
+```rust
+use nlink::TcHandle;
+
+// Construction:
+let h = TcHandle::new(1, 0x10);                // 1:10
+let h = TcHandle::major_only(1);               // 1:
+let h = TcHandle::ROOT;                        // root qdisc
+let h = TcHandle::INGRESS;                     // ingress qdisc
+let h = TcHandle::CLSACT;                      // clsact qdisc
+let h: TcHandle = "1:a".parse()?;              // tc-style string
+let h = TcHandle::from_raw(0x0001_000A);       // raw u32 escape hatch
+
+// Inspection:
+assert_eq!(TcHandle::new(1, 0x10).major(), 1);
+assert_eq!(TcHandle::new(1, 0x10).minor(), 0x10);
+assert!(TcHandle::ROOT.is_root());
+assert!(TcHandle::INGRESS.is_ingress());
+
+// Display round-trips:
+assert_eq!(TcHandle::new(1, 0x10).to_string(), "1:a");
+assert_eq!(TcHandle::ROOT.to_string(), "root");
+```
+
+Connection methods all take `TcHandle` (not `&str`):
+
+```rust
+conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb).await?;
+conn.add_class_config("eth0", TcHandle::major_only(1), TcHandle::new(1, 1), cls).await?;
+conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
+conn.del_qdisc("eth0", TcHandle::ROOT).await?;
+```
+
+`TcMessage::handle()` and `TcMessage::parent()` return `TcHandle`:
+
+```rust
+for q in &qdiscs {
+    println!("handle={} parent={}", q.handle(), q.parent());
+    if q.parent().is_root() { /* ... */ }
+}
+// `handle_raw()` / `parent_raw()` give the u32 if you need it for
+// HashMap keys or wire-format comparisons.
+```
+
+`FilterPriority` is a `u16` with documented bands (operator: 1..=49,
+recipe: 100..=199, app: 200..=999, system: 1000..). nlink helpers like
+`PerPeerImpairer` and `PerHostLimiter` install filters in the recipe
+band so they don't fight with operator-installed rules.
+
 ## Key Patterns
 
 **High-level queries (preferred for library use):**
@@ -546,8 +601,8 @@ applying on both ends of the path.
 
 ```rust
 // All filters whose parent is "1:" (e.g., the root of an HTB tree)
-let filters = conn.get_filters_by_parent("eth0", "1:").await?;
-let filters = conn.get_filters_by_parent_index(ifindex, "1:").await?;
+let filters = conn.get_filters_by_parent("eth0", TcHandle::major_only(1)).await?;
+let filters = conn.get_filters_by_parent_index(ifindex, TcHandle::major_only(1)).await?;
 ```
 
 **Network diagnostics (Diagnostics):**
@@ -758,7 +813,7 @@ conn.del_netem("eth0").await?;
 conn.del_netem_by_index(ifindex).await?;
 
 // Look up a qdisc by handle
-if let Some(qdisc) = conn.get_qdisc_by_handle("eth0", "1:").await? {
+if let Some(qdisc) = conn.get_qdisc_by_handle("eth0", TcHandle::major_only(1)).await? {
     println!("Found qdisc: {}", qdisc.kind().unwrap_or("?"));
 }
 ```
@@ -796,12 +851,12 @@ let conn = Connection::<Route>::new()?;
 
 // First add an HTB qdisc
 let htb = HtbQdiscConfig::new().default_class(0x10).build();
-conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
+conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb).await?;
 
 // Add classes with rate limiting
-conn.add_class("eth0", "1:0", "1:1", "htb", 
+conn.add_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 1), "htb",
     &["rate", "100mbit", "ceil", "1gbit"]).await?;
-conn.add_class("eth0", "1:1", "1:10", "htb", 
+conn.add_class("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x10), "htb",
     &["rate", "10mbit", "ceil", "100mbit"]).await?;
 
 // Query classes
@@ -812,19 +867,19 @@ for class in &classes {
 }
 
 // Change class parameters
-conn.change_class("eth0", "1:0", "1:10", "htb",
+conn.change_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 0x10), "htb",
     &["rate", "20mbit", "ceil", "100mbit"]).await?;
 
 // Replace class (add or update)
-conn.replace_class("eth0", "1:0", "1:10", "htb",
+conn.replace_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 0x10), "htb",
     &["rate", "15mbit", "ceil", "100mbit"]).await?;
 
 // Delete class
-conn.del_class("eth0", "1:0", "1:10").await?;
+conn.del_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 0x10)).await?;
 
 // Namespace-aware operations use *_by_index variants
 let link = conn.get_link_by_name("eth0").await?;
-conn.add_class_by_index(link.ifindex(), "1:0", "1:20", "htb",
+conn.add_class_by_index(link.ifindex(), TcHandle::major_only(1), TcHandle::new(1, 0x20), "htb",
     &["rate", "5mbit"]).await?;
 ```
 
@@ -837,24 +892,24 @@ let conn = Connection::<Route>::new()?;
 
 // First add HTB qdisc
 let htb = HtbQdiscConfig::new().default_class(0x30).build();
-conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
+conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb).await?;
 
 // Add root class (total bandwidth) - typed builder
-conn.add_class_config("eth0", "1:0", "1:1",
+conn.add_class_config("eth0", TcHandle::major_only(1), TcHandle::new(1, 1),
     HtbClassConfig::new(Rate::gbit(1))
         .ceil(Rate::gbit(1))
         .build()
 ).await?;
 
 // Add child classes with priorities
-conn.add_class_config("eth0", "1:1", "1:10",
+conn.add_class_config("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x10),
     HtbClassConfig::new(Rate::mbit(100))
         .ceil(Rate::mbit(500))
         .prio(1)              // High priority
         .build()
 ).await?;
 
-conn.add_class_config("eth0", "1:1", "1:20",
+conn.add_class_config("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x20),
     HtbClassConfig::new(Rate::mbit(200))
         .ceil(Rate::mbit(800))
         .prio(2)
@@ -862,7 +917,7 @@ conn.add_class_config("eth0", "1:1", "1:20",
 ).await?;
 
 // Best effort class
-conn.add_class_config("eth0", "1:1", "1:30",
+conn.add_class_config("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x30),
     HtbClassConfig::new(Rate::mbit(50))
         .prio(3)
         .build()
@@ -870,7 +925,7 @@ conn.add_class_config("eth0", "1:1", "1:30",
 
 // Programmatic rate values via Rate::bytes_per_sec / Rate::bits_per_sec
 let rate = Rate::bits_per_sec(125_000_000); // 125 Mbps
-conn.add_class_config("eth0", "1:1", "1:40",
+conn.add_class_config("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x40),
     HtbClassConfig::new(rate)
         .ceil(rate * 2)
         .burst(Bytes::kib(64))   // 64KiB burst
@@ -894,7 +949,7 @@ conn.replace_class_config("eth0", "1:1", "1:10",
 
 // Namespace-aware with *_by_index variants
 let link = conn.get_link_by_name("eth0").await?;
-conn.add_class_config_by_index(link.ifindex(), "1:1", "1:50",
+conn.add_class_config_by_index(link.ifindex(), TcHandle::new(1, 1), TcHandle::new(1, 0x50),
     HtbClassConfig::new(Rate::mbit(10)).build()
 ).await?;
 ```
@@ -908,19 +963,19 @@ let conn = Connection::<Route>::new()?;
 
 // First add HFSC qdisc
 let hfsc = HfscConfig::new().default_class(0x10).build();
-conn.add_qdisc_full("eth0", "root", Some("1:"), hfsc).await?;
+conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), hfsc).await?;
 
 // Add root class with link-share curve.
 // HFSC's kernel UAPI uses 32-bit rate fields, so Rate values are
 // saturating-cast to u32 (max ~4 GB/s ~= 32 Gbps).
-conn.add_class_config("eth0", "1:0", "1:1",
+conn.add_class_config("eth0", TcHandle::major_only(1), TcHandle::new(1, 1),
     HfscClassConfig::new()
         .ls_rate(Rate::gbit(1))  // 1 Gbps link-share
         .build()
 ).await?;
 
 // Add real-time class with latency guarantee (two-slope curve)
-conn.add_class_config("eth0", "1:1", "1:10",
+conn.add_class_config("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x10),
     HfscClassConfig::new()
         .rt_curve(TcServiceCurve::two_slope(10_000_000, 5000, 1_000_000))
         .ls_rate(Rate::mbit(100))
@@ -928,7 +983,7 @@ conn.add_class_config("eth0", "1:1", "1:10",
 ).await?;
 
 // Add best-effort class with upper limit
-conn.add_class_config("eth0", "1:1", "1:20",
+conn.add_class_config("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x20),
     HfscClassConfig::new()
         .ls_rate(Rate::mbit(50))
         .ul_rate(Rate::mbit(100))  // Cap at 100 Mbps
@@ -942,17 +997,17 @@ use nlink::Bytes;
 use nlink::netlink::tc::{DrrConfig, DrrClassConfig};
 
 // First add DRR qdisc
-let drr = DrrConfig::new().handle("1:").build();
-conn.add_qdisc_full("eth0", "root", Some("1:"), drr).await?;
+let drr = DrrConfig::new().build();
+conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), drr).await?;
 
 // Add classes with different quanta (bandwidth proportions)
-conn.add_class_config("eth0", "1:0", "1:1",
+conn.add_class_config("eth0", TcHandle::major_only(1), TcHandle::new(1, 1),
     DrrClassConfig::new()
         .quantum(Bytes::new(1500))  // 1 packet worth
         .build()
 ).await?;
 
-conn.add_class_config("eth0", "1:0", "1:2",
+conn.add_class_config("eth0", TcHandle::major_only(1), TcHandle::new(1, 2),
     DrrClassConfig::new()
         .quantum(Bytes::new(3000))  // 2x bandwidth of class 1:1
         .build()
@@ -965,17 +1020,17 @@ use nlink::Bytes;
 use nlink::netlink::tc::{QfqConfig, QfqClassConfig};
 
 // First add QFQ qdisc
-let qfq = QfqConfig::new().handle("1:").build();
-conn.add_qdisc_full("eth0", "root", Some("1:"), qfq).await?;
+let qfq = QfqConfig::new().build();
+conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), qfq).await?;
 
 // Add classes with different weights
-conn.add_class_config("eth0", "1:0", "1:1",
+conn.add_class_config("eth0", TcHandle::major_only(1), TcHandle::new(1, 1),
     QfqClassConfig::new()
         .weight(1)
         .build()
 ).await?;
 
-conn.add_class_config("eth0", "1:0", "1:2",
+conn.add_class_config("eth0", TcHandle::major_only(1), TcHandle::new(1, 2),
     QfqClassConfig::new()
         .weight(2)               // 2x bandwidth of class 1:1
         .lmax(Bytes::new(9000))  // Max packet size (for jumbo frames)
@@ -1320,24 +1375,24 @@ let conn = Connection::new(Protocol::Route)?;
 
 // U32 filter to match destination port 80
 let filter = U32Filter::new()
-    .classid("1:10")
+    .classid(TcHandle::new(1, 0x10))
     .match_dst_port(80)
     .build();
-conn.add_filter("eth0", "1:", filter).await?;
+conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
 
 // Flower filter to match TCP traffic to 10.0.0.0/8
 let filter = FlowerFilter::new()
-    .classid("1:20")
+    .classid(TcHandle::new(1, 0x20))
     .ip_proto_tcp()
     .dst_ipv4(Ipv4Addr::new(10, 0, 0, 0), 8)
     .build();
-conn.add_filter("eth0", "1:", filter).await?;
+conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
 
 // Matchall filter for all traffic
 let filter = MatchallFilter::new()
-    .classid("1:30")
+    .classid(TcHandle::new(1, 0x30))
     .build();
-conn.add_filter("eth0", "1:", filter).await?;
+conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
 
 // Replace a filter (create or update)
 conn.replace_filter("eth0", "1:", filter).await?;
@@ -1358,14 +1413,14 @@ use nlink::netlink::action::{GactAction, ActionList};
 // Cgroup filter - matches based on cgroup membership
 let cgroup = CgroupFilter::new()
     .with_action(GactAction::drop());
-conn.add_filter("eth0", "1:", cgroup).await?;
+conn.add_filter("eth0", TcHandle::major_only(1), cgroup).await?;
 
 // Route filter - classifies based on routing realm
 let route = RouteFilter::new()
     .to_realm(10)
     .from_realm(5)
-    .classid(0x10010);  // 1:10
-conn.add_filter("eth0", "1:", route).await?;
+    .classid(TcHandle::new(1, 0x10));  // 1:10
+conn.add_filter("eth0", TcHandle::major_only(1), route).await?;
 
 // Flow filter - multi-key hashing for load balancing
 let flow = FlowFilter::new()
@@ -1374,8 +1429,8 @@ let flow = FlowFilter::new()
     .key(FlowKey::Proto)            // Protocol
     .key(FlowKey::NfctSrc)          // Conntrack original source
     .divisor(256)                    // Hash table size
-    .baseclass(0x10001);            // Base class 1:1
-conn.add_filter("eth0", "1:", flow).await?;
+    .baseclass(TcHandle::new(1, 1));            // Base class 1:1
+conn.add_filter("eth0", TcHandle::major_only(1), flow).await?;
 
 // Flow keys available: Src, Dst, Proto, ProtoSrc, ProtoDst, Iif,
 // Priority, Mark, NfctSrc, NfctDst, NfctProtoSrc, NfctProtoDst,
@@ -1395,8 +1450,8 @@ let conn = Connection::<Route>::new()?;
 conn.add_qdisc("eth0", IngressConfig::new()).await?;
 
 // Create filter chains for organizing filters
-conn.add_tc_chain("eth0", "ingress", 0).await?;
-conn.add_tc_chain("eth0", "ingress", 100).await?;
+conn.add_tc_chain("eth0", TcHandle::INGRESS, 0).await?;
+conn.add_tc_chain("eth0", TcHandle::INGRESS, 100).await?;
 
 // Add filter in chain 0 that jumps to chain 100 for TCP traffic
 let filter = FlowerFilter::new()
@@ -1404,7 +1459,7 @@ let filter = FlowerFilter::new()
     .ip_proto_tcp()
     .goto_chain(100)
     .build();
-conn.add_filter("eth0", "ingress", filter).await?;
+conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
 
 // Add filter in chain 100 to drop traffic to port 80
 let filter = FlowerFilter::new()
@@ -1412,16 +1467,16 @@ let filter = FlowerFilter::new()
     .ip_proto_tcp()
     .dst_port(80)
     .build();
-conn.add_filter("eth0", "ingress", filter).await?;
+conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
 
 // List chains
-let chains = conn.get_tc_chains("eth0", "ingress").await?;
+let chains = conn.get_tc_chains("eth0", TcHandle::INGRESS).await?;
 for chain in chains {
     println!("Chain: {}", chain);
 }
 
 // Delete a chain (filters must be removed first)
-conn.del_tc_chain("eth0", "ingress", 100).await?;
+conn.del_tc_chain("eth0", TcHandle::INGRESS, 100).await?;
 
 // Goto chain action can also be used with GactAction
 let goto = GactAction::goto_chain(100);
@@ -1458,7 +1513,7 @@ let actions = ActionList::new()
 let filter = MatchallFilter::new()
     .actions(actions)
     .build();
-conn.add_filter("eth0", "ingress", filter).await?;
+conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
 ```
 
 **Creating link types:**
@@ -1585,7 +1640,7 @@ let tunnel_release = TunnelKeyAction::release();
 let filter = MatchallFilter::new()
     .actions(ActionList::new().with(snat))
     .build();
-conn.add_filter("eth0", "egress", filter).await?;
+conn.add_filter("eth0", TcHandle::from_raw(0xFFFF_FFF3), filter).await?;
 ```
 
 **Extended TC actions (connmark, csum, sample, ct, pedit):**
@@ -1689,15 +1744,15 @@ let bfifo = BfifoConfig::new().limit(100000);
 
 // DRR (Deficit Round Robin) classful qdisc
 let drr = DrrConfig::new();
-conn.add_qdisc_full("eth0", "root", "1:", drr).await?;
+conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), drr).await?;
 
 // QFQ (Quick Fair Queueing) classful qdisc
 let qfq = QfqConfig::new();
-conn.add_qdisc_full("eth0", "root", "1:", qfq).await?;
+conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), qfq).await?;
 
 // HFSC (Hierarchical Fair Service Curve) classful qdisc
 let hfsc = HfscConfig::new().default_class(0x10);
-conn.add_qdisc_full("eth0", "root", "1:", hfsc).await?;
+conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), hfsc).await?;
 
 // MQPrio (Multi-Queue Priority) for hardware offload
 let mqprio = MqprioConfig::new()
@@ -1725,7 +1780,7 @@ let etf = EtfConfig::new()
     .delta_ns(500_000)  // 500us delta
     .deadline_mode()    // Enable deadline mode
     .offload();         // Enable hardware offload
-conn.add_qdisc_full("eth0", "1:1", "10:", etf).await?;
+conn.add_qdisc_full("eth0", TcHandle::new(1, 1), Some(TcHandle::major_only(10)), etf).await?;
 
 // Plug qdisc for packet buffering
 let plug = PlugConfig::new().limit(10000);
@@ -2193,7 +2248,7 @@ use nlink::util::parse::get_rate;
 let conn = Connection::new(Protocol::Route)?;
 
 // Check error types for recovery logic
-match conn.del_qdisc("eth0", "root").await {
+match conn.del_qdisc("eth0", TcHandle::ROOT).await {
     Ok(()) => println!("Deleted"),
     Err(e) if e.is_not_found() => println!("Nothing to delete"),
     Err(e) if e.is_permission_denied() => println!("Need root"),

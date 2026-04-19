@@ -14,8 +14,9 @@
 //! let b = Bytes::kib(32);
 //! assert_eq!(b.as_u64(), 32 * 1024);
 //!
+//! // Note: parse() follows tc(8) where "kb" means 1024 bytes (binary).
 //! let parsed: Bytes = "32kb".parse().unwrap();
-//! assert_eq!(parsed, Bytes::new(32 * 1000));
+//! assert_eq!(parsed, Bytes::new(32 * 1024));
 //! ```
 
 use core::{fmt, str::FromStr};

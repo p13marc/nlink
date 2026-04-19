@@ -186,6 +186,7 @@ parent rate caps, or BPF dispatching — here's the minimum to do the
 same thing manually with nlink primitives:
 
 ```rust
+use nlink::{Percent, Rate, TcHandle};
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::filter::FlowerFilter;
 use nlink::netlink::tc::{HtbClassConfig, HtbQdiscConfig, NetemConfig};
@@ -196,34 +197,34 @@ let conn = Connection::<Route>::new()?;
 let dev = "vethA-br";
 
 // Clean slate.
-let _ = conn.del_qdisc(dev, "root").await;
+let _ = conn.del_qdisc(dev, TcHandle::ROOT).await;
 
 // Root HTB with default class id pointing at the catch-all.
-conn.add_qdisc_full(dev, "root", Some("1:"),
-    HtbQdiscConfig::new().handle("1:").default_class(0xff).build()
+conn.add_qdisc_full(dev, TcHandle::ROOT, Some(TcHandle::major_only(1)),
+    HtbQdiscConfig::new().default_class(0xff).build()
 ).await?;
 
 // Parent class.
 let link_rate = Rate::bytes_per_sec(10_000_000_000);
-conn.add_class_config(dev, "1:0", "1:1",
+conn.add_class_config(dev, TcHandle::major_only(1), TcHandle::new(1, 1),
     HtbClassConfig::new(link_rate).ceil(link_rate).build()
 ).await?;
 
 // One peer.
-conn.add_class_config(dev, "1:1", "1:2",
+conn.add_class_config(dev, TcHandle::new(1, 1), TcHandle::new(1, 2),
     HtbClassConfig::new(link_rate).ceil(link_rate).build()
 ).await?;
 
-conn.add_qdisc_full(dev, "1:2", Some("a:"),
+conn.add_qdisc_full(dev, TcHandle::new(1, 2), Some(TcHandle::major_only(0xa)),
     NetemConfig::new()
         .delay(Duration::from_millis(15))
         .loss(Percent::new(1.0))
         .build()
 ).await?;
 
-conn.add_filter(dev, "1:",
+conn.add_filter(dev, TcHandle::major_only(1),
     FlowerFilter::new()
-        .classid("1:2")
+        .classid(TcHandle::new(1, 2))
         .priority(100)
         .dst_ipv4(Ipv4Addr::new(172, 100, 3, 18), 32)
         .build()

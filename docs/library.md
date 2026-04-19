@@ -389,7 +389,7 @@ use nlink::netlink::error::ValidationErrorInfo;
 let conn = Connection::<Route>::new()?;
 
 // Check error types for recovery logic
-match conn.del_qdisc("eth0", "root").await {
+match conn.del_qdisc("eth0", TcHandle::ROOT).await {
     Ok(()) => println!("Qdisc deleted"),
     Err(e) if e.is_not_found() => println!("No qdisc to delete"),
     Err(e) if e.is_permission_denied() => println!("Need root privileges"),
@@ -555,24 +555,24 @@ let conn = Connection::<Route>::new()?;
 
 // Add HTB qdisc
 let htb = HtbQdiscConfig::new().default_class(0x30).build();
-conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
+conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb).await?;
 
 // Add root class (total bandwidth)
-conn.add_class_config("eth0", "1:0", "1:1",
+conn.add_class_config("eth0", TcHandle::major_only(1), TcHandle::new(1, 1),
     HtbClassConfig::new(Rate::gbit(1))
         .ceil(Rate::gbit(1))
         .build()
 ).await?;
 
 // Add child classes with priorities
-conn.add_class_config("eth0", "1:1", "1:10",
+conn.add_class_config("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x10),
     HtbClassConfig::new(Rate::mbit(100))
         .ceil(Rate::mbit(500))
         .prio(1)  // High priority
         .build()
 ).await?;
 
-conn.add_class_config("eth0", "1:1", "1:20",
+conn.add_class_config("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x20),
     HtbClassConfig::new(Rate::mbit(50))
         .ceil(Rate::mbit(200))
         .prio(2)  // Lower priority
@@ -592,18 +592,18 @@ let conn = Connection::<Route>::new()?;
 
 // U32 filter to match destination port
 let filter = U32Filter::new()
-    .classid("1:10")
+    .classid(TcHandle::new(1, 0x10))
     .match_dst_port(80)
     .build();
-conn.add_filter("eth0", "1:", filter).await?;
+conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
 
 // Flower filter for TCP traffic to subnet
 let filter = FlowerFilter::new()
-    .classid("1:20")
+    .classid(TcHandle::new(1, 0x20))
     .ip_proto_tcp()
     .dst_ipv4(Ipv4Addr::new(10, 0, 0, 0), 8)
     .build();
-conn.add_filter("eth0", "1:", filter).await?;
+conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
 
 // Filter with police action (rate limit)
 let police = PoliceAction::new()
@@ -615,7 +615,7 @@ let police = PoliceAction::new()
 let filter = MatchallFilter::new()
     .action(police)
     .build();
-conn.add_filter("eth0", "ingress", filter).await?;
+conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
 
 // Mirror traffic to another interface
 let mirror = MirredAction::mirror_egress("eth1");
@@ -624,7 +624,7 @@ let filter = FlowerFilter::new()
     .dst_port(443)
     .action(mirror)
     .build();
-conn.add_filter("eth0", "ingress", filter).await?;
+conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
 ```
 
 ### TC Filter Chains
@@ -641,8 +641,8 @@ let conn = Connection::<Route>::new()?;
 conn.add_qdisc("eth0", IngressConfig::new()).await?;
 
 // Create filter chains
-conn.add_tc_chain("eth0", "ingress", 0).await?;
-conn.add_tc_chain("eth0", "ingress", 100).await?;
+conn.add_tc_chain("eth0", TcHandle::INGRESS, 0).await?;
+conn.add_tc_chain("eth0", TcHandle::INGRESS, 100).await?;
 
 // Add filter in chain 0 that jumps to chain 100 for TCP
 let filter = FlowerFilter::new()
@@ -650,7 +650,7 @@ let filter = FlowerFilter::new()
     .ip_proto_tcp()
     .goto_chain(100)
     .build();
-conn.add_filter("eth0", "ingress", filter).await?;
+conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
 
 // Add filter in chain 100 to drop port 80
 let filter = FlowerFilter::new()
@@ -659,7 +659,7 @@ let filter = FlowerFilter::new()
     .dst_port(80)
     .action(GactAction::drop())
     .build();
-conn.add_filter("eth0", "ingress", filter).await?;
+conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
 
 // List chains
 for chain in conn.get_tc_chains("eth0", "ingress").await? {
