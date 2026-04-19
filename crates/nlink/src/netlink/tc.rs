@@ -123,10 +123,6 @@ pub struct NetemConfig {
     pub rate: Option<crate::util::Rate>,
     /// Queue limit in packets.
     pub limit: u32,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl NetemConfig {
@@ -134,21 +130,8 @@ impl NetemConfig {
     pub fn new() -> Self {
         Self {
             limit: 1000, // Default limit
-            parent: "root".to_string(),
             ..Default::default()
         }
-    }
-
-    /// Set the parent handle (default: "root").
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
     }
 
     /// Set the added delay.
@@ -386,10 +369,6 @@ pub struct FqCodelConfig {
     pub ce_threshold: Option<Duration>,
     /// Memory limit in bytes.
     pub memory_limit: Option<u32>,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for FqCodelConfig {
@@ -410,21 +389,7 @@ impl FqCodelConfig {
             ecn: false,
             ce_threshold: None,
             memory_limit: None,
-            parent: "root".to_string(),
-            handle: None,
         }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
     }
 
     /// Set the target delay (default: 5ms).
@@ -548,10 +513,6 @@ pub struct TbfConfig {
     pub mtu: u32,
     /// Buffer limit.
     pub limit: crate::util::Bytes,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for TbfConfig {
@@ -569,21 +530,7 @@ impl TbfConfig {
             burst: crate::util::Bytes::ZERO,
             mtu: 1514,
             limit: crate::util::Bytes::ZERO,
-            parent: "root".to_string(),
-            handle: None,
         }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
     }
 
     /// Set the rate.
@@ -685,10 +632,6 @@ pub struct HtbQdiscConfig {
     pub r2q: u32,
     /// Direct queue length.
     pub direct_qlen: Option<u32>,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for HtbQdiscConfig {
@@ -704,21 +647,7 @@ impl HtbQdiscConfig {
             default_class: 0,
             r2q: 10,
             direct_qlen: None,
-            parent: "root".to_string(),
-            handle: None,
         }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
     }
 
     /// Set the default class ID.
@@ -785,10 +714,6 @@ pub struct PrioConfig {
     pub bands: i32,
     /// Priority map (16 entries).
     pub priomap: [u8; 16],
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for PrioConfig {
@@ -803,21 +728,7 @@ impl PrioConfig {
         Self {
             bands: 3,
             priomap: [1, 2, 2, 2, 1, 2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1],
-            parent: "root".to_string(),
-            handle: None,
         }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
     }
 
     /// Set the number of bands.
@@ -879,10 +790,6 @@ pub struct SfqConfig {
     pub limit: u32,
     /// Quantum (bytes per round).
     pub quantum: u32,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for SfqConfig {
@@ -898,21 +805,7 @@ impl SfqConfig {
             perturb: 0,
             limit: 127,
             quantum: 0,
-            parent: "root".to_string(),
-            handle: None,
         }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
     }
 
     /// Set the perturbation period in seconds.
@@ -996,10 +889,6 @@ pub struct RedConfig {
     pub harddrop: bool,
     /// Enable adaptive RED.
     pub adaptive: bool,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for RedConfig {
@@ -1019,21 +908,7 @@ impl RedConfig {
             ecn: false,
             harddrop: false,
             adaptive: false,
-            parent: "root".to_string(),
-            handle: None,
         }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
     }
 
     /// Set the queue limit in bytes.
@@ -1162,10 +1037,6 @@ pub struct PieConfig {
     pub ecn: bool,
     /// Use byte mode instead of packet mode.
     pub bytemode: bool,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for PieConfig {
@@ -1185,21 +1056,7 @@ impl PieConfig {
             beta: None,
             ecn: false,
             bytemode: false,
-            parent: "root".to_string(),
-            handle: None,
         }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
     }
 
     /// Set the target delay (default: 15ms).
@@ -1383,10 +1240,6 @@ impl QdiscConfig for ClsactConfig {
 pub struct PfifoConfig {
     /// Queue limit in packets.
     pub limit: u32,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for PfifoConfig {
@@ -1398,23 +1251,7 @@ impl Default for PfifoConfig {
 impl PfifoConfig {
     /// Create a new pfifo configuration builder.
     pub fn new() -> Self {
-        Self {
-            limit: 1000,
-            parent: "root".to_string(),
-            handle: None,
-        }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
+        Self { limit: 1000 }
     }
 
     /// Set the queue limit in packets.
@@ -1466,10 +1303,6 @@ impl QdiscConfig for PfifoConfig {
 pub struct BfifoConfig {
     /// Queue limit in bytes.
     pub limit: u32,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for BfifoConfig {
@@ -1483,21 +1316,7 @@ impl BfifoConfig {
     pub fn new() -> Self {
         Self {
             limit: 100 * 1024, // 100KB default
-            parent: "root".to_string(),
-            handle: None,
         }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
     }
 
     /// Set the queue limit in bytes.
@@ -1549,12 +1368,7 @@ impl QdiscConfig for BfifoConfig {
 /// conn.add_qdisc("eth0", config).await?;
 /// ```
 #[derive(Debug, Clone)]
-pub struct DrrConfig {
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
-}
+pub struct DrrConfig {}
 
 impl Default for DrrConfig {
     fn default() -> Self {
@@ -1565,22 +1379,7 @@ impl Default for DrrConfig {
 impl DrrConfig {
     /// Create a new DRR configuration builder.
     pub fn new() -> Self {
-        Self {
-            parent: "root".to_string(),
-            handle: None,
-        }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
+        Self {}
     }
 
     /// Build the configuration.
@@ -1622,12 +1421,7 @@ impl QdiscConfig for DrrConfig {
 /// conn.add_qdisc("eth0", config).await?;
 /// ```
 #[derive(Debug, Clone)]
-pub struct QfqConfig {
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
-}
+pub struct QfqConfig {}
 
 impl Default for QfqConfig {
     fn default() -> Self {
@@ -1638,22 +1432,7 @@ impl Default for QfqConfig {
 impl QfqConfig {
     /// Create a new QFQ configuration builder.
     pub fn new() -> Self {
-        Self {
-            parent: "root".to_string(),
-            handle: None,
-        }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
+        Self {}
     }
 
     /// Build the configuration.
@@ -1704,10 +1483,6 @@ impl QdiscConfig for QfqConfig {
 pub struct PlugConfig {
     /// Initial limit in bytes.
     pub limit: Option<u32>,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for PlugConfig {
@@ -1719,23 +1494,7 @@ impl Default for PlugConfig {
 impl PlugConfig {
     /// Create a new plug configuration builder.
     pub fn new() -> Self {
-        Self {
-            limit: None,
-            parent: "root".to_string(),
-            handle: None,
-        }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
+        Self { limit: None }
     }
 
     /// Set the queue limit in bytes.
@@ -1801,10 +1560,6 @@ pub struct MqprioConfig {
     pub count: [u16; 16],
     /// Queue offset for each traffic class.
     pub offset: [u16; 16],
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for MqprioConfig {
@@ -1822,21 +1577,7 @@ impl MqprioConfig {
             hw: true,
             count: [0; 16],
             offset: [0; 16],
-            parent: "root".to_string(),
-            handle: None,
         }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
     }
 
     /// Set the number of traffic classes (1-16).
@@ -1952,10 +1693,6 @@ pub struct TaprioConfig {
     pub flags: u32,
     /// TX time delay in nanoseconds.
     pub txtime_delay: u32,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for TaprioConfig {
@@ -1979,21 +1716,7 @@ impl TaprioConfig {
             entries: Vec::new(),
             flags: 0,
             txtime_delay: 0,
-            parent: "root".to_string(),
-            handle: None,
         }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
     }
 
     /// Set the number of traffic classes.
@@ -2189,10 +1912,6 @@ impl QdiscConfig for TaprioConfig {
 pub struct HfscConfig {
     /// Default class for unclassified packets.
     pub default_class: u16,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for HfscConfig {
@@ -2204,23 +1923,7 @@ impl Default for HfscConfig {
 impl HfscConfig {
     /// Create a new HFSC configuration builder.
     pub fn new() -> Self {
-        Self {
-            default_class: 0,
-            parent: "root".to_string(),
-            handle: None,
-        }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
+        Self { default_class: 0 }
     }
 
     /// Set the default class for unclassified packets.
@@ -2286,10 +1989,6 @@ pub struct EtfConfig {
     pub offload: bool,
     /// Skip socket check.
     pub skip_sock_check: bool,
-    /// Parent handle.
-    pub parent: String,
-    /// Qdisc handle.
-    pub handle: Option<String>,
 }
 
 impl Default for EtfConfig {
@@ -2307,21 +2006,7 @@ impl EtfConfig {
             deadline_mode: false,
             offload: false,
             skip_sock_check: false,
-            parent: "root".to_string(),
-            handle: None,
         }
-    }
-
-    /// Set the parent handle.
-    pub fn parent(mut self, parent: impl Into<String>) -> Self {
-        self.parent = parent.into();
-        self
-    }
-
-    /// Set the qdisc handle.
-    pub fn handle(mut self, handle: impl Into<String>) -> Self {
-        self.handle = Some(handle.into());
-        self
     }
 
     /// Set the clock ID (e.g., libc::CLOCK_TAI, libc::CLOCK_MONOTONIC).
@@ -4043,19 +3728,15 @@ mod tests {
 
     #[test]
     fn test_drr_builder() {
-        let config = DrrConfig::new().handle("1:").build();
+        let config = DrrConfig::new().build();
 
-        assert_eq!(config.handle, Some("1:".to_string()));
-        assert_eq!(config.parent, "root");
         assert_eq!(config.kind(), "drr");
     }
 
     #[test]
     fn test_qfq_builder() {
-        let config = QfqConfig::new().handle("1:").parent("root").build();
+        let config = QfqConfig::new().build();
 
-        assert_eq!(config.handle, Some("1:".to_string()));
-        assert_eq!(config.parent, "root");
         assert_eq!(config.kind(), "qfq");
     }
 
@@ -4105,10 +3786,9 @@ mod tests {
 
     #[test]
     fn test_hfsc_builder() {
-        let config = HfscConfig::new().default_class(0x10).handle("1:").build();
+        let config = HfscConfig::new().default_class(0x10).build();
 
         assert_eq!(config.default_class, 0x10);
-        assert_eq!(config.handle, Some("1:".to_string()));
         assert_eq!(config.kind(), "hfsc");
     }
 

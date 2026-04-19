@@ -324,7 +324,6 @@ impl PerPeerImpairer {
         // Root HTB at handle 1:.
         let root_handle = TcHandle::major_only(1);
         let htb_root = HtbQdiscConfig::new()
-            .handle("1:")
             .default_class(default_classid_minor)
             .build();
         conn.add_qdisc_by_index_full(ifindex, TcHandle::ROOT, Some(root_handle), htb_root)

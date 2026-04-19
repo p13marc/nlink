@@ -246,12 +246,15 @@ impl RateLimiter {
         // Remove existing root qdisc (ignore errors if none exists)
         let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
 
-        // Add HTB qdisc at root
-        let htb = HtbQdiscConfig::new()
-            .default_class(0x10)
-            .handle("1:")
-            .build();
-        conn.add_qdisc(&self.dev, htb).await?;
+        // Add HTB qdisc at root with handle 1:
+        let htb = HtbQdiscConfig::new().default_class(0x10).build();
+        conn.add_qdisc_full(
+            &self.dev,
+            TcHandle::ROOT,
+            Some(TcHandle::major_only(1)),
+            htb,
+        )
+        .await?;
 
         // Add root class (1:1) for the rate limit
         let mut class_config = HtbClassConfig::new(limit.rate);
@@ -286,7 +289,7 @@ impl RateLimiter {
         .await?;
 
         // Add fq_codel as leaf qdisc for AQM
-        let mut fq_codel = FqCodelConfig::new().parent("1:10").handle("10:");
+        let mut fq_codel = FqCodelConfig::new();
         if let Some(latency) = limit.latency {
             fq_codel = fq_codel.target(latency);
         }
@@ -328,12 +331,15 @@ impl RateLimiter {
         // Remove existing root qdisc on IFB
         let _ = conn.del_qdisc(&ifb_name, TcHandle::ROOT).await;
 
-        // Add HTB qdisc at root of IFB
-        let htb = HtbQdiscConfig::new()
-            .default_class(0x10)
-            .handle("1:")
-            .build();
-        conn.add_qdisc(&ifb_name, htb).await?;
+        // Add HTB qdisc at root of IFB with handle 1:
+        let htb = HtbQdiscConfig::new().default_class(0x10).build();
+        conn.add_qdisc_full(
+            &ifb_name,
+            TcHandle::ROOT,
+            Some(TcHandle::major_only(1)),
+            htb,
+        )
+        .await?;
 
         // Add root class (1:1) for the rate limit
         let mut class_config = HtbClassConfig::new(limit.rate);
@@ -368,7 +374,7 @@ impl RateLimiter {
         .await?;
 
         // Add fq_codel as leaf qdisc for AQM
-        let mut fq_codel = FqCodelConfig::new().parent("1:10").handle("10:");
+        let mut fq_codel = FqCodelConfig::new();
         if let Some(latency) = limit.latency {
             fq_codel = fq_codel.target(latency);
         }
@@ -642,14 +648,17 @@ impl PerHostLimiter {
         // Remove existing root qdisc
         let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
 
-        // Add HTB qdisc at root
+        // Add HTB qdisc at root with handle 1:
         // Default class will be the last one (for unmatched traffic)
         let default_classid = (self.rules.len() + 1) as u32;
-        let htb = HtbQdiscConfig::new()
-            .default_class(default_classid)
-            .handle("1:")
-            .build();
-        conn.add_qdisc(&self.dev, htb).await?;
+        let htb = HtbQdiscConfig::new().default_class(default_classid).build();
+        conn.add_qdisc_full(
+            &self.dev,
+            TcHandle::ROOT,
+            Some(TcHandle::major_only(1)),
+            htb,
+        )
+        .await?;
 
         // Add root class (1:1) with sum of all rates as ceiling
         let parent_classid = TcHandle::new(1, 1);
@@ -669,9 +678,7 @@ impl PerHostLimiter {
                 .await?;
 
             // Add fq_codel leaf qdisc
-            let mut fq_codel = FqCodelConfig::new()
-                .parent(classid.to_string())
-                .handle(leaf_handle.to_string());
+            let mut fq_codel = FqCodelConfig::new();
             if let Some(latency) = self.latency {
                 fq_codel = fq_codel.target(latency);
             }
@@ -692,9 +699,7 @@ impl PerHostLimiter {
             .await?;
 
         // Add fq_codel leaf for default class
-        let mut fq_codel = FqCodelConfig::new()
-            .parent(default_classid.to_string())
-            .handle(default_handle.to_string());
+        let mut fq_codel = FqCodelConfig::new();
         if let Some(latency) = self.latency {
             fq_codel = fq_codel.target(latency);
         }
