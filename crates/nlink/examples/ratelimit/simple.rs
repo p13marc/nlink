@@ -49,28 +49,29 @@ async fn main() -> nlink::Result<()> {
     println!("--- RateLimiter (interface-wide) ---");
     println!(
         r#"
+    use nlink::Rate;
     use nlink::netlink::ratelimit::{{RateLimiter, RateLimit}};
 
     let conn = Connection::<Route>::new()?;
 
-    // Simple egress rate limiting
+    // Simple egress rate limiting (typed Rate — no unit confusion)
     let limiter = RateLimiter::new("eth0")
-        .egress("100mbit");  // Limit outgoing to 100 Mbps
+        .egress(Rate::mbit(100));  // Limit outgoing to 100 Mbps
 
     limiter.apply(&conn).await?;
 
     // Egress and ingress limiting
     let limiter = RateLimiter::new("eth0")
-        .egress("100mbit")
-        .ingress("50mbit");  // Also limit incoming
+        .egress(Rate::mbit(100))
+        .ingress(Rate::mbit(50));  // Also limit incoming
 
     limiter.apply(&conn).await?;
 
     // With burst allowance
     let limiter = RateLimiter::new("eth0")
-        .egress("100mbit")
-        .ingress("50mbit")
-        .burst_to("200mbit");  // Allow bursts up to 200 Mbps
+        .egress(Rate::mbit(100))
+        .ingress(Rate::mbit(50))
+        .burst_to(Rate::mbit(200));  // Allow bursts up to 200 Mbps
 
     limiter.apply(&conn).await?;
 "#
@@ -79,21 +80,20 @@ async fn main() -> nlink::Result<()> {
     println!("--- Using RateLimit builder ---");
     println!(
         r#"
+    use nlink::{{Bytes, Rate}};
     use nlink::netlink::ratelimit::RateLimit;
 
-    // Parse a tc-style rate string. Internally stored as bytes/sec
-    // to match the kernel's tc_ratespec.
-    let limit = RateLimit::parse("100mbit")?;
-    assert_eq!(limit.rate, 12_500_000);  // bytes/sec = 100 Mbps
+    // Construct from any unit; storage is bytes/sec internally.
+    let limit = RateLimit::new(Rate::mbit(100));
+    assert_eq!(limit.rate.as_bytes_per_sec(), 12_500_000);
 
-    // Or build directly in bytes/sec
-    let limit = RateLimit::new(12_500_000)   // 100 Mbps
-        .ceil(25_000_000)        // Burst up to 200 Mbps
-        .burst(32000);           // 32KB burst bucket
+    // Or via FromStr (tc-style strings)
+    let limit = RateLimit::new("100mbit".parse()?);
 
-    // Use with RateLimiter
-    let limiter = RateLimiter::new("eth0")
-        .egress_limit(limit);
+    // With ceiling and burst
+    let limit = RateLimit::new(Rate::mbit(100))   // 100 Mbps
+        .ceil(Rate::mbit(200))                    // Burst up to 200 Mbps
+        .burst(Bytes::kib(32));                   // 32 KiB burst bucket
 "#
     );
 
@@ -108,12 +108,13 @@ async fn main() -> nlink::Result<()> {
     println!("--- Namespace-aware rate limiting ---");
     println!(
         r#"
+    use nlink::Rate;
     use nlink::netlink::namespace;
 
     // Apply rate limit in a namespace
     let ns_conn = namespace::connection_for("myns")?;
     let limiter = RateLimiter::new("eth0")
-        .egress("10mbit");
+        .egress(Rate::mbit(10));
     limiter.apply(&ns_conn).await?;
 "#
     );
@@ -122,17 +123,18 @@ async fn main() -> nlink::Result<()> {
 
     println!(
         r#"
+    use nlink::Rate;
     use nlink::netlink::ratelimit::PerHostLimiter;
 
     // Limit each IP to 10 Mbps by default
-    let limiter = PerHostLimiter::new("eth0", "10mbit")?;
+    let limiter = PerHostLimiter::new("eth0", Rate::mbit(10));
     limiter.apply(&conn).await?;
 
     // With custom rules for specific IPs/subnets
-    let limiter = PerHostLimiter::new("eth0", "10mbit")?
-        .limit_ip("192.168.1.100".parse()?, "100mbit")?  // VIP client
-        .limit_subnet("10.0.0.0/8", "50mbit")?           // Internal
-        .limit_port(80, "500mbit")?;                     // HTTP traffic
+    let limiter = PerHostLimiter::new("eth0", Rate::mbit(10))
+        .limit_ip("192.168.1.100".parse()?, Rate::mbit(100))      // VIP client
+        .limit_subnet("10.0.0.0/8", Rate::mbit(50))?              // Internal
+        .limit_port(80, Rate::mbit(500));                          // HTTP traffic
     limiter.apply(&conn).await?;
 
     // Remove per-host limits

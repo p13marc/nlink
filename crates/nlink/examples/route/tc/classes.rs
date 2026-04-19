@@ -5,8 +5,10 @@
 //!
 //! Run: sudo cargo run -p nlink --example route_tc_classes
 
-use nlink::netlink::tc::{HtbClassConfig, HtbQdiscConfig};
-use nlink::netlink::{Connection, Route};
+use nlink::netlink::{
+    Connection, Route,
+    tc::{HtbClassConfig, HtbQdiscConfig},
+};
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
@@ -49,36 +51,38 @@ async fn main() -> nlink::Result<()> {
 
     println!(
         r#"
+    use nlink::Rate;
+
     // Add HTB qdisc with default class
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
     conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
 
     // Add root class (total bandwidth)
     conn.add_class_config("eth0", "1:0", "1:1",
-        HtbClassConfig::new("1gbit")?
-            .ceil("1gbit")?
+        HtbClassConfig::new(Rate::gbit(1))
+            .ceil(Rate::gbit(1))
             .build()
     ).await?;
 
     // Add high priority class
     conn.add_class_config("eth0", "1:1", "1:10",
-        HtbClassConfig::new("100mbit")?
-            .ceil("500mbit")?
+        HtbClassConfig::new(Rate::mbit(100))
+            .ceil(Rate::mbit(500))
             .prio(1)
             .build()
     ).await?;
 
     // Add normal priority class
     conn.add_class_config("eth0", "1:1", "1:20",
-        HtbClassConfig::new("200mbit")?
-            .ceil("800mbit")?
+        HtbClassConfig::new(Rate::mbit(200))
+            .ceil(Rate::mbit(800))
             .prio(2)
             .build()
     ).await?;
 
     // Add best effort class (default)
     conn.add_class_config("eth0", "1:1", "1:30",
-        HtbClassConfig::new("50mbit")?
+        HtbClassConfig::new(Rate::mbit(50))
             .prio(3)
             .build()
     ).await?;

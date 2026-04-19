@@ -193,6 +193,58 @@ Stream types for event monitoring:
 Multicast group subscription:
 - `RtnetlinkGroup` - Strongly-typed enum for rtnetlink multicast groups
 
+Strongly-typed unit types (used at TC API boundaries):
+- `Rate` - bandwidth, internally bytes/sec (matches kernel `tc_ratespec.rate`)
+- `Bytes` - byte counts (burst sizes, queue limits, MTU)
+- `Percent` - clamped 0..=100 percentage (netem loss, duplication, etc.)
+
+## Type-safe units (Rate / Bytes / Percent)
+
+Rates, byte counts, and percentages flow through the public TC API as
+strongly-typed newtypes. This kills the unit-confusion bug class
+permanently — there's no way to silently mistake bits-per-second for
+bytes-per-second, or "raw percent" for "fraction".
+
+```rust
+use nlink::{Rate, Bytes, Percent};
+
+// Rate — internally bytes/sec, multiple constructors:
+let r = Rate::mbit(100);                       // 100 megabits/sec
+let r = Rate::gbit(1);                         // 1 gigabit/sec
+let r = Rate::kbit(500);                       // 500 kilobits/sec
+let r = Rate::bytes_per_sec(12_500_000);       // explicit bytes/sec
+let r = Rate::bits_per_sec(100_000_000);       // explicit bits/sec
+let r: Rate = "100mbit".parse()?;              // tc-style string
+
+assert_eq!(r.as_bytes_per_sec(), 12_500_000);
+assert_eq!(r.as_bits_per_sec(), 100_000_000);
+
+// Display round-trips with parse
+assert_eq!(Rate::mbit(100).to_string(), "100mbit");
+
+// Bytes — byte counts (burst, queue limit, MTU contributions):
+let b = Bytes::kib(32);                        // 32 KiB (binary)
+let b = Bytes::kb(32);                         // 32 KB (decimal)
+let b: Bytes = "32k".parse()?;                 // tc-style string (binary)
+
+// Percent — clamped 0..=100 (netem loss, etc):
+let p = Percent::new(1.5);                     // 1.5%
+let p = Percent::from_fraction(0.015);         // same — 1.5%
+let p: Percent = "1.5%".parse()?;
+
+// Arithmetic (saturating):
+Rate::mbit(50) + Rate::mbit(50)               == Rate::mbit(100)
+Rate::mbit(8) * Duration::from_secs(1)        == Bytes::mb(1)
+Bytes::mb(1) / Duration::from_secs(1)         == Rate::mbit(8)
+```
+
+The kernel's `tc_ratespec.rate` field is bytes/sec; `Rate` stores
+internally in that unit and only converts at construction/accessor
+boundaries. Earlier nlink versions had a long-standing bug where
+`HtbClassConfig::new("100mbit")` shaped at 800 Mbps because
+bits-per-second got silently treated as bytes-per-second. With `Rate`,
+that mistake is a compile error.
+
 ## Key Patterns
 
 **High-level queries (preferred for library use):**
@@ -361,25 +413,32 @@ let config = NetworkConfig::new()
 
 **High-level rate limiting (RateLimiter):**
 ```rust
-use nlink::netlink::{Connection, Route};
+use nlink::{Connection, Rate, Route, Bytes};
 use nlink::netlink::ratelimit::RateLimiter;
 use std::time::Duration;
 
 let conn = Connection::<Route>::new()?;
 
-// Simple rate limiting - egress and ingress
+// Rates and sizes are strongly typed via Rate / Bytes (see "Type-safe units"
+// section). Construct rates from any unit; storage is bytes/sec.
 RateLimiter::new("eth0")
-    .egress("100mbit")?       // Limit upload to 100 Mbps
-    .ingress("1gbit")?        // Limit download to 1 Gbps
-    .burst_to("150mbit")?     // Allow bursting to 150 Mbps
-    .latency(Duration::from_millis(20))  // AQM latency target
+    .egress(Rate::mbit(100))                     // 100 Mbps
+    .ingress(Rate::gbit(1))                      // 1 Gbps
+    .burst_to(Rate::mbit(150))                   // ceiling 150 Mbps
+    .latency(Duration::from_millis(20))          // AQM latency target
     .apply(&conn)
     .await?;
 
-// Egress only with bytes-per-second values
+// Or with bytes/sec directly
 RateLimiter::new("eth0")
-    .egress_bps(12_500_000)   // 100 Mbps = 12.5 MB/s
-    .burst_size("64kb")?      // 64 KB burst buffer
+    .egress(Rate::bytes_per_sec(12_500_000))     // = 100 Mbps
+    .burst_size(Bytes::kib(64))                  // 64 KiB burst buffer
+    .apply(&conn)
+    .await?;
+
+// Or with FromStr (tc-style strings)
+RateLimiter::new("eth0")
+    .egress("100mbit".parse()?)
     .apply(&conn)
     .await?;
 
@@ -391,23 +450,24 @@ RateLimiter::new("eth0")
 
 **Per-host rate limiting (PerHostLimiter):**
 ```rust
-use nlink::netlink::{Connection, Route};
+use nlink::{Connection, Rate, Route};
 use nlink::netlink::ratelimit::PerHostLimiter;
 use std::time::Duration;
 
 let conn = Connection::<Route>::new()?;
 
-// Per-IP and per-subnet rate limiting
-PerHostLimiter::new("eth0", "10mbit")?  // Default rate for unmatched traffic
-    .limit_ip("192.168.1.100".parse()?, "100mbit")?  // VIP client
-    .limit_subnet("10.0.0.0/8", "50mbit")?           // Internal network
-    .limit_port(80, "500mbit")?                       // HTTP traffic
+// Per-IP / per-subnet / per-port rate limiting. The default rate
+// applies to unmatched traffic.
+PerHostLimiter::new("eth0", Rate::mbit(10))
+    .limit_ip("192.168.1.100".parse()?, Rate::mbit(100))   // VIP client
+    .limit_subnet("10.0.0.0/8", Rate::mbit(50))?           // Internal network
+    .limit_port(80, Rate::mbit(500))                       // HTTP traffic
     .latency(Duration::from_millis(5))
     .apply(&conn)
     .await?;
 
 // Remove per-host limits
-PerHostLimiter::new("eth0", "10mbit")?
+PerHostLimiter::new("eth0", Rate::mbit(10))
     .remove(&conn)
     .await?;
 ```
@@ -422,6 +482,7 @@ peer-to-peer path needs different RTT/loss characteristics. See
 use nlink::netlink::{Connection, Route, namespace};
 use nlink::netlink::impair::{PerPeerImpairer, PeerImpairment};
 use nlink::netlink::tc::NetemConfig;
+use nlink::{Percent, Rate};
 use std::time::Duration;
 
 let conn: Connection<Route> = namespace::connection_for("lab-mgmt")?;
@@ -432,7 +493,7 @@ PerPeerImpairer::new("vethA-br")
         "172.100.3.18".parse()?,
         NetemConfig::new()
             .delay(Duration::from_millis(15))
-            .loss(1.0)
+            .loss(Percent::new(1.0))
             .build(),
     )
     // Far peer with a 100 Mbps cap
@@ -441,10 +502,10 @@ PerPeerImpairer::new("vethA-br")
         PeerImpairment::new(
             NetemConfig::new()
                 .delay(Duration::from_millis(40))
-                .loss(5.0)
+                .loss(Percent::new(5.0))
                 .build(),
         )
-        .rate_cap("100mbit")?,
+        .rate_cap(Rate::mbit(100)),
     )
     // Subnet match for everything else
     .impair_dst_subnet(
@@ -780,39 +841,39 @@ conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
 
 // Add root class (total bandwidth) - typed builder
 conn.add_class_config("eth0", "1:0", "1:1",
-    HtbClassConfig::new("1gbit")?
-        .ceil("1gbit")?
+    HtbClassConfig::new(Rate::gbit(1))
+        .ceil(Rate::gbit(1))
         .build()
 ).await?;
 
 // Add child classes with priorities
 conn.add_class_config("eth0", "1:1", "1:10",
-    HtbClassConfig::new("100mbit")?
-        .ceil("500mbit")?
+    HtbClassConfig::new(Rate::mbit(100))
+        .ceil(Rate::mbit(500))
         .prio(1)              // High priority
         .build()
 ).await?;
 
 conn.add_class_config("eth0", "1:1", "1:20",
-    HtbClassConfig::new("200mbit")?
-        .ceil("800mbit")?
+    HtbClassConfig::new(Rate::mbit(200))
+        .ceil(Rate::mbit(800))
         .prio(2)
         .build()
 ).await?;
 
 // Best effort class
 conn.add_class_config("eth0", "1:1", "1:30",
-    HtbClassConfig::new("50mbit")?
+    HtbClassConfig::new(Rate::mbit(50))
         .prio(3)
         .build()
 ).await?;
 
-// Alternative: from_bps for programmatic rate values
-let rate_bps = 125_000_000; // 1 Gbps in bits/sec
+// Programmatic rate values via Rate::bytes_per_sec / Rate::bits_per_sec
+let rate = Rate::bits_per_sec(125_000_000); // 125 Mbps
 conn.add_class_config("eth0", "1:1", "1:40",
-    HtbClassConfig::from_bps(rate_bps)
-        .ceil_bps(rate_bps * 2)
-        .burst_bytes(64 * 1024)  // 64KB burst
+    HtbClassConfig::new(rate)
+        .ceil(rate * 2)
+        .burst(Bytes::kib(64))   // 64KiB burst
         .quantum(1500)
         .mtu(9000)               // Jumbo frames
         .build()
@@ -820,21 +881,21 @@ conn.add_class_config("eth0", "1:1", "1:40",
 
 // Change/replace also have typed variants
 conn.change_class_config("eth0", "1:1", "1:10",
-    HtbClassConfig::new("150mbit")?
-        .ceil("600mbit")?
+    HtbClassConfig::new(Rate::mbit(150))
+        .ceil(Rate::mbit(600))
         .build()
 ).await?;
 
 conn.replace_class_config("eth0", "1:1", "1:10",
-    HtbClassConfig::new("200mbit")?
-        .ceil("800mbit")?
+    HtbClassConfig::new(Rate::mbit(200))
+        .ceil(Rate::mbit(800))
         .build()
 ).await?;
 
 // Namespace-aware with *_by_index variants
 let link = conn.get_link_by_name("eth0").await?;
 conn.add_class_config_by_index(link.ifindex(), "1:1", "1:50",
-    HtbClassConfig::new("10mbit")?.build()
+    HtbClassConfig::new(Rate::mbit(10)).build()
 ).await?;
 ```
 
@@ -849,10 +910,12 @@ let conn = Connection::<Route>::new()?;
 let hfsc = HfscConfig::new().default_class(0x10).build();
 conn.add_qdisc_full("eth0", "root", Some("1:"), hfsc).await?;
 
-// Add root class with link-share curve
+// Add root class with link-share curve.
+// HFSC's kernel UAPI uses 32-bit rate fields, so Rate values are
+// saturating-cast to u32 (max ~4 GB/s ~= 32 Gbps).
 conn.add_class_config("eth0", "1:0", "1:1",
     HfscClassConfig::new()
-        .ls_rate(1_000_000_000)  // 1 Gbps link-share
+        .ls_rate(Rate::gbit(1))  // 1 Gbps link-share
         .build()
 ).await?;
 
@@ -860,21 +923,22 @@ conn.add_class_config("eth0", "1:0", "1:1",
 conn.add_class_config("eth0", "1:1", "1:10",
     HfscClassConfig::new()
         .rt_curve(TcServiceCurve::two_slope(10_000_000, 5000, 1_000_000))
-        .ls_rate(100_000_000)
+        .ls_rate(Rate::mbit(100))
         .build()
 ).await?;
 
 // Add best-effort class with upper limit
 conn.add_class_config("eth0", "1:1", "1:20",
     HfscClassConfig::new()
-        .ls_rate(50_000_000)
-        .ul_rate(100_000_000)  // Cap at 100 Mbps
+        .ls_rate(Rate::mbit(50))
+        .ul_rate(Rate::mbit(100))  // Cap at 100 Mbps
         .build()
 ).await?;
 ```
 
 **Typed DRR class configuration:**
 ```rust
+use nlink::Bytes;
 use nlink::netlink::tc::{DrrConfig, DrrClassConfig};
 
 // First add DRR qdisc
@@ -884,19 +948,20 @@ conn.add_qdisc_full("eth0", "root", Some("1:"), drr).await?;
 // Add classes with different quanta (bandwidth proportions)
 conn.add_class_config("eth0", "1:0", "1:1",
     DrrClassConfig::new()
-        .quantum(1500)  // 1 packet worth
+        .quantum(Bytes::new(1500))  // 1 packet worth
         .build()
 ).await?;
 
 conn.add_class_config("eth0", "1:0", "1:2",
     DrrClassConfig::new()
-        .quantum(3000)  // 2x bandwidth of class 1:1
+        .quantum(Bytes::new(3000))  // 2x bandwidth of class 1:1
         .build()
 ).await?;
 ```
 
 **Typed QFQ class configuration:**
 ```rust
+use nlink::Bytes;
 use nlink::netlink::tc::{QfqConfig, QfqClassConfig};
 
 // First add QFQ qdisc
@@ -912,8 +977,8 @@ conn.add_class_config("eth0", "1:0", "1:1",
 
 conn.add_class_config("eth0", "1:0", "1:2",
     QfqClassConfig::new()
-        .weight(2)      // 2x bandwidth of class 1:1
-        .lmax(9000)     // Max packet size (for jumbo frames)
+        .weight(2)               // 2x bandwidth of class 1:1
+        .lmax(Bytes::new(9000))  // Max packet size (for jumbo frames)
         .build()
 ).await?;
 ```

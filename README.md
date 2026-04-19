@@ -103,20 +103,23 @@ config.apply(&conn).await?;
 
 ### Rate Limiting DSL
 
-Simple bandwidth management without TC complexity:
+Simple bandwidth management without TC complexity. Rates are typed
+via [`Rate`](https://docs.rs/nlink/latest/nlink/struct.Rate.html) —
+no more bits/sec vs bytes/sec confusion.
 
 ```rust
+use nlink::Rate;
 use nlink::netlink::ratelimit::{RateLimiter, PerHostLimiter};
 
 // Interface-wide rate limiting
 let limiter = RateLimiter::new("eth0")
-    .egress("100mbit")
-    .ingress("50mbit");
+    .egress(Rate::mbit(100))
+    .ingress(Rate::mbit(50));
 limiter.apply(&conn).await?;
 
 // Per-IP rate limiting
-let limiter = PerHostLimiter::new("eth0", "10mbit")?
-    .limit_ip("192.168.1.100".parse()?, "100mbit")?;
+let limiter = PerHostLimiter::new("eth0", Rate::mbit(10))
+    .limit_ip("192.168.1.100".parse()?, Rate::mbit(100));
 limiter.apply(&conn).await?;
 ```
 
@@ -128,6 +131,7 @@ and loss characteristics. Recipe at
 [`docs/recipes/per-peer-impairment.md`](docs/recipes/per-peer-impairment.md).
 
 ```rust
+use nlink::{Percent, Rate};
 use nlink::netlink::impair::{PerPeerImpairer, PeerImpairment};
 use nlink::netlink::tc::NetemConfig;
 use std::time::Duration;
@@ -135,14 +139,20 @@ use std::time::Duration;
 PerPeerImpairer::new("vethA-br")
     .impair_dst_ip(
         "172.100.3.18".parse()?,
-        NetemConfig::new().delay(Duration::from_millis(15)).loss(1.0).build(),
+        NetemConfig::new()
+            .delay(Duration::from_millis(15))
+            .loss(Percent::new(1.0))
+            .build(),
     )
     .impair_dst_ip(
         "172.100.3.19".parse()?,
         PeerImpairment::new(
-            NetemConfig::new().delay(Duration::from_millis(40)).loss(5.0).build(),
+            NetemConfig::new()
+                .delay(Duration::from_millis(40))
+                .loss(Percent::new(5.0))
+                .build(),
         )
-        .rate_cap("100mbit")?,
+        .rate_cap(Rate::mbit(100)),
     )
     .apply(&conn).await?;
 ```

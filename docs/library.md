@@ -156,7 +156,7 @@ let link = conn.get_link_by_name("eth0").await?;
 
 let netem = NetemConfig::new()
     .delay(Duration::from_millis(100))
-    .loss(1.0)
+    .loss(nlink::Percent::new(1.0))
     .build();
 
 // Use ifindex for namespace-aware operations
@@ -475,38 +475,23 @@ diff.apply(&conn).await?;           // Actually apply
 High-level rate limiting with minimal configuration:
 
 ```rust
-use nlink::netlink::{Connection, Route};
-use nlink::netlink::ratelimit::{RateLimiter, PerHostLimiter, RateLimit};
+use nlink::{Bytes, Rate, netlink::{Connection, Route}};
+use nlink::netlink::ratelimit::{RateLimiter, PerHostLimiter};
 use std::time::Duration;
 
 let conn = Connection::<Route>::new()?;
 
-// Simple interface-level rate limiting
+// Simple interface-level rate limiting (typed Rate / Bytes)
 RateLimiter::new("eth0")
-    .egress(RateLimit::parse("100mbit")?)
-    .ingress(RateLimit::parse("50mbit")?)
-    .burst("256kb")?
+    .egress(Rate::mbit(100))
+    .ingress(Rate::mbit(50))
+    .burst_size(Bytes::kib(256))
     .apply(&conn).await?;
 
-// Rate limit with network emulation
-RateLimiter::new("eth0")
-    .egress(RateLimit::parse("10mbit")?)
-    .with_netem(|n| n
-        .delay(Duration::from_millis(50))
-        .loss(0.1))
-    .apply(&conn).await?;
-
-// Per-source rate limiting (limits each source IP independently)
-PerHostLimiter::new("eth0")
-    .per_source()
-    .rate(RateLimit::parse("1mbit")?)
-    .apply(&conn).await?;
-
-// Per-destination rate limiting
-PerHostLimiter::new("eth0")
-    .per_destination()
-    .rate(RateLimit::parse("10mbit")?)
-    .burst("64kb")?
+// Per-IP rate limiting
+PerHostLimiter::new("eth0", Rate::mbit(10))      // default for unmatched
+    .limit_ip("192.168.1.100".parse()?, Rate::mbit(100))
+    .limit_subnet("10.0.0.0/8", Rate::mbit(50))?
     .apply(&conn).await?;
 ```
 
@@ -563,7 +548,7 @@ for issue in &report.issues {
 ### HTB Class Configuration
 
 ```rust
-use nlink::netlink::{Connection, Route};
+use nlink::{Rate, netlink::{Connection, Route}};
 use nlink::netlink::tc::{HtbQdiscConfig, HtbClassConfig};
 
 let conn = Connection::<Route>::new()?;
@@ -574,22 +559,22 @@ conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
 
 // Add root class (total bandwidth)
 conn.add_class_config("eth0", "1:0", "1:1",
-    HtbClassConfig::new("1gbit")?
-        .ceil("1gbit")?
+    HtbClassConfig::new(Rate::gbit(1))
+        .ceil(Rate::gbit(1))
         .build()
 ).await?;
 
 // Add child classes with priorities
 conn.add_class_config("eth0", "1:1", "1:10",
-    HtbClassConfig::new("100mbit")?
-        .ceil("500mbit")?
+    HtbClassConfig::new(Rate::mbit(100))
+        .ceil(Rate::mbit(500))
         .prio(1)  // High priority
         .build()
 ).await?;
 
 conn.add_class_config("eth0", "1:1", "1:20",
-    HtbClassConfig::new("50mbit")?
-        .ceil("200mbit")?
+    HtbClassConfig::new(Rate::mbit(50))
+        .ceil(Rate::mbit(200))
         .prio(2)  // Lower priority
         .build()
 ).await?;

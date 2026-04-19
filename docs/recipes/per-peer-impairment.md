@@ -31,6 +31,8 @@ use std::time::Duration;
 
 let conn: Connection<Route> = namespace::connection_for("lab-mgmt")?;
 
+use nlink::{Percent, Rate};
+
 PerPeerImpairer::new("vethA-br")
     // Close peer.
     .impair_dst_ip(
@@ -38,7 +40,7 @@ PerPeerImpairer::new("vethA-br")
         NetemConfig::new()
             .delay(Duration::from_millis(15))
             .jitter(Duration::from_millis(5))
-            .loss(1.0)
+            .loss(Percent::new(1.0))
             .build(),
     )
     // Far peer with a 100 Mbps cap.
@@ -47,10 +49,10 @@ PerPeerImpairer::new("vethA-br")
         PeerImpairment::new(
             NetemConfig::new()
                 .delay(Duration::from_millis(40))
-                .loss(5.0)
+                .loss(Percent::new(5.0))
                 .build(),
         )
-        .rate_cap("100mbit")?,
+        .rate_cap(Rate::mbit(100)),
     )
     // Subnet-level fallback for the rest of the bridge.
     .default_impairment(NetemConfig::new().delay(Duration::from_millis(2)).build())
@@ -100,17 +102,18 @@ PRIO would be lighter, but:
 
 ### Per-class HTB rates
 
-Each class is given `rate = ceil = assumed_link_rate_bps`
-(default `10 GB/s`, ≈ 80 Gbps) unless the rule has a `rate_cap`. With
-this large default, HTB does not throttle in practice, and per-class
-borrowing through the parent class lets every peer use its full pipe.
+Each class is given `rate = ceil = assumed_link_rate`
+(default `DEFAULT_ASSUMED_LINK_RATE` = `Rate::bytes_per_sec(10_000_000_000)`
+≈ 80 Gbps) unless the rule has a `rate_cap`. With this large default,
+HTB does not throttle in practice, and per-class borrowing through the
+parent class lets every peer use its full pipe.
 
 To layer a per-peer rate cap on top of the impairment:
 
 ```rust
 .impair_dst_ip(
     peer_addr,
-    PeerImpairment::new(netem).rate_cap("50mbit")?,
+    PeerImpairment::new(netem).rate_cap(Rate::mbit(50)),
 )
 ```
 
@@ -118,7 +121,7 @@ Override the default via:
 
 ```rust
 PerPeerImpairer::new("vethA-br")
-    .assumed_link_rate_bps(125_000_000_000) // 1 Tbps
+    .assumed_link_rate(Rate::gbit(1000)) // 1 Tbps
 ```
 
 ## Symmetric vs. asymmetric
@@ -201,23 +204,20 @@ conn.add_qdisc_full(dev, "root", Some("1:"),
 ).await?;
 
 // Parent class.
+let link_rate = Rate::bytes_per_sec(10_000_000_000);
 conn.add_class_config(dev, "1:0", "1:1",
-    HtbClassConfig::from_bps(10_000_000_000)
-        .ceil_bps(10_000_000_000)
-        .build()
+    HtbClassConfig::new(link_rate).ceil(link_rate).build()
 ).await?;
 
 // One peer.
 conn.add_class_config(dev, "1:1", "1:2",
-    HtbClassConfig::from_bps(10_000_000_000)
-        .ceil_bps(10_000_000_000)
-        .build()
+    HtbClassConfig::new(link_rate).ceil(link_rate).build()
 ).await?;
 
 conn.add_qdisc_full(dev, "1:2", Some("a:"),
     NetemConfig::new()
         .delay(Duration::from_millis(15))
-        .loss(1.0)
+        .loss(Percent::new(1.0))
         .build()
 ).await?;
 

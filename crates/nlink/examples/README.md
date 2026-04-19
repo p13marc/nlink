@@ -370,11 +370,12 @@ if !diff.is_empty() {
 ### Rate limiting
 
 ```rust
+use nlink::Rate;
 use nlink::netlink::ratelimit::RateLimiter;
 
 let limiter = RateLimiter::new("eth0")
-    .egress("100mbit")
-    .ingress("50mbit");
+    .egress(Rate::mbit(100))
+    .ingress(Rate::mbit(50));
 limiter.apply(&conn).await?;
 ```
 
