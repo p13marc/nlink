@@ -365,16 +365,15 @@ impl MplsRoute {
                         action = MplsAction::Swap(out_labels);
                     }
                 }
-                RtaAttr::Oif => {
-                    if payload.len() >= 4 {
+                RtaAttr::Oif
+                    if payload.len() >= 4 => {
                         oif = Some(u32::from_ne_bytes(
                             payload[..4].try_into().unwrap_or([0; 4]),
                         ));
                     }
-                }
-                RtaAttr::Via => {
+                RtaAttr::Via
                     // RTA_VIA: { family(2), addr(4 or 16) }
-                    if payload.len() >= 6 {
+                    if payload.len() >= 6 => {
                         let family = u16::from_ne_bytes(payload[..2].try_into().unwrap_or([0; 2]));
                         match family as i32 {
                             libc::AF_INET if payload.len() >= 6 => {
@@ -390,7 +389,6 @@ impl MplsRoute {
                             _ => {}
                         }
                     }
-                }
                 _ => {}
             }
         }

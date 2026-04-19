@@ -135,31 +135,26 @@ impl Connection<Ethtool> {
                 t if t == EthtoolLinkstateAttr::Header as u16 => {
                     self.parse_header(payload, &mut state.ifname, &mut state.ifindex)?;
                 }
-                t if t == EthtoolLinkstateAttr::Link as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolLinkstateAttr::Link as u16
+                    && !payload.is_empty() => {
                         state.link = payload[0] != 0;
                     }
-                }
-                t if t == EthtoolLinkstateAttr::Sqi as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolLinkstateAttr::Sqi as u16
+                    && payload.len() >= 4 => {
                         state.sqi = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolLinkstateAttr::SqiMax as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolLinkstateAttr::SqiMax as u16
+                    && payload.len() >= 4 => {
                         state.sqi_max = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolLinkstateAttr::ExtState as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolLinkstateAttr::ExtState as u16
+                    && !payload.is_empty() => {
                         state.ext_state = Some(LinkExtState::from_u8(payload[0]));
                     }
-                }
-                t if t == EthtoolLinkstateAttr::ExtSubstate as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolLinkstateAttr::ExtSubstate as u16
+                    && !payload.is_empty() => {
                         state.ext_substate = Some(payload[0]);
                     }
-                }
                 _ => {}
             }
         }
@@ -215,31 +210,26 @@ impl Connection<Ethtool> {
                 t if t == EthtoolLinkinfoAttr::Header as u16 => {
                     self.parse_header(payload, &mut info.ifname, &mut info.ifindex)?;
                 }
-                t if t == EthtoolLinkinfoAttr::Port as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolLinkinfoAttr::Port as u16
+                    && !payload.is_empty() => {
                         info.port = Some(Port::from_u8(payload[0]));
                     }
-                }
-                t if t == EthtoolLinkinfoAttr::Phyaddr as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolLinkinfoAttr::Phyaddr as u16
+                    && !payload.is_empty() => {
                         info.phyaddr = Some(payload[0]);
                     }
-                }
-                t if t == EthtoolLinkinfoAttr::TpMdiCtrl as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolLinkinfoAttr::TpMdiCtrl as u16
+                    && !payload.is_empty() => {
                         info.tp_mdix_ctrl = Some(MdiX::from_u8(payload[0]));
                     }
-                }
-                t if t == EthtoolLinkinfoAttr::TpMdix as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolLinkinfoAttr::TpMdix as u16
+                    && !payload.is_empty() => {
                         info.tp_mdix = Some(MdiX::from_u8(payload[0]));
                     }
-                }
-                t if t == EthtoolLinkinfoAttr::Transceiver as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolLinkinfoAttr::Transceiver as u16
+                    && !payload.is_empty() => {
                         info.transceiver = Some(Transceiver::from_u8(payload[0]));
                     }
-                }
                 _ => {}
             }
         }
@@ -342,40 +332,34 @@ impl Connection<Ethtool> {
                 t if t == EthtoolLinkmodesAttr::Header as u16 => {
                     self.parse_header(payload, &mut modes.ifname, &mut modes.ifindex)?;
                 }
-                t if t == EthtoolLinkmodesAttr::Autoneg as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolLinkmodesAttr::Autoneg as u16
+                    && !payload.is_empty() => {
                         modes.autoneg = payload[0] != 0;
                     }
-                }
-                t if t == EthtoolLinkmodesAttr::Speed as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolLinkmodesAttr::Speed as u16
+                    && payload.len() >= 4 => {
                         let speed = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                         // 0xFFFFFFFF means unknown
                         if speed != 0xFFFFFFFF {
                             modes.speed = Some(speed);
                         }
                     }
-                }
-                t if t == EthtoolLinkmodesAttr::Duplex as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolLinkmodesAttr::Duplex as u16
+                    && !payload.is_empty() => {
                         modes.duplex = Some(Duplex::from_u8(payload[0]));
                     }
-                }
-                t if t == EthtoolLinkmodesAttr::Lanes as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolLinkmodesAttr::Lanes as u16
+                    && payload.len() >= 4 => {
                         modes.lanes = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolLinkmodesAttr::MasterSlaveCfg as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolLinkmodesAttr::MasterSlaveCfg as u16
+                    && !payload.is_empty() => {
                         modes.master_slave_cfg = Some(payload[0]);
                     }
-                }
-                t if t == EthtoolLinkmodesAttr::MasterSlaveState as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolLinkmodesAttr::MasterSlaveState as u16
+                    && !payload.is_empty() => {
                         modes.master_slave_state = Some(payload[0]);
                     }
-                }
                 t if t == EthtoolLinkmodesAttr::Supported as u16 => {
                     modes.supported = EthtoolBitset::parse(payload)?;
                 }
@@ -629,69 +613,57 @@ impl Connection<Ethtool> {
                 t if t == EthtoolRingsAttr::Header as u16 => {
                     self.parse_header(payload, &mut rings.ifname, &mut rings.ifindex)?;
                 }
-                t if t == EthtoolRingsAttr::RxMax as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolRingsAttr::RxMax as u16
+                    && payload.len() >= 4 => {
                         rings.rx_max = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolRingsAttr::RxMiniMax as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolRingsAttr::RxMiniMax as u16
+                    && payload.len() >= 4 => {
                         rings.rx_mini_max =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolRingsAttr::RxJumboMax as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolRingsAttr::RxJumboMax as u16
+                    && payload.len() >= 4 => {
                         rings.rx_jumbo_max =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolRingsAttr::TxMax as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolRingsAttr::TxMax as u16
+                    && payload.len() >= 4 => {
                         rings.tx_max = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolRingsAttr::Rx as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolRingsAttr::Rx as u16
+                    && payload.len() >= 4 => {
                         rings.rx = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolRingsAttr::RxMini as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolRingsAttr::RxMini as u16
+                    && payload.len() >= 4 => {
                         rings.rx_mini = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolRingsAttr::RxJumbo as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolRingsAttr::RxJumbo as u16
+                    && payload.len() >= 4 => {
                         rings.rx_jumbo = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolRingsAttr::Tx as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolRingsAttr::Tx as u16
+                    && payload.len() >= 4 => {
                         rings.tx = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolRingsAttr::RxBufLen as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolRingsAttr::RxBufLen as u16
+                    && payload.len() >= 4 => {
                         rings.rx_buf_len =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolRingsAttr::CqeSize as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolRingsAttr::CqeSize as u16
+                    && payload.len() >= 4 => {
                         rings.cqe_size = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolRingsAttr::TxPush as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolRingsAttr::TxPush as u16
+                    && !payload.is_empty() => {
                         rings.tx_push = Some(payload[0] != 0);
                     }
-                }
-                t if t == EthtoolRingsAttr::RxPush as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolRingsAttr::RxPush as u16
+                    && !payload.is_empty() => {
                         rings.rx_push = Some(payload[0] != 0);
                     }
-                }
                 _ => {}
             }
         }
@@ -806,54 +778,46 @@ impl Connection<Ethtool> {
                 t if t == EthtoolChannelsAttr::Header as u16 => {
                     self.parse_header(payload, &mut channels.ifname, &mut channels.ifindex)?;
                 }
-                t if t == EthtoolChannelsAttr::RxMax as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolChannelsAttr::RxMax as u16
+                    && payload.len() >= 4 => {
                         channels.rx_max =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolChannelsAttr::TxMax as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolChannelsAttr::TxMax as u16
+                    && payload.len() >= 4 => {
                         channels.tx_max =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolChannelsAttr::OtherMax as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolChannelsAttr::OtherMax as u16
+                    && payload.len() >= 4 => {
                         channels.other_max =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolChannelsAttr::CombinedMax as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolChannelsAttr::CombinedMax as u16
+                    && payload.len() >= 4 => {
                         channels.combined_max =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolChannelsAttr::RxCount as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolChannelsAttr::RxCount as u16
+                    && payload.len() >= 4 => {
                         channels.rx_count =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolChannelsAttr::TxCount as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolChannelsAttr::TxCount as u16
+                    && payload.len() >= 4 => {
                         channels.tx_count =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolChannelsAttr::OtherCount as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolChannelsAttr::OtherCount as u16
+                    && payload.len() >= 4 => {
                         channels.other_count =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolChannelsAttr::CombinedCount as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolChannelsAttr::CombinedCount as u16
+                    && payload.len() >= 4 => {
                         channels.combined_count =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
                 _ => {}
             }
         }
@@ -970,88 +934,74 @@ impl Connection<Ethtool> {
                 t if t == EthtoolCoalesceAttr::Header as u16 => {
                     self.parse_header(payload, &mut coalesce.ifname, &mut coalesce.ifindex)?;
                 }
-                t if t == EthtoolCoalesceAttr::RxUsecs as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolCoalesceAttr::RxUsecs as u16
+                    && payload.len() >= 4 => {
                         coalesce.rx_usecs =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolCoalesceAttr::RxMaxFrames as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolCoalesceAttr::RxMaxFrames as u16
+                    && payload.len() >= 4 => {
                         coalesce.rx_max_frames =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolCoalesceAttr::RxUsecsIrq as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolCoalesceAttr::RxUsecsIrq as u16
+                    && payload.len() >= 4 => {
                         coalesce.rx_usecs_irq =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolCoalesceAttr::RxMaxFramesIrq as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolCoalesceAttr::RxMaxFramesIrq as u16
+                    && payload.len() >= 4 => {
                         coalesce.rx_max_frames_irq =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolCoalesceAttr::TxUsecs as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolCoalesceAttr::TxUsecs as u16
+                    && payload.len() >= 4 => {
                         coalesce.tx_usecs =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolCoalesceAttr::TxMaxFrames as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolCoalesceAttr::TxMaxFrames as u16
+                    && payload.len() >= 4 => {
                         coalesce.tx_max_frames =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolCoalesceAttr::TxUsecsIrq as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolCoalesceAttr::TxUsecsIrq as u16
+                    && payload.len() >= 4 => {
                         coalesce.tx_usecs_irq =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolCoalesceAttr::TxMaxFramesIrq as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolCoalesceAttr::TxMaxFramesIrq as u16
+                    && payload.len() >= 4 => {
                         coalesce.tx_max_frames_irq =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolCoalesceAttr::StatsBlockUsecs as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolCoalesceAttr::StatsBlockUsecs as u16
+                    && payload.len() >= 4 => {
                         coalesce.stats_block_usecs =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolCoalesceAttr::UseAdaptiveRx as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolCoalesceAttr::UseAdaptiveRx as u16
+                    && !payload.is_empty() => {
                         coalesce.use_adaptive_rx = Some(payload[0] != 0);
                     }
-                }
-                t if t == EthtoolCoalesceAttr::UseAdaptiveTx as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolCoalesceAttr::UseAdaptiveTx as u16
+                    && !payload.is_empty() => {
                         coalesce.use_adaptive_tx = Some(payload[0] != 0);
                     }
-                }
-                t if t == EthtoolCoalesceAttr::PktRateLow as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolCoalesceAttr::PktRateLow as u16
+                    && payload.len() >= 4 => {
                         coalesce.pkt_rate_low =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolCoalesceAttr::PktRateHigh as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolCoalesceAttr::PktRateHigh as u16
+                    && payload.len() >= 4 => {
                         coalesce.pkt_rate_high =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
-                t if t == EthtoolCoalesceAttr::RateSampleInterval as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolCoalesceAttr::RateSampleInterval as u16
+                    && payload.len() >= 4 => {
                         coalesce.rate_sample_interval =
                             Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
                 _ => {}
             }
         }
@@ -1174,21 +1124,18 @@ impl Connection<Ethtool> {
                 t if t == EthtoolPauseAttr::Header as u16 => {
                     self.parse_header(payload, &mut pause.ifname, &mut pause.ifindex)?;
                 }
-                t if t == EthtoolPauseAttr::Autoneg as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolPauseAttr::Autoneg as u16
+                    && !payload.is_empty() => {
                         pause.autoneg = Some(payload[0] != 0);
                     }
-                }
-                t if t == EthtoolPauseAttr::Rx as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolPauseAttr::Rx as u16
+                    && !payload.is_empty() => {
                         pause.rx = Some(payload[0] != 0);
                     }
-                }
-                t if t == EthtoolPauseAttr::Tx as u16 => {
-                    if !payload.is_empty() {
+                t if t == EthtoolPauseAttr::Tx as u16
+                    && !payload.is_empty() => {
                         pause.tx = Some(payload[0] != 0);
                     }
-                }
                 _ => {}
             }
         }
@@ -1223,11 +1170,10 @@ impl Connection<Ethtool> {
     ) -> Result<()> {
         for (attr_type, payload) in AttrIter::new(data) {
             match attr_type {
-                t if t == EthtoolHeaderAttr::DevIndex as u16 => {
-                    if payload.len() >= 4 {
+                t if t == EthtoolHeaderAttr::DevIndex as u16
+                    && payload.len() >= 4 => {
                         *ifindex = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                     }
-                }
                 t if t == EthtoolHeaderAttr::DevName as u16 => {
                     *ifname = Some(
                         std::str::from_utf8(payload)

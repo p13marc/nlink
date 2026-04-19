@@ -46,31 +46,26 @@ impl NsIdMessage {
         // Parse attributes using existing AttrIter
         for (attr_type, payload) in AttrIter::new(attr_data) {
             match attr_type {
-                x if x == netnsa::NSID => {
-                    if payload.len() >= 4 {
+                x if x == netnsa::NSID
+                    && payload.len() >= 4 => {
                         msg.nsid = Some(u32::from_ne_bytes(payload[..4].try_into().ok()?));
                     }
-                }
-                x if x == netnsa::PID => {
-                    if payload.len() >= 4 {
+                x if x == netnsa::PID
+                    && payload.len() >= 4 => {
                         msg.pid = Some(u32::from_ne_bytes(payload[..4].try_into().ok()?));
                     }
-                }
-                x if x == netnsa::FD => {
-                    if payload.len() >= 4 {
+                x if x == netnsa::FD
+                    && payload.len() >= 4 => {
                         msg.fd = Some(i32::from_ne_bytes(payload[..4].try_into().ok()?));
                     }
-                }
-                x if x == netnsa::TARGET_NSID => {
-                    if payload.len() >= 4 {
+                x if x == netnsa::TARGET_NSID
+                    && payload.len() >= 4 => {
                         msg.target_nsid = Some(u32::from_ne_bytes(payload[..4].try_into().ok()?));
                     }
-                }
-                x if x == netnsa::CURRENT_NSID => {
-                    if payload.len() >= 4 {
+                x if x == netnsa::CURRENT_NSID
+                    && payload.len() >= 4 => {
                         msg.current_nsid = Some(u32::from_ne_bytes(payload[..4].try_into().ok()?));
                     }
-                }
                 _ => {}
             }
         }

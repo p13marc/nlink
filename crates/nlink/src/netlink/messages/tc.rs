@@ -529,40 +529,36 @@ impl TcMessage {
             let payload = &options[pos + 4..pos + len];
 
             match attr_type {
-                bpf::TCA_BPF_ID => {
-                    if payload.len() >= 4 {
+                bpf::TCA_BPF_ID
+                    if payload.len() >= 4 => {
                         info.id = Some(u32::from_ne_bytes([
                             payload[0], payload[1], payload[2], payload[3],
                         ]));
                     }
-                }
                 bpf::TCA_BPF_NAME => {
                     let name = std::str::from_utf8(payload)
                         .ok()
                         .map(|s| s.trim_end_matches('\0').to_string());
                     info.name = name;
                 }
-                bpf::TCA_BPF_TAG => {
-                    if payload.len() >= 8 {
+                bpf::TCA_BPF_TAG
+                    if payload.len() >= 8 => {
                         let mut tag = [0u8; 8];
                         tag.copy_from_slice(&payload[..8]);
                         info.tag = Some(tag);
                     }
-                }
-                bpf::TCA_BPF_FLAGS => {
-                    if payload.len() >= 4 {
+                bpf::TCA_BPF_FLAGS
+                    if payload.len() >= 4 => {
                         let flags =
                             u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
                         info.direct_action = (flags & bpf::TCA_BPF_FLAG_ACT_DIRECT) != 0;
                     }
-                }
-                bpf::TCA_BPF_CLASSID => {
-                    if payload.len() >= 4 {
+                bpf::TCA_BPF_CLASSID
+                    if payload.len() >= 4 => {
                         info.classid = Some(u32::from_ne_bytes([
                             payload[0], payload[1], payload[2], payload[3],
                         ]));
                     }
-                }
                 _ => {}
             }
 
@@ -657,28 +653,24 @@ impl FromNetlink for TcMessage {
                 attr_ids::TCA_XSTATS => {
                     msg.xstats = Some(attr_data.to_vec());
                 }
-                attr_ids::TCA_CHAIN => {
-                    if attr_data.len() >= 4 {
+                attr_ids::TCA_CHAIN
+                    if attr_data.len() >= 4 => {
                         msg.chain = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
-                attr_ids::TCA_HW_OFFLOAD => {
-                    if !attr_data.is_empty() {
+                attr_ids::TCA_HW_OFFLOAD
+                    if !attr_data.is_empty() => {
                         msg.hw_offload = Some(attr_data[0]);
                     }
-                }
-                attr_ids::TCA_INGRESS_BLOCK => {
-                    if attr_data.len() >= 4 {
+                attr_ids::TCA_INGRESS_BLOCK
+                    if attr_data.len() >= 4 => {
                         msg.ingress_block =
                             Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
-                attr_ids::TCA_EGRESS_BLOCK => {
-                    if attr_data.len() >= 4 {
+                attr_ids::TCA_EGRESS_BLOCK
+                    if attr_data.len() >= 4 => {
                         msg.egress_block =
                             Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
                 attr_ids::TCA_STATS2 => {
                     parse_stats2(&mut msg, attr_data);
                 }
@@ -709,9 +701,9 @@ fn parse_stats2(msg: &mut TcMessage, data: &[u8]) {
         let payload = &input[4..len];
 
         match attr_type & 0x3FFF {
-            stats2_ids::TCA_STATS_BASIC | stats2_ids::TCA_STATS_BASIC_HW => {
+            stats2_ids::TCA_STATS_BASIC | stats2_ids::TCA_STATS_BASIC_HW
                 // struct gnet_stats_basic: u64 bytes, u32 packets (+ padding)
-                if payload.len() >= 12 {
+                if payload.len() >= 12 => {
                     let bytes = u64::from_ne_bytes(payload[..8].try_into().unwrap());
                     let packets = u32::from_ne_bytes(payload[8..12].try_into().unwrap());
                     msg.stats_basic = Some(TcStatsBasic {
@@ -719,10 +711,9 @@ fn parse_stats2(msg: &mut TcMessage, data: &[u8]) {
                         packets: packets as u64,
                     });
                 }
-            }
-            stats2_ids::TCA_STATS_PKT64 => {
+            stats2_ids::TCA_STATS_PKT64
                 // 64-bit packet count
-                if payload.len() >= 8 {
+                if payload.len() >= 8 => {
                     let packets = u64::from_ne_bytes(payload[..8].try_into().unwrap());
                     if let Some(ref mut stats) = msg.stats_basic {
                         stats.packets = packets;
@@ -730,10 +721,9 @@ fn parse_stats2(msg: &mut TcMessage, data: &[u8]) {
                         msg.stats_basic = Some(TcStatsBasic { bytes: 0, packets });
                     }
                 }
-            }
-            stats2_ids::TCA_STATS_QUEUE => {
+            stats2_ids::TCA_STATS_QUEUE
                 // struct gnet_stats_queue: u32 qlen, backlog, drops, requeues, overlimits
-                if payload.len() >= 20 {
+                if payload.len() >= 20 => {
                     msg.stats_queue = Some(TcStatsQueue {
                         qlen: u32::from_ne_bytes(payload[0..4].try_into().unwrap()),
                         backlog: u32::from_ne_bytes(payload[4..8].try_into().unwrap()),
@@ -742,22 +732,19 @@ fn parse_stats2(msg: &mut TcMessage, data: &[u8]) {
                         overlimits: u32::from_ne_bytes(payload[16..20].try_into().unwrap()),
                     });
                 }
-            }
-            stats2_ids::TCA_STATS_RATE_EST => {
+            stats2_ids::TCA_STATS_RATE_EST
                 // struct gnet_stats_rate_est: u32 bps, pps
-                if payload.len() >= 8 {
+                if payload.len() >= 8 => {
                     msg.stats_rate_est = Some(TcStatsRateEst {
                         bps: u32::from_ne_bytes(payload[0..4].try_into().unwrap()),
                         pps: u32::from_ne_bytes(payload[4..8].try_into().unwrap()),
                     });
                 }
-            }
-            stats2_ids::TCA_STATS_APP => {
+            stats2_ids::TCA_STATS_APP
                 // Application-specific stats, store in xstats if not already set
-                if msg.xstats.is_none() {
+                if msg.xstats.is_none() => {
                     msg.xstats = Some(payload.to_vec());
                 }
-            }
             _ => {}
         }
 

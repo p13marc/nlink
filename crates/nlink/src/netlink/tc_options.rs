@@ -784,8 +784,8 @@ pub fn parse_htb_class_options(data: &[u8]) -> Option<HtbClassOptions> {
         let payload = &input[4..len];
 
         match attr_type & 0x3FFF {
-            TCA_HTB_PARMS => {
-                if payload.len() >= std::mem::size_of::<TcHtbOpt>() {
+            TCA_HTB_PARMS
+                if payload.len() >= std::mem::size_of::<TcHtbOpt>() => {
                     // Parse TcHtbOpt structure
                     // Rate spec starts at offset 0, ceil at offset 12
                     let rate = u32::from_ne_bytes(payload[8..12].try_into().ok()?);
@@ -801,17 +801,14 @@ pub fn parse_htb_class_options(data: &[u8]) -> Option<HtbClassOptions> {
                         opts.priority = u32::from_ne_bytes(payload[40..44].try_into().ok()?);
                     }
                 }
-            }
-            TCA_HTB_RATE64 => {
-                if payload.len() >= 8 {
+            TCA_HTB_RATE64
+                if payload.len() >= 8 => {
                     rate64 = Some(u64::from_ne_bytes(payload[..8].try_into().ok()?));
                 }
-            }
-            TCA_HTB_CEIL64 => {
-                if payload.len() >= 8 {
+            TCA_HTB_CEIL64
+                if payload.len() >= 8 => {
                     ceil64 = Some(u64::from_ne_bytes(payload[..8].try_into().ok()?));
                 }
-            }
             _ => {}
         }
 
@@ -880,53 +877,44 @@ fn parse_fq_codel_options(data: &[u8]) -> FqCodelOptions {
         let payload = &input[4..len];
 
         match attr_type & 0x3FFF {
-            TCA_FQ_CODEL_TARGET => {
-                if payload.len() >= 4 {
+            TCA_FQ_CODEL_TARGET
+                if payload.len() >= 4 => {
                     opts.target_us = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
-            TCA_FQ_CODEL_LIMIT => {
-                if payload.len() >= 4 {
+            TCA_FQ_CODEL_LIMIT
+                if payload.len() >= 4 => {
                     opts.limit = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
-            TCA_FQ_CODEL_INTERVAL => {
-                if payload.len() >= 4 {
+            TCA_FQ_CODEL_INTERVAL
+                if payload.len() >= 4 => {
                     opts.interval_us = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
-            TCA_FQ_CODEL_ECN => {
-                if payload.len() >= 4 {
+            TCA_FQ_CODEL_ECN
+                if payload.len() >= 4 => {
                     opts.ecn = u32::from_ne_bytes(payload[..4].try_into().unwrap()) != 0;
                 }
-            }
-            TCA_FQ_CODEL_FLOWS => {
-                if payload.len() >= 4 {
+            TCA_FQ_CODEL_FLOWS
+                if payload.len() >= 4 => {
                     opts.flows = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
-            TCA_FQ_CODEL_QUANTUM => {
-                if payload.len() >= 4 {
+            TCA_FQ_CODEL_QUANTUM
+                if payload.len() >= 4 => {
                     opts.quantum = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
-            TCA_FQ_CODEL_CE_THRESHOLD => {
-                if payload.len() >= 4 {
+            TCA_FQ_CODEL_CE_THRESHOLD
+                if payload.len() >= 4 => {
                     opts.ce_threshold_us =
                         Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
-            }
-            TCA_FQ_CODEL_DROP_BATCH_SIZE => {
-                if payload.len() >= 4 {
+            TCA_FQ_CODEL_DROP_BATCH_SIZE
+                if payload.len() >= 4 => {
                     opts.drop_batch_size =
                         Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
-            }
-            TCA_FQ_CODEL_MEMORY_LIMIT => {
-                if payload.len() >= 4 {
+            TCA_FQ_CODEL_MEMORY_LIMIT
+                if payload.len() >= 4 => {
                     opts.memory_limit = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
-            }
             _ => {}
         }
 
@@ -970,18 +958,16 @@ fn parse_htb_options(data: &[u8]) -> HtbOptions {
         let payload = &input[4..len];
 
         match attr_type & 0x3FFF {
-            TCA_HTB_INIT => {
-                if payload.len() >= TcHtbGlob::SIZE {
+            TCA_HTB_INIT
+                if payload.len() >= TcHtbGlob::SIZE => {
                     opts.version = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
                     opts.rate2quantum = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
                     opts.default_class = u32::from_ne_bytes(payload[8..12].try_into().unwrap());
                 }
-            }
-            TCA_HTB_DIRECT_QLEN => {
-                if payload.len() >= 4 {
+            TCA_HTB_DIRECT_QLEN
+                if payload.len() >= 4 => {
                     opts.direct_qlen = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
-            }
             _ => {}
         }
 
@@ -1027,10 +1013,10 @@ fn parse_tbf_options(data: &[u8]) -> TbfOptions {
         let payload = &input[4..len];
 
         match attr_type & 0x3FFF {
-            TCA_TBF_PARMS => {
+            TCA_TBF_PARMS
                 // TcTbfQopt: rate (TcRateSpec), peakrate (TcRateSpec), limit, buffer, mtu
                 // TcRateSpec is 12 bytes
-                if payload.len() >= 36 {
+                if payload.len() >= 36 => {
                     // rate.rate is at offset 8
                     opts.rate = u32::from_ne_bytes(payload[8..12].try_into().unwrap()) as u64;
                     // peakrate.rate is at offset 20
@@ -1042,22 +1028,18 @@ fn parse_tbf_options(data: &[u8]) -> TbfOptions {
                     // mtu at offset 32
                     opts.mtu = u32::from_ne_bytes(payload[32..36].try_into().unwrap());
                 }
-            }
-            TCA_TBF_RATE64 => {
-                if payload.len() >= 8 {
+            TCA_TBF_RATE64
+                if payload.len() >= 8 => {
                     rate64 = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
                 }
-            }
-            TCA_TBF_PRATE64 => {
-                if payload.len() >= 8 {
+            TCA_TBF_PRATE64
+                if payload.len() >= 8 => {
                     prate64 = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
                 }
-            }
-            TCA_TBF_BURST => {
-                if payload.len() >= 4 {
+            TCA_TBF_BURST
+                if payload.len() >= 4 => {
                     opts.burst = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
             _ => {}
         }
 
@@ -1130,8 +1112,8 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
         let payload = &input[4..len];
 
         match attr_type & 0x3FFF {
-            TCA_NETEM_CORR => {
-                if payload.len() >= TcNetemCorr::SIZE {
+            TCA_NETEM_CORR
+                if payload.len() >= TcNetemCorr::SIZE => {
                     let delay_corr = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
                     let loss_corr = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
                     let dup_corr = u32::from_ne_bytes(payload[8..12].try_into().unwrap());
@@ -1139,23 +1121,20 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
                     opts.loss_corr = prob_to_percent(loss_corr);
                     opts.duplicate_corr = prob_to_percent(dup_corr);
                 }
-            }
-            TCA_NETEM_REORDER => {
-                if payload.len() >= TcNetemReorder::SIZE {
+            TCA_NETEM_REORDER
+                if payload.len() >= TcNetemReorder::SIZE => {
                     let prob = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
                     let corr = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
                     opts.reorder_percent = prob_to_percent(prob);
                     opts.reorder_corr = prob_to_percent(corr);
                 }
-            }
-            TCA_NETEM_CORRUPT => {
-                if payload.len() >= TcNetemCorrupt::SIZE {
+            TCA_NETEM_CORRUPT
+                if payload.len() >= TcNetemCorrupt::SIZE => {
                     let prob = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
                     let corr = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
                     opts.corrupt_percent = prob_to_percent(prob);
                     opts.corrupt_corr = prob_to_percent(corr);
                 }
-            }
             TCA_NETEM_RATE => {
                 // TcNetemRate: rate (u32), packet_overhead (i32), cell_size (u32), cell_overhead (i32)
                 if payload.len() >= 4 {
@@ -1167,31 +1146,28 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
                     opts.cell_overhead = i32::from_ne_bytes(payload[12..16].try_into().unwrap());
                 }
             }
-            TCA_NETEM_RATE64 => {
-                if payload.len() >= 8 {
+            TCA_NETEM_RATE64
+                if payload.len() >= 8 => {
                     opts.rate = u64::from_ne_bytes(payload[..8].try_into().unwrap());
                 }
-            }
             TCA_NETEM_ECN => {
                 // ECN is a flag attribute (presence means enabled)
                 // Some kernels send a u32 value, others just the attribute
                 opts.ecn = true;
             }
-            TCA_NETEM_LATENCY64 => {
+            TCA_NETEM_LATENCY64
                 // 64-bit latency in nanoseconds
-                if payload.len() >= 8 {
+                if payload.len() >= 8 => {
                     opts.delay_ns = u64::from_ne_bytes(payload[..8].try_into().unwrap());
                 }
-            }
-            TCA_NETEM_JITTER64 => {
+            TCA_NETEM_JITTER64
                 // 64-bit jitter in nanoseconds
-                if payload.len() >= 8 {
+                if payload.len() >= 8 => {
                     opts.jitter_ns = u64::from_ne_bytes(payload[..8].try_into().unwrap());
                 }
-            }
-            TCA_NETEM_SLOT => {
+            TCA_NETEM_SLOT
                 // TcNetemSlot structure
-                if payload.len() >= TcNetemSlot::SIZE {
+                if payload.len() >= TcNetemSlot::SIZE => {
                     opts.slot = Some(NetemSlotOptions {
                         min_delay_ns: i64::from_ne_bytes(payload[0..8].try_into().unwrap()),
                         max_delay_ns: i64::from_ne_bytes(payload[8..16].try_into().unwrap()),
@@ -1201,7 +1177,6 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
                         dist_jitter_ns: i64::from_ne_bytes(payload[32..40].try_into().unwrap()),
                     });
                 }
-            }
             TCA_NETEM_LOSS => {
                 // Loss model is a nested attribute containing the model type and parameters
                 parse_netem_loss_model(payload, &mut opts);
@@ -1249,9 +1224,9 @@ fn parse_netem_loss_model(data: &[u8], opts: &mut NetemOptions) {
         let payload = &input[4..len];
 
         match attr_type & 0x3FFF {
-            NETEM_LOSS_GI => {
+            NETEM_LOSS_GI
                 // Gilbert-Intuitive 4-state model
-                if payload.len() >= TcNetemGiModel::SIZE {
+                if payload.len() >= TcNetemGiModel::SIZE => {
                     let p13 = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
                     let p31 = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
                     let p32 = u32::from_ne_bytes(payload[8..12].try_into().unwrap());
@@ -1265,10 +1240,9 @@ fn parse_netem_loss_model(data: &[u8], opts: &mut NetemOptions) {
                         p23: prob_to_percent(p23),
                     });
                 }
-            }
-            NETEM_LOSS_GE => {
+            NETEM_LOSS_GE
                 // Gilbert-Elliot 2-state model
-                if payload.len() >= TcNetemGeModel::SIZE {
+                if payload.len() >= TcNetemGeModel::SIZE => {
                     let p = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
                     let r = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
                     let h = u32::from_ne_bytes(payload[8..12].try_into().unwrap());
@@ -1280,7 +1254,6 @@ fn parse_netem_loss_model(data: &[u8], opts: &mut NetemOptions) {
                         k1: prob_to_percent(k1),
                     });
                 }
-            }
             _ => {}
         }
 

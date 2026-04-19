@@ -396,61 +396,54 @@ impl Srv6LocalRoute {
         // First pass: get encap attributes
         for (attr_type, payload) in AttrIter::new(attrs_data) {
             match RtaAttr::from(attr_type) {
-                RtaAttr::Dst => {
-                    if payload.len() >= 16 {
+                RtaAttr::Dst
+                    if payload.len() >= 16 => {
                         let bytes: [u8; 16] = payload[..16].try_into().unwrap_or([0; 16]);
                         sid = Ipv6Addr::from(bytes);
                     }
-                }
-                RtaAttr::Oif => {
-                    if payload.len() >= 4 {
+                RtaAttr::Oif
+                    if payload.len() >= 4 => {
                         oif = Some(u32::from_ne_bytes(
                             payload[..4].try_into().unwrap_or([0; 4]),
                         ));
                     }
-                }
-                RtaAttr::Iif => {
-                    if payload.len() >= 4 {
+                RtaAttr::Iif
+                    if payload.len() >= 4 => {
                         iif = Some(u32::from_ne_bytes(
                             payload[..4].try_into().unwrap_or([0; 4]),
                         ));
                     }
-                }
                 RtaAttr::Encap => {
                     // Parse nested seg6_local attributes
                     for (local_attr, local_payload) in AttrIter::new(payload) {
                         match local_attr {
-                            x if x == seg6_local::ACTION => {
-                                if local_payload.len() >= 4 {
+                            x if x == seg6_local::ACTION
+                                && local_payload.len() >= 4 => {
                                     action_type = u32::from_ne_bytes(
                                         local_payload[..4].try_into().unwrap_or([0; 4]),
                                     );
                                 }
-                            }
-                            x if x == seg6_local::TABLE => {
-                                if local_payload.len() >= 4 {
+                            x if x == seg6_local::TABLE
+                                && local_payload.len() >= 4 => {
                                     table = Some(u32::from_ne_bytes(
                                         local_payload[..4].try_into().unwrap_or([0; 4]),
                                     ));
                                 }
-                            }
-                            x if x == seg6_local::NH4 => {
-                                if local_payload.len() >= 4 {
+                            x if x == seg6_local::NH4
+                                && local_payload.len() >= 4 => {
                                     let bytes: [u8; 4] =
                                         local_payload[..4].try_into().unwrap_or([0; 4]);
                                     nh4 = Some(Ipv4Addr::from(bytes));
                                 }
-                            }
-                            x if x == seg6_local::NH6 => {
-                                if local_payload.len() >= 16 {
+                            x if x == seg6_local::NH6
+                                && local_payload.len() >= 16 => {
                                     let bytes: [u8; 16] =
                                         local_payload[..16].try_into().unwrap_or([0; 16]);
                                     nh6 = Some(Ipv6Addr::from(bytes));
                                 }
-                            }
-                            x if x == seg6_local::SRH => {
+                            x if x == seg6_local::SRH
                                 // Parse SRH: skip mode (4 bytes) + header (8 bytes)
-                                if local_payload.len() >= 12 {
+                                && local_payload.len() >= 12 => {
                                     let srh_data = &local_payload[4..];
                                     if let Some(hdr) = Ipv6SrHdr::from_bytes(srh_data) {
                                         let seg_data = &srh_data[Ipv6SrHdr::SIZE..];
@@ -468,21 +461,18 @@ impl Srv6LocalRoute {
                                         srh_segments.reverse();
                                     }
                                 }
-                            }
-                            x if x == seg6_local::OIF => {
-                                if local_payload.len() >= 4 {
+                            x if x == seg6_local::OIF
+                                && local_payload.len() >= 4 => {
                                     oif = Some(u32::from_ne_bytes(
                                         local_payload[..4].try_into().unwrap_or([0; 4]),
                                     ));
                                 }
-                            }
-                            x if x == seg6_local::IIF => {
-                                if local_payload.len() >= 4 {
+                            x if x == seg6_local::IIF
+                                && local_payload.len() >= 4 => {
                                     iif = Some(u32::from_ne_bytes(
                                         local_payload[..4].try_into().unwrap_or([0; 4]),
                                     ));
                                 }
-                            }
                             _ => {}
                         }
                     }

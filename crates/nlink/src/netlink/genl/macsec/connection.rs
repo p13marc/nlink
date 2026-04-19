@@ -815,13 +815,12 @@ fn parse_sa_attrs(data: &[u8]) -> Result<(u8, bool, u64, Option<[u8; 16]>)> {
                     pn = get::u32_ne(payload)? as u64;
                 }
             }
-            t if t == macsec_sa_attr::KEYID => {
-                if payload.len() >= 16 {
+            t if t == macsec_sa_attr::KEYID
+                && payload.len() >= 16 => {
                     let mut id = [0u8; 16];
                     id.copy_from_slice(&payload[..16]);
                     key_id = Some(id);
                 }
-            }
             _ => {}
         }
     }

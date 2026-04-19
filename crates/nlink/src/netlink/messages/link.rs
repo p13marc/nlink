@@ -520,72 +520,60 @@ impl FromNetlink for LinkMessage {
                 attr_ids::IFLA_PERM_ADDRESS => {
                     msg.perm_address = Some(attr_data.to_vec());
                 }
-                attr_ids::IFLA_MTU => {
-                    if attr_data.len() >= 4 {
+                attr_ids::IFLA_MTU
+                    if attr_data.len() >= 4 => {
                         msg.mtu = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
-                attr_ids::IFLA_MIN_MTU => {
-                    if attr_data.len() >= 4 {
+                attr_ids::IFLA_MIN_MTU
+                    if attr_data.len() >= 4 => {
                         msg.min_mtu = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
-                attr_ids::IFLA_MAX_MTU => {
-                    if attr_data.len() >= 4 {
+                attr_ids::IFLA_MAX_MTU
+                    if attr_data.len() >= 4 => {
                         msg.max_mtu = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
-                attr_ids::IFLA_LINK => {
-                    if attr_data.len() >= 4 {
+                attr_ids::IFLA_LINK
+                    if attr_data.len() >= 4 => {
                         msg.link = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
                 attr_ids::IFLA_QDISC => {
                     msg.qdisc = Some(parse_string_from_bytes(attr_data));
                 }
-                attr_ids::IFLA_MASTER => {
-                    if attr_data.len() >= 4 {
+                attr_ids::IFLA_MASTER
+                    if attr_data.len() >= 4 => {
                         msg.master = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
-                attr_ids::IFLA_TXQLEN => {
-                    if attr_data.len() >= 4 {
+                attr_ids::IFLA_TXQLEN
+                    if attr_data.len() >= 4 => {
                         msg.txqlen = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
-                attr_ids::IFLA_OPERSTATE => {
-                    if !attr_data.is_empty() {
+                attr_ids::IFLA_OPERSTATE
+                    if !attr_data.is_empty() => {
                         msg.operstate = Some(OperState::from(attr_data[0]));
                     }
-                }
-                attr_ids::IFLA_GROUP => {
-                    if attr_data.len() >= 4 {
+                attr_ids::IFLA_GROUP
+                    if attr_data.len() >= 4 => {
                         msg.group = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
-                attr_ids::IFLA_PROMISCUITY => {
-                    if attr_data.len() >= 4 {
+                attr_ids::IFLA_PROMISCUITY
+                    if attr_data.len() >= 4 => {
                         msg.promiscuity =
                             Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
-                attr_ids::IFLA_NUM_TX_QUEUES => {
-                    if attr_data.len() >= 4 {
+                attr_ids::IFLA_NUM_TX_QUEUES
+                    if attr_data.len() >= 4 => {
                         msg.num_tx_queues =
                             Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
-                attr_ids::IFLA_NUM_RX_QUEUES => {
-                    if attr_data.len() >= 4 {
+                attr_ids::IFLA_NUM_RX_QUEUES
+                    if attr_data.len() >= 4 => {
                         msg.num_rx_queues =
                             Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                     }
-                }
-                attr_ids::IFLA_CARRIER => {
-                    if !attr_data.is_empty() {
+                attr_ids::IFLA_CARRIER
+                    if !attr_data.is_empty() => {
                         msg.carrier = Some(attr_data[0] != 0);
                     }
-                }
                 attr_ids::IFLA_LINKINFO => {
                     msg.link_info = Some(parse_link_info(attr_data));
                 }
@@ -1059,11 +1047,10 @@ fn parse_bond_info(data: &[u8]) -> BondInfo {
         let payload = &data[pos + 4..pos + len];
 
         match attr_type {
-            bond_info_ids::IFLA_BOND_MODE => {
-                if !payload.is_empty() {
+            bond_info_ids::IFLA_BOND_MODE
+                if !payload.is_empty() => {
                     info.mode = payload[0];
                 }
-            }
             bond_info_ids::IFLA_BOND_MIIMON => {
                 if let Some(v) = parse_u32_ne(payload) {
                     info.miimon = v;
@@ -1079,11 +1066,10 @@ fn parse_bond_info(data: &[u8]) -> BondInfo {
                     info.downdelay = v;
                 }
             }
-            bond_info_ids::IFLA_BOND_USE_CARRIER => {
-                if !payload.is_empty() {
+            bond_info_ids::IFLA_BOND_USE_CARRIER
+                if !payload.is_empty() => {
                     info.use_carrier = payload[0] != 0;
                 }
-            }
             bond_info_ids::IFLA_BOND_ARP_INTERVAL => {
                 if let Some(v) = parse_u32_ne(payload) {
                     info.arp_interval = v;
@@ -1098,26 +1084,23 @@ fn parse_bond_info(data: &[u8]) -> BondInfo {
             bond_info_ids::IFLA_BOND_ACTIVE_SLAVE => {
                 info.active_slave = parse_u32_ne(payload);
             }
-            bond_info_ids::IFLA_BOND_XMIT_HASH_POLICY => {
-                if !payload.is_empty() {
+            bond_info_ids::IFLA_BOND_XMIT_HASH_POLICY
+                if !payload.is_empty() => {
                     info.xmit_hash_policy = payload[0];
                 }
-            }
-            bond_info_ids::IFLA_BOND_ALL_SLAVES_ACTIVE => {
-                if !payload.is_empty() {
+            bond_info_ids::IFLA_BOND_ALL_SLAVES_ACTIVE
+                if !payload.is_empty() => {
                     info.all_slaves_active = payload[0] != 0;
                 }
-            }
             bond_info_ids::IFLA_BOND_MIN_LINKS => {
                 if let Some(v) = parse_u32_ne(payload) {
                     info.min_links = v;
                 }
             }
-            bond_info_ids::IFLA_BOND_AD_LACP_RATE => {
-                if !payload.is_empty() {
+            bond_info_ids::IFLA_BOND_AD_LACP_RATE
+                if !payload.is_empty() => {
                     info.lacp_rate = Some(payload[0]);
                 }
-            }
             bond_info_ids::IFLA_BOND_AD_INFO => {
                 info.ad_info = Some(parse_bond_ad_info(payload));
             }
@@ -1172,11 +1155,10 @@ fn parse_bond_ad_info(data: &[u8]) -> BondAdInfo {
                     info.partner_key = v;
                 }
             }
-            bond_ad_info_ids::IFLA_BOND_AD_INFO_PARTNER_MAC => {
-                if payload.len() >= 6 {
+            bond_ad_info_ids::IFLA_BOND_AD_INFO_PARTNER_MAC
+                if payload.len() >= 6 => {
                     info.partner_mac.copy_from_slice(&payload[..6]);
                 }
-            }
             _ => {}
         }
 
@@ -1210,49 +1192,45 @@ fn parse_bond_slave_info(data: &[u8]) -> BondSlaveInfo {
         let payload = &data[pos + 4..pos + len];
 
         match attr_type {
-            bond_slave_ids::IFLA_BOND_SLAVE_STATE => {
-                if !payload.is_empty() {
+            bond_slave_ids::IFLA_BOND_SLAVE_STATE
+                if !payload.is_empty() => {
                     info.state = if payload[0] == 0 {
                         BondSlaveState::Active
                     } else {
                         BondSlaveState::Backup
                     };
                 }
-            }
-            bond_slave_ids::IFLA_BOND_SLAVE_MII_STATUS => {
-                if !payload.is_empty() {
+            bond_slave_ids::IFLA_BOND_SLAVE_MII_STATUS
+                if !payload.is_empty() => {
                     info.mii_status = if payload[0] == 0 {
                         MiiStatus::Up
                     } else {
                         MiiStatus::Down
                     };
                 }
-            }
             bond_slave_ids::IFLA_BOND_SLAVE_LINK_FAILURE_COUNT => {
                 if let Some(v) = parse_u32_ne(payload) {
                     info.link_failure_count = v;
                 }
             }
-            bond_slave_ids::IFLA_BOND_SLAVE_PERM_HWADDR => {
-                if payload.len() >= 6 {
+            bond_slave_ids::IFLA_BOND_SLAVE_PERM_HWADDR
+                if payload.len() >= 6 => {
                     let mut addr = [0u8; 6];
                     addr.copy_from_slice(&payload[..6]);
                     info.perm_hwaddr = Some(addr);
                 }
-            }
             bond_slave_ids::IFLA_BOND_SLAVE_QUEUE_ID => {
                 info.queue_id = parse_u16_ne(payload);
             }
             bond_slave_ids::IFLA_BOND_SLAVE_AD_AGGREGATOR_ID => {
                 info.ad_aggregator_id = parse_u16_ne(payload);
             }
-            bond_slave_ids::IFLA_BOND_SLAVE_PRIO => {
-                if payload.len() >= 4 {
+            bond_slave_ids::IFLA_BOND_SLAVE_PRIO
+                if payload.len() >= 4 => {
                     info.prio = Some(i32::from_ne_bytes([
                         payload[0], payload[1], payload[2], payload[3],
                     ]));
                 }
-            }
             _ => {}
         }
 

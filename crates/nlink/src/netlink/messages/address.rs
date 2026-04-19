@@ -237,12 +237,11 @@ impl FromNetlink for AddressMessage {
                         msg.anycast = Some(addr);
                     }
                 }
-                attr_ids::IFA_FLAGS => {
-                    if attr_data.len() >= 4 {
+                attr_ids::IFA_FLAGS
+                    if attr_data.len() >= 4 => {
                         let bytes: [u8; 4] = attr_data[..4].try_into().unwrap();
                         msg.flags = Some(u32::from_ne_bytes(bytes));
                     }
-                }
                 attr_ids::IFA_CACHEINFO => {
                     if let Some(info) = IfaCacheinfo::from_bytes(attr_data) {
                         msg.cache_info = Some(AddressCacheInfo {

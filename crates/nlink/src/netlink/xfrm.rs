@@ -800,8 +800,8 @@ impl Connection<Xfrm> {
                             sa.mark = Some(*mark);
                         }
                     }
-                    XFRMA_IF_ID => {
-                        if attr_data.len() >= 4 {
+                    XFRMA_IF_ID
+                        if attr_data.len() >= 4 => {
                             sa.if_id = Some(u32::from_ne_bytes([
                                 attr_data[0],
                                 attr_data[1],
@@ -809,7 +809,6 @@ impl Connection<Xfrm> {
                                 attr_data[3],
                             ]));
                         }
-                    }
                     _ => {}
                 }
             }
@@ -851,8 +850,8 @@ impl Connection<Xfrm> {
                             policy.mark = Some(*mark);
                         }
                     }
-                    XFRMA_IF_ID => {
-                        if attr_data.len() >= 4 {
+                    XFRMA_IF_ID
+                        if attr_data.len() >= 4 => {
                             policy.if_id = Some(u32::from_ne_bytes([
                                 attr_data[0],
                                 attr_data[1],
@@ -860,7 +859,6 @@ impl Connection<Xfrm> {
                                 attr_data[3],
                             ]));
                         }
-                    }
                     _ => {}
                 }
             }

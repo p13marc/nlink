@@ -165,11 +165,10 @@ impl Nexthop {
 
         for (attr_type, payload) in AttrIter::new(attrs_data) {
             match attr_type {
-                nha::ID => {
-                    if payload.len() >= 4 {
+                nha::ID
+                    if payload.len() >= 4 => {
                         id = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     }
-                }
                 nha::GATEWAY => {
                     gateway = match payload.len() {
                         4 => Some(IpAddr::from(<[u8; 4]>::try_from(payload).unwrap())),
@@ -177,13 +176,12 @@ impl Nexthop {
                         _ => None,
                     };
                 }
-                nha::OIF => {
-                    if payload.len() >= 4 {
+                nha::OIF
+                    if payload.len() >= 4 => {
                         ifindex = Some(u32::from_ne_bytes([
                             payload[0], payload[1], payload[2], payload[3],
                         ]));
                     }
-                }
                 nha::BLACKHOLE => {
                     blackhole = true;
                 }
@@ -206,24 +204,22 @@ impl Nexthop {
                         group = Some(members);
                     }
                 }
-                nha::GROUP_TYPE => {
-                    if payload.len() >= 2 {
+                nha::GROUP_TYPE
+                    if payload.len() >= 2 => {
                         let gt = u16::from_ne_bytes([payload[0], payload[1]]);
                         group_type = Some(NexthopGroupType::from(gt));
                     }
-                }
                 nha::RES_GROUP => {
                     let mut params = ResilientParams::default();
                     for (res_type, res_payload) in AttrIter::new(payload) {
                         match res_type {
-                            nha_res_group::BUCKETS => {
-                                if res_payload.len() >= 2 {
+                            nha_res_group::BUCKETS
+                                if res_payload.len() >= 2 => {
                                     params.buckets =
                                         u16::from_ne_bytes([res_payload[0], res_payload[1]]);
                                 }
-                            }
-                            nha_res_group::IDLE_TIMER => {
-                                if res_payload.len() >= 4 {
+                            nha_res_group::IDLE_TIMER
+                                if res_payload.len() >= 4 => {
                                     params.idle_timer = u32::from_ne_bytes([
                                         res_payload[0],
                                         res_payload[1],
@@ -231,9 +227,8 @@ impl Nexthop {
                                         res_payload[3],
                                     ]);
                                 }
-                            }
-                            nha_res_group::UNBALANCED_TIMER => {
-                                if res_payload.len() >= 4 {
+                            nha_res_group::UNBALANCED_TIMER
+                                if res_payload.len() >= 4 => {
                                     params.unbalanced_timer = u32::from_ne_bytes([
                                         res_payload[0],
                                         res_payload[1],
@@ -241,7 +236,6 @@ impl Nexthop {
                                         res_payload[3],
                                     ]);
                                 }
-                            }
                             _ => {}
                         }
                     }

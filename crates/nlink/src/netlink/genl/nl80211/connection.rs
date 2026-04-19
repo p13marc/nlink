@@ -665,46 +665,40 @@ fn parse_interface(data: &[u8]) -> WirelessInterface {
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
-            NL80211_ATTR_IFINDEX => {
-                if payload.len() >= 4 {
+            NL80211_ATTR_IFINDEX
+                if payload.len() >= 4 => {
                     iface.ifindex = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
             NL80211_ATTR_IFNAME => {
                 iface.name = attr_str(payload);
             }
-            NL80211_ATTR_IFTYPE => {
-                if payload.len() >= 4 {
+            NL80211_ATTR_IFTYPE
+                if payload.len() >= 4 => {
                     let val = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                     iface.iftype =
                         InterfaceType::try_from(val).unwrap_or(InterfaceType::Unspecified);
                 }
-            }
-            NL80211_ATTR_WIPHY => {
-                if payload.len() >= 4 {
+            NL80211_ATTR_WIPHY
+                if payload.len() >= 4 => {
                     iface.wiphy = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
-            NL80211_ATTR_MAC => {
-                if payload.len() >= 6 {
+            NL80211_ATTR_MAC
+                if payload.len() >= 6 => {
                     let mut mac = [0u8; 6];
                     mac.copy_from_slice(&payload[..6]);
                     iface.mac = Some(mac);
                 }
-            }
-            NL80211_ATTR_WIPHY_FREQ => {
-                if payload.len() >= 4 {
+            NL80211_ATTR_WIPHY_FREQ
+                if payload.len() >= 4 => {
                     iface.frequency = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
-            }
             NL80211_ATTR_SSID => {
                 iface.ssid = std::str::from_utf8(payload).ok().map(String::from);
             }
-            NL80211_ATTR_GENERATION => {
-                if payload.len() >= 4 {
+            NL80211_ATTR_GENERATION
+                if payload.len() >= 4 => {
                     iface.generation = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
-            }
             _ => {}
         }
     }
@@ -728,31 +722,26 @@ fn parse_bss(data: &[u8]) -> ScanResult {
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
-            NL80211_BSS_BSSID => {
-                if payload.len() >= 6 {
+            NL80211_BSS_BSSID
+                if payload.len() >= 6 => {
                     result.bssid.copy_from_slice(&payload[..6]);
                 }
-            }
-            NL80211_BSS_FREQUENCY => {
-                if payload.len() >= 4 {
+            NL80211_BSS_FREQUENCY
+                if payload.len() >= 4 => {
                     result.frequency = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
-            NL80211_BSS_TSF => {
-                if payload.len() >= 8 {
+            NL80211_BSS_TSF
+                if payload.len() >= 8 => {
                     result.tsf = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
                 }
-            }
-            NL80211_BSS_BEACON_INTERVAL => {
-                if payload.len() >= 2 {
+            NL80211_BSS_BEACON_INTERVAL
+                if payload.len() >= 2 => {
                     result.beacon_interval = u16::from_ne_bytes(payload[..2].try_into().unwrap());
                 }
-            }
-            NL80211_BSS_CAPABILITY => {
-                if payload.len() >= 2 {
+            NL80211_BSS_CAPABILITY
+                if payload.len() >= 2 => {
                     result.capability = u16::from_ne_bytes(payload[..2].try_into().unwrap());
                 }
-            }
             NL80211_BSS_INFORMATION_ELEMENTS => {
                 result.information_elements = payload.to_vec();
                 // Parse SSID from IE (type 0, first element)
@@ -765,22 +754,19 @@ fn parse_bss(data: &[u8]) -> ScanResult {
                     }
                 }
             }
-            NL80211_BSS_SIGNAL_MBM => {
-                if payload.len() >= 4 {
+            NL80211_BSS_SIGNAL_MBM
+                if payload.len() >= 4 => {
                     result.signal_mbm = i32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
-            NL80211_BSS_STATUS => {
-                if payload.len() >= 4 {
+            NL80211_BSS_STATUS
+                if payload.len() >= 4 => {
                     let val = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                     result.status = BssStatus::try_from(val).ok();
                 }
-            }
-            NL80211_BSS_SEEN_MS_AGO => {
-                if payload.len() >= 4 {
+            NL80211_BSS_SEEN_MS_AGO
+                if payload.len() >= 4 => {
                     result.seen_ms_ago = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
             _ => {}
         }
     }
@@ -804,16 +790,14 @@ fn parse_station(data: &[u8]) -> StationInfo {
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
-            NL80211_ATTR_MAC => {
-                if payload.len() >= 6 {
+            NL80211_ATTR_MAC
+                if payload.len() >= 6 => {
                     station.mac.copy_from_slice(&payload[..6]);
                 }
-            }
-            NL80211_ATTR_IFINDEX => {
-                if payload.len() >= 4 {
+            NL80211_ATTR_IFINDEX
+                if payload.len() >= 4 => {
                     station.ifindex = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
             NL80211_ATTR_STA_INFO => {
                 parse_station_info_nested(payload, &mut station);
             }
@@ -827,56 +811,48 @@ fn parse_station(data: &[u8]) -> StationInfo {
 fn parse_station_info_nested(data: &[u8], station: &mut StationInfo) {
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
-            NL80211_STA_INFO_INACTIVE_TIME => {
-                if payload.len() >= 4 {
+            NL80211_STA_INFO_INACTIVE_TIME
+                if payload.len() >= 4 => {
                     station.inactive_time_ms =
                         Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
-            }
-            NL80211_STA_INFO_RX_BYTES => {
-                if payload.len() >= 4 && station.rx_bytes.is_none() {
+            NL80211_STA_INFO_RX_BYTES
+                if payload.len() >= 4 && station.rx_bytes.is_none() => {
                     station.rx_bytes =
                         Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()) as u64);
                 }
-            }
-            NL80211_STA_INFO_TX_BYTES => {
-                if payload.len() >= 4 && station.tx_bytes.is_none() {
+            NL80211_STA_INFO_TX_BYTES
+                if payload.len() >= 4 && station.tx_bytes.is_none() => {
                     station.tx_bytes =
                         Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()) as u64);
                 }
-            }
-            NL80211_STA_INFO_RX_BYTES64 => {
-                if payload.len() >= 8 {
+            NL80211_STA_INFO_RX_BYTES64
+                if payload.len() >= 8 => {
                     station.rx_bytes = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
                 }
-            }
-            NL80211_STA_INFO_TX_BYTES64 => {
-                if payload.len() >= 8 {
+            NL80211_STA_INFO_TX_BYTES64
+                if payload.len() >= 8 => {
                     station.tx_bytes = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
                 }
-            }
-            NL80211_STA_INFO_SIGNAL => {
-                if !payload.is_empty() {
+            NL80211_STA_INFO_SIGNAL
+                if !payload.is_empty() => {
                     station.signal_dbm = Some(payload[0] as i8);
                 }
-            }
-            NL80211_STA_INFO_SIGNAL_AVG => {
-                if !payload.is_empty() {
+            NL80211_STA_INFO_SIGNAL_AVG
+                if !payload.is_empty() => {
                     station.signal_avg_dbm = Some(payload[0] as i8);
                 }
-            }
             NL80211_STA_INFO_TX_BITRATE => {
                 station.tx_bitrate = Some(parse_bitrate_info(payload));
             }
             NL80211_STA_INFO_RX_BITRATE => {
                 station.rx_bitrate = Some(parse_bitrate_info(payload));
             }
-            NL80211_STA_INFO_CONNECTED_TIME => {
-                if payload.len() >= 4 {
+            NL80211_STA_INFO_CONNECTED_TIME
+                if payload.len() >= 4 => {
                     station.connected_time_secs =
                         Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
-            }
             _ => {}
         }
     }
@@ -892,23 +868,20 @@ fn parse_bitrate_info(data: &[u8]) -> BitrateInfo {
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
-            NL80211_RATE_INFO_BITRATE => {
-                if payload.len() >= 2 && info.bitrate_100kbps.is_none() {
+            NL80211_RATE_INFO_BITRATE
+                if payload.len() >= 2 && info.bitrate_100kbps.is_none() => {
                     info.bitrate_100kbps =
                         Some(u16::from_ne_bytes(payload[..2].try_into().unwrap()) as u32);
                 }
-            }
-            NL80211_RATE_INFO_BITRATE32 => {
-                if payload.len() >= 4 {
+            NL80211_RATE_INFO_BITRATE32
+                if payload.len() >= 4 => {
                     info.bitrate_100kbps =
                         Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
-            }
-            NL80211_RATE_INFO_MCS | NL80211_RATE_INFO_VHT_MCS => {
-                if !payload.is_empty() {
+            NL80211_RATE_INFO_MCS | NL80211_RATE_INFO_VHT_MCS
+                if !payload.is_empty() => {
                     info.mcs = Some(payload[0]);
                 }
-            }
             NL80211_RATE_INFO_SHORT_GI => {
                 info.short_gi = true; // Flag attribute
             }
@@ -942,11 +915,10 @@ fn parse_phy(data: &[u8]) -> PhyInfo {
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
-            NL80211_ATTR_WIPHY => {
-                if payload.len() >= 4 {
+            NL80211_ATTR_WIPHY
+                if payload.len() >= 4 => {
                     phy.index = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
             NL80211_ATTR_WIPHY_NAME => {
                 phy.name = attr_str(payload).unwrap_or_default();
             }
@@ -963,11 +935,10 @@ fn parse_phy(data: &[u8]) -> PhyInfo {
                     }
                 }
             }
-            NL80211_ATTR_MAX_SCAN_SSIDS => {
-                if !payload.is_empty() {
+            NL80211_ATTR_MAX_SCAN_SSIDS
+                if !payload.is_empty() => {
                     phy.max_scan_ssids = Some(payload[0]);
                 }
-            }
             _ => {}
         }
     }
@@ -1000,16 +971,14 @@ fn parse_band(data: &[u8]) -> Band {
                     }
                 }
             }
-            NL80211_BAND_ATTR_HT_CAPA => {
-                if payload.len() >= 2 {
+            NL80211_BAND_ATTR_HT_CAPA
+                if payload.len() >= 2 => {
                     band.ht_capa = Some(u16::from_ne_bytes(payload[..2].try_into().unwrap()));
                 }
-            }
-            NL80211_BAND_ATTR_VHT_CAPA => {
-                if payload.len() >= 4 {
+            NL80211_BAND_ATTR_VHT_CAPA
+                if payload.len() >= 4 => {
                     band.vht_capa = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
-            }
             _ => {}
         }
     }
@@ -1028,11 +997,10 @@ fn parse_frequency(data: &[u8]) -> Frequency {
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
-            NL80211_FREQUENCY_ATTR_FREQ => {
-                if payload.len() >= 4 {
+            NL80211_FREQUENCY_ATTR_FREQ
+                if payload.len() >= 4 => {
                     freq.freq = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
             NL80211_FREQUENCY_ATTR_DISABLED => {
                 freq.disabled = true; // Flag attribute
             }
@@ -1042,11 +1010,10 @@ fn parse_frequency(data: &[u8]) -> Frequency {
             NL80211_FREQUENCY_ATTR_RADAR => {
                 freq.radar = true;
             }
-            NL80211_FREQUENCY_ATTR_MAX_TX_POWER => {
-                if payload.len() >= 4 {
+            NL80211_FREQUENCY_ATTR_MAX_TX_POWER
+                if payload.len() >= 4 => {
                     freq.max_power_mbm = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
             _ => {}
         }
     }
