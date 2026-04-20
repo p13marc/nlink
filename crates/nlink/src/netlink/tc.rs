@@ -1670,6 +1670,376 @@ impl QdiscConfig for QfqConfig {
 }
 
 // ============================================================================
+// CakeConfig
+// ============================================================================
+
+/// CAKE diffserv mode (priority bands by DSCP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CakeDiffserv {
+    /// 3 tins (default for typical home gateways).
+    Diffserv3,
+    /// 4 tins.
+    Diffserv4,
+    /// 8 tins (maximum granularity).
+    Diffserv8,
+    /// 1 tin (no DSCP differentiation).
+    Besteffort,
+    /// Per-IP-precedence prioritization.
+    Precedence,
+}
+
+/// CAKE flow isolation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CakeFlowMode {
+    /// No flow isolation.
+    Flowblind,
+    /// Per source-IP.
+    Srchost,
+    /// Per destination-IP.
+    Dsthost,
+    /// Per host pair (src+dst combined).
+    Hosts,
+    /// Per 5-tuple flow.
+    Flows,
+    /// Hierarchical: dual-isolate on src host, then per-flow.
+    DualSrchost,
+    /// Hierarchical: dual-isolate on dst host, then per-flow.
+    DualDsthost,
+    /// Triple isolation: src-host + dst-host + flow.
+    Triple,
+}
+
+/// CAKE ATM/PTM overhead compensation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CakeAtmMode {
+    /// No overhead compensation.
+    None,
+    /// ATM (53-byte cells, 5-byte header).
+    Atm,
+    /// PTM (G.992.3-style).
+    Ptm,
+}
+
+/// CAKE ACK filtering mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CakeAckFilter {
+    /// No ACK filtering.
+    Disabled,
+    /// Conservative ACK filtering.
+    Filter,
+    /// Aggressive ACK filtering (drops more redundant ACKs).
+    Aggressive,
+}
+
+/// CAKE (Common Applications Kept Enhanced) qdisc configuration.
+///
+/// The most-used modern AQM qdisc on real-world deployments —
+/// OpenWrt's default and the bufferbloat.net community recommendation.
+/// Combines a token-bucket shaper, fair queueing, and CoDel-style AQM
+/// in a single self-tuning qdisc.
+///
+/// This is the typed builder mirroring the rest of the qdisc lineup.
+/// The legacy string-args interface in `tc/options/cake.rs` remains
+/// for `Connection::add_qdisc("eth0", "cake", &["bandwidth", ...])`
+/// callers, but the typed builder is preferred for new code.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::{CakeConfig, CakeFlowMode, CakeDiffserv};
+/// use nlink::Rate;
+/// use std::time::Duration;
+///
+/// let config = CakeConfig::new()
+///     .bandwidth(Rate::mbit(100))
+///     .rtt(Duration::from_millis(80))
+///     .flow_mode(CakeFlowMode::Triple)
+///     .diffserv_mode(CakeDiffserv::Diffserv4)
+///     .nat(true)
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct CakeConfig {
+    /// Bandwidth shaping limit. `None` = unlimited (let cake autorate).
+    pub bandwidth: Option<crate::util::Rate>,
+    /// Estimated round-trip time (drives CoDel target).
+    pub rtt: Option<Duration>,
+    /// Explicit CoDel target delay (overrides RTT-derived default).
+    pub target: Option<Duration>,
+    /// Per-packet overhead compensation in bytes (can be negative).
+    pub overhead: Option<i32>,
+    /// Minimum packet unit (size to charge for sub-MPU packets).
+    pub mpu: Option<u32>,
+    /// Per-qdisc memory limit.
+    pub memory_limit: Option<crate::util::Bytes>,
+    /// fwmark mask used for tin classification.
+    pub fwmark: Option<u32>,
+    /// Diffserv tin layout.
+    pub diffserv_mode: Option<CakeDiffserv>,
+    /// Flow isolation mode.
+    pub flow_mode: Option<CakeFlowMode>,
+    /// ATM/PTM cell-overhead compensation.
+    pub atm_mode: Option<CakeAtmMode>,
+    /// ACK filtering mode.
+    pub ack_filter: Option<CakeAckFilter>,
+    /// Enable autorate-ingress (estimate bandwidth from observed flow).
+    pub autorate: bool,
+    /// Enable NAT mode (rewrite addresses for hash classification).
+    pub nat: bool,
+    /// Disable overhead compensation entirely (raw mode).
+    pub raw: bool,
+    /// Enable DSCP washing (clear DSCP on egress).
+    pub wash: bool,
+    /// Treat as ingress qdisc (use IFB for inbound shaping).
+    pub ingress: bool,
+    /// Split GSO super-segments before queueing.
+    pub split_gso: bool,
+}
+
+impl Default for CakeConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CakeConfig {
+    /// Create a new CAKE configuration builder with all options unset.
+    pub fn new() -> Self {
+        Self {
+            bandwidth: None,
+            rtt: None,
+            target: None,
+            overhead: None,
+            mpu: None,
+            memory_limit: None,
+            fwmark: None,
+            diffserv_mode: None,
+            flow_mode: None,
+            atm_mode: None,
+            ack_filter: None,
+            autorate: false,
+            nat: false,
+            raw: false,
+            wash: false,
+            ingress: false,
+            split_gso: false,
+        }
+    }
+
+    /// Set the bandwidth shaping limit.
+    pub fn bandwidth(mut self, rate: crate::util::Rate) -> Self {
+        self.bandwidth = Some(rate);
+        self
+    }
+
+    /// Mark the qdisc as unlimited (no shaping).
+    ///
+    /// Equivalent to `bandwidth(Rate::ZERO)` — the kernel encodes
+    /// bandwidth=0 as the unlimited sentinel.
+    pub fn unlimited(mut self) -> Self {
+        self.bandwidth = Some(crate::util::Rate::ZERO);
+        self
+    }
+
+    /// Set the estimated round-trip time.
+    pub fn rtt(mut self, rtt: Duration) -> Self {
+        self.rtt = Some(rtt);
+        self
+    }
+
+    /// Set the explicit CoDel target delay.
+    pub fn target(mut self, target: Duration) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    /// Set the per-packet overhead in bytes (can be negative).
+    pub fn overhead(mut self, overhead: i32) -> Self {
+        self.overhead = Some(overhead);
+        self
+    }
+
+    /// Set the minimum packet unit.
+    pub fn mpu(mut self, mpu: u32) -> Self {
+        self.mpu = Some(mpu);
+        self
+    }
+
+    /// Set the per-qdisc memory limit.
+    pub fn memory_limit(mut self, mem: crate::util::Bytes) -> Self {
+        self.memory_limit = Some(mem);
+        self
+    }
+
+    /// Set the fwmark mask used for tin classification.
+    pub fn fwmark(mut self, mask: u32) -> Self {
+        self.fwmark = Some(mask);
+        self
+    }
+
+    /// Set the diffserv tin layout.
+    pub fn diffserv_mode(mut self, mode: CakeDiffserv) -> Self {
+        self.diffserv_mode = Some(mode);
+        self
+    }
+
+    /// Set the flow isolation mode.
+    pub fn flow_mode(mut self, mode: CakeFlowMode) -> Self {
+        self.flow_mode = Some(mode);
+        self
+    }
+
+    /// Set the ATM/PTM overhead compensation mode.
+    pub fn atm_mode(mut self, mode: CakeAtmMode) -> Self {
+        self.atm_mode = Some(mode);
+        self
+    }
+
+    /// Set the ACK filtering mode.
+    pub fn ack_filter(mut self, mode: CakeAckFilter) -> Self {
+        self.ack_filter = Some(mode);
+        self
+    }
+
+    /// Enable autorate-ingress.
+    pub fn autorate(mut self, enable: bool) -> Self {
+        self.autorate = enable;
+        self
+    }
+
+    /// Enable NAT mode.
+    pub fn nat(mut self, enable: bool) -> Self {
+        self.nat = enable;
+        self
+    }
+
+    /// Disable overhead compensation (raw mode).
+    pub fn raw(mut self, enable: bool) -> Self {
+        self.raw = enable;
+        self
+    }
+
+    /// Enable DSCP washing.
+    pub fn wash(mut self, enable: bool) -> Self {
+        self.wash = enable;
+        self
+    }
+
+    /// Mark this as an ingress shaper.
+    pub fn ingress(mut self, enable: bool) -> Self {
+        self.ingress = enable;
+        self
+    }
+
+    /// Enable GSO super-segment splitting.
+    pub fn split_gso(mut self, enable: bool) -> Self {
+        self.split_gso = enable;
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for CakeConfig {
+    fn kind(&self) -> &'static str {
+        "cake"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::cake::*;
+
+        if let Some(bw) = self.bandwidth {
+            builder.append_attr_u64(TCA_CAKE_BASE_RATE64, bw.as_bytes_per_sec());
+        }
+        if let Some(rtt) = self.rtt {
+            builder.append_attr_u32(TCA_CAKE_RTT, rtt.as_micros() as u32);
+        }
+        if let Some(target) = self.target {
+            builder.append_attr_u32(TCA_CAKE_TARGET, target.as_micros() as u32);
+        }
+        if let Some(overhead) = self.overhead {
+            builder.append_attr(TCA_CAKE_OVERHEAD, &overhead.to_ne_bytes());
+        }
+        if let Some(mpu) = self.mpu {
+            builder.append_attr_u32(TCA_CAKE_MPU, mpu);
+        }
+        if let Some(mem) = self.memory_limit {
+            builder.append_attr_u32(TCA_CAKE_MEMORY, mem.as_u32_saturating());
+        }
+        if let Some(mask) = self.fwmark {
+            builder.append_attr_u32(TCA_CAKE_FWMARK, mask);
+        }
+        if let Some(mode) = self.diffserv_mode {
+            let v = match mode {
+                CakeDiffserv::Diffserv3 => CAKE_DIFFSERV_DIFFSERV3,
+                CakeDiffserv::Diffserv4 => CAKE_DIFFSERV_DIFFSERV4,
+                CakeDiffserv::Diffserv8 => CAKE_DIFFSERV_DIFFSERV8,
+                CakeDiffserv::Besteffort => CAKE_DIFFSERV_BESTEFFORT,
+                CakeDiffserv::Precedence => CAKE_DIFFSERV_PRECEDENCE,
+            };
+            builder.append_attr_u32(TCA_CAKE_DIFFSERV_MODE, v);
+        }
+        if let Some(mode) = self.flow_mode {
+            let v = match mode {
+                CakeFlowMode::Flowblind => CAKE_FLOW_NONE,
+                CakeFlowMode::Srchost => CAKE_FLOW_SRC_IP,
+                CakeFlowMode::Dsthost => CAKE_FLOW_DST_IP,
+                CakeFlowMode::Hosts => CAKE_FLOW_HOSTS,
+                CakeFlowMode::Flows => CAKE_FLOW_FLOWS,
+                CakeFlowMode::DualSrchost => CAKE_FLOW_DUAL_SRC,
+                CakeFlowMode::DualDsthost => CAKE_FLOW_DUAL_DST,
+                CakeFlowMode::Triple => CAKE_FLOW_TRIPLE,
+            };
+            builder.append_attr_u32(TCA_CAKE_FLOW_MODE, v);
+        }
+        if let Some(mode) = self.atm_mode {
+            let v = match mode {
+                CakeAtmMode::None => CAKE_ATM_NONE,
+                CakeAtmMode::Atm => CAKE_ATM_ATM,
+                CakeAtmMode::Ptm => CAKE_ATM_PTM,
+            };
+            builder.append_attr_u32(TCA_CAKE_ATM, v);
+        }
+        if let Some(mode) = self.ack_filter {
+            let v = match mode {
+                CakeAckFilter::Disabled => CAKE_ACK_NONE,
+                CakeAckFilter::Filter => CAKE_ACK_FILTER,
+                CakeAckFilter::Aggressive => CAKE_ACK_AGGRESSIVE,
+            };
+            builder.append_attr_u32(TCA_CAKE_ACK_FILTER, v);
+        }
+        if self.autorate {
+            builder.append_attr_u32(TCA_CAKE_AUTORATE, 1);
+        }
+        if self.nat {
+            builder.append_attr_u32(TCA_CAKE_NAT, 1);
+        }
+        if self.raw {
+            builder.append_attr_u32(TCA_CAKE_RAW, 1);
+        }
+        if self.wash {
+            builder.append_attr_u32(TCA_CAKE_WASH, 1);
+        }
+        if self.ingress {
+            builder.append_attr_u32(TCA_CAKE_INGRESS, 1);
+        }
+        if self.split_gso {
+            builder.append_attr_u32(TCA_CAKE_SPLIT_GSO, 1);
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
 // PlugConfig (Plug/Unplug qdisc)
 // ============================================================================
 

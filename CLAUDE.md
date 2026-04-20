@@ -74,7 +74,7 @@ crates/nlink/src/
     events.rs         # NetworkEvent enum for typed event handling
     namespace.rs      # Network namespace utilities
     stats.rs          # Statistics tracking (StatsSnapshot, StatsTracker)
-    tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, HtbConfig, TbfConfig, PrioConfig, SfqConfig, RedConfig, PieConfig, FqPieConfig, DrrConfig, QfqConfig, HfscConfig, MqprioConfig, TaprioConfig, EtfConfig, PlugConfig, etc.)
+    tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, HtbConfig, TbfConfig, PrioConfig, SfqConfig, RedConfig, PieConfig, FqPieConfig, CakeConfig, DrrConfig, QfqConfig, HfscConfig, MqprioConfig, TaprioConfig, EtfConfig, PlugConfig, etc.)
     tc_options.rs     # TC options parsing (netem loss models, etc.)
     filter.rs         # TC filter builders (U32Filter, FlowerFilter, MatchallFilter, FwFilter, BpfFilter, BasicFilter, CgroupFilter, RouteFilter, FlowFilter)
     action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ConnmarkAction, CsumAction, SampleAction, CtAction, PeditAction, BpfAction, SimpleAction, ActionList)
@@ -1808,6 +1808,23 @@ let fq_pie = FqPieConfig::new()
     .ecn(true)
     .build();
 conn.add_qdisc("eth0", fq_pie).await?;
+
+// CAKE — typed builder for the modern self-tuning AQM (OpenWrt's default).
+// The legacy `tc qdisc add ... cake bandwidth ...` string-args API in
+// `tc/options/cake.rs` still works, but new code should prefer this.
+use nlink::netlink::tc::{CakeConfig, CakeFlowMode, CakeDiffserv, CakeAckFilter};
+use nlink::Rate;
+let cake = CakeConfig::new()
+    .bandwidth(Rate::mbit(100))
+    .rtt(Duration::from_millis(80))
+    .flow_mode(CakeFlowMode::Triple)         // src+dst+flow isolation
+    .diffserv_mode(CakeDiffserv::Diffserv4)  // 4 priority tins by DSCP
+    .ack_filter(CakeAckFilter::Filter)       // drop redundant ACKs
+    .nat(true)                               // hash on translated addrs
+    .wash(true)                              // clear DSCP on egress
+    .build();
+conn.add_qdisc("eth0", cake).await?;
+// Use `.unlimited()` for the autorate-only mode (no shaping).
 
 // Ingress qdisc (for ingress filtering)
 let ingress = IngressConfig::new();

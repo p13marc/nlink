@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 133 (PR A): typed `CakeConfig` + `CakeOptions` parser
+
+- `CakeConfig` typed qdisc builder for `sch_cake`, the modern
+  self-tuning AQM (OpenWrt's default and the `bufferbloat.net`
+  recommended setup). Brings cake to typed-builder parity with the
+  rest of the qdisc lineup; the legacy string-args interface in
+  `tc/options/cake.rs` keeps working for `Connection::add_qdisc("eth0",
+  "cake", &["bandwidth", ...])` callers.
+- Typed mode enums: `CakeDiffserv` (Diffserv3 / Diffserv4 / Diffserv8
+  / Besteffort / Precedence), `CakeFlowMode` (Flowblind / Srchost /
+  Dsthost / Hosts / Flows / DualSrchost / DualDsthost / Triple),
+  `CakeAtmMode` (None / Atm / Ptm), `CakeAckFilter` (Disabled /
+  Filter / Aggressive). All `#[non_exhaustive]`.
+- `QdiscOptions::Cake(CakeOptions)` parser variant for dump-side
+  inspection, with `bandwidth() -> Option<Rate>`, `rtt() ->
+  Option<Duration>`, `target() -> Option<Duration>` accessors. Per-tin
+  stats (the cake selling point) are scoped for a follow-up — they
+  arrive via `xstats` and need a separate parser.
+- `unlimited()` shorthand for the no-shaping mode (encoded as
+  bandwidth=0 on the wire).
+
 ### Added — Plan 133 (PR D): `BpfAction` + `SimpleAction`
 
 - `BpfAction` — companion to `BpfFilter`. Runs an eBPF program as a

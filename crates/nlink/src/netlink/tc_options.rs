@@ -46,6 +46,8 @@ pub enum QdiscOptions {
     Sfq(SfqOptions),
     /// fq_pie - Flow Queue PIE
     FqPie(FqPieOptions),
+    /// cake - Common Applications Kept Enhanced
+    Cake(CakeOptions),
     /// Unknown qdisc type (contains raw options)
     Unknown(Vec<u8>),
 }
@@ -792,6 +794,71 @@ impl FqPieOptions {
     }
 }
 
+/// CAKE qdisc options.
+///
+/// Mirrors the kernel's `TCA_CAKE_*` attribute set as echoed back on
+/// a qdisc dump.
+#[derive(Debug, Clone, Default)]
+pub struct CakeOptions {
+    /// Bandwidth shaping limit in bytes/sec (0 = unlimited).
+    pub bandwidth_bps: u64,
+    /// Estimated round-trip time in microseconds (0 = unset).
+    pub rtt_us: u32,
+    /// Explicit CoDel target delay in microseconds (0 = unset).
+    pub target_us: u32,
+    /// Per-packet overhead in bytes (signed; can be negative).
+    pub overhead: i32,
+    /// Minimum packet unit (bytes).
+    pub mpu: u32,
+    /// Memory limit in bytes (0 = unset).
+    pub memory_limit: u32,
+    /// fwmark mask used for tin classification (0 = unset).
+    pub fwmark: u32,
+    /// Diffserv mode (kernel value, see `CAKE_DIFFSERV_*`).
+    pub diffserv_mode: u32,
+    /// Flow isolation mode (kernel value, see `CAKE_FLOW_*`).
+    pub flow_mode: u32,
+    /// ATM/PTM mode (kernel value, see `CAKE_ATM_*`).
+    pub atm_mode: u32,
+    /// ACK filter mode (kernel value, see `CAKE_ACK_*`).
+    pub ack_filter: u32,
+    pub autorate: bool,
+    pub nat: bool,
+    pub raw: bool,
+    pub wash: bool,
+    pub ingress: bool,
+    pub split_gso: bool,
+}
+
+impl CakeOptions {
+    /// Get the bandwidth as a typed `Rate`, or `None` if unlimited (0).
+    pub fn bandwidth(&self) -> Option<crate::util::Rate> {
+        if self.bandwidth_bps > 0 {
+            Some(crate::util::Rate::bytes_per_sec(self.bandwidth_bps))
+        } else {
+            None
+        }
+    }
+
+    /// Get the RTT as a `Duration`, or `None` if unset.
+    pub fn rtt(&self) -> Option<std::time::Duration> {
+        if self.rtt_us > 0 {
+            Some(std::time::Duration::from_micros(self.rtt_us as u64))
+        } else {
+            None
+        }
+    }
+
+    /// Get the target delay as a `Duration`, or `None` if unset.
+    pub fn target(&self) -> Option<std::time::Duration> {
+        if self.target_us > 0 {
+            Some(std::time::Duration::from_micros(self.target_us as u64))
+        } else {
+            None
+        }
+    }
+}
+
 /// Parse qdisc options from a TcMessage.
 ///
 /// Returns `None` if the message has no kind or no options.
@@ -807,6 +874,7 @@ pub fn parse_qdisc_options(msg: &TcMessage) -> Option<QdiscOptions> {
         "prio" => QdiscOptions::Prio(parse_prio_options(data)),
         "sfq" => QdiscOptions::Sfq(parse_sfq_options(data)),
         "fq_pie" => QdiscOptions::FqPie(parse_fq_pie_options(data)),
+        "cake" => QdiscOptions::Cake(parse_cake_options(data)),
         _ => QdiscOptions::Unknown(data.clone()),
     })
 }
@@ -1420,6 +1488,149 @@ fn parse_fq_pie_options(data: &[u8]) -> FqPieOptions {
             TCA_FQ_PIE_DQ_RATE_ESTIMATOR => {
                 if let Some(v) = read_u32(payload) {
                     opts.dq_rate_estimator = v != 0;
+                }
+            }
+            _ => {}
+        }
+
+        let aligned = (len + 3) & !3;
+        if input.len() <= aligned {
+            break;
+        }
+        input = &input[aligned..];
+    }
+
+    opts
+}
+
+fn parse_cake_options(data: &[u8]) -> CakeOptions {
+    use super::types::tc::qdisc::cake::*;
+
+    let mut opts = CakeOptions::default();
+    let mut input = data;
+
+    while input.len() >= 4 {
+        let Some(len) = input
+            .get(..2)
+            .and_then(|b| b.try_into().ok())
+            .map(u16::from_ne_bytes)
+        else {
+            break;
+        };
+        let len = len as usize;
+        let Some(attr_type) = input
+            .get(2..4)
+            .and_then(|b| b.try_into().ok())
+            .map(u16::from_ne_bytes)
+        else {
+            break;
+        };
+
+        if len < 4 || input.len() < len {
+            break;
+        }
+        let payload = &input[4..len];
+
+        let read_u32 = |p: &[u8]| -> Option<u32> {
+            p.get(..4)
+                .and_then(|b| b.try_into().ok())
+                .map(u32::from_ne_bytes)
+        };
+        let read_i32 = |p: &[u8]| -> Option<i32> {
+            p.get(..4)
+                .and_then(|b| b.try_into().ok())
+                .map(i32::from_ne_bytes)
+        };
+        let read_u64 = |p: &[u8]| -> Option<u64> {
+            p.get(..8)
+                .and_then(|b| b.try_into().ok())
+                .map(u64::from_ne_bytes)
+        };
+
+        match attr_type & 0x3FFF {
+            TCA_CAKE_BASE_RATE64 => {
+                if let Some(v) = read_u64(payload) {
+                    opts.bandwidth_bps = v;
+                }
+            }
+            TCA_CAKE_RTT => {
+                if let Some(v) = read_u32(payload) {
+                    opts.rtt_us = v;
+                }
+            }
+            TCA_CAKE_TARGET => {
+                if let Some(v) = read_u32(payload) {
+                    opts.target_us = v;
+                }
+            }
+            TCA_CAKE_OVERHEAD => {
+                if let Some(v) = read_i32(payload) {
+                    opts.overhead = v;
+                }
+            }
+            TCA_CAKE_MPU => {
+                if let Some(v) = read_u32(payload) {
+                    opts.mpu = v;
+                }
+            }
+            TCA_CAKE_MEMORY => {
+                if let Some(v) = read_u32(payload) {
+                    opts.memory_limit = v;
+                }
+            }
+            TCA_CAKE_FWMARK => {
+                if let Some(v) = read_u32(payload) {
+                    opts.fwmark = v;
+                }
+            }
+            TCA_CAKE_DIFFSERV_MODE => {
+                if let Some(v) = read_u32(payload) {
+                    opts.diffserv_mode = v;
+                }
+            }
+            TCA_CAKE_FLOW_MODE => {
+                if let Some(v) = read_u32(payload) {
+                    opts.flow_mode = v;
+                }
+            }
+            TCA_CAKE_ATM => {
+                if let Some(v) = read_u32(payload) {
+                    opts.atm_mode = v;
+                }
+            }
+            TCA_CAKE_ACK_FILTER => {
+                if let Some(v) = read_u32(payload) {
+                    opts.ack_filter = v;
+                }
+            }
+            TCA_CAKE_AUTORATE => {
+                if let Some(v) = read_u32(payload) {
+                    opts.autorate = v != 0;
+                }
+            }
+            TCA_CAKE_NAT => {
+                if let Some(v) = read_u32(payload) {
+                    opts.nat = v != 0;
+                }
+            }
+            TCA_CAKE_RAW => {
+                if let Some(v) = read_u32(payload) {
+                    opts.raw = v != 0;
+                }
+            }
+            TCA_CAKE_WASH => {
+                if let Some(v) = read_u32(payload) {
+                    opts.wash = v != 0;
+                }
+            }
+            TCA_CAKE_INGRESS => {
+                if let Some(v) = read_u32(payload) {
+                    opts.ingress = v != 0;
+                }
+            }
+            TCA_CAKE_SPLIT_GSO => {
+                if let Some(v) = read_u32(payload) {
+                    opts.split_gso = v != 0;
                 }
             }
             _ => {}
@@ -2377,5 +2588,85 @@ mod tests {
         assert_eq!(opts.alpha, 2);
         assert_eq!(opts.beta, 20);
         assert!(opts.ecn);
+    }
+
+    #[test]
+    fn test_cake_options_default() {
+        let opts = CakeOptions::default();
+        assert!(opts.bandwidth().is_none());
+        assert!(opts.rtt().is_none());
+        assert!(opts.target().is_none());
+        assert_eq!(opts.diffserv_mode, 0);
+        assert!(!opts.nat);
+    }
+
+    #[test]
+    fn test_cake_options_bandwidth_accessor() {
+        use crate::util::Rate;
+        let opts = CakeOptions {
+            bandwidth_bps: 12_500_000, // 100 Mbps
+            ..Default::default()
+        };
+        assert_eq!(opts.bandwidth(), Some(Rate::mbit(100)));
+    }
+
+    #[test]
+    fn test_cake_round_trip_via_writer() {
+        use std::time::Duration;
+
+        use super::super::tc::{CakeConfig, CakeDiffserv, CakeFlowMode};
+        use crate::netlink::builder::MessageBuilder;
+        use crate::netlink::tc::QdiscConfig;
+        use crate::util::Rate;
+
+        let cfg = CakeConfig::new()
+            .bandwidth(Rate::mbit(100))
+            .rtt(Duration::from_millis(80))
+            .target(Duration::from_millis(5))
+            .flow_mode(CakeFlowMode::Triple)
+            .diffserv_mode(CakeDiffserv::Diffserv4)
+            .nat(true)
+            .wash(true)
+            .build();
+
+        let mut builder = MessageBuilder::new(0, 0);
+        let start = builder.len();
+        cfg.write_options(&mut builder).unwrap();
+        let end = builder.len();
+        let blob = builder.as_bytes()[start..end].to_vec();
+
+        let opts = parse_cake_options(&blob);
+        assert_eq!(opts.bandwidth_bps, 12_500_000);
+        assert_eq!(opts.rtt_us, 80_000);
+        assert_eq!(opts.target_us, 5_000);
+        assert_eq!(
+            opts.flow_mode,
+            super::super::types::tc::qdisc::cake::CAKE_FLOW_TRIPLE,
+        );
+        assert_eq!(
+            opts.diffserv_mode,
+            super::super::types::tc::qdisc::cake::CAKE_DIFFSERV_DIFFSERV4,
+        );
+        assert!(opts.nat);
+        assert!(opts.wash);
+        // Round-trip Rate accessor.
+        assert_eq!(opts.bandwidth(), Some(Rate::mbit(100)));
+    }
+
+    #[test]
+    fn test_cake_unlimited_writes_zero_rate() {
+        use super::super::tc::CakeConfig;
+        use crate::netlink::builder::MessageBuilder;
+        use crate::netlink::tc::QdiscConfig;
+
+        let cfg = CakeConfig::new().unlimited().build();
+        let mut builder = MessageBuilder::new(0, 0);
+        let start = builder.len();
+        cfg.write_options(&mut builder).unwrap();
+        let blob = builder.as_bytes()[start..].to_vec();
+
+        let opts = parse_cake_options(&blob);
+        assert_eq!(opts.bandwidth_bps, 0);
+        assert!(opts.bandwidth().is_none());
     }
 }
