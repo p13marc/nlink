@@ -266,3 +266,8 @@ path = "examples/route/timeout.rs"
 [[example]]
 name = "impair_per_peer"
 path = "examples/impair/per_peer.rs"
+
+# High-level rate limiting (RateLimiter + PerHostLimiter + reconcile)
+[[example]]
+name = "ratelimit_simple"
+path = "examples/ratelimit/simple.rs"
