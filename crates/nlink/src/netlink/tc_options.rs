@@ -44,6 +44,8 @@ pub enum QdiscOptions {
     Prio(PrioOptions),
     /// sfq - Stochastic Fairness Queuing
     Sfq(SfqOptions),
+    /// fq_pie - Flow Queue PIE
+    FqPie(FqPieOptions),
     /// Unknown qdisc type (contains raw options)
     Unknown(Vec<u8>),
 }
@@ -728,6 +730,68 @@ pub struct SfqOptions {
     pub headdrop: Option<bool>,
 }
 
+/// fq_pie qdisc options.
+///
+/// Mirrors the kernel's `TCA_FQ_PIE_*` attribute set (Linux 5.6+).
+#[derive(Debug, Clone, Default)]
+pub struct FqPieOptions {
+    /// Queue limit in packets.
+    pub limit: u32,
+    /// Number of flow buckets.
+    pub flows: u32,
+    /// Target queueing delay in microseconds.
+    pub target_us: u32,
+    /// Drop-probability update interval in microseconds.
+    pub tupdate_us: u32,
+    /// Alpha parameter (P controller).
+    pub alpha: u32,
+    /// Beta parameter (I controller).
+    pub beta: u32,
+    /// DRR quantum in bytes.
+    pub quantum: u32,
+    /// Per-qdisc memory limit in bytes.
+    pub memory_limit: u32,
+    /// ECN marking probability (per-mille — divide by 10 for percent).
+    pub ecn_prob_permille: u32,
+    /// ECN marking enabled.
+    pub ecn: bool,
+    /// Byte mode enabled.
+    pub bytemode: bool,
+    /// Dequeue rate estimator enabled.
+    pub dq_rate_estimator: bool,
+}
+
+impl FqPieOptions {
+    /// Get the target queueing delay as a `Duration`, or `None` if zero.
+    pub fn target(&self) -> Option<std::time::Duration> {
+        if self.target_us > 0 {
+            Some(std::time::Duration::from_micros(self.target_us as u64))
+        } else {
+            None
+        }
+    }
+
+    /// Get the update interval as a `Duration`, or `None` if zero.
+    pub fn tupdate(&self) -> Option<std::time::Duration> {
+        if self.tupdate_us > 0 {
+            Some(std::time::Duration::from_micros(self.tupdate_us as u64))
+        } else {
+            None
+        }
+    }
+
+    /// Get the ECN probability as a `Percent`, or `None` if zero.
+    pub fn ecn_prob(&self) -> Option<crate::util::Percent> {
+        if self.ecn_prob_permille > 0 {
+            Some(crate::util::Percent::new(
+                self.ecn_prob_permille as f64 / 10.0,
+            ))
+        } else {
+            None
+        }
+    }
+}
+
 /// Parse qdisc options from a TcMessage.
 ///
 /// Returns `None` if the message has no kind or no options.
@@ -742,6 +806,7 @@ pub fn parse_qdisc_options(msg: &TcMessage) -> Option<QdiscOptions> {
         "netem" => QdiscOptions::Netem(parse_netem_options(data)),
         "prio" => QdiscOptions::Prio(parse_prio_options(data)),
         "sfq" => QdiscOptions::Sfq(parse_sfq_options(data)),
+        "fq_pie" => QdiscOptions::FqPie(parse_fq_pie_options(data)),
         _ => QdiscOptions::Unknown(data.clone()),
     })
 }
@@ -1260,6 +1325,114 @@ fn parse_prio_options(data: &[u8]) -> PrioOptions {
     } else {
         PrioOptions::default()
     }
+}
+
+fn parse_fq_pie_options(data: &[u8]) -> FqPieOptions {
+    use super::types::tc::qdisc::fq_pie::*;
+
+    let mut opts = FqPieOptions::default();
+    let mut input = data;
+
+    while input.len() >= 4 {
+        let Some(len) = input
+            .get(..2)
+            .and_then(|b| b.try_into().ok())
+            .map(u16::from_ne_bytes)
+        else {
+            break;
+        };
+        let len = len as usize;
+        let Some(attr_type) = input
+            .get(2..4)
+            .and_then(|b| b.try_into().ok())
+            .map(u16::from_ne_bytes)
+        else {
+            break;
+        };
+
+        if len < 4 || input.len() < len {
+            break;
+        }
+        let payload = &input[4..len];
+
+        let read_u32 = |p: &[u8]| -> Option<u32> {
+            p.get(..4)
+                .and_then(|b| b.try_into().ok())
+                .map(u32::from_ne_bytes)
+        };
+
+        match attr_type & 0x3FFF {
+            TCA_FQ_PIE_LIMIT => {
+                if let Some(v) = read_u32(payload) {
+                    opts.limit = v;
+                }
+            }
+            TCA_FQ_PIE_FLOWS => {
+                if let Some(v) = read_u32(payload) {
+                    opts.flows = v;
+                }
+            }
+            TCA_FQ_PIE_TARGET => {
+                if let Some(v) = read_u32(payload) {
+                    opts.target_us = v;
+                }
+            }
+            TCA_FQ_PIE_TUPDATE => {
+                if let Some(v) = read_u32(payload) {
+                    opts.tupdate_us = v;
+                }
+            }
+            TCA_FQ_PIE_ALPHA => {
+                if let Some(v) = read_u32(payload) {
+                    opts.alpha = v;
+                }
+            }
+            TCA_FQ_PIE_BETA => {
+                if let Some(v) = read_u32(payload) {
+                    opts.beta = v;
+                }
+            }
+            TCA_FQ_PIE_QUANTUM => {
+                if let Some(v) = read_u32(payload) {
+                    opts.quantum = v;
+                }
+            }
+            TCA_FQ_PIE_MEMORY_LIMIT => {
+                if let Some(v) = read_u32(payload) {
+                    opts.memory_limit = v;
+                }
+            }
+            TCA_FQ_PIE_ECN_PROB => {
+                if let Some(v) = read_u32(payload) {
+                    opts.ecn_prob_permille = v;
+                }
+            }
+            TCA_FQ_PIE_ECN => {
+                if let Some(v) = read_u32(payload) {
+                    opts.ecn = v != 0;
+                }
+            }
+            TCA_FQ_PIE_BYTEMODE => {
+                if let Some(v) = read_u32(payload) {
+                    opts.bytemode = v != 0;
+                }
+            }
+            TCA_FQ_PIE_DQ_RATE_ESTIMATOR => {
+                if let Some(v) = read_u32(payload) {
+                    opts.dq_rate_estimator = v != 0;
+                }
+            }
+            _ => {}
+        }
+
+        let aligned = (len + 3) & !3;
+        if input.len() <= aligned {
+            break;
+        }
+        input = &input[aligned..];
+    }
+
+    opts
 }
 
 fn parse_sfq_options(data: &[u8]) -> SfqOptions {
@@ -2140,5 +2313,69 @@ mod tests {
             .loss(crate::util::Percent::new(1.0))
             .build();
         assert!(!current.requires_recreation_for(&new_config));
+    }
+
+    #[test]
+    fn test_fq_pie_options_default() {
+        let opts = FqPieOptions::default();
+        assert_eq!(opts.limit, 0);
+        assert_eq!(opts.flows, 0);
+        assert!(opts.target().is_none());
+        assert!(opts.tupdate().is_none());
+        assert!(opts.ecn_prob().is_none());
+        assert!(!opts.ecn);
+    }
+
+    #[test]
+    fn test_fq_pie_options_target_accessor() {
+        let opts = FqPieOptions {
+            target_us: 15_000,
+            ..Default::default()
+        };
+        assert_eq!(opts.target(), Some(std::time::Duration::from_millis(15)));
+    }
+
+    #[test]
+    fn test_fq_pie_options_ecn_prob_accessor() {
+        let opts = FqPieOptions {
+            ecn_prob_permille: 200, // 20%
+            ..Default::default()
+        };
+        let p = opts.ecn_prob().unwrap();
+        assert!((p.as_percent() - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_fq_pie_round_trip_via_writer() {
+        use std::time::Duration;
+
+        use super::super::tc::FqPieConfig;
+        use crate::netlink::builder::MessageBuilder;
+        use crate::netlink::tc::QdiscConfig;
+
+        let cfg = FqPieConfig::new()
+            .limit(10240)
+            .flows(2048)
+            .target(Duration::from_millis(15))
+            .tupdate(Duration::from_millis(20))
+            .alpha(2)
+            .beta(20)
+            .ecn(true)
+            .build();
+
+        let mut builder = MessageBuilder::new(0, 0);
+        let start = builder.len();
+        cfg.write_options(&mut builder).unwrap();
+        let end = builder.len();
+        let blob = builder.as_bytes()[start..end].to_vec();
+
+        let opts = parse_fq_pie_options(&blob);
+        assert_eq!(opts.limit, 10240);
+        assert_eq!(opts.flows, 2048);
+        assert_eq!(opts.target_us, 15_000);
+        assert_eq!(opts.tupdate_us, 20_000);
+        assert_eq!(opts.alpha, 2);
+        assert_eq!(opts.beta, 20);
+        assert!(opts.ecn);
     }
 }

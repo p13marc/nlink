@@ -884,6 +884,26 @@ pub mod qdisc {
         pub const TCA_PIE_DQ_RATE_ESTIMATOR: u16 = 8;
     }
 
+    /// FQ-PIE (Flow Queue PIE) qdisc-specific attributes.
+    ///
+    /// Mainline since Linux 5.6 (Mar 2020). Combines `fq_codel`'s
+    /// per-flow tracking with PIE's proportional-integral AQM.
+    pub mod fq_pie {
+        pub const TCA_FQ_PIE_UNSPEC: u16 = 0;
+        pub const TCA_FQ_PIE_LIMIT: u16 = 1;
+        pub const TCA_FQ_PIE_FLOWS: u16 = 2;
+        pub const TCA_FQ_PIE_TARGET: u16 = 3;
+        pub const TCA_FQ_PIE_TUPDATE: u16 = 4;
+        pub const TCA_FQ_PIE_ALPHA: u16 = 5;
+        pub const TCA_FQ_PIE_BETA: u16 = 6;
+        pub const TCA_FQ_PIE_QUANTUM: u16 = 7;
+        pub const TCA_FQ_PIE_MEMORY_LIMIT: u16 = 8;
+        pub const TCA_FQ_PIE_ECN_PROB: u16 = 9;
+        pub const TCA_FQ_PIE_ECN: u16 = 10;
+        pub const TCA_FQ_PIE_BYTEMODE: u16 = 11;
+        pub const TCA_FQ_PIE_DQ_RATE_ESTIMATOR: u16 = 12;
+    }
+
     /// FIFO qdisc types (pfifo, bfifo).
     pub mod fifo {
         use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};

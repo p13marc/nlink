@@ -74,7 +74,7 @@ crates/nlink/src/
     events.rs         # NetworkEvent enum for typed event handling
     namespace.rs      # Network namespace utilities
     stats.rs          # Statistics tracking (StatsSnapshot, StatsTracker)
-    tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, HtbConfig, TbfConfig, PrioConfig, SfqConfig, RedConfig, PieConfig, DrrConfig, QfqConfig, HfscConfig, MqprioConfig, TaprioConfig, EtfConfig, PlugConfig, etc.)
+    tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, HtbConfig, TbfConfig, PrioConfig, SfqConfig, RedConfig, PieConfig, FqPieConfig, DrrConfig, QfqConfig, HfscConfig, MqprioConfig, TaprioConfig, EtfConfig, PlugConfig, etc.)
     tc_options.rs     # TC options parsing (netem loss models, etc.)
     filter.rs         # TC filter builders (U32Filter, FlowerFilter, MatchallFilter, FwFilter, BpfFilter, BasicFilter, CgroupFilter, RouteFilter, FlowFilter)
     action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ConnmarkAction, CsumAction, SampleAction, CtAction, PeditAction, ActionList)
@@ -1743,7 +1743,7 @@ let filter = MatchallFilter::new()
 ```rust
 use nlink::netlink::{Connection, Protocol};
 use nlink::netlink::tc::{
-    RedConfig, PieConfig, IngressConfig, ClsactConfig, PfifoConfig, BfifoConfig,
+    RedConfig, PieConfig, FqPieConfig, IngressConfig, ClsactConfig, PfifoConfig, BfifoConfig,
     DrrConfig, QfqConfig, HfscConfig, MqprioConfig, TaprioConfig, EtfConfig, PlugConfig,
     TaprioSchedEntry,
 };
@@ -1770,6 +1770,20 @@ let pie = PieConfig::new()
     .ecn()
     .build();
 conn.add_qdisc("eth0", pie).await?;
+
+// FQ-PIE (Flow Queue PIE, Linux 5.6+) — fq_codel-style flow isolation
+// with PIE's drop-probability AQM. Better than `pie` on shared links
+// where elephant flows would otherwise crowd out interactive ones.
+use std::time::Duration;
+let fq_pie = FqPieConfig::new()
+    .target(Duration::from_millis(15))
+    .tupdate(Duration::from_millis(15))
+    .limit(10240)
+    .flows(1024)
+    .quantum(Bytes::new(1514))
+    .ecn(true)
+    .build();
+conn.add_qdisc("eth0", fq_pie).await?;
 
 // Ingress qdisc (for ingress filtering)
 let ingress = IngressConfig::new();

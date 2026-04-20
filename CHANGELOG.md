@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 133 (PR B): `FqPieConfig`
+
+- `FqPieConfig` typed qdisc builder for `sch_fq_pie` (mainline since
+  Linux 5.6). Combines `fq_codel`'s per-flow hashing with PIE's
+  proportional-integral AQM — each flow gets its own queue and PIE
+  controls per-queue drop probability based on queueing delay.
+  Better than `pie` on shared links where elephant flows would
+  otherwise crowd out interactive ones.
+- `QdiscOptions::FqPie(FqPieOptions)` parser variant in
+  `tc_options.rs`, exposing all 12 `TCA_FQ_PIE_*` attributes plus
+  ergonomic accessors (`target() -> Option<Duration>`, `tupdate() ->
+  Option<Duration>`, `ecn_prob() -> Option<Percent>`).
+- Constants module `netlink::types::tc::qdisc::fq_pie` with the full
+  `TCA_FQ_PIE_*` attribute set.
+
 ### Added — Plan 131: reconcile pattern
 
 - `PerPeerImpairer::reconcile` and `PerHostLimiter::reconcile` —

@@ -1142,6 +1142,223 @@ impl QdiscConfig for PieConfig {
 }
 
 // ============================================================================
+// FqPieConfig
+// ============================================================================
+
+/// FQ-PIE (Flow Queue PIE) qdisc configuration.
+///
+/// Mainline since Linux 5.6 (Mar 2020). Combines `fq_codel`'s per-flow
+/// hashing with PIE's proportional-integral AQM: each flow gets its
+/// own queue, and PIE controls the per-queue drop probability based on
+/// queueing delay.
+///
+/// Practically: a fairer alternative to `pie` for shared links where
+/// elephant flows would otherwise crowd out interactive ones.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::FqPieConfig;
+/// use nlink::{Bytes, Percent};
+/// use std::time::Duration;
+///
+/// let config = FqPieConfig::new()
+///     .target(Duration::from_millis(15))
+///     .tupdate(Duration::from_millis(15))
+///     .limit(10240)
+///     .flows(1024)
+///     .quantum(Bytes::new(1514))
+///     .ecn(true)
+///     .build();
+///
+/// conn.add_qdisc("eth0", config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct FqPieConfig {
+    /// Queue limit in packets.
+    pub limit: Option<u32>,
+    /// Number of flow buckets (default 1024).
+    pub flows: Option<u32>,
+    /// Target queueing delay.
+    pub target: Option<Duration>,
+    /// Drop-probability update interval.
+    pub tupdate: Option<Duration>,
+    /// Alpha parameter (P controller, weighted scaled).
+    pub alpha: Option<u32>,
+    /// Beta parameter (I controller, weighted scaled).
+    pub beta: Option<u32>,
+    /// DRR quantum (bytes per scheduling round).
+    pub quantum: Option<crate::util::Bytes>,
+    /// Per-qdisc memory limit.
+    pub memory_limit: Option<crate::util::Bytes>,
+    /// ECN marking probability.
+    pub ecn_prob: Option<crate::util::Percent>,
+    /// Enable ECN marking.
+    pub ecn: bool,
+    /// Use byte mode instead of packet mode.
+    pub bytemode: bool,
+    /// Enable dequeue rate estimator.
+    pub dq_rate_estimator: bool,
+}
+
+impl Default for FqPieConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FqPieConfig {
+    /// Create a new FQ-PIE configuration builder with all options unset.
+    pub fn new() -> Self {
+        Self {
+            limit: None,
+            flows: None,
+            target: None,
+            tupdate: None,
+            alpha: None,
+            beta: None,
+            quantum: None,
+            memory_limit: None,
+            ecn_prob: None,
+            ecn: false,
+            bytemode: false,
+            dq_rate_estimator: false,
+        }
+    }
+
+    /// Set the queue limit in packets.
+    pub fn limit(mut self, packets: u32) -> Self {
+        self.limit = Some(packets);
+        self
+    }
+
+    /// Set the number of flow buckets.
+    pub fn flows(mut self, n: u32) -> Self {
+        self.flows = Some(n);
+        self
+    }
+
+    /// Set the target queueing delay (default: 15ms).
+    pub fn target(mut self, target: Duration) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    /// Set the drop-probability update interval.
+    pub fn tupdate(mut self, interval: Duration) -> Self {
+        self.tupdate = Some(interval);
+        self
+    }
+
+    /// Set the alpha parameter (P controller).
+    pub fn alpha(mut self, alpha: u32) -> Self {
+        self.alpha = Some(alpha);
+        self
+    }
+
+    /// Set the beta parameter (I controller).
+    pub fn beta(mut self, beta: u32) -> Self {
+        self.beta = Some(beta);
+        self
+    }
+
+    /// Set the DRR quantum (bytes per scheduling round).
+    pub fn quantum(mut self, quantum: crate::util::Bytes) -> Self {
+        self.quantum = Some(quantum);
+        self
+    }
+
+    /// Set the per-qdisc memory limit.
+    pub fn memory_limit(mut self, limit: crate::util::Bytes) -> Self {
+        self.memory_limit = Some(limit);
+        self
+    }
+
+    /// Set the ECN marking probability.
+    pub fn ecn_prob(mut self, prob: crate::util::Percent) -> Self {
+        self.ecn_prob = Some(prob);
+        self
+    }
+
+    /// Enable or disable ECN marking.
+    pub fn ecn(mut self, enable: bool) -> Self {
+        self.ecn = enable;
+        self
+    }
+
+    /// Enable or disable byte mode.
+    pub fn bytemode(mut self, enable: bool) -> Self {
+        self.bytemode = enable;
+        self
+    }
+
+    /// Enable or disable the dequeue rate estimator.
+    pub fn dq_rate_estimator(mut self, enable: bool) -> Self {
+        self.dq_rate_estimator = enable;
+        self
+    }
+
+    /// Build the configuration (returns self, for API consistency).
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl QdiscConfig for FqPieConfig {
+    fn kind(&self) -> &'static str {
+        "fq_pie"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::fq_pie;
+
+        if let Some(limit) = self.limit {
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_LIMIT, limit);
+        }
+        if let Some(flows) = self.flows {
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_FLOWS, flows);
+        }
+        if let Some(target) = self.target {
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_TARGET, target.as_micros() as u32);
+        }
+        if let Some(tupdate) = self.tupdate {
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_TUPDATE, tupdate.as_micros() as u32);
+        }
+        if let Some(alpha) = self.alpha {
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_ALPHA, alpha);
+        }
+        if let Some(beta) = self.beta {
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_BETA, beta);
+        }
+        if let Some(quantum) = self.quantum {
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_QUANTUM, quantum.as_u32_saturating());
+        }
+        if let Some(memory_limit) = self.memory_limit {
+            builder.append_attr_u32(
+                fq_pie::TCA_FQ_PIE_MEMORY_LIMIT,
+                memory_limit.as_u32_saturating(),
+            );
+        }
+        if let Some(prob) = self.ecn_prob {
+            // Kernel encodes ECN probability as a per-mille value.
+            let permille = (prob.as_percent() * 10.0) as u32;
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_ECN_PROB, permille);
+        }
+        if self.ecn {
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_ECN, 1);
+        }
+        if self.bytemode {
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_BYTEMODE, 1);
+        }
+        if self.dq_rate_estimator {
+            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_DQ_RATE_ESTIMATOR, 1);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // IngressConfig
 // ============================================================================
 
