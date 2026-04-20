@@ -2567,4 +2567,94 @@ pub mod action {
             }
         }
     }
+
+    /// `act_bpf` (BPF action) attributes.
+    ///
+    /// Companion to the `cls_bpf` filter — where the classifier matches
+    /// packets, this action runs a BPF program for side effects (mark,
+    /// redirect, drop). Constants follow `enum tca_act_bpf_attrs` in
+    /// `include/uapi/linux/tc_act/tc_bpf.h`.
+    pub mod bpf_act {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        pub const TCA_ACT_BPF_UNSPEC: u16 = 0;
+        pub const TCA_ACT_BPF_TM: u16 = 1;
+        pub const TCA_ACT_BPF_PARMS: u16 = 2;
+        pub const TCA_ACT_BPF_OPS_LEN: u16 = 3;
+        pub const TCA_ACT_BPF_OPS: u16 = 4;
+        pub const TCA_ACT_BPF_FD: u16 = 5;
+        pub const TCA_ACT_BPF_NAME: u16 = 6;
+        pub const TCA_ACT_BPF_PAD: u16 = 7;
+        pub const TCA_ACT_BPF_TAG: u16 = 8;
+        pub const TCA_ACT_BPF_ID: u16 = 9;
+
+        /// `act_bpf` parameters (struct `tc_act_bpf`).
+        ///
+        /// Identical layout to [`super::TcGen`] — the BPF action carries
+        /// no kind-specific parameters in the parms blob.
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcActBpf {
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+        }
+
+        impl TcActBpf {
+            pub fn new(action: i32) -> Self {
+                Self {
+                    action,
+                    ..Self::default()
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
+    /// `act_simple` (simple debugging action) attributes.
+    ///
+    /// `act_simple` writes a string to the kernel log when invoked.
+    /// Useful for debugging filter chains. Constants follow
+    /// `enum tca_def_attrs` in `include/uapi/linux/tc_act/tc_defact.h`.
+    pub mod simple_act {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        pub const TCA_DEF_UNSPEC: u16 = 0;
+        pub const TCA_DEF_TM: u16 = 1;
+        pub const TCA_DEF_PARMS: u16 = 2;
+        pub const TCA_DEF_DATA: u16 = 3;
+        pub const TCA_DEF_PAD: u16 = 4;
+
+        /// `act_simple` parameters (struct `tc_defact`).
+        ///
+        /// Identical layout to [`super::TcGen`] — sdata is carried in a
+        /// separate `TCA_DEF_DATA` attribute.
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcDefact {
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+        }
+
+        impl TcDefact {
+            pub fn new(action: i32) -> Self {
+                Self {
+                    action,
+                    ..Self::default()
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
 }

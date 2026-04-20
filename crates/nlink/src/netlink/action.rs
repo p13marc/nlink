@@ -2063,6 +2063,226 @@ impl ActionList {
     }
 }
 
+// ============================================================================
+// BpfAction
+// ============================================================================
+
+/// `act_bpf` action — run a BPF program for side effects.
+///
+/// Companion to [`super::filter::BpfFilter`]: where the classifier
+/// matches packets, this action runs an eBPF program for side effects
+/// like marking, redirecting, or dropping. The action's verdict
+/// (TC_ACT_OK / TC_ACT_SHOT / etc.) comes from the BPF program's return
+/// value when used in direct-action style, or from the [`BpfAction`]'s
+/// configured action when not.
+///
+/// Programs can be referenced either by file descriptor (e.g. one
+/// loaded via `aya` or `libbpf-rs`) or by a pinned filesystem path
+/// (`bpftool prog pin /sys/fs/bpf/<name>`).
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::action::{BpfAction, ActionList};
+/// use nlink::netlink::filter::MatchallFilter;
+///
+/// // Attach a pinned BPF program as an action on every matched packet.
+/// let bpf = BpfAction::from_pinned("/sys/fs/bpf/my_action")?
+///     .name("my_action")
+///     .pipe()
+///     .build();
+///
+/// let filter = MatchallFilter::new()
+///     .actions(ActionList::new().with(bpf))
+///     .build();
+/// conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
+/// ```
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
+pub struct BpfAction {
+    /// BPF program file descriptor.
+    fd: i32,
+    /// Optional human-readable program name.
+    name: Option<String>,
+    /// Verdict for this action (TC_ACT_*).
+    action: i32,
+}
+
+impl BpfAction {
+    /// Create a new `act_bpf` action wrapping the given file descriptor.
+    ///
+    /// The descriptor must reference a BPF program of type `BPF_PROG_TYPE_SCHED_ACT`.
+    /// Loading is the caller's responsibility — use `aya` or `libbpf-rs`.
+    /// Default verdict is `TC_ACT_PIPE` (continue to next action).
+    pub fn from_fd(fd: i32) -> Self {
+        Self {
+            fd,
+            name: None,
+            action: action::TC_ACT_PIPE,
+        }
+    }
+
+    /// Open a pinned BPF program at `path` and use its file descriptor.
+    ///
+    /// The program must be pinned via `bpf_obj_pin()` or
+    /// `bpftool prog pin id <id> /sys/fs/bpf/<name>`.
+    pub fn from_pinned(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        use std::os::unix::io::IntoRawFd;
+        let file = std::fs::File::open(path.as_ref())
+            .map_err(|e| Error::InvalidMessage(format!("open BPF pin: {e}")))?;
+        Ok(Self::from_fd(file.into_raw_fd()))
+    }
+
+    /// Set the program's human-readable name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Set verdict to `TC_ACT_PIPE` (continue to next action).
+    pub fn pipe(mut self) -> Self {
+        self.action = action::TC_ACT_PIPE;
+        self
+    }
+
+    /// Set verdict to `TC_ACT_OK` (let packet proceed).
+    pub fn ok(mut self) -> Self {
+        self.action = action::TC_ACT_OK;
+        self
+    }
+
+    /// Set verdict to `TC_ACT_SHOT` (drop packet).
+    #[allow(clippy::should_implement_trait)]
+    pub fn drop(mut self) -> Self {
+        self.action = action::TC_ACT_SHOT;
+        self
+    }
+
+    /// Set an arbitrary verdict (escape hatch — prefer the named
+    /// helpers above).
+    pub fn verdict(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build (no-op marker for API consistency).
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl ActionConfig for BpfAction {
+    fn kind(&self) -> &'static str {
+        "bpf"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::action::bpf_act;
+
+        let parms = bpf_act::TcActBpf::new(self.action);
+        builder.append_attr(bpf_act::TCA_ACT_BPF_PARMS, parms.as_bytes());
+        builder.append_attr_u32(bpf_act::TCA_ACT_BPF_FD, self.fd as u32);
+        if let Some(ref name) = self.name {
+            builder.append_attr_str(bpf_act::TCA_ACT_BPF_NAME, name);
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// SimpleAction
+// ============================================================================
+
+/// `act_simple` action — emit a tagged debug event.
+///
+/// `act_simple` writes a tagged string (`sdata`) to the kernel log
+/// when a packet hits the action. Useful for tracing filter chains
+/// during debugging — install at suspect points and watch the log.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::action::{SimpleAction, ActionList};
+/// use nlink::netlink::filter::MatchallFilter;
+///
+/// let trace = SimpleAction::new("matched-port-80").build();
+/// let filter = MatchallFilter::new()
+///     .actions(ActionList::new().with(trace))
+///     .build();
+/// conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
+/// // Watch `dmesg` for the tag when traffic hits the filter.
+/// ```
+///
+/// The kernel limits `sdata` to a fixed buffer
+/// (`SIMP_MAX_DATA = 32` bytes including the trailing NUL); longer
+/// strings get truncated by the kernel without error.
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
+pub struct SimpleAction {
+    /// Tag string emitted on every match.
+    sdata: String,
+    /// Verdict (TC_ACT_*).
+    action: i32,
+}
+
+impl SimpleAction {
+    /// Create a new simple action with the given tag string.
+    ///
+    /// Default verdict is `TC_ACT_PIPE` so packet processing continues
+    /// after the trace fires.
+    pub fn new(sdata: impl Into<String>) -> Self {
+        Self {
+            sdata: sdata.into(),
+            action: action::TC_ACT_PIPE,
+        }
+    }
+
+    /// Set verdict to `TC_ACT_OK` (let packet proceed).
+    pub fn ok(mut self) -> Self {
+        self.action = action::TC_ACT_OK;
+        self
+    }
+
+    /// Set verdict to `TC_ACT_SHOT` (drop packet).
+    #[allow(clippy::should_implement_trait)]
+    pub fn drop(mut self) -> Self {
+        self.action = action::TC_ACT_SHOT;
+        self
+    }
+
+    /// Set an arbitrary verdict.
+    pub fn verdict(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build (no-op marker for API consistency).
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+impl ActionConfig for SimpleAction {
+    fn kind(&self) -> &'static str {
+        "simple"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::action::simple_act;
+
+        let parms = simple_act::TcDefact::new(self.action);
+        builder.append_attr(simple_act::TCA_DEF_PARMS, parms.as_bytes());
+
+        // sdata is a NUL-terminated string in a fixed-size buffer.
+        // Append the bytes plus the trailing NUL; kernel truncates if
+        // longer than `SIMP_MAX_DATA`.
+        let mut bytes = self.sdata.clone().into_bytes();
+        bytes.push(0);
+        builder.append_attr(simple_act::TCA_DEF_DATA, &bytes);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2283,5 +2503,74 @@ mod tests {
 
         // MAC address requires 2 keys (4 bytes + 2 bytes)
         assert_eq!(pedit_eth.keys.len(), 2);
+    }
+
+    #[test]
+    fn test_bpf_action_default_pipe() {
+        let bpf = BpfAction::from_fd(42);
+        assert_eq!(bpf.action, action::TC_ACT_PIPE);
+        assert_eq!(bpf.fd, 42);
+        assert!(bpf.name.is_none());
+        assert_eq!(ActionConfig::kind(&bpf), "bpf");
+    }
+
+    #[test]
+    fn test_bpf_action_verdict_helpers() {
+        assert_eq!(BpfAction::from_fd(1).ok().action, action::TC_ACT_OK);
+        assert_eq!(BpfAction::from_fd(1).drop().action, action::TC_ACT_SHOT);
+        assert_eq!(BpfAction::from_fd(1).pipe().action, action::TC_ACT_PIPE);
+        assert_eq!(BpfAction::from_fd(1).verdict(7).action, 7);
+    }
+
+    #[test]
+    fn test_bpf_action_with_name() {
+        let bpf = BpfAction::from_fd(10).name("my_bpf").build();
+        assert_eq!(bpf.name.as_deref(), Some("my_bpf"));
+    }
+
+    #[test]
+    fn test_bpf_action_from_pinned_missing_path() {
+        // Should error rather than panic when the pin doesn't exist.
+        let result = BpfAction::from_pinned("/nonexistent/path/that/should/not/exist");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bpf_action_writes_attrs() {
+        let bpf = BpfAction::from_fd(42).name("trace").build();
+        let mut builder = crate::netlink::builder::MessageBuilder::new(0, 0);
+        let start = builder.len();
+        ActionConfig::write_options(&bpf, &mut builder).unwrap();
+        let end = builder.len();
+        // PARMS (20 bytes + 4 hdr + 0 pad) + FD (4 bytes + 4 hdr) +
+        // NAME (5 bytes "trace\0" + 4 hdr + 3 pad to align). The fd
+        // and name attrs should add up to a non-zero count.
+        assert!(end > start);
+    }
+
+    #[test]
+    fn test_simple_action_default_pipe() {
+        let s = SimpleAction::new("trace");
+        assert_eq!(s.action, action::TC_ACT_PIPE);
+        assert_eq!(s.sdata, "trace");
+        assert_eq!(ActionConfig::kind(&s), "simple");
+    }
+
+    #[test]
+    fn test_simple_action_verdicts() {
+        assert_eq!(SimpleAction::new("x").ok().action, action::TC_ACT_OK);
+        assert_eq!(SimpleAction::new("x").drop().action, action::TC_ACT_SHOT);
+        assert_eq!(SimpleAction::new("x").verdict(99).action, 99);
+    }
+
+    #[test]
+    fn test_simple_action_writes_sdata_with_nul() {
+        let s = SimpleAction::new("hi").build();
+        let mut builder = crate::netlink::builder::MessageBuilder::new(0, 0);
+        let start = builder.len();
+        ActionConfig::write_options(&s, &mut builder).unwrap();
+        let bytes = &builder.as_bytes()[start..];
+        // sdata blob "hi\0" appears somewhere in the written attrs.
+        assert!(bytes.windows(3).any(|w| w == b"hi\0"));
     }
 }

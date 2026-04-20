@@ -77,7 +77,7 @@ crates/nlink/src/
     tc.rs             # TC typed builders (NetemConfig, FqCodelConfig, HtbConfig, TbfConfig, PrioConfig, SfqConfig, RedConfig, PieConfig, FqPieConfig, DrrConfig, QfqConfig, HfscConfig, MqprioConfig, TaprioConfig, EtfConfig, PlugConfig, etc.)
     tc_options.rs     # TC options parsing (netem loss models, etc.)
     filter.rs         # TC filter builders (U32Filter, FlowerFilter, MatchallFilter, FwFilter, BpfFilter, BasicFilter, CgroupFilter, RouteFilter, FlowFilter)
-    action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ConnmarkAction, CsumAction, SampleAction, CtAction, PeditAction, ActionList)
+    action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ConnmarkAction, CsumAction, SampleAction, CtAction, PeditAction, BpfAction, SimpleAction, ActionList)
     link.rs           # Link type builders (DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, BareudpLink, NetkitLink, NlmonLink, VirtWifiLink, VtiLink, Vti6Link, Ip6GreLink, Ip6GretapLink)
     rule.rs           # Routing rule builder (RuleBuilder)
     nexthop.rs        # Nexthop objects and groups (NexthopBuilder, NexthopGroupBuilder) - Linux 5.3+
@@ -1737,6 +1737,30 @@ let filter = MatchallFilter::new()
         .with(ct)
         .with(csum))
     .build();
+```
+
+**BPF and simple debug actions (`act_bpf`, `act_simple`):**
+```rust
+use nlink::netlink::action::{BpfAction, SimpleAction, ActionList};
+use nlink::netlink::filter::MatchallFilter;
+
+// BPF action — companion to BpfFilter. Reference an already-loaded
+// program by fd, or open a pinned program from /sys/fs/bpf/.
+let bpf = BpfAction::from_pinned("/sys/fs/bpf/my_action")?
+    .name("my_action")
+    .pipe()       // continue to next action after BPF runs (default)
+    .build();
+// Or by fd from aya/libbpf-rs:
+let bpf = BpfAction::from_fd(loaded_prog_fd).pipe();
+
+// Simple action — emit a tagged debug event to dmesg when matched.
+// Useful for tracing filter chains under `dmesg -w`.
+let trace = SimpleAction::new("matched-port-80").build();
+
+let filter = MatchallFilter::new()
+    .actions(ActionList::new().with(trace).with(bpf))
+    .build();
+conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
 ```
 
 **Additional qdisc types:**

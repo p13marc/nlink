@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 133 (PR D): `BpfAction` + `SimpleAction`
+
+- `BpfAction` — companion to `BpfFilter`. Runs an eBPF program as a
+  TC action (vs as a classifier), wrapping a program loaded by
+  `aya` / `libbpf-rs` (`from_fd`) or pinned at a filesystem path
+  (`from_pinned`). Configurable verdict (`pipe()` / `ok()` / `drop()`
+  / `verdict(int)`); default is `TC_ACT_PIPE` so the action chain
+  continues after BPF runs.
+- `SimpleAction` — `act_simple` debugging action that writes a tagged
+  string to the kernel log on every match. Useful for tracing filter
+  chains during debugging (watch via `dmesg -w`). Same verdict
+  helpers; default `TC_ACT_PIPE`.
+- New constant modules `netlink::types::tc::action::{bpf_act,
+  simple_act}` carrying the `TCA_ACT_BPF_*` and `TCA_DEF_*`
+  attribute sets respectively.
+
 ### Added — Plan 133 (PR B): `FqPieConfig`
 
 - `FqPieConfig` typed qdisc builder for `sch_fq_pie` (mainline since
