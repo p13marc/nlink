@@ -45,8 +45,9 @@ that class of issue at the type level.
 | 133 | [TC coverage (cake-typed + fq_pie + cls_basic ematch + act_bpf)](133-tc-coverage-plan.md) | 3 (additive) | ~1800 | Additive | Brings cake to typed-builder parity, adds fq_pie, makes cls_basic actually useful. |
 | 134 | [Tracing instrumentation](134-tracing-instrumentation-plan.md) | 3 (additive) | ~600 | Additive | Wire up the unused `tracing` dep; INFO/DEBUG/TRACE convention. |
 | 135 | [More recipes + public lab module](135-recipes-and-lab-helpers-plan.md) | 3 (additive) | ~2300 | Additive | 7 new recipes + promote `TestNamespace` → public `nlink::lab`. |
+| 136 | [Example cleanup](136-example-cleanup-plan.md) | 3 (additive, docs) | ~500 | Additive | Promote remaining read-only-print examples (wireguard, macsec, mptcp, htb, ethtool_rings, devlink, nl80211, conntrack) to real API usage. Partial work in commit `d023381`. |
 
-Total: ~9550 LOC across the seven plans. Mostly mechanical; the
+Total: ~10050 LOC across the eight plans. Mostly mechanical; the
 substance is in the design decisions in plans 129/130/131.
 
 ---
