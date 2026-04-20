@@ -138,8 +138,20 @@ across "0.14.0" and "1.0"):
   dry-run mode, optional fallback-to-apply for wrong-root-kind drift.
   Internals (`tc_recipe_internals`) parse netem / HTB-class /
   fq_codel / flower attributes for diff comparisons.
-- Plan 133: TC coverage gaps (cake-typed, fq_pie, cls_basic ematch,
-  act_bpf, simple action)
+- Plan 133: TC coverage gaps. **3 of 4 PRs landed** on `master`
+  under `[Unreleased]`:
+  - PR A: typed `CakeConfig` + `CakeOptions` parser (commit `17e5f37`) ✅
+  - PR B: `FqPieConfig` builder + parser (commit `6a62504`) ✅
+  - PR D: `BpfAction` + `SimpleAction` (commit `5e20fca`) ✅
+  - **PR C: `BasicFilter` ematch (cmp/u32/meta) — still pending.**
+    Deferred because the ematch wire format (`TCA_BASIC_EMATCHES` →
+    `TCA_EMATCH_TREE_HDR` + `TCA_EMATCH_TREE_LIST` with per-kind
+    structs: `tcf_em_cmp`, `em_u32`, `tcf_meta_val`) needs validation
+    against captured `tc(8)` hex dumps before shipping — otherwise
+    bugs only surface when packets start missing their intended
+    class. See §4 of `133-tc-coverage-plan.md` for the plan;
+    the Plan 135 cgroup-classification recipe blocks on PR C's
+    `meta` support.
 - Plan 135: Recipes + public lab module
 
 Total ~5800 LOC. Mostly additive; minimal further BC. Plan 135 was

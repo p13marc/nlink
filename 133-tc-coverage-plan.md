@@ -10,6 +10,25 @@ verified: codebase audit complete; kernel attribute lists from training memory
 
 # TC Coverage Plan
 
+> **Status (2026-04-20):** 3 of 4 PRs have landed on `master` under
+> `[Unreleased]`. PR A (typed `CakeConfig`, commit `17e5f37`), PR B
+> (`FqPieConfig`, commit `6a62504`), and PR D (`BpfAction` +
+> `SimpleAction`, commit `5e20fca`) are done.
+>
+> **PR C (`BasicFilter` ematch — cmp/u32/meta) is still pending and
+> needs to be picked back up.** See §4 below for the scope. The
+> deferral reason: the ematch wire format
+> (`TCA_BASIC_EMATCHES` → `TCA_EMATCH_TREE_HDR` + `TCA_EMATCH_TREE_LIST`
+> with per-kind structs `tcf_em_cmp` / `em_u32` / `tcf_meta_val`)
+> should be validated against golden hex captured from `tc filter add
+> ... basic match cmp ...` before shipping — subtle encoding bugs only
+> surface when packets start missing their intended class.
+>
+> Suggested resumption: start with cmp (best-documented, widest
+> coverage), add meta next (Plan 135's cgroup-classification recipe
+> blocks on it), then u32 if demand justifies it. The convenience
+> helpers (`ip_proto_eq`, `skb_mark_eq`) should land alongside cmp.
+
 ## 0. Summary
 
 Gap-fill the TC support after Tier-1 type-safety lands. Each item is
