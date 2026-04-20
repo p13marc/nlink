@@ -1,379 +1,63 @@
 ---
 to: nlink maintainers
 from: nlink maintainers
-subject: nlink roadmap — 0.13 (shipped) → 0.14 (next), 1.0 deferred
-target version: 0.13.0 (shipped 2026-04-19) → 0.14.0 (next)
-date: 2026-04-19
-status: draft, post-verification consolidation (2026-04-19)
-related: plans 129-135 (the seven detailed plans this overview indexes)
+subject: nlink roadmap — active plans only
+target version: 0.14.0 and beyond
+last updated: 2026-04-20
 ---
 
-# nlink Roadmap — Overview
+# nlink Roadmap
 
-> **Status (2026-04-19):** 0.13.0 shipped. Plan 131 (reconcile
-> pattern) has landed on `master` under `[Unreleased]`. Plans 133 +
-> 135 are the remaining 0.14.0 work. The "1.0" milestone is deferred
-> indefinitely — we'll cut it when downstream consumption validates
-> the API, not on a calendar.
+Forward-looking index of active plans. Shipped work is in
+[`CHANGELOG.md`](CHANGELOG.md); detailed plans for shipped features
+have been removed (their substance is in the commits + changelog).
 
-## Original framing (kept for context)
+## Active plans
 
-## 0. What this is
+| # | Plan | Status | Headline |
+|---|---|---|---|
+| 133 | [TC coverage gaps](133-tc-coverage-plan.md) | **3 of 4 PRs landed** (A/B/D under `[Unreleased]`); **PR C deferred** | Typed `CakeConfig`, `FqPieConfig`, `BpfAction`, `SimpleAction`. `BasicFilter` ematch (cmp/u32/meta) pending — ematch wire format needs validation against golden `tc(8)` hex before shipping. |
+| 135 | [Recipes + public `nlink::lab`](135-recipes-and-lab-helpers-plan.md) | Not started | 7 new recipes (bridge VLAN, bidir rate limit, WireGuard mesh, IPsec, nftables stateful firewall, cgroup classification, multi-namespace events) + promote `TestNamespace` → public `nlink::lab`. The cgroup-classification recipe blocks on Plan 133 PR C. |
+| 136 | [Example cleanup](136-example-cleanup-plan.md) | **Partial** (commit `d023381`) | Promote remaining read-only-print examples (wireguard, macsec, mptcp, htb, ethtool_rings, devlink, nl80211, conntrack) to real API usage using the `impair/per_peer.rs` template. |
 
-A consolidated index of the seven detailed plans drafted alongside
-this document. Each plan is self-contained and reviewable in
-isolation; this document gives the cross-cutting view: dependencies,
-sequencing, and which combinations make sense together for which
-release.
+## Release plan
 
-The plans came out of the discussion that followed
-`128-nlink-per-peer-impairer.md` (per-peer netem helper) and the bug
-class it surfaced (`HtbClassConfig::new("100mbit")` shaped at 800 Mbps
-because bits/sec got silently treated as bytes/sec). 0.13.0 fixed
-that class of issue at the type level.
+- **0.13.0** (shipped 2026-04-19): typed `Rate` / `Bytes` / `Percent`
+  newtypes, typed `TcHandle` / `FilterPriority`, API cleanup
+  (builder uniformity + 95-enum `non_exhaustive` lockdown), and
+  `tracing` instrumentation. See CHANGELOG `## [0.13.0]` for the
+  migration tables and detailed bullets.
+- **0.14.0** (in progress): reconcile pattern (shipped under
+  `[Unreleased]`) + Plan 133 (except PR C) + Plan 135 + Plan 136.
+  Mostly additive; minimal BC.
+- **1.0.0**: deferred indefinitely. Cut when downstream consumption
+  validates the API, not on a calendar. The `non_exhaustive`
+  lockdown and typed units already give the most important 1.0
+  guarantees; rest is "let the API marinate, then bless it".
 
----
+## Backlog (lower-priority, track here for later)
 
-## 1. The seven plans
-
-| # | Plan | Tier | LOC est. | BC break | Headline |
-|---|---|---|---|---|---|
-| 129 | [Rate / Bytes / Percent newtypes](129-rate-bytes-percent-newtypes-plan.md) | 1 (foundation) | ~1300 | Major | Eliminates the unit-confusion bug class permanently. ~45 method signatures change. |
-| 130 | [TcHandle / FilterPriority newtypes](130-tc-handle-priority-newtypes-plan.md) | 1 (foundation) | ~1200 | Major | Replaces `&str`/`u32` handles across **52 connection methods**. |
-| 131 | [Reconcile pattern for recipes](131-reconcile-plan.md) | 1 (foundation) | ~1750 | Additive | Non-destructive `reconcile()` for `PerHostLimiter` and `PerPeerImpairer`. Idempotent. |
-| 132 | [API cleanup (builders + non_exhaustive)](132-api-cleanup-plan.md) | 2 (polish) | ~600 | Major (small) | Locks down 95 of 96 unmarked enums; collapses `*Built` wrapper types. |
-| 133 | [TC coverage (cake-typed + fq_pie + cls_basic ematch + act_bpf)](133-tc-coverage-plan.md) | 3 (additive) | ~1800 | Additive | Brings cake to typed-builder parity, adds fq_pie, makes cls_basic actually useful. |
-| 134 | [Tracing instrumentation](134-tracing-instrumentation-plan.md) | 3 (additive) | ~600 | Additive | Wire up the unused `tracing` dep; INFO/DEBUG/TRACE convention. |
-| 135 | [More recipes + public lab module](135-recipes-and-lab-helpers-plan.md) | 3 (additive) | ~2300 | Additive | 7 new recipes + promote `TestNamespace` → public `nlink::lab`. |
-| 136 | [Example cleanup](136-example-cleanup-plan.md) | 3 (additive, docs) | ~500 | Additive | Promote remaining read-only-print examples (wireguard, macsec, mptcp, htb, ethtool_rings, devlink, nl80211, conntrack) to real API usage. Partial work in commit `d023381`. |
-
-Total: ~10050 LOC across the eight plans. Mostly mechanical; the
-substance is in the design decisions in plans 129/130/131.
-
----
-
-## 2. Dependency graph
-
-```text
-                    ┌─────────────────────┐
-                    │ 129 Rate/Bytes/%    │ ◄──── headline 0.13.0 change
-                    │ (foundation)        │
-                    └──────────┬──────────┘
-                               │ enables typed Rate args in
-                               │ qdisc/class builders
-                               ▼
-              ┌────────────────────────────────┐
-              │ 130 TcHandle/FilterPriority    │ ◄── parallel foundation
-              │ (foundation; touches same files)│     (land in same release as 129)
-              └────────────────────────────────┘
-                               │
-                ┌──────────────┴───────────────┐
-                ▼                              ▼
-   ┌────────────────────────┐    ┌────────────────────────┐
-   │ 132 API cleanup        │    │ 131 Reconcile pattern  │
-   │ (subsumes _bps rename  │    │ (uses TcHandle for     │
-   │  if 129 lands)         │    │  diff comparisons)     │
-   └────────────────────────┘    └────────────────────────┘
-                                              │
-                                              │ tracing spans on
-                                              │ recipe operations
-                                              ▼
-                                 ┌────────────────────────┐
-                                 │ 134 Tracing            │
-                                 │ (independent, useful   │
-                                 │  alongside reconcile)  │
-                                 └────────────────────────┘
-
-  Independent of all the above:
-  ┌────────────────────────┐    ┌────────────────────────┐
-  │ 133 TC coverage gaps   │    │ 135 Recipes + lab      │
-  │ (cake-typed, fq_pie,   │    │ (recipes use Plan 133's│
-  │  cls_basic ematch,     │    │  cls_basic for cgroup  │
-  │  act_bpf)              │    │  classification recipe)│
-  └────────────────────────┘    └────────────────────────┘
-```
-
-**Hard dependencies** (must land before / together with):
-
-- **129 ↔ 130**: same files, same release. Splitting forces an awkward
-  intermediate state where some methods take `Rate` and others take `u64`.
-- **132 → 129**: 132's `_bps` rename section is moot if 129 lands; the
-  builder + non_exhaustive parts remain useful.
-- **131 → 130**: reconcile compares handles; benefits from `TcHandle`
-  but works with `&str` (just uglier).
-- **135 cgroup recipe → 133 cls_basic**: the cgroup-classification
-  recipe needs ematch support.
-
-**Soft / optional**:
-
-- **134 tracing** is independent; lands anytime.
-- **135 recipes (excluding cgroup)** are independent.
-
----
-
-## 3. Suggested release plan
-
-### Option A: Single 1.0 release (ambitious)
-
-Land all seven plans in one go. ~9500 LOC. Reviewable but heavy.
-Pros: clean version story, one BC migration for downstream. Cons:
-long-running branch, hard to merge.
-
-### Option B: 0.13 → 0.14 staged (recommended; revised 2026-04-19)
-
-**0.13.0 — SHIPPED 2026-04-19** (live on crates.io):
-- Plan 129: Rate / Bytes / Percent newtypes
-- Plan 130: TcHandle / FilterPriority newtypes
-- Plan 132: API cleanup (builder uniformity + non_exhaustive audit)
-- Plan 134: Tracing instrumentation
-
-Bundled all the BC-breaking type-level work plus the free-standing
-tracing wins. Total ~3700 LOC.
-
-**0.14.0** (in progress; mostly additive — was previously split
-across "0.14.0" and "1.0"):
-- Plan 131: Reconcile pattern — **landed** on `master` (post-0.13
-  `[Unreleased]`). `PerPeerImpairer::reconcile` and
-  `PerHostLimiter::reconcile`, `ReconcileReport` / `ReconcileOptions`
-  / `StaleObject` / `UnmanagedObject`, idempotent-by-construction,
-  dry-run mode, optional fallback-to-apply for wrong-root-kind drift.
-  Internals (`tc_recipe_internals`) parse netem / HTB-class /
-  fq_codel / flower attributes for diff comparisons.
-- Plan 133: TC coverage gaps. **3 of 4 PRs landed** on `master`
-  under `[Unreleased]`:
-  - PR A: typed `CakeConfig` + `CakeOptions` parser (commit `17e5f37`) ✅
-  - PR B: `FqPieConfig` builder + parser (commit `6a62504`) ✅
-  - PR D: `BpfAction` + `SimpleAction` (commit `5e20fca`) ✅
-  - **PR C: `BasicFilter` ematch (cmp/u32/meta) — still pending.**
-    Deferred because the ematch wire format (`TCA_BASIC_EMATCHES` →
-    `TCA_EMATCH_TREE_HDR` + `TCA_EMATCH_TREE_LIST` with per-kind
-    structs: `tcf_em_cmp`, `em_u32`, `tcf_meta_val`) needs validation
-    against captured `tc(8)` hex dumps before shipping — otherwise
-    bugs only surface when packets start missing their intended
-    class. See §4 of `133-tc-coverage-plan.md` for the plan;
-    the Plan 135 cgroup-classification recipe blocks on PR C's
-    `meta` support.
-- Plan 135: Recipes + public lab module
-
-Total ~5800 LOC. Mostly additive; minimal further BC. Plan 135 was
-originally tagged for 1.0 but the work is independent of any 1.0
-guarantee — promoting `TestNamespace` to a public module and adding
-recipes is value the lab team and downstream users want now, not at
-some indefinite future "1.0 moment". Folding it into 0.14.0 collapses
-the milestone count and removes the artificial "1.0 release planning"
-bookkeeping.
-
-**1.0**: deferred indefinitely. We'll declare 1.0 when the API has
-demonstrated stability through real downstream use, not on a
-schedule. The `non_exhaustive` lockdown in Plan 132 and the typed
-units in Plan 129 already give us the most important 1.0 guarantees;
-the rest is "let the API marinate, then bless it".
-
-### Option C: Plans 129/130 only as a 1.0 cut (rejected)
-
-Minimal-scope 1.0 with just the type-safety foundations. Everything
-else continues iterating in 1.x. Pros: fastest to 1.0 with the most
-important fix. Cons: leaves the unused `tracing` dep and the missing
-`reconcile` path on the table for "later."
-
-**Decision: Option B (revised).** 0.13 (shipped) carried the headline
-type-safety work and the tracing wins. 0.14 will land reconcile +
-TC coverage + lab module + recipes. 1.0 deferred until we have
-downstream feedback validating the API.
-
----
-
-## 4. Verification status of the seven plans
-
-All seven plans were drafted, then audited against the codebase. Key
-corrections folded in:
-
-| Plan | Issue caught | Fixed |
+| Item | Priority | Notes |
 |---|---|---|
-| 129 | `DrrClassConfig::quantum` is bytes (not packets); HFSC rates are u32 (not u64); TBF rate methods missing from migration list | ✅ |
-| 130 | "~20 connection methods" was wildly low — actual is **52** | ✅ |
-| 130 | `netlink-packet-route` already has a `TcHandle` (training memory; verify) | ✅ noted |
-| 131 | `QdiscOptions` only parses 6 qdiscs — fq_pie/cake/hfsc/drr/qfq are `Unknown(blob)`. Recipes that target HTB+netem (the existing two) are fully covered. | ✅ |
-| 131 | No `parse_class_options` exists today — would need to add for HTB class rate/ceil reconciliation | ✅ |
-| 132 | Audit count was "4 marked, ~36 unmarked" — actual is **44 marked, 96 unmarked** out of 140 enums | ✅ |
-| 133 | "cake fully implemented" — half-true. Implemented in legacy `pub fn build(builder, &[String])` form only; no typed `CakeConfig`. Plan now adds the typed version. | ✅ |
-| 134 | Verified: `tracing` dep at `Cargo.toml:38`, zero use sites, injection points correct | ✅ |
-| 135 | Verified: `TestNamespace` at 195 LOC, all 8 methods present | ✅ |
+| CI integration tests | Medium | GitHub Actions with privileged containers so the root-gated integration tests in `crates/nlink/tests/` actually run in CI. |
+| Workspace-wide rollout of typed units | Medium | Plans 129/130 landed in nlink; the bins (`bins/{tc,ip,ss,nft,wifi,devlink,bridge,wg,ethtool,diag,config}`) should migrate off any remaining string/raw-u32 patterns. Audit per-bin during implementation. |
+| MACsec enhancements | Medium | Device creation, stats, hardware offload. Companion to the ongoing `genl/macsec.rs` example promote in Plan 136. |
+| GENL Rate audit | Low | Plan 129's `Rate` may apply to WireGuard keepalive intervals, ethtool link rates, nl80211 bitrates. Each GENL family deserves a quick audit. |
+| `netlink-packet-route` interop | Low | Optional `From`/`Into` impls between our `TcHandle` and theirs, gated behind an `nlink-interop` feature. |
+| `NetworkConfig::impair()` | Low | Bridge Plan 131 reconcile with declarative `NetworkConfig`. Parked as 1.x follow-on. |
+| SRv6 advanced features | Low | HMAC, policy, uSID, counters. |
+| VRF in `NetworkConfig` | Low | Add `DeclaredLinkType::Vrf` variant. |
+| `ss` binary remaining features | Low | Kill mode, expression filters, DCCP/VSOCK. |
+| Additional edge-case tests | Low | Error conditions, race conditions. |
 
-**Items NOT verified** (web tools were denied during research):
-
-- Current `uom` / `dimensioned` / `measurements` versions and dep
-  trees — recommendation to roll our own is from training memory
-- `netlink-packet-route` 0.19+ `TcHandle` field-naming — verify
-  before depending on the upstream alignment claim
-- Exact `TCA_CAKE_*` and `TCA_FQ_PIE_*` attribute lists from current
-  kernel headers — verified count from training; spot-check
-  `include/uapi/linux/pkt_sched.h` before implementation
-- `cls_basic` ematch deprecation status — training says still
-  supported; verify against `net/sched/cls_basic.c` recent commits
-
----
-
-## 5. Cross-plan API cohesion
-
-If 129 and 130 both land, the typed-builder shape becomes very
-uniform across the TC API:
-
-```rust
-use nlink::{Connection, Route, Rate, Bytes, Percent, TcHandle, FilterPriority};
-use nlink::netlink::tc::{HtbQdiscConfig, HtbClassConfig, NetemConfig};
-use nlink::netlink::filter::FlowerFilter;
-use std::time::Duration;
-
-let conn = Connection::<Route>::new()?;
-
-// HTB qdisc at root
-conn.add_qdisc_full(
-    "eth0",
-    TcHandle::ROOT,
-    Some(TcHandle::major_only(1)),
-    HtbQdiscConfig::new()
-        .default_class(TcHandle::new(1, 0xff))
-        .build(),
-).await?;
-
-// Rate-shaped class with explicit Rate type
-conn.add_class_config(
-    "eth0",
-    TcHandle::major_only(1),
-    TcHandle::new(1, 1),
-    HtbClassConfig::new(Rate::mbit(100))
-        .ceil(Rate::mbit(500))
-        .burst(Bytes::kib(32))
-        .build(),
-).await?;
-
-// Netem leaf with typed Percent for loss
-conn.add_qdisc_full(
-    "eth0",
-    TcHandle::new(1, 1),
-    Some(TcHandle::major_only(0xa)),
-    NetemConfig::new()
-        .delay(Duration::from_millis(50))
-        .loss(Percent::new(1.5))
-        .build(),
-).await?;
-
-// Flower filter with typed FilterPriority
-conn.add_filter_full(
-    "eth0",
-    TcHandle::major_only(1),
-    None,
-    0x0800,
-    FilterPriority::recipe(0),
-    FlowerFilter::new()
-        .classid(TcHandle::new(1, 1))
-        .dst_ipv4("10.0.0.1".parse()?, 32)
-        .build(),
-).await?;
-```
-
-Compare to today:
-
-```rust
-// Today: ambiguous units, raw u32 handles, &str parsing tax
-HtbClassConfig::from_bps(get_rate("100mbit")?);  // 8x bug if you forget the / 8
-add_class_config("eth0", "1:0", "1:1", cfg);     // strings parsed at every call
-```
-
----
-
-## 6. Open questions cutting across plans
-
-1. **0.13 or 1.0?** Pre-1.0 BC is expected. 1.0 commits us to
-   stability. Lean: 0.13 for the Tier-1 work, 0.14 for
-   stabilization, 1.0 once the additive features have landed and we
-   feel solid.
-
-2. **Workspace-wide rollout.** All plans are nlink-only. The bins
-   (`bins/{ip,tc,ss,nft,wifi,devlink,bridge,wg,ethtool,diag,config}`)
-   need to migrate too. Plan 129 alone touches `bins/{tc,ip}`; the
-   rest are mostly unaffected. Audit per-plan during implementation.
-
-3. **`netlink-packet-route` interop.** Worth providing optional
-   `From`/`Into` impls between our `TcHandle` and theirs (gated
-   behind a feature flag)? Lean: yes, `nlink-interop` feature in a
-   later release.
-
-4. **GENL protocols (WireGuard, MACsec, MPTCP, Ethtool, nl80211,
-   Devlink) — anything similar?** Plan 129's Rate may apply to
-   WireGuard's keepalive intervals, ethtool's link rates, nl80211's
-   bitrates. Each GENL family deserves a quick audit. Out of scope
-   for plans 129-135; track as follow-on work.
-
-5. **`config` module integration.** Plan 131's reconcile lives in
-   the recipe helpers, not in `nlink::netlink::config::NetworkConfig`.
-   Should `NetworkConfig::impair(name, PerPeerImpairer)` (or similar)
-   bridge the two? Park as 1.x follow-on.
-
----
-
-## 7. CHANGELOG strategy across releases
-
-### `## [0.13.0]` — SHIPPED 2026-04-19
-
-Live in CHANGELOG.md under that heading. The actual entries follow
-the structure sketched in the original draft, augmented with the
-detailed migration tables (per-method old-vs-new for both the
-`Rate`/`Bytes`/`Percent` migration and the `TcHandle` migration) and
-the bug fixes folded in as side effects (8× HTB rate, IPv6/L4-port
-filter dispatch in `PerHostLimiter`, BPF clsact egress attach using
-an unparseable string handle).
-
-### `## [0.14.0]` (next)
-
-> Plan 131 has landed under `[Unreleased]` on `master`. The full
-> entry it added is reproduced in `CHANGELOG.md`; the bullets below
-> sketch what 0.14.0 will look like once Plans 133 + 135 land too.
-
-```markdown
-### Added
-
-- `PerHostLimiter::reconcile()` and `PerPeerImpairer::reconcile()` —
-  non-destructive convergence pattern. (✅ shipped under Unreleased,
-  Plan 131)
-- Typed `CakeConfig` builder + per-tin stats.
-- `FqPieConfig` qdisc.
-- `BasicFilter` with `ematch` (cmp/u32/meta).
-- `BpfAction`, `SimpleAction`.
-- `nlink::lab` module (feature `lab`) with public lab/test helpers.
-- Cookbook recipes: bridge VLAN, bidir rate limit, WireGuard mesh,
-  IPsec tunnel, nftables stateful firewall, cgroup classification,
-  multi-namespace events, lab setup.
-```
-
-(Plan 135's lab module + recipes were originally tagged for a
-separate "1.0" milestone but folded into 0.14.0 — see §3 Option B
-revision.)
-
-### `## [1.0.0]`
-
-Deferred indefinitely. We'll declare 1.0 when the API has
-demonstrated stability through real downstream use, not on a
-schedule. The `non_exhaustive` lockdown in Plan 132 (95 enums) and
-the typed units / handles in Plans 129–130 already give us the most
-important 1.0 guarantees; the rest is "let the API marinate, then
-bless it".
-
----
-
-## 8. Review checklist for each PR
-
-When reviewing any PR derived from these plans:
+## Review checklist for PRs derived from the active plans
 
 - [ ] Cross-checks against the relevant detailed plan
-- [ ] All listed call sites migrated (no half-and-half state)
 - [ ] CHANGELOG entry written under `## [Unreleased]`
-- [ ] Tests updated and passing
-- [ ] Examples and CLAUDE.md updated where relevant
-- [ ] `cargo clippy --workspace --all-targets --all-features -- --deny warnings` passes
+- [ ] Tests updated and passing (`cargo test -p nlink --lib`)
+- [ ] `cargo clippy --workspace --all-targets --all-features -- --deny warnings` clean
 - [ ] `cargo machete` shows no NEW unused deps
+- [ ] Examples and `CLAUDE.md` updated where relevant
+- [ ] Integration tests added for namespace-gated flows (skip-if-not-root)
 
----
-
-End of overview. See plans 129-135 for the detailed work.
+End of roadmap.
