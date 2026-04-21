@@ -1,200 +1,290 @@
-//! MACsec (IEEE 802.1AE) Configuration Example
+//! MACsec (IEEE 802.1AE) — full device + SA lifecycle.
 //!
-//! Demonstrates MACsec device configuration via Generic Netlink.
-//! MACsec provides Layer 2 encryption for point-to-point links.
+//! Demonstrates the write-path of `Connection::<Macsec>`: adding a
+//! TX SA, adding an RX SC + RX SA for a peer, dumping, and cleaning
+//! up. Runs inside a temporary namespace on a dummy parent
+//! interface.
 //!
-//! Run: cargo run -p nlink --example genl_macsec
+//! Run modes:
+//!
+//! ```bash
+//! # Print usage patterns + API overview (no privileges)
+//! cargo run -p nlink --example genl_macsec
+//!
+//! # Read-only probe of MACsec interfaces on the current host
+//! cargo run -p nlink --example genl_macsec -- show
+//!
+//! # Create dummy + macsec on top + add TX/RX SAs + dump + cleanup.
+//! # Requires root (CAP_NET_ADMIN), `modprobe macsec`, and `ip(8)`
+//! # (used for the one step where nlink does not yet have a
+//! # `MacsecLink` rtnetlink builder).
+//! sudo cargo run -p nlink --example genl_macsec -- --apply
+//! ```
+//!
+//! See also: `nlink::netlink::genl::macsec::{MacsecSaBuilder,
+//! MacsecDevice}`.
 
-use nlink::netlink::{Connection, Macsec};
+use std::process::Command;
+
+use nlink::netlink::{
+    Connection, Macsec, Route,
+    genl::macsec::{MacsecDevice, MacsecSaBuilder},
+    link::DummyLink,
+    namespace,
+};
+
+// 128-bit test keys for GCM-AES-128. Real deployments use MKA or a
+// key-management daemon; these are for a throwaway namespace demo.
+const LOCAL_KEY: [u8; 16] = [0x11; 16];
+const PEER_KEY: [u8; 16] = [0x22; 16];
+const PEER_SCI: u64 = 0x0011_2233_4455_0001;
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
-    println!("=== MACsec Device Configuration ===\n");
+    let args: Vec<String> = std::env::args().collect();
 
-    // Create MACsec connection
-    match Connection::<Macsec>::new_async().await {
-        Ok(conn) => {
-            println!("MACsec GENL family ID: {}\n", conn.family_id());
-
-            // Try to find MACsec interfaces
-            let route_conn = nlink::netlink::Connection::<nlink::Route>::new()?;
-            let links = route_conn.get_links().await?;
-            let macsec_links: Vec<_> = links
-                .iter()
-                .filter(|l| l.link_kind() == Some("macsec"))
-                .collect();
-
-            if macsec_links.is_empty() {
-                println!("No MACsec interfaces found.\n");
-                println!("Create a MACsec interface with:");
-                println!("  sudo ip link add macsec0 link eth0 type macsec");
-                println!("  sudo ip link set macsec0 up");
-                println!();
-            } else {
-                for link in &macsec_links {
-                    let name = link.name_or("?");
-                    println!("MACsec interface: {}", name);
-
-                    match conn.get_device(name).await {
-                        Ok(device) => {
-                            println!("  SCI: {:016x}", device.sci);
-                            println!("  Cipher: {:?}", device.cipher_suite);
-                            println!("  Encoding SA: {}", device.encoding_sa);
-                            println!("  Encryption: {}", device.encryption);
-                            println!("  Protect: {}", device.protect);
-
-                            // TX SA info
-                            println!("  TX SC:");
-                            for sa in &device.tx_sc.sas {
-                                println!(
-                                    "    SA {}: active={}, PN={}",
-                                    sa.an, sa.active, sa.next_pn
-                                );
-                            }
-
-                            // RX SC info
-                            for rxsc in &device.rx_scs {
-                                println!("  RX SC {:016x}:", rxsc.sci);
-                                for sa in &rxsc.sas {
-                                    println!("    SA {}: active={}", sa.an, sa.active);
-                                }
-                            }
-                        }
-                        Err(e) => println!("  Error: {}", e),
-                    }
-                    println!();
-                }
-            }
-        }
-        Err(e) => {
-            println!("MACsec GENL not available: {}\n", e);
-            println!("Load MACsec module with: sudo modprobe macsec");
-            println!();
-        }
+    match args.get(1).map(|s| s.as_str()) {
+        Some("show") => run_show().await?,
+        Some("--apply") => run_apply().await?,
+        _ => print_overview(),
     }
-
-    // Example MACsec configurations
-    println!("=== MACsec Configuration Examples ===\n");
-
-    println!("--- Create MACsec interface ---");
-    println!(
-        r#"
-    # Create MACsec interface over eth0
-    sudo ip link add macsec0 link eth0 type macsec
-
-    # With specific options
-    sudo ip link add macsec0 link eth0 type macsec \
-        sci 0x0011223344550001 \
-        encrypt on
-
-    sudo ip link set macsec0 up
-"#
-    );
-
-    println!("--- Query MACsec device ---");
-    println!(
-        r#"
-    use nlink::netlink::{{Connection, Macsec}};
-
-    let conn = Connection::<Macsec>::new_async().await?;
-
-    // Get device information by name (resolved via netlink)
-    let device = conn.get_device("macsec0").await?;
-    println!("SCI: {:016x}", device.sci);
-    println!("Cipher: {:?}", device.cipher_suite);
-    println!("Encoding SA: {}", device.encoding_sa);
-
-    // List TX SAs
-    for sa in &device.tx_sc.sas {
-        println!("TX SA {}: active={}", sa.an, sa.active);
-    }
-
-    // List RX SCs and SAs
-    for rxsc in &device.rx_scs {
-        println!("RX SC {:016x}:", rxsc.sci);
-        for sa in &rxsc.sas {
-            println!("  SA {}: active={}", sa.an, sa.active);
-        }
-    }
-"#
-    );
-
-    println!("--- Add TX SA ---");
-    println!(
-        r#"
-    use nlink::netlink::genl::macsec::MacsecSaBuilder;
-
-    // Add TX SA with key (AN 0-3)
-    let key = [0u8; 16];  // 128-bit key for GCM-AES-128
-    conn.add_tx_sa("macsec0",
-        MacsecSaBuilder::new(0)  // AN (Association Number)
-            .key(&key)
-            .pn(1)              // Initial packet number
-            .active(true)
-    ).await?;
-"#
-    );
-
-    println!("--- Update TX SA ---");
-    println!(
-        r#"
-    // Activate/deactivate SA
-    conn.update_tx_sa("macsec0",
-        MacsecSaBuilder::new(0)
-            .active(false)  // Deactivate
-    ).await?;
-
-    // Update packet number
-    conn.update_tx_sa("macsec0",
-        MacsecSaBuilder::new(0)
-            .pn(1000000)
-    ).await?;
-"#
-    );
-
-    println!("--- Add RX SC (peer) ---");
-    println!(
-        r#"
-    // Add RX SC for a peer (using their SCI)
-    let peer_sci = 0x001122334455_0001u64;  // MAC + port
-    conn.add_rx_sc("macsec0", peer_sci).await?;
-
-    // Add RX SA for the peer
-    let peer_key = [0u8; 16];
-    conn.add_rx_sa("macsec0", peer_sci,
-        MacsecSaBuilder::new(0)
-            .key(&peer_key)
-            .pn(1)
-            .active(true)
-    ).await?;
-"#
-    );
-
-    println!("--- Delete SAs and SCs ---");
-    println!(
-        r#"
-    // Delete TX SA
-    conn.del_tx_sa("macsec0", 0).await?;
-
-    // Delete RX SA
-    conn.del_rx_sa("macsec0", peer_sci, 0).await?;
-
-    // Delete RX SC
-    conn.del_rx_sc("macsec0", peer_sci).await?;
-"#
-    );
-
-    println!("=== MACsec Key Management ===\n");
-    println!("MACsec typically uses:");
-    println!("- Pre-shared keys (PSK) for simple deployments");
-    println!("- MKA (MACsec Key Agreement) with 802.1X for enterprise");
-    println!();
-    println!("Key sizes:");
-    println!("- GCM-AES-128: 16-byte key");
-    println!("- GCM-AES-256: 32-byte key");
-    println!("- GCM-AES-XPN-128: 16-byte key (extended PN)");
-    println!("- GCM-AES-XPN-256: 32-byte key (extended PN)");
-    println!();
 
     Ok(())
+}
+
+fn print_overview() {
+    println!("=== MACsec (IEEE 802.1AE) ===\n");
+    println!("Layer-2 encryption for point-to-point links. The kernel");
+    println!("object hierarchy is:\n");
+    println!("    macsec0 (TX SC ──> TX SA 0..3)");
+    println!("             (RX SC per peer ──> RX SA 0..3)\n");
+
+    println!("--- What --apply does ---\n");
+    println!(
+        "    1. Create a temporary namespace.
+    2. Add dummy0 (nlink), bring up.
+    3. Add macsec0 link=dummy0 via `ip link` (no MacsecLink helper yet).
+    4. Open Connection::<Macsec>, print device SCI + cipher.
+    5. add_tx_sa(AN=0, local key, pn=1, active=true).
+    6. add_rx_sc(peer_sci).
+    7. add_rx_sa(peer_sci, AN=0, peer key, pn=1, active=true).
+    8. get_device() to dump the TX + RX SC/SA state.
+    9. del_rx_sa, del_rx_sc, del_tx_sa.
+   10. Delete namespace (takes macsec0 + dummy0 with it).
+"
+    );
+
+    println!("--- Code ---\n");
+    println!(
+        r#"    use nlink::netlink::{{Connection, Macsec, namespace}};
+    use nlink::netlink::genl::macsec::MacsecSaBuilder;
+
+    let conn: Connection<Macsec> =
+        namespace::connection_for_async("lab").await?;
+
+    // TX SA (encodes outgoing frames).
+    conn.add_tx_sa("macsec0",
+        MacsecSaBuilder::new(0, &local_key)   // AN=0, key
+            .packet_number(1)
+            .active(true),
+    ).await?;
+
+    // RX SC (per peer) + RX SA (decodes that peer's frames).
+    conn.add_rx_sc("macsec0", peer_sci).await?;
+    conn.add_rx_sa("macsec0", peer_sci,
+        MacsecSaBuilder::new(0, &peer_key)
+            .packet_number(1)
+            .active(true),
+    ).await?;
+
+    // Inspect current state.
+    let dev = conn.get_device("macsec0").await?;
+
+    // Cleanup (caller's responsibility).
+    conn.del_rx_sa("macsec0", peer_sci, 0).await?;
+    conn.del_rx_sc("macsec0", peer_sci).await?;
+    conn.del_tx_sa("macsec0", 0).await?;
+"#
+    );
+
+    println!("--- Re-run with `--apply` (as root) ---");
+    println!("  Runs the lifecycle above in a temporary namespace.");
+}
+
+async fn run_show() -> nlink::Result<()> {
+    let conn = match Connection::<Macsec>::new_async().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!("Failed to open MACsec GENL: {e}");
+            eprintln!("Load the module with: sudo modprobe macsec");
+            return Ok(());
+        }
+    };
+
+    println!("MACsec family_id={}\n", conn.family_id());
+
+    let route = Connection::<Route>::new()?;
+    let links = route.get_links().await?;
+    let macsec_links: Vec<_> = links
+        .iter()
+        .filter(|l| l.kind() == Some("macsec"))
+        .collect();
+
+    if macsec_links.is_empty() {
+        println!("No MACsec interfaces on this host.");
+        println!();
+        println!("Build one in a temporary namespace with:");
+        println!("  sudo cargo run -p nlink --example genl_macsec -- --apply");
+        return Ok(());
+    }
+
+    for link in &macsec_links {
+        let name = link.name_or("?");
+        match conn.get_device(name).await {
+            Ok(device) => print_device(name, &device),
+            Err(e) => eprintln!("  Error querying {name}: {e}"),
+        }
+    }
+    Ok(())
+}
+
+async fn run_apply() -> nlink::Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("--apply requires root (CAP_NET_ADMIN). Aborting.");
+        std::process::exit(1);
+    }
+
+    println!("=== MACsec live demo (temporary namespace) ===");
+
+    let ns_name = format!("nlink-macsec-demo-{}", std::process::id());
+    namespace::create(&ns_name)?;
+
+    let result = run_demo(&ns_name).await;
+
+    let _ = namespace::delete(&ns_name);
+    result?;
+
+    println!();
+    println!("Done. Namespace `{ns_name}` removed.");
+    Ok(())
+}
+
+async fn run_demo(ns_name: &str) -> nlink::Result<()> {
+    // 1. Dummy parent interface.
+    let route: Connection<Route> = namespace::connection_for(ns_name)?;
+    route.add_link(DummyLink::new("dummy0")).await?;
+    route.set_link_up("dummy0").await?;
+    println!("  Created dummy0 in namespace `{ns_name}`.");
+
+    // 2. MACsec interface on top. We don't yet have a MacsecLink
+    //    rtnetlink builder, so we use `ip link add` in-namespace. If
+    //    this step fails, the most common cause is a missing macsec
+    //    module — surface the hint.
+    let mut ip = Command::new("ip");
+    ip.args(["link", "add", "macsec0", "link", "dummy0", "type", "macsec"]);
+    let out = namespace::spawn_output(ns_name, ip).map_err(|e| {
+        eprintln!("\n  `ip link add ... type macsec` failed: {e}");
+        eprintln!("  Load the module with: sudo modprobe macsec");
+        e
+    })?;
+    if !out.status.success() {
+        eprintln!("\n  `ip link add ... type macsec` exited {}:", out.status);
+        eprintln!("  stderr: {}", String::from_utf8_lossy(&out.stderr));
+        eprintln!("  Load the module with: sudo modprobe macsec");
+        return Err(nlink::Error::from(std::io::Error::other(
+            "ip link add type macsec failed",
+        )));
+    }
+    route.set_link_up("macsec0").await?;
+    println!("  Created macsec0 link=dummy0 via `ip link add` and brought it up.");
+
+    // 3. GENL connection for the namespace.
+    let macsec: Connection<Macsec> = namespace::connection_for_async(ns_name).await?;
+    println!(
+        "  Opened MACsec GENL connection (family_id={}).",
+        macsec.family_id()
+    );
+
+    println!();
+    println!("  --- Initial state ---");
+    let before = macsec.get_device("macsec0").await?;
+    print_device("macsec0", &before);
+
+    // 4. Add a TX SA.
+    println!();
+    println!("  add_tx_sa(AN=0, key=0x11.., pn=1, active=true)");
+    macsec
+        .add_tx_sa(
+            "macsec0",
+            MacsecSaBuilder::new(0, &LOCAL_KEY)
+                .packet_number(1)
+                .active(true),
+        )
+        .await?;
+
+    // 5. Add a peer RX SC + RX SA.
+    println!(
+        "  add_rx_sc(peer_sci=0x{PEER_SCI:016x})"
+    );
+    macsec.add_rx_sc("macsec0", PEER_SCI).await?;
+
+    println!("  add_rx_sa(peer_sci, AN=0, key=0x22.., pn=1, active=true)");
+    macsec
+        .add_rx_sa(
+            "macsec0",
+            PEER_SCI,
+            MacsecSaBuilder::new(0, &PEER_KEY)
+                .packet_number(1)
+                .active(true),
+        )
+        .await?;
+
+    // 6. Dump to verify round-trip.
+    println!();
+    println!("  --- After SA configuration ---");
+    let after = macsec.get_device("macsec0").await?;
+    print_device("macsec0", &after);
+
+    // 7. Cleanup.
+    println!();
+    println!("  Cleaning up: del_rx_sa, del_rx_sc, del_tx_sa...");
+    macsec.del_rx_sa("macsec0", PEER_SCI, 0).await?;
+    macsec.del_rx_sc("macsec0", PEER_SCI).await?;
+    macsec.del_tx_sa("macsec0", 0).await?;
+
+    Ok(())
+}
+
+fn print_device(name: &str, device: &MacsecDevice) {
+    println!("  interface: {name} (ifindex {})", device.ifindex);
+    println!("    SCI:           0x{:016x}", device.sci);
+    println!("    cipher:        {:?}", device.cipher);
+    println!("    encoding_sa:   {}", device.encoding_sa);
+    println!(
+        "    encrypt={}  protect={}  replay_protect={}",
+        device.encrypt, device.protect, device.replay_protect
+    );
+
+    if let Some(tx_sc) = &device.tx_sc {
+        println!("    TX SC (SCI 0x{:016x}):", tx_sc.sci);
+        if tx_sc.sas.is_empty() {
+            println!("      (no TX SAs)");
+        }
+        for sa in &tx_sc.sas {
+            println!("      TX SA an={} active={} pn={}", sa.an, sa.active, sa.pn);
+        }
+    } else {
+        println!("    TX SC: (none)");
+    }
+
+    if device.rx_scs.is_empty() {
+        println!("    RX SCs: (none)");
+    } else {
+        for rx in &device.rx_scs {
+            println!("    RX SC 0x{:016x} active={}:", rx.sci, rx.active);
+            for sa in &rx.sas {
+                println!("      RX SA an={} active={} pn={}", sa.an, sa.active, sa.pn);
+            }
+        }
+    }
 }

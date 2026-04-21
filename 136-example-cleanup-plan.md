@@ -59,8 +59,8 @@ The shape that's already proven and should be reused:
 | File | Current | Proposed | Notes |
 |---|---|---|---|
 | ~~`genl/wireguard.rs`~~ | ~~Dumps devices + peers~~ | **Done** — `--apply` creates wg0 via rtnetlink, sets private key + listen port + peer via GENL, dumps, and cleans up; `show` subcommand retains read-only probing. |
-| `genl/macsec.rs` (200 lines) | Lists TX/RX SAs/SCs | Create device + add TX SA + add RX SC + RX SA + verify | Same shape as wg: write path is the value-add |
-| `genl/mptcp.rs` (216 lines) | Gets limits + endpoints | Add endpoint + set limits + delete endpoint | Same pattern |
+| ~~`genl/macsec.rs`~~ | ~~Lists TX/RX SAs/SCs~~ | **Done** — `--apply` builds a dummy + macsec-on-top (via `ip link add` since there's no `MacsecLink` builder yet), then adds a TX SA + RX SC/SA + dumps + cleans up. Follow-up: add `MacsecLink` rtnetlink helper. |
+| ~~`genl/mptcp.rs`~~ | ~~Gets limits + endpoints~~ | **Done** — `--apply` creates a dummy with a v4 address, adds two endpoints bound to it, sets limits, dumps, flips flags on one, deletes, flushes. |
 | ~~`route/tc/htb.rs`~~ | ~~`show` / `classes` subcommands — dump only~~ | **Done** — `--apply` builds a 3-class HTB tree + 2 flower filters in a temp namespace, dumps, tears down. Query subcommands retained. |
 | `route/addresses.rs` | Partly real, partly list-only | Tighten to a single add/del/show lifecycle on a dummy | Already partly there |
 
@@ -120,7 +120,7 @@ were deleted in `d023381`. Before each promote, verify registration.
 - ~~Promote `route/tc/htb.rs` to a TC pipeline example.~~ **Done.**
 
 **Phase 2 (0.15.0 GENL completeness, ~1 day):**
-- Promote `genl/macsec.rs`, `genl/mptcp.rs` — mirror the wireguard shape.
+- ~~Promote `genl/macsec.rs`, `genl/mptcp.rs` — mirror the wireguard shape.~~ **Done.**
 
 **Phase 3 (opportunistic):**
 - `ethtool_rings.rs`, `devlink.rs`, `nl80211.rs`, `conntrack.rs` —

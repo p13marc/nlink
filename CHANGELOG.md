@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — Plan 136: `genl_macsec` + `genl_mptcp` examples promoted
+
+- `examples/genl/mptcp.rs` gains a `--apply` mode that creates a
+  dummy interface with an IPv4 address in a temporary namespace,
+  opens an MPTCP PM GENL connection, adds two endpoints bound to
+  the dummy (signal+subflow, signal+backup), sets `subflows` /
+  `add_addr_accepted` limits, dumps, flips endpoint #1's flags via
+  `set_endpoint_flags`, deletes it, and flushes. `show` subcommand
+  retained for read-only probing.
+- `examples/genl/macsec.rs` gains a `--apply` mode that creates a
+  dummy parent, shells out to `ip link add macsec0 link dummy0
+  type macsec` (no `MacsecLink` rtnetlink helper yet — tracked as
+  a follow-up), opens a MACsec GENL connection, adds a TX SA, adds
+  an RX SC + RX SA for a peer SCI, dumps the device state, and
+  cleans up. `show` subcommand lists existing macsec interfaces
+  on the host.
+- Both examples are now registered in `crates/nlink/Cargo.toml`
+  under `[[example]]` — previously they were orphans and couldn't
+  be `cargo run`-ed.
+
 ### Changed — Plan 136: `genl_wireguard` example promoted to full lifecycle
 
 - `examples/genl/wireguard.rs` gains a `--apply` mode that creates

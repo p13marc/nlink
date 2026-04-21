@@ -150,6 +150,14 @@ name = "genl_wireguard"
 path = "examples/genl/wireguard.rs"
 
 [[example]]
+name = "genl_mptcp"
+path = "examples/genl/mptcp.rs"
+
+[[example]]
+name = "genl_macsec"
+path = "examples/genl/macsec.rs"
+
+[[example]]
 name = "ethtool_link_state"
 path = "examples/genl/ethtool_link_state.rs"
 
