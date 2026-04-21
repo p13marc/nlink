@@ -59,7 +59,7 @@ fn print_overview() {
     println!(
         "    1. Create a temporary namespace.
     2. Add dummy0 (nlink), bring up.
-    3. Add macsec0 link=dummy0 via `ip link` (no MacsecLink helper yet).
+    3. Add macsec0 link=dummy0 via MacsecLink rtnetlink builder.
     4. Open Connection::<Macsec>, print device SCI + cipher.
     5. add_tx_sa(AN=0, local key, pn=1, active=true).
     6. add_rx_sc(peer_sci).
