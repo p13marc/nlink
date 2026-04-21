@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 135 PR A: public `nlink::lab` module + builders
+
+- New `LabBridge<'a>` builder (`nlink::lab::LabBridge`) that chains
+  `create` → `add_port` → `up` with one rtnetlink op per step —
+  wraps our `BridgeLink` + `Connection::enslave` /
+  `Connection::set_link_up` into a test-friendly fluent interface
+  scoped to a `LabNamespace`.
+- New `LabVeth<'a>` builder (`nlink::lab::LabVeth`) that creates a
+  veth pair with the peer optionally placed in another
+  `LabNamespace` — a thin layer over `VethLink::peer_netns()` that
+  keeps both interface names around for later use.
+- New `examples/lab/three_namespace.rs` — builds an hq/alpha/beta
+  topology with a bridge on hq connected to each client via veth.
+  Default mode prints the topology diagram; `--apply` runs the real
+  setup inside three transient namespaces. Registered in Cargo.toml
+  with `required-features = ["lab"]`.
+
 ### Added — Plan 135 PR A: public `nlink::lab` module
 
 - New `nlink::lab` module, gated behind a `lab` feature flag. Promotes

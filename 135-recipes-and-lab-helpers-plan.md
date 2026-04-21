@@ -4,7 +4,7 @@ from: nlink maintainers
 subject: More cookbook recipes + public lab/test helpers
 target version: 0.14.0 (revised 2026-04-19; originally split between "0.14.0" and "1.0", now folded into 0.14.0)
 date: 2026-04-19
-status: PR A (lab module core) landed 2026-04-21 under [Unreleased]; LabBridge / LabVeth builders and three-namespace example deferred as follow-up. PR B (recipes) not started.
+status: PR A complete 2026-04-21 under [Unreleased] — LabNamespace + with_namespace + LabBridge + LabVeth + three-namespace example all shipped. PR B (recipes) not started.
 ---
 
 # Recipes & Lab Helpers Plan
@@ -495,11 +495,11 @@ Order: A first, then B can use lab helpers in recipe code samples.
 ### PR A: Lab module
 
 - [x] `nlink::lab::LabNamespace` exists, gated by `lab` feature
-- [ ] `LabBridge` and `LabVeth` builders exist **— deferred; file follow-up before PR B needs them in recipes**
+- [x] `LabBridge` and `LabVeth` builders exist
 - [x] `with_namespace` async runner exists
 - [x] `tests/common/mod.rs` migrated (thin shim re-exporting `LabNamespace as TestNamespace`)
 - [x] All existing integration tests compile after migration (`cargo build --tests --features lab`)
-- [ ] `crates/nlink/examples/lab/three_namespace.rs` runs (with sudo) **— deferred; needs LabBridge/LabVeth to be worthwhile**
+- [x] `crates/nlink/examples/lab/three_namespace.rs` builds (runs with sudo)
 - [x] Module-level rustdoc with usage example
 - [x] CHANGELOG entry written
 

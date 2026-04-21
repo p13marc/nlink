@@ -289,3 +289,9 @@ path = "examples/impair/per_peer.rs"
 [[example]]
 name = "ratelimit_simple"
 path = "examples/ratelimit/simple.rs"
+
+# Lab module (LabNamespace / LabBridge / LabVeth) demos
+[[example]]
+name = "lab_three_namespace"
+path = "examples/lab/three_namespace.rs"
+required-features = ["lab"]

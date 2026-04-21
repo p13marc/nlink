@@ -54,6 +54,12 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+mod bridge;
+mod veth;
+
+pub use bridge::LabBridge;
+pub use veth::LabVeth;
+
 use tracing::warn;
 
 use crate::{
