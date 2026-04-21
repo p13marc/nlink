@@ -68,10 +68,10 @@ The shape that's already proven and should be reused:
 
 | File | Current | Proposed | Notes |
 |---|---|---|---|
-| `genl/devlink.rs` (96 lines) | Lists devices/ports/reporters | Add a `--reload <dev>` subcommand that exercises `reload()` with `ReloadAction::DriverReinit`; fall back to info-only for non-devlink hardware | Most dev envs won't have devlink HW, so keep query default |
-| `genl/nl80211.rs` (89 lines) | Lists wireless interfaces | Add `--scan <iface>` that triggers a scan + prints results | Requires WiFi hardware |
-| `genl/ethtool_rings.rs` (125 lines) | Queries ring sizes | Add `--set-rx <N> --set-tx <N>` that configures + verifies + restores | Mirrors the `ethtool_features` promote pattern |
-| `netfilter/conntrack.rs` (122 lines) | Lists conntrack entries | Add `--add-test-entry` that injects a test flow via CTA_* attributes, dumps, removes | Requires `ip_conntrack`; verify library support first |
+| ~~`genl/devlink.rs`~~ | ~~Lists devices/ports/reporters~~ | **Done** — `--reload <bus/device>` exercises `ReloadAction::DriverReinit` with a pre/post snapshot. Inventory mode unchanged (default). |
+| ~~`genl/nl80211.rs`~~ | ~~Lists wireless interfaces~~ | **Done** — `--scan <iface>` triggers an active scan, waits for the `ScanComplete` multicast event (15s timeout), then prints BSSes. Inventory mode unchanged (default). |
+| ~~`genl/ethtool_rings.rs`~~ | ~~Queries ring sizes~~ | **Done** — `--set-rx <N>` / `--set-tx <N>` snapshot current sizes, apply, verify, restore. Mirrors the `ethtool_features` promote pattern. |
+| `netfilter/conntrack.rs` (122 lines) | Lists conntrack entries | **Deferred** — nlink's `Netfilter` connection only exposes `get_conntrack` / `get_conntrack_v6`; no add/del API. Either (a) extend the library (blocked by plan §5 non-goals), or (b) generate real traffic via veth + forwarding and observe — too involved for an example promote. Park until there's a concrete user ask. |
 
 ### 2.3 Low-value (leave as-is or shrink)
 
@@ -123,8 +123,9 @@ were deleted in `d023381`. Before each promote, verify registration.
 - ~~Promote `genl/macsec.rs`, `genl/mptcp.rs` — mirror the wireguard shape.~~ **Done.**
 
 **Phase 3 (opportunistic):**
-- `ethtool_rings.rs`, `devlink.rs`, `nl80211.rs`, `conntrack.rs` —
-  lower value, land when someone's touching the related module.
+- ~~`ethtool_rings.rs`, `devlink.rs`, `nl80211.rs`~~ — **done.**
+- `conntrack.rs` — **deferred** pending library add/del API. See §2.2
+  row for the full rationale.
 
 Each promote is ~50-150 LOC. No BC impact. No test changes required
 (examples don't run in CI).

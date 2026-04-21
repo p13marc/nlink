@@ -18,7 +18,7 @@ have been removed (their substance is in the commits + changelog).
 |---|---|---|---|
 | 133 | [TC coverage gaps](133-tc-coverage-plan.md) | **3 of 4 PRs landed** (A/B/D under `[Unreleased]`); **PR C deferred** | Typed `CakeConfig`, `FqPieConfig`, `BpfAction`, `SimpleAction`. `BasicFilter` ematch (cmp/u32/meta) pending — ematch wire format needs validation against golden `tc(8)` hex before shipping. |
 | 135 | [Recipes + public `nlink::lab`](135-recipes-and-lab-helpers-plan.md) | Not started | 7 new recipes (bridge VLAN, bidir rate limit, WireGuard mesh, IPsec, nftables stateful firewall, cgroup classification, multi-namespace events) + promote `TestNamespace` → public `nlink::lab`. The cgroup-classification recipe blocks on Plan 133 PR C. |
-| 136 | [Example cleanup](136-example-cleanup-plan.md) | **Phases 1 + 2 complete**; Phase 3 remains | Phase 1 (htb + wireguard) and Phase 2 (macsec + mptcp) shipped. Phase 3 (ethtool_rings, devlink, nl80211, conntrack) still pending. `MacsecLink` rtnetlink builder noted as follow-up — the macsec example shells out to `ip link add` for the one step we don't cover. |
+| 136 | [Example cleanup](136-example-cleanup-plan.md) | **Phases 1 + 2 + 3 complete**; conntrack deferred | Phase 1 (htb + wireguard), Phase 2 (macsec + mptcp), and Phase 3 (ethtool_rings + devlink + nl80211) all shipped. `netfilter/conntrack.rs` deferred — nlink's Netfilter connection only dumps, so promoting the example would require a library extension that's out of scope for a test-cleanup plan. `MacsecLink` rtnetlink builder remains a medium-priority follow-up. |
 
 ## Release plan
 

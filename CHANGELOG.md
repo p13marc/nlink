@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — Plan 136: `ethtool_rings`, `genl_nl80211`, `genl_devlink` promoted
+
+- `ethtool_rings` gains `--set-rx <N>` / `--set-tx <N>` that snapshot
+  the current ring sizes, apply the requested size via `set_rings()`,
+  re-query to verify (warning if the driver clamped or rejected),
+  then restore the original values. Requires CAP_NET_ADMIN and a
+  driver that honors `ETHTOOL_SRINGPARAM`. Mirrors the shape of the
+  existing `ethtool_features --toggle` promote.
+- `genl_nl80211` gains `--scan <iface>` that triggers an active scan,
+  waits up to 15s on the multicast group for `Nl80211Event::ScanComplete`,
+  then dumps BSSes (`bssid`, frequency, signal dBm, SSID, privacy
+  flag). Inventory mode (default) unchanged.
+- `genl_devlink` gains `--reload <bus/device>` that parses the
+  devlink path (e.g., `pci/0000:03:00.0`), snapshots the device's
+  pre-reload state (info, ports, health reporters), calls
+  `reload(ReloadAction::DriverReinit)`, and re-queries to confirm
+  the device reappeared. Inventory mode (default) unchanged.
+
 ### Changed — Plan 136: `genl_macsec` + `genl_mptcp` examples promoted
 
 - `examples/genl/mptcp.rs` gains a `--apply` mode that creates a
