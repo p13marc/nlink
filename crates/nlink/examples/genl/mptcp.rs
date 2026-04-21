@@ -169,7 +169,10 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
         .add_address_by_name("dummy0", Ipv4Addr::new(10, 200, 0, 1).into(), 24)
         .await?;
     route.set_link_up("dummy0").await?;
-    let link = route.get_link_by_name("dummy0").await?.expect("just created");
+    let link = route
+        .get_link_by_name("dummy0")
+        .await?
+        .expect("just created");
     println!(
         "  Created dummy0 (ifindex {}) with 10.200.0.1/24 in `{ns_name}`.",
         link.ifindex()
@@ -183,7 +186,10 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
             return Err(e);
         }
     };
-    println!("  Opened MPTCP GENL connection (family_id={}).", mptcp.family_id());
+    println!(
+        "  Opened MPTCP GENL connection (family_id={}).",
+        mptcp.family_id()
+    );
 
     // Start clean in case the PM has stale state from an earlier run.
     let _ = mptcp.flush_endpoints().await;
@@ -219,7 +225,10 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     println!();
     println!("  --- get_limits ---");
     let limits = mptcp.get_limits().await?;
-    println!("    subflows={:?} add_addr_accepted={:?}", limits.subflows, limits.add_addr_accepted);
+    println!(
+        "    subflows={:?} add_addr_accepted={:?}",
+        limits.subflows, limits.add_addr_accepted
+    );
 
     println!();
     println!("  --- get_endpoints ---");
@@ -249,7 +258,10 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     mptcp.flush_endpoints().await?;
 
     let after_flush = mptcp.get_endpoints().await?;
-    println!("  After flush: {} endpoint(s) remaining.", after_flush.len());
+    println!(
+        "  After flush: {} endpoint(s) remaining.",
+        after_flush.len()
+    );
 
     Ok(())
 }

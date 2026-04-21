@@ -179,16 +179,16 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     // rtnetlink side — create wg0 inside the namespace.
     let route: Connection<Route> = namespace::connection_for(ns_name)?;
 
-    route.add_link(WireguardLink::new("wg0")).await.map_err(|e| {
-        eprintln!("\n  add_link(wg0, kind=wireguard) failed: {e}");
-        eprintln!("  Is the `wireguard` kernel module loaded? `sudo modprobe wireguard`.");
-        e
-    })?;
+    route
+        .add_link(WireguardLink::new("wg0"))
+        .await
+        .map_err(|e| {
+            eprintln!("\n  add_link(wg0, kind=wireguard) failed: {e}");
+            eprintln!("  Is the `wireguard` kernel module loaded? `sudo modprobe wireguard`.");
+            e
+        })?;
     route.set_link_up("wg0").await?;
-    let link = route
-        .get_link_by_name("wg0")
-        .await?
-        .expect("just created");
+    let link = route.get_link_by_name("wg0").await?.expect("just created");
     println!(
         "  Created wg0 (ifindex {}) in namespace `{ns_name}`.",
         link.ifindex()
@@ -196,12 +196,17 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
 
     // GENL side — configure via set_device + set_peer.
     let wg: Connection<Wireguard> = namespace::connection_for_async(ns_name).await?;
-    println!("  Opened WireGuard GENL connection (family_id={}).", wg.family_id());
+    println!(
+        "  Opened WireGuard GENL connection (family_id={}).",
+        wg.family_id()
+    );
 
     println!();
     println!("  set_device: private_key + listen_port=51820");
-    wg.set_device("wg0", |dev| dev.private_key(LOCAL_PRIVATE).listen_port(51820))
-        .await?;
+    wg.set_device("wg0", |dev| {
+        dev.private_key(LOCAL_PRIVATE).listen_port(51820)
+    })
+    .await?;
 
     println!(
         "  set_peer:   pubkey={} endpoint=10.0.0.1:51820 allowed=10.0.0.0/24 keepalive=25s",

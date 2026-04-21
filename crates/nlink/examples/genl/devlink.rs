@@ -174,7 +174,10 @@ async fn reload_cycle(conn: &Connection<Devlink>, target: &str) -> nlink::Result
     println!();
     println!("Post-reload state for {target}:");
     let devices_after = conn.get_devices().await?;
-    match devices_after.iter().find(|d| d.bus == bus && d.device == device) {
+    match devices_after
+        .iter()
+        .find(|d| d.bus == bus && d.device == device)
+    {
         Some(dev) => print_device(conn, dev).await,
         None => println!("  device not present in inventory — reload may still be in progress"),
     }

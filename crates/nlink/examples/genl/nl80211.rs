@@ -89,7 +89,12 @@ async fn show_inventory() -> nlink::Result<()> {
 
     println!("\n=== Physical devices ===\n");
     for phy in &conn.get_phys().await? {
-        println!("  phy#{}: {} ({} bands)", phy.index, phy.name, phy.bands.len());
+        println!(
+            "  phy#{}: {} ({} bands)",
+            phy.index,
+            phy.name,
+            phy.bands.len()
+        );
     }
 
     if let Some(iface) = interfaces.first() {

@@ -164,7 +164,10 @@ async fn set_rings_cycle(
 
     // Verify.
     let after = conn.get_rings(ifname).await?;
-    println!("Kernel echoes: {ifname} rx={:?} tx={:?}", after.rx, after.tx);
+    println!(
+        "Kernel echoes: {ifname} rx={:?} tx={:?}",
+        after.rx, after.tx
+    );
     if let Some(rx) = want_rx
         && after.rx != Some(rx)
     {
@@ -195,10 +198,7 @@ async fn set_rings_cycle(
     .await?;
 
     let final_ = conn.get_rings(ifname).await?;
-    println!(
-        "Final: {ifname} rx={:?} tx={:?}",
-        final_.rx, final_.tx
-    );
+    println!("Final: {ifname} rx={:?} tx={:?}", final_.rx, final_.tx);
 
     Ok(())
 }

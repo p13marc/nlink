@@ -211,9 +211,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
         .await?;
 
     // 5. Add a peer RX SC + RX SA.
-    println!(
-        "  add_rx_sc(peer_sci=0x{PEER_SCI:016x})"
-    );
+    println!("  add_rx_sc(peer_sci=0x{PEER_SCI:016x})");
     macsec.add_rx_sc("macsec0", PEER_SCI).await?;
 
     println!("  add_rx_sa(peer_sci, AN=0, key=0x22.., pn=1, active=true)");
