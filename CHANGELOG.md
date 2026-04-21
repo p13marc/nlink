@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 135 PR A: public `nlink::lab` module
+
+- New `nlink::lab` module, gated behind a `lab` feature flag. Promotes
+  the `TestNamespace` helper (previously private in
+  `crates/nlink/tests/common/mod.rs`) to a public, reusable API:
+  - `LabNamespace::new(prefix)` creates an ephemeral namespace with a
+    PID-suffixed unique name; deletes it on `Drop`. Cleanup failure
+    WARNs via `tracing` rather than silently leaking.
+  - `LabNamespace::named(name)` for a user-chosen name (errors if it
+    already exists).
+  - `LabNamespace::connection()` / `connection_for::<P>()` /
+    `connection_for_async::<P>()` open netlink sockets scoped to the
+    namespace — the generic variants accept `ProtocolState` and
+    `AsyncProtocolInit` bounds, both of which are now re-exported at
+    `nlink::netlink`.
+  - `spawn` / `spawn_output` for running a `std::process::Command`
+    inside the namespace via `setns()`.
+  - Convenience: `exec`, `exec_ignore`, `connect_to`, `add_dummy`,
+    `link_up`, `add_addr`.
+- `nlink::lab::with_namespace(prefix, closure)` — async scope-guard
+  idiom: create a namespace, run the closure, delete it regardless of
+  error/panic.
+- `nlink::lab::is_root()` + `nlink::require_root!` /
+  `nlink::require_root_void!` macros for skip-if-not-root test
+  gating.
+- `crates/nlink/tests/common/mod.rs` is now a thin shim that re-exports
+  `LabNamespace as TestNamespace` — existing integration tests keep
+  their `crate::common::TestNamespace` imports unchanged. The
+  `integration` test target now has `required-features = ["lab"]` so
+  the binary only builds when the feature is enabled.
+- `full` feature set picks up `lab`.
+
 ### Changed — Plan 136: `ethtool_rings`, `genl_nl80211`, `genl_devlink` promoted
 
 - `ethtool_rings` gains `--set-rx <N>` / `--set-tx <N>` that snapshot

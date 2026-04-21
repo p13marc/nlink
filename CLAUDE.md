@@ -30,8 +30,8 @@ for isolated testing. These tests require root privileges and a Linux kernel wit
 network namespace support.
 
 ```bash
-# Build the integration tests
-cargo test --test integration --no-run
+# Build the integration tests (requires the `lab` feature for `nlink::lab`)
+cargo test --test integration --features lab --no-run
 
 # Run integration tests (requires root and CAP_SYS_ADMIN)
 sudo ./target/debug/deps/integration-* --test-threads=1
@@ -39,6 +39,11 @@ sudo ./target/debug/deps/integration-* --test-threads=1
 # Run a specific test
 sudo ./target/debug/deps/integration-* test_create_dummy_interface --test-threads=1
 ```
+
+The integration binary has `required-features = ["lab"]` so it won't compile
+without `--features lab`. Downstream consumers can reuse the same namespace
+helpers via `nlink::lab::LabNamespace` / `with_namespace` without vendoring a
+copy. See the [Lab helpers](#lab-integration-test-helpers) section below.
 
 **Test categories:**
 - `link::*` - Interface creation (dummy, veth, bridge, vlan, macvlan, etc.)
@@ -3065,6 +3070,51 @@ let output = namespace::spawn_output_with_etc("myns", cmd)?;
 // No-op if /etc/netns/myns/ doesn't exist (behaves like regular spawn)
 let output = namespace::spawn_output_with_etc("myns", Command::new("hostname"))?;
 ```
+
+## Lab / integration-test helpers
+
+Behind the `lab` feature, `nlink::lab` exposes the namespace + setup
+helpers that previously lived in `crates/nlink/tests/common/mod.rs`.
+Useful for downstream integration-test suites and local CLI demos.
+
+```rust
+use nlink::lab::{LabNamespace, with_namespace};
+use nlink::netlink::link::DummyLink;
+
+// Manual lifecycle — deleted on Drop.
+let ns = LabNamespace::new("probe")?;
+let conn = ns.connection()?;   // Connection<Route> in this namespace
+conn.add_link(DummyLink::new("dummy0")).await?;
+ns.add_addr("dummy0", "10.0.0.1/24")?;
+ns.link_up("dummy0")?;
+// ns goes out of scope here → namespace deleted
+
+// Scope-guarded — namespace deleted even if the closure errors.
+with_namespace("probe2", |ns| async move {
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("dummy0")).await?;
+    Ok(())
+}).await?;
+
+// GENL in a namespace via the async variant.
+let wg: Connection<Wireguard> = ns.connection_for_async().await?;
+
+// Spawn a child process inside the namespace (no `ip netns exec`).
+let out = ns.spawn_output(Command::new("ip").args(["addr"]))?;
+
+// Skip integration tests when not root:
+#[tokio::test]
+async fn needs_root() -> nlink::Result<()> {
+    nlink::require_root!();   // returns early with Ok(()) when euid != 0
+    // ... real test body ...
+    Ok(())
+}
+```
+
+`LabNamespace::Drop` attempts to delete the namespace and WARNs via
+`tracing` on failure (rather than silently leaking). The integration
+test binary has `required-features = ["lab"]` so `cargo test --test
+integration` alone won't build — pass `--features lab`.
 
 ## Route Classification Helpers
 

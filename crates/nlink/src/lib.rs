@@ -139,6 +139,9 @@ pub mod tc;
 #[cfg(feature = "output")]
 pub mod output;
 
+#[cfg(feature = "lab")]
+pub mod lab;
+
 // Re-export common types at crate root for convenience
 // Namespace types
 // Event types
