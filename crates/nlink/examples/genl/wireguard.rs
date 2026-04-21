@@ -1,224 +1,302 @@
-//! Query WireGuard interfaces via Generic Netlink.
+//! WireGuard configuration — full device + peer lifecycle.
 //!
-//! This example demonstrates how to use the Connection<Wireguard> API
-//! to query WireGuard device configuration and peer information.
+//! Demonstrates the write-path side of `Connection::<Wireguard>`:
+//! creating a `wg0` interface, setting its private key and listen
+//! port, adding a peer with an endpoint + allowed-ips, dumping the
+//! resulting state, and removing the peer — all inside a temporary
+//! namespace.
 //!
-//! Run with: cargo run -p nlink --example genl_wireguard
+//! Run modes:
 //!
-//! Note: Requires a WireGuard interface to exist. Create one with:
-//!   sudo ip link add wg0 type wireguard
-//!   sudo wg genkey | sudo tee /etc/wireguard/private.key
-//!   sudo wg set wg0 private-key /etc/wireguard/private.key listen-port 51820
+//! ```bash
+//! # Print usage patterns and the API overview (no privileges)
+//! cargo run -p nlink --example genl_wireguard
+//!
+//! # Probe a real host for existing wireguard interfaces (read-only)
+//! cargo run -p nlink --example genl_wireguard -- show
+//!
+//! # Create wg0 + configure + add peer + dump + cleanup in a
+//! # temporary namespace. Requires root (CAP_NET_ADMIN) and the
+//! # `wireguard` kernel module.
+//! sudo cargo run -p nlink --example genl_wireguard -- --apply
+//! ```
+//!
+//! See also: `nlink::netlink::genl::wireguard::{WgDevice, WgPeer,
+//! AllowedIp}`, and `nlink::netlink::link::WireguardLink` for
+//! rtnetlink-side interface creation.
 
-use nlink::netlink::{Connection, Wireguard};
+use std::{
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    time::SystemTime,
+};
+
+use nlink::netlink::{
+    Connection, Route, Wireguard,
+    genl::wireguard::{AllowedIp, WgDevice, WgPeer},
+    link::WireguardLink,
+    namespace,
+};
+
+// Hardcoded 32-byte "keys" for the demo. Real deployments generate
+// these with `wg genkey`; we don't run crypto in a throwaway namespace
+// and the kernel accepts any 32-byte blob.
+const LOCAL_PRIVATE: [u8; 32] = [0x01; 32];
+const PEER_PUBLIC: [u8; 32] = [0x02; 32];
 
 #[tokio::main]
-async fn main() -> nlink::netlink::Result<()> {
-    // Create a WireGuard connection (resolves GENL family ID)
-    let conn = match Connection::<Wireguard>::new_async().await {
-        Ok(conn) => conn,
-        Err(e) => {
-            eprintln!("Failed to connect to WireGuard: {}", e);
-            eprintln!("Make sure the wireguard kernel module is loaded.");
-            eprintln!("Try: sudo modprobe wireguard");
-            return Ok(());
+async fn main() -> nlink::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    match args.get(1).map(|s| s.as_str()) {
+        Some("show") => {
+            run_show().await?;
         }
-    };
-
-    // List all WireGuard interfaces by checking common names
-    println!("=== WireGuard Interfaces ===\n");
-
-    let interface_names = ["wg0", "wg1", "wg2", "wg-vpn", "wireguard0"];
-    let mut found_any = false;
-
-    for ifname in &interface_names {
-        match conn.get_device(*ifname).await {
-            Ok(device) => {
-                found_any = true;
-                print_device(&device);
-            }
-            Err(e) if e.is_not_found() || e.is_no_device() => {
-                // Interface doesn't exist, skip
-            }
-            Err(e) => {
-                eprintln!("Error querying {}: {}", ifname, e);
-            }
+        Some("--apply") => {
+            run_apply().await?;
         }
-    }
-
-    if !found_any {
-        println!("No WireGuard interfaces found.");
-        println!("\nTo create a WireGuard interface:");
-        println!("  sudo ip link add wg0 type wireguard");
-        println!("  wg genkey > privatekey");
-        println!("  sudo wg set wg0 private-key ./privatekey listen-port 51820");
-        println!("  sudo ip link set wg0 up");
+        _ => {
+            print_overview();
+        }
     }
 
     Ok(())
 }
 
-fn print_device(device: &nlink::netlink::genl::wireguard::WgDevice) {
+fn print_overview() {
+    println!("=== WireGuard (Generic Netlink) ===\n");
+    println!("The `Connection::<Wireguard>` handle sits on top of the WG");
+    println!("GENL family. Interface creation is rtnetlink (same as any");
+    println!("kind=wireguard link); key and peer config flows through GENL.\n");
+
+    println!("--- What --apply does ---\n");
+    println!(
+        "    1. Create a temporary namespace.
+    2. Add wg0 (kind=wireguard) and bring it up (rtnetlink).
+    3. Configure via GENL: private key + listen port.
+    4. Add a peer: public key + endpoint + allowed-ip + keepalive.
+    5. Dump with get_device() to verify round-trip.
+    6. del_peer(), then delete the namespace (wg0 goes with it).
+"
+    );
+
+    println!("--- Code ---\n");
+    println!(
+        r#"    use nlink::netlink::{{Connection, Route, Wireguard, namespace}};
+    use nlink::netlink::genl::wireguard::AllowedIp;
+    use nlink::netlink::link::WireguardLink;
+    use std::net::{{Ipv4Addr, SocketAddrV4}};
+
+    // rtnetlink side — create the interface.
+    let route: Connection<Route> = namespace::connection_for("lab")?;
+    route.add_link(WireguardLink::new("wg0")).await?;
+    route.set_link_up("wg0").await?;
+
+    // GENL side — set keys + peer.
+    let wg: Connection<Wireguard> = namespace::connection_for_async("lab").await?;
+
+    wg.set_device("wg0", |dev| {{
+        dev.private_key(local_private_key)
+           .listen_port(51820)
+    }}).await?;
+
+    wg.set_peer("wg0", peer_public_key, |peer| {{
+        peer.endpoint(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 51820).into())
+            .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
+            .persistent_keepalive(25)
+            .replace_allowed_ips()
+    }}).await?;
+
+    let device = wg.get_device("wg0").await?;
+    for peer in &device.peers {{ /* ... */ }}
+
+    // Remove a peer without tearing down the interface:
+    wg.del_peer("wg0", peer_public_key).await?;
+"#
+    );
+
+    println!("--- Re-run with `--apply` (as root) ---");
+    println!("  Runs the lifecycle above in a temporary namespace.");
+    println!();
+    println!("--- Read-only mode ---");
+    println!("  `show` probes common wg* interface names on the current host.");
+}
+
+async fn run_show() -> nlink::Result<()> {
+    let conn = match Connection::<Wireguard>::new_async().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!("Failed to connect to WireGuard GENL: {e}");
+            eprintln!("Try: sudo modprobe wireguard");
+            return Ok(());
+        }
+    };
+
+    println!("=== WireGuard interfaces (probing wg0..wg2, wg-vpn, wireguard0) ===\n");
+    let candidates = ["wg0", "wg1", "wg2", "wg-vpn", "wireguard0"];
+    let mut found = false;
+
+    for name in candidates {
+        match conn.get_device(name).await {
+            Ok(device) => {
+                found = true;
+                print_device(&device);
+            }
+            Err(e) if e.is_not_found() || e.is_no_device() => {}
+            Err(e) => eprintln!("Error querying {name}: {e}"),
+        }
+    }
+
+    if !found {
+        println!("No WireGuard interfaces found.");
+        println!("Build one with: sudo cargo run -p nlink --example genl_wireguard -- --apply");
+    }
+
+    Ok(())
+}
+
+async fn run_apply() -> nlink::Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("--apply requires root (CAP_NET_ADMIN). Aborting.");
+        std::process::exit(1);
+    }
+
+    println!("=== WireGuard live demo (temporary namespace) ===");
+
+    let ns_name = format!("nlink-wg-demo-{}", std::process::id());
+    namespace::create(&ns_name)?;
+
+    let result = run_demo(&ns_name).await;
+
+    let _ = namespace::delete(&ns_name);
+    result?;
+
+    println!();
+    println!("Done. Namespace `{ns_name}` removed.");
+    Ok(())
+}
+
+async fn run_demo(ns_name: &str) -> nlink::Result<()> {
+    // rtnetlink side — create wg0 inside the namespace.
+    let route: Connection<Route> = namespace::connection_for(ns_name)?;
+
+    route.add_link(WireguardLink::new("wg0")).await.map_err(|e| {
+        eprintln!("\n  add_link(wg0, kind=wireguard) failed: {e}");
+        eprintln!("  Is the `wireguard` kernel module loaded? `sudo modprobe wireguard`.");
+        e
+    })?;
+    route.set_link_up("wg0").await?;
+    let link = route
+        .get_link_by_name("wg0")
+        .await?
+        .expect("just created");
+    println!(
+        "  Created wg0 (ifindex {}) in namespace `{ns_name}`.",
+        link.ifindex()
+    );
+
+    // GENL side — configure via set_device + set_peer.
+    let wg: Connection<Wireguard> = namespace::connection_for_async(ns_name).await?;
+    println!("  Opened WireGuard GENL connection (family_id={}).", wg.family_id());
+
+    println!();
+    println!("  set_device: private_key + listen_port=51820");
+    wg.set_device("wg0", |dev| dev.private_key(LOCAL_PRIVATE).listen_port(51820))
+        .await?;
+
+    println!(
+        "  set_peer:   pubkey={} endpoint=10.0.0.1:51820 allowed=10.0.0.0/24 keepalive=25s",
+        short_key(&PEER_PUBLIC)
+    );
+    wg.set_peer("wg0", PEER_PUBLIC, |peer| {
+        peer.endpoint(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::new(10, 0, 0, 1),
+            51820,
+        )))
+        .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
+        .persistent_keepalive(25)
+        .replace_allowed_ips()
+    })
+    .await?;
+
+    println!();
+    println!("  --- get_device(wg0) ---");
+    let device = wg.get_device("wg0").await?;
+    print_device(&device);
+
+    println!("  Removing peer via del_peer()...");
+    wg.del_peer("wg0", PEER_PUBLIC).await?;
+
+    let device_after = wg.get_device("wg0").await?;
+    println!(
+        "  After del_peer: {} peer(s) remaining on wg0.",
+        device_after.peers.len()
+    );
+
+    Ok(())
+}
+
+fn print_device(device: &WgDevice) {
     let ifname = device.ifname.as_deref().unwrap_or("?");
     let ifindex = device.ifindex.unwrap_or(0);
 
-    println!("interface: {} (index {})", ifname, ifindex);
-
+    println!("  interface: {ifname} (index {ifindex})");
     if let Some(key) = &device.public_key {
-        println!("  public key: {}", format_key(key));
+        println!("    public key: {}", short_key(key));
     }
-
     if let Some(port) = device.listen_port {
-        println!("  listening port: {}", port);
+        println!("    listen port: {port}");
     }
-
     if let Some(fwmark) = device.fwmark
         && fwmark != 0
     {
-        println!("  fwmark: 0x{:x}", fwmark);
+        println!("    fwmark: 0x{fwmark:x}");
     }
-
     if device.peers.is_empty() {
-        println!("  peers: (none)");
+        println!("    peers: (none)");
     } else {
-        println!("  peers: {}", device.peers.len());
+        println!("    peers: {}", device.peers.len());
         for peer in &device.peers {
-            println!();
             print_peer(peer);
         }
     }
-    println!();
 }
 
-fn print_peer(peer: &nlink::netlink::genl::wireguard::WgPeer) {
-    println!("  peer: {}", format_key(&peer.public_key));
-
-    if let Some(endpoint) = &peer.endpoint {
-        println!("    endpoint: {}", endpoint);
+fn print_peer(peer: &WgPeer) {
+    println!("      peer:  {}", short_key(&peer.public_key));
+    if let Some(ep) = &peer.endpoint {
+        println!("        endpoint:    {ep}");
     }
-
     if !peer.allowed_ips.is_empty() {
-        let ips: Vec<String> = peer
+        let s: Vec<String> = peer
             .allowed_ips
             .iter()
             .map(|ip| format!("{}/{}", ip.addr, ip.cidr))
             .collect();
-        println!("    allowed ips: {}", ips.join(", "));
+        println!("        allowed ips: {}", s.join(", "));
     }
-
-    if let Some(keepalive) = peer.persistent_keepalive
-        && keepalive > 0
+    if let Some(k) = peer.persistent_keepalive
+        && k > 0
     {
-        println!("    persistent keepalive: every {} seconds", keepalive);
+        println!("        keepalive:   every {k}s");
     }
-
-    if let Some(handshake) = peer.last_handshake {
-        let now = std::time::SystemTime::now();
-        if let Ok(duration) = now.duration_since(handshake) {
-            let secs = duration.as_secs();
-            if secs < 60 {
-                println!("    latest handshake: {} seconds ago", secs);
-            } else if secs < 3600 {
-                println!("    latest handshake: {} minutes ago", secs / 60);
-            } else if secs < 86400 {
-                println!("    latest handshake: {} hours ago", secs / 3600);
-            } else {
-                println!("    latest handshake: {} days ago", secs / 86400);
-            }
-        }
+    if let Some(t) = peer.last_handshake
+        && let Ok(d) = SystemTime::now().duration_since(t)
+    {
+        println!("        handshake:   {} seconds ago", d.as_secs());
     }
-
     if peer.rx_bytes > 0 || peer.tx_bytes > 0 {
         println!(
-            "    transfer: {} received, {} sent",
-            format_bytes(peer.rx_bytes),
-            format_bytes(peer.tx_bytes)
+            "        transfer:    {} rx, {} tx (bytes)",
+            peer.rx_bytes, peer.tx_bytes
         );
     }
 }
 
-fn format_key(key: &[u8; 32]) -> String {
-    use std::io::Write;
-    let mut buf = Vec::with_capacity(44);
-    {
-        let mut encoder = base64::Encoder::new(&mut buf);
-        encoder.write_all(key).unwrap();
-    }
-    String::from_utf8(buf).unwrap_or_else(|_| "(invalid)".to_string())
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.2} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.2} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
-// Simple base64 encoder for WireGuard keys
-mod base64 {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    pub struct Encoder<'a> {
-        output: &'a mut Vec<u8>,
-        buffer: u32,
-        bits: u8,
-    }
-
-    impl<'a> Encoder<'a> {
-        pub fn new(output: &'a mut Vec<u8>) -> Self {
-            Self {
-                output,
-                buffer: 0,
-                bits: 0,
-            }
-        }
-
-        fn flush(&mut self) {
-            while self.bits >= 6 {
-                self.bits -= 6;
-                let idx = ((self.buffer >> self.bits) & 0x3F) as usize;
-                self.output.push(ALPHABET[idx]);
-            }
-        }
-    }
-
-    impl std::io::Write for Encoder<'_> {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            for &byte in buf {
-                self.buffer = (self.buffer << 8) | byte as u32;
-                self.bits += 8;
-                self.flush();
-            }
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            if self.bits > 0 {
-                self.buffer <<= 6 - self.bits;
-                self.bits = 6;
-                Encoder::flush(self);
-                // Add padding
-                let padding = (3 - (self.output.len() % 3)) % 3;
-                for _ in 0..padding {
-                    self.output.push(b'=');
-                }
-            }
-            Ok(())
-        }
-    }
-
-    impl Drop for Encoder<'_> {
-        fn drop(&mut self) {
-            let _ = std::io::Write::flush(self);
-        }
-    }
+/// Short hex preview of a 32-byte key — enough to identify it in
+/// terminal output without dragging in a base64 encoder.
+fn short_key(key: &[u8; 32]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}…{:02x}{:02x}{:02x}{:02x}",
+        key[0], key[1], key[2], key[3], key[28], key[29], key[30], key[31],
+    )
 }

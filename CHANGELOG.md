@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — Plan 136: `genl_wireguard` example promoted to full lifecycle
+
+- `examples/genl/wireguard.rs` gains a `--apply` mode that creates
+  `wg0` inside a temporary namespace via rtnetlink (`WireguardLink`),
+  configures it through the GENL API (private key + listen port),
+  adds a peer (public key + endpoint + allowed-ip + persistent
+  keepalive), dumps the device to verify the round-trip, removes the
+  peer via `del_peer`, then deletes the namespace. The existing
+  read-only probe was kept behind a `show` subcommand. Dropped the
+  in-file custom base64 encoder in favor of a short hex preview
+  (`abcdef…`) — a demo needs a visual identifier, not a correct
+  wg-tool serialization.
+
 ### Changed — Plan 136: `route_tc_htb` example promoted to full TC pipeline
 
 - `examples/route/tc/htb.rs` gains a `--apply` mode that builds a 3-class

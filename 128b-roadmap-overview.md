@@ -18,7 +18,7 @@ have been removed (their substance is in the commits + changelog).
 |---|---|---|---|
 | 133 | [TC coverage gaps](133-tc-coverage-plan.md) | **3 of 4 PRs landed** (A/B/D under `[Unreleased]`); **PR C deferred** | Typed `CakeConfig`, `FqPieConfig`, `BpfAction`, `SimpleAction`. `BasicFilter` ematch (cmp/u32/meta) pending — ematch wire format needs validation against golden `tc(8)` hex before shipping. |
 | 135 | [Recipes + public `nlink::lab`](135-recipes-and-lab-helpers-plan.md) | Not started | 7 new recipes (bridge VLAN, bidir rate limit, WireGuard mesh, IPsec, nftables stateful firewall, cgroup classification, multi-namespace events) + promote `TestNamespace` → public `nlink::lab`. The cgroup-classification recipe blocks on Plan 133 PR C. |
-| 136 | [Example cleanup](136-example-cleanup-plan.md) | **Partial** (commits `d023381`, htb promote) | Promote remaining read-only-print examples (wireguard, macsec, mptcp, ethtool_rings, devlink, nl80211, conntrack) to real API usage using the `impair/per_peer.rs` template. `route/tc/htb.rs` now ships a full HTB-plus-flower pipeline via `--apply`. |
+| 136 | [Example cleanup](136-example-cleanup-plan.md) | **Phase 1 complete**; Phase 2 + 3 remain | Phase 1 (htb + wireguard) shipped. Phase 2 (macsec, mptcp) and Phase 3 (ethtool_rings, devlink, nl80211, conntrack) still pending, using the `impair/per_peer.rs` template. |
 
 ## Release plan
 
