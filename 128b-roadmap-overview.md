@@ -19,6 +19,7 @@ have been removed (their substance is in the commits + changelog).
 | 133 | [TC coverage gaps](133-tc-coverage-plan.md) | **3 of 4 PRs landed** (A/B/D under `[Unreleased]`); **PR C deferred** | Typed `CakeConfig`, `FqPieConfig`, `BpfAction`, `SimpleAction`. `BasicFilter` ematch (cmp/u32/meta) pending — ematch wire format needs validation against golden `tc(8)` hex before shipping. |
 | 135 | [Recipes + public `nlink::lab`](135-recipes-and-lab-helpers-plan.md) | **PR A complete**; PR B partial (4 of 7) | `nlink::lab` shipped (PR A). Recipes shipped: multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh + index + README/CLAUDE pointers. Deferred: xfrm-ipsec-tunnel, nftables-stateful-fw (both on "Wanted" list); cgroup-classification still blocked on Plan 133 PR C. Recipe smoke tests (`tests/integration/recipes.rs`) deferred. |
 | 136 | [Example cleanup](136-example-cleanup-plan.md) | **Phases 1 + 2 + 3 complete**; conntrack deferred | Phase 1 (htb + wireguard), Phase 2 (macsec + mptcp), and Phase 3 (ethtool_rings + devlink + nl80211) all shipped. `netfilter/conntrack.rs` deferred — nlink's Netfilter connection only dumps, so promoting the example would require a library extension that's out of scope for a test-cleanup plan. `MacsecLink` rtnetlink builder now landed as a follow-up; macsec example uses it directly. |
+| 137 | [Netfilter expansion](137-netfilter-expansion-plan.md) | **Parked for post-0.14.0**; 5 staged PRs | ctnetlink CRUD + events + `ct_expect` + optional nfqueue + nflog. Unblocks Plan 136's `netfilter/conntrack.rs` example promotion. Recommended order A→B→C; D/E gated on demand. |
 
 ## Release plan
 
@@ -30,6 +31,9 @@ have been removed (their substance is in the commits + changelog).
 - **0.14.0** (in progress): reconcile pattern (shipped under
   `[Unreleased]`) + Plan 133 (except PR C) + Plan 135 + Plan 136.
   Mostly additive; minimal BC.
+- **0.15.0 candidate work**: Plan 133 PR C (pending golden-hex
+  validation), Plan 135 PR B remaining recipes, Plan 137 PR A
+  (ctnetlink CRUD — unblocks the Plan 136 conntrack example).
 - **1.0.0**: deferred indefinitely. Cut when downstream consumption
   validates the API, not on a calendar. The `non_exhaustive`
   lockdown and typed units already give the most important 1.0
