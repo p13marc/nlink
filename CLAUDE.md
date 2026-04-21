@@ -3703,6 +3703,28 @@ Spans cost nothing when no subscriber is attached. See
 [`docs/observability.md`](docs/observability.md) for the full level
 conventions and what fields each span carries.
 
+## Cookbook recipes
+
+End-to-end walkthroughs live under [`docs/recipes/`](docs/recipes/)
+with an index at [`docs/recipes/README.md`](docs/recipes/README.md).
+When a user asks "how do I X" and X maps to one of these, link the
+recipe rather than re-synthesizing:
+
+- [`per-peer-impairment`](docs/recipes/per-peer-impairment.md) —
+  per-destination netem on shared L2.
+- [`bridge-vlan`](docs/recipes/bridge-vlan.md) — VLAN-aware bridge
+  with trunk / access ports + VXLAN tunnel mapping.
+- [`bidirectional-rate-limit`](docs/recipes/bidirectional-rate-limit.md)
+  — HTB egress + IFB ingress via `RateLimiter`.
+- [`wireguard-mesh`](docs/recipes/wireguard-mesh.md) — 3-node mesh in
+  `nlink::lab` namespaces.
+- [`multi-namespace-events`](docs/recipes/multi-namespace-events.md) —
+  `StreamMap` fan-in across N namespaces.
+
+When you write new large end-to-end examples, consider whether they
+belong as a recipe (markdown, 200-300 lines, template-enforced
+sections) rather than inline in `CLAUDE.md` or a new example binary.
+
 ## Publishing
 
 The `nlink` crate is the only publishable crate. All binaries have `publish = false`.

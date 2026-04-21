@@ -4,7 +4,7 @@ from: nlink maintainers
 subject: More cookbook recipes + public lab/test helpers
 target version: 0.14.0 (revised 2026-04-19; originally split between "0.14.0" and "1.0", now folded into 0.14.0)
 date: 2026-04-19
-status: PR A complete 2026-04-21 under [Unreleased] — LabNamespace + with_namespace + LabBridge + LabVeth + three-namespace example all shipped. PR B (recipes) not started.
+status: PR A complete 2026-04-21 under [Unreleased]. PR B partial: 4 of 7 recipes shipped (multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh) + recipe index + README/CLAUDE.md pointers. Deferred: xfrm-ipsec-tunnel, nftables-stateful-fw (both on the "Wanted" list in the recipe README); cgroup-classification remains blocked on Plan 133 PR C.
 ---
 
 # Recipes & Lab Helpers Plan
@@ -505,11 +505,11 @@ Order: A first, then B can use lab helpers in recipe code samples.
 
 ### PR B: Recipes
 
-- [ ] 7 new recipes under `docs/recipes/`
-- [ ] `docs/recipes/README.md` index
-- [ ] README and CLAUDE.md updated to point at recipe index
-- [ ] `tests/integration/recipes.rs` smoke-tests each recipe
-- [ ] CHANGELOG entry written
+- [x] 4 of 7 new recipes under `docs/recipes/` (multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh). The three remaining (xfrm-ipsec-tunnel, nftables-stateful-fw, cgroup-classification) are parked on the "Wanted" list; cgroup-classification still blocked on Plan 133 PR C.
+- [x] `docs/recipes/README.md` index
+- [x] README and CLAUDE.md updated to point at recipe index
+- [ ] `tests/integration/recipes.rs` smoke-tests each recipe **— deferred; the recipes use `no_run` fences and rely on doc-compile checks to catch rot. Adding a root-gated smoke test suite is a follow-up.**
+- [x] CHANGELOG entry written
 
 ---
 

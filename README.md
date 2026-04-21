@@ -184,6 +184,7 @@ if let Some(bottleneck) = diag.find_bottleneck().await? {
 ## Documentation
 
 - **[Library Usage](docs/library.md)** - Detailed library examples: namespaces, TC, WireGuard, error handling
+- **[Cookbook Recipes](docs/recipes/README.md)** - End-to-end walkthroughs: per-peer impairment, VLAN-aware bridges, bidirectional rate limiting, WireGuard mesh in namespaces, multi-namespace event monitoring
 - **[CLI Tools](docs/cli.md)** - ip and tc command reference
 - **[Examples](crates/nlink/examples/README.md)** - 40+ runnable examples
 

@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 135 PR B: cookbook recipes
+
+- `docs/recipes/multi-namespace-events.md` — fan-in link/addr/route/TC
+  events across N namespaces with `tokio_stream::StreamMap`.
+- `docs/recipes/bridge-vlan.md` — VLAN-aware bridge, trunk vs. access
+  port shape, VLAN-1-default gotcha, VLAN↔VNI mapping for VXLAN.
+- `docs/recipes/bidirectional-rate-limit.md` — HTB egress + IFB ingress
+  via `RateLimiter`, with the hand-rolled IFB / mirred / HTB sequence
+  for custom filter predicates.
+- `docs/recipes/wireguard-mesh.md` — 3-node WireGuard full-mesh in
+  `nlink::lab` namespaces using the `Connection::<Wireguard>`
+  write-path.
+- `docs/recipes/README.md` — index of all recipes + recipe-shape
+  template + "wanted" list for contributors.
+- `README.md` + `CLAUDE.md` link the recipe index.
+
+Deferred recipes from Plan 135:
+
+- `xfrm-ipsec-tunnel.md` — tracked in the recipes index "Wanted"
+  section; skipped in this drop to stay within a reasonable review
+  chunk.
+- `nftables-stateful-fw.md` — same rationale.
+- `cgroup-classification.md` — blocked on Plan 133 PR C (`BasicFilter`
+  ematch).
+
 ### Added — Plan 135 PR A: public `nlink::lab` module + builders
 
 - New `LabBridge<'a>` builder (`nlink::lab::LabBridge`) that chains
