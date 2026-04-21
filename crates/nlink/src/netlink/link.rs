@@ -29,6 +29,7 @@
 //! - [`Ip6GreLink`] - IPv6 GRE tunnel
 //! - [`Ip6GretapLink`] - IPv6 GRE TAP tunnel (Layer 2)
 //! - [`WireguardLink`] - WireGuard interface
+//! - [`MacsecLink`] - MACsec (IEEE 802.1AE) L2 encryption interface
 //!
 //! # Tunnel Modification Limitations
 //!
@@ -4359,6 +4360,252 @@ impl LinkConfig for WireguardLink {
 
     fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
         write_simple_link(builder, &self.name, "wireguard", self.mtu, None);
+    }
+}
+
+// ============================================================================
+// MACsec Link
+// ============================================================================
+
+/// IFLA_MACSEC_* attribute IDs (kernel `include/uapi/linux/if_link.h`).
+/// We only emit the subset the builder exposes; `ICV_LEN`,
+/// `CIPHER_SUITE`, and `VALIDATION` are managed via the GENL
+/// `Connection::<Macsec>` API after creation.
+mod macsec {
+    pub const IFLA_MACSEC_SCI: u16 = 1;
+    pub const IFLA_MACSEC_PORT: u16 = 2;
+    pub const IFLA_MACSEC_WINDOW: u16 = 5;
+    pub const IFLA_MACSEC_ENCODING_SA: u16 = 6;
+    pub const IFLA_MACSEC_ENCRYPT: u16 = 7;
+    pub const IFLA_MACSEC_PROTECT: u16 = 8;
+    pub const IFLA_MACSEC_INC_SCI: u16 = 9;
+    pub const IFLA_MACSEC_ES: u16 = 10;
+    pub const IFLA_MACSEC_SCB: u16 = 11;
+    pub const IFLA_MACSEC_REPLAY_PROTECT: u16 = 12;
+}
+
+/// Configuration for a MACsec (IEEE 802.1AE) interface.
+///
+/// MACsec provides Layer-2 authenticated encryption for point-to-point
+/// links. The interface sits on top of a parent (typically a physical
+/// NIC or a veth in a lab). Key and SA management happens via the
+/// separate `Connection::<Macsec>` Generic-Netlink API — creating the
+/// interface is an rtnetlink operation, configuring its TX/RX SAs is
+/// GENL.
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() -> nlink::Result<()> {
+/// use nlink::netlink::{Connection, Route};
+/// use nlink::netlink::link::{DummyLink, MacsecLink};
+///
+/// let conn = Connection::<Route>::new()?;
+/// conn.add_link(DummyLink::new("dummy0")).await?;
+/// conn.set_link_up("dummy0").await?;
+///
+/// // Plain macsec interface — encrypt + protect enabled by default.
+/// conn.add_link(MacsecLink::new("macsec0", "dummy0")).await?;
+///
+/// // With an explicit SCI + replay protection disabled (e.g. during
+/// // key rollover when you temporarily accept duplicates).
+/// conn.add_link(
+///     MacsecLink::new("macsec1", "dummy0")
+///         .sci(0x0011_2233_4455_0001)
+///         .replay_protect(false)
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct MacsecLink {
+    name: String,
+    parent: InterfaceRef,
+    mtu: Option<u32>,
+    sci: Option<u64>,
+    port: Option<u16>,
+    encrypt: Option<bool>,
+    protect: Option<bool>,
+    inc_sci: Option<bool>,
+    end_station: Option<bool>,
+    scb: Option<bool>,
+    replay_protect: Option<bool>,
+    replay_window: Option<u32>,
+    encoding_sa: Option<u8>,
+}
+
+impl MacsecLink {
+    /// Create a new MACsec interface configuration sitting on top of
+    /// `parent` (a physical NIC or other Ethernet-kind interface).
+    pub fn new(name: impl Into<String>, parent: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            parent: InterfaceRef::Name(parent.into()),
+            mtu: None,
+            sci: None,
+            port: None,
+            encrypt: None,
+            protect: None,
+            inc_sci: None,
+            end_station: None,
+            scb: None,
+            replay_protect: None,
+            replay_window: None,
+            encoding_sa: None,
+        }
+    }
+
+    /// Create a new MACsec interface with parent specified by index.
+    /// Use this when working across namespaces to avoid a `/sys` lookup.
+    pub fn with_parent_index(name: impl Into<String>, parent_index: u32) -> Self {
+        Self {
+            name: name.into(),
+            parent: InterfaceRef::Index(parent_index),
+            mtu: None,
+            sci: None,
+            port: None,
+            encrypt: None,
+            protect: None,
+            inc_sci: None,
+            end_station: None,
+            scb: None,
+            replay_protect: None,
+            replay_window: None,
+            encoding_sa: None,
+        }
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+
+    /// Explicit Secure Channel Identifier. If omitted, the kernel
+    /// derives the SCI from the parent's MAC address + [`Self::port`]
+    /// (default port = 1).
+    pub fn sci(mut self, sci: u64) -> Self {
+        self.sci = Some(sci);
+        self
+    }
+
+    /// Port component used when the kernel auto-derives the SCI
+    /// (default 1).
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
+    /// Enable / disable frame encryption. Default: enabled.
+    pub fn encrypt(mut self, enabled: bool) -> Self {
+        self.encrypt = Some(enabled);
+        self
+    }
+
+    /// Enable / disable frame protection (integrity). Default: enabled.
+    pub fn protect(mut self, enabled: bool) -> Self {
+        self.protect = Some(enabled);
+        self
+    }
+
+    /// Whether to always include the SCI in frames. Default: off
+    /// (kernel omits it when the SCI matches the derived one).
+    pub fn include_sci(mut self, enabled: bool) -> Self {
+        self.inc_sci = Some(enabled);
+        self
+    }
+
+    /// End-station mode (ES bit).
+    pub fn end_station(mut self, enabled: bool) -> Self {
+        self.end_station = Some(enabled);
+        self
+    }
+
+    /// Single-copy-broadcast mode (SCB bit).
+    pub fn scb(mut self, enabled: bool) -> Self {
+        self.scb = Some(enabled);
+        self
+    }
+
+    /// Enable / disable replay protection. Default: enabled.
+    pub fn replay_protect(mut self, enabled: bool) -> Self {
+        self.replay_protect = Some(enabled);
+        self
+    }
+
+    /// Replay-window size in frames.
+    pub fn replay_window(mut self, window: u32) -> Self {
+        self.replay_window = Some(window);
+        self
+    }
+
+    /// Active TX association number (0-3). Typically managed via the
+    /// GENL `Connection::<Macsec>::update_tx_sa` API after the
+    /// interface is created.
+    pub fn encoding_sa(mut self, an: u8) -> Self {
+        self.encoding_sa = Some(an);
+        self
+    }
+}
+
+impl LinkConfig for MacsecLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "macsec"
+    }
+
+    fn parent_ref(&self) -> Option<&InterfaceRef> {
+        Some(&self.parent)
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
+        write_ifname(builder, &self.name);
+
+        let idx = parent_index.expect("MacsecLink requires parent_index");
+        builder.append_attr_u32(IflaAttr::Link as u16, idx);
+
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, "macsec");
+
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        if let Some(sci) = self.sci {
+            builder.append_attr_u64(macsec::IFLA_MACSEC_SCI, sci);
+        }
+        if let Some(port) = self.port {
+            builder.append_attr_u16(macsec::IFLA_MACSEC_PORT, port);
+        }
+        if let Some(window) = self.replay_window {
+            builder.append_attr_u32(macsec::IFLA_MACSEC_WINDOW, window);
+        }
+        if let Some(encoding_sa) = self.encoding_sa {
+            builder.append_attr_u8(macsec::IFLA_MACSEC_ENCODING_SA, encoding_sa);
+        }
+        if let Some(v) = self.encrypt {
+            builder.append_attr_u8(macsec::IFLA_MACSEC_ENCRYPT, v as u8);
+        }
+        if let Some(v) = self.protect {
+            builder.append_attr_u8(macsec::IFLA_MACSEC_PROTECT, v as u8);
+        }
+        if let Some(v) = self.inc_sci {
+            builder.append_attr_u8(macsec::IFLA_MACSEC_INC_SCI, v as u8);
+        }
+        if let Some(v) = self.end_station {
+            builder.append_attr_u8(macsec::IFLA_MACSEC_ES, v as u8);
+        }
+        if let Some(v) = self.scb {
+            builder.append_attr_u8(macsec::IFLA_MACSEC_SCB, v as u8);
+        }
+        if let Some(v) = self.replay_protect {
+            builder.append_attr_u8(macsec::IFLA_MACSEC_REPLAY_PROTECT, v as u8);
+        }
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
     }
 }
 

@@ -15,21 +15,17 @@
 //! cargo run -p nlink --example genl_macsec -- show
 //!
 //! # Create dummy + macsec on top + add TX/RX SAs + dump + cleanup.
-//! # Requires root (CAP_NET_ADMIN), `modprobe macsec`, and `ip(8)`
-//! # (used for the one step where nlink does not yet have a
-//! # `MacsecLink` rtnetlink builder).
+//! # Requires root (CAP_NET_ADMIN) and `modprobe macsec`.
 //! sudo cargo run -p nlink --example genl_macsec -- --apply
 //! ```
 //!
 //! See also: `nlink::netlink::genl::macsec::{MacsecSaBuilder,
-//! MacsecDevice}`.
-
-use std::process::Command;
+//! MacsecDevice}`, `nlink::netlink::link::MacsecLink`.
 
 use nlink::netlink::{
     Connection, Macsec, Route,
     genl::macsec::{MacsecDevice, MacsecSaBuilder},
-    link::DummyLink,
+    link::{DummyLink, MacsecLink},
     namespace,
 };
 
@@ -176,27 +172,19 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     route.set_link_up("dummy0").await?;
     println!("  Created dummy0 in namespace `{ns_name}`.");
 
-    // 2. MACsec interface on top. We don't yet have a MacsecLink
-    //    rtnetlink builder, so we use `ip link add` in-namespace. If
-    //    this step fails, the most common cause is a missing macsec
-    //    module — surface the hint.
-    let mut ip = Command::new("ip");
-    ip.args(["link", "add", "macsec0", "link", "dummy0", "type", "macsec"]);
-    let out = namespace::spawn_output(ns_name, ip).map_err(|e| {
-        eprintln!("\n  `ip link add ... type macsec` failed: {e}");
-        eprintln!("  Load the module with: sudo modprobe macsec");
-        e
-    })?;
-    if !out.status.success() {
-        eprintln!("\n  `ip link add ... type macsec` exited {}:", out.status);
-        eprintln!("  stderr: {}", String::from_utf8_lossy(&out.stderr));
-        eprintln!("  Load the module with: sudo modprobe macsec");
-        return Err(nlink::Error::from(std::io::Error::other(
-            "ip link add type macsec failed",
-        )));
-    }
+    // 2. MACsec interface on top via the typed rtnetlink builder.
+    //    If this step fails, the most common cause is a missing
+    //    `macsec` kernel module.
+    route
+        .add_link(MacsecLink::new("macsec0", "dummy0"))
+        .await
+        .map_err(|e| {
+            eprintln!("\n  add_link(MacsecLink) failed: {e}");
+            eprintln!("  Load the module with: sudo modprobe macsec");
+            e
+        })?;
     route.set_link_up("macsec0").await?;
-    println!("  Created macsec0 link=dummy0 via `ip link add` and brought it up.");
+    println!("  Created macsec0 link=dummy0 via MacsecLink and brought it up.");
 
     // 3. GENL connection for the namespace.
     let macsec: Connection<Macsec> = namespace::connection_for_async(ns_name).await?;

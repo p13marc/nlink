@@ -83,7 +83,7 @@ crates/nlink/src/
     tc_options.rs     # TC options parsing (netem loss models, etc.)
     filter.rs         # TC filter builders (U32Filter, FlowerFilter, MatchallFilter, FwFilter, BpfFilter, BasicFilter, CgroupFilter, RouteFilter, FlowFilter)
     action.rs         # TC action builders (GactAction, MirredAction, PoliceAction, VlanAction, SkbeditAction, NatAction, TunnelKeyAction, ConnmarkAction, CsumAction, SampleAction, CtAction, PeditAction, BpfAction, SimpleAction, ActionList)
-    link.rs           # Link type builders (DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, BareudpLink, NetkitLink, NlmonLink, VirtWifiLink, VtiLink, Vti6Link, Ip6GreLink, Ip6GretapLink)
+    link.rs           # Link type builders (DummyLink, VethLink, BridgeLink, VlanLink, VxlanLink, MacvlanLink, MacvtapLink, IpvlanLink, IfbLink, GeneveLink, BareudpLink, NetkitLink, NlmonLink, VirtWifiLink, VtiLink, Vti6Link, Ip6GreLink, Ip6GretapLink, WireguardLink, MacsecLink)
     rule.rs           # Routing rule builder (RuleBuilder)
     nexthop.rs        # Nexthop objects and groups (NexthopBuilder, NexthopGroupBuilder) - Linux 5.3+
     mpls.rs           # MPLS routes and encapsulation (MplsEncap, MplsRouteBuilder)

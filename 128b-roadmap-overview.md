@@ -18,7 +18,7 @@ have been removed (their substance is in the commits + changelog).
 |---|---|---|---|
 | 133 | [TC coverage gaps](133-tc-coverage-plan.md) | **3 of 4 PRs landed** (A/B/D under `[Unreleased]`); **PR C deferred** | Typed `CakeConfig`, `FqPieConfig`, `BpfAction`, `SimpleAction`. `BasicFilter` ematch (cmp/u32/meta) pending — ematch wire format needs validation against golden `tc(8)` hex before shipping. |
 | 135 | [Recipes + public `nlink::lab`](135-recipes-and-lab-helpers-plan.md) | **PR A complete**; PR B partial (4 of 7) | `nlink::lab` shipped (PR A). Recipes shipped: multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh + index + README/CLAUDE pointers. Deferred: xfrm-ipsec-tunnel, nftables-stateful-fw (both on "Wanted" list); cgroup-classification still blocked on Plan 133 PR C. Recipe smoke tests (`tests/integration/recipes.rs`) deferred. |
-| 136 | [Example cleanup](136-example-cleanup-plan.md) | **Phases 1 + 2 + 3 complete**; conntrack deferred | Phase 1 (htb + wireguard), Phase 2 (macsec + mptcp), and Phase 3 (ethtool_rings + devlink + nl80211) all shipped. `netfilter/conntrack.rs` deferred — nlink's Netfilter connection only dumps, so promoting the example would require a library extension that's out of scope for a test-cleanup plan. `MacsecLink` rtnetlink builder remains a medium-priority follow-up. |
+| 136 | [Example cleanup](136-example-cleanup-plan.md) | **Phases 1 + 2 + 3 complete**; conntrack deferred | Phase 1 (htb + wireguard), Phase 2 (macsec + mptcp), and Phase 3 (ethtool_rings + devlink + nl80211) all shipped. `netfilter/conntrack.rs` deferred — nlink's Netfilter connection only dumps, so promoting the example would require a library extension that's out of scope for a test-cleanup plan. `MacsecLink` rtnetlink builder now landed as a follow-up; macsec example uses it directly. |
 
 ## Release plan
 
@@ -41,7 +41,7 @@ have been removed (their substance is in the commits + changelog).
 |---|---|---|
 | CI integration tests | Medium | GitHub Actions with privileged containers so the root-gated integration tests in `crates/nlink/tests/` actually run in CI. |
 | Workspace-wide rollout of typed units | Medium | Plans 129/130 landed in nlink; the bins (`bins/{tc,ip,ss,nft,wifi,devlink,bridge,wg,ethtool,diag,config}`) should migrate off any remaining string/raw-u32 patterns. Audit per-bin during implementation. |
-| `MacsecLink` rtnetlink builder | Medium | `examples/genl/macsec.rs` currently shells out to `ip link add … type macsec` because there's no typed helper. Adding `MacsecLink::new("macsec0", parent).encrypt(true).sci(..)` lands the missing piece for end-to-end nlink-only setup. Companion: stats, hardware-offload knobs. |
+| MACsec enhancements (stats, offload) | Medium | `MacsecLink` rtnetlink builder landed; `examples/genl/macsec.rs` now uses it directly (no `ip(8)` shell-out). Follow-ons: MACsec stats parser, hardware-offload knobs (`IFLA_MACSEC_OFFLOAD`), cipher-suite + ICV-length flags on `MacsecLink`. |
 | GENL Rate audit | Low | Plan 129's `Rate` may apply to WireGuard keepalive intervals, ethtool link rates, nl80211 bitrates. Each GENL family deserves a quick audit. |
 | `netlink-packet-route` interop | Low | Optional `From`/`Into` impls between our `TcHandle` and theirs, gated behind an `nlink-interop` feature. |
 | `NetworkConfig::impair()` | Low | Bridge Plan 131 reconcile with declarative `NetworkConfig`. Parked as 1.x follow-on. |

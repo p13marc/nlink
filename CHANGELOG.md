@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `MacsecLink` rtnetlink builder
+
+- `nlink::netlink::link::MacsecLink` — typed rtnetlink builder for
+  creating IEEE 802.1AE MACsec interfaces on top of a parent Ethernet
+  device. Exposes `sci`, `port`, `encrypt`, `protect`, `include_sci`,
+  `end_station`, `scb`, `replay_protect`, `replay_window`, and
+  `encoding_sa`; with a `with_parent_index` namespace-safe variant.
+  Key material + SA lifecycle remain on the GENL
+  `Connection::<Macsec>` API — this builder only creates the
+  interface, matching the split used by WireGuard.
+- `examples/genl/macsec.rs` now uses `MacsecLink` directly instead of
+  shelling out to `ip link add ... type macsec`; the `--apply` flow
+  is fully nlink-native. Closes the follow-up captured when the
+  example first landed.
+
 ### Added — Plan 135 PR B: cookbook recipes
 
 - `docs/recipes/multi-namespace-events.md` — fan-in link/addr/route/TC
