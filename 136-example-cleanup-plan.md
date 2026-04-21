@@ -61,7 +61,7 @@ The shape that's already proven and should be reused:
 | `genl/wireguard.rs` (225 lines) | Dumps devices + peers | Create wg device + add peer + verify via dump | The typed `set_device` / `set_peer` API is the whole point; today's example never calls it |
 | `genl/macsec.rs` (200 lines) | Lists TX/RX SAs/SCs | Create device + add TX SA + add RX SC + RX SA + verify | Same shape as wg: write path is the value-add |
 | `genl/mptcp.rs` (216 lines) | Gets limits + endpoints | Add endpoint + set limits + delete endpoint | Same pattern |
-| `route/tc/htb.rs` (149 lines) | `show` / `classes` subcommands — dump only | Add `--apply` that builds a 3-class HTB tree with flower filters, dumps, tears down | Becomes the canonical "TC pipeline" example; replaces the stale tc(8) hint-comment at the bottom |
+| ~~`route/tc/htb.rs`~~ | ~~`show` / `classes` subcommands — dump only~~ | **Done** — `--apply` builds a 3-class HTB tree + 2 flower filters in a temp namespace, dumps, tears down. Query subcommands retained. |
 | `route/addresses.rs` | Partly real, partly list-only | Tighten to a single add/del/show lifecycle on a dummy | Already partly there |
 
 ### 2.2 Medium-value (typed builder coverage)
@@ -117,7 +117,7 @@ were deleted in `d023381`. Before each promote, verify registration.
 
 **Phase 1 (0.15.0 headline examples, ~1 day):**
 - Promote `genl/wireguard.rs` (write-path is the flagship GENL feature).
-- Promote `route/tc/htb.rs` to a TC pipeline example.
+- ~~Promote `route/tc/htb.rs` to a TC pipeline example.~~ **Done.**
 
 **Phase 2 (0.15.0 GENL completeness, ~1 day):**
 - Promote `genl/macsec.rs`, `genl/mptcp.rs` — mirror the wireguard shape.

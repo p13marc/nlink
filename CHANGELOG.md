@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — Plan 136: `route_tc_htb` example promoted to full TC pipeline
+
+- `examples/route/tc/htb.rs` gains a `--apply` mode that builds a 3-class
+  HTB tree with two flower filters (UDP/5060 → voice, TCP/1935 → video)
+  inside a temporary namespace on a dummy interface, dumps the resulting
+  qdisc/class/filter tree, deletes the root qdisc to demonstrate
+  cascading cleanup, and removes the namespace. Default-args mode now
+  prints the topology diagram + idiomatic code snippet; the existing
+  `show <dev>` / `classes <dev>` query subcommands are retained for
+  inspecting real devices. Rate formatting uses `Rate::bytes_per_sec(..)`
+  's `Display` impl instead of a local helper — one less place that
+  could silently confuse units.
+
 ### Added — Plan 133 (PR A): typed `CakeConfig` + `CakeOptions` parser
 
 - `CakeConfig` typed qdisc builder for `sch_cake`, the modern
