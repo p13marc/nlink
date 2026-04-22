@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 135 PR B: `nftables-stateful-fw` recipe
+
+- `docs/recipes/nftables-stateful-fw.md` — drop-by-default `inet` table
+  with stateful `ct state established,related` shortcut, per-service
+  allows (SSH/HTTPS/ICMP-rate-limited), set-backed blocklist, plus a
+  3-namespace WAN/router/LAN lab demo that asserts the asymmetric
+  ping result. Uses `Transaction::commit` for atomic install and
+  `Connection::<Netfilter>::get_conntrack` for state verification.
+  Caveats cover `nf_conntrack` autoload, `Family::Inet` vs `Family::Ip`
+  for NAT, and the partial-rollback-on-error contract of transactions.
+- Recipe index updated; the `nftables-stateful-fw` entry moves out of
+  the "Wanted" list.
+
 ### Added — `MacsecLink` rtnetlink builder
 
 - `nlink::netlink::link::MacsecLink` — typed rtnetlink builder for

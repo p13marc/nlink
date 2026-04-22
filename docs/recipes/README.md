@@ -28,6 +28,14 @@ to the hand-rolled netlink primitives if you want to go deeper.
   full-mesh entirely within one host, using `nlink::lab` + the
   `Connection::<Wireguard>` write-path.
 
+### Firewalling
+
+- [**Stateful firewall with conntrack**](nftables-stateful-fw.md) —
+  drop-by-default `inet` table, `ct state established,related` shortcut,
+  blocklist set, plus a 3-namespace WAN/router/LAN lab demo. Uses the
+  typed `nftables::Transaction` API + `Connection::<Netfilter>` for
+  conntrack verification.
+
 ### Observability & orchestration
 
 - [**Multi-namespace event monitoring**](multi-namespace-events.md) —
@@ -72,9 +80,6 @@ welcome):
 - **XFRM IPsec site-to-site tunnel** — two namespaces acting as two
   sites, with SA/SP configuration via the XFRM protocol. Tracked in
   Plan 135.
-- **nftables stateful firewall + conntrack** — a complete stateful
-  firewall example (allow established, drop new from WAN) using the
-  typed `nftables::Transaction` + conntrack lookup. Tracked in Plan 135.
 - **Cgroup-based traffic classification** — blocked on the
   [`BasicFilter` ematch API](../../133-tc-coverage-plan.md) (Plan 133
   PR C). Once that lands, the recipe is a 200-line writeup.
