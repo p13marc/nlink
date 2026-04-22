@@ -4,7 +4,7 @@ from: nlink maintainers
 subject: Netfilter capabilities expansion (ctnetlink mutation, events, expect, nfqueue, nflog)
 target version: post-0.14.0 (0.15.0 or later; staged work)
 date: 2026-04-21
-status: PR A in progress — slice 1 (ConntrackBuilder + add/update/del/flush + 9 wire-format unit tests) landed 2026-04-22 under `[Unreleased]`. Remaining for PR A: integration tests under `lab`, examples/netfilter/conntrack.rs promotion, docs/recipes/conntrack-programmatic.md. PRs B/C/D/E unstarted.
+status: PR A in progress — slice 1 (ConntrackBuilder + add/update/del/flush + 9 wire-format unit tests) and slice 2 (docs/recipes/conntrack-programmatic.md) landed 2026-04-22 under `[Unreleased]`. Remaining for PR A: integration tests under `lab`, examples/netfilter/conntrack.rs promotion. PRs B/C/D/E unstarted.
 related: Plan 136 §2.2 row for `netfilter/conntrack.rs` (deferred pending the library extensions this plan describes)
 ---
 

@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 137 PR A (slice 2): conntrack-programmatic recipe
+
+- `docs/recipes/conntrack-programmatic.md` — end-to-end walkthrough of
+  the new ctnetlink write API: inject a synthetic TCP/ESTABLISHED
+  entry, dump it back, update mark + timeout in place, delete by ID,
+  delete by tuple, flush. Covers asymmetric/NAT'd flows (explicit
+  reply tuple + `SRC_NAT` flags) and per-zone scoping. Caveats cover
+  `nf_conntrack` autoload, the `CONFIRMED` mandatory flag, and the
+  `EEXIST`/`ENOENT` semantics of `add` / `del`.
+- Recipe index updated with a Firewalling entry.
+
 ### Added — Plan 137 PR A (slice 1): ctnetlink mutation API
 
 - `nlink::netlink::netfilter::ConntrackBuilder` — typed builder for

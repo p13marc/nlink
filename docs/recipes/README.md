@@ -35,6 +35,11 @@ to the hand-rolled netlink primitives if you want to go deeper.
   blocklist set, plus a 3-namespace WAN/router/LAN lab demo. Uses the
   typed `nftables::Transaction` API + `Connection::<Netfilter>` for
   conntrack verification.
+- [**Programmatic conntrack**](conntrack-programmatic.md) — inject /
+  update / delete / flush conntrack entries via `ConntrackBuilder` for
+  test pre-seeding, NAT control planes, and lab eviction. Covers
+  symmetric (auto-mirrored) and asymmetric (explicit reply / NAT)
+  flow shapes.
 
 ### Observability & orchestration
 
