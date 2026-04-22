@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 137 PR A (slice 1): ctnetlink mutation API
+
+- `nlink::netlink::netfilter::ConntrackBuilder` — typed builder for
+  injecting / replacing / deleting conntrack entries. `new_v4` /
+  `new_v6` constructors lock the address family at the type-state
+  level. Supports `orig` / `reply` tuples, `status`, `timeout`,
+  `mark`, `tcp_state`, `id`, and `zone`. If `reply` is unset on
+  `add_conntrack`, the orig tuple is auto-mirrored (correct for
+  symmetric flows without NAT).
+- `nlink::netlink::netfilter::ConntrackStatus` — bitflags-style flags
+  for the `IPS_*` enum (`CONFIRMED`, `SEEN_REPLY`, `ASSURED`,
+  `SRC_NAT`, etc.) with `bitor` and `contains`. The kernel rejects
+  injections without `CONFIRMED`.
+- `ConntrackTuple::v4` / `v6` / `ports` / `icmp` / `mirror` —
+  ergonomic constructors so callers don't have to populate the
+  field-by-field struct literal.
+- `TcpConntrackState::to_u8` (private) — wire encoding for
+  `CTA_PROTOINFO_TCP_STATE`.
+- New `Connection<Netfilter>` methods:
+  - `add_conntrack(ConntrackBuilder)` — `IPCTNL_MSG_CT_NEW` with
+    `NLM_F_CREATE | NLM_F_EXCL`, returns `Error::AlreadyExists` if
+    the tuple is taken.
+  - `update_conntrack(ConntrackBuilder)` — same wire shape with
+    `NLM_F_CREATE | NLM_F_REPLACE`, for in-place timeout / mark /
+    state nudges.
+  - `del_conntrack(ConntrackBuilder)` — `IPCTNL_MSG_CT_DELETE` by
+    tuple. Status / timeout / mark / protoinfo are intentionally
+    elided since the kernel ignores them on the delete path.
+  - `del_conntrack_by_id(u32)` — delete by the kernel-assigned ID
+    returned in `ConntrackEntry::id`.
+  - `flush_conntrack()` / `flush_conntrack_v6()` — flush the entire
+    family table (matches `conntrack -F`).
+- 9 new unit tests under `netlink::netfilter::tests` covering wire
+  format round-trips (v4 TCP with auto-mirrored reply, v6 UDP, the
+  delete-elides-status invariant), `ConntrackStatus` bitor / contains,
+  `TcpConntrackState::to_u8` round-trip, `ConntrackTuple::mirror`
+  symmetry, and the `(subsystem << 8) | msg` packing of `ctnl_msg_type`.
+
+Integration tests, the `examples/netfilter/conntrack.rs` example
+promotion, and the `docs/recipes/conntrack-programmatic.md` recipe
+are deferred to follow-up commits in this PR — they need `lab`-feature
+plumbing + `nf_conntrack` autoload that's out of scope for the
+wire-format slice.
+
 ### Added — Plan 135 PR B: `nftables-stateful-fw` recipe
 
 - `docs/recipes/nftables-stateful-fw.md` — drop-by-default `inet` table

@@ -3,7 +3,7 @@ to: nlink maintainers
 from: nlink maintainers
 subject: nlink roadmap — active plans only
 target version: 0.14.0 and beyond
-last updated: 2026-04-22
+last updated: 2026-04-22 (Plan 137 PR A slice 1)
 ---
 
 # nlink Roadmap
@@ -19,7 +19,7 @@ have been removed (their substance is in the commits + changelog).
 | 133 | [TC coverage gaps](133-tc-coverage-plan.md) | **3 of 4 PRs landed** (A/B/D under `[Unreleased]`); **PR C deferred** | Typed `CakeConfig`, `FqPieConfig`, `BpfAction`, `SimpleAction`. `BasicFilter` ematch (cmp/u32/meta) pending — ematch wire format needs validation against golden `tc(8)` hex before shipping. |
 | 135 | [Recipes + public `nlink::lab`](135-recipes-and-lab-helpers-plan.md) | **PR A complete**; PR B partial (5 of 7) | `nlink::lab` shipped (PR A). Recipes shipped: multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh, nftables-stateful-fw + index + README/CLAUDE pointers. Deferred: xfrm-ipsec-tunnel (XFRM connection is dump-only — needs a Plan-137-shaped library extension first); cgroup-classification still blocked on Plan 133 PR C. Recipe smoke tests (`tests/integration/recipes.rs`) deferred. |
 | 136 | [Example cleanup](136-example-cleanup-plan.md) | **Phases 1 + 2 + 3 complete**; conntrack deferred | Phase 1 (htb + wireguard), Phase 2 (macsec + mptcp), and Phase 3 (ethtool_rings + devlink + nl80211) all shipped. `netfilter/conntrack.rs` deferred — nlink's Netfilter connection only dumps, so promoting the example would require a library extension that's out of scope for a test-cleanup plan. `MacsecLink` rtnetlink builder now landed as a follow-up; macsec example uses it directly. |
-| 137 | [Netfilter expansion](137-netfilter-expansion-plan.md) | **Parked for post-0.14.0**; 5 staged PRs | ctnetlink CRUD + events + `ct_expect` + optional nfqueue + nflog. Unblocks Plan 136's `netfilter/conntrack.rs` example promotion. Recommended order A→B→C; D/E gated on demand. |
+| 137 | [Netfilter expansion](137-netfilter-expansion-plan.md) | **PR A in progress** (slice 1 landed under `[Unreleased]`); B/C/D/E pending | Slice 1 of PR A: `ConntrackBuilder` + add/update/del/flush + 9 wire-format unit tests. Remaining for PR A: integration tests under `lab`, `examples/netfilter/conntrack.rs` promotion, `docs/recipes/conntrack-programmatic.md`. PRs B (events), C (`ct_expect`), D (nfqueue), E (nflog) still pending; recommended order A→B→C; D/E gated on demand. |
 
 ## Release plan
 
@@ -32,8 +32,10 @@ have been removed (their substance is in the commits + changelog).
   `[Unreleased]`) + Plan 133 (except PR C) + Plan 135 + Plan 136.
   Mostly additive; minimal BC.
 - **0.15.0 candidate work**: Plan 133 PR C (pending golden-hex
-  validation), Plan 135 PR B remaining recipes, Plan 137 PR A
-  (ctnetlink CRUD — unblocks the Plan 136 conntrack example).
+  validation), Plan 135 PR B remaining recipes (xfrm-ipsec-tunnel
+  needs Plan 137 first, cgroup-classification needs Plan 133 PR C),
+  remaining Plan 137 PR A slices (integration tests + example
+  promotion + recipe), then Plan 137 PRs B/C.
 - **1.0.0**: deferred indefinitely. Cut when downstream consumption
   validates the API, not on a calendar. The `non_exhaustive`
   lockdown and typed units already give the most important 1.0
