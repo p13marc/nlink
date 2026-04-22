@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 137 PR A (slice 3): netfilter_conntrack example promotion
+
+- `examples/netfilter/conntrack.rs` rewritten from a query-only dump
+  formatter into a Plan 136 §1-shaped lifecycle demo. New modes:
+  - default → prints usage + a copy-pasteable code skeleton.
+  - `show` → keeps the old dump display (still requires
+    `CAP_NET_ADMIN` for unprivileged hosts).
+  - `--apply` → root-gated lifecycle inside a temporary namespace:
+    inject TCP/ESTABLISHED, dump and verify by tuple, update mark +
+    timeout in place, delete by ID, inject UDP, delete by tuple,
+    inject 2 more, flush. Each step is asserted so the binary
+    doubles as a wire-format smoke test.
+
+### Changed — `Netfilter` derives `Default`
+
+- `nlink::netlink::Netfilter` now derives `Default` (it's a ZST, no
+  semantic change). This unblocks the generic
+  `Connection::<Netfilter>::new()` constructor (already worked) *and*
+  the `namespace::connection_for::<Netfilter>(name)` /
+  `LabNamespace::connection_for::<Netfilter>()` paths, neither of
+  which compiled before. The previous custom `Connection::<Netfilter>::new()`
+  inherent method has been removed in favour of the now-applicable
+  generic — same wire result, no caller-visible breakage.
+
 ### Added — Plan 137 PR A (slice 2): conntrack-programmatic recipe
 
 - `docs/recipes/conntrack-programmatic.md` — end-to-end walkthrough of

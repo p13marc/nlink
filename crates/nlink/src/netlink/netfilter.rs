@@ -35,8 +35,7 @@ use super::{
     error::Result,
     message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE, NLM_F_REQUEST as NLMF_REQUEST},
     parse::PResult,
-    protocol::{Netfilter, ProtocolState},
-    socket::NetlinkSocket,
+    protocol::Netfilter,
 };
 
 // Netlink constants
@@ -643,20 +642,6 @@ impl NfGenMsg {
 }
 
 impl Connection<Netfilter> {
-    /// Create a new netfilter connection.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use nlink::netlink::{Connection, Netfilter};
-    ///
-    /// let conn = Connection::<Netfilter>::new()?;
-    /// ```
-    pub fn new() -> Result<Self> {
-        let socket = NetlinkSocket::new(Netfilter::PROTOCOL)?;
-        Ok(Self::from_parts(socket, Netfilter))
-    }
-
     /// Get all connection tracking entries.
     ///
     /// # Example

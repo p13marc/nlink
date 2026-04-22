@@ -188,7 +188,7 @@ impl ProtocolState for Connector {
 ///
 /// Used for netfilter operations, primarily connection tracking (conntrack).
 /// This is a zero-sized type with no additional state.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct Netfilter;
 
 impl private::Sealed for Netfilter {}
