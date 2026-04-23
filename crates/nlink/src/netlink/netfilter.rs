@@ -374,6 +374,84 @@ impl Default for ConntrackEntry {
     }
 }
 
+/// Conntrack multicast group — passed to
+/// [`Connection::<Netfilter>::subscribe`].
+///
+/// The kernel exposes six conntrack-related groups; the three
+/// "expectation" ones (`ExpNew` / `ExpUpdate` / `ExpDestroy`) carry
+/// `ct_expect` messages, not regular entries — `subscribe_all`
+/// skips them since the parser doesn't understand the expectation
+/// shape yet (Plan 137 PR C).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConntrackGroup {
+    /// `NFNLGRP_CONNTRACK_NEW` (1) — new conntrack entries.
+    New,
+    /// `NFNLGRP_CONNTRACK_UPDATE` (2) — updates to existing entries.
+    /// Note: kernel uses the same `IPCTNL_MSG_CT_NEW` wire type for
+    /// both NEW and UPDATE, so a stream that subscribes to both
+    /// can't tell them apart from message-type alone — they all
+    /// surface as [`ConntrackEvent::New`]. To monitor *only* updates,
+    /// subscribe to `Update` alone.
+    Update,
+    /// `NFNLGRP_CONNTRACK_DESTROY` (3) — entry destroyed.
+    Destroy,
+    /// `NFNLGRP_CONNTRACK_EXP_NEW` (4) — new expectation. Today the
+    /// stream parser ignores expectation messages; subscribing here
+    /// just buffers them in the kernel queue. Wired up under Plan 137
+    /// PR C.
+    ExpNew,
+    /// `NFNLGRP_CONNTRACK_EXP_DESTROY` (6).
+    ExpDestroy,
+}
+
+impl ConntrackGroup {
+    /// Map to the kernel multicast group ID (1-indexed).
+    pub fn to_kernel_group(self) -> u32 {
+        match self {
+            Self::New => 1,
+            Self::Update => 2,
+            Self::Destroy => 3,
+            Self::ExpNew => 4,
+            Self::ExpDestroy => 6,
+        }
+    }
+}
+
+/// An event delivered on a conntrack multicast stream.
+///
+/// `New` covers both fresh entries and update notifications — the
+/// kernel uses the same `IPCTNL_MSG_CT_NEW` wire shape for both, so a
+/// stream that subscribed to both groups can't distinguish them from
+/// the message alone. To monitor only updates, subscribe to
+/// [`ConntrackGroup::Update`] in isolation. `Destroy` is unambiguous:
+/// it always corresponds to `IPCTNL_MSG_CT_DELETE`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ConntrackEvent {
+    /// A new entry was added, or an existing one was updated. See
+    /// the type-level docs for the New-vs-Update caveat.
+    New(ConntrackEntry),
+    /// An entry was destroyed (timed out, deleted, connection closed).
+    Destroy(ConntrackEntry),
+}
+
+/// Build a `ConntrackEvent` from the netlink message type byte +
+/// the body (post-nlmsghdr). Returns `None` for messages we don't
+/// recognise (e.g. expectation messages, error frames).
+pub(crate) fn parse_conntrack_event(msg_type: u16, body: &[u8]) -> Option<ConntrackEvent> {
+    // Subsystem must be ctnetlink.
+    if (msg_type >> 8) != NFNL_SUBSYS_CTNETLINK as u16 {
+        return None;
+    }
+    let entry = parse_conntrack_body(body)?;
+    match msg_type & 0xFF {
+        t if t == IPCTNL_MSG_CT_NEW as u16 => Some(ConntrackEvent::New(entry)),
+        t if t == IPCTNL_MSG_CT_DELETE as u16 => Some(ConntrackEvent::Destroy(entry)),
+        _ => None,
+    }
+}
+
 /// Builder for a conntrack entry — used by `add_conntrack`,
 /// `update_conntrack`, and `del_conntrack`.
 ///
@@ -769,6 +847,45 @@ impl Connection<Netfilter> {
         self.send_ack(b).await
     }
 
+    /// Subscribe to one or more conntrack multicast groups.
+    ///
+    /// Once subscribed, use [`Self::events`] / [`Self::into_events`] to
+    /// consume the resulting `Stream<Item = Result<ConntrackEvent>>`.
+    /// See [`ConntrackGroup`] for the available groups.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Netfilter};
+    /// use nlink::netlink::netfilter::ConntrackGroup;
+    /// use tokio_stream::StreamExt;
+    ///
+    /// let mut nf = Connection::<Netfilter>::new()?;
+    /// nf.subscribe(&[ConntrackGroup::New, ConntrackGroup::Destroy])?;
+    /// let mut events = nf.events();
+    /// while let Some(evt) = events.next().await {
+    ///     println!("{:?}", evt?);
+    /// }
+    /// ```
+    #[tracing::instrument(level = "info", skip(self), fields(groups = ?groups))]
+    pub fn subscribe(&mut self, groups: &[ConntrackGroup]) -> Result<()> {
+        for g in groups {
+            self.socket_mut().add_membership(g.to_kernel_group())?;
+        }
+        Ok(())
+    }
+
+    /// Subscribe to all conntrack multicast groups (`New` + `Update` +
+    /// `Destroy`). Skips the expectation groups (`ExpNew` /
+    /// `ExpDestroy`) — those carry expectation messages, not entry
+    /// messages, and can't be parsed as `ConntrackEntry`.
+    pub fn subscribe_all(&mut self) -> Result<()> {
+        self.subscribe(&[
+            ConntrackGroup::New,
+            ConntrackGroup::Update,
+            ConntrackGroup::Destroy,
+        ])
+    }
+
     /// Get connection tracking entries for a specific address family.
     async fn get_conntrack_family(&self, family: u8) -> Result<Vec<ConntrackEntry>> {
         let seq = self.socket().next_seq();
@@ -853,84 +970,91 @@ impl Connection<Netfilter> {
         }
     }
 
-    /// Parse a conntrack message using winnow.
+    /// Parse a conntrack message (full netlink frame including the
+    /// 16-byte nlmsghdr).
     fn parse_conntrack(&self, data: &[u8]) -> Option<ConntrackEntry> {
-        // Skip netlink header (16 bytes)
-        if data.len() < NLMSG_HDRLEN + 4 {
+        if data.len() < NLMSG_HDRLEN {
             return None;
         }
-
-        let mut input = &data[NLMSG_HDRLEN..];
-
-        // Parse nfgenmsg header
-        let _nfmsg = NfGenMsg::parse(&mut input).ok()?;
-
-        // Parse attributes
-        let mut entry = ConntrackEntry::default();
-
-        while input.len() >= 4 {
-            let (attr_type, attr_data) = parse_nla(&mut input)?;
-
-            match attr_type & 0x7FFF {
-                // Remove NLA_F_NESTED flag
-                CTA_TUPLE_ORIG => {
-                    if let Some((tuple, proto)) = parse_tuple(attr_data) {
-                        entry.orig = tuple;
-                        entry.proto = proto;
-                    }
-                }
-                CTA_TUPLE_REPLY => {
-                    if let Some((tuple, _)) = parse_tuple(attr_data) {
-                        entry.reply = tuple;
-                    }
-                }
-                CTA_STATUS if attr_data.len() >= 4 => {
-                    entry.status = Some(u32::from_be_bytes([
-                        attr_data[0],
-                        attr_data[1],
-                        attr_data[2],
-                        attr_data[3],
-                    ]));
-                }
-                CTA_TIMEOUT if attr_data.len() >= 4 => {
-                    entry.timeout = Some(u32::from_be_bytes([
-                        attr_data[0],
-                        attr_data[1],
-                        attr_data[2],
-                        attr_data[3],
-                    ]));
-                }
-                CTA_MARK if attr_data.len() >= 4 => {
-                    entry.mark = Some(u32::from_be_bytes([
-                        attr_data[0],
-                        attr_data[1],
-                        attr_data[2],
-                        attr_data[3],
-                    ]));
-                }
-                CTA_ID if attr_data.len() >= 4 => {
-                    entry.id = Some(u32::from_be_bytes([
-                        attr_data[0],
-                        attr_data[1],
-                        attr_data[2],
-                        attr_data[3],
-                    ]));
-                }
-                CTA_PROTOINFO => {
-                    entry.tcp_state = parse_protoinfo(attr_data);
-                }
-                CTA_COUNTERS_ORIG => {
-                    entry.counters_orig = parse_counters(attr_data);
-                }
-                CTA_COUNTERS_REPLY => {
-                    entry.counters_reply = parse_counters(attr_data);
-                }
-                _ => {}
-            }
-        }
-
-        Some(entry)
+        parse_conntrack_body(&data[NLMSG_HDRLEN..])
     }
+}
+
+/// Parse a conntrack message body — everything after the 16-byte
+/// nlmsghdr. Used by both the dump path (where we strip the header
+/// ourselves) and the multicast event path (where `MessageIter` has
+/// already stripped it).
+pub(crate) fn parse_conntrack_body(body: &[u8]) -> Option<ConntrackEntry> {
+    if body.len() < 4 {
+        return None;
+    }
+    let mut input = body;
+    let _nfmsg = NfGenMsg::parse(&mut input).ok()?;
+
+    let mut entry = ConntrackEntry::default();
+
+    while input.len() >= 4 {
+        let (attr_type, attr_data) = parse_nla(&mut input)?;
+
+        match attr_type & 0x7FFF {
+            // Remove NLA_F_NESTED flag
+            CTA_TUPLE_ORIG => {
+                if let Some((tuple, proto)) = parse_tuple(attr_data) {
+                    entry.orig = tuple;
+                    entry.proto = proto;
+                }
+            }
+            CTA_TUPLE_REPLY => {
+                if let Some((tuple, _)) = parse_tuple(attr_data) {
+                    entry.reply = tuple;
+                }
+            }
+            CTA_STATUS if attr_data.len() >= 4 => {
+                entry.status = Some(u32::from_be_bytes([
+                    attr_data[0],
+                    attr_data[1],
+                    attr_data[2],
+                    attr_data[3],
+                ]));
+            }
+            CTA_TIMEOUT if attr_data.len() >= 4 => {
+                entry.timeout = Some(u32::from_be_bytes([
+                    attr_data[0],
+                    attr_data[1],
+                    attr_data[2],
+                    attr_data[3],
+                ]));
+            }
+            CTA_MARK if attr_data.len() >= 4 => {
+                entry.mark = Some(u32::from_be_bytes([
+                    attr_data[0],
+                    attr_data[1],
+                    attr_data[2],
+                    attr_data[3],
+                ]));
+            }
+            CTA_ID if attr_data.len() >= 4 => {
+                entry.id = Some(u32::from_be_bytes([
+                    attr_data[0],
+                    attr_data[1],
+                    attr_data[2],
+                    attr_data[3],
+                ]));
+            }
+            CTA_PROTOINFO => {
+                entry.tcp_state = parse_protoinfo(attr_data);
+            }
+            CTA_COUNTERS_ORIG => {
+                entry.counters_orig = parse_counters(attr_data);
+            }
+            CTA_COUNTERS_REPLY => {
+                entry.counters_reply = parse_counters(attr_data);
+            }
+            _ => {}
+        }
+    }
+
+    Some(entry)
 }
 
 /// Parse a netlink attribute.
@@ -1342,5 +1466,104 @@ mod tests {
         assert_eq!(ctnl_msg_type(IPCTNL_MSG_CT_NEW), 0x0100);
         assert_eq!(ctnl_msg_type(IPCTNL_MSG_CT_GET), 0x0101);
         assert_eq!(ctnl_msg_type(IPCTNL_MSG_CT_DELETE), 0x0102);
+    }
+
+    #[test]
+    fn conntrack_group_kernel_ids() {
+        assert_eq!(ConntrackGroup::New.to_kernel_group(), 1);
+        assert_eq!(ConntrackGroup::Update.to_kernel_group(), 2);
+        assert_eq!(ConntrackGroup::Destroy.to_kernel_group(), 3);
+        assert_eq!(ConntrackGroup::ExpNew.to_kernel_group(), 4);
+        assert_eq!(ConntrackGroup::ExpDestroy.to_kernel_group(), 6);
+    }
+
+    /// Build a fake multicast frame: nlmsghdr(msg_type) + nfgenmsg +
+    /// CTA_TUPLE_ORIG with one v4 TCP tuple. Used by the
+    /// parse_events tests below.
+    fn build_event_frame(msg_type: u16) -> Vec<u8> {
+        let mut b = MessageBuilder::new(msg_type, 0);
+        append_nfgenmsg(&mut b, libc::AF_INET as u8);
+        append_tuple(
+            &mut b,
+            CTA_TUPLE_ORIG,
+            IpProtocol::Tcp,
+            &ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2))
+                .ports(40000, 80),
+        );
+        b.append_attr_u32_be(CTA_ID, 0xdead_beef);
+        b.finish()
+    }
+
+    #[test]
+    fn parse_event_new_classifies_as_new() {
+        use crate::netlink::stream::EventSource;
+
+        let frame = build_event_frame(ctnl_msg_type(IPCTNL_MSG_CT_NEW));
+        let events = <Netfilter as EventSource>::parse_events(&frame);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConntrackEvent::New(entry) => {
+                assert_eq!(entry.proto, IpProtocol::Tcp);
+                assert_eq!(entry.orig.src_port, Some(40000));
+                assert_eq!(entry.orig.dst_port, Some(80));
+                assert_eq!(entry.id, Some(0xdead_beef));
+            }
+            ConntrackEvent::Destroy(_) => panic!("expected New, got Destroy"),
+        }
+    }
+
+    #[test]
+    fn parse_event_delete_classifies_as_destroy() {
+        use crate::netlink::stream::EventSource;
+
+        let frame = build_event_frame(ctnl_msg_type(IPCTNL_MSG_CT_DELETE));
+        let events = <Netfilter as EventSource>::parse_events(&frame);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConntrackEvent::Destroy(entry) => {
+                assert_eq!(entry.id, Some(0xdead_beef));
+            }
+            ConntrackEvent::New(_) => panic!("expected Destroy, got New"),
+        }
+    }
+
+    #[test]
+    fn parse_event_ignores_unknown_subsystem() {
+        use crate::netlink::stream::EventSource;
+
+        // Subsystem 99 ≠ NFNL_SUBSYS_CTNETLINK → parser drops it.
+        let frame = build_event_frame(99u16 << 8);
+        let events = <Netfilter as EventSource>::parse_events(&frame);
+        assert!(
+            events.is_empty(),
+            "events from unknown subsys should be ignored"
+        );
+    }
+
+    #[test]
+    fn parse_event_ignores_unknown_ctnetlink_msg() {
+        use crate::netlink::stream::EventSource;
+
+        // Subsystem matches, but message type 99 isn't NEW or DELETE.
+        let frame = build_event_frame(ctnl_msg_type(99));
+        let events = <Netfilter as EventSource>::parse_events(&frame);
+        assert!(
+            events.is_empty(),
+            "unknown ctnetlink msg type should be ignored"
+        );
+    }
+
+    #[test]
+    fn parse_event_back_to_back_frames() {
+        use crate::netlink::stream::EventSource;
+
+        // Concat a NEW frame and a DELETE frame in the same buffer
+        // (the kernel coalesces multicast deliveries this way).
+        let mut buf = build_event_frame(ctnl_msg_type(IPCTNL_MSG_CT_NEW));
+        buf.extend_from_slice(&build_event_frame(ctnl_msg_type(IPCTNL_MSG_CT_DELETE)));
+        let events = <Netfilter as EventSource>::parse_events(&buf);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], ConntrackEvent::New(_)));
+        assert!(matches!(events[1], ConntrackEvent::Destroy(_)));
     }
 }

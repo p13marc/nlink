@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 137 PR B: ctnetlink event subscription
+
+- `nlink::netlink::netfilter::ConntrackEvent` — `#[non_exhaustive]`
+  enum with `New(ConntrackEntry)` and `Destroy(ConntrackEntry)`
+  variants. Update notifications come through as `New` because the
+  kernel uses `IPCTNL_MSG_CT_NEW` for both creation and update wire
+  shapes; subscribe to only `ConntrackGroup::Update` if you need
+  update isolation.
+- `nlink::netlink::netfilter::ConntrackGroup` — typed enum for the
+  conntrack multicast groups (`New=1`, `Update=2`, `Destroy=3`,
+  `ExpNew=4`, `ExpDestroy=6`). `to_kernel_group()` exposes the raw
+  group ID for advanced callers. The `ExpNew` / `ExpDestroy`
+  variants are present so `subscribe()` can be called with them, but
+  the parser ignores expectation messages until Plan 137 PR C lands
+  the `ct_expect` shape.
+- `Connection<Netfilter>::subscribe(&[ConntrackGroup])` and
+  `subscribe_all()` — wire `add_membership` calls with the right
+  kernel group IDs. `subscribe_all` covers `New + Update + Destroy`
+  (skips the expectation groups).
+- `EventSource for Netfilter` — implements the existing trait so
+  `Connection<Netfilter>::events()` and `into_events()` return
+  `Stream<Item = Result<ConntrackEvent>>`. Reuses the dump-side
+  parser that already handles every `ConntrackEntry` field.
+- 6 new unit tests under `netlink::netfilter::tests`:
+  `conntrack_group_kernel_ids`, `parse_event_new_classifies_as_new`,
+  `parse_event_delete_classifies_as_destroy`,
+  `parse_event_ignores_unknown_subsystem`,
+  `parse_event_ignores_unknown_ctnetlink_msg`,
+  `parse_event_back_to_back_frames` (the multicast-coalesced case).
+- Internal refactor: split the conntrack parser body into a
+  `pub(crate) fn parse_conntrack_body(body)` so both the dump path
+  and the multicast event path share the attribute parsing without
+  re-implementing the nfgenmsg-skip dance.
+
+Integration tests, an `examples/netfilter/conntrack_events.rs`
+binary, and a recipe entry are deferred to follow-up commits — they
+need the same `lab` plumbing as Plan 137 PR A's integration-test
+slice, so they should land together.
+
 ### Added — Plan 137 PR A (slice 3): netfilter_conntrack example promotion
 
 - `examples/netfilter/conntrack.rs` rewritten from a query-only dump

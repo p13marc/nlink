@@ -336,8 +336,9 @@ use super::{
     events::NetworkEvent,
     message::NlMsgType,
     messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage},
+    netfilter::{ConntrackEvent, parse_conntrack_event},
     parse::FromNetlink,
-    protocol::{Connector, Devlink, Ethtool, KobjectUevent, Nl80211, Route, SELinux},
+    protocol::{Connector, Devlink, Ethtool, KobjectUevent, Netfilter, Nl80211, Route, SELinux},
     selinux::SELinuxEvent,
     uevent::Uevent,
 };
@@ -480,6 +481,23 @@ fn parse_connector_event(data: &[u8]) -> Option<ProcEvent> {
 
     let payload = &data[NLMSG_HDRLEN + CN_MSG_HDRLEN..];
     ProcEvent::parse_from_bytes(payload)
+}
+
+// Netfilter protocol events (ctnetlink multicast)
+impl private::Sealed for Netfilter {}
+
+impl EventSource for Netfilter {
+    type Event = ConntrackEvent;
+
+    fn parse_events(data: &[u8]) -> Vec<ConntrackEvent> {
+        let mut events = Vec::new();
+        for (header, payload) in MessageIter::new(data).flatten() {
+            if let Some(evt) = parse_conntrack_event(header.nlmsg_type, payload) {
+                events.push(evt);
+            }
+        }
+        events
+    }
 }
 
 // SELinux protocol events
