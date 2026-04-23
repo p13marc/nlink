@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `conntrack-programmatic` recipe gains an Events section
+
+- `docs/recipes/conntrack-programmatic.md` extended with a
+  "Subscribing to events" section showing the `subscribe` →
+  `events()` → `StreamExt::next` loop, plus four sub-sections that
+  capture the gotchas the example surfaced: `subscribe_all` vs
+  targeted groups, the `New` covers updates caveat, the
+  mutation-and-subscription-on-the-same-connection trap (use two
+  connections), and the kernel multicast buffer overrun behaviour.
+- The recipe's "Don't use it when" block no longer warns that events
+  aren't supported (PR B has shipped); it now points readers at the
+  new section for live monitoring.
+- See-also gains pointers to `ConntrackEvent` / `ConntrackGroup` and
+  both `--apply` example binaries.
+
 ### Added — Plan 137 PR B: `netfilter_conntrack_events` example
 
 - New example `netfilter_conntrack_events` exercises the multicast

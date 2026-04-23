@@ -25,9 +25,9 @@ Don't use it when:
 - You're writing real packet-rewriting logic. Conntrack mutation is
   flow-state injection, not packet manipulation. For the latter,
   reach for nftables NAT rules or BPF.
-- You need to subscribe to `NEW` / `UPDATE` / `DESTROY` events. That
-  surface is on the [Plan 137 PR B](../../137-netfilter-expansion-plan.md)
-  roadmap; today the netfilter `Connection` is request-response only.
+- You need historical state — conntrack only knows what's *currently*
+  tracked. For audit trails, log to nftables `log` or pipe events to
+  a collector (see [Subscribing to events](#subscribing-to-events) below).
 
 ## High-level approach
 
@@ -203,6 +203,99 @@ nf.add_conntrack(
 There's no `flush_conntrack_by_zone` helper yet — see [Plan 137 §13.3](../../137-netfilter-expansion-plan.md)
 for the open question on a zone-scoped connection wrapper.
 
+## Subscribing to events
+
+`Connection::<Netfilter>` implements `EventSource`, so you can
+subscribe to the conntrack multicast groups and consume `NEW` /
+`DESTROY` events as a `Stream`. The same connection can't both
+subscribe and submit mutations at the same time without races between
+multicast deliveries and the ACK reply — open two connections, one
+subscribed and one for actions.
+
+```no_run
+# async fn demo() -> nlink::Result<()> {
+use std::time::Duration;
+
+use nlink::netlink::{Connection, Netfilter};
+use nlink::netlink::netfilter::{ConntrackEvent, ConntrackGroup};
+use tokio_stream::StreamExt;
+
+let mut sub = Connection::<Netfilter>::new()?;
+sub.subscribe(&[ConntrackGroup::New, ConntrackGroup::Destroy])?;
+
+let mut events = sub.events();
+let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+
+while tokio::time::Instant::now() < deadline {
+    let remaining = deadline - tokio::time::Instant::now();
+    match tokio::time::timeout(remaining, events.next()).await {
+        Ok(Some(Ok(ConntrackEvent::New(entry)))) => {
+            println!("NEW     {:?} -> {:?}", entry.orig.src_ip, entry.orig.dst_ip);
+        }
+        Ok(Some(Ok(ConntrackEvent::Destroy(entry)))) => {
+            println!("DESTROY {:?} -> {:?}", entry.orig.src_ip, entry.orig.dst_ip);
+        }
+        Ok(Some(Err(e))) => return Err(e),
+        Ok(None) | Err(_) => break,
+    }
+}
+# Ok(())
+# }
+```
+
+### `subscribe_all` vs targeted groups
+
+`subscribe_all()` covers `New + Update + Destroy` — the three groups
+that deliver `ConntrackEntry`-shaped messages. It skips `ExpNew` /
+`ExpDestroy` because the parser doesn't yet understand the
+`ct_expect` shape (Plan 137 PR C). To subscribe to those, call
+`subscribe(&[ConntrackGroup::ExpNew, ConntrackGroup::ExpDestroy])`
+explicitly — events will buffer in the kernel multicast queue but
+won't surface as `ConntrackEvent` until the expect parser lands.
+
+### `New` covers updates too
+
+The kernel uses `IPCTNL_MSG_CT_NEW` for both creation *and* update
+notifications. A subscriber to both `ConntrackGroup::New` and
+`ConntrackGroup::Update` gets `ConntrackEvent::New` for everything —
+the message itself doesn't carry "this is a true creation" vs
+"this is an update" metadata that the parser can lift out without
+ambiguity. To monitor only updates, subscribe to
+`ConntrackGroup::Update` in isolation; every event then *is* an
+update.
+
+`ConntrackEvent::Destroy` is unambiguous — it always corresponds to
+`IPCTNL_MSG_CT_DELETE`.
+
+### Mutation + subscription on the same connection
+
+Don't. The mutation path (`add_conntrack`, etc.) uses `send_ack`,
+which expects a single ACK reply on the next `recv_msg`. If multicast
+deliveries arrive on the same socket between send and recv, they'll
+be consumed by `send_ack` and confuse the seq-matching. Open two
+connections — one subscribed, one for mutations — and route them
+through the same namespace if needed:
+
+```rust,ignore
+let ns = nlink::lab::LabNamespace::new("ct-watch")?;
+let mut sub: Connection<Netfilter> = ns.connection_for()?;
+sub.subscribe(&[ConntrackGroup::New, ConntrackGroup::Destroy])?;
+let act: Connection<Netfilter> = ns.connection_for()?;
+// ... use sub for events, act for add/del.
+```
+
+The `examples/netfilter/conntrack_events.rs --apply` runner exercises
+exactly this pattern.
+
+### Buffer overrun
+
+If the consumer falls behind, the kernel multicast buffer eventually
+fills up and drops events — the next read returns `Error::from_errno(-105)`
+(ENOBUFS). nlink surfaces this rather than silently masking it. If
+you can't keep up, either grow the socket's `SO_RCVBUF` (not yet
+exposed by nlink — drop to a custom socket if you need it) or
+process events on a dedicated task that does nothing else.
+
 ## Caveats
 
 - **Required modules.** `add_conntrack` and friends need both
@@ -288,12 +381,15 @@ shell-out, no parsing of `conntrack -L` output, typed error variants.
 
 - [`ConntrackBuilder`](https://docs.rs/nlink/latest/nlink/netlink/netfilter/struct.ConntrackBuilder.html)
 - [`ConntrackStatus`](https://docs.rs/nlink/latest/nlink/netlink/netfilter/struct.ConntrackStatus.html) — flag constants and `bitor` syntax.
+- [`ConntrackEvent`](https://docs.rs/nlink/latest/nlink/netlink/netfilter/enum.ConntrackEvent.html) and [`ConntrackGroup`](https://docs.rs/nlink/latest/nlink/netlink/netfilter/enum.ConntrackGroup.html) — multicast event types.
 - [`Connection::<Netfilter>::get_conntrack`](https://docs.rs/nlink/latest/nlink/netlink/struct.Connection.html#method.get_conntrack) — dump path, returns the same `ConntrackEntry` shape that injected entries become.
+- [`examples/netfilter/conntrack.rs`](../../crates/nlink/examples/netfilter/conntrack.rs) — `--apply` lifecycle demo for the mutation API.
+- [`examples/netfilter/conntrack_events.rs`](../../crates/nlink/examples/netfilter/conntrack_events.rs) — `--apply` smoke test for the events API; opens two connections (sub + act) in a temp namespace, asserts NEW + DESTROY arrive.
 - [Stateful firewall recipe](./nftables-stateful-fw.md) — uses
   `get_conntrack` to verify that nftables `ct state` rules match the
   flows you expect; pair with this recipe when seeding state for tests.
 - [Plan 137](../../137-netfilter-expansion-plan.md) — roadmap for
-  `ct_expect`, event subscription, nfqueue, nflog.
+  `ct_expect`, nfqueue, nflog.
 - Upstream: `man 8 conntrack`, the kernel's
   `Documentation/networking/nf_conntrack-sysctl.rst`, and
   `include/uapi/linux/netfilter/nfnetlink_conntrack.h` for the
