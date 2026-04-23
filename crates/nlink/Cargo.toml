@@ -206,6 +206,10 @@ path = "examples/connector/process_monitor_stream.rs"
 name = "netfilter_conntrack"
 path = "examples/netfilter/conntrack.rs"
 
+[[example]]
+name = "netfilter_conntrack_events"
+path = "examples/netfilter/conntrack_events.rs"
+
 # XFRM examples (IPsec)
 [[example]]
 name = "xfrm_ipsec_monitor"

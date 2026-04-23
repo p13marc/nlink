@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Plan 137 PR B: `netfilter_conntrack_events` example
+
+- New example `netfilter_conntrack_events` exercises the multicast
+  subscribe + EventSource wire path end-to-end. Modes:
+  - default → usage + code skeleton + the New-vs-Update caveat.
+  - `watch` → root-gated host subscription, prints events forever.
+  - `--apply` → in a temp namespace, opens two `Connection<Netfilter>`
+    (one subscribed, one for mutation), injects a TCP entry, deletes
+    it by ID, asserts at least 1 NEW + 1 DESTROY event arrived in a
+    3-second window. Validated against Linux 6.19: same kernel-
+    assigned ID round-trips through both the inject ACK and the
+    multicast NEW notification, confirming the parser handles
+    back-to-back multicast frames.
+
 ### Added — Plan 137 PR B: ctnetlink event subscription
 
 - `nlink::netlink::netfilter::ConntrackEvent` — `#[non_exhaustive]`

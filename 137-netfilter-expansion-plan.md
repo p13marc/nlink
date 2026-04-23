@@ -4,7 +4,7 @@ from: nlink maintainers
 subject: Netfilter capabilities expansion (ctnetlink mutation, events, expect, nfqueue, nflog)
 target version: post-0.14.0 (0.15.0 or later; staged work)
 date: 2026-04-21
-status: PR A wire-format validated 2026-04-23 (commit `122f60b`); PR B (ConntrackEvent + ConntrackGroup + subscribe + EventSource impl + 6 parse-events unit tests) landed 2026-04-23. Remaining for both PRs: root-gated integration tests under the `lab` feature + an `examples/netfilter/conntrack_events.rs` binary. PRs C (`ct_expect`), D (nfqueue), E (nflog) unstarted. Plan 136 §2.2's conntrack example deferral is now resolved.
+status: PRs A+B both wire-format validated against Linux 6.19. PR A: commit `122f60b`. PR B: 6 parse-events unit tests + the `netfilter_conntrack_events --apply` smoke test (1 NEW + 1 DESTROY received in 3s, same kernel-assigned ID round-trips through the multicast channel). Remaining for both PRs: root-gated integration tests under the `lab` feature + an events Stream recipe pointer. PRs C (`ct_expect`), D (nfqueue), E (nflog) unstarted. Plan 136 §2.2's conntrack example deferral is resolved.
 related: Plan 136 §2.2 row for `netfilter/conntrack.rs` (deferred pending the library extensions this plan describes)
 ---
 
