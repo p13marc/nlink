@@ -215,6 +215,14 @@ for the open question on a zone-scoped connection wrapper.
   from the kernel. The library doesn't pre-validate this — the kernel
   is authoritative because the exact required set varies by kernel
   version.
+- **TCP `tcp_state` requires `timeout`.** A TCP `add_conntrack` that
+  sets `tcp_state` but not `timeout` is rejected with EINVAL — the
+  kernel's TCP state machine needs the timeout for its bookkeeping.
+  Validated against Linux 6.19 (Fedora 43) by the example's `--apply`
+  smoke test, where step 6 originally tripped exactly this. UDP /
+  ICMP injections without `tcp_state` use protocol defaults and don't
+  need explicit `timeout`, but it's still recommended for predictable
+  test cleanup.
 - **`add_conntrack` + `NLM_F_EXCL`.** Injecting a tuple that already
   exists fails with `Error::AlreadyExists` (`-EEXIST`). Use
   `update_conntrack` for upsert, or catch the error if you don't care

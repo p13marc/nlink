@@ -228,7 +228,10 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     );
     println!("    UDP entry deleted by tuple");
 
-    // 6. Inject two more, then flush the whole table.
+    // 6. Inject two more, then flush the whole table. Note the
+    //    explicit timeout — the kernel rejects a TCP add with
+    //    `tcp_state` set but no timeout (EINVAL). It needs the
+    //    timeout for the state-machine bookkeeping.
     println!();
     println!("  Step 6: inject 2 fresh entries, then flush_conntrack()");
     for src_port in [41000u16, 41001] {
@@ -239,9 +242,14 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
                         .ports(src_port, 8080),
                 )
                 .status(ConntrackStatus::CONFIRMED | ConntrackStatus::SEEN_REPLY)
+                .timeout(Duration::from_secs(60))
                 .tcp_state(TcpConntrackState::Established),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            eprintln!("  ! add_conntrack(src_port={src_port}) failed: {e}");
+            e
+        })?;
     }
     let before_flush = nf.get_conntrack().await?.len();
     nf.flush_conntrack().await?;

@@ -453,9 +453,14 @@ impl ConntrackBuilder {
         self
     }
 
-    /// Set the entry timeout. Kernel default is protocol-dependent
-    /// (e.g. 432_000 s for established TCP); explicit `timeout` is
-    /// recommended for synthetic injections.
+    /// Set the entry timeout.
+    ///
+    /// **Required for TCP injections that also set
+    /// [`tcp_state`](Self::tcp_state).** The kernel's TCP state machine
+    /// won't accept an entry without a timeout — `add_conntrack`
+    /// returns `Error::InvalidArgument` (EINVAL). For UDP / ICMP it's
+    /// optional but recommended (kernel defaults are protocol-specific
+    /// and surprisingly long, e.g. 30 s for unreplied UDP).
     pub fn timeout(mut self, d: Duration) -> Self {
         self.timeout = Some(d);
         self
@@ -469,6 +474,10 @@ impl ConntrackBuilder {
 
     /// Set the TCP state (encoded under `CTA_PROTOINFO/CTA_PROTOINFO_TCP`).
     /// Only meaningful when `proto = IpProtocol::Tcp`.
+    ///
+    /// **Pair with [`timeout`](Self::timeout)** — the kernel rejects a
+    /// TCP add that has `tcp_state` set but no timeout (EINVAL). The
+    /// state machine needs the timeout for its bookkeeping.
     pub fn tcp_state(mut self, state: TcpConntrackState) -> Self {
         self.tcp_state = Some(state);
         self
