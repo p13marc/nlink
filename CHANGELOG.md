@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Deprecated — legacy `tc::builders::{class, qdisc, filter, action}`
+
+- `nlink::tc::builders::class` / `qdisc` / `filter` / `action` are now
+  annotated `#[deprecated(since = "0.14.0", ...)]`. These are the
+  original string-args TC builders (take `&str` parent/classid and
+  `&[String]` params, re-split inside). Typed replacements are:
+  - `Connection::add_class_config` + `HtbClassConfig` / etc.
+  - `Connection::add_qdisc(_full)` + `HtbQdiscConfig` / `CakeConfig` /
+    `NetemConfig` / `FqPieConfig` / `TbfConfig` / ...
+  - `Connection::add_filter` + `FlowerFilter` / `U32Filter` / ...
+  - For filter-attached actions: `FilterConfig::actions(...)` +
+    `GactAction` / `MirredAction` / ... Standalone shared-action CRUD
+    on `Connection` is not yet typed — the `action` module stays until
+    that API is designed.
+- Audit is clean: zero library / test / example usage. The only
+  consumer is `bins/tc/`, whose four command files now carry scoped
+  `#[allow(deprecated)]` on the use statements + the `impl Cmd`
+  blocks, each with a `TODO(0.15+)` comment pointing at the typed
+  replacement. Workspace-wide `cargo clippy --all-targets -- --deny
+  warnings` stays green.
+- Module-level docs on `tc::builders::mod` now include the migration
+  table so readers landing there from the deprecation note can find
+  the typed equivalent immediately.
+
 ### Changed — `conntrack-programmatic` recipe gains an Events section
 
 - `docs/recipes/conntrack-programmatic.md` extended with a

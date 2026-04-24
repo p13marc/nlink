@@ -6,8 +6,11 @@ use nlink::{
         Connection, Result, Route, message::NlMsgType, messages::TcMessage, types::tc::tc_handle,
     },
     output::{OutputFormat, OutputOptions, print_all},
-    tc::builders::class as class_builder,
 };
+
+// Deprecated in 0.14.0; see the impl block below for the migration TODO.
+#[allow(deprecated)]
+use nlink::tc::builders::class as class_builder;
 
 #[derive(Args)]
 pub struct ClassCmd {
@@ -123,6 +126,11 @@ enum ClassAction {
     },
 }
 
+// TODO(0.15+): migrate to Connection::add_class_config + typed
+// HtbClassConfig / HfscClassConfig / DrrClassConfig / QfqClassConfig.
+// The legacy `tc::builders::class` API is deprecated in 0.14.0 and
+// this #[allow] keeps CI green until the migration lands.
+#[allow(deprecated)]
 impl ClassCmd {
     pub async fn run(
         self,

@@ -4,8 +4,11 @@ use clap::{Args, Subcommand};
 use nlink::{
     netlink::{Connection, Result, Route, message::NlMsgType, messages::TcMessage},
     output::{OutputFormat, OutputOptions, print_all},
-    tc::builders::qdisc as qdisc_builder,
 };
+
+// Deprecated in 0.14.0; see the impl block below for the migration TODO.
+#[allow(deprecated)]
+use nlink::tc::builders::qdisc as qdisc_builder;
 
 #[derive(Args)]
 pub struct QdiscCmd {
@@ -116,6 +119,12 @@ enum QdiscAction {
     },
 }
 
+// TODO(0.15+): migrate to Connection::add_qdisc(_full) + typed
+// HtbQdiscConfig / NetemConfig / CakeConfig / FqPieConfig /
+// TbfConfig / ... The legacy `tc::builders::qdisc` API is
+// deprecated in 0.14.0 and this #[allow] keeps CI green until
+// the migration lands.
+#[allow(deprecated)]
 impl QdiscCmd {
     pub async fn run(
         self,

@@ -8,8 +8,11 @@ use nlink::{
         Connection, Result, Route, message::NlMsgType, messages::TcMessage, types::tc::tc_handle,
     },
     output::{OutputFormat, OutputOptions, print_items},
-    tc::builders::filter as filter_builder,
 };
+
+// Deprecated in 0.14.0; see the impl block below for the migration TODO.
+#[allow(deprecated)]
+use nlink::tc::builders::filter as filter_builder;
 
 #[derive(Args)]
 pub struct FilterCmd {
@@ -145,6 +148,13 @@ enum FilterAction {
     },
 }
 
+// TODO(0.15+): migrate to Connection::add_filter + typed filter
+// builders (FlowerFilter / U32Filter / MatchallFilter / ...). The
+// legacy `tc::builders::filter` API is deprecated in 0.14.0 — the
+// impl-level #[allow] covers both `run` (which dispatches add/del/
+// change/replace) and the `show` helper's parse_protocol /
+// format_protocol calls.
+#[allow(deprecated)]
 impl FilterCmd {
     pub async fn run(
         self,
@@ -277,6 +287,7 @@ impl FilterCmd {
 }
 
 /// Convert a TcMessage to JSON representation for filter.
+#[allow(deprecated)] // filter_builder::format_protocol — see module deprecation plan
 fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
     let dev = nlink::util::get_ifname_or_index(filter.ifindex());
 
@@ -315,6 +326,7 @@ fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
 }
 
 /// Print filter in text format.
+#[allow(deprecated)] // filter_builder::format_protocol — see module deprecation plan
 fn print_filter_text(
     w: &mut io::StdoutLock<'_>,
     filter: &TcMessage,

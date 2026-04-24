@@ -25,8 +25,11 @@ use nlink::{
         },
     },
     output::{OutputFormat, OutputOptions, formatting::format_rate_bps},
-    tc::builders::action as action_builder,
 };
+
+// Deprecated in 0.14.0; see the impl block below for the migration TODO.
+#[allow(deprecated)]
+use nlink::tc::builders::action as action_builder;
 
 #[derive(Args)]
 pub struct ActionCmd {
@@ -79,6 +82,12 @@ enum ActionAction {
     },
 }
 
+// TODO(future): standalone shared-action CRUD doesn't have a typed
+// Connection method yet — Plan 137 §8.D territory. Until that API is
+// designed, this subcommand keeps the legacy `tc::builders::action`
+// surface alive; the #[allow] scope is the whole impl because
+// show_actions / add / del / get all call into it.
+#[allow(deprecated)]
 impl ActionCmd {
     pub async fn run(
         &self,
