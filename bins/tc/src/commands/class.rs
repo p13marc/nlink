@@ -2,15 +2,13 @@
 
 use clap::{Args, Subcommand};
 use nlink::{
+    TcHandle,
     netlink::{
-        Connection, Result, Route, message::NlMsgType, messages::TcMessage, types::tc::tc_handle,
+        Connection, Error, Result, Route, message::NlMsgType, messages::TcMessage,
+        types::tc::tc_handle,
     },
     output::{OutputFormat, OutputOptions, print_all},
 };
-
-// Deprecated in 0.14.0; see the impl block below for the migration TODO.
-#[allow(deprecated)]
-use nlink::tc::builders::class as class_builder;
 
 #[derive(Args)]
 pub struct ClassCmd {
@@ -126,11 +124,6 @@ enum ClassAction {
     },
 }
 
-// TODO(0.15+): migrate to Connection::add_class_config + typed
-// HtbClassConfig / HfscClassConfig / DrrClassConfig / QfqClassConfig.
-// The legacy `tc::builders::class` API is deprecated in 0.14.0 and
-// this #[allow] keeps CI green until the migration lands.
-#[allow(deprecated)]
 impl ClassCmd {
     pub async fn run(
         self,
@@ -168,26 +161,44 @@ impl ClassCmd {
                 classid,
                 kind,
                 params,
-            } => class_builder::add(conn, &dev, &parent, &classid, &kind, &params).await,
+            } => {
+                let (parent, classid) = parse_handles(&parent, &classid)?;
+                let refs: Vec<&str> = params.iter().map(String::as_str).collect();
+                conn.add_class(dev.as_str(), parent, classid, &kind, &refs)
+                    .await
+            }
             ClassAction::Del {
                 dev,
                 parent,
                 classid,
-            } => class_builder::del(conn, &dev, &parent, &classid).await,
+            } => {
+                let (parent, classid) = parse_handles(&parent, &classid)?;
+                conn.del_class(dev.as_str(), parent, classid).await
+            }
             ClassAction::Change {
                 dev,
                 parent,
                 classid,
                 kind,
                 params,
-            } => class_builder::change(conn, &dev, &parent, &classid, &kind, &params).await,
+            } => {
+                let (parent, classid) = parse_handles(&parent, &classid)?;
+                let refs: Vec<&str> = params.iter().map(String::as_str).collect();
+                conn.change_class(dev.as_str(), parent, classid, &kind, &refs)
+                    .await
+            }
             ClassAction::Replace {
                 dev,
                 parent,
                 classid,
                 kind,
                 params,
-            } => class_builder::replace(conn, &dev, &parent, &classid, &kind, &params).await,
+            } => {
+                let (parent, classid) = parse_handles(&parent, &classid)?;
+                let refs: Vec<&str> = params.iter().map(String::as_str).collect();
+                conn.replace_class(dev.as_str(), parent, classid, &kind, &refs)
+                    .await
+            }
         }
     }
 
@@ -253,4 +264,16 @@ impl ClassCmd {
 
         Ok(())
     }
+}
+
+/// Parse tc-style parent / classid handles from the CLI, surfacing a
+/// clear error when either is malformed.
+fn parse_handles(parent: &str, classid: &str) -> Result<(TcHandle, TcHandle)> {
+    let parent = parent
+        .parse::<TcHandle>()
+        .map_err(|e| Error::InvalidMessage(format!("invalid parent `{parent}`: {e}")))?;
+    let classid = classid
+        .parse::<TcHandle>()
+        .map_err(|e| Error::InvalidMessage(format!("invalid classid `{classid}`: {e}")))?;
+    Ok((parent, classid))
 }

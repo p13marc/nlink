@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `bins/tc`: `class` subcommand off the deprecated legacy path
+
+- `bins/tc/src/commands/class.rs` no longer imports
+  `nlink::tc::builders::class`. `add` / `del` / `change` / `replace`
+  now call `Connection::{add,del,change,replace}_class` directly,
+  which take typed `TcHandle` for `parent` / `classid` (parsed at CLI
+  time via `TcHandle::from_str`) and pass `&[&str]` params through
+  to the same kernel-encoder the legacy builder used. Net effects:
+  - Invalid handles are caught at CLI parse time with a typed error
+    (`Error: InvalidMessage("invalid parent `garbage`: ...")`)
+    instead of failing deep in the legacy string-splitter.
+  - The `#[allow(deprecated)]` scope on `impl ClassCmd` is gone — the
+    file is clippy-clean under `--deny warnings` without suppression.
+  - No behaviour change: the per-kind options parser
+    (`add_class_options`, same codepath the legacy builder called) is
+    reused verbatim.
+- New local helper `parse_handles(parent, classid)` centralises the
+  two-handle parse with clear-error wrapping; it's the shape the
+  other three command files (`qdisc`, `filter`, `action`) will
+  borrow when they migrate.
+- Plan 137-family roadmap row for "Workspace-wide typed-units rollout"
+  advances from "deprecation added" to "class migrated; qdisc +
+  filter unblocked; action still blocked on typed standalone-action
+  CRUD".
+
 ### Deprecated — legacy `tc::builders::{class, qdisc, filter, action}`
 
 - `nlink::tc::builders::class` / `qdisc` / `filter` / `action` are now
