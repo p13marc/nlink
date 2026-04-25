@@ -203,9 +203,13 @@ impl FooConfig {
   variant. Format-string messages have proven readable across
   the 25 shipped parsers.
 
-A sealed `ParseParams` trait formalizing the inherent method
-ships in 0.15.0 — see [Plan 142](142-zero-legacy-typed-api-plan.md)
-Phase 0.
+The sealed `nlink::ParseParams` trait formalizes the inherent
+method for generic dispatch (`fn run<C: ParseParams>(p: &[&str])
+-> Result<C>`). One impl per shipped typed config, each forwarding
+to its inherent `parse_params`; the inherent method stays so
+existing direct callers don't break. The bin's `dispatch!` macros
+bind through the trait so the contract is type-checked, not just
+convention.
 
 ### Deprecated modules
 

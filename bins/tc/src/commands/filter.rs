@@ -400,7 +400,9 @@ async fn try_typed_filter(
 
     macro_rules! dispatch {
         ($Cfg:ident) => {{
-            let cfg = match $Cfg::parse_params(&refs) {
+            // Bind through the ParseParams trait so the dispatcher's
+            // contract is type-checked, not just convention.
+            let cfg = match <$Cfg as nlink::ParseParams>::parse_params(&refs) {
                 Ok(c) => c,
                 Err(e) => return Some(Err(e)),
             };

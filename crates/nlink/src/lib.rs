@@ -171,6 +171,9 @@ pub use netlink::messages::{
     RuleMessage,
     TcMessage,
 };
+// Sealed trait formalizing the `parse_params` contract on every typed TC
+// config. Inherent methods stay; the trait is for generic dispatch.
+pub use netlink::parse_params::ParseParams;
 // Strongly-typed TC handle and filter priority — use these in new code at
 // public boundaries instead of raw &str / u16.
 pub use netlink::tc_handle::{FilterPriority, TcHandle, TcHandleParseError};

@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — sealed `ParseParams` trait (Plan 142 Phase 0, slice 2)
+
+- New `nlink::ParseParams` trait formalizes the `parse_params`
+  contract every typed TC config has implemented since 0.14.0.
+  Sealed via a private supertrait; third-party crates can use the
+  trait but cannot implement it (the contract is intentionally
+  narrow — strict rejection, kind-prefixed error messages —
+  and extending it across foreign types invites drift).
+- 25 forwarding impls cover every shipped typed config: 18 qdisc
+  (`HtbQdiscConfig`, `NetemConfig`, `CakeConfig`, `TbfConfig`,
+  `SfqConfig`, `PrioConfig`, `FqCodelConfig`, `RedConfig`,
+  `PieConfig`, `HfscConfig`, `DrrConfig`, `QfqConfig`,
+  `IngressConfig`, `ClsactConfig`, `PlugConfig`, `MqprioConfig`,
+  `EtfConfig`, `TaprioConfig`) and 7 filter
+  (`BpfFilter`, `CgroupFilter`, `FlowFilter`, `FlowerFilter`,
+  `FwFilter`, `MatchallFilter`, `RouteFilter`). Each impl
+  forwards to the inherent method; existing direct callers
+  (every test, every recipe) keep working unchanged.
+- `bins/tc` qdisc + filter dispatch macros now bind through
+  `<$Cfg as nlink::ParseParams>::parse_params(...)` so the
+  dispatcher's contract is type-checked rather than just
+  convention. No behaviour change.
+- New module `nlink::netlink::parse_params` (the trait's home).
+  Top-level re-export at `nlink::ParseParams` for convenience.
+- 3 unit tests cover: trait dispatch matches inherent dispatch,
+  strict error rejection propagates, generic dispatch
+  (`fn run<C: ParseParams>(...)`) compiles and works.
+
+This closes Plan 142 Phase 0 alongside slice 1's `require_module!`
+helper. Phase 1 (filter side completion: Plan 138 + Plan 133 PR C)
+unblocks next.
+
 ### Added — `nlink::lab::has_module` + `require_module!` macros (Plan 142 Phase 0, slice 1)
 
 - New `nlink::lab::has_module(name) -> bool` checks whether a
