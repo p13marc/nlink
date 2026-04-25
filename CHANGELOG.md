@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `bins/tc` qdisc subcommand: typed dispatch for known kinds (slice 6)
+
+- `bins/tc/src/commands/qdisc.rs` now dispatches typed for the four
+  qdisc kinds with `parse_params` (htb, netem, cake, tbf), calling
+  `Connection::add_qdisc_full` / `del_qdisc_full` / `replace_qdisc_full`
+  / `change_qdisc_full` directly with typed `TcHandle` parents and
+  the appropriate typed config. Long-tail kinds (sfq, prio, fq_codel,
+  ingress, etc.) still fall through to the deprecated
+  `qdisc_builder::*` legacy path.
+- New private helpers in `qdisc.rs`:
+  - `parse_qdisc_handles(parent, handle)` — typed handle parsing
+    with clear-error wrapping. Returns `Err` cleanly so the caller
+    can fall back to the legacy path on failure (which has its own
+    handle parser).
+  - `try_typed_qdisc(verb)` — checks the kind against the four
+    known names; if known, parses handles + the typed config, then
+    runs the verb via `run_typed_qdisc`. Returns `None` for
+    unknown kinds (caller falls back to legacy).
+  - `run_typed_qdisc(cfg, verb)` — generic-over-`QdiscConfig`
+    helper that picks the right `Connection::*_qdisc_full` method
+    by `QdiscVerb` tag.
+- **Typo-on-known-kind surfaces cleanly**: `tc qdisc add dummy0
+  --parent root --handle 1: htb default_class 0x10` now fails with
+  `htb: unknown token "default_class" (expected default, r2q, or
+  direct_qlen)` instead of being silently ignored as the legacy
+  parser used to do. **Long-tail kinds (e.g. sfq) still work
+  unchanged** via the legacy fallback.
+- `#[allow(deprecated)]` on `qdisc_builder` import stays — comment
+  updated to "only used as the long-tail fallback" so the next
+  contributor knows the typed path took the load.
+
 ### Added — `TbfConfig::parse_params` (typed-units rollout, slice 5)
 
 - New method `TbfConfig::parse_params(&[&str]) -> Result<Self>` parses
