@@ -4,13 +4,18 @@ use std::io::{self, Write};
 
 use clap::{Args, Subcommand};
 use nlink::{
+    Error, TcHandle,
     netlink::{
-        Connection, Result, Route, message::NlMsgType, messages::TcMessage, types::tc::tc_handle,
+        Connection, Result, Route, filter::FlowerFilter, message::NlMsgType, messages::TcMessage,
+        types::tc::tc_handle,
     },
     output::{OutputFormat, OutputOptions, print_items},
 };
 
-// Deprecated in 0.14.0; see the impl block below for the migration TODO.
+// Deprecated in 0.14.0; only used as the long-tail fallback when the
+// CLI gives a kind that doesn't yet have a typed parse_params (u32,
+// matchall, basic, fw, bpf, cgroup, route, flow). Flower goes through
+// the typed dispatch below.
 #[allow(deprecated)]
 use nlink::tc::builders::filter as filter_builder;
 
@@ -182,7 +187,23 @@ impl FilterCmd {
                 prio,
                 kind,
                 params,
-            } => filter_builder::add(conn, &dev, &parent, &protocol, prio, &kind, &params).await,
+            } => {
+                if let Some(result) = try_typed_filter(
+                    conn,
+                    &dev,
+                    &parent,
+                    &protocol,
+                    prio,
+                    &kind,
+                    &params,
+                    FilterVerb::Add,
+                )
+                .await
+                {
+                    return result;
+                }
+                filter_builder::add(conn, &dev, &parent, &protocol, prio, &kind, &params).await
+            }
             FilterAction::Del {
                 dev,
                 parent,
@@ -190,6 +211,16 @@ impl FilterCmd {
                 prio,
                 kind,
             } => {
+                // Typed del path needs both protocol and prio (and a parsable
+                // parent). Anything missing -> fall through to the legacy
+                // filter_builder which knows how to handle the holes.
+                if let Some(proto_str) = protocol.as_deref()
+                    && let Some(p) = prio
+                    && let Ok(parent_t) = parent.parse::<TcHandle>()
+                    && let Ok(proto_u) = parse_protocol_u16(proto_str)
+                {
+                    return conn.del_filter(dev.as_str(), parent_t, proto_u, p).await;
+                }
                 filter_builder::del(
                     conn,
                     &dev,
@@ -208,6 +239,20 @@ impl FilterCmd {
                 kind,
                 params,
             } => {
+                if let Some(result) = try_typed_filter(
+                    conn,
+                    &dev,
+                    &parent,
+                    &protocol,
+                    prio,
+                    &kind,
+                    &params,
+                    FilterVerb::Replace,
+                )
+                .await
+                {
+                    return result;
+                }
                 filter_builder::replace(conn, &dev, &parent, &protocol, prio, &kind, &params).await
             }
             FilterAction::Change {
@@ -217,7 +262,23 @@ impl FilterCmd {
                 prio,
                 kind,
                 params,
-            } => filter_builder::change(conn, &dev, &parent, &protocol, prio, &kind, &params).await,
+            } => {
+                if let Some(result) = try_typed_filter(
+                    conn,
+                    &dev,
+                    &parent,
+                    &protocol,
+                    prio,
+                    &kind,
+                    &params,
+                    FilterVerb::Change,
+                )
+                .await
+                {
+                    return result;
+                }
+                filter_builder::change(conn, &dev, &parent, &protocol, prio, &kind, &params).await
+            }
         }
     }
 
@@ -284,6 +345,76 @@ impl FilterCmd {
 
         Ok(())
     }
+}
+
+/// Verb tag for `try_typed_filter` — picks add/replace/change at the
+/// `Connection::*_filter_full` callsite.
+#[derive(Clone, Copy)]
+enum FilterVerb {
+    Add,
+    Replace,
+    Change,
+}
+
+/// Try the typed dispatch path for known filter kinds (currently
+/// `flower`). Returns `Some(Ok)` on success, `Some(Err)` if the typed
+/// parser rejected the params (we surface the error rather than fall
+/// through, so a typo on a known kind doesn't get silently rerouted
+/// through the looser legacy parser). Returns `None` for unknown
+/// kinds — caller falls back to `filter_builder::*`.
+#[allow(clippy::too_many_arguments)] // mirrors the legacy filter_builder shape; bundling into a struct would just add ceremony
+async fn try_typed_filter(
+    conn: &Connection<Route>,
+    dev: &str,
+    parent: &str,
+    protocol: &str,
+    prio: Option<u16>,
+    kind: &str,
+    params: &[String],
+    verb: FilterVerb,
+) -> Option<Result<()>> {
+    if kind != "flower" {
+        return None;
+    }
+    let parent = match parent.parse::<TcHandle>() {
+        Ok(h) => h,
+        Err(_) => return None,
+    };
+    let proto = match parse_protocol_u16(protocol) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+    let priority = prio.unwrap_or(0);
+
+    let refs: Vec<&str> = params.iter().map(String::as_str).collect();
+    let cfg = match FlowerFilter::parse_params(&refs) {
+        Ok(c) => c,
+        Err(e) => return Some(Err(e)),
+    };
+
+    Some(match verb {
+        FilterVerb::Add => {
+            conn.add_filter_full(dev, parent, None, proto, priority, cfg)
+                .await
+        }
+        FilterVerb::Replace => {
+            conn.replace_filter_full(dev, parent, None, proto, priority, cfg)
+                .await
+        }
+        FilterVerb::Change => {
+            conn.change_filter_full(dev, parent, None, proto, priority, cfg)
+                .await
+        }
+    })
+}
+
+/// Wrap the legacy `filter_builder::parse_protocol` to surface its
+/// result via `nlink::Error` and keep the typed dispatch above
+/// independent of the deprecated module's exact error shape.
+#[allow(deprecated)]
+fn parse_protocol_u16(s: &str) -> Result<u16> {
+    filter_builder::parse_protocol(s)
+        .map_err(|e| Error::InvalidMessage(format!("invalid protocol `{s}`: {e}")))
 }
 
 /// Convert a TcMessage to JSON representation for filter.

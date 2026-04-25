@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `bins/tc` filter subcommand: typed dispatch for `flower` (slice 7)
+
+- `bins/tc/src/commands/filter.rs` now dispatches typed for the
+  `flower` filter kind, calling `Connection::add_filter_full` /
+  `del_filter` / `replace_filter_full` / `change_filter_full`
+  directly with typed `TcHandle` parents and a typed
+  `FlowerFilter`. Long-tail kinds (u32, matchall, basic, fw, bpf,
+  cgroup, route, flow) still fall through to the deprecated
+  `filter_builder::*` legacy path.
+- New private helpers in `filter.rs`:
+  - `try_typed_filter(verb)` — checks `kind == "flower"`, parses
+    parent + protocol, builds `FlowerFilter::parse_params`, calls
+    the right `Connection` verb. Returns `None` for non-flower
+    kinds, `Some(Err)` if the typed parser rejects params on a
+    flower call (the error surfaces rather than getting masked by
+    the legacy fallback). `Del` mirrors the same fallback shape:
+    if either protocol or prio is missing, the legacy
+    `filter_builder::del` (which knows how to handle the holes)
+    runs instead.
+  - `parse_protocol_u16(s)` — wraps the deprecated
+    `filter_builder::parse_protocol` (the protocol-name table
+    we'd otherwise duplicate) and surfaces the result via
+    `nlink::Error`.
+- **Typo-on-flower surfaces cleanly**: `tc filter add dummy0
+  --parent 1: --protocol ip --prio 100 flower nonsense_token foo`
+  now fails with `flower: unknown token "nonsense_token"` instead
+  of being silently swallowed. **Long-tail kinds (e.g. u32) still
+  work unchanged** via the legacy fallback (verified
+  interactively — `u32` reaches the netlink layer as expected).
+- `#[allow(deprecated)]` on `filter_builder` import stays — comment
+  updated to "only used as the long-tail fallback" so the next
+  contributor sees that flower took the load.
+
 ### Changed — `bins/tc` qdisc subcommand: typed dispatch for known kinds (slice 6)
 
 - `bins/tc/src/commands/qdisc.rs` now dispatches typed for the four
