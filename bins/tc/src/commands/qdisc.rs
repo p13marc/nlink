@@ -8,9 +8,9 @@ use nlink::{
         message::NlMsgType,
         messages::TcMessage,
         tc::{
-            CakeConfig, ClsactConfig, DrrConfig, FqCodelConfig, HfscConfig, HtbQdiscConfig,
-            IngressConfig, NetemConfig, PieConfig, PrioConfig, QdiscConfig, QfqConfig, RedConfig,
-            SfqConfig, TbfConfig,
+            CakeConfig, ClsactConfig, DrrConfig, EtfConfig, FqCodelConfig, HfscConfig,
+            HtbQdiscConfig, IngressConfig, MqprioConfig, NetemConfig, PieConfig, PlugConfig,
+            PrioConfig, QdiscConfig, QfqConfig, RedConfig, SfqConfig, TbfConfig,
         },
     },
     output::{OutputFormat, OutputOptions, print_all},
@@ -337,6 +337,9 @@ async fn try_typed_qdisc(
             | "qfq"
             | "ingress"
             | "clsact"
+            | "plug"
+            | "mqprio"
+            | "etf"
     );
     if !known {
         return None;
@@ -371,6 +374,9 @@ async fn try_typed_qdisc(
         "qfq" => dispatch!(QfqConfig),
         "ingress" => dispatch!(IngressConfig),
         "clsact" => dispatch!(ClsactConfig),
+        "plug" => dispatch!(PlugConfig),
+        "mqprio" => dispatch!(MqprioConfig),
+        "etf" => dispatch!(EtfConfig),
         _ => unreachable!("checked by `known` guard above"),
     })
 }

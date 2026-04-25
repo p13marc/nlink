@@ -7,7 +7,10 @@ use nlink::{
     Error, TcHandle,
     netlink::{
         Connection, Result, Route,
-        filter::{BpfFilter, FilterConfig, FlowerFilter, FwFilter, MatchallFilter, RouteFilter},
+        filter::{
+            BpfFilter, CgroupFilter, FilterConfig, FlowFilter, FlowerFilter, FwFilter,
+            MatchallFilter, RouteFilter,
+        },
         message::NlMsgType,
         messages::TcMessage,
         types::tc::tc_handle,
@@ -377,7 +380,10 @@ async fn try_typed_filter(
     params: &[String],
     verb: FilterVerb,
 ) -> Option<Result<()>> {
-    if !matches!(kind, "flower" | "matchall" | "fw" | "route" | "bpf") {
+    if !matches!(
+        kind,
+        "flower" | "matchall" | "fw" | "route" | "bpf" | "cgroup" | "flow"
+    ) {
         return None;
     }
     let parent = match parent.parse::<TcHandle>() {
@@ -407,6 +413,8 @@ async fn try_typed_filter(
         "fw" => dispatch!(FwFilter),
         "route" => dispatch!(RouteFilter),
         "bpf" => dispatch!(BpfFilter),
+        "cgroup" => dispatch!(CgroupFilter),
+        "flow" => dispatch!(FlowFilter),
         _ => unreachable!("checked by `matches!` guard above"),
     })
 }

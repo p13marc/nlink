@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — five more parsers + bin wiring (slice 14)
+
+- New `parse_params` methods on five more typed configs:
+  - **Qdisc**:
+    - `PlugConfig::parse_params` — `limit <bytes>`.
+    - `MqprioConfig::parse_params` — `num_tc`, `map` (16 values),
+      `hw`/`nohw`. The `queues <count@offset>` token is rejected
+      with a "not parsed yet" message — that grammar would need its
+      own pair-parser.
+    - `EtfConfig::parse_params` — `delta`, `clockid` (named
+      constants like `CLOCK_TAI` or bare integer), and three flag
+      pairs (`deadline_mode`, `offload`, `skip_sock_check`).
+  - **Filter**:
+    - `CgroupFilter::parse_params` — `chain <n>` only. A bare
+      `cgroup` filter without ematch matches every cgrouped
+      packet, which is rarely useful; the interesting
+      `cgroup CGRP_ID` matches need ematch (Plan 133 PR C).
+    - `FlowFilter::parse_params` — `keys <csv>` (comma-separated
+      `FlowKey` names like `src,dst,proto`), `hash`/`map` mode,
+      `baseclass`, `divisor`, `perturb`, `rshift`, `addend`,
+      `mask`/`xor` (hex-or-decimal), `chain`.
+- `bins/tc/src/commands/qdisc.rs` known-kinds list grew from 14 to
+  17 (+ plug, mqprio, etf). All long-tail qdisc kinds except taprio
+  now route through typed dispatch.
+- `bins/tc/src/commands/filter.rs` known-kinds list grew from 5 to
+  7 (+ cgroup, flow). All long-tail filter kinds except u32 and
+  basic now route through typed dispatch.
+- 22 new unit tests across the five (3 plug + 5 mqprio + 5 etf +
+  3 cgroup + 6 flow). Lib went 563 → 585; clippy clean
+  workspace-wide.
+- Verified interactively: `tc qdisc add dummy0 ... plug limit 10k`,
+  `etf delta 300000 clockid CLOCK_TAI offload`, `tc filter add ...
+  flow keys src,dst hash baseclass 1:1`, `cgroup chain 5` all reach
+  the netlink layer through the typed dispatchers.
+- **Net new CLI capability** for plug/mqprio/etf/cgroup/flow — the
+  legacy CLI silently swallowed all of them (qdisc dispatcher's
+  `_ =>` arm had no case for plug/mqprio/etf; filter dispatcher's
+  `_ =>` arm had no case for cgroup/flow).
+
 ### Added — `BpfFilter::parse_params` + bin wiring (slice 13)
 
 - New `BpfFilter::parse_params` recognises `fd <n>` (raw program

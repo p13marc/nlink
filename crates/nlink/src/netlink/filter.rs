@@ -877,6 +877,48 @@ fn parse_value_mask_u16_hex(s: &str, label: &str) -> crate::Result<(u16, u16)> {
     }
 }
 
+/// Map a tc-style flow key name to the typed `FlowKey` enum.
+fn parse_flow_key(s: &str) -> crate::Result<FlowKey> {
+    use crate::Error;
+    Ok(match s {
+        "src" => FlowKey::Src,
+        "dst" => FlowKey::Dst,
+        "proto" => FlowKey::Proto,
+        "proto-src" => FlowKey::ProtoSrc,
+        "proto-dst" => FlowKey::ProtoDst,
+        "iif" => FlowKey::Iif,
+        "priority" => FlowKey::Priority,
+        "mark" => FlowKey::Mark,
+        "nfct" => FlowKey::Nfct,
+        "nfct-src" => FlowKey::NfctSrc,
+        "nfct-dst" => FlowKey::NfctDst,
+        "nfct-proto-src" => FlowKey::NfctProtoSrc,
+        "nfct-proto-dst" => FlowKey::NfctProtoDst,
+        "rt-classid" => FlowKey::RtClassid,
+        "sk-uid" => FlowKey::SkUid,
+        "sk-gid" => FlowKey::SkGid,
+        "vlan-tag" => FlowKey::VlanTag,
+        "rxhash" => FlowKey::RxHash,
+        other => {
+            return Err(Error::InvalidMessage(format!(
+                "flow: unknown key `{other}` (see FlowKey enum docs for the list)"
+            )));
+        }
+    })
+}
+
+/// Parse a u32 in 0x-prefix-means-hex / otherwise-decimal form,
+/// matching the tc(8) `parse_hex_or_dec` semantics.
+fn parse_flow_u32_hex_or_dec(s: &str, label: &str) -> crate::Result<u32> {
+    use crate::Error;
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16)
+    } else {
+        s.parse::<u32>()
+    }
+    .map_err(|_| Error::InvalidMessage(format!("flow: invalid {label} `{s}`")))
+}
+
 /// Helper to create an IPv4 mask from prefix length.
 fn ipv4_mask(prefix_len: u8) -> Ipv4Addr {
     if prefix_len >= 32 {
@@ -1880,6 +1922,47 @@ impl CgroupFilter {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style cgroup params slice into a typed
+    /// `CgroupFilter`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `chain <n>` — chain index.
+    ///
+    /// **Note**: a bare `cgroup` filter without ematch matches every
+    /// packet that belongs to any cgroup, which is rarely useful.
+    /// The interesting matches (`cgroup CGRP_ID`) need ematch (Plan
+    /// 133 PR C). Action attachment isn't parsed here; build the
+    /// filter typed and use `with_action` if you need that.
+    ///
+    /// **Net new CLI capability**: the legacy filter dispatcher's
+    /// `_ => i += 1` arm silently swallowed `cgroup`.
+    pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
+        use crate::Error;
+        let mut f = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "chain" => {
+                    let s = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("cgroup: `chain` requires a value".into())
+                    })?;
+                    f = f.chain(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("cgroup: invalid chain `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "cgroup: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(f)
+    }
 }
 
 impl FilterConfig for CgroupFilter {
@@ -2401,6 +2484,123 @@ impl FlowFilter {
     pub fn chain(mut self, chain: u32) -> Self {
         self.chain = Some(chain);
         self
+    }
+
+    /// Parse a tc-style flow params slice into a typed `FlowFilter`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `keys <key1>,<key2>,...` — comma-separated list of flow
+    ///   keys (e.g. `src,dst,proto`, `nfct-src,nfct-dst`). Each key
+    ///   is the lowercase tc-style name; supported names: `src`,
+    ///   `dst`, `proto`, `proto-src`, `proto-dst`, `iif`, `priority`,
+    ///   `mark`, `nfct`, `nfct-src`, `nfct-dst`, `nfct-proto-src`,
+    ///   `nfct-proto-dst`, `rt-classid`, `sk-uid`, `sk-gid`,
+    ///   `vlan-tag`, `rxhash`.
+    /// - `hash` / `map` — flow mode (multi-key hashing vs direct map).
+    /// - `baseclass <handle>` — base class id.
+    /// - `divisor <n>` — hash table divisor.
+    /// - `perturb <seconds>` — hash perturbation interval.
+    /// - `rshift <n>` — right-shift amount.
+    /// - `addend <n>` — additive constant.
+    /// - `mask <hex>` — bitwise AND mask (0x-prefix or decimal).
+    /// - `xor <hex>` — bitwise XOR value.
+    /// - `chain <n>` — chain index.
+    ///
+    /// **Net new CLI capability**: the legacy filter dispatcher's
+    /// `_ => i += 1` arm silently swallowed `flow`.
+    ///
+    /// Action attachment isn't parsed here; build the filter typed
+    /// and use `actions()` if you need that.
+    pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
+        use crate::Error;
+        let mut f = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params
+                    .get(i + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("flow: `{key}` requires a value")))
+            };
+            match key {
+                "keys" => {
+                    let s = need_value()?;
+                    for k in s.split(',') {
+                        f = f.key(parse_flow_key(k.trim())?);
+                    }
+                    i += 2;
+                }
+                "hash" => {
+                    f = f.mode_hash();
+                    i += 1;
+                }
+                "map" => {
+                    f = f.mode_map();
+                    i += 1;
+                }
+                "baseclass" => {
+                    let s = need_value()?;
+                    let h = s.parse::<TcHandle>().map_err(|e| {
+                        Error::InvalidMessage(format!("flow: invalid baseclass `{s}`: {e}"))
+                    })?;
+                    f = f.baseclass(h);
+                    i += 2;
+                }
+                "divisor" => {
+                    let s = need_value()?;
+                    f = f.divisor(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("flow: invalid divisor `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "perturb" => {
+                    let s = need_value()?;
+                    f = f.perturb(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("flow: invalid perturb `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "rshift" => {
+                    let s = need_value()?;
+                    f = f.rshift(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("flow: invalid rshift `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "addend" => {
+                    let s = need_value()?;
+                    f = f.addend(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("flow: invalid addend `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "mask" => {
+                    let s = need_value()?;
+                    f = f.mask(parse_flow_u32_hex_or_dec(s, "mask")?);
+                    i += 2;
+                }
+                "xor" => {
+                    let s = need_value()?;
+                    f = f.xor(parse_flow_u32_hex_or_dec(s, "xor")?);
+                    i += 2;
+                }
+                "chain" => {
+                    let s = need_value()?;
+                    f = f.chain(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("flow: invalid chain `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "flow: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(f)
     }
 
     /// Build the filter configuration.
@@ -3554,6 +3754,70 @@ mod tests {
     #[test]
     fn bpf_parse_params_unknown_token_errors() {
         let err = BpfFilter::parse_params(&["fd", "1", "nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn cgroup_parse_params_empty_yields_default() {
+        let f = CgroupFilter::parse_params(&[]).unwrap();
+        assert!(f.chain.is_none());
+    }
+
+    #[test]
+    fn cgroup_parse_params_chain() {
+        let f = CgroupFilter::parse_params(&["chain", "5"]).unwrap();
+        assert_eq!(f.chain, Some(5));
+    }
+
+    #[test]
+    fn cgroup_parse_params_unknown_token_errors() {
+        let err = CgroupFilter::parse_params(&["classid", "1:10"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn flow_parse_params_keys_csv() {
+        let f = FlowFilter::parse_params(&["keys", "src,dst,proto"]).unwrap();
+        assert!(f.keys != 0);
+        // Three keys should each be set.
+        assert_eq!(
+            f.keys,
+            FlowKey::Src.to_bit() | FlowKey::Dst.to_bit() | FlowKey::Proto.to_bit()
+        );
+    }
+
+    #[test]
+    fn flow_parse_params_keys_with_dashes() {
+        let f = FlowFilter::parse_params(&["keys", "nfct-src,nfct-dst,proto-src"]).unwrap();
+        assert_eq!(
+            f.keys,
+            FlowKey::NfctSrc.to_bit() | FlowKey::NfctDst.to_bit() | FlowKey::ProtoSrc.to_bit()
+        );
+    }
+
+    #[test]
+    fn flow_parse_params_mode_hash_and_baseclass() {
+        let f = FlowFilter::parse_params(&["hash", "baseclass", "1:10"]).unwrap();
+        assert_eq!(f.baseclass, Some(TcHandle::new(1, 0x10).as_raw()));
+    }
+
+    #[test]
+    fn flow_parse_params_mask_xor_hex_and_dec() {
+        let f = FlowFilter::parse_params(&["mask", "0xff", "xor", "16", "divisor", "256"]).unwrap();
+        assert_eq!(f.mask, Some(0xff));
+        assert_eq!(f.xor, Some(16));
+        assert_eq!(f.divisor, Some(256));
+    }
+
+    #[test]
+    fn flow_parse_params_unknown_key_errors() {
+        let err = FlowFilter::parse_params(&["keys", "src,nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown key"));
+    }
+
+    #[test]
+    fn flow_parse_params_unknown_token_errors() {
+        let err = FlowFilter::parse_params(&["nonsense"]).unwrap_err();
         assert!(err.to_string().contains("unknown token"));
     }
 }

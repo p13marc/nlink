@@ -3258,6 +3258,44 @@ impl PlugConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style plug params slice into a typed `PlugConfig`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `limit <bytes>` — initial buffer limit.
+    ///
+    /// Unknown tokens, missing values, and unparseable sizes return
+    /// `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "limit" => {
+                    let s = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("plug: `limit` requires a value".into())
+                    })?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "plug: invalid limit `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    cfg.limit = Some(bytes.try_into().map_err(|_| {
+                        Error::InvalidMessage(format!("plug: limit `{s}` exceeds u32"))
+                    })?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "plug: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
 }
 
 impl QdiscConfig for PlugConfig {
@@ -3367,6 +3405,86 @@ impl MqprioConfig {
     /// Build the configuration.
     pub fn build(self) -> Self {
         self
+    }
+
+    /// Parse a tc-style mqprio params slice into a typed `MqprioConfig`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `num_tc <n>` — number of traffic classes (1-16).
+    /// - `map <P0> <P1> ... <P15>` — exactly 16 priority-to-tc
+    ///   mappings.
+    /// - `hw` / `nohw` — hardware-offload flag pair.
+    ///
+    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// `queues <count1@offset1> <count2@offset2> ...` — the
+    /// per-class queue layout is structured (count + offset pairs)
+    /// and the `count@offset` parsing isn't implemented here yet.
+    /// Use `MqprioConfig::queues()` directly on the typed builder
+    /// for that.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "num_tc" => {
+                    let s = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("mqprio: `num_tc` requires a value".into())
+                    })?;
+                    let n: u8 = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "mqprio: invalid num_tc `{s}` (expected 1-16)"
+                        ))
+                    })?;
+                    if !(1..=16).contains(&n) {
+                        return Err(Error::InvalidMessage(format!(
+                            "mqprio: num_tc `{n}` out of range (1-16)"
+                        )));
+                    }
+                    cfg = cfg.num_tc(n);
+                    i += 2;
+                }
+                "map" => {
+                    if params.len() < i + 1 + 16 {
+                        return Err(Error::InvalidMessage(format!(
+                            "mqprio: `map` requires exactly 16 values, got {}",
+                            params.len().saturating_sub(i + 1)
+                        )));
+                    }
+                    let mut map = [0u8; 16];
+                    for j in 0..16 {
+                        let s = params[i + 1 + j];
+                        map[j] = s.parse().map_err(|_| {
+                            Error::InvalidMessage(format!(
+                                "mqprio: invalid map[{j}] `{s}` (expected 0-15)"
+                            ))
+                        })?;
+                    }
+                    cfg.prio_tc_map = map;
+                    i += 17;
+                }
+                "hw" => {
+                    cfg.hw = true;
+                    i += 1;
+                }
+                "nohw" => {
+                    cfg.hw = false;
+                    i += 1;
+                }
+                "queues" => {
+                    return Err(Error::InvalidMessage(
+                        "mqprio: `queues` (count@offset list) is not parsed by parse_params yet — use MqprioConfig::queues() on the typed builder".into(),
+                    ));
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "mqprio: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
     }
 }
 
@@ -3839,6 +3957,98 @@ impl EtfConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style etf params slice into a typed `EtfConfig`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `delta <ns>` — transmission-time delta in nanoseconds
+    ///   (signed i32).
+    /// - `clockid <id>` — clock ID. Accepts the common names
+    ///   `CLOCK_TAI`, `CLOCK_REALTIME`, `CLOCK_MONOTONIC`,
+    ///   `CLOCK_BOOTTIME`, `CLOCK_PROCESS_CPUTIME_ID`,
+    ///   `CLOCK_THREAD_CPUTIME_ID`, or a bare integer.
+    /// - `deadline_mode` / `nodeadline_mode` — flag pair.
+    /// - `offload` / `nooffload` — hardware-offload flag pair.
+    /// - `skip_sock_check` / `noskip_sock_check` — flag pair.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params
+                    .get(i + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("etf: `{key}` requires a value")))
+            };
+            match key {
+                "delta" => {
+                    let s = need_value()?;
+                    cfg.delta = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "etf: invalid delta `{s}` (expected signed integer ns)"
+                        ))
+                    })?;
+                    i += 2;
+                }
+                "clockid" => {
+                    let s = need_value()?;
+                    cfg.clockid = parse_etf_clockid(s)?;
+                    i += 2;
+                }
+                "deadline_mode" => {
+                    cfg.deadline_mode = true;
+                    i += 1;
+                }
+                "nodeadline_mode" => {
+                    cfg.deadline_mode = false;
+                    i += 1;
+                }
+                "offload" => {
+                    cfg.offload = true;
+                    i += 1;
+                }
+                "nooffload" => {
+                    cfg.offload = false;
+                    i += 1;
+                }
+                "skip_sock_check" => {
+                    cfg.skip_sock_check = true;
+                    i += 1;
+                }
+                "noskip_sock_check" => {
+                    cfg.skip_sock_check = false;
+                    i += 1;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "etf: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+/// Map a clock-ID name to its libc constant; otherwise parse as a
+/// bare integer. The named constants come from `<time.h>` and match
+/// what `tc(8)` accepts.
+fn parse_etf_clockid(s: &str) -> Result<i32> {
+    Ok(match s {
+        "CLOCK_REALTIME" => libc::CLOCK_REALTIME,
+        "CLOCK_MONOTONIC" => libc::CLOCK_MONOTONIC,
+        "CLOCK_PROCESS_CPUTIME_ID" => libc::CLOCK_PROCESS_CPUTIME_ID,
+        "CLOCK_THREAD_CPUTIME_ID" => libc::CLOCK_THREAD_CPUTIME_ID,
+        "CLOCK_BOOTTIME" => libc::CLOCK_BOOTTIME,
+        "CLOCK_TAI" => libc::CLOCK_TAI,
+        other => other.parse::<i32>().map_err(|_| {
+            Error::InvalidMessage(format!(
+                "etf: invalid clockid `{other}` (expected name like CLOCK_TAI or bare integer)"
+            ))
+        })?,
+    })
 }
 
 impl QdiscConfig for EtfConfig {
@@ -6478,5 +6688,114 @@ mod tests {
         );
         let err = QfqConfig::parse_params(&["weight", "10"]).unwrap_err();
         assert!(err.to_string().contains("QfqClassConfig"), "got: {err}");
+    }
+
+    #[test]
+    fn plug_parse_params_empty_yields_default() {
+        let cfg = PlugConfig::parse_params(&[]).unwrap();
+        assert!(cfg.limit.is_none());
+    }
+
+    #[test]
+    fn plug_parse_params_limit_with_size_suffix() {
+        let cfg = PlugConfig::parse_params(&["limit", "10k"]).unwrap();
+        assert_eq!(cfg.limit, Some(10 * 1024));
+    }
+
+    #[test]
+    fn plug_parse_params_unknown_token_errors() {
+        let err = PlugConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn mqprio_parse_params_num_tc_and_hw_flag() {
+        let cfg = MqprioConfig::parse_params(&["num_tc", "4", "nohw"]).unwrap();
+        assert_eq!(cfg.num_tc, 4);
+        assert!(!cfg.hw);
+        let cfg = MqprioConfig::parse_params(&["num_tc", "8", "hw"]).unwrap();
+        assert!(cfg.hw);
+    }
+
+    #[test]
+    fn mqprio_parse_params_map_full() {
+        let mut params = vec!["map"];
+        for n in 0u8..16 {
+            params.push(if n < 8 { "0" } else { "1" });
+        }
+        let cfg = MqprioConfig::parse_params(&params).unwrap();
+        let expected: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
+        assert_eq!(cfg.prio_tc_map, expected);
+    }
+
+    #[test]
+    fn mqprio_parse_params_map_short_errors() {
+        let err = MqprioConfig::parse_params(&["map", "1", "2", "3"]).unwrap_err();
+        assert!(err.to_string().contains("requires exactly 16 values"));
+    }
+
+    #[test]
+    fn mqprio_parse_params_num_tc_out_of_range() {
+        let err = MqprioConfig::parse_params(&["num_tc", "20"]).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn mqprio_parse_params_queues_rejected() {
+        let err = MqprioConfig::parse_params(&["queues", "1@0"]).unwrap_err();
+        assert!(err.to_string().contains("not parsed by parse_params yet"));
+    }
+
+    #[test]
+    fn etf_parse_params_empty_yields_default() {
+        let cfg = EtfConfig::parse_params(&[]).unwrap();
+        assert_eq!(cfg.delta, 0);
+        assert_eq!(cfg.clockid, -1);
+        assert!(!cfg.deadline_mode);
+        assert!(!cfg.offload);
+    }
+
+    #[test]
+    fn etf_parse_params_typical() {
+        let cfg = EtfConfig::parse_params(&[
+            "delta",
+            "300000",
+            "clockid",
+            "CLOCK_TAI",
+            "deadline_mode",
+            "offload",
+        ])
+        .unwrap();
+        assert_eq!(cfg.delta, 300_000);
+        assert_eq!(cfg.clockid, libc::CLOCK_TAI);
+        assert!(cfg.deadline_mode);
+        assert!(cfg.offload);
+    }
+
+    #[test]
+    fn etf_parse_params_clockid_named_and_integer() {
+        for (name, expected) in [
+            ("CLOCK_REALTIME", libc::CLOCK_REALTIME),
+            ("CLOCK_MONOTONIC", libc::CLOCK_MONOTONIC),
+            ("CLOCK_BOOTTIME", libc::CLOCK_BOOTTIME),
+            ("CLOCK_TAI", libc::CLOCK_TAI),
+        ] {
+            let cfg = EtfConfig::parse_params(&["clockid", name]).unwrap();
+            assert_eq!(cfg.clockid, expected, "name {name}");
+        }
+        let cfg = EtfConfig::parse_params(&["clockid", "11"]).unwrap();
+        assert_eq!(cfg.clockid, 11);
+    }
+
+    #[test]
+    fn etf_parse_params_unknown_clockid_errors() {
+        let err = EtfConfig::parse_params(&["clockid", "CLOCK_NONSENSE"]).unwrap_err();
+        assert!(err.to_string().contains("invalid clockid"));
+    }
+
+    #[test]
+    fn etf_parse_params_unknown_token_errors() {
+        let err = EtfConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
     }
 }
