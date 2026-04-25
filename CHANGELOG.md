@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `TbfConfig::parse_params` (typed-units rollout, slice 5)
+
+- New method `TbfConfig::parse_params(&[&str]) -> Result<Self>` parses
+  a tc-style tbf params slice directly into the typed config.
+  Recognises every token the typed config can model: `rate <rate>`
+  (uses `Rate::parse` for correct units, no bits/bytes confusion),
+  `peakrate <rate>`, `burst <bytes>` (aliases `buffer`, `maxburst`),
+  `limit <bytes>`, `mtu <bytes>` (alias `minburst`).
+- **Honest scope-mismatch error** for the `latency` token —
+  `tc(8)` accepts it as a derived form (`limit ≈ rate * latency`),
+  but `TbfConfig` only stores the raw `limit`. The parser rejects
+  `latency` with a clear message pointing at
+  `tc::options::tbf::build` or telling callers to compute the limit
+  themselves.
+- `mtu`/`minburst` overflow is also caught: tc-style sizes are u64
+  but `TbfConfig::mtu` is u32, so values >4 GB return a clear error
+  rather than silently truncating.
+- 9 new unit tests cover empty / typical-set (rate+burst+limit) /
+  burst aliases / mtu alias / peakrate / latency-rejected /
+  unknown-token / missing-value / invalid-rate. Lib suite hit a
+  round 500.
+
 ### Added — `CakeConfig::parse_params` (typed-units rollout, slice 4)
 
 - New method `CakeConfig::parse_params(&[&str]) -> Result<Self>`

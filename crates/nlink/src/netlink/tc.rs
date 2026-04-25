@@ -792,6 +792,116 @@ impl TbfConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style tbf params slice into a typed `TbfConfig`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `rate <rate>` — required; the shaping rate.
+    /// - `burst <bytes>` (alias `buffer`, `maxburst`) — required by
+    ///   the kernel; the token-bucket size.
+    /// - `limit <bytes>` — buffer size in bytes.
+    /// - `peakrate <rate>` — optional secondary rate cap.
+    /// - `mtu <bytes>` (alias `minburst`) — peak-burst MTU.
+    ///
+    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`
+    /// pointing at the legacy parser): `latency` — `tc(8)` accepts it
+    /// as a way to specify `limit` indirectly (`limit ≈ rate *
+    /// latency`), but `TbfConfig` only stores the raw `limit`. Drop
+    /// to `tc::options::tbf::build` if you need the latency form.
+    ///
+    /// Stricter than the legacy `tc::options::tbf::build`: unknown
+    /// tokens, missing values, and unparseable rate/size values all
+    /// return `Error::InvalidMessage`. Note: this parser does NOT
+    /// enforce the kernel's "rate and burst are required" rule —
+    /// that's left to `add_qdisc` / the kernel itself, mirroring how
+    /// `parse_params` behaves on every other config.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let cfg = TbfConfig::parse_params(&[
+    ///     "rate", "1mbit",
+    ///     "burst", "32kb",
+    ///     "limit", "10kb",
+    /// ])?;
+    /// ```
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params
+                    .get(i + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("tbf: `{key}` requires a value")))
+            };
+            match key {
+                "rate" => {
+                    let s = need_value()?;
+                    cfg.rate = crate::util::Rate::parse(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "tbf: invalid rate `{s}` (expected tc-style rate like `1mbit`)"
+                        ))
+                    })?;
+                    i += 2;
+                }
+                "peakrate" => {
+                    let s = need_value()?;
+                    cfg.peakrate = Some(crate::util::Rate::parse(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "tbf: invalid peakrate `{s}` (expected tc-style rate)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "burst" | "buffer" | "maxburst" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "tbf: invalid {key} `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    cfg.burst = crate::util::Bytes::new(bytes);
+                    i += 2;
+                }
+                "limit" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "tbf: invalid limit `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    cfg.limit = crate::util::Bytes::new(bytes);
+                    i += 2;
+                }
+                "mtu" | "minburst" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "tbf: invalid {key} `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    cfg.mtu = bytes.try_into().map_err(|_| {
+                        Error::InvalidMessage(format!("tbf: {key} `{s}` exceeds u32 (max ~4GB)"))
+                    })?;
+                    i += 2;
+                }
+                "latency" => {
+                    return Err(Error::InvalidMessage(
+                        "tbf: `latency` is a derived form (limit = rate * latency) and is not modelled by TbfConfig — compute the limit yourself or use tc::options::tbf::build".into(),
+                    ));
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "tbf: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
 }
 
 impl QdiscConfig for TbfConfig {
@@ -5460,5 +5570,75 @@ mod tests {
         assert!(err.to_string().contains("invalid overhead"));
         let err = CakeConfig::parse_params(&["fwmark", "zzzz"]).unwrap_err();
         assert!(err.to_string().contains("invalid fwmark"));
+    }
+
+    #[test]
+    fn tbf_parse_params_empty_yields_default() {
+        let cfg = TbfConfig::parse_params(&[]).unwrap();
+        assert_eq!(cfg.rate, crate::util::Rate::ZERO);
+        assert!(cfg.peakrate.is_none());
+        assert_eq!(cfg.burst, crate::util::Bytes::ZERO);
+        assert_eq!(cfg.mtu, 1514);
+    }
+
+    #[test]
+    fn tbf_parse_params_typical_set() {
+        let cfg =
+            TbfConfig::parse_params(&["rate", "1mbit", "burst", "32kb", "limit", "10kb"]).unwrap();
+        // 1mbit = 125_000 bytes/sec
+        assert_eq!(cfg.rate.as_bytes_per_sec(), 125_000);
+        // 32kb = 32 * 1024 bytes (binary, per tc(8) convention)
+        assert_eq!(cfg.burst.as_u64(), 32 * 1024);
+        assert_eq!(cfg.limit.as_u64(), 10 * 1024);
+    }
+
+    #[test]
+    fn tbf_parse_params_burst_aliases() {
+        for alias in ["burst", "buffer", "maxburst"] {
+            let cfg = TbfConfig::parse_params(&[alias, "16kb"]).unwrap();
+            assert_eq!(cfg.burst.as_u64(), 16 * 1024, "alias {alias}");
+        }
+    }
+
+    #[test]
+    fn tbf_parse_params_mtu_alias() {
+        for alias in ["mtu", "minburst"] {
+            let cfg = TbfConfig::parse_params(&[alias, "9000"]).unwrap();
+            assert_eq!(cfg.mtu, 9000, "alias {alias}");
+        }
+    }
+
+    #[test]
+    fn tbf_parse_params_peakrate() {
+        let cfg = TbfConfig::parse_params(&["rate", "1mbit", "peakrate", "2mbit"]).unwrap();
+        assert_eq!(cfg.rate.as_bytes_per_sec(), 125_000);
+        assert_eq!(cfg.peakrate.unwrap().as_bytes_per_sec(), 250_000);
+    }
+
+    #[test]
+    fn tbf_parse_params_latency_rejected() {
+        let err = TbfConfig::parse_params(&["latency", "50ms"]).unwrap_err();
+        assert!(
+            err.to_string().contains("derived form"),
+            "expected derived-form rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn tbf_parse_params_unknown_token_errors() {
+        let err = TbfConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn tbf_parse_params_missing_value_errors() {
+        let err = TbfConfig::parse_params(&["rate"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"));
+    }
+
+    #[test]
+    fn tbf_parse_params_invalid_rate_errors() {
+        let err = TbfConfig::parse_params(&["rate", "fast"]).unwrap_err();
+        assert!(err.to_string().contains("invalid rate"));
     }
 }
