@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — five small qdisc parsers + bin wiring (slice 11)
+
+- New `parse_params` methods on five more typed qdisc configs:
+  - `HfscConfig::parse_params` — `default <hex>` only (the per-class
+    service-curve work lives on `HfscClassConfig`).
+  - `IngressConfig::parse_params` / `ClsactConfig::parse_params` —
+    take no parameters; empty slice succeeds, anything else returns
+    a clear "takes no parameters" error. Useful for symmetry: the
+    bin's typed dispatch can now route ingress / clsact through the
+    typed path uniformly.
+  - `DrrConfig::parse_params` / `QfqConfig::parse_params` — same
+    "no qdisc-level params" shape, but the error message points at
+    the per-class config (`DrrClassConfig::quantum`,
+    `QfqClassConfig::weight`/`lmax`) so a user trying to put those
+    on the qdisc gets a helpful nudge.
+- `bins/tc/src/commands/qdisc.rs` known-kinds list grew from 9 to
+  14 (+ `hfsc, drr, qfq, ingress, clsact`). The dispatch macro now
+  has a typed arm for every classful AQM and the two
+  filter-attachment qdiscs.
+- 8 new unit tests across the five (4 hfsc + 2 ingress/clsact + 2
+  drr/qfq). Lib suite went 541 → 549; clippy clean workspace-wide.
+- Verified interactively: `tc qdisc add dummy0 --parent root
+  --handle 1: hfsc default 30` and `tc qdisc add dummy0 ingress`
+  both reach the netlink layer; `tc qdisc add dummy0 ingress
+  garbage` fails with `ingress: takes no parameters (got
+  "garbage")`.
+
 ### Added — `RedConfig` + `PieConfig` parse_params + bin wiring (slice 10)
 
 - New `parse_params` methods on two more typed AQM qdisc configs:

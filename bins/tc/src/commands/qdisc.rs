@@ -8,8 +8,9 @@ use nlink::{
         message::NlMsgType,
         messages::TcMessage,
         tc::{
-            CakeConfig, FqCodelConfig, HtbQdiscConfig, NetemConfig, PieConfig, PrioConfig,
-            QdiscConfig, RedConfig, SfqConfig, TbfConfig,
+            CakeConfig, ClsactConfig, DrrConfig, FqCodelConfig, HfscConfig, HtbQdiscConfig,
+            IngressConfig, NetemConfig, PieConfig, PrioConfig, QdiscConfig, QfqConfig, RedConfig,
+            SfqConfig, TbfConfig,
         },
     },
     output::{OutputFormat, OutputOptions, print_all},
@@ -322,7 +323,20 @@ async fn try_typed_qdisc(
     // legacy path without paying for handle parsing.
     let known = matches!(
         kind,
-        "htb" | "netem" | "cake" | "tbf" | "sfq" | "prio" | "fq_codel" | "red" | "pie"
+        "htb"
+            | "netem"
+            | "cake"
+            | "tbf"
+            | "sfq"
+            | "prio"
+            | "fq_codel"
+            | "red"
+            | "pie"
+            | "hfsc"
+            | "drr"
+            | "qfq"
+            | "ingress"
+            | "clsact"
     );
     if !known {
         return None;
@@ -352,6 +366,11 @@ async fn try_typed_qdisc(
         "fq_codel" => dispatch!(FqCodelConfig),
         "red" => dispatch!(RedConfig),
         "pie" => dispatch!(PieConfig),
+        "hfsc" => dispatch!(HfscConfig),
+        "drr" => dispatch!(DrrConfig),
+        "qfq" => dispatch!(QfqConfig),
+        "ingress" => dispatch!(IngressConfig),
+        "clsact" => dispatch!(ClsactConfig),
         _ => unreachable!("checked by `known` guard above"),
     })
 }

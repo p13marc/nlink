@@ -2238,6 +2238,18 @@ impl IngressConfig {
     pub fn new() -> Self {
         Self
     }
+
+    /// Parse a tc-style ingress params slice. Ingress takes no
+    /// parameters; this method is for symmetry with the typed-units
+    /// rollout — empty slice succeeds, anything else errors.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        if let Some(token) = params.first() {
+            return Err(Error::InvalidMessage(format!(
+                "ingress: takes no parameters (got `{token}`)"
+            )));
+        }
+        Ok(Self::new())
+    }
 }
 
 impl QdiscConfig for IngressConfig {
@@ -2275,6 +2287,18 @@ impl ClsactConfig {
     /// Create a new clsact configuration.
     pub fn new() -> Self {
         Self
+    }
+
+    /// Parse a tc-style clsact params slice. Clsact takes no
+    /// parameters; this method is for symmetry — empty slice
+    /// succeeds, anything else errors.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        if let Some(token) = params.first() {
+            return Err(Error::InvalidMessage(format!(
+                "clsact: takes no parameters (got `{token}`)"
+            )));
+        }
+        Ok(Self::new())
     }
 }
 
@@ -2458,6 +2482,19 @@ impl DrrConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style drr params slice. DRR's *qdisc* level takes
+    /// no parameters (the per-class `quantum` lives on `DrrClassConfig`,
+    /// not here); this method is for symmetry — empty slice succeeds,
+    /// anything else errors.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        if let Some(token) = params.first() {
+            return Err(Error::InvalidMessage(format!(
+                "drr: qdisc takes no parameters (got `{token}`); per-class quantum belongs on DrrClassConfig"
+            )));
+        }
+        Ok(Self::new())
+    }
 }
 
 impl QdiscConfig for DrrConfig {
@@ -2510,6 +2547,18 @@ impl QfqConfig {
     /// Build the configuration.
     pub fn build(self) -> Self {
         self
+    }
+
+    /// Parse a tc-style qfq params slice. QFQ's *qdisc* level takes
+    /// no parameters (the per-class `weight` and `lmax` live on
+    /// `QfqClassConfig`); empty slice succeeds, anything else errors.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        if let Some(token) = params.first() {
+            return Err(Error::InvalidMessage(format!(
+                "qfq: qdisc takes no parameters (got `{token}`); per-class weight/lmax belongs on QfqClassConfig"
+            )));
+        }
+        Ok(Self::new())
     }
 }
 
@@ -3637,6 +3686,44 @@ impl HfscConfig {
     /// Build the configuration.
     pub fn build(self) -> Self {
         self
+    }
+
+    /// Parse a tc-style hfsc params slice into a typed `HfscConfig`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `default <classid>` — default class for unclassified
+    ///   packets. Accepts a tc handle's minor (`10` → `0x10`,
+    ///   matching `tc(8)`'s `tc qdisc add ... hfsc default 10`
+    ///   convention).
+    ///
+    /// Unknown tokens, missing values, and unparseable values
+    /// return `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "default" => {
+                    let s = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("hfsc: `default` requires a value".into())
+                    })?;
+                    cfg.default_class = u16::from_str_radix(s, 16).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "hfsc: invalid default `{s}` (expected hex minor like `10`)"
+                        ))
+                    })?;
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "hfsc: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
     }
 }
 
@@ -6334,5 +6421,62 @@ mod tests {
     fn pie_parse_params_invalid_time_errors() {
         let err = PieConfig::parse_params(&["target", "fast"]).unwrap_err();
         assert!(err.to_string().contains("invalid target"));
+    }
+
+    #[test]
+    fn hfsc_parse_params_empty_yields_default() {
+        let cfg = HfscConfig::parse_params(&[]).unwrap();
+        assert_eq!(cfg.default_class, 0);
+    }
+
+    #[test]
+    fn hfsc_parse_params_default_hex() {
+        let cfg = HfscConfig::parse_params(&["default", "10"]).unwrap();
+        assert_eq!(cfg.default_class, 0x10);
+        let cfg = HfscConfig::parse_params(&["default", "ff"]).unwrap();
+        assert_eq!(cfg.default_class, 0xff);
+    }
+
+    #[test]
+    fn hfsc_parse_params_unknown_token_errors() {
+        let err = HfscConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn hfsc_parse_params_missing_value_errors() {
+        let err = HfscConfig::parse_params(&["default"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"));
+    }
+
+    #[test]
+    fn ingress_clsact_parse_params_empty_succeeds() {
+        IngressConfig::parse_params(&[]).unwrap();
+        ClsactConfig::parse_params(&[]).unwrap();
+    }
+
+    #[test]
+    fn ingress_clsact_parse_params_reject_any_token() {
+        let err = IngressConfig::parse_params(&["foo"]).unwrap_err();
+        assert!(err.to_string().contains("takes no parameters"));
+        let err = ClsactConfig::parse_params(&["bar"]).unwrap_err();
+        assert!(err.to_string().contains("takes no parameters"));
+    }
+
+    #[test]
+    fn drr_qfq_parse_params_empty_succeeds() {
+        DrrConfig::parse_params(&[]).unwrap();
+        QfqConfig::parse_params(&[]).unwrap();
+    }
+
+    #[test]
+    fn drr_qfq_parse_params_reject_any_token() {
+        let err = DrrConfig::parse_params(&["quantum", "1500"]).unwrap_err();
+        assert!(
+            err.to_string().contains("DrrClassConfig"),
+            "expected per-class hint, got: {err}"
+        );
+        let err = QfqConfig::parse_params(&["weight", "10"]).unwrap_err();
+        assert!(err.to_string().contains("QfqClassConfig"), "got: {err}");
     }
 }
