@@ -167,6 +167,98 @@ impl GactAction {
         self
     }
 
+    /// Parse a `tc(8)`-style `gact` token slice into a typed
+    /// action.
+    ///
+    /// # Recognised tokens
+    ///
+    /// - One verdict keyword (defaults to `pass` if omitted):
+    ///   `pass`/`ok`, `drop`/`shot`, `pipe`, `reclassify`,
+    ///   `stolen`, `continue`, or `goto_chain <n>`.
+    /// - `random determ <verdict> <one-in-N>` — every Nth matching
+    ///   packet takes `<verdict>` instead of the primary verdict.
+    /// - `random netrand <verdict> <percent>` — `<percent>` (0-100)
+    ///   of matching packets take `<verdict>`.
+    ///
+    /// Stricter than the legacy `add_gact_options` parser: unknown
+    /// tokens, missing values, and unparseable verdicts return
+    /// `Error::InvalidMessage("gact: ...")`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        // Default to TC_ACT_OK (pass).
+        let mut act = Self::pass();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "pass" | "ok" => {
+                    act = Self::new(action::TC_ACT_OK);
+                    i += 1;
+                }
+                "drop" | "shot" => {
+                    act = Self::new(action::TC_ACT_SHOT);
+                    i += 1;
+                }
+                "pipe" => {
+                    act = Self::new(action::TC_ACT_PIPE);
+                    i += 1;
+                }
+                "reclassify" => {
+                    act = Self::new(action::TC_ACT_RECLASSIFY);
+                    i += 1;
+                }
+                "stolen" => {
+                    act = Self::new(action::TC_ACT_STOLEN);
+                    i += 1;
+                }
+                "continue" => {
+                    act = Self::new(action::TC_ACT_UNSPEC);
+                    i += 1;
+                }
+                "goto_chain" => {
+                    let s = action_need_value(params, i, "gact", key)?;
+                    let chain = action_parse_u32("gact", "goto_chain", s)?;
+                    act = Self::goto_chain(chain);
+                    i += 2;
+                }
+                "random" => {
+                    let kind = action_need_value(params, i, "gact", key)?;
+                    let verdict_s = params.get(i + 2).copied().ok_or_else(|| {
+                        Error::InvalidMessage(
+                            "gact: `random <kind>` requires <verdict>".to_string(),
+                        )
+                    })?;
+                    let val_s = params.get(i + 3).copied().ok_or_else(|| {
+                        Error::InvalidMessage(
+                            "gact: `random <kind> <verdict>` requires <value>".to_string(),
+                        )
+                    })?;
+                    let verdict = parse_gact_verdict(verdict_s)?;
+                    let val: u16 = val_s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "gact: invalid random value `{val_s}` (expected u16)"
+                        ))
+                    })?;
+                    act = match kind {
+                        "determ" => act.deterministic(val, verdict),
+                        "netrand" => act.random(val, verdict),
+                        other => {
+                            return Err(Error::InvalidMessage(format!(
+                                "gact: unknown random kind `{other}` (expected `determ` or `netrand`)"
+                            )));
+                        }
+                    };
+                    i += 4;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "gact: unknown token `{other}` (recognised: pass/drop/pipe/reclassify/stolen/continue, goto_chain <n>, random determ|netrand <verdict> <val>)"
+                    )));
+                }
+            }
+        }
+        Ok(act)
+    }
+
     /// Build the action configuration.
     pub fn build(self) -> Self {
         self
@@ -284,6 +376,93 @@ impl MirredAction {
     pub fn pipe(mut self) -> Self {
         self.action = action::TC_ACT_PIPE;
         self
+    }
+
+    /// Parse a `tc(8)`-style `mirred` token slice into a typed
+    /// action.
+    ///
+    /// # Recognised tokens
+    ///
+    /// - Direction: `egress` (default) / `ingress`.
+    /// - Operation: `redirect` (default) / `mirror`.
+    /// - Target interface (one of):
+    ///   - `dev <ifname>` — sysfs lookup via `nlink::util::get_ifindex`.
+    ///     Reads from the host namespace; **inside a foreign netns**
+    ///     prefer the `ifindex` form.
+    ///   - `ifindex <n>` — namespace-safe direct ifindex.
+    ///
+    /// `dev` and `ifindex` are mutually exclusive; the parser
+    /// rejects both being set.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut direction_ingress = false;
+        let mut op_mirror = false;
+        let mut ifindex: Option<u32> = None;
+
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "egress" => {
+                    direction_ingress = false;
+                    i += 1;
+                }
+                "ingress" => {
+                    direction_ingress = true;
+                    i += 1;
+                }
+                "redirect" => {
+                    op_mirror = false;
+                    i += 1;
+                }
+                "mirror" => {
+                    op_mirror = true;
+                    i += 1;
+                }
+                "dev" => {
+                    let s = action_need_value(params, i, "mirred", key)?;
+                    if ifindex.is_some() {
+                        return Err(Error::InvalidMessage(
+                            "mirred: `dev` and `ifindex` are mutually exclusive".to_string(),
+                        ));
+                    }
+                    let idx = crate::util::get_ifindex(s).map_err(|e| {
+                        Error::InvalidMessage(format!(
+                            "mirred: dev `{s}` not found: {e}"
+                        ))
+                    })?;
+                    ifindex = Some(idx);
+                    i += 2;
+                }
+                "ifindex" => {
+                    let s = action_need_value(params, i, "mirred", key)?;
+                    if ifindex.is_some() {
+                        return Err(Error::InvalidMessage(
+                            "mirred: `dev` and `ifindex` are mutually exclusive".to_string(),
+                        ));
+                    }
+                    ifindex = Some(action_parse_u32("mirred", "ifindex", s)?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "mirred: unknown token `{other}` (recognised: egress/ingress, redirect/mirror, dev <ifname>, ifindex <n>)"
+                    )));
+                }
+            }
+        }
+
+        let idx = ifindex.ok_or_else(|| {
+            Error::InvalidMessage(
+                "mirred: target interface required (use `dev <ifname>` or `ifindex <n>`)"
+                    .to_string(),
+            )
+        })?;
+        Ok(match (direction_ingress, op_mirror) {
+            (false, false) => Self::redirect_by_index(idx),
+            (false, true) => Self::mirror_by_index(idx),
+            (true, false) => Self::ingress_redirect_by_index(idx),
+            (true, true) => Self::ingress_mirror_by_index(idx),
+        })
     }
 
     /// Build the action configuration.
@@ -589,6 +768,117 @@ impl VlanAction {
         self
     }
 
+    /// Parse a `tc(8)`-style `vlan` token slice into a typed
+    /// action.
+    ///
+    /// # Recognised tokens
+    ///
+    /// Operation (one required):
+    /// - `pop` — strip the outer VLAN tag.
+    /// - `push <id>` — push a new tag with VLAN ID `<id>`.
+    /// - `modify <id>` — overwrite the existing tag's ID.
+    ///
+    /// Optional modifiers:
+    /// - `priority <p>` — set the VLAN PCP bits (0–7).
+    /// - `protocol 802.1ad` — push/modify with QinQ (default
+    ///   802.1q).
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        // Parse the operation first (it determines the entry-point
+        // constructor that supplies vlan_id), then walk for modifiers.
+        let mut op: Option<&str> = None;
+        let mut vlan_id: Option<u16> = None;
+        let mut priority: Option<u8> = None;
+        let mut qinq = false;
+
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "pop" => {
+                    op = Some("pop");
+                    i += 1;
+                }
+                "push" => {
+                    op = Some("push");
+                    let s = action_need_value(params, i, "vlan", key)?;
+                    let id = action_parse_u32("vlan", "push id", s)?;
+                    if id > 4095 {
+                        return Err(Error::InvalidMessage(format!(
+                            "vlan: VLAN ID `{id}` out of range (0–4095)"
+                        )));
+                    }
+                    vlan_id = Some(id as u16);
+                    i += 2;
+                }
+                "modify" => {
+                    op = Some("modify");
+                    let s = action_need_value(params, i, "vlan", key)?;
+                    let id = action_parse_u32("vlan", "modify id", s)?;
+                    if id > 4095 {
+                        return Err(Error::InvalidMessage(format!(
+                            "vlan: VLAN ID `{id}` out of range (0–4095)"
+                        )));
+                    }
+                    vlan_id = Some(id as u16);
+                    i += 2;
+                }
+                "priority" => {
+                    let s = action_need_value(params, i, "vlan", key)?;
+                    let p = action_parse_u32("vlan", "priority", s)?;
+                    if p > 7 {
+                        return Err(Error::InvalidMessage(format!(
+                            "vlan: priority `{p}` out of range (0–7)"
+                        )));
+                    }
+                    priority = Some(p as u8);
+                    i += 2;
+                }
+                "protocol" => {
+                    let s = action_need_value(params, i, "vlan", key)?;
+                    match s {
+                        "802.1q" => qinq = false,
+                        "802.1ad" => qinq = true,
+                        other => {
+                            return Err(Error::InvalidMessage(format!(
+                                "vlan: unknown protocol `{other}` (expected `802.1q` or `802.1ad`)"
+                            )));
+                        }
+                    }
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "vlan: unknown token `{other}` (recognised: pop, push <id>, modify <id>, priority <p>, protocol 802.1q|802.1ad)"
+                    )));
+                }
+            }
+        }
+
+        let mut act = match op {
+            Some("pop") => Self::pop(),
+            Some("push") => {
+                let id = vlan_id.expect("push always sets vlan_id");
+                Self::push(id)
+            }
+            Some("modify") => {
+                let id = vlan_id.expect("modify always sets vlan_id");
+                Self::modify(id)
+            }
+            _ => {
+                return Err(Error::InvalidMessage(
+                    "vlan: missing operation (pop, push <id>, or modify <id>)".to_string(),
+                ));
+            }
+        };
+        if let Some(p) = priority {
+            act = act.priority(p);
+        }
+        if qinq {
+            act = act.qinq();
+        }
+        Ok(act)
+    }
+
     /// Build the action configuration.
     pub fn build(self) -> Self {
         self
@@ -701,6 +991,71 @@ impl SkbeditAction {
     pub fn action(mut self, action: i32) -> Self {
         self.action = action;
         self
+    }
+
+    /// Parse a `tc(8)`-style `skbedit` token slice into a typed
+    /// action.
+    ///
+    /// # Recognised tokens (any order)
+    ///
+    /// - `priority <u32>` — set the skb priority.
+    /// - `mark <u32>` — set the skb mark.
+    /// - `mask <u32>` — combine with `mark` for masked update.
+    /// - `queue_mapping <u16>` — set the queue mapping index.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut act = Self::new();
+        let mut mark: Option<u32> = None;
+        let mut mask: Option<u32> = None;
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "priority" => {
+                    let s = action_need_value(params, i, "skbedit", key)?;
+                    act = act.priority(action_parse_u32("skbedit", "priority", s)?);
+                    i += 2;
+                }
+                "mark" => {
+                    let s = action_need_value(params, i, "skbedit", key)?;
+                    mark = Some(action_parse_u32("skbedit", "mark", s)?);
+                    i += 2;
+                }
+                "mask" => {
+                    let s = action_need_value(params, i, "skbedit", key)?;
+                    mask = Some(action_parse_u32("skbedit", "mask", s)?);
+                    i += 2;
+                }
+                "queue_mapping" => {
+                    let s = action_need_value(params, i, "skbedit", key)?;
+                    let q = action_parse_u32("skbedit", "queue_mapping", s)?;
+                    if q > u16::MAX as u32 {
+                        return Err(Error::InvalidMessage(format!(
+                            "skbedit: queue_mapping `{q}` out of range (0–65535)"
+                        )));
+                    }
+                    act = act.queue_mapping(q as u16);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "skbedit: unknown token `{other}` (recognised: priority, mark, mask, queue_mapping)"
+                    )));
+                }
+            }
+        }
+        // Apply mark / mask combination at the end so order doesn't
+        // matter at the caller.
+        match (mark, mask) {
+            (Some(m), Some(mk)) => act = act.mark_with_mask(m, mk),
+            (Some(m), None) => act = act.mark(m),
+            (None, Some(_)) => {
+                return Err(Error::InvalidMessage(
+                    "skbedit: `mask` requires a `mark` value".to_string(),
+                ));
+            }
+            (None, None) => {}
+        }
+        Ok(act)
     }
 
     /// Build the action configuration.
@@ -1160,6 +1515,39 @@ impl ConnmarkAction {
     pub fn action(mut self, action: i32) -> Self {
         self.action = action;
         self
+    }
+
+    /// Parse a `tc(8)`-style `connmark` token slice into a typed
+    /// action.
+    ///
+    /// # Recognised tokens
+    ///
+    /// - `zone <u16>` — conntrack zone (default 0).
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut act = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "zone" => {
+                    let s = action_need_value(params, i, "connmark", key)?;
+                    let z = action_parse_u32("connmark", "zone", s)?;
+                    if z > u16::MAX as u32 {
+                        return Err(Error::InvalidMessage(format!(
+                            "connmark: zone `{z}` out of range (0–65535)"
+                        )));
+                    }
+                    act = act.zone(z as u16);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "connmark: unknown token `{other}` (recognised: zone <0–65535>)"
+                    )));
+                }
+            }
+        }
+        Ok(act)
     }
 
     /// Build the action configuration.
@@ -2456,6 +2844,48 @@ fn next_nla(input: &[u8]) -> Option<(u16, &[u8], &[u8])> {
     Some((attr_type, payload, rest))
 }
 
+// ============================================================================
+// Shared parse_params helpers (Plan 139 PR B sub-slice 1)
+// ============================================================================
+
+/// Borrow `params[i + 1]`, returning a kind-prefixed
+/// `InvalidMessage` if the value slot is missing. Mirrors
+/// `filter::need_value` / `tc::need_value` from the qdisc + filter
+/// rollouts.
+fn action_need_value<'a>(params: &[&'a str], i: usize, kind: &str, key: &str) -> Result<&'a str> {
+    params
+        .get(i + 1)
+        .copied()
+        .ok_or_else(|| Error::InvalidMessage(format!("{kind}: `{key}` requires a value")))
+}
+
+/// Parse a decimal `u32` with kind-prefixed error context.
+fn action_parse_u32(kind: &str, key: &str, s: &str) -> Result<u32> {
+    s.parse::<u32>().map_err(|_| {
+        Error::InvalidMessage(format!(
+            "{kind}: invalid {key} `{s}` (expected unsigned integer)"
+        ))
+    })
+}
+
+/// Resolve a `gact` verdict keyword (`pass`/`drop`/etc.) to its
+/// `TC_ACT_*` integer.
+fn parse_gact_verdict(s: &str) -> Result<i32> {
+    Ok(match s {
+        "pass" | "ok" => action::TC_ACT_OK,
+        "drop" | "shot" => action::TC_ACT_SHOT,
+        "pipe" => action::TC_ACT_PIPE,
+        "reclassify" => action::TC_ACT_RECLASSIFY,
+        "stolen" => action::TC_ACT_STOLEN,
+        "continue" => action::TC_ACT_UNSPEC,
+        other => {
+            return Err(Error::InvalidMessage(format!(
+                "gact: unknown verdict `{other}` (expected pass/drop/pipe/reclassify/stolen/continue)"
+            )));
+        }
+    })
+}
+
 /// Parse the action-table contents of a single RTM_NEWACTION /
 /// RTM_GETACTION response message into a flat list of
 /// [`ActionMessage`] entries.
@@ -2972,5 +3402,228 @@ mod tests {
         // actions, not panic.
         let parsed = parse_action_messages(&[0u8; 8]);
         assert!(parsed.is_empty());
+    }
+
+    // ==========================================================
+    // Plan 139 PR B sub-slice 1 — parse_params for 5 simple
+    // action kinds. Each parser follows the same shape as the
+    // qdisc/filter parsers from slices 1-15.
+    // ==========================================================
+
+    fn write_options_bytes<A: ActionConfig>(a: &A) -> Vec<u8> {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        a.write_options(&mut b).unwrap();
+        b.as_bytes()[start..].to_vec()
+    }
+
+    // ---- GactAction ----
+
+    #[test]
+    fn gact_parse_params_default_yields_pass() {
+        let a = GactAction::parse_params(&[]).unwrap();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&GactAction::pass()));
+    }
+
+    #[test]
+    fn gact_parse_params_drop_alias_shot() {
+        let a = GactAction::parse_params(&["drop"]).unwrap();
+        let b = GactAction::parse_params(&["shot"]).unwrap();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&GactAction::drop()));
+    }
+
+    #[test]
+    fn gact_parse_params_pass_alias_ok() {
+        assert_eq!(
+            write_options_bytes(&GactAction::parse_params(&["pass"]).unwrap()),
+            write_options_bytes(&GactAction::parse_params(&["ok"]).unwrap()),
+        );
+    }
+
+    #[test]
+    fn gact_parse_params_goto_chain() {
+        let a = GactAction::parse_params(&["goto_chain", "5"]).unwrap();
+        let b = GactAction::goto_chain(5);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn gact_parse_params_random_determ() {
+        let a = GactAction::parse_params(&["pass", "random", "determ", "drop", "10"]).unwrap();
+        let b = GactAction::pass().deterministic(10, action::TC_ACT_SHOT);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn gact_parse_params_random_netrand_percent() {
+        let a = GactAction::parse_params(&["pass", "random", "netrand", "drop", "25"]).unwrap();
+        let b = GactAction::pass().random(25, action::TC_ACT_SHOT);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn gact_parse_params_unknown_token_errors() {
+        let err = GactAction::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("gact: unknown token"));
+    }
+
+    #[test]
+    fn gact_parse_params_random_unknown_kind_errors() {
+        let err = GactAction::parse_params(&["pass", "random", "wat", "drop", "10"]).unwrap_err();
+        assert!(err.to_string().contains("unknown random kind"));
+    }
+
+    // ---- MirredAction ----
+
+    #[test]
+    fn mirred_parse_params_egress_redirect_by_ifindex() {
+        let a = MirredAction::parse_params(&["egress", "redirect", "ifindex", "7"]).unwrap();
+        assert_eq!(
+            write_options_bytes(&a),
+            write_options_bytes(&MirredAction::redirect_by_index(7)),
+        );
+    }
+
+    #[test]
+    fn mirred_parse_params_ingress_mirror_by_ifindex() {
+        let a = MirredAction::parse_params(&["ingress", "mirror", "ifindex", "11"]).unwrap();
+        assert_eq!(
+            write_options_bytes(&a),
+            write_options_bytes(&MirredAction::ingress_mirror_by_index(11)),
+        );
+    }
+
+    #[test]
+    fn mirred_parse_params_token_order_independent() {
+        let a = MirredAction::parse_params(&["ifindex", "3", "ingress", "redirect"]).unwrap();
+        let b = MirredAction::parse_params(&["ingress", "redirect", "ifindex", "3"]).unwrap();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn mirred_parse_params_dev_and_ifindex_mutually_exclusive() {
+        // We can't easily test `dev <name>` (sysfs lookup), but we
+        // can verify the mutex error fires when both are set.
+        let err = MirredAction::parse_params(&[
+            "ifindex", "1", "ifindex", "2",
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn mirred_parse_params_missing_ifindex_errors() {
+        let err = MirredAction::parse_params(&["egress", "redirect"]).unwrap_err();
+        assert!(err.to_string().contains("target interface required"));
+    }
+
+    // ---- VlanAction ----
+
+    #[test]
+    fn vlan_parse_params_pop() {
+        let a = VlanAction::parse_params(&["pop"]).unwrap();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&VlanAction::pop()));
+    }
+
+    #[test]
+    fn vlan_parse_params_push_with_priority() {
+        let a = VlanAction::parse_params(&["push", "100", "priority", "3"]).unwrap();
+        let b = VlanAction::push(100).priority(3);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn vlan_parse_params_modify_qinq() {
+        let a = VlanAction::parse_params(&["modify", "200", "protocol", "802.1ad"]).unwrap();
+        let b = VlanAction::modify(200).qinq();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn vlan_parse_params_id_out_of_range_errors() {
+        let err = VlanAction::parse_params(&["push", "5000"]).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn vlan_parse_params_missing_op_errors() {
+        let err = VlanAction::parse_params(&["priority", "3"]).unwrap_err();
+        assert!(err.to_string().contains("missing operation"));
+    }
+
+    #[test]
+    fn vlan_parse_params_unknown_protocol_errors() {
+        let err = VlanAction::parse_params(&["pop", "protocol", "wat"]).unwrap_err();
+        assert!(err.to_string().contains("unknown protocol"));
+    }
+
+    // ---- SkbeditAction ----
+
+    #[test]
+    fn skbedit_parse_params_priority() {
+        let a = SkbeditAction::parse_params(&["priority", "7"]).unwrap();
+        let b = SkbeditAction::new().priority(7).build();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn skbedit_parse_params_mark() {
+        let a = SkbeditAction::parse_params(&["mark", "42"]).unwrap();
+        let b = SkbeditAction::new().mark(42).build();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn skbedit_parse_params_mark_with_mask_any_order() {
+        let a = SkbeditAction::parse_params(&["mark", "1", "mask", "0xff"]).unwrap_err();
+        // 0xff is hex; our parser only accepts decimal u32 — verify error
+        assert!(a.to_string().contains("expected unsigned integer"));
+
+        let b = SkbeditAction::parse_params(&["mark", "1", "mask", "255"]).unwrap();
+        let c = SkbeditAction::parse_params(&["mask", "255", "mark", "1"]).unwrap();
+        assert_eq!(write_options_bytes(&b), write_options_bytes(&c));
+    }
+
+    #[test]
+    fn skbedit_parse_params_mask_without_mark_errors() {
+        let err = SkbeditAction::parse_params(&["mask", "255"]).unwrap_err();
+        assert!(err.to_string().contains("`mask` requires a `mark`"));
+    }
+
+    #[test]
+    fn skbedit_parse_params_queue_mapping_out_of_range() {
+        let err = SkbeditAction::parse_params(&["queue_mapping", "100000"]).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    // ---- ConnmarkAction ----
+
+    #[test]
+    fn connmark_parse_params_default_zone_zero() {
+        let a = ConnmarkAction::parse_params(&[]).unwrap();
+        assert_eq!(
+            write_options_bytes(&a),
+            write_options_bytes(&ConnmarkAction::new()),
+        );
+    }
+
+    #[test]
+    fn connmark_parse_params_with_zone() {
+        let a = ConnmarkAction::parse_params(&["zone", "5"]).unwrap();
+        let b = ConnmarkAction::with_zone(5);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn connmark_parse_params_zone_out_of_range_errors() {
+        let err = ConnmarkAction::parse_params(&["zone", "100000"]).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn connmark_parse_params_unknown_token_errors() {
+        let err = ConnmarkAction::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("connmark: unknown token"));
     }
 }

@@ -125,6 +125,14 @@ impl_parse_params! {
     crate::netlink::filter::MatchallFilter,
     crate::netlink::filter::RouteFilter,
     crate::netlink::filter::U32Filter,
+    // Action configs (sub-slice 1 of Plan 139 PR B — 5 of ~14
+    // action kinds typed-first; the rest follow in subsequent
+    // sub-slices).
+    crate::netlink::action::ConnmarkAction,
+    crate::netlink::action::GactAction,
+    crate::netlink::action::MirredAction,
+    crate::netlink::action::SkbeditAction,
+    crate::netlink::action::VlanAction,
 }
 
 #[cfg(test)]

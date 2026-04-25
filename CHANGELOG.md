@@ -4,6 +4,59 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `parse_params` on 5 typed action kinds (Plan 139 PR B sub-slice 1)
+
+First batch of per-kind action parsers — the bulk of the bin
+migration work for `bins/tc/src/commands/action.rs`. Five of
+~14 action kinds typed-first:
+
+- **`GactAction::parse_params`** — verdict keywords (`pass`/`ok`,
+  `drop`/`shot`, `pipe`, `reclassify`, `stolen`, `continue`),
+  `goto_chain <n>`, and `random determ|netrand <verdict> <val>`
+  for probabilistic alternates.
+- **`MirredAction::parse_params`** — `egress`/`ingress` direction +
+  `redirect`/`mirror` operation + `dev <ifname>` (sysfs lookup
+  via `nlink::util::get_ifindex`) or `ifindex <n>`
+  (namespace-safe). `dev` and `ifindex` are mutually exclusive.
+- **`VlanAction::parse_params`** — operation (`pop`,
+  `push <id>`, `modify <id>`) plus optional `priority <p>` and
+  `protocol 802.1q|802.1ad` modifiers. VLAN ID range-checked
+  to 0–4095, priority to 0–7.
+- **`SkbeditAction::parse_params`** — `priority`, `mark`,
+  `mask` (combined with `mark` if both present), and
+  `queue_mapping`. Tokens are any-order; `mask` without `mark`
+  is rejected.
+- **`ConnmarkAction::parse_params`** — `zone <0–65535>`.
+
+Stricter than the legacy `tc::builders::action::*` parsers
+(which silently dropped unknown tokens via `_ => i += 1`):
+unknown tokens, missing values, and out-of-range values all
+return `Error::InvalidMessage("<kind>: ...")`.
+
+Module-scope helpers added: `action_need_value`,
+`action_parse_u32`, `parse_gact_verdict` (mirrors the
+`filter::need_value` / `parse_u32_int` / etc. pattern from the
+qdisc + filter rollouts; reused by the remaining action parsers
+in subsequent sub-slices).
+
+Five new `nlink::ParseParams` trait impls — total now 32 typed
+configs (18 qdisc + 9 filter + 5 action).
+
+30 new unit tests cover: each shortcut/keyword's wire equivalence
+to the direct typed setter (via `write_options` byte comparison),
+token-order independence where applicable, all named verdicts /
+protocols / mutex error cases, plus 13 strict-error scenarios
+across the five parsers.
+
+705 lib tests total (was 677). Workspace clippy with
+--all-features --deny warnings is clean.
+
+Plan 139 PR B sub-slices 2+ ship the remaining ~9 action kinds
+(`PoliceAction`, `NatAction`, `TunnelKeyAction`, `CsumAction`,
+`SampleAction`, `CtAction`, `PeditAction`, `BpfAction`,
+`SimpleAction`). PR C is the legacy-deletion milestone for
+Plan 142 Phase 4.
+
 ### Added — typed standalone-action CRUD on `Connection<Route>` (Plan 139 PR A, Plan 142 Phase 3)
 
 Today nlink has two coexisting action surfaces: filter-attached
