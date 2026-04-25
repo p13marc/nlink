@@ -307,19 +307,13 @@ band so they don't fight with operator-installed rules.
 
 ## TC API conventions
 
-The 0.14.0 typed-units rollout established a uniform set of
-patterns across every TC entity (qdisc, class, filter, action) and
-the `bins/tc` CLI dispatch. This section documents them as a
-contract so new code follows the same shape.
+Every TC entity (qdisc, class, filter, action) follows one
+shape. New TC code MUST match it; reviews bounce on drift.
 
-### Typed configuration objects
-
-Every TC entity has a typed configuration struct in
-`nlink::netlink::{tc,filter,action}`:
+### Typed config + fluent builder
 
 ```rust
 use nlink::netlink::tc::HtbQdiscConfig;
-use nlink::Rate;
 
 let cfg = HtbQdiscConfig::new()
     .default_class(0x10)
@@ -327,26 +321,17 @@ let cfg = HtbQdiscConfig::new()
     .build();
 ```
 
-Conventions (uniform across all 25+ typed configs):
-
-- `pub struct FooConfig` — `#[derive(Debug, Clone)]` minimum;
-  `Default` either derived or hand-rolled to delegate to `new()`.
-- `pub fn new() -> Self` — entry constructor.
-- Fluent setters: `pub fn x(mut self, ...) -> Self`. Each setter
-  consumes `self` and returns `Self` so calls chain
-  left-to-right.
-- `pub fn build(self) -> Self` — terminal no-op for API symmetry.
-  Kept transparent intentionally; the kernel is the validator.
+- `pub fn new() -> Self`; fluent setters consume `self` and
+  return `Self`; `pub fn build(self) -> Self` is a terminal
+  no-op for symmetry (the kernel is the validator).
 - Implements the relevant `QdiscConfig` / `FilterConfig` /
-  `ActionConfig` trait — what `Connection<Route>` generic
-  methods take.
+  `ActionConfig` trait — that's what `Connection<Route>`
+  generic methods take.
 - Public enums (mode/key kinds) carry `#[non_exhaustive]`.
-  Public structs do not — the fluent-setter API is the
+  Public structs don't — the fluent setters are the
   forward-compatible addition point.
 
-### Token-stream parsing — `parse_params`
-
-Every typed config exposes:
+### `parse_params` contract
 
 ```rust
 impl FooConfig {
@@ -354,137 +339,40 @@ impl FooConfig {
 }
 ```
 
-Conventions:
-
-- **Signature**: `&[&str]` in, `nlink::Result<Self>` out. Caller
-  is responsible for `params.iter().map(String::as_str).collect()`
-  if they have an `&[String]`.
-- **Strictness**: unknown tokens, missing values, and
+- **Strict**: unknown tokens, missing values, and
   unparseable inner values all return
   `Error::InvalidMessage(format!("kind: ..."))`. **Silent
-  skipping is a bug.** The legacy `tc::options::*` parsers
-  silently swallow unknown tokens — that fossil is what the
-  typed parsers explicitly fix.
-- **Error shape**: every message begins with the kind name
+  skipping is a bug** — the legacy `tc::options::*` parsers
+  swallow unknown tokens; the typed parsers exist to fix that.
+- **Error shape**: every message starts with the kind name
   (`"htb: invalid r2q `foo` (expected unsigned integer)"`,
-  `"flower: `classid` requires a value"`,
   `"netem: unknown token `nonsense`"`).
 - **Token ordering**: any-order keyword. Positional optional
-  args (e.g. `delay <time> [<jitter> [<corr>]]`) are consumed
-  greedily up to the next keyword via a per-config
-  `is_keyword` helper.
-- **Aliases**: where `tc(8)` accepts multiple tokens for the
-  same attribute (`classid` / `flowid`, `burst` / `buffer` /
-  `maxburst`), the parser handles them at the same arm.
-- **"Not modelled yet" rejections**: when the kernel accepts a
-  token (`mqprio`'s `queues`, `tbf`'s `latency`) the typed
-  config doesn't carry, the parser returns a clear
-  "not modelled by FooConfig" error pointing at the typed
-  builder method or the legacy fallback. **Never silently
-  fall back.**
-- **Doc string**: enumerates recognised tokens with one-line
-  semantics, plus a "**Not yet typed-modelled**" subsection
-  for any rejections.
+  args (`delay <time> [<jitter> [<corr>]]`) consume greedily
+  up to the next keyword via a per-config `is_keyword` helper.
+- **Aliases**: handle `tc(8)` synonyms (`classid`/`flowid`,
+  `burst`/`buffer`/`maxburst`) in the same arm.
+- **"Not modelled yet"**: when the kernel accepts a token the
+  typed config doesn't carry (e.g. `mqprio`'s `queues`),
+  return a clear "not modelled by FooConfig" error pointing
+  at the typed builder method. **Never silently fall back.**
+- **Errors are stringly typed by design** — no typed parse-error
+  variant. Format-string messages have proven readable across
+  the 25 shipped parsers; a typed variant would either explode
+  the variant count or collapse to `kind`/`token` pairs no
+  better than the string.
 
-The `ParseParams` trait formalizes the contract (sealed; one
-impl per shipped typed config):
-
-```rust
-use nlink::netlink::parse::ParseParams;
-use nlink::netlink::tc::HtbQdiscConfig;
-
-let cfg = HtbQdiscConfig::parse_params(&["default", "10"])?;
-```
-
-The inherent method on each config stays for direct use; the
-trait exists for generic dispatch like the `dispatch!` macro
-in `bins/tc`. Lands in 0.15.0 — see [Plan 142](142-zero-legacy-typed-api-plan.md)
+A sealed `ParseParams` trait formalizing the inherent method
+ships in 0.15.0 — see [Plan 142](142-zero-legacy-typed-api-plan.md)
 Phase 0.
 
-### Typed dispatch in `bins/tc`
+### Legacy modules — deletion ships in 0.15.0
 
-`bins/tc/src/commands/{qdisc,filter}.rs` use a uniform shape:
-
-```rust
-async fn try_typed_qdisc(
-    conn: &Connection<Route>,
-    dev: &str,
-    parent: &str,
-    handle: Option<&str>,
-    kind: &str,
-    params: &[String],
-    verb: QdiscVerb,
-) -> Option<Result<()>> {
-    if !matches!(kind, "htb" | "netem" | /* ... */) { return None; }
-    let (parent, handle) = match parse_qdisc_handles(parent, handle) {
-        Ok(p) => p,
-        Err(_) => return None,  // fall through to legacy
-    };
-    let refs: Vec<&str> = params.iter().map(String::as_str).collect();
-
-    macro_rules! dispatch {
-        ($Cfg:ident) => {{
-            let cfg = match $Cfg::parse_params(&refs) {
-                Ok(c) => c,
-                Err(e) => return Some(Err(e)),
-            };
-            run_typed_qdisc(conn, dev, parent, handle, cfg, verb).await
-        }};
-    }
-    Some(match kind {
-        "htb" => dispatch!(HtbQdiscConfig),
-        "netem" => dispatch!(NetemConfig),
-        // ...
-        _ => unreachable!("checked by `matches!` guard above"),
-    })
-}
-```
-
-Two return-shape semantics:
-
-- **`None`** = unknown kind OR handle parse failed → caller
-  falls back to the legacy `qdisc_builder::*` path.
-- **`Some(Err)`** = known kind, but the typed parser rejected
-  the params → surface the error rather than silently route
-  through the looser legacy parser.
-
-This shape lets the bin migrate kind-by-kind without breaking
-the long tail. Once every typed kind is dispatched and the
-legacy path can be deleted, the `None` arm goes away.
-
-### Why no clap `value_parser` for `TcHandle`
-
-The bin parses `parent: String` from clap and converts to
-`TcHandle` later. Tempting to think the parse should land at
-clap-time via `#[arg(value_parser)]`, but the
-typed-then-legacy fallback **requires** the string form to
-survive into the dispatcher: if `parse_qdisc_handles` fails,
-the legacy parser (with its own handle parser) takes over.
-
-This constraint goes away once the legacy fallback is deleted
-in Plan 142 Phase 4 — see the plan for the migration to
-`#[arg(value_parser = clap::value_parser!(TcHandle))]`.
-
-### Errors
-
-All `parse_params` methods return
-`Result<T, nlink::Error::InvalidMessage(String)>`. The string
-carries context — kind name + token + expected format. There
-is intentionally no typed parse-error variant: format-string
-messages have proven readable in interactive use and uniform
-across the 25 shipped parsers; a typed variant would either
-explode the variant count (one per kind × token) or collapse
-to a stringly-typed `kind`/`token` pair no better than the
-free-form string.
-
-### Legacy modules
-
-`nlink::tc::builders::{class,qdisc,filter,action}` and
-`nlink::tc::options/<kind>.rs` are the original string-args
-TC builders. **Deprecated since 0.14.0; deleted in 0.15.0
+`tc::builders::{class,qdisc,filter,action}` and
+`tc::options/<kind>.rs` are the original string-args
+builders. **Deprecated since 0.14.0; deleted in 0.15.0
 under Plan 142 Phase 4.** Don't reach for them in new code.
-The migration table for downstream consumers ships in the
-0.15.0 CHANGELOG entry.
+Migration table for downstream ships in the 0.15.0 CHANGELOG.
 
 ## Key Patterns
 
