@@ -4,7 +4,7 @@ from: nlink maintainers
 subject: More cookbook recipes + public lab/test helpers
 target version: 0.14.0 (revised 2026-04-19; originally split between "0.14.0" and "1.0", now folded into 0.14.0)
 date: 2026-04-19
-status: PR A complete 2026-04-21 under [Unreleased]. PR B partial: 5 of 7 recipes shipped 2026-04-22 (multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh, nftables-stateful-fw) + recipe index + README/CLAUDE.md pointers. Deferred: xfrm-ipsec-tunnel (XFRM connection is dump-only — needs a Plan-137-shaped library extension before a real recipe is possible); cgroup-classification remains blocked on Plan 133 PR C.
+status: PR A complete 2026-04-21 under [Unreleased]. PR B partial: 6 of 7 recipes shipped (multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh, nftables-stateful-fw, conntrack-programmatic — last one extended 2026-04-23 with the Events Stream section after Plan 137 PR B landed) + recipe index + README/CLAUDE.md pointers. Deferred: xfrm-ipsec-tunnel (XFRM connection is dump-only — needs a Plan-137-shaped library extension before a real recipe is possible); cgroup-classification remains blocked on Plan 133 PR C.
 ---
 
 # Recipes & Lab Helpers Plan

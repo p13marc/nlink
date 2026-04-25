@@ -3,7 +3,7 @@ to: nlink maintainers
 from: nlink maintainers
 subject: nlink roadmap — active plans only
 target version: 0.14.0 and beyond
-last updated: 2026-04-22 (Plan 137 PR A slice 1)
+last updated: 2026-04-25 (Plan 137 PRs A+B kernel-validated, legacy `tc::builders` deprecated, bins/tc class subcommand migrated)
 ---
 
 # nlink Roadmap
@@ -17,9 +17,10 @@ have been removed (their substance is in the commits + changelog).
 | # | Plan | Status | Headline |
 |---|---|---|---|
 | 133 | [TC coverage gaps](133-tc-coverage-plan.md) | **3 of 4 PRs landed** (A/B/D under `[Unreleased]`); **PR C deferred** | Typed `CakeConfig`, `FqPieConfig`, `BpfAction`, `SimpleAction`. `BasicFilter` ematch (cmp/u32/meta) pending — ematch wire format needs validation against golden `tc(8)` hex before shipping. |
-| 135 | [Recipes + public `nlink::lab`](135-recipes-and-lab-helpers-plan.md) | **PR A complete**; PR B partial (5 of 7) | `nlink::lab` shipped (PR A). Recipes shipped: multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh, nftables-stateful-fw + index + README/CLAUDE pointers. Deferred: xfrm-ipsec-tunnel (XFRM connection is dump-only — needs a Plan-137-shaped library extension first); cgroup-classification still blocked on Plan 133 PR C. Recipe smoke tests (`tests/integration/recipes.rs`) deferred. |
-| 136 | [Example cleanup](136-example-cleanup-plan.md) | **All phases complete**; conntrack deferral resolved by Plan 137 PR A slice 3 | Phase 1 (htb + wireguard), Phase 2 (macsec + mptcp), Phase 3 (ethtool_rings + devlink + nl80211), and the previously-deferred `netfilter/conntrack.rs` (promoted under Plan 137 PR A slice 3, once the library gained add/update/del/flush). `MacsecLink` rtnetlink builder also landed as a follow-up; macsec example uses it directly. Plan can be archived. |
-| 137 | [Netfilter expansion](137-netfilter-expansion-plan.md) | **PRs A+B both wire-format validated and recipe-documented** (under `[Unreleased]`); C/D/E pending | PR A slices 1+2+3 + the `122f60b` timeout fix; PR B types + EventSource impl + parse units + `--apply` validation. `conntrack-programmatic` recipe now covers both the mutation API *and* the Stream events API (with caveats: New-vs-Update, two-connections-for-mutation+sub, multicast buffer overrun). Remaining for both PRs: root-gated integration tests under the `lab` feature. PRs C (`ct_expect`), D (nfqueue), E (nflog) unstarted; D/E gated on demand. |
+| 135 | [Recipes + public `nlink::lab`](135-recipes-and-lab-helpers-plan.md) | **PR A complete**; PR B partial (6 of 7) | `nlink::lab` shipped (PR A). Recipes shipped: multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh, nftables-stateful-fw, conntrack-programmatic (mutation + events) + index + README/CLAUDE pointers. Deferred: xfrm-ipsec-tunnel (XFRM connection is dump-only — needs a Plan-137-shaped library extension first); cgroup-classification still blocked on Plan 133 PR C. Recipe smoke tests (`tests/integration/recipes.rs`) deferred. |
+| 137 | [Netfilter expansion](137-netfilter-expansion-plan.md) | **PRs A+B both kernel-validated end-to-end** (under `[Unreleased]`); integration tests + C/D/E pending | PR A slices 1+2+3 + the `122f60b` timeout fix; PR B types + EventSource impl + parse units + `--apply` validation. Both `--apply` runners pass on Linux 6.19 with full assertion of the wire round-trip. `conntrack-programmatic` recipe covers both mutation and events with all four caveats (subscribe_all skip, New-covers-Update, two-connections-for-mutation+sub, ENOBUFS). **Remaining for both PRs**: root-gated integration tests under the `lab` feature (4 mutation + 2 events tests, see Plan 137 §2.3 + §3.3). PRs C (`ct_expect`), D (nfqueue), E (nflog) unstarted; D/E gated on demand. |
+
+**Shipped & ready to archive:** Plan 136 (Example cleanup) — all phases plus the conntrack deferral resolved by Plan 137 PR A slice 3 (`1e9307e`). `MacsecLink` rtnetlink builder also landed as a follow-up; `examples/genl/macsec.rs` uses it directly. See CHANGELOG `## [Unreleased]` for the full slate.
 
 ## Release plan
 
@@ -29,13 +30,19 @@ have been removed (their substance is in the commits + changelog).
   `tracing` instrumentation. See CHANGELOG `## [0.13.0]` for the
   migration tables and detailed bullets.
 - **0.14.0** (in progress): reconcile pattern (shipped under
-  `[Unreleased]`) + Plan 133 (except PR C) + Plan 135 + Plan 136.
-  Mostly additive; minimal BC.
-- **0.15.0 candidate work**: Plan 133 PR C (pending golden-hex
-  validation), Plan 135 PR B remaining recipes (xfrm-ipsec-tunnel
-  needs Plan 137 first, cgroup-classification needs Plan 133 PR C),
-  remaining Plan 137 PR A slices (integration tests + example
-  promotion + recipe), then Plan 137 PRs B/C.
+  `[Unreleased]`) + Plan 133 (except PR C) + Plan 135 PR A + 6 of 7
+  PR B recipes + Plan 136 (all phases) + Plan 137 PRs A+B (typed
+  ctnetlink mutation + multicast event subscription, both kernel-
+  validated) + `MacsecLink` rtnetlink builder + `tc::builders::*`
+  deprecation + `bins/tc` `class` subcommand migration. Mostly
+  additive; minimal BC.
+- **0.15.0 candidate work**: Plan 137 integration tests (cheapest
+  win — both `--apply` runners are validated templates); Plan 133
+  PR C (pending golden-hex validation); Plan 135 PR B remaining
+  recipes (xfrm-ipsec-tunnel needs Plan 137 PR-style XFRM extension
+  first; cgroup-classification needs Plan 133 PR C); `bins/tc`
+  qdisc/filter migration via `parse_params` on typed configs (see
+  Backlog row); then Plan 137 PR C (`ct_expect`).
 - **1.0.0**: deferred indefinitely. Cut when downstream consumption
   validates the API, not on a calendar. The `non_exhaustive`
   lockdown and typed units already give the most important 1.0

@@ -2784,6 +2784,83 @@ for entry in &entries {
 let entries_v6 = conn.get_conntrack_v6().await?;
 ```
 
+**Conntrack mutation (inject / update / delete / flush):**
+```rust
+use std::net::Ipv4Addr;
+use std::time::Duration;
+use nlink::netlink::{Connection, Netfilter};
+use nlink::netlink::netfilter::{
+    ConntrackBuilder, ConntrackStatus, ConntrackTuple, IpProtocol,
+    TcpConntrackState,
+};
+
+let nf = Connection::<Netfilter>::new()?;
+
+// Inject a TCP/ESTABLISHED entry. Reply tuple is auto-mirrored from
+// orig (correct for symmetric flows without NAT). Status::CONFIRMED
+// is mandatory; the kernel rejects entries without it.
+nf.add_conntrack(
+    ConntrackBuilder::new_v4(IpProtocol::Tcp)
+        .orig(
+            ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2))
+                .ports(40000, 80),
+        )
+        .status(ConntrackStatus::CONFIRMED | ConntrackStatus::SEEN_REPLY)
+        .timeout(Duration::from_secs(120))  // REQUIRED for TCP+tcp_state
+        .mark(0x42)
+        .tcp_state(TcpConntrackState::Established),
+).await?;
+
+// Update mark + timeout in place (matches by orig tuple).
+nf.update_conntrack(/* same builder shape, different verb */).await?;
+
+// Delete by ID (cheapest if you've just dumped) or by tuple.
+let id = nf.get_conntrack().await?.iter().find_map(|e| e.id).unwrap();
+nf.del_conntrack_by_id(id).await?;
+
+// Flush the whole v4 (or v6) table.
+nf.flush_conntrack().await?;
+nf.flush_conntrack_v6().await?;
+```
+
+For asymmetric/NAT'd flows supply `reply` explicitly (auto-mirror is
+suppressed when `reply` is set). Set `SRC_NAT` / `DST_NAT` /
+`SRC_NAT_DONE` / `DST_NAT_DONE` flags to tell the kernel which side
+was translated. See `docs/recipes/conntrack-programmatic.md`.
+
+**Conntrack event subscription (multicast NEW / DESTROY):**
+```rust
+use nlink::netlink::{Connection, Netfilter};
+use nlink::netlink::netfilter::{ConntrackEvent, ConntrackGroup};
+use tokio_stream::StreamExt;
+
+// IMPORTANT: don't use the same connection for mutation and
+// subscription — multicast deliveries arriving between send_ack's
+// send and recv will confuse the seq-matching. Open two
+// connections (one subscribed, one for actions).
+let mut sub = Connection::<Netfilter>::new()?;
+sub.subscribe(&[ConntrackGroup::New, ConntrackGroup::Destroy])?;
+// or .subscribe_all() for New + Update + Destroy (skips ExpNew/ExpDestroy)
+
+let mut events = sub.events();
+while let Some(evt) = events.next().await {
+    match evt? {
+        ConntrackEvent::New(entry)     => println!("NEW     {:?}", entry.orig),
+        ConntrackEvent::Destroy(entry) => println!("DESTROY {:?}", entry.orig),
+        _ => {}  // #[non_exhaustive]
+    }
+}
+```
+
+The kernel uses `IPCTNL_MSG_CT_NEW` for both creation AND update
+notifications, so `ConntrackEvent::New` covers both. To monitor only
+updates, subscribe to `ConntrackGroup::Update` alone — every event
+then is an update. `Destroy` is unambiguous.
+
+If the consumer falls behind, the kernel multicast buffer fills and
+the next read returns `Error::from_errno(-105)` (ENOBUFS). nlink
+surfaces this rather than masking it.
+
 **IPsec SA/SP management via XFRM:**
 ```rust
 use nlink::netlink::{Connection, Xfrm};

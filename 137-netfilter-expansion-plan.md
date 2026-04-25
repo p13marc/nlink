@@ -4,7 +4,7 @@ from: nlink maintainers
 subject: Netfilter capabilities expansion (ctnetlink mutation, events, expect, nfqueue, nflog)
 target version: post-0.14.0 (0.15.0 or later; staged work)
 date: 2026-04-21
-status: PRs A+B both wire-format validated against Linux 6.19. PR A: commit `122f60b`. PR B: 6 parse-events unit tests + the `netfilter_conntrack_events --apply` smoke test (1 NEW + 1 DESTROY received in 3s, same kernel-assigned ID round-trips through the multicast channel). Remaining for both PRs: root-gated integration tests under the `lab` feature + an events Stream recipe pointer. PRs C (`ct_expect`), D (nfqueue), E (nflog) unstarted. Plan 136 §2.2's conntrack example deferral is resolved.
+status: PRs A+B both kernel-validated end-to-end on Linux 6.19. PR A: ConntrackBuilder + add/update/del/flush/by_id, `--apply` example (`1e9307e`), recipe (`c15206a`), validation fix `122f60b` (TCP add with `tcp_state` requires explicit timeout). PR B: ConntrackEvent + ConntrackGroup + subscribe + EventSource impl + 6 parse-events unit tests + `netfilter_conntrack_events --apply` smoke test (1 NEW + 1 DESTROY received in 3s, same kernel-assigned ID round-trips through the multicast channel). Recipe `conntrack-programmatic.md` extended with an Events section (`b552411`) covering the four caveats: subscribe_all skip list, New-covers-Update, two-connections-for-mutation+sub, ENOBUFS overrun. **Remaining for both PRs**: root-gated integration tests under the `lab` feature (4 mutation + 2 events tests, see §2.3 + §3.3). PRs C (`ct_expect`), D (nfqueue), E (nflog) unstarted. Plan 136 §2.2's conntrack example deferral is resolved.
 related: Plan 136 §2.2 row for `netfilter/conntrack.rs` (deferred pending the library extensions this plan describes)
 ---
 

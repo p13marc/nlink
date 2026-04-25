@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: TC coverage gaps — sch_fq_pie + actions polish + cls_basic ematch
-target version: 0.14.0 (revised 2026-04-19, was "0.13.0")
-date: 2026-04-19
-status: draft, post-verification (2026-04-19) — cake clarified as legacy-only; typed CakeConfig added to scope; retargeted to 0.14.0 after 0.13.0 shipped
-verified: codebase audit complete; kernel attribute lists from training memory
+target version: 0.14.0 (PRs A/B/D landed 2026-04-19/20); PR C deferred to 0.15.0
+date: 2026-04-19; status updated 2026-04-25
+status: 3 of 4 PRs landed under [Unreleased]: PR A typed `CakeConfig` (`17e5f37`), PR B `FqPieConfig` (`6a62504`), PR D `BpfAction` + `SimpleAction` (`5e20fca`). PR C (`BasicFilter` ematch — cmp/u32/meta) deferred — ematch wire format needs validation against golden `tc(8)` hex captures before shipping. PR C also blocks the `cgroup-classification` recipe in Plan 135 PR B.
+verified: PRs A/B/D in CHANGELOG `## [Unreleased]`; PR C scope unchanged from §4 below
 ---
 
 # TC Coverage Plan
