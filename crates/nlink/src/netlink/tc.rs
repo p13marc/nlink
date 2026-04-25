@@ -224,6 +224,232 @@ impl NetemConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style params slice into a typed `NetemConfig`.
+    ///
+    /// Recognised tokens (positional optionals are consumed greedily
+    /// up to the next keyword):
+    ///
+    /// - `delay <time> [<jitter> [<corr>]]` (alias `latency`)
+    /// - `loss [random] <pct> [<corr>]` (alias `drop`)
+    /// - `duplicate <pct> [<corr>]`
+    /// - `corrupt <pct> [<corr>]`
+    /// - `reorder <pct> [<corr>]`
+    /// - `gap <n>`
+    /// - `rate <rate>` — typed config doesn't model the optional
+    ///   `packet_overhead` / `cell_size` / `cell_overhead` extras yet,
+    ///   so those positional args are rejected here. Drop to
+    ///   `tc::options::netem::build` for them.
+    /// - `limit <packets>`
+    ///
+    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`
+    /// pointing at the legacy parser): `slot`, `ecn`, `distribution`,
+    /// the `loss state` 4-state Markov, `loss gemodel`. These need
+    /// `NetemConfig` extensions before they can land here.
+    ///
+    /// Stricter than the legacy `tc::options::netem::build`: unknown
+    /// keywords, missing values, and unparseable
+    /// time/rate/percent/integer values all return an error rather
+    /// than silently being skipped.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let cfg = NetemConfig::parse_params(&[
+    ///     "delay", "100ms", "10ms",
+    ///     "loss", "1%",
+    ///     "limit", "5000",
+    /// ])?;
+    /// assert_eq!(cfg.delay, Some(Duration::from_millis(100)));
+    /// ```
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "delay" | "latency" => {
+                    let time_str = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage(format!("netem: `{key}` requires a value"))
+                    })?;
+                    cfg.delay = Some(crate::util::parse::get_time(time_str).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "netem: invalid {key} `{time_str}` (expected tc-style time)"
+                        ))
+                    })?);
+                    i += 2;
+                    if let Some(j) = params.get(i)
+                        && !is_netem_keyword(j)
+                    {
+                        cfg.jitter = Some(crate::util::parse::get_time(j).map_err(|_| {
+                            Error::InvalidMessage(format!(
+                                "netem: invalid jitter `{j}` (expected tc-style time)"
+                            ))
+                        })?);
+                        i += 1;
+                        if let Some(c) = params.get(i)
+                            && !is_netem_keyword(c)
+                        {
+                            cfg.delay_correlation = parse_netem_percent(c, "delay correlation")?;
+                            i += 1;
+                        }
+                    }
+                }
+                "loss" | "drop" => {
+                    i += 1;
+                    // Optional `random` qualifier on `loss`.
+                    if key == "loss" && params.get(i) == Some(&"random") {
+                        i += 1;
+                    }
+                    // Reject 4-state Markov / gemodel — needs typed
+                    // config extension.
+                    if let Some(next) = params.get(i)
+                        && (*next == "state" || *next == "gemodel")
+                    {
+                        return Err(Error::InvalidMessage(format!(
+                            "netem: `loss {next}` (Markov model) is not supported by the typed parser yet — use tc::options::netem::build"
+                        )));
+                    }
+                    let pct_str = params.get(i).copied().ok_or_else(|| {
+                        Error::InvalidMessage(format!("netem: `{key}` requires a percent value"))
+                    })?;
+                    cfg.loss = parse_netem_percent(pct_str, key)?;
+                    i += 1;
+                    if let Some(c) = params.get(i)
+                        && !is_netem_keyword(c)
+                    {
+                        cfg.loss_correlation = parse_netem_percent(c, "loss correlation")?;
+                        i += 1;
+                    }
+                }
+                "duplicate" => {
+                    let pct_str = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("netem: `duplicate` requires a percent value".into())
+                    })?;
+                    cfg.duplicate = parse_netem_percent(pct_str, "duplicate")?;
+                    i += 2;
+                    if let Some(c) = params.get(i)
+                        && !is_netem_keyword(c)
+                    {
+                        cfg.duplicate_correlation =
+                            parse_netem_percent(c, "duplicate correlation")?;
+                        i += 1;
+                    }
+                }
+                "corrupt" => {
+                    let pct_str = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("netem: `corrupt` requires a percent value".into())
+                    })?;
+                    cfg.corrupt = parse_netem_percent(pct_str, "corrupt")?;
+                    i += 2;
+                    if let Some(c) = params.get(i)
+                        && !is_netem_keyword(c)
+                    {
+                        cfg.corrupt_correlation = parse_netem_percent(c, "corrupt correlation")?;
+                        i += 1;
+                    }
+                }
+                "reorder" => {
+                    let pct_str = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("netem: `reorder` requires a percent value".into())
+                    })?;
+                    cfg.reorder = parse_netem_percent(pct_str, "reorder")?;
+                    i += 2;
+                    if let Some(c) = params.get(i)
+                        && !is_netem_keyword(c)
+                    {
+                        cfg.reorder_correlation = parse_netem_percent(c, "reorder correlation")?;
+                        i += 1;
+                    }
+                }
+                "gap" => {
+                    let n_str = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("netem: `gap` requires a value".into())
+                    })?;
+                    cfg.gap = n_str.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "netem: invalid gap `{n_str}` (expected unsigned integer)"
+                        ))
+                    })?;
+                    i += 2;
+                }
+                "rate" => {
+                    let rate_str = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("netem: `rate` requires a value".into())
+                    })?;
+                    let bps = crate::util::parse::get_rate(rate_str).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "netem: invalid rate `{rate_str}` (expected tc-style rate)"
+                        ))
+                    })?;
+                    cfg.rate = Some(crate::util::Rate::bytes_per_sec(bps));
+                    i += 2;
+                    // Reject the legacy positional packet_overhead /
+                    // cell_size / cell_overhead extras — typed config
+                    // doesn't model them.
+                    if let Some(extra) = params.get(i)
+                        && !is_netem_keyword(extra)
+                    {
+                        return Err(Error::InvalidMessage(format!(
+                            "netem: positional `rate` extras (packet_overhead/cell_size/cell_overhead) are not modelled by NetemConfig — use tc::options::netem::build, got `{extra}`"
+                        )));
+                    }
+                }
+                "limit" => {
+                    let n_str = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("netem: `limit` requires a value".into())
+                    })?;
+                    cfg.limit = n_str.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "netem: invalid limit `{n_str}` (expected unsigned integer)"
+                        ))
+                    })?;
+                    i += 2;
+                }
+                "slot" | "ecn" | "distribution" => {
+                    return Err(Error::InvalidMessage(format!(
+                        "netem: `{key}` is not modelled by NetemConfig yet — use tc::options::netem::build for this kind"
+                    )));
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "netem: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+/// Tokens that begin a new netem option group — used by
+/// `NetemConfig::parse_params` to decide where greedy positional
+/// optionals (jitter / correlation) end.
+fn is_netem_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "delay"
+            | "latency"
+            | "loss"
+            | "drop"
+            | "duplicate"
+            | "corrupt"
+            | "reorder"
+            | "gap"
+            | "rate"
+            | "limit"
+            | "slot"
+            | "ecn"
+            | "distribution"
+            | "random"
+    )
+}
+
+/// Parse a netem percent value (`"1.5"`, `"1.5%"`) with a context
+/// label folded into the error so the user knows which field failed.
+fn parse_netem_percent(s: &str, label: &str) -> Result<crate::util::Percent> {
+    s.parse::<crate::util::Percent>()
+        .map_err(|_| Error::InvalidMessage(format!("netem: invalid {label} `{s}`")))
 }
 
 impl QdiscConfig for NetemConfig {
@@ -4671,5 +4897,127 @@ mod tests {
             err.to_string().contains("invalid default class"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn netem_parse_params_empty_yields_defaults() {
+        let cfg = NetemConfig::parse_params(&[]).unwrap();
+        assert_eq!(cfg.delay, None);
+        assert_eq!(cfg.jitter, None);
+        assert!(cfg.loss.is_zero());
+        assert_eq!(cfg.limit, 1000);
+    }
+
+    #[test]
+    fn netem_parse_params_delay_only() {
+        let cfg = NetemConfig::parse_params(&["delay", "100ms"]).unwrap();
+        assert_eq!(cfg.delay, Some(Duration::from_millis(100)));
+        assert_eq!(cfg.jitter, None);
+    }
+
+    #[test]
+    fn netem_parse_params_delay_with_jitter_and_corr() {
+        let cfg = NetemConfig::parse_params(&["delay", "100ms", "10ms", "25%"]).unwrap();
+        assert_eq!(cfg.delay, Some(Duration::from_millis(100)));
+        assert_eq!(cfg.jitter, Some(Duration::from_millis(10)));
+        // Percent::new(25.0) produces 25% (kernel probability ~ 25/100 * u32::MAX).
+        assert!(!cfg.delay_correlation.is_zero());
+    }
+
+    #[test]
+    fn netem_parse_params_loss_with_random_qualifier() {
+        let cfg = NetemConfig::parse_params(&["loss", "random", "1.5%"]).unwrap();
+        assert!(!cfg.loss.is_zero());
+    }
+
+    #[test]
+    fn netem_parse_params_drop_alias() {
+        // `drop` is the legacy alias for `loss`.
+        let cfg = NetemConfig::parse_params(&["drop", "0.5%"]).unwrap();
+        assert!(!cfg.loss.is_zero());
+    }
+
+    #[test]
+    fn netem_parse_params_multiple_groups() {
+        let cfg = NetemConfig::parse_params(&[
+            "delay",
+            "100ms",
+            "10ms",
+            "loss",
+            "1%",
+            "duplicate",
+            "0.1%",
+            "limit",
+            "5000",
+        ])
+        .unwrap();
+        assert_eq!(cfg.delay, Some(Duration::from_millis(100)));
+        assert_eq!(cfg.jitter, Some(Duration::from_millis(10)));
+        assert!(!cfg.loss.is_zero());
+        assert!(!cfg.duplicate.is_zero());
+        assert_eq!(cfg.limit, 5000);
+    }
+
+    #[test]
+    fn netem_parse_params_rate_no_extras() {
+        let cfg = NetemConfig::parse_params(&["rate", "100mbit"]).unwrap();
+        assert!(cfg.rate.is_some());
+    }
+
+    #[test]
+    fn netem_parse_params_rate_extras_rejected() {
+        // The legacy parser accepts `rate <r> <packet_overhead> <cell_size>
+        // <cell_overhead>`. Typed config doesn't model those — typed
+        // parser rejects them with a clear pointer at the legacy path.
+        let err = NetemConfig::parse_params(&["rate", "100mbit", "20"]).unwrap_err();
+        assert!(
+            err.to_string().contains("packet_overhead"),
+            "expected rate-extras error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn netem_parse_params_unknown_token_errors() {
+        let err = NetemConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"), "got: {err}");
+    }
+
+    #[test]
+    fn netem_parse_params_unsupported_features_rejected() {
+        for unsup in ["slot", "ecn", "distribution"] {
+            let err = NetemConfig::parse_params(&[unsup]).unwrap_err();
+            assert!(
+                err.to_string().contains("not modelled"),
+                "expected not-modelled error for `{unsup}`, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn netem_parse_params_loss_state_rejected() {
+        // 4-state Markov model — typed config doesn't carry the
+        // p13/p31/p32/p23/p14 fields.
+        let err = NetemConfig::parse_params(&["loss", "state", "0.1"]).unwrap_err();
+        assert!(err.to_string().contains("Markov"), "got: {err}");
+    }
+
+    #[test]
+    fn netem_parse_params_missing_value_errors() {
+        let err = NetemConfig::parse_params(&["delay"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"), "got: {err}");
+        let err = NetemConfig::parse_params(&["loss"]).unwrap_err();
+        assert!(err.to_string().contains("percent value"), "got: {err}");
+    }
+
+    #[test]
+    fn netem_parse_params_invalid_time_errors() {
+        let err = NetemConfig::parse_params(&["delay", "fast"]).unwrap_err();
+        assert!(err.to_string().contains("invalid delay"), "got: {err}");
+    }
+
+    #[test]
+    fn netem_parse_params_invalid_percent_errors() {
+        let err = NetemConfig::parse_params(&["loss", "lots"]).unwrap_err();
+        assert!(err.to_string().contains("invalid loss"), "got: {err}");
     }
 }

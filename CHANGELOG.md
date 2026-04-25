@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `NetemConfig::parse_params` (typed-units rollout, slice 2)
+
+- New method `NetemConfig::parse_params(&[&str]) -> Result<Self>`
+  parses a tc-style netem params slice directly into the typed
+  config. Recognises every token the typed config can model:
+  `delay <time> [<jitter> [<corr>]]` (alias `latency`), `loss
+  [random] <pct> [<corr>]` (alias `drop`), `duplicate <pct>
+  [<corr>]`, `corrupt <pct> [<corr>]`, `reorder <pct> [<corr>]`,
+  `gap <n>`, `rate <rate>`, `limit <packets>`.
+- **Honest scope-mismatch errors** for syntax the typed config
+  doesn't yet model. `NetemConfig` lacks fields for `slot`, `ecn`,
+  `distribution`, the 4-state `loss state` Markov model, the
+  `loss gemodel` form, and the positional `rate` extras
+  (`packet_overhead` / `cell_size` / `cell_overhead`) — the parser
+  rejects each with a clear message pointing at
+  `tc::options::netem::build` (the legacy stringly-typed parser
+  that does cover them) so callers know exactly where the line is.
+- Stricter than the legacy parser otherwise: unknown keywords,
+  missing values, and unparseable time/rate/percent/integer values
+  all return `Error::InvalidMessage`.
+- 14 new unit tests. Lib suite 440 → 454; clippy clean
+  workspace-wide; all unit-testable as a regular user.
+
 ### Added — `HtbQdiscConfig::parse_params` (typed-units rollout, slice 1)
 
 - New method `HtbQdiscConfig::parse_params(&[&str]) -> Result<Self>`
