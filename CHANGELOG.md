@@ -4,6 +4,54 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `U32Filter::parse_params` Phase 1 (Plan 138 PR A, Plan 142 Phase 1)
+
+- New `U32Filter::parse_params(&[&str])` parses the raw-match-triple
+  flavour of `tc(8)`'s `u32` filter grammar:
+  - `match u32 <hex-value> <hex-mask> at <offset>` — append a
+    32-bit-wide selector key. Hex accepts `0x`-prefixed or bare
+    digits; offset accepts decimal or hex.
+  - `match u16 <hex-value> <hex-mask> at <offset>` — narrower
+    width, packed into the right half of a 32-bit-sized key
+    based on offset alignment (offset & 3).
+  - `match u8 <hex-value> <hex-mask> at <offset>` — same idea,
+    one of four byte slots in the 32-bit key.
+  - `classid <handle>` / `flowid <handle>` — target class.
+  - `chain <n>` — TC chain index.
+  - `skip_hw` / `skip_sw` — flag tokens setting
+    `TCA_CLS_FLAGS_SKIP_HW` / `SKIP_SW`.
+- New `U32Filter::skip_hw()` / `skip_sw()` setters and the
+  underlying `flags: u32` field, written via `TCA_U32_FLAGS` in
+  `write_options`. The bin's `skip_hw` / `skip_sw` token paths
+  go through these.
+- Stricter than the legacy `add_u32_options` parser (which silently
+  swallowed unknown tokens via `_ => i += 1`): unknown tokens
+  return `Error::InvalidMessage("u32: unknown token \`...\`...")`,
+  bad hex returns `"u32: invalid VAL \`...\` (expected hex value)"`,
+  short matches return `"u32: \`match\` requires \`WIDTH VAL MASK
+  at OFFSET\` (missing ...)"`, etc. Every error message
+  kind-prefixes with `"u32: "`.
+- Width-overflow rejections: `match u8 0xDEAD ...` returns
+  `"u32: u8 match VAL/MASK must fit in 8 bits"`. Same for `u16`.
+- 16 unit tests cover: empty params, raw u32/u16/u8 triples,
+  multiple-match append order, classid/flowid alias, chain +
+  skip flags combo, and 7 error-shape cases (unknown token,
+  invalid hex, unknown width, short match, missing `at`
+  keyword, value-out-of-range, missing required value).
+- `bins/tc/src/commands/filter.rs` typed-dispatch `matches!`
+  guard grew `u32`; new `dispatch!(U32Filter)` arm. Filter side
+  now 8 of 9 typed-first (only `basic` remains, gated on
+  Plan 133 PR C).
+- `U32Filter` joins the `nlink::ParseParams` trait impl list
+  (was 25 impls; now 26).
+
+Phase 2 (named-match shortcuts: `match ip src ADDR/PREFIX`,
+`match tcp dport`, etc.) and Phase 3 (hash-table grammar:
+`divisor`, `ht`, `link`, `order`, `hashkey`) ship in subsequent
+PRs of Plan 138. The `#[allow(deprecated)]` on the bin's
+`filter_builder` import stays until Plan 133 PR C also lands
+(`basic` is the last remaining legacy caller).
+
 ### Added — sealed `ParseParams` trait (Plan 142 Phase 0, slice 2)
 
 - New `nlink::ParseParams` trait formalizes the `parse_params`

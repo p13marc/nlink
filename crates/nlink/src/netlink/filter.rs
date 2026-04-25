@@ -122,6 +122,8 @@ pub struct U32Filter {
     protocol: u16,
     /// Chain index for this filter.
     chain: Option<u32>,
+    /// Filter flags (`TCA_CLS_FLAGS_SKIP_HW`/`SKIP_SW`).
+    flags: u32,
 }
 
 impl U32Filter {
@@ -241,6 +243,95 @@ impl U32Filter {
         self
     }
 
+    /// Set the `TCA_CLS_FLAGS_SKIP_HW` flag — instruct the kernel
+    /// to skip hardware offload for this filter.
+    pub fn skip_hw(mut self) -> Self {
+        self.flags |= flower::TCA_CLS_FLAGS_SKIP_HW;
+        self
+    }
+
+    /// Set the `TCA_CLS_FLAGS_SKIP_SW` flag — instruct the kernel
+    /// to skip software fallback for this filter (hardware-only).
+    pub fn skip_sw(mut self) -> Self {
+        self.flags |= flower::TCA_CLS_FLAGS_SKIP_SW;
+        self
+    }
+
+    /// Parse a `tc(8)`-style `u32` token slice into a typed filter.
+    ///
+    /// # Phase 1 surface (raw matches + structural tokens)
+    ///
+    /// - `match u32 <hex-value> <hex-mask> at <offset>` — append a
+    ///   32-bit-wide selector key. `value` and `mask` accept
+    ///   `0x`-prefixed hex (or bare hex digits); `offset` accepts
+    ///   decimal or hex.
+    /// - `match u16 <hex-value> <hex-mask> at <offset>` — narrower
+    ///   width, packed into the right half of a 32-bit-sized key
+    ///   based on the offset's alignment (offset & 3).
+    /// - `match u8 <hex-value> <hex-mask> at <offset>` — same idea,
+    ///   one of four byte slots in the 32-bit key.
+    /// - `classid <handle>` / `flowid <handle>` — target class
+    ///   (e.g. `1:10`).
+    /// - `chain <n>` — TC chain index (Linux 4.1+).
+    /// - `skip_hw` / `skip_sw` — flag tokens setting
+    ///   `TCA_CLS_FLAGS_SKIP_HW` / `SKIP_SW`.
+    ///
+    /// Stricter than the legacy `add_u32_options` parser (which
+    /// silently dropped unknown tokens via a default `_ => i += 1`
+    /// arm): unknown tokens, missing values, and unparseable hex
+    /// return `Error::InvalidMessage("u32: ...")`.
+    ///
+    /// # Not yet typed-modelled
+    ///
+    /// Named-match shortcuts (`match ip src ADDR/PREFIX`,
+    /// `match tcp dport`, etc.) are Phase 2 of Plan 138; hash-table
+    /// grammar (`divisor`, `ht`, `link`, `order`, `hashkey`) is
+    /// Phase 3. Until those phases land, fall back to the typed
+    /// builder methods (`U32Filter::match_src_ipv4`,
+    /// `match_dst_port`, etc.) for the named cases, and to the
+    /// builder's `divisor()` / `link()` for the hash-table cases.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut f = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "match" => {
+                    let triple = parse_u32_match(params, i)?;
+                    f.keys.push(triple.key);
+                    i = triple.consumed;
+                }
+                "classid" | "flowid" => {
+                    let s = need_value(params, i, "u32", key)?;
+                    let h = s.parse::<TcHandle>().map_err(|e| {
+                        Error::InvalidMessage(format!("u32: invalid {key} `{s}`: {e}"))
+                    })?;
+                    f = f.classid(h);
+                    i += 2;
+                }
+                "chain" => {
+                    let s = need_value(params, i, "u32", key)?;
+                    f = f.chain(parse_u32_int("u32", "chain", s)?);
+                    i += 2;
+                }
+                "skip_hw" => {
+                    f = f.skip_hw();
+                    i += 1;
+                }
+                "skip_sw" => {
+                    f = f.skip_sw();
+                    i += 1;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "u32: unknown token `{other}` (Phase 1 supports: match u32|u16|u8 VAL MASK at OFFSET, classid/flowid, chain, skip_hw, skip_sw)"
+                    )));
+                }
+            }
+        }
+        Ok(f)
+    }
+
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
@@ -292,8 +383,123 @@ impl FilterConfig for U32Filter {
             builder.append_attr(u32_mod::TCA_U32_SEL, &sel.to_bytes());
         }
 
+        // Add classifier flags (skip_hw / skip_sw) if any are set.
+        if self.flags != 0 {
+            builder.append_attr_u32(u32_mod::TCA_U32_FLAGS, self.flags);
+        }
+
         Ok(())
     }
+}
+
+/// Borrow `params[i + 1]`, returning a kind-prefixed
+/// `InvalidMessage` if the value slot is missing.
+fn need_value<'a>(params: &[&'a str], i: usize, kind: &str, key: &str) -> Result<&'a str> {
+    params
+        .get(i + 1)
+        .copied()
+        .ok_or_else(|| Error::InvalidMessage(format!("{kind}: `{key}` requires a value")))
+}
+
+/// Parse a decimal `u32` with kind-prefixed error context.
+fn parse_u32_int(kind: &str, key: &str, s: &str) -> Result<u32> {
+    s.parse::<u32>().map_err(|_| {
+        Error::InvalidMessage(format!(
+            "{kind}: invalid {key} `{s}` (expected unsigned integer)"
+        ))
+    })
+}
+
+/// Parse a hex value (with or without `0x` prefix) into `u32`.
+fn parse_hex_u32(kind: &str, key: &str, s: &str) -> Result<u32> {
+    let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    u32::from_str_radix(body, 16).map_err(|_| {
+        Error::InvalidMessage(format!(
+            "{kind}: invalid {key} `{s}` (expected hex value)"
+        ))
+    })
+}
+
+/// Parse an offset (decimal first, hex if prefixed). Negative offsets
+/// are valid in the kernel API (signed) but rare in user input;
+/// reject them at the parser level for now.
+fn parse_offset(kind: &str, s: &str) -> Result<i32> {
+    let v: u32 = if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(rest, 16)
+            .map_err(|_| Error::InvalidMessage(format!("{kind}: invalid offset `{s}`")))?
+    } else {
+        s.parse::<u32>()
+            .map_err(|_| Error::InvalidMessage(format!("{kind}: invalid offset `{s}`")))?
+    };
+    Ok(v as i32)
+}
+
+/// Result of parsing one `match WIDTH VAL MASK at OFFSET` triple.
+struct U32MatchTriple {
+    key: u32_mod::TcU32Key,
+    /// Index of the next unconsumed token (i.e. `i + 5` on success).
+    consumed: usize,
+}
+
+/// Parse `match WIDTH VAL MASK at OFFSET` starting at `params[i]`.
+/// `params[i]` is assumed to be the literal `"match"` token.
+fn parse_u32_match(params: &[&str], i: usize) -> Result<U32MatchTriple> {
+    // Need: match WIDTH VAL MASK at OFFSET → 6 tokens total.
+    let need = |k: usize, name: &str| -> Result<&str> {
+        params.get(i + k).copied().ok_or_else(|| {
+            Error::InvalidMessage(format!(
+                "u32: `match` requires `WIDTH VAL MASK at OFFSET` (missing {name})"
+            ))
+        })
+    };
+    let width = need(1, "WIDTH")?;
+    let val_s = need(2, "VAL")?;
+    let mask_s = need(3, "MASK")?;
+    let at_kw = need(4, "`at`")?;
+    let off_s = need(5, "OFFSET")?;
+
+    if at_kw != "at" {
+        return Err(Error::InvalidMessage(format!(
+            "u32: expected `at` between MASK and OFFSET, got `{at_kw}`"
+        )));
+    }
+    let offset = parse_offset("u32", off_s)?;
+    let key = match width {
+        "u32" => {
+            let val = parse_hex_u32("u32", "VAL", val_s)?;
+            let mask = parse_hex_u32("u32", "MASK", mask_s)?;
+            u32_mod::pack_key32(val, mask, offset)
+        }
+        "u16" => {
+            let val = parse_hex_u32("u32", "VAL", val_s)?;
+            let mask = parse_hex_u32("u32", "MASK", mask_s)?;
+            if val > 0xFFFF || mask > 0xFFFF {
+                return Err(Error::InvalidMessage(format!(
+                    "u32: u16 match VAL/MASK must fit in 16 bits (got val={val_s}, mask={mask_s})"
+                )));
+            }
+            u32_mod::pack_key16(val as u16, mask as u16, offset)
+        }
+        "u8" => {
+            let val = parse_hex_u32("u32", "VAL", val_s)?;
+            let mask = parse_hex_u32("u32", "MASK", mask_s)?;
+            if val > 0xFF || mask > 0xFF {
+                return Err(Error::InvalidMessage(format!(
+                    "u32: u8 match VAL/MASK must fit in 8 bits (got val={val_s}, mask={mask_s})"
+                )));
+            }
+            u32_mod::pack_key8(val as u8, mask as u8, offset)
+        }
+        other => {
+            return Err(Error::InvalidMessage(format!(
+                "u32: unknown match width `{other}` (expected u32, u16, or u8)"
+            )));
+        }
+    };
+    Ok(U32MatchTriple {
+        key,
+        consumed: i + 6,
+    })
 }
 
 // ============================================================================
@@ -3819,5 +4025,154 @@ mod tests {
     fn flow_parse_params_unknown_token_errors() {
         let err = FlowFilter::parse_params(&["nonsense"]).unwrap_err();
         assert!(err.to_string().contains("unknown token"));
+    }
+
+    // ==========================================================
+    // U32Filter::parse_params — Plan 138 PR A (raw match triples
+    // + structural tokens). Phase 2 (named-match shortcuts) and
+    // Phase 3 (hash-table grammar) land in subsequent PRs.
+    // ==========================================================
+
+    #[test]
+    fn u32_parse_params_empty_yields_default() {
+        let f = U32Filter::parse_params(&[]).unwrap();
+        assert!(f.classid.is_none());
+        assert!(f.keys.is_empty());
+        assert_eq!(f.flags, 0);
+        assert!(f.chain.is_none());
+    }
+
+    #[test]
+    fn u32_parse_params_match_u32_triple() {
+        let f =
+            U32Filter::parse_params(&["match", "u32", "0xCAFEBABE", "0xFFFFFFFF", "at", "0"])
+                .unwrap();
+        assert_eq!(f.keys.len(), 1);
+        let k = f.keys[0];
+        // The kernel stores val/mask big-endian; pack_key32 applies to_be().
+        assert_eq!(u32::from_be(k.val), 0xCAFEBABE);
+        assert_eq!(u32::from_be(k.mask), 0xFFFFFFFF);
+        assert_eq!(k.off, 0);
+    }
+
+    #[test]
+    fn u32_parse_params_match_u32_decimal_offset() {
+        let f =
+            U32Filter::parse_params(&["match", "u32", "0x01020304", "0xFFFFFFFF", "at", "16"])
+                .unwrap();
+        assert_eq!(f.keys[0].off, 16);
+    }
+
+    #[test]
+    fn u32_parse_params_match_u16_upper_half() {
+        // offset=0 → upper 16 bits of the 32-bit slot.
+        let f =
+            U32Filter::parse_params(&["match", "u16", "0x1234", "0xFFFF", "at", "0"]).unwrap();
+        let k = f.keys[0];
+        assert_eq!(u32::from_be(k.val), 0x1234_0000);
+        assert_eq!(u32::from_be(k.mask), 0xFFFF_0000);
+        assert_eq!(k.off, 0);
+    }
+
+    #[test]
+    fn u32_parse_params_match_u16_lower_half() {
+        // offset=2 → lower 16 bits of the 32-bit slot at offset 0.
+        let f =
+            U32Filter::parse_params(&["match", "u16", "0x5678", "0xFFFF", "at", "2"]).unwrap();
+        let k = f.keys[0];
+        assert_eq!(u32::from_be(k.val), 0x0000_5678);
+        assert_eq!(u32::from_be(k.mask), 0x0000_FFFF);
+        // pack_key16 normalises offset to the 32-bit-aligned base.
+        assert_eq!(k.off, 0);
+    }
+
+    #[test]
+    fn u32_parse_params_match_u8_byte_quadrant() {
+        // offset=9 → bits 16..23 of the 32-bit slot at offset 8.
+        let f = U32Filter::parse_params(&["match", "u8", "0x06", "0xFF", "at", "9"]).unwrap();
+        let k = f.keys[0];
+        assert_eq!(u32::from_be(k.val), 0x0006_0000);
+        assert_eq!(u32::from_be(k.mask), 0x00FF_0000);
+        assert_eq!(k.off, 8);
+    }
+
+    #[test]
+    fn u32_parse_params_multiple_matches_append_in_order() {
+        let f = U32Filter::parse_params(&[
+            "match", "u32", "0xAA", "0xFF", "at", "0", "match", "u32", "0xBB", "0xFF", "at", "4",
+        ])
+        .unwrap();
+        assert_eq!(f.keys.len(), 2);
+        assert_eq!(u32::from_be(f.keys[0].val), 0xAA);
+        assert_eq!(u32::from_be(f.keys[1].val), 0xBB);
+        assert_eq!(f.keys[1].off, 4);
+    }
+
+    #[test]
+    fn u32_parse_params_classid_and_flowid_alias() {
+        let by_classid = U32Filter::parse_params(&["classid", "1:10"]).unwrap();
+        let by_flowid = U32Filter::parse_params(&["flowid", "1:10"]).unwrap();
+        let want = TcHandle::new(1, 0x10).as_raw();
+        assert_eq!(by_classid.classid, Some(want));
+        assert_eq!(by_flowid.classid, Some(want));
+    }
+
+    #[test]
+    fn u32_parse_params_chain_and_skip_flags() {
+        let f = U32Filter::parse_params(&["chain", "5", "skip_hw", "skip_sw"]).unwrap();
+        assert_eq!(f.chain, Some(5));
+        assert_eq!(
+            f.flags,
+            flower::TCA_CLS_FLAGS_SKIP_HW | flower::TCA_CLS_FLAGS_SKIP_SW
+        );
+    }
+
+    #[test]
+    fn u32_parse_params_unknown_token_errors() {
+        let err = U32Filter::parse_params(&["nonsense"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("u32: unknown token `nonsense`"), "got: {msg}");
+    }
+
+    #[test]
+    fn u32_parse_params_match_invalid_hex_errors() {
+        let err = U32Filter::parse_params(&["match", "u32", "notahex", "0xFF", "at", "0"])
+            .unwrap_err();
+        assert!(err.to_string().contains("expected hex value"));
+    }
+
+    #[test]
+    fn u32_parse_params_match_unknown_width_errors() {
+        let err =
+            U32Filter::parse_params(&["match", "u64", "0x1", "0x1", "at", "0"]).unwrap_err();
+        assert!(err.to_string().contains("unknown match width"));
+    }
+
+    #[test]
+    fn u32_parse_params_match_short_errors() {
+        // Missing `at OFFSET`.
+        let err = U32Filter::parse_params(&["match", "u32", "0xAA", "0xFF"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("requires") && msg.contains("at"), "got: {msg}");
+    }
+
+    #[test]
+    fn u32_parse_params_match_missing_at_keyword_errors() {
+        let err = U32Filter::parse_params(&["match", "u32", "0xAA", "0xFF", "INSTEAD", "0"])
+            .unwrap_err();
+        assert!(err.to_string().contains("expected `at`"));
+    }
+
+    #[test]
+    fn u32_parse_params_match_u8_value_too_large_errors() {
+        let err =
+            U32Filter::parse_params(&["match", "u8", "0xDEAD", "0xFF", "at", "0"]).unwrap_err();
+        assert!(err.to_string().contains("must fit in 8 bits"));
+    }
+
+    #[test]
+    fn u32_parse_params_classid_missing_value_errors() {
+        let err = U32Filter::parse_params(&["classid"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"));
     }
 }

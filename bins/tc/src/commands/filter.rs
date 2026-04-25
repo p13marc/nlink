@@ -9,7 +9,7 @@ use nlink::{
         Connection, Result, Route,
         filter::{
             BpfFilter, CgroupFilter, FilterConfig, FlowFilter, FlowerFilter, FwFilter,
-            MatchallFilter, RouteFilter,
+            MatchallFilter, RouteFilter, U32Filter,
         },
         message::NlMsgType,
         messages::TcMessage,
@@ -382,7 +382,7 @@ async fn try_typed_filter(
 ) -> Option<Result<()>> {
     if !matches!(
         kind,
-        "flower" | "matchall" | "fw" | "route" | "bpf" | "cgroup" | "flow"
+        "flower" | "matchall" | "fw" | "route" | "bpf" | "cgroup" | "flow" | "u32"
     ) {
         return None;
     }
@@ -417,6 +417,7 @@ async fn try_typed_filter(
         "bpf" => dispatch!(BpfFilter),
         "cgroup" => dispatch!(CgroupFilter),
         "flow" => dispatch!(FlowFilter),
+        "u32" => dispatch!(U32Filter),
         _ => unreachable!("checked by `matches!` guard above"),
     })
 }

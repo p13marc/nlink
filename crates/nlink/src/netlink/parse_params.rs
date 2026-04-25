@@ -115,7 +115,7 @@ impl_parse_params! {
     crate::netlink::tc::SfqConfig,
     crate::netlink::tc::TaprioConfig,
     crate::netlink::tc::TbfConfig,
-    // Filter configs (7) — see crates/nlink/src/netlink/filter.rs.
+    // Filter configs (8) — see crates/nlink/src/netlink/filter.rs.
     crate::netlink::filter::BpfFilter,
     crate::netlink::filter::CgroupFilter,
     crate::netlink::filter::FlowFilter,
@@ -123,6 +123,7 @@ impl_parse_params! {
     crate::netlink::filter::FwFilter,
     crate::netlink::filter::MatchallFilter,
     crate::netlink::filter::RouteFilter,
+    crate::netlink::filter::U32Filter,
 }
 
 #[cfg(test)]
