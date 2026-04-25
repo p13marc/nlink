@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `RedConfig` + `PieConfig` parse_params + bin wiring (slice 10)
+
+- New `parse_params` methods on two more typed AQM qdisc configs:
+  - `RedConfig::parse_params` — `limit` / `min` / `max` (tc-style
+    sizes), `probability` (0-100% mapped to the kernel's 0-255
+    scale), and three flag pairs: `ecn`/`noecn`, `harddrop`/
+    `noharddrop`, `adaptive`/`noadaptive`. The classic
+    `avpkt`/`burst`/`bandwidth` tokens are rejected with a "not
+    modelled" error since `RedConfig` doesn't carry those.
+  - `PieConfig::parse_params` — `target`/`tupdate` (tc-style
+    times), `limit`/`alpha`/`beta` (integers), and the
+    `ecn`/`noecn`, `bytemode`/`nobytemode` flag pairs.
+- **Net new CLI capability**: the legacy parser silently swallowed
+  unknown qdisc kinds (its `add_qdisc_options` match arm has no
+  case for `red` or `pie`), so the CLI couldn't use these at all
+  before. The typed dispatch now routes them through
+  `Connection::add_qdisc_full` with the typed config.
+- `bins/tc/src/commands/qdisc.rs` known-kinds list grew from 7 to
+  9 (htb, netem, cake, tbf, sfq, prio, fq_codel, **red, pie**).
+- 11 new unit tests (6 red + 5 pie) covering empty-yields-default,
+  thresholds-with-size-suffixes (red), probability mapping, all
+  three flag pairs (red), typical-set (pie), flag pairs (pie),
+  unsupported-features-rejected (red avpkt/burst/bandwidth),
+  unknown tokens, and invalid time/probability values. Lib suite
+  went 530 → 541; clippy clean workspace-wide.
+- Verified interactively: `tc qdisc add dummy0 --parent root
+  --handle 1: red limit 100k min 10k max 30k probability 50 ecn`
+  and `tc qdisc add dummy0 --parent root --handle 1: pie target
+  15ms ecn` both reach the netlink layer (and fail at the
+  interface lookup as expected for a non-existent `dummy0`).
+
 ### Added — `MatchallFilter` + `FwFilter` parse_params + bin wiring (slice 9)
 
 - New `parse_params` methods on two more typed filter configs:

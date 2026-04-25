@@ -1616,6 +1616,108 @@ impl RedConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style red params slice into a typed `RedConfig`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `limit <bytes>` — queue limit (tc-style size).
+    /// - `min <bytes>` — minimum threshold.
+    /// - `max <bytes>` — maximum threshold.
+    /// - `probability <pct>` — max probability as a percentage
+    ///   0-100 (converted internally to the kernel's 0-255 scale).
+    /// - `ecn` / `noecn` — ECN marking flag pair.
+    /// - `harddrop` / `noharddrop` — hard-drop flag pair.
+    /// - `adaptive` / `noadaptive` — adaptive RED flag pair.
+    ///
+    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// `avpkt`, `burst`, `bandwidth` — RedConfig doesn't model
+    /// those classic RED parameters. The library uses the bare
+    /// thresholds directly; if you need the avpkt-derived burst
+    /// computation, drop to a hand-rolled `MessageBuilder`.
+    ///
+    /// Stricter than the legacy parser (which doesn't recognise red
+    /// at all — it silently ignores unknown qdisc kinds in
+    /// `add_qdisc`): unknown tokens, missing values, and
+    /// unparseable values return `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params
+                    .get(i + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("red: `{key}` requires a value")))
+            };
+            match key {
+                "limit" | "min" | "max" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "red: invalid {key} `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    let val: u32 = bytes.try_into().map_err(|_| {
+                        Error::InvalidMessage(format!("red: {key} `{s}` exceeds u32"))
+                    })?;
+                    match key {
+                        "limit" => cfg.limit = val,
+                        "min" => cfg.min = val,
+                        "max" => cfg.max = val,
+                        _ => unreachable!(),
+                    }
+                    i += 2;
+                }
+                "probability" => {
+                    let s = need_value()?;
+                    let pct: f64 = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "red: invalid probability `{s}` (expected percentage 0-100)"
+                        ))
+                    })?;
+                    cfg = cfg.max_probability(pct);
+                    i += 2;
+                }
+                "ecn" => {
+                    cfg.ecn = true;
+                    i += 1;
+                }
+                "noecn" => {
+                    cfg.ecn = false;
+                    i += 1;
+                }
+                "harddrop" => {
+                    cfg.harddrop = true;
+                    i += 1;
+                }
+                "noharddrop" => {
+                    cfg.harddrop = false;
+                    i += 1;
+                }
+                "adaptive" => {
+                    cfg.adaptive = true;
+                    i += 1;
+                }
+                "noadaptive" => {
+                    cfg.adaptive = false;
+                    i += 1;
+                }
+                "avpkt" | "burst" | "bandwidth" => {
+                    return Err(Error::InvalidMessage(format!(
+                        "red: `{key}` is not modelled by RedConfig — drop to a hand-rolled MessageBuilder if needed"
+                    )));
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "red: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
 }
 
 impl QdiscConfig for RedConfig {
@@ -1762,6 +1864,101 @@ impl PieConfig {
     /// Build the configuration.
     pub fn build(self) -> Self {
         self
+    }
+
+    /// Parse a tc-style pie params slice into a typed `PieConfig`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `target <time>` — target delay (e.g. `15ms`).
+    /// - `limit <packets>` — queue limit.
+    /// - `tupdate <time>` — probability update interval.
+    /// - `alpha <n>` — P-controller alpha parameter.
+    /// - `beta <n>` — I-controller beta parameter.
+    /// - `ecn` / `noecn` — ECN marking flag pair.
+    /// - `bytemode` / `nobytemode` — byte-vs-packet mode pair.
+    ///
+    /// Stricter than the legacy parser (which doesn't recognise pie
+    /// at all): unknown tokens, missing values, and unparseable
+    /// time/integer values return `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params
+                    .get(i + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("pie: `{key}` requires a value")))
+            };
+            match key {
+                "target" => {
+                    let s = need_value()?;
+                    cfg.target = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "pie: invalid target `{s}` (expected tc-style time)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "limit" => {
+                    let s = need_value()?;
+                    cfg.limit =
+                        Some(s.parse().map_err(|_| {
+                            Error::InvalidMessage(format!("pie: invalid limit `{s}`"))
+                        })?);
+                    i += 2;
+                }
+                "tupdate" => {
+                    let s = need_value()?;
+                    cfg.tupdate = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "pie: invalid tupdate `{s}` (expected tc-style time)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "alpha" => {
+                    let s = need_value()?;
+                    cfg.alpha =
+                        Some(s.parse().map_err(|_| {
+                            Error::InvalidMessage(format!("pie: invalid alpha `{s}`"))
+                        })?);
+                    i += 2;
+                }
+                "beta" => {
+                    let s = need_value()?;
+                    cfg.beta =
+                        Some(s.parse().map_err(|_| {
+                            Error::InvalidMessage(format!("pie: invalid beta `{s}`"))
+                        })?);
+                    i += 2;
+                }
+                "ecn" => {
+                    cfg.ecn = true;
+                    i += 1;
+                }
+                "noecn" => {
+                    cfg.ecn = false;
+                    i += 1;
+                }
+                "bytemode" => {
+                    cfg.bytemode = true;
+                    i += 1;
+                }
+                "nobytemode" => {
+                    cfg.bytemode = false;
+                    i += 1;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "pie: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
     }
 }
 
@@ -6024,6 +6221,118 @@ mod tests {
     #[test]
     fn fq_codel_parse_params_invalid_time_errors() {
         let err = FqCodelConfig::parse_params(&["target", "fast"]).unwrap_err();
+        assert!(err.to_string().contains("invalid target"));
+    }
+
+    #[test]
+    fn red_parse_params_empty_yields_default() {
+        let cfg = RedConfig::parse_params(&[]).unwrap();
+        assert_eq!(cfg.limit, 0);
+        assert_eq!(cfg.min, 0);
+        assert_eq!(cfg.max, 0);
+        assert_eq!(cfg.max_p, 5);
+        assert!(!cfg.ecn);
+        assert!(!cfg.adaptive);
+    }
+
+    #[test]
+    fn red_parse_params_thresholds_with_size_suffixes() {
+        let cfg = RedConfig::parse_params(&["limit", "100k", "min", "10k", "max", "30k"]).unwrap();
+        assert_eq!(cfg.limit, 100 * 1024);
+        assert_eq!(cfg.min, 10 * 1024);
+        assert_eq!(cfg.max, 30 * 1024);
+    }
+
+    #[test]
+    fn red_parse_params_probability() {
+        // 50% should map to ~127 on the 0-255 scale.
+        let cfg = RedConfig::parse_params(&["probability", "50"]).unwrap();
+        assert!(
+            cfg.max_p >= 126 && cfg.max_p <= 128,
+            "expected ~127, got {}",
+            cfg.max_p
+        );
+    }
+
+    #[test]
+    fn red_parse_params_flags_with_negations() {
+        let cfg = RedConfig::parse_params(&["ecn", "harddrop", "adaptive"]).unwrap();
+        assert!(cfg.ecn);
+        assert!(cfg.harddrop);
+        assert!(cfg.adaptive);
+        let cfg = RedConfig::parse_params(&[
+            "ecn",
+            "noecn",
+            "harddrop",
+            "noharddrop",
+            "adaptive",
+            "noadaptive",
+        ])
+        .unwrap();
+        assert!(!cfg.ecn);
+        assert!(!cfg.harddrop);
+        assert!(!cfg.adaptive);
+    }
+
+    #[test]
+    fn red_parse_params_unsupported_features_rejected() {
+        for unsup in ["avpkt", "burst", "bandwidth"] {
+            let err = RedConfig::parse_params(&[unsup, "1"]).unwrap_err();
+            assert!(
+                err.to_string().contains("not modelled"),
+                "expected not-modelled for `{unsup}`, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn red_parse_params_unknown_token_errors() {
+        let err = RedConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn pie_parse_params_empty_yields_default() {
+        let cfg = PieConfig::parse_params(&[]).unwrap();
+        assert!(cfg.target.is_none());
+        assert!(cfg.limit.is_none());
+        assert!(cfg.alpha.is_none());
+        assert!(!cfg.ecn);
+        assert!(!cfg.bytemode);
+    }
+
+    #[test]
+    fn pie_parse_params_typical_set() {
+        let cfg = PieConfig::parse_params(&[
+            "target", "15ms", "limit", "1000", "tupdate", "30ms", "alpha", "2", "beta", "20",
+        ])
+        .unwrap();
+        assert_eq!(cfg.target, Some(Duration::from_millis(15)));
+        assert_eq!(cfg.limit, Some(1000));
+        assert_eq!(cfg.tupdate, Some(Duration::from_millis(30)));
+        assert_eq!(cfg.alpha, Some(2));
+        assert_eq!(cfg.beta, Some(20));
+    }
+
+    #[test]
+    fn pie_parse_params_flags_with_negations() {
+        let cfg = PieConfig::parse_params(&["ecn", "bytemode"]).unwrap();
+        assert!(cfg.ecn);
+        assert!(cfg.bytemode);
+        let cfg = PieConfig::parse_params(&["ecn", "noecn", "bytemode", "nobytemode"]).unwrap();
+        assert!(!cfg.ecn);
+        assert!(!cfg.bytemode);
+    }
+
+    #[test]
+    fn pie_parse_params_unknown_token_errors() {
+        let err = PieConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn pie_parse_params_invalid_time_errors() {
+        let err = PieConfig::parse_params(&["target", "fast"]).unwrap_err();
         assert!(err.to_string().contains("invalid target"));
     }
 }

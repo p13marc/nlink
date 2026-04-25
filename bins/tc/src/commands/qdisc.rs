@@ -8,8 +8,8 @@ use nlink::{
         message::NlMsgType,
         messages::TcMessage,
         tc::{
-            CakeConfig, FqCodelConfig, HtbQdiscConfig, NetemConfig, PrioConfig, QdiscConfig,
-            SfqConfig, TbfConfig,
+            CakeConfig, FqCodelConfig, HtbQdiscConfig, NetemConfig, PieConfig, PrioConfig,
+            QdiscConfig, RedConfig, SfqConfig, TbfConfig,
         },
     },
     output::{OutputFormat, OutputOptions, print_all},
@@ -322,7 +322,7 @@ async fn try_typed_qdisc(
     // legacy path without paying for handle parsing.
     let known = matches!(
         kind,
-        "htb" | "netem" | "cake" | "tbf" | "sfq" | "prio" | "fq_codel"
+        "htb" | "netem" | "cake" | "tbf" | "sfq" | "prio" | "fq_codel" | "red" | "pie"
     );
     if !known {
         return None;
@@ -350,6 +350,8 @@ async fn try_typed_qdisc(
         "sfq" => dispatch!(SfqConfig),
         "prio" => dispatch!(PrioConfig),
         "fq_codel" => dispatch!(FqCodelConfig),
+        "red" => dispatch!(RedConfig),
+        "pie" => dispatch!(PieConfig),
         _ => unreachable!("checked by `known` guard above"),
     })
 }
