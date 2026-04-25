@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `U32Filter::parse_params` Phase 3 hash-table grammar (Plan 138 PR C)
+
+- Closes Plan 138. `U32Filter::parse_params` now recognises every
+  hash-table token typical `tc(8) u32` filters need:
+  - `divisor <n>` — divisor for bucket count when this filter
+    creates a hash table. Combine with no keys for the
+    table-create case (no `TCA_U32_SEL` is emitted then).
+  - `ht <handle>` — hash table this filter belongs to,
+    encoded as `TCA_U32_HASH`. Handle uses tc(8) notation
+    (`100:` → 0x01000000 via `TcHandle::as_raw`).
+  - `link <handle>` — next-hop hash table to chase on match
+    (`TCA_U32_LINK`). Same handle notation. (Setter existed since
+    0.12; only the parser token is new.)
+  - `hashkey mask <hex> at <offset>` — bytes of the packet header
+    used to compute the hash bucket index. `mask` packs into
+    `sel.hmask` (big-endian on the wire); `offset` packs into
+    `sel.hoff` (i16 range, range-checked at parse time).
+- New `U32Filter::ht(u32)` and `U32Filter::hashkey(u32, i16)`
+  setters. New `ht: Option<u32>` and `hashkey: Option<(u32, i16)>`
+  fields. `write_options` emits `TCA_U32_HASH` when `ht` is set
+  and writes `sel.hdr.hmask` / `sel.hdr.hoff` when `hashkey` is
+  set, requiring the selector emit even with zero keys.
+- `order <n>` is **explicitly rejected** with a clear error:
+  modifying the filter's own handle requires bin-side support
+  that isn't wired through `parse_params`. Documented as future
+  work; the error message points there.
+- 10 new unit tests cover: divisor-only filter (no keys, no
+  link/ht/hashkey), `ht <handle>` encoding via `TcHandle`,
+  ht+link+match+classid combo (typical hashed-chain shape),
+  link via tc(8) notation, hashkey packing into `sel`,
+  hashkey i16 range check, missing-`mask`-keyword error,
+  `order` rejection, divisor-not-int error, ht-bad-handle error.
+- Doc-string on `parse_params` grew a "Phase 3 surface" section
+  and a "Not yet typed-modelled" callout for `order`,
+  `match icmp type|code`, and IPv6 named-matches.
+
+`U32Filter::parse_params` now recognises **every Phase 1+2+3
+token** Plan 138 specified. 41 unit tests cover the full grammar
+(16 raw + 15 named + 10 hash-table). Filter side stays at 8 of 9
+typed-first (the `u32` kind is feature-complete; `basic` is the
+only legacy kind remaining, gated on Plan 133 PR C).
+
+Plan 138 closes here. Phase 1 of Plan 142 still needs Plan 133 PR C
+(`BasicFilter` ematch) before the bin's `#[allow(deprecated)]` on
+`filter_builder` can come off.
+
 ### Added — `U32Filter::parse_params` Phase 2 named-match shortcuts (Plan 138 PR B)
 
 - `U32Filter::parse_params` grew the four-token named-match

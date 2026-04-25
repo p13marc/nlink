@@ -110,10 +110,14 @@ pub struct U32Filter {
     classid: Option<u32>,
     /// Selector keys.
     keys: Vec<u32_mod::TcU32Key>,
-    /// Hash table link.
+    /// Hash table this filter belongs to (`TCA_U32_HASH`).
+    ht: Option<u32>,
+    /// Hash table link to chase on match (`TCA_U32_LINK`).
     link: Option<u32>,
     /// Hash divisor (for creating hash tables).
     divisor: Option<u32>,
+    /// Hash key — (mask, offset) pair packed into `sel.hmask`/`hoff`.
+    hashkey: Option<(u32, i16)>,
     /// Match mark value/mask.
     mark: Option<(u32, u32)>,
     /// Priority.
@@ -228,6 +232,25 @@ impl U32Filter {
         self
     }
 
+    /// Set the hash table this filter belongs to (`TCA_U32_HASH`).
+    /// Pass the raw u32 form of a tc(8) handle (e.g.
+    /// `TcHandle::new(0x100, 0).as_raw()` for `100:`).
+    pub fn ht(mut self, handle: u32) -> Self {
+        self.ht = Some(handle);
+        self
+    }
+
+    /// Set the hash key — the bytes of the packet header used to
+    /// compute the bucket index when this filter is part of a hash
+    /// table. `mask` and `offset` are packed into `sel.hmask` and
+    /// `sel.hoff` of the u32 selector header. `mask` is in
+    /// host-byte-order; the encoder converts to big-endian on the
+    /// wire.
+    pub fn hashkey(mut self, mask: u32, offset: i16) -> Self {
+        self.hashkey = Some((mask, offset));
+        self
+    }
+
     /// Match firewall mark.
     pub fn match_mark(mut self, val: u32, mask: u32) -> Self {
         self.mark = Some((val, mask));
@@ -301,13 +324,26 @@ impl U32Filter {
     /// arm): unknown tokens, missing values, and unparseable hex
     /// return `Error::InvalidMessage("u32: ...")`.
     ///
+    /// # Phase 3 surface (hash-table grammar)
+    ///
+    /// - `divisor <n>` — divisor for the bucket count when this
+    ///   filter creates a hash table. Combine with no keys for the
+    ///   table-create case.
+    /// - `ht <handle>` — hash table this filter belongs to,
+    ///   encoded as `TCA_U32_HASH`. Handle uses tc(8) notation
+    ///   (e.g. `100:` → 0x01000000 via `TcHandle`).
+    /// - `link <handle>` — next-hop hash table to chase on match.
+    /// - `hashkey mask <hex> at <offset>` — bytes of the packet
+    ///   used to compute the hash bucket index. `mask` is hex,
+    ///   `offset` is decimal or hex (i16 range).
+    ///
     /// # Not yet typed-modelled
     ///
-    /// `match icmp type|code` and IPv6 named-matches need new
-    /// setters; defer until requested. Hash-table grammar
-    /// (`divisor`, `ht`, `link`, `order`, `hashkey`) is Phase 3.
-    /// Until those phases land, fall back to the builder's
-    /// `divisor()` / `link()` setters for the hash-table cases.
+    /// - `order <n>` — modifies the filter's own handle (not
+    ///   parse_params territory). Returns a clear error pointing
+    ///   at the future bin-side support.
+    /// - `match icmp type|code` and IPv6 named-matches need new
+    ///   setters; defer until requested.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut f = Self::new();
         let mut i = 0;
@@ -359,9 +395,80 @@ impl U32Filter {
                     f = f.skip_sw();
                     i += 1;
                 }
+                "divisor" => {
+                    let s = need_value(params, i, "u32", key)?;
+                    f = f.divisor(parse_u32_int("u32", "divisor", s)?);
+                    i += 2;
+                }
+                "ht" => {
+                    let s = need_value(params, i, "u32", key)?;
+                    let h = s.parse::<TcHandle>().map_err(|e| {
+                        Error::InvalidMessage(format!("u32: invalid ht handle `{s}`: {e}"))
+                    })?;
+                    f = f.ht(h.as_raw());
+                    i += 2;
+                }
+                "link" => {
+                    let s = need_value(params, i, "u32", key)?;
+                    let h = s.parse::<TcHandle>().map_err(|e| {
+                        Error::InvalidMessage(format!("u32: invalid link handle `{s}`: {e}"))
+                    })?;
+                    f = f.link(h.as_raw());
+                    i += 2;
+                }
+                "hashkey" => {
+                    // Form: hashkey mask <hex> at <offset> → 5 tokens total.
+                    let mask_kw = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage(
+                            "u32: `hashkey` requires `mask <hex> at <offset>`".to_string(),
+                        )
+                    })?;
+                    if mask_kw != "mask" {
+                        return Err(Error::InvalidMessage(format!(
+                            "u32: expected `mask` after `hashkey`, got `{mask_kw}`"
+                        )));
+                    }
+                    let mask_s = params.get(i + 2).copied().ok_or_else(|| {
+                        Error::InvalidMessage(
+                            "u32: `hashkey mask` requires a hex value".to_string(),
+                        )
+                    })?;
+                    let at_kw = params.get(i + 3).copied().ok_or_else(|| {
+                        Error::InvalidMessage(
+                            "u32: `hashkey mask <hex>` requires `at <offset>`".to_string(),
+                        )
+                    })?;
+                    if at_kw != "at" {
+                        return Err(Error::InvalidMessage(format!(
+                            "u32: expected `at` between hashkey mask and offset, got `{at_kw}`"
+                        )));
+                    }
+                    let off_s = params.get(i + 4).copied().ok_or_else(|| {
+                        Error::InvalidMessage(
+                            "u32: `hashkey mask <hex> at` requires an offset".to_string(),
+                        )
+                    })?;
+                    let mask = parse_hex_u32("u32", "hashkey mask", mask_s)?;
+                    let offset = parse_offset("u32", off_s)?;
+                    if !(i16::MIN as i32..=i16::MAX as i32).contains(&offset) {
+                        return Err(Error::InvalidMessage(format!(
+                            "u32: hashkey offset `{off_s}` out of range for i16"
+                        )));
+                    }
+                    f = f.hashkey(mask, offset as i16);
+                    i += 5;
+                }
+                "order" => {
+                    return Err(Error::InvalidMessage(
+                        "u32: `order` is not yet typed-modelled — modifying the filter's own \
+                         handle requires bin-side support that isn't wired through \
+                         parse_params; ship `order` support separately when needed"
+                            .to_string(),
+                    ));
+                }
                 other => {
                     return Err(Error::InvalidMessage(format!(
-                        "u32: unknown token `{other}` (Phase 1 supports: match u32|u16|u8 VAL MASK at OFFSET, classid/flowid, chain, skip_hw, skip_sw)"
+                        "u32: unknown token `{other}` (supports: match u32|u16|u8 VAL MASK at OFFSET, match ip|tcp|udp ..., classid/flowid, chain, divisor, ht, link, hashkey, skip_hw, skip_sw)"
                     )));
                 }
             }
@@ -399,6 +506,11 @@ impl FilterConfig for U32Filter {
             builder.append_attr_u32(u32_mod::TCA_U32_DIVISOR, div);
         }
 
+        // Add hash table reference (which bucket this filter belongs to)
+        if let Some(ht) = self.ht {
+            builder.append_attr_u32(u32_mod::TCA_U32_HASH, ht);
+        }
+
         // Add link if set
         if let Some(link) = self.link {
             builder.append_attr_u32(u32_mod::TCA_U32_LINK, link);
@@ -410,12 +522,19 @@ impl FilterConfig for U32Filter {
             builder.append_attr(u32_mod::TCA_U32_MARK, mark.as_bytes());
         }
 
-        // Build and add selector if we have keys
-        if !self.keys.is_empty() {
+        // Build and add selector if we have keys or a hashkey
+        // configured. Divisor-only filters (which create the hash
+        // table itself) emit just TCA_U32_DIVISOR — no selector.
+        if !self.keys.is_empty() || self.hashkey.is_some() {
             let mut sel = u32_mod::TcU32Sel::new();
             sel.set_terminal();
             for key in &self.keys {
                 sel.add_key(*key);
+            }
+            if let Some((mask, offset)) = self.hashkey {
+                // hmask is big-endian on the wire; offset is host-order i16.
+                sel.hdr.hmask = mask.to_be();
+                sel.hdr.hoff = offset;
             }
             builder.append_attr(u32_mod::TCA_U32_SEL, &sel.to_bytes());
         }
@@ -4478,5 +4597,99 @@ mod tests {
     fn u32_parse_params_match_ip_missing_value_errors() {
         let err = U32Filter::parse_params(&["match", "ip", "src"]).unwrap_err();
         assert!(err.to_string().contains("requires VALUE"));
+    }
+
+    // ==========================================================
+    // Phase 3 — hash-table grammar (Plan 138 PR C). Tokens:
+    //   divisor <n>, ht <handle>, link <handle>,
+    //   hashkey mask <hex> at <offset>.
+    // `order <n>` is explicitly rejected as not yet typed-modelled
+    // because it modifies the filter's own handle, which lives
+    // outside parse_params.
+    // ==========================================================
+
+    #[test]
+    fn u32_parse_params_divisor_only() {
+        let f = U32Filter::parse_params(&["divisor", "256"]).unwrap();
+        assert_eq!(f.divisor, Some(256));
+        assert!(f.keys.is_empty(), "divisor-only filter has no keys");
+        assert!(f.link.is_none());
+        assert!(f.ht.is_none());
+        assert!(f.hashkey.is_none());
+    }
+
+    #[test]
+    fn u32_parse_params_ht_handle_encodes_via_tchandle() {
+        let f = U32Filter::parse_params(&["ht", "100:"]).unwrap();
+        // tc(8) `100:` = TcHandle(major=0x100, minor=0) → as_raw() = 0x01000000.
+        let want = TcHandle::new(0x100, 0).as_raw();
+        assert_eq!(f.ht, Some(want));
+    }
+
+    #[test]
+    fn u32_parse_params_ht_link_combo() {
+        // Typical "hashed chain" usage: filter belongs to ht 100:,
+        // matches a key, links to ht 200: on match.
+        let f = U32Filter::parse_params(&[
+            "ht", "100:", "match", "ip", "dst", "10.0.0.1", "link", "200:", "classid", "1:1",
+        ])
+        .unwrap();
+        assert_eq!(f.ht, Some(TcHandle::new(0x100, 0).as_raw()));
+        assert_eq!(f.link, Some(TcHandle::new(0x200, 0).as_raw()));
+        assert_eq!(f.classid, Some(TcHandle::new(1, 1).as_raw()));
+        assert_eq!(f.keys.len(), 1, "the dst match should append a key");
+    }
+
+    #[test]
+    fn u32_parse_params_link_via_handle_notation() {
+        let f = U32Filter::parse_params(&["link", "1:a"]).unwrap();
+        assert_eq!(f.link, Some(TcHandle::new(1, 0xa).as_raw()));
+    }
+
+    #[test]
+    fn u32_parse_params_hashkey_packs_into_sel() {
+        let f = U32Filter::parse_params(&[
+            "hashkey", "mask", "0xff000000", "at", "12", "match", "u32", "0x0a000001",
+            "0xffffffff", "at", "12",
+        ])
+        .unwrap();
+        assert_eq!(f.hashkey, Some((0xff000000, 12)));
+        assert_eq!(f.keys.len(), 1);
+    }
+
+    #[test]
+    fn u32_parse_params_hashkey_negative_offset_errors() {
+        // i16 max is 32767. 100000 is out of range.
+        let err = U32Filter::parse_params(&[
+            "hashkey", "mask", "0xff", "at", "100000",
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("out of range for i16"));
+    }
+
+    #[test]
+    fn u32_parse_params_hashkey_missing_mask_keyword_errors() {
+        let err =
+            U32Filter::parse_params(&["hashkey", "0xff", "at", "0"]).unwrap_err();
+        assert!(err.to_string().contains("expected `mask` after `hashkey`"));
+    }
+
+    #[test]
+    fn u32_parse_params_order_rejected_with_clear_message() {
+        let err = U32Filter::parse_params(&["order", "5"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("`order` is not yet typed-modelled"), "got: {msg}");
+    }
+
+    #[test]
+    fn u32_parse_params_divisor_invalid_int_errors() {
+        let err = U32Filter::parse_params(&["divisor", "wat"]).unwrap_err();
+        assert!(err.to_string().contains("expected unsigned integer"));
+    }
+
+    #[test]
+    fn u32_parse_params_ht_invalid_handle_errors() {
+        let err = U32Filter::parse_params(&["ht", "not-a-handle"]).unwrap_err();
+        assert!(err.to_string().contains("invalid ht handle"));
     }
 }
