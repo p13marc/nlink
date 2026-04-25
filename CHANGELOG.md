@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `BpfFilter::parse_params` + bin wiring (slice 13)
+
+- New `BpfFilter::parse_params` recognises `fd <n>` (raw program
+  fd), `pinned <path>` (alias `object-pinned`; opens the pinned
+  program file and uses its fd; mutually exclusive with `fd`),
+  `name <s>` (alias `section`), `direct-action` (alias `da`),
+  `classid` / `flowid`, and `chain <n>`.
+- **Required**: either `fd` or `pinned` must appear in the params,
+  since the kernel won't accept a BPF filter without a program
+  reference. The parser returns a clear "program reference
+  required" error when neither is present (better than the legacy
+  parser, which silently constructed a half-built filter that the
+  kernel then rejected with EINVAL).
+- `skip_hw` / `skip_sw` are explicitly rejected with a "not
+  modelled" message — `BpfFilter` doesn't expose a flags field.
+- `bins/tc/src/commands/filter.rs` known-kinds list grew from 4 to
+  5 (+ `bpf`).
+- 8 new unit tests cover the program-ref-required guard, fd, full
+  set, name/section + flowid + direct-action aliases, mutex check,
+  pinned-open-failure surfacing, skip-flags rejection, and unknown
+  tokens. Lib went 555 → 563; clippy clean workspace-wide.
+- Verified interactively: `tc filter add dummy0 --parent 1:
+  --protocol ip --prio 100 bpf` fails with the program-ref-required
+  error; `bpf fd 99 da` reaches the netlink layer.
+
 ### Added — `RouteFilter::parse_params` + bin wiring (slice 12)
 
 - New `RouteFilter::parse_params` recognises `classid` / `flowid`,

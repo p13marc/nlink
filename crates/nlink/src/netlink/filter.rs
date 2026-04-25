@@ -1547,6 +1547,139 @@ impl BpfFilter {
         self
     }
 
+    /// Parse a tc-style bpf params slice into a typed `BpfFilter`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `fd <n>` — raw BPF program file descriptor.
+    /// - `pinned <path>` (alias `object-pinned`) — open the pinned
+    ///   program at `path` and use its fd. Mutually exclusive with
+    ///   `fd`.
+    /// - `name <s>` (alias `section`) — program name (informational).
+    /// - `direct-action` (alias `da`) — flag, no value. In direct-
+    ///   action mode the BPF program returns the action directly
+    ///   (TC_ACT_OK / TC_ACT_SHOT / etc.) instead of a classid.
+    /// - `classid <handle>` (alias `flowid`) — target class id (for
+    ///   non-direct-action mode).
+    /// - `chain <n>` — chain index.
+    ///
+    /// **Required**: either `fd <n>` or `pinned <path>` must be
+    /// supplied; the kernel won't accept a BPF filter without a
+    /// program reference. The parser returns
+    /// `Error::InvalidMessage` if neither is present.
+    ///
+    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// `skip_hw` / `skip_sw` — `BpfFilter` doesn't expose a flags
+    /// field. Drop to the legacy `tc::builders::filter::add` for
+    /// hardware-offload control.
+    pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
+        use std::os::unix::io::IntoRawFd;
+
+        use crate::Error;
+
+        let mut fd: Option<i32> = None;
+        let mut name: Option<String> = None;
+        let mut classid: Option<TcHandle> = None;
+        let mut chain: Option<u32> = None;
+        let mut direct_action = false;
+
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = |k: &str, idx: usize| {
+                params
+                    .get(idx + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("bpf: `{k}` requires a value")))
+            };
+            match key {
+                "fd" => {
+                    let s = need_value(key, i)?;
+                    if fd.is_some() {
+                        return Err(Error::InvalidMessage(
+                            "bpf: `fd` and `pinned` are mutually exclusive".into(),
+                        ));
+                    }
+                    fd = Some(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "bpf: invalid fd `{s}` (expected signed integer)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "pinned" | "object-pinned" => {
+                    let path = need_value(key, i)?;
+                    if fd.is_some() {
+                        return Err(Error::InvalidMessage(
+                            "bpf: `fd` and `pinned` are mutually exclusive".into(),
+                        ));
+                    }
+                    let file = std::fs::File::open(path).map_err(|e| {
+                        Error::InvalidMessage(format!(
+                            "bpf: failed to open pinned program `{path}`: {e}"
+                        ))
+                    })?;
+                    fd = Some(file.into_raw_fd());
+                    i += 2;
+                }
+                "name" | "section" => {
+                    name = Some(need_value(key, i)?.to_string());
+                    i += 2;
+                }
+                "classid" | "flowid" => {
+                    let s = need_value(key, i)?;
+                    classid = Some(s.parse::<TcHandle>().map_err(|e| {
+                        Error::InvalidMessage(format!("bpf: invalid {key} `{s}`: {e}"))
+                    })?);
+                    i += 2;
+                }
+                "chain" => {
+                    let s = need_value(key, i)?;
+                    chain =
+                        Some(s.parse().map_err(|_| {
+                            Error::InvalidMessage(format!("bpf: invalid chain `{s}`"))
+                        })?);
+                    i += 2;
+                }
+                "da" | "direct-action" => {
+                    direct_action = true;
+                    i += 1;
+                }
+                "skip_hw" | "skip_sw" => {
+                    return Err(Error::InvalidMessage(format!(
+                        "bpf: `{key}` is not modelled by BpfFilter — drop to tc::builders::filter for hardware-offload control"
+                    )));
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "bpf: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+
+        let Some(fd) = fd else {
+            return Err(Error::InvalidMessage(
+                "bpf: program reference required — supply `fd <n>` or `pinned <path>`".into(),
+            ));
+        };
+
+        let mut f = Self::new(fd);
+        if let Some(n) = name {
+            f = f.name(n);
+        }
+        if let Some(c) = classid {
+            f = f.classid(c);
+        }
+        if let Some(ch) = chain {
+            f = f.chain(ch);
+        }
+        if direct_action {
+            f = f.direct_action();
+        }
+        Ok(f)
+    }
+
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
@@ -3345,5 +3478,82 @@ mod tests {
     fn route_parse_params_invalid_realm_errors() {
         let err = RouteFilter::parse_params(&["to", "not-a-number"]).unwrap_err();
         assert!(err.to_string().contains("invalid to realm"));
+    }
+
+    #[test]
+    fn bpf_parse_params_requires_program_ref() {
+        let err = BpfFilter::parse_params(&[]).unwrap_err();
+        assert!(
+            err.to_string().contains("program reference required"),
+            "got: {err}"
+        );
+        let err = BpfFilter::parse_params(&["da"]).unwrap_err();
+        assert!(err.to_string().contains("program reference required"));
+    }
+
+    #[test]
+    fn bpf_parse_params_fd() {
+        let f = BpfFilter::parse_params(&["fd", "42"]).unwrap();
+        assert_eq!(f.fd, 42);
+        assert!(!f.direct_action);
+    }
+
+    #[test]
+    fn bpf_parse_params_full_set() {
+        let f = BpfFilter::parse_params(&[
+            "fd", "10", "name", "my_prog", "classid", "1:5", "chain", "2", "da",
+        ])
+        .unwrap();
+        assert_eq!(f.fd, 10);
+        assert_eq!(f.name.as_deref(), Some("my_prog"));
+        assert_eq!(f.classid, Some(TcHandle::new(1, 5).as_raw()));
+        assert_eq!(f.chain, Some(2));
+        assert!(f.direct_action);
+    }
+
+    #[test]
+    fn bpf_parse_params_aliases() {
+        let f = BpfFilter::parse_params(&[
+            "fd",
+            "1",
+            "section",
+            "my_section",
+            "flowid",
+            "1:7",
+            "direct-action",
+        ])
+        .unwrap();
+        assert_eq!(f.name.as_deref(), Some("my_section"));
+        assert_eq!(f.classid, Some(TcHandle::new(1, 7).as_raw()));
+        assert!(f.direct_action);
+    }
+
+    #[test]
+    fn bpf_parse_params_pinned_and_fd_mutually_exclusive() {
+        // Use a path that doesn't exist so File::open fails — but the
+        // mutex check happens before that lookup.
+        let err = BpfFilter::parse_params(&["fd", "1", "pinned", "/nonexistent"]).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
+    fn bpf_parse_params_pinned_open_failure_surfaces_err() {
+        let err = BpfFilter::parse_params(&["pinned", "/nonexistent/path/to/bpf"]).unwrap_err();
+        assert!(
+            err.to_string().contains("failed to open pinned program"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn bpf_parse_params_skip_flags_rejected() {
+        let err = BpfFilter::parse_params(&["fd", "1", "skip_hw"]).unwrap_err();
+        assert!(err.to_string().contains("not modelled"), "got: {err}");
+    }
+
+    #[test]
+    fn bpf_parse_params_unknown_token_errors() {
+        let err = BpfFilter::parse_params(&["fd", "1", "nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
     }
 }
