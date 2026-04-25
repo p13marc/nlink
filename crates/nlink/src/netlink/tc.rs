@@ -377,12 +377,11 @@ impl NetemConfig {
                     let rate_str = params.get(i + 1).copied().ok_or_else(|| {
                         Error::InvalidMessage("netem: `rate` requires a value".into())
                     })?;
-                    let bps = crate::util::parse::get_rate(rate_str).map_err(|_| {
+                    cfg.rate = Some(crate::util::Rate::parse(rate_str).map_err(|_| {
                         Error::InvalidMessage(format!(
-                            "netem: invalid rate `{rate_str}` (expected tc-style rate)"
+                            "netem: invalid rate `{rate_str}` (expected tc-style rate like `100mbit`)"
                         ))
-                    })?;
-                    cfg.rate = Some(crate::util::Rate::bytes_per_sec(bps));
+                    })?);
                     i += 2;
                     // Reject the legacy positional packet_overhead /
                     // cell_size / cell_overhead extras — typed config
@@ -2258,6 +2257,266 @@ impl CakeConfig {
     /// Build the configuration.
     pub fn build(self) -> Self {
         self
+    }
+
+    /// Parse a tc-style cake params slice into a typed `CakeConfig`.
+    ///
+    /// Recognised tokens with values:
+    ///
+    /// - `bandwidth <rate>` — set the shaping limit (also: `unlimited`
+    ///   as a flag token, equivalent to `bandwidth 0`).
+    /// - `rtt <time>` — RTT estimate.
+    /// - `target <time>` — explicit CoDel target delay.
+    /// - `overhead <bytes>` — per-packet overhead (signed i32).
+    /// - `mpu <bytes>` — minimum packet unit.
+    /// - `memlimit <bytes>` — per-qdisc memory limit.
+    /// - `fwmark <hex>` — fwmark mask for tin classification.
+    ///
+    /// Flag tokens for diffserv mode: `diffserv3`, `diffserv4`,
+    /// `diffserv8`, `besteffort`, `precedence`.
+    ///
+    /// Flag tokens for flow isolation: `flowblind`, `srchost`,
+    /// `dsthost`, `hosts`, `flows`, `dual-srchost`, `dual-dsthost`,
+    /// `triple-isolate`.
+    ///
+    /// Flag tokens for ATM mode: `noatm`, `atm`, `ptm`.
+    ///
+    /// Flag tokens for ACK filter: `no-ack-filter`, `ack-filter`,
+    /// `ack-filter-aggressive`.
+    ///
+    /// Boolean flag tokens (with their negations where applicable):
+    /// `raw`, `nat` / `nonat`, `wash` / `nowash`, `ingress` /
+    /// `egress`, `split-gso` / `no-split-gso`, `autorate-ingress`,
+    /// `unlimited`.
+    ///
+    /// Stricter than the legacy `tc::options::cake::build`: unknown
+    /// tokens, missing values, and unparseable rate / time / size /
+    /// integer values all return `Error::InvalidMessage`. The legacy
+    /// parser silently skips unknown tokens, which masks typos like
+    /// `bandwidth_limit` (no effect) or `dual_srchost` with an
+    /// underscore instead of a hyphen.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let cfg = CakeConfig::parse_params(&[
+    ///     "bandwidth", "100mbit",
+    ///     "rtt", "20ms",
+    ///     "diffserv4", "triple-isolate",
+    ///     "ack-filter", "wash",
+    /// ])?;
+    /// ```
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params
+                    .get(i + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("cake: `{key}` requires a value")))
+            };
+            match key {
+                // Value tokens.
+                "bandwidth" => {
+                    let s = need_value()?;
+                    cfg.bandwidth = Some(crate::util::Rate::parse(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "cake: invalid bandwidth `{s}` (expected tc-style rate like `100mbit`)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "rtt" => {
+                    let s = need_value()?;
+                    cfg.rtt = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "cake: invalid rtt `{s}` (expected tc-style time)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "target" => {
+                    let s = need_value()?;
+                    cfg.target = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "cake: invalid target `{s}` (expected tc-style time)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "overhead" => {
+                    let s = need_value()?;
+                    cfg.overhead = Some(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "cake: invalid overhead `{s}` (expected signed integer bytes)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "mpu" => {
+                    let s = need_value()?;
+                    cfg.mpu = Some(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "cake: invalid mpu `{s}` (expected unsigned integer bytes)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "memlimit" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "cake: invalid memlimit `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    cfg.memory_limit = Some(crate::util::Bytes::new(bytes));
+                    i += 2;
+                }
+                "fwmark" => {
+                    let s = need_value()?;
+                    let trimmed = s.strip_prefix("0x").unwrap_or(s);
+                    cfg.fwmark = Some(u32::from_str_radix(trimmed, 16).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "cake: invalid fwmark `{s}` (expected hex u32)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                // Diffserv flag tokens.
+                "diffserv3" => {
+                    cfg.diffserv_mode = Some(CakeDiffserv::Diffserv3);
+                    i += 1;
+                }
+                "diffserv4" => {
+                    cfg.diffserv_mode = Some(CakeDiffserv::Diffserv4);
+                    i += 1;
+                }
+                "diffserv8" => {
+                    cfg.diffserv_mode = Some(CakeDiffserv::Diffserv8);
+                    i += 1;
+                }
+                "besteffort" => {
+                    cfg.diffserv_mode = Some(CakeDiffserv::Besteffort);
+                    i += 1;
+                }
+                "precedence" => {
+                    cfg.diffserv_mode = Some(CakeDiffserv::Precedence);
+                    i += 1;
+                }
+                // Flow-mode flag tokens.
+                "flowblind" => {
+                    cfg.flow_mode = Some(CakeFlowMode::Flowblind);
+                    i += 1;
+                }
+                "srchost" => {
+                    cfg.flow_mode = Some(CakeFlowMode::Srchost);
+                    i += 1;
+                }
+                "dsthost" => {
+                    cfg.flow_mode = Some(CakeFlowMode::Dsthost);
+                    i += 1;
+                }
+                "hosts" => {
+                    cfg.flow_mode = Some(CakeFlowMode::Hosts);
+                    i += 1;
+                }
+                "flows" => {
+                    cfg.flow_mode = Some(CakeFlowMode::Flows);
+                    i += 1;
+                }
+                "dual-srchost" => {
+                    cfg.flow_mode = Some(CakeFlowMode::DualSrchost);
+                    i += 1;
+                }
+                "dual-dsthost" => {
+                    cfg.flow_mode = Some(CakeFlowMode::DualDsthost);
+                    i += 1;
+                }
+                "triple-isolate" => {
+                    cfg.flow_mode = Some(CakeFlowMode::Triple);
+                    i += 1;
+                }
+                // ATM mode flag tokens.
+                "noatm" => {
+                    cfg.atm_mode = Some(CakeAtmMode::None);
+                    i += 1;
+                }
+                "atm" => {
+                    cfg.atm_mode = Some(CakeAtmMode::Atm);
+                    i += 1;
+                }
+                "ptm" => {
+                    cfg.atm_mode = Some(CakeAtmMode::Ptm);
+                    i += 1;
+                }
+                // ACK filter flag tokens.
+                "no-ack-filter" => {
+                    cfg.ack_filter = Some(CakeAckFilter::Disabled);
+                    i += 1;
+                }
+                "ack-filter" => {
+                    cfg.ack_filter = Some(CakeAckFilter::Filter);
+                    i += 1;
+                }
+                "ack-filter-aggressive" => {
+                    cfg.ack_filter = Some(CakeAckFilter::Aggressive);
+                    i += 1;
+                }
+                // Boolean flag tokens.
+                "raw" => {
+                    cfg.raw = true;
+                    i += 1;
+                }
+                "nat" => {
+                    cfg.nat = true;
+                    i += 1;
+                }
+                "nonat" => {
+                    cfg.nat = false;
+                    i += 1;
+                }
+                "wash" => {
+                    cfg.wash = true;
+                    i += 1;
+                }
+                "nowash" => {
+                    cfg.wash = false;
+                    i += 1;
+                }
+                "ingress" => {
+                    cfg.ingress = true;
+                    i += 1;
+                }
+                "egress" => {
+                    cfg.ingress = false;
+                    i += 1;
+                }
+                "split-gso" => {
+                    cfg.split_gso = true;
+                    i += 1;
+                }
+                "no-split-gso" => {
+                    cfg.split_gso = false;
+                    i += 1;
+                }
+                "autorate-ingress" => {
+                    cfg.autorate = true;
+                    i += 1;
+                }
+                "unlimited" => {
+                    cfg.bandwidth = Some(crate::util::Rate::ZERO);
+                    i += 1;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "cake: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
     }
 }
 
@@ -4961,7 +5220,15 @@ mod tests {
     #[test]
     fn netem_parse_params_rate_no_extras() {
         let cfg = NetemConfig::parse_params(&["rate", "100mbit"]).unwrap();
-        assert!(cfg.rate.is_some());
+        // 100mbit = 12_500_000 bytes/sec. The previous implementation
+        // mis-routed get_rate (which returns bits) through
+        // Rate::bytes_per_sec, ending up at 100_000_000 (= 800mbit).
+        // Switching to Rate::parse fixed the units bug.
+        assert_eq!(
+            cfg.rate.map(|r| r.as_bytes_per_sec()),
+            Some(12_500_000),
+            "100mbit should round-trip to 12.5 MB/sec"
+        );
     }
 
     #[test]
@@ -5019,5 +5286,179 @@ mod tests {
     fn netem_parse_params_invalid_percent_errors() {
         let err = NetemConfig::parse_params(&["loss", "lots"]).unwrap_err();
         assert!(err.to_string().contains("invalid loss"), "got: {err}");
+    }
+
+    #[test]
+    fn cake_parse_params_empty_yields_default() {
+        let cfg = CakeConfig::parse_params(&[]).unwrap();
+        assert!(cfg.bandwidth.is_none());
+        assert!(cfg.rtt.is_none());
+        assert!(cfg.diffserv_mode.is_none());
+        assert!(cfg.flow_mode.is_none());
+        assert!(!cfg.nat);
+        assert!(!cfg.wash);
+    }
+
+    #[test]
+    fn cake_parse_params_bandwidth_and_rtt() {
+        let cfg = CakeConfig::parse_params(&["bandwidth", "100mbit", "rtt", "20ms"]).unwrap();
+        assert_eq!(
+            cfg.bandwidth.map(|r| r.as_bytes_per_sec()),
+            Some(12_500_000)
+        );
+        assert_eq!(cfg.rtt, Some(Duration::from_millis(20)));
+    }
+
+    #[test]
+    fn cake_parse_params_unlimited_flag() {
+        let cfg = CakeConfig::parse_params(&["unlimited"]).unwrap();
+        assert_eq!(cfg.bandwidth, Some(crate::util::Rate::ZERO));
+    }
+
+    #[test]
+    fn cake_parse_params_diffserv_modes() {
+        for (token, expected) in [
+            ("diffserv3", CakeDiffserv::Diffserv3),
+            ("diffserv4", CakeDiffserv::Diffserv4),
+            ("diffserv8", CakeDiffserv::Diffserv8),
+            ("besteffort", CakeDiffserv::Besteffort),
+            ("precedence", CakeDiffserv::Precedence),
+        ] {
+            let cfg = CakeConfig::parse_params(&[token]).unwrap();
+            assert_eq!(cfg.diffserv_mode, Some(expected), "diffserv {token}");
+        }
+    }
+
+    #[test]
+    fn cake_parse_params_flow_modes() {
+        for (token, expected) in [
+            ("flowblind", CakeFlowMode::Flowblind),
+            ("srchost", CakeFlowMode::Srchost),
+            ("dsthost", CakeFlowMode::Dsthost),
+            ("hosts", CakeFlowMode::Hosts),
+            ("flows", CakeFlowMode::Flows),
+            ("dual-srchost", CakeFlowMode::DualSrchost),
+            ("dual-dsthost", CakeFlowMode::DualDsthost),
+            ("triple-isolate", CakeFlowMode::Triple),
+        ] {
+            let cfg = CakeConfig::parse_params(&[token]).unwrap();
+            assert_eq!(cfg.flow_mode, Some(expected), "flow {token}");
+        }
+    }
+
+    #[test]
+    fn cake_parse_params_atm_modes() {
+        for (token, expected) in [
+            ("noatm", CakeAtmMode::None),
+            ("atm", CakeAtmMode::Atm),
+            ("ptm", CakeAtmMode::Ptm),
+        ] {
+            let cfg = CakeConfig::parse_params(&[token]).unwrap();
+            assert_eq!(cfg.atm_mode, Some(expected), "atm {token}");
+        }
+    }
+
+    #[test]
+    fn cake_parse_params_ack_filter() {
+        let cfg = CakeConfig::parse_params(&["ack-filter"]).unwrap();
+        assert_eq!(cfg.ack_filter, Some(CakeAckFilter::Filter));
+        let cfg = CakeConfig::parse_params(&["ack-filter-aggressive"]).unwrap();
+        assert_eq!(cfg.ack_filter, Some(CakeAckFilter::Aggressive));
+        let cfg = CakeConfig::parse_params(&["no-ack-filter"]).unwrap();
+        assert_eq!(cfg.ack_filter, Some(CakeAckFilter::Disabled));
+    }
+
+    #[test]
+    fn cake_parse_params_boolean_flags_with_negations() {
+        let cfg =
+            CakeConfig::parse_params(&["nat", "wash", "ingress", "split-gso", "raw"]).unwrap();
+        assert!(cfg.nat);
+        assert!(cfg.wash);
+        assert!(cfg.ingress);
+        assert!(cfg.split_gso);
+        assert!(cfg.raw);
+
+        // Negations override.
+        let cfg =
+            CakeConfig::parse_params(&["nat", "nonat", "wash", "nowash", "ingress", "egress"])
+                .unwrap();
+        assert!(!cfg.nat);
+        assert!(!cfg.wash);
+        assert!(!cfg.ingress);
+    }
+
+    #[test]
+    fn cake_parse_params_overhead_signed() {
+        let cfg = CakeConfig::parse_params(&["overhead", "-4"]).unwrap();
+        assert_eq!(cfg.overhead, Some(-4));
+        let cfg = CakeConfig::parse_params(&["overhead", "38"]).unwrap();
+        assert_eq!(cfg.overhead, Some(38));
+    }
+
+    #[test]
+    fn cake_parse_params_memlimit_size() {
+        let cfg = CakeConfig::parse_params(&["memlimit", "32k"]).unwrap();
+        assert_eq!(cfg.memory_limit.map(|b| b.as_u64()), Some(32 * 1024));
+    }
+
+    #[test]
+    fn cake_parse_params_fwmark_hex() {
+        let cfg = CakeConfig::parse_params(&["fwmark", "0xff"]).unwrap();
+        assert_eq!(cfg.fwmark, Some(0xff));
+        // Bare hex without 0x prefix.
+        let cfg = CakeConfig::parse_params(&["fwmark", "ff"]).unwrap();
+        assert_eq!(cfg.fwmark, Some(0xff));
+    }
+
+    #[test]
+    fn cake_parse_params_realistic_combo() {
+        // A typical bufferbloat-mitigation config.
+        let cfg = CakeConfig::parse_params(&[
+            "bandwidth",
+            "100mbit",
+            "rtt",
+            "20ms",
+            "diffserv4",
+            "triple-isolate",
+            "ack-filter",
+            "nat",
+            "wash",
+        ])
+        .unwrap();
+        assert!(cfg.bandwidth.is_some());
+        assert_eq!(cfg.rtt, Some(Duration::from_millis(20)));
+        assert_eq!(cfg.diffserv_mode, Some(CakeDiffserv::Diffserv4));
+        assert_eq!(cfg.flow_mode, Some(CakeFlowMode::Triple));
+        assert_eq!(cfg.ack_filter, Some(CakeAckFilter::Filter));
+        assert!(cfg.nat);
+        assert!(cfg.wash);
+    }
+
+    #[test]
+    fn cake_parse_params_unknown_token_errors() {
+        let err = CakeConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+        // Common typo: dual_srchost vs dual-srchost. Legacy parser
+        // silently ignored — typed parser flags it.
+        let err = CakeConfig::parse_params(&["dual_srchost"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn cake_parse_params_missing_value_errors() {
+        let err = CakeConfig::parse_params(&["bandwidth"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"));
+        let err = CakeConfig::parse_params(&["rtt"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"));
+    }
+
+    #[test]
+    fn cake_parse_params_invalid_value_errors() {
+        let err = CakeConfig::parse_params(&["bandwidth", "fast"]).unwrap_err();
+        assert!(err.to_string().contains("invalid bandwidth"));
+        let err = CakeConfig::parse_params(&["overhead", "lots"]).unwrap_err();
+        assert!(err.to_string().contains("invalid overhead"));
+        let err = CakeConfig::parse_params(&["fwmark", "zzzz"]).unwrap_err();
+        assert!(err.to_string().contains("invalid fwmark"));
     }
 }

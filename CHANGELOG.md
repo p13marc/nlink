@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `CakeConfig::parse_params` (typed-units rollout, slice 4)
+
+- New method `CakeConfig::parse_params(&[&str]) -> Result<Self>`
+  parses a tc-style cake params slice directly into the typed
+  config. Recognises every token the typed config can model:
+  `bandwidth` / `unlimited`, `rtt`, `target`, `overhead` (signed
+  i32), `mpu`, `memlimit`, `fwmark` (hex), the 5 diffserv flag
+  tokens (`diffserv3`/`4`/`8`, `besteffort`, `precedence`), the 8
+  flow-isolation tokens (`flowblind`, `srchost`, `dsthost`,
+  `hosts`, `flows`, `dual-srchost`, `dual-dsthost`,
+  `triple-isolate`), the 3 ATM tokens (`noatm`, `atm`, `ptm`), the
+  3 ACK-filter tokens (`ack-filter`, `ack-filter-aggressive`,
+  `no-ack-filter`), and the boolean flag pairs (`raw`,
+  `nat`/`nonat`, `wash`/`nowash`, `ingress`/`egress`,
+  `split-gso`/`no-split-gso`, `autorate-ingress`).
+- Stricter than `tc::options::cake::build`: unknown tokens (e.g.
+  `dual_srchost` typo'd with underscore instead of hyphen),
+  missing values, and unparseable rate / time / size / integer
+  values all return `Error::InvalidMessage` rather than being
+  silently skipped.
+- 15 new unit tests cover empty / bandwidth+rtt / unlimited / each
+  diffserv mode / each flow mode / each atm mode / each ack-filter
+  variant / boolean flags with negations / signed overhead /
+  memlimit size / fwmark hex (with and without `0x` prefix) /
+  realistic combo / unknown-token (including the underscore typo) /
+  missing values / invalid values.
+
+### Fixed — units bug in `NetemConfig::parse_params` `rate` token
+
+- `NetemConfig::parse_params(["rate", "100mbit"])` was returning a
+  `Rate` of 100 MB/sec (= 800 Mbit) instead of 12.5 MB/sec
+  (= 100 Mbit) because it routed the legacy `get_rate` (which
+  returns bits) through `Rate::bytes_per_sec`. Caught while
+  writing `CakeConfig::parse_params` against the same pattern.
+  Both now use `Rate::parse` (the typed parser that handles the
+  unit conversion correctly), and the netem test asserts the exact
+  bytes/sec round-trip so future regressions trip the test.
+
 ### Added — `FlowerFilter::parse_params` (typed-units rollout, slice 3)
 
 - New method `FlowerFilter::parse_params(&[&str]) -> Result<Self>`
