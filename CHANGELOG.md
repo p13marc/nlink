@@ -4,6 +4,87 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `XfrmSaBuilder` + SA CRUD on `Connection<Xfrm>` (Plan 141 PR A, Plan 142 Phase 2)
+
+`Connection<Xfrm>` was dump-only — `get_security_associations`
+and `get_security_policies`, nothing else. PR A adds the typed
+write path for Security Associations using the same builder
+pattern Plan 137 PR A established for `Connection<Netfilter>`.
+
+New public types in `nlink::netlink::xfrm`:
+
+- `XfrmSaBuilder { src, dst, spi, proto, mode, reqid, ... }` —
+  `must_use` builder with fluent setters.
+- `XfrmAlgoAuth { name, key }`, `XfrmAlgoEncr { name, key }`,
+  `XfrmAlgoAead { name, key, icv_truncbits }` — algorithm specs.
+- `XfrmUsersaId` (24 bytes) and `XfrmUsersaFlush` (8 bytes) —
+  zero-copy structs for `XFRM_MSG_DELSA` / `FLUSHSA` bodies.
+
+Builder API (chained):
+- `XfrmSaBuilder::new(src, dst, spi, proto)` — entry point;
+  defaults to transport mode, reqid 0, replay window 32 (kernel
+  default of 0 disables replay protection — surprising footgun;
+  builder picks the iproute2-default 32 packets).
+- `.mode(XfrmMode)`, `.reqid(u32)`, `.replay_window(u8)`.
+- `.auth(name, key)` and `.auth_hmac_sha256(key)` for auth algos.
+- `.encr(name, key)` and `.encr_aes_cbc(key)` for encrypt algos.
+- `.aead(name, key, icv_truncbits)` and `.aead_aes_gcm(key, icv)`
+  for AEAD (combined auth+encrypt with ICV).
+- `.nat_t_udp_encap(sport, dport)` — picks
+  `UDP_ENCAP_ESPINUDP` (2) for dport=4500, `_NON_IKE` (1)
+  otherwise.
+- `.mark(mark, mask)` and `.if_id(id)` for filtering attributes.
+
+New `Connection<Xfrm>` methods:
+- `add_sa(sa)` — sends `XFRM_MSG_NEWSA` with
+  `NLM_F_CREATE | NLM_F_EXCL`. Returns `EEXIST` if SA tuple
+  already exists.
+- `del_sa(src, dst, spi, proto)` — sends `XFRM_MSG_DELSA` with
+  `XfrmUsersaId` body + optional `XFRMA_SRCADDR` attribute.
+- `flush_sa()` — sends `XFRM_MSG_FLUSHSA` with proto=0
+  (IPSEC_PROTO_ANY → all protocols).
+
+Wire-format encoding helpers:
+- `encode_xfrm_algo(name, key)` — packs the kernel `xfrm_algo`
+  layout: 64-byte zero-padded name + 4-byte key_len_bits + key.
+- `encode_xfrm_algo_aead(name, key, icv_truncbits)` — adds the
+  4-byte icv_truncbits field between key_len and key.
+- `family_for_pair(src, dst)` — returns `AF_INET`/`AF_INET6` (or
+  0 for mismatched families; kernel rejects).
+- `ip_to_xfrm_addr(IpAddr)` — wraps the existing
+  `XfrmAddress::from_v4` / `from_v6` constructors.
+
+Eight new unit tests round-trip builder output through the
+existing `parse_sa_msg` (extracted from the impl as an associated
+function so tests can call it without a live socket):
+- `xfrm_sa_v4_esp_separate_auth_encr_roundtrips_through_parse_sa`
+- `xfrm_sa_v4_esp_aead_aes_gcm_roundtrips`
+- `xfrm_sa_v6_separate_auth_encr_roundtrips`
+- `xfrm_sa_nat_t_udp_encap_roundtrips`
+- `xfrm_del_sa_emits_correct_tuple` (24-byte XfrmUsersaId
+  verified field-by-field)
+- `xfrm_flush_sa_proto_zero_means_all`
+- `xfrm_sa_default_replay_window_is_32` (locks in the iproute2
+  default to prevent regressions to the kernel's 0 default)
+- Plus updated `zerocopy_sizes` with the new struct sizes.
+
+656 lib tests total (was 649). Workspace clippy with
+--all-features --deny warnings is clean.
+
+**Deferred to a follow-up slice** (Plan §9 PR A DoD):
+- `update_sa` (NLM_F_REPLACE wire shape) — `NLM_F_REPLACE`
+  constant is in place but unused, gated with
+  `#[allow(dead_code)]`.
+- `flush_sa_proto(proto)` — variant of flush_sa that flushes
+  only one protocol.
+- `get_sa(src, dst, spi, proto)` — single-result equivalent of
+  `get_security_associations`; needs a parser refactor for
+  single-message reads.
+
+These three slot into a quick follow-up commit. Plan 141 PR B
+(SP CRUD) is the next major slice; PR C is the recipe + example
+promotion.
+
 ### Added — `BasicFilter` ematch tree typed support (Plan 133 PR C, Plan 142 Phase 1)
 
 Closes the filter side at **9 of 9 typed-first**. The `cls_basic`

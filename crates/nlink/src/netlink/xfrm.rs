@@ -30,6 +30,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use super::{
+    builder::MessageBuilder,
     connection::Connection,
     error::Result,
     protocol::{ProtocolState, Xfrm},
@@ -40,17 +41,26 @@ use super::{
 const NLMSG_DONE: u16 = 3;
 const NLMSG_ERROR: u16 = 2;
 const NLM_F_REQUEST: u16 = 0x01;
+const NLM_F_ACK: u16 = 0x04;
 const NLM_F_DUMP: u16 = 0x300;
+const NLM_F_CREATE: u16 = 0x400;
+const NLM_F_EXCL: u16 = 0x200;
+#[allow(dead_code)] // for the upcoming update_sa slice
+const NLM_F_REPLACE: u16 = 0x100;
 
 // XFRM message types (from linux/xfrm.h)
-const XFRM_MSG_GETSA: u16 = 0x12;
+const XFRM_MSG_NEWSA: u16 = 16;
+const XFRM_MSG_DELSA: u16 = 17;
+const XFRM_MSG_GETSA: u16 = 18;
 const XFRM_MSG_GETPOLICY: u16 = 0x15;
+const XFRM_MSG_FLUSHSA: u16 = 25;
 
 // XFRM attribute types
 const XFRMA_ALG_AUTH: u16 = 1;
 const XFRMA_ALG_CRYPT: u16 = 2;
 const XFRMA_ALG_COMP: u16 = 3;
 const XFRMA_ENCAP: u16 = 4;
+const XFRMA_SRCADDR: u16 = 9;
 const XFRMA_ALG_AEAD: u16 = 18;
 const XFRMA_ALG_AUTH_TRUNC: u16 = 20;
 const XFRMA_MARK: u16 = 21;
@@ -134,6 +144,28 @@ pub struct XfrmId {
     pub proto: u8,
     /// Padding.
     pub _pad: [u8; 3],
+}
+
+/// `xfrm_usersa_id` — body of `XFRM_MSG_DELSA` / `GETSA` requests.
+/// 24 bytes (16 daddr + 4 spi + 2 family + 1 proto + 1 align).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct XfrmUsersaId {
+    pub daddr: XfrmAddress,
+    pub spi: u32,
+    pub family: u16,
+    pub proto: u8,
+    pub _pad: u8,
+}
+
+/// `xfrm_usersa_flush` — body of `XFRM_MSG_FLUSHSA`. Just the
+/// `proto` byte (0 = IPSEC_PROTO_ANY → flush everything); padded
+/// to 8 bytes for the kernel's `sizeof`-rounded read.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct XfrmUsersaFlush {
+    pub proto: u8,
+    pub _pad: [u8; 7],
 }
 
 /// XFRM selector (traffic selector for policies/SAs).
@@ -393,6 +425,16 @@ impl XfrmMode {
             other => Self::Other(other),
         }
     }
+
+    /// Convert back to the wire-format `u8`.
+    pub fn number(&self) -> u8 {
+        match self {
+            Self::Transport => XFRM_MODE_TRANSPORT,
+            Self::Tunnel => XFRM_MODE_TUNNEL,
+            Self::Beet => XFRM_MODE_BEET,
+            Self::Other(n) => *n,
+        }
+    }
 }
 
 /// Policy direction.
@@ -547,6 +589,340 @@ pub struct SecurityPolicy {
     pub if_id: Option<u32>,
 }
 
+// ============================================================================
+// Write-path builder (Plan 141 PR A, Plan 142 Phase 2)
+// ============================================================================
+
+/// Authentication algorithm spec for an [`XfrmSaBuilder`].
+///
+/// `name` is a kernel algorithm string like `"hmac(sha256)"`; the
+/// kernel's crypto subsystem decides which combinations are valid.
+/// `key` is the raw key bytes; `key_len_bits` is set automatically
+/// from `key.len() * 8` by the helper constructors.
+#[derive(Debug, Clone)]
+pub struct XfrmAlgoAuth {
+    pub name: String,
+    pub key: Vec<u8>,
+}
+
+/// Encryption algorithm spec.
+#[derive(Debug, Clone)]
+pub struct XfrmAlgoEncr {
+    pub name: String,
+    pub key: Vec<u8>,
+}
+
+/// AEAD algorithm spec (combined auth + encrypt with ICV).
+///
+/// `icv_truncbits` is the ICV length in bits (e.g. 128 for
+/// AES-GCM-128).
+#[derive(Debug, Clone)]
+pub struct XfrmAlgoAead {
+    pub name: String,
+    pub key: Vec<u8>,
+    pub icv_truncbits: u32,
+}
+
+/// Builder for a Security Association write request.
+///
+/// Construct via [`XfrmSaBuilder::new`], chain the relevant setters,
+/// and pass to [`Connection::add_sa`]. The kernel validates the
+/// combination of `proto` / `mode` / algorithm specs; mismatches
+/// surface as `EINVAL` from `add_sa`.
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() -> nlink::Result<()> {
+/// use nlink::netlink::{Connection, Xfrm};
+/// use nlink::netlink::xfrm::{XfrmSaBuilder, XfrmMode, IpsecProtocol};
+///
+/// let conn = Connection::<Xfrm>::new()?;
+/// let sa = XfrmSaBuilder::new(
+///     "10.0.0.1".parse().unwrap(),
+///     "10.0.0.2".parse().unwrap(),
+///     0xdead_beef,
+///     IpsecProtocol::Esp,
+/// )
+/// .mode(XfrmMode::Tunnel)
+/// .reqid(42)
+/// .auth_hmac_sha256(&[0u8; 32])
+/// .encr_aes_cbc(&[0u8; 16]);
+/// conn.add_sa(sa).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless submitted to the connection"]
+pub struct XfrmSaBuilder {
+    src: IpAddr,
+    dst: IpAddr,
+    spi: u32,
+    proto: IpsecProtocol,
+    mode: XfrmMode,
+    reqid: u32,
+    flags: u8,
+    replay_window: u8,
+    auth: Option<XfrmAlgoAuth>,
+    encr: Option<XfrmAlgoEncr>,
+    aead: Option<XfrmAlgoAead>,
+    encap: Option<XfrmEncapTmpl>,
+    mark: Option<(u32, u32)>,
+    if_id: Option<u32>,
+}
+
+impl XfrmSaBuilder {
+    /// Create a new SA builder for the given (src, dst, spi, proto)
+    /// tuple. Defaults to transport mode, reqid 0, replay window 32.
+    pub fn new(src: IpAddr, dst: IpAddr, spi: u32, proto: IpsecProtocol) -> Self {
+        Self {
+            src,
+            dst,
+            spi,
+            proto,
+            mode: XfrmMode::Transport,
+            reqid: 0,
+            flags: 0,
+            // Default replay window — kernel default is 0 (replay
+            // protection disabled), which surprises users; pick 32
+            // packets like iproute2 does for `ip xfrm`.
+            replay_window: 32,
+            auth: None,
+            encr: None,
+            aead: None,
+            encap: None,
+            mark: None,
+            if_id: None,
+        }
+    }
+
+    pub fn mode(mut self, mode: XfrmMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn reqid(mut self, id: u32) -> Self {
+        self.reqid = id;
+        self
+    }
+
+    pub fn replay_window(mut self, w: u8) -> Self {
+        self.replay_window = w;
+        self
+    }
+
+    /// Set the auth algorithm by name + raw key bytes. Most users
+    /// want one of the named helpers ([`Self::auth_hmac_sha256`]).
+    pub fn auth(mut self, name: impl Into<String>, key: &[u8]) -> Self {
+        self.auth = Some(XfrmAlgoAuth {
+            name: name.into(),
+            key: key.to_vec(),
+        });
+        self
+    }
+
+    /// Convenience: HMAC-SHA256. Key must be 32 bytes.
+    pub fn auth_hmac_sha256(self, key: &[u8]) -> Self {
+        self.auth("hmac(sha256)", key)
+    }
+
+    /// Set the encryption algorithm by name + raw key bytes.
+    pub fn encr(mut self, name: impl Into<String>, key: &[u8]) -> Self {
+        self.encr = Some(XfrmAlgoEncr {
+            name: name.into(),
+            key: key.to_vec(),
+        });
+        self
+    }
+
+    /// Convenience: AES-CBC. Key length determines variant
+    /// (16 → AES-128, 24 → AES-192, 32 → AES-256).
+    pub fn encr_aes_cbc(self, key: &[u8]) -> Self {
+        self.encr("cbc(aes)", key)
+    }
+
+    /// Set the AEAD algorithm. Pass `icv_truncbits` in BITS
+    /// (e.g. 128 for the standard AES-GCM-128 ICV).
+    pub fn aead(mut self, name: impl Into<String>, key: &[u8], icv_truncbits: u32) -> Self {
+        self.aead = Some(XfrmAlgoAead {
+            name: name.into(),
+            key: key.to_vec(),
+            icv_truncbits,
+        });
+        self
+    }
+
+    /// Convenience: AES-GCM (RFC 4106). Key includes the 4-byte
+    /// salt suffix per RFC; pass `icv_truncbits` 128 for the
+    /// standard ICV length.
+    pub fn aead_aes_gcm(self, key: &[u8], icv_truncbits: u32) -> Self {
+        self.aead("rfc4106(gcm(aes))", key, icv_truncbits)
+    }
+
+    /// Configure NAT-T UDP encapsulation. Picks the encap type
+    /// based on `dport` (4500 → IKE-compatible variant, anything
+    /// else → non-IKE).
+    pub fn nat_t_udp_encap(mut self, sport: u16, dport: u16) -> Self {
+        // UDP_ENCAP_ESPINUDP_NON_IKE = 1, UDP_ENCAP_ESPINUDP = 2
+        // (from include/uapi/linux/udp.h)
+        let encap_type: u16 = if dport == 4500 { 2 } else { 1 };
+        self.encap = Some(XfrmEncapTmpl {
+            encap_type,
+            encap_sport: sport.to_be(),
+            encap_dport: dport.to_be(),
+            _pad: 0,
+            encap_oa: XfrmAddress::default(),
+        });
+        self
+    }
+
+    /// Filter which policies/SAs apply by skb mark.
+    pub fn mark(mut self, mark: u32, mask: u32) -> Self {
+        self.mark = Some((mark, mask));
+        self
+    }
+
+    /// XFRM interface ID (XFRMA_IF_ID).
+    pub fn if_id(mut self, id: u32) -> Self {
+        self.if_id = Some(id);
+        self
+    }
+
+    /// Address family inferred from `src`/`dst` (must match).
+    fn family(&self) -> u16 {
+        family_for_pair(self.src, self.dst)
+    }
+
+    /// Populate the request's `xfrm_usersa_info` header bytes.
+    fn build_usersa_info(&self) -> XfrmUsersaInfo {
+        let saddr = ip_to_xfrm_addr(self.src);
+        let daddr = ip_to_xfrm_addr(self.dst);
+        let family = self.family();
+        XfrmUsersaInfo {
+            sel: XfrmSelector {
+                family,
+                ..Default::default()
+            },
+            id: XfrmId {
+                daddr,
+                spi: self.spi.to_be(),
+                proto: self.proto.number(),
+                _pad: [0; 3],
+            },
+            saddr,
+            lft: XfrmLifetimeCfg {
+                soft_byte_limit: u64::MAX,
+                hard_byte_limit: u64::MAX,
+                soft_packet_limit: u64::MAX,
+                hard_packet_limit: u64::MAX,
+                soft_add_expires_seconds: 0,
+                hard_add_expires_seconds: 0,
+                soft_use_expires_seconds: 0,
+                hard_use_expires_seconds: 0,
+            },
+            curlft: XfrmLifetimeCur::default(),
+            stats: XfrmStats::default(),
+            seq: 0,
+            reqid: self.reqid,
+            family,
+            mode: self.mode.number(),
+            replay_window: self.replay_window,
+            flags: self.flags,
+            _pad: [0; 7],
+        }
+    }
+
+    /// Append the SA to a [`MessageBuilder`]: header bytes followed
+    /// by algorithm + encap + mark + if_id attributes.
+    fn write_into(&self, b: &mut MessageBuilder) {
+        let info = self.build_usersa_info();
+        b.append_bytes(info.as_bytes());
+
+        if let Some(a) = &self.auth {
+            let bytes = encode_xfrm_algo(&a.name, &a.key);
+            b.append_attr(XFRMA_ALG_AUTH, &bytes);
+        }
+        if let Some(e) = &self.encr {
+            let bytes = encode_xfrm_algo(&e.name, &e.key);
+            b.append_attr(XFRMA_ALG_CRYPT, &bytes);
+        }
+        if let Some(a) = &self.aead {
+            let bytes = encode_xfrm_algo_aead(&a.name, &a.key, a.icv_truncbits);
+            b.append_attr(XFRMA_ALG_AEAD, &bytes);
+        }
+        if let Some(encap) = &self.encap {
+            b.append_attr(XFRMA_ENCAP, encap.as_bytes());
+        }
+        if let Some((mark, mask)) = self.mark {
+            let m = XfrmMark { v: mark, m: mask };
+            b.append_attr(XFRMA_MARK, m.as_bytes());
+        }
+        if let Some(id) = self.if_id {
+            b.append_attr_u32(XFRMA_IF_ID, id);
+        }
+    }
+}
+
+/// Encode the `xfrm_algo` wire layout: 64-byte zero-padded name
+/// + 4-byte key_len (BITS) + key bytes.
+fn encode_xfrm_algo(name: &str, key: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(68 + key.len());
+    let mut name_field = [0u8; 64];
+    let n = name.len().min(63);
+    name_field[..n].copy_from_slice(&name.as_bytes()[..n]);
+    buf.extend_from_slice(&name_field);
+    let key_len_bits = (key.len() * 8) as u32;
+    buf.extend_from_slice(&key_len_bits.to_le_bytes());
+    buf.extend_from_slice(key);
+    buf
+}
+
+/// Encode `xfrm_algo_aead`: 64-byte name + 4-byte key_len (BITS)
+/// + 4-byte icv_len (BITS) + key bytes.
+fn encode_xfrm_algo_aead(name: &str, key: &[u8], icv_truncbits: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(72 + key.len());
+    let mut name_field = [0u8; 64];
+    let n = name.len().min(63);
+    name_field[..n].copy_from_slice(&name.as_bytes()[..n]);
+    buf.extend_from_slice(&name_field);
+    let key_len_bits = (key.len() * 8) as u32;
+    buf.extend_from_slice(&key_len_bits.to_le_bytes());
+    buf.extend_from_slice(&icv_truncbits.to_le_bytes());
+    buf.extend_from_slice(key);
+    buf
+}
+
+/// Convert a Rust `IpAddr` into the kernel's 16-byte
+/// `xfrm_address_t` (IPv4 in the first 4 bytes, network order).
+fn ip_to_xfrm_addr(ip: IpAddr) -> XfrmAddress {
+    match ip {
+        IpAddr::V4(v4) => XfrmAddress::from_v4(v4),
+        IpAddr::V6(v6) => XfrmAddress::from_v6(v6),
+    }
+}
+
+/// Address family for a `(src, dst)` pair. Mismatched families
+/// return 0 — the kernel will reject the request with EINVAL.
+fn family_for_pair(src: IpAddr, dst: IpAddr) -> u16 {
+    match (src, dst) {
+        (IpAddr::V4(_), IpAddr::V4(_)) => libc::AF_INET as u16,
+        (IpAddr::V6(_), IpAddr::V6(_)) => libc::AF_INET6 as u16,
+        _ => 0,
+    }
+}
+
+impl XfrmUsersaId {
+    fn as_bytes(&self) -> &[u8] {
+        <Self as IntoBytes>::as_bytes(self)
+    }
+}
+
+impl XfrmUsersaFlush {
+    fn as_bytes(&self) -> &[u8] {
+        <Self as IntoBytes>::as_bytes(self)
+    }
+}
+
 impl Connection<Xfrm> {
     /// Create a new XFRM connection.
     ///
@@ -560,6 +936,77 @@ impl Connection<Xfrm> {
     pub fn new() -> Result<Self> {
         let socket = NetlinkSocket::new(Xfrm::PROTOCOL)?;
         Ok(Self::from_parts(socket, Xfrm))
+    }
+
+    /// Create a Security Association.
+    ///
+    /// Sends `XFRM_MSG_NEWSA` with `NLM_F_CREATE | NLM_F_EXCL`.
+    /// Returns `Err` (`EEXIST`) if an SA with the same
+    /// (dst, spi, proto) already exists; use [`Self::update_sa`]
+    /// (lands in a follow-up slice) to replace in place.
+    ///
+    /// Common failure modes:
+    /// - `EINVAL` — algorithm/key length mismatch, or src/dst
+    ///   address-family mismatch.
+    /// - `EEXIST` — SA tuple already present.
+    /// - `EPROTONOSUPPORT` — kernel lacks the requested algorithm.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_sa"))]
+    pub async fn add_sa(&self, sa: XfrmSaBuilder) -> Result<()> {
+        let mut b = MessageBuilder::new(
+            XFRM_MSG_NEWSA,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        sa.write_into(&mut b);
+        self.send_ack(b).await
+    }
+
+    /// Delete a Security Association identified by its tuple.
+    ///
+    /// Sends `XFRM_MSG_DELSA`. The kernel matches on
+    /// (`daddr`, `spi`, `proto`, `family`); the source address is
+    /// not part of the lookup key.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_sa"))]
+    pub async fn del_sa(
+        &self,
+        src: IpAddr,
+        dst: IpAddr,
+        spi: u32,
+        proto: IpsecProtocol,
+    ) -> Result<()> {
+        let mut b = MessageBuilder::new(XFRM_MSG_DELSA, NLM_F_REQUEST | NLM_F_ACK);
+
+        // xfrm_usersa_id { daddr, spi, family, proto, _pad }
+        let id = XfrmUsersaId {
+            daddr: ip_to_xfrm_addr(dst),
+            spi: spi.to_be(),
+            family: family_for_pair(src, dst),
+            proto: proto.number(),
+            _pad: 0,
+        };
+        b.append_bytes(id.as_bytes());
+
+        // Optional XFRMA_SRCADDR — kernel doesn't require it for
+        // the lookup but iproute2 includes it for clarity.
+        let saddr = ip_to_xfrm_addr(src);
+        b.append_attr(XFRMA_SRCADDR, &saddr.bytes);
+
+        self.send_ack(b).await
+    }
+
+    /// Flush every Security Association in the kernel's database.
+    ///
+    /// Sends `XFRM_MSG_FLUSHSA` with `proto = 0` (which the kernel
+    /// reads as IPSEC_PROTO_ANY → all protocols).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_sa"))]
+    pub async fn flush_sa(&self) -> Result<()> {
+        self.flush_sa_inner(0).await
+    }
+
+    async fn flush_sa_inner(&self, proto: u8) -> Result<()> {
+        let mut b = MessageBuilder::new(XFRM_MSG_FLUSHSA, NLM_F_REQUEST | NLM_F_ACK);
+        let body = XfrmUsersaFlush { proto, _pad: [0; 7] };
+        b.append_bytes(body.as_bytes());
+        self.send_ack(b).await
     }
 
     /// Get all Security Associations.
@@ -748,6 +1195,15 @@ impl Connection<Xfrm> {
 
     /// Parse a Security Association from a netlink message.
     fn parse_sa(&self, data: &[u8]) -> Option<SecurityAssociation> {
+        Self::parse_sa_msg(data)
+    }
+
+    /// Parse a Security Association from a netlink message buffer
+    /// (`nlmsghdr` + `xfrm_usersa_info` + attributes). Associated
+    /// function (no `&self`) so unit tests can call it via
+    /// `Connection::<Xfrm>::parse_sa_msg(...)` without needing a
+    /// live socket.
+    fn parse_sa_msg(data: &[u8]) -> Option<SecurityAssociation> {
         if data.len() < NLMSG_HDRLEN + std::mem::size_of::<XfrmUsersaInfo>() {
             return None;
         }
@@ -1032,5 +1488,201 @@ mod tests {
         assert_eq!(std::mem::size_of::<XfrmAddress>(), 16);
         assert_eq!(std::mem::size_of::<XfrmId>(), 24);
         assert_eq!(std::mem::size_of::<XfrmMark>(), 8);
+        // New write-path structs:
+        assert_eq!(std::mem::size_of::<XfrmUsersaId>(), 24);
+        assert_eq!(std::mem::size_of::<XfrmUsersaFlush>(), 8);
+    }
+
+    // ==========================================================
+    // XfrmSaBuilder — Plan 141 PR A wire-format round-trip tests
+    // ==========================================================
+
+    use super::Connection;
+    use super::Xfrm;
+
+    /// Build an `add_sa` request via XfrmSaBuilder + MessageBuilder
+    /// and return the full netlink frame (header + body + attrs).
+    fn build_add_sa_frame(sa: XfrmSaBuilder) -> Vec<u8> {
+        let mut b = MessageBuilder::new(
+            XFRM_MSG_NEWSA,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        sa.write_into(&mut b);
+        b.finish()
+    }
+
+    #[test]
+    fn xfrm_sa_v4_esp_separate_auth_encr_roundtrips_through_parse_sa() {
+        let sa = XfrmSaBuilder::new(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            0xdead_beef,
+            IpsecProtocol::Esp,
+        )
+        .mode(XfrmMode::Tunnel)
+        .reqid(42)
+        .auth_hmac_sha256(&[0u8; 32])
+        .encr_aes_cbc(&[0u8; 16]);
+
+        let frame = build_add_sa_frame(sa);
+        let parsed = Connection::<Xfrm>::parse_sa_msg(&frame)
+            .expect("parse_sa must round-trip XfrmSaBuilder output");
+
+        assert_eq!(
+            parsed.src_addr,
+            Some(IpAddr::V4("10.0.0.1".parse().unwrap()))
+        );
+        assert_eq!(
+            parsed.dst_addr,
+            Some(IpAddr::V4("10.0.0.2".parse().unwrap()))
+        );
+        assert_eq!(parsed.spi, 0xdead_beef);
+        assert_eq!(parsed.protocol, IpsecProtocol::Esp);
+        assert_eq!(parsed.mode, XfrmMode::Tunnel);
+        assert_eq!(parsed.reqid, 42);
+        assert_eq!(parsed.replay_window, 32, "default replay window");
+
+        let auth = parsed.auth_alg.expect("auth alg present");
+        assert_eq!(auth.name, "hmac(sha256)");
+        assert_eq!(auth.key_len, 32 * 8, "key_len_bits");
+        assert_eq!(auth.key.len(), 32);
+
+        let encr = parsed.enc_alg.expect("encr alg present");
+        assert_eq!(encr.name, "cbc(aes)");
+        assert_eq!(encr.key_len, 16 * 8);
+        assert_eq!(encr.key.len(), 16);
+    }
+
+    #[test]
+    fn xfrm_sa_v4_esp_aead_aes_gcm_roundtrips() {
+        // AEAD AES-GCM-128: 16-byte key + 4-byte salt = 20 bytes;
+        // ICV truncbits = 128.
+        let key = [0xAAu8; 20];
+        let sa = XfrmSaBuilder::new(
+            "192.0.2.1".parse().unwrap(),
+            "192.0.2.2".parse().unwrap(),
+            0x12345678,
+            IpsecProtocol::Esp,
+        )
+        .mode(XfrmMode::Transport)
+        .reqid(7)
+        .aead_aes_gcm(&key, 128);
+
+        let frame = build_add_sa_frame(sa);
+        let parsed = Connection::<Xfrm>::parse_sa_msg(&frame)
+            .expect("parse_sa must round-trip AEAD SA");
+
+        assert_eq!(parsed.spi, 0x12345678);
+        assert_eq!(parsed.mode, XfrmMode::Transport);
+        let aead = parsed.aead_alg.expect("aead alg present");
+        assert_eq!(aead.name, "rfc4106(gcm(aes))");
+        assert_eq!(aead.key_len, key.len() as u32 * 8);
+        assert_eq!(aead.icv_len, 128);
+        assert_eq!(aead.key.len(), 20);
+        assert!(parsed.auth_alg.is_none());
+        assert!(parsed.enc_alg.is_none());
+    }
+
+    #[test]
+    fn xfrm_sa_v6_separate_auth_encr_roundtrips() {
+        let sa = XfrmSaBuilder::new(
+            "2001:db8::1".parse().unwrap(),
+            "2001:db8::2".parse().unwrap(),
+            0xCAFEBABE,
+            IpsecProtocol::Esp,
+        )
+        .mode(XfrmMode::Tunnel)
+        .reqid(99)
+        .auth_hmac_sha256(&[0xBBu8; 32])
+        .encr_aes_cbc(&[0xCCu8; 32]); // AES-256
+
+        let frame = build_add_sa_frame(sa);
+        let parsed = Connection::<Xfrm>::parse_sa_msg(&frame)
+            .expect("parse_sa must round-trip v6 SA");
+
+        assert_eq!(
+            parsed.src_addr,
+            Some(IpAddr::V6("2001:db8::1".parse().unwrap()))
+        );
+        assert_eq!(
+            parsed.dst_addr,
+            Some(IpAddr::V6("2001:db8::2".parse().unwrap()))
+        );
+        assert_eq!(parsed.spi, 0xCAFEBABE);
+        let encr = parsed.enc_alg.unwrap();
+        assert_eq!(encr.key_len, 256, "AES-256 key length in bits");
+    }
+
+    #[test]
+    fn xfrm_sa_nat_t_udp_encap_roundtrips() {
+        let sa = XfrmSaBuilder::new(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            0x1000,
+            IpsecProtocol::Esp,
+        )
+        .nat_t_udp_encap(4500, 4500) // both 4500 → IKE-compatible
+        .auth_hmac_sha256(&[0u8; 32])
+        .encr_aes_cbc(&[0u8; 16]);
+
+        let frame = build_add_sa_frame(sa);
+        let parsed = Connection::<Xfrm>::parse_sa_msg(&frame)
+            .expect("parse_sa must round-trip NAT-T SA");
+
+        let encap = parsed.encap.expect("XFRMA_ENCAP must be present");
+        // sport/dport are stored network-byte-order on the wire; the
+        // parser doesn't byte-swap them. Compare the wire form.
+        assert_eq!(encap.encap_sport, 4500u16.to_be());
+        assert_eq!(encap.encap_dport, 4500u16.to_be());
+        assert_eq!(encap.encap_type, 2, "dport=4500 → ESPINUDP (IKE)");
+    }
+
+    #[test]
+    fn xfrm_del_sa_emits_correct_tuple() {
+        let mut b = MessageBuilder::new(XFRM_MSG_DELSA, NLM_F_REQUEST | NLM_F_ACK);
+        let id = XfrmUsersaId {
+            daddr: ip_to_xfrm_addr("10.0.0.2".parse().unwrap()),
+            spi: 0xdead_beef_u32.to_be(),
+            family: libc::AF_INET as u16,
+            proto: IpsecProtocol::Esp.number(),
+            _pad: 0,
+        };
+        b.append_bytes(id.as_bytes());
+        let frame = b.finish();
+
+        // Frame layout: 16-byte nlmsghdr + 24-byte XfrmUsersaId.
+        assert!(frame.len() >= 16 + 24);
+        let id_bytes = &frame[16..16 + 24];
+        let (got, _) = XfrmUsersaId::ref_from_prefix(id_bytes).unwrap();
+        assert_eq!(got.daddr.to_ip(libc::AF_INET as u16),
+                   Some(IpAddr::V4("10.0.0.2".parse().unwrap())));
+        assert_eq!(u32::from_be(got.spi), 0xdead_beef);
+        assert_eq!(got.family, libc::AF_INET as u16);
+        assert_eq!(got.proto, IpsecProtocol::Esp.number());
+    }
+
+    #[test]
+    fn xfrm_flush_sa_proto_zero_means_all() {
+        let mut b = MessageBuilder::new(XFRM_MSG_FLUSHSA, NLM_F_REQUEST | NLM_F_ACK);
+        let body = XfrmUsersaFlush { proto: 0, _pad: [0; 7] };
+        b.append_bytes(body.as_bytes());
+        let frame = b.finish();
+
+        assert!(frame.len() >= 16 + 8);
+        assert_eq!(frame[16], 0, "proto=0 = IPSEC_PROTO_ANY");
+    }
+
+    #[test]
+    fn xfrm_sa_default_replay_window_is_32() {
+        // The kernel's default of 0 disables replay protection,
+        // which is a footgun. Builder defaults to 32 like iproute2.
+        let sa = XfrmSaBuilder::new(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            1,
+            IpsecProtocol::Esp,
+        );
+        let info = sa.build_usersa_info();
+        assert_eq!(info.replay_window, 32);
     }
 }
