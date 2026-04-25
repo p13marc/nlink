@@ -3,7 +3,7 @@ to: nlink maintainers
 from: nlink maintainers
 subject: nlink roadmap — active plans only
 target version: 0.14.0 and beyond
-last updated: 2026-04-25 (typed-units rollout shipped — 27 typed parsers, qdisc 18/18, filter **9/9 typed-first**; **Plan 142 is the consolidated 0.15.0 master**; **Phase 0 shipped + Phase 1 substantively shipped** under `[Unreleased]` — `lab::has_module` + `require_module!`, sealed `ParseParams` trait + 27 impls, bins/tc dispatch tightened; Plan 138 closes (3 PRs: u32 raw + named-match + hash-table); Plan 133 closes (PR C BasicFilter ematch tree); only Plan 137 integration tests un-parking + Phase 4 deprecated-import drop remain on Phase 1; Phase 2 (XFRM, Plan 141) next)
+last updated: 2026-04-25 (Plan 142 Phases 0–3 substantively shipped under `[Unreleased]`; **41 typed configs in `nlink::ParseParams`** — qdisc 18/18, filter 9/9, action 14/14; XFRM SA + SP CRUD landed; standalone-action CRUD landed; **Phase 4 (Plan 139 PR C — legacy deletion of `tc::builders::*` + `tc::options::*`) is the only library work remaining for the 0.15.0 cut**; Plan 141 PR C recipe + Plan 137 integration tests are sudo-gated and remain open)
 ---
 
 # nlink Roadmap
