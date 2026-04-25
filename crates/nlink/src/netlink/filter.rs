@@ -1147,6 +1147,72 @@ impl MatchallFilter {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style matchall params slice into a typed
+    /// `MatchallFilter`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `classid <handle>` (alias `flowid`) — target class id.
+    /// - `chain <n>` — chain index.
+    /// - `goto_chain <n>` — jump-on-match action.
+    /// - `skip_hw` / `skip_sw` — flag tokens.
+    ///
+    /// Stricter than the legacy parser (which only recognised
+    /// `classid` / `flowid` and silently dropped everything else):
+    /// unknown tokens, missing values, and unparseable handles
+    /// return `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
+        use crate::Error;
+        let mut f = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("matchall: `{key}` requires a value"))
+                })
+            };
+            match key {
+                "classid" | "flowid" => {
+                    let s = need_value()?;
+                    let h = s.parse::<TcHandle>().map_err(|e| {
+                        Error::InvalidMessage(format!("matchall: invalid {key} `{s}`: {e}"))
+                    })?;
+                    f = f.classid(h);
+                    i += 2;
+                }
+                "chain" => {
+                    let s = need_value()?;
+                    f = f.chain(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("matchall: invalid chain `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "goto_chain" => {
+                    let s = need_value()?;
+                    f = f.goto_chain(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("matchall: invalid goto_chain `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "skip_hw" => {
+                    f = f.skip_hw();
+                    i += 1;
+                }
+                "skip_sw" => {
+                    f = f.skip_sw();
+                    i += 1;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "matchall: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(f)
+    }
 }
 
 impl FilterConfig for MatchallFilter {
@@ -1262,6 +1328,74 @@ impl FwFilter {
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
+    }
+
+    /// Parse a tc-style fw params slice into a typed `FwFilter`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `classid <handle>` (alias `flowid`) — target class id.
+    /// - `mask <hex|dec>` — mask for the firewall mark.
+    /// - `chain <n>` — chain index.
+    ///
+    /// Stricter than the legacy parser: unknown tokens, missing
+    /// values, and unparseable values return `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
+        use crate::Error;
+        let mut f = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params
+                    .get(i + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("fw: `{key}` requires a value")))
+            };
+            match key {
+                "classid" | "flowid" => {
+                    let s = need_value()?;
+                    let h = s.parse::<TcHandle>().map_err(|e| {
+                        Error::InvalidMessage(format!("fw: invalid {key} `{s}`: {e}"))
+                    })?;
+                    f = f.classid(h);
+                    i += 2;
+                }
+                "mask" => {
+                    let s = need_value()?;
+                    // Match the legacy semantics: "0x"-prefix is hex,
+                    // everything else is decimal. Hex-first guessing
+                    // would silently flip "255" to 0x255 = 597.
+                    let m =
+                        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                            u32::from_str_radix(hex, 16)
+                        } else {
+                            s.parse::<u32>()
+                        }
+                        .map_err(|_| {
+                            Error::InvalidMessage(format!(
+                                "fw: invalid mask `{s}` (expected hex `0xNN` or decimal u32)"
+                            ))
+                        })?;
+                    f = f.mask(m);
+                    i += 2;
+                }
+                "chain" => {
+                    let s = need_value()?;
+                    f =
+                        f.chain(s.parse().map_err(|_| {
+                            Error::InvalidMessage(format!("fw: invalid chain `{s}`"))
+                        })?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "fw: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(f)
     }
 }
 
@@ -3002,5 +3136,93 @@ mod tests {
     fn flower_parse_params_invalid_ipv4_prefix_errors() {
         let err = FlowerFilter::parse_params(&["src_ip", "10.0.0.0/40"]).unwrap_err();
         assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn matchall_parse_params_empty_yields_default() {
+        let f = MatchallFilter::parse_params(&[]).unwrap();
+        assert!(f.classid.is_none());
+        assert!(f.chain.is_none());
+        assert!(f.goto_chain.is_none());
+        assert_eq!(f.flags, 0);
+    }
+
+    #[test]
+    fn matchall_parse_params_classid() {
+        let f = MatchallFilter::parse_params(&["classid", "1:10"]).unwrap();
+        assert_eq!(f.classid, Some(TcHandle::new(1, 0x10).as_raw()));
+    }
+
+    #[test]
+    fn matchall_parse_params_flowid_alias() {
+        let f = MatchallFilter::parse_params(&["flowid", "1:20"]).unwrap();
+        assert_eq!(f.classid, Some(TcHandle::new(1, 0x20).as_raw()));
+    }
+
+    #[test]
+    fn matchall_parse_params_chain_and_goto_chain() {
+        let f = MatchallFilter::parse_params(&["chain", "5", "goto_chain", "100"]).unwrap();
+        assert_eq!(f.chain, Some(5));
+        assert_eq!(f.goto_chain, Some(100));
+    }
+
+    #[test]
+    fn matchall_parse_params_skip_flags() {
+        let f = MatchallFilter::parse_params(&["skip_hw", "skip_sw"]).unwrap();
+        assert_eq!(
+            f.flags,
+            flower::TCA_CLS_FLAGS_SKIP_HW | flower::TCA_CLS_FLAGS_SKIP_SW
+        );
+    }
+
+    #[test]
+    fn matchall_parse_params_unknown_token_errors() {
+        let err = MatchallFilter::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn matchall_parse_params_missing_value_errors() {
+        let err = MatchallFilter::parse_params(&["classid"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"));
+    }
+
+    #[test]
+    fn fw_parse_params_empty_yields_default() {
+        let f = FwFilter::parse_params(&[]).unwrap();
+        assert!(f.classid.is_none());
+        assert_eq!(f.mask, 0xFFFFFFFF);
+        assert!(f.chain.is_none());
+    }
+
+    #[test]
+    fn fw_parse_params_classid_and_mask() {
+        let f = FwFilter::parse_params(&["classid", "1:10", "mask", "0xff"]).unwrap();
+        assert_eq!(f.classid, Some(TcHandle::new(1, 0x10).as_raw()));
+        assert_eq!(f.mask, 0xff);
+    }
+
+    #[test]
+    fn fw_parse_params_mask_decimal() {
+        let f = FwFilter::parse_params(&["mask", "255"]).unwrap();
+        assert_eq!(f.mask, 255);
+    }
+
+    #[test]
+    fn fw_parse_params_chain() {
+        let f = FwFilter::parse_params(&["chain", "3"]).unwrap();
+        assert_eq!(f.chain, Some(3));
+    }
+
+    #[test]
+    fn fw_parse_params_unknown_token_errors() {
+        let err = FwFilter::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn fw_parse_params_invalid_mask_errors() {
+        let err = FwFilter::parse_params(&["mask", "zzzz"]).unwrap_err();
+        assert!(err.to_string().contains("invalid mask"));
     }
 }

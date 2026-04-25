@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `MatchallFilter` + `FwFilter` parse_params + bin wiring (slice 9)
+
+- New `parse_params` methods on two more typed filter configs:
+  - `MatchallFilter::parse_params` — `classid` / `flowid`,
+    `chain`, `goto_chain`, `skip_hw` / `skip_sw`. Stricter than the
+    legacy parser (which only recognised classid / flowid and
+    silently dropped everything else).
+  - `FwFilter::parse_params` — `classid` / `flowid`, `mask` (0x-prefix
+    means hex, otherwise decimal — matches `parse_hex_or_dec`'s
+    semantics, avoids the bare-hex-vs-decimal ambiguity that would
+    silently flip "255" to 0x255), `chain`.
+- `bins/tc/src/commands/filter.rs` `try_typed_filter` now dispatches
+  via the same `dispatch!` macro pattern as the qdisc side. Known
+  filter kinds grew from 1 to 3: flower, matchall, fw. Long-tail
+  kinds (u32, basic, bpf, cgroup, route, flow) still fall through
+  to the legacy `filter_builder::*` path. New helper
+  `run_typed_filter` factors the verb dispatch out of the macro
+  body for clarity.
+- 13 new unit tests (7 matchall + 6 fw) covering empty / classid /
+  flowid alias / chain+goto_chain / skip flags / unknown-token /
+  missing-value / mask-hex / mask-decimal / invalid-mask. Lib
+  suite went 517 → 530; clippy clean workspace-wide.
+- Verified interactively: `matchall garbage_token` → `matchall:
+  unknown token "garbage_token"`; valid matchall/fw params reach
+  the netlink layer.
+
 ### Added — three more typed qdisc parsers + bin wiring (slice 8)
 
 - New `parse_params` methods on three more typed qdisc configs:

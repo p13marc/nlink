@@ -6,7 +6,10 @@ use clap::{Args, Subcommand};
 use nlink::{
     Error, TcHandle,
     netlink::{
-        Connection, Result, Route, filter::FlowerFilter, message::NlMsgType, messages::TcMessage,
+        Connection, Result, Route,
+        filter::{FilterConfig, FlowerFilter, FwFilter, MatchallFilter},
+        message::NlMsgType,
+        messages::TcMessage,
         types::tc::tc_handle,
     },
     output::{OutputFormat, OutputOptions, print_items},
@@ -14,8 +17,8 @@ use nlink::{
 
 // Deprecated in 0.14.0; only used as the long-tail fallback when the
 // CLI gives a kind that doesn't yet have a typed parse_params (u32,
-// matchall, basic, fw, bpf, cgroup, route, flow). Flower goes through
-// the typed dispatch below.
+// basic, bpf, cgroup, route, flow). Flower / matchall / fw go
+// through the typed dispatch below.
 #[allow(deprecated)]
 use nlink::tc::builders::filter as filter_builder;
 
@@ -356,12 +359,13 @@ enum FilterVerb {
     Change,
 }
 
-/// Try the typed dispatch path for known filter kinds (currently
-/// `flower`). Returns `Some(Ok)` on success, `Some(Err)` if the typed
-/// parser rejected the params (we surface the error rather than fall
-/// through, so a typo on a known kind doesn't get silently rerouted
-/// through the looser legacy parser). Returns `None` for unknown
-/// kinds — caller falls back to `filter_builder::*`.
+/// Try the typed dispatch path for known filter kinds (flower,
+/// matchall, fw). Returns `Some(Ok)` on success, `Some(Err)` if the
+/// typed parser rejected the params (we surface the error rather
+/// than fall through, so a typo on a known kind doesn't get
+/// silently rerouted through the looser legacy parser). Returns
+/// `None` for unknown kinds — caller falls back to
+/// `filter_builder::*`.
 #[allow(clippy::too_many_arguments)] // mirrors the legacy filter_builder shape; bundling into a struct would just add ceremony
 async fn try_typed_filter(
     conn: &Connection<Route>,
@@ -373,7 +377,7 @@ async fn try_typed_filter(
     params: &[String],
     verb: FilterVerb,
 ) -> Option<Result<()>> {
-    if kind != "flower" {
+    if !matches!(kind, "flower" | "matchall" | "fw") {
         return None;
     }
     let parent = match parent.parse::<TcHandle>() {
@@ -387,12 +391,34 @@ async fn try_typed_filter(
     let priority = prio.unwrap_or(0);
 
     let refs: Vec<&str> = params.iter().map(String::as_str).collect();
-    let cfg = match FlowerFilter::parse_params(&refs) {
-        Ok(c) => c,
-        Err(e) => return Some(Err(e)),
-    };
 
-    Some(match verb {
+    macro_rules! dispatch {
+        ($Cfg:ident) => {{
+            let cfg = match $Cfg::parse_params(&refs) {
+                Ok(c) => c,
+                Err(e) => return Some(Err(e)),
+            };
+            run_typed_filter(conn, dev, parent, proto, priority, cfg, verb).await
+        }};
+    }
+    Some(match kind {
+        "flower" => dispatch!(FlowerFilter),
+        "matchall" => dispatch!(MatchallFilter),
+        "fw" => dispatch!(FwFilter),
+        _ => unreachable!("checked by `matches!` guard above"),
+    })
+}
+
+async fn run_typed_filter<C: FilterConfig>(
+    conn: &Connection<Route>,
+    dev: &str,
+    parent: TcHandle,
+    proto: u16,
+    priority: u16,
+    cfg: C,
+    verb: FilterVerb,
+) -> Result<()> {
+    match verb {
         FilterVerb::Add => {
             conn.add_filter_full(dev, parent, None, proto, priority, cfg)
                 .await
@@ -405,7 +431,7 @@ async fn try_typed_filter(
             conn.change_filter_full(dev, parent, None, proto, priority, cfg)
                 .await
         }
-    })
+    }
 }
 
 /// Wrap the legacy `filter_builder::parse_protocol` to surface its
