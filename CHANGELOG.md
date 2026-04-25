@@ -4,6 +4,73 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — typed standalone-action CRUD on `Connection<Route>` (Plan 139 PR A, Plan 142 Phase 3)
+
+Today nlink has two coexisting action surfaces: filter-attached
+actions (typed end-to-end since 0.13.0) and standalone shared
+actions (the `tc action add ...` flavour). Standalone actions
+were previously only reachable via the deprecated
+`nlink::tc::builders::action::*` free functions. PR A adds the
+typed equivalent on `Connection<Route>` using the existing
+`ActionConfig` trait — same trait the filter-attached actions
+already use.
+
+New public API in `nlink::netlink::action`:
+
+- `ActionMessage { kind, index, options_raw }` — parsed dump
+  entry. Per-kind decoders for `options_raw` are intentionally
+  deferred (Plan 139 §3.2): the raw payload is the honest
+  baseline.
+- `Connection<Route>::add_action<A: ActionConfig>(action)` —
+  `RTM_NEWACTION` + `NLM_F_CREATE`. Kernel assigns the index
+  (returning the assigned value requires `NLM_F_ECHO` plumbing,
+  deferred per Plan 139 §8).
+- `Connection<Route>::del_action(kind, index)` —
+  `RTM_DELACTION`. Index goes alongside `TCA_ACT_KIND` at the
+  slot level (modern lookup path).
+- `Connection<Route>::get_action(kind, index)` — single-result
+  fetch via `send_request`. Returns `Ok(Some(am))` /
+  `Ok(None)` / `Err`.
+- `Connection<Route>::dump_actions(kind)` — dump all actions of
+  a kind (or pass `""` for every kind).
+
+Wire shape mirrors `tc(8)`'s standalone-action protocol:
+`tcamsg + TCA_ACT_TAB { [1] { TCA_ACT_KIND + TCA_ACT_OPTIONS { ... } } }`.
+The typed methods reuse the existing `ActionConfig::write_options`
+to emit each kind's bits — no per-kind code in the new methods.
+
+Internal:
+- `parse_action_messages(msg) -> Vec<ActionMessage>` — walks
+  `TCA_ACT_TAB` slots, extracts kind + index + raw options.
+  Falls back to extracting index from the first sub-attribute's
+  PARMS struct payload (older kernel encoding) when the modern
+  slot-level `TCA_ACT_INDEX` is absent.
+- `next_nla(input)` — small TLV walker that masks
+  `NLA_F_NESTED` / `NLA_F_NET_BYTEORDER` flags through
+  `NLA_TYPE_MASK` so the dispatch sees only the bare type.
+
+8 new unit tests round-trip builder output through the new
+parser:
+- `add_action_gact_drop_roundtrips_through_parser`
+- `add_action_mirred_roundtrips`
+- `add_action_police_roundtrips`
+- `add_action_vlan_pop_roundtrips`
+- `add_action_skbedit_roundtrips`
+- `del_action_emits_kind_plus_index_at_slot_level`
+- `get_action_request_uses_request_only_flags`
+- `parse_action_messages_handles_two_slots` /
+  `parse_action_messages_skips_truncated_input`
+
+677 lib tests total (was 668). Workspace clippy with
+--all-features --deny warnings is clean.
+
+**Plan 139 PR B** is the bulk of the per-kind work — `parse_params`
+on every typed action kind (~14 kinds) so `bins/tc/src/commands/
+action.rs` can dispatch typed instead of falling through to the
+deprecated `tc::builders::action::*` path. PR C is the
+**legacy-deletion milestone** for Plan 142 Phase 4: deletes
+`tc::builders::*` and `tc::options/*` entirely.
+
 ### Added — `XfrmSpBuilder` + Security Policy CRUD (Plan 141 PR B)
 
 `Connection<Xfrm>` already shipped Security Association CRUD in

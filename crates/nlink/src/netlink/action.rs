@@ -31,10 +31,18 @@
 use std::net::Ipv4Addr;
 
 use super::{
+    Connection,
     builder::MessageBuilder,
+    connection::dump_request,
     error::{Error, Result},
-    types::tc::action::{
-        self, TcGen, connmark, csum, ct, gact, mirred, nat, pedit, police, sample, tunnel_key, vlan,
+    message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_REQUEST, NlMsgType},
+    protocol::Route,
+    types::tc::{
+        TCA_ACT_TAB, TcMsg,
+        action::{
+            self, TCA_ACT_INDEX, TCA_ACT_KIND, TCA_ACT_OPTIONS, TcGen, connmark, csum, ct, gact,
+            mirred, nat, pedit, police, sample, tunnel_key, vlan,
+        },
     },
 };
 
@@ -2283,6 +2291,244 @@ impl ActionConfig for SimpleAction {
     }
 }
 
+// ============================================================================
+// Standalone-action CRUD on Connection<Route> (Plan 139 PR A)
+// ============================================================================
+
+/// Parsed shared-action dump entry — kind + index + the
+/// kind-specific options blob (raw bytes, since per-kind decoders
+/// are a separate ~14-parser arc deferred per Plan 139 §3.2).
+///
+/// Returned from [`Connection::dump_actions`] and
+/// [`Connection::get_action`].
+#[derive(Debug, Clone)]
+pub struct ActionMessage {
+    /// Action kind string (`"gact"`, `"mirred"`, etc.).
+    pub kind: String,
+    /// Kernel-assigned index for this shared action.
+    pub index: u32,
+    /// Raw bytes of the kind-specific `TCA_ACT_OPTIONS` payload.
+    /// Decode via the per-kind parser of your choice or leave as-is
+    /// for inspection.
+    pub options_raw: Vec<u8>,
+}
+
+impl Connection<Route> {
+    /// Add a standalone shared action.
+    ///
+    /// The kernel assigns the action's index; this slice doesn't
+    /// capture it (use [`Self::dump_actions`] to enumerate after
+    /// add). A future iteration may add `add_action_returning_index`
+    /// once the response-payload-capture path is wired up — see
+    /// Plan 139 §8.
+    ///
+    /// Sends `RTM_NEWACTION` with `NLM_F_CREATE`. Wire shape:
+    /// `tcamsg + TCA_ACT_TAB { [1] { TCA_ACT_KIND + TCA_ACT_OPTIONS { ... } } }`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_action", kind = %action.kind()))]
+    pub async fn add_action<A: ActionConfig>(&self, action: A) -> Result<()> {
+        let mut b = MessageBuilder::new(
+            NlMsgType::RTM_NEWACTION,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
+        );
+        b.append(&TcMsg::default());
+
+        let tab = b.nest_start(TCA_ACT_TAB);
+        let act = b.nest_start(1);
+        b.append_attr(TCA_ACT_KIND, action.kind().as_bytes());
+        let opts = b.nest_start(TCA_ACT_OPTIONS);
+        action.write_options(&mut b)?;
+        b.nest_end(opts);
+        b.nest_end(act);
+        b.nest_end(tab);
+
+        self.send_ack(b).await
+    }
+
+    /// Delete a standalone shared action by `(kind, index)`.
+    ///
+    /// Sends `RTM_DELACTION`. The index goes alongside the kind
+    /// (sibling of `TCA_ACT_KIND` inside the action slot) — the
+    /// modern lookup path the kernel accepts.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_action", kind = %kind, index))]
+    pub async fn del_action(&self, kind: &str, index: u32) -> Result<()> {
+        let mut b = MessageBuilder::new(NlMsgType::RTM_DELACTION, NLM_F_REQUEST | NLM_F_ACK);
+        b.append(&TcMsg::default());
+
+        let tab = b.nest_start(TCA_ACT_TAB);
+        let act = b.nest_start(1);
+        b.append_attr(TCA_ACT_KIND, kind.as_bytes());
+        b.append_attr_u32(TCA_ACT_INDEX, index);
+        b.nest_end(act);
+        b.nest_end(tab);
+
+        self.send_ack(b).await
+    }
+
+    /// Fetch a single shared action by `(kind, index)`. Returns
+    /// `Ok(None)` on ENOENT.
+    ///
+    /// Sends `RTM_GETACTION` with `NLM_F_REQUEST` only (no DUMP,
+    /// no ACK). The kernel responds with a single `RTM_NEWACTION`-
+    /// shaped message carrying the action.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_action", kind = %kind, index))]
+    pub async fn get_action(&self, kind: &str, index: u32) -> Result<Option<ActionMessage>> {
+        let mut b = MessageBuilder::new(NlMsgType::RTM_GETACTION, NLM_F_REQUEST);
+        b.append(&TcMsg::default());
+
+        let tab = b.nest_start(TCA_ACT_TAB);
+        let act = b.nest_start(1);
+        b.append_attr(TCA_ACT_KIND, kind.as_bytes());
+        b.append_attr_u32(TCA_ACT_INDEX, index);
+        b.nest_end(act);
+        b.nest_end(tab);
+
+        match self.send_request(b).await {
+            Ok(response) => {
+                let msgs = parse_action_messages(&response);
+                Ok(msgs.into_iter().next())
+            }
+            Err(e) if e.is_not_found() => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Dump every shared action of a specific kind. Pass `""` to
+    /// dump actions of every kind in one go.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "dump_actions", kind = %kind))]
+    pub async fn dump_actions(&self, kind: &str) -> Result<Vec<ActionMessage>> {
+        let mut b = dump_request(NlMsgType::RTM_GETACTION);
+        b.append(&TcMsg::default());
+
+        let tab = b.nest_start(TCA_ACT_TAB);
+        let act = b.nest_start(1);
+        if !kind.is_empty() {
+            b.append_attr(TCA_ACT_KIND, kind.as_bytes());
+        }
+        b.nest_end(act);
+        b.nest_end(tab);
+
+        let responses = self.send_dump(b).await?;
+        let mut actions = Vec::new();
+        for response in responses {
+            actions.extend(parse_action_messages(&response));
+        }
+        Ok(actions)
+    }
+}
+
+/// Skip past the netlink header + tcmsg, returning the slice
+/// containing the top-level attributes. Returns `None` if the
+/// message is too short.
+fn action_attr_slice(msg: &[u8]) -> Option<&[u8]> {
+    // nlmsghdr (16) + tcmsg (4 bytes minimum). The legacy parser
+    // uses TcMsg::default() which is 20 bytes via #[repr(C)].
+    const NLMSG_HDRLEN: usize = 16;
+    let tcmsg_size = std::mem::size_of::<TcMsg>();
+    let start = NLMSG_HDRLEN + tcmsg_size;
+    if msg.len() < start {
+        return None;
+    }
+    Some(&msg[start..])
+}
+
+/// Walk one netlink netlink-attribute (TLV: 4-byte hdr + payload,
+/// padded to 4-byte boundary). Returns `(attr_type, payload, rest)`.
+/// `attr_type` is masked through `NLA_TYPE_MASK` so the
+/// `NLA_F_NESTED` / `NLA_F_NET_BYTEORDER` flags don't leak into
+/// the dispatch.
+fn next_nla(input: &[u8]) -> Option<(u16, &[u8], &[u8])> {
+    use super::attr::NLA_TYPE_MASK;
+    if input.len() < 4 {
+        return None;
+    }
+    let len = u16::from_le_bytes([input[0], input[1]]) as usize;
+    let attr_type = u16::from_le_bytes([input[2], input[3]]) & NLA_TYPE_MASK;
+    if len < 4 || len > input.len() {
+        return None;
+    }
+    let payload = &input[4..len];
+    let aligned = (len + 3) & !3;
+    let rest = if aligned <= input.len() {
+        &input[aligned..]
+    } else {
+        &[]
+    };
+    Some((attr_type, payload, rest))
+}
+
+/// Parse the action-table contents of a single RTM_NEWACTION /
+/// RTM_GETACTION response message into a flat list of
+/// [`ActionMessage`] entries.
+fn parse_action_messages(msg: &[u8]) -> Vec<ActionMessage> {
+    let mut out = Vec::new();
+    let Some(attrs) = action_attr_slice(msg) else {
+        return out;
+    };
+    let mut input = attrs;
+    while let Some((attr_type, payload, rest)) = next_nla(input) {
+        input = rest;
+        if attr_type != TCA_ACT_TAB {
+            continue;
+        }
+        // Inside TCA_ACT_TAB: each numbered nested attr is one
+        // action slot.
+        let mut slot_input = payload;
+        while let Some((_slot_id, slot_payload, slot_rest)) = next_nla(slot_input) {
+            slot_input = slot_rest;
+            if let Some(action) = parse_one_action(slot_payload) {
+                out.push(action);
+            }
+        }
+    }
+    out
+}
+
+/// Parse one action slot's attributes into an [`ActionMessage`].
+fn parse_one_action(slot: &[u8]) -> Option<ActionMessage> {
+    let mut kind: Option<String> = None;
+    let mut index: u32 = 0;
+    let mut options_raw: Vec<u8> = Vec::new();
+
+    let mut input = slot;
+    while let Some((attr_type, payload, rest)) = next_nla(input) {
+        input = rest;
+        match attr_type {
+            TCA_ACT_KIND => {
+                let bytes = payload.split(|&b| b == 0).next().unwrap_or(payload);
+                kind = Some(String::from_utf8_lossy(bytes).into_owned());
+            }
+            TCA_ACT_INDEX if payload.len() >= 4 => {
+                index = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            }
+            TCA_ACT_OPTIONS => {
+                options_raw = payload.to_vec();
+                // Some kernel versions also embed the index inside the
+                // kind-specific PARMS struct. If we didn't see a
+                // sibling TCA_ACT_INDEX, try to extract it from the
+                // first 4 bytes of the first sub-attr's payload.
+                if index == 0
+                    && let Some((_kind_attr, parms_payload, _)) = next_nla(payload)
+                    && parms_payload.len() >= 4
+                {
+                    index = u32::from_le_bytes([
+                        parms_payload[0],
+                        parms_payload[1],
+                        parms_payload[2],
+                        parms_payload[3],
+                    ]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(ActionMessage {
+        kind: kind?,
+        index,
+        options_raw,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2572,5 +2818,159 @@ mod tests {
         let bytes = &builder.as_bytes()[start..];
         // sdata blob "hi\0" appears somewhere in the written attrs.
         assert!(bytes.windows(3).any(|w| w == b"hi\0"));
+    }
+
+    // ==========================================================
+    // Plan 139 PR A — wire-format tests for ActionMessage parser
+    // and the new Connection<Route> standalone-action methods.
+    // We don't need a live Connection<Route>; we construct the
+    // request bytes via MessageBuilder and run them back through
+    // parse_action_messages, mirroring the SA round-trip pattern.
+    // ==========================================================
+
+    /// Build the bytes that `add_action(action)` would emit.
+    fn build_add_action_frame<A: ActionConfig>(action: A) -> Vec<u8> {
+        let mut b = MessageBuilder::new(
+            NlMsgType::RTM_NEWACTION,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
+        );
+        b.append(&TcMsg::default());
+        let tab = b.nest_start(TCA_ACT_TAB);
+        let act = b.nest_start(1);
+        b.append_attr(TCA_ACT_KIND, action.kind().as_bytes());
+        let opts = b.nest_start(TCA_ACT_OPTIONS);
+        action.write_options(&mut b).unwrap();
+        b.nest_end(opts);
+        b.nest_end(act);
+        b.nest_end(tab);
+        b.finish()
+    }
+
+    #[test]
+    fn add_action_gact_drop_roundtrips_through_parser() {
+        let frame = build_add_action_frame(GactAction::drop());
+        let parsed = parse_action_messages(&frame);
+        assert_eq!(parsed.len(), 1, "exactly one action slot");
+        assert_eq!(parsed[0].kind, "gact");
+        assert!(!parsed[0].options_raw.is_empty());
+    }
+
+    #[test]
+    fn add_action_mirred_roundtrips() {
+        let action = MirredAction::redirect_by_index(7);
+        let frame = build_add_action_frame(action);
+        let parsed = parse_action_messages(&frame);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].kind, "mirred");
+    }
+
+    #[test]
+    fn add_action_police_roundtrips() {
+        let action = PoliceAction::new()
+            .rate(1_000_000)
+            .burst(32 * 1024)
+            .exceed_drop()
+            .build();
+        let frame = build_add_action_frame(action);
+        let parsed = parse_action_messages(&frame);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].kind, "police");
+    }
+
+    #[test]
+    fn add_action_vlan_pop_roundtrips() {
+        let frame = build_add_action_frame(VlanAction::pop());
+        let parsed = parse_action_messages(&frame);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].kind, "vlan");
+    }
+
+    #[test]
+    fn add_action_skbedit_roundtrips() {
+        let frame = build_add_action_frame(SkbeditAction::new().mark(0x42).build());
+        let parsed = parse_action_messages(&frame);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].kind, "skbedit");
+    }
+
+    #[test]
+    fn del_action_emits_kind_plus_index_at_slot_level() {
+        let mut b = MessageBuilder::new(NlMsgType::RTM_DELACTION, NLM_F_REQUEST | NLM_F_ACK);
+        b.append(&TcMsg::default());
+        let tab = b.nest_start(TCA_ACT_TAB);
+        let act = b.nest_start(1);
+        b.append_attr(TCA_ACT_KIND, b"gact");
+        b.append_attr_u32(TCA_ACT_INDEX, 42);
+        b.nest_end(act);
+        b.nest_end(tab);
+        let frame = b.finish();
+
+        let parsed = parse_action_messages(&frame);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].kind, "gact");
+        assert_eq!(parsed[0].index, 42);
+        assert!(parsed[0].options_raw.is_empty(), "del has no options");
+
+        // nlmsg_type at offset 4..6 must be RTM_DELACTION.
+        let nlmsg_type = u16::from_le_bytes([frame[4], frame[5]]);
+        assert_eq!(nlmsg_type, NlMsgType::RTM_DELACTION);
+    }
+
+    #[test]
+    fn get_action_request_uses_request_only_flags() {
+        let mut b = MessageBuilder::new(NlMsgType::RTM_GETACTION, NLM_F_REQUEST);
+        b.append(&TcMsg::default());
+        let tab = b.nest_start(TCA_ACT_TAB);
+        let act = b.nest_start(1);
+        b.append_attr(TCA_ACT_KIND, b"mirred");
+        b.append_attr_u32(TCA_ACT_INDEX, 7);
+        b.nest_end(act);
+        b.nest_end(tab);
+        let frame = b.finish();
+
+        let nlmsg_type = u16::from_le_bytes([frame[4], frame[5]]);
+        assert_eq!(nlmsg_type, NlMsgType::RTM_GETACTION);
+        let flags = u16::from_le_bytes([frame[6], frame[7]]);
+        // Single-result GET: REQUEST only, no DUMP, no ACK.
+        const NLM_F_DUMP: u16 = 0x300;
+        assert_eq!(flags & NLM_F_DUMP, 0);
+        assert_eq!(flags & NLM_F_ACK, 0);
+        assert!(flags & NLM_F_REQUEST != 0);
+    }
+
+    #[test]
+    fn parse_action_messages_handles_two_slots() {
+        // Build an action table with two slots: gact + mirred.
+        let mut b = MessageBuilder::new(NlMsgType::RTM_NEWACTION, 0);
+        b.append(&TcMsg::default());
+        let tab = b.nest_start(TCA_ACT_TAB);
+
+        let act1 = b.nest_start(1);
+        b.append_attr(TCA_ACT_KIND, b"gact");
+        b.append_attr_u32(TCA_ACT_INDEX, 1);
+        b.nest_end(act1);
+
+        let act2 = b.nest_start(2);
+        b.append_attr(TCA_ACT_KIND, b"mirred");
+        b.append_attr_u32(TCA_ACT_INDEX, 2);
+        b.nest_end(act2);
+
+        b.nest_end(tab);
+        let frame = b.finish();
+
+        let parsed = parse_action_messages(&frame);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].kind, "gact");
+        assert_eq!(parsed[0].index, 1);
+        assert_eq!(parsed[1].kind, "mirred");
+        assert_eq!(parsed[1].index, 2);
+    }
+
+    #[test]
+    fn parse_action_messages_skips_truncated_input() {
+        // Truncated frame (just the nlmsghdr) should yield zero
+        // actions, not panic.
+        let parsed = parse_action_messages(&[0u8; 8]);
+        assert!(parsed.is_empty());
     }
 }
