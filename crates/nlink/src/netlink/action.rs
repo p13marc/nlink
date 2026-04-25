@@ -627,6 +627,137 @@ impl PoliceAction {
         self
     }
 
+    /// Parse a `tc(8)`-style `police` token slice into a typed
+    /// action.
+    ///
+    /// # Recognised tokens (any order)
+    ///
+    /// - `rate <tc-rate>` (required) — token-bucket fill rate.
+    ///   Accepts `100mbit`, `1gbit`, `2.5kbit`, etc.
+    /// - `burst <bytes>` (required) — bucket size in `tc(8)` byte
+    ///   syntax (`32k`, `1m`, etc.).
+    /// - `peakrate <tc-rate>` — optional peak rate.
+    /// - `mtu <bytes>` — optional MTU (default 2047).
+    /// - `avrate <tc-rate>` — optional stateful average rate.
+    /// - `conform-exceed <conform>/<exceed>` — slash-separated
+    ///   verdict pair (e.g. `pass/drop`). Each side accepts the
+    ///   same verdict keywords as `gact`. Alternative forms
+    ///   `conform <verdict>` and `exceed <verdict>` are also
+    ///   recognised individually.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut act = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "rate" => {
+                    let s = action_need_value(params, i, "police", key)?;
+                    let r = crate::util::Rate::parse(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "police: invalid rate `{s}` (expected tc-style rate like `1mbit`)"
+                        ))
+                    })?;
+                    act = act.rate(r.as_bytes_per_sec());
+                    i += 2;
+                }
+                "peakrate" => {
+                    let s = action_need_value(params, i, "police", key)?;
+                    let r = crate::util::Rate::parse(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "police: invalid peakrate `{s}` (expected tc-style rate)"
+                        ))
+                    })?;
+                    act = act.peakrate(r.as_bytes_per_sec());
+                    i += 2;
+                }
+                "burst" | "buffer" | "maxburst" => {
+                    let s = action_need_value(params, i, "police", key)?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "police: invalid burst `{s}` (expected tc-style size like `32k`)"
+                        ))
+                    })?;
+                    if bytes > u32::MAX as u64 {
+                        return Err(Error::InvalidMessage(format!(
+                            "police: burst `{s}` exceeds u32::MAX bytes"
+                        )));
+                    }
+                    act = act.burst(bytes as u32);
+                    i += 2;
+                }
+                "mtu" => {
+                    let s = action_need_value(params, i, "police", key)?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "police: invalid mtu `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    if bytes > u32::MAX as u64 {
+                        return Err(Error::InvalidMessage(format!(
+                            "police: mtu `{s}` exceeds u32::MAX bytes"
+                        )));
+                    }
+                    act = act.mtu(bytes as u32);
+                    i += 2;
+                }
+                "avrate" => {
+                    let s = action_need_value(params, i, "police", key)?;
+                    let r = crate::util::Rate::parse(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "police: invalid avrate `{s}` (expected tc-style rate)"
+                        ))
+                    })?;
+                    let bps = r.as_bytes_per_sec();
+                    if bps > u32::MAX as u64 {
+                        return Err(Error::InvalidMessage(format!(
+                            "police: avrate `{s}` exceeds u32::MAX bytes/sec"
+                        )));
+                    }
+                    act = act.avrate(bps as u32);
+                    i += 2;
+                }
+                "conform-exceed" => {
+                    let s = action_need_value(params, i, "police", key)?;
+                    let (conform_s, exceed_s) = s.split_once('/').ok_or_else(|| {
+                        Error::InvalidMessage(format!(
+                            "police: `conform-exceed` requires `<conform>/<exceed>` (got `{s}`)"
+                        ))
+                    })?;
+                    let conform = parse_gact_verdict(conform_s).map_err(|e| {
+                        Error::InvalidMessage(e.to_string().replace("gact:", "police:"))
+                    })?;
+                    let exceed = parse_gact_verdict(exceed_s).map_err(|e| {
+                        Error::InvalidMessage(e.to_string().replace("gact:", "police:"))
+                    })?;
+                    act = act.conform(conform).exceed(exceed);
+                    i += 2;
+                }
+                "conform" => {
+                    let s = action_need_value(params, i, "police", key)?;
+                    let v = parse_gact_verdict(s).map_err(|e| {
+                        Error::InvalidMessage(e.to_string().replace("gact:", "police:"))
+                    })?;
+                    act = act.conform(v);
+                    i += 2;
+                }
+                "exceed" => {
+                    let s = action_need_value(params, i, "police", key)?;
+                    let v = parse_gact_verdict(s).map_err(|e| {
+                        Error::InvalidMessage(e.to_string().replace("gact:", "police:"))
+                    })?;
+                    act = act.exceed(v);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "police: unknown token `{other}` (recognised: rate, burst/buffer/maxburst, peakrate, mtu, avrate, conform-exceed <c>/<e>, conform, exceed)"
+                    )));
+                }
+            }
+        }
+        Ok(act)
+    }
+
     /// Build the action configuration.
     pub fn build(self) -> Self {
         self
@@ -2323,6 +2454,104 @@ impl CtAction {
         self
     }
 
+    /// Parse a `tc(8)`-style `ct` token slice into a typed action.
+    ///
+    /// # Recognised tokens
+    ///
+    /// Operation (one optional, defaults to "restore state"):
+    /// - `commit` — commit the connection.
+    /// - `clear` — clear connection state.
+    ///
+    /// Modifiers:
+    /// - `force` (flag, no value) — combined with `commit` to
+    ///   re-commit even if already tracked.
+    /// - `zone <0–65535>` — connection-tracking zone.
+    /// - `mark <m> <mask>` — mark + mask (two values; mask
+    ///   defaults to `0xffffffff` if omitted via the typed
+    ///   builder, but `parse_params` requires both for clarity).
+    /// - `nat src <addr>` / `nat dst <addr>` — single-address
+    ///   SNAT / DNAT.
+    /// - `nat src <min>-<max>` / `nat dst <min>-<max>` — IPv4
+    ///   address-range NAT.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        // First pass: pick the entry-point constructor (commit /
+        // clear / restore-default).
+        let op = params.iter().copied().find_map(|t| match t {
+            "commit" => Some("commit"),
+            "clear" => Some("clear"),
+            _ => None,
+        });
+        let mut act = match op {
+            Some("commit") => Self::commit(),
+            Some("clear") => Self::clear(),
+            _ => Self::new(),
+        };
+
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "commit" | "clear" => i += 1, // already consumed above
+                "force" => {
+                    act = act.force();
+                    i += 1;
+                }
+                "zone" => {
+                    let s = action_need_value(params, i, "ct", key)?;
+                    let z = action_parse_u32("ct", "zone", s)?;
+                    if z > u16::MAX as u32 {
+                        return Err(Error::InvalidMessage(format!(
+                            "ct: zone `{z}` out of range (0–65535)"
+                        )));
+                    }
+                    act = act.zone(z as u16);
+                    i += 2;
+                }
+                "mark" => {
+                    let mark_s = action_need_value(params, i, "ct", key)?;
+                    let mask_s = params.get(i + 2).copied().ok_or_else(|| {
+                        Error::InvalidMessage("ct: `mark` requires `<value> <mask>`".to_string())
+                    })?;
+                    let m = action_parse_u32("ct", "mark", mark_s)?;
+                    let mk = action_parse_u32("ct", "mark mask", mask_s)?;
+                    act = act.mark(m, mk);
+                    i += 3;
+                }
+                "nat" => {
+                    // Form: nat src|dst <addr> | nat src|dst <min>-<max>
+                    let dir = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage(
+                            "ct: `nat` requires `src|dst <addr>` or `src|dst <min>-<max>`"
+                                .to_string(),
+                        )
+                    })?;
+                    let range_s = params.get(i + 2).copied().ok_or_else(|| {
+                        Error::InvalidMessage(format!(
+                            "ct: `nat {dir}` requires an address or `<min>-<max>` range"
+                        ))
+                    })?;
+                    let (min, max) = parse_ipv4_range_or_single(range_s)?;
+                    act = match dir {
+                        "src" => act.nat_src(min, max),
+                        "dst" => act.nat_dst(min, max),
+                        other => {
+                            return Err(Error::InvalidMessage(format!(
+                                "ct: `nat` direction must be `src` or `dst` (got `{other}`)"
+                            )));
+                        }
+                    };
+                    i += 3;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "ct: unknown token `{other}` (recognised: commit, clear, force, zone, mark <v> <m>, nat src|dst <addr>|<min>-<max>)"
+                    )));
+                }
+            }
+        }
+        Ok(act)
+    }
+
     /// Build the action configuration.
     pub fn build(self) -> Self {
         self
@@ -2647,6 +2876,27 @@ impl PeditAction {
     pub fn action(mut self, action: i32) -> Self {
         self.action = action;
         self
+    }
+
+    /// Reject all `pedit` token slices — the `tc(8)` pedit DSL
+    /// (`munge ip src set 1.2.3.4`, etc.) is genuinely complex
+    /// and per Plan 139 §10 is "punt-eligible until a downstream
+    /// user asks". Use the typed builder
+    /// ([`PeditAction::set_ipv4_src`], etc.) directly for now.
+    ///
+    /// This stub keeps `PeditAction` discoverable in the
+    /// `ParseParams` trait impl list while making the
+    /// not-yet-typed-modelled status explicit. The `bins/tc`
+    /// dispatch will surface this error to users who run
+    /// `tc action add pedit ...`; they fall back to the typed
+    /// builder via library code.
+    pub fn parse_params(_params: &[&str]) -> Result<Self> {
+        Err(Error::InvalidMessage(
+            "pedit: not yet typed-modelled — use the typed builder \
+             (PeditAction::set_ipv4_src / set_tcp_dport / etc.) \
+             instead of the tc(8) DSL. Future work per Plan 139 §10."
+                .to_string(),
+        ))
     }
 
     /// Build the action configuration.
@@ -3331,6 +3581,26 @@ fn action_parse_u32(kind: &str, key: &str, s: &str) -> Result<u32> {
             "{kind}: invalid {key} `{s}` (expected unsigned integer)"
         ))
     })
+}
+
+/// Parse an IPv4 address or `<min>-<max>` range. Single addresses
+/// expand to `(addr, addr)` so callers can always pass a pair to
+/// the typed builder. Used by `CtAction::parse_params`.
+fn parse_ipv4_range_or_single(s: &str) -> Result<(Ipv4Addr, Ipv4Addr)> {
+    if let Some((min_s, max_s)) = s.split_once('-') {
+        let min: Ipv4Addr = min_s.parse().map_err(|_| {
+            Error::InvalidMessage(format!("ct: invalid min address `{min_s}` in range"))
+        })?;
+        let max: Ipv4Addr = max_s.parse().map_err(|_| {
+            Error::InvalidMessage(format!("ct: invalid max address `{max_s}` in range"))
+        })?;
+        Ok((min, max))
+    } else {
+        let addr: Ipv4Addr = s
+            .parse()
+            .map_err(|_| Error::InvalidMessage(format!("ct: invalid address `{s}`")))?;
+        Ok((addr, addr))
+    }
 }
 
 /// Resolve a `gact` verdict keyword (`pass`/`drop`/etc.) to its
@@ -4326,5 +4596,164 @@ mod tests {
     fn bpf_parse_params_pinned_and_fd_mutually_exclusive() {
         let err = BpfAction::parse_params(&["fd", "1", "fd", "2"]).unwrap_err();
         assert!(err.to_string().contains("only one of"));
+    }
+
+    // ==========================================================
+    // Plan 139 PR B sub-slice 3 — police / ct / pedit (closes
+    // PR B at 14 of 14 action kinds typed-first; pedit is a
+    // not-yet-typed-modelled stub per Plan 139 §10).
+    // ==========================================================
+
+    // ---- PoliceAction ----
+
+    #[test]
+    fn police_parse_params_rate_and_burst() {
+        let a =
+            PoliceAction::parse_params(&["rate", "1mbit", "burst", "32k"]).unwrap();
+        let b = PoliceAction::new()
+            .rate(crate::util::Rate::mbit(1).as_bytes_per_sec())
+            .burst(32 * 1024);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn police_parse_params_conform_exceed_pair() {
+        let a = PoliceAction::parse_params(&[
+            "rate",
+            "1mbit",
+            "burst",
+            "32k",
+            "conform-exceed",
+            "pass/drop",
+        ])
+        .unwrap();
+        let b = PoliceAction::new()
+            .rate(crate::util::Rate::mbit(1).as_bytes_per_sec())
+            .burst(32 * 1024)
+            .conform(action::TC_ACT_OK)
+            .exceed(action::TC_ACT_SHOT);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn police_parse_params_individual_conform_exceed() {
+        let a = PoliceAction::parse_params(&[
+            "rate",
+            "1mbit",
+            "burst",
+            "32k",
+            "conform",
+            "pipe",
+            "exceed",
+            "reclassify",
+        ])
+        .unwrap();
+        let b = PoliceAction::new()
+            .rate(crate::util::Rate::mbit(1).as_bytes_per_sec())
+            .burst(32 * 1024)
+            .conform(action::TC_ACT_PIPE)
+            .exceed(action::TC_ACT_RECLASSIFY);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn police_parse_params_invalid_rate_errors() {
+        let err = PoliceAction::parse_params(&["rate", "wat", "burst", "32k"]).unwrap_err();
+        assert!(err.to_string().contains("invalid rate"));
+    }
+
+    #[test]
+    fn police_parse_params_conform_exceed_missing_slash_errors() {
+        let err = PoliceAction::parse_params(&["conform-exceed", "passdrop"]).unwrap_err();
+        assert!(err.to_string().contains("requires `<conform>/<exceed>`"));
+    }
+
+    #[test]
+    fn police_parse_params_conform_exceed_unknown_verdict_rebrands() {
+        let err = PoliceAction::parse_params(&["conform-exceed", "wat/drop"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("police:"), "rebranded prefix expected: {msg}");
+        assert!(!msg.contains("gact:"));
+    }
+
+    // ---- CtAction ----
+
+    #[test]
+    fn ct_parse_params_commit_with_zone_and_mark() {
+        let a = CtAction::parse_params(&["commit", "zone", "5", "mark", "0", "0"]).unwrap();
+        // Build the equivalent via the typed builder. mark expects
+        // decimal u32 (no hex in this parser today — locked in by
+        // sub-slice 1's skbedit test).
+        let b = CtAction::commit().zone(5).mark(0, 0);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn ct_parse_params_clear_with_force() {
+        // `force` is meaningful when combined with commit per
+        // kernel docs, but the parser accepts it regardless and
+        // lets the kernel reject if invalid.
+        let a = CtAction::parse_params(&["clear", "force"]).unwrap();
+        let b = CtAction::clear().force();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn ct_parse_params_nat_src_single_addr() {
+        let a = CtAction::parse_params(&["commit", "nat", "src", "10.0.0.1"]).unwrap();
+        let b = CtAction::commit().nat_src_single("10.0.0.1".parse().unwrap());
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn ct_parse_params_nat_dst_address_range() {
+        let a = CtAction::parse_params(&[
+            "commit", "nat", "dst", "10.0.0.10-10.0.0.20",
+        ])
+        .unwrap();
+        let b = CtAction::commit().nat_dst(
+            "10.0.0.10".parse().unwrap(),
+            "10.0.0.20".parse().unwrap(),
+        );
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn ct_parse_params_zone_out_of_range_errors() {
+        let err = CtAction::parse_params(&["zone", "100000"]).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn ct_parse_params_mark_requires_two_values() {
+        let err = CtAction::parse_params(&["mark", "1"]).unwrap_err();
+        assert!(err.to_string().contains("`<value> <mask>`"));
+    }
+
+    #[test]
+    fn ct_parse_params_nat_unknown_direction_errors() {
+        let err = CtAction::parse_params(&["nat", "wat", "10.0.0.1"]).unwrap_err();
+        assert!(err.to_string().contains("must be `src` or `dst`"));
+    }
+
+    // ---- PeditAction (stub) ----
+
+    #[test]
+    fn pedit_parse_params_always_rejects_with_clear_message() {
+        let err = PeditAction::parse_params(&["munge", "ip", "src", "set", "1.2.3.4"])
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("pedit:"), "kind-prefixed: {msg}");
+        assert!(msg.contains("not yet typed-modelled"), "stub message: {msg}");
+        assert!(msg.contains("Plan 139"), "points at the plan: {msg}");
+    }
+
+    #[test]
+    fn pedit_parse_params_empty_input_also_rejects() {
+        // The stub doesn't pretend to support a no-op parse — even
+        // empty input is rejected so users get the consistent
+        // "use the typed builder" message.
+        let err = PeditAction::parse_params(&[]).unwrap_err();
+        assert!(err.to_string().contains("not yet typed-modelled"));
     }
 }

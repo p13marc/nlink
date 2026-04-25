@@ -4,6 +4,54 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `parse_params` on the last 3 action kinds (Plan 139 PR B closes; sub-slice 3)
+
+Plan 139 PR B closes here. **All 14 action kinds typed-first**
+(13 fully parsed + 1 stub for `pedit`). Total
+`nlink::ParseParams` impls now **41** (18 qdisc + 9 filter + 14
+action). The bin's `bins/tc/src/commands/action.rs` migration
+(PR C) can now dispatch typed for every kind it supports.
+
+- **`PoliceAction::parse_params`** — large token surface mapping
+  to typed `Rate` (`rate`, `peakrate`, `avrate`) and
+  tc-byte-syntax sizes (`burst`/`buffer`/`maxburst`, `mtu`).
+  `conform-exceed <conform>/<exceed>` parses the slash-separated
+  verdict pair (e.g. `pass/drop`); the alternative
+  `conform <verdict>` and `exceed <verdict>` individual tokens
+  also work. Verdict parsing reuses `parse_gact_verdict` with
+  `gact:` → `police:` error-prefix rebrand.
+- **`CtAction::parse_params`** — operation (`commit` / `clear`,
+  default "restore state"), `force` flag, `zone <0–65535>`,
+  `mark <value> <mask>` (two values for clarity), and
+  `nat src|dst <addr>` / `nat src|dst <min>-<max>` for
+  single-address or range NAT (parsed via the new
+  `parse_ipv4_range_or_single` helper).
+- **`PeditAction::parse_params`** — explicit rejection stub.
+  `tc(8)`'s pedit DSL (`munge ip src set 1.2.3.4`, etc.) is
+  genuinely complex; per Plan 139 §10 it's "punt-eligible until
+  a downstream user asks". The stub keeps `PeditAction`
+  discoverable in the `ParseParams` trait list and surfaces a
+  clean error pointing at the typed builder
+  (`PeditAction::set_ipv4_src` etc.) for users who run
+  `tc action add pedit ...`.
+
+15 new unit tests cover: police rate/burst/conform-exceed combos
+(slash form + individual form), invalid-rate / missing-slash /
+unknown-verdict-rebrand error paths; ct commit+zone+mark,
+clear+force, nat src single-addr, nat dst range, zone
+out-of-range / mark missing-mask / nat unknown-direction
+errors; pedit stub-always-rejects.
+
+749 lib tests total (was 734). Workspace clippy with
+--all-features --deny warnings is clean.
+
+**Plan 139 PR C** is the **legacy-deletion milestone** for
+Plan 142 Phase 4 — it migrates `bins/tc/src/commands/action.rs`
+to dispatch typed (using these 14 parse_params), drops the
+last `#[allow(deprecated)]` on `bins/tc`, and **deletes
+`tc::builders::*` and `tc::options/*` entirely**. That PR closes
+the 0.15.0 cycle.
+
 ### Added — `parse_params` on 6 more typed action kinds (Plan 139 PR B sub-slice 2)
 
 Eleven of ~14 action kinds now typed-first. The remaining three
