@@ -1181,6 +1181,73 @@ impl NatAction {
         self
     }
 
+    /// Parse a `tc(8)`-style `nat` token slice into a typed action.
+    ///
+    /// # Recognised tokens (positional, mirrors `tc(8)`)
+    ///
+    /// `<ingress|egress> <oldaddr[/prefix]> <newaddr>`
+    ///
+    /// - `ingress` → DNAT (matches incoming destination, rewrites
+    ///   to the new address).
+    /// - `egress` → SNAT (matches outgoing source, rewrites to the
+    ///   new address).
+    /// - Old address may carry a prefix (`10.0.0.0/24`) for
+    ///   network-based NAT; bare addresses default to /32.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        if params.len() < 3 {
+            return Err(Error::InvalidMessage(
+                "nat: requires `ingress|egress <oldaddr[/prefix]> <newaddr>`"
+                    .to_string(),
+            ));
+        }
+        let direction = params[0];
+        let old_with_prefix = params[1];
+        let new_addr_s = params[2];
+        if params.len() > 3 {
+            return Err(Error::InvalidMessage(format!(
+                "nat: unexpected token `{}` after `{} {} {}` (only the 3 positional args are supported)",
+                params[3], direction, old_with_prefix, new_addr_s
+            )));
+        }
+
+        let (old_addr_s, prefix) = match old_with_prefix.split_once('/') {
+            Some((a, p)) => {
+                let pl: u8 = p.parse().map_err(|_| {
+                    Error::InvalidMessage(format!(
+                        "nat: invalid old-address prefix `{p}` (expected 0–32)"
+                    ))
+                })?;
+                if pl > 32 {
+                    return Err(Error::InvalidMessage(format!(
+                        "nat: prefix `{pl}` out of range (0–32)"
+                    )));
+                }
+                (a, pl)
+            }
+            None => (old_with_prefix, 32),
+        };
+        let old_addr: Ipv4Addr = old_addr_s.parse().map_err(|_| {
+            Error::InvalidMessage(format!("nat: invalid old address `{old_addr_s}`"))
+        })?;
+        let new_addr: Ipv4Addr = new_addr_s.parse().map_err(|_| {
+            Error::InvalidMessage(format!("nat: invalid new address `{new_addr_s}`"))
+        })?;
+
+        let mut act = match direction {
+            "egress" => Self::snat(old_addr, new_addr),
+            "ingress" => Self::dnat(old_addr, new_addr),
+            other => {
+                return Err(Error::InvalidMessage(format!(
+                    "nat: direction `{other}` (expected `ingress` or `egress`)"
+                )));
+            }
+        };
+        if prefix != 32 {
+            act = act.prefix(prefix);
+        }
+        Ok(act)
+    }
+
     /// Build the action configuration.
     pub fn build(self) -> Self {
         self
@@ -1387,6 +1454,191 @@ impl TunnelKeyAction {
     pub fn action(mut self, action: i32) -> Self {
         self.action = action;
         self
+    }
+
+    /// Parse a `tc(8)`-style `tunnel_key` token slice into a typed
+    /// action.
+    ///
+    /// # Recognised tokens
+    ///
+    /// Operation (required):
+    /// - `set` — set tunnel metadata (encap path).
+    /// - `release` — strip tunnel metadata (decap path).
+    ///
+    /// Set-only modifiers (rejected with `release`):
+    /// - `src <ipv4>` / `dst <ipv4>` — IPv4 outer addresses.
+    /// - `src6 <ipv6>` / `dst6 <ipv6>` — IPv6 outer addresses.
+    /// - `id <vni>` — tunnel key (VNI for VXLAN, etc.).
+    /// - `dst_port <port>` — UDP destination port.
+    /// - `tos <0–255>` / `ttl <0–255>` — outer IP TOS / TTL.
+    /// - `no_csum` — disable UDP checksum (flag, no value).
+    /// - `no_frag` — disable fragmentation (flag, no value).
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        // Determine operation first (set vs release).
+        let mut op: Option<&str> = None;
+        for &t in params {
+            if matches!(t, "set" | "release") {
+                if op.is_some() {
+                    return Err(Error::InvalidMessage(
+                        "tunnel_key: only one of `set` / `release` may be specified".to_string(),
+                    ));
+                }
+                op = Some(t);
+            }
+        }
+        let mut act = match op {
+            Some("set") => Self::set(),
+            Some("release") => Self::release(),
+            _ => {
+                return Err(Error::InvalidMessage(
+                    "tunnel_key: missing operation (`set` or `release`)".to_string(),
+                ));
+            }
+        };
+        let is_set = matches!(op, Some("set"));
+
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "set" | "release" => i += 1,
+                "src" => {
+                    let s = action_need_value(params, i, "tunnel_key", key)?;
+                    let addr: Ipv4Addr = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("tunnel_key: invalid src `{s}`"))
+                    })?;
+                    if !is_set {
+                        return Err(Error::InvalidMessage(
+                            "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
+                        ));
+                    }
+                    act = act.src(addr);
+                    i += 2;
+                }
+                "dst" => {
+                    let s = action_need_value(params, i, "tunnel_key", key)?;
+                    let addr: Ipv4Addr = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("tunnel_key: invalid dst `{s}`"))
+                    })?;
+                    if !is_set {
+                        return Err(Error::InvalidMessage(
+                            "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
+                        ));
+                    }
+                    act = act.dst(addr);
+                    i += 2;
+                }
+                "src6" => {
+                    let s = action_need_value(params, i, "tunnel_key", key)?;
+                    let addr: std::net::Ipv6Addr = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("tunnel_key: invalid src6 `{s}`"))
+                    })?;
+                    if !is_set {
+                        return Err(Error::InvalidMessage(
+                            "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
+                        ));
+                    }
+                    act = act.src6(addr);
+                    i += 2;
+                }
+                "dst6" => {
+                    let s = action_need_value(params, i, "tunnel_key", key)?;
+                    let addr: std::net::Ipv6Addr = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("tunnel_key: invalid dst6 `{s}`"))
+                    })?;
+                    if !is_set {
+                        return Err(Error::InvalidMessage(
+                            "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
+                        ));
+                    }
+                    act = act.dst6(addr);
+                    i += 2;
+                }
+                "id" => {
+                    let s = action_need_value(params, i, "tunnel_key", key)?;
+                    let id = action_parse_u32("tunnel_key", "id", s)?;
+                    if !is_set {
+                        return Err(Error::InvalidMessage(
+                            "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
+                        ));
+                    }
+                    act = act.key_id(id);
+                    i += 2;
+                }
+                "dst_port" => {
+                    let s = action_need_value(params, i, "tunnel_key", key)?;
+                    let port = action_parse_u32("tunnel_key", "dst_port", s)?;
+                    if port > u16::MAX as u32 {
+                        return Err(Error::InvalidMessage(format!(
+                            "tunnel_key: dst_port `{port}` out of range (0–65535)"
+                        )));
+                    }
+                    if !is_set {
+                        return Err(Error::InvalidMessage(
+                            "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
+                        ));
+                    }
+                    act = act.dst_port(port as u16);
+                    i += 2;
+                }
+                "tos" => {
+                    let s = action_need_value(params, i, "tunnel_key", key)?;
+                    let v = action_parse_u32("tunnel_key", "tos", s)?;
+                    if v > u8::MAX as u32 {
+                        return Err(Error::InvalidMessage(format!(
+                            "tunnel_key: tos `{v}` out of range (0–255)"
+                        )));
+                    }
+                    if !is_set {
+                        return Err(Error::InvalidMessage(
+                            "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
+                        ));
+                    }
+                    act = act.tos(v as u8);
+                    i += 2;
+                }
+                "ttl" => {
+                    let s = action_need_value(params, i, "tunnel_key", key)?;
+                    let v = action_parse_u32("tunnel_key", "ttl", s)?;
+                    if v > u8::MAX as u32 {
+                        return Err(Error::InvalidMessage(format!(
+                            "tunnel_key: ttl `{v}` out of range (0–255)"
+                        )));
+                    }
+                    if !is_set {
+                        return Err(Error::InvalidMessage(
+                            "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
+                        ));
+                    }
+                    act = act.ttl(v as u8);
+                    i += 2;
+                }
+                "no_csum" => {
+                    if !is_set {
+                        return Err(Error::InvalidMessage(
+                            "tunnel_key: no_csum only valid with `set`".to_string(),
+                        ));
+                    }
+                    act = act.no_csum();
+                    i += 1;
+                }
+                "no_frag" => {
+                    if !is_set {
+                        return Err(Error::InvalidMessage(
+                            "tunnel_key: no_frag only valid with `set`".to_string(),
+                        ));
+                    }
+                    act = act.no_frag();
+                    i += 1;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "tunnel_key: unknown token `{other}` (recognised: set/release, src/dst[6] <addr>, id <vni>, dst_port <port>, tos/ttl <0-255>, no_csum, no_frag)"
+                    )));
+                }
+            }
+        }
+        Ok(act)
     }
 
     /// Build the action configuration.
@@ -1665,6 +1917,36 @@ impl CsumAction {
         self
     }
 
+    /// Parse a `tc(8)`-style `csum` token slice into a typed
+    /// action.
+    ///
+    /// # Recognised tokens
+    ///
+    /// One or more checksum-kind keywords, accumulated as flags:
+    /// `iph` (IPv4 header), `icmp`, `igmp`, `tcp`, `udp`,
+    /// `udplite`, `sctp`. Order is irrelevant; duplicates are a
+    /// no-op (bitmask OR).
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut act = Self::new();
+        for &t in params {
+            act = match t {
+                "iph" => act.iph(),
+                "icmp" => act.icmp(),
+                "igmp" => act.igmp(),
+                "tcp" => act.tcp(),
+                "udp" => act.udp(),
+                "udplite" => act.udplite(),
+                "sctp" => act.sctp(),
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "csum: unknown checksum kind `{other}` (recognised: iph/icmp/igmp/tcp/udp/udplite/sctp)"
+                    )));
+                }
+            };
+        }
+        Ok(act)
+    }
+
     /// Build the action configuration.
     pub fn build(self) -> Self {
         self
@@ -1746,6 +2028,60 @@ impl SampleAction {
     pub fn action(mut self, action: i32) -> Self {
         self.action = action;
         self
+    }
+
+    /// Parse a `tc(8)`-style `sample` token slice into a typed
+    /// action.
+    ///
+    /// # Recognised tokens (any order)
+    ///
+    /// Required:
+    /// - `rate <N>` — sample 1 in N packets.
+    /// - `group <G>` — psample group ID to send samples to.
+    ///
+    /// Optional:
+    /// - `trunc <bytes>` — truncate sampled packets to N bytes.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut rate: Option<u32> = None;
+        let mut group: Option<u32> = None;
+        let mut trunc: Option<u32> = None;
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "rate" => {
+                    let s = action_need_value(params, i, "sample", key)?;
+                    rate = Some(action_parse_u32("sample", "rate", s)?);
+                    i += 2;
+                }
+                "group" => {
+                    let s = action_need_value(params, i, "sample", key)?;
+                    group = Some(action_parse_u32("sample", "group", s)?);
+                    i += 2;
+                }
+                "trunc" => {
+                    let s = action_need_value(params, i, "sample", key)?;
+                    trunc = Some(action_parse_u32("sample", "trunc", s)?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "sample: unknown token `{other}` (recognised: rate <N>, group <G>, trunc <bytes>)"
+                    )));
+                }
+            }
+        }
+        let rate = rate.ok_or_else(|| {
+            Error::InvalidMessage("sample: `rate <N>` required".to_string())
+        })?;
+        let group = group.ok_or_else(|| {
+            Error::InvalidMessage("sample: `group <G>` required".to_string())
+        })?;
+        let mut act = Self::new(rate, group);
+        if let Some(t) = trunc {
+            act = act.trunc(t);
+        }
+        Ok(act)
     }
 
     /// Build the action configuration.
@@ -2561,6 +2897,83 @@ impl BpfAction {
         self
     }
 
+    /// Parse a `tc(8)`-style `bpf` token slice into a typed action.
+    ///
+    /// # Recognised tokens (one program source required)
+    ///
+    /// - `pinned <path>` — open a pinned BPF program (e.g.
+    ///   `/sys/fs/bpf/myprog`); equivalent to
+    ///   [`BpfAction::from_pinned`].
+    /// - `fd <n>` — wrap a raw file descriptor (advanced; the
+    ///   caller is responsible for the program's lifetime).
+    /// - `name <text>` — optional human-readable label.
+    /// - `verdict pass|drop|pipe|reclassify|stolen|continue` —
+    ///   override the default `pipe` verdict.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut source: Option<Self> = None;
+        let mut name: Option<String> = None;
+        let mut verdict: Option<i32> = None;
+
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "pinned" => {
+                    let s = action_need_value(params, i, "bpf", key)?;
+                    if source.is_some() {
+                        return Err(Error::InvalidMessage(
+                            "bpf: only one of `pinned` / `fd` may be specified".to_string(),
+                        ));
+                    }
+                    source = Some(Self::from_pinned(s)?);
+                    i += 2;
+                }
+                "fd" => {
+                    let s = action_need_value(params, i, "bpf", key)?;
+                    if source.is_some() {
+                        return Err(Error::InvalidMessage(
+                            "bpf: only one of `pinned` / `fd` may be specified".to_string(),
+                        ));
+                    }
+                    let fd_u = action_parse_u32("bpf", "fd", s)?;
+                    source = Some(Self::from_fd(fd_u as i32));
+                    i += 2;
+                }
+                "name" => {
+                    let s = action_need_value(params, i, "bpf", key)?;
+                    name = Some(s.to_string());
+                    i += 2;
+                }
+                "verdict" => {
+                    let s = action_need_value(params, i, "bpf", key)?;
+                    verdict = Some(parse_gact_verdict(s).map_err(|e| {
+                        // Re-prefix gact: → bpf:.
+                        Error::InvalidMessage(e.to_string().replace("gact:", "bpf:"))
+                    })?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "bpf: unknown token `{other}` (recognised: pinned <path>, fd <n>, name <text>, verdict <kw>)"
+                    )));
+                }
+            }
+        }
+
+        let mut act = source.ok_or_else(|| {
+            Error::InvalidMessage(
+                "bpf: program source required (`pinned <path>` or `fd <n>`)".to_string(),
+            )
+        })?;
+        if let Some(n) = name {
+            act = act.name(n);
+        }
+        if let Some(v) = verdict {
+            act = act.verdict(v);
+        }
+        Ok(act)
+    }
+
     /// Build (no-op marker for API consistency).
     pub fn build(self) -> Self {
         self
@@ -2650,6 +3063,58 @@ impl SimpleAction {
     pub fn verdict(mut self, action: i32) -> Self {
         self.action = action;
         self
+    }
+
+    /// Parse a `tc(8)`-style `simple` token slice into a typed
+    /// action.
+    ///
+    /// # Recognised tokens
+    ///
+    /// - `sdata <text>` (required) — the tag string emitted on
+    ///   every match. Single token (no spaces); the kernel
+    ///   truncates strings longer than `SIMP_MAX_DATA = 32` bytes
+    ///   (including the trailing NUL).
+    /// - `verdict pass|drop|pipe|reclassify|stolen|continue` —
+    ///   override the default `pipe` verdict.
+    ///
+    /// Per Plan 139 §8.4: spaces inside `sdata` aren't supported
+    /// since `bins/tc` already pre-tokenises on whitespace.
+    /// Callers needing a multi-word tag should construct via
+    /// [`SimpleAction::new`] directly.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut sdata: Option<&str> = None;
+        let mut verdict: Option<i32> = None;
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "sdata" => {
+                    let s = action_need_value(params, i, "simple", key)?;
+                    sdata = Some(s);
+                    i += 2;
+                }
+                "verdict" => {
+                    let s = action_need_value(params, i, "simple", key)?;
+                    verdict = Some(parse_gact_verdict(s).map_err(|e| {
+                        Error::InvalidMessage(e.to_string().replace("gact:", "simple:"))
+                    })?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "simple: unknown token `{other}` (recognised: sdata <text>, verdict <kw>)"
+                    )));
+                }
+            }
+        }
+        let sdata = sdata.ok_or_else(|| {
+            Error::InvalidMessage("simple: `sdata <text>` required".to_string())
+        })?;
+        let mut act = Self::new(sdata);
+        if let Some(v) = verdict {
+            act = act.verdict(v);
+        }
+        Ok(act)
     }
 
     /// Build (no-op marker for API consistency).
@@ -3625,5 +4090,241 @@ mod tests {
     fn connmark_parse_params_unknown_token_errors() {
         let err = ConnmarkAction::parse_params(&["nonsense"]).unwrap_err();
         assert!(err.to_string().contains("connmark: unknown token"));
+    }
+
+    // ==========================================================
+    // Plan 139 PR B sub-slice 2 — 6 more action parsers.
+    // ==========================================================
+
+    // ---- CsumAction ----
+
+    #[test]
+    fn csum_parse_params_iph_only() {
+        let a = CsumAction::parse_params(&["iph"]).unwrap();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&CsumAction::new().iph()));
+    }
+
+    #[test]
+    fn csum_parse_params_combo_any_order_idempotent() {
+        let a = CsumAction::parse_params(&["iph", "tcp", "udp"]).unwrap();
+        let b = CsumAction::parse_params(&["udp", "iph", "tcp"]).unwrap();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+        // Duplicate is a no-op (bitmask OR).
+        let c = CsumAction::parse_params(&["iph", "iph", "tcp", "tcp", "udp"]).unwrap();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&c));
+    }
+
+    #[test]
+    fn csum_parse_params_all_kinds() {
+        let a = CsumAction::parse_params(&[
+            "iph", "icmp", "igmp", "tcp", "udp", "udplite", "sctp",
+        ])
+        .unwrap();
+        let b = CsumAction::new().iph().icmp().igmp().tcp().udp().udplite().sctp();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn csum_parse_params_unknown_kind_errors() {
+        let err = CsumAction::parse_params(&["iph", "wat"]).unwrap_err();
+        assert!(err.to_string().contains("unknown checksum kind"));
+    }
+
+    // ---- SampleAction ----
+
+    #[test]
+    fn sample_parse_params_required_rate_and_group() {
+        let a = SampleAction::parse_params(&["rate", "100", "group", "5"]).unwrap();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&SampleAction::new(100, 5)));
+    }
+
+    #[test]
+    fn sample_parse_params_with_trunc_any_order() {
+        let a = SampleAction::parse_params(&["trunc", "128", "rate", "100", "group", "5"])
+            .unwrap();
+        let b = SampleAction::new(100, 5).trunc(128);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn sample_parse_params_missing_rate_errors() {
+        let err = SampleAction::parse_params(&["group", "5"]).unwrap_err();
+        assert!(err.to_string().contains("`rate <N>` required"));
+    }
+
+    #[test]
+    fn sample_parse_params_missing_group_errors() {
+        let err = SampleAction::parse_params(&["rate", "100"]).unwrap_err();
+        assert!(err.to_string().contains("`group <G>` required"));
+    }
+
+    // ---- TunnelKeyAction ----
+
+    #[test]
+    fn tunnel_key_parse_params_set_full_v4() {
+        let a = TunnelKeyAction::parse_params(&[
+            "set", "src", "10.0.0.1", "dst", "10.0.0.2", "id", "100", "dst_port", "4789",
+        ])
+        .unwrap();
+        let b = TunnelKeyAction::set()
+            .src("10.0.0.1".parse().unwrap())
+            .dst("10.0.0.2".parse().unwrap())
+            .key_id(100)
+            .dst_port(4789);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn tunnel_key_parse_params_release_emits_no_metadata() {
+        let a = TunnelKeyAction::parse_params(&["release"]).unwrap();
+        let b = TunnelKeyAction::release();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn tunnel_key_parse_params_set_with_no_csum_no_frag() {
+        let a = TunnelKeyAction::parse_params(&[
+            "set", "dst", "10.0.0.2", "id", "1", "no_csum", "no_frag",
+        ])
+        .unwrap();
+        let b = TunnelKeyAction::set()
+            .dst("10.0.0.2".parse().unwrap())
+            .key_id(1)
+            .no_csum()
+            .no_frag();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn tunnel_key_parse_params_release_rejects_set_modifiers() {
+        let err = TunnelKeyAction::parse_params(&["release", "src", "10.0.0.1"]).unwrap_err();
+        assert!(err.to_string().contains("only valid with `set`"));
+    }
+
+    #[test]
+    fn tunnel_key_parse_params_missing_op_errors() {
+        let err = TunnelKeyAction::parse_params(&["src", "10.0.0.1"]).unwrap_err();
+        assert!(err.to_string().contains("missing operation"));
+    }
+
+    #[test]
+    fn tunnel_key_parse_params_invalid_dst_port_errors() {
+        let err =
+            TunnelKeyAction::parse_params(&["set", "dst_port", "70000"]).unwrap_err();
+        assert!(err.to_string().contains("dst_port"));
+    }
+
+    // ---- NatAction ----
+
+    #[test]
+    fn nat_parse_params_egress_snat_full_addr() {
+        let a = NatAction::parse_params(&["egress", "10.0.0.1", "192.168.0.1"]).unwrap();
+        let b = NatAction::snat(
+            "10.0.0.1".parse().unwrap(),
+            "192.168.0.1".parse().unwrap(),
+        );
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn nat_parse_params_ingress_dnat_with_prefix() {
+        let a = NatAction::parse_params(&["ingress", "10.0.0.0/24", "192.168.0.0"]).unwrap();
+        let b = NatAction::dnat(
+            "10.0.0.0".parse().unwrap(),
+            "192.168.0.0".parse().unwrap(),
+        )
+        .prefix(24);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn nat_parse_params_short_input_errors() {
+        let err = NatAction::parse_params(&["egress", "10.0.0.1"]).unwrap_err();
+        assert!(err.to_string().contains("requires"));
+    }
+
+    #[test]
+    fn nat_parse_params_unknown_direction_errors() {
+        let err = NatAction::parse_params(&["wat", "10.0.0.1", "192.168.0.1"]).unwrap_err();
+        assert!(err.to_string().contains("direction"));
+    }
+
+    #[test]
+    fn nat_parse_params_invalid_prefix_errors() {
+        let err =
+            NatAction::parse_params(&["egress", "10.0.0.0/40", "192.168.0.0"]).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    // ---- SimpleAction ----
+
+    #[test]
+    fn simple_parse_params_sdata_required() {
+        let err = SimpleAction::parse_params(&[]).unwrap_err();
+        assert!(err.to_string().contains("`sdata <text>` required"));
+    }
+
+    #[test]
+    fn simple_parse_params_sdata_only() {
+        let a = SimpleAction::parse_params(&["sdata", "matched-port-80"]).unwrap();
+        let b = SimpleAction::new("matched-port-80");
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn simple_parse_params_with_verdict() {
+        let a = SimpleAction::parse_params(&["sdata", "trace", "verdict", "drop"]).unwrap();
+        let b = SimpleAction::new("trace").drop();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn simple_parse_params_unknown_verdict_rebrands_error_prefix() {
+        let err = SimpleAction::parse_params(&["sdata", "x", "verdict", "wat"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("simple:"), "must rebrand gact: → simple: ({msg})");
+        assert!(!msg.contains("gact:"));
+    }
+
+    // ---- BpfAction ----
+
+    #[test]
+    fn bpf_parse_params_fd_basic() {
+        let a = BpfAction::parse_params(&["fd", "42"]).unwrap();
+        let b = BpfAction::from_fd(42);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn bpf_parse_params_fd_with_name() {
+        let a = BpfAction::parse_params(&["fd", "7", "name", "trace"]).unwrap();
+        let b = BpfAction::from_fd(7).name("trace");
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn bpf_parse_params_fd_with_verdict() {
+        let a = BpfAction::parse_params(&["fd", "1", "verdict", "drop"]).unwrap();
+        let b = BpfAction::from_fd(1).verdict(action::TC_ACT_SHOT);
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn bpf_parse_params_pinned_missing_path_errors() {
+        let err = BpfAction::parse_params(&["pinned", "/nonexistent/xyzzy"]).unwrap_err();
+        // Open errors are reported via the from_pinned helper.
+        assert!(err.to_string().contains("open BPF pin"));
+    }
+
+    #[test]
+    fn bpf_parse_params_no_source_errors() {
+        let err = BpfAction::parse_params(&["name", "x"]).unwrap_err();
+        assert!(err.to_string().contains("program source required"));
+    }
+
+    #[test]
+    fn bpf_parse_params_pinned_and_fd_mutually_exclusive() {
+        let err = BpfAction::parse_params(&["fd", "1", "fd", "2"]).unwrap_err();
+        assert!(err.to_string().contains("only one of"));
     }
 }

@@ -4,6 +4,55 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `parse_params` on 6 more typed action kinds (Plan 139 PR B sub-slice 2)
+
+Eleven of ~14 action kinds now typed-first. The remaining three
+(`PoliceAction`, `CtAction`, `PeditAction`) are the larger /
+trickier parsers; they ship in sub-slice 3.
+
+- **`CsumAction::parse_params`** — accumulates checksum-kind
+  flags (`iph`/`icmp`/`igmp`/`tcp`/`udp`/`udplite`/`sctp`).
+  Order-independent, idempotent (bitmask OR).
+- **`SampleAction::parse_params`** — required `rate <N>` +
+  `group <G>` plus optional `trunc <bytes>`.
+- **`TunnelKeyAction::parse_params`** — `set` / `release`
+  operation, plus set-only modifiers `src`/`dst`/`src6`/`dst6`
+  for outer addresses, `id <vni>`, `dst_port <port>`,
+  `tos`/`ttl <0–255>`, and the `no_csum` / `no_frag` flag
+  tokens. Set-only modifiers under `release` are explicitly
+  rejected.
+- **`NatAction::parse_params`** — positional
+  `<ingress|egress> <oldaddr[/prefix]> <newaddr>` mirroring
+  `tc(8)`. `egress` → SNAT, `ingress` → DNAT. Bare addresses
+  default to /32.
+- **`SimpleAction::parse_params`** — required `sdata <text>`
+  (single token; multi-word tags need the typed builder per
+  Plan 139 §8.4) plus optional `verdict <kw>`.
+- **`BpfAction::parse_params`** — required program source
+  (`pinned <path>` for filesystem-pinned programs, or
+  `fd <n>` for raw file descriptors — mutually exclusive),
+  optional `name <text>` and `verdict <kw>`.
+
+Three of these (`BpfAction`, `SimpleAction`) reuse
+`parse_gact_verdict` for their `verdict <kw>` token — the
+`gact:` error prefix gets rebranded to the action's own kind
+on the way out, so users see `simple: unknown verdict ...`
+rather than the misleading `gact: ...`.
+
+29 new unit tests cover: each parser's wire equivalence to the
+typed builder via `write_options` byte comparison,
+token-order independence (where applicable), all reject paths
+(missing required tokens, out-of-range values, wrong-direction
+modifiers, mutex violations, unknown tokens), error-prefix
+rebranding for shared-helper paths.
+
+Six new `nlink::ParseParams` trait impls — total now **38 typed
+configs** (18 qdisc + 9 filter + 11 action). Three action kinds
+remain (police/ct/pedit).
+
+734 lib tests total (was 705). Workspace clippy with
+--all-features --deny warnings is clean.
+
 ### Added — `parse_params` on 5 typed action kinds (Plan 139 PR B sub-slice 1)
 
 First batch of per-kind action parsers — the bulk of the bin
