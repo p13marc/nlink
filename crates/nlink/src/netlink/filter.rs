@@ -276,6 +276,26 @@ impl U32Filter {
     /// - `skip_hw` / `skip_sw` — flag tokens setting
     ///   `TCA_CLS_FLAGS_SKIP_HW` / `SKIP_SW`.
     ///
+    /// # Phase 2 surface (named-match shortcuts, IPv4 only)
+    ///
+    /// All four-token shortcuts are sugar over the existing typed
+    /// setters (`match_src_ipv4` / `match_dst_ipv4` /
+    /// `match_ip_proto` / `match_src_port` / `match_dst_port`).
+    /// Wire output matches what those setters emit; tcp/udp port
+    /// matches use `nexthdr`-relative offsets (IP-options-tolerant).
+    ///
+    /// - `match ip src <addr>[/<prefix>]` — IPv4 source address.
+    ///   Bare address defaults to `/32`.
+    /// - `match ip dst <addr>[/<prefix>]` — IPv4 destination address.
+    /// - `match ip protocol <name|number>` — IP protocol.
+    ///   Names: `tcp`, `udp`, `icmp`, `icmpv6`, `sctp`, `ah`, `esp`,
+    ///   `gre`. Numeric: 0–255.
+    /// - `match ip sport <port>` — L4 source port (nexthdr-relative).
+    /// - `match ip dport <port>` — L4 destination port.
+    /// - `match tcp sport|dport <port>` / `match udp sport|dport <port>`
+    ///   — alias for `match ip sport|dport`. The wire is identical;
+    ///   the prefix is `tc(8)` syntax sugar.
+    ///
     /// Stricter than the legacy `add_u32_options` parser (which
     /// silently dropped unknown tokens via a default `_ => i += 1`
     /// arm): unknown tokens, missing values, and unparseable hex
@@ -283,13 +303,11 @@ impl U32Filter {
     ///
     /// # Not yet typed-modelled
     ///
-    /// Named-match shortcuts (`match ip src ADDR/PREFIX`,
-    /// `match tcp dport`, etc.) are Phase 2 of Plan 138; hash-table
-    /// grammar (`divisor`, `ht`, `link`, `order`, `hashkey`) is
-    /// Phase 3. Until those phases land, fall back to the typed
-    /// builder methods (`U32Filter::match_src_ipv4`,
-    /// `match_dst_port`, etc.) for the named cases, and to the
-    /// builder's `divisor()` / `link()` for the hash-table cases.
+    /// `match icmp type|code` and IPv6 named-matches need new
+    /// setters; defer until requested. Hash-table grammar
+    /// (`divisor`, `ht`, `link`, `order`, `hashkey`) is Phase 3.
+    /// Until those phases land, fall back to the builder's
+    /// `divisor()` / `link()` setters for the hash-table cases.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut f = Self::new();
         let mut i = 0;
@@ -297,9 +315,28 @@ impl U32Filter {
             let key = params[i];
             match key {
                 "match" => {
-                    let triple = parse_u32_match(params, i)?;
-                    f.keys.push(triple.key);
-                    i = triple.consumed;
+                    let width = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage(
+                            "u32: `match` requires `WIDTH ...` (missing WIDTH)".to_string(),
+                        )
+                    })?;
+                    match width {
+                        "u32" | "u16" | "u8" => {
+                            let triple = parse_u32_raw_match(params, i, width)?;
+                            f.keys.push(triple.key);
+                            i = triple.consumed;
+                        }
+                        "ip" | "tcp" | "udp" => {
+                            f = apply_named_match(f, params, i, width)?;
+                            i += 4;
+                        }
+                        other => {
+                            return Err(Error::InvalidMessage(format!(
+                                "u32: unknown match width `{other}` \
+                                 (expected u32, u16, u8, ip, tcp, or udp)"
+                            )));
+                        }
+                    }
                 }
                 "classid" | "flowid" => {
                     let s = need_value(params, i, "u32", key)?;
@@ -437,13 +474,13 @@ fn parse_offset(kind: &str, s: &str) -> Result<i32> {
 /// Result of parsing one `match WIDTH VAL MASK at OFFSET` triple.
 struct U32MatchTriple {
     key: u32_mod::TcU32Key,
-    /// Index of the next unconsumed token (i.e. `i + 5` on success).
+    /// Index of the next unconsumed token (i.e. `i + 6` on success).
     consumed: usize,
 }
 
-/// Parse `match WIDTH VAL MASK at OFFSET` starting at `params[i]`.
-/// `params[i]` is assumed to be the literal `"match"` token.
-fn parse_u32_match(params: &[&str], i: usize) -> Result<U32MatchTriple> {
+/// Parse `match WIDTH VAL MASK at OFFSET` starting at `params[i]`,
+/// where `WIDTH` is one of `u32`/`u16`/`u8` (validated by the caller).
+fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32MatchTriple> {
     // Need: match WIDTH VAL MASK at OFFSET → 6 tokens total.
     let need = |k: usize, name: &str| -> Result<&str> {
         params.get(i + k).copied().ok_or_else(|| {
@@ -452,7 +489,6 @@ fn parse_u32_match(params: &[&str], i: usize) -> Result<U32MatchTriple> {
             ))
         })
     };
-    let width = need(1, "WIDTH")?;
     let val_s = need(2, "VAL")?;
     let mask_s = need(3, "MASK")?;
     let at_kw = need(4, "`at`")?;
@@ -491,14 +527,123 @@ fn parse_u32_match(params: &[&str], i: usize) -> Result<U32MatchTriple> {
             u32_mod::pack_key8(val as u8, mask as u8, offset)
         }
         other => {
+            // Caller pre-validated; unreachable in practice.
             return Err(Error::InvalidMessage(format!(
-                "u32: unknown match width `{other}` (expected u32, u16, or u8)"
+                "u32: unknown match width `{other}`"
             )));
         }
     };
     Ok(U32MatchTriple {
         key,
         consumed: i + 6,
+    })
+}
+
+/// Apply a named-match shortcut (`match ip src ADDR/PREFIX`,
+/// `match tcp dport PORT`, etc.) by routing through the existing
+/// typed setters. Returns the mutated filter; caller advances `i` by
+/// 4 (the shortcut is always exactly `match LAYER FIELD VALUE`).
+fn apply_named_match(
+    filter: U32Filter,
+    params: &[&str],
+    i: usize,
+    layer: &str,
+) -> Result<U32Filter> {
+    let field = params.get(i + 2).copied().ok_or_else(|| {
+        Error::InvalidMessage(format!("u32: `match {layer}` requires FIELD"))
+    })?;
+    let value = params.get(i + 3).copied().ok_or_else(|| {
+        Error::InvalidMessage(format!(
+            "u32: `match {layer} {field}` requires VALUE"
+        ))
+    })?;
+
+    match (layer, field) {
+        ("ip", "src") => {
+            let (addr, prefix) = parse_u32_ipv4_with_prefix(value)?;
+            Ok(filter.match_src_ipv4(addr, prefix))
+        }
+        ("ip", "dst") => {
+            let (addr, prefix) = parse_u32_ipv4_with_prefix(value)?;
+            Ok(filter.match_dst_ipv4(addr, prefix))
+        }
+        ("ip", "protocol") => {
+            let proto = parse_ip_proto_name_or_num(value)?;
+            Ok(filter.match_ip_proto(proto))
+        }
+        ("ip", "sport") | ("tcp", "sport") | ("udp", "sport") => {
+            let port = parse_port("sport", layer, value)?;
+            Ok(filter.match_src_port(port))
+        }
+        ("ip", "dport") | ("tcp", "dport") | ("udp", "dport") => {
+            let port = parse_port("dport", layer, value)?;
+            Ok(filter.match_dst_port(port))
+        }
+        _ => Err(Error::InvalidMessage(format!(
+            "u32: unsupported `match {layer} {field}` \
+             (Phase 2 supports: ip src/dst/protocol/sport/dport, \
+             tcp/udp sport/dport)"
+        ))),
+    }
+}
+
+/// Parse `ADDR[/PREFIX]` into (Ipv4Addr, u8) with `u32:` error
+/// prefix. Bare addresses get /32. The flower filter has its own
+/// equivalent (`parse_ipv4_with_prefix`) with a `flower:` prefix.
+fn parse_u32_ipv4_with_prefix(s: &str) -> Result<(Ipv4Addr, u8)> {
+    let (addr_s, prefix) = match s.split_once('/') {
+        Some((a, p)) => {
+            let pl: u8 = p.parse().map_err(|_| {
+                Error::InvalidMessage(format!(
+                    "u32: invalid IPv4 prefix length `{p}` (expected 0–32)"
+                ))
+            })?;
+            if pl > 32 {
+                return Err(Error::InvalidMessage(format!(
+                    "u32: IPv4 prefix length `{pl}` out of range (expected 0–32)"
+                )));
+            }
+            (a, pl)
+        }
+        None => (s, 32),
+    };
+    let addr: Ipv4Addr = addr_s.parse().map_err(|_| {
+        Error::InvalidMessage(format!("u32: invalid IPv4 address `{addr_s}`"))
+    })?;
+    Ok((addr, prefix))
+}
+
+/// Parse an IP protocol name or numeric value into a u8.
+fn parse_ip_proto_name_or_num(s: &str) -> Result<u8> {
+    // Try numeric first; common case is `match ip protocol 6`.
+    if let Ok(n) = s.parse::<u8>() {
+        return Ok(n);
+    }
+    // Fall back to the small set of named protocols `tc(8)` accepts.
+    Ok(match s {
+        "tcp" => 6,
+        "udp" => 17,
+        "icmp" => 1,
+        "icmpv6" => 58,
+        "sctp" => 132,
+        "ah" => 51,
+        "esp" => 50,
+        "gre" => 47,
+        other => {
+            return Err(Error::InvalidMessage(format!(
+                "u32: unknown IP protocol `{other}` \
+                 (expected name [tcp/udp/icmp/icmpv6/sctp/ah/esp/gre] or number 0–255)"
+            )));
+        }
+    })
+}
+
+/// Parse a u16 port value with kind-prefixed error context.
+fn parse_port(field: &str, layer: &str, s: &str) -> Result<u16> {
+    s.parse::<u16>().map_err(|_| {
+        Error::InvalidMessage(format!(
+            "u32: invalid {layer} {field} `{s}` (expected port 0–65535)"
+        ))
     })
 }
 
@@ -4174,5 +4319,164 @@ mod tests {
     fn u32_parse_params_classid_missing_value_errors() {
         let err = U32Filter::parse_params(&["classid"]).unwrap_err();
         assert!(err.to_string().contains("requires a value"));
+    }
+
+    // ==========================================================
+    // Phase 2 — named-match shortcuts (Plan 138 PR B). Each
+    // shortcut routes through the existing typed setter; the
+    // tests verify wire equivalence by comparing parser output to
+    // the direct-setter output rather than hard-coding offsets.
+    // Golden-hex fixtures captured from `tc(8)` are deferred until
+    // the privileged GHA runner ships (Plan 142 Phase 0 GHA file
+    // is no-op until then). Until then, setter equivalence is
+    // the strongest check we have.
+    // ==========================================================
+
+    #[test]
+    fn u32_parse_params_match_ip_src_with_prefix() {
+        let parsed = U32Filter::parse_params(&["match", "ip", "src", "10.0.0.0/24"]).unwrap();
+        let direct = U32Filter::new().match_src_ipv4("10.0.0.0".parse().unwrap(), 24);
+        assert_eq!(parsed.keys.len(), 1);
+        assert_eq!(parsed.keys[0].val, direct.keys[0].val);
+        assert_eq!(parsed.keys[0].mask, direct.keys[0].mask);
+        assert_eq!(parsed.keys[0].off, direct.keys[0].off);
+    }
+
+    #[test]
+    fn u32_parse_params_match_ip_src_no_prefix_defaults_to_32() {
+        let parsed = U32Filter::parse_params(&["match", "ip", "src", "10.1.2.3"]).unwrap();
+        let direct = U32Filter::new().match_src_ipv4("10.1.2.3".parse().unwrap(), 32);
+        assert_eq!(parsed.keys[0].val, direct.keys[0].val);
+        assert_eq!(parsed.keys[0].mask, direct.keys[0].mask);
+        // /32 → mask is 0xFFFF_FFFF (host order before to_be).
+        assert_eq!(u32::from_be(parsed.keys[0].mask), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn u32_parse_params_match_ip_dst_with_prefix() {
+        let parsed =
+            U32Filter::parse_params(&["match", "ip", "dst", "192.168.0.0/16"]).unwrap();
+        let direct = U32Filter::new().match_dst_ipv4("192.168.0.0".parse().unwrap(), 16);
+        assert_eq!(parsed.keys[0].val, direct.keys[0].val);
+        assert_eq!(parsed.keys[0].mask, direct.keys[0].mask);
+        assert_eq!(parsed.keys[0].off, direct.keys[0].off);
+    }
+
+    #[test]
+    fn u32_parse_params_match_ip_protocol_named() {
+        let by_name = U32Filter::parse_params(&["match", "ip", "protocol", "tcp"]).unwrap();
+        let direct = U32Filter::new().match_ip_proto(6);
+        assert_eq!(by_name.keys[0].val, direct.keys[0].val);
+        assert_eq!(by_name.keys[0].mask, direct.keys[0].mask);
+        assert_eq!(by_name.keys[0].off, direct.keys[0].off);
+    }
+
+    #[test]
+    fn u32_parse_params_match_ip_protocol_numeric() {
+        let parsed = U32Filter::parse_params(&["match", "ip", "protocol", "6"]).unwrap();
+        let direct = U32Filter::new().match_ip_proto(6);
+        assert_eq!(parsed.keys[0].val, direct.keys[0].val);
+        assert_eq!(parsed.keys[0].mask, direct.keys[0].mask);
+    }
+
+    #[test]
+    fn u32_parse_params_match_ip_protocol_named_set() {
+        // Spot-check each named protocol resolves to the kernel value.
+        let cases = [
+            ("tcp", 6),
+            ("udp", 17),
+            ("icmp", 1),
+            ("icmpv6", 58),
+            ("sctp", 132),
+            ("ah", 51),
+            ("esp", 50),
+            ("gre", 47),
+        ];
+        for (name, num) in cases {
+            let parsed =
+                U32Filter::parse_params(&["match", "ip", "protocol", name]).unwrap();
+            let direct = U32Filter::new().match_ip_proto(num);
+            assert_eq!(
+                parsed.keys[0].val, direct.keys[0].val,
+                "{name} should map to proto {num}"
+            );
+        }
+    }
+
+    #[test]
+    fn u32_parse_params_match_ip_dport_and_sport() {
+        let dport = U32Filter::parse_params(&["match", "ip", "dport", "443"]).unwrap();
+        let sport = U32Filter::parse_params(&["match", "ip", "sport", "12345"]).unwrap();
+        let dport_direct = U32Filter::new().match_dst_port(443);
+        let sport_direct = U32Filter::new().match_src_port(12345);
+        assert_eq!(dport.keys[0].val, dport_direct.keys[0].val);
+        assert_eq!(dport.keys[0].mask, dport_direct.keys[0].mask);
+        assert_eq!(dport.keys[0].offmask, dport_direct.keys[0].offmask); // -1 = nexthdr-relative
+        assert_eq!(sport.keys[0].val, sport_direct.keys[0].val);
+        assert_eq!(sport.keys[0].mask, sport_direct.keys[0].mask);
+    }
+
+    #[test]
+    fn u32_parse_params_match_tcp_udp_port_aliases() {
+        let by_ip = U32Filter::parse_params(&["match", "ip", "dport", "80"]).unwrap();
+        let by_tcp = U32Filter::parse_params(&["match", "tcp", "dport", "80"]).unwrap();
+        let by_udp = U32Filter::parse_params(&["match", "udp", "dport", "80"]).unwrap();
+        // The tcp/udp prefix is sugar; the wire is identical.
+        assert_eq!(by_ip.keys[0].val, by_tcp.keys[0].val);
+        assert_eq!(by_ip.keys[0].val, by_udp.keys[0].val);
+        assert_eq!(by_ip.keys[0].mask, by_tcp.keys[0].mask);
+    }
+
+    #[test]
+    fn u32_parse_params_named_match_combines_with_classid() {
+        let f = U32Filter::parse_params(&[
+            "match", "ip", "src", "10.0.0.0/24", "match", "tcp", "dport", "80", "classid",
+            "1:10",
+        ])
+        .unwrap();
+        assert_eq!(f.keys.len(), 2);
+        assert_eq!(f.classid, Some(TcHandle::new(1, 0x10).as_raw()));
+    }
+
+    #[test]
+    fn u32_parse_params_match_ip_invalid_prefix_errors() {
+        let err =
+            U32Filter::parse_params(&["match", "ip", "src", "10.0.0.0/40"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("u32:") && msg.contains("prefix"), "got: {msg}");
+    }
+
+    #[test]
+    fn u32_parse_params_match_ip_invalid_addr_errors() {
+        let err =
+            U32Filter::parse_params(&["match", "ip", "src", "999.999.999.999"]).unwrap_err();
+        assert!(err.to_string().contains("invalid IPv4 address"));
+    }
+
+    #[test]
+    fn u32_parse_params_match_ip_unknown_field_errors() {
+        let err = U32Filter::parse_params(&["match", "ip", "fragment", "yes"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unsupported `match ip fragment`"), "got: {msg}");
+    }
+
+    #[test]
+    fn u32_parse_params_match_ip_unknown_proto_errors() {
+        let err =
+            U32Filter::parse_params(&["match", "ip", "protocol", "wat"]).unwrap_err();
+        assert!(err.to_string().contains("unknown IP protocol"));
+    }
+
+    #[test]
+    fn u32_parse_params_match_ip_dport_invalid_port_errors() {
+        let err =
+            U32Filter::parse_params(&["match", "ip", "dport", "70000"]).unwrap_err();
+        assert!(err.to_string().contains("expected port 0–65535"));
+    }
+
+    #[test]
+    fn u32_parse_params_match_ip_missing_value_errors() {
+        let err = U32Filter::parse_params(&["match", "ip", "src"]).unwrap_err();
+        assert!(err.to_string().contains("requires VALUE"));
     }
 }

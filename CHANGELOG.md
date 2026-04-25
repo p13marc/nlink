@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `U32Filter::parse_params` Phase 2 named-match shortcuts (Plan 138 PR B)
+
+- `U32Filter::parse_params` grew the four-token named-match
+  shortcuts that desugar to the existing typed setters
+  (`match_src_ipv4` / `match_dst_ipv4` / `match_ip_proto` /
+  `match_src_port` / `match_dst_port`). Wire output is identical
+  to direct setter calls — port matches use `nexthdr`-relative
+  offsets via `with_nexthdr`, which is IP-options-tolerant.
+- Recognised shortcuts:
+  - `match ip src <addr>[/<prefix>]` — IPv4 source. Bare addr → /32.
+  - `match ip dst <addr>[/<prefix>]` — IPv4 destination.
+  - `match ip protocol <name|number>` — IP protocol. Names accepted:
+    `tcp` (6), `udp` (17), `icmp` (1), `icmpv6` (58), `sctp` (132),
+    `ah` (51), `esp` (50), `gre` (47). Numeric: 0–255.
+  - `match ip sport <port>` / `match ip dport <port>` — L4 ports.
+  - `match tcp sport|dport <port>` and `match udp sport|dport <port>`
+    — alias for `match ip sport|dport`. The wire is identical;
+    the `tcp`/`udp` prefix is `tc(8)` syntax sugar.
+- New private helpers (`apply_named_match`,
+  `parse_u32_ipv4_with_prefix`, `parse_ip_proto_name_or_num`,
+  `parse_port`) factored at module scope. The flower filter has
+  its own `parse_ipv4_with_prefix` with a `flower:` error prefix;
+  the u32 helper is renamed to disambiguate.
+- 15 new unit tests cover: each shortcut's wire equivalence to
+  the direct setter, /32 default, all 8 named protocols, port
+  aliases (ip vs tcp vs udp produce identical bytes), shortcut
+  combination with `classid`, plus 6 strict-error cases (invalid
+  prefix, invalid addr, unknown field, unknown proto, port out
+  of range, missing value).
+- `parse_u32_raw_match` (renamed from `parse_u32_match`) now takes
+  `width: &str` from the caller's already-validated dispatch.
+  No behaviour change.
+
+Per the plan, golden-hex fixtures from `tc(8)` are deferred until
+the privileged GHA runner ships (the workflow file lands in a
+follow-up alongside the first integration test that uses
+`require_module!`). Until then, setter equivalence via shared
+helpers is the strongest local check.
+
+Phase 3 (hash-table grammar: `divisor`, `ht`, `link`, `order`,
+`hashkey`) follows in the next PR. The filter side stays at 8 of 9
+typed-first; `basic` (Plan 133 PR C) is the last remaining kind.
+
 ### Added — `U32Filter::parse_params` Phase 1 (Plan 138 PR A, Plan 142 Phase 1)
 
 - New `U32Filter::parse_params(&[&str])` parses the raw-match-triple
