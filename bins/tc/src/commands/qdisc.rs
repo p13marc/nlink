@@ -7,7 +7,10 @@ use nlink::{
         Connection, Result, Route,
         message::NlMsgType,
         messages::TcMessage,
-        tc::{CakeConfig, HtbQdiscConfig, NetemConfig, QdiscConfig, TbfConfig},
+        tc::{
+            CakeConfig, FqCodelConfig, HtbQdiscConfig, NetemConfig, PrioConfig, QdiscConfig,
+            SfqConfig, TbfConfig,
+        },
     },
     output::{OutputFormat, OutputOptions, print_all},
 };
@@ -317,7 +320,10 @@ async fn try_typed_qdisc(
 ) -> Option<Result<()>> {
     // Bail fast for unknown kinds — keeps unsupported kinds on the
     // legacy path without paying for handle parsing.
-    let known = matches!(kind, "htb" | "netem" | "cake" | "tbf");
+    let known = matches!(
+        kind,
+        "htb" | "netem" | "cake" | "tbf" | "sfq" | "prio" | "fq_codel"
+    );
     if !known {
         return None;
     }
@@ -341,6 +347,9 @@ async fn try_typed_qdisc(
         "netem" => dispatch!(NetemConfig),
         "cake" => dispatch!(CakeConfig),
         "tbf" => dispatch!(TbfConfig),
+        "sfq" => dispatch!(SfqConfig),
+        "prio" => dispatch!(PrioConfig),
+        "fq_codel" => dispatch!(FqCodelConfig),
         _ => unreachable!("checked by `known` guard above"),
     })
 }

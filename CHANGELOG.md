@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — three more typed qdisc parsers + bin wiring (slice 8)
+
+- New `parse_params` methods on three more typed qdisc configs:
+  - `SfqConfig::parse_params` — `quantum`, `perturb`, `limit`. The
+    legacy `divisor` token is rejected ("not modelled by SfqConfig")
+    until the typed config grows that field.
+  - `PrioConfig::parse_params` — `bands`, `priomap` (exactly 16
+    values; the legacy parser silently ignored short maps, the typed
+    one returns a clear "requires exactly 16 values, got N" error).
+  - `FqCodelConfig::parse_params` — `limit`, `target`, `interval`,
+    `flows`, `quantum`, `ce_threshold`, `memory_limit`, plus the
+    `ecn` / `noecn` flag pair.
+- `bins/tc/src/commands/qdisc.rs` `try_typed_qdisc` now dispatches
+  these three new kinds via the same `dispatch!` macro as before.
+  The known-kinds list grew from 4 to 7: htb, netem, cake, tbf, sfq,
+  prio, fq_codel. Long-tail kinds (ingress, clsact, red, pie, hfsc,
+  drr, qfq, mqprio, taprio, etf, plug, etc.) still fall through to
+  the legacy `qdisc_builder::*`.
+- 17 new unit tests across the three configs (6 sfq + 5 prio + 6
+  fq_codel) covering empty-yields-default, typical-set,
+  unknown-token, missing-value, invalid-value, plus per-config
+  specifics (sfq's quantum-with-size-suffix and divisor rejection;
+  prio's full-priomap and short-priomap-error; fq_codel's
+  ecn/noecn toggle and ce_threshold). Lib suite went 500 → 517;
+  clippy clean workspace-wide.
+- Verified interactively: `tc qdisc add dummy0 --parent root --handle
+  1: sfq nonsense_token foo` now fails with `sfq: unknown token
+  "nonsense_token"`; valid params reach the netlink layer.
+
 ### Changed — `bins/tc` filter subcommand: typed dispatch for `flower` (slice 7)
 
 - `bins/tc/src/commands/filter.rs` now dispatches typed for the

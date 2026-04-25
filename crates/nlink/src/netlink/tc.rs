@@ -669,6 +669,114 @@ impl FqCodelConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style fq_codel params slice into a typed
+    /// `FqCodelConfig`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `limit <packets>` — hard limit on queue size.
+    /// - `target <time>` — target delay (e.g. `5ms`).
+    /// - `interval <time>` — moving-time-window width (e.g. `100ms`).
+    /// - `flows <n>` — number of flows.
+    /// - `quantum <bytes>` — bytes served per round.
+    /// - `ce_threshold <time>` — ECN CE marking threshold.
+    /// - `memory_limit <bytes>` — memory limit (tc-style size).
+    /// - `ecn` / `noecn` — flag tokens, no value.
+    ///
+    /// Stricter than the legacy parser: unknown tokens, missing
+    /// values, and unparseable time/size/integer values all return
+    /// `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("fq_codel: `{key}` requires a value"))
+                })
+            };
+            match key {
+                "limit" => {
+                    let s = need_value()?;
+                    cfg.limit = Some(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("fq_codel: invalid limit `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "target" => {
+                    let s = need_value()?;
+                    cfg.target = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_codel: invalid target `{s}` (expected tc-style time)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "interval" => {
+                    let s = need_value()?;
+                    cfg.interval = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_codel: invalid interval `{s}` (expected tc-style time)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "flows" => {
+                    let s = need_value()?;
+                    cfg.flows = Some(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("fq_codel: invalid flows `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "quantum" => {
+                    let s = need_value()?;
+                    cfg.quantum = Some(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_codel: invalid quantum `{s}` (expected unsigned integer bytes)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "ce_threshold" => {
+                    let s = need_value()?;
+                    cfg.ce_threshold = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_codel: invalid ce_threshold `{s}` (expected tc-style time)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "memory_limit" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_codel: invalid memory_limit `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    cfg.memory_limit = Some(bytes.try_into().map_err(|_| {
+                        Error::InvalidMessage(format!("fq_codel: memory_limit `{s}` exceeds u32"))
+                    })?);
+                    i += 2;
+                }
+                "ecn" => {
+                    cfg.ecn = true;
+                    i += 1;
+                }
+                "noecn" => {
+                    cfg.ecn = false;
+                    i += 1;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "fq_codel: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
 }
 
 impl QdiscConfig for FqCodelConfig {
@@ -1168,6 +1276,63 @@ impl PrioConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style prio params slice into a typed `PrioConfig`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `bands <n>` — number of priority bands (signed i32 to match
+    ///   the kernel's wire type).
+    /// - `priomap <P0> <P1> ... <P15>` — exactly 16 priority-to-band
+    ///   mappings. Stricter than the legacy parser, which silently
+    ///   ignored the token if there weren't 16 values; here a short
+    ///   priomap is an explicit error.
+    ///
+    /// Unknown tokens, missing values, and unparseable numbers all
+    /// return `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "bands" => {
+                    let s = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("prio: `bands` requires a value".into())
+                    })?;
+                    cfg.bands = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "prio: invalid bands `{s}` (expected signed integer)"
+                        ))
+                    })?;
+                    i += 2;
+                }
+                "priomap" => {
+                    if params.len() < i + 1 + 16 {
+                        return Err(Error::InvalidMessage(format!(
+                            "prio: `priomap` requires exactly 16 values, got {}",
+                            params.len().saturating_sub(i + 1)
+                        )));
+                    }
+                    for j in 0..16 {
+                        let s = params[i + 1 + j];
+                        cfg.priomap[j] = s.parse().map_err(|_| {
+                            Error::InvalidMessage(format!(
+                                "prio: invalid priomap[{j}] `{s}` (expected 0-255)"
+                            ))
+                        })?;
+                    }
+                    i += 17;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "prio: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
 }
 
 impl QdiscConfig for PrioConfig {
@@ -1250,6 +1415,78 @@ impl SfqConfig {
     /// Build the configuration.
     pub fn build(self) -> Self {
         self
+    }
+
+    /// Parse a tc-style sfq params slice into a typed `SfqConfig`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `quantum <bytes>` — bytes dequeued per round (tc-style size).
+    /// - `perturb <seconds>` — hash perturbation interval.
+    /// - `limit <packets>` — queue limit in packets.
+    ///
+    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// `divisor` — `SfqConfig` doesn't expose the hash-table divisor
+    /// field. Drop to `tc::options::sfq::build` if you need it.
+    ///
+    /// Stricter than the legacy parser: unknown tokens, missing
+    /// values, and unparseable numbers all return an error.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params
+                    .get(i + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("sfq: `{key}` requires a value")))
+            };
+            match key {
+                "quantum" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "sfq: invalid quantum `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    cfg.quantum = bytes.try_into().map_err(|_| {
+                        Error::InvalidMessage(format!("sfq: quantum `{s}` exceeds u32"))
+                    })?;
+                    i += 2;
+                }
+                "perturb" => {
+                    let s = need_value()?;
+                    cfg.perturb = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "sfq: invalid perturb `{s}` (expected signed integer seconds)"
+                        ))
+                    })?;
+                    i += 2;
+                }
+                "limit" => {
+                    let s = need_value()?;
+                    cfg.limit = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "sfq: invalid limit `{s}` (expected unsigned integer packets)"
+                        ))
+                    })?;
+                    i += 2;
+                }
+                "divisor" => {
+                    return Err(Error::InvalidMessage(
+                        "sfq: `divisor` is not modelled by SfqConfig — use tc::options::sfq::build"
+                            .into(),
+                    ));
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "sfq: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
     }
 }
 
@@ -5640,5 +5877,153 @@ mod tests {
     fn tbf_parse_params_invalid_rate_errors() {
         let err = TbfConfig::parse_params(&["rate", "fast"]).unwrap_err();
         assert!(err.to_string().contains("invalid rate"));
+    }
+
+    #[test]
+    fn sfq_parse_params_empty_yields_default() {
+        let cfg = SfqConfig::parse_params(&[]).unwrap();
+        assert_eq!(cfg.perturb, 0);
+        assert_eq!(cfg.limit, 127);
+        assert_eq!(cfg.quantum, 0);
+    }
+
+    #[test]
+    fn sfq_parse_params_typical_set() {
+        let cfg = SfqConfig::parse_params(&["perturb", "10", "limit", "1000", "quantum", "1500"])
+            .unwrap();
+        assert_eq!(cfg.perturb, 10);
+        assert_eq!(cfg.limit, 1000);
+        assert_eq!(cfg.quantum, 1500);
+    }
+
+    #[test]
+    fn sfq_parse_params_quantum_with_size_suffix() {
+        let cfg = SfqConfig::parse_params(&["quantum", "1k"]).unwrap();
+        assert_eq!(cfg.quantum, 1024);
+    }
+
+    #[test]
+    fn sfq_parse_params_divisor_rejected() {
+        let err = SfqConfig::parse_params(&["divisor", "1024"]).unwrap_err();
+        assert!(err.to_string().contains("not modelled"), "got: {err}");
+    }
+
+    #[test]
+    fn sfq_parse_params_unknown_token_errors() {
+        let err = SfqConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn sfq_parse_params_missing_value_errors() {
+        let err = SfqConfig::parse_params(&["perturb"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"));
+    }
+
+    #[test]
+    fn prio_parse_params_empty_yields_default() {
+        let cfg = PrioConfig::parse_params(&[]).unwrap();
+        assert_eq!(cfg.bands, 3);
+        assert_eq!(
+            cfg.priomap,
+            [1, 2, 2, 2, 1, 2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]
+        );
+    }
+
+    #[test]
+    fn prio_parse_params_bands() {
+        let cfg = PrioConfig::parse_params(&["bands", "5"]).unwrap();
+        assert_eq!(cfg.bands, 5);
+    }
+
+    #[test]
+    fn prio_parse_params_priomap_full() {
+        // 16 explicit values
+        let mut params = vec!["priomap"];
+        for n in 0u8..16 {
+            params.push(if n < 8 { "0" } else { "1" });
+        }
+        let cfg = PrioConfig::parse_params(&params).unwrap();
+        let expected: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
+        assert_eq!(cfg.priomap, expected);
+    }
+
+    #[test]
+    fn prio_parse_params_priomap_short_errors() {
+        // Only 5 values supplied — strict, unlike the legacy parser.
+        let err = PrioConfig::parse_params(&["priomap", "1", "2", "3", "4", "5"]).unwrap_err();
+        assert!(
+            err.to_string().contains("requires exactly 16 values"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn prio_parse_params_unknown_token_errors() {
+        let err = PrioConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn fq_codel_parse_params_empty_yields_default() {
+        let cfg = FqCodelConfig::parse_params(&[]).unwrap();
+        assert!(cfg.target.is_none());
+        assert!(cfg.interval.is_none());
+        assert!(cfg.limit.is_none());
+        assert!(!cfg.ecn);
+    }
+
+    #[test]
+    fn fq_codel_parse_params_typical_set() {
+        let cfg = FqCodelConfig::parse_params(&[
+            "limit",
+            "10240",
+            "target",
+            "5ms",
+            "interval",
+            "100ms",
+            "flows",
+            "1024",
+            "quantum",
+            "1500",
+            "memory_limit",
+            "32m",
+            "ecn",
+        ])
+        .unwrap();
+        assert_eq!(cfg.limit, Some(10240));
+        assert_eq!(cfg.target, Some(Duration::from_millis(5)));
+        assert_eq!(cfg.interval, Some(Duration::from_millis(100)));
+        assert_eq!(cfg.flows, Some(1024));
+        assert_eq!(cfg.quantum, Some(1500));
+        // 32m via tc-style size = 32 * 1024 * 1024
+        assert_eq!(cfg.memory_limit, Some(32 * 1024 * 1024));
+        assert!(cfg.ecn);
+    }
+
+    #[test]
+    fn fq_codel_parse_params_ecn_noecn_toggle() {
+        let cfg = FqCodelConfig::parse_params(&["ecn"]).unwrap();
+        assert!(cfg.ecn);
+        let cfg = FqCodelConfig::parse_params(&["ecn", "noecn"]).unwrap();
+        assert!(!cfg.ecn);
+    }
+
+    #[test]
+    fn fq_codel_parse_params_ce_threshold() {
+        let cfg = FqCodelConfig::parse_params(&["ce_threshold", "20ms"]).unwrap();
+        assert_eq!(cfg.ce_threshold, Some(Duration::from_millis(20)));
+    }
+
+    #[test]
+    fn fq_codel_parse_params_unknown_token_errors() {
+        let err = FqCodelConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn fq_codel_parse_params_invalid_time_errors() {
+        let err = FqCodelConfig::parse_params(&["target", "fast"]).unwrap_err();
+        assert!(err.to_string().contains("invalid target"));
     }
 }
