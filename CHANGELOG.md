@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `RouteFilter::parse_params` + bin wiring (slice 12)
+
+- New `RouteFilter::parse_params` recognises `classid` / `flowid`,
+  `to <realm>`, `from <realm>`, `iif <dev>`, and `chain <n>`.
+  Action attachment isn't parsed (use the typed builder's
+  `with_action` for that).
+- `bins/tc/src/commands/filter.rs` known-kinds list grew from 3 to
+  4 (+ `route`).
+- **Net new CLI capability**: the legacy filter dispatcher's
+  `_ => i += 1` arm silently swallowed `route`, so the CLI
+  couldn't configure route-filter rules at all before this slice.
+- 6 new unit tests cover empty / typical / chain+flowid alias /
+  unknown-token / missing-value / invalid-realm. Lib suite went
+  549 → 555; clippy clean workspace-wide.
+- Verified interactively: `tc filter add dummy0 --parent 1:
+  --protocol ip --prio 100 route to 10 from 5 classid 1:10` reaches
+  the netlink layer; `route nonsense` fails typed-parser-clean.
+
 ### Added — five small qdisc parsers + bin wiring (slice 11)
 
 - New `parse_params` methods on five more typed qdisc configs:

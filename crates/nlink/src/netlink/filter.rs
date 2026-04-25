@@ -1887,6 +1887,81 @@ impl RouteFilter {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style route params slice into a typed `RouteFilter`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `classid <handle>` (alias `flowid`) — target class id.
+    /// - `to <realm>` — match destination routing realm.
+    /// - `from <realm>` — match source routing realm.
+    /// - `iif <dev>` — match input interface by name. Resolved at
+    ///   filter-add time; for namespace operations prefer setting
+    ///   `from_if_index()` on the typed builder directly.
+    /// - `chain <n>` — chain index.
+    ///
+    /// Action attachment is not parsed here; build the filter typed
+    /// and use `with_action` if you need to attach actions.
+    ///
+    /// **Net new CLI capability**: the legacy filter parser doesn't
+    /// recognise `route` at all (silently swallowed in the
+    /// `_ => i += 1` arm). Prior to this method the CLI couldn't
+    /// configure route filters.
+    pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
+        use crate::Error;
+        let mut f = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("route: `{key}` requires a value"))
+                })
+            };
+            match key {
+                "classid" | "flowid" => {
+                    let s = need_value()?;
+                    let h = s.parse::<TcHandle>().map_err(|e| {
+                        Error::InvalidMessage(format!("route: invalid {key} `{s}`: {e}"))
+                    })?;
+                    f = f.classid(h);
+                    i += 2;
+                }
+                "to" => {
+                    let s = need_value()?;
+                    f = f.to_realm(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("route: invalid to realm `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "from" => {
+                    let s = need_value()?;
+                    f = f.from_realm(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("route: invalid from realm `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "iif" => {
+                    let s = need_value()?;
+                    f = f.from_if(s);
+                    i += 2;
+                }
+                "chain" => {
+                    let s = need_value()?;
+                    f = f.chain(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("route: invalid chain `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "route: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(f)
+    }
 }
 
 impl FilterConfig for RouteFilter {
@@ -3224,5 +3299,51 @@ mod tests {
     fn fw_parse_params_invalid_mask_errors() {
         let err = FwFilter::parse_params(&["mask", "zzzz"]).unwrap_err();
         assert!(err.to_string().contains("invalid mask"));
+    }
+
+    #[test]
+    fn route_parse_params_empty_yields_default() {
+        let f = RouteFilter::parse_params(&[]).unwrap();
+        assert!(f.classid.is_none());
+        assert!(f.to_realm.is_none());
+        assert!(f.from_realm.is_none());
+        assert!(f.from_if.is_none());
+        assert!(f.chain.is_none());
+    }
+
+    #[test]
+    fn route_parse_params_typical() {
+        let f =
+            RouteFilter::parse_params(&["classid", "1:10", "to", "10", "from", "5", "iif", "eth1"])
+                .unwrap();
+        assert_eq!(f.classid, Some(TcHandle::new(1, 0x10).as_raw()));
+        assert_eq!(f.to_realm, Some(10));
+        assert_eq!(f.from_realm, Some(5));
+        assert_eq!(f.chain, None);
+    }
+
+    #[test]
+    fn route_parse_params_chain_and_flowid_alias() {
+        let f = RouteFilter::parse_params(&["flowid", "1:20", "chain", "3"]).unwrap();
+        assert_eq!(f.classid, Some(TcHandle::new(1, 0x20).as_raw()));
+        assert_eq!(f.chain, Some(3));
+    }
+
+    #[test]
+    fn route_parse_params_unknown_token_errors() {
+        let err = RouteFilter::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn route_parse_params_missing_value_errors() {
+        let err = RouteFilter::parse_params(&["to"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"));
+    }
+
+    #[test]
+    fn route_parse_params_invalid_realm_errors() {
+        let err = RouteFilter::parse_params(&["to", "not-a-number"]).unwrap_err();
+        assert!(err.to_string().contains("invalid to realm"));
     }
 }
