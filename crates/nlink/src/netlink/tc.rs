@@ -672,6 +672,92 @@ impl HtbQdiscConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style params slice into a typed `HtbQdiscConfig`.
+    ///
+    /// Recognised tokens (each followed by a value):
+    ///
+    /// - `default <class>` — default class for unclassified traffic.
+    ///   Accepts a tc handle (`1:10`) or a bare hex minor (`10`,
+    ///   matching iproute2's `tc qdisc add ... htb default 10`).
+    /// - `r2q <n>` — rate-to-quantum divisor (default 10).
+    /// - `direct_qlen <n>` — direct queue length.
+    ///
+    /// Stricter than the legacy `tc::options::htb::build`: unknown
+    /// tokens, keys missing their value, and unparseable numbers all
+    /// return `Error::InvalidMessage` instead of being silently
+    /// skipped (which used to mask typos like `default_class` —
+    /// that token has no effect on the legacy parser).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let cfg = HtbQdiscConfig::parse_params(&["default", "1:10", "r2q", "5"])?;
+    /// assert_eq!(cfg.r2q, 5);
+    /// ```
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let value = || {
+                params
+                    .get(i + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("htb: `{key}` requires a value")))
+            };
+            match key {
+                "default" => {
+                    cfg.default_class = parse_default_class(value()?)?;
+                    i += 2;
+                }
+                "r2q" => {
+                    cfg.r2q = value()?.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "htb: invalid r2q `{}` (expected unsigned integer)",
+                            params[i + 1]
+                        ))
+                    })?;
+                    i += 2;
+                }
+                "direct_qlen" => {
+                    cfg.direct_qlen = Some(value()?.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "htb: invalid direct_qlen `{}` (expected unsigned integer)",
+                            params[i + 1]
+                        ))
+                    })?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "htb: unknown token `{other}` (expected default, r2q, or direct_qlen)"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+/// Parse the `default` class identifier in an HTB params slice.
+///
+/// Accepts a tc handle (`1:10` → raw u32 of `TcHandle::new(1, 0x10)`)
+/// or a bare hex minor (`10` → `0x10`). The bare-hex form mirrors
+/// `tc(8)`'s convention where `tc qdisc add ... htb default 10`
+/// means "minor 0x10 under the qdisc's own major".
+fn parse_default_class(s: &str) -> Result<u32> {
+    if s.contains(':') {
+        s.parse::<crate::netlink::tc_handle::TcHandle>()
+            .map(|h| h.as_raw())
+            .map_err(|e| Error::InvalidMessage(format!("htb: invalid default class `{s}`: {e}")))
+    } else {
+        u32::from_str_radix(s, 16).map_err(|_| {
+            Error::InvalidMessage(format!(
+                "htb: invalid default class `{s}` (expected hex minor or tc handle)"
+            ))
+        })
+    }
 }
 
 impl QdiscConfig for HtbQdiscConfig {
@@ -4501,5 +4587,89 @@ mod tests {
         assert_eq!(config.mtu, 1600);
         assert_eq!(config.mpu, 0);
         assert_eq!(config.overhead, 0);
+    }
+
+    #[test]
+    fn htb_qdisc_parse_params_empty_yields_defaults() {
+        let cfg = HtbQdiscConfig::parse_params(&[]).unwrap();
+        assert_eq!(cfg.default_class, 0);
+        assert_eq!(cfg.r2q, 10);
+        assert_eq!(cfg.direct_qlen, None);
+    }
+
+    #[test]
+    fn htb_qdisc_parse_params_default_as_handle() {
+        // tc handle form: "1:10" -> raw u32 of TcHandle::new(1, 0x10)
+        let cfg = HtbQdiscConfig::parse_params(&["default", "1:10"]).unwrap();
+        assert_eq!(
+            cfg.default_class,
+            crate::netlink::tc_handle::TcHandle::new(1, 0x10).as_raw(),
+        );
+    }
+
+    #[test]
+    fn htb_qdisc_parse_params_default_as_bare_hex() {
+        // bare-hex form mirrors `tc(8)`: "default 10" means minor 0x10.
+        let cfg = HtbQdiscConfig::parse_params(&["default", "10"]).unwrap();
+        assert_eq!(cfg.default_class, 0x10);
+        let cfg = HtbQdiscConfig::parse_params(&["default", "ff"]).unwrap();
+        assert_eq!(cfg.default_class, 0xff);
+    }
+
+    #[test]
+    fn htb_qdisc_parse_params_all_three() {
+        let cfg =
+            HtbQdiscConfig::parse_params(&["default", "1:10", "r2q", "5", "direct_qlen", "1000"])
+                .unwrap();
+        assert_eq!(
+            cfg.default_class,
+            crate::netlink::tc_handle::TcHandle::new(1, 0x10).as_raw(),
+        );
+        assert_eq!(cfg.r2q, 5);
+        assert_eq!(cfg.direct_qlen, Some(1000));
+    }
+
+    #[test]
+    fn htb_qdisc_parse_params_unknown_token_errors() {
+        // Legacy parser silently swallowed `default_class` (a typo for
+        // `default`); the typed parser rejects it so callers see the
+        // mistake immediately.
+        let err = HtbQdiscConfig::parse_params(&["default_class", "1:10"]).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown token"),
+            "expected unknown-token error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn htb_qdisc_parse_params_missing_value_errors() {
+        let err = HtbQdiscConfig::parse_params(&["default"]).unwrap_err();
+        assert!(
+            err.to_string().contains("requires a value"),
+            "expected missing-value error, got: {err}"
+        );
+        let err = HtbQdiscConfig::parse_params(&["r2q"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"));
+    }
+
+    #[test]
+    fn htb_qdisc_parse_params_invalid_number_errors() {
+        let err = HtbQdiscConfig::parse_params(&["r2q", "not-a-number"]).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid r2q"),
+            "expected invalid-r2q error, got: {err}"
+        );
+        let err = HtbQdiscConfig::parse_params(&["direct_qlen", "x"]).unwrap_err();
+        assert!(err.to_string().contains("invalid direct_qlen"));
+    }
+
+    #[test]
+    fn htb_qdisc_parse_params_invalid_default_errors() {
+        // Bare "abcdefg" is not a valid hex u32.
+        let err = HtbQdiscConfig::parse_params(&["default", "zzzz"]).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid default class"),
+            "got: {err}"
+        );
     }
 }

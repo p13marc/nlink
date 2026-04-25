@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `HtbQdiscConfig::parse_params` (typed-units rollout, slice 1)
+
+- New method `HtbQdiscConfig::parse_params(&[&str]) -> Result<Self>`
+  parses a tc-style params slice (`["default", "1:10", "r2q", "5",
+  "direct_qlen", "1000"]`) directly into a typed config. Recognises
+  the same `default` / `r2q` / `direct_qlen` tokens as the legacy
+  `nlink::tc::options::htb::build`, and accepts both forms of the
+  `default` value (tc handle `1:10` or bare hex `10`, matching
+  `tc(8)`).
+- **Stricter error model than the legacy parser:** unknown tokens,
+  keys missing their value, and unparseable numbers all return
+  `Error::InvalidMessage` with a clear context-bearing message. The
+  legacy `tc::options::htb::build` silently swallowed unknown tokens
+  (so a typo like `default_class` for `default` did nothing
+  visible) — the typed parser rejects it.
+- 8 new unit tests cover the empty / handle / bare-hex / all-three /
+  unknown-token / missing-value / invalid-number / invalid-default
+  cases. Lib suite: 440 pass; clippy clean workspace-wide.
+
+This is the first slice of the design path captured in commit
+`8013d3a`: per the roadmap, `bins/tc/src/commands/qdisc.rs` will
+later dispatch on `kind` and call `HtbQdiscConfig::parse_params`
+(plus equivalents on `NetemConfig`, `CakeConfig`, etc. as they're
+written) to construct typed configs and call
+`Connection::add_qdisc_full` directly — replacing the deprecated
+`tc::builders::qdisc::add` path entirely. No bin changes in this
+commit; the parser is in place for the next slice to consume.
+
 ### Changed — `bins/tc`: `class` subcommand off the deprecated legacy path
 
 - `bins/tc/src/commands/class.rs` no longer imports
