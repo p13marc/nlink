@@ -45,7 +45,6 @@ const NLM_F_ACK: u16 = 0x04;
 const NLM_F_DUMP: u16 = 0x300;
 const NLM_F_CREATE: u16 = 0x400;
 const NLM_F_EXCL: u16 = 0x200;
-#[allow(dead_code)] // for the upcoming update_sa slice
 const NLM_F_REPLACE: u16 = 0x100;
 
 // XFRM message types (from linux/xfrm.h)
@@ -993,6 +992,24 @@ impl Connection<Xfrm> {
         self.send_ack(b).await
     }
 
+    /// Replace an existing Security Association in place — same
+    /// wire shape as [`Self::add_sa`] but with
+    /// `NLM_F_CREATE | NLM_F_REPLACE`. The kernel matches on the
+    /// (`daddr`, `spi`, `proto`, `family`) tuple from the body and
+    /// updates the matching SA's algorithms / encap / mark / etc.
+    /// Useful for rotating keys or nudging an SA's mark without a
+    /// delete-then-add (which would briefly leave traffic
+    /// unprotected).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "update_sa"))]
+    pub async fn update_sa(&self, sa: XfrmSaBuilder) -> Result<()> {
+        let mut b = MessageBuilder::new(
+            XFRM_MSG_NEWSA,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+        );
+        sa.write_into(&mut b);
+        self.send_ack(b).await
+    }
+
     /// Flush every Security Association in the kernel's database.
     ///
     /// Sends `XFRM_MSG_FLUSHSA` with `proto = 0` (which the kernel
@@ -1002,11 +1019,53 @@ impl Connection<Xfrm> {
         self.flush_sa_inner(0).await
     }
 
+    /// Flush every Security Association of a specific protocol
+    /// (e.g. ESP only). Useful for narrow cleanup that leaves
+    /// other-protocol SAs in place.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_sa_proto"))]
+    pub async fn flush_sa_proto(&self, proto: IpsecProtocol) -> Result<()> {
+        self.flush_sa_inner(proto.number()).await
+    }
+
     async fn flush_sa_inner(&self, proto: u8) -> Result<()> {
         let mut b = MessageBuilder::new(XFRM_MSG_FLUSHSA, NLM_F_REQUEST | NLM_F_ACK);
         let body = XfrmUsersaFlush { proto, _pad: [0; 7] };
         b.append_bytes(body.as_bytes());
         self.send_ack(b).await
+    }
+
+    /// Fetch a single Security Association by its tuple. Returns
+    /// `Ok(None)` if no SA matches (kernel returns ENOENT).
+    ///
+    /// Sends `XFRM_MSG_GETSA` with an `XfrmUsersaId` body — same
+    /// shape as [`Self::del_sa`]'s lookup key. The response is a
+    /// single `XFRM_MSG_NEWSA`-style message carrying the SA, or a
+    /// `NLMSG_ERROR` with `errno=ENOENT` when nothing matches.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_sa"))]
+    pub async fn get_sa(
+        &self,
+        src: IpAddr,
+        dst: IpAddr,
+        spi: u32,
+        proto: IpsecProtocol,
+    ) -> Result<Option<SecurityAssociation>> {
+        let mut b = MessageBuilder::new(XFRM_MSG_GETSA, NLM_F_REQUEST);
+        let id = XfrmUsersaId {
+            daddr: ip_to_xfrm_addr(dst),
+            spi: spi.to_be(),
+            family: family_for_pair(src, dst),
+            proto: proto.number(),
+            _pad: 0,
+        };
+        b.append_bytes(id.as_bytes());
+        let saddr = ip_to_xfrm_addr(src);
+        b.append_attr(XFRMA_SRCADDR, &saddr.bytes);
+
+        match self.send_request(b).await {
+            Ok(response) => Ok(Self::parse_sa_msg(&response)),
+            Err(e) if e.is_not_found() => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Get all Security Associations.
@@ -1684,5 +1743,112 @@ mod tests {
         );
         let info = sa.build_usersa_info();
         assert_eq!(info.replay_window, 32);
+    }
+
+    // ==========================================================
+    // Slice 2 — update_sa, flush_sa_proto, get_sa
+    // ==========================================================
+
+    fn build_update_sa_frame(sa: XfrmSaBuilder) -> Vec<u8> {
+        let mut b = MessageBuilder::new(
+            XFRM_MSG_NEWSA,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+        );
+        sa.write_into(&mut b);
+        b.finish()
+    }
+
+    #[test]
+    fn xfrm_update_sa_uses_create_and_replace_flags_not_excl() {
+        let sa = XfrmSaBuilder::new(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            0xdead_beef,
+            IpsecProtocol::Esp,
+        )
+        .auth_hmac_sha256(&[0u8; 32])
+        .encr_aes_cbc(&[0u8; 16]);
+
+        let frame = build_update_sa_frame(sa);
+
+        // nlmsghdr.flags is at offset 6..8 (after len + type).
+        let flags = u16::from_le_bytes([frame[6], frame[7]]);
+        let want = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+        assert_eq!(flags, want, "update_sa must set CREATE+REPLACE, not EXCL");
+        assert_eq!(flags & NLM_F_EXCL, 0, "EXCL must NOT be set");
+    }
+
+    #[test]
+    fn xfrm_update_sa_body_round_trips_like_add_sa() {
+        // The body bytes are identical to add_sa — only nlmsghdr
+        // flags differ. Verify the SA payload still parses.
+        let sa = XfrmSaBuilder::new(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            0xCAFE,
+            IpsecProtocol::Esp,
+        )
+        .reqid(11)
+        .aead_aes_gcm(&[0xAAu8; 20], 128);
+
+        let frame = build_update_sa_frame(sa);
+        let parsed = Connection::<Xfrm>::parse_sa_msg(&frame)
+            .expect("parse_sa must round-trip update_sa body");
+        assert_eq!(parsed.spi, 0xCAFE);
+        assert_eq!(parsed.reqid, 11);
+        assert!(parsed.aead_alg.is_some());
+    }
+
+    #[test]
+    fn xfrm_flush_sa_proto_writes_specific_proto_byte() {
+        // Frame layout: 16-byte nlmsghdr + 8-byte XfrmUsersaFlush;
+        // the proto byte sits at offset 16.
+        let mut b = MessageBuilder::new(XFRM_MSG_FLUSHSA, NLM_F_REQUEST | NLM_F_ACK);
+        let body = XfrmUsersaFlush {
+            proto: IpsecProtocol::Esp.number(),
+            _pad: [0; 7],
+        };
+        b.append_bytes(body.as_bytes());
+        let frame = b.finish();
+
+        assert!(frame.len() >= 16 + 8);
+        assert_eq!(frame[16], 50, "proto=ESP=50");
+        // Padding bytes stay zero.
+        for &b in &frame[17..24] {
+            assert_eq!(b, 0, "flush body padding must be zero");
+        }
+    }
+
+    #[test]
+    fn xfrm_get_sa_request_carries_lookup_tuple() {
+        // get_sa builds the same XfrmUsersaId body as del_sa, but
+        // with XFRM_MSG_GETSA + NLM_F_REQUEST (no DUMP, no ACK).
+        let mut b = MessageBuilder::new(XFRM_MSG_GETSA, NLM_F_REQUEST);
+        let id = XfrmUsersaId {
+            daddr: ip_to_xfrm_addr("192.0.2.10".parse().unwrap()),
+            spi: 0x1234_5678_u32.to_be(),
+            family: libc::AF_INET as u16,
+            proto: IpsecProtocol::Ah.number(),
+            _pad: 0,
+        };
+        b.append_bytes(id.as_bytes());
+        let saddr = ip_to_xfrm_addr("192.0.2.1".parse().unwrap());
+        b.append_attr(XFRMA_SRCADDR, &saddr.bytes);
+        let frame = b.finish();
+
+        // nlmsg_type at offset 4..6
+        let nlmsg_type = u16::from_le_bytes([frame[4], frame[5]]);
+        assert_eq!(nlmsg_type, XFRM_MSG_GETSA);
+
+        // nlmsg_flags at offset 6..8 — REQUEST only, no DUMP / ACK.
+        let flags = u16::from_le_bytes([frame[6], frame[7]]);
+        assert_eq!(flags & NLM_F_DUMP, 0, "get_sa must NOT use DUMP");
+        assert_eq!(flags & NLM_F_ACK, 0, "get_sa must NOT use ACK");
+        assert!(flags & NLM_F_REQUEST != 0);
+
+        // XfrmUsersaId at offset 16..40
+        let (got, _) = XfrmUsersaId::ref_from_prefix(&frame[16..16 + 24]).unwrap();
+        assert_eq!(u32::from_be(got.spi), 0x1234_5678);
+        assert_eq!(got.proto, IpsecProtocol::Ah.number());
     }
 }

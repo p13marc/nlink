@@ -4,6 +4,54 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — XFRM SA write-path slice 2: `update_sa`, `flush_sa_proto`, `get_sa` (Plan 141 PR A complete)
+
+Closes Plan 141 PR A's full DoD. Three small methods, all
+mirrored from Plan 137 PR A's pattern for `Connection<Netfilter>`:
+
+- `Connection<Xfrm>::update_sa(sa)` — same wire shape as
+  `add_sa` but with `NLM_F_CREATE | NLM_F_REPLACE` (no
+  `NLM_F_EXCL`). The kernel matches on the
+  (`daddr`, `spi`, `proto`, `family`) tuple from the body and
+  updates in place. Useful for rotating keys without a
+  delete-then-add (which would briefly leave traffic
+  unprotected).
+- `Connection<Xfrm>::flush_sa_proto(proto: IpsecProtocol)` —
+  variant of `flush_sa()` that flushes only one IPsec
+  protocol (e.g. ESP only, leaving AH SAs in place).
+  Internally just calls `flush_sa_inner(proto.number())`.
+- `Connection<Xfrm>::get_sa(src, dst, spi, proto)` — single-result
+  fetch. Returns `Ok(Some(sa))` on hit, `Ok(None)` on
+  ENOENT (kernel says no such SA), `Err(e)` on other failures.
+  Uses `send_request` (not `send_dump`) for the one-message
+  response. Sends `XFRM_MSG_GETSA` with `NLM_F_REQUEST` only
+  (no DUMP, no ACK) and an `XfrmUsersaId` body, with optional
+  `XFRMA_SRCADDR` for the source-address hint.
+
+`NLM_F_REPLACE` constant lost its `#[allow(dead_code)]` gate.
+
+4 new unit tests:
+- `xfrm_update_sa_uses_create_and_replace_flags_not_excl` —
+  asserts the nlmsghdr.flags carry `CREATE|REPLACE` but NOT
+  `EXCL`.
+- `xfrm_update_sa_body_round_trips_like_add_sa` — the body is
+  identical to `add_sa`, so existing `parse_sa_msg` round-trips
+  it.
+- `xfrm_flush_sa_proto_writes_specific_proto_byte` — checks the
+  proto byte at the expected offset and that padding stays zero.
+- `xfrm_get_sa_request_carries_lookup_tuple` — asserts
+  `nlmsg_type=GETSA`, flags=`REQUEST` only, and the
+  `XfrmUsersaId` lookup body decodes correctly.
+
+660 lib tests total (was 656). Workspace clippy with
+--all-features --deny warnings is clean.
+
+Plan 141 PR A is now complete per §9 DoD: builder + all 6
+methods (`add`/`update`/`del`/`flush`/`flush_proto`/`get`) +
+8 round-trip wire-format tests. Plan 141 PR B (Security Policy
+CRUD with `XfrmSpBuilder`) is the next slice; PR C bundles the
+recipe and `--apply` example promotion.
+
 ### Added — `XfrmSaBuilder` + SA CRUD on `Connection<Xfrm>` (Plan 141 PR A, Plan 142 Phase 2)
 
 `Connection<Xfrm>` was dump-only — `get_security_associations`
