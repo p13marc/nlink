@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `TaprioConfig::parse_params` + bin wiring (slice 15)
+
+- New `TaprioConfig::parse_params` parses the time-aware shaper's
+  full grammar:
+  - `num_tc` (with 1-16 range check), `map` (16 values).
+  - `clockid` (named `CLOCK_TAI` / `CLOCK_REALTIME` / etc., or bare
+    integer — reuses the `parse_etf_clockid` helper).
+  - `base-time`, `cycle-time`, `cycle-time-extension` (i64 ns).
+  - `txtime-delay` (u32 ns).
+  - `txtime-assist` / `notxtime-assist` and `full-offload` /
+    `nofull-offload` flag pairs, plus a raw `flags <hex>` token for
+    advanced use.
+  - **`sched-entry <CMD> <gate-mask-hex> <interval-ns>`** —
+    structured triple grammar. CMD accepts the long names
+    (`SET_AND_HOLD`), short names (`HOLD`), and single-letter
+    aliases (`H`); also lowercase variants. Multiple `sched-entry`
+    tokens append to the schedule.
+  - `queues <count@offset>` is rejected with the same "not parsed
+    yet" message as `MqprioConfig` — pair grammar deferred.
+- `bins/tc/src/commands/qdisc.rs` known-kinds list grew from 17 to
+  18 (+ taprio). **The qdisc side is now 100% typed-first** — every
+  kind that has a typed `QdiscConfig` is also dispatched through
+  the typed parser path.
+- 8 new unit tests cover empty / typical (multi-entry schedule) /
+  cmd aliases (SET/S/HOLD/H/RELEASE/R) / short sched-entry / flag
+  pairs vs raw `flags` / queues rejection / unknown tokens /
+  invalid sched-entry cmd. Lib went 585 → 593; clippy clean.
+- Verified interactively: a full taprio config with two
+  sched-entry triples reaches the netlink layer; `sched-entry
+  BOGUS 0x1 100` fails with `taprio: invalid sched-entry cmd
+  "BOGUS" (expected SET / HOLD / RELEASE)`.
+- **Net new CLI capability**: the legacy qdisc dispatcher silently
+  swallowed `taprio`.
+
 ### Added — five more parsers + bin wiring (slice 14)
 
 - New `parse_params` methods on five more typed configs:

@@ -3673,6 +3673,219 @@ impl TaprioConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style taprio params slice into a typed
+    /// `TaprioConfig`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `num_tc <n>` — number of traffic classes (1-16).
+    /// - `map <P0> ... <P15>` — exactly 16 priority-to-tc mappings.
+    /// - `clockid <id>` — clock ID (named like `CLOCK_TAI` or bare
+    ///   integer).
+    /// - `base-time <ns>` — base time, ns since epoch (i64).
+    /// - `cycle-time <ns>` — cycle time (i64).
+    /// - `cycle-time-extension <ns>` — cycle time extension (i64).
+    /// - `txtime-delay <ns>` — TX time delay (u32).
+    /// - `txtime-assist` / `notxtime-assist` — flag pair.
+    /// - `full-offload` / `nofull-offload` — flag pair.
+    /// - `flags <hex>` — raw flags u32 (alternative to the named
+    ///   flag pairs above; replaces, doesn't OR).
+    /// - `sched-entry <CMD> <gate-mask-hex> <interval-ns>` —
+    ///   schedule entry. CMD is `SET` (alias `S`),
+    ///   `SET_AND_HOLD` (`HOLD`/`H`), or `SET_AND_RELEASE`
+    ///   (`RELEASE`/`R`). Multiple `sched-entry` tokens append.
+    ///
+    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// `queues <count@offset>` — same pair-grammar deferral as
+    /// `MqprioConfig`.
+    ///
+    /// **Net new CLI capability**: the legacy qdisc dispatcher
+    /// silently swallowed `taprio`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        use crate::netlink::types::tc::qdisc::taprio::{
+            TAPRIO_ATTR_FLAG_FULL_OFFLOAD, TAPRIO_ATTR_FLAG_TXTIME_ASSIST,
+        };
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("taprio: `{key}` requires a value"))
+                })
+            };
+            match key {
+                "num_tc" => {
+                    let s = need_value()?;
+                    let n: u8 = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "taprio: invalid num_tc `{s}` (expected 1-16)"
+                        ))
+                    })?;
+                    if !(1..=16).contains(&n) {
+                        return Err(Error::InvalidMessage(format!(
+                            "taprio: num_tc `{n}` out of range (1-16)"
+                        )));
+                    }
+                    cfg = cfg.num_tc(n);
+                    i += 2;
+                }
+                "map" => {
+                    if params.len() < i + 1 + 16 {
+                        return Err(Error::InvalidMessage(format!(
+                            "taprio: `map` requires exactly 16 values, got {}",
+                            params.len().saturating_sub(i + 1)
+                        )));
+                    }
+                    let mut map = [0u8; 16];
+                    for j in 0..16 {
+                        let s = params[i + 1 + j];
+                        map[j] = s.parse().map_err(|_| {
+                            Error::InvalidMessage(format!(
+                                "taprio: invalid map[{j}] `{s}` (expected 0-15)"
+                            ))
+                        })?;
+                    }
+                    cfg.prio_tc_map = map;
+                    i += 17;
+                }
+                "clockid" => {
+                    let s = need_value()?;
+                    cfg.clockid = parse_etf_clockid(s).map_err(|e| {
+                        // Re-label the error from the etf helper to taprio context.
+                        Error::InvalidMessage(format!("taprio: invalid clockid `{s}` ({e})"))
+                    })?;
+                    i += 2;
+                }
+                "base-time" => {
+                    let s = need_value()?;
+                    cfg.base_time = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("taprio: invalid base-time `{s}`"))
+                    })?;
+                    i += 2;
+                }
+                "cycle-time" => {
+                    let s = need_value()?;
+                    cfg.cycle_time = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("taprio: invalid cycle-time `{s}`"))
+                    })?;
+                    i += 2;
+                }
+                "cycle-time-extension" => {
+                    let s = need_value()?;
+                    cfg.cycle_time_extension = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("taprio: invalid cycle-time-extension `{s}`"))
+                    })?;
+                    i += 2;
+                }
+                "txtime-delay" => {
+                    let s = need_value()?;
+                    cfg.txtime_delay = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("taprio: invalid txtime-delay `{s}`"))
+                    })?;
+                    i += 2;
+                }
+                "txtime-assist" => {
+                    cfg.flags |= TAPRIO_ATTR_FLAG_TXTIME_ASSIST;
+                    i += 1;
+                }
+                "notxtime-assist" => {
+                    cfg.flags &= !TAPRIO_ATTR_FLAG_TXTIME_ASSIST;
+                    i += 1;
+                }
+                "full-offload" => {
+                    cfg.flags |= TAPRIO_ATTR_FLAG_FULL_OFFLOAD;
+                    i += 1;
+                }
+                "nofull-offload" => {
+                    cfg.flags &= !TAPRIO_ATTR_FLAG_FULL_OFFLOAD;
+                    i += 1;
+                }
+                "flags" => {
+                    let s = need_value()?;
+                    let trimmed = s.strip_prefix("0x").unwrap_or(s);
+                    cfg.flags = u32::from_str_radix(trimmed, 16)
+                        .or_else(|_| s.parse::<u32>())
+                        .map_err(|_| {
+                            Error::InvalidMessage(format!(
+                                "taprio: invalid flags `{s}` (expected hex u32 or decimal)"
+                            ))
+                        })?;
+                    i += 2;
+                }
+                "sched-entry" => {
+                    let cmd_s = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage(
+                            "taprio: `sched-entry` needs <cmd> <gate-mask-hex> <interval-ns>"
+                                .into(),
+                        )
+                    })?;
+                    let mask_s = params.get(i + 2).copied().ok_or_else(|| {
+                        Error::InvalidMessage(
+                            "taprio: `sched-entry` needs <cmd> <gate-mask-hex> <interval-ns>"
+                                .into(),
+                        )
+                    })?;
+                    let interval_s = params.get(i + 3).copied().ok_or_else(|| {
+                        Error::InvalidMessage(
+                            "taprio: `sched-entry` needs <cmd> <gate-mask-hex> <interval-ns>"
+                                .into(),
+                        )
+                    })?;
+                    let entry = parse_taprio_sched_entry(cmd_s, mask_s, interval_s)?;
+                    cfg.entries.push(entry);
+                    i += 4;
+                }
+                "queues" => {
+                    return Err(Error::InvalidMessage(
+                        "taprio: `queues` (count@offset list) is not parsed by parse_params yet — use TaprioConfig::queues() on the typed builder".into(),
+                    ));
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "taprio: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+/// Parse a single taprio sched-entry triple (cmd, gate-mask-hex,
+/// interval-ns).
+fn parse_taprio_sched_entry(
+    cmd_s: &str,
+    mask_s: &str,
+    interval_s: &str,
+) -> Result<super::types::tc::qdisc::taprio::TaprioSchedEntry> {
+    use super::types::tc::qdisc::taprio::{
+        TC_TAPRIO_CMD_SET_AND_HOLD, TC_TAPRIO_CMD_SET_AND_RELEASE, TC_TAPRIO_CMD_SET_GATES,
+        TaprioSchedEntry,
+    };
+    let cmd = match cmd_s {
+        "SET" | "S" | "set" | "s" => TC_TAPRIO_CMD_SET_GATES,
+        "SET_AND_HOLD" | "HOLD" | "H" | "hold" | "h" => TC_TAPRIO_CMD_SET_AND_HOLD,
+        "SET_AND_RELEASE" | "RELEASE" | "R" | "release" | "r" => TC_TAPRIO_CMD_SET_AND_RELEASE,
+        other => {
+            return Err(Error::InvalidMessage(format!(
+                "taprio: invalid sched-entry cmd `{other}` (expected SET / HOLD / RELEASE)"
+            )));
+        }
+    };
+    let mask_trimmed = mask_s.strip_prefix("0x").unwrap_or(mask_s);
+    let mask = u32::from_str_radix(mask_trimmed, 16).map_err(|_| {
+        Error::InvalidMessage(format!(
+            "taprio: invalid sched-entry gate mask `{mask_s}` (expected hex)"
+        ))
+    })?;
+    let interval = interval_s.parse::<u32>().map_err(|_| {
+        Error::InvalidMessage(format!(
+            "taprio: invalid sched-entry interval `{interval_s}` (expected u32 ns)"
+        ))
+    })?;
+    Ok(TaprioSchedEntry::new(cmd, mask, interval))
 }
 
 impl QdiscConfig for TaprioConfig {
@@ -6797,5 +7010,99 @@ mod tests {
     fn etf_parse_params_unknown_token_errors() {
         let err = EtfConfig::parse_params(&["nonsense"]).unwrap_err();
         assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn taprio_parse_params_empty_yields_default() {
+        let cfg = TaprioConfig::parse_params(&[]).unwrap();
+        assert_eq!(cfg.entries.len(), 0);
+        assert_eq!(cfg.cycle_time, 0);
+    }
+
+    #[test]
+    fn taprio_parse_params_typical() {
+        let cfg = TaprioConfig::parse_params(&[
+            "num_tc",
+            "2",
+            "clockid",
+            "CLOCK_TAI",
+            "base-time",
+            "0",
+            "cycle-time",
+            "1000000",
+            "sched-entry",
+            "SET",
+            "0x1",
+            "500000",
+            "sched-entry",
+            "SET",
+            "0x2",
+            "500000",
+        ])
+        .unwrap();
+        assert_eq!(cfg.num_tc, 2);
+        assert_eq!(cfg.clockid, libc::CLOCK_TAI);
+        assert_eq!(cfg.cycle_time, 1_000_000);
+        assert_eq!(cfg.entries.len(), 2);
+        assert_eq!(cfg.entries[0].gate_mask, 0x1);
+        assert_eq!(cfg.entries[0].interval, 500_000);
+        assert_eq!(cfg.entries[1].gate_mask, 0x2);
+    }
+
+    #[test]
+    fn taprio_parse_params_sched_entry_cmd_aliases() {
+        use crate::netlink::types::tc::qdisc::taprio::{
+            TC_TAPRIO_CMD_SET_AND_HOLD, TC_TAPRIO_CMD_SET_AND_RELEASE, TC_TAPRIO_CMD_SET_GATES,
+        };
+        for (cmd, expected) in [
+            ("SET", TC_TAPRIO_CMD_SET_GATES),
+            ("S", TC_TAPRIO_CMD_SET_GATES),
+            ("set", TC_TAPRIO_CMD_SET_GATES),
+            ("HOLD", TC_TAPRIO_CMD_SET_AND_HOLD),
+            ("H", TC_TAPRIO_CMD_SET_AND_HOLD),
+            ("RELEASE", TC_TAPRIO_CMD_SET_AND_RELEASE),
+            ("R", TC_TAPRIO_CMD_SET_AND_RELEASE),
+        ] {
+            let cfg = TaprioConfig::parse_params(&["sched-entry", cmd, "0x1", "100"]).unwrap();
+            assert_eq!(cfg.entries[0].cmd, expected, "cmd alias `{cmd}`");
+        }
+    }
+
+    #[test]
+    fn taprio_parse_params_sched_entry_short_errors() {
+        let err = TaprioConfig::parse_params(&["sched-entry", "SET", "0x1"]).unwrap_err();
+        assert!(err.to_string().contains("sched-entry"));
+    }
+
+    #[test]
+    fn taprio_parse_params_flags_and_named() {
+        use crate::netlink::types::tc::qdisc::taprio::{
+            TAPRIO_ATTR_FLAG_FULL_OFFLOAD, TAPRIO_ATTR_FLAG_TXTIME_ASSIST,
+        };
+        let cfg = TaprioConfig::parse_params(&["txtime-assist", "full-offload"]).unwrap();
+        assert_eq!(
+            cfg.flags,
+            TAPRIO_ATTR_FLAG_TXTIME_ASSIST | TAPRIO_ATTR_FLAG_FULL_OFFLOAD
+        );
+        let cfg = TaprioConfig::parse_params(&["flags", "0x3"]).unwrap();
+        assert_eq!(cfg.flags, 0x3);
+    }
+
+    #[test]
+    fn taprio_parse_params_queues_rejected() {
+        let err = TaprioConfig::parse_params(&["queues", "1@0"]).unwrap_err();
+        assert!(err.to_string().contains("not parsed by parse_params yet"));
+    }
+
+    #[test]
+    fn taprio_parse_params_unknown_token_errors() {
+        let err = TaprioConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn taprio_parse_params_invalid_sched_entry_cmd() {
+        let err = TaprioConfig::parse_params(&["sched-entry", "BOGUS", "0x1", "100"]).unwrap_err();
+        assert!(err.to_string().contains("invalid sched-entry cmd"));
     }
 }

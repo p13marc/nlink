@@ -10,7 +10,7 @@ use nlink::{
         tc::{
             CakeConfig, ClsactConfig, DrrConfig, EtfConfig, FqCodelConfig, HfscConfig,
             HtbQdiscConfig, IngressConfig, MqprioConfig, NetemConfig, PieConfig, PlugConfig,
-            PrioConfig, QdiscConfig, QfqConfig, RedConfig, SfqConfig, TbfConfig,
+            PrioConfig, QdiscConfig, QfqConfig, RedConfig, SfqConfig, TaprioConfig, TbfConfig,
         },
     },
     output::{OutputFormat, OutputOptions, print_all},
@@ -340,6 +340,7 @@ async fn try_typed_qdisc(
             | "plug"
             | "mqprio"
             | "etf"
+            | "taprio"
     );
     if !known {
         return None;
@@ -377,6 +378,7 @@ async fn try_typed_qdisc(
         "plug" => dispatch!(PlugConfig),
         "mqprio" => dispatch!(MqprioConfig),
         "etf" => dispatch!(EtfConfig),
+        "taprio" => dispatch!(TaprioConfig),
         _ => unreachable!("checked by `known` guard above"),
     })
 }
