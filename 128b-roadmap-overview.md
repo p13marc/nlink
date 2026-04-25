@@ -3,7 +3,7 @@ to: nlink maintainers
 from: nlink maintainers
 subject: nlink roadmap — active plans only
 target version: 0.14.0 and beyond
-last updated: 2026-04-25 (typed-units rollout shipped — 25 parsers across 15 slices, qdisc 100%, filter 7/9; **Plan 142 is the consolidated 0.15.0 master** — read it first for the full picture; Plans 133 PR C / 138 / 139 / 140 / 141 are its phase-level details)
+last updated: 2026-04-25 (typed-units rollout shipped — 25 parsers across 15 slices, qdisc 100%, filter 7/9; **Plan 142 is the consolidated 0.15.0 master** — read it first for the full picture; Plans 133 PR C / 138 / 139 / 140 / 141 are its phase-level details; **Phase 0 substantively shipped under `[Unreleased]`** — `lab::has_module` + `require_module!` helper, sealed `ParseParams` trait + 25 impls, bins/tc dispatch tightened — only the GHA workflow file itself remains, deferred until an in-tree test actually uses `require_module!`; Phase 1 next)
 ---
 
 # nlink Roadmap
@@ -24,7 +24,7 @@ have been removed (their substance is in the commits + changelog).
 | 137 | [Netfilter expansion](137-netfilter-expansion-plan.md) | **PRs A+B kernel-validated** (under `[Unreleased]`); integration tests un-parked by Plan 142 Phase 0; C/D/E demand-gated | PRs A+B and the `conntrack-programmatic` recipe shipped. Integration tests slot into Plan 142 Phase 1. PRs C (`ct_expect`), D (nfqueue), E (nflog) **explicitly out of scope for 0.15.0** per Plan 142 §1; demand-gated. |
 | 138 | [bins/tc u32 filter selector grammar](138-u32-filter-selector-grammar-plan.md) | **draft — Plan 142 Phase 1 detail** | 3-PR arc (raw triples; named-match shortcuts with golden-hex fixtures; hash-table grammar). |
 | 139 | [Typed standalone-action CRUD](139-typed-standalone-action-crud-plan.md) | **draft — Plan 142 Phases 3 + 4 detail** | 3-PR arc. PR A library API; PR B per-kind `parse_params` (~14 action kinds); **PR C is the legacy-deletion milestone** (deletes `tc::builders::*` + `tc::options::*`). |
-| 140 | [CI integration tests harness](140-ci-integration-tests-plan.md) | **draft — Plan 142 Phase 0 detail** | Privileged GHA runner + `nlink::lab::require_module` skip helper. Recommended landing first because every later phase's integration tests depend on it. |
+| 140 | [CI integration tests harness](140-ci-integration-tests-plan.md) | **`require_module!` helper shipped** under `[Unreleased]` (commit `553f9dd`); GHA workflow deferred until an in-tree test uses it | `nlink::lab::has_module` + `require_module!` macros landed. Workflow file itself is no-op until Phase 1 lands integration tests that actually call `require_module!` — wires up then. |
 | 141 | [XFRM write-path API extension](141-xfrm-write-path-plan.md) | **draft — Plan 142 Phase 2 detail** | 3-PR arc modeled on Plan 137 PR A. Independent of Phase 1; can land in parallel. Closes Plan 135 PR B at 7/7. |
 
 **Shipped & ready to archive:** Plan 136 (Example cleanup) — all phases plus the conntrack deferral resolved by Plan 137 PR A slice 3 (`1e9307e`). `MacsecLink` rtnetlink builder also landed as a follow-up; `examples/genl/macsec.rs` uses it directly. See CHANGELOG `## [Unreleased]` for the full slate.
@@ -51,7 +51,7 @@ have been removed (their substance is in the commits + changelog).
 
   | Phase | Subsumes | Outcome |
   |---|---|---|
-  | 0 | Plan 140 + `ParseParams` trait formalization | CI runs root-gated tests on every push; every typed config implements the sealed `ParseParams` trait |
+  | 0 | Plan 140 (helper) + `ParseParams` trait formalization — **substantively shipped** under `[Unreleased]` | `nlink::lab::has_module` + `require_module!` helper; sealed `nlink::ParseParams` trait + 25 impls; bins/tc dispatch macros bind through the trait. GHA workflow deferred to land alongside the first Phase 1 integration test that needs it. |
   | 1 | Plan 138 (3 PRs) + Plan 133 PR C + Plan 137 integration tests un-parked | Filter side 9/9 typed-first; `bins/tc/src/commands/filter.rs` `#[allow(deprecated)]` reduced to the format/parse_protocol wrappers |
   | 2 | Plan 141 (3 PRs) | `Connection<Xfrm>` SA/SP CRUD; `xfrm-ipsec-tunnel` recipe; Plan 135 PR B closes at 7/7 |
   | 3 | Plan 139 PRs A + B | Typed standalone-action CRUD on `Connection<Route>` + `parse_params` on every action kind |
