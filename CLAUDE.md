@@ -47,8 +47,12 @@ sudo ./target/debug/deps/integration-* --test-threads=1
 ```
 
 For new tests that need root, gate with `nlink::require_root!()`
-(early-returns `Ok(())` when `euid != 0`). For new examples,
-prefer the `--apply` runner pattern over assertions.
+(early-returns `Ok(())` when `euid != 0`). For tests that depend
+on a specific kernel module, also gate with
+`nlink::require_module!("nf_conntrack")` — `has_module()` checks
+`/sys/module/<name>` so it works for both loadable and built-in
+features. For new examples, prefer the `--apply` runner pattern
+over assertions.
 
 ## Architecture
 

@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `nlink::lab::has_module` + `require_module!` macros (Plan 142 Phase 0, slice 1)
+
+- New `nlink::lab::has_module(name) -> bool` checks whether a
+  named kernel feature is loaded as a module or compiled into
+  the kernel. Reads `/sys/module/<name>` (which sysfs exposes
+  for both loaded loadable modules and built-in features) so it
+  doesn't false-negative on distros that build common bits like
+  `nf_conntrack` directly into the kernel image.
+- New `nlink::require_module!("nf_conntrack")` macro pairs with
+  `nlink::require_root!()` for integration tests that depend on
+  optional kernel features. Returns early with `Ok(())` when the
+  module is missing — produces a clean skip message rather than
+  a cryptic `is_not_supported()` error deep in the test body.
+  Also `require_module_void!` for non-`Result` test signatures.
+- `has_module` rejects names containing `/` or `\0` (defense in
+  depth — those aren't legal kernel module names, and `Path::join`
+  would silently resolve outside `/sys/module` for an absolute
+  name).
+- `CLAUDE.md` "Integration tests" section gained one sentence
+  documenting the new macro.
+
+This is the first of two Phase 0 deliverables for Plan 142
+(slice 2 will be the sealed `ParseParams` trait + 25 forwarding
+impls). The GHA workflow itself ships separately once an
+integration test that needs root validation lands — there's no
+test in-tree that uses `require_module!` yet, so the workflow
+would be a no-op.
+
 ### Docs — Plan 142 consolidates the 0.15.0 typed-API completion arc
 
 - New master plan [`142-zero-legacy-typed-api-plan.md`](142-zero-legacy-typed-api-plan.md)

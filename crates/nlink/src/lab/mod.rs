@@ -297,6 +297,27 @@ pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// `true` if the named kernel feature is loaded as a module or
+/// compiled into the kernel.
+///
+/// Checks for `/sys/module/<name>`, which sysfs exposes for both
+/// loaded loadable modules (after `modprobe`) and built-in features
+/// — many distros build common bits like `nf_conntrack` directly
+/// into the kernel image, so a `/proc/modules` grep would falsely
+/// report them as missing.
+///
+/// Returns `false` (not an error) when the module is missing, so
+/// the caller can decide whether to skip or fail. Also returns
+/// `false` for any name containing `/` or `\0` (kernel module names
+/// can't legally contain those, and `Path::join` would otherwise
+/// silently resolve outside `/sys/module` for an absolute name).
+pub fn has_module(name: &str) -> bool {
+    if name.is_empty() || name.contains('/') || name.contains('\0') {
+        return false;
+    }
+    std::path::Path::new("/sys/module").join(name).exists()
+}
+
 /// Macro that returns early with `Ok(())` if the current process is
 /// not running as root, useful for integration tests that need
 /// `CAP_SYS_ADMIN`.
@@ -331,6 +352,54 @@ macro_rules! require_root_void {
     };
 }
 
+/// Macro that returns early with `Ok(())` if the named kernel
+/// module isn't loaded or built-in. Use this in integration tests
+/// that depend on a specific kernel feature (`nf_conntrack`,
+/// `cls_flower`, `xfrm_user`, etc.) so a missing module produces a
+/// clean skip rather than a cryptic `is_not_supported()` error
+/// deep in the test body.
+///
+/// Wraps [`has_module`]. Pair with [`require_root`] — the module
+/// can only be checked once the test is actually trying to run.
+///
+/// ```ignore
+/// #[tokio::test]
+/// async fn needs_conntrack() -> nlink::Result<()> {
+///     nlink::require_root!();
+///     nlink::require_module!("nf_conntrack");
+///     nlink::require_module!("nf_conntrack_netlink");
+///     // ... real test body ...
+///     Ok(())
+/// }
+/// ```
+#[macro_export]
+macro_rules! require_module {
+    ($name:expr) => {
+        if !$crate::lab::has_module($name) {
+            eprintln!(
+                "Skipping test: kernel module '{}' not loaded or built-in",
+                $name
+            );
+            return Ok(());
+        }
+    };
+}
+
+/// Like [`require_module`] but for test functions whose return type
+/// is `()` rather than `Result<()>`.
+#[macro_export]
+macro_rules! require_module_void {
+    ($name:expr) => {
+        if !$crate::lab::has_module($name) {
+            eprintln!(
+                "Skipping test: kernel module '{}' not loaded or built-in",
+                $name
+            );
+            return;
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +410,22 @@ mod tests {
         let n2 = unique_ns_name("probe");
         assert_ne!(n1, n2);
         assert!(n1.starts_with("nlink-lab-probe-"));
+    }
+
+    #[test]
+    fn has_module_returns_false_for_unknown_name() {
+        assert!(!has_module("nlink_definitely_not_a_real_module_xyzzy"));
+    }
+
+    #[test]
+    fn has_module_rejects_path_traversal() {
+        // Names containing '/' or NUL aren't valid kernel module names
+        // and would let `Path::join` resolve outside /sys/module on an
+        // absolute component.
+        assert!(!has_module(""));
+        assert!(!has_module("/etc/passwd"));
+        assert!(!has_module("../../etc/passwd"));
+        assert!(!has_module("nf_conntrack/foo"));
+        assert!(!has_module("nf\0conntrack"));
     }
 }
