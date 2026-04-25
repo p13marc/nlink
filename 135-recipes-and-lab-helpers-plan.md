@@ -4,7 +4,7 @@ from: nlink maintainers
 subject: More cookbook recipes + public lab/test helpers
 target version: 0.14.0 (revised 2026-04-19; originally split between "0.14.0" and "1.0", now folded into 0.14.0)
 date: 2026-04-19
-status: PR A complete 2026-04-21 under [Unreleased]. PR B partial: 6 of 7 recipes shipped (multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh, nftables-stateful-fw, conntrack-programmatic — last one extended 2026-04-23 with the Events Stream section after Plan 137 PR B landed) + recipe index + README/CLAUDE.md pointers. Deferred: `xfrm-ipsec-tunnel` (now tracked under [Plan 141](141-xfrm-write-path-plan.md) — its PR C lands the recipe and bumps this to 7/7); `cgroup-classification` remains blocked on Plan 133 PR C. Recipe smoke tests (`tests/integration/recipes.rs`) parked behind [Plan 140](140-ci-integration-tests-plan.md).
+status: PR A complete 2026-04-21 under [Unreleased]. PR B partial: 6 of 7 recipes shipped (multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh, nftables-stateful-fw, conntrack-programmatic) + recipe index + README/CLAUDE.md pointers. Two deferred recipes are now phases of [Plan 142](142-zero-legacy-typed-api-plan.md): `xfrm-ipsec-tunnel` lands with Plan 141 PR C (Plan 142 Phase 2), `cgroup-classification` lands with Plan 133 PR C (Plan 142 Phase 1). PR B closes at 7/7 once both phases land. Recipe smoke tests (`tests/integration/recipes.rs`) un-parked by Plan 140 (Plan 142 Phase 0).
 ---
 
 # Recipes & Lab Helpers Plan

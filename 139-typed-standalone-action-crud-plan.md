@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: typed standalone-action CRUD on `Connection<Route>` — unblocks bins/tc action subcommand migration
-target version: 0.15.0 (or later)
+target version: 0.15.0 (Phase 3 + Phase 4 of [Plan 142](142-zero-legacy-typed-api-plan.md))
 date: 2026-04-25
-status: draft — last typed-units rollout remainder for `bins/tc`
-related: completes the "Workspace-wide rollout of typed units" backlog row by removing the last `#[allow(deprecated)]` from `bins/tc`.
+status: draft — phase-level detail document for **Plan 142 Phases 3 + 4**. Phase 3 is this plan's PRs A + B (library API + per-kind parse_params). Phase 4 is this plan's PR C, which is the **legacy-deletion milestone** for the entire 0.15.0 release. Read Plan 142 first; this plan provides the wire-format / per-kind / acceptance-criteria detail.
+related: Plan 142 master; Plan 138 (must land first — `u32` parse_params + bin dispatch); Plan 133 PR C (must land first — `basic` parse_params + bin dispatch); Plan 140 (must land first — CI infrastructure); Plan 141 (independent but typically lands before this).
 ---
 
 # Typed standalone-action CRUD on `Connection<Route>`

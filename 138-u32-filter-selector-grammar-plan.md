@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: bins/tc u32 filter selector grammar — typed `parse_params` for `U32Filter`
-target version: 0.15.0 (or later — own multi-slice arc)
+target version: 0.15.0 (Phase 1 of [Plan 142](142-zero-legacy-typed-api-plan.md))
 date: 2026-04-25
-status: draft — last typed-units rollout remainder on the filter side; arc-sized work
-related: closes the final open item in the "Workspace-wide rollout of typed units" backlog row alongside Plan 133 PR C (basic filter ematch).
+status: draft — phase-level detail document for **Plan 142 Phase 1**. Read Plan 142 first for the consolidated view; this plan is the per-PR / per-token / per-fixture specification.
+related: Plan 142 master; Plan 133 PR C (basic filter ematch — the other half of Plan 142 Phase 1); Plan 140 (CI integration tests harness — Plan 142 Phase 0 prerequisite for the golden-hex fixtures in Phase 2 of this plan).
 ---
 
 # bins/tc u32 filter selector grammar

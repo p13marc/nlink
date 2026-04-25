@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: CI integration tests harness — privileged GitHub Actions runner for root-gated `lab`-feature tests
-target version: 0.15.0 (or whenever the team commits to ongoing CI maintenance)
+target version: 0.15.0 (Phase 0 of [Plan 142](142-zero-legacy-typed-api-plan.md))
 date: 2026-04-25
-status: draft — gating dependency for Plan 137 integration tests, recipe smoke tests, and any future root-gated test addition
-related: unblocks Plan 137 integration tests (currently parked); referenced by every "integration test" deferral note in Plans 135 / 137.
+status: draft — phase-level detail document for **Plan 142 Phase 0**. Recommended landing first because every later phase's integration tests depend on it. Read Plan 142 first for the consolidated view; this plan is the workflow / kernel-module / skip-helper specification.
+related: Plan 142 master; Plan 137 integration tests (un-parked once this lands); Plan 135 recipe smoke tests (also un-parked); Plan 138 PR B golden-hex fixtures (run by this CI workflow).
 ---
 
 # CI integration tests harness

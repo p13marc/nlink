@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: XFRM write-path API extension — `Connection<Xfrm>` SA / SP CRUD
-target version: 0.15.0 (or later — modeled after Plan 137 PR A)
+target version: 0.15.0 (Phase 2 of [Plan 142](142-zero-legacy-typed-api-plan.md))
 date: 2026-04-25
-status: draft — unblocks the `xfrm-ipsec-tunnel` recipe deferred from Plan 135 PR B
-related: closes Plan 135 PR B's last deferred recipe (`xfrm-ipsec-tunnel`); follows the Plan 137 PR A typed-builder pattern.
+status: draft — phase-level detail document for **Plan 142 Phase 2**. Independent of Phases 1, 3, 4 — can land in parallel with Phase 1 if maintainer bandwidth allows. Read Plan 142 first; this plan provides the SA/SP wire-format and recipe specifics.
+related: Plan 142 master; Plan 135 PR B (this plan's PR C bumps Plan 135 to 7/7); Plan 137 PR A (the typed-builder pattern this plan mirrors).
 ---
 
 # XFRM write-path API extension

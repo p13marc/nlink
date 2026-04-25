@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Docs — Plan 142 consolidates the 0.15.0 typed-API completion arc
+
+- New master plan [`142-zero-legacy-typed-api-plan.md`](142-zero-legacy-typed-api-plan.md)
+  consolidates Plans 133 PR C / 138 / 139 / 140 / 141 into a
+  single 0.15.0 milestone. Defines the end-state typed API,
+  formalizes the `parse_params` / fluent-builder / typed-dispatch
+  patterns that emerged from the 0.14.0 typed-units rollout, and
+  makes the **legacy-removal milestone** unambiguous:
+  `tc::builders::{class,qdisc,filter,action}` and
+  `tc::options/*` are deleted from the source tree as Phase 4
+  of the plan, with concrete acceptance criteria a PR must hit.
+- New top-level `CLAUDE.md` section "TC API conventions"
+  documents the patterns: typed config builder shape,
+  `parse_params` strictness contract, the `ParseParams` trait
+  (lands in Plan 142 Phase 0), the `try_typed_X` dispatch
+  shape, the deliberate "no clap `value_parser` until Phase 4"
+  rationale, and the typed-error policy.
+- The roadmap, plus Plans 133/135/137/138/139/140/141, all gain
+  cross-references to Plan 142 in their status headers — Plan
+  142 is the entry point; the others are phase-level details.
+- One new public API previewed: `pub trait ParseParams: Sized`
+  (sealed). Lands in Plan 142 Phase 0 alongside Plan 140; one
+  impl per shipped typed config (~25 impls forwarding to the
+  existing inherent methods). Additive, no breaking change.
+
+No code changes in this commit. Implementation lands in the
+phases of Plan 142 across the 0.15.0 cycle.
+
 ### Added — `TaprioConfig::parse_params` + bin wiring (slice 15)
 
 - New `TaprioConfig::parse_params` parses the time-aware shaper's

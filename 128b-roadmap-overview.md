@@ -3,7 +3,7 @@ to: nlink maintainers
 from: nlink maintainers
 subject: nlink roadmap — active plans only
 target version: 0.14.0 and beyond
-last updated: 2026-04-25 (typed-units rollout shipped — 25 parsers across 15 slices, qdisc 100%, filter 7/9; Plans 138/139/140/141 added for the truly-blocked remainders)
+last updated: 2026-04-25 (typed-units rollout shipped — 25 parsers across 15 slices, qdisc 100%, filter 7/9; **Plan 142 is the consolidated 0.15.0 master** — read it first for the full picture; Plans 133 PR C / 138 / 139 / 140 / 141 are its phase-level details)
 ---
 
 # nlink Roadmap
@@ -14,15 +14,18 @@ have been removed (their substance is in the commits + changelog).
 
 ## Active plans
 
+**Read first:** [Plan 142 — 0.15.0 typed-API completion (zero-legacy milestone)](142-zero-legacy-typed-api-plan.md). It is the consolidated master plan for the 0.15.0 release: end-state API, phase ordering, legacy-removal acceptance criteria, doc-update requirements. Plans 133 PR C / 138 / 139 / 140 / 141 are its phase-level detail documents.
+
 | # | Plan | Status | Headline |
 |---|---|---|---|
-| 133 | [TC coverage gaps](133-tc-coverage-plan.md) | **3 of 4 PRs landed** (A/B/D under `[Unreleased]`); **PR C deferred** | Typed `CakeConfig`, `FqPieConfig`, `BpfAction`, `SimpleAction`. `BasicFilter` ematch (cmp/u32/meta) pending — ematch wire format needs golden `tc(8)` hex before shipping. PR C unblocks the `cgroup-classification` recipe (Plan 135) and the `basic` filter dispatch (last filter kind needed alongside Plan 138). |
-| 135 | [Recipes + public `nlink::lab`](135-recipes-and-lab-helpers-plan.md) | **PR A complete**; PR B partial (6 of 7) | `nlink::lab` shipped (PR A). Recipes shipped: multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh, nftables-stateful-fw, conntrack-programmatic (mutation + events) + index + README/CLAUDE pointers. Deferred: `xfrm-ipsec-tunnel` (now tracked under Plan 141); `cgroup-classification` (still blocked on Plan 133 PR C). Recipe smoke tests (`tests/integration/recipes.rs`) parked behind Plan 140. |
-| 137 | [Netfilter expansion](137-netfilter-expansion-plan.md) | **PRs A+B both kernel-validated end-to-end** (under `[Unreleased]`); integration tests parked behind Plan 140; C/D/E pending | PR A slices 1+2+3 + the `122f60b` timeout fix; PR B types + EventSource impl + parse units + `--apply` validation. Both `--apply` runners pass on Linux 6.19. `conntrack-programmatic` recipe covers both APIs with all four caveats. PRs C (`ct_expect`), D (nfqueue), E (nflog) unstarted; D/E gated on demand. |
-| 138 | [bins/tc u32 filter selector grammar](138-u32-filter-selector-grammar-plan.md) | **draft** — last typed-units rollout remainder on the filter side | 3-PR arc: Phase 1 raw `match u32/u16/u8 V M at OFF` triples + structural tokens; Phase 2 named-match shortcuts (`match ip src`, `match tcp dport`, etc.) with golden-hex fixtures; Phase 3 hash-table grammar (`divisor`/`ht`/`link`/`order`). Lands `u32` typed dispatch in `bins/tc/src/commands/filter.rs`; alongside Plan 133 PR C closes the filter side of the rollout. |
-| 139 | [Typed standalone-action CRUD](139-typed-standalone-action-crud-plan.md) | **draft** — last typed-units rollout remainder for `bins/tc` action subcommand | 3-PR arc: PR A `Connection<Route>::{add,del,get,dump}_action` + wire-format tests; PR B `parse_params` on every typed action kind (~14 kinds); PR C bin migration + **delete `tc::builders::{class,qdisc,filter,action}` entirely**. Closes the workspace-wide typed-units rollout. |
-| 140 | [CI integration tests harness](140-ci-integration-tests-plan.md) | **draft** — gating dependency for any new root-gated test | Privileged GitHub Actions runner runs the `lab`-feature integration tests on every push. Adds `nlink::lab::require_module(name)` skip-helper alongside the existing `require_root!`. **Unblocks**: Plan 137 integration tests, Plan 135 recipe smoke tests, Plan 138 PR B golden-hex regression, every future root-gated test. |
-| 141 | [XFRM write-path API extension](141-xfrm-write-path-plan.md) | **draft** — unblocks Plan 135 PR B's last deferred recipe | 3-PR arc modeled on Plan 137 PR A: PR A SA CRUD; PR B SP CRUD; PR C `xfrm-ipsec-tunnel` recipe + `examples/xfrm/ipsec_monitor.rs --apply` promotion. Closes Plan 135 PR B (7/7 recipes). |
+| **142** | **[0.15.0 typed-API completion (zero-legacy milestone)](142-zero-legacy-typed-api-plan.md)** | **draft — master plan** | Consolidates Plans 133 PR C / 138 / 139 / 140 / 141 into a single 0.15.0 milestone. End-state: typed surface end-to-end, `tc::builders::*` and `tc::options::*` deleted from source tree, `bins/tc` zero `#[allow(deprecated)]`. Phases: 0 = CI infra + `ParseParams` trait; 1 = filter side completion (138 + 133 PR C + 137 integration tests); 2 = XFRM (141); 3 = action API (139 PRs A+B); 4 = LEGACY DELETION (139 PR C). |
+| 133 | [TC coverage gaps](133-tc-coverage-plan.md) | **3 of 4 PRs landed** (A/B/D under `[Unreleased]`); **PR C → Plan 142 Phase 1** | Typed `CakeConfig`, `FqPieConfig`, `BpfAction`, `SimpleAction`. PR C (`BasicFilter` ematch — cmp/u32/meta) is now phase-level detail for Plan 142 Phase 1; needs golden `tc(8)` hex captures (run alongside Plan 140's CI infra). |
+| 135 | [Recipes + public `nlink::lab`](135-recipes-and-lab-helpers-plan.md) | **PR A complete**; PR B partial (6 of 7) — both deferred recipes are Plan 142 phases | `nlink::lab` shipped (PR A). Six recipes shipped under `[Unreleased]`. The two deferred recipes (`xfrm-ipsec-tunnel` and `cgroup-classification`) close as Plan 142 Phase 2 (via Plan 141) and Phase 1 (via Plan 133 PR C) respectively, bumping PR B to 7/7. |
+| 137 | [Netfilter expansion](137-netfilter-expansion-plan.md) | **PRs A+B kernel-validated** (under `[Unreleased]`); integration tests un-parked by Plan 142 Phase 0; C/D/E demand-gated | PRs A+B and the `conntrack-programmatic` recipe shipped. Integration tests slot into Plan 142 Phase 1. PRs C (`ct_expect`), D (nfqueue), E (nflog) **explicitly out of scope for 0.15.0** per Plan 142 §1; demand-gated. |
+| 138 | [bins/tc u32 filter selector grammar](138-u32-filter-selector-grammar-plan.md) | **draft — Plan 142 Phase 1 detail** | 3-PR arc (raw triples; named-match shortcuts with golden-hex fixtures; hash-table grammar). |
+| 139 | [Typed standalone-action CRUD](139-typed-standalone-action-crud-plan.md) | **draft — Plan 142 Phases 3 + 4 detail** | 3-PR arc. PR A library API; PR B per-kind `parse_params` (~14 action kinds); **PR C is the legacy-deletion milestone** (deletes `tc::builders::*` + `tc::options::*`). |
+| 140 | [CI integration tests harness](140-ci-integration-tests-plan.md) | **draft — Plan 142 Phase 0 detail** | Privileged GHA runner + `nlink::lab::require_module` skip helper. Recommended landing first because every later phase's integration tests depend on it. |
+| 141 | [XFRM write-path API extension](141-xfrm-write-path-plan.md) | **draft — Plan 142 Phase 2 detail** | 3-PR arc modeled on Plan 137 PR A. Independent of Phase 1; can land in parallel. Closes Plan 135 PR B at 7/7. |
 
 **Shipped & ready to archive:** Plan 136 (Example cleanup) — all phases plus the conntrack deferral resolved by Plan 137 PR A slice 3 (`1e9307e`). `MacsecLink` rtnetlink builder also landed as a follow-up; `examples/genl/macsec.rs` uses it directly. See CHANGELOG `## [Unreleased]` for the full slate.
 
@@ -43,31 +46,24 @@ have been removed (their substance is in the commits + changelog).
   Mostly additive; minimal BC. Only deprecation note in the slate
   is `tc::builders::{class,qdisc,filter,action}` — actual removal
   ships under Plan 139 PR C.
-- **0.15.0 candidate work**, ranked by user-visible value vs.
-  effort:
-  1. **Plan 140 — CI integration tests harness.** Gating
-     dependency for everything else's "integration tests" item;
-     small/tractable PR; once it lands, every later plan's test
-     deferral disappears. Recommended first.
-  2. **Plan 138 PR A — u32 filter Phase 1.** Smallest meaningful
-     bin-side win after Plan 140; raw `match u32/u16/u8` triples +
-     structural tokens; opens the typed dispatch path for the most
-     common u32 filter shape. Phases B/C land incrementally.
-  3. **Plan 137 integration tests.** Un-parked by Plan 140.
-     Templates already exist in the `--apply` runners (`bdf0f84`,
-     `b2243d0`); lifting into `#[tokio::test]` is mostly mechanical.
-  4. **Plan 133 PR C — `BasicFilter` ematch.** Needs golden
-     `tc(8)` hex captures (capture once under sudo, check in as
-     test fixtures). Unblocks the `cgroup-classification` recipe
-     and the bin's `basic` filter dispatch.
-  5. **Plan 141 — XFRM write-path.** Unblocks Plan 135 PR B's
-     `xfrm-ipsec-tunnel` recipe (closes that plan at 7/7).
-  6. **Plan 139 — Typed standalone-action CRUD.** Largest of the
-     remaining plans; lands the typed action API + bin migration
-     + **deletes `tc::builders::*` entirely**, ending the
-     typed-units rollout.
-  7. **Plan 137 PR C (`ct_expect`)** — demand-gated; only worth
-     doing if concrete user ask for FTP/SIP helper testing surfaces.
+- **0.15.0 work** is the [Plan 142](142-zero-legacy-typed-api-plan.md)
+  phases, in order:
+
+  | Phase | Subsumes | Outcome |
+  |---|---|---|
+  | 0 | Plan 140 + `ParseParams` trait formalization | CI runs root-gated tests on every push; every typed config implements the sealed `ParseParams` trait |
+  | 1 | Plan 138 (3 PRs) + Plan 133 PR C + Plan 137 integration tests un-parked | Filter side 9/9 typed-first; `bins/tc/src/commands/filter.rs` `#[allow(deprecated)]` reduced to the format/parse_protocol wrappers |
+  | 2 | Plan 141 (3 PRs) | `Connection<Xfrm>` SA/SP CRUD; `xfrm-ipsec-tunnel` recipe; Plan 135 PR B closes at 7/7 |
+  | 3 | Plan 139 PRs A + B | Typed standalone-action CRUD on `Connection<Route>` + `parse_params` on every action kind |
+  | 4 | Plan 139 PR C — **legacy deletion milestone** | `tc::builders::*` + `tc::options::*` DELETED. Zero `#[allow(deprecated)]` in `bins/tc`. 0.15.0 release-cut commit. |
+
+  **Out of scope for 0.15.0** per Plan 142 §1: Plan 137 PRs C/D/E
+  (`ct_expect`, nfqueue, nflog) — demand-gated; per-bin
+  typed-units rollout to `bins/{ip,ss,nft,wifi,devlink,bridge,wg,
+  ethtool,diag,config}` (audit-driven, opens per-bin plans
+  opportunistically); `mqprio`/`taprio` `queues <count@offset>`
+  pair grammar (~50 LOC, lands when someone hits the deferred
+  error).
 - **1.0.0**: deferred indefinitely. Cut when downstream consumption
   validates the API, not on a calendar. The `non_exhaustive`
   lockdown and typed units already give the most important 1.0
