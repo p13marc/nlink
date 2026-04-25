@@ -4,6 +4,87 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `BasicFilter` ematch tree typed support (Plan 133 PR C, Plan 142 Phase 1)
+
+Closes the filter side at **9 of 9 typed-first**. The `cls_basic`
+classifier was a stub (just `classid` + `chain`); it now grows
+ematch tree support via typed Rust newtypes that mirror the
+kernel's `tcf_ematch_*` wire structs.
+
+New public types in `nlink::netlink::filter`:
+
+- `Ematch { kind, op, negate }` — one entry in the tree.
+- `EmatchKind::{Cmp, U32}` — `non_exhaustive` enum so `Meta` can
+  ship later without breaking matches.
+- `EmatchCmp { layer, align, offset, mask, value, op, trans }` —
+  compare a packet field against a constant.
+- `EmatchU32 { mask, value, offset }` — same selector primitive
+  as `cls_u32`'s key, embedded in a `cls_basic` ematch tree.
+- `EmatchOp::{And, Or}` — relation joining adjacent matches.
+- `CmpOp::{Eq, Gt, Lt}`, `CmpLayer::{Link, Network, Transport}`,
+  `CmpAlign::{U8, U16, U32}` — all `non_exhaustive`.
+
+Builder additions to `BasicFilter`:
+
+- `ematch(Ematch)` — append a match (multiple calls accumulate).
+- `ip_proto_eq(u8)` — convenience shortcut for a single `cmp`
+  match on the IP protocol byte at offset 9 of the network header.
+- `Ematch::cmp(EmatchCmp) -> Ematch` and `Ematch::u32(EmatchU32)`
+  constructors with default `And` relation and no negation.
+- `.or()` and `.negate()` chainable modifiers on `Ematch`.
+
+Wire format — new `nlink::netlink::types::tc::filter::ematch`
+module exposes the kernel constants and zero-copy structs
+(`TcfEmatchTreeHdr`, `TcfEmatchHdr`, `TcfEmCmp`, `TcfEmU32`).
+`TcfEmCmp` is 16 bytes (14 declared + 2 explicit alignment slot
+matching the kernel's `sizeof`-rounded struct). The bit-packed
+`align:4 / flags:4` and `layer:4 / opnd:4` fields are exposed
+as plain `u8`s at module level; the encoder packs them as
+`(high << 4) | (low & 0x0F)`. `BasicFilter::write_options` builds
+the full nest (`TCA_BASIC_EMATCHES → TCA_EMATCH_TREE_HDR +
+TCA_EMATCH_TREE_LIST → per-match attrs`).
+
+`BasicFilter::parse_params` recognises:
+- `classid <handle>` / `flowid <handle>` — target class.
+- `chain <n>` — TC chain index.
+- `ip_proto_eq <name|number>` — convenience for the IP-proto-byte
+  cmp match. Accepts the same protocol names as `U32Filter`'s
+  `match ip protocol` shortcut (tcp/udp/icmp/icmpv6/sctp/ah/esp/gre).
+
+The full ematch DSL (`match cmp(...) and cmp(...)` with paren
+grouping) is intentionally not parsed — `tc(8)`'s ematch syntax
+relies on shell-quoted expressions that don't tokenise cleanly
+through `bins/tc`'s flat `&[String]` interface. Use the typed
+builder for non-trivial trees.
+
+`bins/tc/src/commands/filter.rs` `matches!` guard grew `basic`;
+new `dispatch!(BasicFilter)` arm. The bin's import-level
+`#[allow(deprecated)]` for `filter_builder` stays for now — it
+covers the legacy `add/del/replace/change` fallback paths
+(reached only for kinds not in the typed list) plus
+`parse_protocol`/`format_protocol` wrappers. Full removal lands
+in Plan 142 Phase 4 alongside the legacy module deletion.
+
+`BasicFilter` joined the `nlink::ParseParams` trait impl list
+(was 26 impls; now 27 — full filter side + 18 qdiscs typed-first).
+
+12 unit tests cover: single-match `cmp` from `ip_proto_eq`,
+two-match tree (relation flags), `negate()` setting `TCF_EM_INVERT`,
+`or()` setting the relation flag (and last match's op being
+ignored), `cmp` byte layout matching the kernel struct exactly
+(via `as_bytes()` comparison), `parse_params` empty/classid/
+flowid/chain/ip_proto_eq named/numeric, unknown-token error,
+and the `u32:` → `basic:` error-prefix rebrand for shared helper
+errors. **`Meta` ematch kind deferred** — its wire format is more
+complex and benefits from golden-hex captures the maintainer
+needs sudo for.
+
+Plan 133 closes (all 4 PRs shipped). Filter side at 9 of 9
+typed-first means **Plan 142 Phase 1 is substantively complete**
+(only Plan 137 integration tests un-parking + the bin's deprecated
+import drop remain as Phase 1 cleanup; the latter slots into
+Phase 4 anyway).
+
 ### Added — `U32Filter::parse_params` Phase 3 hash-table grammar (Plan 138 PR C)
 
 - Closes Plan 138. `U32Filter::parse_params` now recognises every

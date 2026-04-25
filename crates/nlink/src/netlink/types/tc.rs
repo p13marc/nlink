@@ -1641,6 +1641,138 @@ pub mod filter {
         pub const TCA_BASIC_POLICE: u16 = 4;
     }
 
+    /// Extended-match (ematch) tree types and per-kind payload structs
+    /// used by the basic classifier (`cls_basic`). See kernel
+    /// `include/uapi/linux/pkt_cls.h` and `net/sched/em_*.c`.
+    pub mod ematch {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        // Tree-level attribute IDs nested under TCA_BASIC_EMATCHES.
+        pub const TCA_EMATCH_TREE_UNSPEC: u16 = 0;
+        pub const TCA_EMATCH_TREE_HDR: u16 = 1;
+        pub const TCA_EMATCH_TREE_LIST: u16 = 2;
+
+        // Tree-header `progid`. TC always uses 0.
+        pub const TCF_EM_PROG_TC: u16 = 0;
+
+        // Per-match flags in tcf_ematch_hdr.flags. The relation
+        // applies to the NEXT match (or REL_END for the last one).
+        pub const TCF_EM_REL_END: u16 = 0;
+        pub const TCF_EM_REL_AND: u16 = 1 << 0;
+        pub const TCF_EM_REL_OR: u16 = 1 << 1;
+        pub const TCF_EM_INVERT: u16 = 1 << 2;
+        pub const TCF_EM_SIMPLE: u16 = 1 << 3;
+
+        // Per-match `kind` discriminant in tcf_ematch_hdr.kind.
+        pub const TCF_EM_CONTAINER: u16 = 0;
+        pub const TCF_EM_CMP: u16 = 1;
+        pub const TCF_EM_NBYTE: u16 = 2;
+        pub const TCF_EM_U32: u16 = 3;
+        pub const TCF_EM_META: u16 = 4;
+
+        // tcf_em_cmp.layer (which header offset is relative to).
+        pub const TCF_LAYER_LINK: u8 = 0;
+        pub const TCF_LAYER_NETWORK: u8 = 1;
+        pub const TCF_LAYER_TRANSPORT: u8 = 2;
+
+        // tcf_em_cmp.align (width of the packet field to compare).
+        pub const TCF_EM_ALIGN_U8: u8 = 1;
+        pub const TCF_EM_ALIGN_U16: u8 = 2;
+        pub const TCF_EM_ALIGN_U32: u8 = 4;
+
+        // tcf_em_cmp.opnd (comparison operator).
+        pub const TCF_EM_OPND_EQ: u8 = 0;
+        pub const TCF_EM_OPND_GT: u8 = 1;
+        pub const TCF_EM_OPND_LT: u8 = 2;
+
+        // tcf_em_cmp.flags (cmp-local; distinct from tree-level flags).
+        // Setting TRANS makes the kernel ntohl() the packet bytes
+        // before comparing; useful when matching fields stored in
+        // network byte order against a host-order val.
+        pub const TCF_EM_CMP_TRANS: u8 = 1;
+
+        /// Tree-header struct sent under `TCA_EMATCH_TREE_HDR`.
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcfEmatchTreeHdr {
+            pub nmatches: u16,
+            pub progid: u16,
+        }
+
+        impl TcfEmatchTreeHdr {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+
+        /// Per-match header that prefixes every entry in
+        /// `TCA_EMATCH_TREE_LIST`. Kind-specific data follows.
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcfEmatchHdr {
+            pub matchid: u16,
+            pub kind: u16,
+            pub flags: u16,
+            pub _pad: u16,
+        }
+
+        impl TcfEmatchHdr {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+
+        /// `tcf_em_cmp` payload: 16 bytes after the per-match header
+        /// (14 declared + 2 trailing alignment bytes the kernel
+        /// `sizeof` rounds to).
+        ///
+        /// Kernel C layout uses bit fields (`align:4 / flags:4`,
+        /// `layer:4 / opnd:4`); on a little-endian wire the byte at
+        /// each pair is `(high << 4) | (low & 0x0F)`.
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcfEmCmp {
+            pub val: u32,
+            pub mask: u32,
+            pub off: u16,
+            /// Packed: `(flags << 4) | (align & 0x0F)`.
+            pub align_flags: u8,
+            /// Packed: `(opnd << 4) | (layer & 0x0F)`.
+            pub layer_opnd: u8,
+            pub _pad: u16,
+            /// Trailing alignment slot — kernel struct rounds to 16
+            /// bytes via u32 alignment; we declare it explicitly so
+            /// `zerocopy::IntoBytes` doesn't reject implicit padding.
+            pub _pad2: u16,
+        }
+
+        impl TcfEmCmp {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+
+        /// `tcf_em_u32` payload: 12 bytes after the per-match header.
+        /// Same selector primitive as `cls_u32`'s key.
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcfEmU32 {
+            pub mask: u32,
+            pub val: u32,
+            pub off: u32,
+        }
+
+        impl TcfEmU32 {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
     /// Matchall filter attributes.
     pub mod matchall {
         pub const TCA_MATCHALL_UNSPEC: u16 = 0;

@@ -115,7 +115,8 @@ impl_parse_params! {
     crate::netlink::tc::SfqConfig,
     crate::netlink::tc::TaprioConfig,
     crate::netlink::tc::TbfConfig,
-    // Filter configs (8) — see crates/nlink/src/netlink/filter.rs.
+    // Filter configs (9 — full filter side typed-first as of Plan 138 + Plan 133 PR C).
+    crate::netlink::filter::BasicFilter,
     crate::netlink::filter::BpfFilter,
     crate::netlink::filter::CgroupFilter,
     crate::netlink::filter::FlowFilter,

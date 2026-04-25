@@ -8,8 +8,8 @@ use nlink::{
     netlink::{
         Connection, Result, Route,
         filter::{
-            BpfFilter, CgroupFilter, FilterConfig, FlowFilter, FlowerFilter, FwFilter,
-            MatchallFilter, RouteFilter, U32Filter,
+            BasicFilter, BpfFilter, CgroupFilter, FilterConfig, FlowFilter, FlowerFilter,
+            FwFilter, MatchallFilter, RouteFilter, U32Filter,
         },
         message::NlMsgType,
         messages::TcMessage,
@@ -382,7 +382,7 @@ async fn try_typed_filter(
 ) -> Option<Result<()>> {
     if !matches!(
         kind,
-        "flower" | "matchall" | "fw" | "route" | "bpf" | "cgroup" | "flow" | "u32"
+        "flower" | "matchall" | "fw" | "route" | "bpf" | "cgroup" | "flow" | "u32" | "basic"
     ) {
         return None;
     }
@@ -418,6 +418,7 @@ async fn try_typed_filter(
         "cgroup" => dispatch!(CgroupFilter),
         "flow" => dispatch!(FlowFilter),
         "u32" => dispatch!(U32Filter),
+        "basic" => dispatch!(BasicFilter),
         _ => unreachable!("checked by `matches!` guard above"),
     })
 }

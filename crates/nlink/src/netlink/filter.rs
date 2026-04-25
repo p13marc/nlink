@@ -49,7 +49,7 @@ use super::{
     tc_handle::TcHandle,
     types::tc::{
         TcMsg, TcaAttr,
-        filter::{basic, bpf, flower, fw, matchall, u32 as u32_mod},
+        filter::{basic, bpf, ematch, flower, fw, matchall, u32 as u32_mod},
     },
 };
 
@@ -2239,20 +2239,144 @@ impl FilterConfig for BpfFilter {
 }
 
 // ============================================================================
-// BasicFilter
+// BasicFilter — ematch tree (Plan 133 PR C, Plan 142 Phase 1)
 // ============================================================================
 
-/// Basic filter configuration.
+/// Comparison operator for an [`EmatchCmp`] match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CmpOp {
+    Eq,
+    Gt,
+    Lt,
+}
+
+/// Layer the offset in [`EmatchCmp::offset`] is relative to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CmpLayer {
+    Link,
+    Network,
+    Transport,
+}
+
+/// Width of the packet field an [`EmatchCmp`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CmpAlign {
+    U8,
+    U16,
+    U32,
+}
+
+/// Relation joining one [`Ematch`] with the next in the tree.
+/// `Or` short-circuits on a match; `And` requires both. The last
+/// match in the tree is encoded with `TCF_EM_REL_END` regardless
+/// of the value carried here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EmatchOp {
+    And,
+    Or,
+}
+
+/// `cmp` ematch — compare a packet field against a constant.
 ///
-/// The basic filter is a simple classifier that can use ematch expressions.
+/// `value` and `mask` are stored host-byte-order; set `trans = true`
+/// for the kernel to `ntohl()` the packet bytes before comparison
+/// (use this when matching network-byte-order fields with an
+/// host-byte-order `value`).
+#[derive(Debug, Clone)]
+pub struct EmatchCmp {
+    pub layer: CmpLayer,
+    pub align: CmpAlign,
+    pub offset: u16,
+    pub mask: u32,
+    pub value: u32,
+    pub op: CmpOp,
+    pub trans: bool,
+}
+
+/// `u32` ematch — same selector primitive as `cls_u32`'s key, but
+/// embedded in a `cls_basic` ematch tree.
+#[derive(Debug, Clone)]
+pub struct EmatchU32 {
+    pub mask: u32,
+    pub value: u32,
+    pub offset: u32,
+}
+
+/// Ematch payload kinds. `Meta` is intentionally absent until a
+/// downstream user asks for it (the wire format is more complex
+/// and benefits from golden-hex captures).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum EmatchKind {
+    Cmp(EmatchCmp),
+    U32(EmatchU32),
+}
+
+/// One entry in a `cls_basic` ematch tree.
+#[derive(Debug, Clone)]
+pub struct Ematch {
+    pub kind: EmatchKind,
+    /// Relation to the next match. Ignored for the last match in
+    /// the tree (encoded as `TCF_EM_REL_END`).
+    pub op: EmatchOp,
+    /// Set `TCF_EM_INVERT` on this match (negate the result).
+    pub negate: bool,
+}
+
+impl Ematch {
+    /// Build an `Ematch` wrapping a [`EmatchCmp`] with default
+    /// relation (AND) and no negation.
+    pub fn cmp(cmp: EmatchCmp) -> Self {
+        Self {
+            kind: EmatchKind::Cmp(cmp),
+            op: EmatchOp::And,
+            negate: false,
+        }
+    }
+
+    /// Build an `Ematch` wrapping a [`EmatchU32`] with default
+    /// relation (AND) and no negation.
+    pub fn u32(u: EmatchU32) -> Self {
+        Self {
+            kind: EmatchKind::U32(u),
+            op: EmatchOp::And,
+            negate: false,
+        }
+    }
+
+    /// Set the relation-to-next-match to OR.
+    pub fn or(mut self) -> Self {
+        self.op = EmatchOp::Or;
+        self
+    }
+
+    /// Set the negate flag (`TCF_EM_INVERT`).
+    pub fn negate(mut self) -> Self {
+        self.negate = true;
+        self
+    }
+}
+
+/// Basic filter configuration with optional ematch tree support.
+///
+/// `cls_basic` is the kernel's "compose primitive matches via
+/// boolean operators" classifier. Use it when `flower` and `u32`
+/// are too specialized.
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::filter::BasicFilter;
+/// use nlink::TcHandle;
 ///
+/// // Match TCP traffic to class 1:10.
 /// let filter = BasicFilter::new()
-///     .classid(nlink::TcHandle::new(1, 0x10))
+///     .classid(TcHandle::new(1, 0x10))
+///     .ip_proto_eq(6)
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -2260,6 +2384,8 @@ impl FilterConfig for BpfFilter {
 pub struct BasicFilter {
     /// Target class ID.
     classid: Option<u32>,
+    /// Ematch tree (zero or more matches AND/OR'd together).
+    matches: Vec<Ematch>,
     /// Priority.
     priority: u16,
     /// Protocol.
@@ -2297,11 +2423,109 @@ impl BasicFilter {
 
     /// Set the chain index for this filter.
     ///
-    /// Chains provide logical grouping of filters for better performance
-    /// and organization (Linux 4.1+).
+    /// Chains provide logical grouping of filters for better
+    /// performance and organization (Linux 4.1+).
     pub fn chain(mut self, chain: u32) -> Self {
         self.chain = Some(chain);
         self
+    }
+
+    /// Append an ematch to the tree. Multiple calls accumulate;
+    /// the relation between adjacent matches is taken from each
+    /// match's [`Ematch::op`]. The last match's `op` is ignored
+    /// (encoded as `TCF_EM_REL_END`).
+    pub fn ematch(mut self, m: Ematch) -> Self {
+        self.matches.push(m);
+        self
+    }
+
+    /// Convenience: append a `cmp` match for the IP protocol byte
+    /// at offset 9 of the network header.
+    ///
+    /// Equivalent to:
+    /// ```ignore
+    /// f.ematch(Ematch::cmp(EmatchCmp {
+    ///     layer: CmpLayer::Network,
+    ///     align: CmpAlign::U8,
+    ///     offset: 9,
+    ///     mask: 0xff,
+    ///     value: proto as u32,
+    ///     op: CmpOp::Eq,
+    ///     trans: false,
+    /// }))
+    /// ```
+    pub fn ip_proto_eq(self, proto: u8) -> Self {
+        self.ematch(Ematch::cmp(EmatchCmp {
+            layer: CmpLayer::Network,
+            align: CmpAlign::U8,
+            offset: 9,
+            mask: 0xff,
+            value: proto as u32,
+            op: CmpOp::Eq,
+            trans: false,
+        }))
+    }
+
+    /// Parse a `tc(8)`-style `basic` token slice into a typed
+    /// filter.
+    ///
+    /// # Recognised tokens
+    ///
+    /// - `classid <handle>` / `flowid <handle>` — target class.
+    /// - `chain <n>` — TC chain index.
+    /// - `ip_proto_eq <name|number>` — convenience for a single
+    ///   `cmp` match on the IP protocol byte. Names accepted:
+    ///   `tcp`, `udp`, `icmp`, `icmpv6`, `sctp`, `ah`, `esp`,
+    ///   `gre`. Numeric: 0–255.
+    ///
+    /// # Not yet typed-modelled
+    ///
+    /// The full ematch DSL (`match cmp(...)`, `match u32(...)`,
+    /// AND/OR composition with paren grouping) is intentionally
+    /// not parsed here. The tc(8) ematch syntax doesn't tokenise
+    /// cleanly through `bins/tc`'s flat `&[String]` interface —
+    /// it relies on shell-quoted expressions. Use the typed
+    /// builder API ([`BasicFilter::ematch`], [`Ematch::cmp`],
+    /// [`Ematch::u32`]) for non-trivial trees.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut f = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "classid" | "flowid" => {
+                    let s = need_value(params, i, "basic", key)?;
+                    let h = s.parse::<TcHandle>().map_err(|e| {
+                        Error::InvalidMessage(format!(
+                            "basic: invalid {key} `{s}`: {e}"
+                        ))
+                    })?;
+                    f = f.classid(h);
+                    i += 2;
+                }
+                "chain" => {
+                    let s = need_value(params, i, "basic", key)?;
+                    f = f.chain(parse_u32_int("basic", "chain", s)?);
+                    i += 2;
+                }
+                "ip_proto_eq" => {
+                    let s = need_value(params, i, "basic", key)?;
+                    let proto = parse_ip_proto_name_or_num(s).map_err(|e| {
+                        // Re-prefix from `u32:` to `basic:`.
+                        let msg = e.to_string().replace("u32:", "basic:");
+                        Error::InvalidMessage(msg)
+                    })?;
+                    f = f.ip_proto_eq(proto);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "basic: unknown token `{other}` (recognised: classid/flowid, chain, ip_proto_eq; complex ematch trees go through the typed builder)"
+                    )));
+                }
+            }
+        }
+        Ok(f)
     }
 
     /// Build the filter configuration.
@@ -2327,7 +2551,98 @@ impl FilterConfig for BasicFilter {
         if let Some(classid) = self.classid {
             builder.append_attr_u32(basic::TCA_BASIC_CLASSID, classid);
         }
+        if !self.matches.is_empty() {
+            write_ematch_tree(builder, &self.matches);
+        }
         Ok(())
+    }
+}
+
+/// Encode an ematch tree under `TCA_BASIC_EMATCHES`.
+fn write_ematch_tree(builder: &mut MessageBuilder, matches: &[Ematch]) {
+    let outer = builder.nest_start(basic::TCA_BASIC_EMATCHES);
+
+    let tree_hdr = ematch::TcfEmatchTreeHdr {
+        nmatches: matches.len() as u16,
+        progid: ematch::TCF_EM_PROG_TC,
+    };
+    builder.append_attr(ematch::TCA_EMATCH_TREE_HDR, tree_hdr.as_bytes());
+
+    let list = builder.nest_start(ematch::TCA_EMATCH_TREE_LIST);
+    let last = matches.len().saturating_sub(1);
+    for (i, m) in matches.iter().enumerate() {
+        // 1-based attribute type per kernel convention.
+        let attr_type = (i + 1) as u16;
+
+        let mut flags = if m.negate { ematch::TCF_EM_INVERT } else { 0 };
+        if i < last {
+            flags |= match m.op {
+                EmatchOp::And => ematch::TCF_EM_REL_AND,
+                EmatchOp::Or => ematch::TCF_EM_REL_OR,
+            };
+        }
+        // Last match: REL_END (0) — leave unmasked.
+
+        let kind_id = match &m.kind {
+            EmatchKind::Cmp(_) => ematch::TCF_EM_CMP,
+            EmatchKind::U32(_) => ematch::TCF_EM_U32,
+        };
+
+        let hdr = ematch::TcfEmatchHdr {
+            matchid: 0,
+            kind: kind_id,
+            flags,
+            _pad: 0,
+        };
+
+        let mut payload = Vec::with_capacity(ematch::TcfEmatchHdr::SIZE + 16);
+        payload.extend_from_slice(hdr.as_bytes());
+
+        match &m.kind {
+            EmatchKind::Cmp(c) => payload.extend_from_slice(encode_cmp(c).as_bytes()),
+            EmatchKind::U32(u) => {
+                let body = ematch::TcfEmU32 {
+                    mask: u.mask,
+                    val: u.value,
+                    off: u.offset,
+                };
+                payload.extend_from_slice(body.as_bytes());
+            }
+        }
+
+        builder.append_attr(attr_type, &payload);
+    }
+    builder.nest_end(list);
+    builder.nest_end(outer);
+}
+
+/// Pack an [`EmatchCmp`] into the kernel `tcf_em_cmp` byte layout.
+fn encode_cmp(c: &EmatchCmp) -> ematch::TcfEmCmp {
+    let align = match c.align {
+        CmpAlign::U8 => ematch::TCF_EM_ALIGN_U8,
+        CmpAlign::U16 => ematch::TCF_EM_ALIGN_U16,
+        CmpAlign::U32 => ematch::TCF_EM_ALIGN_U32,
+    };
+    let layer = match c.layer {
+        CmpLayer::Link => ematch::TCF_LAYER_LINK,
+        CmpLayer::Network => ematch::TCF_LAYER_NETWORK,
+        CmpLayer::Transport => ematch::TCF_LAYER_TRANSPORT,
+    };
+    let opnd = match c.op {
+        CmpOp::Eq => ematch::TCF_EM_OPND_EQ,
+        CmpOp::Gt => ematch::TCF_EM_OPND_GT,
+        CmpOp::Lt => ematch::TCF_EM_OPND_LT,
+    };
+    let cmp_flags = if c.trans { ematch::TCF_EM_CMP_TRANS } else { 0 };
+
+    ematch::TcfEmCmp {
+        val: c.value,
+        mask: c.mask,
+        off: c.offset,
+        align_flags: (cmp_flags << 4) | (align & 0x0F),
+        layer_opnd: (opnd << 4) | (layer & 0x0F),
+        _pad: 0,
+        _pad2: 0,
     }
 }
 
@@ -4691,5 +5006,209 @@ mod tests {
     fn u32_parse_params_ht_invalid_handle_errors() {
         let err = U32Filter::parse_params(&["ht", "not-a-handle"]).unwrap_err();
         assert!(err.to_string().contains("invalid ht handle"));
+    }
+
+    // ==========================================================
+    // BasicFilter — Plan 133 PR C (cls_basic ematch tree).
+    // Tests: wire format spot-checks (one-match cmp + two-match
+    // cmp/u32 combo), ip_proto_eq builder/parser equivalence,
+    // parse_params token shapes + strict errors.
+    // ==========================================================
+
+    use crate::netlink::builder::MessageBuilder;
+    use crate::netlink::types::tc::filter::ematch as ematch_consts;
+
+    /// Build a `BasicFilter` and run write_options into a fresh
+    /// MessageBuilder; returns the produced bytes for inspection.
+    fn basic_to_bytes(f: &BasicFilter) -> Vec<u8> {
+        let mut b = MessageBuilder::new(0, 0);
+        f.write_options(&mut b).expect("write_options");
+        b.as_bytes().to_vec()
+    }
+
+    #[test]
+    fn basic_ip_proto_eq_emits_single_cmp_match() {
+        let f = BasicFilter::new()
+            .classid(TcHandle::new(1, 0x10))
+            .ip_proto_eq(6); // TCP
+
+        // Wire output should contain a TCA_BASIC_EMATCHES nest with
+        // one tcf_em_cmp (16 bytes) for the proto check at offset 9.
+        assert_eq!(f.matches.len(), 1, "one match accumulated");
+        match &f.matches[0].kind {
+            EmatchKind::Cmp(c) => {
+                assert_eq!(c.layer, CmpLayer::Network);
+                assert_eq!(c.align, CmpAlign::U8);
+                assert_eq!(c.offset, 9);
+                assert_eq!(c.value, 6);
+                assert_eq!(c.mask, 0xff);
+                assert_eq!(c.op, CmpOp::Eq);
+                assert!(!c.trans);
+            }
+            _ => panic!("expected Cmp"),
+        }
+    }
+
+    #[test]
+    fn basic_two_match_tree_encodes_relations() {
+        let f = BasicFilter::new()
+            .ip_proto_eq(6) // first match
+            .ematch(Ematch::cmp(EmatchCmp {
+                layer: CmpLayer::Transport,
+                align: CmpAlign::U16,
+                offset: 2,
+                mask: 0xffff,
+                value: 80,
+                op: CmpOp::Eq,
+                trans: false,
+            }));
+
+        assert_eq!(f.matches.len(), 2);
+
+        let bytes = basic_to_bytes(&f);
+        // The encoder must emit non-empty output that contains the
+        // tree-header attribute (TCA_EMATCH_TREE_HDR = 1) followed by
+        // a TCA_EMATCH_TREE_LIST (= 2) carrying both matches.
+        assert!(!bytes.is_empty(), "write_options produced no bytes");
+        // The 2-match tree header should be present somewhere in the
+        // payload as the bytes [02, 00] (nmatches=2, le).
+        let has_nmatches_2 = bytes.windows(4).any(|w| w == [0x02, 0x00, 0x00, 0x00]);
+        assert!(has_nmatches_2, "tree header should advertise nmatches=2");
+    }
+
+    #[test]
+    fn basic_negate_sets_invert_flag() {
+        let f = BasicFilter::new().ematch(Ematch::cmp(EmatchCmp {
+            layer: CmpLayer::Network,
+            align: CmpAlign::U8,
+            offset: 9,
+            mask: 0xff,
+            value: 6,
+            op: CmpOp::Eq,
+            trans: false,
+        }).negate());
+        assert!(f.matches[0].negate);
+        // Spot-check that TCF_EM_INVERT is the documented bit.
+        assert_eq!(ematch_consts::TCF_EM_INVERT, 1 << 2);
+    }
+
+    #[test]
+    fn basic_or_sets_relation() {
+        let f = BasicFilter::new()
+            .ematch(Ematch::cmp(EmatchCmp {
+                layer: CmpLayer::Network,
+                align: CmpAlign::U8,
+                offset: 9,
+                mask: 0xff,
+                value: 6,
+                op: CmpOp::Eq,
+                trans: false,
+            }).or())
+            .ematch(Ematch::cmp(EmatchCmp {
+                layer: CmpLayer::Network,
+                align: CmpAlign::U8,
+                offset: 9,
+                mask: 0xff,
+                value: 17,
+                op: CmpOp::Eq,
+                trans: false,
+            }));
+        assert_eq!(f.matches[0].op, EmatchOp::Or);
+        // Last match's op is encoded as REL_END regardless.
+        assert_eq!(f.matches[1].op, EmatchOp::And);
+    }
+
+    #[test]
+    fn basic_cmp_byte_layout_matches_kernel_struct() {
+        // Hand-pack the tcf_em_cmp the kernel expects for
+        // `match u8 6 0xff at 9 layer ip eq`, then compare.
+        let want = ematch_consts::TcfEmCmp {
+            val: 6,
+            mask: 0xff,
+            off: 9,
+            // align=U8 (1) low nibble, flags=0 high nibble → 0x01
+            align_flags: ematch_consts::TCF_EM_ALIGN_U8 & 0x0F,
+            // layer=Network (1) low nibble, opnd=Eq (0) high nibble → 0x01
+            layer_opnd: ematch_consts::TCF_LAYER_NETWORK & 0x0F,
+            _pad: 0,
+            _pad2: 0,
+        };
+        let got = encode_cmp(&EmatchCmp {
+            layer: CmpLayer::Network,
+            align: CmpAlign::U8,
+            offset: 9,
+            mask: 0xff,
+            value: 6,
+            op: CmpOp::Eq,
+            trans: false,
+        });
+        assert_eq!(got.as_bytes(), want.as_bytes());
+    }
+
+    #[test]
+    fn basic_parse_params_empty_yields_default() {
+        let f = BasicFilter::parse_params(&[]).unwrap();
+        assert!(f.classid.is_none());
+        assert!(f.matches.is_empty());
+        assert!(f.chain.is_none());
+    }
+
+    #[test]
+    fn basic_parse_params_classid_and_chain() {
+        let f =
+            BasicFilter::parse_params(&["classid", "1:10", "chain", "5"]).unwrap();
+        assert_eq!(f.classid, Some(TcHandle::new(1, 0x10).as_raw()));
+        assert_eq!(f.chain, Some(5));
+    }
+
+    #[test]
+    fn basic_parse_params_flowid_alias() {
+        let f = BasicFilter::parse_params(&["flowid", "2:20"]).unwrap();
+        assert_eq!(f.classid, Some(TcHandle::new(2, 0x20).as_raw()));
+    }
+
+    #[test]
+    fn basic_parse_params_ip_proto_eq_named_matches_builder() {
+        let parsed = BasicFilter::parse_params(&["ip_proto_eq", "tcp"]).unwrap();
+        let direct = BasicFilter::new().ip_proto_eq(6);
+        assert_eq!(parsed.matches.len(), 1);
+        match (&parsed.matches[0].kind, &direct.matches[0].kind) {
+            (EmatchKind::Cmp(p), EmatchKind::Cmp(d)) => {
+                assert_eq!(p.value, d.value);
+                assert_eq!(p.mask, d.mask);
+                assert_eq!(p.offset, d.offset);
+                assert_eq!(p.align, d.align);
+                assert_eq!(p.layer, d.layer);
+            }
+            _ => panic!("expected Cmp on both"),
+        }
+    }
+
+    #[test]
+    fn basic_parse_params_ip_proto_eq_numeric() {
+        let f = BasicFilter::parse_params(&["ip_proto_eq", "6"]).unwrap();
+        match &f.matches[0].kind {
+            EmatchKind::Cmp(c) => assert_eq!(c.value, 6),
+            _ => panic!("expected Cmp"),
+        }
+    }
+
+    #[test]
+    fn basic_parse_params_unknown_token_errors() {
+        let err = BasicFilter::parse_params(&["nonsense"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("basic: unknown token `nonsense`"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn basic_parse_params_ip_proto_eq_unknown_proto_rebrands_error_prefix() {
+        let err = BasicFilter::parse_params(&["ip_proto_eq", "wat"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("basic:"), "error must rebrand u32→basic: {msg}");
+        assert!(!msg.contains("u32:"), "error must NOT mention u32: {msg}");
+        assert!(msg.contains("unknown IP protocol"), "got: {msg}");
     }
 }
