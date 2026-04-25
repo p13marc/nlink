@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `FlowerFilter::parse_params` (typed-units rollout, slice 3)
+
+- New method `FlowerFilter::parse_params(&[&str]) -> Result<Self>`
+  parses a tc-style flower params slice directly into the typed
+  filter. Recognises every match the typed filter can model:
+  `classid` / `flowid`, `ip_proto` (named or numeric),
+  `src_ip` / `dst_ip` (v4 or v6, with optional prefix; sets
+  `eth_type` implicitly), `src_port` / `dst_port`,
+  `src_mac` / `dst_mac`, `eth_type` (named or hex),
+  `vlan_id` / `vlan_prio` (with range validation),
+  `ip_tos` / `ip_ttl` (val[/mask]), `tcp_flags` (val[/mask]),
+  `skip_hw` / `skip_sw`.
+- **Honest scope-mismatch errors** for syntax `FlowerFilter` doesn't
+  yet model: `ct_state`, `ct_zone`, `ct_mark`, `enc_key_id`,
+  `enc_dst_ip`, `enc_src_ip`, `enc_dst_port`, `indev`. Each
+  rejection points at `tc::builders::filter` so callers know the
+  fallback path.
+- Six new private helpers (`parse_flower_ip_proto`,
+  `parse_flower_eth_type`, `parse_ipv4_with_prefix`,
+  `parse_ipv6_with_prefix`, `parse_mac`, `parse_value_mask_u8`,
+  `parse_value_mask_u16_hex`) handle the per-field parsing with
+  context-bearing error messages.
+- 22 new unit tests cover the empty, classid, flowid alias, ip_proto
+  by name and numeric, ports, IPv4/IPv6 with-and-without prefix,
+  MAC, eth_type by name and hex, vlan_id+prio (with out-of-range
+  error), ip_tos with-mask and bare-implies-mask-ff, skip_hw/sw,
+  unknown tokens, all 8 unsupported features, missing values,
+  invalid MACs, and out-of-range prefixes. Lib suite went 454 →
+  476; workspace clippy clean; all unit-testable as a regular user.
+
 ### Added — `NetemConfig::parse_params` (typed-units rollout, slice 2)
 
 - New method `NetemConfig::parse_params(&[&str]) -> Result<Self>`

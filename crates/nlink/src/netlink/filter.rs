@@ -565,6 +565,316 @@ impl FlowerFilter {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style flower params slice into a typed `FlowerFilter`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `classid <handle>` (alias `flowid`) — target class id (`1:10`)
+    /// - `ip_proto <name|num>` — `tcp` / `udp` / `icmp` / `icmpv6` or
+    ///   bare u8
+    /// - `src_ip <addr[/prefix]>` / `dst_ip <addr[/prefix]>` — IPv4 or
+    ///   IPv6 (auto-detected via `:` presence). Bare address means
+    ///   `/32` (v4) or `/128` (v6). Sets `eth_type` if not already set.
+    /// - `src_port <port>` / `dst_port <port>`
+    /// - `src_mac <mac>` / `dst_mac <mac>` — `xx:xx:xx:xx:xx:xx`
+    /// - `eth_type <name|hex>` — `ip` / `ipv4` / `ipv6` / `arp` / `vlan`
+    ///   / `802.1q` / `802.1ad`, or hex (`0x800`)
+    /// - `vlan_id <1-4094>` / `vlan_prio <0-7>`
+    /// - `ip_tos <val[/mask]>` / `ip_ttl <val[/mask]>` —
+    ///   bare value implies `/0xff` mask
+    /// - `tcp_flags <flags[/mask]>` — hex u16
+    /// - `skip_hw` / `skip_sw` — flag tokens (no value)
+    ///
+    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`
+    /// pointing at the legacy parser): `ct_state`, `ct_zone`,
+    /// `ct_mark`, `enc_key_id`, `enc_dst_ip`, `enc_src_ip`,
+    /// `enc_dst_port`, `indev`. Drop to the legacy
+    /// `tc::builders::filter::add` for those.
+    ///
+    /// Stricter than the legacy `add_flower_options`: unknown tokens,
+    /// missing values, and unparseable addresses / ports / MACs all
+    /// return `Error::InvalidMessage` rather than silently being
+    /// skipped.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let f = FlowerFilter::parse_params(&[
+    ///     "classid", "1:10",
+    ///     "ip_proto", "tcp",
+    ///     "dst_port", "80",
+    /// ])?;
+    /// ```
+    pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
+        use crate::Error;
+        let mut f = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("flower: `{key}` requires a value"))
+                })
+            };
+            match key {
+                "classid" | "flowid" => {
+                    let s = need_value()?;
+                    let h = s.parse::<TcHandle>().map_err(|e| {
+                        Error::InvalidMessage(format!("flower: invalid {key} `{s}`: {e}"))
+                    })?;
+                    f = f.classid(h);
+                    i += 2;
+                }
+                "ip_proto" => {
+                    let s = need_value()?;
+                    let proto = parse_flower_ip_proto(s)?;
+                    f = f.ip_proto(proto);
+                    i += 2;
+                }
+                "src_port" => {
+                    let s = need_value()?;
+                    let port: u16 = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "flower: invalid src_port `{s}` (expected 0-65535)"
+                        ))
+                    })?;
+                    f = f.src_port(port);
+                    i += 2;
+                }
+                "dst_port" => {
+                    let s = need_value()?;
+                    let port: u16 = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "flower: invalid dst_port `{s}` (expected 0-65535)"
+                        ))
+                    })?;
+                    f = f.dst_port(port);
+                    i += 2;
+                }
+                "src_ip" => {
+                    let s = need_value()?;
+                    if s.contains(':') {
+                        let (addr, plen) = parse_ipv6_with_prefix(s)?;
+                        f = f.src_ipv6(addr, plen);
+                    } else {
+                        let (addr, plen) = parse_ipv4_with_prefix(s)?;
+                        f = f.src_ipv4(addr, plen);
+                    }
+                    i += 2;
+                }
+                "dst_ip" => {
+                    let s = need_value()?;
+                    if s.contains(':') {
+                        let (addr, plen) = parse_ipv6_with_prefix(s)?;
+                        f = f.dst_ipv6(addr, plen);
+                    } else {
+                        let (addr, plen) = parse_ipv4_with_prefix(s)?;
+                        f = f.dst_ipv4(addr, plen);
+                    }
+                    i += 2;
+                }
+                "src_mac" => {
+                    f = f.src_mac(parse_mac(need_value()?)?);
+                    i += 2;
+                }
+                "dst_mac" => {
+                    f = f.dst_mac(parse_mac(need_value()?)?);
+                    i += 2;
+                }
+                "eth_type" => {
+                    let s = need_value()?;
+                    f.eth_type = Some(parse_flower_eth_type(s)?);
+                    i += 2;
+                }
+                "vlan_id" => {
+                    let s = need_value()?;
+                    let id: u16 = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("flower: invalid vlan_id `{s}`"))
+                    })?;
+                    if !(1..=4094).contains(&id) {
+                        return Err(Error::InvalidMessage(format!(
+                            "flower: vlan_id `{id}` out of range (must be 1-4094)"
+                        )));
+                    }
+                    f = f.vlan_id(id);
+                    i += 2;
+                }
+                "vlan_prio" => {
+                    let s = need_value()?;
+                    let prio: u8 = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("flower: invalid vlan_prio `{s}`"))
+                    })?;
+                    if prio > 7 {
+                        return Err(Error::InvalidMessage(format!(
+                            "flower: vlan_prio `{prio}` out of range (must be 0-7)"
+                        )));
+                    }
+                    f = f.vlan_prio(prio);
+                    i += 2;
+                }
+                "ip_tos" => {
+                    let (v, m) = parse_value_mask_u8(need_value()?, "ip_tos")?;
+                    f = f.ip_tos(v, m);
+                    i += 2;
+                }
+                "ip_ttl" => {
+                    let (v, m) = parse_value_mask_u8(need_value()?, "ip_ttl")?;
+                    f = f.ip_ttl(v, m);
+                    i += 2;
+                }
+                "tcp_flags" => {
+                    let (v, m) = parse_value_mask_u16_hex(need_value()?, "tcp_flags")?;
+                    f = f.tcp_flags(v, m);
+                    i += 2;
+                }
+                "skip_hw" => {
+                    f.flags |= flower::TCA_CLS_FLAGS_SKIP_HW;
+                    i += 1;
+                }
+                "skip_sw" => {
+                    f.flags |= flower::TCA_CLS_FLAGS_SKIP_SW;
+                    i += 1;
+                }
+                "ct_state" | "ct_zone" | "ct_mark" | "enc_key_id" | "enc_dst_ip" | "enc_src_ip"
+                | "enc_dst_port" | "indev" => {
+                    return Err(Error::InvalidMessage(format!(
+                        "flower: `{key}` is not modelled by FlowerFilter yet — use tc::builders::filter for this match"
+                    )));
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "flower: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(f)
+    }
+}
+
+fn parse_flower_ip_proto(s: &str) -> crate::Result<u8> {
+    use crate::Error;
+    Ok(match s {
+        "tcp" => flower::IPPROTO_TCP,
+        "udp" => flower::IPPROTO_UDP,
+        "icmp" => flower::IPPROTO_ICMP,
+        "icmpv6" => flower::IPPROTO_ICMPV6,
+        other => other.parse::<u8>().map_err(|_| {
+            Error::InvalidMessage(format!(
+                "flower: invalid ip_proto `{other}` (expected tcp/udp/icmp/icmpv6 or 0-255)"
+            ))
+        })?,
+    })
+}
+
+fn parse_flower_eth_type(s: &str) -> crate::Result<u16> {
+    use crate::Error;
+    Ok(match s {
+        "ip" | "ipv4" => 0x0800,
+        "ipv6" => 0x86dd,
+        "arp" => 0x0806,
+        "vlan" | "802.1q" => 0x8100,
+        "802.1ad" => 0x88a8,
+        other => {
+            let trimmed = other.strip_prefix("0x").unwrap_or(other);
+            u16::from_str_radix(trimmed, 16).map_err(|_| {
+                Error::InvalidMessage(format!(
+                    "flower: invalid eth_type `{other}` (expected name or hex)"
+                ))
+            })?
+        }
+    })
+}
+
+fn parse_ipv4_with_prefix(s: &str) -> crate::Result<(Ipv4Addr, u8)> {
+    use crate::Error;
+    if let Some((addr_s, plen_s)) = s.split_once('/') {
+        let addr: Ipv4Addr = addr_s.parse().map_err(|_| {
+            Error::InvalidMessage(format!("flower: invalid IPv4 address `{addr_s}`"))
+        })?;
+        let plen: u8 = plen_s.parse().map_err(|_| {
+            Error::InvalidMessage(format!("flower: invalid IPv4 prefix `{plen_s}`"))
+        })?;
+        if plen > 32 {
+            return Err(Error::InvalidMessage(format!(
+                "flower: IPv4 prefix `{plen}` out of range (max 32)"
+            )));
+        }
+        Ok((addr, plen))
+    } else {
+        let addr: Ipv4Addr = s
+            .parse()
+            .map_err(|_| Error::InvalidMessage(format!("flower: invalid IPv4 address `{s}`")))?;
+        Ok((addr, 32))
+    }
+}
+
+fn parse_ipv6_with_prefix(s: &str) -> crate::Result<(Ipv6Addr, u8)> {
+    use crate::Error;
+    if let Some((addr_s, plen_s)) = s.rsplit_once('/')
+        && let Ok(addr) = addr_s.parse::<Ipv6Addr>()
+    {
+        let plen: u8 = plen_s.parse().map_err(|_| {
+            Error::InvalidMessage(format!("flower: invalid IPv6 prefix `{plen_s}`"))
+        })?;
+        if plen > 128 {
+            return Err(Error::InvalidMessage(format!(
+                "flower: IPv6 prefix `{plen}` out of range (max 128)"
+            )));
+        }
+        return Ok((addr, plen));
+    }
+    let addr: Ipv6Addr = s
+        .parse()
+        .map_err(|_| Error::InvalidMessage(format!("flower: invalid IPv6 address `{s}`")))?;
+    Ok((addr, 128))
+}
+
+fn parse_mac(s: &str) -> crate::Result<[u8; 6]> {
+    use crate::Error;
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        return Err(Error::InvalidMessage(format!(
+            "flower: invalid MAC `{s}` (expected xx:xx:xx:xx:xx:xx)"
+        )));
+    }
+    let mut mac = [0u8; 6];
+    for (i, part) in parts.iter().enumerate() {
+        mac[i] = u8::from_str_radix(part, 16)
+            .map_err(|_| Error::InvalidMessage(format!("flower: invalid MAC `{s}`")))?;
+    }
+    Ok(mac)
+}
+
+fn parse_value_mask_u8(s: &str, label: &str) -> crate::Result<(u8, u8)> {
+    use crate::Error;
+    let parse_one = |t: &str| -> crate::Result<u8> {
+        let trimmed = t.strip_prefix("0x").unwrap_or(t);
+        u8::from_str_radix(trimmed, 16)
+            .or_else(|_| t.parse::<u8>())
+            .map_err(|_| Error::InvalidMessage(format!("flower: invalid {label} `{t}`")))
+    };
+    if let Some((v, m)) = s.split_once('/') {
+        Ok((parse_one(v)?, parse_one(m)?))
+    } else {
+        Ok((parse_one(s)?, 0xff))
+    }
+}
+
+fn parse_value_mask_u16_hex(s: &str, label: &str) -> crate::Result<(u16, u16)> {
+    use crate::Error;
+    let parse_one = |t: &str| -> crate::Result<u16> {
+        let trimmed = t.strip_prefix("0x").unwrap_or(t);
+        u16::from_str_radix(trimmed, 16)
+            .or_else(|_| t.parse::<u16>())
+            .map_err(|_| Error::InvalidMessage(format!("flower: invalid {label} `{t}`")))
+    };
+    if let Some((v, m)) = s.split_once('/') {
+        Ok((parse_one(v)?, parse_one(m)?))
+    } else {
+        Ok((parse_one(s)?, 0xffff))
+    }
 }
 
 /// Helper to create an IPv4 mask from prefix length.
@@ -2524,5 +2834,173 @@ mod tests {
     fn test_bpf_from_pinned_invalid_path() {
         let result = BpfFilter::from_pinned("/nonexistent/path/to/bpf");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn flower_parse_params_empty_yields_default() {
+        let f = FlowerFilter::parse_params(&[]).unwrap();
+        assert!(f.classid.is_none());
+        assert!(f.eth_type.is_none());
+        assert!(f.ip_proto.is_none());
+        assert_eq!(f.flags, 0);
+    }
+
+    #[test]
+    fn flower_parse_params_classid_and_proto() {
+        let f = FlowerFilter::parse_params(&["classid", "1:10", "ip_proto", "tcp"]).unwrap();
+        assert_eq!(f.classid, Some(TcHandle::new(1, 0x10).as_raw()));
+        assert_eq!(f.ip_proto, Some(flower::IPPROTO_TCP));
+    }
+
+    #[test]
+    fn flower_parse_params_flowid_alias() {
+        let f = FlowerFilter::parse_params(&["flowid", "1:20"]).unwrap();
+        assert_eq!(f.classid, Some(TcHandle::new(1, 0x20).as_raw()));
+    }
+
+    #[test]
+    fn flower_parse_params_ip_proto_numeric() {
+        let f = FlowerFilter::parse_params(&["ip_proto", "47"]).unwrap();
+        assert_eq!(f.ip_proto, Some(47)); // GRE
+    }
+
+    #[test]
+    fn flower_parse_params_dst_port() {
+        let f = FlowerFilter::parse_params(&["dst_port", "443"]).unwrap();
+        assert_eq!(f.dst_port, Some(443));
+    }
+
+    #[test]
+    fn flower_parse_params_src_ip_v4_with_prefix() {
+        let f = FlowerFilter::parse_params(&["src_ip", "10.0.0.0/8"]).unwrap();
+        assert_eq!(f.src_ipv4, Some(("10.0.0.0".parse().unwrap(), 8)));
+        // sets eth_type implicitly
+        assert_eq!(f.eth_type, Some(0x0800));
+    }
+
+    #[test]
+    fn flower_parse_params_src_ip_v4_bare() {
+        let f = FlowerFilter::parse_params(&["dst_ip", "192.168.1.1"]).unwrap();
+        assert_eq!(f.dst_ipv4, Some(("192.168.1.1".parse().unwrap(), 32)));
+    }
+
+    #[test]
+    fn flower_parse_params_dst_ip_v6_with_prefix() {
+        let f = FlowerFilter::parse_params(&["dst_ip", "fe80::1/64"]).unwrap();
+        assert_eq!(f.dst_ipv6, Some(("fe80::1".parse().unwrap(), 64)));
+        assert_eq!(f.eth_type, Some(0x86dd));
+    }
+
+    #[test]
+    fn flower_parse_params_dst_ip_v6_bare() {
+        let f = FlowerFilter::parse_params(&["src_ip", "::1"]).unwrap();
+        assert_eq!(f.src_ipv6, Some(("::1".parse().unwrap(), 128)));
+    }
+
+    #[test]
+    fn flower_parse_params_dst_mac() {
+        let f = FlowerFilter::parse_params(&["dst_mac", "aa:bb:cc:dd:ee:ff"]).unwrap();
+        assert_eq!(f.dst_mac, Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
+    }
+
+    #[test]
+    fn flower_parse_params_eth_type_names() {
+        for (name, expected) in [
+            ("ip", 0x0800u16),
+            ("ipv4", 0x0800),
+            ("ipv6", 0x86dd),
+            ("arp", 0x0806),
+            ("802.1q", 0x8100),
+            ("802.1ad", 0x88a8),
+        ] {
+            let f = FlowerFilter::parse_params(&["eth_type", name]).unwrap();
+            assert_eq!(f.eth_type, Some(expected), "eth_type {name}");
+        }
+    }
+
+    #[test]
+    fn flower_parse_params_eth_type_hex() {
+        let f = FlowerFilter::parse_params(&["eth_type", "0x806"]).unwrap();
+        assert_eq!(f.eth_type, Some(0x0806));
+    }
+
+    #[test]
+    fn flower_parse_params_vlan_id_and_prio() {
+        let f = FlowerFilter::parse_params(&["vlan_id", "100", "vlan_prio", "5"]).unwrap();
+        assert_eq!(f.vlan_id, Some(100));
+        assert_eq!(f.vlan_prio, Some(5));
+    }
+
+    #[test]
+    fn flower_parse_params_vlan_id_out_of_range_errors() {
+        let err = FlowerFilter::parse_params(&["vlan_id", "0"]).unwrap_err();
+        assert!(err.to_string().contains("vlan_id"));
+        let err = FlowerFilter::parse_params(&["vlan_id", "5000"]).unwrap_err();
+        assert!(err.to_string().contains("vlan_id"));
+    }
+
+    #[test]
+    fn flower_parse_params_ip_tos_with_mask() {
+        let f = FlowerFilter::parse_params(&["ip_tos", "0x10/0x3f"]).unwrap();
+        assert_eq!(f.ip_tos, Some((0x10, 0x3f)));
+    }
+
+    #[test]
+    fn flower_parse_params_ip_tos_bare_implies_mask_ff() {
+        let f = FlowerFilter::parse_params(&["ip_tos", "0x10"]).unwrap();
+        assert_eq!(f.ip_tos, Some((0x10, 0xff)));
+    }
+
+    #[test]
+    fn flower_parse_params_skip_hw_sw_flags() {
+        let f = FlowerFilter::parse_params(&["skip_hw", "skip_sw"]).unwrap();
+        assert_eq!(
+            f.flags,
+            flower::TCA_CLS_FLAGS_SKIP_HW | flower::TCA_CLS_FLAGS_SKIP_SW
+        );
+    }
+
+    #[test]
+    fn flower_parse_params_unknown_token_errors() {
+        let err = FlowerFilter::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn flower_parse_params_unsupported_features_rejected() {
+        for unsup in [
+            "ct_state",
+            "ct_zone",
+            "ct_mark",
+            "enc_key_id",
+            "enc_dst_ip",
+            "enc_src_ip",
+            "enc_dst_port",
+            "indev",
+        ] {
+            let err = FlowerFilter::parse_params(&[unsup, "x"]).unwrap_err();
+            assert!(
+                err.to_string().contains("not modelled"),
+                "expected not-modelled for `{unsup}`, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn flower_parse_params_missing_value_errors() {
+        let err = FlowerFilter::parse_params(&["classid"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"));
+    }
+
+    #[test]
+    fn flower_parse_params_invalid_mac_errors() {
+        let err = FlowerFilter::parse_params(&["dst_mac", "not-a-mac"]).unwrap_err();
+        assert!(err.to_string().contains("invalid MAC"));
+    }
+
+    #[test]
+    fn flower_parse_params_invalid_ipv4_prefix_errors() {
+        let err = FlowerFilter::parse_params(&["src_ip", "10.0.0.0/40"]).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
     }
 }
