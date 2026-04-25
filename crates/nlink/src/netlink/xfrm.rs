@@ -51,15 +51,21 @@ const NLM_F_REPLACE: u16 = 0x100;
 const XFRM_MSG_NEWSA: u16 = 16;
 const XFRM_MSG_DELSA: u16 = 17;
 const XFRM_MSG_GETSA: u16 = 18;
-const XFRM_MSG_GETPOLICY: u16 = 0x15;
+const XFRM_MSG_NEWPOLICY: u16 = 19;
+const XFRM_MSG_DELPOLICY: u16 = 20;
+const XFRM_MSG_GETPOLICY: u16 = 21;
 const XFRM_MSG_FLUSHSA: u16 = 25;
+const XFRM_MSG_FLUSHPOLICY: u16 = 28;
 
 // XFRM attribute types
 const XFRMA_ALG_AUTH: u16 = 1;
 const XFRMA_ALG_CRYPT: u16 = 2;
 const XFRMA_ALG_COMP: u16 = 3;
 const XFRMA_ENCAP: u16 = 4;
+const XFRMA_TMPL: u16 = 5;
 const XFRMA_SRCADDR: u16 = 9;
+#[allow(dead_code)] // for the future "main vs sub" policy-type slice
+const XFRMA_POLICY_TYPE: u16 = 16;
 const XFRMA_ALG_AEAD: u16 = 18;
 const XFRMA_ALG_AUTH_TRUNC: u16 = 20;
 const XFRMA_MARK: u16 = 21;
@@ -165,6 +171,37 @@ pub struct XfrmUsersaId {
 pub struct XfrmUsersaFlush {
     pub proto: u8,
     pub _pad: [u8; 7],
+}
+
+/// `xfrm_userpolicy_id` — body of `XFRM_MSG_DELPOLICY` /
+/// `GETPOLICY` requests. Selector + index + direction byte.
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct XfrmUserpolicyId {
+    pub sel: XfrmSelector,
+    pub index: u32,
+    pub dir: u8,
+    pub _pad: [u8; 7],
+}
+
+/// `xfrm_user_tmpl` — one entry in an SP's `XFRMA_TMPL` array.
+/// Tells the kernel which SA(s) to look up to satisfy the policy:
+/// the (daddr, spi, proto) triple plus mode/reqid + algorithm
+/// bitmasks (typically 0xFFFFFFFF = "any algorithm").
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct XfrmUserTmpl {
+    pub id: XfrmId,
+    pub family: u16,
+    pub saddr: XfrmAddress,
+    pub reqid: u32,
+    pub mode: u8,
+    pub share: u8,
+    pub optional: u8,
+    pub _pad: u8,
+    pub aalgos: u32,
+    pub ealgos: u32,
+    pub calgos: u32,
 }
 
 /// XFRM selector (traffic selector for policies/SAs).
@@ -459,6 +496,16 @@ impl PolicyDirection {
             other => Self::Unknown(other),
         }
     }
+
+    /// Convert back to the wire-format `u8`.
+    pub fn number(&self) -> u8 {
+        match self {
+            Self::In => XFRM_POLICY_IN,
+            Self::Out => XFRM_POLICY_OUT,
+            Self::Forward => XFRM_POLICY_FWD,
+            Self::Unknown(n) => *n,
+        }
+    }
 }
 
 /// Policy action.
@@ -479,6 +526,15 @@ impl PolicyAction {
             XFRM_POLICY_ALLOW => Self::Allow,
             XFRM_POLICY_BLOCK => Self::Block,
             other => Self::Unknown(other),
+        }
+    }
+
+    /// Convert back to the wire-format `u8`.
+    pub fn number(&self) -> u8 {
+        match self {
+            Self::Allow => XFRM_POLICY_ALLOW,
+            Self::Block => XFRM_POLICY_BLOCK,
+            Self::Unknown(n) => *n,
         }
     }
 }
@@ -922,6 +978,211 @@ impl XfrmUsersaFlush {
     }
 }
 
+impl XfrmUserpolicyId {
+    fn as_bytes(&self) -> &[u8] {
+        <Self as IntoBytes>::as_bytes(self)
+    }
+}
+
+impl XfrmUserTmpl {
+    fn as_bytes(&self) -> &[u8] {
+        <Self as IntoBytes>::as_bytes(self)
+    }
+
+    /// Build a typical "match-any-algo" template: forward to a
+    /// specific destination via `proto`/`mode`, no SPI constraint.
+    pub fn match_any(
+        src: IpAddr,
+        dst: IpAddr,
+        proto: IpsecProtocol,
+        mode: XfrmMode,
+        reqid: u32,
+    ) -> Self {
+        Self {
+            id: XfrmId {
+                daddr: ip_to_xfrm_addr(dst),
+                spi: 0,
+                proto: proto.number(),
+                _pad: [0; 3],
+            },
+            family: family_for_pair(src, dst),
+            saddr: ip_to_xfrm_addr(src),
+            reqid,
+            mode: mode.number(),
+            share: 0,
+            optional: 0,
+            _pad: 0,
+            // Default: any algorithm acceptable (kernel matches any
+            // SA whose algorithms intersect this bitmask).
+            aalgos: u32::MAX,
+            ealgos: u32::MAX,
+            calgos: u32::MAX,
+        }
+    }
+}
+
+// ============================================================================
+// Security Policy write-path builder (Plan 141 PR B)
+// ============================================================================
+
+/// Builder for a Security Policy write request.
+///
+/// SPs steer traffic into / out of the IPsec subsystem: each
+/// matching packet is checked against the policy's templates and
+/// either encrypted/decrypted via the resolved SA, blocked, or
+/// passed through. Construct via [`XfrmSpBuilder::new`], chain
+/// the relevant setters (and any number of [`Self::template`]
+/// calls), and pass to [`Connection::add_sp`].
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() -> nlink::Result<()> {
+/// use nlink::netlink::{Connection, Xfrm};
+/// use nlink::netlink::xfrm::{
+///     XfrmSpBuilder, XfrmSelector, XfrmUserTmpl, IpsecProtocol,
+///     PolicyDirection, XfrmMode,
+/// };
+///
+/// let conn = Connection::<Xfrm>::new()?;
+/// let sel = XfrmSelector { family: libc::AF_INET as u16, ..Default::default() };
+/// let tmpl = XfrmUserTmpl::match_any(
+///     "10.0.0.1".parse().unwrap(),
+///     "10.0.0.2".parse().unwrap(),
+///     IpsecProtocol::Esp, XfrmMode::Tunnel, 42,
+/// );
+/// let sp = XfrmSpBuilder::new(sel, PolicyDirection::Out)
+///     .priority(100)
+///     .template(tmpl);
+/// conn.add_sp(sp).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless submitted to the connection"]
+pub struct XfrmSpBuilder {
+    sel: XfrmSelector,
+    direction: PolicyDirection,
+    action: PolicyAction,
+    priority: u32,
+    index: u32,
+    flags: u8,
+    share: u8,
+    tmpls: Vec<XfrmUserTmpl>,
+    mark: Option<(u32, u32)>,
+    if_id: Option<u32>,
+}
+
+impl XfrmSpBuilder {
+    /// New SP for the given selector + direction. Defaults to
+    /// `Allow` action, priority 0, kernel-assigned index.
+    pub fn new(sel: XfrmSelector, direction: PolicyDirection) -> Self {
+        Self {
+            sel,
+            direction,
+            action: PolicyAction::Allow,
+            priority: 0,
+            index: 0,
+            flags: 0,
+            share: 0,
+            tmpls: Vec::new(),
+            mark: None,
+            if_id: None,
+        }
+    }
+
+    /// Set action to `Allow` (default).
+    pub fn allow(mut self) -> Self {
+        self.action = PolicyAction::Allow;
+        self
+    }
+
+    /// Set action to `Block` — packets matching this selector are
+    /// dropped.
+    pub fn block(mut self) -> Self {
+        self.action = PolicyAction::Block;
+        self
+    }
+
+    pub fn priority(mut self, p: u32) -> Self {
+        self.priority = p;
+        self
+    }
+
+    /// Pre-pin a policy index. Default 0 = kernel assigns one.
+    pub fn index(mut self, idx: u32) -> Self {
+        self.index = idx;
+        self
+    }
+
+    /// Append a template to the policy. Each template references
+    /// an SA the kernel must look up to satisfy the policy. Order
+    /// matters for nested transforms (e.g. AH inside ESP).
+    pub fn template(mut self, tmpl: XfrmUserTmpl) -> Self {
+        self.tmpls.push(tmpl);
+        self
+    }
+
+    /// Filter which policies apply by skb mark.
+    pub fn mark(mut self, mark: u32, mask: u32) -> Self {
+        self.mark = Some((mark, mask));
+        self
+    }
+
+    /// XFRM interface ID (XFRMA_IF_ID).
+    pub fn if_id(mut self, id: u32) -> Self {
+        self.if_id = Some(id);
+        self
+    }
+
+    fn build_userpolicy_info(&self) -> XfrmUserpolicyInfo {
+        XfrmUserpolicyInfo {
+            sel: self.sel,
+            lft: XfrmLifetimeCfg {
+                soft_byte_limit: u64::MAX,
+                hard_byte_limit: u64::MAX,
+                soft_packet_limit: u64::MAX,
+                hard_packet_limit: u64::MAX,
+                soft_add_expires_seconds: 0,
+                hard_add_expires_seconds: 0,
+                soft_use_expires_seconds: 0,
+                hard_use_expires_seconds: 0,
+            },
+            curlft: XfrmLifetimeCur::default(),
+            priority: self.priority,
+            index: self.index,
+            dir: self.direction.number(),
+            action: self.action.number(),
+            flags: self.flags,
+            share: self.share,
+        }
+    }
+
+    fn write_into(&self, b: &mut MessageBuilder) {
+        let info = self.build_userpolicy_info();
+        b.append_bytes(info.as_bytes());
+
+        if !self.tmpls.is_empty() {
+            // XFRMA_TMPL is a single attribute carrying a packed
+            // array of xfrm_user_tmpl entries (no per-entry
+            // attribute header — just the structs back-to-back).
+            let mut payload =
+                Vec::with_capacity(self.tmpls.len() * std::mem::size_of::<XfrmUserTmpl>());
+            for t in &self.tmpls {
+                payload.extend_from_slice(t.as_bytes());
+            }
+            b.append_attr(XFRMA_TMPL, &payload);
+        }
+        if let Some((mark, mask)) = self.mark {
+            let m = XfrmMark { v: mark, m: mask };
+            b.append_attr(XFRMA_MARK, m.as_bytes());
+        }
+        if let Some(id) = self.if_id {
+            b.append_attr_u32(XFRMA_IF_ID, id);
+        }
+    }
+}
+
 impl Connection<Xfrm> {
     /// Create a new XFRM connection.
     ///
@@ -1063,6 +1324,82 @@ impl Connection<Xfrm> {
 
         match self.send_request(b).await {
             Ok(response) => Ok(Self::parse_sa_msg(&response)),
+            Err(e) if e.is_not_found() => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Create a Security Policy.
+    ///
+    /// Sends `XFRM_MSG_NEWPOLICY` with `NLM_F_CREATE | NLM_F_EXCL`.
+    /// Returns `EEXIST` if a policy with the same (selector, dir,
+    /// index) already exists; use [`Self::update_sp`] to replace.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_sp"))]
+    pub async fn add_sp(&self, sp: XfrmSpBuilder) -> Result<()> {
+        let mut b = MessageBuilder::new(
+            XFRM_MSG_NEWPOLICY,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        sp.write_into(&mut b);
+        self.send_ack(b).await
+    }
+
+    /// Replace an existing Security Policy in place — same wire
+    /// shape as [`Self::add_sp`] but with
+    /// `NLM_F_CREATE | NLM_F_REPLACE`. Match key is the
+    /// `(selector, dir)` from the body.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "update_sp"))]
+    pub async fn update_sp(&self, sp: XfrmSpBuilder) -> Result<()> {
+        let mut b = MessageBuilder::new(
+            XFRM_MSG_NEWPOLICY,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+        );
+        sp.write_into(&mut b);
+        self.send_ack(b).await
+    }
+
+    /// Delete a Security Policy by `(selector, direction)`.
+    /// Sends `XFRM_MSG_DELPOLICY` with an `XfrmUserpolicyId` body.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_sp"))]
+    pub async fn del_sp(&self, sel: XfrmSelector, direction: PolicyDirection) -> Result<()> {
+        let mut b = MessageBuilder::new(XFRM_MSG_DELPOLICY, NLM_F_REQUEST | NLM_F_ACK);
+        let id = XfrmUserpolicyId {
+            sel,
+            index: 0,
+            dir: direction.number(),
+            _pad: [0; 7],
+        };
+        b.append_bytes(id.as_bytes());
+        self.send_ack(b).await
+    }
+
+    /// Flush every Security Policy in the kernel's database.
+    /// Sends `XFRM_MSG_FLUSHPOLICY`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_sp"))]
+    pub async fn flush_sp(&self) -> Result<()> {
+        let b = MessageBuilder::new(XFRM_MSG_FLUSHPOLICY, NLM_F_REQUEST | NLM_F_ACK);
+        self.send_ack(b).await
+    }
+
+    /// Fetch a single Security Policy by `(selector, direction)`.
+    /// Returns `Ok(None)` if no policy matches.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_sp"))]
+    pub async fn get_sp(
+        &self,
+        sel: XfrmSelector,
+        direction: PolicyDirection,
+    ) -> Result<Option<SecurityPolicy>> {
+        let mut b = MessageBuilder::new(XFRM_MSG_GETPOLICY, NLM_F_REQUEST);
+        let id = XfrmUserpolicyId {
+            sel,
+            index: 0,
+            dir: direction.number(),
+            _pad: [0; 7],
+        };
+        b.append_bytes(id.as_bytes());
+
+        match self.send_request(b).await {
+            Ok(response) => Ok(Self::parse_policy_msg(&response)),
             Err(e) if e.is_not_found() => Ok(None),
             Err(e) => Err(e),
         }
@@ -1345,6 +1682,14 @@ impl Connection<Xfrm> {
 
     /// Parse a Security Policy from a netlink message.
     fn parse_policy(&self, data: &[u8]) -> Option<SecurityPolicy> {
+        Self::parse_policy_msg(data)
+    }
+
+    /// Parse a Security Policy from a netlink message buffer.
+    /// Associated function so unit tests can call it via
+    /// `Connection::<Xfrm>::parse_policy_msg(...)` without a live
+    /// socket.
+    fn parse_policy_msg(data: &[u8]) -> Option<SecurityPolicy> {
         if data.len() < NLMSG_HDRLEN + std::mem::size_of::<XfrmUserpolicyInfo>() {
             return None;
         }
@@ -1816,6 +2161,189 @@ mod tests {
         // Padding bytes stay zero.
         for &b in &frame[17..24] {
             assert_eq!(b, 0, "flush body padding must be zero");
+        }
+    }
+
+    // ==========================================================
+    // XfrmSpBuilder — Plan 141 PR B SP CRUD wire-format tests
+    // ==========================================================
+
+    fn ipv4_subnet_selector(family: u16) -> XfrmSelector {
+        XfrmSelector {
+            family,
+            ..Default::default()
+        }
+    }
+
+    fn build_add_sp_frame(sp: XfrmSpBuilder) -> Vec<u8> {
+        let mut b = MessageBuilder::new(
+            XFRM_MSG_NEWPOLICY,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        sp.write_into(&mut b);
+        b.finish()
+    }
+
+    #[test]
+    fn xfrm_sp_out_with_one_tmpl_roundtrips() {
+        let sel = ipv4_subnet_selector(libc::AF_INET as u16);
+        let tmpl = XfrmUserTmpl::match_any(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            IpsecProtocol::Esp,
+            XfrmMode::Tunnel,
+            42,
+        );
+        let sp = XfrmSpBuilder::new(sel, PolicyDirection::Out)
+            .priority(100)
+            .template(tmpl);
+
+        let frame = build_add_sp_frame(sp);
+        let parsed = Connection::<Xfrm>::parse_policy_msg(&frame)
+            .expect("parse_policy must round-trip XfrmSpBuilder output");
+
+        assert_eq!(parsed.direction, PolicyDirection::Out);
+        assert_eq!(parsed.action, PolicyAction::Allow, "default action");
+        assert_eq!(parsed.priority, 100);
+    }
+
+    #[test]
+    fn xfrm_sp_in_with_two_tmpls_packs_array() {
+        // Inbound chain: ESP outer + AH inner.
+        let sel = ipv4_subnet_selector(libc::AF_INET as u16);
+        let esp = XfrmUserTmpl::match_any(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            IpsecProtocol::Esp,
+            XfrmMode::Tunnel,
+            1,
+        );
+        let ah = XfrmUserTmpl::match_any(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            IpsecProtocol::Ah,
+            XfrmMode::Tunnel,
+            2,
+        );
+        let sp = XfrmSpBuilder::new(sel, PolicyDirection::In)
+            .template(esp)
+            .template(ah);
+
+        let frame = build_add_sp_frame(sp);
+        let parsed = Connection::<Xfrm>::parse_policy_msg(&frame)
+            .expect("parse_policy must round-trip nested-tmpl SP");
+
+        assert_eq!(parsed.direction, PolicyDirection::In);
+        // The current parse_policy doesn't expose the templates list,
+        // but we can verify XFRMA_TMPL is present in the wire bytes
+        // and that it carries 2 * size_of::<XfrmUserTmpl>() bytes.
+        let tmpl_size = std::mem::size_of::<XfrmUserTmpl>();
+        let want_attr_payload_len = 2 * tmpl_size;
+        let attr_present = frame.windows(2).any(|w| {
+            // Look for the XFRMA_TMPL nlattr type byte. nlattr is
+            // {len: u16, type: u16}; type is at +2.
+            u16::from_le_bytes([w[0], w[1]]) == want_attr_payload_len as u16 + 4
+        });
+        assert!(
+            attr_present,
+            "XFRMA_TMPL attr should carry 2*sizeof(XfrmUserTmpl) bytes"
+        );
+    }
+
+    #[test]
+    fn xfrm_sp_block_action_no_templates() {
+        let sel = ipv4_subnet_selector(libc::AF_INET as u16);
+        let sp = XfrmSpBuilder::new(sel, PolicyDirection::Out).block();
+
+        let frame = build_add_sp_frame(sp);
+        let parsed = Connection::<Xfrm>::parse_policy_msg(&frame)
+            .expect("parse_policy must round-trip block SP");
+        assert_eq!(parsed.action, PolicyAction::Block);
+    }
+
+    #[test]
+    fn xfrm_del_sp_emits_selector_plus_dir() {
+        let sel = ipv4_subnet_selector(libc::AF_INET as u16);
+        let mut b = MessageBuilder::new(XFRM_MSG_DELPOLICY, NLM_F_REQUEST | NLM_F_ACK);
+        let id = XfrmUserpolicyId {
+            sel,
+            index: 0,
+            dir: PolicyDirection::Out.number(),
+            _pad: [0; 7],
+        };
+        b.append_bytes(id.as_bytes());
+        let frame = b.finish();
+
+        // nlmsg_type = DELPOLICY (offset 4..6)
+        assert_eq!(
+            u16::from_le_bytes([frame[4], frame[5]]),
+            XFRM_MSG_DELPOLICY
+        );
+
+        // XfrmUserpolicyId starts at offset 16. Direction byte
+        // sits at offset 16 + size_of::<XfrmSelector>() + 4 (index).
+        let sel_size = std::mem::size_of::<XfrmSelector>();
+        let dir_off = 16 + sel_size + 4;
+        assert_eq!(frame[dir_off], XFRM_POLICY_OUT);
+    }
+
+    #[test]
+    fn xfrm_get_sp_request_uses_request_only_flags() {
+        let sel = ipv4_subnet_selector(libc::AF_INET as u16);
+        let mut b = MessageBuilder::new(XFRM_MSG_GETPOLICY, NLM_F_REQUEST);
+        let id = XfrmUserpolicyId {
+            sel,
+            index: 0,
+            dir: PolicyDirection::In.number(),
+            _pad: [0; 7],
+        };
+        b.append_bytes(id.as_bytes());
+        let frame = b.finish();
+
+        let nlmsg_type = u16::from_le_bytes([frame[4], frame[5]]);
+        assert_eq!(nlmsg_type, XFRM_MSG_GETPOLICY);
+        let flags = u16::from_le_bytes([frame[6], frame[7]]);
+        assert_eq!(flags & NLM_F_DUMP, 0, "get_sp must NOT use DUMP");
+        assert_eq!(flags & NLM_F_ACK, 0, "get_sp must NOT use ACK");
+        assert!(flags & NLM_F_REQUEST != 0);
+    }
+
+    #[test]
+    fn xfrm_flush_sp_has_no_body() {
+        let b = MessageBuilder::new(XFRM_MSG_FLUSHPOLICY, NLM_F_REQUEST | NLM_F_ACK);
+        let frame = b.finish();
+        // Just the 16-byte nlmsghdr — no XfrmUserpolicyId body.
+        assert_eq!(frame.len(), 16);
+        assert_eq!(
+            u16::from_le_bytes([frame[4], frame[5]]),
+            XFRM_MSG_FLUSHPOLICY
+        );
+    }
+
+    #[test]
+    fn xfrm_user_tmpl_sets_default_algo_bitmasks_to_max() {
+        // The "any algorithm" default is u32::MAX on all three
+        // bitmasks — the kernel matches any SA whose algorithms
+        // intersect this mask.
+        let t = XfrmUserTmpl::match_any(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            IpsecProtocol::Esp,
+            XfrmMode::Tunnel,
+            0,
+        );
+        let aalgos = t.aalgos;
+        let ealgos = t.ealgos;
+        let calgos = t.calgos;
+        assert_eq!(aalgos, u32::MAX);
+        assert_eq!(ealgos, u32::MAX);
+        assert_eq!(calgos, u32::MAX);
+    }
+
+    #[test]
+    fn policy_direction_to_u8_round_trips() {
+        for dir in [PolicyDirection::In, PolicyDirection::Out, PolicyDirection::Forward] {
+            assert_eq!(PolicyDirection::from_u8(dir.number()), dir);
         }
     }
 

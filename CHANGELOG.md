@@ -4,6 +4,92 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `XfrmSpBuilder` + Security Policy CRUD (Plan 141 PR B)
+
+`Connection<Xfrm>` already shipped Security Association CRUD in
+PR A. PR B adds the matching write path for Security Policies —
+SPs are what steer traffic into the IPsec subsystem in the first
+place (without an SP, an SA never sees a packet).
+
+New public types in `nlink::netlink::xfrm`:
+
+- `XfrmSpBuilder { sel, direction, action, priority, index,
+  flags, share, tmpls, mark, if_id }` — `must_use` builder.
+- `XfrmUserTmpl` — zero-copy struct mirroring the kernel's
+  `xfrm_user_tmpl` (one entry in an SP's `XFRMA_TMPL` array).
+  Tells the kernel which SA to look up to satisfy the policy.
+- `XfrmUserpolicyId` — zero-copy struct for `XFRM_MSG_DELPOLICY`
+  / `GETPOLICY` request bodies (selector + index + dir byte).
+- `PolicyDirection::number()` / `PolicyAction::number()` —
+  inverse of the existing `from_u8` parsers (mirrors
+  `IpsecProtocol::number` / `XfrmMode::number` from PR A).
+
+Builder API (chained):
+- `XfrmSpBuilder::new(sel, dir)` — entry point. Defaults to
+  `Allow` action, priority 0, kernel-assigned index, no
+  templates.
+- `.allow()` / `.block()` — set action.
+- `.priority(u32)` — order of evaluation (lower = first).
+- `.index(u32)` — pre-pin a policy index (default 0 → kernel
+  assigns).
+- `.template(XfrmUserTmpl)` — append a template; multiple calls
+  accumulate in order (relevant for nested ESP+AH).
+- `.mark(mark, mask)` — filter which policies apply by skb mark.
+- `.if_id(id)` — XFRM interface ID.
+
+`XfrmUserTmpl::match_any(src, dst, proto, mode, reqid)` —
+convenience constructor for the common "match any algorithm
+combination" template (algorithm bitmasks default to `u32::MAX`).
+
+New `Connection<Xfrm>` methods:
+- `add_sp(sp)` — `XFRM_MSG_NEWPOLICY` with `CREATE | EXCL`.
+- `update_sp(sp)` — `XFRM_MSG_NEWPOLICY` with `CREATE | REPLACE`,
+  matches on `(selector, dir)` to update in place.
+- `del_sp(sel, dir)` — `XFRM_MSG_DELPOLICY` with
+  `XfrmUserpolicyId` body.
+- `flush_sp()` — `XFRM_MSG_FLUSHPOLICY`. No body — wipes all
+  policies in the kernel's database.
+- `get_sp(sel, dir)` — single-result fetch via `send_request`.
+  Returns `Ok(Some(sp))` on hit, `Ok(None)` on ENOENT.
+
+Internal: `parse_policy_msg` extracted as an associated function
+on `Connection<Xfrm>` (mirrors `parse_sa_msg` from PR A) so unit
+tests can call it without a live socket. The `&self` `parse_policy`
+method delegates.
+
+8 new unit tests:
+- `xfrm_sp_out_with_one_tmpl_roundtrips` — typical
+  outbound-encrypt SP with one template via `match_any`.
+- `xfrm_sp_in_with_two_tmpls_packs_array` — inbound chain
+  (ESP outer + AH inner); asserts `XFRMA_TMPL` carries
+  `2 * sizeof(XfrmUserTmpl)` bytes packed back-to-back (the
+  kernel reads it as a packed array, not nested attrs).
+- `xfrm_sp_block_action_no_templates` — `Block` action emits
+  no templates.
+- `xfrm_del_sp_emits_selector_plus_dir` — direction byte at
+  the documented offset (16 + sel_size + 4) carries
+  `XFRM_POLICY_OUT`.
+- `xfrm_get_sp_request_uses_request_only_flags` — flags must
+  be `REQUEST` only (no DUMP, no ACK).
+- `xfrm_flush_sp_has_no_body` — frame is exactly the 16-byte
+  nlmsghdr.
+- `xfrm_user_tmpl_sets_default_algo_bitmasks_to_max` — locks
+  in the "match any algorithm" default.
+- `policy_direction_to_u8_round_trips` — `from_u8(number())`
+  preserves all 3 named variants.
+
+Plus 1 new constant `XFRMA_POLICY_TYPE` is in place but currently
+`#[allow(dead_code)]` for the future "main vs sub" policy-type
+slice.
+
+668 lib tests total (was 660). Workspace clippy with
+--all-features --deny warnings is clean.
+
+Plan 141 PR B closes here. Plan 141 PR C (the
+`xfrm-ipsec-tunnel` recipe + `examples/xfrm/ipsec_monitor.rs`
+`--apply` promotion) is the last slice; it bumps Plan 135 PR B
+to 7/7 once shipped.
+
 ### Added — XFRM SA write-path slice 2: `update_sa`, `flush_sa_proto`, `get_sa` (Plan 141 PR A complete)
 
 Closes Plan 141 PR A's full DoD. Three small methods, all
