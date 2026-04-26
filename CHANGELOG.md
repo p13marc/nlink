@@ -6,13 +6,15 @@ All notable changes to this project will be documented in this file.
 
 (empty — entries land here as the next release accumulates)
 
-## [0.15.1] - 2026-04-XX
+## [0.15.1] - 2026-04-26
 
 Patch release. Fixes a regression that prevented `cargo test
---workspace` from compiling with default features, plus
-docs/CI quality wins from the 0.16 strategic analysis that
-fit a patch (no public-API changes; `cargo-semver-checks`
-verifies a clean diff against 0.15.0).
+--workspace` from compiling with default features, fixes a
+shipped bug where `Connection::<Ethtool>::set_features` was a
+silent no-op, and lands quality wins from the 0.16 strategic
+analysis that fit a patch (no public-API changes;
+`cargo-semver-checks` + `cargo public-api diff` verify a clean
+diff against 0.15.0).
 
 ### Fixed
 
@@ -24,6 +26,23 @@ verifies a clean diff against 0.15.0).
   so `cargo test --workspace` (default features) failed to
   compile the example. Pure metadata fix; library code is
   unchanged.
+- **`Connection::<Ethtool>::set_features` now actually sends the
+  request** (was a silent no-op since the `Features` API
+  shipped). The closure that should encode the `EthtoolBitset`
+  into the `ETHTOOL_A_FEATURES_WANTED` attribute had `let _ =
+  wanted; let _ = builder;` placeholder code with a `// TODO:
+  Properly encode bitset` marker. Implemented the bit-by-bit
+  encoder as `EthtoolBitset::write_to(&mut MessageBuilder,
+  attr_type)` (matches the kernel ethtool-netlink format the
+  parser already understands) and wired it into
+  `apply_features`. Roundtrip unit test
+  (`bitset::tests::write_to_roundtrips_through_parse`) covers
+  encode → parse symmetry; live-kernel validation requires
+  ethtool-capable hardware (skip-if-no-hw).
+- The `parse_bits` parser now also accepts name-only entries
+  (without an `Index` attribute), needed because SET requests
+  send only `Name` while GET responses send both. Behavior
+  for kernel GET responses is unchanged.
 - **`cargo doc -p nlink --no-deps` now emits zero warnings**
   (Plan 145). Seven unresolved intra-doc cross-references
   fixed:
@@ -72,10 +91,11 @@ verifies a clean diff against 0.15.0).
   releases require an empty diff; minor releases drop
   `--deny=all` and use the diff informationally. Verified
   empty between `0.15.0` tag and the 0.15.1 candidate.
-  Snapshot-file convention (`crates/nlink/public-api.txt`) is
-  deferred to 0.16 per Plan 144 §4.4; the
-  `--diff-git-checkouts`-style git-ref diff is sufficient
-  meanwhile and requires no checked-in baseline.
+- **`msrv` job** runs `cargo-msrv verify --path crates/nlink`
+  to enforce the newly-declared `rust-version = "1.85"` in
+  `[workspace.package]`. `edition = "2024"` already required
+  1.85 implicitly; the explicit declaration lets downstream
+  consumers pin against a known floor.
 - **`audit-examples` job** runs `scripts/audit-example-features.sh`,
   a new bash diagnostic that maps every `[[example]]` entry
   to its `required-features` declaration, cross-references
@@ -104,6 +124,15 @@ published `nlink` crate.)
   uses `clap` + `serde_json` + `atty` only). Verified by
   `cargo build -p nlink-bridge`.
 
+### Added — MSRV declaration
+
+- `[workspace.package]` now declares `rust-version = "1.85"`.
+  `edition = "2024"` already required Rust 1.85 implicitly; the
+  explicit field makes the floor declared so `cargo-msrv` can
+  verify it in CI and so downstream consumers can pin against
+  a known floor. Cadence policy: advanced in minor releases
+  only, called out in CHANGELOG.
+
 ### Documentation
 
 - New `scripts/audit-example-features.sh` (~110 LOC bash) —
@@ -111,21 +140,44 @@ published `nlink` crate.)
   be run manually before opening a PR. Tested to catch the
   exact regression class that produced the `xfrm_ipsec_monitor`
   bug.
+- New `crates/nlink/public-api.txt` placeholder reserves the
+  path for the eventual full-snapshot convention. The full
+  output of `cargo public-api -p nlink -sss` is ~14k lines,
+  too noisy as a checked-in baseline; 0.16 will decide whether
+  to commit the full snapshot, a curated stable-surface
+  subset (per `STRATEGIC_ANALYSIS.md` §4.1), or stay with the
+  CI diff-vs-tag mechanism alone. The placeholder file
+  documents the trade-off.
 - Plan documents 143/144/145 (deleted post-cut per the
   project's plan-document convention) described the design and
   acceptance criteria for the 0.15.1 surgery. Substance lives
   in this CHANGELOG section.
 
-### Out of scope (deferred to 0.16+)
+### Out of scope (genuinely 0.16+)
 
-Per `STRATEGIC_ANALYSIS.md`: streaming dump API, observability
-feature, MSRV declaration, `cargo public-api` snapshot-file
-convention (the diff-vs-tag gating shipped in 0.15.1; the
-checked-in baseline file lands in 0.16), fuzzing infrastructure,
-all kernel features (netkit, tcx, flowtable, …), all library
-features (MultiConnection, NetworkStatPoller, TcDebugger), YNL
-bet, README rewrite, 1.0 stability tier declaration. 0.15.1 is
-a quality patch, not a feature release.
+Per `STRATEGIC_ANALYSIS.md`, the following require new public
+API surface, semver-major scope, or substantial design work
+that doesn't fit a patch release:
+
+- **Streaming dump API** (`get_routes()` etc. iterator form).
+  Adds new public methods.
+- **Observability feature** (structured spans + optional
+  `metrics` integration). Adds a new feature flag.
+- **Fuzzing infrastructure** (`fuzz/` tree + corpora).
+  Substantial new infrastructure with ongoing maintenance
+  commitment.
+- **All new kernel features** (`netkit` link kind, `tcx` BPF
+  attach hooks, nftables flowtable, XFRM IPsec offload,
+  devlink rate, nl80211 MLO). Each adds new public types.
+- **All new library features** (`MultiConnection`,
+  `NetworkStatPoller`, `TcDebugger`, `#[derive(Builder)]`).
+  New public surface.
+- **YNL codegen bet** (proof-of-concept and possibly full
+  rollout). Multi-week project.
+- **README rewrite** ("lead with the moat"). Cosmetic but
+  worth the dedicated cycle.
+- **1.0 stability tier declaration**. Needs API freeze
+  decision and `nlink_unstable` cfg reservation.
 
 ## [0.15.0] - 2026-04-26
 
