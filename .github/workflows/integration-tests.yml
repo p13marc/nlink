@@ -32,7 +32,21 @@ jobs:
       # the occasional CI flakiness when a new Rust release lands
       # in exchange for catching new diagnostics early.
       image: rust:bookworm
-      options: --cap-add=NET_ADMIN --cap-add=SYS_ADMIN --cap-add=NET_RAW
+      # `--cap-add=SYS_ADMIN` is necessary but not sufficient:
+      # Docker's default seccomp profile blocks `mount(MS_BIND)`
+      # (used by `namespace::create` to bind-mount the netns file
+      # at /var/run/netns/<name>) even when CAP_SYS_ADMIN is held.
+      # Same restriction applies to `setns()` in some configs.
+      # Disabling seccomp + apparmor is the standard pattern for
+      # netns integration tests in CI containers; --privileged
+      # would also work but is a bigger sledgehammer (gives ALL
+      # caps, not just the ones we need).
+      options: >-
+        --cap-add=NET_ADMIN
+        --cap-add=SYS_ADMIN
+        --cap-add=NET_RAW
+        --security-opt seccomp=unconfined
+        --security-opt apparmor=unconfined
     steps:
       - uses: actions/checkout@v4
 
