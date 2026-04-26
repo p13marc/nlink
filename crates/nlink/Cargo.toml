@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+rust-version.workspace = true
 documentation = "https://docs.rs/nlink"
 readme = "../../README.md"
 description = "Async netlink library for Linux network configuration"

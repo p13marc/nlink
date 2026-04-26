@@ -92,10 +92,9 @@ diff against 0.15.0).
   `--deny=all` and use the diff informationally. Verified
   empty between `0.15.0` tag and the 0.15.1 candidate.
 - **`msrv` job** runs `cargo-msrv verify --path crates/nlink`
-  to enforce the newly-declared `rust-version = "1.85"` in
-  `[workspace.package]`. `edition = "2024"` already required
-  1.85 implicitly; the explicit declaration lets downstream
-  consumers pin against a known floor.
+  to enforce the declared `rust-version = "1.95"` in
+  `[workspace.package]`. Catches accidental usage of features
+  stabilized after the floor.
 - **Every Rust-using job in `rust.yml` now pins
   `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2`.**
   The previous workflow had no toolchain step, so each job
@@ -144,12 +143,16 @@ published `nlink` crate.)
 
 ### Added — MSRV declaration
 
-- `[workspace.package]` now declares `rust-version = "1.85"`.
-  `edition = "2024"` already required Rust 1.85 implicitly; the
-  explicit field makes the floor declared so `cargo-msrv` can
-  verify it in CI and so downstream consumers can pin against
-  a known floor. Cadence policy: advanced in minor releases
-  only, called out in CHANGELOG.
+- `[workspace.package]` now declares `rust-version = "1.95"`.
+  Tracks current stable: the project is happy to require
+  contributors and downstream consumers stay on a recent
+  toolchain in exchange for using modern language features
+  (`if let && Y` chains, etc.) without contortion. Every
+  package crate (`crates/nlink/Cargo.toml` + 11 bins) inherits
+  via `rust-version.workspace = true` so `cargo-msrv` can
+  verify it without resolving workspace inheritance. Cadence
+  policy: advance in lockstep with stable; called out in
+  CHANGELOG when it bumps.
 
 ### Documentation
 

@@ -4,6 +4,7 @@ description = "ss command - socket statistics"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 publish = false
 
 [[bin]]

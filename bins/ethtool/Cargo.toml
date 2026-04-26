@@ -3,6 +3,7 @@ name = "nlink-ethtool"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 publish = false
 description = "Proof-of-concept ethtool utility using nlink"
 
