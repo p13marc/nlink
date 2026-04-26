@@ -130,7 +130,7 @@ pub trait RouteConfig: Send + Sync {
     ///
     /// Older shape: no interface resolution. Kept for backward
     /// compatibility with downstream `RouteConfig` implementors.
-    /// New code should override [`write_delete_with_interfaces`]
+    /// New code should override [`Self::write_delete_with_interfaces`]
     /// (which receives the resolved OIF) so the kernel can match
     /// the route on the full key.
     fn write_delete(&self, builder: &mut MessageBuilder);
@@ -146,10 +146,10 @@ pub trait RouteConfig: Send + Sync {
     /// to an ifindex and pass it through, so the delete request
     /// carries `RTA_OIF`.
     ///
-    /// Default impl preserves the legacy [`write_delete`] behaviour
-    /// for downstream implementors that haven't migrated yet. The
-    /// in-tree [`Ipv4Route`] / [`Ipv6Route`] override this to write
-    /// the full discriminating key.
+    /// Default impl preserves the legacy [`Self::write_delete`]
+    /// behaviour for downstream implementors that haven't migrated
+    /// yet. The in-tree [`Ipv4Route`] / [`Ipv6Route`] override this
+    /// to write the full discriminating key.
     fn write_delete_with_interfaces(
         &self,
         builder: &mut MessageBuilder,

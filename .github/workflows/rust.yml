@@ -122,12 +122,12 @@ jobs:
             exit 0
           fi
           echo "Diffing public API: $LATEST_TAG..HEAD"
-          # `diff` subcommand with `<tag>..HEAD` syntax checks out
-          # both refs, builds rustdoc JSON, and reports added/removed/
-          # changed items. `--deny=all` fails the build if any change
-          # is detected. For patch releases, expect empty diff. For
-          # minor releases, drop --deny=all and use it as informational.
-          cargo public-api -p nlink diff "$LATEST_TAG..HEAD" --deny=all
+          # Informational only: prints added / removed / changed items
+          # so reviewers see the diff in the PR run, but doesn't fail
+          # the build. The strict gate is `cargo-semver-checks` (above),
+          # which catches accidental breakage. Adding new pub items —
+          # legitimate for minor releases — should not fail PR CI.
+          cargo public-api -p nlink diff "$LATEST_TAG..HEAD"
 
   # Audit script: every [[example]] entry must declare
   # `required-features` for any feature-gated module it imports
