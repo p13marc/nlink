@@ -96,6 +96,24 @@ diff against 0.15.0).
   `[workspace.package]`. `edition = "2024"` already required
   1.85 implicitly; the explicit declaration lets downstream
   consumers pin against a known floor.
+- **Every Rust-using job in `rust.yml` now pins
+  `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2`.**
+  The previous workflow had no toolchain step, so each job
+  silently used whatever Rust ubuntu-latest shipped
+  pre-installed (typically 2-4 months behind current stable).
+  That produced spurious clippy warnings against new lints,
+  rustdoc warnings against new diagnostics, and tool-install
+  failures when `cargo install --locked` wanted a newer Rust
+  than the runner had. With the explicit toolchain step,
+  every job uses current stable; the rust-cache action keeps
+  CI fast across runs.
+- **`integration-tests.yml` container bumped from
+  `rust:1.85-bookworm` to `rust:bookworm`** (latest stable
+  Debian + Rust). The 1.85 pin lagged current stable by ~10
+  versions, producing the same kind of warning churn. The
+  floating `bookworm` tag tracks current stable; in exchange
+  for the very occasional CI flakiness when a new Rust release
+  lands, we catch new diagnostics early.
 - **`audit-examples` job** runs `scripts/audit-example-features.sh`,
   a new bash diagnostic that maps every `[[example]]` entry
   to its `required-features` declaration, cross-references

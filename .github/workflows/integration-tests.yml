@@ -24,7 +24,14 @@ jobs:
   integration:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.85-bookworm
+      # `rust:bookworm` tracks the latest stable Rust on Debian
+      # Bookworm. Was previously pinned to `rust:1.85-bookworm`
+      # which lagged current stable by ~10 versions and produced
+      # spurious warnings (clippy lints against newer std APIs,
+      # tool-install churn). The `bookworm` tag floats — accept
+      # the occasional CI flakiness when a new Rust release lands
+      # in exchange for catching new diagnostics early.
+      image: rust:bookworm
       options: --cap-add=NET_ADMIN --cap-add=SYS_ADMIN --cap-add=NET_RAW
     steps:
       - uses: actions/checkout@v4

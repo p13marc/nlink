@@ -13,6 +13,13 @@ env:
 # `cargo test --verbose` job is split into named, parallel-able
 # checks. Each gate has a clear "what failed" signal in the
 # GitHub UI.
+#
+# Toolchain: every Rust-using job pins `dtolnay/rust-toolchain@stable`
+# explicitly. Without this, jobs use whatever Rust ubuntu-latest
+# ships pre-installed, which lags current stable by months and
+# produces compiler/clippy warnings against deprecated APIs and
+# missing-lint diagnostics. `Swatinem/rust-cache@v2` caches the
+# cargo registry + target/ between runs to keep CI fast.
 jobs:
 
   # Catches the 0.15.0-class regression where an example imports a
@@ -23,6 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Build (default features, all targets)
         run: cargo build --workspace --all-targets
       - name: Test (default features)
@@ -35,6 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Build (--all-features, all targets)
         run: cargo build --workspace --all-targets --all-features
       - name: Test (--all-features)
@@ -45,6 +56,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
 
@@ -58,12 +73,15 @@ jobs:
       RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::redundant_explicit_links"
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Build docs
         run: cargo doc -p nlink --no-deps --all-features
 
   # Catches accidental SemVer violations against the latest published
   # version on crates.io. Per obi1kenobi research, ~1 in 6 crates
   # accidentally violates semver. This is the cheapest 1.0-prep step.
+  # The action handles its own toolchain pinning internally.
   semver-checks:
     name: cargo-semver-checks
     runs-on: ubuntu-latest
@@ -77,9 +95,7 @@ jobs:
   # Diff the public API surface against the previous git tag. For
   # patch releases, the diff MUST be empty. For minor releases, the
   # diff is informational; the gate catches *unintended* changes,
-  # not all changes. Per Plan 144 §4.4: stub the snapshot file
-  # (crates/nlink/public-api.txt) in 0.16 once the convention is
-  # finalized; until then, --diff-git-checkouts is sufficient.
+  # not all changes.
   public-api-diff:
     name: cargo public-api diff vs last tag
     runs-on: ubuntu-latest
@@ -87,6 +103,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # full history needed for git tag lookup
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install cargo-public-api
         run: cargo install --locked cargo-public-api
       - name: Diff public API vs latest tag
@@ -107,6 +125,7 @@ jobs:
   # Audit script: every [[example]] entry must declare
   # `required-features` for any feature-gated module it imports
   # (lab, sockdiag, tuntap, output, namespace_watcher).
+  # Pure bash; no toolchain step needed.
   audit-examples:
     name: audit example feature gating
     runs-on: ubuntu-latest
@@ -123,6 +142,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install cargo-machete
         run: cargo install --locked cargo-machete
       - name: Run cargo machete
@@ -131,12 +152,16 @@ jobs:
   # Verifies the declared `rust-version` in Cargo.toml actually
   # builds. Catches accidental usage of a feature stabilized after
   # the floor (e.g. someone uses a 1.86 std API while the floor is
-  # 1.85). Pairs with the workspace.package.rust-version declaration.
+  # 1.85). cargo-msrv downloads the MSRV toolchain (1.85) on its
+  # own; the runner toolchain just needs to be modern enough to
+  # build cargo-msrv itself.
   msrv:
     name: cargo-msrv verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install cargo-msrv
         run: cargo install --locked cargo-msrv
       - name: Verify MSRV
