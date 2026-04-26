@@ -103,7 +103,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # full history needed for git tag lookup
+      # cargo-public-api needs nightly to invoke `cargo +nightly
+      # rustdoc --output-format json` (the JSON output it diffs
+      # against). Stable is also needed to build cargo-public-api
+      # itself. Install both; nightly is just available, stable
+      # remains the default for `cargo install`.
       - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: rustup default stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-public-api
         run: cargo install --locked cargo-public-api
@@ -150,11 +157,10 @@ jobs:
         run: cargo machete
 
   # Verifies the declared `rust-version` in Cargo.toml actually
-  # builds. Catches accidental usage of a feature stabilized after
-  # the floor (e.g. someone uses a 1.86 std API while the floor is
-  # 1.85). cargo-msrv downloads the MSRV toolchain (1.85) on its
-  # own; the runner toolchain just needs to be modern enough to
-  # build cargo-msrv itself.
+  # builds. cargo-msrv downloads the MSRV toolchain (currently
+  # 1.95) on its own; the runner toolchain just needs to be
+  # modern enough to build cargo-msrv itself. When stable
+  # advances, bump the workspace `rust-version` in lockstep.
   msrv:
     name: cargo-msrv verify
     runs-on: ubuntu-latest
