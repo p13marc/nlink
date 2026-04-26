@@ -127,7 +127,36 @@ pub trait RouteConfig: Send + Sync {
     fn write_add(&self, builder: &mut MessageBuilder, interfaces: &ResolvedRouteInterfaces);
 
     /// Write the delete message to the builder.
+    ///
+    /// Older shape: no interface resolution. Kept for backward
+    /// compatibility with downstream `RouteConfig` implementors.
+    /// New code should override [`write_delete_with_interfaces`]
+    /// (which receives the resolved OIF) so the kernel can match
+    /// the route on the full key.
     fn write_delete(&self, builder: &mut MessageBuilder);
+
+    /// Write the delete message to the builder with resolved
+    /// interface indices.
+    ///
+    /// Newer kernels match `RTM_DELROUTE` strictly on the route
+    /// key (`dst`, `dst_len`, `table`, `protocol`, `scope`, `type`,
+    /// `RTA_OIF`, `RTA_GATEWAY`, `RTA_PRIORITY`), and return ESRCH
+    /// when the request is missing fields the original `add` set.
+    /// This method lets `Connection::del_route` resolve the device
+    /// to an ifindex and pass it through, so the delete request
+    /// carries `RTA_OIF`.
+    ///
+    /// Default impl preserves the legacy [`write_delete`] behaviour
+    /// for downstream implementors that haven't migrated yet. The
+    /// in-tree [`Ipv4Route`] / [`Ipv6Route`] override this to write
+    /// the full discriminating key.
+    fn write_delete_with_interfaces(
+        &self,
+        builder: &mut MessageBuilder,
+        _interfaces: &ResolvedRouteInterfaces,
+    ) {
+        self.write_delete(builder);
+    }
 }
 
 /// Route metrics configuration.
@@ -764,6 +793,10 @@ impl RouteConfig for Ipv4Route {
     }
 
     fn write_delete(&self, builder: &mut MessageBuilder) {
+        // Legacy delete path: no interface resolution. Newer
+        // kernels need RTA_OIF + protocol/scope/type to match the
+        // original add — see `write_delete_with_interfaces` for the
+        // strict-key form.
         let table_u8 = if self.table > 255 {
             rt_table::UNSPEC
         } else {
@@ -785,6 +818,66 @@ impl RouteConfig for Ipv4Route {
         // RTA_TABLE (for table > 255)
         if self.table > 255 {
             builder.append_attr_u32(RtaAttr::Table as u16, self.table);
+        }
+    }
+
+    fn write_delete_with_interfaces(
+        &self,
+        builder: &mut MessageBuilder,
+        interfaces: &ResolvedRouteInterfaces,
+    ) {
+        // Strict-key delete: writes the same discriminating fields
+        // `write_add` writes (family, dst_len, table, protocol,
+        // scope, type, RTA_DST, RTA_OIF, RTA_GATEWAY, RTA_PREFSRC,
+        // RTA_PRIORITY) so newer kernels match the original add and
+        // don't return ESRCH.
+        let table_u8 = if self.table > 255 {
+            rt_table::UNSPEC
+        } else {
+            self.table as u8
+        };
+
+        let scope = self.determine_scope();
+
+        let rtmsg = RtMsg::new()
+            .with_family(AF_INET)
+            .with_dst_len(self.prefix_len)
+            .with_table(table_u8)
+            .with_protocol(self.protocol as u8)
+            .with_scope(scope as u8)
+            .with_type(self.route_type as u8);
+
+        builder.append(&rtmsg);
+
+        // RTA_DST
+        if self.prefix_len > 0 {
+            builder.append_attr(RtaAttr::Dst as u16, &self.destination.octets());
+        }
+
+        // RTA_GATEWAY (kernel matches strictly)
+        if let Some(gw) = self.gateway {
+            builder.append_attr(RtaAttr::Gateway as u16, &gw.octets());
+        }
+
+        // RTA_PREFSRC
+        if let Some(src) = self.prefsrc {
+            builder.append_attr(RtaAttr::Prefsrc as u16, &src.octets());
+        }
+
+        // RTA_OIF (from resolved interface) — the field this whole
+        // method exists to write
+        if let Some(ifindex) = interfaces.oif {
+            builder.append_attr_u32(RtaAttr::Oif as u16, ifindex);
+        }
+
+        // RTA_TABLE (for table > 255)
+        if self.table > 255 {
+            builder.append_attr_u32(RtaAttr::Table as u16, self.table);
+        }
+
+        // RTA_PRIORITY
+        if let Some(prio) = self.priority {
+            builder.append_attr_u32(RtaAttr::Priority as u16, prio);
         }
     }
 }
@@ -1144,6 +1237,7 @@ impl RouteConfig for Ipv6Route {
     }
 
     fn write_delete(&self, builder: &mut MessageBuilder) {
+        // Legacy delete path: see Ipv4Route::write_delete docs.
         let table_u8 = if self.table > 255 {
             rt_table::UNSPEC
         } else {
@@ -1165,6 +1259,57 @@ impl RouteConfig for Ipv6Route {
         // RTA_TABLE
         if self.table > 255 {
             builder.append_attr_u32(RtaAttr::Table as u16, self.table);
+        }
+    }
+
+    fn write_delete_with_interfaces(
+        &self,
+        builder: &mut MessageBuilder,
+        interfaces: &ResolvedRouteInterfaces,
+    ) {
+        // Strict-key delete (matches `write_add`'s discriminating
+        // fields). See Ipv4Route::write_delete_with_interfaces for
+        // rationale.
+        let table_u8 = if self.table > 255 {
+            rt_table::UNSPEC
+        } else {
+            self.table as u8
+        };
+
+        let scope = self.determine_scope();
+
+        let rtmsg = RtMsg::new()
+            .with_family(AF_INET6)
+            .with_dst_len(self.prefix_len)
+            .with_table(table_u8)
+            .with_protocol(self.protocol as u8)
+            .with_scope(scope as u8)
+            .with_type(self.route_type as u8);
+
+        builder.append(&rtmsg);
+
+        if self.prefix_len > 0 {
+            builder.append_attr(RtaAttr::Dst as u16, &self.destination.octets());
+        }
+
+        if let Some(gw) = self.gateway {
+            builder.append_attr(RtaAttr::Gateway as u16, &gw.octets());
+        }
+
+        if let Some(src) = self.prefsrc {
+            builder.append_attr(RtaAttr::Prefsrc as u16, &src.octets());
+        }
+
+        if let Some(ifindex) = interfaces.oif {
+            builder.append_attr_u32(RtaAttr::Oif as u16, ifindex);
+        }
+
+        if self.table > 255 {
+            builder.append_attr_u32(RtaAttr::Table as u16, self.table);
+        }
+
+        if let Some(prio) = self.priority {
+            builder.append_attr_u32(RtaAttr::Priority as u16, prio);
         }
     }
 }
@@ -1316,9 +1461,17 @@ impl Connection<Route> {
     }
 
     /// Delete a route using a config.
+    ///
+    /// Resolves any device references (`.dev("eth0")`) to ifindex
+    /// and calls [`RouteConfig::write_delete_with_interfaces`] so
+    /// the kernel matches the route on the full key — newer
+    /// kernels return `ESRCH` if the request omits fields the
+    /// original `add` set (e.g. `RTA_OIF` when the route was
+    /// added with `.dev(...)`).
     pub async fn del_route<R: RouteConfig>(&self, config: R) -> Result<()> {
+        let interfaces = self.resolve_route_interfaces(&config).await?;
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK);
-        config.write_delete(&mut builder);
+        config.write_delete_with_interfaces(&mut builder, &interfaces);
         self.send_ack(builder)
             .await
             .map_err(|e| e.with_context("del_route"))

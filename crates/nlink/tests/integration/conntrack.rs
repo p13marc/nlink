@@ -274,27 +274,37 @@ async fn ct_subscribe_observes_destroy_event_on_flush() -> nlink::Result<()> {
     // Give the kernel a beat to register the multicast subscription
     // before triggering the events. Without this small sleep the
     // flush can race the subscription on slower CI kernels and the
-    // Destroy event is delivered before we're listening.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Destroy event is delivered before we're listening. Bumped
+    // from 100ms → 250ms after CI still raced with 100ms.
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
     nf_mut.flush_conntrack().await?;
 
     // Drain until we see a Destroy for our port (other system traffic
     // could in principle generate Destroys; in a fresh netns this is
     // overwhelmingly unlikely but loop with a budget for safety).
-    // Bumped from 3s → 10s to absorb CI scheduler jitter.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // 30s deadline absorbs CI scheduler jitter; the diagnostic
+    // print below tells us what (if any) events arrived during the
+    // wait so a future timeout failure has a paper trail.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut event_count = 0usize;
     loop {
         if std::time::Instant::now() >= deadline {
-            panic!("timed out waiting for ConntrackEvent::Destroy");
+            panic!(
+                "timed out waiting for ConntrackEvent::Destroy after {event_count} events"
+            );
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let ev = match tokio::time::timeout(remaining, events.next()).await {
             Ok(Some(Ok(ev))) => ev,
             Ok(Some(Err(e))) => return Err(e),
             Ok(None) => panic!("event stream ended unexpectedly"),
-            Err(_) => panic!("timed out waiting for ConntrackEvent::Destroy"),
+            Err(_) => panic!(
+                "timed out waiting for ConntrackEvent::Destroy after {event_count} events"
+            ),
         };
+        event_count += 1;
+        eprintln!("conntrack event #{event_count}: {ev:?}");
         if let ConntrackEvent::Destroy(entry) = ev
             && entry.orig.dst_port == Some(8080)
         {
