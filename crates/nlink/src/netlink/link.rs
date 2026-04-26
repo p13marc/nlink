@@ -2933,18 +2933,6 @@ impl LinkConfig for Ip6GretapLink {
 // Bond Link
 // ============================================================================
 
-/// Bond mode constants (deprecated, use `BondMode` enum instead).
-#[deprecated(note = "use `BondMode` enum instead")]
-pub mod bond_mode {
-    pub const BALANCE_RR: u8 = 0;
-    pub const ACTIVE_BACKUP: u8 = 1;
-    pub const BALANCE_XOR: u8 = 2;
-    pub const BROADCAST: u8 = 3;
-    pub const LACP: u8 = 4; // 802.3ad
-    pub const BALANCE_TLB: u8 = 5;
-    pub const BALANCE_ALB: u8 = 6;
-}
-
 /// Bonding mode.
 ///
 /// Determines how traffic is distributed across slave interfaces.
