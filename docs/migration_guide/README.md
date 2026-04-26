@@ -47,6 +47,14 @@ recipes, performance work, dependency bumps.
 | [`0.13.0-to-0.14.0`](0.13.0-to-0.14.0.md) | Mostly additive: typed-units rollout (25 `parse_params`), reconcile pattern, ctnetlink mutation. **One deprecation**: `nlink::tc::builders::*` and `nlink::tc::options/*` — actual removal shipped in 0.15.0. |
 | [`0.14.0-to-0.15.0`](0.14.0-to-0.15.0.md) | **Major release.** The 0.14.0 deprecations are deleted: `tc::builders::*` and `tc::options/*` removed. Typed XFRM SA/SP CRUD, typed standalone-action CRUD. `bins/tc` behaviour changes for unknown kinds and partial-spec `del`. |
 
+> **Upgrading from 0.13.0 to 0.15.0?** 0.14.0 was never
+> published as its own release — its work merged into the 0.15.0
+> ship. Read **both** files in order: `0.13.0-to-0.14.0.md`
+> covers the additive surface (new typed-units `parse_params`,
+> reconcile pattern, ctnetlink, `MacsecLink`); then
+> `0.14.0-to-0.15.0.md` covers the legacy deletion that closes
+> the arc.
+
 ## Authoring
 
 When cutting a new release:

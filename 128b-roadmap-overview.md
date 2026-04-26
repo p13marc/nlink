@@ -2,8 +2,8 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: nlink roadmap — active plans only
-target version: 0.15.0 (cut-pending) and beyond
-last updated: 2026-04-25 (post-Plan-142 tidy: typed-API completion arc closed under `[Unreleased]`; only sudo-gated tail items remain on the active table; 0.15.0 cut is procedural — bump version, rename `[Unreleased]` → `[0.15.0]`, `cargo publish`)
+target version: 0.15.0 cut 2026-04-26; 0.16.0 and beyond
+last updated: 2026-04-26 (0.15.0 cut: workspace version bumped, CHANGELOG `[Unreleased]` → `[0.15.0] - 2026-04-26`; ready for `cargo publish -p nlink` and tag. Active plans table now reflects post-cut tail only.)
 ---
 
 # nlink Roadmap
@@ -28,12 +28,11 @@ forward progress without root access for capture / validation.
 | 141 PR C | [XFRM write-path API extension](141-xfrm-write-path-plan.md) | PRs A+B complete; PR C drafted, **needs sudo** | `xfrm-ipsec-tunnel.md` recipe + `examples/xfrm/ipsec_monitor.rs --apply` promotion. Library code can be written without sudo; golden-frame validation needs root. Closes Plan 135 PR B at 7/7 if `cgroup-classification` doesn't land first. |
 | 137 (tail) | [Netfilter expansion](137-netfilter-expansion-plan.md) | PRs A+B shipped; integration tests un-parked but un-written; PRs C/D/E demand-gated | The `--apply` runners + recipe shipped under `[Unreleased]`. Integration tests (rewriting the `--apply` assertions as `#[tokio::test]` with `require_root!` + `require_module!`) un-park here once the GHA workflow lands. PRs C (`ct_expect`) / D (nfqueue) / E (nflog) explicitly demand-gated — open per-PR plans only when a downstream user asks. |
 
-**Procedural follow-up: cut 0.15.0.** The work is done; what's
-left is bumping the workspace version (currently `0.13.0`),
-renaming `## [Unreleased]` → `## [0.15.0] - YYYY-MM-DD` in
-CHANGELOG, and `cargo publish -p nlink`. The
-[migration guide](docs/migration_guide/0.14.0-to-0.15.0.md) is
-already in place.
+**0.15.0 cut on 2026-04-26.** Workspace at `0.15.0`, CHANGELOG
+header is `## [0.15.0] - 2026-04-26`, migration guide in place
+at [`docs/migration_guide/0.14.0-to-0.15.0.md`](docs/migration_guide/0.14.0-to-0.15.0.md).
+Maintainer publishes via `cargo publish -p nlink` and tags
+`v0.15.0`.
 
 ## Shipped & ready to archive
 
@@ -59,9 +58,9 @@ substance is already in CHANGELOG entries and the
   surface. See CHANGELOG `## [0.13.0]` and the
   [migration guide](docs/migration_guide/0.13.0-to-0.14.0.md).
 
-- **0.15.0** (cut-pending under `[Unreleased]`): the typed-API
-  completion arc — what would have been 0.14.0 + 0.15.0 in the
-  original release plan merged into one ship. Highlights:
+- **0.15.0** (cut 2026-04-26): the typed-API completion arc —
+  what would have been 0.14.0 + 0.15.0 in the original release
+  plan merged into one ship. Highlights:
 
   - **Plan 142 Phases 0–4** all met. Typed surface end-to-end
     (41 typed configs in `nlink::ParseParams` — 18 qdisc + 9
