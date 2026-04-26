@@ -18,6 +18,49 @@ Full upgrade walkthrough:
 Highlights below — see the per-PR sections that follow for the
 detail.
 
+### Added — recipes + CI tail items (post-cut, pre-publish)
+
+The remaining sudo-gated tail items from Plan 142's open list
+all landed before the publish:
+
+- **`docs/recipes/xfrm-ipsec-tunnel.md`** — two-namespace IPsec
+  tunnel walkthrough using the typed `XfrmSaBuilder` /
+  `XfrmSpBuilder` from Plan 141 PRs A+B. Covers SA install,
+  SP setup, key rotation via `update_sa`, and NAT-T encap.
+  Plan 135 PR B closes at 7/7.
+- **`docs/recipes/cgroup-classification.md`** — per-cgroup
+  HTB shaping via `net_cls` cgroup v1 + the typed
+  `CgroupFilter`. Plus an ematch-combination snippet for
+  L4-aware steering using `BasicFilter`.
+- **`examples/xfrm/ipsec_monitor.rs --apply`** — promoted from
+  dump-only to full lifecycle (install → verify → rotate → tear
+  down) inside a `LabNamespace`. Mirrors the conntrack `--apply`
+  runner shape. Sudo-gated for end-to-end validation.
+- **`crates/nlink/tests/integration/conntrack.rs`** — Plan 137
+  integration tests un-park: 6 `#[tokio::test]` functions
+  covering inject/query, update-in-place, del-by-id, flush, and
+  multicast NEW + DESTROY event subscription. Each test gates
+  with `nlink::require_root!()` + `nlink::require_module!(...)`
+  so the suite skips cleanly on non-root runs and bit-rots no
+  more.
+- **`.github/workflows/integration-tests.yml`** — Plan 140 tail:
+  privileged GHA runner runs the integration tests on every
+  push to master (and PR). `--test-threads=1` mandatory for
+  namespace-naming reasons; `modprobe nf_conntrack` best-effort
+  with autoload fallback. Same job runs lib tests + clippy +
+  cargo machete to keep one CI gate authoritative.
+
+Lib code: tiny additive change — `Xfrm` protocol state now
+derives `Default` so `LabNamespace::connection_for::<Xfrm>()`
+works (consistent with `Route` / `Netfilter` / `Generic` etc.).
+The hand-rolled `Connection<Xfrm>::new()` was removed — the
+generic `Connection::<P>::new()` covers it now that `Xfrm:
+Default`.
+
+Active plans table cleared: every row from `128b-roadmap-overview.md`
+that was open at cut-pending time has shipped. 0.16.0 opens
+fresh (other-bins typed-units rollout per the Backlog).
+
 ### Removed — legacy `tc::builders` + `tc::options` modules (Plan 139 PR C, **0.15.0 release-cut**)
 
 This is the **legacy-deletion milestone** that closes Plan 142

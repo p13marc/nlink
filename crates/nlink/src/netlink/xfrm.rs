@@ -33,8 +33,7 @@ use super::{
     builder::MessageBuilder,
     connection::Connection,
     error::Result,
-    protocol::{ProtocolState, Xfrm},
-    socket::NetlinkSocket,
+    protocol::Xfrm,
 };
 
 // Netlink constants
@@ -1184,20 +1183,6 @@ impl XfrmSpBuilder {
 }
 
 impl Connection<Xfrm> {
-    /// Create a new XFRM connection.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use nlink::netlink::{Connection, Xfrm};
-    ///
-    /// let conn = Connection::<Xfrm>::new()?;
-    /// ```
-    pub fn new() -> Result<Self> {
-        let socket = NetlinkSocket::new(Xfrm::PROTOCOL)?;
-        Ok(Self::from_parts(socket, Xfrm))
-    }
-
     /// Create a Security Association.
     ///
     /// Sends `XFRM_MSG_NEWSA` with `NLM_F_CREATE | NLM_F_EXCL`.

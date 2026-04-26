@@ -1,171 +1,227 @@
-//! IPsec Security Associations and Policies monitor.
+//! IPsec Security Associations and Policies monitor + lifecycle demo.
 //!
-//! This example shows how to query IPsec Security Associations (SAs)
-//! and Security Policies (SPs) using the NETLINK_XFRM protocol.
-//!
-//! # Usage
+//! Run modes:
 //!
 //! ```bash
-//! cargo run --example xfrm_ipsec_monitor
+//! # Print usage and a code skeleton (no privileges)
+//! cargo run -p nlink --example xfrm_ipsec_monitor
+//!
+//! # Dump the current host SA + SP tables (no privileges beyond
+//! # netlink read access)
+//! cargo run -p nlink --example xfrm_ipsec_monitor -- show
+//!
+//! # Run the install/verify/rotate/delete lifecycle inside a
+//! # temporary namespace. Requires root (CAP_NET_ADMIN).
+//! sudo cargo run -p nlink --example xfrm_ipsec_monitor -- --apply
 //! ```
 //!
-//! # Requirements
-//!
-//! - Requires CAP_NET_ADMIN or root privileges to query XFRM state
-//! - IPsec must be configured (e.g., with strongSwan, Libreswan, or iproute2)
+//! See also: `nlink::netlink::xfrm::{XfrmSaBuilder, XfrmSpBuilder}`,
+//! `docs/recipes/xfrm-ipsec-tunnel.md`.
+
+use std::{env, net::IpAddr};
 
 use nlink::netlink::{
     Connection, Xfrm,
-    xfrm::{IpsecProtocol, PolicyDirection, XfrmMode},
+    xfrm::{
+        IpsecProtocol, PolicyAction, PolicyDirection, XfrmMode, XfrmSaBuilder, XfrmSelector,
+        XfrmSpBuilder, XfrmUserTmpl,
+    },
 };
+
+const SPI_OUT: u32 = 0x0000_AABB;
+const SPI_IN: u32 = 0x0000_CCDD;
+const REQID: u32 = 42;
+const AUTH_KEY: [u8; 32] = [0u8; 32];
+const ENCR_KEY: [u8; 16] = [0u8; 16];
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
-    let conn = Connection::<Xfrm>::new()?;
+    let args: Vec<String> = env::args().collect();
 
-    // List Security Associations
+    match args.get(1).map(|s| s.as_str()) {
+        Some("show") => {
+            let conn = Connection::<Xfrm>::new()?;
+            show_state(&conn).await?;
+        }
+        Some("--apply") => {
+            run_apply().await?;
+        }
+        _ => {
+            print_overview();
+        }
+    }
+
+    Ok(())
+}
+
+fn print_overview() {
+    println!("=== XFRM (IPsec) lifecycle demo ===\n");
+    println!("Connection<Xfrm> exposes both the dump path");
+    println!("(get_security_associations / get_security_policies) and");
+    println!("the typed write path (add/update/del/flush_sa + same for");
+    println!("_sp) on the same socket.\n");
+    println!("Modes:");
+    println!("  show          — Dump host SA + SP tables (no privileges");
+    println!("                  beyond netlink read access)");
+    println!("  --apply       — Install + verify + rotate + tear down");
+    println!("                  inside a temp namespace (root required)");
+    println!();
+    println!("See `docs/recipes/xfrm-ipsec-tunnel.md` for the");
+    println!("two-namespace tunnel walkthrough.");
+}
+
+async fn show_state(conn: &Connection<Xfrm>) -> nlink::Result<()> {
     println!("=== Security Associations ===\n");
     let sas = conn.get_security_associations().await?;
-
     if sas.is_empty() {
-        println!("No Security Associations found.");
-        println!("(IPsec SAs are created when VPN tunnels are established)");
+        println!("(none — IPsec SAs are created when VPN tunnels are");
+        println!(" established or when --apply runs)");
     } else {
         for sa in &sas {
-            println!(
-                "SA: {:?} -> {:?}",
-                sa.src_addr
-                    .map(|a| a.to_string())
-                    .unwrap_or_else(|| "?".to_string()),
-                sa.dst_addr
-                    .map(|a| a.to_string())
-                    .unwrap_or_else(|| "?".to_string())
-            );
-            println!("  SPI: 0x{:08x}", sa.spi);
-            println!(
-                "  Protocol: {}",
-                match sa.protocol {
-                    IpsecProtocol::Esp => "ESP",
-                    IpsecProtocol::Ah => "AH",
-                    IpsecProtocol::Comp => "COMP",
-                    IpsecProtocol::Other(n) => {
-                        println!("  Protocol number: {}", n);
-                        "OTHER"
-                    }
-                    _ => "?",
-                }
-            );
-            println!(
-                "  Mode: {}",
-                match sa.mode {
-                    XfrmMode::Transport => "transport",
-                    XfrmMode::Tunnel => "tunnel",
-                    XfrmMode::Beet => "beet",
-                    XfrmMode::Other(n) => {
-                        println!("  Mode number: {}", n);
-                        "other"
-                    }
-                    _ => "?",
-                }
-            );
-            println!("  ReqID: {}", sa.reqid);
-
-            if let Some(ref enc) = sa.enc_alg {
-                println!("  Encryption: {} ({} bits)", enc.name, enc.key_len);
-            }
-            if let Some(ref auth) = sa.auth_alg {
-                println!("  Authentication: {} ({} bits)", auth.name, auth.key_len);
-            }
-            if let Some(ref aead) = sa.aead_alg {
-                println!(
-                    "  AEAD: {} ({} bits, ICV {} bits)",
-                    aead.name, aead.key_len, aead.icv_len
-                );
-            }
-
-            println!("  Stats: {} bytes, {} packets", sa.bytes, sa.packets);
-
-            if let Some(mark) = &sa.mark {
-                println!("  Mark: 0x{:x}/0x{:x}", mark.v, mark.m);
-            }
-            if let Some(if_id) = sa.if_id {
-                println!("  Interface ID: {}", if_id);
-            }
-
-            println!();
+            print_sa_brief(sa);
         }
     }
 
-    // List Security Policies
     println!("\n=== Security Policies ===\n");
     let policies = conn.get_security_policies().await?;
-
     if policies.is_empty() {
-        println!("No Security Policies found.");
-        println!("(IPsec policies define which traffic should be protected)");
+        println!("(none — IPsec policies steer traffic into the SA");
+        println!(" lookup; without them no traffic gets encrypted)");
     } else {
         for pol in &policies {
-            println!(
-                "Policy: {} (index {})",
-                match pol.direction {
-                    PolicyDirection::In => "IN",
-                    PolicyDirection::Out => "OUT",
-                    PolicyDirection::Forward => "FWD",
-                    PolicyDirection::Unknown(n) => {
-                        println!("  Direction number: {}", n);
-                        "?"
-                    }
-                    _ => "?",
-                },
-                pol.index
-            );
-            println!("  Priority: {}", pol.priority);
-            println!(
-                "  Action: {}",
-                match pol.action {
-                    nlink::netlink::xfrm::PolicyAction::Allow => "allow",
-                    nlink::netlink::xfrm::PolicyAction::Block => "block",
-                    nlink::netlink::xfrm::PolicyAction::Unknown(n) => {
-                        println!("  Action number: {}", n);
-                        "?"
-                    }
-                    _ => "?",
-                }
-            );
-
-            // Selector info
-            let sel = &pol.selector;
-            if let Some(src) = &sel.src_addr {
-                println!("  Source: {}/{}", src, sel.src_prefix_len);
-            }
-            if let Some(dst) = &sel.dst_addr {
-                println!("  Dest: {}/{}", dst, sel.dst_prefix_len);
-            }
-            if sel.proto != 0 {
-                println!("  Protocol: {}", sel.proto);
-            }
-            if let Some(sport) = sel.src_port {
-                println!("  Source port: {}", sport);
-            }
-            if let Some(dport) = sel.dst_port {
-                println!("  Dest port: {}", dport);
-            }
-
-            if let Some(mark) = &pol.mark {
-                println!("  Mark: 0x{:x}/0x{:x}", mark.v, mark.m);
-            }
-            if let Some(if_id) = pol.if_id {
-                println!("  Interface ID: {}", if_id);
-            }
-
-            println!();
+            print_sp_brief(pol);
         }
     }
 
-    println!("\nTo create IPsec SAs/policies, use tools like:");
-    println!("  - ip xfrm state add ...");
-    println!("  - ip xfrm policy add ...");
-    println!("  - strongSwan/Libreswan VPN");
+    Ok(())
+}
 
+fn print_sa_brief(sa: &nlink::netlink::xfrm::SecurityAssociation) {
+    let src = sa.src_addr.map(|a| a.to_string()).unwrap_or_else(|| "?".into());
+    let dst = sa.dst_addr.map(|a| a.to_string()).unwrap_or_else(|| "?".into());
+    let proto = match sa.protocol {
+        IpsecProtocol::Esp => "ESP",
+        IpsecProtocol::Ah => "AH",
+        IpsecProtocol::Comp => "COMP",
+        _ => "?",
+    };
+    let mode = match sa.mode {
+        XfrmMode::Transport => "transport",
+        XfrmMode::Tunnel => "tunnel",
+        XfrmMode::Beet => "beet",
+        _ => "?",
+    };
+    println!(
+        "  {} {src} -> {dst}  spi=0x{:08x} reqid={} mode={mode}",
+        proto, sa.spi, sa.reqid
+    );
+    if let Some(ref enc) = sa.enc_alg {
+        println!("    encr: {} ({} bits)", enc.name, enc.key_len);
+    }
+    if let Some(ref auth) = sa.auth_alg {
+        println!("    auth: {} ({} bits)", auth.name, auth.key_len);
+    }
+    if let Some(ref aead) = sa.aead_alg {
+        println!("    aead: {} ({} bits, ICV {} bits)", aead.name, aead.key_len, aead.icv_len);
+    }
+}
+
+fn print_sp_brief(pol: &nlink::netlink::xfrm::SecurityPolicy) {
+    let dir = match pol.direction {
+        PolicyDirection::In => "IN",
+        PolicyDirection::Out => "OUT",
+        PolicyDirection::Forward => "FWD",
+        _ => "?",
+    };
+    let action = match pol.action {
+        PolicyAction::Allow => "allow",
+        PolicyAction::Block => "block",
+        _ => "?",
+    };
+    println!(
+        "  {dir} prio={} action={action} index={}",
+        pol.priority, pol.index
+    );
+}
+
+async fn run_apply() -> nlink::Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("--apply requires root (CAP_NET_ADMIN). Aborting.");
+        std::process::exit(1);
+    }
+
+    println!("=== XFRM lifecycle apply ===\n");
+
+    // Use the lab namespace so we don't touch host XFRM tables.
+    use nlink::lab::with_namespace;
+    with_namespace("xfrm-apply", |ns| async move {
+        println!("Created namespace: {}", ns.name());
+        let conn: Connection<Xfrm> = ns.connection_for()?;
+
+        let local: IpAddr = "10.50.0.1".parse().unwrap();
+        let peer: IpAddr = "10.50.0.2".parse().unwrap();
+
+        // 1. Install outbound + inbound SA.
+        println!("\n[1/6] Installing outbound + inbound SAs (ESP-tunnel + HMAC-SHA256 + AES-CBC)...");
+        let sa_out = XfrmSaBuilder::new(local, peer, SPI_OUT, IpsecProtocol::Esp)
+            .mode(XfrmMode::Tunnel)
+            .reqid(REQID)
+            .auth_hmac_sha256(&AUTH_KEY)
+            .encr_aes_cbc(&ENCR_KEY);
+        conn.add_sa(sa_out).await?;
+        let sa_in = XfrmSaBuilder::new(peer, local, SPI_IN, IpsecProtocol::Esp)
+            .mode(XfrmMode::Tunnel)
+            .reqid(REQID)
+            .auth_hmac_sha256(&AUTH_KEY)
+            .encr_aes_cbc(&ENCR_KEY);
+        conn.add_sa(sa_in).await?;
+        println!("  added 2 SAs (spi=0x{:08x}, spi=0x{:08x})", SPI_OUT, SPI_IN);
+
+        // 2. Install matching SPs.
+        println!("\n[2/6] Installing outbound + inbound SPs...");
+        let sel = XfrmSelector { family: libc::AF_INET as u16, ..Default::default() };
+        let sp_out = XfrmSpBuilder::new(sel, PolicyDirection::Out)
+            .priority(100)
+            .template(XfrmUserTmpl::match_any(local, peer, IpsecProtocol::Esp, XfrmMode::Tunnel, REQID));
+        conn.add_sp(sp_out).await?;
+        let sp_in = XfrmSpBuilder::new(sel, PolicyDirection::In)
+            .priority(100)
+            .template(XfrmUserTmpl::match_any(peer, local, IpsecProtocol::Esp, XfrmMode::Tunnel, REQID));
+        conn.add_sp(sp_in).await?;
+        println!("  added 2 SPs (Out, In)");
+
+        // 3. Verify by dumping.
+        println!("\n[3/6] Dumping namespace XFRM tables...");
+        show_state(&conn).await?;
+
+        // 4. Rotate the outbound SA in place via update_sa.
+        println!("\n[4/6] Rotating outbound SA in place (update_sa)...");
+        let rotated = XfrmSaBuilder::new(local, peer, SPI_OUT, IpsecProtocol::Esp)
+            .mode(XfrmMode::Tunnel)
+            .reqid(REQID)
+            .auth_hmac_sha256(&[0xAAu8; 32])
+            .encr_aes_cbc(&[0xBBu8; 16]);
+        conn.update_sa(rotated).await?;
+        println!("  rotated (same SPI; keys differ)");
+
+        // 5. Fetch the rotated SA back via get_sa.
+        println!("\n[5/6] Fetching rotated SA via get_sa...");
+        match conn.get_sa(local, peer, SPI_OUT, IpsecProtocol::Esp).await? {
+            Some(sa) => print_sa_brief(&sa),
+            None => println!("  (not found — kernel said ENOENT)"),
+        }
+
+        // 6. Tear down.
+        println!("\n[6/6] Tearing down (del_sa x2 + flush_sp)...");
+        conn.del_sa(local, peer, SPI_OUT, IpsecProtocol::Esp).await?;
+        conn.del_sa(peer, local, SPI_IN, IpsecProtocol::Esp).await?;
+        conn.flush_sp().await?;
+        println!("  done — namespace will be deleted on Drop");
+
+        Ok(())
+    })
+    .await?;
+
+    println!("\nLifecycle complete.");
     Ok(())
 }

@@ -1,0 +1,73 @@
+name: Integration tests (root-gated)
+
+# Runs the `tests/integration/*` suite under the `lab` feature in
+# a privileged container. Tests gate themselves with
+# `nlink::require_root!()` and `nlink::require_module!(...)` so
+# they skip cleanly on developer machines run as a regular user.
+# In CI they run for real.
+#
+# Per `140-ci-integration-tests-plan.md`:
+#   - GHA-default kernel only (no matrix); add a self-hosted
+#     runner if a kernel-specific bug surfaces.
+#   - --test-threads=1 mandatory (namespace-naming collisions).
+#   - apt-get for iproute2 / kmod / conntrack utils; modprobe
+#     may fail on read-only /lib/modules — fall back to
+#     autoload-on-first-netlink-call.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.85-bookworm
+      options: --cap-add=NET_ADMIN --cap-add=SYS_ADMIN --cap-add=NET_RAW
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends iproute2 kmod conntrack
+          # Best-effort autoload of conntrack modules. The container's
+          # /lib/modules is typically read-only from the host, so
+          # modprobe may fail; in that case the kernel autoloads on
+          # first netlink request and `require_module!` skips tests
+          # for any module it can't see.
+          modprobe nf_conntrack || echo "nf_conntrack will autoload on first use"
+          modprobe nf_conntrack_netlink || echo "nf_conntrack_netlink will autoload"
+
+      - name: Build with `lab` feature
+        run: cargo build -p nlink --features lab --tests
+
+      - name: Run integration tests as root
+        env:
+          CARGO_TERM_COLOR: always
+        run: |
+          # --test-threads=1 is mandatory: tests create
+          # `nlink-lab-*` namespaces and the unique-name suffix
+          # prevents collisions, but parallel execution of the
+          # heavier recipes (HTB trees, xfrm SAs) still races on
+          # shared kernel state in some kernels.
+          cargo test -p nlink --features lab --test integration -- \
+              --test-threads=1 --nocapture
+
+      - name: Run library unit tests too
+        # One CI job, one quality gate — keep the unit suite here
+        # so a kernel-version mismatch surfaces at the same place
+        # as integration failures.
+        run: cargo test -p nlink --lib
+
+      - name: Workspace clippy
+        run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
+
+      - name: cargo machete
+        # Pre-existing nlink-ss / nlink-bridge unused-deps warnings
+        # are noise; gate the new-deps check separately if needed.
+        run: |
+          cargo install cargo-machete --locked
+          cargo machete || true

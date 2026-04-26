@@ -27,6 +27,18 @@ to the hand-rolled netlink primitives if you want to go deeper.
 - [**WireGuard mesh in namespaces**](wireguard-mesh.md) — 3-node WG
   full-mesh entirely within one host, using `nlink::lab` + the
   `Connection::<Wireguard>` write-path.
+- [**IPsec tunnel between two lab namespaces (XFRM)**](xfrm-ipsec-tunnel.md) —
+  install matching SA + SP on each side via typed `Connection<Xfrm>`
+  CRUD; ESP-tunnel + HMAC-SHA256 + AES-CBC. Includes key rotation
+  via `update_sa` and a NAT-T pointer.
+
+### Per-process / per-cgroup classification
+
+- [**Per-cgroup traffic classification (net_cls + cls_cgroup)**](cgroup-classification.md) —
+  steer per-tenant / per-container traffic into HTB classes by
+  socket cgroup membership. Uses the typed `CgroupFilter` and
+  the `net_cls` cgroup v1 controller; ematch combination shown
+  for L4-aware steering.
 
 ### Firewalling
 
@@ -82,9 +94,6 @@ Every recipe follows the same structure:
 Recipes we'd like to have but haven't written yet (contributions
 welcome):
 
-- **XFRM IPsec site-to-site tunnel** — two namespaces acting as two
-  sites, with SA/SP configuration via the XFRM protocol. Tracked in
-  Plan 135.
-- **Cgroup-based traffic classification** — blocked on the
-  [`BasicFilter` ematch API](../../133-tc-coverage-plan.md) (Plan 133
-  PR C). Once that lands, the recipe is a 200-line writeup.
+- _(both deferred recipes — XFRM IPsec tunnel and cgroup-based
+  traffic classification — landed as part of the 0.15.0 cycle.
+  Plan 135 PR B closes at 7/7.)_

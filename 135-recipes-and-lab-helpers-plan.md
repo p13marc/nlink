@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: More cookbook recipes + public lab/test helpers
-target version: 0.15.0 (PR A + 6 of 7 recipes shipped under `[Unreleased]`); 2 deferred recipes pending
-date: 2026-04-19; status updated 2026-04-25
-status: **PARTIAL — PR A closed; PR B at 6/7.** PR A complete 2026-04-21: `nlink::lab` shipped publicly with `LabNamespace` + `with_namespace` + `LabBridge` + `LabVeth`. PR B: 6 recipes shipped under `[Unreleased]` (`multi-namespace-events`, `bridge-vlan`, `bidirectional-rate-limit`, `wireguard-mesh`, `nftables-stateful-fw`, `conntrack-programmatic`, `per-peer-impairment`) + recipe index + README/CLAUDE.md pointers. **Both deferred recipes are now writeable** with the typed surfaces shipped in Plan 142: `xfrm-ipsec-tunnel` uses Plan 141 PR A+B's typed XFRM CRUD (sudo-gated for golden-frame validation); `cgroup-classification` uses Plan 133 PR C's `BasicFilter::ematch(EmatchKind::U32(...))`. Either order; both close PR B at 7/7. Recipe smoke tests (`tests/integration/recipes.rs`) un-park alongside the GHA workflow YAML (Plan 140 tail).
-related: Plan 141 PR C (xfrm-ipsec-tunnel recipe — sudo-gated); Plan 133 PR C (`e2ee5d8`, shipped — enables cgroup-classification recipe).
+target version: 0.15.0 (released under `[Unreleased]`)
+date: 2026-04-19; closed 2026-04-26
+status: **CLOSED — PR A + PR B at 7/7.** PR A complete 2026-04-21: `nlink::lab` shipped publicly with `LabNamespace` + `with_namespace` + `LabBridge` + `LabVeth`. PR B closed at 7/7 with the post-cut tail cleanup that landed both deferred recipes: `xfrm-ipsec-tunnel.md` (uses Plan 141 PR A+B's typed XFRM CRUD) and `cgroup-classification.md` (uses Plan 133 PR C's `BasicFilter::ematch` + the typed `CgroupFilter`). Final recipe roster: `multi-namespace-events`, `bridge-vlan`, `bidirectional-rate-limit`, `wireguard-mesh`, `nftables-stateful-fw`, `conntrack-programmatic`, `per-peer-impairment`, `xfrm-ipsec-tunnel`, `cgroup-classification`. Historical reference; substance lives in CHANGELOG `## [0.15.0]` and the recipe files themselves.
+related: Plan 141 (closed); Plan 133 PR C (closed); Plan 140 (closed — its GHA workflow validates the conntrack integration tests that landed alongside).
 ---
 
 # Recipes & Lab Helpers Plan

@@ -68,3 +68,6 @@ mod sysctl;
 
 #[path = "integration/namespace_spawn.rs"]
 mod namespace_spawn;
+
+#[path = "integration/conntrack.rs"]
+mod conntrack;

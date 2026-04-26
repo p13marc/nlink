@@ -2,8 +2,8 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: nlink roadmap — active plans only
-target version: 0.15.0 cut 2026-04-26; 0.16.0 and beyond
-last updated: 2026-04-26 (0.15.0 cut: workspace version bumped, CHANGELOG `[Unreleased]` → `[0.15.0] - 2026-04-26`; ready for `cargo publish -p nlink` and tag. Active plans table now reflects post-cut tail only.)
+target version: 0.15.0 cut 2026-04-26 (publish-ready, all sudo-gated tail items shipped pre-publish); 0.16.0 and beyond
+last updated: 2026-04-26 (post-cut tail cleared: xfrm-ipsec-tunnel + cgroup-classification recipes shipped, ipsec_monitor.rs --apply promoted, Plan 137 conntrack integration tests un-parked with 6 root-gated tests, Plan 140 GHA workflow YAML wired. Active plans table empty; 0.16.0 work opens with the other-bins typed-units rollout.)
 ---
 
 # nlink Roadmap
@@ -16,23 +16,25 @@ changelog). For per-release upgrade notes see
 
 ## Active plans
 
-The bulk of the 0.15.0 typed-API completion arc shipped under
-`[Unreleased]`. What remains here is the **sudo-gated tail** —
-items where the maintainer's "regular user" workflow blocks
-forward progress without root access for capture / validation.
-
-| # | Plan | Status | Headline |
-|---|---|---|---|
-| 135 PR B | [Recipes + public `nlink::lab`](135-recipes-and-lab-helpers-plan.md) | 6 of 7 recipes shipped; 2 deferred — both writeable now | Two recipes deferred during the typed-units arc are now writeable: `xfrm-ipsec-tunnel` (uses Plan 141 PR A+B's typed XFRM CRUD) and `cgroup-classification` (uses Plan 133 PR C's `BasicFilter` ematch). Either order; both close PR B at 7/7. |
-| 140 (tail) | [CI integration tests harness](140-ci-integration-tests-plan.md) | helper shipped (`553f9dd`); GHA workflow YAML pending | `nlink::lab::has_module` + `require_module!` macros landed. The `.github/workflows/integration-tests.yml` itself is no-op until an in-tree test calls `require_module!` — wires up alongside the first such test (Plan 137 integration tests un-parking is the natural trigger). |
-| 141 PR C | [XFRM write-path API extension](141-xfrm-write-path-plan.md) | PRs A+B complete; PR C drafted, **needs sudo** | `xfrm-ipsec-tunnel.md` recipe + `examples/xfrm/ipsec_monitor.rs --apply` promotion. Library code can be written without sudo; golden-frame validation needs root. Closes Plan 135 PR B at 7/7 if `cgroup-classification` doesn't land first. |
-| 137 (tail) | [Netfilter expansion](137-netfilter-expansion-plan.md) | PRs A+B shipped; integration tests un-parked but un-written; PRs C/D/E demand-gated | The `--apply` runners + recipe shipped under `[Unreleased]`. Integration tests (rewriting the `--apply` assertions as `#[tokio::test]` with `require_root!` + `require_module!`) un-park here once the GHA workflow lands. PRs C (`ct_expect`) / D (nfqueue) / E (nflog) explicitly demand-gated — open per-PR plans only when a downstream user asks. |
+**Empty as of 2026-04-26 (post-0.15.0 cut, post-tail cleanup).**
+Every row that was on this table at cut-pending time shipped
+before publish — both deferred recipes, the GHA workflow YAML,
+the conntrack integration tests, and the `ipsec_monitor.rs
+--apply` promotion all landed under the same `## [0.15.0]`
+heading. See the "Shipped & ready to archive" table for the
+final per-plan status.
 
 **0.15.0 cut on 2026-04-26.** Workspace at `0.15.0`, CHANGELOG
 header is `## [0.15.0] - 2026-04-26`, migration guide in place
 at [`docs/migration_guide/0.14.0-to-0.15.0.md`](docs/migration_guide/0.14.0-to-0.15.0.md).
 Maintainer publishes via `cargo publish -p nlink` and tags
 `v0.15.0`.
+
+**Next-up after publish**: the other-bins typed-units rollout
+(see Backlog row promoted to "Medium — next-up after 0.15.0
+cut"). Other PRs/items not in this table are explicitly
+demand-gated (Plan 137 PRs C/D/E for `ct_expect` / nfqueue /
+nflog) — open per-PR plans only when a downstream user asks.
 
 ## Shipped & ready to archive
 
@@ -44,9 +46,13 @@ substance is already in CHANGELOG entries and the
 | Plan | Shipped | Headline |
 |---|---|---|
 | 133 (TC coverage gaps) | all 4 PRs | Typed `CakeConfig`, `FqPieConfig`, `BpfAction`, `SimpleAction`, `BasicFilter` ematch tree (cmp + u32; meta deferred). PR C (`e2ee5d8`) closed the filter side at 9/9 typed-first. |
+| 135 (recipes + lab helpers) | PR A + PR B at 7/7 | `nlink::lab` module + 7 cookbook recipes. The two deferred recipes (`xfrm-ipsec-tunnel`, `cgroup-classification`) shipped during the post-cut tail cleanup; PR B closes at 7/7. |
 | 136 (Example cleanup) | all phases | Plus the conntrack deferral resolved by Plan 137 PR A slice 3 (`1e9307e`). `MacsecLink` rtnetlink builder landed as a follow-up; `examples/genl/macsec.rs` uses it directly. |
+| 137 (netfilter expansion) | PRs A+B + integration tests | PRs A+B kernel-validated under `[Unreleased]` (typed ctnetlink mutation + multicast event subscription). Integration tests un-parked post-cut: 6 root-gated `#[tokio::test]` functions in `tests/integration/conntrack.rs`. PRs C/D/E (`ct_expect`, nfqueue, nflog) demand-gated. |
 | 138 (u32 filter selector grammar) | all 3 PRs (`ae0e4ae`, `3b5cb21`, `d95a0ea`) | Raw `match u32|u16|u8 VAL MASK at OFFSET` triples + named-match shortcuts + hash-table grammar. 41 unit tests. `order` deferred with explicit rejection. |
 | 139 (typed standalone-action CRUD) | all 3 PRs | PR A: library typed CRUD on `Connection<Route>` (`d69e10a`). PR B: `parse_params` on all 14 action kinds, 74 tests (`f7e4502`/`d124920`/`2764806`). PR C: bin migration + **legacy deletion** (`56371db`, -3940 LOC) — the 0.15.0 release-cut commit. |
+| 140 (CI integration tests harness) | helper + GHA workflow | Helper macros (`require_module!`, `has_module`) shipped in Phase 0 (`553f9dd`). GHA workflow YAML (`.github/workflows/integration-tests.yml`) wired during the post-cut tail cleanup, alongside the conntrack integration tests it validates against. |
+| 141 (XFRM write path) | all 3 PRs | PRs A+B (`74a4e48`/`844a166`/`a120ee7`): typed SA + SP CRUD on `Connection<Xfrm>`, 20 wire-format round-trip tests. PR C: `xfrm-ipsec-tunnel` recipe + `examples/xfrm/ipsec_monitor.rs --apply` lifecycle runner shipped during the post-cut tail cleanup. |
 | 142 (0.15.0 master) | all 5 phases substantively | Phase 0: helper + sealed `ParseParams` trait. Phase 1: filter side 9/9. Phase 2: XFRM SA + SP CRUD. Phase 3: typed action CRUD. Phase 4: legacy deletion. Every Phase 4 §6 acceptance gate met. |
 
 ## Release plan

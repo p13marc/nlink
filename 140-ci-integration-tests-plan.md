@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: CI integration tests harness — privileged GitHub Actions runner for root-gated `lab`-feature tests
-target version: 0.15.0 helper shipped under `[Unreleased]`; GHA workflow YAML deferred to 0.16.0 / sudo session
-date: 2026-04-25; status updated 2026-04-25
-status: **PARTIAL — helper shipped, workflow YAML pending.** **Helper** (commit `553f9dd`) shipped under `[Unreleased]` as Plan 142 Phase 0: `nlink::lab::has_module(name) -> bool` checks `/sys/module/<name>` (works for both loadable + built-in features), and the `nlink::require_module!("nf_conntrack")` / `require_module_void!` macros pair with `require_root!()` for clean test skips. **GHA workflow YAML** (`.github/workflows/integration-tests.yml`) deferred — the maintainer runs `cargo test` as a regular user, so a workflow without an in-tree test that actually uses `require_module!` is no-op. Wires up alongside the first such test, which is the natural Plan 137 integration tests un-parking trigger. Both land together so the workflow has something to validate against on its first green run. Historical reference for the helper; substance lives in CHANGELOG `## [Unreleased]`.
-related: Plan 142 master (Phase 0 closed); Plan 137 integration tests (the natural un-park trigger).
+target version: 0.15.0 (helper + GHA workflow YAML both shipped under `[Unreleased]`)
+date: 2026-04-25; closed 2026-04-26
+status: **CLOSED — helper + GHA workflow YAML both shipped.** **Helper** (commit `553f9dd`) shipped as Plan 142 Phase 0: `nlink::lab::has_module(name) -> bool` checks `/sys/module/<name>` (works for both loadable + built-in features), and the `nlink::require_module!("nf_conntrack")` / `require_module_void!` macros pair with `require_root!()` for clean test skips. **GHA workflow YAML** (`.github/workflows/integration-tests.yml`) shipped during the post-cut tail cleanup, alongside the Plan 137 conntrack integration tests it validates against (6 root-gated `#[tokio::test]` functions in `crates/nlink/tests/integration/conntrack.rs`). Workflow runs the full integration suite + lib tests + clippy + cargo machete on every push to master and every PR; `--test-threads=1` mandatory for namespace-naming reasons; container image is `rust:1.85-bookworm` with `--cap-add=NET_ADMIN --cap-add=SYS_ADMIN --cap-add=NET_RAW`. Historical reference; substance lives in CHANGELOG `## [0.15.0]`.
+related: Plan 137 integration tests (closed — the workflow runs them); Plan 142 master (Phase 0 closed).
 ---
 
 # CI integration tests harness

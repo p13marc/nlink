@@ -201,7 +201,7 @@ impl ProtocolState for Netfilter {
 ///
 /// Used for IPsec Security Association (SA) and Security Policy (SP) management.
 /// This is a zero-sized type with no additional state.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct Xfrm;
 
 impl private::Sealed for Xfrm {}
