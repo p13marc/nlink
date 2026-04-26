@@ -879,16 +879,11 @@ impl PerHostLimiter {
                 if !htb_class_rates_match(c, total_bps, total_bps) {
                     if !opts.dry_run {
                         let cfg = HtbClassConfig::new(total_rate).ceil(total_rate).build();
-                        conn.change_class_by_index(
-                            ifindex,
-                            root_handle,
-                            parent_classid,
-                            cfg,
-                        )
-                        .await
-                        .map_err(|e| {
-                            e.with_context("PerHostLimiter::reconcile: update parent class 1:1")
-                        })?;
+                        conn.change_class_by_index(ifindex, root_handle, parent_classid, cfg)
+                            .await
+                            .map_err(|e| {
+                                e.with_context("PerHostLimiter::reconcile: update parent class 1:1")
+                            })?;
                     }
                     report.changes_made += 1;
                     report.root_modified = true;
@@ -928,18 +923,13 @@ impl PerHostLimiter {
                     if !htb_class_rates_match(c, class_rate_bps, class_ceil_bps) {
                         if !opts.dry_run {
                             let cfg = HtbClassConfig::new(class_rate).ceil(class_ceil).build();
-                            conn.change_class_by_index(
-                                ifindex,
-                                parent_classid,
-                                classid,
-                                cfg,
-                            )
-                            .await
-                            .map_err(|e| {
-                                e.with_context(format!(
-                                    "PerHostLimiter::reconcile: update class {classid}"
-                                ))
-                            })?;
+                            conn.change_class_by_index(ifindex, parent_classid, classid, cfg)
+                                .await
+                                .map_err(|e| {
+                                    e.with_context(format!(
+                                        "PerHostLimiter::reconcile: update class {classid}"
+                                    ))
+                                })?;
                         }
                         report.changes_made += 1;
                         rule_modified = true;
@@ -1048,16 +1038,11 @@ impl PerHostLimiter {
                         let cfg = HtbClassConfig::new(self.default_rate)
                             .ceil(self.default_rate)
                             .build();
-                        conn.change_class_by_index(
-                            ifindex,
-                            parent_classid,
-                            default_classid,
-                            cfg,
-                        )
-                        .await
-                        .map_err(|e| {
-                            e.with_context("PerHostLimiter::reconcile: update default class")
-                        })?;
+                        conn.change_class_by_index(ifindex, parent_classid, default_classid, cfg)
+                            .await
+                            .map_err(|e| {
+                                e.with_context("PerHostLimiter::reconcile: update default class")
+                            })?;
                     }
                     report.changes_made += 1;
                     report.default_modified = true;

@@ -38,11 +38,8 @@ async fn ct_inject_and_query_tcp_entry() -> nlink::Result<()> {
     let ns = TestNamespace::new("ct-inject-query")?;
     let nf = nf_in_ns(&ns)?;
 
-    let orig = ConntrackTuple::v4(
-        Ipv4Addr::new(10, 0, 0, 1),
-        Ipv4Addr::new(10, 0, 0, 2),
-    )
-    .ports(40000, 80);
+    let orig =
+        ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)).ports(40000, 80);
 
     nf.add_conntrack(
         ConntrackBuilder::new_v4(IpProtocol::Tcp)
@@ -83,11 +80,8 @@ async fn ct_update_changes_mark_in_place() -> nlink::Result<()> {
     let ns = TestNamespace::new("ct-update")?;
     let nf = nf_in_ns(&ns)?;
 
-    let orig = ConntrackTuple::v4(
-        Ipv4Addr::new(10, 0, 0, 1),
-        Ipv4Addr::new(10, 0, 0, 2),
-    )
-    .ports(40001, 81);
+    let orig =
+        ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)).ports(40001, 81);
 
     nf.add_conntrack(
         ConntrackBuilder::new_v4(IpProtocol::Tcp)
@@ -132,11 +126,8 @@ async fn ct_del_by_id_removes_entry() -> nlink::Result<()> {
     let ns = TestNamespace::new("ct-del")?;
     let nf = nf_in_ns(&ns)?;
 
-    let orig = ConntrackTuple::v4(
-        Ipv4Addr::new(10, 0, 0, 1),
-        Ipv4Addr::new(10, 0, 0, 2),
-    )
-    .ports(40002, 82);
+    let orig =
+        ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)).ports(40002, 82);
 
     nf.add_conntrack(
         ConntrackBuilder::new_v4(IpProtocol::Tcp)
@@ -181,11 +172,8 @@ async fn ct_flush_empties_table() -> nlink::Result<()> {
         nf.add_conntrack(
             ConntrackBuilder::new_v4(IpProtocol::Tcp)
                 .orig(
-                    ConntrackTuple::v4(
-                        Ipv4Addr::new(10, 0, 0, 1),
-                        Ipv4Addr::new(10, 0, 0, 2),
-                    )
-                    .ports(port, 90),
+                    ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2))
+                        .ports(port, 90),
                 )
                 .status(ConntrackStatus::CONFIRMED | ConntrackStatus::SEEN_REPLY)
                 .timeout(Duration::from_secs(60))
@@ -223,11 +211,8 @@ async fn ct_subscribe_observes_new_event() -> nlink::Result<()> {
     nf_sub.subscribe(&[ConntrackGroup::New])?;
     let mut events = nf_sub.events();
 
-    let orig = ConntrackTuple::v4(
-        Ipv4Addr::new(10, 0, 0, 1),
-        Ipv4Addr::new(10, 0, 0, 2),
-    )
-    .ports(50001, 443);
+    let orig = ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2))
+        .ports(50001, 443);
 
     nf_mut
         .add_conntrack(
@@ -271,11 +256,8 @@ async fn ct_subscribe_observes_destroy_event_on_flush() -> nlink::Result<()> {
     let mut nf_sub: Connection<Netfilter> = namespace::connection_for(ns.name())?;
 
     // Inject first so there's something to destroy.
-    let orig = ConntrackTuple::v4(
-        Ipv4Addr::new(10, 0, 0, 1),
-        Ipv4Addr::new(10, 0, 0, 2),
-    )
-    .ports(50002, 8080);
+    let orig = ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2))
+        .ports(50002, 8080);
     nf_mut
         .add_conntrack(
             ConntrackBuilder::new_v4(IpProtocol::Tcp)

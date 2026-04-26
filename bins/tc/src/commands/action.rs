@@ -156,11 +156,7 @@ impl ActionCmd {
 /// `ParseParams` impl and submits via the typed CRUD method.
 /// Mirrors `try_typed_qdisc` / `try_typed_filter` from the qdisc /
 /// filter subcommands.
-async fn add_typed_action(
-    conn: &Connection<Route>,
-    kind: &str,
-    params: &[String],
-) -> Result<()> {
+async fn add_typed_action(conn: &Connection<Route>, kind: &str, params: &[String]) -> Result<()> {
     let refs: Vec<&str> = params.iter().map(String::as_str).collect();
 
     macro_rules! dispatch {

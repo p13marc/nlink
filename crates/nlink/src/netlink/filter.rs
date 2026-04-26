@@ -568,11 +568,12 @@ fn parse_u32_int(kind: &str, key: &str, s: &str) -> Result<u32> {
 
 /// Parse a hex value (with or without `0x` prefix) into `u32`.
 fn parse_hex_u32(kind: &str, key: &str, s: &str) -> Result<u32> {
-    let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let body = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     u32::from_str_radix(body, 16).map_err(|_| {
-        Error::InvalidMessage(format!(
-            "{kind}: invalid {key} `{s}` (expected hex value)"
-        ))
+        Error::InvalidMessage(format!("{kind}: invalid {key} `{s}` (expected hex value)"))
     })
 }
 
@@ -668,13 +669,12 @@ fn apply_named_match(
     i: usize,
     layer: &str,
 ) -> Result<U32Filter> {
-    let field = params.get(i + 2).copied().ok_or_else(|| {
-        Error::InvalidMessage(format!("u32: `match {layer}` requires FIELD"))
-    })?;
+    let field = params
+        .get(i + 2)
+        .copied()
+        .ok_or_else(|| Error::InvalidMessage(format!("u32: `match {layer}` requires FIELD")))?;
     let value = params.get(i + 3).copied().ok_or_else(|| {
-        Error::InvalidMessage(format!(
-            "u32: `match {layer} {field}` requires VALUE"
-        ))
+        Error::InvalidMessage(format!("u32: `match {layer} {field}` requires VALUE"))
     })?;
 
     match (layer, field) {
@@ -726,9 +726,9 @@ fn parse_u32_ipv4_with_prefix(s: &str) -> Result<(Ipv4Addr, u8)> {
         }
         None => (s, 32),
     };
-    let addr: Ipv4Addr = addr_s.parse().map_err(|_| {
-        Error::InvalidMessage(format!("u32: invalid IPv4 address `{addr_s}`"))
-    })?;
+    let addr: Ipv4Addr = addr_s
+        .parse()
+        .map_err(|_| Error::InvalidMessage(format!("u32: invalid IPv4 address `{addr_s}`")))?;
     Ok((addr, prefix))
 }
 
@@ -2495,9 +2495,7 @@ impl BasicFilter {
                 "classid" | "flowid" => {
                     let s = need_value(params, i, "basic", key)?;
                     let h = s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!(
-                            "basic: invalid {key} `{s}`: {e}"
-                        ))
+                        Error::InvalidMessage(format!("basic: invalid {key} `{s}`: {e}"))
                     })?;
                     f = f.classid(h);
                     i += 2;
@@ -4622,9 +4620,8 @@ mod tests {
 
     #[test]
     fn u32_parse_params_match_u32_triple() {
-        let f =
-            U32Filter::parse_params(&["match", "u32", "0xCAFEBABE", "0xFFFFFFFF", "at", "0"])
-                .unwrap();
+        let f = U32Filter::parse_params(&["match", "u32", "0xCAFEBABE", "0xFFFFFFFF", "at", "0"])
+            .unwrap();
         assert_eq!(f.keys.len(), 1);
         let k = f.keys[0];
         // The kernel stores val/mask big-endian; pack_key32 applies to_be().
@@ -4635,17 +4632,15 @@ mod tests {
 
     #[test]
     fn u32_parse_params_match_u32_decimal_offset() {
-        let f =
-            U32Filter::parse_params(&["match", "u32", "0x01020304", "0xFFFFFFFF", "at", "16"])
-                .unwrap();
+        let f = U32Filter::parse_params(&["match", "u32", "0x01020304", "0xFFFFFFFF", "at", "16"])
+            .unwrap();
         assert_eq!(f.keys[0].off, 16);
     }
 
     #[test]
     fn u32_parse_params_match_u16_upper_half() {
         // offset=0 → upper 16 bits of the 32-bit slot.
-        let f =
-            U32Filter::parse_params(&["match", "u16", "0x1234", "0xFFFF", "at", "0"]).unwrap();
+        let f = U32Filter::parse_params(&["match", "u16", "0x1234", "0xFFFF", "at", "0"]).unwrap();
         let k = f.keys[0];
         assert_eq!(u32::from_be(k.val), 0x1234_0000);
         assert_eq!(u32::from_be(k.mask), 0xFFFF_0000);
@@ -4655,8 +4650,7 @@ mod tests {
     #[test]
     fn u32_parse_params_match_u16_lower_half() {
         // offset=2 → lower 16 bits of the 32-bit slot at offset 0.
-        let f =
-            U32Filter::parse_params(&["match", "u16", "0x5678", "0xFFFF", "at", "2"]).unwrap();
+        let f = U32Filter::parse_params(&["match", "u16", "0x5678", "0xFFFF", "at", "2"]).unwrap();
         let k = f.keys[0];
         assert_eq!(u32::from_be(k.val), 0x0000_5678);
         assert_eq!(u32::from_be(k.mask), 0x0000_FFFF);
@@ -4714,15 +4708,14 @@ mod tests {
 
     #[test]
     fn u32_parse_params_match_invalid_hex_errors() {
-        let err = U32Filter::parse_params(&["match", "u32", "notahex", "0xFF", "at", "0"])
-            .unwrap_err();
+        let err =
+            U32Filter::parse_params(&["match", "u32", "notahex", "0xFF", "at", "0"]).unwrap_err();
         assert!(err.to_string().contains("expected hex value"));
     }
 
     #[test]
     fn u32_parse_params_match_unknown_width_errors() {
-        let err =
-            U32Filter::parse_params(&["match", "u64", "0x1", "0x1", "at", "0"]).unwrap_err();
+        let err = U32Filter::parse_params(&["match", "u64", "0x1", "0x1", "at", "0"]).unwrap_err();
         assert!(err.to_string().contains("unknown match width"));
     }
 
@@ -4736,8 +4729,8 @@ mod tests {
 
     #[test]
     fn u32_parse_params_match_missing_at_keyword_errors() {
-        let err = U32Filter::parse_params(&["match", "u32", "0xAA", "0xFF", "INSTEAD", "0"])
-            .unwrap_err();
+        let err =
+            U32Filter::parse_params(&["match", "u32", "0xAA", "0xFF", "INSTEAD", "0"]).unwrap_err();
         assert!(err.to_string().contains("expected `at`"));
     }
 
@@ -4787,8 +4780,7 @@ mod tests {
 
     #[test]
     fn u32_parse_params_match_ip_dst_with_prefix() {
-        let parsed =
-            U32Filter::parse_params(&["match", "ip", "dst", "192.168.0.0/16"]).unwrap();
+        let parsed = U32Filter::parse_params(&["match", "ip", "dst", "192.168.0.0/16"]).unwrap();
         let direct = U32Filter::new().match_dst_ipv4("192.168.0.0".parse().unwrap(), 16);
         assert_eq!(parsed.keys[0].val, direct.keys[0].val);
         assert_eq!(parsed.keys[0].mask, direct.keys[0].mask);
@@ -4826,8 +4818,7 @@ mod tests {
             ("gre", 47),
         ];
         for (name, num) in cases {
-            let parsed =
-                U32Filter::parse_params(&["match", "ip", "protocol", name]).unwrap();
+            let parsed = U32Filter::parse_params(&["match", "ip", "protocol", name]).unwrap();
             let direct = U32Filter::new().match_ip_proto(num);
             assert_eq!(
                 parsed.keys[0].val, direct.keys[0].val,
@@ -4863,7 +4854,15 @@ mod tests {
     #[test]
     fn u32_parse_params_named_match_combines_with_classid() {
         let f = U32Filter::parse_params(&[
-            "match", "ip", "src", "10.0.0.0/24", "match", "tcp", "dport", "80", "classid",
+            "match",
+            "ip",
+            "src",
+            "10.0.0.0/24",
+            "match",
+            "tcp",
+            "dport",
+            "80",
+            "classid",
             "1:10",
         ])
         .unwrap();
@@ -4873,16 +4872,14 @@ mod tests {
 
     #[test]
     fn u32_parse_params_match_ip_invalid_prefix_errors() {
-        let err =
-            U32Filter::parse_params(&["match", "ip", "src", "10.0.0.0/40"]).unwrap_err();
+        let err = U32Filter::parse_params(&["match", "ip", "src", "10.0.0.0/40"]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("u32:") && msg.contains("prefix"), "got: {msg}");
     }
 
     #[test]
     fn u32_parse_params_match_ip_invalid_addr_errors() {
-        let err =
-            U32Filter::parse_params(&["match", "ip", "src", "999.999.999.999"]).unwrap_err();
+        let err = U32Filter::parse_params(&["match", "ip", "src", "999.999.999.999"]).unwrap_err();
         assert!(err.to_string().contains("invalid IPv4 address"));
     }
 
@@ -4890,20 +4887,21 @@ mod tests {
     fn u32_parse_params_match_ip_unknown_field_errors() {
         let err = U32Filter::parse_params(&["match", "ip", "fragment", "yes"]).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("unsupported `match ip fragment`"), "got: {msg}");
+        assert!(
+            msg.contains("unsupported `match ip fragment`"),
+            "got: {msg}"
+        );
     }
 
     #[test]
     fn u32_parse_params_match_ip_unknown_proto_errors() {
-        let err =
-            U32Filter::parse_params(&["match", "ip", "protocol", "wat"]).unwrap_err();
+        let err = U32Filter::parse_params(&["match", "ip", "protocol", "wat"]).unwrap_err();
         assert!(err.to_string().contains("unknown IP protocol"));
     }
 
     #[test]
     fn u32_parse_params_match_ip_dport_invalid_port_errors() {
-        let err =
-            U32Filter::parse_params(&["match", "ip", "dport", "70000"]).unwrap_err();
+        let err = U32Filter::parse_params(&["match", "ip", "dport", "70000"]).unwrap_err();
         assert!(err.to_string().contains("expected port 0–65535"));
     }
 
@@ -4963,8 +4961,17 @@ mod tests {
     #[test]
     fn u32_parse_params_hashkey_packs_into_sel() {
         let f = U32Filter::parse_params(&[
-            "hashkey", "mask", "0xff000000", "at", "12", "match", "u32", "0x0a000001",
-            "0xffffffff", "at", "12",
+            "hashkey",
+            "mask",
+            "0xff000000",
+            "at",
+            "12",
+            "match",
+            "u32",
+            "0x0a000001",
+            "0xffffffff",
+            "at",
+            "12",
         ])
         .unwrap();
         assert_eq!(f.hashkey, Some((0xff000000, 12)));
@@ -4974,17 +4981,14 @@ mod tests {
     #[test]
     fn u32_parse_params_hashkey_negative_offset_errors() {
         // i16 max is 32767. 100000 is out of range.
-        let err = U32Filter::parse_params(&[
-            "hashkey", "mask", "0xff", "at", "100000",
-        ])
-        .unwrap_err();
+        let err =
+            U32Filter::parse_params(&["hashkey", "mask", "0xff", "at", "100000"]).unwrap_err();
         assert!(err.to_string().contains("out of range for i16"));
     }
 
     #[test]
     fn u32_parse_params_hashkey_missing_mask_keyword_errors() {
-        let err =
-            U32Filter::parse_params(&["hashkey", "0xff", "at", "0"]).unwrap_err();
+        let err = U32Filter::parse_params(&["hashkey", "0xff", "at", "0"]).unwrap_err();
         assert!(err.to_string().contains("expected `mask` after `hashkey`"));
     }
 
@@ -4992,7 +4996,10 @@ mod tests {
     fn u32_parse_params_order_rejected_with_clear_message() {
         let err = U32Filter::parse_params(&["order", "5"]).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("`order` is not yet typed-modelled"), "got: {msg}");
+        assert!(
+            msg.contains("`order` is not yet typed-modelled"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -5077,15 +5084,18 @@ mod tests {
 
     #[test]
     fn basic_negate_sets_invert_flag() {
-        let f = BasicFilter::new().ematch(Ematch::cmp(EmatchCmp {
-            layer: CmpLayer::Network,
-            align: CmpAlign::U8,
-            offset: 9,
-            mask: 0xff,
-            value: 6,
-            op: CmpOp::Eq,
-            trans: false,
-        }).negate());
+        let f = BasicFilter::new().ematch(
+            Ematch::cmp(EmatchCmp {
+                layer: CmpLayer::Network,
+                align: CmpAlign::U8,
+                offset: 9,
+                mask: 0xff,
+                value: 6,
+                op: CmpOp::Eq,
+                trans: false,
+            })
+            .negate(),
+        );
         assert!(f.matches[0].negate);
         // Spot-check that TCF_EM_INVERT is the documented bit.
         assert_eq!(ematch_consts::TCF_EM_INVERT, 1 << 2);
@@ -5094,15 +5104,18 @@ mod tests {
     #[test]
     fn basic_or_sets_relation() {
         let f = BasicFilter::new()
-            .ematch(Ematch::cmp(EmatchCmp {
-                layer: CmpLayer::Network,
-                align: CmpAlign::U8,
-                offset: 9,
-                mask: 0xff,
-                value: 6,
-                op: CmpOp::Eq,
-                trans: false,
-            }).or())
+            .ematch(
+                Ematch::cmp(EmatchCmp {
+                    layer: CmpLayer::Network,
+                    align: CmpAlign::U8,
+                    offset: 9,
+                    mask: 0xff,
+                    value: 6,
+                    op: CmpOp::Eq,
+                    trans: false,
+                })
+                .or(),
+            )
             .ematch(Ematch::cmp(EmatchCmp {
                 layer: CmpLayer::Network,
                 align: CmpAlign::U8,
@@ -5154,8 +5167,7 @@ mod tests {
 
     #[test]
     fn basic_parse_params_classid_and_chain() {
-        let f =
-            BasicFilter::parse_params(&["classid", "1:10", "chain", "5"]).unwrap();
+        let f = BasicFilter::parse_params(&["classid", "1:10", "chain", "5"]).unwrap();
         assert_eq!(f.classid, Some(TcHandle::new(1, 0x10).as_raw()));
         assert_eq!(f.chain, Some(5));
     }
@@ -5206,7 +5218,10 @@ mod tests {
     fn basic_parse_params_ip_proto_eq_unknown_proto_rebrands_error_prefix() {
         let err = BasicFilter::parse_params(&["ip_proto_eq", "wat"]).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("basic:"), "error must rebrand u32→basic: {msg}");
+        assert!(
+            msg.contains("basic:"),
+            "error must rebrand u32→basic: {msg}"
+        );
         assert!(!msg.contains("u32:"), "error must NOT mention u32: {msg}");
         assert!(msg.contains("unknown IP protocol"), "got: {msg}");
     }

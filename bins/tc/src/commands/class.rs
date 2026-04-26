@@ -171,7 +171,18 @@ impl ClassCmd {
                 classid,
                 kind,
                 params,
-            } => dispatch_class(conn, &dev, &parent, &classid, &kind, &params, ClassVerb::Add).await,
+            } => {
+                dispatch_class(
+                    conn,
+                    &dev,
+                    &parent,
+                    &classid,
+                    &kind,
+                    &params,
+                    ClassVerb::Add,
+                )
+                .await
+            }
             ClassAction::Del {
                 dev,
                 parent,
@@ -187,8 +198,16 @@ impl ClassCmd {
                 kind,
                 params,
             } => {
-                dispatch_class(conn, &dev, &parent, &classid, &kind, &params, ClassVerb::Change)
-                    .await
+                dispatch_class(
+                    conn,
+                    &dev,
+                    &parent,
+                    &classid,
+                    &kind,
+                    &params,
+                    ClassVerb::Change,
+                )
+                .await
             }
             ClassAction::Replace {
                 dev,
@@ -197,8 +216,16 @@ impl ClassCmd {
                 kind,
                 params,
             } => {
-                dispatch_class(conn, &dev, &parent, &classid, &kind, &params, ClassVerb::Replace)
-                    .await
+                dispatch_class(
+                    conn,
+                    &dev,
+                    &parent,
+                    &classid,
+                    &kind,
+                    &params,
+                    ClassVerb::Replace,
+                )
+                .await
             }
         }
     }

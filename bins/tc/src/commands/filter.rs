@@ -8,8 +8,8 @@ use nlink::{
     netlink::{
         Connection, Result, Route,
         filter::{
-            BasicFilter, BpfFilter, CgroupFilter, FilterConfig, FlowFilter, FlowerFilter,
-            FwFilter, MatchallFilter, RouteFilter, U32Filter,
+            BasicFilter, BpfFilter, CgroupFilter, FilterConfig, FlowFilter, FlowerFilter, FwFilter,
+            MatchallFilter, RouteFilter, U32Filter,
         },
         message::NlMsgType,
         messages::TcMessage,
@@ -349,9 +349,9 @@ async fn dispatch_filter(
     params: &[String],
     verb: FilterVerb,
 ) -> Result<()> {
-    let parent = parent.parse::<TcHandle>().map_err(|e| {
-        Error::InvalidMessage(format!("tc filter: invalid parent `{parent}`: {e}"))
-    })?;
+    let parent = parent
+        .parse::<TcHandle>()
+        .map_err(|e| Error::InvalidMessage(format!("tc filter: invalid parent `{parent}`: {e}")))?;
     let proto = parse_protocol_u16(protocol)?;
     let priority = prio.unwrap_or(0);
 
@@ -420,13 +420,11 @@ fn parse_protocol_u16(s: &str) -> Result<u16> {
         "mpls_mc" => 0x8848,         // ETH_P_MPLS_MC
         _ => {
             if let Some(hex) = s.strip_prefix("0x") {
-                u16::from_str_radix(hex, 16).map_err(|_| {
-                    Error::InvalidMessage(format!("invalid protocol: {s}"))
-                })?
+                u16::from_str_radix(hex, 16)
+                    .map_err(|_| Error::InvalidMessage(format!("invalid protocol: {s}")))?
             } else {
-                s.parse().map_err(|_| {
-                    Error::InvalidMessage(format!("unknown protocol: {s}"))
-                })?
+                s.parse()
+                    .map_err(|_| Error::InvalidMessage(format!("unknown protocol: {s}")))?
             }
         }
     })

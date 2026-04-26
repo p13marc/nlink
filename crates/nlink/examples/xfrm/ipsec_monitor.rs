@@ -97,8 +97,14 @@ async fn show_state(conn: &Connection<Xfrm>) -> nlink::Result<()> {
 }
 
 fn print_sa_brief(sa: &nlink::netlink::xfrm::SecurityAssociation) {
-    let src = sa.src_addr.map(|a| a.to_string()).unwrap_or_else(|| "?".into());
-    let dst = sa.dst_addr.map(|a| a.to_string()).unwrap_or_else(|| "?".into());
+    let src = sa
+        .src_addr
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "?".into());
+    let dst = sa
+        .dst_addr
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "?".into());
     let proto = match sa.protocol {
         IpsecProtocol::Esp => "ESP",
         IpsecProtocol::Ah => "AH",
@@ -122,7 +128,10 @@ fn print_sa_brief(sa: &nlink::netlink::xfrm::SecurityAssociation) {
         println!("    auth: {} ({} bits)", auth.name, auth.key_len);
     }
     if let Some(ref aead) = sa.aead_alg {
-        println!("    aead: {} ({} bits, ICV {} bits)", aead.name, aead.key_len, aead.icv_len);
+        println!(
+            "    aead: {} ({} bits, ICV {} bits)",
+            aead.name, aead.key_len, aead.icv_len
+        );
     }
 }
 
@@ -162,7 +171,9 @@ async fn run_apply() -> nlink::Result<()> {
         let peer: IpAddr = "10.50.0.2".parse().unwrap();
 
         // 1. Install outbound + inbound SA.
-        println!("\n[1/6] Installing outbound + inbound SAs (ESP-tunnel + HMAC-SHA256 + AES-CBC)...");
+        println!(
+            "\n[1/6] Installing outbound + inbound SAs (ESP-tunnel + HMAC-SHA256 + AES-CBC)..."
+        );
         let sa_out = XfrmSaBuilder::new(local, peer, SPI_OUT, IpsecProtocol::Esp)
             .mode(XfrmMode::Tunnel)
             .reqid(REQID)
@@ -175,18 +186,36 @@ async fn run_apply() -> nlink::Result<()> {
             .auth_hmac_sha256(&AUTH_KEY)
             .encr_aes_cbc(&ENCR_KEY);
         conn.add_sa(sa_in).await?;
-        println!("  added 2 SAs (spi=0x{:08x}, spi=0x{:08x})", SPI_OUT, SPI_IN);
+        println!(
+            "  added 2 SAs (spi=0x{:08x}, spi=0x{:08x})",
+            SPI_OUT, SPI_IN
+        );
 
         // 2. Install matching SPs.
         println!("\n[2/6] Installing outbound + inbound SPs...");
-        let sel = XfrmSelector { family: libc::AF_INET as u16, ..Default::default() };
+        let sel = XfrmSelector {
+            family: libc::AF_INET as u16,
+            ..Default::default()
+        };
         let sp_out = XfrmSpBuilder::new(sel, PolicyDirection::Out)
             .priority(100)
-            .template(XfrmUserTmpl::match_any(local, peer, IpsecProtocol::Esp, XfrmMode::Tunnel, REQID));
+            .template(XfrmUserTmpl::match_any(
+                local,
+                peer,
+                IpsecProtocol::Esp,
+                XfrmMode::Tunnel,
+                REQID,
+            ));
         conn.add_sp(sp_out).await?;
         let sp_in = XfrmSpBuilder::new(sel, PolicyDirection::In)
             .priority(100)
-            .template(XfrmUserTmpl::match_any(peer, local, IpsecProtocol::Esp, XfrmMode::Tunnel, REQID));
+            .template(XfrmUserTmpl::match_any(
+                peer,
+                local,
+                IpsecProtocol::Esp,
+                XfrmMode::Tunnel,
+                REQID,
+            ));
         conn.add_sp(sp_in).await?;
         println!("  added 2 SPs (Out, In)");
 
@@ -206,14 +235,18 @@ async fn run_apply() -> nlink::Result<()> {
 
         // 5. Fetch the rotated SA back via get_sa.
         println!("\n[5/6] Fetching rotated SA via get_sa...");
-        match conn.get_sa(local, peer, SPI_OUT, IpsecProtocol::Esp).await? {
+        match conn
+            .get_sa(local, peer, SPI_OUT, IpsecProtocol::Esp)
+            .await?
+        {
             Some(sa) => print_sa_brief(&sa),
             None => println!("  (not found — kernel said ENOENT)"),
         }
 
         // 6. Tear down.
         println!("\n[6/6] Tearing down (del_sa x2 + flush_sp)...");
-        conn.del_sa(local, peer, SPI_OUT, IpsecProtocol::Esp).await?;
+        conn.del_sa(local, peer, SPI_OUT, IpsecProtocol::Esp)
+            .await?;
         conn.del_sa(peer, local, SPI_IN, IpsecProtocol::Esp).await?;
         conn.flush_sp().await?;
         println!("  done — namespace will be deleted on Drop");

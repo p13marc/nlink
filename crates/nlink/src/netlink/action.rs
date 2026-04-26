@@ -426,9 +426,7 @@ impl MirredAction {
                         ));
                     }
                     let idx = crate::util::get_ifindex(s).map_err(|e| {
-                        Error::InvalidMessage(format!(
-                            "mirred: dev `{s}` not found: {e}"
-                        ))
+                        Error::InvalidMessage(format!("mirred: dev `{s}` not found: {e}"))
                     })?;
                     ifindex = Some(idx);
                     i += 2;
@@ -1327,8 +1325,7 @@ impl NatAction {
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         if params.len() < 3 {
             return Err(Error::InvalidMessage(
-                "nat: requires `ingress|egress <oldaddr[/prefix]> <newaddr>`"
-                    .to_string(),
+                "nat: requires `ingress|egress <oldaddr[/prefix]> <newaddr>`".to_string(),
             ));
         }
         let direction = params[0];
@@ -2202,12 +2199,10 @@ impl SampleAction {
                 }
             }
         }
-        let rate = rate.ok_or_else(|| {
-            Error::InvalidMessage("sample: `rate <N>` required".to_string())
-        })?;
-        let group = group.ok_or_else(|| {
-            Error::InvalidMessage("sample: `group <G>` required".to_string())
-        })?;
+        let rate =
+            rate.ok_or_else(|| Error::InvalidMessage("sample: `rate <N>` required".to_string()))?;
+        let group = group
+            .ok_or_else(|| Error::InvalidMessage("sample: `group <G>` required".to_string()))?;
         let mut act = Self::new(rate, group);
         if let Some(t) = trunc {
             act = act.trunc(t);
@@ -3357,9 +3352,8 @@ impl SimpleAction {
                 }
             }
         }
-        let sdata = sdata.ok_or_else(|| {
-            Error::InvalidMessage("simple: `sdata <text>` required".to_string())
-        })?;
+        let sdata = sdata
+            .ok_or_else(|| Error::InvalidMessage("simple: `sdata <text>` required".to_string()))?;
         let mut act = Self::new(sdata);
         if let Some(v) = verdict {
             act = act.verdict(v);
@@ -4157,7 +4151,10 @@ mod tests {
     #[test]
     fn gact_parse_params_default_yields_pass() {
         let a = GactAction::parse_params(&[]).unwrap();
-        assert_eq!(write_options_bytes(&a), write_options_bytes(&GactAction::pass()));
+        assert_eq!(
+            write_options_bytes(&a),
+            write_options_bytes(&GactAction::pass())
+        );
     }
 
     #[test]
@@ -4165,7 +4162,10 @@ mod tests {
         let a = GactAction::parse_params(&["drop"]).unwrap();
         let b = GactAction::parse_params(&["shot"]).unwrap();
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
-        assert_eq!(write_options_bytes(&a), write_options_bytes(&GactAction::drop()));
+        assert_eq!(
+            write_options_bytes(&a),
+            write_options_bytes(&GactAction::drop())
+        );
     }
 
     #[test]
@@ -4240,10 +4240,7 @@ mod tests {
     fn mirred_parse_params_dev_and_ifindex_mutually_exclusive() {
         // We can't easily test `dev <name>` (sysfs lookup), but we
         // can verify the mutex error fires when both are set.
-        let err = MirredAction::parse_params(&[
-            "ifindex", "1", "ifindex", "2",
-        ])
-        .unwrap_err();
+        let err = MirredAction::parse_params(&["ifindex", "1", "ifindex", "2"]).unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"));
     }
 
@@ -4258,7 +4255,10 @@ mod tests {
     #[test]
     fn vlan_parse_params_pop() {
         let a = VlanAction::parse_params(&["pop"]).unwrap();
-        assert_eq!(write_options_bytes(&a), write_options_bytes(&VlanAction::pop()));
+        assert_eq!(
+            write_options_bytes(&a),
+            write_options_bytes(&VlanAction::pop())
+        );
     }
 
     #[test]
@@ -4371,7 +4371,10 @@ mod tests {
     #[test]
     fn csum_parse_params_iph_only() {
         let a = CsumAction::parse_params(&["iph"]).unwrap();
-        assert_eq!(write_options_bytes(&a), write_options_bytes(&CsumAction::new().iph()));
+        assert_eq!(
+            write_options_bytes(&a),
+            write_options_bytes(&CsumAction::new().iph())
+        );
     }
 
     #[test]
@@ -4386,11 +4389,16 @@ mod tests {
 
     #[test]
     fn csum_parse_params_all_kinds() {
-        let a = CsumAction::parse_params(&[
-            "iph", "icmp", "igmp", "tcp", "udp", "udplite", "sctp",
-        ])
-        .unwrap();
-        let b = CsumAction::new().iph().icmp().igmp().tcp().udp().udplite().sctp();
+        let a = CsumAction::parse_params(&["iph", "icmp", "igmp", "tcp", "udp", "udplite", "sctp"])
+            .unwrap();
+        let b = CsumAction::new()
+            .iph()
+            .icmp()
+            .igmp()
+            .tcp()
+            .udp()
+            .udplite()
+            .sctp();
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
     }
 
@@ -4405,13 +4413,15 @@ mod tests {
     #[test]
     fn sample_parse_params_required_rate_and_group() {
         let a = SampleAction::parse_params(&["rate", "100", "group", "5"]).unwrap();
-        assert_eq!(write_options_bytes(&a), write_options_bytes(&SampleAction::new(100, 5)));
+        assert_eq!(
+            write_options_bytes(&a),
+            write_options_bytes(&SampleAction::new(100, 5))
+        );
     }
 
     #[test]
     fn sample_parse_params_with_trunc_any_order() {
-        let a = SampleAction::parse_params(&["trunc", "128", "rate", "100", "group", "5"])
-            .unwrap();
+        let a = SampleAction::parse_params(&["trunc", "128", "rate", "100", "group", "5"]).unwrap();
         let b = SampleAction::new(100, 5).trunc(128);
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
     }
@@ -4479,8 +4489,7 @@ mod tests {
 
     #[test]
     fn tunnel_key_parse_params_invalid_dst_port_errors() {
-        let err =
-            TunnelKeyAction::parse_params(&["set", "dst_port", "70000"]).unwrap_err();
+        let err = TunnelKeyAction::parse_params(&["set", "dst_port", "70000"]).unwrap_err();
         assert!(err.to_string().contains("dst_port"));
     }
 
@@ -4489,21 +4498,15 @@ mod tests {
     #[test]
     fn nat_parse_params_egress_snat_full_addr() {
         let a = NatAction::parse_params(&["egress", "10.0.0.1", "192.168.0.1"]).unwrap();
-        let b = NatAction::snat(
-            "10.0.0.1".parse().unwrap(),
-            "192.168.0.1".parse().unwrap(),
-        );
+        let b = NatAction::snat("10.0.0.1".parse().unwrap(), "192.168.0.1".parse().unwrap());
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
     }
 
     #[test]
     fn nat_parse_params_ingress_dnat_with_prefix() {
         let a = NatAction::parse_params(&["ingress", "10.0.0.0/24", "192.168.0.0"]).unwrap();
-        let b = NatAction::dnat(
-            "10.0.0.0".parse().unwrap(),
-            "192.168.0.0".parse().unwrap(),
-        )
-        .prefix(24);
+        let b =
+            NatAction::dnat("10.0.0.0".parse().unwrap(), "192.168.0.0".parse().unwrap()).prefix(24);
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
     }
 
@@ -4521,8 +4524,7 @@ mod tests {
 
     #[test]
     fn nat_parse_params_invalid_prefix_errors() {
-        let err =
-            NatAction::parse_params(&["egress", "10.0.0.0/40", "192.168.0.0"]).unwrap_err();
+        let err = NatAction::parse_params(&["egress", "10.0.0.0/40", "192.168.0.0"]).unwrap_err();
         assert!(err.to_string().contains("out of range"));
     }
 
@@ -4552,7 +4554,10 @@ mod tests {
     fn simple_parse_params_unknown_verdict_rebrands_error_prefix() {
         let err = SimpleAction::parse_params(&["sdata", "x", "verdict", "wat"]).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("simple:"), "must rebrand gact: → simple: ({msg})");
+        assert!(
+            msg.contains("simple:"),
+            "must rebrand gact: → simple: ({msg})"
+        );
         assert!(!msg.contains("gact:"));
     }
 
@@ -4608,8 +4613,7 @@ mod tests {
 
     #[test]
     fn police_parse_params_rate_and_burst() {
-        let a =
-            PoliceAction::parse_params(&["rate", "1mbit", "burst", "32k"]).unwrap();
+        let a = PoliceAction::parse_params(&["rate", "1mbit", "burst", "32k"]).unwrap();
         let b = PoliceAction::new()
             .rate(crate::util::Rate::mbit(1).as_bytes_per_sec())
             .burst(32 * 1024);
@@ -4707,14 +4711,9 @@ mod tests {
 
     #[test]
     fn ct_parse_params_nat_dst_address_range() {
-        let a = CtAction::parse_params(&[
-            "commit", "nat", "dst", "10.0.0.10-10.0.0.20",
-        ])
-        .unwrap();
-        let b = CtAction::commit().nat_dst(
-            "10.0.0.10".parse().unwrap(),
-            "10.0.0.20".parse().unwrap(),
-        );
+        let a = CtAction::parse_params(&["commit", "nat", "dst", "10.0.0.10-10.0.0.20"]).unwrap();
+        let b =
+            CtAction::commit().nat_dst("10.0.0.10".parse().unwrap(), "10.0.0.20".parse().unwrap());
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
     }
 
@@ -4740,11 +4739,13 @@ mod tests {
 
     #[test]
     fn pedit_parse_params_always_rejects_with_clear_message() {
-        let err = PeditAction::parse_params(&["munge", "ip", "src", "set", "1.2.3.4"])
-            .unwrap_err();
+        let err = PeditAction::parse_params(&["munge", "ip", "src", "set", "1.2.3.4"]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("pedit:"), "kind-prefixed: {msg}");
-        assert!(msg.contains("not yet typed-modelled"), "stub message: {msg}");
+        assert!(
+            msg.contains("not yet typed-modelled"),
+            "stub message: {msg}"
+        );
         assert!(msg.contains("Plan 139"), "points at the plan: {msg}");
     }
 

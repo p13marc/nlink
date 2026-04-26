@@ -29,12 +29,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use super::{
-    builder::MessageBuilder,
-    connection::Connection,
-    error::Result,
-    protocol::Xfrm,
-};
+use super::{builder::MessageBuilder, connection::Connection, error::Result, protocol::Xfrm};
 
 // Netlink constants
 const NLMSG_DONE: u16 = 3;
@@ -1275,7 +1270,10 @@ impl Connection<Xfrm> {
 
     async fn flush_sa_inner(&self, proto: u8) -> Result<()> {
         let mut b = MessageBuilder::new(XFRM_MSG_FLUSHSA, NLM_F_REQUEST | NLM_F_ACK);
-        let body = XfrmUsersaFlush { proto, _pad: [0; 7] };
+        let body = XfrmUsersaFlush {
+            proto,
+            _pad: [0; 7],
+        };
         b.append_bytes(body.as_bytes());
         self.send_ack(b).await
     }
@@ -1958,8 +1956,8 @@ mod tests {
         .aead_aes_gcm(&key, 128);
 
         let frame = build_add_sa_frame(sa);
-        let parsed = Connection::<Xfrm>::parse_sa_msg(&frame)
-            .expect("parse_sa must round-trip AEAD SA");
+        let parsed =
+            Connection::<Xfrm>::parse_sa_msg(&frame).expect("parse_sa must round-trip AEAD SA");
 
         assert_eq!(parsed.spi, 0x12345678);
         assert_eq!(parsed.mode, XfrmMode::Transport);
@@ -1986,8 +1984,8 @@ mod tests {
         .encr_aes_cbc(&[0xCCu8; 32]); // AES-256
 
         let frame = build_add_sa_frame(sa);
-        let parsed = Connection::<Xfrm>::parse_sa_msg(&frame)
-            .expect("parse_sa must round-trip v6 SA");
+        let parsed =
+            Connection::<Xfrm>::parse_sa_msg(&frame).expect("parse_sa must round-trip v6 SA");
 
         assert_eq!(
             parsed.src_addr,
@@ -2015,8 +2013,8 @@ mod tests {
         .encr_aes_cbc(&[0u8; 16]);
 
         let frame = build_add_sa_frame(sa);
-        let parsed = Connection::<Xfrm>::parse_sa_msg(&frame)
-            .expect("parse_sa must round-trip NAT-T SA");
+        let parsed =
+            Connection::<Xfrm>::parse_sa_msg(&frame).expect("parse_sa must round-trip NAT-T SA");
 
         let encap = parsed.encap.expect("XFRMA_ENCAP must be present");
         // sport/dport are stored network-byte-order on the wire; the
@@ -2043,8 +2041,10 @@ mod tests {
         assert!(frame.len() >= 16 + 24);
         let id_bytes = &frame[16..16 + 24];
         let (got, _) = XfrmUsersaId::ref_from_prefix(id_bytes).unwrap();
-        assert_eq!(got.daddr.to_ip(libc::AF_INET as u16),
-                   Some(IpAddr::V4("10.0.0.2".parse().unwrap())));
+        assert_eq!(
+            got.daddr.to_ip(libc::AF_INET as u16),
+            Some(IpAddr::V4("10.0.0.2".parse().unwrap()))
+        );
         assert_eq!(u32::from_be(got.spi), 0xdead_beef);
         assert_eq!(got.family, libc::AF_INET as u16);
         assert_eq!(got.proto, IpsecProtocol::Esp.number());
@@ -2053,7 +2053,10 @@ mod tests {
     #[test]
     fn xfrm_flush_sa_proto_zero_means_all() {
         let mut b = MessageBuilder::new(XFRM_MSG_FLUSHSA, NLM_F_REQUEST | NLM_F_ACK);
-        let body = XfrmUsersaFlush { proto: 0, _pad: [0; 7] };
+        let body = XfrmUsersaFlush {
+            proto: 0,
+            _pad: [0; 7],
+        };
         b.append_bytes(body.as_bytes());
         let frame = b.finish();
 
@@ -2260,10 +2263,7 @@ mod tests {
         let frame = b.finish();
 
         // nlmsg_type = DELPOLICY (offset 4..6)
-        assert_eq!(
-            u16::from_le_bytes([frame[4], frame[5]]),
-            XFRM_MSG_DELPOLICY
-        );
+        assert_eq!(u16::from_le_bytes([frame[4], frame[5]]), XFRM_MSG_DELPOLICY);
 
         // XfrmUserpolicyId starts at offset 16. Direction byte
         // sits at offset 16 + size_of::<XfrmSelector>() + 4 (index).
@@ -2327,7 +2327,11 @@ mod tests {
 
     #[test]
     fn policy_direction_to_u8_round_trips() {
-        for dir in [PolicyDirection::In, PolicyDirection::Out, PolicyDirection::Forward] {
+        for dir in [
+            PolicyDirection::In,
+            PolicyDirection::Out,
+            PolicyDirection::Forward,
+        ] {
             assert_eq!(PolicyDirection::from_u8(dir.number()), dir);
         }
     }

@@ -4490,9 +4490,10 @@ impl HtbClassConfig {
         while i < params.len() {
             let tok = params[i];
             let val = || {
-                params.get(i + 1).copied().ok_or_else(|| {
-                    Error::InvalidMessage(format!("htb: `{tok}` requires a value"))
-                })
+                params
+                    .get(i + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("htb: `{tok}` requires a value")))
             };
             match tok {
                 "rate" => {
@@ -4552,18 +4553,14 @@ impl HtbClassConfig {
                 "mpu" => {
                     let v = val()?;
                     mpu = Some(v.parse::<u16>().map_err(|_| {
-                        Error::InvalidMessage(format!(
-                            "htb: invalid mpu `{v}` (expected u16)"
-                        ))
+                        Error::InvalidMessage(format!("htb: invalid mpu `{v}` (expected u16)"))
                     })?);
                     i += 2;
                 }
                 "overhead" => {
                     let v = val()?;
                     overhead = Some(v.parse::<u16>().map_err(|_| {
-                        Error::InvalidMessage(format!(
-                            "htb: invalid overhead `{v}` (expected u16)"
-                        ))
+                        Error::InvalidMessage(format!("htb: invalid overhead `{v}` (expected u16)"))
                     })?);
                     i += 2;
                 }
@@ -4575,9 +4572,7 @@ impl HtbClassConfig {
             }
         }
 
-        let rate = rate.ok_or_else(|| {
-            Error::InvalidMessage("htb: `rate` is required".into())
-        })?;
+        let rate = rate.ok_or_else(|| Error::InvalidMessage("htb: `rate` is required".into()))?;
         let mut cfg = HtbClassConfig::new(rate);
         if let Some(c) = ceil {
             cfg = cfg.ceil(c);
@@ -4854,9 +4849,9 @@ impl HfscClassConfig {
             let v = params.get(i + 2).copied().ok_or_else(|| {
                 Error::InvalidMessage(format!("hfsc: `{kind} rate` requires a value"))
             })?;
-            let rate = v.parse::<Rate>().map_err(|e| {
-                Error::InvalidMessage(format!("hfsc: invalid rate `{v}`: {e}"))
-            })?;
+            let rate = v
+                .parse::<Rate>()
+                .map_err(|e| Error::InvalidMessage(format!("hfsc: invalid rate `{v}`: {e}")))?;
             cfg = match kind {
                 "rt" => cfg.rt_rate(rate),
                 "ls" => cfg.ls_rate(rate),
@@ -7034,7 +7029,10 @@ mod tests {
     #[test]
     fn htb_class_parse_params_rate_only() {
         let cfg = HtbClassConfig::parse_params(&["rate", "100mbit"]).unwrap();
-        assert_eq!(cfg.rate.as_bytes_per_sec(), crate::util::Rate::mbit(100).as_bytes_per_sec());
+        assert_eq!(
+            cfg.rate.as_bytes_per_sec(),
+            crate::util::Rate::mbit(100).as_bytes_per_sec()
+        );
         assert!(cfg.ceil.is_none());
     }
 
@@ -7066,7 +7064,10 @@ mod tests {
     #[test]
     fn htb_class_parse_params_unknown_token_errors() {
         let err = HtbClassConfig::parse_params(&["rate", "100mbit", "nonsense"]).unwrap_err();
-        assert!(err.to_string().contains("htb: unknown token `nonsense`"), "got: {err}");
+        assert!(
+            err.to_string().contains("htb: unknown token `nonsense`"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -7101,7 +7102,10 @@ mod tests {
     #[test]
     fn hfsc_class_parse_params_unknown_curve_errors() {
         let err = HfscClassConfig::parse_params(&["xt", "rate", "10mbit"]).unwrap_err();
-        assert!(err.to_string().contains("hfsc: unknown token `xt`"), "got: {err}");
+        assert!(
+            err.to_string().contains("hfsc: unknown token `xt`"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -7109,7 +7113,10 @@ mod tests {
         let err = HfscClassConfig::parse_params(&["rt", "rate", "10mbit", "ls", "m1", "100"])
             .unwrap_err();
         assert!(err.to_string().contains("hfsc:"), "kind-prefixed: {err}");
-        assert!(err.to_string().contains("only the `rate <rate>` form"), "got: {err}");
+        assert!(
+            err.to_string().contains("only the `rate <rate>` form"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -7123,7 +7130,10 @@ mod tests {
     #[test]
     fn drr_class_parse_params_unknown_token_errors() {
         let err = DrrClassConfig::parse_params(&["rate", "100mbit"]).unwrap_err();
-        assert!(err.to_string().contains("drr: unknown token `rate`"), "got: {err}");
+        assert!(
+            err.to_string().contains("drr: unknown token `rate`"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -7142,7 +7152,10 @@ mod tests {
     #[test]
     fn qfq_class_parse_params_unknown_token_errors() {
         let err = QfqClassConfig::parse_params(&["nonsense"]).unwrap_err();
-        assert!(err.to_string().contains("qfq: unknown token `nonsense`"), "got: {err}");
+        assert!(
+            err.to_string().contains("qfq: unknown token `nonsense`"),
+            "got: {err}"
+        );
     }
 
     /// Generic dispatch through the sealed `ParseParams` trait —
