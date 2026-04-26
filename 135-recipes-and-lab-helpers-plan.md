@@ -2,9 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: More cookbook recipes + public lab/test helpers
-target version: 0.14.0 (revised 2026-04-19; originally split between "0.14.0" and "1.0", now folded into 0.14.0)
-date: 2026-04-19
-status: PR A complete 2026-04-21 under [Unreleased]. PR B partial: 6 of 7 recipes shipped (multi-namespace-events, bridge-vlan, bidirectional-rate-limit, wireguard-mesh, nftables-stateful-fw, conntrack-programmatic) + recipe index + README/CLAUDE.md pointers. Two deferred recipes are now phases of [Plan 142](142-zero-legacy-typed-api-plan.md): `xfrm-ipsec-tunnel` lands with Plan 141 PR C (Plan 142 Phase 2), `cgroup-classification` lands with Plan 133 PR C (Plan 142 Phase 1). PR B closes at 7/7 once both phases land. Recipe smoke tests (`tests/integration/recipes.rs`) un-parked by Plan 140 (Plan 142 Phase 0).
+target version: 0.15.0 (PR A + 6 of 7 recipes shipped under `[Unreleased]`); 2 deferred recipes pending
+date: 2026-04-19; status updated 2026-04-25
+status: **PARTIAL — PR A closed; PR B at 6/7.** PR A complete 2026-04-21: `nlink::lab` shipped publicly with `LabNamespace` + `with_namespace` + `LabBridge` + `LabVeth`. PR B: 6 recipes shipped under `[Unreleased]` (`multi-namespace-events`, `bridge-vlan`, `bidirectional-rate-limit`, `wireguard-mesh`, `nftables-stateful-fw`, `conntrack-programmatic`, `per-peer-impairment`) + recipe index + README/CLAUDE.md pointers. **Both deferred recipes are now writeable** with the typed surfaces shipped in Plan 142: `xfrm-ipsec-tunnel` uses Plan 141 PR A+B's typed XFRM CRUD (sudo-gated for golden-frame validation); `cgroup-classification` uses Plan 133 PR C's `BasicFilter::ematch(EmatchKind::U32(...))`. Either order; both close PR B at 7/7. Recipe smoke tests (`tests/integration/recipes.rs`) un-park alongside the GHA workflow YAML (Plan 140 tail).
+related: Plan 141 PR C (xfrm-ipsec-tunnel recipe — sudo-gated); Plan 133 PR C (`e2ee5d8`, shipped — enables cgroup-classification recipe).
 ---
 
 # Recipes & Lab Helpers Plan

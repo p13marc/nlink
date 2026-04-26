@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: TC coverage gaps — sch_fq_pie + actions polish + cls_basic ematch
-target version: 0.14.0 (PRs A/B/D landed 2026-04-19/20); PR C deferred to 0.15.0
-date: 2026-04-19; status updated 2026-04-25
-status: 3 of 4 PRs landed under [Unreleased]: PR A typed `CakeConfig` (`17e5f37`), PR B `FqPieConfig` (`6a62504`), PR D `BpfAction` + `SimpleAction` (`5e20fca`). PR C (`BasicFilter` ematch — cmp/u32/meta) deferred — ematch wire format needs validation against golden `tc(8)` hex captures before shipping. **PR C is now Phase 1 of [Plan 142](142-zero-legacy-typed-api-plan.md)** (the consolidated 0.15.0 master plan); it ships alongside Plan 138's u32 work and the un-parked Plan 137 integration tests. The golden-hex capture step pairs naturally with Plan 140 (Phase 0 of Plan 142) — capture under sudo locally, check fixtures into the repo, run comparison tests in CI.
-verified: PRs A/B/D in CHANGELOG `## [Unreleased]`; PR C scope unchanged from §4 below
+target version: 0.15.0 (released under `[Unreleased]`)
+date: 2026-04-19; closed 2026-04-25
+status: **CLOSED — all 4 PRs shipped under `[Unreleased]`.** PR A typed `CakeConfig` (`17e5f37`), PR B `FqPieConfig` (`6a62504`), PR D `BpfAction` + `SimpleAction` (`5e20fca`). **PR C** shipped as Plan 142 Phase 1 (`e2ee5d8`): `BasicFilter` ematch tree (cmp + u32; meta deferred until golden hex available), 12 unit tests, `tcf_ematch_*` wire structs in `types/tc/filter/ematch`. Filter side at 9/9 typed-first; the bin's `#[allow(deprecated)]` on `filter_builder` came off in Plan 139 PR C (`0d095ae`). This plan is historical reference — the substance lives in CHANGELOG `## [Unreleased]` and [`docs/migration_guide/0.14.0-to-0.15.0.md`](docs/migration_guide/0.14.0-to-0.15.0.md).
+related: Plan 142 master; Plan 139 PR C (`56371db`) deletion of the legacy modules made every typed config the canonical surface.
 ---
 
 # TC Coverage Plan

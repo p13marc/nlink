@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: XFRM write-path API extension — `Connection<Xfrm>` SA / SP CRUD
-target version: 0.15.0 (Phase 2 of [Plan 142](142-zero-legacy-typed-api-plan.md))
-date: 2026-04-25
-status: draft — phase-level detail document for **Plan 142 Phase 2**. Independent of Phases 1, 3, 4 — can land in parallel with Phase 1 if maintainer bandwidth allows. Read Plan 142 first; this plan provides the SA/SP wire-format and recipe specifics.
-related: Plan 142 master; Plan 135 PR B (this plan's PR C bumps Plan 135 to 7/7); Plan 137 PR A (the typed-builder pattern this plan mirrors).
+target version: 0.15.0 (PRs A+B shipped under `[Unreleased]`); PR C drafted, sudo-gated
+date: 2026-04-25; status updated 2026-04-25
+status: **PARTIAL — PRs A+B closed; PR C drafted (needs sudo).** **PR A** (`74a4e48` slice 1 + `844a166` slice 2): typed `XfrmSaBuilder` + 6 SA CRUD methods on `Connection<Xfrm>` (`add/update/del/flush/flush_proto/get_sa`), 12 wire-format unit tests round-tripping through `parse_sa_msg`. **PR B** (`a120ee7`): `XfrmSpBuilder` + 5 SP CRUD methods (`add/update/del/flush/get_sp`), `XfrmUserTmpl::match_any` convenience constructor, `XfrmUserpolicyId` body struct, 8 wire-format tests. 20 round-trip tests total across A+B; lib code can ship without sudo. **PR C** (recipe + `--apply` example promotion) drafted but **needs sudo for golden-frame validation** — the maintainer's "regular user" workflow blocks shipping the validation step. The library code for the recipe could ship now (the typed surface is proven by the round-trip tests); the `--apply` runner needs a kernel session to validate end-to-end IPsec encap. Closes Plan 135 PR B at 7/7 if it ships before the `cgroup-classification` recipe.
+related: Plan 142 master (Phase 2 — A+B closed; PR C tail); Plan 135 PR B (closes at 7/7 once the xfrm recipe lands); Plan 137 PR A (the typed-builder pattern this plan mirrors).
 ---
 
 # XFRM write-path API extension

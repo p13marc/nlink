@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: bins/tc u32 filter selector grammar — typed `parse_params` for `U32Filter`
-target version: 0.15.0 (Phase 1 of [Plan 142](142-zero-legacy-typed-api-plan.md))
-date: 2026-04-25
-status: draft — phase-level detail document for **Plan 142 Phase 1**. Read Plan 142 first for the consolidated view; this plan is the per-PR / per-token / per-fixture specification.
-related: Plan 142 master; Plan 133 PR C (basic filter ematch — the other half of Plan 142 Phase 1); Plan 140 (CI integration tests harness — Plan 142 Phase 0 prerequisite for the golden-hex fixtures in Phase 2 of this plan).
+target version: 0.15.0 (released under `[Unreleased]`)
+date: 2026-04-25; closed 2026-04-25
+status: **CLOSED — all 3 PRs shipped under `[Unreleased]` as Plan 142 Phase 1.** PR A (`ae0e4ae`): raw `match u32|u16|u8 VAL MASK at OFFSET` triples + structural tokens (classid/flowid, chain, skip_hw, skip_sw), 16 unit tests. PR B (`3b5cb21`): named-match shortcuts (`match ip src/dst/protocol/sport/dport`, `match tcp|udp sport|dport`) routing through existing typed setters, 15 tests. PR C (`d95a0ea`): hash-table grammar (`divisor`, `ht`, `link`, `hashkey`); `order` deferred with explicit rejection. 41 unit tests across the three PRs. Filter side at 9/9 typed-first (the last kind, `basic`, closed via Plan 133 PR C). Bin migration off the legacy `filter_builder` fallback completed in Plan 139 PR C (`0d095ae`). Historical reference; substance lives in CHANGELOG `## [Unreleased]`.
+related: Plan 142 master; Plan 133 PR C (the other half of Phase 1); Plan 139 PR C (bin migration that finalised the filter side).
 ---
 
 # bins/tc u32 filter selector grammar

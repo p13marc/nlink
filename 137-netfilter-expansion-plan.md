@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: Netfilter capabilities expansion (ctnetlink mutation, events, expect, nfqueue, nflog)
-target version: post-0.14.0 (0.15.0 or later; staged work)
-date: 2026-04-21
-status: PRs A+B both kernel-validated end-to-end on Linux 6.19. PR A: ConntrackBuilder + add/update/del/flush/by_id, `--apply` example (`1e9307e`), recipe (`c15206a`), validation fix `122f60b` (TCP add with `tcp_state` requires explicit timeout). PR B: ConntrackEvent + ConntrackGroup + subscribe + EventSource impl + 6 parse-events unit tests + `netfilter_conntrack_events --apply` smoke test (1 NEW + 1 DESTROY received in 3s, same kernel-assigned ID round-trips through the multicast channel). Recipe `conntrack-programmatic.md` extended with an Events section (`b552411`). **Integration tests un-parked by [Plan 142](142-zero-legacy-typed-api-plan.md) Phase 0** (CI infrastructure via Plan 140) and ride along with Phase 1 — the 4 mutation + 2 events tests (§2.3 + §3.3) lift cleanly from the existing `--apply` runners. PRs C (`ct_expect`), D (nfqueue), E (nflog) unstarted; **explicitly out of scope for the 0.15.0 release per Plan 142 §1**; demand-gated. Plan 136 §2.2's conntrack example deferral is resolved.
-related: Plan 136 §2.2 row for `netfilter/conntrack.rs` (deferred pending the library extensions this plan describes)
+target version: 0.15.0 (PRs A+B shipped under `[Unreleased]`); integration-tests + PRs C/D/E open
+date: 2026-04-21; status updated 2026-04-25
+status: **PARTIAL — PRs A+B shipped + kernel-validated; integration tests + PRs C/D/E open.** PR A: `ConntrackBuilder` + `add/update/del/flush/by_id`, `--apply` example (`1e9307e`), recipe (`c15206a`), validation fix `122f60b` (TCP add with `tcp_state` requires explicit timeout). PR B: `ConntrackEvent` + `ConntrackGroup` + subscribe + `EventSource` impl + 6 parse-events unit tests + `netfilter_conntrack_events --apply` smoke test (1 NEW + 1 DESTROY received in 3s, same kernel-assigned ID round-trips through the multicast channel). Recipe `conntrack-programmatic.md` extended with an Events section (`b552411`). **Integration tests** (the 4 mutation + 2 events tests at §2.3 + §3.3 — lift cleanly from the existing `--apply` runners) un-park alongside the Plan 140 GHA workflow YAML; both wait on the maintainer's first sudo session because the GHA workflow + the in-tree tests need to land together to validate. **PRs C (`ct_expect`), D (nfqueue), E (nflog)** unstarted; demand-gated — open per-PR plans only when a downstream user asks. Plan 136 §2.2's conntrack example deferral is resolved.
+related: Plan 136 §2.2 row for `netfilter/conntrack.rs` (resolved by PR A slice 3); Plan 140 (CI workflow that un-parks the integration tests).
 ---
 
 # Netfilter Capabilities Expansion

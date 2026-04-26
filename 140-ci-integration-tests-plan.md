@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: CI integration tests harness — privileged GitHub Actions runner for root-gated `lab`-feature tests
-target version: 0.15.0 (Phase 0 of [Plan 142](142-zero-legacy-typed-api-plan.md))
-date: 2026-04-25
-status: draft — phase-level detail document for **Plan 142 Phase 0**. Recommended landing first because every later phase's integration tests depend on it. Read Plan 142 first for the consolidated view; this plan is the workflow / kernel-module / skip-helper specification.
-related: Plan 142 master; Plan 137 integration tests (un-parked once this lands); Plan 135 recipe smoke tests (also un-parked); Plan 138 PR B golden-hex fixtures (run by this CI workflow).
+target version: 0.15.0 helper shipped under `[Unreleased]`; GHA workflow YAML deferred to 0.16.0 / sudo session
+date: 2026-04-25; status updated 2026-04-25
+status: **PARTIAL — helper shipped, workflow YAML pending.** **Helper** (commit `553f9dd`) shipped under `[Unreleased]` as Plan 142 Phase 0: `nlink::lab::has_module(name) -> bool` checks `/sys/module/<name>` (works for both loadable + built-in features), and the `nlink::require_module!("nf_conntrack")` / `require_module_void!` macros pair with `require_root!()` for clean test skips. **GHA workflow YAML** (`.github/workflows/integration-tests.yml`) deferred — the maintainer runs `cargo test` as a regular user, so a workflow without an in-tree test that actually uses `require_module!` is no-op. Wires up alongside the first such test, which is the natural Plan 137 integration tests un-parking trigger. Both land together so the workflow has something to validate against on its first green run. Historical reference for the helper; substance lives in CHANGELOG `## [Unreleased]`.
+related: Plan 142 master (Phase 0 closed); Plan 137 integration tests (the natural un-park trigger).
 ---
 
 # CI integration tests harness

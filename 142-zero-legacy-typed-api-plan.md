@@ -2,9 +2,9 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: 0.15.0 typed-API completion — zero-legacy milestone (consolidates Plans 133 PR C, 138, 139, 140, 141)
-target version: 0.15.0
-date: 2026-04-25
-status: draft — master plan; subordinate detailed plans (138/139/140/141) provide phase-level wire-format and API specifics
+target version: 0.15.0 (substantively shipped under `[Unreleased]`; cut-pending)
+date: 2026-04-25; substantively closed 2026-04-25
+status: **CLOSED — all 5 phases substantively shipped; only sudo-gated tail items remain.** **Phase 0** (`553f9dd` + `05b626d`): `nlink::lab::has_module` + `require_module!` macros + sealed `nlink::ParseParams` trait + 25 (now 41) impls + bins/tc dispatch tightened. **Phase 1** (`ae0e4ae` + `3b5cb21` + `d95a0ea` + `e2ee5d8`): Plan 138 closes (3 PRs) + Plan 133 PR C closes; filter side at 9/9 typed-first. **Phase 2** (`74a4e48` + `844a166` + `a120ee7`): Plan 141 PRs A+B close — XFRM SA + SP CRUD with 20 round-trip tests; PR C (recipe + `--apply`) is sudo-gated. **Phase 3** (`d69e10a` + `f7e4502` + `d124920` + `2764806`): Plan 139 PRs A+B close — typed standalone-action CRUD + `parse_params` on all 14 action kinds (74 tests). **Phase 4** (`b2370fd` + `0d095ae` + `56371db`): legacy-deletion milestone — `tc::builders::*` + `tc::options/*` deleted (-3940 LOC), zero `#[allow(deprecated)]` in `bins/tc`, every §6 acceptance gate met. Lib tests: 593 → 749 (+156). **Master plan closed; phase-level detail plans (133, 138, 139, 140, 141) all marked closed in their own headers.** Remaining tail (sudo-gated, ships post-cut): Plan 141 PR C recipe; Plan 140 GHA workflow YAML alongside Plan 137 integration tests un-parking. Procedural follow-up: cut 0.15.0 (bump version, rename `[Unreleased]`, publish). Migration walkthrough: [`docs/migration_guide/0.14.0-to-0.15.0.md`](docs/migration_guide/0.14.0-to-0.15.0.md).
 ---
 
 # Plan 142: 0.15.0 — Typed-API completion (zero-legacy milestone)

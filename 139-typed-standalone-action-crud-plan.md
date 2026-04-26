@@ -2,10 +2,10 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: typed standalone-action CRUD on `Connection<Route>` — unblocks bins/tc action subcommand migration
-target version: 0.15.0 (Phase 3 + Phase 4 of [Plan 142](142-zero-legacy-typed-api-plan.md))
-date: 2026-04-25
-status: draft — phase-level detail document for **Plan 142 Phases 3 + 4**. Phase 3 is this plan's PRs A + B (library API + per-kind parse_params). Phase 4 is this plan's PR C, which is the **legacy-deletion milestone** for the entire 0.15.0 release. Read Plan 142 first; this plan provides the wire-format / per-kind / acceptance-criteria detail.
-related: Plan 142 master; Plan 138 (must land first — `u32` parse_params + bin dispatch); Plan 133 PR C (must land first — `basic` parse_params + bin dispatch); Plan 140 (must land first — CI infrastructure); Plan 141 (independent but typically lands before this).
+target version: 0.15.0 (released under `[Unreleased]`); PR C is the release-cut commit
+date: 2026-04-25; closed 2026-04-25
+status: **CLOSED — all 3 PRs shipped under `[Unreleased]` as Plan 142 Phases 3 + 4.** **PR A** (`d69e10a`): library typed CRUD on `Connection<Route>` — `add/del/get/dump_action` + `ActionMessage` parser, 8 wire-format tests. **PR B** (`f7e4502` + `d124920` + `2764806`): `parse_params` on all 14 action kinds (13 fully parsed + `PeditAction` stub per §10), 74 unit tests. **PR C** (`b2370fd` + `0d095ae` + `56371db`): bin migration (action.rs typed dispatch + qdisc/filter legacy-fallback removal + parse_protocol inlining) + the **legacy-deletion milestone** that closed the 0.15.0 release-cut — `tc::builders::*` + `tc::options/*` deleted entirely (-3940 LOC), zero `#[allow(deprecated)]` in `bins/tc`. Every Plan 142 §6 acceptance gate met. Historical reference; substance lives in CHANGELOG `## [Unreleased]` and [`docs/migration_guide/0.14.0-to-0.15.0.md`](docs/migration_guide/0.14.0-to-0.15.0.md). One backlog item: `PeditAction::parse_params` is a stub (always rejects per §10's "punt-eligible until a downstream user asks") — see Backlog row in `128b-roadmap-overview.md`.
+related: Plan 142 master; Plans 138 + 133 PR C (filter side prerequisite — closed); Plan 140 (helper prerequisite — closed); Plan 141 (independent — closed except sudo-gated PR C).
 ---
 
 # Typed standalone-action CRUD on `Connection<Route>`

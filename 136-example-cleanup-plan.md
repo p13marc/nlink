@@ -2,9 +2,9 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: Example cleanup — promote read-only-print examples to real API usage
-target version: 0.14.0 (all phases shipped under `[Unreleased]`)
+target version: 0.15.0 (all phases shipped under `[Unreleased]`)
 date: 2026-04-20; closed 2026-04-25
-status: COMPLETE — all phases shipped, plan ready to archive. Phase 1 (`62b2ee5` htb, `87d0a56` wireguard); Phase 2 (`9168f40` macsec + mptcp, plus `fef5660` `MacsecLink` rtnetlink builder + `d52cd5d` doc cleanup); Phase 3 (`c872d37` ethtool_rings + nl80211 + devlink); previously-deferred `netfilter/conntrack.rs` promoted under Plan 137 PR A slice 3 (`1e9307e`) once the library gained typed conntrack mutation. The `MacsecLink` follow-up resolves the §2.2 caveat about shelling out to `ip(8)`.
+status: **CLOSED — all phases shipped, plan ready to archive.** Phase 1 (`62b2ee5` htb, `87d0a56` wireguard); Phase 2 (`9168f40` macsec + mptcp, plus `fef5660` `MacsecLink` rtnetlink builder + `d52cd5d` doc cleanup); Phase 3 (`c872d37` ethtool_rings + nl80211 + devlink); previously-deferred `netfilter/conntrack.rs` promoted under Plan 137 PR A slice 3 (`1e9307e`) once the library gained typed conntrack mutation. The `MacsecLink` follow-up resolves the §2.2 caveat about shelling out to `ip(8)`. Historical reference; substance is in CHANGELOG `## [Unreleased]`.
 related: Plan 137 (resolved the conntrack deferral); audit conversation 2026-04-20; `impair/per_peer.rs` template
 ---
 
