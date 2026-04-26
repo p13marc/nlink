@@ -1767,6 +1767,18 @@ Deferred recipes from Plan 135:
 config-tick loops). See `docs/recipes/per-peer-impairment.md` and
 the reconcile-loop snippet in `CLAUDE.md`.
 
+## [0.14.0] — skipped
+
+0.14.0 was never published as its own release. Its work
+(additive: typed-units rollout, reconcile pattern, ctnetlink
+mutation, `MacsecLink`, recipes, `tc::builders::*` deprecation)
+shipped together with the 0.15.0 deletion work as a single
+release. Upgrading from 0.13.0? Read both
+[`docs/migration_guide/0.13.0-to-0.14.0.md`](docs/migration_guide/0.13.0-to-0.14.0.md)
+(additive surface) and
+[`docs/migration_guide/0.14.0-to-0.15.0.md`](docs/migration_guide/0.14.0-to-0.15.0.md)
+(deletion) in order.
+
 ## [0.13.0] - 2026-04-19
 
 The 0.13.0 release lands the four foundation plans from the 1.0
