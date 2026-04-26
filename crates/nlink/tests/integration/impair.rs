@@ -19,6 +19,7 @@ fn netem_50ms() -> NetemConfig {
 #[tokio::test]
 async fn test_apply_creates_full_tree() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_apply")?;
     let conn = ns.connection()?;
@@ -77,6 +78,7 @@ async fn test_apply_creates_full_tree() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_apply_with_default_impairment_adds_default_leaf() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_default")?;
     let conn = ns.connection()?;
@@ -105,6 +107,7 @@ async fn test_apply_with_default_impairment_adds_default_leaf() -> nlink::Result
 #[tokio::test]
 async fn test_apply_no_default_means_no_default_leaf() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_no_default")?;
     let conn = ns.connection()?;
@@ -132,6 +135,7 @@ async fn test_apply_no_default_means_no_default_leaf() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_apply_idempotent() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_idempotent")?;
     let conn = ns.connection()?;
@@ -171,6 +175,7 @@ async fn test_apply_idempotent() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_clear_removes_all() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_clear")?;
     let conn = ns.connection()?;
@@ -211,6 +216,7 @@ async fn test_clear_removes_all() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_apply_with_ipv6_match() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_v6")?;
     let conn = ns.connection()?;
@@ -240,6 +246,7 @@ async fn test_apply_with_ipv6_match() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_apply_with_dst_mac_match() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_mac")?;
     let conn = ns.connection()?;
@@ -268,6 +275,7 @@ async fn test_apply_with_dst_mac_match() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_apply_by_index_constructor() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_byidx")?;
     let conn = ns.connection()?;
@@ -294,6 +302,7 @@ async fn test_apply_by_index_constructor() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_rate_cap_per_rule() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_ratecap")?;
     let conn = ns.connection()?;
@@ -326,6 +335,7 @@ async fn test_rate_cap_per_rule() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_reconcile_first_call_creates_tree() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_reconcile_first")?;
     let conn = ns.connection()?;
@@ -362,6 +372,7 @@ async fn test_reconcile_first_call_creates_tree() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_reconcile_idempotent() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_reconcile_idem")?;
     let conn = ns.connection()?;
@@ -389,6 +400,7 @@ async fn test_reconcile_idempotent() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_reconcile_modify_netem() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_reconcile_mod")?;
     let conn = ns.connection()?;
@@ -419,6 +431,7 @@ async fn test_reconcile_modify_netem() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_reconcile_remove_rule() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_reconcile_rm")?;
     let conn = ns.connection()?;
@@ -449,6 +462,7 @@ async fn test_reconcile_remove_rule() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_reconcile_dry_run_makes_no_changes() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_reconcile_dry")?;
     let conn = ns.connection()?;
@@ -478,6 +492,7 @@ async fn test_reconcile_dry_run_makes_no_changes() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_reconcile_wrong_root_kind_errors() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
     use nlink::netlink::tc::PrioConfig;
 
     let ns = TestNamespace::new("impair_reconcile_wrongroot")?;
@@ -506,6 +521,7 @@ async fn test_reconcile_wrong_root_kind_errors() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_reconcile_with_fallback_to_apply() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
     use nlink::ReconcileOptions;
     use nlink::netlink::tc::PrioConfig;
 
@@ -544,6 +560,7 @@ async fn test_reconcile_with_fallback_to_apply() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_get_filters_by_parent_filters_correctly() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower", "sch_netem");
 
     let ns = TestNamespace::new("impair_byparent")?;
     let conn = ns.connection()?;

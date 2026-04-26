@@ -90,6 +90,7 @@ fn test_per_host_limiter_with_rules() {
 #[tokio::test]
 async fn test_egress_rate_limiting() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower");
 
     let ns = TestNamespace::new("rl_egress")?;
     let conn = ns.connection()?;
@@ -123,6 +124,7 @@ async fn test_egress_rate_limiting() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_ingress_rate_limiting() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower");
 
     let ns = TestNamespace::new("rl_ingress")?;
     let conn = ns.connection()?;
@@ -162,6 +164,7 @@ async fn test_ingress_rate_limiting() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_bidirectional_rate_limiting() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower");
 
     let ns = TestNamespace::new("rl_bidir")?;
     let conn = ns.connection()?;
@@ -197,6 +200,7 @@ async fn test_bidirectional_rate_limiting() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_per_host_rate_limiting() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower");
 
     let ns = TestNamespace::new("rl_perhost")?;
     let conn = ns.connection()?;
@@ -238,6 +242,7 @@ async fn test_per_host_rate_limiting() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_rate_limiter_idempotency() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower");
 
     let ns = TestNamespace::new("rl_idemp")?;
     let conn = ns.connection()?;
@@ -262,6 +267,7 @@ async fn test_rate_limiter_idempotency() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_rate_limiter_remove_nonexistent() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower");
 
     let ns = TestNamespace::new("rl_remove")?;
     let conn = ns.connection()?;
@@ -282,6 +288,7 @@ async fn test_rate_limiter_remove_nonexistent() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_per_host_reconcile_first_call_creates_tree() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower");
 
     let ns = TestNamespace::new("rl_reconcile_first")?;
     let conn = ns.connection()?;
@@ -312,6 +319,7 @@ async fn test_per_host_reconcile_first_call_creates_tree() -> nlink::Result<()> 
 #[tokio::test]
 async fn test_per_host_reconcile_idempotent() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower");
 
     let ns = TestNamespace::new("rl_reconcile_idem")?;
     let conn = ns.connection()?;
@@ -337,6 +345,7 @@ async fn test_per_host_reconcile_idempotent() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_per_host_reconcile_dry_run() -> nlink::Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower");
 
     let ns = TestNamespace::new("rl_reconcile_dry")?;
     let conn = ns.connection()?;

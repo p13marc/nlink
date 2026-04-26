@@ -37,6 +37,7 @@ async fn setup_tc_ns(name: &str) -> Result<(TestNamespace, Connection<Route>)> {
 #[tokio::test]
 async fn test_add_netem_qdisc() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_netem");
 
     let (_ns, conn) = setup_tc_ns("netem").await?;
 
@@ -59,6 +60,7 @@ async fn test_add_netem_qdisc() -> Result<()> {
 #[tokio::test]
 async fn test_netem_with_loss() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_netem");
 
     let (_ns, conn) = setup_tc_ns("netemloss").await?;
 
@@ -78,6 +80,7 @@ async fn test_netem_with_loss() -> Result<()> {
 #[tokio::test]
 async fn test_del_netem() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_netem");
 
     let (_ns, conn) = setup_tc_ns("netemrm").await?;
 
@@ -101,6 +104,7 @@ async fn test_del_netem() -> Result<()> {
 #[tokio::test]
 async fn test_add_htb_qdisc() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb");
 
     let (_ns, conn) = setup_tc_ns("htb").await?;
 
@@ -121,6 +125,7 @@ async fn test_add_htb_qdisc() -> Result<()> {
 #[tokio::test]
 async fn test_add_tbf_qdisc() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_tbf");
 
     let (_ns, conn) = setup_tc_ns("tbf").await?;
 
@@ -143,6 +148,7 @@ async fn test_add_tbf_qdisc() -> Result<()> {
 #[tokio::test]
 async fn test_add_fq_codel_qdisc() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_fq_codel");
 
     let (_ns, conn) = setup_tc_ns("fqcodel").await?;
 
@@ -165,6 +171,7 @@ async fn test_add_fq_codel_qdisc() -> Result<()> {
 #[tokio::test]
 async fn test_add_prio_qdisc() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_prio");
 
     let (_ns, conn) = setup_tc_ns("prio").await?;
 
@@ -189,6 +196,7 @@ async fn test_add_prio_qdisc() -> Result<()> {
 #[tokio::test]
 async fn test_add_sfq_qdisc() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_sfq");
 
     let (_ns, conn) = setup_tc_ns("sfq").await?;
 
@@ -207,6 +215,7 @@ async fn test_add_sfq_qdisc() -> Result<()> {
 #[tokio::test]
 async fn test_add_ingress_qdisc() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_ingress");
 
     let (_ns, conn) = setup_tc_ns("ingress").await?;
 
@@ -224,6 +233,7 @@ async fn test_add_ingress_qdisc() -> Result<()> {
 #[tokio::test]
 async fn test_delete_qdisc() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb");
 
     let (_ns, conn) = setup_tc_ns("qdiscdel").await?;
 
@@ -244,6 +254,7 @@ async fn test_delete_qdisc() -> Result<()> {
 #[tokio::test]
 async fn test_replace_qdisc() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "sch_netem");
 
     let (_ns, conn) = setup_tc_ns("qdiscrep").await?;
 
@@ -270,6 +281,7 @@ async fn test_replace_qdisc() -> Result<()> {
 #[tokio::test]
 async fn test_add_htb_class() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb");
 
     let (_ns, conn) = setup_tc_ns("htbclass").await?;
 
@@ -303,6 +315,7 @@ async fn test_add_htb_class() -> Result<()> {
 #[tokio::test]
 async fn test_htb_class_hierarchy() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb");
 
     let (_ns, conn) = setup_tc_ns("htbhier").await?;
 
@@ -344,6 +357,7 @@ async fn test_htb_class_hierarchy() -> Result<()> {
 #[tokio::test]
 async fn test_delete_class() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb");
 
     let (_ns, conn) = setup_tc_ns("classdel").await?;
 
@@ -381,6 +395,7 @@ async fn test_delete_class() -> Result<()> {
 #[tokio::test]
 async fn test_add_matchall_filter() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_matchall");
 
     let (_ns, conn) = setup_tc_ns("matchall").await?;
 
@@ -417,6 +432,7 @@ async fn test_add_matchall_filter() -> Result<()> {
 #[tokio::test]
 async fn test_add_u32_filter() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_u32");
 
     let (_ns, conn) = setup_tc_ns("u32").await?;
 
@@ -454,6 +470,7 @@ async fn test_add_u32_filter() -> Result<()> {
 #[tokio::test]
 async fn test_add_flower_filter() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_flower");
 
     let (_ns, conn) = setup_tc_ns("flower").await?;
 
@@ -491,6 +508,7 @@ async fn test_add_flower_filter() -> Result<()> {
 #[tokio::test]
 async fn test_matchall_on_ingress() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_ingress", "cls_matchall");
 
     let (_ns, conn) = setup_tc_ns("matchinq").await?;
 
@@ -511,6 +529,7 @@ async fn test_matchall_on_ingress() -> Result<()> {
 #[tokio::test]
 async fn test_matchall_goto_chain() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_matchall");
 
     let (_ns, conn) = setup_tc_ns("gotoch").await?;
 
@@ -538,6 +557,7 @@ async fn test_matchall_goto_chain() -> Result<()> {
 #[tokio::test]
 async fn test_filter_on_ifb() -> Result<()> {
     require_root!();
+    nlink::require_modules!("ifb", "sch_htb", "cls_matchall");
 
     let (_ns, conn) = setup_tc_ns("ifbfilt").await?;
 
@@ -572,6 +592,7 @@ async fn test_filter_on_ifb() -> Result<()> {
 #[tokio::test]
 async fn test_delete_filter() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_matchall");
 
     let (_ns, conn) = setup_tc_ns("filterdel").await?;
 
@@ -611,6 +632,7 @@ async fn test_delete_filter() -> Result<()> {
 #[tokio::test]
 async fn test_replace_filter() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_matchall");
 
     let (_ns, conn) = setup_tc_ns("filterrep").await?;
 
@@ -670,6 +692,7 @@ async fn test_replace_filter() -> Result<()> {
 #[tokio::test]
 async fn test_qdisc_statistics() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb");
 
     let (_ns, conn) = setup_tc_ns("qdiscstats").await?;
 
@@ -692,6 +715,7 @@ async fn test_qdisc_statistics() -> Result<()> {
 #[tokio::test]
 async fn test_class_statistics() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb");
 
     let (_ns, conn) = setup_tc_ns("classstats").await?;
 
@@ -729,6 +753,7 @@ async fn test_class_statistics() -> Result<()> {
 #[tokio::test]
 async fn test_add_tc_chain() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_matchall");
 
     let (_ns, conn) = setup_tc_ns("chain").await?;
 
@@ -753,6 +778,7 @@ async fn test_add_tc_chain() -> Result<()> {
 #[tokio::test]
 async fn test_delete_tc_chain() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_matchall");
 
     let (_ns, conn) = setup_tc_ns("chaindel").await?;
 
@@ -779,6 +805,7 @@ async fn test_delete_tc_chain() -> Result<()> {
 #[tokio::test]
 async fn test_filter_with_chain() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sch_htb", "cls_matchall");
 
     let (_ns, conn) = setup_tc_ns("fchain").await?;
 

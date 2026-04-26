@@ -32,21 +32,28 @@ jobs:
       # the occasional CI flakiness when a new Rust release lands
       # in exchange for catching new diagnostics early.
       image: rust:bookworm
-      # `--cap-add=SYS_ADMIN` is necessary but not sufficient:
-      # Docker's default seccomp profile blocks `mount(MS_BIND)`
-      # (used by `namespace::create` to bind-mount the netns file
-      # at /var/run/netns/<name>) even when CAP_SYS_ADMIN is held.
-      # Same restriction applies to `setns()` in some configs.
-      # Disabling seccomp + apparmor is the standard pattern for
-      # netns integration tests in CI containers; --privileged
-      # would also work but is a bigger sledgehammer (gives ALL
-      # caps, not just the ones we need).
+      # Container privileges:
+      # - `--cap-add=SYS_ADMIN` for unshare(CLONE_NEWNET) and mount(MS_BIND).
+      # - `--cap-add=NET_ADMIN` for rtnetlink mutations (link/addr/route/tc).
+      # - `--cap-add=NET_RAW` for raw socket operations in some tests.
+      # - `--security-opt seccomp=unconfined`: Docker's default seccomp
+      #   profile blocks `mount(MS_BIND)` (used by `namespace::create`
+      #   to bind-mount the netns file at /var/run/netns/<name>) even
+      #   when CAP_SYS_ADMIN is held. Same restriction on `setns()`.
+      # - `--security-opt apparmor=unconfined`: Ubuntu hosts layer
+      #   apparmor on top of seccomp.
+      # - `--volume /lib/modules:/lib/modules:ro`: gives `modprobe`
+      #   inside the container access to the host's kernel modules.
+      #   Without this, the container's empty /lib/modules means
+      #   modprobe can't load HTB / cls_flower / VRF / etc., and
+      #   tests that depend on those modules fail with EOPNOTSUPP.
       options: >-
         --cap-add=NET_ADMIN
         --cap-add=SYS_ADMIN
         --cap-add=NET_RAW
         --security-opt seccomp=unconfined
         --security-opt apparmor=unconfined
+        --volume /lib/modules:/lib/modules:ro
     steps:
       - uses: actions/checkout@v4
 
@@ -54,13 +61,40 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends iproute2 kmod conntrack
-          # Best-effort autoload of conntrack modules. The container's
-          # /lib/modules is typically read-only from the host, so
-          # modprobe may fail; in that case the kernel autoloads on
-          # first netlink request and `require_module!` skips tests
-          # for any module it can't see.
-          modprobe nf_conntrack || echo "nf_conntrack will autoload on first use"
-          modprobe nf_conntrack_netlink || echo "nf_conntrack_netlink will autoload"
+
+          # Modprobe everything the integration tests can possibly
+          # need. Each `|| true` keeps the workflow going if a
+          # specific module is missing on the host kernel — the
+          # affected test then skips via `require_module!()`.
+          # /lib/modules is mounted read-only from the host (see
+          # container options above), so modprobe loads against the
+          # actual host kernel.
+          modules=(
+            # netfilter (conntrack mutation + multicast events)
+            nf_conntrack
+            nf_conntrack_netlink
+            # tc qdiscs
+            sch_htb sch_netem sch_tbf sch_sfq sch_prio
+            sch_fq_codel sch_ingress sch_clsact sch_drr sch_qfq
+            sch_hfsc sch_red sch_pie sch_cake
+            # tc classifiers
+            cls_flower cls_u32 cls_matchall cls_basic cls_fw
+            cls_route cls_bpf cls_cgroup
+            # tc actions
+            act_gact act_mirred act_police act_vlan act_skbedit
+            act_csum act_nat act_pedit act_bpf act_ct
+            # link types
+            dummy veth bridge bonding ifb vrf
+            macvlan ipvlan vlan vxlan geneve gre gretap
+            ip6_gre ipip sit
+            # xfrm (IPsec)
+            xfrm_user xfrm4_tunnel xfrm6_tunnel
+            # macsec (GENL family)
+            macsec
+          )
+          for m in "${modules[@]}"; do
+            modprobe "$m" 2>/dev/null && echo "loaded: $m" || echo "skip: $m (not available; tests will skip via require_module!)"
+          done
 
       - name: Build with `lab` feature
         run: cargo build -p nlink --features lab --tests

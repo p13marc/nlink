@@ -400,6 +400,51 @@ macro_rules! require_module_void {
     };
 }
 
+/// Require multiple kernel modules in one call. Skips the test
+/// (returning `Ok(())`) if any of the named modules is not
+/// loaded or built-in. Convenience for tests that touch several
+/// independent kernel features.
+///
+/// ```ignore
+/// #[tokio::test]
+/// async fn needs_htb_and_flower() -> nlink::Result<()> {
+///     nlink::require_root!();
+///     nlink::require_modules!("sch_htb", "cls_flower");
+///     // ...
+/// }
+/// ```
+#[macro_export]
+macro_rules! require_modules {
+    ($($name:expr),+ $(,)?) => {
+        $( $crate::require_module!($name); )+
+    };
+}
+
+/// Require that a sysctl path exists and is writable. Used by
+/// sysctl write tests that need `/proc/sys/...` to be RW (some
+/// container configurations mount it read-only). Skips the
+/// test (returning `Ok(())`) if the path is not writable.
+///
+/// ```ignore
+/// nlink::require_writable_sysctl!("/proc/sys/net/ipv4/ip_forward");
+/// ```
+#[macro_export]
+macro_rules! require_writable_sysctl {
+    ($path:expr) => {
+        match std::fs::OpenOptions::new().write(true).open($path) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "Skipping test: sysctl '{}' not writable ({}); \
+                     /proc/sys may be read-only in this environment",
+                    $path, e
+                );
+                return Ok(());
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

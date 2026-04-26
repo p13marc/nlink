@@ -18,6 +18,7 @@ use crate::common::TestNamespace;
 #[tokio::test]
 async fn test_link_events() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("linkev")?;
     let mut conn = ns.connection()?;
@@ -49,6 +50,7 @@ async fn test_link_events() -> Result<()> {
 #[tokio::test]
 async fn test_address_events() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("addrev")?;
     let mut conn = ns.connection()?;
@@ -88,6 +90,7 @@ async fn test_address_events() -> Result<()> {
 #[tokio::test]
 async fn test_tc_events() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("tcev")?;
     let mut conn = ns.connection()?;
@@ -121,6 +124,7 @@ async fn test_tc_events() -> Result<()> {
 #[tokio::test]
 async fn test_subscribe_all() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("suball")?;
     let mut conn = ns.connection()?;
@@ -147,6 +151,7 @@ async fn test_subscribe_all() -> Result<()> {
 #[tokio::test]
 async fn test_multiple_subscriptions() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("multisub")?;
     let mut conn = ns.connection()?;
@@ -170,6 +175,7 @@ async fn test_multiple_subscriptions() -> Result<()> {
 #[tokio::test]
 async fn test_link_down_event() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("linkdown")?;
     let mut conn = ns.connection()?;
@@ -204,6 +210,7 @@ async fn test_link_down_event() -> Result<()> {
 #[tokio::test]
 async fn test_del_link_event() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("dellinkev")?;
     let mut conn = ns.connection()?;
@@ -235,6 +242,7 @@ async fn test_del_link_event() -> Result<()> {
 #[tokio::test]
 async fn test_del_address_event() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("deladdrev")?;
     let mut conn = ns.connection()?;
@@ -271,6 +279,7 @@ async fn test_del_address_event() -> Result<()> {
 #[tokio::test]
 async fn test_owned_event_stream() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("ownedstream")?;
     let mut conn = ns.connection()?;
@@ -303,6 +312,7 @@ async fn test_owned_event_stream() -> Result<()> {
 #[tokio::test]
 async fn test_event_stream_continues() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("streamcont")?;
     let mut conn = ns.connection()?;
@@ -335,6 +345,7 @@ async fn test_event_stream_continues() -> Result<()> {
 #[tokio::test]
 async fn test_ipv6_address_events() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("addr6ev")?;
     let mut conn = ns.connection()?;

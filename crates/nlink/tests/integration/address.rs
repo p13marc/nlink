@@ -17,6 +17,7 @@ use crate::common::TestNamespace;
 #[tokio::test]
 async fn test_add_ipv4_address() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("addr4")?;
     let conn = ns.connection()?;
@@ -46,6 +47,7 @@ async fn test_add_ipv4_address() -> Result<()> {
 #[tokio::test]
 async fn test_add_ipv6_address() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("addr6")?;
     let conn = ns.connection()?;
@@ -75,6 +77,7 @@ async fn test_add_ipv6_address() -> Result<()> {
 #[tokio::test]
 async fn test_delete_ipv4_address() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("deladdr4")?;
     let conn = ns.connection()?;
@@ -105,6 +108,7 @@ async fn test_delete_ipv4_address() -> Result<()> {
 #[tokio::test]
 async fn test_delete_ipv6_address() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("deladdr6")?;
     let conn = ns.connection()?;
@@ -135,6 +139,7 @@ async fn test_delete_ipv6_address() -> Result<()> {
 #[tokio::test]
 async fn test_multiple_addresses() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("multiaddr")?;
     let conn = ns.connection()?;
@@ -175,6 +180,7 @@ async fn test_multiple_addresses() -> Result<()> {
 #[tokio::test]
 async fn test_get_addresses_for_interface() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("getaddr")?;
     let conn = ns.connection()?;
@@ -215,6 +221,7 @@ async fn test_get_addresses_for_interface() -> Result<()> {
 #[tokio::test]
 async fn test_address_with_broadcast() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("bcast")?;
     let conn = ns.connection()?;
@@ -249,6 +256,7 @@ async fn test_address_with_broadcast() -> Result<()> {
 #[tokio::test]
 async fn test_address_with_label() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("label")?;
     let conn = ns.connection()?;
@@ -279,6 +287,7 @@ async fn test_address_with_label() -> Result<()> {
 #[tokio::test]
 async fn test_replace_address() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("replace")?;
     let conn = ns.connection()?;
@@ -313,6 +322,7 @@ async fn test_replace_address() -> Result<()> {
 #[tokio::test]
 async fn test_loopback_address() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("loaddr")?;
     let conn = ns.connection()?;
@@ -341,6 +351,7 @@ async fn test_loopback_address() -> Result<()> {
 #[tokio::test]
 async fn test_address_scope() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("scope")?;
     let conn = ns.connection()?;
@@ -382,6 +393,7 @@ async fn test_address_scope() -> Result<()> {
 #[tokio::test]
 async fn test_add_address_by_name() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("addr-name")?;
     let conn = ns.connection()?;
@@ -406,6 +418,7 @@ async fn test_add_address_by_name() -> Result<()> {
 #[tokio::test]
 async fn test_replace_address_by_name() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("addr-repl")?;
     let conn = ns.connection()?;

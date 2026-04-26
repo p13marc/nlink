@@ -25,6 +25,7 @@ async fn test_sysctl_get_in_namespace() -> Result<()> {
 #[tokio::test]
 async fn test_sysctl_set_roundtrip() -> Result<()> {
     require_root!();
+    nlink::require_writable_sysctl!("/proc/sys/net/ipv4/ip_forward");
 
     let ns = TestNamespace::new("sysctl-set")?;
 
@@ -46,6 +47,7 @@ async fn test_sysctl_set_roundtrip() -> Result<()> {
 #[tokio::test]
 async fn test_sysctl_set_many() -> Result<()> {
     require_root!();
+    nlink::require_writable_sysctl!("/proc/sys/net/ipv4/ip_forward");
 
     let ns = TestNamespace::new("sysctl-many")?;
 

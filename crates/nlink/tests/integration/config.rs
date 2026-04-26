@@ -144,6 +144,7 @@ fn test_vlan_link_builder() {
 #[tokio::test]
 async fn test_config_diff_empty_namespace() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("config-diff")?;
     let conn = ns.connection()?;
@@ -160,6 +161,7 @@ async fn test_config_diff_empty_namespace() -> Result<()> {
 #[tokio::test]
 async fn test_config_diff_detects_missing_link() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("config-diff-link")?;
     let conn = ns.connection()?;
@@ -178,6 +180,7 @@ async fn test_config_diff_detects_missing_link() -> Result<()> {
 #[tokio::test]
 async fn test_config_diff_detects_existing_link() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("config-diff-existing")?;
     let conn = ns.connection()?;
@@ -198,6 +201,7 @@ async fn test_config_diff_detects_existing_link() -> Result<()> {
 #[tokio::test]
 async fn test_config_diff_detects_state_change() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("config-diff-state")?;
     let conn = ns.connection()?;
@@ -220,6 +224,7 @@ async fn test_config_diff_detects_state_change() -> Result<()> {
 #[tokio::test]
 async fn test_config_apply_creates_link() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("config-apply-link")?;
     let conn = ns.connection()?;
@@ -240,6 +245,7 @@ async fn test_config_apply_creates_link() -> Result<()> {
 #[tokio::test]
 async fn test_config_apply_creates_address() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("config-apply-addr")?;
     let conn = ns.connection()?;
@@ -265,6 +271,7 @@ async fn test_config_apply_creates_address() -> Result<()> {
 #[tokio::test]
 async fn test_config_apply_idempotent() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("config-idempotent")?;
     let conn = ns.connection()?;
@@ -287,6 +294,7 @@ async fn test_config_apply_idempotent() -> Result<()> {
 #[tokio::test]
 async fn test_config_dry_run() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("config-dryrun")?;
     let conn = ns.connection()?;
@@ -315,6 +323,7 @@ async fn test_config_dry_run() -> Result<()> {
 #[tokio::test]
 async fn test_config_apply_bridge_with_port() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("config-bridge")?;
     let conn = ns.connection()?;
@@ -340,6 +349,7 @@ async fn test_config_apply_bridge_with_port() -> Result<()> {
 #[tokio::test]
 async fn test_config_diff_summary() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("config-summary")?;
     let conn = ns.connection()?;
@@ -360,6 +370,7 @@ async fn test_config_diff_summary() -> Result<()> {
 #[tokio::test]
 async fn test_config_apply_qdisc() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("config-qdisc")?;
     let conn = ns.connection()?;

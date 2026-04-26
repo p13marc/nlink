@@ -39,6 +39,7 @@ async fn setup_routed_ns(name: &str) -> Result<(TestNamespace, Connection<Route>
 #[tokio::test]
 async fn test_add_route_via_interface() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let (_ns, conn) = setup_routed_ns("rtdev").await?;
 
@@ -60,6 +61,7 @@ async fn test_add_route_via_interface() -> Result<()> {
 #[tokio::test]
 async fn test_add_route_via_gateway() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let (_ns, conn) = setup_routed_ns("rtgw").await?;
 
@@ -87,6 +89,7 @@ async fn test_add_route_via_gateway() -> Result<()> {
 #[tokio::test]
 async fn test_delete_route() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let (_ns, conn) = setup_routed_ns("rtdel").await?;
 
@@ -112,6 +115,7 @@ async fn test_delete_route() -> Result<()> {
 #[tokio::test]
 async fn test_blackhole_route() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("rtblack")?;
     let conn = ns.connection()?;
@@ -135,6 +139,7 @@ async fn test_blackhole_route() -> Result<()> {
 #[tokio::test]
 async fn test_unreachable_route() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("rtunreach")?;
     let conn = ns.connection()?;
@@ -158,6 +163,7 @@ async fn test_unreachable_route() -> Result<()> {
 #[tokio::test]
 async fn test_prohibit_route() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("rtprohib")?;
     let conn = ns.connection()?;
@@ -181,6 +187,7 @@ async fn test_prohibit_route() -> Result<()> {
 #[tokio::test]
 async fn test_default_route() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let (_ns, conn) = setup_routed_ns("rtdefault").await?;
 
@@ -205,6 +212,7 @@ async fn test_default_route() -> Result<()> {
 #[tokio::test]
 async fn test_ipv6_route() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("rtv6")?;
     let conn = ns.connection()?;
@@ -231,6 +239,7 @@ async fn test_ipv6_route() -> Result<()> {
 #[tokio::test]
 async fn test_route_with_source() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let (_ns, conn) = setup_routed_ns("rtsrc").await?;
 
@@ -258,6 +267,7 @@ async fn test_route_with_source() -> Result<()> {
 #[tokio::test]
 async fn test_route_with_table() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let (_ns, conn) = setup_routed_ns("rttable").await?;
 
@@ -278,6 +288,7 @@ async fn test_route_with_table() -> Result<()> {
 #[tokio::test]
 async fn test_route_with_metrics() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let (_ns, conn) = setup_routed_ns("rtmetric").await?;
 
@@ -303,6 +314,7 @@ async fn test_route_with_metrics() -> Result<()> {
 #[tokio::test]
 async fn test_multipath_route() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("rtecmp")?;
     let conn = ns.connection()?;
@@ -354,6 +366,7 @@ async fn test_multipath_route() -> Result<()> {
 #[tokio::test]
 async fn test_replace_route() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let (_ns, conn) = setup_routed_ns("rtreplace").await?;
 
@@ -391,6 +404,7 @@ async fn test_replace_route() -> Result<()> {
 #[tokio::test]
 async fn test_connected_route_auto_created() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let ns = TestNamespace::new("rtconn")?;
     let conn = ns.connection()?;
@@ -421,6 +435,7 @@ async fn test_connected_route_auto_created() -> Result<()> {
 #[tokio::test]
 async fn test_host_route() -> Result<()> {
     require_root!();
+    nlink::require_module!("dummy");
 
     let (_ns, conn) = setup_routed_ns("rthost").await?;
 

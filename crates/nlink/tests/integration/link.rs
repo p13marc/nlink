@@ -16,6 +16,7 @@ use crate::common::TestNamespace;
 #[tokio::test]
 async fn test_create_dummy_interface() -> Result<()> {
     require_root!();
+    nlink::require_modules!("dummy");
 
     let ns = TestNamespace::new("dummy")?;
     let conn = ns.connection()?;
@@ -56,6 +57,7 @@ async fn test_create_dummy_interface() -> Result<()> {
 #[tokio::test]
 async fn test_create_veth_pair() -> Result<()> {
     require_root!();
+    nlink::require_modules!("veth");
 
     let ns = TestNamespace::new("veth")?;
     let conn = ns.connection()?;
@@ -100,6 +102,7 @@ async fn test_create_veth_pair() -> Result<()> {
 #[tokio::test]
 async fn test_create_bridge() -> Result<()> {
     require_root!();
+    nlink::require_modules!("bridge");
 
     let ns = TestNamespace::new("bridge")?;
     let conn = ns.connection()?;
@@ -143,6 +146,7 @@ async fn test_create_bridge() -> Result<()> {
 #[tokio::test]
 async fn test_create_vlan() -> Result<()> {
     require_root!();
+    nlink::require_modules!("8021q");
 
     let ns = TestNamespace::new("vlan")?;
     let conn = ns.connection()?;
@@ -176,6 +180,7 @@ async fn test_create_vlan() -> Result<()> {
 #[tokio::test]
 async fn test_create_macvlan() -> Result<()> {
     require_root!();
+    nlink::require_modules!("macvlan");
 
     let ns = TestNamespace::new("macvlan")?;
     let conn = ns.connection()?;
@@ -200,6 +205,7 @@ async fn test_create_macvlan() -> Result<()> {
 #[tokio::test]
 async fn test_create_ipvlan() -> Result<()> {
     require_root!();
+    nlink::require_modules!("ipvlan");
 
     let ns = TestNamespace::new("ipvlan")?;
     let conn = ns.connection()?;
@@ -223,6 +229,7 @@ async fn test_create_ipvlan() -> Result<()> {
 #[tokio::test]
 async fn test_create_ifb() -> Result<()> {
     require_root!();
+    nlink::require_modules!("ifb");
 
     let ns = TestNamespace::new("ifb")?;
     let conn = ns.connection()?;
@@ -242,6 +249,7 @@ async fn test_create_ifb() -> Result<()> {
 #[tokio::test]
 async fn test_create_vrf() -> Result<()> {
     require_root!();
+    nlink::require_modules!("vrf");
 
     let ns = TestNamespace::new("vrf")?;
     let conn = ns.connection()?;
@@ -270,6 +278,7 @@ async fn test_create_vrf() -> Result<()> {
 #[tokio::test]
 async fn test_set_mtu() -> Result<()> {
     require_root!();
+    nlink::require_modules!("dummy");
 
     let ns = TestNamespace::new("mtu")?;
     let conn = ns.connection()?;
@@ -291,6 +300,7 @@ async fn test_set_mtu() -> Result<()> {
 #[tokio::test]
 async fn test_rename_interface() -> Result<()> {
     require_root!();
+    nlink::require_modules!("dummy");
 
     let ns = TestNamespace::new("rename")?;
     let conn = ns.connection()?;
@@ -313,6 +323,7 @@ async fn test_rename_interface() -> Result<()> {
 #[tokio::test]
 async fn test_set_mac_address() -> Result<()> {
     require_root!();
+    nlink::require_modules!("dummy");
 
     let ns = TestNamespace::new("mac")?;
     let conn = ns.connection()?;
@@ -336,6 +347,7 @@ async fn test_set_mac_address() -> Result<()> {
 #[tokio::test]
 async fn test_get_link_by_name() -> Result<()> {
     require_root!();
+    nlink::require_modules!("dummy");
 
     let ns = TestNamespace::new("getlink")?;
     let conn = ns.connection()?;
@@ -358,6 +370,7 @@ async fn test_get_link_by_name() -> Result<()> {
 #[tokio::test]
 async fn test_get_link_by_index() -> Result<()> {
     require_root!();
+    nlink::require_modules!("dummy");
 
     let ns = TestNamespace::new("getidx")?;
     let conn = ns.connection()?;
@@ -386,6 +399,7 @@ async fn test_get_link_by_index() -> Result<()> {
 #[tokio::test]
 async fn test_veth_between_namespaces() -> Result<()> {
     require_root!();
+    nlink::require_modules!("veth");
 
     let ns1 = TestNamespace::new("veth-ns1")?;
     let ns2 = TestNamespace::new("veth-ns2")?;
@@ -411,6 +425,7 @@ async fn test_veth_between_namespaces() -> Result<()> {
 #[tokio::test]
 async fn test_interface_flags() -> Result<()> {
     require_root!();
+    nlink::require_modules!("dummy");
 
     let ns = TestNamespace::new("flags")?;
     let conn = ns.connection()?;
@@ -461,6 +476,7 @@ async fn test_loopback_exists() -> Result<()> {
 #[tokio::test]
 async fn test_gre_tunnel() -> Result<()> {
     require_root!();
+    nlink::require_modules!("ip_gre");
 
     let ns = TestNamespace::new("gre")?;
     let conn = ns.connection()?;
@@ -490,6 +506,7 @@ async fn test_gre_tunnel() -> Result<()> {
 #[tokio::test]
 async fn test_gretap_tunnel() -> Result<()> {
     require_root!();
+    nlink::require_modules!("ip_gre");
 
     let ns = TestNamespace::new("gretap")?;
     let conn = ns.connection()?;
@@ -512,6 +529,7 @@ async fn test_gretap_tunnel() -> Result<()> {
 #[tokio::test]
 async fn test_ipip_tunnel() -> Result<()> {
     require_root!();
+    nlink::require_modules!("ipip");
 
     let ns = TestNamespace::new("ipip")?;
     let conn = ns.connection()?;
@@ -541,6 +559,7 @@ async fn test_ipip_tunnel() -> Result<()> {
 #[tokio::test]
 async fn test_sit_tunnel() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sit");
 
     let ns = TestNamespace::new("sit")?;
     let conn = ns.connection()?;
@@ -558,6 +577,7 @@ async fn test_sit_tunnel() -> Result<()> {
 #[tokio::test]
 async fn test_sit_isatap() -> Result<()> {
     require_root!();
+    nlink::require_modules!("sit");
 
     let ns = TestNamespace::new("isatap")?;
     let conn = ns.connection()?;
@@ -575,6 +595,7 @@ async fn test_sit_isatap() -> Result<()> {
 #[tokio::test]
 async fn test_bond_lacp() -> Result<()> {
     require_root!();
+    nlink::require_modules!("bonding");
 
     let ns = TestNamespace::new("bond-lacp")?;
     let conn = ns.connection()?;
@@ -600,6 +621,7 @@ async fn test_bond_lacp() -> Result<()> {
 #[tokio::test]
 async fn test_bond_active_backup_with_slaves() -> Result<()> {
     require_root!();
+    nlink::require_modules!("bonding", "veth");
 
     let ns = TestNamespace::new("bond-ab")?;
     let conn = ns.connection()?;
@@ -637,6 +659,7 @@ async fn test_bond_active_backup_with_slaves() -> Result<()> {
 #[tokio::test]
 async fn test_enslave_convenience() -> Result<()> {
     require_root!();
+    nlink::require_modules!("bonding", "veth");
 
     let ns = TestNamespace::new("enslave")?;
     let conn = ns.connection()?;
