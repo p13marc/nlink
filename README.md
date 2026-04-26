@@ -21,15 +21,21 @@ nlink is a from-scratch implementation of Linux netlink-based network management
 ## Installation
 
 ```toml
-# Core netlink functionality
-nlink = "0.12"
+# Core netlink functionality (always built — TC, link, address,
+# route, namespace, GENL families, conntrack, XFRM, etc. all
+# live in always-built modules)
+nlink = "0.15"
 
 # With additional features
-nlink = { version = "0.11", features = ["sockdiag", "tuntap", "tc", "output"] }
+nlink = { version = "0.15", features = ["sockdiag", "tuntap", "output"] }
 
 # All features
-nlink = { version = "0.11", features = ["full"] }
+nlink = { version = "0.15", features = ["full"] }
 ```
+
+> Upgrading from an earlier release? See
+> [`docs/migration_guide/`](docs/migration_guide/README.md) for
+> per-release upgrade notes.
 
 ### Features
 
@@ -37,9 +43,9 @@ nlink = { version = "0.11", features = ["full"] }
 |---------|-------------|
 | `sockdiag` | Socket diagnostics via NETLINK_SOCK_DIAG |
 | `tuntap` | TUN/TAP device management |
-| `tc` | Traffic control utilities |
 | `output` | JSON/text output formatting |
 | `namespace_watcher` | Namespace watching via inotify |
+| `lab` | `nlink::lab` namespace + integration-test harness |
 | `full` | All features enabled |
 
 ## Quick Start
@@ -186,6 +192,7 @@ if let Some(bottleneck) = diag.find_bottleneck().await? {
 - **[Library Usage](docs/library.md)** - Detailed library examples: namespaces, TC, WireGuard, error handling
 - **[Cookbook Recipes](docs/recipes/README.md)** - End-to-end walkthroughs: per-peer impairment, VLAN-aware bridges, bidirectional rate limiting, WireGuard mesh in namespaces, multi-namespace event monitoring
 - **[CLI Tools](docs/cli.md)** - ip and tc command reference
+- **[Migration Guides](docs/migration_guide/README.md)** - Per-release upgrade notes (what was removed / behaviour-changed / typed-replacement-of)
 - **[Examples](crates/nlink/examples/README.md)** - 40+ runnable examples
 
 ## Library Modules
@@ -223,9 +230,10 @@ The library API is production-ready for network monitoring and configuration.
 - Link operations (show, add, del, set) with 20+ link types
 - Address, route, neighbor, and rule operations
 - Event monitoring (link, address, route, neighbor, TC)
-- TC qdisc operations with 19 qdisc types
+- TC qdisc operations with 18 typed qdisc kinds (every kind has `parse_params`)
 - TC class management with typed builders (HTB, HFSC, DRR, QFQ)
-- TC filter (9 types) and action (12 types) support
+- TC filter (9 typed kinds, all `parse_params`-driven) and action (14 typed kinds) support
+- Standalone shared-action CRUD on `Connection<Route>` (typed `add_action` / `del_action` / `get_action` / `dump_actions`)
 - TC filter chains for complex classification
 - Network namespace support
 - Tunnel management (GRE, IPIP, SIT, VTI, VXLAN, Geneve)

@@ -186,8 +186,8 @@ impl FooConfig {
 - **Strict**: unknown tokens, missing values, and unparseable
   inner values all return
   `Error::InvalidMessage(format!("kind: ..."))`. **Silent
-  skipping is a bug** — the legacy `tc::options::*` parsers
-  swallow unknown tokens; the typed parsers exist to fix that.
+  skipping is a bug** — the typed parsers exist precisely
+  because the old string-args builders swallowed unknown tokens.
 - **Error shape**: every message starts with the kind name
   (`"htb: invalid r2q `foo` (expected unsigned integer)"`).
 - **Token ordering**: any-order keyword. Positional optional
@@ -201,7 +201,7 @@ impl FooConfig {
   **Never silently fall back.**
 - **Errors are stringly typed by design** — no typed parse-error
   variant. Format-string messages have proven readable across
-  the 25 shipped parsers.
+  the 41 shipped parsers (18 qdisc + 9 filter + 14 action).
 
 The sealed `nlink::ParseParams` trait formalizes the inherent
 method for generic dispatch (`fn run<C: ParseParams>(p: &[&str])
@@ -211,15 +211,15 @@ existing direct callers don't break. The bin's `dispatch!` macros
 bind through the trait so the contract is type-checked, not just
 convention.
 
-### Deprecated modules
+### No legacy string-args builders
 
-`nlink::tc::builders::{class,qdisc,filter,action}` and
-`nlink::tc::options/<kind>.rs` are the original string-args
-builders. **Deprecated since 0.14.0; deleted in 0.15.0 under
-Plan 142 Phase 4.** Don't reach for them in new code. Don't add
-new stringly-typed `add_class(kind, &[&str])`-shaped methods to
-mirror the one remaining fossil — extend typed configs with
-`parse_params` instead.
+The old `tc::builders::{class,qdisc,filter,action}` modules and
+the per-kind `tc::options/<kind>` parsers were deleted in 0.15.0.
+Don't add new stringly-typed `add_class(kind, &[&str])`-shaped
+methods to bring them back — extend typed configs with
+`parse_params` instead. See
+[`docs/migration_guide/0.14.0-to-0.15.0.md`](docs/migration_guide/0.14.0-to-0.15.0.md)
+for the per-symbol migration table.
 
 ## Connections & namespaces
 
@@ -322,22 +322,29 @@ they are kept current.
 
 ## Active work
 
-The 0.15.0 release is organized under
-[Plan 142](142-zero-legacy-typed-api-plan.md) (master plan,
-"zero-legacy milestone"). Phases:
+[Plan 142](142-zero-legacy-typed-api-plan.md) — the 0.15.0
+"zero-legacy milestone" — has substantively shipped under
+`[Unreleased]`. All five phases met their acceptance criteria:
+sealed `ParseParams` trait + 41 impls, filter side 9/9
+typed-first, XFRM SA + SP CRUD, typed standalone-action CRUD,
+and the legacy `tc::builders::*` + `tc::options::*` modules
+deleted. The current `[Unreleased]` block IS the 0.15.0
+release-cut content.
 
-- **0** — CI harness (Plan 140) + sealed `ParseParams` trait
-- **1** — filter side completion (Plan 138 + Plan 133 PR C +
-  Plan 137 integration tests un-parked)
-- **2** — XFRM write path (Plan 141)
-- **3** — typed standalone-action CRUD (Plan 139 PRs A+B)
-- **4** — **legacy deletion milestone** (Plan 139 PR C):
-  `tc::builders::*` + `tc::options::*` deleted; zero
-  `#[allow(deprecated)]` in `bins/tc`
+Open items not in the cut (sudo-gated):
 
-Read Plan 142 first when picking up 0.15.0 work; phase detail
-plans live alongside it. Roadmap entry point:
+- **Plan 141 PR C** — `xfrm-ipsec-tunnel` recipe +
+  `examples/xfrm/ipsec_monitor.rs --apply` promotion; closes
+  Plan 135 PR B at 7/7.
+- **Plan 137 integration tests un-parking** + the GHA workflow
+  YAML; needs an in-tree test that uses `require_module!`.
+
+Roadmap entry point:
 [`128b-roadmap-overview.md`](128b-roadmap-overview.md).
+Per-release upgrade guides:
+[`docs/migration_guide/`](docs/migration_guide/README.md) — write
+a new one when cutting any minor release; the README explains the
+convention.
 
 ## Publishing
 
