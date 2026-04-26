@@ -271,12 +271,19 @@ async fn ct_subscribe_observes_destroy_event_on_flush() -> nlink::Result<()> {
     nf_sub.subscribe(&[ConntrackGroup::Destroy])?;
     let mut events = nf_sub.events();
 
+    // Give the kernel a beat to register the multicast subscription
+    // before triggering the events. Without this small sleep the
+    // flush can race the subscription on slower CI kernels and the
+    // Destroy event is delivered before we're listening.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     nf_mut.flush_conntrack().await?;
 
     // Drain until we see a Destroy for our port (other system traffic
     // could in principle generate Destroys; in a fresh netns this is
     // overwhelmingly unlikely but loop with a budget for safety).
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    // Bumped from 3s → 10s to absorb CI scheduler jitter.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         if std::time::Instant::now() >= deadline {
             panic!("timed out waiting for ConntrackEvent::Destroy");

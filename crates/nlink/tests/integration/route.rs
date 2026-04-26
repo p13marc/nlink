@@ -102,8 +102,13 @@ async fn test_delete_route() -> Result<()> {
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0));
     assert!(routes.iter().any(|r| r.destination() == Some(&target)));
 
-    // Delete it
-    conn.del_route_v4("10.0.0.0", 8).await?;
+    // Delete it. Use the symmetric Route-builder form (with the same
+    // `dev` binding the add used) — the convenience `del_route_v4`
+    // doesn't carry the device binding, and newer kernels return
+    // ESRCH ("no matching route") rather than fuzzy-matching the
+    // dst+prefix alone.
+    conn.del_route(Ipv4Route::new("10.0.0.0", 8).dev("dummy0"))
+        .await?;
 
     // Verify it's gone
     let routes = conn.get_routes().await?;
@@ -275,10 +280,12 @@ async fn test_route_with_table() -> Result<()> {
     conn.add_route(Ipv4Route::new("10.0.0.0", 8).dev("dummy0").table(100))
         .await?;
 
-    // Get all routes including non-main tables
-    // Note: get_routes() only returns main table by default
-    // We verify by deleting from the specific table
-    conn.del_route(Ipv4Route::new("10.0.0.0", 8).table(100))
+    // Verify by deleting from the specific table.
+    // get_routes() only returns main table by default, so a successful
+    // del is the verification. The del must mirror the add's full key
+    // (dest + prefix + dev + table) — newer kernels return ESRCH on
+    // partial-key del.
+    conn.del_route(Ipv4Route::new("10.0.0.0", 8).dev("dummy0").table(100))
         .await?;
 
     // If we got here without error, the route existed in table 100

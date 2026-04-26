@@ -15,9 +15,16 @@ async fn test_sysctl_get_in_namespace() -> Result<()> {
 
     let ns = TestNamespace::new("sysctl-get")?;
 
-    // ip_forward defaults to "0" in a new namespace
+    // The intent of this test is to verify GET works in a netns,
+    // not to assert a specific kernel default. `ip_forward`'s
+    // "default" depends on what the host wrote to the all-namespace
+    // template before our netns was created — vanilla kernels give
+    // "0", but some distros/containers preset to "1". Accept either.
     let val = namespace::get_sysctl(ns.name(), "net.ipv4.ip_forward")?;
-    assert_eq!(val, "0");
+    assert!(
+        val == "0" || val == "1",
+        "ip_forward should be 0 or 1, got {val:?}"
+    );
 
     Ok(())
 }
