@@ -66,8 +66,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
 
       - name: cargo machete
-        # Pre-existing nlink-ss / nlink-bridge unused-deps warnings
-        # are noise; gate the new-deps check separately if needed.
+        # `bins/{ss,bridge}` pre-existing dead deps were cleaned up
+        # in 0.15.1 (Plan 144 Phase 4), so machete now runs without
+        # `|| true` suppression.
         run: |
           cargo install cargo-machete --locked
-          cargo machete || true
+          cargo machete

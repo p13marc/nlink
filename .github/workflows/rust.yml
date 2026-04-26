@@ -9,14 +9,91 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Per Plan 144 (0.15.1 CI safety nets), the prior single-step
+# `cargo test --verbose` job is split into named, parallel-able
+# checks. Each gate has a clear "what failed" signal in the
+# GitHub UI.
 jobs:
-  build:
 
+  # Catches the 0.15.0-class regression where an example imports a
+  # feature-gated module without declaring `required-features`. With
+  # default features only, every example still has to compile.
+  build-and-test-default-features:
+    name: build + test (default features)
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v4
+      - name: Build (default features, all targets)
+        run: cargo build --workspace --all-targets
+      - name: Test (default features)
+        run: cargo test --workspace
+
+  # Catches issues that only manifest when optional features are on
+  # (cfg-gated code paths, feature-flag wiring bugs).
+  build-and-test-all-features:
+    name: build + test (--all-features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (--all-features, all targets)
+        run: cargo build --workspace --all-targets --all-features
+      - name: Test (--all-features)
+        run: cargo test --workspace --all-features
+
+  clippy:
+    name: clippy --deny warnings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
+
+  # rustdoc-side enforcement: broken intra-doc links fail the build.
+  # Matches the docs.rs build (--all-features per
+  # crates/nlink/Cargo.toml [package.metadata.docs.rs]).
+  doc:
+    name: cargo doc (deny broken intra-doc links)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::redundant_explicit_links"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build docs
+        run: cargo doc -p nlink --no-deps --all-features
+
+  # Catches accidental SemVer violations against the latest published
+  # version on crates.io. Per obi1kenobi research, ~1 in 6 crates
+  # accidentally violates semver. This is the cheapest 1.0-prep step.
+  semver-checks:
+    name: cargo-semver-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo semver-checks
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: nlink
+
+  # Audit script: every [[example]] entry must declare
+  # `required-features` for any feature-gated module it imports
+  # (lab, sockdiag, tuntap, output, namespace_watcher).
+  audit-examples:
+    name: audit example feature gating
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scripts/audit-example-features.sh
+        run: bash scripts/audit-example-features.sh
+
+  # No more `|| true` suppression. Plan 144 cleaned up the
+  # pre-existing dead deps in bins/{ss,bridge}; if a NEW unused
+  # dep lands, fail loudly so the contributor cleans up before merge.
+  machete:
+    name: cargo machete (no unused deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-machete
+        run: cargo install --locked cargo-machete
+      - name: Run cargo machete
+        run: cargo machete
