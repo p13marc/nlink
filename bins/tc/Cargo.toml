@@ -11,7 +11,7 @@ name = "tc"
 path = "src/main.rs"
 
 [dependencies]
-nlink = { workspace = true, features = ["tc", "output"] }
+nlink = { workspace = true, features = ["output"] }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 clap = { workspace = true }

@@ -4,6 +4,131 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Removed — legacy `tc::builders` + `tc::options` modules (Plan 139 PR C, **0.15.0 release-cut**)
+
+This is the **legacy-deletion milestone** that closes Plan 142
+Phase 4 and the 0.15.0 typed-API completion arc. The
+`#[deprecated]` markers introduced in 0.14.0 have been redeemed:
+the modules they pointed at are gone.
+
+**Deleted entirely** (~3500 LOC):
+
+- `nlink::tc::builders::class` — replaced by
+  `Connection<Route>::add_class_config(...)` taking
+  `HtbClassConfig` / `HfscClassConfig` / `DrrClassConfig` /
+  `QfqClassConfig`.
+- `nlink::tc::builders::qdisc` — replaced by
+  `Connection<Route>::add_qdisc_full(...)` taking the typed
+  qdisc config (18 kinds: `HtbQdiscConfig`, `NetemConfig`,
+  `CakeConfig`, ...).
+- `nlink::tc::builders::filter` — replaced by
+  `Connection<Route>::add_filter_full(...)` taking the typed
+  filter config (9 kinds: `FlowerFilter`, `U32Filter`, ...).
+- `nlink::tc::builders::action` — replaced by
+  `Connection<Route>::{add,del,get,dump}_action(...)` shipped
+  in Plan 139 PR A, plus the typed action configs (14 kinds).
+- `nlink::tc::options::{cake,codel,fq_codel,fq,htb,netem,prio,sfq,tbf}` —
+  replaced by their typed `*Config::parse_params(&[&str])`
+  methods (38 typed `parse_params` methods total in the
+  `nlink::ParseParams` trait impl list).
+- `nlink::tc::handle` (incl. `parse_handle` / `format_handle` /
+  `Handle`) — internal helper of the deprecated tree, was only
+  used by `tc::options::htb`. The unrelated
+  `nlink::TcHandle` typed handle (with `from_str` and `Display`)
+  is the canonical replacement.
+- The `tc` Cargo feature flag — its only purpose was to gate
+  the deleted modules. `nlink::TcHandle` and the typed configs
+  live in always-built modules.
+
+**Migration table for downstream consumers:**
+
+| Removed call | Typed replacement |
+|---|---|
+| `tc::builders::class::add(conn, dev, parent, classid, "htb", &["rate", "100mbit"])` | `conn.add_class_config(dev, parent, classid, HtbClassConfig::parse_params(&["rate", "100mbit"])?)` |
+| `tc::builders::qdisc::add(conn, dev, parent, handle, "htb", &params)` | `conn.add_qdisc_full(dev, parent, handle, HtbQdiscConfig::parse_params(&params)?)` |
+| `tc::builders::filter::add(conn, dev, parent, "ip", prio, "flower", &params)` | `conn.add_filter_full(dev, parent, handle, "ip" → u16, prio, FlowerFilter::parse_params(&params)?)` |
+| `tc::builders::filter::parse_protocol("ip")` | inline (~10-line lookup; see `bins/tc/src/commands/filter.rs::parse_protocol_u16`) |
+| `tc::builders::action::add(conn, "gact", &params)` | `conn.add_action(GactAction::parse_params(&params)?)` |
+| `tc::handle::parse_handle("1:a")` | `"1:a".parse::<nlink::TcHandle>()?` |
+| `tc::options::netem::build(...)` | `NetemConfig::parse_params(&params)?` |
+
+The typed parsers are **stricter** than the legacy code they
+replace — unknown tokens, missing values, and unparseable
+inner values now return `Error::InvalidMessage("kind: ...")`
+instead of being silently swallowed. That's the point of the
+typed surface; downstream code that relied on silent skips will
+need to fix the input.
+
+**`bins/tc` migration** — completed across PR C slices 1+2
+(commits `b2370fd`, `0d095ae`):
+
+- `bins/tc/src/commands/action.rs` — typed dispatch via
+  `add_typed_action` macro mapping kind → `parse_params` →
+  `conn.add_action`. 14 action kinds wired. Unknown kinds error
+  cleanly with a recognised-kinds list.
+- `bins/tc/src/commands/qdisc.rs` — `try_typed_qdisc`
+  (`Option<Result<()>>`) restructured as `dispatch_qdisc`
+  (`Result<()>`); legacy fallback removed. Unknown kinds error
+  with a recognised-kinds list.
+- `bins/tc/src/commands/filter.rs` — same restructure;
+  `parse_protocol_u16` and `format_protocol` inlined (10-line
+  helpers; no need to keep them in a separate module).
+- All `#[allow(deprecated)]` directives in `bins/tc/` are gone
+  (`grep -r "allow(deprecated)" bins/tc/` returns empty).
+
+**Behavior changes** (documented for users upgrading from
+0.14.0):
+
+- `tc qdisc add DEV TYPE` for an unknown TYPE now errors
+  immediately instead of silently emitting an empty options
+  payload (which the kernel would reject with EINVAL anyway).
+  The new error message lists every recognised kind.
+- `tc filter add DEV TYPE` similarly errors on unknown TYPE.
+- `tc filter del DEV` now requires `--protocol` and `--prio`
+  (the typed `del_filter` takes the full lookup tuple). The
+  partial-spec "delete-all-on-DEV" path is gone — users who
+  need it should `tc filter show DEV` to enumerate, then delete
+  by tuple. (Or open an issue if a typed flush-by-partial-spec
+  helper is wanted.)
+- `tc action del KIND` now requires `--index` (the typed
+  `del_action` takes a concrete index).
+
+**Plan 142 §6 acceptance criteria — all met:**
+
+- [x] `crates/nlink/src/tc/builders/` directory does not exist
+- [x] `crates/nlink/src/tc/options/` directory does not exist
+- [x] `crates/nlink/src/tc/` directory does not exist (the whole
+      legacy subtree is gone, including the unused `handle.rs`
+      that only `tc::options::htb` referenced)
+- [x] `bins/tc/src/commands/{class,qdisc,filter,action}.rs`
+      contains zero `#[allow(deprecated)]` directives
+- [x] No `use nlink::tc::builders::` anywhere in the workspace
+- [x] No `nlink::tc::options::` references anywhere
+- [x] No `tc::handle::parse_handle` references
+- [x] `cargo clippy --workspace --all-targets --all-features
+      -- --deny warnings` passes
+- [x] `cargo machete` reports no NEW unused dependencies (the
+      pre-existing `nlink-ss` / `nlink-bridge` warnings are
+      unrelated to this PR)
+- [x] `cargo test -p nlink --lib` passes (749 tests)
+- [x] `cargo test -p nlink-tc` passes (35 tests)
+
+**Net diff:** -3940 LOC deleted, +53 LOC inlined =
+~3887 LOC removed from the source tree. The typed surface
+that replaces the deletion was already shipped over Phases
+0–3 and bumped lib tests from 593 → 749 (+156 net new) — the
+typed code is more strictly tested AND smaller than the legacy
+it replaces.
+
+**Plan 142 closes here. Phase 4 done. 0.15.0 ready to cut.**
+
+Remaining open items (out of scope for the 0.15.0 release-cut):
+- Plan 141 PR C — `xfrm-ipsec-tunnel` recipe + `examples/xfrm/
+  ipsec_monitor.rs --apply` promotion (needs sudo for golden-
+  frame validation).
+- Plan 137 integration tests un-parking + the GHA workflow
+  (needs an in-tree test that uses `require_module!`).
+
 ### Added — `parse_params` on the last 3 action kinds (Plan 139 PR B closes; sub-slice 3)
 
 Plan 139 PR B closes here. **All 14 action kinds typed-first**

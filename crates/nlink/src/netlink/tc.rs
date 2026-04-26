@@ -237,18 +237,16 @@ impl NetemConfig {
     /// - `reorder <pct> [<corr>]`
     /// - `gap <n>`
     /// - `rate <rate>` — typed config doesn't model the optional
-    ///   `packet_overhead` / `cell_size` / `cell_overhead` extras yet,
-    ///   so those positional args are rejected here. Drop to
-    ///   `tc::options::netem::build` for them.
+    ///   `packet_overhead` / `cell_size` / `cell_overhead` extras
+    ///   yet, so those positional args are rejected here.
     /// - `limit <packets>`
     ///
-    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`
-    /// pointing at the legacy parser): `slot`, `ecn`, `distribution`,
-    /// the `loss state` 4-state Markov, `loss gemodel`. These need
-    /// `NetemConfig` extensions before they can land here.
+    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// `slot`, `ecn`, `distribution`, the `loss state` 4-state
+    /// Markov, `loss gemodel`. These need `NetemConfig` extensions
+    /// before they can land here.
     ///
-    /// Stricter than the legacy `tc::options::netem::build`: unknown
-    /// keywords, missing values, and unparseable
+    /// Strict: unknown keywords, missing values, and unparseable
     /// time/rate/percent/integer values all return an error rather
     /// than silently being skipped.
     ///
@@ -307,7 +305,7 @@ impl NetemConfig {
                         && (*next == "state" || *next == "gemodel")
                     {
                         return Err(Error::InvalidMessage(format!(
-                            "netem: `loss {next}` (Markov model) is not supported by the typed parser yet — use tc::options::netem::build"
+                            "netem: `loss {next}` (Markov model) is not supported by the typed parser yet — file an issue if you need this"
                         )));
                     }
                     let pct_str = params.get(i).copied().ok_or_else(|| {
@@ -390,7 +388,7 @@ impl NetemConfig {
                         && !is_netem_keyword(extra)
                     {
                         return Err(Error::InvalidMessage(format!(
-                            "netem: positional `rate` extras (packet_overhead/cell_size/cell_overhead) are not modelled by NetemConfig — use tc::options::netem::build, got `{extra}`"
+                            "netem: positional `rate` extras (packet_overhead/cell_size/cell_overhead) are not modelled by NetemConfig — file an issue if you need them, got `{extra}`"
                         )));
                     }
                 }
@@ -407,7 +405,7 @@ impl NetemConfig {
                 }
                 "slot" | "ecn" | "distribution" => {
                     return Err(Error::InvalidMessage(format!(
-                        "netem: `{key}` is not modelled by NetemConfig yet — use tc::options::netem::build for this kind"
+                        "netem: `{key}` is not modelled by NetemConfig yet — file an issue if you need this token"
                     )));
                 }
                 other => {
@@ -912,18 +910,18 @@ impl TbfConfig {
     /// - `peakrate <rate>` — optional secondary rate cap.
     /// - `mtu <bytes>` (alias `minburst`) — peak-burst MTU.
     ///
-    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`
-    /// pointing at the legacy parser): `latency` — `tc(8)` accepts it
-    /// as a way to specify `limit` indirectly (`limit ≈ rate *
-    /// latency`), but `TbfConfig` only stores the raw `limit`. Drop
-    /// to `tc::options::tbf::build` if you need the latency form.
+    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// `latency` — `tc(8)` accepts it as a way to specify `limit`
+    /// indirectly (`limit ≈ rate * latency`), but `TbfConfig` only
+    /// stores the raw `limit`. Compute the limit yourself or file
+    /// an issue if the latency form is important.
     ///
-    /// Stricter than the legacy `tc::options::tbf::build`: unknown
-    /// tokens, missing values, and unparseable rate/size values all
-    /// return `Error::InvalidMessage`. Note: this parser does NOT
-    /// enforce the kernel's "rate and burst are required" rule —
-    /// that's left to `add_qdisc` / the kernel itself, mirroring how
-    /// `parse_params` behaves on every other config.
+    /// Strict: unknown tokens, missing values, and unparseable
+    /// rate/size values all return `Error::InvalidMessage`. Note:
+    /// this parser does NOT enforce the kernel's "rate and burst
+    /// are required" rule — that's left to `add_qdisc` / the kernel
+    /// itself, mirroring how `parse_params` behaves on every other
+    /// config.
     ///
     /// # Example
     ///
@@ -998,7 +996,7 @@ impl TbfConfig {
                 }
                 "latency" => {
                     return Err(Error::InvalidMessage(
-                        "tbf: `latency` is a derived form (limit = rate * latency) and is not modelled by TbfConfig — compute the limit yourself or use tc::options::tbf::build".into(),
+                        "tbf: `latency` is a derived form (limit = rate * latency) and is not modelled by TbfConfig — compute the limit yourself".into(),
                     ));
                 }
                 other => {
@@ -1126,11 +1124,9 @@ impl HtbQdiscConfig {
     /// - `r2q <n>` — rate-to-quantum divisor (default 10).
     /// - `direct_qlen <n>` — direct queue length.
     ///
-    /// Stricter than the legacy `tc::options::htb::build`: unknown
-    /// tokens, keys missing their value, and unparseable numbers all
-    /// return `Error::InvalidMessage` instead of being silently
-    /// skipped (which used to mask typos like `default_class` —
-    /// that token has no effect on the legacy parser).
+    /// Strict: unknown tokens, keys missing their value, and
+    /// unparseable numbers all return `Error::InvalidMessage`
+    /// instead of being silently skipped.
     ///
     /// # Example
     ///
@@ -1427,10 +1423,10 @@ impl SfqConfig {
     ///
     /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
     /// `divisor` — `SfqConfig` doesn't expose the hash-table divisor
-    /// field. Drop to `tc::options::sfq::build` if you need it.
+    /// field. File an issue if you need it.
     ///
-    /// Stricter than the legacy parser: unknown tokens, missing
-    /// values, and unparseable numbers all return an error.
+    /// Strict: unknown tokens, missing values, and unparseable
+    /// numbers all return an error.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -1475,7 +1471,7 @@ impl SfqConfig {
                 }
                 "divisor" => {
                     return Err(Error::InvalidMessage(
-                        "sfq: `divisor` is not modelled by SfqConfig — use tc::options::sfq::build"
+                        "sfq: `divisor` is not modelled by SfqConfig — file an issue if you need it"
                             .into(),
                     ));
                 }
@@ -2882,12 +2878,9 @@ impl CakeConfig {
     /// `egress`, `split-gso` / `no-split-gso`, `autorate-ingress`,
     /// `unlimited`.
     ///
-    /// Stricter than the legacy `tc::options::cake::build`: unknown
-    /// tokens, missing values, and unparseable rate / time / size /
-    /// integer values all return `Error::InvalidMessage`. The legacy
-    /// parser silently skips unknown tokens, which masks typos like
-    /// `bandwidth_limit` (no effect) or `dual_srchost` with an
-    /// underscore instead of a hyphen.
+    /// Strict: unknown tokens, missing values, and unparseable
+    /// rate / time / size / integer values all return
+    /// `Error::InvalidMessage`.
     ///
     /// # Example
     ///

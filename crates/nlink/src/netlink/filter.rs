@@ -1056,11 +1056,10 @@ impl FlowerFilter {
     /// - `tcp_flags <flags[/mask]>` — hex u16
     /// - `skip_hw` / `skip_sw` — flag tokens (no value)
     ///
-    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`
-    /// pointing at the legacy parser): `ct_state`, `ct_zone`,
-    /// `ct_mark`, `enc_key_id`, `enc_dst_ip`, `enc_src_ip`,
-    /// `enc_dst_port`, `indev`. Drop to the legacy
-    /// `tc::builders::filter::add` for those.
+    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// `ct_state`, `ct_zone`, `ct_mark`, `enc_key_id`,
+    /// `enc_dst_ip`, `enc_src_ip`, `enc_dst_port`, `indev`. File
+    /// an issue if you need any of these.
     ///
     /// Stricter than the legacy `add_flower_options`: unknown tokens,
     /// missing values, and unparseable addresses / ports / MACs all
@@ -1209,7 +1208,7 @@ impl FlowerFilter {
                 "ct_state" | "ct_zone" | "ct_mark" | "enc_key_id" | "enc_dst_ip" | "enc_src_ip"
                 | "enc_dst_port" | "indev" => {
                     return Err(Error::InvalidMessage(format!(
-                        "flower: `{key}` is not modelled by FlowerFilter yet — use tc::builders::filter for this match"
+                        "flower: `{key}` is not modelled by FlowerFilter yet — file an issue if you need this match"
                     )));
                 }
                 other => {
@@ -2082,8 +2081,8 @@ impl BpfFilter {
     ///
     /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
     /// `skip_hw` / `skip_sw` — `BpfFilter` doesn't expose a flags
-    /// field. Drop to the legacy `tc::builders::filter::add` for
-    /// hardware-offload control.
+    /// field. File an issue if you need hardware-offload control
+    /// on a BPF filter.
     pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
         use std::os::unix::io::IntoRawFd;
 
@@ -2159,7 +2158,7 @@ impl BpfFilter {
                 }
                 "skip_hw" | "skip_sw" => {
                     return Err(Error::InvalidMessage(format!(
-                        "bpf: `{key}` is not modelled by BpfFilter — drop to tc::builders::filter for hardware-offload control"
+                        "bpf: `{key}` is not modelled by BpfFilter — file an issue if you need hardware-offload control"
                     )));
                 }
                 other => {

@@ -19,8 +19,6 @@ sockdiag = ["dep:serde"]
 tuntap = []
 # TUN/TAP async support
 tuntap-async = ["tuntap"]
-# Traffic control utilities
-tc = []
 # Output formatting (JSON/text)
 output = ["dep:serde", "dep:serde_json"]
 # Namespace watcher (inotify-based)
@@ -28,7 +26,7 @@ namespace_watcher = ["dep:inotify"]
 # Lab / integration-test helpers (LabNamespace, with_namespace, require_root!)
 lab = []
 # All features
-full = ["sockdiag", "tuntap", "tuntap-async", "tc", "output", "namespace_watcher", "lab"]
+full = ["sockdiag", "tuntap", "tuntap-async", "output", "namespace_watcher", "lab"]
 # Enable integration tests (require root or network namespace)
 integration = []
 

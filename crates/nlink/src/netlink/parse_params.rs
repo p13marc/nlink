@@ -38,8 +38,8 @@ mod sealed {
 ///
 /// - Return `Err(`[`Error::InvalidMessage`]`)` for unknown tokens,
 ///   missing values, and unparseable inner values. Silent skipping
-///   is a bug — the legacy `tc::options::*` parsers swallowed
-///   unknown tokens, and the typed parsers exist to fix that.
+///   is a bug — the typed parsers exist precisely because the old
+///   string-args builders swallowed unknown tokens.
 /// - Begin every error message with the kind name
 ///   (`"htb: invalid r2q `foo` (expected unsigned integer)"`,
 ///   `"flower: `classid` requires a value"`,

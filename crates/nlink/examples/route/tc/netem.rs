@@ -3,15 +3,15 @@
 //! This example demonstrates how to configure network emulation
 //! (delay, loss, corruption, etc.) using the TC netem qdisc.
 //!
-//! Run with: cargo run -p nlink --features tc --example tc_netem
+//! Run with: cargo run -p nlink --example tc_netem
 //!
 //! Requires root privileges. Uses a dummy interface for safety.
 //!
 //! Examples:
-//!   cargo run -p nlink --features tc --example tc_netem -- show eth0
-//!   sudo cargo run -p nlink --features tc --example tc_netem -- add eth0 delay 100ms
-//!   sudo cargo run -p nlink --features tc --example tc_netem -- add eth0 loss 1%
-//!   sudo cargo run -p nlink --features tc --example tc_netem -- del eth0
+//!   cargo run -p nlink --example tc_netem -- show eth0
+//!   sudo cargo run -p nlink --example tc_netem -- add eth0 delay 100ms
+//!   sudo cargo run -p nlink --example tc_netem -- add eth0 loss 1%
+//!   sudo cargo run -p nlink --example tc_netem -- del eth0
 
 use std::{env, time::Duration};
 

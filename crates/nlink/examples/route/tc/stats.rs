@@ -3,11 +3,11 @@
 //! This example demonstrates how to track TC statistics and calculate
 //! throughput rates over time.
 //!
-//! Run with: cargo run -p nlink --features tc --example tc_stats
+//! Run with: cargo run -p nlink --example tc_stats
 //!
 //! Examples:
-//!   cargo run -p nlink --features tc --example tc_stats
-//!   cargo run -p nlink --features tc --example tc_stats -- eth0
+//!   cargo run -p nlink --example tc_stats
+//!   cargo run -p nlink --example tc_stats -- eth0
 
 use std::{
     collections::HashMap,

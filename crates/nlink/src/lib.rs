@@ -133,9 +133,6 @@ pub mod sockdiag;
 #[cfg(feature = "tuntap")]
 pub mod tuntap;
 
-#[cfg(feature = "tc")]
-pub mod tc;
-
 #[cfg(feature = "output")]
 pub mod output;
 
