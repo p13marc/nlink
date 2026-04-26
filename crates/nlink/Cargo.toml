@@ -209,9 +209,12 @@ name = "netfilter_conntrack_events"
 path = "examples/netfilter/conntrack_events.rs"
 
 # XFRM examples (IPsec)
+# `--apply` codepath uses `nlink::lab::with_namespace`, so the example
+# requires the `lab` feature.
 [[example]]
 name = "xfrm_ipsec_monitor"
 path = "examples/xfrm/ipsec_monitor.rs"
+required-features = ["lab"]
 
 # FIB lookup examples
 [[example]]
