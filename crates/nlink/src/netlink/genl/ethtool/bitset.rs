@@ -267,7 +267,13 @@ impl EthtoolBitset {
     /// So `enable("rx-gro")` on an empty bitset writes `(name=rx-gro,
     /// VALUE flag set)`, and `disable("rx-gro")` writes `(name=rx-gro,
     /// no VALUE flag)`.
-    pub fn write_to(&self, builder: &mut MessageBuilder, attr_type: u16) {
+    ///
+    /// `pub(crate)` rather than `pub`: only the ethtool connection
+    /// helpers need to encode bitsets; downstream users hit it
+    /// through `set_features` / `set_link_modes` etc. Promoting to
+    /// `pub` is a semver-minor change and so out of scope for a
+    /// patch release; the right venue for that is 0.16.
+    pub(crate) fn write_to(&self, builder: &mut MessageBuilder, attr_type: u16) {
         let outer = builder.nest_start(attr_type | NLA_F_NESTED);
         let bits = builder.nest_start(EthtoolBitsetAttr::Bits as u16 | NLA_F_NESTED);
         // Walk in deterministic name order so encoded bytes are
