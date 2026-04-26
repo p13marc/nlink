@@ -74,6 +74,36 @@ jobs:
         with:
           package: nlink
 
+  # Diff the public API surface against the previous git tag. For
+  # patch releases, the diff MUST be empty. For minor releases, the
+  # diff is informational; the gate catches *unintended* changes,
+  # not all changes. Per Plan 144 §4.4: stub the snapshot file
+  # (crates/nlink/public-api.txt) in 0.16 once the convention is
+  # finalized; until then, --diff-git-checkouts is sufficient.
+  public-api-diff:
+    name: cargo public-api diff vs last tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history needed for git tag lookup
+      - name: Install cargo-public-api
+        run: cargo install --locked cargo-public-api
+      - name: Diff public API vs latest tag
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [[ -z "$LATEST_TAG" ]]; then
+            echo "No git tag found; skipping public-api diff (first release?)"
+            exit 0
+          fi
+          echo "Diffing public API: $LATEST_TAG..HEAD"
+          # `diff` subcommand with `<tag>..HEAD` syntax checks out
+          # both refs, builds rustdoc JSON, and reports added/removed/
+          # changed items. `--deny=all` fails the build if any change
+          # is detected. For patch releases, expect empty diff. For
+          # minor releases, drop --deny=all and use it as informational.
+          cargo public-api -p nlink diff "$LATEST_TAG..HEAD" --deny=all
+
   # Audit script: every [[example]] entry must declare
   # `required-features` for any feature-gated module it imports
   # (lab, sockdiag, tuntap, output, namespace_watcher).

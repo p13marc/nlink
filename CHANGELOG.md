@@ -67,6 +67,15 @@ verifies a clean diff against 0.15.0).
   ~1 in 6 crates accidentally violate semver). Would have
   caught the `add_class_config` rename / stringly-typed
   holdover that pre-publish surgery surfaced in 0.15.0.
+- **`public-api-diff` job** runs `cargo public-api -p nlink
+  diff <latest-tag>..HEAD --deny=all` on every PR. Patch
+  releases require an empty diff; minor releases drop
+  `--deny=all` and use the diff informationally. Verified
+  empty between `0.15.0` tag and the 0.15.1 candidate.
+  Snapshot-file convention (`crates/nlink/public-api.txt`) is
+  deferred to 0.16 per Plan 144 §4.4; the
+  `--diff-git-checkouts`-style git-ref diff is sufficient
+  meanwhile and requires no checked-in baseline.
 - **`audit-examples` job** runs `scripts/audit-example-features.sh`,
   a new bash diagnostic that maps every `[[example]]` entry
   to its `required-features` declaration, cross-references
@@ -111,12 +120,13 @@ published `nlink` crate.)
 ### Out of scope (deferred to 0.16+)
 
 Per `STRATEGIC_ANALYSIS.md`: streaming dump API, observability
-feature, MSRV declaration, `cargo public-api` baseline + diff
-gating, fuzzing infrastructure, all kernel features (netkit,
-tcx, flowtable, …), all library features (MultiConnection,
-NetworkStatPoller, TcDebugger), YNL bet, README rewrite, 1.0
-stability tier declaration. 0.15.1 is a quality patch, not a
-feature release.
+feature, MSRV declaration, `cargo public-api` snapshot-file
+convention (the diff-vs-tag gating shipped in 0.15.1; the
+checked-in baseline file lands in 0.16), fuzzing infrastructure,
+all kernel features (netkit, tcx, flowtable, …), all library
+features (MultiConnection, NetworkStatPoller, TcDebugger), YNL
+bet, README rewrite, 1.0 stability tier declaration. 0.15.1 is
+a quality patch, not a feature release.
 
 ## [0.15.0] - 2026-04-26
 
