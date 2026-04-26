@@ -741,7 +741,7 @@ impl PerHostLimiter {
     /// **zero** kernel calls on the second invocation.
     ///
     /// If the live root qdisc is the wrong kind (not HTB), reconcile
-    /// returns an error by default. Pass [`ReconcileOptions::with_fallback_to_apply(true)`]
+    /// returns an error by default. Pass [`ReconcileOptions::with_fallback_to_apply`]`(true)`
     /// to instead trigger a destructive rebuild via [`apply()`].
     ///
     /// [`apply()`]: Self::apply

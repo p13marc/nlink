@@ -163,7 +163,7 @@ impl TcMessage {
         self.header.tcm_ifindex as u32
     }
 
-    /// Get the handle (qdisc/class ID) as a typed [`TcHandle`].
+    /// Get the handle (qdisc/class ID) as a typed [`TcHandle`](crate::TcHandle).
     ///
     /// For the raw `u32` (e.g. for use as a `HashMap` key), call
     /// [`handle_raw`](Self::handle_raw).
@@ -172,13 +172,13 @@ impl TcMessage {
     }
 
     /// Get the raw `u32` handle the kernel returned, without wrapping it in
-    /// a [`TcHandle`]. Prefer [`handle`](Self::handle) unless you need the
+    /// a [`TcHandle`](crate::TcHandle). Prefer [`handle`](Self::handle) unless you need the
     /// raw integer (e.g. as a `HashMap` key).
     pub fn handle_raw(&self) -> u32 {
         self.header.tcm_handle
     }
 
-    /// Get the parent handle as a typed [`TcHandle`].
+    /// Get the parent handle as a typed [`TcHandle`](crate::TcHandle).
     ///
     /// For the raw `u32`, call [`parent_raw`](Self::parent_raw).
     pub fn parent(&self) -> crate::TcHandle {
@@ -186,7 +186,7 @@ impl TcMessage {
     }
 
     /// Get the raw `u32` parent the kernel returned, without wrapping it in
-    /// a [`TcHandle`]. Prefer [`parent`](Self::parent) unless you need the
+    /// a [`TcHandle`](crate::TcHandle). Prefer [`parent`](Self::parent) unless you need the
     /// raw integer.
     pub fn parent_raw(&self) -> u32 {
         self.header.tcm_parent

@@ -22,8 +22,8 @@
 //! - The shape mirrors `PerHostLimiter`, easing maintenance.
 //!
 //! Per-peer rate caps are supported via [`PeerImpairment::rate_cap`]. When no
-//! cap is set, each class gets `rate = ceil = assumed_link_rate_bps` (default
-//! [`DEFAULT_ASSUMED_LINK_RATE_BPS`], ~80 Gbps), which effectively disables
+//! cap is set, each class gets `rate = ceil = assumed_link_rate` (default
+//! [`DEFAULT_ASSUMED_LINK_RATE`], ~80 Gbps), which effectively disables
 //! shaping while still satisfying HTB's positive-rate requirement.
 //!
 //! Filters use `cls_flower` (mainline since Linux 4.2). If the classifier is
@@ -425,7 +425,7 @@ impl PerPeerImpairer {
     /// Returns a structured [`ReconcileReport`] describing what changed.
     ///
     /// If the live root qdisc is the wrong kind (not HTB), reconcile
-    /// returns an error by default. Pass [`ReconcileOptions::with_fallback_to_apply(true)`]
+    /// returns an error by default. Pass [`ReconcileOptions::with_fallback_to_apply`]`(true)`
     /// to instead trigger a destructive rebuild via [`apply()`].
     ///
     /// [`apply()`]: Self::apply
