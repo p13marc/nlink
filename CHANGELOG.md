@@ -57,6 +57,14 @@ The hand-rolled `Connection<Xfrm>::new()` was removed — the
 generic `Connection::<P>::new()` covers it now that `Xfrm:
 Default`.
 
+Pre-publish source-tree cleanup: the long-standing
+`#[deprecated] pub mod nlink::netlink::link::bond_mode { ... }`
+constants module (replaced by the `BondMode` enum since 0.13.0
+and unreferenced anywhere in the workspace) was deleted. With
+this, the source tree carries **zero `#[deprecated]` attributes
+and zero `#[allow(deprecated)]` overrides**, satisfying Plan 142
+§6's "zero deprecations in source" gate.
+
 Active plans table cleared: every row from `128b-roadmap-overview.md`
 that was open at cut-pending time has shipped. 0.16.0 opens
 fresh (other-bins typed-units rollout per the Backlog).
