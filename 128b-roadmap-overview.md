@@ -2,10 +2,11 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: nlink roadmap — active plans only
-target version: 0.15.0 cut 2026-04-26 (publish-ready); 0.16.0 and beyond
-last updated: 2026-04-26 (post-cut tail cleared, all shipped detail
-plans removed from tree — substance lives in CHANGELOG `## [0.15.0]`
-and `docs/migration_guide/0.14.0-to-0.15.0.md`)
+target version: 0.15.1 in flight (patch); 0.16.0 and beyond
+last updated: 2026-04-26 (0.15.1 cycle opened — post-publish CI
+went red on `cargo test --workspace` due to `xfrm_ipsec_monitor`
+example missing `required-features = ["lab"]`. Plans 143/144/145
+drafted; all three target the same patch cut.)
 ---
 
 # nlink Roadmap
@@ -16,25 +17,35 @@ features have been removed (their substance is in the commits +
 changelog). For per-release upgrade notes see
 [`docs/migration_guide/`](docs/migration_guide/README.md).
 
-## Active plans
+## Active plans (0.15.1 cycle)
 
-**Empty as of 2026-04-26 (post-0.15.0 cut, post-tail cleanup).**
-Every plan that was active at cut-pending time shipped before
-publish — both deferred recipes, the GHA workflow YAML, the
-conntrack integration tests, and the `ipsec_monitor.rs --apply`
-promotion all landed under the same `## [0.15.0]` heading.
+| Plan | Title | Status |
+|---|---|---|
+| [143](143-0.15.1-master-plan.md) | 0.15.1 master + test-failure fix (Phase 0 = the 1-line `[[example]]` gating fix) | drafted; Phase 0 ready to ship |
+| [144](144-0.15.1-ci-safety-nets-plan.md) | CI safety nets — split rust.yml into named jobs, semver-checks, audit-examples script, machete enforcement (no `\|\| true`), `bins/{ss,bridge}` dead-deps cleanup | drafted |
+| [145](145-0.15.1-doc-cleanup-plan.md) | Doc warning cleanup — 7 unresolved intra-doc cross-references in `impair.rs`, `ratelimit.rs`, `messages/tc.rs` + new `cargo doc` deny-warnings CI gate | drafted |
 
-**0.15.0 cut on 2026-04-26.** Workspace at `0.15.0`, CHANGELOG
-header is `## [0.15.0] - 2026-04-26`, migration guide in place
-at [`docs/migration_guide/0.14.0-to-0.15.0.md`](docs/migration_guide/0.14.0-to-0.15.0.md).
-Maintainer publishes via `cargo publish -p nlink` and tags
-`v0.15.0`.
+**0.15.0 published 2026-04-26.** Tag `0.15.0`. CI on master
+went red shortly after publish — see Plan 143 for the root
+cause (one-line Cargo.toml metadata fix). 0.15.1 cuts after all
+three plans land.
 
-**Next-up after publish**: the other-bins typed-units rollout
-(see Backlog row "Workspace-wide typed-units rollout to other
-bins"). Other items not in the active set are explicitly
-demand-gated (typed `ct_expect` / nfqueue / nflog surfaces) —
-open per-PR plans only when a downstream user asks.
+**0.15.1 acceptance gates** (per Plan 143 §5):
+- `cargo test --workspace` (default features) green on a fresh `git clone`
+- `cargo doc -p nlink --no-deps` emits zero warnings
+- `cargo machete` clean without `|| true`
+- `cargo-semver-checks` clean diff vs published 0.15.0
+- Workspace bumped to 0.15.1
+
+**Next-up after 0.15.1 publish**: the 0.16.0 quality cycle
+(streaming dump API, MSRV declaration, observability feature,
+`netkit` link kind support, `cargo public-api` baseline). See
+[`STRATEGIC_ANALYSIS.md`](STRATEGIC_ANALYSIS.md) for the deep
+analysis driving 0.16+ priorities.
+
+Other items not in the active set are explicitly demand-gated
+(typed `ct_expect` / nfqueue / nflog surfaces) — open per-PR
+plans only when a downstream user asks.
 
 ## Release plan
 

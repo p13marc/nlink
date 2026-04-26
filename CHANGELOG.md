@@ -6,10 +6,122 @@ All notable changes to this project will be documented in this file.
 
 (empty — entries land here as the next release accumulates)
 
+## [0.15.1] - 2026-04-XX
+
+Patch release. Fixes a regression that prevented `cargo test
+--workspace` from compiling with default features, plus
+docs/CI quality wins from the 0.16 strategic analysis that
+fit a patch (no public-API changes; `cargo-semver-checks`
+verifies a clean diff against 0.15.0).
+
+### Fixed
+
+- **`examples/xfrm/ipsec_monitor.rs` — `[[example]]` entry now
+  declares `required-features = ["lab"]`** (Plan 143 Phase 0).
+  The example was promoted to a full lifecycle runner using
+  `nlink::lab::with_namespace` during the 0.15.0 post-cut tail
+  (commit `5634f1a`), but the Cargo.toml gating wasn't added,
+  so `cargo test --workspace` (default features) failed to
+  compile the example. Pure metadata fix; library code is
+  unchanged.
+- **`cargo doc -p nlink --no-deps` now emits zero warnings**
+  (Plan 145). Seven unresolved intra-doc cross-references
+  fixed:
+  - `DEFAULT_ASSUMED_LINK_RATE_BPS` typo in `impair.rs`
+    module docs (correct name: `DEFAULT_ASSUMED_LINK_RATE`).
+  - Two `[\`ReconcileOptions::with_fallback_to_apply(true)\`]`
+    occurrences in `impair.rs` and `ratelimit.rs` —
+    rustdoc doesn't accept function-call argument lists in
+    link paths; the `(true)` now lives outside the link as
+    inline code.
+  - Four bare `[\`TcHandle\`]` references in `messages/tc.rs`
+    — `TcHandle` is re-exported at the crate root but not in
+    scope at the use site; now use `[\`TcHandle\`](crate::TcHandle)`
+    so the link resolves while keeping the rendered text.
+- **CHANGELOG `## [0.15.0]` preamble typo** corrected: said
+  "41 typed configs in `nlink::ParseParams` (18 qdisc + 4
+  class + 9 filter + 14 action)" — the breakdown sums to 45
+  (which is correct as of the 0.15.0 pre-publish class-side
+  surgery in commit `c43de7f`). Now reads "45".
+
+### Changed — CI safety nets (Plan 144)
+
+- **`.github/workflows/rust.yml` rewritten as 7 named jobs**
+  (was: a single `cargo build && cargo test` step):
+  `build-and-test-default-features`, `build-and-test-all-features`,
+  `clippy`, `doc`, `semver-checks`, `audit-examples`, `machete`.
+  Each gate has a clear "what failed" signal in the GitHub UI.
+- **`build-and-test-default-features`** runs `cargo test
+  --workspace` with no features, catching the
+  `xfrm_ipsec_monitor`-class regression (a feature-gated
+  example that imports a feature-gated module without
+  declaring `required-features`).
+- **`doc` job** runs `cargo doc -p nlink --no-deps --all-features`
+  with `RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D
+  rustdoc::redundant_explicit_links"`. Matches the docs.rs
+  build configuration.
+- **`semver-checks` job** uses
+  `obi1kenobi/cargo-semver-checks-action@v2` against the
+  latest published version on crates.io. Catches accidental
+  semver violations (per [Predrag Gruevski's research](https://predr.ag/blog/semver-in-rust-tooling-breakage-and-edge-cases/),
+  ~1 in 6 crates accidentally violate semver). Would have
+  caught the `add_class_config` rename / stringly-typed
+  holdover that pre-publish surgery surfaced in 0.15.0.
+- **`audit-examples` job** runs `scripts/audit-example-features.sh`,
+  a new bash diagnostic that maps every `[[example]]` entry
+  to its `required-features` declaration, cross-references
+  against feature-gated module imports (`nlink::lab`,
+  `nlink::sockdiag`, `nlink::tuntap`, `nlink::output`,
+  `nlink::namespace_watcher`), and exits non-zero on any
+  mismatch. Belt-and-suspenders alongside the
+  `build-and-test-default-features` enforcement layer.
+- **`machete` job** now runs without `|| true` suppression
+  (see "Removed" below). Same change applied to
+  `.github/workflows/integration-tests.yml`.
+
+### Removed — pre-existing dead deps in `bins/{ss,bridge}` (Plan 144 Phase 4 Option A)
+
+`cargo machete` previously flagged five unused dependencies
+that the CI workflow suppressed with `|| true`. All five are
+deleted; both bins still build cleanly. (Both bins are
+`publish = false` POCs; this change has no effect on the
+published `nlink` crate.)
+
+- **`bins/ss/Cargo.toml`** — removed `libc` (no `use libc`
+  anywhere in `src/`) and `atty` (no caller). Verified by
+  `cargo build -p nlink-ss`.
+- **`bins/bridge/Cargo.toml`** — removed `tokio-stream`,
+  `tracing`, and `tracing-subscriber` (no callers; `bridge`
+  uses `clap` + `serde_json` + `atty` only). Verified by
+  `cargo build -p nlink-bridge`.
+
+### Documentation
+
+- New `scripts/audit-example-features.sh` (~110 LOC bash) —
+  the diagnostic powering the `audit-examples` CI job. Can
+  be run manually before opening a PR. Tested to catch the
+  exact regression class that produced the `xfrm_ipsec_monitor`
+  bug.
+- Plan documents in tree (`143-0.15.1-master-plan.md`,
+  `144-0.15.1-ci-safety-nets-plan.md`,
+  `145-0.15.1-doc-cleanup-plan.md`) describe the design and
+  acceptance criteria for the 0.15.1 surgery. Will be archived
+  post-publish per the project's plan-document convention.
+
+### Out of scope (deferred to 0.16+)
+
+Per `STRATEGIC_ANALYSIS.md`: streaming dump API, observability
+feature, MSRV declaration, `cargo public-api` baseline + diff
+gating, fuzzing infrastructure, all kernel features (netkit,
+tcx, flowtable, …), all library features (MultiConnection,
+NetworkStatPoller, TcDebugger), YNL bet, README rewrite, 1.0
+stability tier declaration. 0.15.1 is a quality patch, not a
+feature release.
+
 ## [0.15.0] - 2026-04-26
 
 The typed-API completion arc — what would have been 0.14.0 +
-0.15.0 in the original release plan merged into one ship. 41
+0.15.0 in the original release plan merged into one ship. 45
 typed configs in `nlink::ParseParams` (18 qdisc + 4 class + 9
 filter + 14 action). Legacy `tc::builders::*` and `tc::options/*` modules
 deleted. Lib tests grew from 593 (post-0.13.0) to 749 (+156).
