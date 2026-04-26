@@ -18,6 +18,12 @@ members = [
 [workspace.package]
 version = "0.15.1"
 edition = "2024"
+# Minimum Supported Rust Version. `edition = "2024"` already requires
+# 1.85 implicitly; this declaration makes the floor explicit so
+# downstream consumers can pin against a known floor and so
+# `cargo-msrv` can verify it in CI. Cadence: advanced in minor
+# releases only, called out in CHANGELOG.
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/p13marc/nlink"
 authors = ["Marc Pardo <p13marc@gmail.com>"]

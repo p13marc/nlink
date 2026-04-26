@@ -127,3 +127,17 @@ jobs:
         run: cargo install --locked cargo-machete
       - name: Run cargo machete
         run: cargo machete
+
+  # Verifies the declared `rust-version` in Cargo.toml actually
+  # builds. Catches accidental usage of a feature stabilized after
+  # the floor (e.g. someone uses a 1.86 std API while the floor is
+  # 1.85). Pairs with the workspace.package.rust-version declaration.
+  msrv:
+    name: cargo-msrv verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-msrv
+        run: cargo install --locked cargo-msrv
+      - name: Verify MSRV
+        run: cargo msrv verify --path crates/nlink
