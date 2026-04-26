@@ -10,8 +10,8 @@ All notable changes to this project will be documented in this file.
 
 The typed-API completion arc — what would have been 0.14.0 +
 0.15.0 in the original release plan merged into one ship. 41
-typed configs in `nlink::ParseParams` (18 qdisc + 9 filter + 14
-action). Legacy `tc::builders::*` and `tc::options/*` modules
+typed configs in `nlink::ParseParams` (18 qdisc + 4 class + 9
+filter + 14 action). Legacy `tc::builders::*` and `tc::options/*` modules
 deleted. Lib tests grew from 593 (post-0.13.0) to 749 (+156).
 Full upgrade walkthrough:
 [`docs/migration_guide/0.14.0-to-0.15.0.md`](docs/migration_guide/0.14.0-to-0.15.0.md).

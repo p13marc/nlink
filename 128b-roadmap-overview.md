@@ -49,8 +49,8 @@ open per-PR plans only when a downstream user asks.
   what would have been 0.14.0 + 0.15.0 in the original release
   plan merged into one ship. Highlights:
 
-  - **Typed surface end-to-end** — 41 typed configs in
-    `nlink::ParseParams` (18 qdisc + 9 filter + 14 action).
+  - **Typed surface end-to-end** — 45 typed configs in
+    `nlink::ParseParams` (18 qdisc + 4 class + 9 filter + 14 action).
     Sealed `ParseParams` trait formalizes the contract.
   - **Legacy deletion** — `tc::builders::*` and `tc::options/*`
     modules removed (-3940 LOC). Zero `#[deprecated]` and zero

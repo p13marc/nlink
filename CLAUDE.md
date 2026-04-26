@@ -201,7 +201,7 @@ impl FooConfig {
   **Never silently fall back.**
 - **Errors are stringly typed by design** — no typed parse-error
   variant. Format-string messages have proven readable across
-  the 41 shipped parsers (18 qdisc + 9 filter + 14 action).
+  the 45 shipped parsers (18 qdisc + 4 class + 9 filter + 14 action).
 
 The sealed `nlink::ParseParams` trait formalizes the inherent
 method for generic dispatch (`fn run<C: ParseParams>(p: &[&str])
@@ -323,7 +323,7 @@ they are kept current.
 ## Active work
 
 The 0.15.0 typed-API completion arc has shipped — sealed
-`ParseParams` trait + 41 impls, filter side 9/9 typed-first,
+`ParseParams` trait + 45 impls, filter side 9/9 typed-first,
 XFRM SA + SP CRUD, typed standalone-action CRUD, and the legacy
 `tc::builders::*` + `tc::options::*` modules deleted. See
 CHANGELOG `## [0.15.0]` for the per-PR breakdown.
