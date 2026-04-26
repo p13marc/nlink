@@ -4329,14 +4329,14 @@ pub trait ClassConfig: Send + Sync {
 /// conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
 ///
 /// // Add root class (total bandwidth)
-/// conn.add_class_config("eth0", "1:0", "1:1",
+/// conn.add_class("eth0", "1:0", "1:1",
 ///     HtbClassConfig::new(Rate::gbit(1))
 ///         .ceil(Rate::gbit(1))
 ///         .build()
 /// ).await?;
 ///
 /// // Add child class with guaranteed and ceiling rates
-/// conn.add_class_config("eth0", "1:1", "1:10",
+/// conn.add_class("eth0", "1:1", "1:10",
 ///     HtbClassConfig::new(Rate::mbit(100))
 ///         .ceil(Rate::mbit(500))
 ///         .prio(1)
@@ -4462,6 +4462,149 @@ impl HtbClassConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a `tc(8)`-style HTB class param token slice.
+    ///
+    /// Accepts the same keywords as `tc class add ... htb`: `rate`,
+    /// `ceil`, `burst`/`buffer`/`maxburst`, `cburst`/`cbuffer`/`cmaxburst`,
+    /// `prio`, `quantum`, `mtu`, `mpu`, `overhead`. `rate` is required
+    /// (matches the kernel and `HtbClassConfig::new`'s contract).
+    ///
+    /// Strict: unknown tokens, missing values, and unparseable
+    /// rates/sizes/integers all return `Error::InvalidMessage` —
+    /// the legacy stringly-typed dispatcher used to silently swallow
+    /// unknown tokens, which this replaces.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        use crate::util::Rate;
+        let mut rate: Option<Rate> = None;
+        let mut ceil: Option<Rate> = None;
+        let mut burst: Option<crate::util::Bytes> = None;
+        let mut cburst: Option<crate::util::Bytes> = None;
+        let mut prio: Option<u32> = None;
+        let mut quantum: Option<u32> = None;
+        let mut mtu: Option<u32> = None;
+        let mut mpu: Option<u16> = None;
+        let mut overhead: Option<u16> = None;
+
+        let mut i = 0;
+        while i < params.len() {
+            let tok = params[i];
+            let val = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("htb: `{tok}` requires a value"))
+                })
+            };
+            match tok {
+                "rate" => {
+                    let v = val()?;
+                    rate = Some(v.parse::<Rate>().map_err(|e| {
+                        Error::InvalidMessage(format!("htb: invalid rate `{v}`: {e}"))
+                    })?);
+                    i += 2;
+                }
+                "ceil" => {
+                    let v = val()?;
+                    ceil = Some(v.parse::<Rate>().map_err(|e| {
+                        Error::InvalidMessage(format!("htb: invalid ceil `{v}`: {e}"))
+                    })?);
+                    i += 2;
+                }
+                "burst" | "buffer" | "maxburst" => {
+                    let v = val()?;
+                    burst = Some(v.parse::<crate::util::Bytes>().map_err(|e| {
+                        Error::InvalidMessage(format!("htb: invalid burst `{v}`: {e}"))
+                    })?);
+                    i += 2;
+                }
+                "cburst" | "cbuffer" | "cmaxburst" => {
+                    let v = val()?;
+                    cburst = Some(v.parse::<crate::util::Bytes>().map_err(|e| {
+                        Error::InvalidMessage(format!("htb: invalid cburst `{v}`: {e}"))
+                    })?);
+                    i += 2;
+                }
+                "prio" => {
+                    let v = val()?;
+                    prio = Some(v.parse::<u32>().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "htb: invalid prio `{v}` (expected unsigned integer)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "quantum" => {
+                    let v = val()?;
+                    let bytes = v.parse::<crate::util::Bytes>().map_err(|e| {
+                        Error::InvalidMessage(format!("htb: invalid quantum `{v}`: {e}"))
+                    })?;
+                    quantum = Some(bytes.as_u32_saturating());
+                    i += 2;
+                }
+                "mtu" => {
+                    let v = val()?;
+                    mtu = Some(v.parse::<u32>().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "htb: invalid mtu `{v}` (expected unsigned integer)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "mpu" => {
+                    let v = val()?;
+                    mpu = Some(v.parse::<u16>().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "htb: invalid mpu `{v}` (expected u16)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "overhead" => {
+                    let v = val()?;
+                    overhead = Some(v.parse::<u16>().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "htb: invalid overhead `{v}` (expected u16)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "htb: unknown token `{other}` (recognised: rate, ceil, burst, cburst, prio, quantum, mtu, mpu, overhead)"
+                    )));
+                }
+            }
+        }
+
+        let rate = rate.ok_or_else(|| {
+            Error::InvalidMessage("htb: `rate` is required".into())
+        })?;
+        let mut cfg = HtbClassConfig::new(rate);
+        if let Some(c) = ceil {
+            cfg = cfg.ceil(c);
+        }
+        if let Some(b) = burst {
+            cfg = cfg.burst(b);
+        }
+        if let Some(c) = cburst {
+            cfg = cfg.cburst(c);
+        }
+        if let Some(p) = prio {
+            cfg = cfg.prio(p);
+        }
+        if let Some(q) = quantum {
+            cfg = cfg.quantum(q);
+        }
+        if let Some(m) = mtu {
+            cfg = cfg.mtu(m);
+        }
+        if let Some(m) = mpu {
+            cfg = cfg.mpu(m);
+        }
+        if let Some(o) = overhead {
+            cfg = cfg.overhead(o);
+        }
+        Ok(cfg)
+    }
 }
 
 impl ClassConfig for HtbClassConfig {
@@ -4579,14 +4722,14 @@ impl ClassConfig for HtbClassConfig {
 /// conn.add_qdisc_full("eth0", "root", Some("1:"), hfsc).await?;
 ///
 /// // Add root class with link-share curve
-/// conn.add_class_config("eth0", "1:0", "1:1",
+/// conn.add_class("eth0", "1:0", "1:1",
 ///     HfscClassConfig::new()
 ///         .ls_rate(1_000_000_000)  // 1 Gbps link-share
 ///         .build()
 /// ).await?;
 ///
 /// // Add real-time class with latency guarantee
-/// conn.add_class_config("eth0", "1:1", "1:10",
+/// conn.add_class("eth0", "1:1", "1:10",
 ///     HfscClassConfig::new()
 ///         .rt_curve(TcServiceCurve::two_slope(10_000_000, 5000, 1_000_000))
 ///         .ls_rate(100_000_000)
@@ -4594,7 +4737,7 @@ impl ClassConfig for HtbClassConfig {
 /// ).await?;
 ///
 /// // Add best-effort class with upper limit
-/// conn.add_class_config("eth0", "1:1", "1:20",
+/// conn.add_class("eth0", "1:1", "1:20",
 ///     HfscClassConfig::new()
 ///         .ls_rate(50_000_000)
 ///         .ul_rate(100_000_000)  // Cap at 100 Mbps
@@ -4672,6 +4815,58 @@ impl HfscClassConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a simplified `tc(8)`-style HFSC class param token slice.
+    ///
+    /// Accepts the rate-only forms: `rt rate <rate>`, `ls rate <rate>`,
+    /// `ul rate <rate>`. The full `m1/d/m2` service-curve grammar is
+    /// not parsed here — callers needing arbitrary curves should use
+    /// the typed builder (`HfscClassConfig::new().rt_curve(...)`)
+    /// directly. Strict rejection on unknown tokens.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        use crate::util::Rate;
+        let mut cfg = HfscClassConfig::new();
+        let mut i = 0;
+        while i < params.len() {
+            let curve = params[i];
+            let kind = match curve {
+                "rt" | "ls" | "ul" => curve,
+                "sc" => {
+                    return Err(Error::InvalidMessage(
+                        "hfsc: `sc` (real-time + link-share combined) not modelled by parse_params — use HfscClassConfig::rt_curve + ls_curve on the typed builder".into(),
+                    ));
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "hfsc: unknown token `{other}` (recognised: rt, ls, ul; each followed by `rate <rate>`)"
+                    )));
+                }
+            };
+            // Expect `rate <rate>` after the curve keyword.
+            let next = params.get(i + 1).copied().ok_or_else(|| {
+                Error::InvalidMessage(format!("hfsc: `{kind}` requires `rate <rate>`"))
+            })?;
+            if next != "rate" {
+                return Err(Error::InvalidMessage(format!(
+                    "hfsc: `{kind}` followed by `{next}` — only the `rate <rate>` form is parsed (use the typed builder for full m1/d/m2 curves)"
+                )));
+            }
+            let v = params.get(i + 2).copied().ok_or_else(|| {
+                Error::InvalidMessage(format!("hfsc: `{kind} rate` requires a value"))
+            })?;
+            let rate = v.parse::<Rate>().map_err(|e| {
+                Error::InvalidMessage(format!("hfsc: invalid rate `{v}`: {e}"))
+            })?;
+            cfg = match kind {
+                "rt" => cfg.rt_rate(rate),
+                "ls" => cfg.ls_rate(rate),
+                "ul" => cfg.ul_rate(rate),
+                _ => unreachable!(),
+            };
+            i += 3;
+        }
+        Ok(cfg)
+    }
 }
 
 impl ClassConfig for HfscClassConfig {
@@ -4723,13 +4918,13 @@ impl ClassConfig for HfscClassConfig {
 /// conn.add_qdisc_full("eth0", "root", Some("1:"), drr).await?;
 ///
 /// // Add classes with different quanta (bandwidth proportions)
-/// conn.add_class_config("eth0", "1:0", "1:1",
+/// conn.add_class("eth0", "1:0", "1:1",
 ///     DrrClassConfig::new()
 ///         .quantum(1500)  // 1 packet worth
 ///         .build()
 /// ).await?;
 ///
-/// conn.add_class_config("eth0", "1:0", "1:2",
+/// conn.add_class("eth0", "1:0", "1:2",
 ///     DrrClassConfig::new()
 ///         .quantum(3000)  // 2x bandwidth of class 1:1
 ///         .build()
@@ -4762,6 +4957,37 @@ impl DrrClassConfig {
     /// builder is already usable as a `ClassConfig` without it.
     pub fn build(self) -> Self {
         self
+    }
+
+    /// Parse a `tc(8)`-style DRR class param token slice.
+    ///
+    /// DRR class accepts a single optional keyword: `quantum <bytes>`.
+    /// Unknown tokens, missing values, and unparseable sizes return
+    /// `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = DrrClassConfig::new();
+        let mut i = 0;
+        while i < params.len() {
+            let tok = params[i];
+            match tok {
+                "quantum" => {
+                    let v = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("drr: `quantum` requires a value".into())
+                    })?;
+                    let q = v.parse::<crate::util::Bytes>().map_err(|e| {
+                        Error::InvalidMessage(format!("drr: invalid quantum `{v}`: {e}"))
+                    })?;
+                    cfg = cfg.quantum(q);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "drr: unknown token `{other}` (recognised: quantum)"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
     }
 }
 
@@ -4804,13 +5030,13 @@ impl ClassConfig for DrrClassConfig {
 /// conn.add_qdisc_full("eth0", "root", Some("1:"), qfq).await?;
 ///
 /// // Add classes with different weights
-/// conn.add_class_config("eth0", "1:0", "1:1",
+/// conn.add_class("eth0", "1:0", "1:1",
 ///     QfqClassConfig::new()
 ///         .weight(1)
 ///         .build()
 /// ).await?;
 ///
-/// conn.add_class_config("eth0", "1:0", "1:2",
+/// conn.add_class("eth0", "1:0", "1:2",
 ///     QfqClassConfig::new()
 ///         .weight(2)  // 2x bandwidth of class 1:1
 ///         .lmax(9000) // Max packet size (for jumbo frames)
@@ -4856,6 +5082,49 @@ impl QfqClassConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a `tc(8)`-style QFQ class param token slice.
+    ///
+    /// QFQ class accepts: `weight <u32>` (1..=1023, clamped) and
+    /// `lmax <bytes>`. Unknown tokens and unparseable values return
+    /// `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = QfqClassConfig::new();
+        let mut i = 0;
+        while i < params.len() {
+            let tok = params[i];
+            match tok {
+                "weight" => {
+                    let v = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("qfq: `weight` requires a value".into())
+                    })?;
+                    let w = v.parse::<u32>().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "qfq: invalid weight `{v}` (expected unsigned integer)"
+                        ))
+                    })?;
+                    cfg = cfg.weight(w);
+                    i += 2;
+                }
+                "lmax" => {
+                    let v = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("qfq: `lmax` requires a value".into())
+                    })?;
+                    let b = v.parse::<crate::util::Bytes>().map_err(|e| {
+                        Error::InvalidMessage(format!("qfq: invalid lmax `{v}`: {e}"))
+                    })?;
+                    cfg = cfg.lmax(b);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "qfq: unknown token `{other}` (recognised: weight, lmax)"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
 }
 
 impl ClassConfig for QfqClassConfig {
@@ -4879,186 +5148,8 @@ impl ClassConfig for QfqClassConfig {
 }
 
 // ============================================================================
-// Class option helpers
+// HTB class rate-table helper (used by `impl ClassConfig for HtbClassConfig`)
 // ============================================================================
-
-/// Add class-specific options to the message builder.
-fn add_class_options(builder: &mut MessageBuilder, kind: &str, params: &[String]) -> Result<()> {
-    if params.is_empty() {
-        return Ok(());
-    }
-
-    let options_token = builder.nest_start(TcaAttr::Options as u16);
-
-    match kind {
-        "htb" => add_htb_class_options(builder, params)?,
-        _ => {
-            // Unknown class type - just ignore parameters
-        }
-    }
-
-    builder.nest_end(options_token);
-    Ok(())
-}
-
-/// Add HTB class options.
-fn add_htb_class_options(builder: &mut MessageBuilder, params: &[String]) -> Result<()> {
-    use crate::util::parse::{get_rate, get_size};
-
-    let mut rate64: u64 = 0;
-    let mut ceil64: u64 = 0;
-    let mut burst: u32 = 0;
-    let mut cburst: u32 = 0;
-    let mut prio: u32 = 0;
-    let mut quantum: u32 = 0;
-    let mut mtu: u32 = 1600;
-    let mut mpu: u16 = 0;
-    let mut overhead: u16 = 0;
-
-    let mut i = 0;
-    while i < params.len() {
-        match params[i].as_str() {
-            "rate" if i + 1 < params.len() => {
-                rate64 = get_rate(&params[i + 1])
-                    .map_err(|_| Error::InvalidMessage("invalid rate".into()))?;
-                i += 2;
-            }
-            "ceil" if i + 1 < params.len() => {
-                ceil64 = get_rate(&params[i + 1])
-                    .map_err(|_| Error::InvalidMessage("invalid ceil".into()))?;
-                i += 2;
-            }
-            "burst" | "buffer" | "maxburst" if i + 1 < params.len() => {
-                burst = get_size(&params[i + 1])
-                    .map_err(|_| Error::InvalidMessage("invalid burst".into()))?
-                    as u32;
-                i += 2;
-            }
-            "cburst" | "cbuffer" | "cmaxburst" if i + 1 < params.len() => {
-                cburst = get_size(&params[i + 1])
-                    .map_err(|_| Error::InvalidMessage("invalid cburst".into()))?
-                    as u32;
-                i += 2;
-            }
-            "prio" if i + 1 < params.len() => {
-                prio = params[i + 1]
-                    .parse()
-                    .map_err(|_| Error::InvalidMessage("invalid prio".into()))?;
-                i += 2;
-            }
-            "quantum" if i + 1 < params.len() => {
-                quantum = get_size(&params[i + 1])
-                    .map_err(|_| Error::InvalidMessage("invalid quantum".into()))?
-                    as u32;
-                i += 2;
-            }
-            "mtu" if i + 1 < params.len() => {
-                mtu = params[i + 1]
-                    .parse()
-                    .map_err(|_| Error::InvalidMessage("invalid mtu".into()))?;
-                i += 2;
-            }
-            "mpu" if i + 1 < params.len() => {
-                mpu = params[i + 1]
-                    .parse()
-                    .map_err(|_| Error::InvalidMessage("invalid mpu".into()))?;
-                i += 2;
-            }
-            "overhead" if i + 1 < params.len() => {
-                overhead = params[i + 1]
-                    .parse()
-                    .map_err(|_| Error::InvalidMessage("invalid overhead".into()))?;
-                i += 2;
-            }
-            _ => i += 1,
-        }
-    }
-
-    // Rate is required
-    if rate64 == 0 {
-        return Err(Error::InvalidMessage("htb class: rate is required".into()));
-    }
-
-    // Default ceil to rate if not specified
-    if ceil64 == 0 {
-        ceil64 = rate64;
-    }
-
-    // Get HZ for time calculations (typically 100 or 1000 on Linux)
-    let hz: u64 = 1000;
-
-    // Compute burst from rate if not specified
-    if burst == 0 {
-        burst = (rate64 / hz + mtu as u64) as u32;
-    }
-
-    // Compute cburst from ceil if not specified
-    if cburst == 0 {
-        cburst = (ceil64 / hz + mtu as u64) as u32;
-    }
-
-    // Calculate buffer time (in ticks). Falls back to the raw burst size
-    // when the rate would cause a divide-by-zero.
-    let buffer = (burst as u64 * 1_000_000)
-        .checked_div(rate64)
-        .map(|v| v as u32)
-        .unwrap_or(burst);
-
-    let cbuffer = (cburst as u64 * 1_000_000)
-        .checked_div(ceil64)
-        .map(|v| v as u32)
-        .unwrap_or(cburst);
-
-    // Build the tc_htb_opt structure
-    let opt = htb::TcHtbOpt {
-        rate: TcRateSpec {
-            rate: if rate64 >= (1u64 << 32) {
-                u32::MAX
-            } else {
-                rate64 as u32
-            },
-            mpu,
-            overhead,
-            ..Default::default()
-        },
-        ceil: TcRateSpec {
-            rate: if ceil64 >= (1u64 << 32) {
-                u32::MAX
-            } else {
-                ceil64 as u32
-            },
-            mpu,
-            overhead,
-            ..Default::default()
-        },
-        buffer,
-        cbuffer,
-        quantum,
-        prio,
-        ..Default::default()
-    };
-
-    // Add 64-bit rate if needed
-    if rate64 >= (1u64 << 32) {
-        builder.append_attr(htb::TCA_HTB_RATE64, &rate64.to_ne_bytes());
-    }
-
-    if ceil64 >= (1u64 << 32) {
-        builder.append_attr(htb::TCA_HTB_CEIL64, &ceil64.to_ne_bytes());
-    }
-
-    // Add the main parameters structure
-    builder.append_attr(htb::TCA_HTB_PARMS, opt.as_bytes());
-
-    // Add rate tables
-    let rtab = compute_htb_rate_table(rate64, mtu);
-    let ctab = compute_htb_rate_table(ceil64, mtu);
-
-    builder.append_attr(htb::TCA_HTB_RTAB, &rtab);
-    builder.append_attr(htb::TCA_HTB_CTAB, &ctab);
-
-    Ok(())
-}
 
 /// Compute a rate table for HTB class.
 fn compute_htb_rate_table(rate: u64, mtu: u32) -> [u8; 1024] {
@@ -5498,71 +5589,6 @@ impl Connection<Route> {
     // TC Class Operations
     // ========================================================================
 
-    /// Add a TC class.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use nlink::netlink::{Connection, Route};
-    /// use nlink::netlink::tc::HtbQdiscConfig;
-    ///
-    /// let conn = Connection::<Route>::new()?;
-    ///
-    /// // First add an HTB qdisc
-    /// let htb = HtbQdiscConfig::new().default_class(0x10).build();
-    /// conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
-    ///
-    /// // Then add a class with rate 10mbit, ceil 100mbit
-    /// conn.add_class("eth0", "1:0", "1:10", "htb",
-    ///     &["rate", "10mbit", "ceil", "100mbit"]).await?;
-    /// ```
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_class"))]
-    pub async fn add_class(
-        &self,
-        dev: impl Into<InterfaceRef>,
-        parent: TcHandle,
-        classid: TcHandle,
-        kind: &str,
-        params: &[&str],
-    ) -> Result<()> {
-        let ifindex = self.resolve_interface(&dev.into()).await?;
-        self.add_class_by_index(ifindex, parent, classid, kind, params)
-            .await
-    }
-
-    /// Add a TC class by interface index.
-    ///
-    /// This is useful for namespace-aware operations where you've already
-    /// resolved the interface index via `conn.get_link_by_name()`.
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_class_by_index"))]
-    pub async fn add_class_by_index(
-        &self,
-        ifindex: u32,
-        parent: TcHandle,
-        classid: TcHandle,
-        kind: &str,
-        params: &[&str],
-    ) -> Result<()> {
-        let parent_handle = parent.as_raw();
-        let class_handle = classid.as_raw();
-
-        let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex as i32)
-            .with_parent(parent_handle)
-            .with_handle(class_handle);
-
-        let mut builder = create_request(NlMsgType::RTM_NEWTCLASS);
-        builder.append(&tcmsg);
-        builder.append_attr_str(TcaAttr::Kind as u16, kind);
-
-        let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
-        add_class_options(&mut builder, kind, &params)?;
-
-        self.send_ack(builder)
-            .await
-            .map_err(|e| e.with_context("add_class"))
-    }
-
     /// Delete a TC class.
     ///
     /// # Example
@@ -5605,118 +5631,12 @@ impl Connection<Route> {
             .map_err(|e| e.with_context("del_class"))
     }
 
-    /// Change a TC class's parameters.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// conn.change_class("eth0", "1:0", "1:10", "htb",
-    ///     &["rate", "20mbit", "ceil", "100mbit"]).await?;
-    /// ```
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "change_class"))]
-    pub async fn change_class(
-        &self,
-        dev: impl Into<InterfaceRef>,
-        parent: TcHandle,
-        classid: TcHandle,
-        kind: &str,
-        params: &[&str],
-    ) -> Result<()> {
-        let ifindex = self.resolve_interface(&dev.into()).await?;
-        self.change_class_by_index(ifindex, parent, classid, kind, params)
-            .await
-    }
-
-    /// Change a TC class by interface index.
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "change_class_by_index"))]
-    pub async fn change_class_by_index(
-        &self,
-        ifindex: u32,
-        parent: TcHandle,
-        classid: TcHandle,
-        kind: &str,
-        params: &[&str],
-    ) -> Result<()> {
-        let parent_handle = parent.as_raw();
-        let class_handle = classid.as_raw();
-
-        let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex as i32)
-            .with_parent(parent_handle)
-            .with_handle(class_handle);
-
-        let mut builder = ack_request(NlMsgType::RTM_NEWTCLASS);
-        builder.append(&tcmsg);
-        builder.append_attr_str(TcaAttr::Kind as u16, kind);
-
-        let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
-        add_class_options(&mut builder, kind, &params)?;
-
-        self.send_ack(builder)
-            .await
-            .map_err(|e| e.with_context("change_class"))
-    }
-
-    /// Replace a TC class (add or update).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// conn.replace_class("eth0", "1:0", "1:10", "htb",
-    ///     &["rate", "10mbit", "ceil", "100mbit"]).await?;
-    /// ```
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_class"))]
-    pub async fn replace_class(
-        &self,
-        dev: impl Into<InterfaceRef>,
-        parent: TcHandle,
-        classid: TcHandle,
-        kind: &str,
-        params: &[&str],
-    ) -> Result<()> {
-        let ifindex = self.resolve_interface(&dev.into()).await?;
-        self.replace_class_by_index(ifindex, parent, classid, kind, params)
-            .await
-    }
-
-    /// Replace a TC class by interface index.
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_class_by_index"))]
-    pub async fn replace_class_by_index(
-        &self,
-        ifindex: u32,
-        parent: TcHandle,
-        classid: TcHandle,
-        kind: &str,
-        params: &[&str],
-    ) -> Result<()> {
-        let parent_handle = parent.as_raw();
-        let class_handle = classid.as_raw();
-
-        let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex as i32)
-            .with_parent(parent_handle)
-            .with_handle(class_handle);
-
-        let mut builder = replace_request(NlMsgType::RTM_NEWTCLASS);
-        builder.append(&tcmsg);
-        builder.append_attr_str(TcaAttr::Kind as u16, kind);
-
-        let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
-        add_class_options(&mut builder, kind, &params)?;
-
-        self.send_ack(builder)
-            .await
-            .map_err(|e| e.with_context("replace_class"))
-    }
-
-    // ========================================================================
-    // Typed Class Config Operations
-    // ========================================================================
-
     /// Add a TC class with typed configuration.
     ///
-    /// This method provides a type-safe way to add classes, as an alternative
-    /// to the string-based `add_class` method.
+    /// Mirrors `add_qdisc` / `add_filter` / `add_action`: takes the
+    /// typed `ClassConfig` (`HtbClassConfig`, `HfscClassConfig`,
+    /// `DrrClassConfig`, `QfqClassConfig`) and submits a single
+    /// `RTM_NEWTCLASS` request.
     ///
     /// # Example
     ///
@@ -5731,14 +5651,15 @@ impl Connection<Route> {
     /// conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
     ///
     /// // Add a class with guaranteed 100mbit, ceiling 500mbit
-    /// conn.add_class_config("eth0", "1:0", "1:10",
+    /// conn.add_class("eth0", "1:0", "1:10",
     ///     HtbClassConfig::new(Rate::mbit(100))
     ///         .ceil(Rate::mbit(500))
     ///         .prio(1)
     ///         .build()
     /// ).await?;
     /// ```
-    pub async fn add_class_config<C: ClassConfig>(
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_class", kind = %config.kind()))]
+    pub async fn add_class<C: ClassConfig>(
         &self,
         dev: impl Into<InterfaceRef>,
         parent: TcHandle,
@@ -5746,15 +5667,16 @@ impl Connection<Route> {
         config: C,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
-        self.add_class_config_by_index(ifindex, parent, classid, config)
+        self.add_class_by_index(ifindex, parent, classid, config)
             .await
     }
 
     /// Add a TC class with typed configuration by interface index.
     ///
-    /// This is useful for namespace-aware operations where you've already
-    /// resolved the interface index via `conn.get_link_by_name()`.
-    pub async fn add_class_config_by_index<C: ClassConfig>(
+    /// Useful for namespace-aware operations where the interface
+    /// index has already been resolved via `conn.get_link_by_name()`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_class_by_index", kind = %config.kind()))]
+    pub async fn add_class_by_index<C: ClassConfig>(
         &self,
         ifindex: u32,
         parent: TcHandle,
@@ -5788,13 +5710,14 @@ impl Connection<Route> {
     ///
     /// ```ignore
     /// // Update an existing class's rate
-    /// conn.change_class_config("eth0", "1:0", "1:10",
+    /// conn.change_class("eth0", "1:0", "1:10",
     ///     HtbClassConfig::new(Rate::mbit(200))
     ///         .ceil(Rate::mbit(800))
     ///         .build()
     /// ).await?;
     /// ```
-    pub async fn change_class_config<C: ClassConfig>(
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "change_class", kind = %config.kind()))]
+    pub async fn change_class<C: ClassConfig>(
         &self,
         dev: impl Into<InterfaceRef>,
         parent: TcHandle,
@@ -5802,12 +5725,13 @@ impl Connection<Route> {
         config: C,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
-        self.change_class_config_by_index(ifindex, parent, classid, config)
+        self.change_class_by_index(ifindex, parent, classid, config)
             .await
     }
 
     /// Change a TC class with typed configuration by interface index.
-    pub async fn change_class_config_by_index<C: ClassConfig>(
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "change_class_by_index", kind = %config.kind()))]
+    pub async fn change_class_by_index<C: ClassConfig>(
         &self,
         ifindex: u32,
         parent: TcHandle,
@@ -5841,13 +5765,14 @@ impl Connection<Route> {
     ///
     /// ```ignore
     /// // Create or update a class
-    /// conn.replace_class_config("eth0", "1:0", "1:10",
+    /// conn.replace_class("eth0", "1:0", "1:10",
     ///     HtbClassConfig::new(Rate::mbit(100))
     ///         .ceil(Rate::mbit(500))
     ///         .build()
     /// ).await?;
     /// ```
-    pub async fn replace_class_config<C: ClassConfig>(
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_class", kind = %config.kind()))]
+    pub async fn replace_class<C: ClassConfig>(
         &self,
         dev: impl Into<InterfaceRef>,
         parent: TcHandle,
@@ -5855,12 +5780,13 @@ impl Connection<Route> {
         config: C,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
-        self.replace_class_config_by_index(ifindex, parent, classid, config)
+        self.replace_class_by_index(ifindex, parent, classid, config)
             .await
     }
 
     /// Replace a TC class with typed configuration by interface index.
-    pub async fn replace_class_config_by_index<C: ClassConfig>(
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_class_by_index", kind = %config.kind()))]
+    pub async fn replace_class_by_index<C: ClassConfig>(
         &self,
         ifindex: u32,
         parent: TcHandle,
@@ -7097,5 +7023,138 @@ mod tests {
     fn taprio_parse_params_invalid_sched_entry_cmd() {
         let err = TaprioConfig::parse_params(&["sched-entry", "BOGUS", "0x1", "100"]).unwrap_err();
         assert!(err.to_string().contains("invalid sched-entry cmd"));
+    }
+
+    // ============================================================================
+    // Class-config parse_params tests (HtbClassConfig / HfscClassConfig /
+    // DrrClassConfig / QfqClassConfig — added in 0.15.0 to close the class
+    // side at typed-first parity with qdisc/filter/action).
+    // ============================================================================
+
+    #[test]
+    fn htb_class_parse_params_rate_only() {
+        let cfg = HtbClassConfig::parse_params(&["rate", "100mbit"]).unwrap();
+        assert_eq!(cfg.rate.as_bytes_per_sec(), crate::util::Rate::mbit(100).as_bytes_per_sec());
+        assert!(cfg.ceil.is_none());
+    }
+
+    #[test]
+    fn htb_class_parse_params_full_aliases() {
+        // Cover the alias set: buffer / cbuffer = burst / cburst.
+        let cfg = HtbClassConfig::parse_params(&[
+            "rate", "10mbit", "ceil", "100mbit", "buffer", "32kb", "cbuffer", "64kb", "prio", "1",
+            "quantum", "1500", "mtu", "1500", "mpu", "64", "overhead", "14",
+        ])
+        .unwrap();
+        assert!(cfg.ceil.is_some());
+        assert!(cfg.burst.is_some());
+        assert!(cfg.cburst.is_some());
+        assert_eq!(cfg.prio, Some(1));
+        assert_eq!(cfg.quantum, Some(1500));
+        assert_eq!(cfg.mtu, 1500);
+        assert_eq!(cfg.mpu, 64);
+        assert_eq!(cfg.overhead, 14);
+    }
+
+    #[test]
+    fn htb_class_parse_params_missing_rate_errors() {
+        let err = HtbClassConfig::parse_params(&[]).unwrap_err();
+        assert!(err.to_string().contains("htb:"), "kind-prefixed: {err}");
+        assert!(err.to_string().contains("`rate` is required"), "got: {err}");
+    }
+
+    #[test]
+    fn htb_class_parse_params_unknown_token_errors() {
+        let err = HtbClassConfig::parse_params(&["rate", "100mbit", "nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("htb: unknown token `nonsense`"), "got: {err}");
+    }
+
+    #[test]
+    fn htb_class_parse_params_missing_value_errors() {
+        let err = HtbClassConfig::parse_params(&["rate"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"), "got: {err}");
+    }
+
+    #[test]
+    fn htb_class_parse_params_invalid_rate_errors() {
+        let err = HtbClassConfig::parse_params(&["rate", "fast"]).unwrap_err();
+        assert!(err.to_string().contains("htb: invalid rate"), "got: {err}");
+    }
+
+    #[test]
+    fn hfsc_class_parse_params_empty_yields_empty_config() {
+        let cfg = HfscClassConfig::parse_params(&[]).unwrap();
+        assert!(cfg.rsc.is_none() && cfg.fsc.is_none() && cfg.usc.is_none());
+    }
+
+    #[test]
+    fn hfsc_class_parse_params_three_curves() {
+        let cfg = HfscClassConfig::parse_params(&[
+            "rt", "rate", "10mbit", "ls", "rate", "100mbit", "ul", "rate", "200mbit",
+        ])
+        .unwrap();
+        assert!(cfg.rsc.is_some());
+        assert!(cfg.fsc.is_some());
+        assert!(cfg.usc.is_some());
+    }
+
+    #[test]
+    fn hfsc_class_parse_params_unknown_curve_errors() {
+        let err = HfscClassConfig::parse_params(&["xt", "rate", "10mbit"]).unwrap_err();
+        assert!(err.to_string().contains("hfsc: unknown token `xt`"), "got: {err}");
+    }
+
+    #[test]
+    fn hfsc_class_parse_params_non_rate_form_errors() {
+        let err = HfscClassConfig::parse_params(&["rt", "rate", "10mbit", "ls", "m1", "100"])
+            .unwrap_err();
+        assert!(err.to_string().contains("hfsc:"), "kind-prefixed: {err}");
+        assert!(err.to_string().contains("only the `rate <rate>` form"), "got: {err}");
+    }
+
+    #[test]
+    fn drr_class_parse_params_empty_and_quantum() {
+        let cfg = DrrClassConfig::parse_params(&[]).unwrap();
+        assert!(cfg.quantum.is_none());
+        let cfg = DrrClassConfig::parse_params(&["quantum", "1500"]).unwrap();
+        assert!(cfg.quantum.is_some());
+    }
+
+    #[test]
+    fn drr_class_parse_params_unknown_token_errors() {
+        let err = DrrClassConfig::parse_params(&["rate", "100mbit"]).unwrap_err();
+        assert!(err.to_string().contains("drr: unknown token `rate`"), "got: {err}");
+    }
+
+    #[test]
+    fn qfq_class_parse_params_weight_and_lmax() {
+        let cfg = QfqClassConfig::parse_params(&["weight", "5", "lmax", "9000"]).unwrap();
+        assert_eq!(cfg.weight, Some(5));
+        assert!(cfg.lmax.is_some());
+    }
+
+    #[test]
+    fn qfq_class_parse_params_weight_clamped() {
+        let cfg = QfqClassConfig::parse_params(&["weight", "9999"]).unwrap();
+        assert_eq!(cfg.weight, Some(1023));
+    }
+
+    #[test]
+    fn qfq_class_parse_params_unknown_token_errors() {
+        let err = QfqClassConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("qfq: unknown token `nonsense`"), "got: {err}");
+    }
+
+    /// Generic dispatch through the sealed `ParseParams` trait —
+    /// proves the new class-config impls are wired into the trait
+    /// alongside qdisc/filter/action, not just inherent methods.
+    #[test]
+    fn class_configs_dispatch_through_parse_params_trait() {
+        use crate::ParseParams;
+        let _: HtbClassConfig =
+            <HtbClassConfig as ParseParams>::parse_params(&["rate", "100mbit"]).unwrap();
+        let _: HfscClassConfig = <HfscClassConfig as ParseParams>::parse_params(&[]).unwrap();
+        let _: DrrClassConfig = <DrrClassConfig as ParseParams>::parse_params(&[]).unwrap();
+        let _: QfqClassConfig = <QfqClassConfig as ParseParams>::parse_params(&[]).unwrap();
     }
 }

@@ -136,7 +136,7 @@ operation.
 Trace one full `PerPeerImpairer::apply` in detail:
 
 ```bash
-RUST_LOG="nlink::netlink::impair=info,nlink[method=add_qdisc]=debug,nlink[method=add_class_config]=debug,nlink[method=add_filter]=debug,nlink::netlink::connection[send_ack_inner]=trace"
+RUST_LOG="nlink::netlink::impair=info,nlink[method=add_qdisc]=debug,nlink[method=add_class]=debug,nlink[method=add_filter]=debug,nlink::netlink::connection[send_ack_inner]=trace"
 ```
 
 See every kernel error returned to your process (useful when something

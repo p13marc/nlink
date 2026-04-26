@@ -342,7 +342,7 @@ impl PerPeerImpairer {
         let parent_classid = TcHandle::new(1, 1);
         let total_rate = self.total_rate();
         let root_cls = HtbClassConfig::new(total_rate).ceil(total_rate).build();
-        conn.add_class_config_by_index(ifindex, TcHandle::major_only(1), parent_classid, root_cls)
+        conn.add_class_by_index(ifindex, TcHandle::major_only(1), parent_classid, root_cls)
             .await
             .map_err(|e| e.with_context("PerPeerImpairer: add HTB parent class 1:1"))?;
 
@@ -353,7 +353,7 @@ impl PerPeerImpairer {
             let class_rate = rule.impairment.rate_cap.unwrap_or(link_rate);
 
             let cls = HtbClassConfig::new(class_rate).ceil(class_rate).build();
-            conn.add_class_config_by_index(ifindex, parent_classid, classid, cls)
+            conn.add_class_by_index(ifindex, parent_classid, classid, cls)
                 .await
                 .map_err(|e| e.with_context(format!("PerPeerImpairer: add class {classid}")))?;
 
@@ -379,7 +379,7 @@ impl PerPeerImpairer {
             .and_then(|d| d.rate_cap)
             .unwrap_or(link_rate);
         let default_cls = HtbClassConfig::new(default_rate).ceil(default_rate).build();
-        conn.add_class_config_by_index(ifindex, parent_classid, default_classid, default_cls)
+        conn.add_class_by_index(ifindex, parent_classid, default_classid, default_cls)
             .await
             .map_err(|e| e.with_context("PerPeerImpairer: add default class"))?;
 
@@ -558,7 +558,7 @@ impl PerPeerImpairer {
             None => {
                 if !opts.dry_run {
                     let cfg = HtbClassConfig::new(total_rate).ceil(total_rate).build();
-                    conn.add_class_config_by_index(ifindex, root_handle, parent_classid, cfg)
+                    conn.add_class_by_index(ifindex, root_handle, parent_classid, cfg)
                         .await
                         .map_err(|e| {
                             e.with_context("PerPeerImpairer::reconcile: add parent class 1:1")
@@ -571,7 +571,7 @@ impl PerPeerImpairer {
                 if !htb_class_rates_match(c, total_bps, total_bps) {
                     if !opts.dry_run {
                         let cfg = HtbClassConfig::new(total_rate).ceil(total_rate).build();
-                        conn.change_class_config_by_index(
+                        conn.change_class_by_index(
                             ifindex,
                             root_handle,
                             parent_classid,
@@ -605,7 +605,7 @@ impl PerPeerImpairer {
                 None => {
                     if !opts.dry_run {
                         let cfg = HtbClassConfig::new(class_rate).ceil(class_rate).build();
-                        conn.add_class_config_by_index(ifindex, parent_classid, classid, cfg)
+                        conn.add_class_by_index(ifindex, parent_classid, classid, cfg)
                             .await
                             .map_err(|e| {
                                 e.with_context(format!(
@@ -620,7 +620,7 @@ impl PerPeerImpairer {
                     if !htb_class_rates_match(c, class_bps, class_bps) {
                         if !opts.dry_run {
                             let cfg = HtbClassConfig::new(class_rate).ceil(class_rate).build();
-                            conn.change_class_config_by_index(
+                            conn.change_class_by_index(
                                 ifindex,
                                 parent_classid,
                                 classid,
@@ -746,7 +746,7 @@ impl PerPeerImpairer {
             None => {
                 if !opts.dry_run {
                     let cfg = HtbClassConfig::new(default_rate).ceil(default_rate).build();
-                    conn.add_class_config_by_index(ifindex, parent_classid, default_classid, cfg)
+                    conn.add_class_by_index(ifindex, parent_classid, default_classid, cfg)
                         .await
                         .map_err(|e| {
                             e.with_context("PerPeerImpairer::reconcile: add default class")
@@ -759,7 +759,7 @@ impl PerPeerImpairer {
                 if !htb_class_rates_match(c, default_bps, default_bps) {
                     if !opts.dry_run {
                         let cfg = HtbClassConfig::new(default_rate).ceil(default_rate).build();
-                        conn.change_class_config_by_index(
+                        conn.change_class_by_index(
                             ifindex,
                             parent_classid,
                             default_classid,

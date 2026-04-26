@@ -255,12 +255,12 @@ conn.add_qdisc_full(dev, TcHandle::ROOT, Some(TcHandle::major_only(1)),
 
 // Parent class.
 let link_rate = Rate::bytes_per_sec(10_000_000_000);
-conn.add_class_config(dev, TcHandle::major_only(1), TcHandle::new(1, 1),
+conn.add_class(dev, TcHandle::major_only(1), TcHandle::new(1, 1),
     HtbClassConfig::new(link_rate).ceil(link_rate).build()
 ).await?;
 
 // One peer.
-conn.add_class_config(dev, TcHandle::new(1, 1), TcHandle::new(1, 2),
+conn.add_class(dev, TcHandle::new(1, 1), TcHandle::new(1, 2),
     HtbClassConfig::new(link_rate).ceil(link_rate).build()
 ).await?;
 

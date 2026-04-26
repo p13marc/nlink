@@ -558,21 +558,21 @@ let htb = HtbQdiscConfig::new().default_class(0x30).build();
 conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb).await?;
 
 // Add root class (total bandwidth)
-conn.add_class_config("eth0", TcHandle::major_only(1), TcHandle::new(1, 1),
+conn.add_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 1),
     HtbClassConfig::new(Rate::gbit(1))
         .ceil(Rate::gbit(1))
         .build()
 ).await?;
 
 // Add child classes with priorities
-conn.add_class_config("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x10),
+conn.add_class("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x10),
     HtbClassConfig::new(Rate::mbit(100))
         .ceil(Rate::mbit(500))
         .prio(1)  // High priority
         .build()
 ).await?;
 
-conn.add_class_config("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x20),
+conn.add_class("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x20),
     HtbClassConfig::new(Rate::mbit(50))
         .ceil(Rate::mbit(200))
         .prio(2)  // Lower priority

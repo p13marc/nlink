@@ -115,6 +115,15 @@ impl_parse_params! {
     crate::netlink::tc::SfqConfig,
     crate::netlink::tc::TaprioConfig,
     crate::netlink::tc::TbfConfig,
+    // Class configs (4) — added in 0.15.0 to close the class side at
+    // typed-first parity with qdisc/filter/action. The legacy stringly-
+    // typed `Connection::add_class(kind, &[&str])` and its silent-skip
+    // dispatcher were deleted in the same release; bins/tc class now
+    // routes through these per the dispatch! macro pattern.
+    crate::netlink::tc::DrrClassConfig,
+    crate::netlink::tc::HfscClassConfig,
+    crate::netlink::tc::HtbClassConfig,
+    crate::netlink::tc::QfqClassConfig,
     // Filter configs (9 — full filter side typed-first as of Plan 138 + Plan 133 PR C).
     crate::netlink::filter::BasicFilter,
     crate::netlink::filter::BpfFilter,

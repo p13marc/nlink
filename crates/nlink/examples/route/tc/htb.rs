@@ -98,7 +98,7 @@ fn print_overview() {
     ).await?;
 
     // 2. Parent class (total link capacity).
-    conn.add_class_config(
+    conn.add_class(
         "eth0",
         TcHandle::major_only(1),
         TcHandle::new(1, 1),
@@ -106,7 +106,7 @@ fn print_overview() {
     ).await?;
 
     // 3. Child class with priority.
-    conn.add_class_config(
+    conn.add_class(
         "eth0",
         TcHandle::new(1, 1),
         TcHandle::new(1, 0x10),
@@ -191,7 +191,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
 
     // 2. Parent class: the whole link capacity (1 Gbit).
     println!("  Adding parent class 1:1 (1 gbit rate+ceil)...");
-    conn.add_class_config_by_index(
+    conn.add_class_by_index(
         ifindex,
         TcHandle::major_only(1),
         TcHandle::new(1, 1),
@@ -212,7 +212,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
         println!(
             "  Adding child class 1:{minor:x} ({label}, rate={rate} ceil={ceil} prio={prio})..."
         );
-        conn.add_class_config_by_index(
+        conn.add_class_by_index(
             ifindex,
             TcHandle::new(1, 1),
             TcHandle::new(1, minor),

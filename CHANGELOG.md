@@ -18,6 +18,57 @@ Full upgrade walkthrough:
 Highlights below — see the per-PR sections that follow for the
 detail.
 
+### Changed — class side closes the typed-API completion arc (pre-publish surgery)
+
+A pre-publish deep audit caught that the **class side** of the TC
+API still carried legacy holdovers Plan 142 Phase 4 had missed:
+
+- `Connection::add_class("eth0", parent, classid, "htb",
+  &["rate", "100mbit"])` (and `change_class` / `replace_class`,
+  with `*_by_index` variants) — six stringly-typed mutation
+  methods that bypassed the typed-config dispatch.
+- `add_class_options(builder, kind, &params)` — a per-kind
+  dispatcher whose non-HTB arm read `_ => { /* ignore */ }` —
+  the exact silent-skipping anti-pattern the typed `parse_params`
+  contract exists to kill. HFSC / DRR / QFQ class params went
+  straight into the void.
+- `bins/tc class add|change|replace` was still routed through the
+  stringly-typed methods, so the bin's class command inherited
+  the silent-skip behaviour.
+
+Surgery (zero downstream callers in the workspace before this
+commit, so it's a clean break inside the 0.15.0 release window):
+
+- **Added `parse_params` to all 4 class configs**:
+  `HtbClassConfig`, `HfscClassConfig`, `DrrClassConfig`,
+  `QfqClassConfig`. Strict-rejection contract identical to the
+  18 qdisc + 9 filter + 14 action parsers (kind-prefixed errors,
+  unknown-token rejection, alias support). 16 new unit tests.
+- **Wired the 4 class configs into the sealed `ParseParams`
+  trait** (`crates/nlink/src/netlink/parse_params.rs`). The
+  total typed config count grows from 41 to **45** (18 qdisc +
+  4 class + 9 filter + 14 action).
+- **Deleted the 6 stringly-typed class methods** from
+  `Connection<Route>` and the `add_class_options` /
+  `add_htb_class_options` helpers (~250 LOC).
+- **Renamed `add_class_config` / `change_class_config` /
+  `replace_class_config`** (and `*_by_index` variants) to drop
+  the `_config` suffix. The typed surface is now uniform:
+  `add_qdisc<C: QdiscConfig>` / `add_class<C: ClassConfig>` /
+  `add_filter<C: FilterConfig>` / `add_action<A: ActionConfig>`.
+- **Migrated `bins/tc/src/commands/class.rs` to the typed
+  `dispatch!` macro pattern** mirroring `qdisc.rs` — unknown
+  class kinds error with a recognised-kinds list (`htb, hfsc,
+  drr, qfq`) instead of silently dropping params on the floor.
+
+Net source-tree effect: zero stringly-typed `Connection`
+mutation methods remain. Every TC mutation goes through a typed
+config that implements `ParseParams`. Lib tests grew 749 → 765
+(+16 net, all green). `cargo clippy --workspace --all-targets
+--all-features -- --deny warnings` clean. `cargo machete` clean
+(only the same two pre-existing nlink-ss / nlink-bridge entries
+unrelated to this work).
+
 ### Added — recipes + CI tail items (post-cut, pre-publish)
 
 The remaining sudo-gated tail items from Plan 142's open list
@@ -79,9 +130,13 @@ the modules they pointed at are gone.
 **Deleted entirely** (~3500 LOC):
 
 - `nlink::tc::builders::class` — replaced by
-  `Connection<Route>::add_class_config(...)` taking
+  `Connection<Route>::add_class(...)` taking
   `HtbClassConfig` / `HfscClassConfig` / `DrrClassConfig` /
-  `QfqClassConfig`.
+  `QfqClassConfig`. (The `add_class_config` name briefly used
+  during the migration was renamed back to `add_class` once the
+  legacy stringly-typed `add_class("htb", &["rate", ...])` was
+  deleted, restoring uniformity with `add_qdisc` / `add_filter` /
+  `add_action`.)
 - `nlink::tc::builders::qdisc` — replaced by
   `Connection<Route>::add_qdisc_full(...)` taking the typed
   qdisc config (18 kinds: `HtbQdiscConfig`, `NetemConfig`,
@@ -109,7 +164,7 @@ the modules they pointed at are gone.
 
 | Removed call | Typed replacement |
 |---|---|
-| `tc::builders::class::add(conn, dev, parent, classid, "htb", &["rate", "100mbit"])` | `conn.add_class_config(dev, parent, classid, HtbClassConfig::parse_params(&["rate", "100mbit"])?)` |
+| `tc::builders::class::add(conn, dev, parent, classid, "htb", &["rate", "100mbit"])` | `conn.add_class(dev, parent, classid, HtbClassConfig::parse_params(&["rate", "100mbit"])?)` |
 | `tc::builders::qdisc::add(conn, dev, parent, handle, "htb", &params)` | `conn.add_qdisc_full(dev, parent, handle, HtbQdiscConfig::parse_params(&params)?)` |
 | `tc::builders::filter::add(conn, dev, parent, "ip", prio, "flower", &params)` | `conn.add_filter_full(dev, parent, handle, "ip" → u16, prio, FlowerFilter::parse_params(&params)?)` |
 | `tc::builders::filter::parse_protocol("ip")` | inline (~10-line lookup; see `bins/tc/src/commands/filter.rs::parse_protocol_u16`) |

@@ -271,7 +271,7 @@ impl RateLimiter {
         if let Some(burst) = limit.burst {
             class_config = class_config.burst(burst);
         }
-        conn.add_class_config(
+        conn.add_class(
             &self.dev,
             TcHandle::major_only(1),
             TcHandle::new(1, 1),
@@ -287,7 +287,7 @@ impl RateLimiter {
         if let Some(burst) = limit.burst {
             default_config = default_config.burst(burst);
         }
-        conn.add_class_config(
+        conn.add_class(
             &self.dev,
             TcHandle::new(1, 1),
             TcHandle::new(1, 10),
@@ -356,7 +356,7 @@ impl RateLimiter {
         if let Some(burst) = limit.burst {
             class_config = class_config.burst(burst);
         }
-        conn.add_class_config(
+        conn.add_class(
             &ifb_name,
             TcHandle::major_only(1),
             TcHandle::new(1, 1),
@@ -372,7 +372,7 @@ impl RateLimiter {
         if let Some(burst) = limit.burst {
             default_config = default_config.burst(burst);
         }
-        conn.add_class_config(
+        conn.add_class(
             &ifb_name,
             TcHandle::new(1, 1),
             TcHandle::new(1, 10),
@@ -674,7 +674,7 @@ impl PerHostLimiter {
         let total_rate: crate::util::Rate =
             self.default_rate + self.rules.iter().map(|r| r.rate).sum::<crate::util::Rate>();
         let root_config = HtbClassConfig::new(total_rate).ceil(total_rate).build();
-        conn.add_class_config(&self.dev, major_only_1, parent_classid, root_config)
+        conn.add_class(&self.dev, major_only_1, parent_classid, root_config)
             .await?;
 
         // Add classes for each rule
@@ -682,7 +682,7 @@ impl PerHostLimiter {
             let classid = TcHandle::new(1, (i + 2) as u16);
             let leaf_handle = TcHandle::major_only((i + 10) as u16);
             let class_config = HtbClassConfig::new(rule.rate).ceil(rule.ceil.unwrap_or(rule.rate));
-            conn.add_class_config(&self.dev, parent_classid, classid, class_config.build())
+            conn.add_class(&self.dev, parent_classid, classid, class_config.build())
                 .await?;
 
             // Add fq_codel leaf qdisc
@@ -703,7 +703,7 @@ impl PerHostLimiter {
         let default_config = HtbClassConfig::new(self.default_rate)
             .ceil(self.default_rate)
             .build();
-        conn.add_class_config(&self.dev, parent_classid, default_classid, default_config)
+        conn.add_class(&self.dev, parent_classid, default_classid, default_config)
             .await?;
 
         // Add fq_codel leaf for default class
@@ -866,7 +866,7 @@ impl PerHostLimiter {
             None => {
                 if !opts.dry_run {
                     let cfg = HtbClassConfig::new(total_rate).ceil(total_rate).build();
-                    conn.add_class_config_by_index(ifindex, root_handle, parent_classid, cfg)
+                    conn.add_class_by_index(ifindex, root_handle, parent_classid, cfg)
                         .await
                         .map_err(|e| {
                             e.with_context("PerHostLimiter::reconcile: add parent class 1:1")
@@ -879,7 +879,7 @@ impl PerHostLimiter {
                 if !htb_class_rates_match(c, total_bps, total_bps) {
                     if !opts.dry_run {
                         let cfg = HtbClassConfig::new(total_rate).ceil(total_rate).build();
-                        conn.change_class_config_by_index(
+                        conn.change_class_by_index(
                             ifindex,
                             root_handle,
                             parent_classid,
@@ -913,7 +913,7 @@ impl PerHostLimiter {
                 None => {
                     if !opts.dry_run {
                         let cfg = HtbClassConfig::new(class_rate).ceil(class_ceil).build();
-                        conn.add_class_config_by_index(ifindex, parent_classid, classid, cfg)
+                        conn.add_class_by_index(ifindex, parent_classid, classid, cfg)
                             .await
                             .map_err(|e| {
                                 e.with_context(format!(
@@ -928,7 +928,7 @@ impl PerHostLimiter {
                     if !htb_class_rates_match(c, class_rate_bps, class_ceil_bps) {
                         if !opts.dry_run {
                             let cfg = HtbClassConfig::new(class_rate).ceil(class_ceil).build();
-                            conn.change_class_config_by_index(
+                            conn.change_class_by_index(
                                 ifindex,
                                 parent_classid,
                                 classid,
@@ -1033,7 +1033,7 @@ impl PerHostLimiter {
                     let cfg = HtbClassConfig::new(self.default_rate)
                         .ceil(self.default_rate)
                         .build();
-                    conn.add_class_config_by_index(ifindex, parent_classid, default_classid, cfg)
+                    conn.add_class_by_index(ifindex, parent_classid, default_classid, cfg)
                         .await
                         .map_err(|e| {
                             e.with_context("PerHostLimiter::reconcile: add default class")
@@ -1048,7 +1048,7 @@ impl PerHostLimiter {
                         let cfg = HtbClassConfig::new(self.default_rate)
                             .ceil(self.default_rate)
                             .build();
-                        conn.change_class_config_by_index(
+                        conn.change_class_by_index(
                             ifindex,
                             parent_classid,
                             default_classid,

@@ -136,7 +136,7 @@ TcHandle::ROOT.is_root();                   // inspection helpers
 
 // Connection methods take TcHandle (not &str)
 conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb).await?;
-conn.add_class_config("eth0", TcHandle::major_only(1), TcHandle::new(1, 1), cfg).await?;
+conn.add_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 1), cfg).await?;
 
 // TcMessage::handle() / TcMessage::parent() return TcHandle
 for q in &qdiscs {

@@ -84,7 +84,7 @@ conn.add_qdisc_full(
 ).await?;
 
 // Root class — total bandwidth budget.
-conn.add_class_config(
+conn.add_class(
     dev,
     TcHandle::major_only(1),
     TcHandle::new(1, 1),
@@ -92,7 +92,7 @@ conn.add_class_config(
 ).await?;
 
 // Gold tier.
-conn.add_class_config(
+conn.add_class(
     dev,
     TcHandle::new(1, 1),
     TcHandle::new(1, 0x10),
@@ -102,7 +102,7 @@ conn.add_class_config(
 ).await?;
 
 // Silver tier.
-conn.add_class_config(
+conn.add_class(
     dev,
     TcHandle::new(1, 1),
     TcHandle::new(1, 0x20),

@@ -2,9 +2,12 @@
 
 use clap::{Args, Subcommand};
 use nlink::{
-    TcHandle,
+    Error, TcHandle,
     netlink::{
-        Connection, Error, Result, Route, message::NlMsgType, messages::TcMessage,
+        Connection, Result, Route,
+        message::NlMsgType,
+        messages::TcMessage,
+        tc::{ClassConfig, DrrClassConfig, HfscClassConfig, HtbClassConfig, QfqClassConfig},
         types::tc::tc_handle,
     },
     output::{OutputFormat, OutputOptions, print_all},
@@ -56,7 +59,7 @@ enum ClassAction {
         #[arg(long)]
         classid: String,
 
-        /// Class type (htb, etc.).
+        /// Class type (htb, hfsc, drr, qfq).
         #[arg(name = "TYPE")]
         kind: String,
 
@@ -124,6 +127,13 @@ enum ClassAction {
     },
 }
 
+#[derive(Clone, Copy)]
+enum ClassVerb {
+    Add,
+    Change,
+    Replace,
+}
+
 impl ClassCmd {
     pub async fn run(
         self,
@@ -161,12 +171,7 @@ impl ClassCmd {
                 classid,
                 kind,
                 params,
-            } => {
-                let (parent, classid) = parse_handles(&parent, &classid)?;
-                let refs: Vec<&str> = params.iter().map(String::as_str).collect();
-                conn.add_class(dev.as_str(), parent, classid, &kind, &refs)
-                    .await
-            }
+            } => dispatch_class(conn, &dev, &parent, &classid, &kind, &params, ClassVerb::Add).await,
             ClassAction::Del {
                 dev,
                 parent,
@@ -182,9 +187,7 @@ impl ClassCmd {
                 kind,
                 params,
             } => {
-                let (parent, classid) = parse_handles(&parent, &classid)?;
-                let refs: Vec<&str> = params.iter().map(String::as_str).collect();
-                conn.change_class(dev.as_str(), parent, classid, &kind, &refs)
+                dispatch_class(conn, &dev, &parent, &classid, &kind, &params, ClassVerb::Change)
                     .await
             }
             ClassAction::Replace {
@@ -194,9 +197,7 @@ impl ClassCmd {
                 kind,
                 params,
             } => {
-                let (parent, classid) = parse_handles(&parent, &classid)?;
-                let refs: Vec<&str> = params.iter().map(String::as_str).collect();
-                conn.replace_class(dev.as_str(), parent, classid, &kind, &refs)
+                dispatch_class(conn, &dev, &parent, &classid, &kind, &params, ClassVerb::Replace)
                     .await
             }
         }
@@ -276,4 +277,51 @@ fn parse_handles(parent: &str, classid: &str) -> Result<(TcHandle, TcHandle)> {
         .parse::<TcHandle>()
         .map_err(|e| Error::InvalidMessage(format!("invalid classid `{classid}`: {e}")))?;
     Ok((parent, classid))
+}
+
+/// Typed dispatch path for every class kind nlink models. Unknown
+/// kinds error cleanly with a recognised-kinds list — there is no
+/// silent fallback to a looser legacy parser.
+async fn dispatch_class(
+    conn: &Connection<Route>,
+    dev: &str,
+    parent: &str,
+    classid: &str,
+    kind: &str,
+    params: &[String],
+    verb: ClassVerb,
+) -> Result<()> {
+    let (parent, classid) = parse_handles(parent, classid)?;
+    let refs: Vec<&str> = params.iter().map(String::as_str).collect();
+
+    macro_rules! dispatch {
+        ($Cfg:ident) => {{
+            let cfg = <$Cfg as nlink::ParseParams>::parse_params(&refs)?;
+            run_typed_class(conn, dev, parent, classid, cfg, verb).await
+        }};
+    }
+    match kind {
+        "htb" => dispatch!(HtbClassConfig),
+        "hfsc" => dispatch!(HfscClassConfig),
+        "drr" => dispatch!(DrrClassConfig),
+        "qfq" => dispatch!(QfqClassConfig),
+        other => Err(Error::InvalidMessage(format!(
+            "tc class: unknown kind `{other}` (recognised: htb, hfsc, drr, qfq)"
+        ))),
+    }
+}
+
+async fn run_typed_class<C: ClassConfig>(
+    conn: &Connection<Route>,
+    dev: &str,
+    parent: TcHandle,
+    classid: TcHandle,
+    cfg: C,
+    verb: ClassVerb,
+) -> Result<()> {
+    match verb {
+        ClassVerb::Add => conn.add_class(dev, parent, classid, cfg).await,
+        ClassVerb::Change => conn.change_class(dev, parent, classid, cfg).await,
+        ClassVerb::Replace => conn.replace_class(dev, parent, classid, cfg).await,
+    }
 }

@@ -197,7 +197,7 @@ conn.add_qdisc_full(
     "eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)),
     HtbQdiscConfig::new().default_class(0x10).build(),
 ).await?;
-conn.add_class_config(
+conn.add_class(
     "eth0", TcHandle::major_only(1), TcHandle::new(1, 0x10),
     HtbClassConfig::new(Rate::mbit(10)).ceil(Rate::mbit(10)).build(),
 ).await?;

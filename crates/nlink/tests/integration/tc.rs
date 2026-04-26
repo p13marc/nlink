@@ -282,7 +282,7 @@ async fn test_add_htb_class() -> Result<()> {
     let class = HtbClassConfig::new(nlink::Rate::mbit(10))
         .ceil(nlink::Rate::mbit(800)) // 800 Mbps (was buggy 100_000_000 bytes/sec = 800 Mbps)
         .build();
-    conn.add_class_config(
+    conn.add_class(
         "dummy0",
         TcHandle::major_only(1),
         TcHandle::new(1, 10),
@@ -313,7 +313,7 @@ async fn test_htb_class_hierarchy() -> Result<()> {
 
     // Add root class
     let root_class = HtbClassConfig::new(nlink::Rate::mbit(100)).build();
-    conn.add_class_config(
+    conn.add_class(
         "dummy0",
         TcHandle::major_only(1),
         TcHandle::new(1, 1),
@@ -325,13 +325,13 @@ async fn test_htb_class_hierarchy() -> Result<()> {
     let child1 = HtbClassConfig::new(nlink::Rate::mbit(50))
         .ceil(nlink::Rate::mbit(800))
         .build();
-    conn.add_class_config("dummy0", TcHandle::new(1, 1), TcHandle::new(1, 10), child1)
+    conn.add_class("dummy0", TcHandle::new(1, 1), TcHandle::new(1, 10), child1)
         .await?;
 
     let child2 = HtbClassConfig::new(nlink::Rate::mbit(30))
         .ceil(nlink::Rate::mbit(800))
         .build();
-    conn.add_class_config("dummy0", TcHandle::new(1, 1), TcHandle::new(1, 20), child2)
+    conn.add_class("dummy0", TcHandle::new(1, 1), TcHandle::new(1, 20), child2)
         .await?;
 
     // Verify
@@ -354,7 +354,7 @@ async fn test_delete_class() -> Result<()> {
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config(
+    conn.add_class(
         "dummy0",
         TcHandle::major_only(1),
         TcHandle::new(1, 10),
@@ -391,7 +391,7 @@ async fn test_add_matchall_filter() -> Result<()> {
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config(
+    conn.add_class(
         "dummy0",
         TcHandle::major_only(1),
         TcHandle::new(1, 10),
@@ -427,7 +427,7 @@ async fn test_add_u32_filter() -> Result<()> {
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config(
+    conn.add_class(
         "dummy0",
         TcHandle::major_only(1),
         TcHandle::new(1, 10),
@@ -464,7 +464,7 @@ async fn test_add_flower_filter() -> Result<()> {
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config(
+    conn.add_class(
         "dummy0",
         TcHandle::major_only(1),
         TcHandle::new(1, 10),
@@ -552,7 +552,7 @@ async fn test_filter_on_ifb() -> Result<()> {
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config("ifb0", TcHandle::major_only(1), TcHandle::new(1, 10), class)
+    conn.add_class("ifb0", TcHandle::major_only(1), TcHandle::new(1, 10), class)
         .await?;
 
     // Add matchall filter
@@ -582,7 +582,7 @@ async fn test_delete_filter() -> Result<()> {
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config(
+    conn.add_class(
         "dummy0",
         TcHandle::major_only(1),
         TcHandle::new(1, 10),
@@ -621,7 +621,7 @@ async fn test_replace_filter() -> Result<()> {
 
     // Add classes
     let class1 = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config(
+    conn.add_class(
         "dummy0",
         TcHandle::major_only(1),
         TcHandle::new(1, 10),
@@ -630,7 +630,7 @@ async fn test_replace_filter() -> Result<()> {
     .await?;
 
     let class2 = HtbClassConfig::new(nlink::Rate::mbit(20)).build();
-    conn.add_class_config(
+    conn.add_class(
         "dummy0",
         TcHandle::major_only(1),
         TcHandle::new(1, 20),
@@ -701,7 +701,7 @@ async fn test_class_statistics() -> Result<()> {
         .await?;
 
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config(
+    conn.add_class(
         "dummy0",
         TcHandle::major_only(1),
         TcHandle::new(1, 10),
@@ -789,7 +789,7 @@ async fn test_filter_with_chain() -> Result<()> {
 
     // Add class
     let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
-    conn.add_class_config(
+    conn.add_class(
         "dummy0",
         TcHandle::major_only(1),
         TcHandle::new(1, 10),

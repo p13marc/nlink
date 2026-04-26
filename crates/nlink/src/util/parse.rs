@@ -86,9 +86,9 @@ where
 /// (or `"100mbit".parse::<Rate>()?`) instead — it returns a typed `Rate`
 /// that handles the unit conversion at construction.
 ///
-/// This function remains as the underlying parser for the legacy raw
-/// `&[String]` TC API (`Connection::add_class("eth0", parent, classid,
-/// "htb", &["rate", "100mbit", ...])`) and for `Rate::parse` itself.
+/// This function remains as the underlying primitive that powers
+/// `Rate::parse` (and a few internal callsites that still need the
+/// raw bytes/sec value).
 pub fn get_rate(s: &str) -> Result<u64> {
     let s = s.trim().to_lowercase();
 
