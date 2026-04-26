@@ -16,13 +16,6 @@ use nlink::{
     output::{OutputFormat, OutputOptions, print_all},
 };
 
-// Deprecated in 0.14.0; only used as the long-tail fallback when the
-// CLI gives a kind that doesn't yet have a typed parse_params (sfq,
-// prio, fq_codel, ingress, etc.). The known-kind path goes through
-// the typed dispatch below.
-#[allow(deprecated)]
-use nlink::tc::builders::qdisc as qdisc_builder;
-
 #[derive(Args)]
 pub struct QdiscCmd {
     #[command(subcommand)]
@@ -132,12 +125,6 @@ enum QdiscAction {
     },
 }
 
-// TODO(0.15+): migrate to Connection::add_qdisc(_full) + typed
-// HtbQdiscConfig / NetemConfig / CakeConfig / FqPieConfig /
-// TbfConfig / ... The legacy `tc::builders::qdisc` API is
-// deprecated in 0.14.0 and this #[allow] keeps CI green until
-// the migration lands.
-#[allow(deprecated)]
 impl QdiscCmd {
     pub async fn run(
         self,
@@ -223,12 +210,7 @@ impl QdiscCmd {
         kind: &str,
         params: &[String],
     ) -> Result<()> {
-        if let Some(result) =
-            try_typed_qdisc(conn, dev, parent, handle, kind, params, QdiscVerb::Add).await
-        {
-            return result;
-        }
-        qdisc_builder::add(conn, dev, parent, handle, kind, params).await
+        dispatch_qdisc(conn, dev, parent, handle, kind, params, QdiscVerb::Add).await
     }
 
     async fn del(
@@ -237,10 +219,8 @@ impl QdiscCmd {
         parent: &str,
         handle: Option<&str>,
     ) -> Result<()> {
-        if let Ok((p, h)) = parse_qdisc_handles(parent, handle) {
-            return conn.del_qdisc_full(dev, p, h).await;
-        }
-        qdisc_builder::del(conn, dev, parent, handle).await
+        let (p, h) = parse_qdisc_handles(parent, handle)?;
+        conn.del_qdisc_full(dev, p, h).await
     }
 
     async fn replace(
@@ -251,12 +231,7 @@ impl QdiscCmd {
         kind: &str,
         params: &[String],
     ) -> Result<()> {
-        if let Some(result) =
-            try_typed_qdisc(conn, dev, parent, handle, kind, params, QdiscVerb::Replace).await
-        {
-            return result;
-        }
-        qdisc_builder::replace(conn, dev, parent, handle, kind, params).await
+        dispatch_qdisc(conn, dev, parent, handle, kind, params, QdiscVerb::Replace).await
     }
 
     async fn change(
@@ -267,12 +242,7 @@ impl QdiscCmd {
         kind: &str,
         params: &[String],
     ) -> Result<()> {
-        if let Some(result) =
-            try_typed_qdisc(conn, dev, parent, handle, kind, params, QdiscVerb::Change).await
-        {
-            return result;
-        }
-        qdisc_builder::change(conn, dev, parent, handle, kind, params).await
+        dispatch_qdisc(conn, dev, parent, handle, kind, params, QdiscVerb::Change).await
     }
 }
 
@@ -302,15 +272,10 @@ fn parse_qdisc_handles(parent: &str, handle: Option<&str>) -> Result<(TcHandle, 
     Ok((parent, handle))
 }
 
-/// Try the typed dispatch path for known qdisc kinds (htb, netem,
-/// cake, tbf). Returns `Some(Ok)` on success, `Some(Err)` if the
-/// typed parser rejected the params (we surface that error rather
-/// than fall through, because a malformed HTB option in a known
-/// kind is a user mistake — not a reason to silently route through
-/// the looser legacy parser). Returns `None` for unknown kinds or
-/// when handle parsing fails — in those cases the caller falls back
-/// to `qdisc_builder::*`.
-async fn try_typed_qdisc(
+/// Typed dispatch path for every qdisc kind nlink models. Unknown
+/// kinds error cleanly with a recognised-kinds list — there's no
+/// silent fallback to a looser legacy parser anymore.
+async fn dispatch_qdisc(
     conn: &Connection<Route>,
     dev: &str,
     parent: &str,
@@ -318,51 +283,19 @@ async fn try_typed_qdisc(
     kind: &str,
     params: &[String],
     verb: QdiscVerb,
-) -> Option<Result<()>> {
-    // Bail fast for unknown kinds — keeps unsupported kinds on the
-    // legacy path without paying for handle parsing.
-    let known = matches!(
-        kind,
-        "htb"
-            | "netem"
-            | "cake"
-            | "tbf"
-            | "sfq"
-            | "prio"
-            | "fq_codel"
-            | "red"
-            | "pie"
-            | "hfsc"
-            | "drr"
-            | "qfq"
-            | "ingress"
-            | "clsact"
-            | "plug"
-            | "mqprio"
-            | "etf"
-            | "taprio"
-    );
-    if !known {
-        return None;
-    }
-    let (parent, handle) = match parse_qdisc_handles(parent, handle) {
-        Ok(parts) => parts,
-        Err(_) => return None,
-    };
+) -> Result<()> {
+    let (parent, handle) = parse_qdisc_handles(parent, handle)?;
     let refs: Vec<&str> = params.iter().map(String::as_str).collect();
 
     macro_rules! dispatch {
         ($Cfg:ident) => {{
             // Bind through the ParseParams trait so the dispatcher's
             // contract is type-checked, not just convention.
-            let cfg = match <$Cfg as nlink::ParseParams>::parse_params(&refs) {
-                Ok(c) => c,
-                Err(e) => return Some(Err(e)),
-            };
+            let cfg = <$Cfg as nlink::ParseParams>::parse_params(&refs)?;
             run_typed_qdisc(conn, dev, parent, handle, cfg, verb).await
         }};
     }
-    Some(match kind {
+    match kind {
         "htb" => dispatch!(HtbQdiscConfig),
         "netem" => dispatch!(NetemConfig),
         "cake" => dispatch!(CakeConfig),
@@ -381,8 +314,10 @@ async fn try_typed_qdisc(
         "mqprio" => dispatch!(MqprioConfig),
         "etf" => dispatch!(EtfConfig),
         "taprio" => dispatch!(TaprioConfig),
-        _ => unreachable!("checked by `known` guard above"),
-    })
+        other => Err(Error::InvalidMessage(format!(
+            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, etf, taprio)"
+        ))),
+    }
 }
 
 async fn run_typed_qdisc<C: QdiscConfig>(

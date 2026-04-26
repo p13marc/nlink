@@ -18,13 +18,6 @@ use nlink::{
     output::{OutputFormat, OutputOptions, print_items},
 };
 
-// Deprecated in 0.14.0; only used as the long-tail fallback when the
-// CLI gives a kind that doesn't yet have a typed parse_params (u32,
-// basic, bpf, cgroup, route, flow). Flower / matchall / fw go
-// through the typed dispatch below.
-#[allow(deprecated)]
-use nlink::tc::builders::filter as filter_builder;
-
 #[derive(Args)]
 pub struct FilterCmd {
     #[command(subcommand)]
@@ -159,13 +152,6 @@ enum FilterAction {
     },
 }
 
-// TODO(0.15+): migrate to Connection::add_filter + typed filter
-// builders (FlowerFilter / U32Filter / MatchallFilter / ...). The
-// legacy `tc::builders::filter` API is deprecated in 0.14.0 — the
-// impl-level #[allow] covers both `run` (which dispatches add/del/
-// change/replace) and the `show` helper's parse_protocol /
-// format_protocol calls.
-#[allow(deprecated)]
 impl FilterCmd {
     pub async fn run(
         self,
@@ -194,7 +180,7 @@ impl FilterCmd {
                 kind,
                 params,
             } => {
-                if let Some(result) = try_typed_filter(
+                dispatch_filter(
                     conn,
                     &dev,
                     &parent,
@@ -205,37 +191,34 @@ impl FilterCmd {
                     FilterVerb::Add,
                 )
                 .await
-                {
-                    return result;
-                }
-                filter_builder::add(conn, &dev, &parent, &protocol, prio, &kind, &params).await
             }
             FilterAction::Del {
                 dev,
                 parent,
                 protocol,
                 prio,
-                kind,
+                kind: _,
             } => {
-                // Typed del path needs both protocol and prio (and a parsable
-                // parent). Anything missing -> fall through to the legacy
-                // filter_builder which knows how to handle the holes.
-                if let Some(proto_str) = protocol.as_deref()
-                    && let Some(p) = prio
-                    && let Ok(parent_t) = parent.parse::<TcHandle>()
-                    && let Ok(proto_u) = parse_protocol_u16(proto_str)
-                {
-                    return conn.del_filter(dev.as_str(), parent_t, proto_u, p).await;
-                }
-                filter_builder::del(
-                    conn,
-                    &dev,
-                    &parent,
-                    protocol.as_deref(),
-                    prio,
-                    kind.as_deref(),
-                )
-                .await
+                // Typed del_filter requires (parent, protocol, prio) — partial
+                // specs (e.g. delete-by-kind-only) are no longer supported by
+                // the bin; users must supply all three.
+                let proto_str = protocol.as_deref().ok_or_else(|| {
+                    Error::InvalidMessage(
+                        "tc filter del: --protocol is required (typed del needs the full lookup tuple)"
+                            .to_string(),
+                    )
+                })?;
+                let p = prio.ok_or_else(|| {
+                    Error::InvalidMessage(
+                        "tc filter del: --prio is required (typed del needs the full lookup tuple)"
+                            .to_string(),
+                    )
+                })?;
+                let parent_t = parent.parse::<TcHandle>().map_err(|e| {
+                    Error::InvalidMessage(format!("tc filter del: invalid parent `{parent}`: {e}"))
+                })?;
+                let proto_u = parse_protocol_u16(proto_str)?;
+                conn.del_filter(dev.as_str(), parent_t, proto_u, p).await
             }
             FilterAction::Replace {
                 dev,
@@ -245,7 +228,7 @@ impl FilterCmd {
                 kind,
                 params,
             } => {
-                if let Some(result) = try_typed_filter(
+                dispatch_filter(
                     conn,
                     &dev,
                     &parent,
@@ -256,10 +239,6 @@ impl FilterCmd {
                     FilterVerb::Replace,
                 )
                 .await
-                {
-                    return result;
-                }
-                filter_builder::replace(conn, &dev, &parent, &protocol, prio, &kind, &params).await
             }
             FilterAction::Change {
                 dev,
@@ -269,7 +248,7 @@ impl FilterCmd {
                 kind,
                 params,
             } => {
-                if let Some(result) = try_typed_filter(
+                dispatch_filter(
                     conn,
                     &dev,
                     &parent,
@@ -280,10 +259,6 @@ impl FilterCmd {
                     FilterVerb::Change,
                 )
                 .await
-                {
-                    return result;
-                }
-                filter_builder::change(conn, &dev, &parent, &protocol, prio, &kind, &params).await
             }
         }
     }
@@ -312,9 +287,7 @@ impl FilterCmd {
                 nlink::netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
             })?;
 
-        let proto_filter = protocol_filter
-            .map(filter_builder::parse_protocol)
-            .transpose()?;
+        let proto_filter = protocol_filter.map(parse_protocol_u16).transpose()?;
 
         // Fetch all filters using typed API
         let all_filters: Vec<TcMessage> = conn.dump_typed(NlMsgType::RTM_GETTFILTER).await?;
@@ -362,15 +335,11 @@ enum FilterVerb {
     Change,
 }
 
-/// Try the typed dispatch path for known filter kinds (flower,
-/// matchall, fw). Returns `Some(Ok)` on success, `Some(Err)` if the
-/// typed parser rejected the params (we surface the error rather
-/// than fall through, so a typo on a known kind doesn't get
-/// silently rerouted through the looser legacy parser). Returns
-/// `None` for unknown kinds — caller falls back to
-/// `filter_builder::*`.
-#[allow(clippy::too_many_arguments)] // mirrors the legacy filter_builder shape; bundling into a struct would just add ceremony
-async fn try_typed_filter(
+/// Typed dispatch for every filter kind nlink models. Unknown
+/// kinds error cleanly with a recognised-kinds list; there's no
+/// silent fallback to a looser legacy parser anymore.
+#[allow(clippy::too_many_arguments)] // 7 args mirror the tc(8) CLI surface; bundling into a struct would just add ceremony
+async fn dispatch_filter(
     conn: &Connection<Route>,
     dev: &str,
     parent: &str,
@@ -379,21 +348,11 @@ async fn try_typed_filter(
     kind: &str,
     params: &[String],
     verb: FilterVerb,
-) -> Option<Result<()>> {
-    if !matches!(
-        kind,
-        "flower" | "matchall" | "fw" | "route" | "bpf" | "cgroup" | "flow" | "u32" | "basic"
-    ) {
-        return None;
-    }
-    let parent = match parent.parse::<TcHandle>() {
-        Ok(h) => h,
-        Err(_) => return None,
-    };
-    let proto = match parse_protocol_u16(protocol) {
-        Ok(p) => p,
-        Err(_) => return None,
-    };
+) -> Result<()> {
+    let parent = parent.parse::<TcHandle>().map_err(|e| {
+        Error::InvalidMessage(format!("tc filter: invalid parent `{parent}`: {e}"))
+    })?;
+    let proto = parse_protocol_u16(protocol)?;
     let priority = prio.unwrap_or(0);
 
     let refs: Vec<&str> = params.iter().map(String::as_str).collect();
@@ -402,14 +361,11 @@ async fn try_typed_filter(
         ($Cfg:ident) => {{
             // Bind through the ParseParams trait so the dispatcher's
             // contract is type-checked, not just convention.
-            let cfg = match <$Cfg as nlink::ParseParams>::parse_params(&refs) {
-                Ok(c) => c,
-                Err(e) => return Some(Err(e)),
-            };
+            let cfg = <$Cfg as nlink::ParseParams>::parse_params(&refs)?;
             run_typed_filter(conn, dev, parent, proto, priority, cfg, verb).await
         }};
     }
-    Some(match kind {
+    match kind {
         "flower" => dispatch!(FlowerFilter),
         "matchall" => dispatch!(MatchallFilter),
         "fw" => dispatch!(FwFilter),
@@ -419,8 +375,10 @@ async fn try_typed_filter(
         "flow" => dispatch!(FlowFilter),
         "u32" => dispatch!(U32Filter),
         "basic" => dispatch!(BasicFilter),
-        _ => unreachable!("checked by `matches!` guard above"),
-    })
+        other => Err(Error::InvalidMessage(format!(
+            "tc filter: unknown kind `{other}` (recognised: flower, matchall, fw, route, bpf, cgroup, flow, u32, basic)"
+        ))),
+    }
 }
 
 async fn run_typed_filter<C: FilterConfig>(
@@ -448,17 +406,49 @@ async fn run_typed_filter<C: FilterConfig>(
     }
 }
 
-/// Wrap the legacy `filter_builder::parse_protocol` to surface its
-/// result via `nlink::Error` and keep the typed dispatch above
-/// independent of the deprecated module's exact error shape.
-#[allow(deprecated)]
+/// Parse a protocol name (or hex `0x…`) into the kernel's `u16`.
+/// Recognised names mirror what `tc(8)` accepts.
 fn parse_protocol_u16(s: &str) -> Result<u16> {
-    filter_builder::parse_protocol(s)
-        .map_err(|e| Error::InvalidMessage(format!("invalid protocol `{s}`: {e}")))
+    Ok(match s.to_lowercase().as_str() {
+        "all" => 0x0003,             // ETH_P_ALL
+        "ip" => 0x0800,              // ETH_P_IP
+        "ipv6" => 0x86DD,            // ETH_P_IPV6
+        "arp" => 0x0806,             // ETH_P_ARP
+        "802.1q" | "vlan" => 0x8100, // ETH_P_8021Q
+        "802.1ad" => 0x88A8,         // ETH_P_8021AD
+        "mpls_uc" => 0x8847,         // ETH_P_MPLS_UC
+        "mpls_mc" => 0x8848,         // ETH_P_MPLS_MC
+        _ => {
+            if let Some(hex) = s.strip_prefix("0x") {
+                u16::from_str_radix(hex, 16).map_err(|_| {
+                    Error::InvalidMessage(format!("invalid protocol: {s}"))
+                })?
+            } else {
+                s.parse().map_err(|_| {
+                    Error::InvalidMessage(format!("unknown protocol: {s}"))
+                })?
+            }
+        }
+    })
+}
+
+/// Inverse of [`parse_protocol_u16`]. Inlined for the same
+/// reason — keeps the bin off the deprecated module.
+fn format_protocol(proto: u16) -> String {
+    match proto {
+        0x0003 => "all".to_string(),
+        0x0800 => "ip".to_string(),
+        0x86DD => "ipv6".to_string(),
+        0x0806 => "arp".to_string(),
+        0x8100 => "802.1Q".to_string(),
+        0x88A8 => "802.1ad".to_string(),
+        0x8847 => "mpls_uc".to_string(),
+        0x8848 => "mpls_mc".to_string(),
+        _ => format!("0x{proto:04x}"),
+    }
 }
 
 /// Convert a TcMessage to JSON representation for filter.
-#[allow(deprecated)] // filter_builder::format_protocol — see module deprecation plan
 fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
     let dev = nlink::util::get_ifname_or_index(filter.ifindex());
 
@@ -466,7 +456,7 @@ fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
         "dev": dev,
         "kind": filter.kind().unwrap_or(""),
         "parent": filter.parent().to_string(),
-        "protocol": filter_builder::format_protocol(filter.protocol()),
+        "protocol": format_protocol(filter.protocol()),
         "pref": filter.priority(),
     });
 
@@ -497,7 +487,6 @@ fn filter_to_json(filter: &TcMessage) -> serde_json::Value {
 }
 
 /// Print filter in text format.
-#[allow(deprecated)] // filter_builder::format_protocol — see module deprecation plan
 fn print_filter_text(
     w: &mut io::StdoutLock<'_>,
     filter: &TcMessage,
@@ -509,7 +498,7 @@ fn print_filter_text(
         w,
         "filter parent {} protocol {} pref {} {} ",
         filter.parent(),
-        filter_builder::format_protocol(filter.protocol()),
+        format_protocol(filter.protocol()),
         filter.priority(),
         filter.kind().unwrap_or("")
     )?;
