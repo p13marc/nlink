@@ -1,35 +1,32 @@
 //! tc action command implementation.
 //!
 //! Actions are operations attached to filters that control packet fate.
-//! Common actions include:
-//! - gact: Generic action (pass, drop, etc.)
-//! - mirred: Mirror or redirect to another interface
-//! - police: Rate limiting with token bucket
+//! Common kinds: gact (pass/drop/etc.), mirred (mirror/redirect),
+//! police (rate limit), vlan, skbedit, connmark, csum, sample,
+//! tunnel_key, nat, simple, bpf, ct.
 
 use std::io::{self, Write};
 
 use clap::{Args, Subcommand};
 use nlink::{
+    Error, ParseParams,
     netlink::{
         Connection, Result, Route,
+        action::{
+            ActionMessage, BpfAction, ConnmarkAction, CsumAction, CtAction, GactAction,
+            MirredAction, NatAction, PeditAction, PoliceAction, SampleAction, SimpleAction,
+            SkbeditAction, TunnelKeyAction, VlanAction,
+        },
         attr::AttrIter,
-        message::NLMSG_HDRLEN,
-        types::tc::{
-            TCA_ACT_TAB, TcMsg,
-            action::{
-                self, TCA_ACT_KIND, TCA_ACT_OPTIONS,
-                gact::{TCA_GACT_PARMS, TcGact},
-                mirred::{self, TCA_MIRRED_PARMS, TcMirred},
-                police::{TCA_POLICE_TBF, TcPolice},
-            },
+        types::tc::action::{
+            self,
+            gact::{TCA_GACT_PARMS, TcGact},
+            mirred::{self, TCA_MIRRED_PARMS, TcMirred},
+            police::{TCA_POLICE_TBF, TcPolice},
         },
     },
     output::{OutputFormat, OutputOptions, formatting::format_rate_bps},
 };
-
-// Deprecated in 0.14.0; see the impl block below for the migration TODO.
-#[allow(deprecated)]
-use nlink::tc::builders::action as action_builder;
 
 #[derive(Args)]
 pub struct ActionCmd {
@@ -39,42 +36,44 @@ pub struct ActionCmd {
 
 #[derive(Subcommand)]
 enum ActionAction {
-    /// Show actions.
+    /// Show actions of a kind.
     Show {
-        /// Action type (gact, mirred, police).
+        /// Action kind (gact, mirred, police, vlan, skbedit, connmark,
+        /// csum, sample, tunnel_key, nat, simple, bpf, ct, pedit).
         kind: String,
     },
 
     /// List actions (alias for show).
     #[command(visible_alias = "ls")]
     List {
-        /// Action type.
+        /// Action kind.
         kind: String,
     },
 
     /// Add an action.
     Add {
-        /// Action type (gact, mirred, police).
+        /// Action kind.
         kind: String,
 
-        /// Action-specific parameters.
+        /// Kind-specific parameters (consumed by the kind's
+        /// `parse_params`).
         #[arg(trailing_var_arg = true)]
         params: Vec<String>,
     },
 
-    /// Delete an action.
+    /// Delete an action by kind + index.
     Del {
-        /// Action type.
+        /// Action kind.
         kind: String,
 
-        /// Action index.
+        /// Action index (required — the typed CRUD lookup key).
         #[arg(long)]
-        index: Option<u32>,
+        index: u32,
     },
 
-    /// Get a specific action.
+    /// Get a specific action by kind + index.
     Get {
-        /// Action type.
+        /// Action kind.
         kind: String,
 
         /// Action index.
@@ -82,12 +81,6 @@ enum ActionAction {
     },
 }
 
-// TODO(future): standalone shared-action CRUD doesn't have a typed
-// Connection method yet — Plan 137 §8.D territory. Until that API is
-// designed, this subcommand keeps the legacy `tc::builders::action`
-// surface alive; the #[allow] scope is the whole impl because
-// show_actions / add / del / get all call into it.
-#[allow(deprecated)]
 impl ActionCmd {
     pub async fn run(
         &self,
@@ -100,12 +93,12 @@ impl ActionCmd {
                 Self::show_actions(conn, kind, format, opts).await
             }
             Some(ActionAction::Add { kind, params }) => {
-                action_builder::add(conn, kind, params).await?;
+                add_typed_action(conn, kind, params).await?;
                 println!("Action added");
                 Ok(())
             }
             Some(ActionAction::Del { kind, index }) => {
-                action_builder::del(conn, kind, *index).await?;
+                conn.del_action(kind, *index).await?;
                 println!("Action deleted");
                 Ok(())
             }
@@ -113,8 +106,11 @@ impl ActionCmd {
                 Self::get_action(conn, kind, *index, format, opts).await
             }
             None => {
-                println!("Usage: tc action <show|add|del|get> <type> [options]");
-                println!("Action types: gact, mirred, police");
+                println!(
+                    "Usage: tc action <show|add|del|get> <kind> [options]\n\
+                     Recognised kinds: gact, mirred, police, vlan, skbedit, connmark, \
+                     csum, sample, tunnel_key, nat, simple, bpf, ct, pedit"
+                );
                 Ok(())
             }
         }
@@ -126,25 +122,12 @@ impl ActionCmd {
         format: OutputFormat,
         _opts: &OutputOptions,
     ) -> Result<()> {
-        let responses = action_builder::dump(conn, kind).await?;
-
+        let actions = conn.dump_actions(kind).await?;
         let stdout = io::stdout();
         let mut handle = stdout.lock();
-
-        for response in responses {
-            if response.len() < NLMSG_HDRLEN + std::mem::size_of::<TcMsg>() {
-                continue;
-            }
-
-            let payload = &response[NLMSG_HDRLEN..];
-            if payload.len() < std::mem::size_of::<TcMsg>() {
-                continue;
-            }
-
-            let attrs_data = &payload[std::mem::size_of::<TcMsg>()..];
-            print_action_response(&mut handle, attrs_data, format)?;
+        for am in &actions {
+            print_action_message(&mut handle, am, format)?;
         }
-
         Ok(())
     }
 
@@ -155,81 +138,81 @@ impl ActionCmd {
         format: OutputFormat,
         _opts: &OutputOptions,
     ) -> Result<()> {
-        let response = action_builder::get(conn, kind, index).await?;
-
-        let stdout = io::stdout();
-        let mut handle = stdout.lock();
-
-        if response.len() >= NLMSG_HDRLEN + std::mem::size_of::<TcMsg>() {
-            let payload = &response[NLMSG_HDRLEN..];
-            let attrs_data = &payload[std::mem::size_of::<TcMsg>()..];
-            print_action_response(&mut handle, attrs_data, format)?;
+        match conn.get_action(kind, index).await? {
+            Some(am) => {
+                let stdout = io::stdout();
+                let mut handle = stdout.lock();
+                print_action_message(&mut handle, &am, format)?;
+            }
+            None => {
+                eprintln!("action {} index {} not found", kind, index);
+            }
         }
-
         Ok(())
     }
 }
 
-/// Print action response.
-fn print_action_response(
-    w: &mut impl Write,
-    attrs_data: &[u8],
-    format: OutputFormat,
+/// Per-kind dispatch — parses the params via each action's
+/// `ParseParams` impl and submits via the typed CRUD method.
+/// Mirrors `try_typed_qdisc` / `try_typed_filter` from the qdisc /
+/// filter subcommands.
+async fn add_typed_action(
+    conn: &Connection<Route>,
+    kind: &str,
+    params: &[String],
 ) -> Result<()> {
-    // Parse TCA_ACT_TAB
-    for (attr_type, attr_data) in AttrIter::new(attrs_data) {
-        if attr_type == TCA_ACT_TAB {
-            // Iterate over actions in the tab
-            for (act_idx, act_data) in AttrIter::new(attr_data) {
-                if act_idx == 0 {
-                    continue;
-                }
-                print_single_action(w, act_data, format)?;
-            }
-        }
+    let refs: Vec<&str> = params.iter().map(String::as_str).collect();
+
+    macro_rules! dispatch {
+        ($Cfg:ident) => {{
+            let cfg = <$Cfg as ParseParams>::parse_params(&refs)?;
+            conn.add_action(cfg).await
+        }};
     }
 
-    Ok(())
+    match kind {
+        "gact" => dispatch!(GactAction),
+        "mirred" => dispatch!(MirredAction),
+        "police" => dispatch!(PoliceAction),
+        "vlan" => dispatch!(VlanAction),
+        "skbedit" => dispatch!(SkbeditAction),
+        "connmark" => dispatch!(ConnmarkAction),
+        "csum" => dispatch!(CsumAction),
+        "sample" => dispatch!(SampleAction),
+        "tunnel_key" => dispatch!(TunnelKeyAction),
+        "nat" => dispatch!(NatAction),
+        "simple" => dispatch!(SimpleAction),
+        "bpf" => dispatch!(BpfAction),
+        "ct" => dispatch!(CtAction),
+        "pedit" => dispatch!(PeditAction),
+        other => Err(Error::InvalidMessage(format!(
+            "tc action: unknown kind `{other}` (recognised: gact, mirred, police, vlan, skbedit, connmark, csum, sample, tunnel_key, nat, simple, bpf, ct, pedit)"
+        ))),
+    }
 }
 
-/// Print a single action.
-fn print_single_action(w: &mut impl Write, act_data: &[u8], format: OutputFormat) -> Result<()> {
-    let mut kind: Option<&str> = None;
-    let mut options_data: Option<&[u8]> = None;
-
-    for (attr_type, attr_data) in AttrIter::new(act_data) {
-        match attr_type {
-            TCA_ACT_KIND => {
-                if let Ok(k) = std::str::from_utf8(attr_data) {
-                    kind = Some(k.trim_end_matches('\0'));
-                }
-            }
-            TCA_ACT_OPTIONS => {
-                options_data = Some(attr_data);
-            }
-            _ => {}
-        }
-    }
-
-    let kind = kind.unwrap_or("unknown");
-
+fn print_action_message(
+    w: &mut impl Write,
+    am: &ActionMessage,
+    format: OutputFormat,
+) -> Result<()> {
     match format {
         OutputFormat::Json => {
-            write!(w, "{{\"kind\":\"{}\",", kind)?;
-            if let Some(opts) = options_data {
-                print_action_options_json(w, kind, opts)?;
+            write!(w, "{{\"kind\":\"{}\",\"index\":{}", am.kind, am.index)?;
+            if !am.options_raw.is_empty() {
+                write!(w, ",")?;
+                print_action_options_json(w, &am.kind, &am.options_raw)?;
             }
             writeln!(w, "}}")?;
         }
         OutputFormat::Text => {
-            write!(w, "action {} ", kind)?;
-            if let Some(opts) = options_data {
-                print_action_options_text(w, kind, opts)?;
+            write!(w, "action {} index {} ", am.kind, am.index)?;
+            if !am.options_raw.is_empty() {
+                print_action_options_text(w, &am.kind, &am.options_raw)?;
             }
             writeln!(w)?;
         }
     }
-
     Ok(())
 }
 
@@ -242,9 +225,8 @@ fn print_action_options_json(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
                     let gact = unsafe { &*(attr_data.as_ptr() as *const TcGact) };
                     write!(
                         w,
-                        "\"action\":\"{}\",\"index\":{},\"ref\":{},\"bind\":{}",
+                        "\"action\":\"{}\",\"ref\":{},\"bind\":{}",
                         action::format_action_result(gact.action),
-                        gact.index,
                         gact.refcnt,
                         gact.bindcnt
                     )?;
@@ -259,11 +241,10 @@ fn print_action_options_json(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
                     let m = unsafe { &*(attr_data.as_ptr() as *const TcMirred) };
                     write!(
                         w,
-                        "\"mirred_action\":\"{}\",\"ifindex\":{},\"action\":\"{}\",\"index\":{},\"ref\":{},\"bind\":{}",
+                        "\"mirred_action\":\"{}\",\"ifindex\":{},\"action\":\"{}\",\"ref\":{},\"bind\":{}",
                         mirred::format_mirred_action(m.eaction),
                         m.ifindex,
                         action::format_action_result(m.action),
-                        m.index,
                         m.refcnt,
                         m.bindcnt
                     )?;
@@ -277,12 +258,11 @@ fn print_action_options_json(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
                     let p = unsafe { &*(attr_data.as_ptr() as *const TcPolice) };
                     write!(
                         w,
-                        "\"rate\":{},\"burst\":{},\"mtu\":{},\"action\":\"{}\",\"index\":{},\"ref\":{},\"bind\":{}",
+                        "\"rate\":{},\"burst\":{},\"mtu\":{},\"action\":\"{}\",\"ref\":{},\"bind\":{}",
                         p.rate.rate,
                         p.burst,
                         p.mtu,
                         action::format_action_result(p.action),
-                        p.index,
                         p.refcnt,
                         p.bindcnt
                     )?;
@@ -304,11 +284,7 @@ fn print_action_options_text(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
                     let gact = unsafe { &*(attr_data.as_ptr() as *const TcGact) };
                     write!(w, "{}", action::format_action_result(gact.action))?;
                     writeln!(w)?;
-                    write!(
-                        w,
-                        "\tindex {} ref {} bind {}",
-                        gact.index, gact.refcnt, gact.bindcnt
-                    )?;
+                    write!(w, "\tref {} bind {}", gact.refcnt, gact.bindcnt)?;
                 }
             }
         }
@@ -326,7 +302,7 @@ fn print_action_options_text(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
                         action::format_action_result(m.action)
                     )?;
                     writeln!(w)?;
-                    write!(w, "\tindex {} ref {} bind {}", m.index, m.refcnt, m.bindcnt)?;
+                    write!(w, "\tref {} bind {}", m.refcnt, m.bindcnt)?;
                 }
             }
         }
@@ -344,7 +320,7 @@ fn print_action_options_text(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
                         action::format_action_result(p.action)
                     )?;
                     writeln!(w)?;
-                    write!(w, "\tindex {} ref {} bind {}", p.index, p.refcnt, p.bindcnt)?;
+                    write!(w, "\tref {} bind {}", p.refcnt, p.bindcnt)?;
                 }
             }
         }
