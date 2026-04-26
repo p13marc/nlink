@@ -58,6 +58,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install runtime deps
+        # GHA defaults `run:` steps inside containers to `sh`
+        # (which on Debian is dash, not bash). The bash array
+        # syntax below requires bash; force it explicitly.
+        shell: bash
         run: |
           apt-get update
           apt-get install -y --no-install-recommends iproute2 kmod conntrack
