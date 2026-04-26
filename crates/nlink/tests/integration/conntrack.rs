@@ -252,6 +252,30 @@ async fn ct_subscribe_observes_destroy_event_on_flush() -> nlink::Result<()> {
     nlink::require_module!("nf_conntrack_netlink");
 
     let ns = TestNamespace::new("ct-events-destroy")?;
+
+    // Make sure conntrack events are enabled inside the namespace.
+    // On most kernels this defaults to "1" but some configs (or
+    // sysctl presets that bleed into new netns) leave it off, in
+    // which case the flush below silently produces no Destroy
+    // events and the test times out. Best-effort: ignore failure
+    // so we still cover kernels where the sysctl is already on or
+    // missing. If the sysctl path doesn't exist (kernel built
+    // without CONFIG_NF_CONNTRACK_EVENTS) the whole test is
+    // pointless — skip cleanly.
+    if std::path::Path::new("/proc/sys/net/netfilter/nf_conntrack_events").exists() {
+        let _ = nlink::netlink::namespace::set_sysctl(
+            ns.name(),
+            "net.netfilter.nf_conntrack_events",
+            "1",
+        );
+    } else {
+        eprintln!(
+            "Skipping test: /proc/sys/net/netfilter/nf_conntrack_events not present \
+             (kernel built without CONFIG_NF_CONNTRACK_EVENTS?)"
+        );
+        return Ok(());
+    }
+
     let nf_mut: Connection<Netfilter> = namespace::connection_for(ns.name())?;
     let mut nf_sub: Connection<Netfilter> = namespace::connection_for(ns.name())?;
 
@@ -268,15 +292,19 @@ async fn ct_subscribe_observes_destroy_event_on_flush() -> nlink::Result<()> {
         )
         .await?;
 
-    nf_sub.subscribe(&[ConntrackGroup::Destroy])?;
+    // Subscribe to ALL conntrack groups (not just Destroy). If CI
+    // still reports zero events, we'll see in the diagnostic
+    // prints whether ANY event arrives — that distinguishes
+    // "subscription doesn't work" (none) from "flush doesn't
+    // generate Destroy events for synthetic entries" (other
+    // events arrive, just not Destroy).
+    nf_sub.subscribe_all()?;
     let mut events = nf_sub.events();
 
     // Give the kernel a beat to register the multicast subscription
-    // before triggering the events. Without this small sleep the
-    // flush can race the subscription on slower CI kernels and the
-    // Destroy event is delivered before we're listening. Bumped
-    // from 100ms → 250ms after CI still raced with 100ms.
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // before triggering the events. Bumped 250ms → 1s after CI
+    // still received zero events with 250ms.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     nf_mut.flush_conntrack().await?;
 
