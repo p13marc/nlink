@@ -910,12 +910,13 @@ would be a no-op.
 
 ### Docs — Plan 142 consolidates the 0.15.0 typed-API completion arc
 
-- New master plan [`142-zero-legacy-typed-api-plan.md`](142-zero-legacy-typed-api-plan.md)
-  consolidates Plans 133 PR C / 138 / 139 / 140 / 141 into a
-  single 0.15.0 milestone. Defines the end-state typed API,
-  formalizes the `parse_params` / fluent-builder / typed-dispatch
+- New master plan `142-zero-legacy-typed-api-plan.md` (deleted
+  post-0.15.0; substance lives in this CHANGELOG section)
+  consolidated Plans 133 PR C / 138 / 139 / 140 / 141 into a
+  single 0.15.0 milestone. Defined the end-state typed API,
+  formalized the `parse_params` / fluent-builder / typed-dispatch
   patterns that emerged from the 0.14.0 typed-units rollout, and
-  makes the **legacy-removal milestone** unambiguous:
+  made the **legacy-removal milestone** unambiguous:
   `tc::builders::{class,qdisc,filter,action}` and
   `tc::options/*` are deleted from the source tree as Phase 4
   of the plan, with concrete acceptance criteria a PR must hit.

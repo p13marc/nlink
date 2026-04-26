@@ -23,9 +23,9 @@ Don't use it when:
   covers the firewall sweet spot — for the long tail, drop to the
   raw `MessageBuilder` or shell out to `nft -f`.
 - You need to inspect or manipulate conntrack entries themselves
-  (insert / delete / mark). Today `Connection::<Netfilter>` is
-  dump-only; mutation is on the [Plan 137](../../137-netfilter-expansion-plan.md)
-  roadmap.
+  (insert / delete / mark). For that, see the
+  [conntrack-programmatic](./conntrack-programmatic.md) recipe —
+  this one stays focused on the rule-side firewall.
 
 ## High-level approach
 
@@ -332,8 +332,7 @@ traffic from a flow already in conntrack survives the forward chain.
   `MessageBuilder` for v6 set membership today).
 - **Conntrack zones.** Multiple firewalls on a single host (e.g.,
   per-tenant CT zones) need `zone()` set on rules. Not yet exposed by
-  the typed `Rule` builder — see [Plan 137 §13.3](../../137-netfilter-expansion-plan.md)
-  for the open question on zone API ergonomics.
+  the typed `Rule` builder — file an issue if you need it.
 
 ## Hand-rolled equivalent
 
@@ -364,8 +363,8 @@ typed builder to emit.
   — full type list (`Chain`, `Rule`, `Set`, `Transaction`, etc.).
 - [`Connection::<Netfilter>::get_conntrack`](https://docs.rs/nlink/latest/nlink/netlink/struct.Connection.html#method.get_conntrack)
   — dump the live conntrack table for verification.
-- [Plan 137](../../137-netfilter-expansion-plan.md) — roadmap for
-  conntrack mutation, event subscription, and ct_expect.
+- [conntrack-programmatic](./conntrack-programmatic.md) — typed
+  conntrack mutation + multicast event subscription.
 - Upstream: `man 8 nft`, the [nftables wiki][nft-wiki], and
   `Documentation/networking/nf_conntrack-sysctl.rst` in the kernel tree.
 

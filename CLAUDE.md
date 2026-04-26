@@ -322,25 +322,18 @@ they are kept current.
 
 ## Active work
 
-[Plan 142](142-zero-legacy-typed-api-plan.md) — the 0.15.0
-"zero-legacy milestone" — has substantively shipped under
-`[Unreleased]`. All five phases met their acceptance criteria:
-sealed `ParseParams` trait + 41 impls, filter side 9/9
-typed-first, XFRM SA + SP CRUD, typed standalone-action CRUD,
-and the legacy `tc::builders::*` + `tc::options::*` modules
-deleted. The current `[Unreleased]` block IS the 0.15.0
-release-cut content.
-
-Open items not in the cut (sudo-gated):
-
-- **Plan 141 PR C** — `xfrm-ipsec-tunnel` recipe +
-  `examples/xfrm/ipsec_monitor.rs --apply` promotion; closes
-  Plan 135 PR B at 7/7.
-- **Plan 137 integration tests un-parking** + the GHA workflow
-  YAML; needs an in-tree test that uses `require_module!`.
+The 0.15.0 typed-API completion arc has shipped — sealed
+`ParseParams` trait + 41 impls, filter side 9/9 typed-first,
+XFRM SA + SP CRUD, typed standalone-action CRUD, and the legacy
+`tc::builders::*` + `tc::options::*` modules deleted. See
+CHANGELOG `## [0.15.0]` for the per-PR breakdown.
 
 Roadmap entry point:
-[`128b-roadmap-overview.md`](128b-roadmap-overview.md).
+[`128b-roadmap-overview.md`](128b-roadmap-overview.md). The
+"Active plans" table is empty as of the 0.15.0 cut; new work
+opens fresh plan files at the repo root when scoped (next
+expected: per-bin typed-units audit for `bins/{ip,ss,nft,...}`).
+
 Per-release upgrade guides:
 [`docs/migration_guide/`](docs/migration_guide/README.md) — write
 a new one when cutting any minor release; the README explains the

@@ -200,8 +200,8 @@ nf.add_conntrack(
 ).await?;
 ```
 
-There's no `flush_conntrack_by_zone` helper yet — see [Plan 137 §13.3](../../137-netfilter-expansion-plan.md)
-for the open question on a zone-scoped connection wrapper.
+There's no `flush_conntrack_by_zone` helper yet — file an issue
+if you need a zone-scoped connection wrapper.
 
 ## Subscribing to events
 
@@ -388,8 +388,8 @@ shell-out, no parsing of `conntrack -L` output, typed error variants.
 - [Stateful firewall recipe](./nftables-stateful-fw.md) — uses
   `get_conntrack` to verify that nftables `ct state` rules match the
   flows you expect; pair with this recipe when seeding state for tests.
-- [Plan 137](../../137-netfilter-expansion-plan.md) — roadmap for
-  `ct_expect`, nfqueue, nflog.
+- Demand-gated follow-ons: `ct_expect`, nfqueue, nflog. File an
+  issue if you need any of them.
 - Upstream: `man 8 conntrack`, the kernel's
   `Documentation/networking/nf_conntrack-sysctl.rst`, and
   `include/uapi/linux/netfilter/nfnetlink_conntrack.h` for the

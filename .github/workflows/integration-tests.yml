@@ -6,7 +6,7 @@ name: Integration tests (root-gated)
 # they skip cleanly on developer machines run as a regular user.
 # In CI they run for real.
 #
-# Per `140-ci-integration-tests-plan.md`:
+# Operational notes (originally from the Plan 140 design):
 #   - GHA-default kernel only (no matrix); add a self-hosted
 #     runner if a kernel-specific bug surfaces.
 #   - --test-threads=1 mandatory (namespace-naming collisions).
