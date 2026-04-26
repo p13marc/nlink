@@ -122,6 +122,10 @@ it replaces.
 
 **Plan 142 closes here. Phase 4 done. 0.15.0 ready to cut.**
 
+For the full upgrade walkthrough (every removed symbol, every
+behaviour change, before/after diffs, worked HTB-tree example),
+see [`docs/migration_guide/0.14.0-to-0.15.0.md`](docs/migration_guide/0.14.0-to-0.15.0.md).
+
 Remaining open items (out of scope for the 0.15.0 release-cut):
 - Plan 141 PR C — `xfrm-ipsec-tunnel` recipe + `examples/xfrm/
   ipsec_monitor.rs --apply` promotion (needs sudo for golden-
