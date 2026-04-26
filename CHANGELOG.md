@@ -111,11 +111,10 @@ published `nlink` crate.)
   be run manually before opening a PR. Tested to catch the
   exact regression class that produced the `xfrm_ipsec_monitor`
   bug.
-- Plan documents in tree (`143-0.15.1-master-plan.md`,
-  `144-0.15.1-ci-safety-nets-plan.md`,
-  `145-0.15.1-doc-cleanup-plan.md`) describe the design and
-  acceptance criteria for the 0.15.1 surgery. Will be archived
-  post-publish per the project's plan-document convention.
+- Plan documents 143/144/145 (deleted post-cut per the
+  project's plan-document convention) described the design and
+  acceptance criteria for the 0.15.1 surgery. Substance lives
+  in this CHANGELOG section.
 
 ### Out of scope (deferred to 0.16+)
 
