@@ -381,7 +381,12 @@ impl Connection<Ethtool> {
             if let Some(lanes) = config.lanes {
                 builder.append_attr_u32(EthtoolLinkmodesAttr::Lanes as u16, lanes);
             }
-            // TODO: Handle advertised modes bitset
+            // Advertised-modes bitset is not exposed by `LinkModesBuilder`
+            // today (kernel attr `EthtoolLinkmodesAttr::Ours`). The
+            // bitset encoder lives at `super::bitset::EthtoolBitset::write_to`
+            // and is wired in for `set_features`; expose advertised modes
+            // through a follow-up `LinkModesBuilder::advertise(...)` setter
+            // when a downstream user asks for it.
         })
         .await
     }
@@ -503,7 +508,9 @@ impl Connection<Ethtool> {
     }
 
     async fn apply_features(&self, ifname: &str, config: &FeaturesBuilder) -> Result<()> {
-        // Build a bitset with the changes
+        // Build a bitset reflecting the requested changes. Bits
+        // present in the encoded message = "I'm changing this";
+        // VALUE flag presence = enable; absence = disable.
         let mut wanted = EthtoolBitset::new();
         for name in &config.enable {
             wanted.set(name, true);
@@ -512,10 +519,12 @@ impl Connection<Ethtool> {
             wanted.set(name, false);
         }
 
-        self.ethtool_set(EthtoolCmd::FeaturesSet, ifname, |builder| {
-            // TODO: Properly encode bitset as ETHTOOL_A_FEATURES_WANTED
-            let _ = wanted;
-            let _ = builder;
+        self.ethtool_set(EthtoolCmd::FeaturesSet, ifname, move |builder| {
+            // Serialise as ETHTOOL_A_FEATURES_WANTED (= 3, see
+            // EthtoolFeaturesAttr). The encoder uses the bit-by-bit
+            // format and is exercised by the roundtrip unit test
+            // in `bitset.rs::tests::write_to_roundtrips_through_parse`.
+            wanted.write_to(builder, EthtoolFeaturesAttr::Wanted as u16);
         })
         .await
     }

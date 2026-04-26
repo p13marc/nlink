@@ -11,7 +11,11 @@
 use std::collections::HashMap;
 
 use super::{EthtoolBitsetAttr, EthtoolBitsetBitAttr};
-use crate::netlink::{attr::AttrIter, error::Result};
+use crate::netlink::{
+    attr::{AttrIter, NLA_F_NESTED},
+    builder::MessageBuilder,
+    error::Result,
+};
 
 /// An ethtool bitset.
 ///
@@ -74,6 +78,17 @@ impl EthtoolBitset {
     }
 
     /// Parse bit-by-bit format.
+    ///
+    /// Each list entry carries an optional `Index` (u32), an optional
+    /// `Name` (string), and an optional `Value` flag. Real-world
+    /// payload shapes:
+    /// - **Kernel GET responses** include both `Index` and `Name`.
+    /// - **Userspace SET requests** typically include only `Name`
+    ///   (the kernel resolves names to indices itself). The
+    ///   roundtrip test in this module verifies that `write_to` →
+    ///   `parse` works for the name-only shape; if `Index` is
+    ///   absent we synthesize one from the entry's position so the
+    ///   bit still gets recorded.
     fn parse_bits(&mut self, data: &[u8]) -> Result<()> {
         for (_idx, bit_data) in AttrIter::new(data) {
             let mut index: Option<u32> = None;
@@ -101,7 +116,13 @@ impl EthtoolBitset {
                 }
             }
 
-            if let Some(idx) = index {
+            // For kernel GET responses both Index and Name are
+            // present; for our own write_to (SET requests) only Name
+            // is present. In the latter case, fall back to using the
+            // position in the names table so the bit is still
+            // tracked. Drop entries with neither.
+            let idx = index.unwrap_or(self.names.len() as u32);
+            if name.is_some() || index.is_some() {
                 self.values.insert(idx, value);
                 if let Some(n) = name {
                     self.name_to_index.insert(n.clone(), idx);
@@ -226,6 +247,46 @@ impl EthtoolBitset {
             self.size = index + 1;
         }
     }
+
+    /// Encode this bitset as a nested netlink attribute using the
+    /// **bit-by-bit format** (the format ethtool SET requests use to
+    /// convey, for example, `ETHTOOL_A_FEATURES_WANTED`).
+    ///
+    /// The outer attribute is `attr_type` (with `NLA_F_NESTED`); the
+    /// inner structure is one `EthtoolBitsetBitAttr::Name` (+
+    /// optional `EthtoolBitsetBitAttr::Value` flag) per set/cleared
+    /// bit. List entries use sequential 1-based attr-type indices,
+    /// matching what `parse_bits` reads back.
+    ///
+    /// Kernel semantics for SET requests:
+    /// - Bits **present** in the list = "I'm changing this bit".
+    /// - Bits with the `Value` flag = set to **true**.
+    /// - Bits without the `Value` flag = set to **false**.
+    /// - Bits **absent** from the list = untouched.
+    ///
+    /// So `enable("rx-gro")` on an empty bitset writes `(name=rx-gro,
+    /// VALUE flag set)`, and `disable("rx-gro")` writes `(name=rx-gro,
+    /// no VALUE flag)`.
+    pub fn write_to(&self, builder: &mut MessageBuilder, attr_type: u16) {
+        let outer = builder.nest_start(attr_type | NLA_F_NESTED);
+        let bits = builder.nest_start(EthtoolBitsetAttr::Bits as u16 | NLA_F_NESTED);
+        // Walk in deterministic name order so encoded bytes are
+        // reproducible (HashMap iteration order is otherwise
+        // randomized per run, which would break test fixtures).
+        let mut entries: Vec<(&u32, &String)> = self.names.iter().collect();
+        entries.sort_by_key(|(_, name)| (*name).clone());
+        for (i, (idx, name)) in entries.iter().enumerate() {
+            let entry_id = (i as u16) + 1;
+            let entry = builder.nest_start(entry_id | NLA_F_NESTED);
+            builder.append_attr_str(EthtoolBitsetBitAttr::Name as u16, name);
+            if self.values.get(*idx).copied().unwrap_or(false) {
+                builder.append_attr(EthtoolBitsetBitAttr::Value as u16, &[]);
+            }
+            builder.nest_end(entry);
+        }
+        builder.nest_end(bits);
+        builder.nest_end(outer);
+    }
 }
 
 #[cfg(test)]
@@ -259,5 +320,74 @@ mod tests {
         assert_eq!(active.len(), 2);
         assert!(active.contains(&"a"));
         assert!(active.contains(&"c"));
+    }
+
+    /// `write_to` must emit bytes that `parse` reads back faithfully.
+    /// This is the pure-format-correctness gate; live-kernel
+    /// validation of `set_features` happens in integration tests
+    /// (skip-if-no-ethtool-hw).
+    #[test]
+    fn write_to_roundtrips_through_parse() {
+        use crate::netlink::builder::MessageBuilder;
+
+        let mut bs = EthtoolBitset::new();
+        bs.set("rx-gro", true);
+        bs.set("tx-tcp-segmentation", true);
+        bs.set("rx-checksum", false);
+
+        // Write into a netlink message under attr type 99 (arbitrary).
+        let mut builder = MessageBuilder::new(0, 0);
+        bs.write_to(&mut builder, 99);
+        let bytes = builder.finish();
+
+        // Locate our attr 99 in the produced message and feed its
+        // payload into the parser.
+        let payload_start = find_attr_payload(&bytes, 99)
+            .expect("attr 99 should exist in the encoded message");
+        let payload = &bytes[payload_start.0..payload_start.1];
+
+        // The bitset payload starts with the inner ETHTOOL_A_BITSET_BITS
+        // nest. parse() handles both compact and bit-by-bit; we encode
+        // bit-by-bit, so it should reconstruct the same names/values.
+        let parsed = EthtoolBitset::parse(payload).expect("parse should succeed");
+
+        // Verify every input bit roundtripped (both true and false).
+        assert!(parsed.is_set("rx-gro"), "rx-gro should be true");
+        assert!(
+            parsed.is_set("tx-tcp-segmentation"),
+            "tx-tcp-segmentation should be true"
+        );
+        assert!(
+            !parsed.is_set("rx-checksum"),
+            "rx-checksum should be false"
+        );
+        // Sanity: a name we never touched stays absent from the index.
+        assert_eq!(parsed.index("nonexistent"), None);
+    }
+
+    /// Helper: walk netlink message bytes, find the (start, end)
+    /// payload range for a given outer attr type, ignoring the
+    /// netlink message header. Used only by the roundtrip test.
+    fn find_attr_payload(bytes: &[u8], target_type: u16) -> Option<(usize, usize)> {
+        use crate::netlink::attr::{NLA_F_NESTED, NLA_TYPE_MASK};
+        // Skip the 16-byte nlmsghdr.
+        let mut cursor = 16;
+        while cursor + 4 <= bytes.len() {
+            let nla_len = u16::from_ne_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
+            let nla_type =
+                u16::from_ne_bytes([bytes[cursor + 2], bytes[cursor + 3]]) & !NLA_F_NESTED
+                    & NLA_TYPE_MASK;
+            if nla_len < 4 || cursor + nla_len > bytes.len() {
+                return None;
+            }
+            if nla_type == target_type {
+                let payload_start = cursor + 4;
+                let payload_end = cursor + nla_len;
+                return Some((payload_start, payload_end));
+            }
+            // 4-byte align next attr
+            cursor += (nla_len + 3) & !3;
+        }
+        None
     }
 }
