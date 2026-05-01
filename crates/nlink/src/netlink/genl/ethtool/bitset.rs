@@ -348,8 +348,8 @@ mod tests {
 
         // Locate our attr 99 in the produced message and feed its
         // payload into the parser.
-        let payload_start = find_attr_payload(&bytes, 99)
-            .expect("attr 99 should exist in the encoded message");
+        let payload_start =
+            find_attr_payload(&bytes, 99).expect("attr 99 should exist in the encoded message");
         let payload = &bytes[payload_start.0..payload_start.1];
 
         // The bitset payload starts with the inner ETHTOOL_A_BITSET_BITS
@@ -363,10 +363,7 @@ mod tests {
             parsed.is_set("tx-tcp-segmentation"),
             "tx-tcp-segmentation should be true"
         );
-        assert!(
-            !parsed.is_set("rx-checksum"),
-            "rx-checksum should be false"
-        );
+        assert!(!parsed.is_set("rx-checksum"), "rx-checksum should be false");
         // Sanity: a name we never touched stays absent from the index.
         assert_eq!(parsed.index("nonexistent"), None);
     }
@@ -380,9 +377,9 @@ mod tests {
         let mut cursor = 16;
         while cursor + 4 <= bytes.len() {
             let nla_len = u16::from_ne_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
-            let nla_type =
-                u16::from_ne_bytes([bytes[cursor + 2], bytes[cursor + 3]]) & !NLA_F_NESTED
-                    & NLA_TYPE_MASK;
+            let nla_type = u16::from_ne_bytes([bytes[cursor + 2], bytes[cursor + 3]])
+                & !NLA_F_NESTED
+                & NLA_TYPE_MASK;
             if nla_len < 4 || cursor + nla_len > bytes.len() {
                 return None;
             }

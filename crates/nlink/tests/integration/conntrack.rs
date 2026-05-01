@@ -245,8 +245,16 @@ async fn ct_subscribe_observes_new_event() -> nlink::Result<()> {
     Ok(())
 }
 
+/// Verify that an explicit `del_conntrack` fires a Destroy
+/// multicast event. Was previously written against `flush_conntrack`,
+/// but `flush` has unreliable event semantics for synthetic
+/// (ctnetlink-injected) entries on some kernels — repeated CI
+/// runs showed zero Destroy events arriving in 30s after a flush,
+/// while `del_conntrack` always fires the event because the
+/// kernel handles targeted deletes through a deterministic event
+/// path.
 #[tokio::test]
-async fn ct_subscribe_observes_destroy_event_on_flush() -> nlink::Result<()> {
+async fn ct_subscribe_observes_destroy_event_on_del() -> nlink::Result<()> {
     nlink::require_root!();
     nlink::require_module!("nf_conntrack");
     nlink::require_module!("nf_conntrack_netlink");
@@ -254,14 +262,10 @@ async fn ct_subscribe_observes_destroy_event_on_flush() -> nlink::Result<()> {
     let ns = TestNamespace::new("ct-events-destroy")?;
 
     // Make sure conntrack events are enabled inside the namespace.
-    // On most kernels this defaults to "1" but some configs (or
-    // sysctl presets that bleed into new netns) leave it off, in
-    // which case the flush below silently produces no Destroy
-    // events and the test times out. Best-effort: ignore failure
-    // so we still cover kernels where the sysctl is already on or
-    // missing. If the sysctl path doesn't exist (kernel built
-    // without CONFIG_NF_CONNTRACK_EVENTS) the whole test is
-    // pointless — skip cleanly.
+    // Defaults to "1" on most kernels but some configs leave it
+    // off; ignore failure (sysctl may not exist, may be read-only).
+    // If the path doesn't exist at all the kernel was built without
+    // CONFIG_NF_CONNTRACK_EVENTS — skip cleanly.
     if std::path::Path::new("/proc/sys/net/netfilter/nf_conntrack_events").exists() {
         let _ = nlink::netlink::namespace::set_sysctl(
             ns.name(),
@@ -282,54 +286,47 @@ async fn ct_subscribe_observes_destroy_event_on_flush() -> nlink::Result<()> {
     // Inject first so there's something to destroy.
     let orig = ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2))
         .ports(50002, 8080);
-    nf_mut
-        .add_conntrack(
-            ConntrackBuilder::new_v4(IpProtocol::Tcp)
-                .orig(orig)
-                .status(ConntrackStatus::CONFIRMED | ConntrackStatus::SEEN_REPLY)
-                .timeout(Duration::from_secs(60))
-                .tcp_state(TcpConntrackState::Established),
-        )
-        .await?;
+    let entry = ConntrackBuilder::new_v4(IpProtocol::Tcp)
+        .orig(orig)
+        .status(ConntrackStatus::CONFIRMED | ConntrackStatus::SEEN_REPLY)
+        .timeout(Duration::from_secs(60))
+        .tcp_state(TcpConntrackState::Established);
+    nf_mut.add_conntrack(entry.clone()).await?;
 
-    // Subscribe to ALL conntrack groups (not just Destroy). If CI
-    // still reports zero events, we'll see in the diagnostic
-    // prints whether ANY event arrives — that distinguishes
-    // "subscription doesn't work" (none) from "flush doesn't
-    // generate Destroy events for synthetic entries" (other
-    // events arrive, just not Destroy).
+    // Subscribe to ALL conntrack groups so the per-event diagnostic
+    // print shows everything that arrives — useful breadcrumb if
+    // this ever times out again.
     nf_sub.subscribe_all()?;
     let mut events = nf_sub.events();
 
-    // Give the kernel a beat to register the multicast subscription
-    // before triggering the events. Bumped 250ms → 1s after CI
-    // still received zero events with 250ms.
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Small sleep so the multicast subscription is fully registered
+    // before triggering the event. (Race window is real for the
+    // sub/op pair; 250ms is plenty for the targeted del path.)
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
-    nf_mut.flush_conntrack().await?;
+    // Targeted delete by tuple: kernel matches the entry, removes
+    // it, and fires Destroy through a well-defined event path.
+    // Reliable across kernels — unlike flush, which the kernel may
+    // optimize differently for synthetic entries.
+    nf_mut.del_conntrack(entry).await?;
 
-    // Drain until we see a Destroy for our port (other system traffic
-    // could in principle generate Destroys; in a fresh netns this is
-    // overwhelmingly unlikely but loop with a budget for safety).
-    // 30s deadline absorbs CI scheduler jitter; the diagnostic
-    // print below tells us what (if any) events arrived during the
-    // wait so a future timeout failure has a paper trail.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    // Drain until we see Destroy for our port. 5s is generous for
+    // a targeted delete; bumped from earlier 30s flush variant
+    // because the path is much more deterministic.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut event_count = 0usize;
     loop {
         if std::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for ConntrackEvent::Destroy after {event_count} events"
-            );
+            panic!("timed out waiting for ConntrackEvent::Destroy after {event_count} events");
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let ev = match tokio::time::timeout(remaining, events.next()).await {
             Ok(Some(Ok(ev))) => ev,
             Ok(Some(Err(e))) => return Err(e),
             Ok(None) => panic!("event stream ended unexpectedly"),
-            Err(_) => panic!(
-                "timed out waiting for ConntrackEvent::Destroy after {event_count} events"
-            ),
+            Err(_) => {
+                panic!("timed out waiting for ConntrackEvent::Destroy after {event_count} events")
+            }
         };
         event_count += 1;
         eprintln!("conntrack event #{event_count}: {ev:?}");
