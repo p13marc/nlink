@@ -121,6 +121,14 @@ jobs:
         # as integration failures.
         run: cargo test -p nlink --lib
 
+      - name: Install clippy component
+        # The `rust:bookworm` image ships with rustup + a default
+        # toolchain but no extra components. Earlier `rust:1.85-bookworm`
+        # behaviour worked by accident; the floating tag doesn't.
+        # rustfmt is also missing from the default install, but we
+        # don't run it in CI yet.
+        run: rustup component add clippy
+
       - name: Workspace clippy
         run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
 
