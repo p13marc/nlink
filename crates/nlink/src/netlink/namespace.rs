@@ -439,7 +439,16 @@ impl NamespaceGuard {
 impl Drop for NamespaceGuard {
     fn drop(&mut self) {
         if let Err(e) = self.do_restore() {
-            eprintln!("warning: failed to restore namespace: {}", e);
+            // We cannot return an error from Drop. Emit a structured
+            // tracing event so observers see the failure (replaces the
+            // pre-0.16.0 `eprintln!` — consistent with the broader
+            // eprintln→tracing audit in Plan 147 §9.2). Callers that
+            // need explicit detection should restore the namespace via
+            // an explicit call before dropping the guard.
+            tracing::error!(
+                error = %e,
+                "NamespaceGuard::drop: failed to restore original namespace; thread may be stuck"
+            );
         }
     }
 }

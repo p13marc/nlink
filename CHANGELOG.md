@@ -31,6 +31,43 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`EthtoolBitset::write_to` no longer clones each bitset name on
+  encode** (`genl/ethtool/bitset.rs:283`). Switched
+  `sort_by_key(|(_, name)| (*name).clone())` to
+  `sort_unstable_by_key(|(_, name)| name.as_str())` — one fewer
+  `String` allocation per name per `set_features` call. The
+  earlier clippy-suggested form had picked a key shape that
+  allocated; the borrow form is strictly cheaper. Stable-vs-unstable
+  ordering is immaterial here (names are unique within a bitset).
+
+- **`NamespaceGuard::drop` now emits `tracing::error!` instead of
+  `eprintln!`** on restore failure (`netlink/namespace.rs:442`).
+  Same class of bug as the `socket.rs` Phase 1 fix in this release
+  — unstructured stderr output didn't surface in subscribers,
+  hiding the "thread stuck in foreign netns" hazard. Drop can't
+  return errors, so the structured event is the right escape.
+  Callers that need explicit detection should restore the
+  namespace via an explicit method call before the guard drops.
+
+- **`util/parse.rs` octal parser uses byte indexing instead of
+  `chars().nth(1).unwrap()`** (line 65). The previous form walked
+  the UTF-8 iterator just to peek at byte 1, which is guaranteed
+  to be ASCII by the surrounding `len() > 1` + `starts_with('0')`
+  guards. Cosmetic; no behavior change.
+
+- **SAFETY comment added on `libc::geteuid()` in `lab::is_root`**
+  (`lab/mod.rs:297`). `geteuid` is POSIX-mandated infallible
+  and has no preconditions — documented for the reader.
+
+- **`route.rs` `write_delete_with_interfaces` carries a kernel-source
+  citation explaining why `RTA_METRICS` is deliberately omitted
+  on delete** (Plan 147 §4.2). `fib_table_delete` (IPv4) and
+  `ip6_route_del` (IPv6) match on the route's discriminating-key
+  fields; metrics live in the shared `fib_info` / `fib6_info` and
+  are never part of the match key. The asymmetry with `write_add`
+  (which DOES write metrics) is intentional. Documentation-only;
+  no behavior change.
+
 - **`NetworkConfig::diff` now detects same-kind / different-params
   qdisc changes** (`config/diff.rs:434`). Previously, changing an
   HTB's `default_class` from `0x10` to `0x20` (or any other

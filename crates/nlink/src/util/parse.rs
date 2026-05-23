@@ -61,8 +61,12 @@ where
         return T::try_from(val).map_err(|e| ParseError::OutOfRange(e.to_string()));
     }
 
-    // Handle octal
-    if s.starts_with('0') && s.len() > 1 && s.chars().nth(1).unwrap().is_ascii_digit() {
+    // Handle octal. The second-byte access is safe: the `len() > 1`
+    // guard above ensures at least 2 bytes; ASCII '0' is one byte
+    // wide, so `as_bytes()[1]` cannot panic. Prefer byte indexing
+    // over `chars().nth(1).unwrap()` to avoid the implicit UTF-8
+    // walk + Option unwrap.
+    if s.starts_with('0') && s.len() > 1 && (s.as_bytes()[1] as char).is_ascii_digit() {
         let val = u64::from_str_radix(&s[1..], 8)
             .map_err(|e| ParseError::InvalidNumber(e.to_string()))?;
         return T::try_from(val).map_err(|e| ParseError::OutOfRange(e.to_string()));

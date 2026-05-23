@@ -294,6 +294,9 @@ where
 
 /// `true` if the current process has effective UID 0.
 pub fn is_root() -> bool {
+    // SAFETY: `geteuid()` is a POSIX-mandated read-only syscall that
+    // cannot fail and has no preconditions. Always returns the calling
+    // process's effective user ID.
     unsafe { libc::geteuid() == 0 }
 }
 
