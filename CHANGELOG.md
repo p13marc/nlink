@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`Error::NamespaceRestoreFailed { source }`** variant +
+  `Error::is_namespace_restore_failed()` predicate. Surfaces the
+  previously-swallowed `setns()` restore failure in
+  `NetlinkSocket::new_in_namespace` — the socket was created in the
+  target netns but the calling thread couldn't be restored. Prior
+  behavior (≤ 0.15.1) was to log to stderr and return the socket
+  anyway, leaving the thread silently stuck in the target ns. This
+  was a real footgun in tokio multi-thread runtimes where another
+  task scheduled on the corrupted thread would read
+  `/sys/class/net/` from the wrong namespace. See Plan 147 §4.1.
+  Variant is additive under `#[non_exhaustive]`.
+
 - **`Rule::match_saddr_v6` / `match_daddr_v6` / `match_saddr_v6_not`
   / `match_daddr_v6_not`** on the nftables rule builder, alongside
   the existing v4 helpers. Same `(addr, prefix)` signature; `/128`
@@ -18,6 +30,16 @@ All notable changes to this project will be documented in this file.
   variants, and the prefix-to-mask byte-boundary case.
 
 ### Fixed
+
+- **`NetlinkSocket::new_in_namespace` no longer silently corrupts
+  thread state on `setns()` restore failure** (`socket.rs:138`).
+  Previously the function used `eprintln!` to warn and returned
+  the (successful) socket regardless. Now it returns
+  `Error::NamespaceRestoreFailed`, drops the socket, and emits a
+  structured `tracing::error!` event. The calling thread is still
+  in the target netns when the error returns — the documented
+  recovery is to abort the affected task or pin subsequent work to
+  a different thread. See Plan 147 §4.1.
 
 - **`Neighbor::write_delete` now propagates `ndm_flags`** so the
   kernel can match flag-keyed entries on delete. The user-visible

@@ -99,8 +99,10 @@ impl NetlinkSocket {
     /// # Safety
     ///
     /// This function uses `setns()` which affects the calling thread. It saves and
-    /// restores the original namespace, but callers should be aware of potential
-    /// issues in multi-threaded contexts if the restoration fails.
+    /// restores the original namespace. If restoration fails, the function
+    /// returns [`Error::NamespaceRestoreFailed`] — the socket may have been
+    /// created successfully but the calling thread is now stuck in the target
+    /// namespace. See the variant's documentation for recovery options.
     ///
     /// # Example
     ///
@@ -128,17 +130,21 @@ impl NetlinkSocket {
         // Create the socket in the target namespace
         let result = Self::create_socket(protocol);
 
-        // Restore the original namespace (best effort - log but don't fail)
+        // Restore the original namespace. If this fails, the calling thread
+        // is stuck in the target ns — surface as an error so callers can
+        // decide whether to abort or pin work to a different thread.
         // SAFETY: libc::setns restores the original namespace. current_ns_fd
         // is valid (opened from /proc/thread-self/ns/net above).
         let restore_ret = unsafe { libc::setns(current_ns_fd, libc::CLONE_NEWNET) };
         if restore_ret < 0 {
-            // We successfully created the socket but failed to restore namespace.
-            // This is a serious issue, but we still return the socket.
-            eprintln!(
-                "warning: failed to restore original namespace: {}",
-                std::io::Error::last_os_error()
+            let source = std::io::Error::last_os_error();
+            tracing::error!(
+                error = %source,
+                "netns restore failed after socket creation; thread stuck in target netns"
             );
+            // Drop the (possibly successful) socket — the caller can't rely
+            // on thread-context to use it safely.
+            return Err(Error::NamespaceRestoreFailed { source });
         }
 
         result

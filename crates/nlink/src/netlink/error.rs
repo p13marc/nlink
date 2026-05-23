@@ -138,6 +138,34 @@ pub enum Error {
     /// ```
     #[error("operation timed out")]
     Timeout,
+
+    /// `setns()` failed to restore the calling thread to its original
+    /// network namespace after a `new_in_namespace`-style socket
+    /// creation.
+    ///
+    /// The socket itself was created successfully and lives in the
+    /// target namespace as intended. But the **calling thread** is
+    /// now stuck in the target namespace — every subsequent
+    /// `/sys/class/net/`-reading call from this thread (or any
+    /// other tokio task scheduled on it) will read from the wrong
+    /// namespace. There is no automatic recovery; the calling code
+    /// must decide whether to abort, retry the restore manually, or
+    /// pin work to a different thread.
+    ///
+    /// Previously (≤ 0.15.1) this condition logged to stderr and
+    /// returned the socket anyway. Promoted to an error variant in
+    /// 0.16.0 because silent thread-state corruption was producing
+    /// surprises that took hours to debug.
+    ///
+    /// Recover via [`Error::is_namespace_restore_failed`] for the
+    /// predicate form.
+    #[error("netns restore failed after socket creation; thread \
+             stuck in target netns: {source}")]
+    NamespaceRestoreFailed {
+        /// The underlying `setns()` failure.
+        #[source]
+        source: io::Error,
+    },
 }
 
 /// Structured validation error information.
@@ -356,6 +384,18 @@ impl Error {
         matches!(self, Self::Timeout) || self.errno() == Some(libc::ETIMEDOUT)
     }
 
+    /// Check if this is a namespace-restore failure
+    /// ([`Error::NamespaceRestoreFailed`]).
+    ///
+    /// Indicates that a socket was created successfully in a target
+    /// netns, but the calling thread could not be restored to its
+    /// original netns. The thread is now stuck in the target netns;
+    /// callers typically respond by aborting the affected task or
+    /// pinning subsequent work to a different thread.
+    pub fn is_namespace_restore_failed(&self) -> bool {
+        matches!(self, Self::NamespaceRestoreFailed { .. })
+    }
+
     /// Check if this is an "address already in use" error (EADDRINUSE).
     ///
     /// This typically occurs when trying to add an IP address that is
@@ -486,6 +526,22 @@ mod tests {
         // Kernel ETIMEDOUT should also match
         let err = Error::from_errno(-(libc::ETIMEDOUT));
         assert!(err.is_timeout());
+    }
+
+    #[test]
+    fn test_namespace_restore_failed_predicate() {
+        let err = Error::NamespaceRestoreFailed {
+            source: io::Error::from_raw_os_error(libc::EPERM),
+        };
+        assert!(err.is_namespace_restore_failed());
+        assert!(!err.is_timeout());
+        assert!(!err.is_permission_denied()); // not an errno predicate
+        assert!(err.to_string().contains("netns restore failed"));
+        assert!(err.to_string().contains("thread stuck"));
+
+        // Unrelated errors don't claim to be netns-restore failures.
+        let other = Error::Timeout;
+        assert!(!other.is_namespace_restore_failed());
     }
 
     #[test]
