@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **XFRM IPsec hardware offload** — `XfrmSaBuilder::offload(ifindex,
+  flags)` requests kernel push the SA's crypto / packet path onto a
+  NIC (mlx5, hns3, etc.). `XfrmOffloadFlag` bitwise-newtype with
+  `IPV6` / `INBOUND` / `PACKET` (last needs kernel 6.0+).
+  Wire-encoded as `XFRMA_OFFLOAD_DEV` (= 26) carrying
+  `struct xfrm_user_offload` (4 byte ifindex + 1 byte flags + 3 byte
+  pad). If the NIC doesn't support the requested shape the kernel
+  returns `EOPNOTSUPP` on the add — callers can dispatch via
+  `Error::is_not_supported()` and retry without offload. Unit
+  tests pin the constants against the kernel UAPI. See Plan 153 §4.1.
+
 - **`syscall_batch` feature** — opt-in `recvmmsg(2)` /
   `sendmmsg(2)` syscall batching. New
   `NetlinkSocket::recv_batch(&mut Vec<Vec<u8>>, max)` and

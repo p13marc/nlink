@@ -63,6 +63,7 @@ const XFRMA_POLICY_TYPE: u16 = 16;
 const XFRMA_ALG_AEAD: u16 = 18;
 const XFRMA_ALG_AUTH_TRUNC: u16 = 20;
 const XFRMA_MARK: u16 = 21;
+const XFRMA_OFFLOAD_DEV: u16 = 26;
 const XFRMA_IF_ID: u16 = 31;
 
 // XFRM modes
@@ -397,6 +398,91 @@ pub struct XfrmMark {
     pub m: u32,
 }
 
+/// `XFRMA_OFFLOAD_DEV` payload — `struct xfrm_user_offload`.
+///
+/// Used to request hardware offload of an SA's crypto and/or
+/// packet path onto a NIC (mlx5, hns3, etc.). Carries the
+/// offload-target ifindex + the offload-shape flags.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct XfrmUserOffload {
+    /// Interface index to offload to.
+    pub ifindex: u32,
+    /// Bitmask of [`XfrmOffloadFlag`] values.
+    pub flags: u8,
+    /// Padding to match the kernel struct layout (the C struct
+    /// has natural padding after the u8 to keep the next field —
+    /// none in this case — at u32 alignment).
+    pub _pad: [u8; 3],
+}
+
+impl XfrmUserOffload {
+    pub fn new(ifindex: u32, flags: XfrmOffloadFlag) -> Self {
+        Self {
+            ifindex,
+            flags: flags.bits(),
+            _pad: [0; 3],
+        }
+    }
+}
+
+/// Flags for [`XfrmUserOffload`] / [`XfrmSaBuilder::offload`].
+///
+/// Kernel reference: `include/uapi/linux/xfrm.h`:
+/// `XFRM_OFFLOAD_IPV6` / `XFRM_OFFLOAD_INBOUND` / `XFRM_OFFLOAD_PACKET`.
+///
+/// `PACKET` requires kernel 6.0+ and full packet-mode-capable NIC
+/// (mlx5 ConnectX-7 + later). Crypto-only offload works on older
+/// kernels with simpler hardware.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct XfrmOffloadFlag(u8);
+
+impl XfrmOffloadFlag {
+    /// Offload an IPv6 SA. Required for IPv6 ESP / IPv6 UDP-encap
+    /// ESP offload.
+    pub const IPV6: Self = Self(0x1);
+    /// Inbound SA (decrypt path). Default is outbound (encrypt).
+    pub const INBOUND: Self = Self(0x2);
+    /// Full packet-mode offload (kernel 6.0+). Without this flag,
+    /// only the crypto path is offloaded; the kernel still
+    /// handles packet framing.
+    pub const PACKET: Self = Self(0x4);
+
+    /// Empty / outbound + crypto-only — the default.
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Compose multiple flags. Idiomatic bit-or via `|` is also
+    /// supported.
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    /// Underlying bitmask value.
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// `true` if `other` is fully contained in `self`.
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+
+impl std::ops::BitOr for XfrmOffloadFlag {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for XfrmOffloadFlag {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
 /// IPsec protocol type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -718,6 +804,7 @@ pub struct XfrmSaBuilder {
     encap: Option<XfrmEncapTmpl>,
     mark: Option<(u32, u32)>,
     if_id: Option<u32>,
+    offload: Option<XfrmUserOffload>,
 }
 
 impl XfrmSaBuilder {
@@ -742,7 +829,40 @@ impl XfrmSaBuilder {
             encap: None,
             mark: None,
             if_id: None,
+            offload: None,
         }
+    }
+
+    /// Request hardware offload of this SA to the given device
+    /// (by ifindex) with the given offload shape.
+    ///
+    /// Kernel 6.11+ extended offload to IPv6 ESP and IPv4 UDP-encap
+    /// ESP; earlier kernels support IPv4 ESP only. NIC support
+    /// varies — mlx5, hns3, and a few others; check
+    /// `ethtool -k <dev> | grep esp` on the target NIC. If the
+    /// NIC doesn't support the requested shape the kernel returns
+    /// `EOPNOTSUPP` on the add; callers can dispatch via
+    /// `Error::is_not_supported()` and retry without offload.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::net::Ipv4Addr;
+    /// use nlink::netlink::xfrm::{XfrmSaBuilder, IpsecProtocol, XfrmOffloadFlag};
+    ///
+    /// let mlx5_ifindex = 3;
+    /// let sa = XfrmSaBuilder::new(
+    ///     Ipv4Addr::new(10, 0, 0, 1).into(),
+    ///     Ipv4Addr::new(10, 0, 0, 2).into(),
+    ///     0x12345678,
+    ///     IpsecProtocol::Esp,
+    /// )
+    /// .auth_hmac_sha256(&[0u8; 32])
+    /// .offload(mlx5_ifindex, XfrmOffloadFlag::PACKET);
+    /// ```
+    pub fn offload(mut self, ifindex: u32, flags: XfrmOffloadFlag) -> Self {
+        self.offload = Some(XfrmUserOffload::new(ifindex, flags));
+        self
     }
 
     pub fn mode(mut self, mode: XfrmMode) -> Self {
@@ -908,6 +1028,11 @@ impl XfrmSaBuilder {
         }
         if let Some(id) = self.if_id {
             b.append_attr_u32(XFRMA_IF_ID, id);
+        }
+        if let Some(off) = &self.offload {
+            // XFRMA_OFFLOAD_DEV carries `struct xfrm_user_offload`
+            // (4 bytes ifindex + 1 byte flags + 3 bytes pad).
+            b.append_attr(XFRMA_OFFLOAD_DEV, off.as_bytes());
         }
     }
 }
@@ -1878,6 +2003,41 @@ mod tests {
         // New write-path structs:
         assert_eq!(std::mem::size_of::<XfrmUsersaId>(), 24);
         assert_eq!(std::mem::size_of::<XfrmUsersaFlush>(), 8);
+        // Plan 153.1 XFRMA_OFFLOAD_DEV — 4-byte ifindex + 1 byte
+        // flags + 3 bytes pad = 8 bytes per kernel UAPI.
+        assert_eq!(std::mem::size_of::<XfrmUserOffload>(), 8);
+    }
+
+    #[test]
+    fn xfrm_offload_flag_bitops() {
+        let combined = XfrmOffloadFlag::IPV6 | XfrmOffloadFlag::PACKET;
+        assert!(combined.contains(XfrmOffloadFlag::IPV6));
+        assert!(combined.contains(XfrmOffloadFlag::PACKET));
+        assert!(!combined.contains(XfrmOffloadFlag::INBOUND));
+        assert_eq!(combined.bits(), 0x1 | 0x4);
+
+        let mut acc = XfrmOffloadFlag::empty();
+        acc |= XfrmOffloadFlag::INBOUND;
+        assert!(acc.contains(XfrmOffloadFlag::INBOUND));
+        assert!(!acc.contains(XfrmOffloadFlag::IPV6));
+    }
+
+    #[test]
+    fn xfrm_offload_kernel_constants() {
+        // Values from include/uapi/linux/xfrm.h. Stable ABI; must
+        // not drift.
+        assert_eq!(XfrmOffloadFlag::IPV6.bits(), 0x1);
+        assert_eq!(XfrmOffloadFlag::INBOUND.bits(), 0x2);
+        assert_eq!(XfrmOffloadFlag::PACKET.bits(), 0x4);
+        assert_eq!(XFRMA_OFFLOAD_DEV, 26);
+    }
+
+    #[test]
+    fn xfrm_user_offload_struct_init() {
+        let off = XfrmUserOffload::new(7, XfrmOffloadFlag::IPV6 | XfrmOffloadFlag::PACKET);
+        assert_eq!(off.ifindex, 7);
+        assert_eq!(off.flags, 0x5);
+        assert_eq!(off._pad, [0, 0, 0]);
     }
 
     // ==========================================================
