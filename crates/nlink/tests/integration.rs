@@ -71,3 +71,6 @@ mod namespace_spawn;
 
 #[path = "integration/conntrack.rs"]
 mod conntrack;
+
+#[path = "integration/neigh.rs"]
+mod neigh;

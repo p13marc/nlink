@@ -54,7 +54,7 @@ use super::{
     interface_ref::InterfaceRef,
     message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType},
     protocol::Route,
-    types::neigh::{NdMsg, NdaAttr, NeighborState, ntf, nud},
+    types::neigh::{NdMsg, NdaAttr, NeighborState, nud},
 };
 
 /// NLM_F_CREATE flag
@@ -70,6 +70,14 @@ const AF_INET6: u8 = 10;
 
 // Re-export NeighborState for convenience
 pub use super::types::neigh::NeighborState as State;
+
+/// Neighbor flags (`NTF_*`).
+///
+/// Re-exported so callers decoding [`NeighborMessage::flags`] don't
+/// have to redefine kernel constants.
+///
+/// [`NeighborMessage::flags`]: crate::netlink::messages::NeighborMessage::flags
+pub use super::types::neigh::ntf;
 
 /// Trait for neighbor configurations that can be added.
 ///
@@ -370,9 +378,13 @@ impl NeighborConfig for Neighbor {
     }
 
     fn write_delete(&self, builder: &mut MessageBuilder, ifindex: u32) -> Result<()> {
-        let ndmsg = NdMsg::new()
+        let mut ndmsg = NdMsg::new()
             .with_family(self.family())
             .with_ifindex(ifindex as i32);
+        // ndm_flags is part of the kernel's lookup key for NTF_PROXY /
+        // NTF_ROUTER / NTF_EXT_LEARNED entries. ndm_state deliberately
+        // stays unset — the kernel doesn't match on state for delete.
+        ndmsg.ndm_flags = self.flags;
 
         builder.append(&ndmsg);
 

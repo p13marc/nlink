@@ -4,7 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-(empty — entries land here as the next release accumulates)
+### Fixed
+
+- **`Neighbor::write_delete` now propagates `ndm_flags`** so the
+  kernel can match flag-keyed entries on delete. The user-visible
+  symptom was deleting a proxy NDP entry through the high-level
+  API returning `ENOENT`: the kernel's pneigh lookup keys on
+  `(family, ifindex, NDA_DST, ndm_flags)`, and the flags field
+  was being dropped. The fix also lines `write_delete` up with
+  `NTF_ROUTER` / `NTF_EXT_LEARNED`, though in practice the
+  kernel's unicast delete only matches on
+  `(family, ifindex, NDA_DST)`, so only the proxy case was
+  user-broken. `ndm_state` deliberately stays unset on delete;
+  the kernel doesn't match on state. The regression test is
+  `test_delete_proxy_ndp_entry_round_trip` in
+  `tests/integration/neigh.rs` (requires the `lab` feature);
+  guards for the unicast and `NTF_EXT_LEARNED` paths land
+  alongside it. `nlink::netlink::neigh::ntf` is now re-exported
+  so callers decoding `NeighborMessage::flags()` don't have to
+  redefine kernel constants.
 
 ## [0.15.1] - 2026-04-26
 
