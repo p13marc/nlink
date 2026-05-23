@@ -6,38 +6,56 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **New `nlink-macros` crate** (Plan 154 Phase 1, scaffold + first
-  derive). Proc-macro crate that downstream consumers will
-  eventually use to define new GENL families in ~20 lines of
-  declarative code (matching neli's `#[neli_enum]` ergonomics on
-  top of nlink's typed `Connection<P>` machinery).
+- **New `nlink-macros` crate** (Plan 154 Phases 1 + 2). Proc-macro
+  crate that downstream consumers will use to define new GENL
+  families in ~20 lines of declarative code (matching neli's
+  `#[neli_enum]` ergonomics on top of nlink's typed
+  `Connection<P>` machinery).
 
-  Phase 1 ships only the smallest derive — the rest of the
-  derives (`GenlAttribute`, `GenlEnum`, `GenlMessage`,
-  `NetlinkAttrs`) and the `#[genl_family]` attribute macro land
-  in subsequent phases.
+  Phases 1 + 2 ship the three typed-enum codec derives. They
+  share one expansion path (`codec::expand_codec`); each derive
+  differs only in attribute name + accepted repr widths +
+  pointer-at-the-right-derive error hints. The remaining derives
+  (`GenlMessage`, `NetlinkAttrs`) and the `#[genl_family]`
+  attribute macro land in subsequent phases.
 
   - `#[derive(GenlCommand)]` + `#[genl_command(repr = "u8"|"u16")]`
-    — generates `From<EnumType> for ReprType` (infallible) +
-    `TryFrom<ReprType> for EnumType` (returns
-    `EnumTypeUnknownValue(repr)` on unknown wire values; the
-    error type derives `Debug + Display + std::error::Error`).
-    Variants must have explicit discriminants (e.g. `Get = 1`)
-    because kernel ABI requires stable wire values; anonymous
-    discriminants are a compile error.
+    — typed GENL command enum.
+  - `#[derive(GenlAttribute)]` + `#[genl_attribute(repr = "u8"|"u16")]`
+    — typed attribute-kind enum (the u16 attribute-type field
+    on each `nlattr`). Caller manages `NLA_F_NESTED` / `NLA_F_NET_BYTEORDER`
+    flag bits.
+  - `#[derive(GenlEnum)]` + `#[genl_enum(repr = "u8"|"u16"|"u32")]`
+    — typed value enum encoded *inside* an attribute payload.
+    Used for `DPLL_LOCK_STATUS_*`, `DEVLINK_RATE_TYPE_*`, etc.
+    No constraint on 1-based-vs-0-based discriminants (kernel
+    UAPI has both — e.g. `DPLL_FEATURE_STATE_DISABLE = 0`).
 
-  Test surface: 7 runtime tests (round-trip / sparse
-  discriminants / u16 repr / Display contains enum name + bad
-  value / std::error::Error impl) + 5 trybuild compile-fail
-  cases (missing attribute, struct/union target, missing
-  discriminants, invalid repr value, discriminant overflow).
-  Trybuild baselines are committed; re-generate via
-  `TRYBUILD=overwrite cargo test -p nlink-macros --test
+  All three generate:
+  - `impl From<EnumType> for ReprType` (infallible — every
+    variant has a known discriminant).
+  - `impl TryFrom<ReprType> for EnumType` returning
+    `EnumTypeUnknownValue(repr)` on unknown wire values.
+  - `EnumTypeUnknownValue` carries the raw bad value + impls
+    `Debug + Display + std::error::Error`.
+
+  Variants must have explicit discriminants (e.g. `Get = 1`) —
+  kernel ABI requires stable wire values; anonymous
+  discriminants are a compile error.
+
+  Test surface: 14 runtime tests across the three derives
+  (round-trips / sparse discriminants / u16+u32 reprs / 0-based
+  outlier / Display contains enum name + bad value /
+  std::error::Error impl) + 5 trybuild compile-fail cases
+  (missing attribute, struct/union target, missing
+  discriminants, invalid repr value, discriminant overflow) +
+  1 compile-pass case. Trybuild baselines committed; re-bless
+  via `TRYBUILD=overwrite cargo test -p nlink-macros --test
   trybuild` after stable-Rust message-text drift.
 
-  The crate is in the workspace + ready to be depended on by
-  `nlink` once enough derives have shipped to enable downstream
-  family definitions. For 0.16, it stays standalone.
+  The crate is standalone in 0.16 — `nlink` does not yet depend
+  on it. Wiring lands in Plan 154 Phase 7 once `GenlMessage` +
+  `NetlinkAttrs` + `#[genl_family]` ship.
 
 - **Declarative `NftablesConfig`** — mirror of `NetworkConfig`
   for the nftables subsystem. `NftablesConfig::new()` →

@@ -1,4 +1,4 @@
-error: #[derive(GenlCommand)] requires #[genl_command(repr = "u8"|"u16")] attribute
+error: #[derive(GenlCommand)] requires #[genl_command(repr = "u8"|"u16"|...)] attribute
  --> tests/ui/fail/01_missing_attribute.rs:4:10
   |
 4 | pub enum NoAttr {

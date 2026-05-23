@@ -6,13 +6,20 @@
 //! examples of defining a new GENL family in ~20 lines of
 //! declarative code.
 //!
-//! # Shipped derives (0.16 Phase 1)
+//! # Shipped derives (0.16 Phases 1 + 2)
 //!
 //! - [`macro@GenlCommand`] + `#[genl_command(repr = "u8"|"u16")]`
 //!   — typed GENL command enum
+//! - [`macro@GenlAttribute`] + `#[genl_attribute(repr = "u8"|"u16")]`
+//!   — typed attribute-kind enum
+//! - [`macro@GenlEnum`] + `#[genl_enum(repr = "u8"|"u16"|"u32")]`
+//!   — typed value enum encoded *inside* an attribute payload
 //!
-//! The remaining derives ([`GenlAttribute`][note-1],
-//! [`GenlEnum`][note-1], [`GenlMessage`][note-1],
+//! All three produce the same shape — `From<EnumType> for
+//! ReprType` + `TryFrom<ReprType> for EnumType` + a small
+//! `EnumTypeUnknownValue(repr)` error newtype.
+//!
+//! The remaining derives ([`GenlMessage`][note-1],
 //! [`NetlinkAttrs`][note-1], and the `#[genl_family]` attribute
 //! macro) ship in subsequent phases of Plan 154.
 //!
@@ -24,7 +31,10 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use syn::{parse_macro_input, Data, DeriveInput, Expr, ExprLit, Lit, LitStr, Meta};
 
+mod codec;
+mod genl_attribute;
 mod genl_command;
+mod genl_enum;
 
 /// Derive a typed-enum codec for a Generic Netlink **command** ID
 /// enum.
@@ -74,6 +84,81 @@ mod genl_command;
 pub fn derive_genl_command(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     genl_command::expand(input)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+/// Derive a typed-enum codec for a Generic Netlink **attribute
+/// kind** enum.
+///
+/// Same shape as [`macro@GenlCommand`] but for the u16
+/// attribute-type field on each `nlattr`. Accepts `repr = "u8"`
+/// or `repr = "u16"`; the `NLA_F_NESTED` (0x8000) and
+/// `NLA_F_NET_BYTEORDER` (0x4000) flag bits are the caller's
+/// responsibility — the derive doesn't reserve them.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink_macros::GenlAttribute;
+///
+/// #[derive(GenlAttribute, Debug, Clone, Copy, PartialEq, Eq)]
+/// #[genl_attribute(repr = "u16")]
+/// #[non_exhaustive]
+/// pub enum DpllAttr {
+///     Id = 1,
+///     ModuleName = 2,
+///     ClockId = 4,
+///     Mode = 5,
+/// }
+/// ```
+#[proc_macro_derive(GenlAttribute, attributes(genl_attribute))]
+pub fn derive_genl_attribute(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    genl_attribute::expand(input)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+/// Derive a typed-enum codec for a value enum encoded *inside*
+/// an attribute payload (rather than as the attribute kind
+/// itself).
+///
+/// Use this for kernel-UAPI enums like `DPLL_LOCK_STATUS_*`,
+/// `DEVLINK_RATE_TYPE_*`, or any other typed value the kernel
+/// declares via `enum dpll_lock_status` etc. Accepts `repr =
+/// "u8"`, `"u16"`, or `"u32"`. Strictly weaker than
+/// [`macro@GenlAttribute`] — no attribute-kind machinery — and
+/// no constraint on 1-based-vs-0-based discriminants: the derive
+/// matches whatever the user declares.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink_macros::GenlEnum;
+///
+/// // 1-based (the common kernel convention).
+/// #[derive(GenlEnum, Debug, Clone, Copy, PartialEq, Eq)]
+/// #[genl_enum(repr = "u32")]
+/// #[non_exhaustive]
+/// pub enum DpllMode {
+///     Manual = 1,
+///     Automatic = 2,
+/// }
+///
+/// // 0-based outlier (rare but real — DPLL_FEATURE_STATE_*).
+/// #[derive(GenlEnum, Debug, Clone, Copy, PartialEq, Eq)]
+/// #[genl_enum(repr = "u32")]
+/// #[non_exhaustive]
+/// pub enum DpllFeatureState {
+///     Disable = 0,
+///     Enable = 1,
+/// }
+/// ```
+#[proc_macro_derive(GenlEnum, attributes(genl_enum))]
+pub fn derive_genl_enum(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    genl_enum::expand(input)
         .unwrap_or_else(|e| e.to_compile_error())
         .into()
 }
