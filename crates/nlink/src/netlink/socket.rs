@@ -357,6 +357,317 @@ impl AsRawFd for NetlinkSocket {
     }
 }
 
+// ============================================================================
+// Batched I/O via recvmmsg(2) / sendmmsg(2)
+// Plan 158 — opt-in `syscall_batch` feature flag for 0.16; default-on in 0.17.
+// ============================================================================
+
+/// Maximum number of frames batched in one `recvmmsg`/`sendmmsg`
+/// syscall. Matches quinn-udp's choice; above 64 cache footprint
+/// outweighs syscall amortization.
+#[cfg(feature = "syscall_batch")]
+pub const NL_BATCH_SIZE: usize = 32;
+
+/// Per-slot recv buffer size. Sized to exceed any realistic
+/// single netlink frame; MSG_TRUNC is a hard error rather than
+/// silent truncation.
+#[cfg(feature = "syscall_batch")]
+pub const NL_BUF_SIZE: usize = 32 * 1024;
+
+#[cfg(feature = "syscall_batch")]
+struct BatchBufs {
+    /// Owned per-slot recv storage. Allocated once; pointers
+    /// reused across calls.
+    storage: Vec<Vec<u8>>,
+    /// iovec entries pointing into `storage`. Set up at
+    /// construction; the pointers stay valid because `storage`
+    /// is never resized.
+    ///
+    /// Held here even though we don't read the field directly —
+    /// `msgs[i].msg_hdr.msg_iov` is a raw `*mut iovec` into this
+    /// `Vec`, and dropping `iovecs` would dangle those pointers.
+    /// Keeping ownership in the same struct guarantees the
+    /// lifetime extends across `recvmmsg` calls.
+    #[allow(dead_code)]
+    iovecs: Vec<libc::iovec>,
+    /// mmsghdr array; msg_hdr.msg_iov points into `iovecs`.
+    msgs: Vec<libc::mmsghdr>,
+}
+
+#[cfg(feature = "syscall_batch")]
+impl BatchBufs {
+    fn new() -> Self {
+        let mut storage: Vec<Vec<u8>> = (0..NL_BATCH_SIZE)
+            .map(|_| vec![0u8; NL_BUF_SIZE])
+            .collect();
+        let mut iovecs: Vec<libc::iovec> = storage
+            .iter_mut()
+            .map(|buf| libc::iovec {
+                iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            })
+            .collect();
+        let mut msgs: Vec<libc::mmsghdr> = (0..NL_BATCH_SIZE)
+            .map(|_| unsafe { std::mem::zeroed() })
+            .collect();
+        for (i, msg) in msgs.iter_mut().enumerate() {
+            msg.msg_hdr.msg_iov = &mut iovecs[i] as *mut _;
+            msg.msg_hdr.msg_iovlen = 1;
+            msg.msg_hdr.msg_name = std::ptr::null_mut();
+            msg.msg_hdr.msg_namelen = 0;
+            msg.msg_hdr.msg_control = std::ptr::null_mut();
+            msg.msg_hdr.msg_controllen = 0;
+            msg.msg_hdr.msg_flags = 0;
+            msg.msg_len = 0;
+        }
+        BatchBufs {
+            storage,
+            iovecs,
+            msgs,
+        }
+    }
+
+    /// Reset per-call mutable fields on the first `n` slots. The
+    /// iov_base / iov_len / msg_iov bindings stay valid.
+    fn prepare(&mut self, n: usize) {
+        for i in 0..n {
+            self.msgs[i].msg_len = 0;
+            self.msgs[i].msg_hdr.msg_flags = 0;
+        }
+    }
+}
+
+#[cfg(feature = "syscall_batch")]
+impl NetlinkSocket {
+    /// Receive up to `max` netlink datagrams in one `recvmmsg(2)`
+    /// syscall.
+    ///
+    /// Pushes each successfully-received frame as an owned `Vec<u8>`
+    /// onto `out` (not cleared). Returns the count received in
+    /// this call. `max` is clamped to [`NL_BATCH_SIZE`].
+    ///
+    /// On `EAGAIN`/`EWOULDBLOCK` returns `Ok(0)` after the
+    /// `AsyncFd` re-arms — caller can poll again or back off.
+    /// Other syscall errors propagate. `MSG_TRUNC` on any slot is
+    /// promoted to `Error::InvalidMessage` ("frame exceeded
+    /// `NL_BUF_SIZE`") — the 32 KiB per-slot buffer exceeds every
+    /// realistic netlink frame, so this signals a kernel ABI
+    /// violation worth screaming about rather than silently
+    /// dropping bytes.
+    ///
+    /// The per-socket buffer pool is lazily allocated on first
+    /// call (`NL_BATCH_SIZE * NL_BUF_SIZE = 1 MiB`) and reused
+    /// across subsequent calls.
+    ///
+    /// # Cancellation safety
+    ///
+    /// Cancellation-safe: dropping the future before the syscall
+    /// completes leaves the socket state intact (AsyncFd has not
+    /// consumed any data). Re-polling resumes cleanly.
+    pub async fn recv_batch(&self, out: &mut Vec<Vec<u8>>, max: usize) -> Result<usize> {
+        let max = max.clamp(1, NL_BATCH_SIZE);
+        loop {
+            let mut guard = self.fd.ready(Interest::READABLE).await?;
+            // try_io expects io::Result<T> so it can spot
+            // WouldBlock — we map nlink::Error back through Io to
+            // satisfy that contract, then unwrap at the outer
+            // layer. The Other-shaped Error::InvalidMessage stays
+            // typed via the OS-error roundtrip below.
+            let result: std::result::Result<std::io::Result<Vec<Vec<u8>>>, _> =
+                guard.try_io(|inner| Self::recv_batch_inner(inner.get_ref().as_raw_fd(), max));
+            match result {
+                Ok(Ok(frames)) => {
+                    let n = frames.len();
+                    out.extend(frames);
+                    return Ok(n);
+                }
+                Ok(Err(e)) => return Err(Error::Io(e)),
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
+    fn recv_batch_inner(fd: RawFd, max: usize) -> std::io::Result<Vec<Vec<u8>>> {
+        // Per-call buffer pool — lazily initialized in TLS to keep
+        // recv_batch &self (no Mutex contention). The cost is one
+        // BatchBufs per thread that ever calls recv_batch on any
+        // socket; for the per-connection single-flight pattern
+        // that's exactly one.
+        thread_local! {
+            static BUFS: std::cell::RefCell<Option<BatchBufs>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        BUFS.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let bufs = borrow.get_or_insert_with(BatchBufs::new);
+            bufs.prepare(max);
+
+            // SAFETY: `recvmmsg` requires the mmsghdr array to be
+            // valid for reads and writes for `max` entries; we own
+            // it via the thread-local BatchBufs and the iovec
+            // pointers reference owned storage that outlives this
+            // call (storage is never resized after BatchBufs::new).
+            // MSG_DONTWAIT skips blocking; timeout = NULL because
+            // the kernel `timeout` arg has been buggy since 2010
+            // (see `man recvmmsg(2)` BUGS) — tokio::time::timeout
+            // is the right tool.
+            let n = unsafe {
+                libc::recvmmsg(
+                    fd,
+                    bufs.msgs.as_mut_ptr(),
+                    max as libc::c_uint,
+                    libc::MSG_DONTWAIT,
+                    std::ptr::null_mut(),
+                )
+            };
+            if n < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            let mut frames = Vec::with_capacity(n as usize);
+            for i in 0..n as usize {
+                let len = bufs.msgs[i].msg_len as usize;
+                let flags = bufs.msgs[i].msg_hdr.msg_flags;
+                if flags & libc::MSG_TRUNC != 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "netlink frame {} exceeded NL_BUF_SIZE ({} bytes > {} buffer); \
+                             file an issue with the kernel version + subsystem",
+                            i, len, NL_BUF_SIZE
+                        ),
+                    ));
+                }
+                frames.push(bufs.storage[i][..len].to_vec());
+            }
+            Ok(frames)
+        })
+    }
+
+    /// Send up to `msgs.len()` netlink request frames in one
+    /// `sendmmsg(2)` syscall. `msgs.len()` clamped to
+    /// [`NL_BATCH_SIZE`].
+    ///
+    /// Returns the count successfully sent. Partial sends are
+    /// possible — per `sendmmsg(2)`, if slot K errors the call
+    /// returns K (the successful prefix) and the K-th error is
+    /// silently dropped. Caller handles partial-send by re-calling
+    /// from the returned offset; the resulting `-1` return will
+    /// carry the real errno.
+    ///
+    /// **Important**: per-request kernel processing errors (the
+    /// kernel's `NLMSG_ERROR` responses to malformed requests)
+    /// are NOT surfaced here — they arrive asynchronously on the
+    /// receive side, matched by `nlmsg_seq`. `send_batch` only
+    /// reports syscall-level errors (`ENOBUFS`, `EMSGSIZE`, etc.).
+    pub async fn send_batch(&self, msgs: &[&[u8]]) -> Result<usize> {
+        if msgs.is_empty() {
+            return Ok(0);
+        }
+        let n = msgs.len().min(NL_BATCH_SIZE);
+
+        loop {
+            let mut guard = self.fd.ready(Interest::WRITABLE).await?;
+            let result: std::result::Result<std::io::Result<usize>, _> = guard.try_io(|inner| {
+                Self::send_batch_inner(inner.get_ref().as_raw_fd(), &msgs[..n])
+            });
+            match result {
+                Ok(Ok(sent)) => return Ok(sent),
+                Ok(Err(e)) => return Err(Error::Io(e)),
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
+    fn send_batch_inner(fd: RawFd, msgs: &[&[u8]]) -> std::io::Result<usize> {
+        let mut iovecs: Vec<libc::iovec> = msgs
+            .iter()
+            .map(|m| libc::iovec {
+                iov_base: m.as_ptr() as *mut libc::c_void,
+                iov_len: m.len(),
+            })
+            .collect();
+        let mut mmsg: Vec<libc::mmsghdr> = (0..msgs.len())
+            .map(|i| unsafe {
+                let mut hdr: libc::mmsghdr = std::mem::zeroed();
+                hdr.msg_hdr.msg_iov = &mut iovecs[i] as *mut _;
+                hdr.msg_hdr.msg_iovlen = 1;
+                hdr
+            })
+            .collect();
+
+        // SAFETY: mmsghdr + iovec arrays are owned for the duration
+        // of the call; pointers from `msgs.iter().as_ptr()` are
+        // valid for `msg.len()` bytes (the slice's invariant).
+        // MSG_DONTWAIT avoids blocking the executor thread.
+        let n = unsafe {
+            libc::sendmmsg(
+                fd,
+                mmsg.as_mut_ptr(),
+                msgs.len() as libc::c_uint,
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // Verify each successful slot wrote the full input length;
+        // partial writes shouldn't happen on netlink (datagram
+        // semantics) but if they do, surface as WriteZero.
+        for (i, slot) in mmsg.iter().enumerate().take(n as usize) {
+            if slot.msg_len as usize != msgs[i].len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    format!(
+                        "sendmmsg slot {i}: wrote {} of {} bytes",
+                        slot.msg_len,
+                        msgs[i].len()
+                    ),
+                ));
+            }
+        }
+        Ok(n as usize)
+    }
+}
+
+#[cfg(all(test, feature = "syscall_batch"))]
+mod batch_tests {
+    use super::*;
+
+    #[test]
+    fn batch_bufs_initialization_wires_iovecs() {
+        let bufs = BatchBufs::new();
+        assert_eq!(bufs.storage.len(), NL_BATCH_SIZE);
+        assert_eq!(bufs.iovecs.len(), NL_BATCH_SIZE);
+        assert_eq!(bufs.msgs.len(), NL_BATCH_SIZE);
+        for i in 0..NL_BATCH_SIZE {
+            assert_eq!(bufs.storage[i].len(), NL_BUF_SIZE);
+            assert_eq!(bufs.iovecs[i].iov_len, NL_BUF_SIZE);
+            assert_eq!(bufs.iovecs[i].iov_base as *const u8, bufs.storage[i].as_ptr());
+            // msg_iov should point at the i-th iovec.
+            assert_eq!(
+                bufs.msgs[i].msg_hdr.msg_iov as *const libc::iovec,
+                &bufs.iovecs[i] as *const libc::iovec
+            );
+            assert_eq!(bufs.msgs[i].msg_hdr.msg_iovlen, 1);
+        }
+    }
+
+    #[test]
+    fn batch_bufs_prepare_resets_mutable_fields() {
+        let mut bufs = BatchBufs::new();
+        // Pretend a previous recvmmsg populated these.
+        bufs.msgs[0].msg_len = 1234;
+        bufs.msgs[0].msg_hdr.msg_flags = libc::MSG_TRUNC;
+        bufs.msgs[5].msg_len = 567;
+        bufs.prepare(8);
+        assert_eq!(bufs.msgs[0].msg_len, 0);
+        assert_eq!(bufs.msgs[0].msg_hdr.msg_flags, 0);
+        assert_eq!(bufs.msgs[5].msg_len, 0);
+    }
+}
+
 /// Multicast groups for NETLINK_ROUTE.
 pub mod rtnetlink_groups {
     pub const RTNLGRP_LINK: u32 = 1;

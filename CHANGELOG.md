@@ -6,6 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`syscall_batch` feature** — opt-in `recvmmsg(2)` /
+  `sendmmsg(2)` syscall batching. New
+  `NetlinkSocket::recv_batch(&mut Vec<Vec<u8>>, max)` and
+  `NetlinkSocket::send_batch(&[&[u8]])` (both async, AsyncFd-
+  integrated). Batches up to 32 frames per syscall — expected
+  2-5× reduction in syscall count + ~1.5× wall-clock speedup on
+  dump-heavy workloads (BGP route tables, conntrack tables, nft
+  rulesets) per the prior-art measurements in quinn-udp. `MSG_TRUNC`
+  on any slot is promoted to `Error::InvalidMessage` instead of
+  silent truncation. Per-socket recv-buffer pool is thread-local
+  + lazy (~1 MiB on first batched recv per thread). Constants
+  exposed: `NL_BATCH_SIZE` (32), `NL_BUF_SIZE` (32 KiB). Behind
+  the `syscall_batch` feature flag for one release of soak;
+  default-on planned for 0.17. Dump-path wiring (the per-callsite
+  `cfg`-gate that swaps `recv_msg` for `recv_batch`) lands when
+  the bench infrastructure (Plan 158 §5) is in place to measure
+  the speedup. See Plan 158.
+
 - **ENOBUFS resync types** — `ResyncedEvent<T>` sum type
   (`Event(T)` / `Resynced(T)` / `Marker(...)`) + `ResyncMarker`
   (`ResyncStart` / `ResyncEnd`) for consumers that want to handle

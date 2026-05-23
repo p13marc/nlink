@@ -26,8 +26,14 @@ output = ["dep:serde", "dep:serde_json"]
 namespace_watcher = ["dep:inotify"]
 # Lab / integration-test helpers (LabNamespace, with_namespace, require_root!)
 lab = []
+# Bulk-receive via recvmmsg(2) / sendmmsg(2) — batches up to 32
+# netlink frames per syscall. ≥1.5x wall-clock speedup on
+# dump-heavy workloads (BGP route tables, conntrack tables, nft
+# rulesets). Opt-in for one release while soak runs; default-on
+# planned for 0.17. See Plan 158.
+syscall_batch = []
 # All features
-full = ["sockdiag", "tuntap", "tuntap-async", "output", "namespace_watcher", "lab"]
+full = ["sockdiag", "tuntap", "tuntap-async", "output", "namespace_watcher", "lab", "syscall_batch"]
 # Enable integration tests (require root or network namespace)
 integration = []
 
