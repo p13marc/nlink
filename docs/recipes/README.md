@@ -59,6 +59,15 @@ to the hand-rolled netlink primitives if you want to go deeper.
   watch link/addr/route/TC events across N namespaces concurrently
   with `tokio_stream::StreamMap`.
 
+### Cross-cutting
+
+- [**Error handling patterns**](error-handling-patterns.md) — how
+  to dispatch on `is_*()` predicates (rather than direct variant
+  matching), bounded-retry on EAGAIN/ENOBUFS, idempotent
+  `NLM_F_EXCL` create/delete, XFRM SA/SP `update` vs
+  delete-then-add, namespace cleanup, cross-fork pitfalls,
+  cancellation safety in async.
+
 ## Recipe shape
 
 Every recipe follows the same structure:

@@ -62,19 +62,25 @@ pub struct Connection<P: ProtocolState> {
 // Shared methods for protocol types that implement Default
 // ============================================================================
 
-impl<P: ProtocolState + Default> Connection<P> {
+impl<P> Connection<P>
+where
+    P: ProtocolState + Default + crate::netlink::protocol::construction::SyncConstructible,
+{
     /// Create a new connection for this protocol type.
     ///
-    /// This is available for protocols that implement `Default`, but should
-    /// only be used for sync protocol types (`Route`, `SockDiag`, `Generic`,
-    /// `Nftables`).
+    /// Bounded `where P: SyncConstructible` so the GENL protocol
+    /// markers (`Wireguard`, `Macsec`, `Mptcp`, `Ethtool`, `Nl80211`,
+    /// `Devlink`) are a **compile error** here — those families need
+    /// async family-ID resolution and must use `new_async().await`.
+    /// Sync-constructible markers are: `Route`, `SockDiag`, `Generic`,
+    /// `KobjectUevent`, `Connector`, `Netfilter`, `Xfrm`, `FibLookup`,
+    /// `SELinux`, `Audit`, `Nftables`.
     ///
-    /// # Important
-    ///
-    /// **Do not use this for GENL protocol types** (`Wireguard`, `Macsec`,
-    /// `Mptcp`, `Ethtool`, `Nl80211`, `Devlink`). While it compiles, the
-    /// connection will have an unresolved family ID (0) and operations will
-    /// fail. Use `Connection::<Wireguard>::new_async().await?` instead.
+    /// Before 0.16.0 this method took only `P: ProtocolState + Default`,
+    /// which let `Connection::<Wireguard>::new()` compile and return a
+    /// connection with `family_id = 0`; the first operation then failed
+    /// with a confusing kernel error. The new bound prevents that
+    /// class of bug at the type level.
     ///
     /// # Example
     ///
@@ -721,6 +727,73 @@ impl Connection<Route> {
     pub async fn get_link_by_index(&self, index: u32) -> Result<Option<LinkMessage>> {
         let links = self.get_links().await?;
         Ok(links.into_iter().find(|l| l.ifindex() == index))
+    }
+
+    /// Wait for an interface to reach the `IFF_UP` state.
+    ///
+    /// Polls the interface state with exponential backoff (starting
+    /// at 10ms, capped at 100ms) until `IFF_UP` is observed or
+    /// `timeout` elapses. The polling form is preferred over a
+    /// subscription-based wait because it keeps lifetime concerns
+    /// trivial — no multicast socket to manage, no event-stream
+    /// drop semantics to document.
+    ///
+    /// Returns `Err(Timeout)` on deadline. Returns
+    /// `Err(InterfaceNotFound)` if the interface is removed during
+    /// the wait.
+    ///
+    /// # Namespace safety
+    ///
+    /// Takes `impl Into<InterfaceRef>`. With a `Name` variant the
+    /// lookup goes via netlink (`get_link_by_name`), which queries
+    /// the connection's netns — namespace-correct even from a
+    /// process running in a different mount namespace.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::time::Duration;
+    /// use nlink::{Connection, Route};
+    ///
+    /// let conn = Connection::<Route>::new()?;
+    /// // Bring up the interface, then wait for the operstate to
+    /// // reflect it (kernel may take milliseconds).
+    /// conn.set_link_up_by_name("eth0").await?;
+    /// conn.wait_link_up("eth0", Duration::from_secs(5)).await?;
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "wait_link_up"))]
+    pub async fn wait_link_up(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        timeout: Duration,
+    ) -> Result<()> {
+        let iface = iface.into();
+        let label = match &iface {
+            InterfaceRef::Name(n) => n.clone(),
+            InterfaceRef::Index(i) => i.to_string(),
+        };
+        let deadline = std::time::Instant::now() + timeout;
+        let mut backoff = Duration::from_millis(10);
+        // Resolve once to ifindex so subsequent polls are
+        // namespace-correct + cheaper.
+        let ifindex = self.resolve_interface(&iface).await?;
+
+        loop {
+            let link = self
+                .get_link_by_index(ifindex)
+                .await?
+                .ok_or_else(|| Error::InterfaceNotFound {
+                    name: label.clone(),
+                })?;
+            if link.is_up() {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_millis(100));
+        }
     }
 
     /// Get the kernel-reported per-link statistics for the named or

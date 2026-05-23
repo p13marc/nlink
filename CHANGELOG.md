@@ -6,6 +6,37 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`Connection::<P>::wait_link_up(iface, timeout)`** — polls for
+  `IFF_UP` with exponential backoff (10ms → 100ms cap) until
+  observed or the deadline elapses. `Err(Timeout)` on deadline,
+  `Err(InterfaceNotFound)` if the interface is removed during the
+  wait. Namespace-correct via the existing `resolve_interface`
+  pipeline. See Plan 148 §4.1.
+
+- **Sealed GENL constructor traits** — `Connection::<P>::new()`
+  is now bounded `where P: SyncConstructible`, and the GENL
+  protocol markers (`Wireguard`, `Macsec`, `Mptcp`, `Ethtool`,
+  `Nl80211`, `Devlink`) are excluded from that bound. This turns
+  the silent runtime bug
+  (`Connection::<Wireguard>::new()` returning a connection with
+  `family_id = 0` that fails confusingly on first use) into a
+  **compile error** that points the user at `new_async().await`.
+  GENL constructors are bounded `where P: AsyncConstructible`
+  (added to namespace.rs's `connection_for_async` family).
+  Both marker traits live in `nlink::netlink::protocol::construction`
+  and are sealed via the same `private::Sealed` supertrait as
+  `ProtocolState`. **Breaking-shaped but bug-fix in intent**:
+  any code that compiled with `Connection::<Wireguard>::new()`
+  was already broken at runtime; this surface change just moves
+  the failure to compile time. See Plan 148 §4.5.
+
+- **`docs/recipes/error-handling-patterns.md`** — new cookbook
+  recipe covering `is_*()` predicate dispatch, bounded retry on
+  EAGAIN/ENOBUFS, idempotent `NLM_F_EXCL` create/delete, XFRM
+  SA/SP `update_sa` vs delete-then-add, namespace cleanup on
+  error paths, cross-fork pitfalls, and cancellation safety in
+  async. Linked from `docs/recipes/README.md`. See Plan 148 §4.6.
+
 - **Crate-root re-exports** for route / address / rule builders and
   the extension traits. Previously reachable only via deep
   `nlink::netlink::route::Ipv4Route`-style paths; now also surfaced

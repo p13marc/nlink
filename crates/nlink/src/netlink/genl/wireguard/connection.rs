@@ -38,7 +38,7 @@ impl Connection<Wireguard> {
     /// ```ignore
     /// use nlink::netlink::{Connection, Wireguard};
     ///
-    /// let conn = Connection::<Wireguard>::new().await?;
+    /// let conn = Connection::<Wireguard>::new_async().await?;
     /// let device = conn.get_device("wg0").await?;
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "new_async"))]

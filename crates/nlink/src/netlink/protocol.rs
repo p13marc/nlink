@@ -74,6 +74,56 @@ pub trait AsyncProtocolInit: ProtocolState {
         Self: Sized;
 }
 
+/// Marker traits used to gate `Connection::<P>::new()` /
+/// `Connection::<P>::new_async()` so the constructor that **actually
+/// works** for each protocol is the only one that compiles.
+///
+/// Before this gate landed, `Connection::<Wireguard>::new()` compiled
+/// but produced a connection with `family_id = 0`; the first operation
+/// failed with a confusing kernel error. Now it's a compile error
+/// pointing the user at `new_async()`.
+///
+/// Both traits are sealed via the same `private::Sealed` supertrait
+/// that `ProtocolState` uses, so downstream code cannot opt a custom
+/// type in.
+pub mod construction {
+    use super::*;
+
+    /// Protocols whose connection can be constructed synchronously
+    /// (no GENL family-ID resolution needed). `Connection::<P>::new()`
+    /// is bounded `where P: SyncConstructible`.
+    pub trait SyncConstructible: ProtocolState {}
+
+    /// Protocols that require async GENL family-ID resolution at
+    /// construction time. `Connection::<P>::new_async()` is bounded
+    /// `where P: AsyncConstructible`.
+    pub trait AsyncConstructible: ProtocolState {}
+}
+
+// Non-GENL protocols — synchronously constructible. Each must also
+// match the existing per-type sealed `Sealed` constraint (i.e. live
+// in this crate).
+impl construction::SyncConstructible for Route {}
+impl construction::SyncConstructible for SockDiag {}
+impl construction::SyncConstructible for Generic {}
+impl construction::SyncConstructible for KobjectUevent {}
+impl construction::SyncConstructible for Connector {}
+impl construction::SyncConstructible for Netfilter {}
+impl construction::SyncConstructible for Xfrm {}
+impl construction::SyncConstructible for FibLookup {}
+impl construction::SyncConstructible for SELinux {}
+impl construction::SyncConstructible for Audit {}
+impl construction::SyncConstructible for Nftables {}
+
+// GENL protocols — must be constructed via `new_async()` so the
+// family ID is resolved before first use.
+impl construction::AsyncConstructible for Wireguard {}
+impl construction::AsyncConstructible for Macsec {}
+impl construction::AsyncConstructible for Mptcp {}
+impl construction::AsyncConstructible for Devlink {}
+impl construction::AsyncConstructible for Nl80211 {}
+impl construction::AsyncConstructible for Ethtool {}
+
 /// Route protocol state (RTNetlink).
 ///
 /// Used for interface, address, route, neighbor, and traffic control operations.
