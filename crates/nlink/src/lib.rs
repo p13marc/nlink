@@ -253,6 +253,13 @@ pub use netlink::dump_stream::DumpStream;
 // netfilter conntrack-cached forwarding bypass.
 pub use netlink::nftables::Flowtable;
 
+// Declarative nftables config (Plan 157) — diff + apply for
+// tables/chains/rules/flowtables, mirroring NetworkConfig's shape.
+pub use netlink::nftables::config::{
+    DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredTable, NftablesConfig,
+    NftablesDiff,
+};
+
 // XFRM IPsec hardware offload (Plan 153.1) — request kernel push
 // SA crypto/packet path onto NIC hardware.
 pub use netlink::xfrm::{XfrmOffloadFlag, XfrmUserOffload};

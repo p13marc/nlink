@@ -31,6 +31,7 @@
 //! ).await?;
 //! ```
 
+pub mod config;
 pub mod connection;
 pub mod expr;
 pub mod types;

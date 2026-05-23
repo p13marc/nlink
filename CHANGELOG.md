@@ -6,6 +6,54 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Declarative `NftablesConfig`** — mirror of `NetworkConfig`
+  for the nftables subsystem. `NftablesConfig::new()` →
+  `.table(name, family, |t| ...)` → `.chain(name, |c| ...)` →
+  `.rule(chain, |r| ...)` → `.flowtable(name, |f| ...)`, with
+  closure-style nesting that matches the visual shape of
+  `nft list ruleset`.
+
+  ```ignore
+  let cfg = NftablesConfig::new()
+      .table("filter", Family::Inet, |t| t
+          .persist(true)
+          .chain("input", |c| c
+              .hook(Hook::Input).priority(Priority::Filter).policy(Policy::Drop))
+          .rule("input", |r| r.match_iif("lo").accept())
+          .rule_keyed("input", "allow-icmp", |r| r.match_proto(Proto::Icmp).accept())
+          .flowtable("ft", |f| f.device("eth0").hw_offload(true)));
+  let diff = cfg.diff(&conn).await?;
+  println!("{}", diff.summary());
+  diff.apply(&conn).await?;
+  ```
+
+  Surface added:
+  - `NftablesConfig` builder + `DeclaredTable` / `DeclaredChain` /
+    `DeclaredRule` / `DeclaredFlowtable` value types
+  - `NftablesDiff` per-object change collections + `summary()` /
+    `change_count()` / `is_empty()`
+  - `NftablesConfig::diff(&conn)` async method
+  - `NftablesDiff::apply(&conn)` async method
+  - `RuleHandle(u64)` newtype for kernel-assigned rule handles
+  - All re-exported at the crate root
+
+  **0.16 scope caveats** (documented in module rustdoc):
+  - Rule identity: name-based via caller-supplied `handle_key`
+    (`rule_keyed`); rules without a key are re-applied on every
+    diff (harmless churn). Full canonicalization-based diff
+    deferred — needs typed `Match` collection refactor that's
+    not in tree yet.
+  - Apply is **not atomic** (the existing `Transaction` doesn't
+    yet cover `del_chain` / `del_rule` / flowtable ops — Plan
+    150 §9.4 coordination point). Operations execute in
+    dependency-correct order so partial failure recovery is
+    converge-on-next-apply. Atomic apply flips on when
+    Transaction grows full coverage post-0.16.
+  - Sets and maps deferred — separate dimension of nftables
+    state warranting its own design pass.
+
+  See Plan 157.
+
 - **Devlink rate + port-function-state**
   (`Connection::<Devlink>::{add_rate, set_rate, del_rate,
   set_port_function_state}`). Cloud + SmartNIC users use these to
