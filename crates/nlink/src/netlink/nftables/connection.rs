@@ -106,6 +106,107 @@ impl Connection<Nftables> {
         Ok(tables)
     }
 
+    /// Add a flowtable to the named table.
+    ///
+    /// Constructs and emits an `NFT_MSG_NEWFLOWTABLE`. The nested
+    /// `NFTA_FLOWTABLE_HOOK` carries `NF_NETDEV_INGRESS` (= 0) +
+    /// the configured priority + the device list. See
+    /// [`super::Flowtable`] for builder shape.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::nftables::{Flowtable, Family};
+    /// let ft = Flowtable::new(Family::Inet, "filter", "ft")
+    ///     .device("eth0").device("eth1").hw_offload(true);
+    /// conn.add_flowtable(&ft).await?;
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_flowtable"))]
+    pub async fn add_flowtable(&self, ft: &super::types::Flowtable) -> Result<()> {
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWFLOWTABLE),
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        let nfgenmsg = NfGenMsg::new(ft.family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_FLOWTABLE_TABLE, &ft.table);
+        builder.append_attr_str(NFTA_FLOWTABLE_NAME, &ft.name);
+
+        // Nested NFTA_FLOWTABLE_HOOK with hook-num, priority, devs.
+        let hook = builder.nest_start(NFTA_FLOWTABLE_HOOK | 0x8000);
+        builder.append_attr_u32_be(NFTA_FLOWTABLE_HOOK_NUM, NF_NETDEV_INGRESS);
+        builder.append_attr_u32_be(NFTA_FLOWTABLE_HOOK_PRIORITY, ft.priority as u32);
+        if !ft.devs.is_empty() {
+            let devs = builder.nest_start(NFTA_FLOWTABLE_HOOK_DEVS | 0x8000);
+            for dev in &ft.devs {
+                // Each device is a nested attribute carrying
+                // NFTA_DEVICE_NAME = 1 (string).
+                let dev_nest = builder.nest_start(1u16 | 0x8000); // NFTA_LIST_ELEM
+                builder.append_attr_str(NFTA_DEVICE_NAME, dev);
+                builder.nest_end(dev_nest);
+            }
+            builder.nest_end(devs);
+        }
+        builder.nest_end(hook);
+
+        if ft.flags != 0 {
+            builder.append_attr_u32_be(NFTA_FLOWTABLE_FLAGS, ft.flags);
+        }
+
+        self.nft_request_ack(builder).await
+    }
+
+    /// Delete a flowtable from the named table.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_flowtable"))]
+    pub async fn del_flowtable(
+        &self,
+        family: Family,
+        table: &str,
+        name: &str,
+    ) -> Result<()> {
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_DELFLOWTABLE),
+            NLM_F_REQUEST | NLM_F_ACK,
+        );
+        let nfgenmsg = NfGenMsg::new(family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_FLOWTABLE_TABLE, table);
+        builder.append_attr_str(NFTA_FLOWTABLE_NAME, name);
+
+        self.nft_request_ack(builder).await
+    }
+
+    /// Dump all flowtables in the kernel.
+    ///
+    /// Returns one [`super::types::Flowtable`] per kernel-installed
+    /// flowtable. The parsed flowtables carry `use_count` and
+    /// `handle` populated by the kernel; `devs` is reported via
+    /// the nested hook block.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_flowtables"))]
+    pub async fn list_flowtables(&self) -> Result<Vec<super::types::Flowtable>> {
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_GETFLOWTABLE),
+            NLM_F_REQUEST | NLM_F_DUMP,
+        );
+        // AF_UNSPEC = all families.
+        let nfgenmsg = NfGenMsg {
+            nfgen_family: 0,
+            version: 0,
+            res_id: 0,
+        };
+        builder.append(&nfgenmsg);
+
+        let responses = self.nft_dump(builder).await?;
+        let mut out = Vec::new();
+        for (family_byte, payload) in &responses {
+            let family = Family::from_u8(*family_byte).unwrap_or(Family::Inet);
+            if let Some(ft) = parse_flowtable(payload, family) {
+                out.push(ft);
+            }
+        }
+        Ok(out)
+    }
+
     /// Delete an nftables table.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_table"))]
     pub async fn del_table(&self, name: &str, family: Family) -> Result<()> {
@@ -885,4 +986,70 @@ impl Transaction {
     pub async fn commit(self, conn: &Connection<Nftables>) -> Result<()> {
         conn.send_batch(self.messages).await
     }
+}
+
+/// Parse a flowtable from `NFT_MSG_GETFLOWTABLE` response payload.
+fn parse_flowtable(data: &[u8], family: Family) -> Option<super::types::Flowtable> {
+    let mut ft = super::types::Flowtable {
+        family,
+        table: String::new(),
+        name: String::new(),
+        devs: Vec::new(),
+        priority: 0,
+        flags: 0,
+        use_count: 0,
+        handle: 0,
+    };
+
+    for (attr_type, payload) in AttrIter::new(data) {
+        match attr_type & 0x7FFF {
+            NFTA_FLOWTABLE_TABLE => {
+                ft.table = attr_str(payload)?;
+            }
+            NFTA_FLOWTABLE_NAME => {
+                ft.name = attr_str(payload)?;
+            }
+            NFTA_FLOWTABLE_USE if payload.len() >= 4 => {
+                ft.use_count = u32::from_be_bytes(payload[..4].try_into().ok()?);
+            }
+            NFTA_FLOWTABLE_HANDLE if payload.len() >= 8 => {
+                ft.handle = u64::from_be_bytes(payload[..8].try_into().ok()?);
+            }
+            NFTA_FLOWTABLE_FLAGS if payload.len() >= 4 => {
+                ft.flags = u32::from_be_bytes(payload[..4].try_into().ok()?);
+            }
+            NFTA_FLOWTABLE_HOOK => {
+                // Nested: walk for priority + devs list.
+                for (h_attr, h_payload) in AttrIter::new(payload) {
+                    match h_attr & 0x7FFF {
+                        NFTA_FLOWTABLE_HOOK_PRIORITY if h_payload.len() >= 4 => {
+                            ft.priority = i32::from_be_bytes(
+                                h_payload[..4].try_into().ok()?,
+                            );
+                        }
+                        NFTA_FLOWTABLE_HOOK_DEVS => {
+                            // List of nested NFTA_LIST_ELEM each
+                            // carrying NFTA_DEVICE_NAME.
+                            for (_le_attr, le_payload) in AttrIter::new(h_payload) {
+                                for (d_attr, d_payload) in AttrIter::new(le_payload) {
+                                    if d_attr & 0x7FFF == NFTA_DEVICE_NAME
+                                        && let Some(s) = attr_str(d_payload)
+                                    {
+                                        ft.devs.push(s);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if ft.name.is_empty() {
+        return None;
+    }
+    Some(ft)
 }

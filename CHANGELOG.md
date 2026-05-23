@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **nftables flowtable support** — `Connection::<Nftables>::add_flowtable`,
+  `del_flowtable`, `list_flowtables`. New `Flowtable` builder
+  (`Flowtable::new(family, table, name).device(d).priority(p).hw_offload(true).counter(true)`).
+  Pairs with the new `Expr::FlowOffload { table }` rule expression
+  for the `flow add @<ft>` rule clause that populates the
+  flowtable from a rule path. Kernel UAPI constants exposed:
+  `NFT_MSG_NEWFLOWTABLE` (= 22), `NFT_MSG_GETFLOWTABLE` (= 23),
+  `NFT_MSG_DELFLOWTABLE` (= 24), `NFTA_FLOWTABLE_*` attribute IDs,
+  `NF_NETDEV_INGRESS` (= 0), `NFT_FLOWTABLE_HW_OFFLOAD` (= 0x1),
+  `NFT_FLOWTABLE_COUNTER` (= 0x2). Unit tests pin the constants
+  against the kernel UAPI header. See Plan 150.
+
 - **Streaming dump API** — `Connection::<P>::dump_stream<T>(msg_type)
   -> DumpStream<'_, P, T>` plus four typed wrappers on
   `Connection<Route>`: `stream_links`, `stream_routes`,

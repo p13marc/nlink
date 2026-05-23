@@ -324,6 +324,115 @@ impl NatExpr {
 // Table (parsed from dump)
 // =============================================================================
 
+/// An nftables flowtable.
+///
+/// Per-table object that caches established conntrack flows, letting
+/// the kernel bypass the full nftables rule traversal for matching
+/// packets. On capable NICs the flow path can be hardware-offloaded
+/// via `NFT_FLOWTABLE_HW_OFFLOAD`.
+///
+/// Construct via [`Self::new`] + fluent setters; install via
+/// `Connection::<Nftables>::add_flowtable`. List via `get_flowtables`.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::nftables::{Flowtable, Family};
+///
+/// let ft = Flowtable::new(Family::Inet, "filter", "ft")
+///     .device("eth0")
+///     .device("eth1")
+///     .priority(0)
+///     .hw_offload(true);
+/// conn.add_flowtable(&ft).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct Flowtable {
+    /// Owning table family (typically `Inet`, `Ip`, `Ip6`).
+    pub family: Family,
+    /// Owning table name.
+    pub table: String,
+    /// Flowtable name (unique within the table).
+    pub name: String,
+    /// Device names to attach the ingress hook to. Empty = no
+    /// devices (the kernel accepts the add but the flowtable does
+    /// nothing until devices are added in a follow-up update).
+    pub devs: Vec<String>,
+    /// Hook priority. Default 0; `-300` for early ingress.
+    pub priority: i32,
+    /// Flags bitmap. Combine `NFT_FLOWTABLE_HW_OFFLOAD` and
+    /// `NFT_FLOWTABLE_COUNTER` from
+    /// [`crate::netlink::nftables`].
+    pub flags: u32,
+    /// Use-count reported by the kernel (read-only; populated by
+    /// `get_flowtables` parse, ignored on add).
+    pub use_count: u32,
+    /// Kernel-assigned handle (read-only; same as `use_count`).
+    pub handle: u64,
+}
+
+impl Flowtable {
+    /// New builder for a flowtable in the named table.
+    pub fn new(
+        family: Family,
+        table: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            family,
+            table: table.into(),
+            name: name.into(),
+            devs: Vec::new(),
+            priority: 0,
+            flags: 0,
+            use_count: 0,
+            handle: 0,
+        }
+    }
+
+    /// Attach the flowtable's ingress hook to a device. Call
+    /// multiple times to attach to several devices (e.g. both ends
+    /// of a bridge).
+    pub fn device(mut self, dev: impl Into<String>) -> Self {
+        self.devs.push(dev.into());
+        self
+    }
+
+    /// Set the ingress hook priority. Default is 0.
+    pub fn priority(mut self, p: i32) -> Self {
+        self.priority = p;
+        self
+    }
+
+    /// Request hardware offload (`NFT_FLOWTABLE_HW_OFFLOAD`).
+    ///
+    /// Requires a NIC with flow-table offload support (mlx5, hns3,
+    /// etc.) and a kernel built with `CONFIG_NF_FLOW_TABLE_HW`.
+    /// If the NIC doesn't support offload the kernel accepts the
+    /// add and silently falls back to software — there's no in-band
+    /// signal. Check `ethtool -k <dev> | grep hw-tc-offload` or
+    /// inspect per-flow counters to confirm offload engaged.
+    pub fn hw_offload(mut self, on: bool) -> Self {
+        if on {
+            self.flags |= super::NFT_FLOWTABLE_HW_OFFLOAD;
+        } else {
+            self.flags &= !super::NFT_FLOWTABLE_HW_OFFLOAD;
+        }
+        self
+    }
+
+    /// Request per-flow counter tracking
+    /// (`NFT_FLOWTABLE_COUNTER`). Adds overhead.
+    pub fn counter(mut self, on: bool) -> Self {
+        if on {
+            self.flags |= super::NFT_FLOWTABLE_COUNTER;
+        } else {
+            self.flags &= !super::NFT_FLOWTABLE_COUNTER;
+        }
+        self
+    }
+}
+
 /// An nftables table.
 #[derive(Debug, Clone)]
 pub struct Table {
