@@ -6,8 +6,8 @@ use nlink::{
     Result,
     netlink::link::{
         BondLink, BondMode, BridgeLink, DummyLink, GreLink, GretapLink, IfbLink, IpipLink,
-        IpvlanLink, LacpRate, MacvlanLink, MacvlanMode, SitLink, VethLink, VlanLink, VrfLink,
-        XmitHashPolicy,
+        IpvlanLink, LacpRate, MacvlanLink, MacvlanMode, NetkitLink, NetkitMode, NetkitPolicy,
+        SitLink, VethLink, VlanLink, VrfLink, XmitHashPolicy,
     },
 };
 
@@ -685,6 +685,52 @@ async fn test_enslave_convenience() -> Result<()> {
     // Verify slaves are up (enslave brings them back up)
     assert!(eth0.is_up(), "eth0 should be up after enslave");
     assert!(eth1.is_up(), "eth1 should be up after enslave");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_create_netkit_pair() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("netkit");
+
+    let ns = TestNamespace::new("netkit-pair")?;
+    let conn = ns.connection()?;
+
+    // Create a netkit pair in L3 mode with forward policy.
+    conn.add_link(
+        NetkitLink::new("nk0", "nk1")
+            .mode(NetkitMode::L3)
+            .policy(NetkitPolicy::Forward),
+    )
+    .await?;
+
+    let links = conn.get_links().await?;
+    assert!(
+        links.iter().any(|l| l.name() == Some("nk0")),
+        "primary netkit interface nk0 should exist"
+    );
+    assert!(
+        links.iter().any(|l| l.name() == Some("nk1")),
+        "peer netkit interface nk1 should exist"
+    );
+
+    // Verify kind reports as "netkit".
+    let nk0 = links.iter().find(|l| l.name() == Some("nk0")).unwrap();
+    assert_eq!(nk0.kind(), Some("netkit"));
+
+    // Delete the pair (deleting one half removes the other).
+    conn.del_link("nk0").await?;
+
+    let links = conn.get_links().await?;
+    assert!(
+        !links.iter().any(|l| l.name() == Some("nk0")),
+        "nk0 should be deleted"
+    );
+    assert!(
+        !links.iter().any(|l| l.name() == Some("nk1")),
+        "peer nk1 should also be deleted (pair removal is symmetric)"
+    );
 
     Ok(())
 }

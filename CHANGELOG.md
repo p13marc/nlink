@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`netkit` integration test** — `tests/integration/link.rs`
+  gains `test_create_netkit_pair` covering primary + peer
+  creation, kind verification, and symmetric pair-removal-on-del.
+  Closes the test gap CODE_ANALYSIS.md §4.1 flagged: the
+  `NetkitLink` type has shipped since 0.13 but never had a CI
+  regression test. Gated `require_root!()` + `require_module!("netkit")`.
+  See Plan 148 §4.7.
+
 - **`Connection::<P>::wait_link_up(iface, timeout)`** — polls for
   `IFF_UP` with exponential backoff (10ms → 100ms cap) until
   observed or the deadline elapses. `Err(Timeout)` on deadline,
