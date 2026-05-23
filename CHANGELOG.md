@@ -31,6 +31,17 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`NetworkConfig::diff` now detects same-kind / different-params
+  qdisc changes** (`config/diff.rs:434`). Previously, changing an
+  HTB's `default_class` from `0x10` to `0x20` (or any other
+  parameter on any qdisc kind) produced an empty diff — the diff
+  loop only compared the `kind` string. Now `diff_qdiscs` renders
+  the declared `DeclaredQdiscType` through `QdiscConfig::write_options`
+  and byte-compares against the kernel's `TCA_OPTIONS` blob.
+  Differences (including known false positives from kernel-side
+  default attributes) push to `qdiscs_to_replace` and trigger
+  idempotent re-apply via the normal `apply` path. See Plan 147 §4.4.
+
 - **`NetlinkSocket::new_in_namespace` no longer silently corrupts
   thread state on `setns()` restore failure** (`socket.rs:138`).
   Previously the function used `eprintln!` to warn and returned

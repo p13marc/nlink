@@ -7,15 +7,22 @@ use std::{
     net::IpAddr,
 };
 
+use std::time::Duration;
+
 use super::types::{
-    DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredRoute, LinkState,
-    NetworkConfig, QdiscParent,
+    DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredQdiscType,
+    DeclaredRoute, LinkState, NetworkConfig, QdiscParent,
 };
 use crate::netlink::{
+    builder::MessageBuilder,
     connection::Connection,
     error::Result,
     messages::{AddressMessage, LinkMessage, RouteMessage, TcMessage},
     protocol::Route,
+    tc::{
+        ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, NetemConfig, PrioConfig,
+        QdiscConfig, SfqConfig, TbfConfig,
+    },
     types::{link::OperState, route::RouteType},
 };
 
@@ -428,13 +435,183 @@ fn diff_qdiscs(
             let desired_kind = declared.qdisc_type.kind();
 
             if existing_kind != desired_kind {
-                // Different type, need to replace
+                // Different type, need to replace.
+                diff.qdiscs_to_replace.push(declared.clone());
+            } else if !qdisc_params_match(&declared.qdisc_type, existing.raw_options()) {
+                // Same kind, different parameters — replace.
                 diff.qdiscs_to_replace.push(declared.clone());
             }
-            // TODO: Could check detailed parameters here
         } else {
-            // No qdisc at this position, need to add
+            // No qdisc at this position, need to add.
             diff.qdiscs_to_add.push(declared.clone());
         }
+    }
+}
+
+/// Compare a declared qdisc's parameters against the kernel's reported
+/// `TCA_OPTIONS` blob.
+///
+/// Renders the declared config through `QdiscConfig::write_options` into a
+/// scratch buffer, then byte-compares against the kernel's blob. Returns
+/// `true` if they match exactly.
+///
+/// **Known limitation**: the kernel may add attributes (defaults, optional
+/// counters, padding) that the declared side doesn't write. Those cases
+/// surface as "differs" → harmless re-apply via `qdiscs_to_replace`. The
+/// alternative (per-field parse-and-compare) needs per-kind parsers that
+/// don't exist in nlink yet; that's tracked as a 0.17 polish item. Until
+/// then, prefer false-positive churn over the silent-no-op bug this
+/// replaces.
+fn qdisc_params_match(declared: &DeclaredQdiscType, existing_opts: Option<&[u8]>) -> bool {
+    let declared_bytes = declared_options_bytes(declared);
+    let existing_bytes = existing_opts.unwrap_or(&[]);
+    declared_bytes.as_slice() == existing_bytes
+}
+
+/// Render the `TCA_OPTIONS` payload bytes for a declared qdisc type.
+/// Mirrors the typed-config construction in `apply.rs::add_qdisc` —
+/// kept in sync by being the exact same `match`.
+fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
+    let mut builder = MessageBuilder::new(0, 0);
+    let start = builder.len();
+    let write_result: Result<()> = match t {
+        DeclaredQdiscType::Netem {
+            delay_us,
+            jitter_us,
+            loss_percent,
+            limit,
+        } => {
+            let mut cfg = NetemConfig::new();
+            if let Some(d) = delay_us {
+                cfg = cfg.delay(Duration::from_micros(*d as u64));
+            }
+            if let Some(j) = jitter_us {
+                cfg = cfg.jitter(Duration::from_micros(*j as u64));
+            }
+            if let Some(l) = loss_percent {
+                cfg = cfg.loss(crate::util::Percent::new(*l));
+            }
+            if let Some(lim) = limit {
+                cfg = cfg.limit(*lim);
+            }
+            cfg.build().write_options(&mut builder)
+        }
+        DeclaredQdiscType::Htb { default_class } => {
+            HtbQdiscConfig::new()
+                .default_class(*default_class)
+                .write_options(&mut builder)
+        }
+        DeclaredQdiscType::FqCodel {
+            limit,
+            target_us,
+            interval_us,
+        } => {
+            let mut cfg = FqCodelConfig::new();
+            if let Some(lim) = limit {
+                cfg = cfg.limit(*lim);
+            }
+            if let Some(t) = target_us {
+                cfg = cfg.target(Duration::from_micros(*t as u64));
+            }
+            if let Some(i) = interval_us {
+                cfg = cfg.interval(Duration::from_micros(*i as u64));
+            }
+            cfg.write_options(&mut builder)
+        }
+        DeclaredQdiscType::Tbf {
+            rate_bps,
+            burst_bytes,
+            limit_bytes,
+        } => {
+            let mut cfg = TbfConfig::new()
+                .rate(crate::util::Rate::bytes_per_sec(*rate_bps))
+                .burst(crate::util::Bytes::new(*burst_bytes as u64));
+            if let Some(lim) = limit_bytes {
+                cfg = cfg.limit(crate::util::Bytes::new(*lim as u64));
+            }
+            cfg.write_options(&mut builder)
+        }
+        DeclaredQdiscType::Sfq { perturb_secs } => {
+            let mut cfg = SfqConfig::new();
+            if let Some(p) = perturb_secs {
+                cfg = cfg.perturb(*p as i32);
+            }
+            cfg.write_options(&mut builder)
+        }
+        DeclaredQdiscType::Prio { bands } => {
+            let mut cfg = PrioConfig::new();
+            if let Some(b) = bands {
+                cfg = cfg.bands(*b as i32);
+            }
+            cfg.write_options(&mut builder)
+        }
+        DeclaredQdiscType::Ingress => IngressConfig::new().write_options(&mut builder),
+        DeclaredQdiscType::Clsact => ClsactConfig::new().write_options(&mut builder),
+    };
+    let end = builder.len();
+    // If write_options failed, return empty bytes — the diff will then
+    // see "declared = empty, existing = something" → replace. Safe
+    // failure mode.
+    if write_result.is_err() {
+        return Vec::new();
+    }
+    builder.as_bytes()[start..end].to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declared_options_bytes_differs_when_param_changes() {
+        // Two HTB configs with different default_class should produce
+        // different option bytes.
+        let a = DeclaredQdiscType::Htb { default_class: 0x10 };
+        let b = DeclaredQdiscType::Htb { default_class: 0x20 };
+        assert_ne!(declared_options_bytes(&a), declared_options_bytes(&b));
+    }
+
+    #[test]
+    fn declared_options_bytes_stable_for_same_input() {
+        let cfg = DeclaredQdiscType::Netem {
+            delay_us: Some(100_000),
+            jitter_us: Some(10_000),
+            loss_percent: Some(0.5),
+            limit: Some(1000),
+        };
+        assert_eq!(declared_options_bytes(&cfg), declared_options_bytes(&cfg));
+    }
+
+    #[test]
+    fn declared_options_bytes_differs_across_netem_params() {
+        let a = DeclaredQdiscType::Netem {
+            delay_us: Some(100_000),
+            jitter_us: None,
+            loss_percent: None,
+            limit: None,
+        };
+        let b = DeclaredQdiscType::Netem {
+            delay_us: Some(200_000),
+            jitter_us: None,
+            loss_percent: None,
+            limit: None,
+        };
+        assert_ne!(declared_options_bytes(&a), declared_options_bytes(&b));
+    }
+
+    #[test]
+    fn qdisc_params_match_treats_empty_existing_as_mismatch_when_declared_nonempty() {
+        let cfg = DeclaredQdiscType::Htb { default_class: 0x10 };
+        // Existing has no options at all — should not match a non-empty declared.
+        assert!(!qdisc_params_match(&cfg, None));
+        assert!(!qdisc_params_match(&cfg, Some(&[])));
+    }
+
+    #[test]
+    fn qdisc_params_match_clsact_has_no_options() {
+        // Clsact emits zero option bytes; matches an empty existing.
+        let cfg = DeclaredQdiscType::Clsact;
+        assert!(qdisc_params_match(&cfg, Some(&[])));
+        assert!(qdisc_params_match(&cfg, None));
     }
 }
