@@ -61,6 +61,13 @@ to the hand-rolled netlink primitives if you want to go deeper.
 
 ### Cross-cutting
 
+- [**Connection pool**](connection-pool.md) — hold a bounded set
+  of `Connection<P>` and round-robin requests across tasks.
+  Right answer when you'd otherwise hand-roll multiple
+  connections for parallel work (exporters, multi-namespace
+  watchers, control planes). Uses `ConnectionPool<P>` +
+  `PooledConnection<'p, P>` (Plan 159, 0.16+).
+
 - [**Error handling patterns**](error-handling-patterns.md) — how
   to dispatch on `is_*()` predicates (rather than direct variant
   matching), bounded-retry on EAGAIN/ENOBUFS, idempotent

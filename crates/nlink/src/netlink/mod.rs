@@ -103,6 +103,7 @@ pub mod nexthop;
 pub mod nftables;
 pub mod parse;
 pub mod parse_params;
+pub mod pool;
 mod protocol;
 pub mod ratelimit;
 pub mod route;

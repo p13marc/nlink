@@ -6,6 +6,23 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`ConnectionPool<P>` + `PooledConnection<'p, P>`** — bounded
+  mpsc-channel-backed pool for high-fanout consumers. RAII
+  `PooledConnection` derefs to `&Connection<P>`, returns the
+  connection to the pool on drop (or invalidates it on demand).
+  `ConnectionPoolBuilder::<P>::new().size(N).build()` for sync
+  protocols; `.build_async()` for GENL families — split via the
+  Plan 148 §4.5 sealed `SyncConstructible` / `AsyncConstructible`
+  traits. `ConnectionPool::<P>::for_namespace(ns, size)`
+  convenience for per-namespace pools (the canonical CNI / multi-
+  tenant shape). Two new error variants — `Error::PoolExhausted
+  { size, timeout }` and `Error::PoolClosed` — both with
+  `is_X()` predicates. Re-exported at the crate root as
+  `nlink::{ConnectionPool, ConnectionPoolBuilder, PooledConnection}`.
+  Recipe at `docs/recipes/connection-pool.md`. Partial alternative
+  to the deferred-to-0.17 NlRouter-style multiplexing (see
+  master plan §4 item 6). See Plan 159.
+
 - **`netkit` integration test** — `tests/integration/link.rs`
   gains `test_create_netkit_pair` covering primary + peer
   creation, kind verification, and symmetric pair-removal-on-del.

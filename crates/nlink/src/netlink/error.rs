@@ -163,6 +163,28 @@ pub enum Error {
     #[error("operation timed out")]
     Timeout,
 
+    /// Connection pool was unable to hand out a connection within
+    /// the configured `acquire_timeout`.
+    ///
+    /// Recover via [`Self::is_pool_exhausted`]. Typical responses:
+    /// retry with a longer timeout, scale the pool size up, or
+    /// shed load.
+    #[error("connection pool exhausted: {size} connections all busy, waited {timeout:?}")]
+    PoolExhausted {
+        /// Configured pool size (total connections, busy + idle).
+        size: usize,
+        /// The acquire timeout that just expired.
+        timeout: std::time::Duration,
+    },
+
+    /// The connection pool was dropped while an `acquire()` was
+    /// pending, or while waiting to send a connection back to it.
+    ///
+    /// Recover via [`Self::is_pool_closed`]. Indicates a teardown
+    /// race; the surviving task should fail through.
+    #[error("connection pool is closed (all handles dropped)")]
+    PoolClosed,
+
     /// `setns()` failed to restore the calling thread to its original
     /// network namespace after a `new_in_namespace`-style socket
     /// creation.
@@ -486,6 +508,25 @@ impl Error {
     /// kernel ETIMEDOUT errors.
     pub fn is_timeout(&self) -> bool {
         matches!(self, Self::Timeout) || self.errno() == Some(libc::ETIMEDOUT)
+    }
+
+    /// Check if this is a [`Error::PoolExhausted`].
+    ///
+    /// All pool slots were busy when `ConnectionPool::acquire` was
+    /// called, and the `acquire_timeout` elapsed before any returned.
+    /// Typical recovery: retry with a longer timeout, scale the
+    /// pool size up, or shed load.
+    pub fn is_pool_exhausted(&self) -> bool {
+        matches!(self, Self::PoolExhausted { .. })
+    }
+
+    /// Check if this is a [`Error::PoolClosed`].
+    ///
+    /// The pool was dropped while an acquire / return was pending.
+    /// Indicates teardown race; the surviving task should fail
+    /// through.
+    pub fn is_pool_closed(&self) -> bool {
+        matches!(self, Self::PoolClosed)
     }
 
     /// Check if this is a namespace-restore failure

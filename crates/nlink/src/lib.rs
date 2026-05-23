@@ -236,3 +236,7 @@ pub use netlink::rule::RuleBuilder;
 // Link + neighbor extension traits for custom impl.
 pub use netlink::link::LinkConfig;
 pub use netlink::neigh::NeighborConfig;
+
+// Connection pool (Plan 159) — bounded mpsc-channel-backed pool
+// for high-fanout consumers.
+pub use netlink::pool::{ConnectionPool, ConnectionPoolBuilder, PooledConnection};
