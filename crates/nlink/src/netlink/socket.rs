@@ -222,6 +222,64 @@ impl NetlinkSocket {
         self.protocol
     }
 
+    /// Toggle extended-ack reception (`NETLINK_EXT_ACK`, kernel
+    /// 4.12+). Enabled by default during socket construction
+    /// ([`Self::create_socket`]); rarely useful to disable. Exposed
+    /// for parity with neli and for callers that want to suppress
+    /// the trailing TLVs in error responses (e.g. for tighter
+    /// timing-sensitive measurements).
+    ///
+    /// Returns `Ok(())` on pre-4.12 kernels where the sockopt is
+    /// not supported (`ENOPROTOOPT`) — graceful degradation.
+    pub fn set_ext_ack(&self, on: bool) -> Result<()> {
+        Self::set_netlink_sockopt(self.as_raw_fd(), libc::NETLINK_EXT_ACK, on)
+    }
+
+    /// Enable kernel-side strict checking (`NETLINK_GET_STRICT_CHK`,
+    /// kernel 5.0+). When enabled, the kernel validates dump request
+    /// filters strictly and returns an error if they reference
+    /// unknown attributes — useful for catching
+    /// client/kernel-version mismatches early.
+    ///
+    /// Off by default. Returns `Ok(())` silently on pre-5.0 kernels
+    /// where the sockopt is not supported (`ENOPROTOOPT`).
+    pub fn set_strict_checking(&self, on: bool) -> Result<()> {
+        // NETLINK_GET_STRICT_CHK = 12 per include/uapi/linux/netlink.h.
+        // Not in libc as of writing; define inline.
+        const NETLINK_GET_STRICT_CHK: libc::c_int = 12;
+        Self::set_netlink_sockopt(self.as_raw_fd(), NETLINK_GET_STRICT_CHK, on)
+    }
+
+    /// Internal helper: setsockopt(SOL_NETLINK, optname, on as int).
+    /// Treats `ENOPROTOOPT` as success (graceful degradation when
+    /// the running kernel doesn't recognize the optname).
+    fn set_netlink_sockopt(fd: RawFd, optname: libc::c_int, on: bool) -> Result<()> {
+        let val: libc::c_int = if on { 1 } else { 0 };
+        // SAFETY: setsockopt with a valid fd + SOL_NETLINK level +
+        // pointer to a stack-allocated int + correct size. Returns
+        // -1 on failure; we check it.
+        let rc = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_NETLINK,
+                optname,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOPROTOOPT) {
+                // Kernel doesn't support this sockopt — silently
+                // succeed so callers can `enable_strict_checking(true)`
+                // unconditionally and it's a no-op on old kernels.
+                return Ok(());
+            }
+            return Err(Error::Io(err));
+        }
+        Ok(())
+    }
+
     /// Subscribe to multicast groups.
     pub fn add_membership(&mut self, group: u32) -> Result<()> {
         self.fd.get_mut().add_membership(group)?;

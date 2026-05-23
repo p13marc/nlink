@@ -196,6 +196,51 @@ impl<P: ProtocolState> Connection<P> {
         self.timeout
     }
 
+    /// Enable kernel-side strict checking (`NETLINK_GET_STRICT_CHK`,
+    /// kernel 5.0+). When enabled, the kernel validates dump request
+    /// filters strictly and returns an error if they reference
+    /// unknown attributes — useful for catching client/kernel-version
+    /// mismatches early during development.
+    ///
+    /// Off by default for backwards compatibility with older
+    /// kernels. The setsockopt is silently a no-op on pre-5.0
+    /// kernels (returns `Ok(())` on `ENOPROTOOPT`), so calling
+    /// `enable_strict_checking(true)` unconditionally is safe.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::{Connection, Route};
+    /// let conn = Connection::<Route>::new()?;
+    /// conn.enable_strict_checking(true)?;
+    /// ```
+    pub fn enable_strict_checking(&self, on: bool) -> Result<()> {
+        self.socket.set_strict_checking(on)
+    }
+
+    /// Toggle extended-ack reception (`NETLINK_EXT_ACK`, kernel
+    /// 4.12+). **Enabled by default** during socket construction —
+    /// disabling is rarely useful in practice. Exposed for parity
+    /// with neli's API and for callers that explicitly want to
+    /// suppress the trailing TLVs in error responses.
+    ///
+    /// Silently a no-op on pre-4.12 kernels (returns `Ok(())` on
+    /// `ENOPROTOOPT`).
+    ///
+    /// See [`Error::Kernel::ext_ack`] for what these TLVs contain
+    /// once parsed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::{Connection, Route};
+    /// let conn = Connection::<Route>::new()?;
+    /// conn.set_ext_ack(false)?;  // disable; rarely useful
+    /// ```
+    pub fn set_ext_ack(&self, on: bool) -> Result<()> {
+        self.socket.set_ext_ack(on)
+    }
+
     /// Wrap a future with the configured timeout.
     ///
     /// If no timeout is set, the future runs without time limit.

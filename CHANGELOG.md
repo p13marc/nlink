@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`Connection::<P>::enable_strict_checking(on: bool)`** — toggles
+  the `NETLINK_GET_STRICT_CHK` sockopt (kernel 5.0+). When enabled,
+  the kernel validates dump request filters strictly and returns an
+  error if they reference unknown attributes — useful for catching
+  client/kernel-version mismatches early. Off by default. Silently
+  a no-op on pre-5.0 kernels (`ENOPROTOOPT` → `Ok(())`). See
+  Plan 155 §4.2.
+
+- **`Connection::<P>::set_ext_ack(on: bool)`** — toggles the
+  `NETLINK_EXT_ACK` sockopt (kernel 4.12+). Enabled by default
+  during socket construction; exposed for parity with neli's API
+  and for callers wanting to explicitly suppress the trailing
+  TLVs in error responses. Silently a no-op on pre-4.12 kernels.
+  See Plan 155 §4.3.
+
 - **Extended-ack TLV parsing from kernel error responses**. The
   kernel populates `NLMSGERR_ATTR_MSG` (human-readable error
   string) and `NLMSGERR_ATTR_OFFS` (offset into the offending
