@@ -6,6 +6,35 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Extended-ack TLV parsing from kernel error responses**. The
+  kernel populates `NLMSGERR_ATTR_MSG` (human-readable error
+  string) and `NLMSGERR_ATTR_OFFS` (offset into the offending
+  request) when `NETLINK_EXT_ACK` is enabled (on by default in
+  nlink). Previously these TLVs sat unparsed at the bottom of
+  every error response and the user saw `errno = 22` with no
+  context. Now `Error::Kernel` / `Error::KernelWithContext`
+  carry `ext_ack: Option<String>` and `ext_ack_offset:
+  Option<u32>` fields, and the `Display` output stitches the
+  ext-ack message in when present. Example output:
+  `"add_link(veth0): Invalid argument (errno 22): attribute
+  IFLA_MTU rejected: value 0 out of range (at request offset 24)"`.
+  See Plan 155 §4.1.
+
+  New surface:
+  - `Error::Kernel { errno, message, ext_ack, ext_ack_offset }`
+  - `Error::KernelWithContext { operation, errno, message, ext_ack, ext_ack_offset }`
+  - Both variants now `#[non_exhaustive]` so future field
+    additions are non-breaking
+  - `Error::from_errno_ext_ack(errno, ext_ack, ext_ack_offset)`
+    constructor (plus context variant)
+  - `nlink::netlink::message::ParsedExtAck { message, offset }`
+  - `nlink::netlink::message::NlMsgError::parsed_ext_ack(&self, payload)
+    -> ParsedExtAck`
+  - `nlink::netlink::message::NlMsgError::into_error(&self, payload)
+    -> Error` — convenience for the "early return on non-ACK" pattern
+  - `nlink::netlink::message::nlmsgerr_attr::{MSG, OFFS, COOKIE,
+    POLICY, MISS_TYPE, MISS_NEST}` constants
+
 - **`Error::NamespaceRestoreFailed { source }`** variant +
   `Error::is_namespace_restore_failed()` predicate. Surfaces the
   previously-swallowed `setns()` restore failure in

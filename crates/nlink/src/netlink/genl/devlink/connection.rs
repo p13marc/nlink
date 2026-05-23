@@ -469,7 +469,7 @@ impl Connection<Devlink> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                     done = true;
                     continue;
@@ -528,7 +528,7 @@ impl Connection<Devlink> {
                     if err.is_ack() {
                         return Ok(());
                     }
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
 
                 if header.is_done() {
@@ -556,7 +556,7 @@ impl Connection<Devlink> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                     continue;
                 }
@@ -954,7 +954,7 @@ async fn resolve_devlink_family(socket: &NetlinkSocket) -> Result<(u16, Option<u
                         name: DEVLINK_GENL_NAME.to_string(),
                     });
                 }
-                return Err(Error::from_errno(err.error));
+                return Err(err.into_error(payload));
             }
             continue;
         }

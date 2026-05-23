@@ -475,7 +475,7 @@ impl Connection<Nftables> {
                     if err.is_ack() {
                         return Ok(());
                     }
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
 
                 if header.is_done() {
@@ -529,7 +529,7 @@ impl Connection<Nftables> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                     continue;
                 }

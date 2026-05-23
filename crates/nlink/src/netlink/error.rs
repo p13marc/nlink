@@ -21,23 +21,47 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 
     /// Kernel returned an error code.
-    #[error("kernel error: {message} (errno {errno})")]
+    ///
+    /// Carries optional extended-ack TLVs ([`ext_ack`](Self::Kernel::ext_ack),
+    /// [`ext_ack_offset`](Self::Kernel::ext_ack_offset)) populated by
+    /// the kernel when `NETLINK_EXT_ACK` is enabled (on by default in
+    /// nlink — see [`Self::is_namespace_restore_failed`] note).
+    #[error("{}", format_kernel(message, *errno, ext_ack.as_deref(), *ext_ack_offset))]
+    #[non_exhaustive]
     Kernel {
         /// The errno value from the kernel.
         errno: i32,
-        /// Human-readable error message.
+        /// Human-readable error message (from `strerror(errno)`).
         message: String,
+        /// Kernel-supplied human-readable detail string from the
+        /// `NLMSGERR_ATTR_MSG` TLV, when present. Often dramatically
+        /// more actionable than the raw errno — for example,
+        /// `errno = 22 (EINVAL)` + `ext_ack = "attribute IFLA_MTU
+        /// rejected: value 0 out of range"`.
+        ext_ack: Option<String>,
+        /// Byte offset into the original request where the kernel
+        /// detected the problem, from `NLMSGERR_ATTR_OFFS`.
+        ext_ack_offset: Option<u32>,
     },
 
     /// Kernel error with operation context.
-    #[error("{operation}: {message} (errno {errno})")]
+    ///
+    /// Like [`Self::Kernel`] but carries the calling-site operation
+    /// label (`"add_link(veth0, kind=veth)"` etc.) for readable
+    /// `tracing` events.
+    #[error("{}", format_kernel_ctx(operation, message, *errno, ext_ack.as_deref(), *ext_ack_offset))]
+    #[non_exhaustive]
     KernelWithContext {
         /// The operation that failed.
         operation: String,
         /// The errno value from the kernel.
         errno: i32,
-        /// Human-readable error message.
+        /// Human-readable error message (from `strerror(errno)`).
         message: String,
+        /// See [`Self::Kernel::ext_ack`].
+        ext_ack: Option<String>,
+        /// See [`Self::Kernel::ext_ack_offset`].
+        ext_ack_offset: Option<u32>,
     },
 
     /// Message was truncated.
@@ -202,23 +226,96 @@ fn format_validation_errors(errors: &[ValidationErrorInfo]) -> String {
         .join("; ")
 }
 
+/// Format the Display output for [`Error::Kernel`], stitching the
+/// ext-ack message in when present. Pulled into a free fn so the
+/// `#[error(...)]` attribute stays readable.
+fn format_kernel(
+    message: &str,
+    errno: i32,
+    ext_ack: Option<&str>,
+    ext_ack_offset: Option<u32>,
+) -> String {
+    let mut out = format!("kernel error: {message} (errno {errno})");
+    if let Some(msg) = ext_ack {
+        out.push_str(": ");
+        out.push_str(msg);
+    }
+    if let Some(off) = ext_ack_offset {
+        out.push_str(&format!(" (at request offset {off})"));
+    }
+    out
+}
+
+/// Format the Display output for [`Error::KernelWithContext`].
+fn format_kernel_ctx(
+    operation: &str,
+    message: &str,
+    errno: i32,
+    ext_ack: Option<&str>,
+    ext_ack_offset: Option<u32>,
+) -> String {
+    let mut out = format!("{operation}: {message} (errno {errno})");
+    if let Some(msg) = ext_ack {
+        out.push_str(": ");
+        out.push_str(msg);
+    }
+    if let Some(off) = ext_ack_offset {
+        out.push_str(&format!(" (at request offset {off})"));
+    }
+    out
+}
+
 impl Error {
-    /// Create a kernel error from an errno value.
+    /// Create a kernel error from an errno value (no ext-ack info).
+    ///
+    /// Prefer [`Self::from_errno_ext_ack`] when the kernel response
+    /// carries `NLMSGERR_ATTR_MSG` / `NLMSGERR_ATTR_OFFS` TLVs —
+    /// those become user-visible diagnostics far more actionable than
+    /// the raw errno.
     pub fn from_errno(errno: i32) -> Self {
+        Self::from_errno_ext_ack(errno, None, None)
+    }
+
+    /// Create a kernel error from an errno value plus the parsed
+    /// extended-ack TLVs from the same error response.
+    ///
+    /// Typical use: after `NlMsgError::from_bytes`, call
+    /// `err.parsed_ext_ack(payload)` to get a [`crate::netlink::message::ParsedExtAck`],
+    /// then forward the fields here.
+    pub fn from_errno_ext_ack(
+        errno: i32,
+        ext_ack: Option<String>,
+        ext_ack_offset: Option<u32>,
+    ) -> Self {
         let message = io::Error::from_raw_os_error(-errno).to_string();
         Self::Kernel {
             errno: -errno,
             message,
+            ext_ack,
+            ext_ack_offset,
         }
     }
 
-    /// Create a kernel error with operation context.
+    /// Create a kernel error with operation context (no ext-ack info).
     pub fn from_errno_with_context(errno: i32, operation: impl Into<String>) -> Self {
+        Self::from_errno_with_context_ext_ack(errno, operation, None, None)
+    }
+
+    /// Create a kernel error with operation context plus the parsed
+    /// extended-ack TLVs.
+    pub fn from_errno_with_context_ext_ack(
+        errno: i32,
+        operation: impl Into<String>,
+        ext_ack: Option<String>,
+        ext_ack_offset: Option<u32>,
+    ) -> Self {
         let message = io::Error::from_raw_os_error(-errno).to_string();
         Self::KernelWithContext {
             operation: operation.into(),
             errno: -errno,
             message,
+            ext_ack,
+            ext_ack_offset,
         }
     }
 
@@ -227,10 +324,17 @@ impl Error {
     /// Wraps kernel errors with operation context. Other errors are returned unchanged.
     pub fn with_context(self, operation: impl Into<String>) -> Self {
         match self {
-            Self::Kernel { errno, message } => Self::KernelWithContext {
+            Self::Kernel {
+                errno,
+                message,
+                ext_ack,
+                ext_ack_offset,
+            } => Self::KernelWithContext {
                 operation: operation.into(),
                 errno,
                 message,
+                ext_ack,
+                ext_ack_offset,
             },
             other => other,
         }

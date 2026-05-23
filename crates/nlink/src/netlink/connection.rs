@@ -315,7 +315,7 @@ impl<P: ProtocolState> Connection<P> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                 }
 
@@ -355,7 +355,7 @@ impl<P: ProtocolState> Connection<P> {
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
                 if !err.is_ack() {
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
             }
         }
@@ -375,7 +375,7 @@ impl<P: ProtocolState> Connection<P> {
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
                 if !err.is_ack() {
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
                 return Ok(());
             }
@@ -2003,7 +2003,7 @@ impl Connection<Generic> {
                             name: name.to_string(),
                         });
                     }
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
                 continue;
             }
@@ -2180,7 +2180,7 @@ impl Connection<Generic> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                     continue;
                 }
@@ -2214,7 +2214,7 @@ impl Connection<Generic> {
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
                 if !err.is_ack() {
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
             }
         }

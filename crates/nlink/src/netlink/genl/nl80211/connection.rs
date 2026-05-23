@@ -612,7 +612,7 @@ impl Connection<Nl80211> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                     continue;
                 }
@@ -650,7 +650,7 @@ impl Connection<Nl80211> {
                     if err.is_ack() {
                         return Ok(());
                     }
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
 
                 if header.is_done() {
@@ -1116,7 +1116,7 @@ async fn resolve_nl80211_family(socket: &NetlinkSocket) -> Result<ResolvedNl8021
                         name: NL80211_GENL_NAME.to_string(),
                     });
                 }
-                return Err(Error::from_errno(err.error));
+                return Err(err.into_error(payload));
             }
             continue;
         }

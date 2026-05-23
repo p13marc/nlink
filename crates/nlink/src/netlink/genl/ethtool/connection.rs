@@ -1201,7 +1201,7 @@ impl Connection<Ethtool> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                     continue;
                 }
@@ -1275,7 +1275,7 @@ impl Connection<Ethtool> {
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
                 if !err.is_ack() {
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
             }
         }
@@ -1358,7 +1358,7 @@ async fn resolve_ethtool_family(socket: &NetlinkSocket) -> Result<(u16, Option<u
                         name: ETHTOOL_GENL_NAME.to_string(),
                     });
                 }
-                return Err(Error::from_errno(err.error));
+                return Err(err.into_error(payload));
             }
             continue;
         }
