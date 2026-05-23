@@ -252,6 +252,54 @@ The `nlink::lab` module (feature `lab`) provides `LabNamespace`
 and `with_namespace` for integration tests + local CLI demos.
 Drop deletes the namespace; failures `tracing::warn!`.
 
+### Namespace-safe APIs
+
+nlink provides `*_by_index` variants alongside `*_by_name` for
+every resource lookup. The `_by_index` variants take a kernel
+ifindex directly, so they're safe to call from any process mount
+namespace — the index is always relative to the connection's
+netns. The `_by_name` variants read `/sys/class/net/` from the
+calling process's mount namespace, which is convenient for simple
+cases but surprises inside foreign netns. **For namespace-aware
+code (CNI plugins, multi-tenant managers, integration-test
+harnesses that touch foreign netns), prefer the `_by_index`
+variants — or pre-resolve names once via
+`conn.get_link_by_name(...)` and pass the index to subsequent
+calls.**
+
+This is a deliberate design choice that distinguishes nlink from
+`neli` and `vishvananda/netlink`, both of which leave namespace
+handling to the caller — a documented footgun in
+[Cilium issue #40280](https://github.com/cilium/cilium/issues/40280).
+nlink's typed `InterfaceRef::Index(u32)` plus the per-method
+`_by_index` variants make namespace-correct code natural to write.
+
+If you want compile-time enforcement instead of "prefer", use
+the `Index(_)` variant of `InterfaceRef` (or pass a `u32`
+ifindex directly to methods that accept it) — the `_by_name`
+methods become a deliberate convenience choice rather than a
+default.
+
+### Connection diagnostics + sockopts
+
+Two `Connection<P>` methods control kernel-side diagnostic
+surfaces; both are silently no-ops on kernels that don't recognize
+the underlying sockopt:
+
+- `conn.enable_strict_checking(true)?` —
+  `NETLINK_GET_STRICT_CHK` (kernel 5.0+). Validates dump filters
+  against the running kernel's attribute set; surfaces
+  client/kernel-version mismatches as errors instead of silent
+  misbehavior. Off by default; opt in when developing against a
+  specific kernel.
+- `conn.set_ext_ack(true)?` — `NETLINK_EXT_ACK` (kernel 4.12+).
+  **On by default** — disabling is rarely useful. When on (and
+  the kernel cooperates), error responses carry human-readable
+  TLVs that nlink parses and stitches into `Error::Kernel::Display`
+  output. Example: `errno = 22 (EINVAL)` becomes
+  `"attribute IFLA_MTU rejected: value 0 out of range (at request
+  offset 24)"`. See `Error::Kernel::ext_ack`.
+
 ## Errors
 
 All public methods return `nlink::Result<T>`. The error type is

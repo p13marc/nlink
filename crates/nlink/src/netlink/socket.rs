@@ -223,11 +223,11 @@ impl NetlinkSocket {
     }
 
     /// Toggle extended-ack reception (`NETLINK_EXT_ACK`, kernel
-    /// 4.12+). Enabled by default during socket construction
-    /// ([`Self::create_socket`]); rarely useful to disable. Exposed
-    /// for parity with neli and for callers that want to suppress
-    /// the trailing TLVs in error responses (e.g. for tighter
-    /// timing-sensitive measurements).
+    /// 4.12+). Enabled by default during socket construction;
+    /// rarely useful to disable. Exposed for parity with neli and
+    /// for callers that want to suppress the trailing TLVs in
+    /// error responses (e.g. for tighter timing-sensitive
+    /// measurements).
     ///
     /// Returns `Ok(())` on pre-4.12 kernels where the sockopt is
     /// not supported (`ENOPROTOOPT`) — graceful degradation.

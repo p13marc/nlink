@@ -77,6 +77,39 @@
 //! let genl: Connection<Generic> = namespace::connection_for("myns")?;
 //! ```
 //!
+//! ## Namespace safety — `_by_index` vs `_by_name`
+//!
+//! Every resource lookup that takes an interface comes in two
+//! flavors: `*_by_index(ifindex: u32)` and `*_by_name(name: &str)`.
+//! The `_by_index` form is **always** safe to call from any process
+//! mount namespace — the kernel ifindex is relative to the
+//! connection's netns, no userspace resolution needed. The
+//! `_by_name` form reads `/sys/class/net/` from the **calling
+//! process's mount namespace**, which is convenient for simple
+//! cases but surprises inside foreign netns (CNI plugins,
+//! multi-tenant managers, integration-test harnesses).
+//!
+//! For namespace-aware code, the canonical pattern is:
+//!
+//! ```ignore
+//! use nlink::{Connection, Route};
+//! let conn = Connection::<Route>::new()?;
+//! // One name resolution at startup, then ifindex everywhere:
+//! let eth0_idx = conn.get_link_by_name("eth0").await?
+//!     .ok_or(nlink::Error::InterfaceNotFound { name: "eth0".into() })?
+//!     .ifindex();
+//! conn.set_link_mtu_by_index(eth0_idx, 9000).await?;
+//! ```
+//!
+//! This is a deliberate design choice. `neli` and
+//! `vishvananda/netlink` both leave namespace handling to the
+//! caller — a documented footgun in
+//! [Cilium issue #40280](https://github.com/cilium/cilium/issues/40280).
+//! nlink's typed `InterfaceRef::Index(u32)` plus the per-method
+//! `_by_index` variants make namespace-correct code natural to
+//! write, while `_by_name` stays available as the deliberate
+//! convenience choice.
+//!
 //! # Event Monitoring
 //!
 //! Use `Connection::subscribe()` to select event types, then `events()` to get a stream:

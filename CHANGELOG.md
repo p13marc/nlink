@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Namespace-safety doc story** — added a "Namespace safety —
+  `_by_index` vs `_by_name`" section to `lib.rs`'s rustdoc landing
+  page and to `CLAUDE.md` ("Namespace-safe APIs" subsection of
+  "Connections & namespaces"). Documents the existing `_by_index`
+  design as a deliberate distinguishing-feature choice vs neli +
+  vishvananda/netlink (which both leave namespace handling to the
+  caller — the documented Cilium-issue-#40280 footgun). Also added
+  a "Connection diagnostics + sockopts" subsection covering the new
+  `enable_strict_checking` + `set_ext_ack` methods. See Plan 155 §4.4.
+
 - **`Connection::<P>::enable_strict_checking(on: bool)`** — toggles
   the `NETLINK_GET_STRICT_CHK` sockopt (kernel 5.0+). When enabled,
   the kernel validates dump request filters strictly and returns an
