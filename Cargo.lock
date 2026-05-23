@@ -412,6 +412,7 @@ dependencies = [
  "inotify",
  "libc",
  "netlink-sys",
+ "nlink-macros",
  "serde",
  "serde_json",
  "thiserror",

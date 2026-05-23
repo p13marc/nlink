@@ -155,6 +155,7 @@
 //! ```
 
 // Core modules (always available)
+pub mod macros;
 pub mod netlink;
 pub mod prelude;
 pub mod util;

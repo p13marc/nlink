@@ -6,6 +6,34 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`nlink::macros` module** — substrate for the proc-macro
+  derives (Plan 154 Phase 3a). nlink now depends on `nlink-macros`;
+  downstream code writes `use nlink::macros::*;` to pull in the
+  derives + the supporting traits in one shot, no need to depend
+  on `nlink-macros` directly.
+
+  Surface added:
+  - `nlink::macros::GenlCommand` / `GenlAttribute` / `GenlEnum` —
+    the three typed-enum codec derives re-exported from
+    `nlink-macros`.
+  - `nlink::macros::GenlMessage` trait — wire-protocol contract
+    for a GENL message (CMD constant + `to_bytes` + `from_bytes`).
+    Implemented automatically by `#[derive(GenlMessage)]` (Phase 3b);
+    can be hand-implemented today against the `__rt` helpers below.
+  - `nlink::macros::NetlinkAttrs` trait — same shape for nested
+    attribute groups (no CMD, just `write_attrs` / `read_attrs`).
+  - `nlink::macros::__rt` — `#[doc(hidden)]` runtime module the
+    macros emit calls into: `emit_{u8,u16,u32,u64}_attr`,
+    `parse_{u8,u16,u32,u64}_attr`, `emit_str_attr`/`parse_str_attr`,
+    `emit_bytes_attr`/`parse_bytes_attr`, `emit_flag_attr`, and
+    big-endian variants (`*_be_attr`) for nftables-style
+    attributes. Plus an `attr_iter` re-export.
+
+  4 new unit tests cover: a hand-rolled `GenlMessage` impl
+  round-tripping through the runtime helpers, truncated-payload
+  rejection (`u8` / `u32` / `u64`), NUL-termination + lossy-UTF8
+  string parsing, big-endian round-trip.
+
 - **New `nlink-macros` crate** (Plan 154 Phases 1 + 2). Proc-macro
   crate that downstream consumers will use to define new GENL
   families in ~20 lines of declarative code (matching neli's
