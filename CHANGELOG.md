@@ -6,6 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Streaming dump API** — `Connection::<P>::dump_stream<T>(msg_type)
+  -> DumpStream<'_, P, T>` plus four typed wrappers on
+  `Connection<Route>`: `stream_links`, `stream_routes`,
+  `stream_neighbors`, `stream_addresses`. Yields parsed messages
+  one at a time as the kernel returns them, instead of buffering
+  the full response into a `Vec<T>` like the eager `get_*`
+  counterparts. O(1) memory in number of messages — the cliff fix
+  for BGP-scale route tables, container-host link counts,
+  busy-gateway conntrack tables.
+
+  Hand-rolled `Stream` impl (no `async-stream` dep) following the
+  same pattern as the multicast `EventSubscription`. The
+  per-message parse failures keep the stream iterating
+  (kernel sometimes ships partially-parseable frames on long
+  dumps); `NLMSG_ERROR` and socket-level errors terminate after
+  yielding the error. The existing `get_links` docstring gains a
+  scale note pointing at `stream_links`. See Plan 149.
+
 - **`ConnectionPool<P>` + `PooledConnection<'p, P>`** — bounded
   mpsc-channel-backed pool for high-fanout consumers. RAII
   `PooledConnection` derefs to `&Connection<P>`, returns the

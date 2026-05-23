@@ -695,9 +695,67 @@ impl Connection<Route> {
     ///     println!("{}: {}", link.ifindex(), link.name.as_deref().unwrap_or("?"));
     /// }
     /// ```
+    ///
+    /// **Scale note**: this eager variant collects the full kernel
+    /// response into a `Vec<LinkMessage>` before returning. For
+    /// hosts with thousands of interfaces (containers, VM hosts),
+    /// prefer [`Self::stream_links`] — same data, O(1) memory.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_links"))]
     pub async fn get_links(&self) -> Result<Vec<LinkMessage>> {
         self.dump_typed(NlMsgType::RTM_GETLINK).await
+    }
+
+    /// Stream a link dump frame-by-frame.
+    ///
+    /// O(1) memory in the number of links, vs `get_links` which
+    /// buffers the full response. See [`Self::dump_stream`] for
+    /// the full semantics. On hosts with thousands of interfaces
+    /// (containers, VM hosts), this is the cliff-fix.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use tokio_stream::StreamExt;
+    /// let mut s = conn.stream_links().await?;
+    /// while let Some(link) = s.next().await {
+    ///     let link = link?;
+    ///     // process one link with O(1) memory
+    /// }
+    /// ```
+    pub async fn stream_links(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, LinkMessage>> {
+        self.dump_stream::<LinkMessage>(NlMsgType::RTM_GETLINK).await
+    }
+
+    /// Stream a route dump frame-by-frame. See [`Self::stream_links`].
+    pub async fn stream_routes(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, RouteMessage>> {
+        self.dump_stream::<RouteMessage>(NlMsgType::RTM_GETROUTE)
+            .await
+    }
+
+    /// Stream a neighbor-table dump frame-by-frame. See
+    /// [`Self::stream_links`].
+    ///
+    /// Note: the kernel returns both unicast neighbors and the
+    /// bridge FDB entries together when AF_BRIDGE isn't filtered;
+    /// use the typed-config Connection (`stream_fdb` on
+    /// `Connection<Route>` when added in 0.17) for FDB-only.
+    pub async fn stream_neighbors(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, NeighborMessage>> {
+        self.dump_stream::<NeighborMessage>(NlMsgType::RTM_GETNEIGH)
+            .await
+    }
+
+    /// Stream an address dump frame-by-frame. See [`Self::stream_links`].
+    pub async fn stream_addresses(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, AddressMessage>> {
+        self.dump_stream::<AddressMessage>(NlMsgType::RTM_GETADDR)
+            .await
     }
 
     /// Get a network interface by name.
