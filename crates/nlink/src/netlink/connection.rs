@@ -1555,6 +1555,55 @@ impl Connection<Route> {
             .collect())
     }
 
+    /// Stream a qdisc dump frame-by-frame.
+    ///
+    /// O(1) memory in the number of qdiscs, vs `get_qdiscs` which
+    /// buffers the full response. See [`Self::stream_links`] for
+    /// the full semantics. Right answer on hosts with many TC-heavy
+    /// interfaces (BGP peers per-route TC, telecom DPDK fanout,
+    /// per-pod CNI plugins).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use tokio_stream::StreamExt;
+    /// let mut s = conn.stream_qdiscs().await?;
+    /// while let Some(q) = s.next().await {
+    ///     let q = q?;
+    ///     // process one qdisc with O(1) memory
+    /// }
+    /// ```
+    pub async fn stream_qdiscs(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
+        self.dump_stream::<TcMessage>(NlMsgType::RTM_GETQDISC).await
+    }
+
+    /// Stream a TC class dump frame-by-frame. See
+    /// [`Self::stream_qdiscs`].
+    pub async fn stream_classes(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
+        self.dump_stream::<TcMessage>(NlMsgType::RTM_GETTCLASS)
+            .await
+    }
+
+    /// Stream a TC filter dump frame-by-frame. See
+    /// [`Self::stream_qdiscs`].
+    ///
+    /// Note: the kernel returns filters for **all** interfaces
+    /// (matches the eager `get_filters` semantics). Filter
+    /// client-side via `.filter(|f| f.as_ref().map(|f|
+    /// f.ifindex() == my_index).unwrap_or(true))` if you only
+    /// care about one interface — there's no kernel-side
+    /// per-ifindex `RTM_GETTFILTER` dump filter.
+    pub async fn stream_filters(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
+        self.dump_stream::<TcMessage>(NlMsgType::RTM_GETTFILTER)
+            .await
+    }
+
     /// Get TC filters for a specific interface, filtered by parent handle.
     ///
     /// Equivalent to `get_filters_by_name(...).await?` followed by a

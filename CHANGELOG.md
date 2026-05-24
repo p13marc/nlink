@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **TC streaming dump wrappers** (Plan 149 follow-up):
+  `Connection::<Route>::stream_qdiscs()` / `stream_classes()` /
+  `stream_filters()` return `DumpStream<'_, Route, TcMessage>`
+  for O(1)-memory iteration over kernel TC tables. Same shape as
+  the existing `stream_links` / `stream_routes` /
+  `stream_neighbors` / `stream_addresses`. Right answer on hosts
+  with TC-heavy interfaces (per-pod CNI, per-BGP-peer route
+  shaping, telecom DPDK fanout) where the existing eager
+  `get_qdiscs()` / `get_classes()` / `get_filters()` would
+  materialize tens of MB of intermediate buffers.
+
 - **Nftables multicast events** (Plan 150 §9.2): subscribe to
   `NFNLGRP_NFTABLES` (7) and consume a typed
   `Stream<Item = Result<NftablesEvent>>`. Mirrors the existing
