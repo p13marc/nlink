@@ -363,10 +363,16 @@ recipe rather than re-synthesizing:
   — declare a complete custom GENL family in ~30 lines via
   `nlink-macros` (`#[genl_family]` + `#[derive(GenlMessage)]` +
   `conn.send_typed(req).await?`).
+- [`dpll-monitor`](docs/recipes/dpll-monitor.md) — enumerate
+  clock-synchronization hardware (SyncE / PTP / GNSS) via
+  `Connection<Dpll>`, poll for lock-status transitions, detect
+  holdover acquisition, diagnose lock loss via
+  `DpllLockStatusError`. Telco-RAN / time-sync / SmartNIC
+  control-plane use case (0.16+).
 
 Per-subsystem runnable examples live under
 `crates/nlink/examples/`: `genl/{wireguard,macsec,mptcp,ethtool_*,
-nl80211,devlink}.rs`, `macros/define_taskstats.rs`,
+nl80211,devlink,dpll}.rs`, `macros/define_taskstats.rs`,
 `netfilter/{conntrack,conntrack_events}.rs`,
 `{audit,bridge,config,connector,diagnostics,events,fib_lookup,
 impair,lab,namespace,nftables,ratelimit,route,selinux,sockdiag,
@@ -408,10 +414,22 @@ tracker. Headlines that landed so far:
   `sendmmsg` batching wired into both eager dumps + streaming.
 - **Plan 159 — `ConnectionPool<P>`** (🟢): bounded-mpsc-channel-
   backed pool for parallel fanout.
+- **Plan 156 — DPLL family** (🟡): first in-tree dogfood of the
+  macros. Phases 1-4 + 6 (partial) landed —
+  `Connection<Dpll>` with `get/dump/set_*` for devices and pins,
+  all 11 typed enums + nested attribute groups + bitflags
+  newtype, recipe at `docs/recipes/dpll-monitor.md` + runnable
+  example at `examples/genl/dpll.rs`. ~430 lines of declarative
+  Rust for the full family vs ~600+ lines hand-written per the
+  WireGuard / MACsec / Devlink pattern. Phase 5 (multicast
+  monitor) deferred — needs new GENL `CTRL_ATTR_MCAST_GROUPS`
+  resolution infrastructure shared with Devlink / Nl80211 /
+  Ethtool.
 
-Ready to start (no blockers): Plan 156 (DPLL — first in-tree
-dogfood of the macros), Plan 153.3 (`net_shaper` GENL family),
-Plan 152 (aya/Prometheus/OTel showcases).
+Ready to start (no blockers): Plan 153.3 (`net_shaper` GENL
+family), Plan 152 (aya/Prometheus/OTel showcases — best
+sequenced after Plan 156 Phase 5 closes so the showcase can
+demonstrate event-driven workloads).
 
 Per-release upgrade guides:
 [`docs/migration_guide/`](docs/migration_guide/README.md) — write
