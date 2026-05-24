@@ -6,6 +6,42 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **XFRM streaming dump** (Plan 149 follow-up).
+  `Connection<Xfrm>::stream_sas` and `stream_sps` return
+  `DumpStream<'_, Xfrm, SecurityAssociation>` /
+  `DumpStream<'_, Xfrm, SecurityPolicy>` — O(1)-memory iteration
+  preferred over the eager `get_security_associations` /
+  `get_security_policies` on hosts running scale-out IPsec
+  (cloud gateways, telco aggregation routers with thousands of
+  active SAs).
+
+  ```rust
+  use nlink::netlink::{Connection, Xfrm};
+  use tokio_stream::StreamExt;
+
+  let conn = Connection::<Xfrm>::new()?;
+  let mut stream = conn.stream_sas().await?;
+  while let Some(sa) = stream.next().await {
+      let sa = sa?;
+      tracing::info!(spi = %format!("{:x}", sa.spi), dst = ?sa.dst_addr, "SA");
+  }
+  ```
+
+  Internally: refactored the existing `parse_sa_msg` /
+  `parse_policy_msg` into payload-only `parse_sa_payload` /
+  `parse_sp_payload` helpers (the nlmsghdr-stripped form
+  `DumpStream` needs), then implemented `FromNetlink` for
+  `SecurityAssociation` + `SecurityPolicy` against those
+  helpers. `write_dump_header` pushes the kernel's required
+  `xfrm_usersa_info` / `xfrm_userpolicy_info` body prefix
+  zeroed = "match all." No public API churn — the existing
+  eager methods keep working unchanged. 6 new unit tests
+  (937 lib tests total).
+
+  Conntrack + nft-rules streaming still deferred — they need
+  the dump-stream API to learn how to pass a body prefix
+  parameterized by caller (conntrack needs nfgenmsg.family).
+
 - **`net_shaper` Generic Netlink family** (Plan 153 §4.3 — closes
   Plan 153). TX hardware shaping (per-NIC, per-queue, or
   intermediate-node bandwidth/burst/priority/weight) via the
