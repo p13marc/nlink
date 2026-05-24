@@ -60,6 +60,10 @@ inotify = { version = "0.11", default-features = false, features = ["stream"], o
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Bitflags newtype generation — used by the GenlMessage derive's
+# bitflags-field-support unit tests. Not a runtime nlink dep;
+# downstream consumers bring their own bitflags version.
+bitflags = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true

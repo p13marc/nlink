@@ -683,6 +683,63 @@ mod tests {
         modes_supported: Vec<TestMode>,
     }
 
+    // ---- Bitflags-newtype field tests (Phase 8.4) --------------
+
+    bitflags::bitflags! {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        struct TestCapabilities: u32 {
+            const READ      = 0b0000_0001;
+            const WRITE     = 0b0000_0010;
+            const EXECUTE   = 0b0000_0100;
+        }
+    }
+
+    #[derive(GenlMessageDerive, Debug, Clone, PartialEq, Eq)]
+    #[genl_message(cmd = 15u8)]
+    struct DerivedBitflagsField {
+        #[genl_attr(1u16)]
+        id: u32,
+        #[genl_attr(2u16, bitflags = "u32")]
+        caps: TestCapabilities,
+    }
+
+    #[test]
+    fn derived_bitflags_field_round_trips_combined_bits() {
+        let original = DerivedBitflagsField {
+            id: 11,
+            caps: TestCapabilities::READ | TestCapabilities::EXECUTE,
+        };
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        original.to_bytes(&mut builder).expect("emit");
+        let parsed = DerivedBitflagsField::from_bytes(&builder.as_bytes()[body_start..])
+            .expect("parse");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn derived_bitflags_field_missing_attr_yields_empty_flags() {
+        // No attrs at all → caps defaults to empty (from_bits_retain(0)).
+        let parsed = DerivedBitflagsField::from_bytes(&[]).expect("parse");
+        assert_eq!(parsed.id, 0);
+        assert_eq!(parsed.caps, TestCapabilities::empty());
+    }
+
+    #[test]
+    fn derived_bitflags_field_preserves_unknown_bits() {
+        // Synthesize a frame where the kernel set a bit this binary
+        // doesn't know about (0x80). from_bits_retain must keep it
+        // so the next emit round-trips back unchanged.
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        __rt::emit_u32_attr(&mut builder, 2, 0x80 | TestCapabilities::READ.bits());
+        let parsed = DerivedBitflagsField::from_bytes(&builder.as_bytes()[body_start..])
+            .expect("parse");
+        // The unknown 0x80 bit and the READ bit are both present.
+        assert_eq!(parsed.caps.bits(), 0x80 | TestCapabilities::READ.bits());
+        assert!(parsed.caps.contains(TestCapabilities::READ));
+    }
+
     #[test]
     fn derived_repeated_enum_round_trips_multiple_elements() {
         // Realistic shape: kernel emits the same attribute type

@@ -6,6 +6,46 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`bitflags`-newtype field support in `#[derive(GenlMessage)]`**
+  (Plan 154 Phase 8.4). Bitmask fields (DPLL `pin_capabilities`,
+  devlink port flags, etc.) now declare cleanly via the existing
+  `bitflags::bitflags!` macro:
+
+  ```rust
+  bitflags::bitflags! {
+      pub struct DpllPinCapabilities: u32 {
+          const DIRECTION_CAN_CHANGE = 1;
+          const PRIORITY_CAN_CHANGE  = 2;
+          const STATE_CAN_CHANGE     = 4;
+      }
+  }
+
+  #[derive(GenlMessage, Debug, Clone)]
+  #[genl_message(cmd = DpllCmd::PinGet)]
+  pub struct DpllPinReply {
+      #[genl_attr(DpllPinAttr::Id)] pub id: u32,
+      #[genl_attr(DpllPinAttr::Capabilities, bitflags = "u32")]
+      pub caps: DpllPinCapabilities,
+  }
+  ```
+
+  Emit writes `.bits()` directly through `emit_uN_attr`. Parse
+  uses `Type::from_bits_retain(raw)` so unknown kernel-side bits
+  are preserved verbatim — a newer kernel emitting flags this
+  binary doesn't recognize round-trips through `parse → emit`
+  unchanged instead of silently dropping bits.
+
+  No `Option<>` wrapper needed (unlike `Option<MyEnum>`): a
+  bitflags newtype is self-empty-able via `from_bits_retain(0)`,
+  so missing-attribute defaults to `Type::empty()`. Allowed both
+  at top-level and inside `Option<>` if the caller wants to
+  distinguish "attr absent" from "attr present with no bits set".
+
+  Added `bitflags = "2"` as a workspace dep + nlink dev-dep
+  (downstream consumers bring their own version). 3 new tests:
+  combined-bits round-trip, missing-attr → empty flags,
+  unknown-bit preservation.
+
 - **`Vec<MyEnum>` repeated-attribute support in
   `#[derive(GenlMessage)]`** (Plan 154 Phase 8.3). When the kernel
   emits the same attribute type multiple times for list-valued

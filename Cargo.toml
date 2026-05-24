@@ -63,6 +63,12 @@ zerocopy = { version = "0.8", features = ["derive"] }
 # Stream utilities
 tokio-stream = "0.1"
 
+# Bitflags newtype generation (used directly by nftables.rs's
+# FlowtableFlag and by the Plan 154 macro-stack tests; downstream
+# crates that define their own GENL families with bitmask fields
+# bring their own dep).
+bitflags = "2"
+
 # Proc macros
 proc-macro2 = "1"
 quote = "1"

@@ -205,19 +205,44 @@ enum WireKind {
         type_path: Box<Type>,
         repr: ReprWidth,
     },
+    /// A bitflags-style newtype — the type exposes
+    /// `.bits() -> Repr` and `Type::from_bits_retain(Repr) -> Self`
+    /// (the standard `bitflags::Flags` shape from the `bitflags`
+    /// crate). Emit writes `.bits()`; parse round-trips through
+    /// `from_bits_retain` so unknown kernel-side bits are
+    /// preserved verbatim instead of being dropped.
+    Bitflags {
+        type_path: Box<Type>,
+        repr: ReprWidth,
+    },
     Optional(Box<WireKind>),
 }
 
-/// Parsed contents of `#[genl_attr(EXPR [, repr = "u8"|"u16"|"u32"])]`.
+/// Parsed contents of the field annotation —
+/// `#[genl_attr(EXPR, repr = "...")]` for GenlEnum-typed fields, or
+/// `#[genl_attr(EXPR, bitflags = "...")]` for bitflags newtypes.
+/// `repr` and `bitflags` are mutually exclusive on a single field;
+/// supplying both is a compile error.
 struct GenlAttrArgs {
     attr_expr: Expr,
-    repr: Option<ReprWidth>,
+    /// `Some(width, kind)` if the field carries a width-marker
+    /// hint. `kind` distinguishes `repr` (GenlEnum) from
+    /// `bitflags` (bitflags newtype).
+    width: Option<(ReprWidth, WidthKind)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WidthKind {
+    /// `repr = "..."` — GenlEnum-typed field.
+    Enum,
+    /// `bitflags = "..."` — bitflags-newtype field.
+    Bitflags,
 }
 
 impl Parse for GenlAttrArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let attr_expr: Expr = input.parse()?;
-        let mut repr: Option<ReprWidth> = None;
+        let mut width: Option<(ReprWidth, WidthKind)> = None;
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
             if input.is_empty() {
@@ -225,23 +250,39 @@ impl Parse for GenlAttrArgs {
             }
             let ident: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
-            match ident.to_string().as_str() {
-                "repr" => {
+            let key = ident.to_string();
+            match key.as_str() {
+                "repr" | "bitflags" => {
+                    if width.is_some() {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "#[genl_attr] accepts at most one of `repr` / `bitflags` \
+                             (they're mutually exclusive — pick the field-kind \
+                             that matches your type)",
+                        ));
+                    }
                     let lit: LitStr = input.parse()?;
-                    repr = Some(ReprWidth::parse(&lit)?);
+                    let w = ReprWidth::parse(&lit)?;
+                    let kind = if key == "repr" {
+                        WidthKind::Enum
+                    } else {
+                        WidthKind::Bitflags
+                    };
+                    width = Some((w, kind));
                 }
                 other => {
                     return Err(syn::Error::new(
                         ident.span(),
                         format!(
                             "unknown #[genl_attr] key `{other}`; expected \
-                             `repr = \"u8\"|\"u16\"|\"u32\"`"
+                             `repr = \"u8\"|\"u16\"|\"u32\"` (GenlEnum-typed) \
+                             or `bitflags = \"u8\"|\"u16\"|\"u32\"` (bitflags newtype)"
                         ),
                     ))
                 }
             }
         }
-        Ok(Self { attr_expr, repr })
+        Ok(Self { attr_expr, width })
     }
 }
 
@@ -261,6 +302,7 @@ impl WireKind {
             Self::RepeatedEnum { type_path, .. } => {
                 quote! { ::std::vec::Vec<#type_path> }
             }
+            Self::Bitflags { type_path, .. } => quote! { #type_path },
             Self::Optional(inner) => {
                 let inner_ty = inner.type_token();
                 quote! { ::core::option::Option<#inner_ty> }
@@ -284,6 +326,12 @@ impl WireKind {
                 quote! { unreachable!("bare-Enum WireKind reached default_expr") }
             }
             Self::RepeatedEnum { .. } => quote! { ::std::vec::Vec::new() },
+            Self::Bitflags { type_path, repr } => {
+                // Default = empty / all-zero bits via from_bits_retain(0).
+                // Sidesteps requiring `Default` on the user's type.
+                let repr_ident = repr.ident();
+                quote! { #type_path::from_bits_retain(0 as #repr_ident) }
+            }
             Self::Optional(_) => quote! { ::core::option::Option::None },
         }
     }
@@ -298,9 +346,12 @@ impl WireKind {
             Self::I32 => quote! { ::nlink::macros::__rt::parse_i32_attr },
             Self::Str => quote! { ::nlink::macros::__rt::parse_str_attr },
             Self::Bytes => quote! { ::nlink::macros::__rt::parse_bytes_attr },
-            Self::Enum { repr, .. } | Self::RepeatedEnum { repr, .. } => {
+            Self::Enum { repr, .. }
+            | Self::RepeatedEnum { repr, .. }
+            | Self::Bitflags { repr, .. } => {
                 // Use the repr's underlying parse helper. The
-                // outer parse_arm handles the TryFrom conversion.
+                // outer parse_arm handles the TryFrom / from_bits
+                // conversion.
                 let ident = repr.ident();
                 let fn_ident = proc_macro2::Ident::new(
                     &format!("parse_{ident}_attr"),
@@ -366,6 +417,22 @@ impl WireKind {
                 // never called for this variant. Defensive arm in
                 // case a future refactor routes it here.
                 quote! { compile_error!("internal: RepeatedEnum in emit_call_inner") }
+            }
+            Self::Bitflags { repr, .. } => {
+                // Write field.bits() directly — bitflags' `.bits()`
+                // returns the underlying repr type.
+                let repr_ident = repr.ident();
+                let fn_ident = proc_macro2::Ident::new(
+                    &format!("emit_{repr_ident}_attr"),
+                    proc_macro2::Span::call_site(),
+                );
+                quote! {
+                    ::nlink::macros::__rt::#fn_ident(
+                        #builder,
+                        (#attr_expr) as u16,
+                        #value_expr.bits(),
+                    );
+                }
             }
             Self::Optional(_) => {
                 // Optional should never call emit_call_inner directly —
@@ -486,6 +553,16 @@ impl FieldSpec {
                     #ident.push(__decoded);
                 }
             },
+            WireKind::Bitflags { type_path, .. } => quote! {
+                __ty if __ty == (#attr) as u16 => {
+                    let __raw = #parse_fn(__attr_payload)?;
+                    // from_bits_retain preserves unknown bits, so a
+                    // newer kernel emitting flags this binary doesn't
+                    // recognize round-trips correctly instead of
+                    // silently dropping bits.
+                    #ident = #type_path::from_bits_retain(__raw);
+                }
+            },
             _ => quote! {
                 __ty if __ty == (#attr) as u16 => {
                     #ident = #parse_fn(__attr_payload)?;
@@ -511,10 +588,10 @@ fn parse_field(field: &Field) -> syn::Result<FieldSpec> {
         )
     })?;
 
-    // #[genl_attr(EXPR [, repr = "u8"|"u16"|"u32"])]
-    let GenlAttrArgs { attr_expr, repr } = ml.parse_args()?;
+    // #[genl_attr(EXPR [, repr = "..."] [, bitflags = "..."])]
+    let GenlAttrArgs { attr_expr, width } = ml.parse_args()?;
 
-    let kind = classify_type(&field.ty, repr)?;
+    let kind = classify_type(&field.ty, width)?;
 
     Ok(FieldSpec {
         ident,
@@ -523,13 +600,16 @@ fn parse_field(field: &Field) -> syn::Result<FieldSpec> {
     })
 }
 
-fn classify_type(ty: &Type, repr_hint: Option<ReprWidth>) -> syn::Result<WireKind> {
-    classify_type_inner(ty, repr_hint, /* inside_option = */ false)
+fn classify_type(
+    ty: &Type,
+    width_hint: Option<(ReprWidth, WidthKind)>,
+) -> syn::Result<WireKind> {
+    classify_type_inner(ty, width_hint, /* inside_option = */ false)
 }
 
 fn classify_type_inner(
     ty: &Type,
-    repr_hint: Option<ReprWidth>,
+    width_hint: Option<(ReprWidth, WidthKind)>,
     inside_option: bool,
 ) -> syn::Result<WireKind> {
     let Type::Path(p) = ty else {
@@ -572,7 +652,7 @@ fn classify_type_inner(
             if inner_last.ident == "u8" {
                 return Ok(WireKind::Bytes);
             }
-            if let Some(repr) = repr_hint {
+            if let Some((repr, WidthKind::Enum)) = width_hint {
                 return Ok(WireKind::RepeatedEnum {
                     type_path: Box::new(inner.clone()),
                     repr,
@@ -584,14 +664,15 @@ fn classify_type_inner(
                     "Vec<{}> needs a `repr = \"u8\"|\"u16\"|\"u32\"` hint on its \
                      `#[genl_attr(...)]` annotation — `Vec<MyGenlEnum>` is the \
                      repeated-attribute shape; bare Vec<{}> without a hint is \
-                     ambiguous (could mean Vec<u8> bytes, but it's not u8).",
+                     ambiguous (could mean Vec<u8> bytes, but it's not u8). \
+                     Repeated-bitflags fields aren't currently supported.",
                     inner_last.ident, inner_last.ident
                 ),
             ))
         }
         "Option" => {
             let inner = single_type_arg(last, ty)?;
-            let inner_kind = classify_type_inner(inner, repr_hint, /* inside_option = */ true)?;
+            let inner_kind = classify_type_inner(inner, width_hint, /* inside_option = */ true)?;
             if matches!(inner_kind, WireKind::Optional(_)) {
                 return Err(syn::Error::new_spanned(
                     ty,
@@ -601,49 +682,59 @@ fn classify_type_inner(
             Ok(WireKind::Optional(Box::new(inner_kind)))
         }
         _ => {
-            // Unknown type: if the field annotation supplied a
-            // `repr = "..."` hint, treat it as a GenlEnum-typed
-            // field (uses From<MyEnum> for repr on emit + TryFrom
-            // on parse). Must be inside Option<MyEnum> because
-            // most kernel UAPI enums don't derive Default
-            // (1-based discriminants — there's no sensible "zero"
-            // variant). Without a hint, error pointing the user
-            // at how to fix it.
-            if let Some(repr) = repr_hint {
-                if !inside_option {
-                    return Err(syn::Error::new_spanned(
-                        ty,
-                        format!(
-                            "GenlEnum-typed field `{name}` must be wrapped in \
-                             `Option<{name}>` for #[derive(GenlMessage)] (kernel \
-                             UAPI enums typically don't have a sensible Default; \
-                             missing-attr semantics map cleanly to None). Change \
-                             the field to `Option<{name}>` and re-derive. Wire \
-                             repr stays `repr = \"{}\"`.",
-                            match repr {
-                                ReprWidth::U8 => "u8",
-                                ReprWidth::U16 => "u16",
-                                ReprWidth::U32 => "u32",
-                            }
-                        ),
-                    ));
+            // Unknown type: dispatch on the field's hint kind.
+            //   `repr = "u32"`     → GenlEnum-typed (requires Option<>)
+            //   `bitflags = "u32"` → bitflags newtype (no Option needed —
+            //                        from_bits_retain(0) is the natural
+            //                        empty value)
+            // Without any hint, error pointing the user at how to fix it.
+            match width_hint {
+                Some((repr, WidthKind::Enum)) => {
+                    if !inside_option {
+                        return Err(syn::Error::new_spanned(
+                            ty,
+                            format!(
+                                "GenlEnum-typed field `{name}` must be wrapped in \
+                                 `Option<{name}>` for #[derive(GenlMessage)] (kernel \
+                                 UAPI enums typically don't have a sensible Default; \
+                                 missing-attr semantics map cleanly to None). Change \
+                                 the field to `Option<{name}>` and re-derive. Wire \
+                                 repr stays `repr = \"{}\"`.",
+                                match repr {
+                                    ReprWidth::U8 => "u8",
+                                    ReprWidth::U16 => "u16",
+                                    ReprWidth::U32 => "u32",
+                                }
+                            ),
+                        ));
+                    }
+                    Ok(WireKind::Enum {
+                        type_path: Box::new(ty.clone()),
+                        repr,
+                    })
                 }
-                return Ok(WireKind::Enum {
-                    type_path: Box::new(ty.clone()),
-                    repr,
-                });
+                Some((repr, WidthKind::Bitflags)) => {
+                    // Bitflags newtypes are self-empty-able via
+                    // from_bits_retain(0); no Option<> required.
+                    // Allowed at both top-level and inside Option<>.
+                    Ok(WireKind::Bitflags {
+                        type_path: Box::new(ty.clone()),
+                        repr,
+                    })
+                }
+                None => Err(syn::Error::new_spanned(
+                    ty,
+                    format!(
+                        "unsupported field type `{name}` in #[derive(GenlMessage)]. \
+                         Supported: u8, u16, u32, u64, i32, String, Vec<u8>, Option<T>. \
+                         For `#[derive(GenlEnum)]`-typed fields, wrap in `Option<T>` \
+                         and add `repr = \"u8\"|\"u16\"|\"u32\"`. \
+                         For bitflags newtypes (`.bits()` + `from_bits_retain`), \
+                         add `bitflags = \"u8\"|\"u16\"|\"u32\"`. \
+                         (Nested attribute groups via NetlinkAttrs land in a follow-up phase.)"
+                    ),
+                )),
             }
-            Err(syn::Error::new_spanned(
-                ty,
-                format!(
-                    "unsupported field type `{name}` in #[derive(GenlMessage)]. \
-                     Supported: u8, u16, u32, u64, i32, String, Vec<u8>, Option<T>. \
-                     For `#[derive(GenlEnum)]`-typed fields, wrap in `Option<T>` \
-                     and add a repr hint: \
-                     `#[genl_attr(MyAttr::Foo, repr = \"u32\")]` (or u8/u16). \
-                     (Nested attribute groups via NetlinkAttrs land in a follow-up phase.)"
-                ),
-            ))
         }
     }
 }
