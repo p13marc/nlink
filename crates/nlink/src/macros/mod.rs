@@ -632,6 +632,63 @@ mod tests {
         name: String,
     }
 
+    // ---- GenlEnum-typed field tests (Phase 8.2) ----------------
+
+    use crate::macros::GenlEnum;
+
+    #[derive(GenlEnum, Debug, Clone, Copy, PartialEq, Eq)]
+    #[genl_enum(repr = "u32")]
+    enum TestMode {
+        Manual = 1,
+        Automatic = 2,
+    }
+
+    #[derive(GenlMessageDerive, Debug, Default, Clone, PartialEq, Eq)]
+    #[genl_message(cmd = 13u8)]
+    struct DerivedEnumField {
+        #[genl_attr(1u16)]
+        id: u32,
+        #[genl_attr(2u16, repr = "u32")]
+        mode: Option<TestMode>,
+    }
+
+    #[test]
+    fn derived_genl_enum_field_round_trips() {
+        let original = DerivedEnumField {
+            id: 7,
+            mode: Some(TestMode::Automatic),
+        };
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        original.to_bytes(&mut builder).expect("emit");
+        let parsed = DerivedEnumField::from_bytes(&builder.as_bytes()[body_start..])
+            .expect("parse");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn derived_genl_enum_missing_attr_yields_none() {
+        // No attrs at all → mode defaults to None.
+        let parsed = DerivedEnumField::from_bytes(&[]).expect("parse");
+        assert_eq!(parsed.id, 0);
+        assert_eq!(parsed.mode, None);
+    }
+
+    #[test]
+    fn derived_genl_enum_unknown_value_surfaces_as_error() {
+        // Synthesize a frame with a value (=99) outside any
+        // TestMode variant. Parse should fail with
+        // Error::InvalidMessage carrying the UnknownValue text.
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        __rt::emit_u32_attr(&mut builder, 2, 99); // attr=2, value=99 (not a variant)
+        let result = DerivedEnumField::from_bytes(&builder.as_bytes()[body_start..]);
+        let err = result.expect_err("parse should fail on unknown enum value");
+        // Inner UnknownValue's Display message is plumbed through.
+        let s = format!("{err}");
+        assert!(s.contains("99"), "expected error text to include 99: {s}");
+    }
+
     #[test]
     fn typed_enums_compose_with_message_derive() {
         // CMD comes from TestCmd::Get (= 2) via `as u8`.

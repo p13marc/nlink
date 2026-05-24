@@ -6,6 +6,46 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`Option<MyEnum>` field support in `#[derive(GenlMessage)]`**
+  (Plan 154 Phase 8.2 — **the macro-stack headline unblocker**).
+  `#[genl_attr(...)]` now accepts an optional `repr = "u8"|"u16"|"u32"`
+  hint telling the derive a field is a `#[derive(GenlEnum)]`-typed
+  value:
+
+  ```rust
+  #[derive(GenlEnum, Debug, Clone, Copy, PartialEq, Eq)]
+  #[genl_enum(repr = "u32")]
+  enum DpllMode { Manual = 1, Automatic = 2 }
+
+  #[derive(GenlMessage, Debug, Default)]
+  #[genl_message(cmd = DpllCmd::DeviceGet)]
+  pub struct DpllDeviceReply {
+      #[genl_attr(DpllAttr::Id)] pub id: u32,
+      #[genl_attr(DpllAttr::Mode, repr = "u32")] pub mode: Option<DpllMode>,
+  }
+  ```
+
+  Emit routes through `<Repr as From<MyEnum>>::from(field)` (the
+  `GenlEnum` derive ships `From<MyEnum> for Repr`); parse routes
+  through `<MyEnum as TryFrom<Repr>>::try_from(raw)`. Unknown
+  wire values surface as `Error::InvalidMessage` carrying the
+  generated `MyEnumUnknownValue(repr)` Display text.
+
+  **Why `Option<MyEnum>` and not bare `MyEnum`?** Kernel UAPI
+  enums are typically 1-based with no sensible "zero" variant,
+  so `Default` doesn't exist. Wrapping in `Option<T>` makes
+  missing-attribute semantics map cleanly to `None`. The derive
+  emits a compile error pointing at the fix if a bare enum is
+  used.
+
+  Unblocks Plan 156 (DPLL) and Plan 153.3 (`net_shaper`) on
+  scalar-enum fields. Repeated-enum (`Vec<MyEnum>`), bitflags
+  newtypes, and nested attribute groups remain as the rest of
+  Phase 8.
+
+  3 new tests: round-trip `Some(MyEnum)`, missing-attr → `None`,
+  unknown-value → typed error.
+
 - **`i32` field support in `#[derive(GenlMessage)]`** (Plan 154
   Phase 8.1). The first of the five Phase 8 macro extensions —
   smallest mechanical piece. Adds `WireKind::I32` to the

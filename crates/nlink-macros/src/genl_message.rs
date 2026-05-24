@@ -40,11 +40,13 @@
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use syn::{
-    spanned::Spanned, Data, DeriveInput, Expr, Field, Fields, GenericArgument, Ident,
-    PathArguments, Type,
+    parse::{Parse, ParseStream},
+    spanned::Spanned,
+    Data, DeriveInput, Expr, Field, Fields, GenericArgument, Ident, LitStr, PathArguments, Token,
+    Type,
 };
 
-use crate::find_meta_list;
+use crate::{find_meta_list, ReprWidth};
 
 pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
     let struct_ident = &input.ident;
@@ -187,7 +189,52 @@ enum WireKind {
     I32,
     Str,
     Bytes,
+    /// A `#[derive(GenlEnum)]`-typed field. `type_path` is the
+    /// fully-qualified field type (e.g. `DpllMode`); `repr` is the
+    /// underlying wire width supplied via
+    /// `#[genl_attr(MyAttr::Foo, repr = "u32")]`.
+    Enum {
+        type_path: Box<Type>,
+        repr: ReprWidth,
+    },
     Optional(Box<WireKind>),
+}
+
+/// Parsed contents of `#[genl_attr(EXPR [, repr = "u8"|"u16"|"u32"])]`.
+struct GenlAttrArgs {
+    attr_expr: Expr,
+    repr: Option<ReprWidth>,
+}
+
+impl Parse for GenlAttrArgs {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let attr_expr: Expr = input.parse()?;
+        let mut repr: Option<ReprWidth> = None;
+        while input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+            if input.is_empty() {
+                break;
+            }
+            let ident: Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+            match ident.to_string().as_str() {
+                "repr" => {
+                    let lit: LitStr = input.parse()?;
+                    repr = Some(ReprWidth::parse(&lit)?);
+                }
+                other => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!(
+                            "unknown #[genl_attr] key `{other}`; expected \
+                             `repr = \"u8\"|\"u16\"|\"u32\"`"
+                        ),
+                    ))
+                }
+            }
+        }
+        Ok(Self { attr_expr, repr })
+    }
 }
 
 impl WireKind {
@@ -202,6 +249,7 @@ impl WireKind {
             Self::I32 => quote! { i32 },
             Self::Str => quote! { ::std::string::String },
             Self::Bytes => quote! { ::std::vec::Vec<u8> },
+            Self::Enum { type_path, .. } => quote! { #type_path },
             Self::Optional(inner) => {
                 let inner_ty = inner.type_token();
                 quote! { ::core::option::Option<#inner_ty> }
@@ -217,6 +265,13 @@ impl WireKind {
             Self::I32 => quote! { 0i32 },
             Self::Str => quote! { ::std::string::String::new() },
             Self::Bytes => quote! { ::std::vec::Vec::new() },
+            Self::Enum { .. } => {
+                // Unreachable: classify_type rejects bare `MyEnum`
+                // and requires `Option<MyEnum>`. The Enum default
+                // therefore only ever appears wrapped inside
+                // Optional, whose arm below returns None.
+                quote! { unreachable!("bare-Enum WireKind reached default_expr") }
+            }
             Self::Optional(_) => quote! { ::core::option::Option::None },
         }
     }
@@ -231,6 +286,16 @@ impl WireKind {
             Self::I32 => quote! { ::nlink::macros::__rt::parse_i32_attr },
             Self::Str => quote! { ::nlink::macros::__rt::parse_str_attr },
             Self::Bytes => quote! { ::nlink::macros::__rt::parse_bytes_attr },
+            Self::Enum { repr, .. } => {
+                // Use the repr's underlying parse helper. The
+                // outer parse_arm handles the TryFrom conversion.
+                let ident = repr.ident();
+                let fn_ident = proc_macro2::Ident::new(
+                    &format!("parse_{ident}_attr"),
+                    proc_macro2::Span::call_site(),
+                );
+                quote! { ::nlink::macros::__rt::#fn_ident }
+            }
             Self::Optional(inner) => inner.parse_fn(),
         }
     }
@@ -266,6 +331,23 @@ impl WireKind {
             Self::Bytes => quote! {
                 ::nlink::macros::__rt::emit_bytes_attr(#builder, (#attr_expr) as u16, #value_expr);
             },
+            Self::Enum { repr, .. } => {
+                // Route through the repr's emit helper. The
+                // GenlEnum derive ships `From<MyEnum> for Repr`
+                // so `Repr::from(value)` converts losslessly.
+                let ident = repr.ident();
+                let fn_ident = proc_macro2::Ident::new(
+                    &format!("emit_{ident}_attr"),
+                    proc_macro2::Span::call_site(),
+                );
+                quote! {
+                    ::nlink::macros::__rt::#fn_ident(
+                        #builder,
+                        (#attr_expr) as u16,
+                        <#ident as ::core::convert::From<_>>::from(#value_expr),
+                    );
+                }
+            }
             Self::Optional(_) => {
                 // Optional should never call emit_call_inner directly —
                 // its outer emit_call handles the if-let-Some wrapping.
@@ -274,7 +356,7 @@ impl WireKind {
         }
     }
 
-    /// Whether the emit call takes `&` or moves: ints copy,
+    /// Whether the emit call takes `&` or moves: ints + enums copy,
     /// strings/bytes need `&`.
     fn needs_reference_on_emit(&self) -> bool {
         matches!(self, Self::Str | Self::Bytes)
@@ -329,9 +411,30 @@ impl FieldSpec {
         let attr = &self.attr_expr;
         let parse_fn = self.kind.parse_fn();
         match &self.kind {
-            WireKind::Optional(_) => quote! {
+            WireKind::Optional(inner) => match inner.as_ref() {
+                WireKind::Enum { type_path, .. } => quote! {
+                    __ty if __ty == (#attr) as u16 => {
+                        let __raw = #parse_fn(__attr_payload)?;
+                        let __decoded = <#type_path as ::core::convert::TryFrom<_>>::try_from(__raw)
+                            .map_err(|e| ::nlink::Error::InvalidMessage(
+                                ::std::format!("{e}")
+                            ))?;
+                        #ident = ::core::option::Option::Some(__decoded);
+                    }
+                },
+                _ => quote! {
+                    __ty if __ty == (#attr) as u16 => {
+                        #ident = ::core::option::Option::Some(#parse_fn(__attr_payload)?);
+                    }
+                },
+            },
+            WireKind::Enum { type_path, .. } => quote! {
                 __ty if __ty == (#attr) as u16 => {
-                    #ident = ::core::option::Option::Some(#parse_fn(__attr_payload)?);
+                    let __raw = #parse_fn(__attr_payload)?;
+                    #ident = <#type_path as ::core::convert::TryFrom<_>>::try_from(__raw)
+                        .map_err(|e| ::nlink::Error::InvalidMessage(
+                            ::std::format!("{e}")
+                        ))?;
                 }
             },
             _ => quote! {
@@ -359,11 +462,10 @@ fn parse_field(field: &Field) -> syn::Result<FieldSpec> {
         )
     })?;
 
-    // #[genl_attr(EXPR)] — EXPR is a single expression (an
-    // integer literal or a typed-enum variant cast).
-    let attr_expr: Expr = ml.parse_args()?;
+    // #[genl_attr(EXPR [, repr = "u8"|"u16"|"u32"])]
+    let GenlAttrArgs { attr_expr, repr } = ml.parse_args()?;
 
-    let kind = classify_type(&field.ty)?;
+    let kind = classify_type(&field.ty, repr)?;
 
     Ok(FieldSpec {
         ident,
@@ -372,7 +474,15 @@ fn parse_field(field: &Field) -> syn::Result<FieldSpec> {
     })
 }
 
-fn classify_type(ty: &Type) -> syn::Result<WireKind> {
+fn classify_type(ty: &Type, repr_hint: Option<ReprWidth>) -> syn::Result<WireKind> {
+    classify_type_inner(ty, repr_hint, /* inside_option = */ false)
+}
+
+fn classify_type_inner(
+    ty: &Type,
+    repr_hint: Option<ReprWidth>,
+    inside_option: bool,
+) -> syn::Result<WireKind> {
     let Type::Path(p) = ty else {
         return Err(syn::Error::new_spanned(
             ty,
@@ -421,7 +531,7 @@ fn classify_type(ty: &Type) -> syn::Result<WireKind> {
         }
         "Option" => {
             let inner = single_type_arg(last, ty)?;
-            let inner_kind = classify_type(inner)?;
+            let inner_kind = classify_type_inner(inner, repr_hint, /* inside_option = */ true)?;
             if matches!(inner_kind, WireKind::Optional(_)) {
                 return Err(syn::Error::new_spanned(
                     ty,
@@ -430,14 +540,51 @@ fn classify_type(ty: &Type) -> syn::Result<WireKind> {
             }
             Ok(WireKind::Optional(Box::new(inner_kind)))
         }
-        other => Err(syn::Error::new_spanned(
-            ty,
-            format!(
-                "unsupported field type `{other}` in #[derive(GenlMessage)]. \
-                 Supported: u8, u16, u32, u64, i32, String, Vec<u8>, Option<T>. \
-                 (Nested attribute groups via NetlinkAttrs land in a follow-up phase.)"
-            ),
-        )),
+        _ => {
+            // Unknown type: if the field annotation supplied a
+            // `repr = "..."` hint, treat it as a GenlEnum-typed
+            // field (uses From<MyEnum> for repr on emit + TryFrom
+            // on parse). Must be inside Option<MyEnum> because
+            // most kernel UAPI enums don't derive Default
+            // (1-based discriminants — there's no sensible "zero"
+            // variant). Without a hint, error pointing the user
+            // at how to fix it.
+            if let Some(repr) = repr_hint {
+                if !inside_option {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        format!(
+                            "GenlEnum-typed field `{name}` must be wrapped in \
+                             `Option<{name}>` for #[derive(GenlMessage)] (kernel \
+                             UAPI enums typically don't have a sensible Default; \
+                             missing-attr semantics map cleanly to None). Change \
+                             the field to `Option<{name}>` and re-derive. Wire \
+                             repr stays `repr = \"{}\"`.",
+                            match repr {
+                                ReprWidth::U8 => "u8",
+                                ReprWidth::U16 => "u16",
+                                ReprWidth::U32 => "u32",
+                            }
+                        ),
+                    ));
+                }
+                return Ok(WireKind::Enum {
+                    type_path: Box::new(ty.clone()),
+                    repr,
+                });
+            }
+            Err(syn::Error::new_spanned(
+                ty,
+                format!(
+                    "unsupported field type `{name}` in #[derive(GenlMessage)]. \
+                     Supported: u8, u16, u32, u64, i32, String, Vec<u8>, Option<T>. \
+                     For `#[derive(GenlEnum)]`-typed fields, wrap in `Option<T>` \
+                     and add a repr hint: \
+                     `#[genl_attr(MyAttr::Foo, repr = \"u32\")]` (or u8/u16). \
+                     (Nested attribute groups via NetlinkAttrs land in a follow-up phase.)"
+                ),
+            ))
+        }
     }
 }
 
