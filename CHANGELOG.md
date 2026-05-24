@@ -6,6 +6,54 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`net_shaper` Generic Netlink family** (Plan 153 §4.3 — closes
+  Plan 153). TX hardware shaping (per-NIC, per-queue, or
+  intermediate-node bandwidth/burst/priority/weight) via the
+  kernel-6.13 `net-shaper` family. Surface:
+
+  ```rust
+  use nlink::netlink::{
+      Connection,
+      genl::net_shaper::{
+          NetShaper, NetShaperHandle, NetShaperMetric, NetShaperScope, NetShaperSetRequest,
+      },
+  };
+
+  let conn = Connection::<NetShaper>::new_async().await?;
+
+  // Always check caps before set — drivers vary widely.
+  let caps = conn.get_caps(ifindex, NetShaperScope::Queue).await?;
+  if caps.support_bw_max && caps.support_burst {
+      conn.set_shaper(
+          NetShaperSetRequest::new(ifindex, NetShaperHandle::queue(0))
+              .metric(NetShaperMetric::Bps)
+              .bw_max(1_000_000_000)
+              .burst(1 << 16),
+      ).await?;
+  }
+  ```
+
+  Connection methods: `get_shaper` / `dump_shapers` /
+  `set_shaper` / `del_shaper` / `get_caps` / `dump_caps`. The
+  `group` command (NET_SHAPER_CMD_GROUP — hierarchical
+  reparenting) is deferred: it needs `Vec<NetlinkAttrs>` support
+  in the macro stack which doesn't ship yet (Plan 154
+  follow-up).
+
+  **Second in-tree dogfood of `nlink-macros`** (after DPLL — Plan
+  156). The full family — 5 commands, 10 outer attrs, 10 caps
+  attrs, 2 handle attrs, 2 enums — declares in ~200 lines of
+  macro-derived Rust. The one hand-written piece is
+  `NetShaperCapsReply::from_bytes`, parsing the kernel's
+  presence-flag attributes (`NET_SHAPER_A_CAPS_SUPPORT_*`) into
+  `bool` fields — the macros don't yet model zero-payload flag
+  attributes. 15 new unit tests; 931 lib tests pass total. End-
+  to-end validated on kernel 6.13+ (kernel correctly parses our
+  requests, returns EOPNOTSUPP on loopback as expected). Recipe
+  at [`docs/recipes/tx-hw-shaping.md`](docs/recipes/tx-hw-shaping.md);
+  runnable example at
+  [`crates/nlink/examples/genl/net_shaper.rs`](crates/nlink/examples/genl/net_shaper.rs).
+
 - **DPLL multicast monitor + shared GENL group-resolution infra**
   (Plan 156 Phase 5 — closes Plan 156). The `Connection<Dpll>`
   API now exposes a typed push-based event stream:

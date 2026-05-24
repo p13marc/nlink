@@ -52,6 +52,7 @@ pub mod dpll;
 pub mod ethtool;
 pub mod macsec;
 pub mod mptcp;
+pub mod net_shaper;
 pub mod nl80211;
 pub mod wireguard;
 

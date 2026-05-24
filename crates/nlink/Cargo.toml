@@ -200,6 +200,10 @@ path = "examples/genl/ethtool_monitor.rs"
 name = "genl_dpll"
 path = "examples/genl/dpll.rs"
 
+[[example]]
+name = "genl_net_shaper"
+path = "examples/genl/net_shaper.rs"
+
 # nlink-macros showcase
 [[example]]
 name = "macros_define_taskstats"
