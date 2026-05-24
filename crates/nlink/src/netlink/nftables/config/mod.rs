@@ -55,6 +55,7 @@ mod apply;
 mod diff;
 mod types;
 
+pub use apply::{ReconcileOptions, ReconcileReport};
 pub use diff::{NftablesDiff, RuleHandle};
 pub use types::{
     DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredTable, NftablesConfig,

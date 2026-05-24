@@ -47,6 +47,12 @@ to the hand-rolled netlink primitives if you want to go deeper.
   blocklist set, plus a 3-namespace WAN/router/LAN lab demo. Uses the
   typed `nftables::Transaction` API + `Connection::<Netfilter>` for
   conntrack verification.
+- [**Declarative nftables config**](nftables-declarative-config.md) —
+  manage a whole ruleset from a config file: define `NftablesConfig`,
+  `cfg.diff(&conn).await?`, `diff.apply(&conn).await?` (atomic via
+  single `NFNL_MSG_BATCH_*` commit). `apply_reconcile` retries on
+  EBUSY/EAGAIN for concurrent-mutator scenarios. Mirrors the
+  existing `NetworkConfig` pattern.
 - [**Programmatic conntrack**](conntrack-programmatic.md) — inject /
   update / delete / flush conntrack entries via `ConntrackBuilder` for
   test pre-seeding, NAT control planes, and lab eviction. Covers

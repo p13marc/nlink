@@ -6,6 +6,41 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`NftablesDiff::apply_reconcile` + declarative-config recipe**
+  (Plan 157 §4.5 + §6). Bounded retry-on-conflict variant of
+  `apply` for concurrent-mutator scenarios (e.g. operator pod +
+  `systemd-resolved` racing on `nft -f`):
+
+  ```rust
+  use nlink::netlink::nftables::config::ReconcileOptions;
+  use std::time::Duration;
+
+  let diff = cfg.diff(&conn).await?;
+  let report = diff
+      .apply_reconcile(&conn, ReconcileOptions::default())
+      .await?;
+  if report.attempts > 1 {
+      tracing::warn!(retries = report.attempts - 1, "transient conflict");
+  }
+  ```
+
+  Default options: 3 retries, 100ms initial backoff (exponential
+  to `backoff × 2^10`). Predicate is
+  `Error::is_busy() || Error::is_try_again()`; non-transient
+  errors surface immediately. Plus a new
+  [`docs/recipes/nftables-declarative-config.md`](docs/recipes/nftables-declarative-config.md)
+  walking through the `diff + apply + reconcile` pattern,
+  including the documented "flush before reapply" workaround for
+  the rule-identity caveat.
+
+  **Plan 157 rule canonicalization (§4.3) deferred to 0.17** —
+  needs a refactor of the `Rule` type. Current `Rule` stores
+  `Vec<Expr>` already-lowered; Plan §4.3's canonicalization
+  design requires sorting at the typed `Vec<Match>` layer
+  *before* lowering. The match-vs-expression layering is the
+  prerequisite, and it's a substantial enough change to warrant
+  its own focused pass.
+
 - **Conntrack + nft-rules streaming dump** (Plan 149 closeout —
   closes Plan 149). `Connection<Netfilter>::stream_conntrack` /
   `stream_conntrack_v4` / `stream_conntrack_v6` and

@@ -359,6 +359,10 @@ recipe rather than re-synthesizing:
   — ctnetlink mutation + multicast NEW/DESTROY events.
 - [`nftables-stateful-fw`](docs/recipes/nftables-stateful-fw.md) —
   table/chain/rule plumbing + atomic transactions.
+- [`nftables-declarative-config`](docs/recipes/nftables-declarative-config.md) —
+  declare a whole ruleset, `cfg.diff(&conn)` + `diff.apply(&conn)`
+  (atomic single-batch commit) + `apply_reconcile` for concurrent
+  mutators. Mirror of `NetworkConfig` for nftables.
 - [`define-your-own-genl-family`](docs/recipes/define-your-own-genl-family.md)
   — declare a complete custom GENL family in ~30 lines via
   `nlink-macros` (`#[genl_family]` + `#[derive(GenlMessage)]` +
@@ -441,8 +445,13 @@ tracker. Headlines that landed so far:
   in-tree macro dogfood after DPLL).
 - **Plan 157 — declarative `NftablesConfig`** (🟡): diff + atomic
   apply via the extended `Transaction` (every diff op commits in
-  one `NFNL_MSG_BATCH_BEGIN…END` round-trip). Canonicalization +
-  sets/maps + reconcile still deferred.
+  one `NFNL_MSG_BATCH_BEGIN…END` round-trip) +
+  `apply_reconcile(opts)` (bounded retry on EBUSY/EAGAIN) +
+  recipe. Rule canonicalization (§4.3) deferred to 0.17 — needs
+  a `Rule` type refactor (current Rule stores `Vec<Expr>`
+  already-lowered; canonicalization needs the typed
+  `Vec<Match>` layer to sort before lowering). Sets/maps still
+  deferred per original plan scope.
 - **Plan 158 — `syscall_batch` feature** (🟢 opt-in): `recvmmsg` /
   `sendmmsg` batching wired into both eager dumps + streaming.
 - **Plan 159 — `ConnectionPool<P>`** (🟢): bounded-mpsc-channel-

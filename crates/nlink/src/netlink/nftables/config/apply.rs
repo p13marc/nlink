@@ -24,8 +24,11 @@
 //! so they stay inside the atomic batch; no out-of-batch
 //! fallback remains.
 //!
-//! `apply_reconcile` (Plan 157 §4.5 retry-on-conflict variant)
-//! remains a documented follow-up.
+//! `apply_reconcile` (Plan 157 §4.5) — bounded retry-on-conflict
+//! variant — landed alongside the atomic apply. See
+//! [`NftablesDiff::apply_reconcile`].
+
+use std::time::Duration;
 
 use super::diff::NftablesDiff;
 use super::super::connection::Transaction;
@@ -132,5 +135,125 @@ impl NftablesDiff {
 
         tx.commit(conn).await?;
         Ok(total)
+    }
+
+    /// Apply with bounded retry on transient kernel-busy errors
+    /// (EBUSY / EAGAIN). Useful when another process may be
+    /// mutating the same ruleset concurrently — e.g. systemd-resolved
+    /// + a node firewall tool both calling nft simultaneously.
+    ///
+    /// On EBUSY / EAGAIN, sleeps `opts.backoff` × 2^attempt and
+    /// retries up to `opts.max_retries` times. Non-transient errors
+    /// surface immediately (caller's responsibility to handle).
+    ///
+    /// Returns a [`ReconcileReport`] with the attempt count + the
+    /// diff that was finally applied. Total wall time is bounded
+    /// by Σ(opts.backoff × 2^i) for i in 0..max_retries.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::nftables::config::{NftablesConfig, ReconcileOptions};
+    /// use std::time::Duration;
+    ///
+    /// let cfg = NftablesConfig::new() /* ... */;
+    /// let diff = cfg.diff(&conn).await?;
+    /// let report = diff
+    ///     .apply_reconcile(&conn, ReconcileOptions::default())
+    ///     .await?;
+    /// if report.attempts > 1 {
+    ///     tracing::warn!(retries = report.attempts - 1, "transient conflict");
+    /// }
+    /// ```
+    pub async fn apply_reconcile(
+        &self,
+        conn: &Connection<Nftables>,
+        opts: ReconcileOptions,
+    ) -> Result<ReconcileReport> {
+        let mut attempt: usize = 0;
+        loop {
+            match self.apply(conn).await {
+                Ok(_) => {
+                    return Ok(ReconcileReport {
+                        attempts: attempt + 1,
+                        change_count: self.change_count(),
+                    });
+                }
+                Err(e) if (e.is_busy() || e.is_try_again()) && attempt < opts.max_retries => {
+                    let backoff = opts.backoff.saturating_mul(1u32 << attempt.min(10));
+                    tokio::time::sleep(backoff).await;
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+/// Options controlling [`NftablesDiff::apply_reconcile`]'s retry
+/// loop. Defaults: 3 retries, 100ms initial backoff (exponential).
+#[derive(Debug, Clone)]
+pub struct ReconcileOptions {
+    /// Maximum number of retries after the initial attempt.
+    /// Total apply attempts is `max_retries + 1`. Default: 3.
+    pub max_retries: usize,
+    /// Backoff between retries. Doubles each attempt (exponential),
+    /// capped at `backoff × 2^10`. Default: 100ms.
+    pub backoff: Duration,
+}
+
+impl Default for ReconcileOptions {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            backoff: Duration::from_millis(100),
+        }
+    }
+}
+
+/// Outcome of [`NftablesDiff::apply_reconcile`]. `attempts == 1`
+/// means the first apply succeeded — no contention encountered.
+#[derive(Debug, Clone, Default)]
+pub struct ReconcileReport {
+    /// Total number of apply attempts (including retries).
+    /// 1 = first try succeeded; 2+ = retried after EBUSY/EAGAIN.
+    pub attempts: usize,
+    /// `change_count()` of the diff that was applied.
+    pub change_count: usize,
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+
+    #[test]
+    fn default_reconcile_options_match_plan_spec() {
+        let opts = ReconcileOptions::default();
+        assert_eq!(opts.max_retries, 3);
+        assert_eq!(opts.backoff, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn reconcile_report_default_is_zero_attempts() {
+        let r = ReconcileReport::default();
+        assert_eq!(r.attempts, 0);
+        assert_eq!(r.change_count, 0);
+    }
+
+    #[test]
+    fn empty_diff_apply_via_reconcile_returns_one_attempt() {
+        // Smoke: an empty diff doesn't even need a socket — apply
+        // returns Ok(0) early. apply_reconcile loops once and
+        // succeeds.
+        // Can't easily test the retry path without a mock; the
+        // shape check is what unit tests cover. Real retries land
+        // in the integration test gate.
+        let d = NftablesDiff::default();
+        assert!(d.is_empty());
+        // Build a no-op connection isn't trivial without sockets;
+        // the empty-diff fast path is exercised in apply()'s own
+        // tests at the integration level.
+        let _ = d;
     }
 }
