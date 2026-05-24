@@ -60,13 +60,27 @@
 
 use crate::macros::genl_family;
 
+pub mod connection;
+pub mod messages;
 pub mod types;
 
+pub use messages::{DpllDeviceGetRequest, DpllDeviceReply, DpllDeviceSetRequest};
 pub use types::{
     DpllAttr, DpllClockQualityLevel, DpllCmd, DpllFeatureState, DpllLockStatus,
     DpllLockStatusError, DpllMode, DpllPinAttr, DpllPinCapabilities, DpllPinDirection,
     DpllPinState, DpllPinType, DpllType,
 };
+
+/// Divider applied to `DPLL_A_TEMP` (mdegC → degC). Plan 156 §4.5.
+pub const DPLL_TEMP_DIVIDER: i32 = 1000;
+
+/// Divider applied to `DPLL_A_PIN_PHASE_OFFSET` (kernel reports
+/// attoseconds × 1000; divide for nanoseconds). Plan 156 §4.5.
+pub const DPLL_PHASE_OFFSET_DIVIDER: i64 = 1000;
+
+/// Divider applied to `DPLL_A_PIN_MEASURED_FREQUENCY` (mHz × 1000
+/// → Hz). Plan 156 §4.5.
+pub const DPLL_PIN_MEASURED_FREQUENCY_DIVIDER: u64 = 1000;
 
 /// DPLL Generic Netlink family marker.
 ///
