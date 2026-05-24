@@ -7,7 +7,8 @@ use crate::netlink::{
     connection::Connection,
     error::{Error, Result},
     message::{
-        MessageIter, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST, NlMsgError,
+        MessageIter, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REPLACE, NLM_F_REQUEST,
+        NlMsgError,
     },
     protocol::Nftables,
 };
@@ -358,6 +359,13 @@ impl Connection<Nftables> {
 
         if !rule.exprs.is_empty() {
             write_expressions(&mut builder, &rule.exprs);
+        }
+
+        // Comment → NFTA_RULE_USERDATA TLV (Plan 157b v2).
+        if let Some(comment) = &rule.comment
+            && let Some(udata) = super::userdata::encode_nlink_comment(comment)
+        {
+            builder.append_attr(NFTA_RULE_USERDATA, &udata);
         }
 
         self.nft_request_ack(builder).await
@@ -842,6 +850,9 @@ pub(crate) fn parse_rule(data: &[u8], family: Family) -> Option<RuleInfo> {
         family,
         handle: 0,
         position: None,
+        comment: None,
+        userdata_raw: None,
+        expression_bytes: Vec::new(),
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
@@ -857,6 +868,13 @@ pub(crate) fn parse_rule(data: &[u8], family: Family) -> Option<RuleInfo> {
             }
             NFTA_RULE_POSITION if payload.len() >= 8 => {
                 rule.position = Some(u64::from_be_bytes(payload[..8].try_into().unwrap()));
+            }
+            NFTA_RULE_EXPRESSIONS => {
+                rule.expression_bytes = payload.to_vec();
+            }
+            NFTA_RULE_USERDATA => {
+                rule.userdata_raw = Some(payload.to_vec());
+                rule.comment = super::userdata::parse_nlink_comment(payload);
             }
             _ => {}
         }
@@ -1011,6 +1029,47 @@ impl Transaction {
 
         if !rule.exprs.is_empty() {
             write_expressions(&mut builder, &rule.exprs);
+        }
+
+        // Comment → NFTA_RULE_USERDATA TLV (Plan 157b v2).
+        if let Some(comment) = &rule.comment
+            && let Some(udata) = super::userdata::encode_nlink_comment(comment)
+        {
+            builder.append_attr(NFTA_RULE_USERDATA, &udata);
+        }
+
+        builder.set_seq(self.next_seq());
+        self.messages.push(builder.finish());
+        self
+    }
+
+    /// Replace an existing rule's body at a specific kernel handle.
+    /// Emits `NFT_MSG_NEWRULE | NLM_F_REPLACE | NFTA_RULE_HANDLE`,
+    /// which the kernel atomically swaps in-place (preserves rule
+    /// position; no flush). Used by `NftablesDiff::apply` when a
+    /// keyed rule's body has changed but its identity (handle_key
+    /// → `NFTA_RULE_USERDATA`) still matches.
+    ///
+    /// Plan 157b v2.
+    pub fn replace_rule(mut self, rule: Rule, handle: u64) -> Self {
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWRULE),
+            NLM_F_REQUEST | NLM_F_REPLACE,
+        );
+        let nfgenmsg = NfGenMsg::new(rule.family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_RULE_TABLE, &rule.table);
+        builder.append_attr_str(NFTA_RULE_CHAIN, &rule.chain);
+        builder.append_attr_u64_be(NFTA_RULE_HANDLE, handle);
+
+        if !rule.exprs.is_empty() {
+            write_expressions(&mut builder, &rule.exprs);
+        }
+
+        if let Some(comment) = &rule.comment
+            && let Some(udata) = super::userdata::encode_nlink_comment(comment)
+        {
+            builder.append_attr(NFTA_RULE_USERDATA, &udata);
         }
 
         builder.set_seq(self.next_seq());
@@ -1560,5 +1619,73 @@ mod stream_tests {
         assert_eq!(rule.table, "filter");
         assert_eq!(rule.chain, "input");
         assert_eq!(rule.handle, 7);
+    }
+}
+
+#[cfg(test)]
+mod userdata_roundtrip_tests {
+    //! Plan 157b v2 — wire-level round-trip test for
+    //! `Rule::comment` → `NFTA_RULE_USERDATA` → `RuleInfo::comment`.
+    //! Validates that a comment we emit on a `Transaction::add_rule`
+    //! is recoverable by `parse_rule` from the on-wire bytes.
+
+    use super::*;
+    use crate::netlink::nftables::types::Rule;
+
+    /// Strip the netlink header from a Transaction message and
+    /// return the body. Same shape as what `parse_rule` consumes
+    /// inside `nft_dump`.
+    fn body_after_nfgenmsg(msg: &[u8]) -> &[u8] {
+        // 16 bytes nlmsghdr + 4 bytes nfgenmsg = 20.
+        &msg[20..]
+    }
+
+    #[test]
+    fn comment_round_trips_through_transaction_add_rule() {
+        let rule = Rule::new("filter", "input")
+            .family(Family::Inet)
+            .comment("ssh-accept");
+        let tx = Transaction::new().add_rule(rule);
+        // Transaction stores raw messages in self.messages.
+        let messages = &tx.messages;
+        assert_eq!(messages.len(), 1, "expected exactly one rule msg");
+
+        // Parse the rule body back out (skip nlmsghdr + nfgenmsg).
+        let body = body_after_nfgenmsg(&messages[0]);
+        let parsed = super::parse_rule(body, Family::Inet)
+            .expect("parse_rule should succeed on a well-formed body");
+        assert_eq!(parsed.table, "filter");
+        assert_eq!(parsed.chain, "input");
+        assert_eq!(
+            parsed.comment.as_deref(),
+            Some("ssh-accept"),
+            "comment should round-trip from emit through parse",
+        );
+        assert!(
+            parsed.userdata_raw.is_some(),
+            "raw userdata should also be preserved",
+        );
+    }
+
+    #[test]
+    fn rule_without_comment_has_none_after_parse() {
+        let rule = Rule::new("filter", "input").family(Family::Inet);
+        let tx = Transaction::new().add_rule(rule);
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        let parsed = super::parse_rule(body, Family::Inet).expect("parse");
+        assert!(parsed.comment.is_none());
+        assert!(parsed.userdata_raw.is_none());
+    }
+
+    #[test]
+    fn replace_rule_carries_comment_and_handle() {
+        let rule = Rule::new("filter", "input")
+            .family(Family::Inet)
+            .comment("ssh-accept");
+        let tx = Transaction::new().replace_rule(rule, 42);
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        let parsed = super::parse_rule(body, Family::Inet).expect("parse");
+        assert_eq!(parsed.handle, 42);
+        assert_eq!(parsed.comment.as_deref(), Some("ssh-accept"));
     }
 }

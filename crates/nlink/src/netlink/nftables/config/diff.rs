@@ -6,7 +6,32 @@ use super::types::{
     DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredTable, NftablesConfig,
 };
 use super::super::types::Family;
-use crate::netlink::{connection::Connection, error::Result, protocol::Nftables};
+use crate::netlink::{
+    builder::MessageBuilder, connection::Connection, error::Result, protocol::Nftables,
+};
+
+/// Render the declared `Rule`'s expression list to the same byte
+/// shape the kernel returns in `NFTA_RULE_EXPRESSIONS` (the
+/// nested elem-list inner bytes, *not* including the outer
+/// attribute header). Used by the diff to byte-compare declared
+/// vs kernel rule bodies. Plan 157b v2.
+fn lower_to_expression_bytes(rule: &super::super::types::Rule) -> Vec<u8> {
+    if rule.exprs.is_empty() {
+        return Vec::new();
+    }
+    // Scratch builder: write the NFTA_RULE_EXPRESSIONS attribute,
+    // then strip the 16-byte nlmsghdr + 4-byte attribute header
+    // to get just the inner elem list (matches what the kernel
+    // emits as the `NFTA_RULE_EXPRESSIONS` payload).
+    let mut b = MessageBuilder::new(0, 0);
+    super::super::expr::write_expressions(&mut b, &rule.exprs);
+    let raw = b.finish();
+    // NlMsgHdr is 16 bytes, attribute header is 4 bytes.
+    if raw.len() <= 20 {
+        return Vec::new();
+    }
+    raw[20..].to_vec()
+}
 
 /// Kernel-assigned rule handle (`NFTA_RULE_HANDLE`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -32,6 +57,16 @@ pub struct NftablesDiff {
     pub rules_to_add: Vec<DeclaredRule>,
     /// Rules to delete — kernel-assigned handles.
     pub rules_to_delete: Vec<(String, Family, RuleHandle)>,
+    /// Rules to replace in-place. Each entry is
+    /// `(table, family, chain, kernel_handle, replacement)` —
+    /// emits `NFT_MSG_NEWRULE | NLM_F_REPLACE | NFTA_RULE_HANDLE`
+    /// so the kernel atomically swaps the rule body at that
+    /// handle (preserves position, no flush).
+    ///
+    /// Populated by [`NftablesConfig::diff`] when a declared
+    /// keyed rule matches a kernel rule by `NFTA_RULE_USERDATA`
+    /// comment but the expression bytes differ. Plan 157b v2.
+    pub rules_to_replace: Vec<(String, Family, String, RuleHandle, DeclaredRule)>,
     /// Flowtables to add.
     pub flowtables_to_add: Vec<DeclaredFlowtable>,
     /// Flowtables to delete — (family, table, name).
@@ -47,6 +82,7 @@ impl NftablesDiff {
             && self.chains_to_delete.is_empty()
             && self.rules_to_add.is_empty()
             && self.rules_to_delete.is_empty()
+            && self.rules_to_replace.is_empty()
             && self.flowtables_to_add.is_empty()
             && self.flowtables_to_delete.is_empty()
     }
@@ -59,6 +95,7 @@ impl NftablesDiff {
             + self.chains_to_delete.len()
             + self.rules_to_add.len()
             + self.rules_to_delete.len()
+            + self.rules_to_replace.len()
             + self.flowtables_to_add.len()
             + self.flowtables_to_delete.len()
     }
@@ -91,6 +128,13 @@ impl NftablesDiff {
         }
         for (tbl, fam, h) in &self.rules_to_delete {
             lines.push(format!("- rule {fam:?} {tbl} (handle={})", h.0));
+        }
+        for (tbl, fam, chain, h, r) in &self.rules_to_replace {
+            let key = r.handle_key().unwrap_or("<anonymous>");
+            lines.push(format!(
+                "~ rule {fam:?} {tbl}/{chain} (handle={} key={key})",
+                h.0
+            ));
         }
         for f in &self.flowtables_to_add {
             lines.push(format!(
@@ -223,25 +267,142 @@ impl NftablesConfig {
                 }
             }
 
-            // Rules: 0.16 strategy is "all declared rules get
-            // added; current rules tagged with handle_keys we
-            // didn't declare get deleted." The kernel returns
-            // rule handles in list_rules; deletes target the
-            // handle.
+            // Rules: per-rule USERDATA-keyed identity (Plan
+            // 157b v2). NetworkConfig-symmetric — each rule is an
+            // individually diffable object keyed by its
+            // user-supplied `handle_key`, which round-trips
+            // through the kernel as
+            // `NFTA_RULE_USERDATA = "nlink:<key>"`.
             //
-            // Without a per-rule handle_key registry, the
-            // pragmatic shape: emit all declared rules
-            // unconditionally + delete every current rule whose
-            // declared peer is missing. This means rules churn
-            // on every reapply, but apply remains correct.
-            //
-            // For 0.16, take an even simpler stance: emit all
-            // declared rules and DON'T delete current ones. Users
-            // who want full reconcile can call flush_table first,
-            // then apply. The integration test below documents
-            // this.
-            for r in declared.rules() {
-                diff.rules_to_add.push(r.clone());
+            // Anonymous rules (no `handle_key`): always-add with a
+            // tracing::warn. Documented limitation — same as a
+            // `LinkConfig` without a name in `NetworkConfig`.
+            let current_rules = conn
+                .list_rules(declared.name(), declared.family())
+                .await?;
+            let rules_in_chain: Vec<&super::super::types::RuleInfo> = Vec::new();
+            // Per-chain: group declared rules by chain, then
+            // diff against kernel rules in the same chain.
+            use std::collections::HashMap as _HashMap;
+            let kernel_in_chain: _HashMap<String, Vec<&super::super::types::RuleInfo>> =
+                current_rules
+                    .iter()
+                    .fold(_HashMap::new(), |mut acc, r| {
+                        acc.entry(r.chain.clone()).or_default().push(r);
+                        acc
+                    });
+            let _ = rules_in_chain; // silence the placeholder
+            let declared_in_chain: _HashMap<&str, Vec<&DeclaredRule>> = declared
+                .rules()
+                .iter()
+                .fold(_HashMap::new(), |mut acc, r| {
+                    acc.entry(r.chain()).or_default().push(r);
+                    acc
+                });
+
+            for (chain_name, declared_rules) in &declared_in_chain {
+                let kernel_rules: &[&super::super::types::RuleInfo] = kernel_in_chain
+                    .get(*chain_name)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+
+                // Map: key → kernel rule with that nlink:<key>
+                // comment.
+                let kernel_by_key: _HashMap<&str, &super::super::types::RuleInfo> = kernel_rules
+                    .iter()
+                    .filter_map(|r| r.comment.as_deref().map(|c| (c, *r)))
+                    .collect();
+
+                // Track which kernel keys we've claimed so we can
+                // delete the rest in pass 2.
+                let mut declared_keys: HashSet<&str> = HashSet::new();
+
+                // Pass 1: declared rules.
+                for declared_rule in declared_rules {
+                    let Some(key) = declared_rule.handle_key() else {
+                        // Anonymous → always-add. Warn so users
+                        // notice the idempotency gap.
+                        tracing::warn!(
+                            chain = chain_name,
+                            "anonymous rule in declarative config; \
+                             will be added on every apply (use \
+                             rule_keyed for idempotent reconcile)",
+                        );
+                        diff.rules_to_add.push((*declared_rule).clone());
+                        continue;
+                    };
+                    declared_keys.insert(key);
+
+                    match kernel_by_key.get(key) {
+                        Some(kr) => {
+                            // Key matches: compare expression
+                            // bytes. If different → in-place
+                            // replace at the kernel handle.
+                            let declared_body =
+                                lower_to_expression_bytes(&declared_rule.body);
+                            if declared_body != kr.expression_bytes {
+                                diff.rules_to_replace.push((
+                                    declared.name().to_string(),
+                                    declared.family(),
+                                    chain_name.to_string(),
+                                    RuleHandle(kr.handle),
+                                    (*declared_rule).clone(),
+                                ));
+                            }
+                            // else: no-op (declared and kernel
+                            // already agree byte-for-byte)
+                        }
+                        None => {
+                            // Not in kernel: add.
+                            diff.rules_to_add.push((*declared_rule).clone());
+                        }
+                    }
+                }
+
+                // Pass 2: kernel rules with nlink keys we didn't
+                // declare → delete (they're ours, they shouldn't
+                // be there). Kernel rules without an nlink-prefix
+                // comment (foreign / external) are left alone.
+                for kr in kernel_rules {
+                    let Some(key) = kr.comment.as_deref() else { continue };
+                    if !declared_keys.contains(key) {
+                        diff.rules_to_delete.push((
+                            declared.name().to_string(),
+                            declared.family(),
+                            RuleHandle(kr.handle),
+                        ));
+                    }
+                }
+            }
+
+            // Pass 3: declared chains with no rules in
+            // declared_in_chain — those chains' kernel rules
+            // (with nlink keys) need cleanup too.
+            for kchain_name in kernel_in_chain.keys() {
+                if declared_in_chain.contains_key(kchain_name.as_str()) {
+                    continue;
+                }
+                // Only act on chains that are in the declared
+                // chain list (or being-added). Drift in chains
+                // we don't manage is left alone.
+                let in_declared_chains = declared
+                    .chains()
+                    .iter()
+                    .any(|c| c.name() == kchain_name);
+                if !in_declared_chains {
+                    continue;
+                }
+                if let Some(krs) = kernel_in_chain.get(kchain_name) {
+                    for kr in krs {
+                        if kr.comment.is_some() {
+                            diff.rules_to_delete.push((
+                                declared.name().to_string(),
+                                declared.family(),
+                                RuleHandle(kr.handle),
+                            ));
+                        }
+                    }
+                }
             }
 
             // Flowtables: name-based identity, like chains.
@@ -325,5 +486,70 @@ mod tests {
         d.tables_to_delete
             .push((super::super::super::types::Family::Inet, "y".to_string()));
         assert_eq!(d.change_count(), 2);
+    }
+
+    // ---- Plan 157b v2 — per-rule USERDATA-keyed identity ----
+
+    #[test]
+    fn lower_to_expression_bytes_is_deterministic() {
+        use super::super::super::types::Rule;
+        let r1 = Rule::new("filter", "input").match_tcp_dport(22).accept();
+        let r2 = Rule::new("filter", "input").match_tcp_dport(22).accept();
+        assert_eq!(
+            lower_to_expression_bytes(&r1),
+            lower_to_expression_bytes(&r2),
+            "identical rule builders should lower to identical bytes"
+        );
+        assert!(
+            !lower_to_expression_bytes(&r1).is_empty(),
+            "non-empty rule should have non-empty expression bytes"
+        );
+    }
+
+    #[test]
+    fn lower_to_expression_bytes_differs_on_value_change() {
+        use super::super::super::types::Rule;
+        let r1 = Rule::new("filter", "input").match_tcp_dport(22).accept();
+        let r2 = Rule::new("filter", "input").match_tcp_dport(443).accept();
+        assert_ne!(
+            lower_to_expression_bytes(&r1),
+            lower_to_expression_bytes(&r2),
+            "rules matching different ports should lower differently"
+        );
+    }
+
+    #[test]
+    fn empty_rule_lowers_to_empty_bytes() {
+        use super::super::super::types::Rule;
+        let r = Rule::new("filter", "input"); // no exprs
+        assert!(lower_to_expression_bytes(&r).is_empty());
+    }
+
+    #[test]
+    fn summary_renders_rules_to_replace() {
+        use super::super::super::types::{Family, Rule};
+        use super::super::types::DeclaredRule;
+        let mut d = NftablesDiff::default();
+        let rule = Rule::new("filter", "input").match_tcp_dport(22).accept();
+        let declared = DeclaredRule {
+            table: "filter".to_string(),
+            chain: "input".to_string(),
+            family: Family::Inet,
+            handle_key: Some("ssh".to_string()),
+            body: rule,
+        };
+        d.rules_to_replace.push((
+            "filter".to_string(),
+            Family::Inet,
+            "input".to_string(),
+            RuleHandle(42),
+            declared,
+        ));
+        let s = d.summary();
+        assert!(s.contains("~ rule"), "summary missing replace marker: {s}");
+        assert!(s.contains("handle=42"), "summary missing handle: {s}");
+        assert!(s.contains("key=ssh"), "summary missing key: {s}");
+        assert_eq!(d.change_count(), 1);
+        assert!(!d.is_empty());
     }
 }

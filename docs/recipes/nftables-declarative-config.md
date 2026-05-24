@@ -103,50 +103,71 @@ For tables/chains/flowtables this works out of the box —
 name-based identity is stable. **Rules are a known exception** —
 see the next section.
 
-## Rule identity caveat (0.16)
+## Rule identity (Plan 157b v2)
 
-The 0.16 diff uses **name-based identity** for tables, chains,
-and flowtables, and **always re-applies declared rules** without
-removing extras. Why: full rule-equivalence diffing requires
-canonicalizing the typed `Rule` (Plan 157 §4.3) — the kernel may
-re-emit rules with different attribute orderings or compat
-attributes (`NFTA_RULE_COMPAT` on rules originally created via
-`iptables-nft`), so a naive byte-compare produces false-positive
-replaces. The canonicalization layer needs a refactor of the
-`Rule` type's match-collection representation that's deferred to
-the next release cycle.
+Each rule that participates in reconciliation needs a stable
+identity key — same shape as `LinkConfig::name` or
+`RouteConfig::destination` in the existing `NetworkConfig`. Use
+`.rule_keyed("chain", "your-key", |r| ...)` instead of `.rule(...)`:
 
-Practical implications for **0.16**:
+```rust,no_run
+use nlink::netlink::nftables::config::NftablesConfig;
+use nlink::netlink::nftables::types::{Family, Hook, Policy};
 
-- Re-applying a config that contains rules adds those rules again
-  on every apply (the kernel doesn't enforce dedup). To avoid
-  accumulating duplicates, **flush the table before re-applying**
-  in the reconcile loop:
+let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
+    t.chain("input", |c| c.hook(Hook::Input).policy(Policy::Drop))
+        .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(22).accept())
+        .rule_keyed("input", "icmp-allow", |r| r.match_proto(nlink::netlink::nftables::types::Proto::Icmp).accept())
+});
+```
 
-  ```rust,no_run
-  # use nlink::{Connection, Nftables};
-  # use nlink::netlink::nftables::config::NftablesConfig;
-  # use nlink::netlink::nftables::types::Family;
-  # async fn run(cfg: NftablesConfig, conn: &Connection<Nftables>) -> nlink::Result<()> {
-  // Recipe pattern: bracket apply with a flush so the post-state
-  // is fully determined by the config (no leftover state from
-  // earlier applies).
-  let _ = conn.del_table("filter", Family::Inet).await; // ignore "not found"
-  let diff = cfg.diff(conn).await?;
-  diff.apply(conn).await?;
-  # Ok(())
-  # }
-  ```
+Under the hood: the `handle_key` is encoded as
+`NFTA_RULE_USERDATA` (libnftnl-compatible TLV — shows up as
+`comment "nlink:ssh-allow"` in `nft list ruleset` output), so the
+kernel round-trips it across dumps. The diff:
 
-  This trades atomicity (delete and apply are two transactions)
-  for simplicity. For sites that need true atomicity on every
-  reapply, wait for the canonicalization landing in 0.17 — or
-  drop into the raw `Transaction` API and bundle the delete +
-  re-add by hand.
+- Matches declared rules to kernel rules by key.
+- For matched pairs: byte-compares the expression list. Differ →
+  in-place `replace_rule` (atomic kernel-side update at the
+  rule's handle; preserves position; no flush).
+- Declared key with no kernel match → add.
+- Kernel rule with our `nlink:<key>` prefix but not in declared
+  → delete (it's ours; it shouldn't be there).
+- Kernel rule without an `nlink:` prefix → left alone (foreign
+  rule from `iptables-nft`, hand-edited via `nft -f`, etc.).
 
-- Operator-pattern users (Kubernetes controllers) typically have
-  the same loop already — the controller-runtime "delete + create
-  on diff" pattern is well-understood.
+```rust,no_run
+# use nlink::{Connection, Nftables};
+# use nlink::netlink::nftables::config::NftablesConfig;
+# async fn run(cfg: NftablesConfig, conn: &Connection<Nftables>) -> nlink::Result<()> {
+// Idempotent re-apply: second diff is empty.
+cfg.diff(conn).await?.apply(conn).await?;
+let second_diff = cfg.diff(conn).await?;
+assert!(second_diff.is_empty()); // no-op
+# Ok(())
+# }
+```
+
+### Anonymous rules (no key) — documented limitation
+
+Rules declared with bare `.rule(...)` (no `handle_key`) have no
+identity for the diff. The library treats them as "always add"
+and emits a `tracing::warn!` so operators notice. Documented
+trade-off; same shape as a `LinkConfig` without a name would be
+in `NetworkConfig` — pathological.
+
+If your config has any rule you want to reconcile across
+applies, use `.rule_keyed(...)`. Operators typically derive
+keys from their config schema:
+`service-foo/ingress/allow`, `firewall-rule-3142`, etc.
+
+### Foreign rules are preserved
+
+Rules in your chains created by other tools (no `nlink:` prefix
+on their comment, or no comment at all) are left alone by the
+diff. The library only deletes what it owns. If you want a clean
+chain (drop everything not declared), use the imperative
+`conn.del_chain(...)` first.
 
 ## `apply_reconcile` — retry on conflict
 

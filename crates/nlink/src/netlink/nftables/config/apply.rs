@@ -110,10 +110,31 @@ impl NftablesDiff {
             tx = tx.add_chain(chain);
         }
 
-        // 7. Rule adds. The DeclaredRule already carries a fully-
-        //    constructed Rule body; just clone and add.
+        // 7. Rule adds. Wire `handle_key` → `body.comment` so the
+        //    kernel round-trips it as `NFTA_RULE_USERDATA`
+        //    (Plan 157b v2 — drives per-rule diff identity).
         for rule in &self.rules_to_add {
-            tx = tx.add_rule(rule.body.clone());
+            let mut body = rule.body.clone();
+            if let Some(key) = rule.handle_key()
+                && body.comment.is_none()
+            {
+                body.comment = Some(key.to_string());
+            }
+            tx = tx.add_rule(body);
+        }
+
+        // 7b. Rule in-place replaces — emits
+        //     `NFT_MSG_NEWRULE | NLM_F_REPLACE | NFTA_RULE_HANDLE`.
+        //     Kernel atomically swaps the body at that handle
+        //     (preserves position, no flush). Plan 157b v2.
+        for (_table, _family, _chain, handle, declared) in &self.rules_to_replace {
+            let mut body = declared.body.clone();
+            if let Some(key) = declared.handle_key()
+                && body.comment.is_none()
+            {
+                body.comment = Some(key.to_string());
+            }
+            tx = tx.replace_rule(body, handle.0);
         }
 
         // 8. Flowtable adds.

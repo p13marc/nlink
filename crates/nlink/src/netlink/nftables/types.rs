@@ -547,6 +547,7 @@ pub struct Rule {
     pub(crate) family: Family,
     pub(crate) exprs: Vec<super::expr::Expr>,
     pub(crate) position: Option<u64>,
+    pub(crate) comment: Option<String>,
 }
 
 impl Rule {
@@ -558,6 +559,7 @@ impl Rule {
             family: Family::Inet,
             exprs: Vec::new(),
             position: None,
+            comment: None,
         }
     }
 
@@ -571,6 +573,26 @@ impl Rule {
     pub fn position(mut self, pos: u64) -> Self {
         self.position = Some(pos);
         self
+    }
+
+    /// Attach a comment to this rule. Encoded as
+    /// `NFTA_RULE_USERDATA` (libnftnl-compatible TLV); shows up
+    /// in `nft list ruleset` output as inline `comment "..."`.
+    ///
+    /// The declarative-config diff layer uses comments matching
+    /// `nlink:<key>` as the rule's reconciliation identity (Plan
+    /// 157b v2 — analogous to `LinkConfig::name`). Max 122 chars
+    /// for the user-supplied portion (128-byte libnftnl
+    /// `NFTNL_UDATA_COMMENT_MAXLEN` minus the `nlink:` prefix +
+    /// trailing NUL).
+    pub fn comment(mut self, comment: &str) -> Self {
+        self.comment = Some(comment.to_string());
+        self
+    }
+
+    /// Borrow the rule's comment, if any.
+    pub fn comment_ref(&self) -> Option<&str> {
+        self.comment.as_deref()
     }
 
     /// Match TCP destination port.
@@ -1179,6 +1201,21 @@ pub struct RuleInfo {
     pub handle: u64,
     /// Position in chain.
     pub position: Option<u64>,
+    /// `nlink:<key>` comment extracted from `NFTA_RULE_USERDATA`,
+    /// if any. `Some(key)` when this rule was created by nlink
+    /// (and carries an `nlink:`-prefixed comment); `None` when
+    /// the rule has no comment or a foreign-prefixed one. Plan
+    /// 157b v2 — drives per-rule reconciliation identity.
+    pub comment: Option<String>,
+    /// Raw `NFTA_RULE_USERDATA` payload, preserved verbatim. Lets
+    /// callers round-trip foreign comments (set by `iptables-nft`,
+    /// `nft -f` users, or other tools) without dropping them, even
+    /// though nlink's diff doesn't manage them.
+    pub userdata_raw: Option<Vec<u8>>,
+    /// Raw `NFTA_RULE_EXPRESSIONS` payload, preserved for the
+    /// body-equivalence check in `NftablesDiff::diff` (Plan 157b
+    /// v2). Empty when the rule has no expressions (degenerate).
+    pub expression_bytes: Vec<u8>,
 }
 
 // =============================================================================

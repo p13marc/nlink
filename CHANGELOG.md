@@ -6,6 +6,102 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Per-rule USERDATA-keyed reconciliation for `NftablesConfig`**
+  (Plan 157b v2 — closes Plan 157 §4.3 with a different design
+  than the original).
+
+  `DeclaredRule::handle_key` now does real work: it's encoded as
+  `NFTA_RULE_USERDATA` (libnftnl-compatible TLV — shows up as
+  `comment "nlink:<key>"` in `nft list ruleset` output) on apply,
+  parsed back on dump, and used as the per-rule identity field
+  for the diff. Matches the existing `NetworkConfig` per-object
+  reconciliation pattern (where each link/route/address is
+  individually diffable by name/destination).
+
+  ```rust
+  let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
+      t.chain("input", |c| c.hook(Hook::Input).policy(Policy::Drop))
+          .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(22).accept())
+          .rule_keyed("input", "icmp-allow", |r| r.match_proto(Proto::Icmp).accept())
+  });
+
+  cfg.diff(&conn).await?.apply(&conn).await?;     // first time: 2 adds
+  cfg.diff(&conn).await?.apply(&conn).await?;     // re-apply: 0 ops (idempotent)
+
+  // Change one rule's body, keep the key.
+  let updated = NftablesConfig::new().table("filter", Family::Inet, |t| {
+      t.chain("input", |c| c.hook(Hook::Input).policy(Policy::Drop))
+          .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(2222).accept())
+          .rule_keyed("input", "icmp-allow", |r| r.match_proto(Proto::Icmp).accept())
+  });
+  updated.diff(&conn).await?.apply(&conn).await?; // 1 op (replace_rule by handle)
+  ```
+
+  Diff algorithm:
+  - Declared keyed rule with kernel-side `nlink:<key>` match
+    → compare expression bytes; differ → `rules_to_replace`
+    (in-place atomic update via `NFT_MSG_NEWRULE + NLM_F_REPLACE
+    + handle`); same → no-op.
+  - Declared keyed rule with no kernel match → `rules_to_add`.
+  - Kernel rule with `nlink:<key>` comment NOT in declared →
+    `rules_to_delete` (it's ours; it shouldn't be there).
+  - Kernel rule without an `nlink:` prefix → left alone (foreign
+    rule from `iptables-nft`, hand-edited via `nft -f`, etc.).
+  - Declared rule without `handle_key` → always-add + `tracing::warn`
+    (anonymous; no idempotency — pathological, same as a
+    `LinkConfig` without a name).
+
+  **Why this design (research-validated):** the original Plan
+  157 §4.3 called for typed-Match canonicalization + reverse-
+  lowering of kernel-dumped expressions. Research turned up
+  that no production tool implements this — kube-proxy's
+  nftables mode (KEP-3866, GA in K8s 1.33) uses chain-as-unit
+  regeneration, Google's `nftables` Go library uses USERDATA
+  comment-tagging, libnftnl has no equivalence API. The
+  USERDATA-tagging approach is the documented production
+  pattern, robust against `NFTA_RULE_COMPAT` and future kernel
+  attribute additions, and aligns with `NetworkConfig`'s
+  per-object identity model. See
+  [`plans/157b-rule-reconciliation-design.md`](plans/157b-rule-reconciliation-design.md)
+  for the full design rationale.
+
+  New API surface:
+  - `Rule::comment(comment: &str)` — attach a comment that
+    round-trips through `NFTA_RULE_USERDATA`.
+  - `Rule::comment_ref()` — read it back.
+  - `Transaction::replace_rule(rule, handle)` — emit
+    `NFT_MSG_NEWRULE | NLM_F_REPLACE | NFTA_RULE_HANDLE` inside
+    the atomic batch.
+  - `RuleInfo` gains `comment: Option<String>` (parsed nlink-key,
+    if any), `userdata_raw: Option<Vec<u8>>` (preserves foreign
+    comments), `expression_bytes: Vec<u8>` (raw payload for the
+    body-equivalence check).
+  - `NftablesDiff::rules_to_replace: Vec<(table, family, chain,
+    handle, declared)>` — populated by the new diff branch.
+  - `nftables::userdata` module (crate-private) ships the TLV
+    encode/decode helpers; 8 unit tests cover round-trip,
+    over-long key rejection, foreign-prefix skip, unknown-TLV
+    skip, malformed input.
+
+  Implementation:
+  - `crates/nlink/src/netlink/nftables/userdata.rs` — new module.
+  - `crates/nlink/src/netlink/nftables/types.rs` — `Rule.comment`
+    + `RuleInfo` field additions.
+  - `crates/nlink/src/netlink/nftables/connection.rs` — wire
+    USERDATA into `Connection::add_rule` + `Transaction::add_rule`
+    + new `Transaction::replace_rule`; extend `parse_rule` to
+    extract `NFTA_RULE_USERDATA` + `NFTA_RULE_EXPRESSIONS`.
+  - `crates/nlink/src/netlink/nftables/config/diff.rs` — replace
+    the "always re-add" stub with per-rule identity diff.
+  - `crates/nlink/src/netlink/nftables/config/apply.rs` — handle
+    `rules_to_replace` in the atomic batch; auto-wire
+    `handle_key` → `body.comment` at apply boundary.
+
+  Test count: 960 lib tests (was 953 + 7 new — 3 wire-roundtrip,
+  4 diff). End-to-end wire format validated via parse-back round
+  trip; idempotent-reapply scenarios pending the privileged-CI
+  gate (Plan 140).
+
 - **`NftablesDiff::apply_reconcile` + declarative-config recipe**
   (Plan 157 §4.5 + §6). Bounded retry-on-conflict variant of
   `apply` for concurrent-mutator scenarios (e.g. operator pod +

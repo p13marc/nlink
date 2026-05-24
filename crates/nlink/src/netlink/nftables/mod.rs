@@ -36,6 +36,7 @@ pub mod connection;
 pub mod events;
 pub mod expr;
 pub mod types;
+pub(crate) mod userdata;
 
 pub use events::{NftablesEvent, NftablesGroup, NFNLGRP_NFTABLES};
 pub use expr::*;
@@ -166,6 +167,11 @@ pub const NFTA_RULE_CHAIN: u16 = 2;
 pub const NFTA_RULE_HANDLE: u16 = 3;
 pub const NFTA_RULE_EXPRESSIONS: u16 = 4;
 pub const NFTA_RULE_POSITION: u16 = 6;
+/// `NFTA_RULE_USERDATA = 7` — opaque-bytes payload the kernel
+/// preserves verbatim across reads / writes (max
+/// `NFT_USERDATA_MAXLEN = 256` bytes). Used for libnftnl-compatible
+/// TLV-encoded rule comments — see [`userdata`].
+pub const NFTA_RULE_USERDATA: u16 = 7;
 
 // =============================================================================
 // Expression Attributes
