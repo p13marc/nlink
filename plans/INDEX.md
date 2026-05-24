@@ -17,8 +17,16 @@ day-to-day tracker.
 ## Quick status
 
 - **Cycle**: 0.16.0 — branched from 0.15.1
+- **Workspace version**: `0.16.0` (bumped mid-cycle; publishing
+  remains manual via `cargo publish -p nlink-macros` then
+  `cargo publish -p nlink`)
 - **Estimated length**: 5 – 6 focused weeks
 - **Plans**: 1 master + 13 sub-plans (147 – 159)
+- **CI**: PR [#3](https://github.com/p13marc/nlink/pull/3) (draft) is
+  the long-lived 0.16 → master release-branch CI driver — GitHub
+  Actions only triggers on push/PR to master, so the draft PR is
+  how 0.16 work gets validated. All Rust + integration-test jobs
+  pass on the latest 0.16 head as of the version bump.
 - **Cut blocker**: all thirteen sub-plans + standard release prep
   (CHANGELOG, migration guide, semver-checks, public-api gate)
 
