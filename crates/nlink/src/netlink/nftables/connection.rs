@@ -641,6 +641,54 @@ impl Connection<Nftables> {
         self.send_batch(vec![builder.finish()]).await
     }
 
+    /// Subscribe to one or more nftables multicast groups.
+    ///
+    /// Once subscribed, use
+    /// [`Self::events`](crate::netlink::Connection::events) /
+    /// [`Self::into_events`](crate::netlink::Connection::into_events)
+    /// to consume the resulting
+    /// `Stream<Item = Result<NftablesEvent>>`.
+    /// See [`NftablesGroup`] for the available groups (only `All`
+    /// today — the kernel ships a single group for the family).
+    ///
+    /// Mirrors the
+    /// [`Connection::<Netfilter>::subscribe`](crate::netlink::Connection::subscribe)
+    /// shape used for conntrack events.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Nftables};
+    /// use nlink::netlink::nftables::{NftablesEvent, NftablesGroup};
+    /// use tokio_stream::StreamExt;
+    ///
+    /// let mut nft = Connection::<Nftables>::new()?;
+    /// nft.subscribe(&[NftablesGroup::All])?;
+    /// let mut events = nft.events();
+    /// while let Some(evt) = events.next().await {
+    ///     match evt? {
+    ///         NftablesEvent::NewTable(t) => println!("+ table {}", t.name),
+    ///         NftablesEvent::DelTable(t) => println!("- table {}", t.name),
+    ///         _ => {}
+    ///     }
+    /// }
+    /// ```
+    #[tracing::instrument(level = "info", skip(self), fields(groups = ?groups))]
+    pub fn subscribe(&mut self, groups: &[super::events::NftablesGroup]) -> Result<()> {
+        for g in groups {
+            self.socket_mut().add_membership(g.to_kernel_group())?;
+        }
+        Ok(())
+    }
+
+    /// Subscribe to every nftables multicast group.
+    ///
+    /// Convenience for the typical "watch any ruleset mutation"
+    /// pattern. Today equivalent to `subscribe(&[NftablesGroup::All])`;
+    /// future kernel additions are picked up automatically.
+    pub fn subscribe_all(&mut self) -> Result<()> {
+        self.subscribe(&[super::events::NftablesGroup::All])
+    }
+
     /// Send a dump request and collect responses.
     ///
     /// Returns (nfgen_family, payload_after_nfgenmsg) tuples.
@@ -698,7 +746,7 @@ impl Connection<Nftables> {
 // Attribute Parsing
 // =============================================================================
 
-fn parse_table(data: &[u8], family: Family) -> Option<Table> {
+pub(crate) fn parse_table(data: &[u8], family: Family) -> Option<Table> {
     let mut table = Table {
         name: String::new(),
         family,
@@ -732,7 +780,7 @@ fn parse_table(data: &[u8], family: Family) -> Option<Table> {
     }
 }
 
-fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
+pub(crate) fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
     let mut chain = ChainInfo {
         table: String::new(),
         name: String::new(),
@@ -787,7 +835,7 @@ fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
     }
 }
 
-fn parse_rule(data: &[u8], family: Family) -> Option<RuleInfo> {
+pub(crate) fn parse_rule(data: &[u8], family: Family) -> Option<RuleInfo> {
     let mut rule = RuleInfo {
         table: String::new(),
         chain: String::new(),
@@ -989,7 +1037,7 @@ impl Transaction {
 }
 
 /// Parse a flowtable from `NFT_MSG_GETFLOWTABLE` response payload.
-fn parse_flowtable(data: &[u8], family: Family) -> Option<super::types::Flowtable> {
+pub(crate) fn parse_flowtable(data: &[u8], family: Family) -> Option<super::types::Flowtable> {
     let mut ft = super::types::Flowtable {
         family,
         table: String::new(),

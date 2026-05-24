@@ -33,9 +33,11 @@
 
 pub mod config;
 pub mod connection;
+pub mod events;
 pub mod expr;
 pub mod types;
 
+pub use events::{NftablesEvent, NftablesGroup, NFNLGRP_NFTABLES};
 pub use expr::*;
 pub use types::*;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};

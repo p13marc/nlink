@@ -6,6 +6,40 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Nftables multicast events** (Plan 150 §9.2): subscribe to
+  `NFNLGRP_NFTABLES` (7) and consume a typed
+  `Stream<Item = Result<NftablesEvent>>`. Mirrors the existing
+  `Connection::<Netfilter>::subscribe` /
+  `Connection::<Netfilter>::events` shape that conntrack consumers
+  already use.
+
+  ```rust
+  use nlink::netlink::{Connection, Nftables};
+  use nlink::netlink::nftables::{NftablesEvent, NftablesGroup};
+  use tokio_stream::StreamExt;
+
+  let mut nft = Connection::<Nftables>::new()?;
+  nft.subscribe(&[NftablesGroup::All])?;
+  let mut events = nft.events();
+  while let Some(evt) = events.next().await {
+      match evt? {
+          NftablesEvent::NewTable(t) => println!("+ table {}", t.name),
+          NftablesEvent::DelRule(r)  => println!("- rule  on {}/{}", r.table, r.chain),
+          _ => {}
+      }
+  }
+  ```
+
+  Eight typed variants: `NewTable`/`DelTable`, `NewChain`/`DelChain`,
+  `NewRule`/`DelRule`, `NewFlowtable`/`DelFlowtable`. Sets +
+  setelem + gen messages aren't parsed today (silently dropped from
+  the stream — wire when a consumer asks). Bonus surface for
+  Plan 157's reconcile mode: the declarative `NftablesConfig` can
+  subscribe to these to drive convergent reapply on external drift.
+
+  4 new unit tests cover group→kernel-id mapping, wrong-subsystem
+  rejection, truncated-body rejection, and unknown-msg-type skip.
+
 - **nlink-macros polish + publish-order docs** (Plan 154 Phase 7,
   closes out the macro cycle):
   - `crates/nlink-macros/README.md` — crates.io landing page

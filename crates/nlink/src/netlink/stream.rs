@@ -500,6 +500,27 @@ impl EventSource for Netfilter {
     }
 }
 
+// Nftables protocol events (NFNLGRP_NFTABLES multicast — table /
+// chain / rule / flowtable mutations).
+impl private::Sealed for super::protocol::Nftables {}
+
+impl EventSource for super::protocol::Nftables {
+    type Event = super::nftables::NftablesEvent;
+
+    fn parse_events(data: &[u8]) -> Vec<super::nftables::NftablesEvent> {
+        let mut events = Vec::new();
+        for (header, payload) in MessageIter::new(data).flatten() {
+            if let Some(evt) = super::nftables::events::parse_nftables_event(
+                header.nlmsg_type,
+                payload,
+            ) {
+                events.push(evt);
+            }
+        }
+        events
+    }
+}
+
 // SELinux protocol events
 impl private::Sealed for SELinux {}
 
