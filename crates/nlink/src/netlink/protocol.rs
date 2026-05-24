@@ -356,15 +356,16 @@ impl ProtocolState for Mptcp {
 /// Devlink protocol state.
 ///
 /// Used for querying hardware device management via Generic Netlink.
-/// Contains the resolved devlink family ID.
+/// Contains the resolved devlink family ID + the multicast-group
+/// map parsed from `CTRL_CMD_GETFAMILY`.
 ///
 /// Construct with `Connection::<Devlink>::new_async().await?`, not `Connection::new()`.
 #[derive(Debug, Default)]
 pub struct Devlink {
     /// Resolved devlink GENL family ID.
     pub(crate) family_id: u16,
-    /// Multicast group ID for event notifications.
-    pub(crate) monitor_group_id: Option<u32>,
+    /// Multicast groups exposed by the family (name → kernel-assigned ID).
+    pub(crate) mcast_groups: ::std::collections::HashMap<String, u32>,
 }
 
 impl private::Sealed for Devlink {}
@@ -389,18 +390,17 @@ impl ProtocolState for Nftables {
 /// nl80211 protocol state.
 ///
 /// Used for WiFi configuration via Generic Netlink.
-/// Contains the resolved nl80211 family ID.
+/// Contains the resolved nl80211 family ID + the multicast-group
+/// map parsed from `CTRL_CMD_GETFAMILY` (`"scan"`, `"mlme"`,
+/// `"regulatory"`, `"config"`, …).
 ///
 /// Construct with `Connection::<Nl80211>::new_async().await?`, not `Connection::new()`.
 #[derive(Debug, Default)]
 pub struct Nl80211 {
     /// Resolved nl80211 GENL family ID.
     pub(crate) family_id: u16,
-    /// Multicast group IDs for event monitoring.
-    pub(crate) scan_group_id: Option<u32>,
-    pub(crate) mlme_group_id: Option<u32>,
-    pub(crate) regulatory_group_id: Option<u32>,
-    pub(crate) config_group_id: Option<u32>,
+    /// Multicast groups exposed by the family (name → kernel-assigned ID).
+    pub(crate) mcast_groups: ::std::collections::HashMap<String, u32>,
 }
 
 impl private::Sealed for Nl80211 {}
@@ -412,15 +412,15 @@ impl ProtocolState for Nl80211 {
 /// Ethtool protocol state.
 ///
 /// Used for querying and configuring network device settings via Generic Netlink.
-/// Contains the resolved ethtool family ID and monitor group ID.
+/// Contains the resolved ethtool family ID + the multicast-group map.
 ///
 /// Construct with `Connection::<Ethtool>::new_async().await?`, not `Connection::new()`.
 #[derive(Debug, Default)]
 pub struct Ethtool {
     /// Resolved ethtool GENL family ID.
     pub(crate) family_id: u16,
-    /// Monitor multicast group ID (for event notifications).
-    pub(crate) monitor_group_id: Option<u32>,
+    /// Multicast groups exposed by the family (name → kernel-assigned ID).
+    pub(crate) mcast_groups: ::std::collections::HashMap<String, u32>,
 }
 
 impl private::Sealed for Ethtool {}

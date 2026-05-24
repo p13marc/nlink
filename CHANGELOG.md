@@ -69,16 +69,20 @@ All notable changes to this project will be documented in this file.
   rejection, and truncated-payload rejection. 880 lib tests pass
   (was 875 + 5). Clippy clean across `--all-features`.
 
-  ### Follow-up: refactor existing families to use the shared
-  infra
+  ### Follow-up: existing families now use the shared infra
 
-  Devlink, Nl80211, and Ethtool currently hand-roll their own
-  per-family multicast-group resolution in their
-  `resolve_*_family()` helpers (each ~100 lines of duplicated
-  CTRL_ATTR_MCAST_GROUPS-parsing code). The new shared resolver
-  makes those redundant — a follow-up commit can drop the
-  per-family copies and route them through `GenlFamily::mcast_group`.
-  Net code reduction across 3 families.
+  Devlink, Nl80211, and Ethtool previously hand-rolled their own
+  per-family multicast-group resolution in `resolve_*_family()`
+  helpers (each ~100 lines of duplicated
+  `CTRL_ATTR_MCAST_GROUPS`-parsing). All three now route through
+  `__rt::resolve_genl_family_with_groups` and implement
+  `GenlFamily` (with a `mcast_group(name) -> Option<u32>` lookup
+  into the parsed map). **Net −254 lines** of duplicated wire
+  parsing across the three connection.rs files. The bespoke
+  `Connection::<F>::subscribe()` methods are preserved as thin
+  wrappers over the generic `subscribe_group(name)`, so calling
+  code is unaffected. The `Ethtool::monitor_group_id()` accessor
+  now delegates to the map lookup. No API change.
 
 - **DPLL Generic Netlink family** (Plan 156, Phases 1-4 + 6
   partial) — the kernel's clock-synchronization family (SyncE,
