@@ -154,6 +154,16 @@
 //! }
 //! ```
 
+// The Plan 154 derive macros generate code referencing
+// `::nlink::macros::__rt::*` so the same expansion works
+// uniformly from any downstream crate. Inside `nlink` itself
+// that path would fail to resolve (no external crate named
+// `nlink` from our own perspective); this `extern crate self as
+// nlink` aliases the crate to its own external name so generated
+// paths work here too. Required for the in-tree derive tests in
+// `crate::macros::tests`.
+extern crate self as nlink;
+
 // Core modules (always available)
 pub mod macros;
 pub mod netlink;

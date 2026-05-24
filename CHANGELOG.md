@@ -6,6 +6,65 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`#[derive(GenlMessage)]`** (Plan 154 Phase 3b) — the big
+  derive that turns a struct annotation into a complete
+  `GenlMessage` impl. Pairs with the typed-enum codec derives to
+  let downstream authors define a GENL message body in ~10 lines:
+
+  ```rust
+  use nlink::macros::*;
+
+  #[derive(GenlCommand, Debug, Clone, Copy)]
+  #[genl_command(repr = "u8")]
+  enum MyCmd { Get = 2 }
+
+  #[derive(GenlAttribute, Debug, Clone, Copy)]
+  #[genl_attribute(repr = "u16")]
+  enum MyAttr { Id = 1, Name = 2, Description = 3 }
+
+  #[derive(GenlMessage, Debug)]
+  #[genl_message(cmd = MyCmd::Get)]
+  struct GetRequest {
+      #[genl_attr(MyAttr::Id)]      id: u32,
+      #[genl_attr(MyAttr::Name)]    name: String,
+      #[genl_attr(MyAttr::Description)] description: Option<String>,
+  }
+  ```
+
+  Supported field types (0.16 Phase 3b):
+  - `u8` / `u16` / `u32` / `u64`
+  - `String`
+  - `Vec<u8>`
+  - `Option<T>` for any of the above — omitted on `None`,
+    present-when-`Some`, `Some(parsed)` if the kernel returns it.
+
+  Unsupported types (`i32`, nested attribute groups, `IpAddr`,
+  `bool`) produce a compile-time error naming the field +
+  pointing at the supported-types list. Nested-group support
+  via `#[derive(NetlinkAttrs)]` lands in a follow-up phase.
+
+  `from_bytes` semantics: missing attributes produce default
+  values (zero for ints, empty for strings/bytes, `None` for
+  `Option<T>`). Unknown attribute types are silently skipped —
+  forward-compatibility with newer kernels emitting attrs older
+  consumers don't understand.
+
+  Generated locals use a `__` prefix (`__payload`, `__ty`,
+  `__attr_payload`) so they can't collide with user field names
+  — a field named `payload` no longer shadows the function
+  parameter.
+
+  Required for the in-tree derive tests: `extern crate self as
+  nlink;` was added to `lib.rs` so the macro-generated
+  `::nlink::macros::__rt::*` paths resolve uniformly from inside
+  the `nlink` crate itself + from any downstream crate.
+
+  7 new runtime tests (in addition to the 4 substrate tests
+  shipped in Phase 3a): simple round-trip, `Option<T>` omitted-
+  on-None + round-trip-Some, typed-enum composition (CMD comes
+  from `MyCmd::Get as u8`), `Vec<u8>` round-trip, default-fill
+  on empty payload, unknown-attribute skip.
+
 - **`nlink::macros` module** — substrate for the proc-macro
   derives (Plan 154 Phase 3a). nlink now depends on `nlink-macros`;
   downstream code writes `use nlink::macros::*;` to pull in the

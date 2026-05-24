@@ -1,0 +1,469 @@
+//! `#[derive(GenlMessage)]` expansion.
+//!
+//! Parses a struct annotated with `#[genl_message(cmd = EXPR)]`
+//! and one `#[genl_attr(EXPR)]` per field, then generates
+//! `impl GenlMessage` (CMD + to_bytes + from_bytes) by mapping
+//! each field's Rust type at expand time to the right
+//! `nlink::macros::__rt::*` helper.
+//!
+//! # Supported field types (0.16 Phase 3b)
+//!
+//! - `u8` / `u16` / `u32` / `u64`
+//! - `String`
+//! - `Vec<u8>`
+//! - `Option<T>` where `T` is any of the above — omitted on
+//!   `None`, present-only-when-set on emit, `Some(parsed)` on
+//!   parse if the attribute is present.
+//!
+//! Unsupported types (`i32`, nested `T: NetlinkAttrs`, `bool`,
+//! `IpAddr`, etc.) produce a compile-time error that names the
+//! field and points at the unsupported-type message in the
+//! derive's docstring. Nested-attribute support lands in a
+//! later phase alongside `#[derive(NetlinkAttrs)]`.
+//!
+//! # from_bytes semantics
+//!
+//! `from_bytes` walks the attribute payload via
+//! [`crate::macros::__rt::attr_iter`][`nlink::macros::__rt::attr_iter`]
+//! and assigns each known attribute. **Missing attributes
+//! produce default values** (zero for ints, empty for
+//! strings/bytes, `None` for `Option<T>`). This is the
+//! pragmatic 0.16 stance — "required-attribute enforcement"
+//! is a follow-up that needs a per-field `#[genl_attr(required)]`
+//! marker. Document the assumption in the derived struct's
+//! rustdoc if the kernel never returns the field as missing.
+//!
+//! Unknown attribute types are silently skipped — forward
+//! compatibility with newer kernels that emit attrs older
+//! consumers don't understand.
+
+use proc_macro2::{Span, TokenStream as TokenStream2};
+use quote::quote;
+use syn::{
+    spanned::Spanned, Data, DeriveInput, Expr, Field, Fields, GenericArgument, Ident,
+    PathArguments, Type,
+};
+
+use crate::find_meta_list;
+
+pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
+    let struct_ident = &input.ident;
+    let span = struct_ident.span();
+
+    // 1. Parse #[genl_message(cmd = EXPR)] — required.
+    let cmd_expr = parse_genl_message_attr(&input)?;
+
+    // 2. Require a named-field struct.
+    let fields = require_named_struct(&input.data, span)?;
+    if fields.named.is_empty() {
+        return Err(syn::Error::new(
+            span,
+            "#[derive(GenlMessage)] requires at least one field; \
+             zero-field messages have no on-wire representation",
+        ));
+    }
+
+    // 3. Per-field: parse #[genl_attr(EXPR)] + classify the
+    //    field's Rust type.
+    let field_specs: Vec<FieldSpec> = fields
+        .named
+        .iter()
+        .map(parse_field)
+        .collect::<syn::Result<_>>()?;
+
+    // 4. Generate the three impl bodies.
+    let emit_calls = field_specs.iter().map(FieldSpec::emit_call);
+    let field_defaults = field_specs.iter().map(FieldSpec::field_default);
+    let parse_arms = field_specs.iter().map(FieldSpec::parse_arm);
+    let field_idents = field_specs.iter().map(|s| &s.ident);
+
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    Ok(quote! {
+        impl #impl_generics ::nlink::macros::GenlMessage for #struct_ident #ty_generics #where_clause {
+            const CMD: u8 = (#cmd_expr) as u8;
+
+            fn to_bytes(
+                &self,
+                builder: &mut ::nlink::netlink::MessageBuilder,
+            ) -> ::core::result::Result<(), ::nlink::Error> {
+                #(#emit_calls)*
+                ::core::result::Result::Ok(())
+            }
+
+            fn from_bytes(
+                __payload: &[u8],
+            ) -> ::core::result::Result<Self, ::nlink::Error> {
+                // Generated locals use double-underscore prefix so
+                // they can't collide with user field names — e.g.
+                // a field named `payload` would otherwise shadow
+                // the function parameter and break the attr_iter
+                // call below.
+                #(#field_defaults)*
+                for (__ty, __attr_payload)
+                    in ::nlink::macros::__rt::attr_iter(__payload)
+                {
+                    match __ty {
+                        #(#parse_arms,)*
+                        _ => {} // unknown attr — forward-compat with newer kernels
+                    }
+                }
+                ::core::result::Result::Ok(Self {
+                    #(#field_idents,)*
+                })
+            }
+        }
+    })
+}
+
+// --------------------------------------------------------------
+// Helpers
+// --------------------------------------------------------------
+
+fn parse_genl_message_attr(input: &DeriveInput) -> syn::Result<Expr> {
+    let ml = find_meta_list(&input.attrs, "genl_message").ok_or_else(|| {
+        syn::Error::new(
+            input.ident.span(),
+            "#[derive(GenlMessage)] requires #[genl_message(cmd = EXPR)] attribute; \
+             EXPR can be an integer literal (`cmd = 2`) or a typed-enum variant cast \
+             (`cmd = MyCmd::Get`)",
+        )
+    })?;
+    let mut found_cmd: Option<Expr> = None;
+    ml.parse_nested_meta(|meta| {
+        if meta.path.is_ident("cmd") {
+            let value = meta.value()?;
+            let expr: Expr = value.parse()?;
+            found_cmd = Some(expr);
+            Ok(())
+        } else {
+            Err(meta.error(format!(
+                "unknown genl_message key {:?}; expected `cmd`",
+                meta.path
+                    .get_ident()
+                    .map(|i| i.to_string())
+                    .unwrap_or_default()
+            )))
+        }
+    })?;
+    found_cmd.ok_or_else(|| {
+        syn::Error::new_spanned(ml, "#[genl_message(...)] must specify `cmd = EXPR`")
+    })
+}
+
+fn require_named_struct(data: &Data, span: Span) -> syn::Result<&syn::FieldsNamed> {
+    match data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Named(n) => Ok(n),
+            Fields::Unnamed(_) => Err(syn::Error::new(
+                span,
+                "#[derive(GenlMessage)] requires a struct with named fields, not a \
+                 tuple struct",
+            )),
+            Fields::Unit => Err(syn::Error::new(
+                span,
+                "#[derive(GenlMessage)] requires a struct with named fields, not a \
+                 unit struct",
+            )),
+        },
+        Data::Enum(_) => Err(syn::Error::new(
+            span,
+            "#[derive(GenlMessage)] is only valid on structs; use #[derive(GenlEnum)] \
+             for value enums or #[derive(GenlCommand)] for command enums",
+        )),
+        Data::Union(_) => Err(syn::Error::new(
+            span,
+            "#[derive(GenlMessage)] is only valid on structs, not unions",
+        )),
+    }
+}
+
+#[derive(Debug, Clone)]
+enum WireKind {
+    U8,
+    U16,
+    U32,
+    U64,
+    Str,
+    Bytes,
+    Optional(Box<WireKind>),
+}
+
+impl WireKind {
+    /// Token for the inner Rust type — e.g. `u32` or `String`.
+    /// `Optional` returns the wrapped form `Option<T>`.
+    fn type_token(&self) -> TokenStream2 {
+        match self {
+            Self::U8 => quote! { u8 },
+            Self::U16 => quote! { u16 },
+            Self::U32 => quote! { u32 },
+            Self::U64 => quote! { u64 },
+            Self::Str => quote! { ::std::string::String },
+            Self::Bytes => quote! { ::std::vec::Vec<u8> },
+            Self::Optional(inner) => {
+                let inner_ty = inner.type_token();
+                quote! { ::core::option::Option<#inner_ty> }
+            }
+        }
+    }
+
+    /// The default-value expression used as the from_bytes seed
+    /// before walking the attribute iterator.
+    fn default_expr(&self) -> TokenStream2 {
+        match self {
+            Self::U8 | Self::U16 | Self::U32 | Self::U64 => quote! { 0 },
+            Self::Str => quote! { ::std::string::String::new() },
+            Self::Bytes => quote! { ::std::vec::Vec::new() },
+            Self::Optional(_) => quote! { ::core::option::Option::None },
+        }
+    }
+
+    /// The `__rt::parse_*_attr` function for this kind.
+    fn parse_fn(&self) -> TokenStream2 {
+        match self {
+            Self::U8 => quote! { ::nlink::macros::__rt::parse_u8_attr },
+            Self::U16 => quote! { ::nlink::macros::__rt::parse_u16_attr },
+            Self::U32 => quote! { ::nlink::macros::__rt::parse_u32_attr },
+            Self::U64 => quote! { ::nlink::macros::__rt::parse_u64_attr },
+            Self::Str => quote! { ::nlink::macros::__rt::parse_str_attr },
+            Self::Bytes => quote! { ::nlink::macros::__rt::parse_bytes_attr },
+            Self::Optional(inner) => inner.parse_fn(),
+        }
+    }
+
+    /// Generate the emit call for a non-Option field.
+    /// `self_expr` is the borrowed field value
+    /// (e.g. `&self.label` for String/Bytes, `self.id` for ints).
+    fn emit_call_inner(
+        &self,
+        builder: &TokenStream2,
+        attr_expr: &Expr,
+        value_expr: &TokenStream2,
+    ) -> TokenStream2 {
+        match self {
+            Self::U8 => quote! {
+                ::nlink::macros::__rt::emit_u8_attr(#builder, (#attr_expr) as u16, #value_expr);
+            },
+            Self::U16 => quote! {
+                ::nlink::macros::__rt::emit_u16_attr(#builder, (#attr_expr) as u16, #value_expr);
+            },
+            Self::U32 => quote! {
+                ::nlink::macros::__rt::emit_u32_attr(#builder, (#attr_expr) as u16, #value_expr);
+            },
+            Self::U64 => quote! {
+                ::nlink::macros::__rt::emit_u64_attr(#builder, (#attr_expr) as u16, #value_expr);
+            },
+            Self::Str => quote! {
+                ::nlink::macros::__rt::emit_str_attr(#builder, (#attr_expr) as u16, #value_expr);
+            },
+            Self::Bytes => quote! {
+                ::nlink::macros::__rt::emit_bytes_attr(#builder, (#attr_expr) as u16, #value_expr);
+            },
+            Self::Optional(_) => {
+                // Optional should never call emit_call_inner directly —
+                // its outer emit_call handles the if-let-Some wrapping.
+                quote! { compile_error!("internal: Optional in emit_call_inner") }
+            }
+        }
+    }
+
+    /// Whether the emit call takes `&` or moves: ints copy,
+    /// strings/bytes need `&`.
+    fn needs_reference_on_emit(&self) -> bool {
+        matches!(self, Self::Str | Self::Bytes)
+    }
+}
+
+struct FieldSpec {
+    ident: Ident,
+    attr_expr: Expr,
+    kind: WireKind,
+}
+
+impl FieldSpec {
+    fn emit_call(&self) -> TokenStream2 {
+        let ident = &self.ident;
+        let attr = &self.attr_expr;
+        let builder = quote! { builder };
+        match &self.kind {
+            WireKind::Optional(inner) => {
+                let value_expr = if inner.needs_reference_on_emit() {
+                    quote! { v }
+                } else {
+                    quote! { *v }
+                };
+                let inner_emit = inner.emit_call_inner(&builder, attr, &value_expr);
+                quote! {
+                    if let ::core::option::Option::Some(v) = self.#ident.as_ref() {
+                        #inner_emit
+                    }
+                }
+            }
+            other => {
+                let value_expr = if other.needs_reference_on_emit() {
+                    quote! { &self.#ident }
+                } else {
+                    quote! { self.#ident }
+                };
+                other.emit_call_inner(&builder, attr, &value_expr)
+            }
+        }
+    }
+
+    fn field_default(&self) -> TokenStream2 {
+        let ident = &self.ident;
+        let ty = self.kind.type_token();
+        let default = self.kind.default_expr();
+        quote! { let mut #ident: #ty = #default; }
+    }
+
+    fn parse_arm(&self) -> TokenStream2 {
+        let ident = &self.ident;
+        let attr = &self.attr_expr;
+        let parse_fn = self.kind.parse_fn();
+        match &self.kind {
+            WireKind::Optional(_) => quote! {
+                __ty if __ty == (#attr) as u16 => {
+                    #ident = ::core::option::Option::Some(#parse_fn(__attr_payload)?);
+                }
+            },
+            _ => quote! {
+                __ty if __ty == (#attr) as u16 => {
+                    #ident = #parse_fn(__attr_payload)?;
+                }
+            },
+        }
+    }
+}
+
+fn parse_field(field: &Field) -> syn::Result<FieldSpec> {
+    let ident = field
+        .ident
+        .clone()
+        .ok_or_else(|| syn::Error::new_spanned(field, "field must have a name"))?;
+
+    let ml = find_meta_list(&field.attrs, "genl_attr").ok_or_else(|| {
+        syn::Error::new_spanned(
+            field,
+            format!(
+                "field `{ident}` is missing #[genl_attr(EXPR)] — every field in a \
+                 #[derive(GenlMessage)] struct must declare its attribute kind"
+            ),
+        )
+    })?;
+
+    // #[genl_attr(EXPR)] — EXPR is a single expression (an
+    // integer literal or a typed-enum variant cast).
+    let attr_expr: Expr = ml.parse_args()?;
+
+    let kind = classify_type(&field.ty)?;
+
+    Ok(FieldSpec {
+        ident,
+        attr_expr,
+        kind,
+    })
+}
+
+fn classify_type(ty: &Type) -> syn::Result<WireKind> {
+    let Type::Path(p) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "unsupported field-type shape; expected a named type",
+        ));
+    };
+    let last = p.path.segments.last().ok_or_else(|| {
+        syn::Error::new_spanned(ty, "empty type path")
+    })?;
+    let name = last.ident.to_string();
+    match name.as_str() {
+        "u8" => Ok(WireKind::U8),
+        "u16" => Ok(WireKind::U16),
+        "u32" => Ok(WireKind::U32),
+        "u64" => Ok(WireKind::U64),
+        "String" => Ok(WireKind::Str),
+        "Vec" => {
+            // Only Vec<u8> is supported.
+            let inner = single_type_arg(last, ty)?;
+            let inner_path = match inner {
+                Type::Path(p) => p,
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        inner,
+                        "Vec inner type must be a path; only Vec<u8> is currently \
+                         supported in #[derive(GenlMessage)]",
+                    ))
+                }
+            };
+            let inner_last = inner_path.path.segments.last().ok_or_else(|| {
+                syn::Error::new_spanned(inner, "empty inner type path")
+            })?;
+            if inner_last.ident == "u8" {
+                Ok(WireKind::Bytes)
+            } else {
+                Err(syn::Error::new_spanned(
+                    inner,
+                    format!(
+                        "only Vec<u8> is supported in #[derive(GenlMessage)]; found \
+                         Vec<{}>",
+                        inner_last.ident
+                    ),
+                ))
+            }
+        }
+        "Option" => {
+            let inner = single_type_arg(last, ty)?;
+            let inner_kind = classify_type(inner)?;
+            if matches!(inner_kind, WireKind::Optional(_)) {
+                return Err(syn::Error::new_spanned(
+                    ty,
+                    "nested Option<Option<T>> is not supported in #[derive(GenlMessage)]",
+                ));
+            }
+            Ok(WireKind::Optional(Box::new(inner_kind)))
+        }
+        other => Err(syn::Error::new_spanned(
+            ty,
+            format!(
+                "unsupported field type `{other}` in #[derive(GenlMessage)]. \
+                 Supported: u8, u16, u32, u64, String, Vec<u8>, Option<T>. \
+                 (Nested attribute groups via NetlinkAttrs land in a follow-up phase.)"
+            ),
+        )),
+    }
+}
+
+/// Extract the single type argument from a generic segment
+/// (e.g. `Option<T>` → `T`, `Vec<u8>` → `u8`).
+fn single_type_arg<'a>(
+    seg: &'a syn::PathSegment,
+    parent_ty: &Type,
+) -> syn::Result<&'a Type> {
+    let args = match &seg.arguments {
+        PathArguments::AngleBracketed(a) => a,
+        _ => {
+            return Err(syn::Error::new_spanned(
+                parent_ty,
+                format!("`{}` must have a single type parameter", seg.ident),
+            ))
+        }
+    };
+    let _ = parent_ty.span();
+    if args.args.len() != 1 {
+        return Err(syn::Error::new_spanned(
+            args,
+            format!(
+                "`{}` requires exactly one type parameter; found {}",
+                seg.ident,
+                args.args.len()
+            ),
+        ));
+    }
+    match &args.args[0] {
+        GenericArgument::Type(t) => Ok(t),
+        other => Err(syn::Error::new_spanned(
+            other,
+            format!("`{}` type parameter must be a type", seg.ident),
+        )),
+    }
+}

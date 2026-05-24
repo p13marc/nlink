@@ -35,7 +35,7 @@
 //! | 6 | Worked example + recipe | — |
 //! | 7 | Final re-export polish + CHANGELOG framing | — |
 
-pub use nlink_macros::{GenlAttribute, GenlCommand, GenlEnum};
+pub use nlink_macros::{GenlAttribute, GenlCommand, GenlEnum, GenlMessage};
 
 use crate::netlink::MessageBuilder;
 use crate::Result;
@@ -346,5 +346,184 @@ mod tests {
             }
         }
         assert_eq!(found, Some(0x1234_5678));
+    }
+
+    // -- Phase 3b derive tests ---------------------------------
+    //
+    // The crate-root re-export `nlink_macros::GenlMessage` lives
+    // in the macro namespace; the trait `GenlMessage` lives in
+    // the type namespace. Both share the name without colliding.
+    //
+    // These tests use the derive (`#[derive(GenlMessage)]`)
+    // against the trait + runtime helpers defined in this same
+    // module — the proof that the macro expansion's
+    // `::nlink::macros::__rt::*` path resolves correctly.
+
+    use crate::macros::GenlMessage as GenlMessageDerive;
+    // ^ Cargo doc-test's macro/trait dual-namespace works fine
+    //   in normal test compilation; this alias is only here to
+    //   make the derive macro's identity unambiguous if a future
+    //   rustc warning forces one or the other.
+
+    #[derive(GenlMessageDerive, Debug, Clone, PartialEq, Eq)]
+    #[genl_message(cmd = 7u8)]
+    struct DerivedSimple {
+        #[genl_attr(1u16)]
+        id: u32,
+        #[genl_attr(2u16)]
+        label: String,
+    }
+
+    #[test]
+    fn derived_simple_round_trips() {
+        let original = DerivedSimple {
+            id: 0xCAFEBABE,
+            label: "world".to_string(),
+        };
+        assert_eq!(DerivedSimple::CMD, 7);
+
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        original.to_bytes(&mut builder).expect("emit");
+        let bytes = builder.as_bytes();
+
+        let parsed = DerivedSimple::from_bytes(&bytes[body_start..]).expect("parse");
+        assert_eq!(parsed, original);
+    }
+
+    #[derive(GenlMessageDerive, Debug, Clone, PartialEq, Eq)]
+    #[genl_message(cmd = 9u8)]
+    struct DerivedOptional {
+        #[genl_attr(1u16)]
+        id: u32,
+        #[genl_attr(2u16)]
+        description: Option<String>,
+        #[genl_attr(3u16)]
+        priority: Option<u16>,
+    }
+
+    #[test]
+    fn derived_optional_omits_none_on_emit() {
+        let with_none = DerivedOptional {
+            id: 1,
+            description: None,
+            priority: None,
+        };
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        with_none.to_bytes(&mut builder).expect("emit");
+        let bytes = &builder.as_bytes()[body_start..];
+
+        // Only the id attribute should be present.
+        let mut attrs_seen: Vec<u16> = Vec::new();
+        for (ty, _) in __rt::attr_iter(bytes) {
+            attrs_seen.push(ty);
+        }
+        assert_eq!(attrs_seen, vec![1u16]);
+
+        let parsed = DerivedOptional::from_bytes(bytes).expect("parse");
+        assert_eq!(parsed, with_none);
+    }
+
+    #[test]
+    fn derived_optional_round_trips_some() {
+        let original = DerivedOptional {
+            id: 42,
+            description: Some("hello".to_string()),
+            priority: Some(99),
+        };
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        original.to_bytes(&mut builder).expect("emit");
+        let parsed = DerivedOptional::from_bytes(&builder.as_bytes()[body_start..])
+            .expect("parse");
+        assert_eq!(parsed, original);
+    }
+
+    // Verify the derive interoperates with the typed-enum
+    // codec derives — the realistic shape downstream code uses.
+
+    use crate::macros::{GenlAttribute, GenlCommand};
+
+    #[derive(GenlCommand, Debug, Clone, Copy, PartialEq, Eq)]
+    #[genl_command(repr = "u8")]
+    enum TestCmd {
+        Unspec = 0,
+        Get = 2,
+    }
+
+    #[derive(GenlAttribute, Debug, Clone, Copy, PartialEq, Eq)]
+    #[genl_attribute(repr = "u16")]
+    enum TestAttr {
+        Id = 1,
+        Name = 2,
+    }
+
+    #[derive(GenlMessageDerive, Debug, Clone, PartialEq, Eq)]
+    #[genl_message(cmd = TestCmd::Get)]
+    struct TypedGetReq {
+        #[genl_attr(TestAttr::Id)]
+        id: u32,
+        #[genl_attr(TestAttr::Name)]
+        name: String,
+    }
+
+    #[test]
+    fn typed_enums_compose_with_message_derive() {
+        // CMD comes from TestCmd::Get (= 2) via `as u8`.
+        assert_eq!(TypedGetReq::CMD, 2);
+
+        let original = TypedGetReq {
+            id: 7,
+            name: "device-0".to_string(),
+        };
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        original.to_bytes(&mut builder).expect("emit");
+        let parsed = TypedGetReq::from_bytes(&builder.as_bytes()[body_start..])
+            .expect("parse");
+        assert_eq!(parsed, original);
+    }
+
+    #[derive(GenlMessageDerive, Debug, Clone, PartialEq, Eq)]
+    #[genl_message(cmd = 5u8)]
+    struct DerivedBytes {
+        #[genl_attr(1u16)]
+        payload: Vec<u8>,
+    }
+
+    #[test]
+    fn derived_vec_u8_round_trips() {
+        let original = DerivedBytes {
+            payload: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02],
+        };
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        original.to_bytes(&mut builder).expect("emit");
+        let parsed = DerivedBytes::from_bytes(&builder.as_bytes()[body_start..])
+            .expect("parse");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn derived_from_bytes_fills_defaults_for_missing_attrs() {
+        // Empty payload — every field comes back as its default.
+        let parsed = DerivedSimple::from_bytes(&[]).expect("parse");
+        assert_eq!(parsed.id, 0);
+        assert_eq!(parsed.label, "");
+    }
+
+    #[test]
+    fn derived_from_bytes_skips_unknown_attrs() {
+        // Emit a known attr (id=1) + an unknown attr (id=99).
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        __rt::emit_u32_attr(&mut builder, 1, 42);
+        __rt::emit_u32_attr(&mut builder, 99, 0xDEAD_BEEF);
+        let parsed =
+            DerivedSimple::from_bytes(&builder.as_bytes()[body_start..]).expect("parse");
+        // Only id is consumed; label stays default.
+        assert_eq!(parsed.id, 42);
+        assert_eq!(parsed.label, "");
     }
 }

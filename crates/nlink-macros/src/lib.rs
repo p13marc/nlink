@@ -35,6 +35,7 @@ mod codec;
 mod genl_attribute;
 mod genl_command;
 mod genl_enum;
+mod genl_message;
 
 /// Derive a typed-enum codec for a Generic Netlink **command** ID
 /// enum.
@@ -159,6 +160,76 @@ pub fn derive_genl_attribute(input: TokenStream) -> TokenStream {
 pub fn derive_genl_enum(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     genl_enum::expand(input)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+/// Derive `nlink::macros::GenlMessage` for a struct-shaped GENL
+/// message body.
+///
+/// The struct's `#[genl_message(cmd = EXPR)]` attribute supplies
+/// the command byte (any compile-time-evaluable expression that
+/// casts to `u8` — typically an integer literal or a typed-enum
+/// variant cast like `cmd = MyCmd::Get`). Each named field carries
+/// a `#[genl_attr(EXPR)]` attribute naming its on-wire attribute
+/// kind (similarly, any expression that casts to `u16`).
+///
+/// # Supported field types (0.16 Phase 3b)
+///
+/// - `u8` / `u16` / `u32` / `u64`
+/// - `String`
+/// - `Vec<u8>`
+/// - `Option<T>` where `T` is any of the above — omitted on
+///   `None`, present-when-`Some`, `Some(parsed)` if the kernel
+///   returns it.
+///
+/// Unsupported types (`i32`, nested groups, `IpAddr`, `bool`)
+/// produce a compile-time error that points at the field.
+/// Nested-group support via `#[derive(NetlinkAttrs)]` ships in a
+/// later phase.
+///
+/// # `from_bytes` semantics
+///
+/// Missing attributes produce default values (zero for ints,
+/// empty for strings/bytes, `None` for `Option<T>`). Unknown
+/// attribute types are silently skipped — forward-compatibility
+/// with newer kernels.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::macros::*;
+///
+/// #[derive(GenlCommand, Debug, Clone, Copy, PartialEq, Eq)]
+/// #[genl_command(repr = "u8")]
+/// pub enum MyCmd { Unspec = 0, Get = 1 }
+///
+/// #[derive(GenlAttribute, Debug, Clone, Copy, PartialEq, Eq)]
+/// #[genl_attribute(repr = "u16")]
+/// pub enum MyAttr { Id = 1, Name = 2, Description = 3 }
+///
+/// #[derive(GenlMessage, Debug)]
+/// #[genl_message(cmd = MyCmd::Get)]
+/// pub struct GetRequest {
+///     #[genl_attr(MyAttr::Id)]
+///     pub id: u32,
+///     #[genl_attr(MyAttr::Name)]
+///     pub name: String,
+///     #[genl_attr(MyAttr::Description)]
+///     pub description: Option<String>,
+/// }
+///
+/// // Generated:
+/// // impl GenlMessage for GetRequest {
+/// //     const CMD: u8 = MyCmd::Get as u8;  // = 1
+/// //     fn to_bytes(&self, b: &mut MessageBuilder) -> Result<()> { ... }
+/// //     fn from_bytes(payload: &[u8]) -> Result<Self> { ... }
+/// // }
+/// ```
+#[proc_macro_derive(GenlMessage, attributes(genl_message, genl_attr))]
+pub fn derive_genl_message(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    genl_message::expand(input)
         .unwrap_or_else(|e| e.to_compile_error())
         .into()
 }
