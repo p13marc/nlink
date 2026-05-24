@@ -6,6 +6,57 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **DPLL Generic Netlink family** (Plan 156, Phases 1-4 + 6
+  partial) — the kernel's clock-synchronization family (SyncE,
+  PTP, GNSS-disciplined oscillators) is now a first-class
+  `Connection<Dpll>` API. **First in-tree user of `nlink-macros`**
+  — every type in `nlink::netlink::genl::dpll::*` is declared
+  via the macro stack: ~430 lines of declarative Rust for the
+  full family (12 commands, 14 device attrs, 31 pin attrs, 8
+  value enums, 1 bitflags newtype, 2 nested attribute groups,
+  3 message structs each for device + pin sides). Compare with
+  the hand-written `wireguard` / `macsec` / `devlink` modules
+  in the same `genl/` directory: 600+ lines each for comparable
+  surface.
+
+  Public surface:
+
+  ```rust
+  use nlink::netlink::{genl::dpll::{Dpll, DpllMode}, Connection};
+  use tokio_stream::StreamExt;
+
+  let conn = Connection::<Dpll>::new_async().await?;
+  let mut devices = conn.dump_devices().await?;
+  while let Some(dev) = devices.next().await {
+      let dev = dev?;
+      println!("device {}: {:?}", dev.id, dev.lock_status);
+  }
+  conn.set_device_mode(0, DpllMode::Automatic).await?;
+  conn.set_pin_priority(pin_id, 0).await?;
+  ```
+
+  Version-gated kernel fields surface as `Option<…>`:
+  - kernel 6.10+: `lock_status_error` + `clock_quality_level`
+  - kernel 6.11+: pin `measured_frequency` + `phase_adjust_gran`
+  - kernel 6.12+: device `phase_offset_monitor` +
+    `frequency_monitor` + `phase_offset_avg_factor`
+
+  Scaling helpers apply the kernel's dividers transparently:
+  `DpllDeviceReply::temp_celsius()`,
+  `DpllPinReply::phase_offset_ns()`,
+  `DpllPinReply::measured_frequency_hz()`. Raw fields stay
+  accessible for high-resolution callers.
+
+  Recipe: [`docs/recipes/dpll-monitor.md`](docs/recipes/dpll-monitor.md).
+  Runnable example:
+  [`crates/nlink/examples/genl/dpll.rs`](crates/nlink/examples/genl/dpll.rs).
+
+  **Multicast monitor (Phase 5) deferred** — the
+  `DPLL_CMD_*_CHANGE_NTF` push-notification path needs new
+  GENL multicast-group-ID resolution infrastructure that didn't
+  fit this commit. Polling pattern in the recipe is the 0.16
+  shape; push semantics land in a follow-up.
+
 - **`#[derive(NetlinkAttrs)]` for nested attribute groups + the
   `nested` field hint** (Plan 154 Phase 8.5 — closes out the
   Phase 8 macro-extension batch). The final downstream-unblocker

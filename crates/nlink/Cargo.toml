@@ -196,6 +196,10 @@ path = "examples/genl/ethtool_rings.rs"
 name = "ethtool_monitor"
 path = "examples/genl/ethtool_monitor.rs"
 
+[[example]]
+name = "genl_dpll"
+path = "examples/genl/dpll.rs"
+
 # nlink-macros showcase
 [[example]]
 name = "macros_define_taskstats"

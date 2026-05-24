@@ -86,6 +86,14 @@ to the hand-rolled netlink primitives if you want to go deeper.
   + `conn.send_typed(req).await?`). Walked through against the
   kernel's `taskstats` family (Plan 154, 0.16+).
 
+- [**Watch DPLL lock-status transitions**](dpll-monitor.md) —
+  enumerate clock-synchronization hardware (SyncE / PTP / GNSS),
+  poll for lock-status changes, detect holdover acquisition,
+  diagnose lock loss via `DpllLockStatusError`. Telco-RAN,
+  time-sync infrastructure, SmartNIC control-plane use case.
+  Uses `Connection<Dpll>` (Plan 156, 0.16+) — the in-tree dogfood
+  of the nlink-macros stack.
+
 ## Recipe shape
 
 Every recipe follows the same structure:

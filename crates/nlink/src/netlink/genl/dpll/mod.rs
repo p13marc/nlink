@@ -17,11 +17,11 @@
 //! | Phase | Ships | Status |
 //! |---|---|---|
 //! | 1 | Family marker + module scaffold | ✓ |
-//! | 2 | Command + attribute + value enums | — |
-//! | 3 | Device-side messages + Connection methods | — |
-//! | 4 | Pin-side messages + Connection methods | — |
+//! | 2 | Command + attribute + value enums | ✓ |
+//! | 3 | Device-side messages + Connection methods | ✓ |
+//! | 4 | Pin-side messages + Connection methods | ✓ |
 //! | 5 | Multicast monitor + `DpllEvent` stream | — |
-//! | 6 | Scaling helpers + recipe + example | — |
+//! | 6 | Scaling helpers + recipe + example | ✓ (example + recipe) |
 //!
 //! # Why DPLL is the macro dogfood
 //!
