@@ -80,15 +80,32 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
         conn: &'a Connection<P>,
         msg_type: u16,
     ) -> Result<Self> {
-        let mut builder = MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_DUMP);
-
-        // FromNetlink optionally writes a fixed-size header
-        // (e.g. NDM_FAMILY = AF_BRIDGE for FDB dumps via
-        // RTM_GETNEIGH). For most types this is a no-op.
         let mut header_buf = Vec::new();
         T::write_dump_header(&mut header_buf);
-        if !header_buf.is_empty() {
-            builder.append_bytes(&header_buf);
+        Self::send_with_body_bytes(conn, msg_type, &header_buf).await
+    }
+
+    /// Same as [`send`](Self::send), but the body bytes come from
+    /// the caller instead of `T::write_dump_header`. Used for
+    /// families whose dump request needs a runtime-parameterized
+    /// body — conntrack (`nfgenmsg.family` varies v4/v6/AF_UNSPEC)
+    /// or nft rules (nfgenmsg + `NFTA_RULE_TABLE` filter).
+    pub(crate) async fn send_with_body(
+        conn: &'a Connection<P>,
+        msg_type: u16,
+        body: &[u8],
+    ) -> Result<Self> {
+        Self::send_with_body_bytes(conn, msg_type, body).await
+    }
+
+    async fn send_with_body_bytes(
+        conn: &'a Connection<P>,
+        msg_type: u16,
+        body: &[u8],
+    ) -> Result<Self> {
+        let mut builder = MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_DUMP);
+        if !body.is_empty() {
+            builder.append_bytes(body);
         }
 
         let socket = conn.socket();
@@ -294,6 +311,27 @@ impl<P: ProtocolState> Connection<P> {
         T: FromNetlink + Unpin,
     {
         DumpStream::send(self, msg_type).await
+    }
+
+    /// Like [`dump_stream`](Self::dump_stream), but the caller
+    /// supplies the body bytes that follow the `nlmsghdr`. Bypasses
+    /// `T::write_dump_header` entirely — use this when the dump
+    /// request body is runtime-parameterized (e.g.
+    /// `nfgenmsg.family` for conntrack, or a fixed body + filter
+    /// attribute for nft rules).
+    ///
+    /// `T` still parses each frame's body via
+    /// [`FromNetlink::from_bytes`]; the per-frame body shape is
+    /// whatever the kernel emits (independent of the request body).
+    pub async fn dump_stream_with_body<T>(
+        &self,
+        msg_type: u16,
+        body: &[u8],
+    ) -> Result<DumpStream<'_, P, T>>
+    where
+        T: FromNetlink + Unpin,
+    {
+        DumpStream::send_with_body(self, msg_type, body).await
     }
 }
 

@@ -1410,3 +1410,159 @@ mod transaction_tests {
         );
     }
 }
+
+// =========================================================================
+// Streaming dump support — Plan 149 closeout
+// =========================================================================
+
+use crate::netlink::dump_stream::DumpStream;
+use crate::netlink::parse::{FromNetlink, PResult};
+
+impl FromNetlink for RuleInfo {
+    /// Default body: AF_UNSPEC nfgenmsg. The kernel returns rules
+    /// across every family + table; for filtered dumps use the
+    /// table+family-aware
+    /// [`Connection::<Nftables>::stream_rules`].
+    fn write_dump_header(buf: &mut Vec<u8>) {
+        let nfgenmsg = NfGenMsg {
+            nfgen_family: 0, // AF_UNSPEC
+            version: 0,
+            res_id: 0,
+        };
+        buf.extend_from_slice(nfgenmsg.as_bytes());
+    }
+
+    fn parse(input: &mut &[u8]) -> PResult<Self> {
+        let consumed = *input;
+        *input = &input[input.len()..];
+        Self::from_bytes(consumed).map_err(|_| {
+            winnow::error::ErrMode::Cut(winnow::error::ContextError::new())
+        })
+    }
+
+    /// Parse a post-nlmsghdr rule frame: `nfgenmsg + attrs`.
+    /// Extracts the family from the nfgenmsg, then delegates to
+    /// the existing `parse_rule` so the eager `list_rules` path
+    /// and this streaming path share one parser.
+    fn from_bytes(payload: &[u8]) -> crate::Result<Self> {
+        if payload.len() < NFGENMSG_HDRLEN {
+            return Err(crate::Error::InvalidMessage(
+                "nft rule body shorter than nfgenmsg".into(),
+            ));
+        }
+        let family = Family::from_u8(payload[0]).unwrap_or(Family::Inet);
+        let attrs = &payload[NFGENMSG_HDRLEN..];
+        parse_rule(attrs, family).ok_or_else(|| {
+            crate::Error::InvalidMessage("nft rule parse failed".into())
+        })
+    }
+}
+
+impl Connection<Nftables> {
+    /// Stream rules in `table` for `family` — one [`RuleInfo`]
+    /// per `next().await`, bounded-memory. Preferred over the
+    /// eager [`list_rules`](Self::list_rules) on rule-heavy
+    /// hosts (CDN edges, service meshes with thousands of
+    /// per-tenant rules).
+    ///
+    /// ```ignore
+    /// use tokio_stream::StreamExt;
+    /// use nlink::netlink::nftables::types::Family;
+    /// let conn = Connection::<Nftables>::new()?;
+    /// let mut stream = conn.stream_rules("filter", Family::Inet).await?;
+    /// while let Some(rule) = stream.next().await {
+    ///     let rule = rule?;
+    ///     println!("{}/{} handle={}", rule.table, rule.chain, rule.handle);
+    /// }
+    /// ```
+    pub async fn stream_rules(
+        &self,
+        table: &str,
+        family: Family,
+    ) -> Result<DumpStream<'_, Nftables, RuleInfo>> {
+        // Build nfgenmsg + NFTA_RULE_TABLE filter attr.
+        let mut body = Vec::with_capacity(4 + 4 + table.len() + 1);
+        let nfgenmsg = NfGenMsg::new(family);
+        body.extend_from_slice(nfgenmsg.as_bytes());
+
+        // NFTA_RULE_TABLE attribute: 4-byte header (len + type) +
+        // null-terminated string, padded to 4 bytes.
+        let str_len = table.len() + 1;
+        let attr_len = 4 + str_len;
+        body.extend_from_slice(&(attr_len as u16).to_le_bytes());
+        body.extend_from_slice(&NFTA_RULE_TABLE.to_le_bytes());
+        body.extend_from_slice(table.as_bytes());
+        body.push(0); // null terminator
+        // Pad to 4 bytes
+        let padding = (4 - (attr_len % 4)) % 4;
+        for _ in 0..padding {
+            body.push(0);
+        }
+
+        self.dump_stream_with_body::<RuleInfo>(
+            nft_msg_type(NFT_MSG_GETRULE),
+            &body,
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn rule_write_dump_header_emits_4byte_nfgenmsg() {
+        let mut buf = Vec::new();
+        <RuleInfo as FromNetlink>::write_dump_header(&mut buf);
+        assert_eq!(buf.len(), NFGENMSG_HDRLEN);
+        assert_eq!(buf[0], 0); // AF_UNSPEC
+    }
+
+    #[test]
+    fn rule_from_bytes_rejects_truncated_payload() {
+        // shorter than nfgenmsg
+        let payload = vec![0u8; 2];
+        assert!(<RuleInfo as FromNetlink>::from_bytes(&payload).is_err());
+    }
+
+    #[test]
+    fn rule_from_bytes_parses_family_from_nfgenmsg() {
+        // nfgenmsg with AF_INET (2) + NFTA_RULE_TABLE attr "filter"
+        let mut body = Vec::new();
+        body.push(2); // AF_INET
+        body.push(0); // version
+        body.extend_from_slice(&0u16.to_be_bytes()); // res_id
+        let table = b"filter\0";
+        let attr_len = 4 + table.len();
+        body.extend_from_slice(&(attr_len as u16).to_le_bytes());
+        body.extend_from_slice(&NFTA_RULE_TABLE.to_le_bytes());
+        body.extend_from_slice(table);
+        // pad to 4
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+        // Add NFTA_RULE_CHAIN
+        let chain = b"input\0";
+        let attr_len2 = 4 + chain.len();
+        body.extend_from_slice(&(attr_len2 as u16).to_le_bytes());
+        body.extend_from_slice(&NFTA_RULE_CHAIN.to_le_bytes());
+        body.extend_from_slice(chain);
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+        // Add NFTA_RULE_HANDLE = 7 (8-byte big-endian u64)
+        body.extend_from_slice(&12u16.to_le_bytes()); // len = 4 + 8
+        body.extend_from_slice(&NFTA_RULE_HANDLE.to_le_bytes());
+        body.extend_from_slice(&7u64.to_be_bytes());
+
+        let rule = <RuleInfo as FromNetlink>::from_bytes(&body).expect("parse");
+        // nftables Family::Ip = 2 (IPv4-only table) — matches what
+        // we passed in nfgenmsg. AF_INET (libc) also = 2 but
+        // nftables doesn't use AF_* identifiers.
+        assert_eq!(rule.family, Family::Ip);
+        assert_eq!(rule.table, "filter");
+        assert_eq!(rule.chain, "input");
+        assert_eq!(rule.handle, 7);
+    }
+}

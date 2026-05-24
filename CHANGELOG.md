@@ -6,6 +6,45 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Conntrack + nft-rules streaming dump** (Plan 149 closeout —
+  closes Plan 149). `Connection<Netfilter>::stream_conntrack` /
+  `stream_conntrack_v4` / `stream_conntrack_v6` and
+  `Connection<Nftables>::stream_rules(table, family)` return
+  `DumpStream` for O(1)-memory iteration. The use case that
+  motivated the streaming-dump foundation in the first place:
+  busy NAT gateways with millions of conntrack entries, CDN
+  edges with thousands of per-tenant nft rules.
+
+  ```rust
+  use nlink::netlink::{Connection, Netfilter};
+  use tokio_stream::StreamExt;
+
+  let conn = Connection::<Netfilter>::new()?;
+  let mut stream = conn.stream_conntrack(libc::AF_INET as u8).await?;
+  while let Some(entry) = stream.next().await {
+      let entry = entry?;
+      // ... process one entry, bounded memory
+  }
+  ```
+
+  Required a small extension to the `DumpStream` foundation:
+  new `Connection::dump_stream_with_body<T>(msg_type, body: &[u8])`
+  bypasses `T::write_dump_header` so callers can pass a
+  runtime-parameterized body — conntrack needs `nfgenmsg.family`
+  (varies v4/v6/AF_UNSPEC), nft-rules needs `nfgenmsg + NFTA_RULE_TABLE`
+  filter attribute. The existing `dump_stream` is unchanged and
+  forwards through the same internal `send_with_body_bytes`
+  helper.
+
+  Plus `FromNetlink` impls on `ConntrackEntry` + `RuleInfo`
+  delegating to the existing `parse_conntrack_body` and
+  `parse_rule` (one parser per kind shared with the eager /
+  multicast-event paths). 5 new unit tests (942 lib tests
+  total). End-to-end validated on this kernel — conntrack
+  stream correctly delivered EPERM through the stream item
+  channel (same wire-shape as the eager `get_conntrack` would
+  produce).
+
 - **XFRM streaming dump** (Plan 149 follow-up).
   `Connection<Xfrm>::stream_sas` and `stream_sps` return
   `DumpStream<'_, Xfrm, SecurityAssociation>` /
