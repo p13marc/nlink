@@ -674,6 +674,54 @@ mod tests {
         assert_eq!(parsed.mode, None);
     }
 
+    #[derive(GenlMessageDerive, Debug, Default, Clone, PartialEq, Eq)]
+    #[genl_message(cmd = 14u8)]
+    struct DerivedRepeatedEnum {
+        #[genl_attr(1u16)]
+        id: u32,
+        #[genl_attr(2u16, repr = "u32")]
+        modes_supported: Vec<TestMode>,
+    }
+
+    #[test]
+    fn derived_repeated_enum_round_trips_multiple_elements() {
+        // Realistic shape: kernel emits the same attribute type
+        // once per element. Verify all elements arrive in order
+        // on the parse side.
+        let original = DerivedRepeatedEnum {
+            id: 42,
+            modes_supported: vec![TestMode::Manual, TestMode::Automatic],
+        };
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        original.to_bytes(&mut builder).expect("emit");
+        let parsed =
+            DerivedRepeatedEnum::from_bytes(&builder.as_bytes()[body_start..]).expect("parse");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn derived_repeated_enum_empty_vec_emits_no_attrs() {
+        // An empty Vec emits zero attrs of that type — the parse
+        // side sees no matching attr, leaves the Vec at default.
+        let original = DerivedRepeatedEnum {
+            id: 1,
+            modes_supported: Vec::new(),
+        };
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        original.to_bytes(&mut builder).expect("emit");
+        let bytes = &builder.as_bytes()[body_start..];
+        // Only the id attribute should be present.
+        let mut attrs_seen: Vec<u16> = Vec::new();
+        for (ty, _) in __rt::attr_iter(bytes) {
+            attrs_seen.push(ty);
+        }
+        assert_eq!(attrs_seen, vec![1u16]);
+        let parsed = DerivedRepeatedEnum::from_bytes(bytes).expect("parse");
+        assert_eq!(parsed, original);
+    }
+
     #[test]
     fn derived_genl_enum_unknown_value_surfaces_as_error() {
         // Synthesize a frame with a value (=99) outside any

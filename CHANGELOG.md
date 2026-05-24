@@ -6,6 +6,32 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`Vec<MyEnum>` repeated-attribute support in
+  `#[derive(GenlMessage)]`** (Plan 154 Phase 8.3). When the kernel
+  emits the same attribute type multiple times for list-valued
+  fields (DPLL's `mode_supported`, devlink rate-limit's list
+  fields, etc.), declare the Rust side as
+  `Vec<MyGenlEnum>` and tag the field with the existing
+  `repr = "..."` hint:
+
+  ```rust
+  #[genl_attr(DpllAttr::ModeSupported, repr = "u32")]
+  pub modes_supported: Vec<DpllMode>,
+  ```
+
+  Emit writes one attribute per element; parse accumulates each
+  matching attr into the Vec in arrival order. Empty Vec emits
+  zero attrs (no trailing presence indicator needed).
+
+  `Vec<u8>` keeps its existing meaning ("the whole payload of a
+  single attribute is a byte string") — only `Vec<MyEnum>` with a
+  repr hint produces the repeated shape. Other `Vec<T>` shapes
+  without a hint produce a compile error pointing at the supported
+  forms.
+
+  2 new tests: round-trip a 2-element Vec, empty-Vec emits no
+  attrs of that type.
+
 - **`Option<MyEnum>` field support in `#[derive(GenlMessage)]`**
   (Plan 154 Phase 8.2 — **the macro-stack headline unblocker**).
   `#[genl_attr(...)]` now accepts an optional `repr = "u8"|"u16"|"u32"`

@@ -197,6 +197,14 @@ enum WireKind {
         type_path: Box<Type>,
         repr: ReprWidth,
     },
+    /// A repeated `GenlEnum`-typed field — `Vec<MyEnum>`. The
+    /// kernel emits the same attribute type once per element. On
+    /// parse we accumulate into the Vec; on emit we write one
+    /// attribute per element.
+    RepeatedEnum {
+        type_path: Box<Type>,
+        repr: ReprWidth,
+    },
     Optional(Box<WireKind>),
 }
 
@@ -250,6 +258,9 @@ impl WireKind {
             Self::Str => quote! { ::std::string::String },
             Self::Bytes => quote! { ::std::vec::Vec<u8> },
             Self::Enum { type_path, .. } => quote! { #type_path },
+            Self::RepeatedEnum { type_path, .. } => {
+                quote! { ::std::vec::Vec<#type_path> }
+            }
             Self::Optional(inner) => {
                 let inner_ty = inner.type_token();
                 quote! { ::core::option::Option<#inner_ty> }
@@ -272,6 +283,7 @@ impl WireKind {
                 // Optional, whose arm below returns None.
                 quote! { unreachable!("bare-Enum WireKind reached default_expr") }
             }
+            Self::RepeatedEnum { .. } => quote! { ::std::vec::Vec::new() },
             Self::Optional(_) => quote! { ::core::option::Option::None },
         }
     }
@@ -286,7 +298,7 @@ impl WireKind {
             Self::I32 => quote! { ::nlink::macros::__rt::parse_i32_attr },
             Self::Str => quote! { ::nlink::macros::__rt::parse_str_attr },
             Self::Bytes => quote! { ::nlink::macros::__rt::parse_bytes_attr },
-            Self::Enum { repr, .. } => {
+            Self::Enum { repr, .. } | Self::RepeatedEnum { repr, .. } => {
                 // Use the repr's underlying parse helper. The
                 // outer parse_arm handles the TryFrom conversion.
                 let ident = repr.ident();
@@ -348,6 +360,13 @@ impl WireKind {
                     );
                 }
             }
+            Self::RepeatedEnum { .. } => {
+                // RepeatedEnum is handled at the FieldSpec::emit_call
+                // level (loop over Vec elements); emit_call_inner is
+                // never called for this variant. Defensive arm in
+                // case a future refactor routes it here.
+                quote! { compile_error!("internal: RepeatedEnum in emit_call_inner") }
+            }
             Self::Optional(_) => {
                 // Optional should never call emit_call_inner directly —
                 // its outer emit_call handles the if-let-Some wrapping.
@@ -385,6 +404,24 @@ impl FieldSpec {
                 quote! {
                     if let ::core::option::Option::Some(v) = self.#ident.as_ref() {
                         #inner_emit
+                    }
+                }
+            }
+            WireKind::RepeatedEnum { repr, .. } => {
+                // Emit one attribute per Vec element. `*v` copies the
+                // (Copy) enum value; From<MyEnum> for Repr converts.
+                let ident_repr = repr.ident();
+                let fn_ident = proc_macro2::Ident::new(
+                    &format!("emit_{ident_repr}_attr"),
+                    proc_macro2::Span::call_site(),
+                );
+                quote! {
+                    for __v in self.#ident.iter() {
+                        ::nlink::macros::__rt::#fn_ident(
+                            #builder,
+                            (#attr) as u16,
+                            <#ident_repr as ::core::convert::From<_>>::from(*__v),
+                        );
                     }
                 }
             }
@@ -435,6 +472,18 @@ impl FieldSpec {
                         .map_err(|e| ::nlink::Error::InvalidMessage(
                             ::std::format!("{e}")
                         ))?;
+                }
+            },
+            WireKind::RepeatedEnum { type_path, .. } => quote! {
+                __ty if __ty == (#attr) as u16 => {
+                    // Kernel may emit the same attr type repeatedly
+                    // for list-valued fields. Push each occurrence.
+                    let __raw = #parse_fn(__attr_payload)?;
+                    let __decoded = <#type_path as ::core::convert::TryFrom<_>>::try_from(__raw)
+                        .map_err(|e| ::nlink::Error::InvalidMessage(
+                            ::std::format!("{e}")
+                        ))?;
+                    #ident.push(__decoded);
                 }
             },
             _ => quote! {
@@ -501,15 +550,19 @@ fn classify_type_inner(
         "i32" => Ok(WireKind::I32),
         "String" => Ok(WireKind::Str),
         "Vec" => {
-            // Only Vec<u8> is supported.
+            // Vec<u8> = whole-payload byte string (the existing
+            // single-attribute meaning).
+            // Vec<MyEnum> + repr hint = repeated GenlEnum attr.
+            // Other Vec<T> with a repr hint = compile error
+            // pointing at the supported shapes.
             let inner = single_type_arg(last, ty)?;
             let inner_path = match inner {
                 Type::Path(p) => p,
                 _ => {
                     return Err(syn::Error::new_spanned(
                         inner,
-                        "Vec inner type must be a path; only Vec<u8> is currently \
-                         supported in #[derive(GenlMessage)]",
+                        "Vec inner type must be a path; only Vec<u8> and \
+                         Vec<MyGenlEnum> are supported in #[derive(GenlMessage)]",
                     ))
                 }
             };
@@ -517,17 +570,24 @@ fn classify_type_inner(
                 syn::Error::new_spanned(inner, "empty inner type path")
             })?;
             if inner_last.ident == "u8" {
-                Ok(WireKind::Bytes)
-            } else {
-                Err(syn::Error::new_spanned(
-                    inner,
-                    format!(
-                        "only Vec<u8> is supported in #[derive(GenlMessage)]; found \
-                         Vec<{}>",
-                        inner_last.ident
-                    ),
-                ))
+                return Ok(WireKind::Bytes);
             }
+            if let Some(repr) = repr_hint {
+                return Ok(WireKind::RepeatedEnum {
+                    type_path: Box::new(inner.clone()),
+                    repr,
+                });
+            }
+            Err(syn::Error::new_spanned(
+                inner,
+                format!(
+                    "Vec<{}> needs a `repr = \"u8\"|\"u16\"|\"u32\"` hint on its \
+                     `#[genl_attr(...)]` annotation — `Vec<MyGenlEnum>` is the \
+                     repeated-attribute shape; bare Vec<{}> without a hint is \
+                     ambiguous (could mean Vec<u8> bytes, but it's not u8).",
+                    inner_last.ident, inner_last.ident
+                ),
+            ))
         }
         "Option" => {
             let inner = single_type_arg(last, ty)?;
