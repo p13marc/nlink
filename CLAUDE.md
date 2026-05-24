@@ -375,17 +375,43 @@ they are kept current.
 
 ## Active work
 
-The 0.15.0 typed-API completion arc has shipped — sealed
-`ParseParams` trait + 45 impls, filter side 9/9 typed-first,
-XFRM SA + SP CRUD, typed standalone-action CRUD, and the legacy
-`tc::builders::*` + `tc::options::*` modules deleted. See
-CHANGELOG `## [0.15.0]` for the per-PR breakdown.
+The **0.16 cycle is mid-flight** on the `0.16` branch (do not push
+to master). Plans live in [`plans/`](plans/) with
+[`plans/INDEX.md`](plans/INDEX.md) as the day-to-day status
+tracker. Headlines that landed so far:
 
-Roadmap entry point:
-[`128b-roadmap-overview.md`](128b-roadmap-overview.md). The
-"Active plans" table is empty as of the 0.15.0 cut; new work
-opens fresh plan files at the repo root when scoped (next
-expected: per-bin typed-units audit for `bins/{ip,ss,nft,...}`).
+- **Plan 154 — `nlink-macros` proc-macro crate** (🟢 all 7 main
+  phases + Phase 8.1-8.5 done). Downstream code declares a
+  complete custom GENL family + typed request/response in ~30
+  lines via `#[genl_family(...)]` + `#[derive(GenlMessage)]` +
+  `#[derive(GenlCommand/GenlAttribute/GenlEnum/NetlinkAttrs)]` +
+  `Connection::<F>::send_typed(req).await?`. Field types now
+  cover: primitives + `Option<T>` + `Vec<u8>` + `Vec<GenlEnum>`
+  + bitflags newtypes + `Option<GenlEnum>` + nested attribute
+  groups via `nested` hint. See
+  [`docs/recipes/define-your-own-genl-family.md`](docs/recipes/define-your-own-genl-family.md)
+  + [`crates/nlink/examples/macros/define_taskstats.rs`](crates/nlink/examples/macros/define_taskstats.rs).
+- **Plan 149 — streaming dump API** (🟡): `dump_stream<T>` +
+  typed wrappers for links/routes/neighbors/addresses + qdiscs/
+  classes/filters. O(1) memory iteration over large kernel dumps.
+- **Plan 150 — nftables flowtable** (🟡): full CRUD + multicast
+  events (`Connection::<Nftables>::subscribe` + 8 typed event
+  variants). Counters introspection still deferred.
+- **Plan 151 — ENOBUFS resync types** (🟡): `ResyncedEvent<T>` +
+  `ResyncMarker` + recipe. Pre-baked Stream wrapper on hold for
+  design soak.
+- **Plan 157 — declarative `NftablesConfig`** (🟡): diff + atomic
+  apply via the extended `Transaction` (every diff op commits in
+  one `NFNL_MSG_BATCH_BEGIN…END` round-trip). Canonicalization +
+  sets/maps + reconcile still deferred.
+- **Plan 158 — `syscall_batch` feature** (🟢 opt-in): `recvmmsg` /
+  `sendmmsg` batching wired into both eager dumps + streaming.
+- **Plan 159 — `ConnectionPool<P>`** (🟢): bounded-mpsc-channel-
+  backed pool for parallel fanout.
+
+Ready to start (no blockers): Plan 156 (DPLL — first in-tree
+dogfood of the macros), Plan 153.3 (`net_shaper` GENL family),
+Plan 152 (aya/Prometheus/OTel showcases).
 
 Per-release upgrade guides:
 [`docs/migration_guide/`](docs/migration_guide/README.md) — write
@@ -394,9 +420,18 @@ convention.
 
 ## Publishing
 
-`nlink` is the only publishable crate (binaries have
-`publish = false`).
+Two publishable crates as of 0.16: `nlink` and `nlink-macros` (the
+proc-macro derives `nlink::macros::*` re-exports). Both bins set
+`publish = false`.
+
+**Publish nlink-macros FIRST** when cutting — `nlink`'s `Cargo.toml`
+pins `nlink-macros` with `version = "..."` alongside the path dep
+so `cargo publish -p nlink` resolves the dep on crates.io;
+publishing nlink before nlink-macros fails with "no matching
+version found."
 
 ```bash
+cargo publish -p nlink-macros
+# wait ~30s for crates.io to index
 cargo publish -p nlink
 ```

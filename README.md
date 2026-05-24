@@ -22,15 +22,18 @@ nlink is a from-scratch implementation of Linux netlink-based network management
 
 ```toml
 # Core netlink functionality (always built — TC, link, address,
-# route, namespace, GENL families, conntrack, XFRM, etc. all
-# live in always-built modules)
-nlink = "0.15"
+# route, namespace, GENL families, conntrack, XFRM, nftables, etc.
+# all live in always-built modules). 0.16 bundles a re-export of
+# `nlink-macros` so downstream code that wants to define its own
+# GENL family pulls in only one dep.
+nlink = "0.16"
 
 # With additional features
-nlink = { version = "0.15", features = ["sockdiag", "tuntap", "output"] }
+nlink = { version = "0.16", features = ["sockdiag", "tuntap", "output"] }
 
-# All features
-nlink = { version = "0.15", features = ["full"] }
+# All features (including opt-in syscall_batch — 1.5x speedup on
+# dump-heavy workloads via recvmmsg/sendmmsg, see Plan 158).
+nlink = { version = "0.16", features = ["full"] }
 ```
 
 > Upgrading from an earlier release? See
@@ -46,6 +49,7 @@ nlink = { version = "0.15", features = ["full"] }
 | `output` | JSON/text output formatting |
 | `namespace_watcher` | Namespace watching via inotify |
 | `lab` | `nlink::lab` namespace + integration-test harness |
+| `syscall_batch` | `recvmmsg`/`sendmmsg` batching on dumps + streams (0.16+, opt-in) |
 | `full` | All features enabled |
 
 ## Quick Start
@@ -190,7 +194,7 @@ if let Some(bottleneck) = diag.find_bottleneck().await? {
 ## Documentation
 
 - **[Library Usage](docs/library.md)** - Detailed library examples: namespaces, TC, WireGuard, error handling
-- **[Cookbook Recipes](docs/recipes/README.md)** - End-to-end walkthroughs: per-peer impairment, VLAN-aware bridges, bidirectional rate limiting, WireGuard mesh in namespaces, multi-namespace event monitoring
+- **[Cookbook Recipes](docs/recipes/README.md)** - End-to-end walkthroughs: per-peer impairment, VLAN-aware bridges, bidirectional rate limiting, WireGuard mesh in namespaces, multi-namespace event monitoring, ENOBUFS-resync event loops, connection pools, **define-your-own-GENL-family**
 - **[CLI Tools](docs/cli.md)** - ip and tc command reference
 - **[Migration Guides](docs/migration_guide/README.md)** - Per-release upgrade notes (what was removed / behaviour-changed / typed-replacement-of)
 - **[Examples](crates/nlink/examples/README.md)** - 40+ runnable examples
@@ -201,8 +205,12 @@ if let Some(bottleneck) = diag.find_bottleneck().await? {
 |--------|-------------|
 | `nlink::netlink` | Core netlink: `Connection<Route>`, EventStream, namespace, TC |
 | `nlink::netlink::config` | Declarative network configuration |
+| `nlink::netlink::nftables::config` | Declarative `NftablesConfig` — diff + atomic apply (0.16+) |
 | `nlink::netlink::ratelimit` | High-level rate limiting API |
 | `nlink::netlink::diagnostics` | Network diagnostics and issue detection |
+| `nlink::netlink::dump_stream` | `DumpStream<T>` — O(1)-memory iteration over large dumps (0.16+) |
+| `nlink::netlink::resync` | `ResyncedEvent<T>` + `ResyncMarker` — ENOBUFS overflow recovery (0.16+) |
+| `nlink::netlink::pool` | `ConnectionPool<P>` + `PooledConnection<'p, P>` (0.16+) |
 | `nlink::netlink::genl` | Generic Netlink: WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink |
 | `nlink::netlink::nexthop` | Nexthop objects and ECMP groups (Linux 5.3+) |
 | `nlink::netlink::mpls` | MPLS routes and encapsulation |
@@ -212,10 +220,12 @@ if let Some(bottleneck) = diag.find_bottleneck().await? {
 | `nlink::netlink::uevent` | Device hotplug events: `Connection<KobjectUevent>` |
 | `nlink::netlink::connector` | Process lifecycle events: `Connection<Connector>` |
 | `nlink::netlink::netfilter` | Connection tracking: `Connection<Netfilter>` |
-| `nlink::netlink::xfrm` | IPsec SA/SP management: `Connection<Xfrm>` |
+| `nlink::netlink::nftables` | nftables management + multicast events: `Connection<Nftables>` |
+| `nlink::netlink::xfrm` | IPsec SA/SP management: `Connection<Xfrm>` (+ IPsec offload, 0.16+) |
 | `nlink::netlink::fib_lookup` | FIB route lookups: `Connection<FibLookup>` |
 | `nlink::netlink::audit` | Linux Audit subsystem: `Connection<Audit>` |
 | `nlink::netlink::selinux` | SELinux events: `Connection<SELinux>` |
+| `nlink::macros` | Proc-macro derives — define your own GENL family in ~30 lines (0.16+; re-exported from `nlink-macros`) |
 | `nlink::sockdiag` | Socket diagnostics: `Connection<SockDiag>` (feature: `sockdiag`) |
 | `nlink::util` | Parsing utilities, address helpers, name resolution |
 | `nlink::tuntap` | TUN/TAP devices (feature: `tuntap`) |
@@ -261,9 +271,38 @@ The library API is production-ready for network monitoring and configuration.
 - Name-based address operations (add_address_by_name, replace_address_by_name)
 - Bond/bridge enslavement helper (enslave/enslave_by_index)
 
+**New in 0.16 (in flight on the `0.16` branch):**
+
+- **`nlink-macros` proc-macro crate** — declare a custom Generic
+  Netlink family + typed request/response structs in ~30 lines via
+  `#[genl_family(...)]` + `#[derive(GenlMessage / GenlCommand /
+  GenlAttribute / GenlEnum / NetlinkAttrs)]` and consume it through
+  `Connection::<F>::send_typed(req).await?` / `dump_typed_stream`.
+  See [`docs/recipes/define-your-own-genl-family.md`](docs/recipes/define-your-own-genl-family.md).
+- Streaming dump API (`dump_stream<T>` + typed wrappers for links/
+  routes/neighbors/addresses + qdiscs/classes/filters) — O(1)
+  memory iteration on BGP/conntrack-scale dumps
+- `ConnectionPool<P>` + `PooledConnection<'p, P>` for parallel fanout
+- ENOBUFS-resync types (`ResyncedEvent<T>` + `ResyncMarker` +
+  recipe) for multicast-overflow recovery
+- Declarative `NftablesConfig` with atomic single-batch apply
+- Nftables multicast event subscription
+  (`Connection::<Nftables>::events()`)
+- Generic `Connection::<P: AsyncConstructible>::new_async()` —
+  collapsed six hand-rolled per-family constructors into one;
+  macro-defined families plug in for free
+- Devlink rate-limit objects + port-function state
+- XFRM IPsec hardware offload (`XFRMA_OFFLOAD_DEV`)
+- nftables flowtables + `Expr::FlowOffload`
+- `recvmmsg` / `sendmmsg` syscall batching (opt-in
+  `syscall_batch` feature — ≥1.5x speedup on dump-heavy
+  workloads)
+- ext-ack error TLVs parsed into `Error::Kernel::ext_ack`;
+  `enable_strict_checking` + `set_ext_ack` sockopts
+
 ## Building
 
-Requires Rust 1.85+ (edition 2024).
+Requires Rust 1.95+ (edition 2024).
 
 ```bash
 cargo build --release

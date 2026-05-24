@@ -1201,3 +1201,212 @@ pub(crate) fn parse_flowtable(data: &[u8], family: Family) -> Option<super::type
     }
     Some(ft)
 }
+
+#[cfg(test)]
+mod transaction_tests {
+    //! Wire-shape unit tests for [`Transaction`] — verifies the new
+    //! batch operations (`del_chain` / `del_rule` / `add_flowtable` /
+    //! `del_flowtable` / `add_table_with_flags`) emit the right
+    //! netlink message bytes without needing a live netlink socket.
+    //!
+    //! The atomic `NftablesDiff::apply` path that Plan 157 ships
+    //! routes every diff op through these methods, so verifying each
+    //! method's wire shape catches the bulk of the refactor risk.
+
+    use super::super::*;
+    use super::*;
+
+    /// Construct a Transaction. The constructor is private; reach
+    /// into it via `Transaction::new` (same-module access).
+    fn new_tx() -> Transaction {
+        Transaction::new()
+    }
+
+    /// Walk a single batch message and assert `(nlmsg_type, flags)`.
+    /// Skips the per-message sequence-number check — that's
+    /// asserted separately.
+    fn assert_header(msg: &[u8], expected_type: u16, expected_flags: u16) {
+        assert!(msg.len() >= 16, "msg too short for nlmsghdr: {}", msg.len());
+        let ty = u16::from_ne_bytes([msg[4], msg[5]]);
+        let flags = u16::from_ne_bytes([msg[6], msg[7]]);
+        assert_eq!(ty, expected_type, "nlmsg_type mismatch");
+        assert_eq!(flags, expected_flags, "nlmsg_flags mismatch");
+    }
+
+    /// Find an attribute by type in the post-nfgenmsg payload.
+    fn find_attr(payload: &[u8], wanted_type: u16) -> Option<Vec<u8>> {
+        let mut offset = 0;
+        while offset + 4 <= payload.len() {
+            let len = u16::from_ne_bytes([payload[offset], payload[offset + 1]]) as usize;
+            let ty = u16::from_ne_bytes([payload[offset + 2], payload[offset + 3]]) & 0x7FFF;
+            if len < 4 || offset + len > payload.len() {
+                return None;
+            }
+            if ty == wanted_type {
+                return Some(payload[offset + 4..offset + len].to_vec());
+            }
+            offset += (len + 3) & !3;
+        }
+        None
+    }
+
+    fn body_after_nfgenmsg(msg: &[u8]) -> &[u8] {
+        // Skip nlmsghdr (16 bytes) + nfgenmsg (4 bytes).
+        &msg[16 + 4..]
+    }
+
+    #[test]
+    fn del_chain_emits_correct_wire_message() {
+        let tx = new_tx().del_chain("filter", "input", Family::Inet);
+        assert_eq!(tx.messages.len(), 1);
+
+        let msg = &tx.messages[0];
+        assert_header(msg, nft_msg_type(NFT_MSG_DELCHAIN), NLM_F_REQUEST);
+
+        let body = body_after_nfgenmsg(msg);
+        let table = find_attr(body, NFTA_CHAIN_TABLE).expect("NFTA_CHAIN_TABLE missing");
+        let name = find_attr(body, NFTA_CHAIN_NAME).expect("NFTA_CHAIN_NAME missing");
+        // Strings are NUL-terminated on the wire — strip before compare.
+        assert_eq!(&table[..table.len().saturating_sub(1)], b"filter");
+        assert_eq!(&name[..name.len().saturating_sub(1)], b"input");
+    }
+
+    #[test]
+    fn del_rule_emits_correct_wire_message_with_handle() {
+        let tx = new_tx().del_rule("filter", "input", Family::Inet, 0xDEAD_BEEF);
+        assert_eq!(tx.messages.len(), 1);
+
+        let msg = &tx.messages[0];
+        assert_header(msg, nft_msg_type(NFT_MSG_DELRULE), NLM_F_REQUEST);
+
+        let body = body_after_nfgenmsg(msg);
+        let handle = find_attr(body, NFTA_RULE_HANDLE).expect("NFTA_RULE_HANDLE missing");
+        assert_eq!(handle.len(), 8, "handle must be u64 big-endian");
+        assert_eq!(u64::from_be_bytes(handle.try_into().unwrap()), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn add_flowtable_emits_nested_hook_block() {
+        let ft = super::super::types::Flowtable {
+            family: Family::Inet,
+            table: "filter".into(),
+            name: "ft".into(),
+            devs: vec!["eth0".into()],
+            priority: -300,
+            flags: NFT_FLOWTABLE_HW_OFFLOAD,
+            use_count: 0,
+            handle: 0,
+        };
+        let tx = new_tx().add_flowtable(&ft);
+        assert_eq!(tx.messages.len(), 1);
+
+        let msg = &tx.messages[0];
+        assert_header(
+            msg,
+            nft_msg_type(NFT_MSG_NEWFLOWTABLE),
+            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL,
+        );
+
+        let body = body_after_nfgenmsg(msg);
+        assert!(find_attr(body, NFTA_FLOWTABLE_TABLE).is_some());
+        assert!(find_attr(body, NFTA_FLOWTABLE_NAME).is_some());
+        // Hook block is a nested attribute (NLA_F_NESTED set on the
+        // type byte) — verified by the flag bit in the on-wire type.
+        let mut hook_found_with_nested_flag = false;
+        let mut offset = 0;
+        while offset + 4 <= body.len() {
+            let len = u16::from_ne_bytes([body[offset], body[offset + 1]]) as usize;
+            let raw_ty = u16::from_ne_bytes([body[offset + 2], body[offset + 3]]);
+            if len < 4 || offset + len > body.len() {
+                break;
+            }
+            if (raw_ty & 0x7FFF) == NFTA_FLOWTABLE_HOOK && (raw_ty & 0x8000) != 0 {
+                hook_found_with_nested_flag = true;
+            }
+            offset += (len + 3) & !3;
+        }
+        assert!(hook_found_with_nested_flag, "hook block missing NLA_F_NESTED flag");
+        // Flags attr present + correct value (HW_OFFLOAD = 1, big-endian).
+        let flags = find_attr(body, NFTA_FLOWTABLE_FLAGS).expect("flags missing");
+        assert_eq!(u32::from_be_bytes(flags.try_into().unwrap()), NFT_FLOWTABLE_HW_OFFLOAD);
+    }
+
+    #[test]
+    fn del_flowtable_emits_table_plus_name() {
+        let tx = new_tx().del_flowtable(Family::Inet, "filter", "ft");
+        assert_eq!(tx.messages.len(), 1);
+
+        let msg = &tx.messages[0];
+        assert_header(msg, nft_msg_type(NFT_MSG_DELFLOWTABLE), NLM_F_REQUEST);
+
+        let body = body_after_nfgenmsg(msg);
+        assert!(find_attr(body, NFTA_FLOWTABLE_TABLE).is_some());
+        assert!(find_attr(body, NFTA_FLOWTABLE_NAME).is_some());
+    }
+
+    #[test]
+    fn add_table_with_flags_emits_flags_attr() {
+        let tx = new_tx().add_table_with_flags(
+            "filter",
+            Family::Inet,
+            NFT_TABLE_F_DORMANT,
+        );
+        assert_eq!(tx.messages.len(), 1);
+
+        let msg = &tx.messages[0];
+        assert_header(
+            msg,
+            nft_msg_type(NFT_MSG_NEWTABLE),
+            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL,
+        );
+
+        let body = body_after_nfgenmsg(msg);
+        let flags = find_attr(body, NFTA_TABLE_FLAGS).expect("NFTA_TABLE_FLAGS missing");
+        assert_eq!(
+            u32::from_be_bytes(flags.try_into().unwrap()),
+            NFT_TABLE_F_DORMANT
+        );
+    }
+
+    #[test]
+    fn add_table_with_flags_omits_flags_attr_when_zero() {
+        // Sanity: zero flags → no NFTA_TABLE_FLAGS attribute (saves
+        // bytes; matches the imperative add_table_with_flags shape).
+        let tx = new_tx().add_table_with_flags("filter", Family::Inet, 0);
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        assert!(find_attr(body, NFTA_TABLE_FLAGS).is_none());
+    }
+
+    #[test]
+    fn chained_batch_preserves_message_order_and_seq_numbers() {
+        let tx = new_tx()
+            .del_rule("filter", "input", Family::Inet, 1)
+            .del_chain("filter", "input", Family::Inet)
+            .del_table("filter", Family::Inet);
+        assert_eq!(tx.messages.len(), 3);
+
+        // Sequence numbers are at offset 8..12 of each message.
+        let seqs: Vec<u32> = tx
+            .messages
+            .iter()
+            .map(|m| u32::from_ne_bytes([m[8], m[9], m[10], m[11]]))
+            .collect();
+        // Per Transaction::next_seq the first message gets seq=1, next 2, next 3.
+        assert_eq!(seqs, vec![1, 2, 3]);
+
+        // Order is preserved: DELRULE, DELCHAIN, DELTABLE.
+        let types: Vec<u16> = tx
+            .messages
+            .iter()
+            .map(|m| u16::from_ne_bytes([m[4], m[5]]))
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                nft_msg_type(NFT_MSG_DELRULE),
+                nft_msg_type(NFT_MSG_DELCHAIN),
+                nft_msg_type(NFT_MSG_DELTABLE),
+            ]
+        );
+    }
+}
