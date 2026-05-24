@@ -211,7 +211,7 @@ if let Some(bottleneck) = diag.find_bottleneck().await? {
 | `nlink::netlink::dump_stream` | `DumpStream<T>` — O(1)-memory iteration over large dumps (0.16+) |
 | `nlink::netlink::resync` | `ResyncedEvent<T>` + `ResyncMarker` — ENOBUFS overflow recovery (0.16+) |
 | `nlink::netlink::pool` | `ConnectionPool<P>` + `PooledConnection<'p, P>` (0.16+) |
-| `nlink::netlink::genl` | Generic Netlink: WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink |
+| `nlink::netlink::genl` | Generic Netlink: WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink, DPLL |
 | `nlink::netlink::nexthop` | Nexthop objects and ECMP groups (Linux 5.3+) |
 | `nlink::netlink::mpls` | MPLS routes and encapsulation |
 | `nlink::netlink::srv6` | SRv6 segment routing |
@@ -279,6 +279,13 @@ The library API is production-ready for network monitoring and configuration.
   GenlAttribute / GenlEnum / NetlinkAttrs)]` and consume it through
   `Connection::<F>::send_typed(req).await?` / `dump_typed_stream`.
   See [`docs/recipes/define-your-own-genl-family.md`](docs/recipes/define-your-own-genl-family.md).
+- **DPLL family** (`Connection<Dpll>`) — kernel 6.7+
+  clock-synchronization hardware (SyncE, PTP, GNSS-disciplined
+  oscillators). The in-tree dogfood of the nlink-macros stack:
+  ~430 lines of declarative Rust for the full family vs ~600+
+  lines hand-written per the WireGuard / MACsec / Devlink
+  pattern. Telco-RAN, time-sync, SmartNIC use case. See
+  [`docs/recipes/dpll-monitor.md`](docs/recipes/dpll-monitor.md).
 - Streaming dump API (`dump_stream<T>` + typed wrappers for links/
   routes/neighbors/addresses + qdiscs/classes/filters) — O(1)
   memory iteration on BGP/conntrack-scale dumps
