@@ -19,6 +19,11 @@
 //! 7. Rule adds
 //! 8. Flowtable adds
 //!
+//! Tables with flags (`NFT_TABLE_F_DORMANT` / `_OWNER` /
+//! `_PERSIST`) route through `Transaction::add_table_with_flags`
+//! so they stay inside the atomic batch; no out-of-batch
+//! fallback remains.
+//!
 //! `apply_reconcile` (Plan 157 §4.5 retry-on-conflict variant)
 //! remains a documented follow-up.
 
@@ -74,19 +79,12 @@ impl NftablesDiff {
         }
 
         // 5. Table adds (must precede chain/rule/flowtable adds
-        //    that reference them).
-        //
-        // `Transaction::add_table` doesn't currently expose a
-        // flags variant, so tables that need NFT_TABLE_F_DORMANT /
-        // _OWNER / _PERSIST fall back to the imperative path
-        // outside the batch — that drops atomicity for those
-        // specific table adds only. Tracked as a smaller follow-up
-        // ("Transaction::add_table_with_flags") once a consumer
-        // hits it.
+        //    that reference them). Flagged tables route through
+        //    Transaction::add_table_with_flags so they stay
+        //    inside the atomic batch.
         for table in &self.tables_to_add {
             if table.flags() != 0 {
-                conn.add_table_with_flags(table.name(), table.family(), table.flags())
-                    .await?;
+                tx = tx.add_table_with_flags(table.name(), table.family(), table.flags());
             } else {
                 tx = tx.add_table(table.name(), table.family());
             }

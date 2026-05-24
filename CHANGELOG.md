@@ -6,12 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **`Transaction::{del_chain, del_rule, add_flowtable, del_flowtable}`**
-  on the nftables batch type (Plan 150 §9.4 / Plan 157
-  coordination follow-up). The batch now mirrors the imperative
-  `Connection::<Nftables>` mutation surface end-to-end, with the
-  one exception of `add_table_with_flags` (deferred — single
-  tracked follow-up).
+- **`Transaction::{add_table_with_flags, del_chain, del_rule,
+  add_flowtable, del_flowtable}`** on the nftables batch type
+  (Plan 150 §9.4 / Plan 157 coordination follow-up). The batch
+  now mirrors the imperative `Connection::<Nftables>` mutation
+  surface end-to-end; no operation needs to escape the atomic
+  batch.
 
 - **`NftablesDiff::apply` flips to atomic** (Plan 157 §4.4
   closeout). With the four new `Transaction` methods above in
@@ -23,10 +23,9 @@ All notable changes to this project will be documented in this file.
   running long-lived `NftablesConfig` reconcilers no longer
   have to design around the partial-apply window.
 
-  The 0.16-era non-atomic imperative path is gone; only the
-  `Transaction::add_table_with_flags` gap forces a single
-  out-of-batch fallback for tables with NFT_TABLE_F_DORMANT /
-  _OWNER / _PERSIST set.
+  The 0.16-era non-atomic imperative path is gone — every
+  table/chain/rule/flowtable mutation in a diff (including
+  flagged tables) commits in one batch.
 
 - **TC streaming dump wrappers** (Plan 149 follow-up):
   `Connection::<Route>::stream_qdiscs()` / `stream_classes()` /

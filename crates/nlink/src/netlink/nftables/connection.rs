@@ -1029,6 +1029,30 @@ impl Transaction {
         self
     }
 
+    /// Add a table creation with explicit table-level flags
+    /// (`NFT_TABLE_F_DORMANT` / `_OWNER` / `_PERSIST`) to the
+    /// batch. Mirrors the imperative
+    /// [`Connection::<Nftables>::add_table_with_flags`](Connection).
+    /// Use [`Self::add_table`] when no flags are needed.
+    pub fn add_table_with_flags(mut self, name: &str, family: Family, flags: u32) -> Self {
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWTABLE),
+            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        let nfgenmsg = NfGenMsg::new(family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_TABLE_NAME, name);
+        if flags != 0 {
+            // NFTA_TABLE_FLAGS is big-endian per kernel convention
+            // (matches the existing list_tables parser at
+            // `parse_table` which reads it as `from_be_bytes`).
+            builder.append_attr_u32_be(NFTA_TABLE_FLAGS, flags);
+        }
+        builder.set_seq(self.next_seq());
+        self.messages.push(builder.finish());
+        self
+    }
+
     /// Add a chain deletion to the batch. Mirrors the imperative
     /// [`Connection::<Nftables>::del_chain`](Connection) shape.
     pub fn del_chain(mut self, table: &str, name: &str, family: Family) -> Self {
