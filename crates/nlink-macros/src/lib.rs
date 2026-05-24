@@ -1,12 +1,15 @@
 //! Proc-macro derives for the [`nlink`][nlink] Linux-netlink
-//! library — typed GENL family / command / attribute codecs.
+//! library — typed GENL family / command / attribute / message
+//! codecs.
 //!
-//! See the [Plan 154][plan-154] for the design + roadmap and
-//! `crates/nlink/examples/macros/` (when shipped) for end-to-end
-//! examples of defining a new GENL family in ~20 lines of
-//! declarative code.
+//! **Don't depend on this crate directly.** Use `nlink` and write
+//! `use nlink::macros::*;` to pull in every macro plus the
+//! supporting traits in one shot. See the README + the
+//! [`define-your-own-genl-family` recipe][recipe] for end-to-end
+//! usage; the runnable example lives at
+//! [`crates/nlink/examples/macros/define_taskstats.rs`][example].
 //!
-//! # Shipped derives (0.16 Phases 1 + 2)
+//! # Shipped surface (0.16, Plan 154 Phases 1–6)
 //!
 //! - [`macro@GenlCommand`] + `#[genl_command(repr = "u8"|"u16")]`
 //!   — typed GENL command enum
@@ -14,18 +17,33 @@
 //!   — typed attribute-kind enum
 //! - [`macro@GenlEnum`] + `#[genl_enum(repr = "u8"|"u16"|"u32")]`
 //!   — typed value enum encoded *inside* an attribute payload
+//! - [`macro@GenlMessage`] + `#[genl_message(cmd = ...)]` +
+//!   per-field `#[genl_attr(...)]` — typed request/response
+//!   body. Pairs with the generic
+//!   `Connection::<F: GenlFamily>::send_typed<M, R>` /
+//!   `dump_typed_stream<M, R>` dispatch in `nlink`.
+//! - [`macro@genl_family`] — `#[genl_family(name = "...", version
+//!   = N)]` rewrites a unit-struct declaration into a complete
+//!   family marker (`ProtocolState` + `AsyncProtocolInit` +
+//!   `GenlFamily` + sealed-trait impls + `family_id` field +
+//!   `Default` / `Debug`).
 //!
-//! All three produce the same shape — `From<EnumType> for
+//! The three codec derives (`GenlCommand`, `GenlAttribute`,
+//! `GenlEnum`) produce the same shape — `From<EnumType> for
 //! ReprType` + `TryFrom<ReprType> for EnumType` + a small
 //! `EnumTypeUnknownValue(repr)` error newtype.
 //!
-//! The remaining derives ([`GenlMessage`][note-1],
-//! [`NetlinkAttrs`][note-1], and the `#[genl_family]` attribute
-//! macro) ship in subsequent phases of Plan 154.
+//! # Deferred follow-up
+//!
+//! `#[derive(NetlinkAttrs)]` for nested attribute groups
+//! (`NLA_F_NESTED`) is tracked as a Plan 154 follow-up. The
+//! `nlink::macros::NetlinkAttrs` *trait* is already in tree so
+//! hand-implementations work today; the derive will close the
+//! last remaining "hand-roll this bit" gap.
 //!
 //! [nlink]: https://docs.rs/nlink
-//! [plan-154]: https://github.com/p13marc/nlink/blob/master/plans/154-0.16-nlink-macros-plan.md
-//! [note-1]: # "follow-up phases of Plan 154 — not yet shipped"
+//! [recipe]: https://github.com/p13marc/nlink/blob/master/docs/recipes/define-your-own-genl-family.md
+//! [example]: https://github.com/p13marc/nlink/blob/master/crates/nlink/examples/macros/define_taskstats.rs
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;

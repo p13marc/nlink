@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **nlink-macros polish + publish-order docs** (Plan 154 Phase 7,
+  closes out the macro cycle):
+  - `crates/nlink-macros/README.md` — crates.io landing page
+    with the headline taste, the "don't depend on this crate
+    directly" note, and the **publish-order requirement** (the
+    matching `nlink-macros X.Y.Z` must be on crates.io before
+    `cargo publish -p nlink`).
+  - `crates/nlink-macros/src/lib.rs` module docstring refreshed
+    to reflect the full Phase 1–6 shipped surface (was stuck on
+    Phases 1+2 narrative since Phase 3a landed).
+  - Workspace `Cargo.toml` `nlink-macros` dep now carries
+    `version = "..."` alongside the path dep — required for
+    `cargo publish -p nlink` to resolve the dependency on
+    crates.io. Documented inline.
+
+  Plan 154 is now feature-complete for the 0.16 cycle. The
+  `#[derive(NetlinkAttrs)]` derive for nested attribute groups
+  remains as a documented follow-up (the trait is in tree, only
+  the derive's automation is deferred).
+
 - **Worked example + recipe for the macro stack** (Plan 154
   Phase 6):
   - [`crates/nlink/examples/macros/define_taskstats.rs`](crates/nlink/examples/macros/define_taskstats.rs)

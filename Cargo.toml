@@ -73,4 +73,10 @@ trybuild = "1"
 
 # Workspace crates
 nlink = { path = "crates/nlink" }
-nlink-macros = { path = "crates/nlink-macros" }
+# nlink-macros is published to crates.io independently of nlink (it
+# ships the proc-macro derives that nlink re-exports). The `version`
+# pin is required for `cargo publish nlink` to resolve the dep on
+# crates.io; bump in lockstep with the workspace version at cycle
+# cut. **Publish nlink-macros first** when releasing — nlink's
+# publication will fail until the matching version is live.
+nlink-macros = { path = "crates/nlink-macros", version = "0.15.1" }
