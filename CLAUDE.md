@@ -365,14 +365,21 @@ recipe rather than re-synthesizing:
   `conn.send_typed(req).await?`).
 - [`dpll-monitor`](docs/recipes/dpll-monitor.md) — enumerate
   clock-synchronization hardware (SyncE / PTP / GNSS) via
-  `Connection<Dpll>`, poll for lock-status transitions, detect
+  `Connection<Dpll>`, push-based event stream
+  (`subscribe_monitor()` + `DpllEvent` via `EventSource`), detect
   holdover acquisition, diagnose lock loss via
   `DpllLockStatusError`. Telco-RAN / time-sync / SmartNIC
   control-plane use case (0.16+).
+- [`tx-hw-shaping`](docs/recipes/tx-hw-shaping.md) — TX hardware
+  shaping (per-NIC, per-queue, or scheduler-node bandwidth/burst/
+  priority/weight) via `Connection<NetShaper>` (kernel 6.13+).
+  Capability handshake via `get_caps` before `set_shaper` so
+  drivers with partial support don't surprise you. Telco /
+  SmartNIC / SR-IOV multi-tenancy use case (0.16+).
 
 Per-subsystem runnable examples live under
 `crates/nlink/examples/`: `genl/{wireguard,macsec,mptcp,ethtool_*,
-nl80211,devlink,dpll}.rs`, `macros/define_taskstats.rs`,
+nl80211,devlink,dpll,net_shaper}.rs`, `macros/define_taskstats.rs`,
 `netfilter/{conntrack,conntrack_events}.rs`,
 `{audit,bridge,config,connector,diagnostics,events,fib_lookup,
 impair,lab,namespace,nftables,ratelimit,route,selinux,sockdiag,
@@ -411,13 +418,24 @@ tracker. Headlines that landed so far:
   + [`crates/nlink/examples/macros/define_taskstats.rs`](crates/nlink/examples/macros/define_taskstats.rs).
 - **Plan 149 — streaming dump API** (🟡): `dump_stream<T>` +
   typed wrappers for links/routes/neighbors/addresses + qdiscs/
-  classes/filters. O(1) memory iteration over large kernel dumps.
+  classes/filters + XFRM SAs/SPs (`stream_sas` / `stream_sps`,
+  `FromNetlink` impls via refactored payload-only parsers).
+  O(1) memory iteration over large kernel dumps. Conntrack +
+  nft-rules streaming still deferred — need a `dump_stream` API
+  extension to pass a caller-parameterized body prefix
+  (conntrack: `nfgenmsg.family`).
 - **Plan 150 — nftables flowtable** (🟡): full CRUD + multicast
   events (`Connection::<Nftables>::subscribe` + 8 typed event
-  variants). Counters introspection still deferred.
+  variants). Counters introspection still deferred — kernel
+  UAPI premise needs re-investigation (per-flow counters live
+  in conntrack, not in NFT_MSG_GETFLOWTABLE).
 - **Plan 151 — ENOBUFS resync types** (🟡): `ResyncedEvent<T>` +
   `ResyncMarker` + recipe. Pre-baked Stream wrapper on hold for
   design soak.
+- **Plan 153 — kernel feature bundle** (🟢): all three sub-features
+  shipped (§4.1 XFRM IPsec offload + §4.2 Devlink rate +
+  port-function-state + §4.3 `net_shaper` GENL family — second
+  in-tree macro dogfood after DPLL).
 - **Plan 157 — declarative `NftablesConfig`** (🟡): diff + atomic
   apply via the extended `Transaction` (every diff op commits in
   one `NFNL_MSG_BATCH_BEGIN…END` round-trip). Canonicalization +
@@ -426,22 +444,23 @@ tracker. Headlines that landed so far:
   `sendmmsg` batching wired into both eager dumps + streaming.
 - **Plan 159 — `ConnectionPool<P>`** (🟢): bounded-mpsc-channel-
   backed pool for parallel fanout.
-- **Plan 156 — DPLL family** (🟡): first in-tree dogfood of the
-  macros. Phases 1-4 + 6 (partial) landed —
-  `Connection<Dpll>` with `get/dump/set_*` for devices and pins,
-  all 11 typed enums + nested attribute groups + bitflags
-  newtype, recipe at `docs/recipes/dpll-monitor.md` + runnable
-  example at `examples/genl/dpll.rs`. ~430 lines of declarative
-  Rust for the full family vs ~600+ lines hand-written per the
-  WireGuard / MACsec / Devlink pattern. Phase 5 (multicast
-  monitor) deferred — needs new GENL `CTRL_ATTR_MCAST_GROUPS`
-  resolution infrastructure shared with Devlink / Nl80211 /
-  Ethtool.
+- **Plan 156 — DPLL family** (🟢): first in-tree dogfood of the
+  macros. All 6 phases landed — `Connection<Dpll>` with
+  `get/dump/set_*` for devices and pins (all 11 typed enums +
+  nested groups + bitflags), push-based multicast monitor
+  (`subscribe_monitor()` + `DpllEvent` via `EventSource`),
+  recipe + example. ~430 lines of declarative Rust for the full
+  family vs ~600+ lines hand-written. Phase 5 closeout also
+  shipped **shared GENL multicast-group infrastructure**:
+  `__rt::resolve_genl_family_with_groups` +
+  `GenlFamily::mcast_group(name)` +
+  `Connection::<F: GenlFamily>::subscribe_group(name)`.
+  Devlink/Nl80211/Ethtool refactored to use it (−254 lines of
+  duplicated wire parsing).
 
-Ready to start (no blockers): Plan 153.3 (`net_shaper` GENL
-family), Plan 152 (aya/Prometheus/OTel showcases — best
-sequenced after Plan 156 Phase 5 closes so the showcase can
-demonstrate event-driven workloads).
+Ready to start (no blockers): Plan 152 (aya/Prometheus/OTel
+showcases — both DPLL and net_shaper now in tree as macro
+reference points). Currently deprioritized per maintainer.
 
 Per-release upgrade guides:
 [`docs/migration_guide/`](docs/migration_guide/README.md) — write

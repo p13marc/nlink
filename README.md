@@ -211,7 +211,7 @@ if let Some(bottleneck) = diag.find_bottleneck().await? {
 | `nlink::netlink::dump_stream` | `DumpStream<T>` — O(1)-memory iteration over large dumps (0.16+) |
 | `nlink::netlink::resync` | `ResyncedEvent<T>` + `ResyncMarker` — ENOBUFS overflow recovery (0.16+) |
 | `nlink::netlink::pool` | `ConnectionPool<P>` + `PooledConnection<'p, P>` (0.16+) |
-| `nlink::netlink::genl` | Generic Netlink: WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink, DPLL |
+| `nlink::netlink::genl` | Generic Netlink: WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink, DPLL, net_shaper (TX HW shaping) |
 | `nlink::netlink::nexthop` | Nexthop objects and ECMP groups (Linux 5.3+) |
 | `nlink::netlink::mpls` | MPLS routes and encapsulation |
 | `nlink::netlink::srv6` | SRv6 segment routing |
@@ -281,14 +281,30 @@ The library API is production-ready for network monitoring and configuration.
   See [`docs/recipes/define-your-own-genl-family.md`](docs/recipes/define-your-own-genl-family.md).
 - **DPLL family** (`Connection<Dpll>`) — kernel 6.7+
   clock-synchronization hardware (SyncE, PTP, GNSS-disciplined
-  oscillators). The in-tree dogfood of the nlink-macros stack:
+  oscillators). First in-tree dogfood of the nlink-macros stack:
   ~430 lines of declarative Rust for the full family vs ~600+
   lines hand-written per the WireGuard / MACsec / Devlink
-  pattern. Telco-RAN, time-sync, SmartNIC use case. See
+  pattern. Includes push-based multicast monitor
+  (`subscribe_monitor()` + `DpllEvent` stream via `EventSource`).
+  Telco-RAN, time-sync, SmartNIC use case. See
   [`docs/recipes/dpll-monitor.md`](docs/recipes/dpll-monitor.md).
+- **`net_shaper` family** (`Connection<NetShaper>`) — kernel 6.13+
+  TX hardware shaping: per-NIC, per-queue, or intermediate-node
+  bandwidth/burst/priority/weight on shaper-capable drivers
+  (Intel `ice` E810/E830, Mellanox `mlx5` ConnectX-7+, Broadcom
+  `bnxt`). Second in-tree macro dogfood — ~200 lines of
+  declarative Rust for the full family. See
+  [`docs/recipes/tx-hw-shaping.md`](docs/recipes/tx-hw-shaping.md).
+- **Shared GENL multicast-group resolution** —
+  `GenlFamily::mcast_group(name) -> Option<u32>` +
+  `Connection::<F>::subscribe_group(name)`. `#[genl_family]`
+  populates the map automatically; Devlink/Nl80211/Ethtool
+  also refactored to use it (−254 lines of duplicated wire
+  parsing).
 - Streaming dump API (`dump_stream<T>` + typed wrappers for links/
-  routes/neighbors/addresses + qdiscs/classes/filters) — O(1)
-  memory iteration on BGP/conntrack-scale dumps
+  routes/neighbors/addresses + qdiscs/classes/filters + XFRM
+  SAs/SPs) — O(1) memory iteration on BGP/conntrack/IPsec-scale
+  dumps
 - `ConnectionPool<P>` + `PooledConnection<'p, P>` for parallel fanout
 - ENOBUFS-resync types (`ResyncedEvent<T>` + `ResyncMarker` +
   recipe) for multicast-overflow recovery
