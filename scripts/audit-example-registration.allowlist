@@ -1,0 +1,27 @@
+# Known-orphan example files exempted from the
+# audit-example-registration.sh check. Each entry corresponds to
+# a file under crates/nlink/examples/ that exists on disk but is
+# NOT registered as a [[example]] entry in
+# crates/nlink/Cargo.toml.
+#
+# Surfaced by plans/160-example-registry-audit.md. As Plan 160
+# triages each orphan, the maintainer either:
+#   (a) updates the example to the current API + registers it
+#       in Cargo.toml, then removes the entry here, OR
+#   (b) deletes the file entirely, then removes the entry here.
+#
+# Category legend:
+#   R = Rename-only (trivial cosmetic fix)
+#   F = Format-string bug in raw-string println!s
+#   P = Phantom API (references symbols that never existed)
+#   O = Obsolete API shape (struct-vs-closure builder, etc.)
+
+examples/bridge/fdb.rs                # P  — link_kind() + is_local() never existed
+examples/bridge/vlan.rs               # R+F — link_kind() → kind(); plus 7 raw-string println bugs
+examples/config/declarative.rs        # O  — struct-based LinkConfig/etc. never existed; actual API is closure-based
+examples/diagnostics/bottleneck.rs    # P+F — Bottleneck::score never existed
+examples/diagnostics/connectivity.rs  # P  — route.dev/src never existed; gateway_reachable wrong type
+examples/diagnostics/scan.rs          # P+F — iface.up/carrier never existed; field renames in RouteDiag
+examples/route/mpls.rs                # R+F — route.gateway → route.via; plus 9 raw-string println bugs
+examples/route/nexthop.rs             # R+F — nh.is_blackhole() → nh.blackhole (field); plus 8 raw-string println bugs
+examples/route/srv6.rs                # P+F — Srv6LocalRoute::table never existed

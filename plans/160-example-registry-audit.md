@@ -117,52 +117,64 @@ examples.
 
 ## Wiring (the safety net)
 
-`scripts/audit-example-registration.sh` is in tree. It walks
-`crates/nlink/examples/` recursively, finds every `*.rs`, and
-verifies each is referenced by a `path = "..."` line in
-`crates/nlink/Cargo.toml`. Exits 0 if every file is registered;
-exits 1 with a per-file list otherwise.
+`scripts/audit-example-registration.sh` is in tree, **wired into
+CI** as the `audit-example-registration` workflow job in
+`.github/workflows/rust.yml`. The script:
 
-The script is **NOT yet wired into the CI workflow** (no job
-stanza in `.github/workflows/rust.yml`) because the 9 known
-orphans would immediately break CI on the 0.16 branch. The
-proposed two-step rollout:
+1. Walks `crates/nlink/examples/` recursively for every `*.rs`.
+2. Skips files registered via `path = "..."` in
+   `crates/nlink/Cargo.toml` (those compile in the existing
+   `build-and-test-*` jobs).
+3. Skips files exempted in
+   `scripts/audit-example-registration.allowlist` (the 9 known
+   orphans below).
+4. **Fails CI** for any new orphan that's neither registered nor
+   allowlisted — with a copy-paste fix block in the error message.
+5. Warns when the allowlist contains stale paths (the file was
+   deleted or moved without pruning the entry).
 
-1. **Catalog phase (this commit, in 0.16)** — script in tree;
-   not in CI. Maintainer can run `bash
-   scripts/audit-example-registration.sh` locally to verify the
-   catalog matches reality.
+Allowlist shrinkage = Plan 160 progress. Each time an orphan is
+resolved (fixed-and-registered, or deleted), drop the matching
+line from `scripts/audit-example-registration.allowlist`. When
+the file is empty, the catalog is closed and the file can be
+deleted.
 
-2. **Enforcement phase (post-catalog-resolution)** — after the
-   9 orphans are resolved (each either fixed-and-registered or
-   deleted), add the workflow stanza below to `rust.yml` and
-   the script becomes a mandatory CI gate:
+### Current allowlist (= the 9 known orphans, with category)
 
-   ```yaml
-   audit-example-registration:
-     name: audit example registration (every .rs in examples/ is in Cargo.toml)
-     runs-on: ubuntu-latest
-     steps:
-       - uses: actions/checkout@v4
-       - name: Run scripts/audit-example-registration.sh
-         run: bash scripts/audit-example-registration.sh
-   ```
+```
+examples/bridge/fdb.rs                # P  — link_kind() + is_local() never existed
+examples/bridge/vlan.rs               # R+F
+examples/config/declarative.rs        # O  — struct API never existed; actual is closure-based
+examples/diagnostics/bottleneck.rs    # P+F — Bottleneck::score never existed
+examples/diagnostics/connectivity.rs  # P  — route.dev/src never existed
+examples/diagnostics/scan.rs          # P+F — field names never existed
+examples/route/mpls.rs                # R+F — route.gateway → route.via
+examples/route/nexthop.rs             # R+F — nh.is_blackhole() → nh.blackhole
+examples/route/srv6.rs                # P+F — Srv6LocalRoute::table never existed
+```
 
-   This new job runs in ~3s (pure bash, no toolchain), so it's
-   essentially free.
+Categories: R = trivial rename, F = raw-string format bug,
+P = phantom (symbol never existed), O = obsolete API shape.
 
 ## Acceptance criteria
 
 For this plan to close:
 
 - [x] `scripts/audit-example-registration.sh` ships in tree.
+- [x] `scripts/audit-example-registration.allowlist` exempts the
+      9 known orphans (each entry annotated with its category).
 - [x] This plan documents the 9 orphans + per-file category.
 - [x] CLAUDE.md project conventions note registers
       "every example .rs must have an `[[example]]` entry".
+- [x] **Workflow stanza wired** — `audit-example-registration`
+      job in `.github/workflows/rust.yml` runs the script on
+      every push/PR. Allowlist makes it green today; any NEW
+      orphan fails CI loudly.
 - [ ] Maintainer triages the 9 orphans (one or more follow-up
-      commits, one per file or grouped).
-- [ ] Post-triage: workflow stanza added to `rust.yml`; the audit
-      becomes a mandatory CI gate.
+      commits, one per file or grouped) — each triage edit
+      removes the file's line from the allowlist.
+- [ ] Once the allowlist is empty, delete the file itself
+      (the script no-ops when the allowlist file is absent).
 
 ## Cross-references
 
