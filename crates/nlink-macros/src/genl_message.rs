@@ -215,20 +215,28 @@ enum WireKind {
         type_path: Box<Type>,
         repr: ReprWidth,
     },
+    /// A `#[derive(NetlinkAttrs)]`-typed nested attribute group.
+    /// Emit wraps the field's `write_attrs` output in an
+    /// `NLA_F_NESTED` attribute. Parse calls `T::read_attrs` on
+    /// the nested payload. Must be wrapped in `Option<T>` because
+    /// nested-group structs typically don't derive `Default`.
+    Nested { type_path: Box<Type> },
     Optional(Box<WireKind>),
 }
 
-/// Parsed contents of the field annotation —
-/// `#[genl_attr(EXPR, repr = "...")]` for GenlEnum-typed fields, or
-/// `#[genl_attr(EXPR, bitflags = "...")]` for bitflags newtypes.
-/// `repr` and `bitflags` are mutually exclusive on a single field;
-/// supplying both is a compile error.
+/// Parsed contents of the field annotation. Three mutually-exclusive
+/// field-kind hints: `repr = "..."` (GenlEnum-typed), `bitflags
+/// = "..."` (bitflags newtype), or `nested` (NetlinkAttrs-typed
+/// nested group). Supplying more than one on a single field is a
+/// compile error.
 struct GenlAttrArgs {
     attr_expr: Expr,
     /// `Some(width, kind)` if the field carries a width-marker
-    /// hint. `kind` distinguishes `repr` (GenlEnum) from
-    /// `bitflags` (bitflags newtype).
+    /// hint (repr or bitflags). Mutually exclusive with `nested`.
     width: Option<(ReprWidth, WidthKind)>,
+    /// True if the field annotation supplied the `nested` keyword.
+    /// Mutually exclusive with `width`.
+    nested: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,24 +251,25 @@ impl Parse for GenlAttrArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let attr_expr: Expr = input.parse()?;
         let mut width: Option<(ReprWidth, WidthKind)> = None;
+        let mut nested = false;
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
             if input.is_empty() {
                 break;
             }
             let ident: Ident = input.parse()?;
-            input.parse::<Token![=]>()?;
             let key = ident.to_string();
             match key.as_str() {
                 "repr" | "bitflags" => {
-                    if width.is_some() {
+                    if width.is_some() || nested {
                         return Err(syn::Error::new(
                             ident.span(),
-                            "#[genl_attr] accepts at most one of `repr` / `bitflags` \
-                             (they're mutually exclusive — pick the field-kind \
-                             that matches your type)",
+                            "#[genl_attr] accepts at most one of `repr` / \
+                             `bitflags` / `nested` (mutually exclusive — pick the \
+                             field-kind that matches your type)",
                         ));
                     }
+                    input.parse::<Token![=]>()?;
                     let lit: LitStr = input.parse()?;
                     let w = ReprWidth::parse(&lit)?;
                     let kind = if key == "repr" {
@@ -270,19 +279,31 @@ impl Parse for GenlAttrArgs {
                     };
                     width = Some((w, kind));
                 }
+                "nested" => {
+                    if width.is_some() || nested {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "#[genl_attr] accepts at most one of `repr` / \
+                             `bitflags` / `nested` (mutually exclusive — pick the \
+                             field-kind that matches your type)",
+                        ));
+                    }
+                    nested = true;
+                }
                 other => {
                     return Err(syn::Error::new(
                         ident.span(),
                         format!(
                             "unknown #[genl_attr] key `{other}`; expected \
-                             `repr = \"u8\"|\"u16\"|\"u32\"` (GenlEnum-typed) \
-                             or `bitflags = \"u8\"|\"u16\"|\"u32\"` (bitflags newtype)"
+                             `repr = \"u8\"|\"u16\"|\"u32\"` (GenlEnum-typed), \
+                             `bitflags = \"u8\"|\"u16\"|\"u32\"` (bitflags newtype), \
+                             or `nested` (NetlinkAttrs-typed nested group)"
                         ),
                     ))
                 }
             }
         }
-        Ok(Self { attr_expr, width })
+        Ok(Self { attr_expr, width, nested })
     }
 }
 
@@ -303,6 +324,7 @@ impl WireKind {
                 quote! { ::std::vec::Vec<#type_path> }
             }
             Self::Bitflags { type_path, .. } => quote! { #type_path },
+            Self::Nested { type_path } => quote! { #type_path },
             Self::Optional(inner) => {
                 let inner_ty = inner.type_token();
                 quote! { ::core::option::Option<#inner_ty> }
@@ -332,6 +354,11 @@ impl WireKind {
                 let repr_ident = repr.ident();
                 quote! { #type_path::from_bits_retain(0 as #repr_ident) }
             }
+            Self::Nested { .. } => {
+                // Unreachable: classify_type_inner requires Nested
+                // fields to be wrapped in `Option<T>`.
+                quote! { unreachable!("bare-Nested WireKind reached default_expr") }
+            }
             Self::Optional(_) => quote! { ::core::option::Option::None },
         }
     }
@@ -358,6 +385,12 @@ impl WireKind {
                     proc_macro2::Span::call_site(),
                 );
                 quote! { ::nlink::macros::__rt::#fn_ident }
+            }
+            Self::Nested { .. } => {
+                // Nested has no scalar parse helper — the outer
+                // parse_arm dispatches directly through
+                // `T::read_attrs`. Defensive placeholder.
+                quote! { compile_error!("internal: Nested in parse_fn") }
             }
             Self::Optional(inner) => inner.parse_fn(),
         }
@@ -434,6 +467,18 @@ impl WireKind {
                     );
                 }
             }
+            Self::Nested { .. } => {
+                // Open a nested-attribute container, delegate the
+                // body to the nested type's write_attrs, then close
+                // it. NLA_F_NESTED = 0x8000.
+                quote! {
+                    {
+                        let __nest = #builder.nest_start(((#attr_expr) as u16) | 0x8000u16);
+                        ::nlink::macros::NetlinkAttrs::write_attrs(#value_expr, #builder)?;
+                        #builder.nest_end(__nest);
+                    }
+                }
+            }
             Self::Optional(_) => {
                 // Optional should never call emit_call_inner directly —
                 // its outer emit_call handles the if-let-Some wrapping.
@@ -443,20 +488,20 @@ impl WireKind {
     }
 
     /// Whether the emit call takes `&` or moves: ints + enums copy,
-    /// strings/bytes need `&`.
+    /// strings/bytes/nested-groups need `&` (write_attrs takes &self).
     fn needs_reference_on_emit(&self) -> bool {
-        matches!(self, Self::Str | Self::Bytes)
+        matches!(self, Self::Str | Self::Bytes | Self::Nested { .. })
     }
 }
 
-struct FieldSpec {
-    ident: Ident,
-    attr_expr: Expr,
+pub(crate) struct FieldSpec {
+    pub(crate) ident: Ident,
+    pub(crate) attr_expr: Expr,
     kind: WireKind,
 }
 
 impl FieldSpec {
-    fn emit_call(&self) -> TokenStream2 {
+    pub(crate) fn emit_call(&self) -> TokenStream2 {
         let ident = &self.ident;
         let attr = &self.attr_expr;
         let builder = quote! { builder };
@@ -503,14 +548,14 @@ impl FieldSpec {
         }
     }
 
-    fn field_default(&self) -> TokenStream2 {
+    pub(crate) fn field_default(&self) -> TokenStream2 {
         let ident = &self.ident;
         let ty = self.kind.type_token();
         let default = self.kind.default_expr();
         quote! { let mut #ident: #ty = #default; }
     }
 
-    fn parse_arm(&self) -> TokenStream2 {
+    pub(crate) fn parse_arm(&self) -> TokenStream2 {
         let ident = &self.ident;
         let attr = &self.attr_expr;
         let parse_fn = self.kind.parse_fn();
@@ -524,6 +569,16 @@ impl FieldSpec {
                                 ::std::format!("{e}")
                             ))?;
                         #ident = ::core::option::Option::Some(__decoded);
+                    }
+                },
+                WireKind::Nested { type_path } => quote! {
+                    // The kernel may set NLA_F_NESTED in the attr
+                    // type byte; mask it off when matching, then
+                    // dispatch to the nested type's read_attrs over
+                    // the inner payload.
+                    __ty if (__ty & !0x8000u16) == (#attr) as u16 => {
+                        let __inner = <#type_path as ::nlink::macros::NetlinkAttrs>::read_attrs(__attr_payload)?;
+                        #ident = ::core::option::Option::Some(__inner);
                     }
                 },
                 _ => quote! {
@@ -572,7 +627,7 @@ impl FieldSpec {
     }
 }
 
-fn parse_field(field: &Field) -> syn::Result<FieldSpec> {
+pub(crate) fn parse_field(field: &Field) -> syn::Result<FieldSpec> {
     let ident = field
         .ident
         .clone()
@@ -588,10 +643,14 @@ fn parse_field(field: &Field) -> syn::Result<FieldSpec> {
         )
     })?;
 
-    // #[genl_attr(EXPR [, repr = "..."] [, bitflags = "..."])]
-    let GenlAttrArgs { attr_expr, width } = ml.parse_args()?;
+    // #[genl_attr(EXPR [, repr | bitflags | nested ...])]
+    let GenlAttrArgs {
+        attr_expr,
+        width,
+        nested,
+    } = ml.parse_args()?;
 
-    let kind = classify_type(&field.ty, width)?;
+    let kind = classify_type(&field.ty, width, nested)?;
 
     Ok(FieldSpec {
         ident,
@@ -603,13 +662,15 @@ fn parse_field(field: &Field) -> syn::Result<FieldSpec> {
 fn classify_type(
     ty: &Type,
     width_hint: Option<(ReprWidth, WidthKind)>,
+    nested: bool,
 ) -> syn::Result<WireKind> {
-    classify_type_inner(ty, width_hint, /* inside_option = */ false)
+    classify_type_inner(ty, width_hint, nested, /* inside_option = */ false)
 }
 
 fn classify_type_inner(
     ty: &Type,
     width_hint: Option<(ReprWidth, WidthKind)>,
+    nested: bool,
     inside_option: bool,
 ) -> syn::Result<WireKind> {
     let Type::Path(p) = ty else {
@@ -672,7 +733,12 @@ fn classify_type_inner(
         }
         "Option" => {
             let inner = single_type_arg(last, ty)?;
-            let inner_kind = classify_type_inner(inner, width_hint, /* inside_option = */ true)?;
+            let inner_kind = classify_type_inner(
+                inner,
+                width_hint,
+                nested,
+                /* inside_option = */ true,
+            )?;
             if matches!(inner_kind, WireKind::Optional(_)) {
                 return Err(syn::Error::new_spanned(
                     ty,
@@ -687,7 +753,27 @@ fn classify_type_inner(
             //   `bitflags = "u32"` → bitflags newtype (no Option needed —
             //                        from_bits_retain(0) is the natural
             //                        empty value)
+            //   `nested`           → NetlinkAttrs-typed group (requires
+            //                        Option<>, same reason as repr).
             // Without any hint, error pointing the user at how to fix it.
+            if nested {
+                if !inside_option {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        format!(
+                            "nested-group field `{name}` must be wrapped in \
+                             `Option<{name}>` for #[derive(GenlMessage)]. \
+                             Nested attribute groups have no sensible Default \
+                             (the kernel either emits the block or doesn't); \
+                             `None` is the natural missing-group state. Change \
+                             the field to `Option<{name}>` and re-derive."
+                        ),
+                    ));
+                }
+                return Ok(WireKind::Nested {
+                    type_path: Box::new(ty.clone()),
+                });
+            }
             match width_hint {
                 Some((repr, WidthKind::Enum)) => {
                     if !inside_option {
@@ -731,7 +817,8 @@ fn classify_type_inner(
                          and add `repr = \"u8\"|\"u16\"|\"u32\"`. \
                          For bitflags newtypes (`.bits()` + `from_bits_retain`), \
                          add `bitflags = \"u8\"|\"u16\"|\"u32\"`. \
-                         (Nested attribute groups via NetlinkAttrs land in a follow-up phase.)"
+                         For `#[derive(NetlinkAttrs)]`-typed nested groups, wrap \
+                         in `Option<T>` and add `nested`."
                     ),
                 )),
             }

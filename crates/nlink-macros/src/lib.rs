@@ -59,6 +59,7 @@ mod genl_command;
 mod genl_family;
 mod genl_enum;
 mod genl_message;
+mod netlink_attrs;
 
 /// Derive a typed-enum codec for a Generic Netlink **command** ID
 /// enum.
@@ -253,6 +254,46 @@ pub fn derive_genl_enum(input: TokenStream) -> TokenStream {
 pub fn derive_genl_message(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     genl_message::expand(input)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+/// Derive `NetlinkAttrs` for a nested attribute group — a struct
+/// the kernel encodes as the contents of a single `NLA_F_NESTED`
+/// attribute.
+///
+/// Same field-type-mapping table as `#[derive(GenlMessage)]`
+/// (primitives + `Option<T>` + `Vec<u8>` + `Vec<GenlEnum>` +
+/// bitflags + `Option<GenlEnum>`), same per-field
+/// `#[genl_attr(EXPR [, repr = "..."] [, bitflags = "..."])]`
+/// annotation. The only difference: no `cmd` const, methods are
+/// `write_attrs` / `read_attrs` (matching the
+/// `nlink::macros::NetlinkAttrs` trait).
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::macros::*;
+///
+/// #[derive(NetlinkAttrs, Debug, Default)]
+/// pub struct ParentDeviceBlock {
+///     #[genl_attr(1u16)] pub device_id: u32,
+///     #[genl_attr(2u16)] pub pin_id: u32,
+/// }
+///
+/// // Use the group inside a GenlMessage struct via `nested`:
+/// #[derive(GenlMessage, Debug, Default)]
+/// #[genl_message(cmd = DpllCmd::PinGet)]
+/// pub struct DpllPinReply {
+///     #[genl_attr(DpllPinAttr::Id)] pub id: u32,
+///     #[genl_attr(DpllPinAttr::ParentDevice, nested)]
+///     pub parent_device: Option<ParentDeviceBlock>,
+/// }
+/// ```
+#[proc_macro_derive(NetlinkAttrs, attributes(genl_attr))]
+pub fn derive_netlink_attrs(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    netlink_attrs::expand(input)
         .unwrap_or_else(|e| e.to_compile_error())
         .into()
 }

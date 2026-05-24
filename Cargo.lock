@@ -408,6 +408,7 @@ dependencies = [
 name = "nlink"
 version = "0.15.1"
 dependencies = [
+ "bitflags",
  "bytes",
  "inotify",
  "libc",

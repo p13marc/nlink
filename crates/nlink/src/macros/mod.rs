@@ -38,9 +38,11 @@
 //! | 8.2 | `Option<GenlEnum>` via `repr = "..."` hint | ✓ |
 //! | 8.3 | `Vec<GenlEnum>` repeated-attribute fields | ✓ |
 //! | 8.4 | `bitflags`-newtype fields via `bitflags = "..."` hint | ✓ |
-//! | 8.5 | `#[derive(NetlinkAttrs)]` for nested attribute groups — unblocks DPLL's `parent_device` / `parent_pin` blocks | — |
+//! | 8.5 | `#[derive(NetlinkAttrs)]` + `nested` field hint for nested attribute groups | ✓ |
 
-pub use nlink_macros::{genl_family, GenlAttribute, GenlCommand, GenlEnum, GenlMessage};
+pub use nlink_macros::{
+    genl_family, GenlAttribute, GenlCommand, GenlEnum, GenlMessage, NetlinkAttrs,
+};
 
 mod genl_dispatch;
 
@@ -676,6 +678,90 @@ mod tests {
         let parsed = DerivedEnumField::from_bytes(&[]).expect("parse");
         assert_eq!(parsed.id, 0);
         assert_eq!(parsed.mode, None);
+    }
+
+    // ---- NetlinkAttrs nested-group tests (Phase 8.5) -----------
+
+    use crate::macros::NetlinkAttrs as NetlinkAttrsDerive;
+
+    #[derive(NetlinkAttrsDerive, Debug, Default, Clone, PartialEq, Eq)]
+    struct DerivedNestedBlock {
+        #[genl_attr(1u16)]
+        device_id: u32,
+        #[genl_attr(2u16)]
+        label: String,
+    }
+
+    #[derive(GenlMessageDerive, Debug, Default, Clone, PartialEq, Eq)]
+    #[genl_message(cmd = 17u8)]
+    struct DerivedWithNested {
+        #[genl_attr(1u16)]
+        id: u32,
+        #[genl_attr(2u16, nested)]
+        parent: Option<DerivedNestedBlock>,
+    }
+
+    #[test]
+    fn derived_nested_group_round_trips() {
+        let original = DerivedWithNested {
+            id: 100,
+            parent: Some(DerivedNestedBlock {
+                device_id: 0xDEAD_BEEF,
+                label: "wg0".to_string(),
+            }),
+        };
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        original.to_bytes(&mut builder).expect("emit");
+        let parsed = DerivedWithNested::from_bytes(&builder.as_bytes()[body_start..])
+            .expect("parse");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn derived_nested_group_missing_attr_yields_none() {
+        let parsed = DerivedWithNested::from_bytes(&[]).expect("parse");
+        assert_eq!(parsed.id, 0);
+        assert_eq!(parsed.parent, None);
+    }
+
+    #[test]
+    fn nested_attrs_carry_nla_f_nested_flag_on_wire() {
+        // The emitted attribute type should include 0x8000
+        // (NLA_F_NESTED) on the wire. AttrIter strips it on read,
+        // so to observe it we walk the raw bytes — find the second
+        // attribute header and check its nla_type word directly.
+        //
+        // Per nlattr layout: each attribute is `[u16 len, u16 type,
+        // payload..., padding]` aligned to 4 bytes.
+        let original = DerivedWithNested {
+            id: 1,
+            parent: Some(DerivedNestedBlock {
+                device_id: 7,
+                label: String::new(),
+            }),
+        };
+        let mut builder = MessageBuilder::new(0, 0);
+        let body_start = builder.len();
+        original.to_bytes(&mut builder).expect("emit");
+        let bytes = &builder.as_bytes()[body_start..];
+
+        // First attr: u16 len + u16 type (=1, id, u32 payload).
+        let first_len = u16::from_ne_bytes([bytes[0], bytes[1]]) as usize;
+        let aligned_first = (first_len + 3) & !3;
+        // Second attr header starts at aligned_first.
+        let second_type =
+            u16::from_ne_bytes([bytes[aligned_first + 2], bytes[aligned_first + 3]]);
+        assert_eq!(
+            second_type & 0x8000,
+            0x8000,
+            "NLA_F_NESTED flag missing on wire (got 0x{second_type:04x})"
+        );
+        assert_eq!(
+            second_type & 0x7FFF,
+            2,
+            "wrong masked-off attr type (got 0x{second_type:04x})"
+        );
     }
 
     #[derive(GenlMessageDerive, Debug, Default, Clone, PartialEq, Eq)]

@@ -6,6 +6,48 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`#[derive(NetlinkAttrs)]` for nested attribute groups + the
+  `nested` field hint** (Plan 154 Phase 8.5 — closes out the
+  Phase 8 macro-extension batch). The final downstream-unblocker
+  piece. Nested attribute groups (kernel encodes a sub-struct as
+  the contents of a single `NLA_F_NESTED` attribute) now declare
+  via two coordinated derives:
+
+  ```rust
+  #[derive(NetlinkAttrs, Debug, Default)]
+  pub struct ParentDeviceBlock {
+      #[genl_attr(1u16)] pub device_id: u32,
+      #[genl_attr(2u16)] pub label: String,
+  }
+
+  #[derive(GenlMessage, Debug, Default)]
+  #[genl_message(cmd = DpllCmd::PinGet)]
+  pub struct DpllPinReply {
+      #[genl_attr(DpllPinAttr::Id)] pub id: u32,
+      #[genl_attr(DpllPinAttr::ParentDevice, nested)]
+      pub parent_device: Option<ParentDeviceBlock>,
+  }
+  ```
+
+  - `#[derive(NetlinkAttrs)]` emits `impl NetlinkAttrs for T {
+    write_attrs, read_attrs }` — same field-type-mapping table as
+    `GenlMessage` (primitives + `Option<T>` + `Vec<u8>` +
+    `Vec<GenlEnum>` + bitflags + `Option<GenlEnum>`), minus the
+    `CMD` const.
+  - `#[genl_attr(MyAttr::Foo, nested)]` on a `GenlMessage` field
+    routes through the nested type's `write_attrs` / `read_attrs`,
+    wrapping the output in an `NLA_F_NESTED` attribute on the wire.
+  - Like `Option<MyEnum>`, the nested field must be wrapped in
+    `Option<T>` (kernel either emits the group or doesn't; no
+    sensible Default).
+
+  With this, **Plan 156 (DPLL) is fully unblocked** — every DPLL
+  field shape now expressible via the macros. Plan 153.3
+  (`net_shaper`) is similarly clear. Phase 8 complete.
+
+  3 new tests: round-trip a nested group, missing-attr → None,
+  on-wire `NLA_F_NESTED` flag check.
+
 - **`bitflags`-newtype field support in `#[derive(GenlMessage)]`**
   (Plan 154 Phase 8.4). Bitmask fields (DPLL `pin_capabilities`,
   devlink port flags, etc.) now declare cleanly via the existing
