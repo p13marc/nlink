@@ -1495,9 +1495,7 @@ impl Connection<Nftables> {
         body.push(0); // null terminator
         // Pad to 4 bytes
         let padding = (4 - (attr_len % 4)) % 4;
-        for _ in 0..padding {
-            body.push(0);
-        }
+        body.resize(body.len() + padding, 0);
 
         self.dump_stream_with_body::<RuleInfo>(
             nft_msg_type(NFT_MSG_GETRULE),
@@ -1539,18 +1537,16 @@ mod stream_tests {
         body.extend_from_slice(&NFTA_RULE_TABLE.to_le_bytes());
         body.extend_from_slice(table);
         // pad to 4
-        while body.len() % 4 != 0 {
-            body.push(0);
-        }
+        let pad = (4 - body.len() % 4) % 4;
+        body.resize(body.len() + pad, 0);
         // Add NFTA_RULE_CHAIN
         let chain = b"input\0";
         let attr_len2 = 4 + chain.len();
         body.extend_from_slice(&(attr_len2 as u16).to_le_bytes());
         body.extend_from_slice(&NFTA_RULE_CHAIN.to_le_bytes());
         body.extend_from_slice(chain);
-        while body.len() % 4 != 0 {
-            body.push(0);
-        }
+        let pad = (4 - body.len() % 4) % 4;
+        body.resize(body.len() + pad, 0);
         // Add NFTA_RULE_HANDLE = 7 (8-byte big-endian u64)
         body.extend_from_slice(&12u16.to_le_bytes()); // len = 4 + 8
         body.extend_from_slice(&NFTA_RULE_HANDLE.to_le_bytes());
