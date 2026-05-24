@@ -64,7 +64,10 @@ pub mod connection;
 pub mod messages;
 pub mod types;
 
-pub use messages::{DpllDeviceGetRequest, DpllDeviceReply, DpllDeviceSetRequest};
+pub use messages::{
+    DpllDeviceGetRequest, DpllDeviceReply, DpllDeviceSetRequest, DpllPinGetRequest,
+    DpllPinParentDevice, DpllPinParentPin, DpllPinReply, DpllPinSetRequest,
+};
 pub use types::{
     DpllAttr, DpllClockQualityLevel, DpllCmd, DpllFeatureState, DpllLockStatus,
     DpllLockStatusError, DpllMode, DpllPinAttr, DpllPinCapabilities, DpllPinDirection,

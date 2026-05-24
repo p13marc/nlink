@@ -375,7 +375,7 @@ bitflags::bitflags! {
     /// `Connection::set_pin_state(Output)` is allowed.
     ///
     /// Wire: `u32` per `DPLL_PIN_CAPABILITIES_*`.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
     pub struct DpllPinCapabilities: u32 {
         /// `DPLL_PIN_CAPABILITIES_DIRECTION_CAN_CHANGE`.
         const DIRECTION_CAN_CHANGE = 1;

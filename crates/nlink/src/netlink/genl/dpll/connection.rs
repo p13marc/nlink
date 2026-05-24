@@ -13,8 +13,11 @@ use crate::macros::GenlTypedDumpStream;
 use crate::netlink::{
     connection::Connection,
     error::Result,
-    genl::dpll::messages::{DpllDeviceGetRequest, DpllDeviceReply, DpllDeviceSetRequest},
-    genl::dpll::types::{DpllFeatureState, DpllMode},
+    genl::dpll::messages::{
+        DpllDeviceGetRequest, DpllDeviceReply, DpllDeviceSetRequest, DpllPinGetRequest,
+        DpllPinReply, DpllPinSetRequest,
+    },
+    genl::dpll::types::{DpllFeatureState, DpllMode, DpllPinDirection, DpllPinState},
 };
 
 use super::Dpll;
@@ -93,6 +96,82 @@ impl Connection<Dpll> {
     ) -> Result<()> {
         let _: DpllDeviceReply = self
             .send_typed(DpllDeviceSetRequest::new(id).frequency_monitor(state))
+            .await?;
+        Ok(())
+    }
+
+    // ---- Pin-side helpers ----------------------------------------
+
+    /// Query a single pin by ID. Returns
+    /// `Error::is_not_found()` if no pin with `id` exists.
+    pub async fn get_pin(&self, id: u32) -> Result<DpllPinReply> {
+        self.send_typed(DpllPinGetRequest::by_id(id)).await
+    }
+
+    /// Stream every DPLL pin the kernel reports — every device's
+    /// pins are flattened into a single stream (use
+    /// `pin.parent_device.parent_id` to group by device).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use tokio_stream::StreamExt;
+    /// let conn = Connection::<Dpll>::new_async().await?;
+    /// let mut stream = conn.dump_pins().await?;
+    /// while let Some(pin) = stream.next().await {
+    ///     let pin = pin?;
+    ///     println!(
+    ///         "pin {} ({:?}): {:?}",
+    ///         pin.id,
+    ///         pin.board_label.as_deref().unwrap_or("?"),
+    ///         pin.state,
+    ///     );
+    /// }
+    /// ```
+    pub async fn dump_pins(
+        &self,
+    ) -> Result<GenlTypedDumpStream<'_, Dpll, DpllPinReply>> {
+        self.dump_typed_stream(DpllPinGetRequest::dump()).await
+    }
+
+    /// Set a pin's selection priority. Lower priority wins
+    /// during automatic-mode selection. Requires the pin's
+    /// `DPLL_PIN_CAPABILITIES_PRIORITY_CAN_CHANGE` capability.
+    pub async fn set_pin_priority(&self, id: u32, priority: u32) -> Result<()> {
+        let _: DpllPinReply = self
+            .send_typed(DpllPinSetRequest::new(id).prio(priority))
+            .await?;
+        Ok(())
+    }
+
+    /// Set a pin's connection state. Requires
+    /// `DPLL_PIN_CAPABILITIES_STATE_CAN_CHANGE`.
+    pub async fn set_pin_state(&self, id: u32, state: DpllPinState) -> Result<()> {
+        let _: DpllPinReply = self
+            .send_typed(DpllPinSetRequest::new(id).state(state))
+            .await?;
+        Ok(())
+    }
+
+    /// Set a pin's frequency in Hz. The kernel rejects values
+    /// outside the pin's `[frequency_min, frequency_max]` range
+    /// or not in its `frequency_supported` list (driver-specific).
+    pub async fn set_pin_frequency(&self, id: u32, hz: u64) -> Result<()> {
+        let _: DpllPinReply = self
+            .send_typed(DpllPinSetRequest::new(id).frequency(hz))
+            .await?;
+        Ok(())
+    }
+
+    /// Set a pin's direction (input ↔ output). Requires
+    /// `DPLL_PIN_CAPABILITIES_DIRECTION_CAN_CHANGE`.
+    pub async fn set_pin_direction(
+        &self,
+        id: u32,
+        direction: DpllPinDirection,
+    ) -> Result<()> {
+        let _: DpllPinReply = self
+            .send_typed(DpllPinSetRequest::new(id).direction(direction))
             .await?;
         Ok(())
     }

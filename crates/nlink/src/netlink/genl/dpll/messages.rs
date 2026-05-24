@@ -10,11 +10,12 @@
 //! where the equivalent code spans 200+ lines of manual
 //! `MessageBuilder` + `AttrIter` walks.
 
-use crate::macros::GenlMessage;
+use crate::macros::{GenlMessage, NetlinkAttrs};
 
 use super::types::{
     DpllAttr, DpllClockQualityLevel, DpllCmd, DpllFeatureState, DpllLockStatus,
-    DpllLockStatusError, DpllMode, DpllType,
+    DpllLockStatusError, DpllMode, DpllPinAttr, DpllPinCapabilities, DpllPinDirection,
+    DpllPinState, DpllPinType, DpllType,
 };
 
 // ============================================================
@@ -189,6 +190,252 @@ impl DpllDeviceReply {
     }
 }
 
+// ============================================================
+// Pin-side nested attribute groups
+// ============================================================
+
+/// Inner block of `DPLL_A_PIN_PARENT_DEVICE` — links a pin to
+/// its parent device with a per-link connection state.
+///
+/// Wire shape: nested attribute group inside the pin reply.
+#[derive(NetlinkAttrs, Debug, Default, Clone, PartialEq, Eq)]
+pub struct DpllPinParentDevice {
+    /// Parent device's numeric ID.
+    #[genl_attr(DpllPinAttr::ParentId)]
+    pub parent_id: u32,
+    /// Connection state from this pin to the parent device.
+    /// `Option<>` because the kernel may report a parenting link
+    /// without an active state (e.g., disabled parent).
+    #[genl_attr(DpllPinAttr::State, repr = "u32")]
+    pub state: Option<DpllPinState>,
+}
+
+/// Inner block of `DPLL_A_PIN_PARENT_PIN` — chains a pin to
+/// another pin (mux selection).
+///
+/// Wire shape: nested attribute group inside the pin reply.
+#[derive(NetlinkAttrs, Debug, Default, Clone, PartialEq, Eq)]
+pub struct DpllPinParentPin {
+    /// Parent pin's numeric ID.
+    #[genl_attr(DpllPinAttr::ParentId)]
+    pub parent_id: u32,
+    /// Connection state from this pin to the parent pin.
+    #[genl_attr(DpllPinAttr::State, repr = "u32")]
+    pub state: Option<DpllPinState>,
+}
+
+// ============================================================
+// Pin-side messages
+// ============================================================
+
+/// `DPLL_CMD_PIN_GET` request — single-pin get or full dump.
+#[derive(GenlMessage, Debug, Default, Clone)]
+#[genl_message(cmd = DpllCmd::PinGet)]
+pub struct DpllPinGetRequest {
+    /// Pin ID to query. `None` = "no filter; dump all".
+    #[genl_attr(DpllPinAttr::Id)]
+    pub id: Option<u32>,
+}
+
+impl DpllPinGetRequest {
+    /// Construct a single-pin get request by ID.
+    pub fn by_id(id: u32) -> Self {
+        Self { id: Some(id) }
+    }
+
+    /// Construct a dump request (no ID filter).
+    pub fn dump() -> Self {
+        Self { id: None }
+    }
+}
+
+/// `DPLL_CMD_PIN_GET` / `_CHANGE_NTF` reply — a pin's complete
+/// state. Every supported attribute is represented; version-gated
+/// fields are `Option<T>`. Repeated attributes (frequency
+/// supported ranges, ESYNC supported frequencies) are `Vec<u64>`.
+///
+/// **Scaling fields:**
+/// - `phase_offset` is attoseconds × 1000. Divide by
+///   [`super::DPLL_PHASE_OFFSET_DIVIDER`] (= 1000) for ns —
+///   [`Self::phase_offset_ns`] does this.
+/// - `measured_frequency` is mHz × 1000. Divide by
+///   [`super::DPLL_PIN_MEASURED_FREQUENCY_DIVIDER`] (= 1000) for
+///   Hz — [`Self::measured_frequency_hz`] does this.
+#[derive(GenlMessage, Debug, Default, Clone)]
+#[genl_message(cmd = DpllCmd::PinGet)]
+pub struct DpllPinReply {
+    /// Pin ID.
+    #[genl_attr(DpllPinAttr::Id)]
+    pub id: u32,
+    /// Driver module name.
+    #[genl_attr(DpllPinAttr::ModuleName)]
+    pub module_name: String,
+    /// Hardware clock ID this pin belongs to.
+    #[genl_attr(DpllPinAttr::ClockId)]
+    pub clock_id: u64,
+    /// Vendor-supplied board label (silkscreen).
+    #[genl_attr(DpllPinAttr::BoardLabel)]
+    pub board_label: Option<String>,
+    /// Front-panel label.
+    #[genl_attr(DpllPinAttr::PanelLabel)]
+    pub panel_label: Option<String>,
+    /// Package-level label.
+    #[genl_attr(DpllPinAttr::PackageLabel)]
+    pub package_label: Option<String>,
+    /// Pin kind (mux, ext, SyncE eth port, …).
+    #[genl_attr(DpllPinAttr::Type, repr = "u32")]
+    pub kind: Option<DpllPinType>,
+    /// Direction (input / output).
+    #[genl_attr(DpllPinAttr::Direction, repr = "u32")]
+    pub direction: Option<DpllPinDirection>,
+    /// Current frequency in Hz.
+    #[genl_attr(DpllPinAttr::Frequency)]
+    pub frequency: Option<u64>,
+    /// Supported frequencies (repeated `DPLL_A_PIN_FREQUENCY_SUPPORTED`).
+    #[genl_attr(DpllPinAttr::FrequencyMin)]
+    pub frequency_min: Option<u64>,
+    /// Maximum supported frequency.
+    #[genl_attr(DpllPinAttr::FrequencyMax)]
+    pub frequency_max: Option<u64>,
+    /// Selection priority (lower wins).
+    #[genl_attr(DpllPinAttr::Prio)]
+    pub prio: Option<u32>,
+    /// Current state.
+    #[genl_attr(DpllPinAttr::State, repr = "u32")]
+    pub state: Option<DpllPinState>,
+    /// Capability bitmask — decides which `set_pin_*` ops the
+    /// kernel will accept.
+    #[genl_attr(DpllPinAttr::Capabilities, bitflags = "u32")]
+    pub capabilities: DpllPinCapabilities,
+    /// Nested: parent-device link block.
+    #[genl_attr(DpllPinAttr::ParentDevice, nested)]
+    pub parent_device: Option<DpllPinParentDevice>,
+    /// Nested: parent-pin link block (only set on mux pins).
+    #[genl_attr(DpllPinAttr::ParentPin, nested)]
+    pub parent_pin: Option<DpllPinParentPin>,
+    /// Phase-adjust minimum (picoseconds).
+    #[genl_attr(DpllPinAttr::PhaseAdjustMin)]
+    pub phase_adjust_min: Option<i32>,
+    /// Phase-adjust maximum.
+    #[genl_attr(DpllPinAttr::PhaseAdjustMax)]
+    pub phase_adjust_max: Option<i32>,
+    /// Current phase adjustment.
+    #[genl_attr(DpllPinAttr::PhaseAdjust)]
+    pub phase_adjust: Option<i32>,
+    /// Measured phase offset (attoseconds × 1000 — use
+    /// [`Self::phase_offset_ns`] for nanoseconds).
+    #[genl_attr(DpllPinAttr::PhaseOffset)]
+    pub phase_offset: Option<i32>,
+    /// ESYNC carrier frequency (kernel 6.10+).
+    #[genl_attr(DpllPinAttr::EsyncFrequency)]
+    pub esync_frequency: Option<u64>,
+    /// ESYNC pulse-width configuration (kernel 6.10+).
+    #[genl_attr(DpllPinAttr::EsyncPulse)]
+    pub esync_pulse: Option<u32>,
+    /// Phase-adjust granularity (picoseconds, kernel 6.11+).
+    #[genl_attr(DpllPinAttr::PhaseAdjustGran)]
+    pub phase_adjust_gran: Option<u32>,
+    /// Fractional frequency offset in parts-per-trillion
+    /// (kernel 6.11+).
+    #[genl_attr(DpllPinAttr::FractionalFrequencyOffsetPpt)]
+    pub fractional_frequency_offset_ppt: Option<i32>,
+    /// Measured frequency in mHz × 1000 (kernel 6.11+) — use
+    /// [`Self::measured_frequency_hz`] for Hz.
+    #[genl_attr(DpllPinAttr::MeasuredFrequency)]
+    pub measured_frequency: Option<u64>,
+}
+
+impl DpllPinReply {
+    /// Pin phase offset in nanoseconds, if reported.
+    /// Applies the kernel's `DPLL_PHASE_OFFSET_DIVIDER = 1000`.
+    pub fn phase_offset_ns(&self) -> Option<i64> {
+        self.phase_offset
+            .map(|p| p as i64 / super::DPLL_PHASE_OFFSET_DIVIDER)
+    }
+
+    /// Measured pin frequency in Hz, if reported (kernel 6.11+).
+    /// Applies the kernel's
+    /// `DPLL_PIN_MEASURED_FREQUENCY_DIVIDER = 1000`.
+    pub fn measured_frequency_hz(&self) -> Option<u64> {
+        self.measured_frequency
+            .map(|m| m / super::DPLL_PIN_MEASURED_FREQUENCY_DIVIDER)
+    }
+}
+
+/// `DPLL_CMD_PIN_SET` request — mutate a pin's state.
+///
+/// Construct with [`Self::new(id)`] then chain setter methods.
+/// Unset fields stay `None` and are omitted from the wire request.
+#[derive(GenlMessage, Debug, Default, Clone)]
+#[genl_message(cmd = DpllCmd::PinSet)]
+pub struct DpllPinSetRequest {
+    /// Target pin ID. Always present.
+    #[genl_attr(DpllPinAttr::Id)]
+    pub id: u32,
+    /// New selection priority.
+    #[genl_attr(DpllPinAttr::Prio)]
+    pub prio: Option<u32>,
+    /// New state (Connected / Disconnected / Selectable).
+    #[genl_attr(DpllPinAttr::State, repr = "u32")]
+    pub state: Option<DpllPinState>,
+    /// New frequency in Hz.
+    #[genl_attr(DpllPinAttr::Frequency)]
+    pub frequency: Option<u64>,
+    /// New direction (if the pin's capabilities allow changing).
+    #[genl_attr(DpllPinAttr::Direction, repr = "u32")]
+    pub direction: Option<DpllPinDirection>,
+    /// New phase adjustment in picoseconds.
+    #[genl_attr(DpllPinAttr::PhaseAdjust)]
+    pub phase_adjust: Option<i32>,
+}
+
+impl DpllPinSetRequest {
+    /// Start a set request targeting `id`.
+    pub fn new(id: u32) -> Self {
+        Self {
+            id,
+            ..Self::default()
+        }
+    }
+
+    /// Set the pin's selection priority (lower = higher priority).
+    #[must_use]
+    pub fn prio(mut self, prio: u32) -> Self {
+        self.prio = Some(prio);
+        self
+    }
+
+    /// Set the pin's connection state.
+    #[must_use]
+    pub fn state(mut self, state: DpllPinState) -> Self {
+        self.state = Some(state);
+        self
+    }
+
+    /// Set the pin's frequency in Hz.
+    #[must_use]
+    pub fn frequency(mut self, hz: u64) -> Self {
+        self.frequency = Some(hz);
+        self
+    }
+
+    /// Set the pin's direction (input ↔ output) — only legal if
+    /// the pin's `DPLL_PIN_CAPABILITIES_DIRECTION_CAN_CHANGE` bit
+    /// is set in its capabilities; the kernel rejects otherwise.
+    #[must_use]
+    pub fn direction(mut self, direction: DpllPinDirection) -> Self {
+        self.direction = Some(direction);
+        self
+    }
+
+    /// Set the pin's phase adjustment in picoseconds.
+    #[must_use]
+    pub fn phase_adjust(mut self, ps: i32) -> Self {
+        self.phase_adjust = Some(ps);
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +547,108 @@ mod tests {
                 DpllAttr::Id as u16,
                 DpllAttr::Mode as u16,
                 DpllAttr::FrequencyMonitor as u16,
+            ]
+        );
+    }
+
+    // ---- Pin-side tests --------------------------------------
+
+    #[test]
+    fn pin_get_request_with_id_emits_one_attr() {
+        let req = DpllPinGetRequest::by_id(12);
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        req.to_bytes(&mut b).expect("emit");
+        let bytes = &b.as_bytes()[start..];
+
+        let mut attrs: Vec<u16> = Vec::new();
+        for (ty, _) in __rt::attr_iter(bytes) {
+            attrs.push(ty);
+        }
+        assert_eq!(attrs, vec![DpllPinAttr::Id as u16]);
+    }
+
+    #[test]
+    fn pin_reply_round_trips_with_nested_parent_device() {
+        let original = DpllPinReply {
+            id: 5,
+            module_name: "ice".to_string(),
+            clock_id: 0xC1F0_D000,
+            board_label: Some("REF0".to_string()),
+            kind: Some(DpllPinType::SynceEthPort),
+            direction: Some(DpllPinDirection::Input),
+            frequency: Some(10_000_000),
+            prio: Some(1),
+            state: Some(DpllPinState::Connected),
+            capabilities: DpllPinCapabilities::PRIORITY_CAN_CHANGE
+                | DpllPinCapabilities::STATE_CAN_CHANGE,
+            parent_device: Some(DpllPinParentDevice {
+                parent_id: 42,
+                state: Some(DpllPinState::Connected),
+            }),
+            phase_offset: Some(123_000),
+            measured_frequency: Some(10_000_000_000),
+            ..DpllPinReply::default()
+        };
+
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        original.to_bytes(&mut b).expect("emit");
+        let parsed = DpllPinReply::from_bytes(&b.as_bytes()[start..]).expect("parse");
+
+        assert_eq!(parsed.id, 5);
+        assert_eq!(parsed.module_name, "ice");
+        assert_eq!(parsed.clock_id, 0xC1F0_D000);
+        assert_eq!(parsed.board_label.as_deref(), Some("REF0"));
+        assert_eq!(parsed.kind, Some(DpllPinType::SynceEthPort));
+        assert_eq!(parsed.direction, Some(DpllPinDirection::Input));
+        assert_eq!(parsed.frequency, Some(10_000_000));
+        assert_eq!(parsed.prio, Some(1));
+        assert_eq!(parsed.state, Some(DpllPinState::Connected));
+        assert_eq!(
+            parsed.capabilities,
+            DpllPinCapabilities::PRIORITY_CAN_CHANGE | DpllPinCapabilities::STATE_CAN_CHANGE
+        );
+        let parent = parsed.parent_device.expect("parent_device present");
+        assert_eq!(parent.parent_id, 42);
+        assert_eq!(parent.state, Some(DpllPinState::Connected));
+        assert_eq!(parsed.phase_offset, Some(123_000));
+        assert_eq!(parsed.measured_frequency, Some(10_000_000_000));
+    }
+
+    #[test]
+    fn pin_reply_helpers_apply_dividers() {
+        let reply = DpllPinReply {
+            phase_offset: Some(123_456_000),
+            measured_frequency: Some(10_000_000_000),
+            ..DpllPinReply::default()
+        };
+        assert_eq!(reply.phase_offset_ns(), Some(123_456));
+        assert_eq!(reply.measured_frequency_hz(), Some(10_000_000));
+        assert_eq!(DpllPinReply::default().phase_offset_ns(), None);
+        assert_eq!(DpllPinReply::default().measured_frequency_hz(), None);
+    }
+
+    #[test]
+    fn pin_set_builder_chains_priority_and_state() {
+        let req = DpllPinSetRequest::new(7)
+            .prio(2)
+            .state(DpllPinState::Selectable);
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        req.to_bytes(&mut b).expect("emit");
+        let bytes = &b.as_bytes()[start..];
+
+        let mut attrs: Vec<u16> = Vec::new();
+        for (ty, _) in __rt::attr_iter(bytes) {
+            attrs.push(ty);
+        }
+        assert_eq!(
+            attrs,
+            vec![
+                DpllPinAttr::Id as u16,
+                DpllPinAttr::Prio as u16,
+                DpllPinAttr::State as u16,
             ]
         );
     }
