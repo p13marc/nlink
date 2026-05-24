@@ -34,6 +34,7 @@
 //! | 5 | `Connection::<F>::send_typed<M, R>` + `dump_typed_stream` | ✓ |
 //! | 6 | Worked example + recipe | ✓ |
 //! | 7 | Final re-export polish + CHANGELOG framing | ✓ |
+//! | 8 | Extended field types (`GenlEnum` / `Vec<T: GenlEnum>` / bitflags / `i32` / `NetlinkAttrs`) — unblocks Plan 156/153.3/152 | — |
 
 pub use nlink_macros::{genl_family, GenlAttribute, GenlCommand, GenlEnum, GenlMessage};
 
