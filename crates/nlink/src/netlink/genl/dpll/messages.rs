@@ -118,7 +118,7 @@ pub struct DpllDeviceReply {
 
 /// `DPLL_CMD_DEVICE_SET` request — mutate a device's state.
 ///
-/// Construct with [`Self::new(id)`] then chain setter methods for
+/// Construct with [`Self::new`] then chain setter methods for
 /// the fields you want to change. Unset fields stay `None` and
 /// are omitted from the wire request (`Option`-typed attrs).
 #[derive(GenlMessage, Debug, Default, Clone)]
@@ -364,7 +364,7 @@ impl DpllPinReply {
 
 /// `DPLL_CMD_PIN_SET` request — mutate a pin's state.
 ///
-/// Construct with [`Self::new(id)`] then chain setter methods.
+/// Construct with [`Self::new`] then chain setter methods.
 /// Unset fields stay `None` and are omitted from the wire request.
 #[derive(GenlMessage, Debug, Default, Clone)]
 #[genl_message(cmd = DpllCmd::PinSet)]
