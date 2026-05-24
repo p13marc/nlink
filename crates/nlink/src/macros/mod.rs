@@ -34,7 +34,11 @@
 //! | 5 | `Connection::<F>::send_typed<M, R>` + `dump_typed_stream` | ✓ |
 //! | 6 | Worked example + recipe | ✓ |
 //! | 7 | Final re-export polish + CHANGELOG framing | ✓ |
-//! | 8 | Extended field types (`GenlEnum` / `Vec<T: GenlEnum>` / bitflags / `i32` / `NetlinkAttrs`) — unblocks Plan 156/153.3/152 | — |
+//! | 8.1 | `i32` field support | ✓ |
+//! | 8.2 | `Option<GenlEnum>` via `repr = "..."` hint | ✓ |
+//! | 8.3 | `Vec<GenlEnum>` repeated-attribute fields | ✓ |
+//! | 8.4 | `bitflags`-newtype fields via `bitflags = "..."` hint | ✓ |
+//! | 8.5 | `#[derive(NetlinkAttrs)]` for nested attribute groups — unblocks DPLL's `parent_device` / `parent_pin` blocks | — |
 
 pub use nlink_macros::{genl_family, GenlAttribute, GenlCommand, GenlEnum, GenlMessage};
 
