@@ -499,6 +499,12 @@ so `cargo publish -p nlink` resolves the dep on crates.io;
 publishing nlink before nlink-macros fails with "no matching
 version found."
 
+Use `scripts/cut-release.sh X.Y.Z` (Plan 175) to walk the full
+cut: pre-flight, CHANGELOG promotion, CI green-gate, dry-runs,
+merge, tag, publish (macros → index-poll → nlink), GitHub release
+(length-aware body), next-cycle branch. The script confirms at
+every irreversible step. Manual equivalent for emergencies:
+
 ```bash
 cargo publish -p nlink-macros
 # wait ~30s for crates.io to index
@@ -510,7 +516,7 @@ unless the matching `nlink-macros` version is already on
 crates.io. The dry-run checks against the live registry; the
 publish order is "macros first, then nlink." Skip the
 `nlink --dry-run`; rely on the macros dry-run + the real publish
-sequence. Plan 175 (`scripts/cut-release.sh`) bakes this in.
+sequence. `cut-release.sh` skips it automatically with a comment.
 
 **Plan-file cleanup**: when a cycle cuts + publishes, delete the
 per-plan scaffolding under `plans/` in a follow-up commit. The

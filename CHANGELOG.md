@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`scripts/cut-release.sh` (Plan 175)** — one-shot orchestrator
+  for an nlink release cut. Walks the Plan 167 sequence end-to-
+  end with confirmation prompts at the irreversible steps
+  (publish, merge, tag-push). Bakes in the three friction points
+  hit during the 0.16 cut:
+  - skips `cargo publish -p nlink --dry-run` (known false
+    negative — `nlink-macros` isn't on crates.io yet at that
+    point);
+  - automates the `## [Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD`
+    CHANGELOG promotion;
+  - detects when the CHANGELOG section exceeds GitHub's 125000-
+    char release-body limit and falls back to a "highlights +
+    link to the full file" template;
+  - replaces the manual `sleep 30` after `cargo publish -p nlink-
+    macros` with a poll loop on `cargo search` (5-min cap).
+
+  Pre-flight checks: clean tree, on the cycle branch, Cargo.toml
+  version matches the arg, cargo + gh auth present.
+
 ### Changed
 
 - **CI observability (Plan 174)** — three related improvements
