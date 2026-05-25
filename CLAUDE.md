@@ -35,11 +35,15 @@ cargo machete                             # no unused deps
 
 Live under `crates/nlink/tests/integration/` and require root +
 network namespaces. Maintainer runs `cargo test` as a regular
-user, so root-gated tests **bit-rot silently** — they live behind
-the `lab` feature and a privileged-CI gate (Plan 140 / Plan 142
-Phase 0). Until that lands, validate root flows manually with
-`--apply` example runners (e.g., `examples/netfilter/conntrack.rs
---apply`) and document the invocation in the recipe / plan.
+user, so root-gated tests would **bit-rot silently** if they
+weren't both (a) gated with `nlink::require_root!()` (so they
+skip cleanly as non-root) and (b) run under the privileged-CI
+gate that landed in 0.15.0 (Plan 140 — see
+`.github/workflows/integration-tests.yml`; runs on every push/PR
+to master under a container with `CAP_NET_ADMIN` + `CAP_SYS_ADMIN`
++ `seccomp=unconfined`). For local validation as a non-root user,
+the `--apply` example runners stay the canonical channel (e.g.,
+`examples/netfilter/conntrack.rs --apply`).
 
 ```bash
 cargo test --test integration --features lab --no-run

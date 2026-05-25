@@ -44,7 +44,10 @@ All notable changes to this project will be documented in this file.
   `pool.rs` (Plan 159 + Plan 162 guard — 5 tests). All gated
   with `nlink::require_root!()` + `nlink::require_modules!()`
   so they ship in 0.16 and early-exit cleanly when run as a
-  regular user; runs under privileged CI once Plan 140 lands.
+  regular user; runs under the Plan 140 privileged-CI workflow
+  already in tree since 0.15.0
+  (`.github/workflows/integration-tests.yml`) — activates the
+  moment 0.16 merges to master.
   Hardware-only scenarios (XFRM offload, devlink rate,
   net_shaper caps round-trip) explicitly out of scope.
 
@@ -166,8 +169,10 @@ All notable changes to this project will be documented in this file.
 
   Test count: 960 lib tests (was 953 + 7 new — 3 wire-roundtrip,
   4 diff). End-to-end wire format validated via parse-back round
-  trip; idempotent-reapply scenarios pending the privileged-CI
-  gate (Plan 140).
+  trip; idempotent-reapply + replace + cascade-delete scenarios
+  shipped via Plan 166 (`tests/integration/nftables_reconcile.rs`,
+  7 root-gated scenarios) and run under the Plan 140
+  privileged-CI workflow.
 
 - **`NftablesDiff::apply_reconcile` + declarative-config recipe**
   (Plan 157 §4.5 + §6). Bounded retry-on-conflict variant of
