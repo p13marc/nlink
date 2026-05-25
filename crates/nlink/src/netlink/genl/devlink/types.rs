@@ -488,3 +488,164 @@ impl FlashRequest {
         self
     }
 }
+
+// =============================================================================
+// Devlink rate (Plan 153.2) — SR-IOV VF + node rate-limiting via devlink-rate
+// =============================================================================
+
+/// Devlink rate-object type — leaf (terminal, applies to a VF or
+/// PF) or node (internal scheduler node grouping leaves).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DevlinkRateType {
+    /// Terminal rate object — applies to a specific port-function
+    /// (typically an SR-IOV VF or PF).
+    Leaf,
+    /// Internal scheduler node — groups leaves into a rate
+    /// hierarchy. Useful for shared-link-aggregation rate
+    /// management.
+    Node,
+}
+
+impl DevlinkRateType {
+    /// Kernel wire value (`DEVLINK_RATE_TYPE_*`).
+    pub fn as_u16(self) -> u16 {
+        match self {
+            Self::Leaf => super::DEVLINK_RATE_TYPE_LEAF,
+            Self::Node => super::DEVLINK_RATE_TYPE_NODE,
+        }
+    }
+}
+
+/// Port-function state — controls whether the function's
+/// underlying resource (typically an SR-IOV VF) is active. Sent
+/// via `Connection::<Devlink>::set_port_function_state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DevlinkPortFunctionState {
+    /// Function is allocated but the underlying VF is not
+    /// presented to the kernel — useful for stopping traffic on
+    /// a VF without tearing it down.
+    Inactive,
+    /// Function is presented and operational.
+    Active,
+}
+
+impl DevlinkPortFunctionState {
+    /// Kernel wire value (`DEVLINK_PORT_FN_STATE_*`).
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Inactive => super::DEVLINK_PORT_FN_STATE_INACTIVE,
+            Self::Active => super::DEVLINK_PORT_FN_STATE_ACTIVE,
+        }
+    }
+}
+
+/// A devlink rate object — terminal-leaf or scheduler-node.
+///
+/// Cloud + SmartNIC users use these to rate-limit SR-IOV VFs at
+/// the kernel/firmware boundary (vs in the guest's TC stack).
+///
+/// Construct via [`Self::new`] + fluent setters; install via
+/// [`super::super::super::Connection::<Devlink>::add_rate`]
+/// (`Connection<Devlink>::add_rate(&rate)`).
+#[derive(Debug, Clone)]
+pub struct DevlinkRate {
+    /// Bus identifier (e.g., `"pci"`).
+    pub bus_name: String,
+    /// Device identifier (e.g., `"0000:01:00.0"`).
+    pub device_name: String,
+    /// Rate-object node name (caller-chosen).
+    pub node_name: String,
+    /// Parent scheduler node, if this rate is grouped under one.
+    pub parent_node: Option<String>,
+    /// Guaranteed bandwidth share in **bytes/second** (kernel
+    /// units — pair with [`crate::Rate`]'s `bytes_per_sec()`).
+    pub tx_share: Option<u64>,
+    /// Maximum bandwidth cap in bytes/second.
+    pub tx_max: Option<u64>,
+    /// Rate-object type (leaf vs node).
+    pub rate_type: DevlinkRateType,
+}
+
+impl DevlinkRate {
+    /// New rate-object builder. Defaults to `Leaf` type; call
+    /// `.rate_type(DevlinkRateType::Node)` to build a scheduler
+    /// node instead.
+    pub fn new(
+        bus_name: impl Into<String>,
+        device_name: impl Into<String>,
+        node_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            bus_name: bus_name.into(),
+            device_name: device_name.into(),
+            node_name: node_name.into(),
+            parent_node: None,
+            tx_share: None,
+            tx_max: None,
+            rate_type: DevlinkRateType::Leaf,
+        }
+    }
+
+    /// Set the rate-object type. Default is `Leaf`.
+    pub fn rate_type(mut self, t: DevlinkRateType) -> Self {
+        self.rate_type = t;
+        self
+    }
+
+    /// Guaranteed-share rate in bytes/sec. Accepts an
+    /// [`crate::Rate`] to keep the unit story straight.
+    pub fn tx_share(mut self, rate: crate::Rate) -> Self {
+        self.tx_share = Some(rate.as_bytes_per_sec());
+        self
+    }
+
+    /// Maximum-cap rate in bytes/sec.
+    pub fn tx_max(mut self, rate: crate::Rate) -> Self {
+        self.tx_max = Some(rate.as_bytes_per_sec());
+        self
+    }
+
+    /// Group this rate object under a parent scheduler node.
+    pub fn parent_node(mut self, name: impl Into<String>) -> Self {
+        self.parent_node = Some(name.into());
+        self
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::*;
+
+    #[test]
+    fn devlink_rate_type_wire_values() {
+        assert_eq!(DevlinkRateType::Leaf.as_u16(), 0);
+        assert_eq!(DevlinkRateType::Node.as_u16(), 1);
+    }
+
+    #[test]
+    fn devlink_port_function_state_wire_values() {
+        assert_eq!(DevlinkPortFunctionState::Inactive.as_u8(), 0);
+        assert_eq!(DevlinkPortFunctionState::Active.as_u8(), 1);
+    }
+
+    #[test]
+    fn devlink_rate_builder_composition() {
+        use crate::Rate;
+        let r = DevlinkRate::new("pci", "0000:01:00.0", "vf0_rate")
+            .rate_type(DevlinkRateType::Leaf)
+            .tx_share(Rate::mbit(100))
+            .tx_max(Rate::gbit(1))
+            .parent_node("group_a");
+        assert_eq!(r.bus_name, "pci");
+        assert_eq!(r.device_name, "0000:01:00.0");
+        assert_eq!(r.node_name, "vf0_rate");
+        assert_eq!(r.rate_type, DevlinkRateType::Leaf);
+        // Rate::mbit(100) = 100 Mbit/s = 12_500_000 bytes/s.
+        assert_eq!(r.tx_share, Some(12_500_000));
+        // Rate::gbit(1) = 1 Gbit/s = 125_000_000 bytes/s.
+        assert_eq!(r.tx_max, Some(125_000_000));
+        assert_eq!(r.parent_node.as_deref(), Some("group_a"));
+    }
+}

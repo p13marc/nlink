@@ -9,54 +9,44 @@ use super::{
     EthtoolLinkmodesAttr, EthtoolLinkstateAttr, EthtoolPauseAttr, EthtoolRingsAttr,
     bitset::EthtoolBitset, types::*,
 };
+use crate::macros::{GenlFamily, __rt::resolve_genl_family_with_groups};
 use crate::netlink::{
     attr::{AttrIter, NLA_F_NESTED},
     builder::MessageBuilder,
     connection::Connection,
     error::{Error, Result},
-    genl::{CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr},
+    genl::{GENL_HDRLEN, GenlMsgHdr},
     interface_ref::InterfaceRef,
     message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
-    protocol::{AsyncProtocolInit, Ethtool, ProtocolState, Route},
+    protocol::{AsyncProtocolInit, Ethtool, Route},
     socket::NetlinkSocket,
 };
 
 impl AsyncProtocolInit for Ethtool {
     async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
-        let (family_id, monitor_group_id) = resolve_ethtool_family(socket).await?;
+        let (family_id, mcast_groups) =
+            resolve_genl_family_with_groups(socket, ETHTOOL_GENL_NAME).await?;
         Ok(Self {
             family_id,
-            monitor_group_id,
+            mcast_groups,
         })
     }
 }
 
-impl Connection<Ethtool> {
-    /// Create a new ethtool connection.
-    ///
-    /// This resolves the ethtool GENL family ID during initialization.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use nlink::netlink::{Connection, Ethtool};
-    ///
-    /// let conn = Connection::<Ethtool>::new_async().await?;
-    /// let state = conn.get_link_state("eth0").await?;
-    /// println!("Link: {}", if state.link { "up" } else { "down" });
-    /// ```
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "new_async"))]
-    pub async fn new_async() -> Result<Self> {
-        let socket = NetlinkSocket::new(Ethtool::PROTOCOL)?;
-        let (family_id, monitor_group_id) = resolve_ethtool_family(&socket).await?;
+impl GenlFamily for Ethtool {
+    const VERSION: u8 = ETHTOOL_GENL_VERSION;
+    const NAME: &'static str = ETHTOOL_GENL_NAME;
 
-        let state = Ethtool {
-            family_id,
-            monitor_group_id,
-        };
-        Ok(Self::from_parts(socket, state))
+    fn family_id(&self) -> u16 {
+        self.family_id
     }
 
+    fn mcast_group(&self, name: &str) -> Option<u32> {
+        self.mcast_groups.get(name).copied()
+    }
+}
+
+impl Connection<Ethtool> {
     /// Get the ethtool family ID.
     pub fn family_id(&self) -> u16 {
         self.state().family_id
@@ -64,7 +54,7 @@ impl Connection<Ethtool> {
 
     /// Get the monitor multicast group ID (if available).
     pub fn monitor_group_id(&self) -> Option<u32> {
-        self.state().monitor_group_id
+        self.state().mcast_groups.get(ETHTOOL_MCGRP_MONITOR).copied()
     }
 
     /// Resolve an interface reference to a name.
@@ -1201,7 +1191,7 @@ impl Connection<Ethtool> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                     continue;
                 }
@@ -1275,7 +1265,7 @@ impl Connection<Ethtool> {
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
                 if !err.is_ack() {
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
             }
         }
@@ -1307,113 +1297,6 @@ impl Connection<Ethtool> {
     /// }
     /// ```
     pub fn subscribe(&mut self) -> Result<()> {
-        let group_id = self
-            .state()
-            .monitor_group_id
-            .ok_or_else(|| Error::InvalidMessage("monitor group not available".into()))?;
-        self.socket_mut().add_membership(group_id)?;
-        Ok(())
-    }
-}
-
-/// Resolve the ethtool GENL family ID and monitor group ID.
-async fn resolve_ethtool_family(socket: &NetlinkSocket) -> Result<(u16, Option<u32>)> {
-    // Build CTRL_CMD_GETFAMILY request
-    let mut builder = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK);
-
-    // Append GENL header
-    let genl_hdr = GenlMsgHdr::new(CtrlCmd::GetFamily as u8, 1);
-    builder.append(&genl_hdr);
-
-    // Append family name attribute
-    builder.append_attr_str(CtrlAttr::FamilyName as u16, ETHTOOL_GENL_NAME);
-
-    // Send request
-    let seq = socket.next_seq();
-    builder.set_seq(seq);
-    builder.set_pid(socket.pid());
-
-    let msg = builder.finish();
-    socket.send(&msg).await?;
-
-    // Receive response
-    let response: Vec<u8> = socket.recv_msg().await?;
-
-    let mut family_id: Option<u16> = None;
-    let mut monitor_group_id: Option<u32> = None;
-
-    // Parse response
-    for result in MessageIter::new(&response) {
-        let (header, payload) = result?;
-
-        if header.nlmsg_seq != seq {
-            continue;
-        }
-
-        if header.is_error() {
-            let err = NlMsgError::from_bytes(payload)?;
-            if !err.is_ack() {
-                if err.error == -libc::ENOENT {
-                    return Err(Error::FamilyNotFound {
-                        name: ETHTOOL_GENL_NAME.to_string(),
-                    });
-                }
-                return Err(Error::from_errno(err.error));
-            }
-            continue;
-        }
-
-        if header.is_done() {
-            continue;
-        }
-
-        // Parse GENL header
-        if payload.len() < GENL_HDRLEN {
-            return Err(Error::InvalidMessage("GENL header too short".into()));
-        }
-
-        // Parse attributes after GENL header
-        let attrs_data = &payload[GENL_HDRLEN..];
-        for (attr_type, attr_payload) in AttrIter::new(attrs_data) {
-            if attr_type == CtrlAttr::FamilyId as u16 {
-                if attr_payload.len() >= 2 {
-                    family_id = Some(u16::from_ne_bytes(attr_payload[..2].try_into().unwrap()));
-                }
-            } else if attr_type == CtrlAttr::McastGroups as u16 {
-                // Parse multicast groups to find "monitor"
-                for (_idx, grp_data) in AttrIter::new(attr_payload) {
-                    let mut grp_name: Option<String> = None;
-                    let mut grp_id: Option<u32> = None;
-
-                    for (grp_attr_type, grp_attr_payload) in AttrIter::new(grp_data) {
-                        if grp_attr_type == CtrlAttrMcastGrp::Name as u16 {
-                            grp_name = Some(
-                                std::str::from_utf8(grp_attr_payload)
-                                    .unwrap_or("")
-                                    .trim_end_matches('\0')
-                                    .to_string(),
-                            );
-                        } else if grp_attr_type == CtrlAttrMcastGrp::Id as u16
-                            && grp_attr_payload.len() >= 4
-                        {
-                            grp_id = Some(u32::from_ne_bytes(
-                                grp_attr_payload[..4].try_into().unwrap(),
-                            ));
-                        }
-                    }
-
-                    if grp_name.as_deref() == Some(ETHTOOL_MCGRP_MONITOR) {
-                        monitor_group_id = grp_id;
-                    }
-                }
-            }
-        }
-    }
-
-    match family_id {
-        Some(id) => Ok((id, monitor_group_id)),
-        None => Err(Error::FamilyNotFound {
-            name: ETHTOOL_GENL_NAME.to_string(),
-        }),
+        self.subscribe_group(ETHTOOL_MCGRP_MONITOR)
     }
 }

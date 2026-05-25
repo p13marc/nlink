@@ -1,0 +1,5 @@
+error: variant discriminant 999 overflows the chosen repr (u8)
+ --> tests/ui/fail/05_overflows_repr.rs:7:5
+  |
+7 |     B = 999,  // > u8::MAX
+  |     ^^^^^^^

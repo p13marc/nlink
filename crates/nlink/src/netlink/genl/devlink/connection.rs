@@ -1,51 +1,43 @@
 //! Devlink connection implementation for `Connection<Devlink>`.
 
 use super::{types::*, *};
+use crate::macros::{GenlFamily, __rt::resolve_genl_family_with_groups};
 use crate::netlink::{
     attr::AttrIter,
     builder::MessageBuilder,
     connection::Connection,
     error::{Error, Result},
-    genl::{CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr},
+    genl::{GENL_HDRLEN, GenlMsgHdr},
     message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
-    protocol::{AsyncProtocolInit, Devlink, ProtocolState},
+    protocol::{AsyncProtocolInit, Devlink},
     socket::NetlinkSocket,
 };
 
 impl AsyncProtocolInit for Devlink {
     async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
-        let (family_id, monitor_group_id) = resolve_devlink_family(socket).await?;
+        let (family_id, mcast_groups) =
+            resolve_genl_family_with_groups(socket, DEVLINK_GENL_NAME).await?;
         Ok(Self {
             family_id,
-            monitor_group_id,
+            mcast_groups,
         })
     }
 }
 
-impl Connection<Devlink> {
-    /// Create a new devlink connection.
-    ///
-    /// Resolves the "devlink" GENL family ID during initialization.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use nlink::netlink::{Connection, Devlink};
-    ///
-    /// let conn = Connection::<Devlink>::new_async().await?;
-    /// let devices = conn.get_devices().await?;
-    /// ```
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "new_async"))]
-    pub async fn new_async() -> Result<Self> {
-        let socket = NetlinkSocket::new(Devlink::PROTOCOL)?;
-        let (family_id, monitor_group_id) = resolve_devlink_family(&socket).await?;
-        let state = Devlink {
-            family_id,
-            monitor_group_id,
-        };
-        Ok(Self::from_parts(socket, state))
+impl GenlFamily for Devlink {
+    const VERSION: u8 = DEVLINK_GENL_VERSION;
+    const NAME: &'static str = DEVLINK_GENL_NAME;
+
+    fn family_id(&self) -> u16 {
+        self.family_id
     }
 
+    fn mcast_group(&self, name: &str) -> Option<u32> {
+        self.mcast_groups.get(name).copied()
+    }
+}
+
+impl Connection<Devlink> {
     /// Get the devlink family ID.
     pub fn family_id(&self) -> u16 {
         self.state().family_id
@@ -53,14 +45,13 @@ impl Connection<Devlink> {
 
     /// Subscribe to devlink multicast events.
     ///
-    /// After subscribing, use `events()` or `into_events()` to receive events.
+    /// Convenience wrapper around
+    /// [`subscribe_group`](Connection::subscribe_group) for the
+    /// `"config"` group (the only one devlink ships in-tree).
+    /// After subscribing, use `events()` or `into_events()` to
+    /// receive events.
     pub fn subscribe(&mut self) -> Result<()> {
-        let group_id = self
-            .state()
-            .monitor_group_id
-            .ok_or_else(|| Error::InvalidMessage("devlink monitor group not available".into()))?;
-        self.socket_mut().add_membership(group_id)?;
-        Ok(())
+        self.subscribe_group(DEVLINK_MCGRP_NAME)
     }
 
     // =========================================================================
@@ -333,6 +324,92 @@ impl Connection<Devlink> {
     }
 
     // =========================================================================
+    // Rate-object CRUD (Plan 153.2) — SR-IOV VF / scheduler-node
+    // rate-limiting via devlink-rate. Reuses the existing
+    // devlink_cmd_builder helper for the bus/device prefix.
+    // =========================================================================
+
+    /// Create a new devlink rate object. Sets `rate_type`,
+    /// `node_name`, and any of `tx_share` / `tx_max` /
+    /// `parent_node` that the builder populated.
+    ///
+    /// On NICs without rate support (most non-SmartNIC hardware),
+    /// the kernel returns `EOPNOTSUPP` — callers dispatch via
+    /// `Error::is_not_supported()`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_rate"))]
+    pub async fn add_rate(&self, rate: &super::types::DevlinkRate) -> Result<()> {
+        self.send_rate(DEVLINK_CMD_RATE_NEW, rate).await
+    }
+
+    /// Update an existing devlink rate object's fields.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_rate"))]
+    pub async fn set_rate(&self, rate: &super::types::DevlinkRate) -> Result<()> {
+        self.send_rate(DEVLINK_CMD_RATE_SET, rate).await
+    }
+
+    /// Delete a devlink rate object (`Leaf` or `Node`) by
+    /// (bus, device, node_name).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rate"))]
+    pub async fn del_rate(
+        &self,
+        bus: &str,
+        device: &str,
+        node_name: &str,
+    ) -> Result<()> {
+        let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_RATE_DEL, bus, device);
+        builder.append_attr_str(DEVLINK_ATTR_RATE_NODE_NAME, node_name);
+        self.devlink_send_ack(builder).await
+    }
+
+    /// Set port-function state. Used to activate/deactivate the
+    /// SR-IOV VF underlying a devlink port without tearing it
+    /// down — see [`super::types::DevlinkPortFunctionState`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_port_function_state"))]
+    pub async fn set_port_function_state(
+        &self,
+        bus: &str,
+        device: &str,
+        port_index: u32,
+        state: super::types::DevlinkPortFunctionState,
+    ) -> Result<()> {
+        let mut builder =
+            self.devlink_cmd_builder(DEVLINK_CMD_PORT_FUNCTION_SET, bus, device);
+        builder.append_attr_u32(DEVLINK_ATTR_PORT_INDEX, port_index);
+        // DEVLINK_ATTR_PORT_FUNCTION is a NESTED attribute. The
+        // inner attributes live in a SEPARATE namespace defined by
+        // `enum devlink_port_function_attr`:
+        // `DEVLINK_PORT_FN_ATTR_STATE = 2` (u8). Earlier versions
+        // wrongly used 174 (an outer-namespace constant from a
+        // different enum), which the kernel rejected with EINVAL.
+        let nested = builder.nest_start(DEVLINK_ATTR_PORT_FUNCTION | 0x8000);
+        builder.append_attr(DEVLINK_PORT_FN_ATTR_STATE, &[state.as_u8()]);
+        builder.nest_end(nested);
+        self.devlink_send_ack(builder).await
+    }
+
+    /// Shared implementation for `add_rate` / `set_rate` — the
+    /// only difference is the command byte (NEW vs SET).
+    async fn send_rate(
+        &self,
+        cmd: u8,
+        rate: &super::types::DevlinkRate,
+    ) -> Result<()> {
+        let mut builder = self.devlink_cmd_builder(cmd, &rate.bus_name, &rate.device_name);
+        builder.append_attr_str(DEVLINK_ATTR_RATE_NODE_NAME, &rate.node_name);
+        builder.append_attr_u16(DEVLINK_ATTR_RATE_TYPE, rate.rate_type.as_u16());
+        if let Some(share) = rate.tx_share {
+            builder.append_attr_u64(DEVLINK_ATTR_RATE_TX_SHARE, share);
+        }
+        if let Some(max) = rate.tx_max {
+            builder.append_attr_u64(DEVLINK_ATTR_RATE_TX_MAX, max);
+        }
+        if let Some(parent) = &rate.parent_node {
+            builder.append_attr_str(DEVLINK_ATTR_RATE_PARENT_NODE_NAME, parent);
+        }
+        self.devlink_send_ack(builder).await
+    }
+
+    // =========================================================================
     // Port Split/Unsplit
     // =========================================================================
 
@@ -469,7 +546,7 @@ impl Connection<Devlink> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                     done = true;
                     continue;
@@ -528,7 +605,7 @@ impl Connection<Devlink> {
                     if err.is_ack() {
                         return Ok(());
                     }
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
 
                 if header.is_done() {
@@ -556,7 +633,7 @@ impl Connection<Devlink> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                     continue;
                 }
@@ -921,90 +998,3 @@ fn attr_str(payload: &[u8]) -> Option<String> {
     }
 }
 
-/// Resolve the devlink GENL family ID and multicast group ID.
-async fn resolve_devlink_family(socket: &NetlinkSocket) -> Result<(u16, Option<u32>)> {
-    let mut builder = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK);
-    let genl_hdr = GenlMsgHdr::new(CtrlCmd::GetFamily as u8, 1);
-    builder.append(&genl_hdr);
-    builder.append_attr_str(CtrlAttr::FamilyName as u16, DEVLINK_GENL_NAME);
-
-    let seq = socket.next_seq();
-    builder.set_seq(seq);
-    builder.set_pid(socket.pid());
-
-    let msg = builder.finish();
-    socket.send(&msg).await?;
-
-    let response: Vec<u8> = socket.recv_msg().await?;
-    let mut family_id: Option<u16> = None;
-    let mut monitor_group_id: Option<u32> = None;
-
-    for result in MessageIter::new(&response) {
-        let (header, payload) = result?;
-
-        if header.nlmsg_seq != seq {
-            continue;
-        }
-
-        if header.is_error() {
-            let err = NlMsgError::from_bytes(payload)?;
-            if !err.is_ack() {
-                if err.error == -libc::ENOENT {
-                    return Err(Error::FamilyNotFound {
-                        name: DEVLINK_GENL_NAME.to_string(),
-                    });
-                }
-                return Err(Error::from_errno(err.error));
-            }
-            continue;
-        }
-
-        if header.is_done() {
-            continue;
-        }
-
-        if payload.len() < GENL_HDRLEN {
-            return Err(Error::InvalidMessage("GENL header too short".into()));
-        }
-
-        let attrs_data = &payload[GENL_HDRLEN..];
-        for (attr_type, attr_payload) in AttrIter::new(attrs_data) {
-            if attr_type == CtrlAttr::FamilyId as u16 && attr_payload.len() >= 2 {
-                family_id = Some(u16::from_ne_bytes(attr_payload[..2].try_into().unwrap()));
-            } else if attr_type == CtrlAttr::McastGroups as u16 {
-                for (_idx, grp_data) in AttrIter::new(attr_payload) {
-                    let mut grp_name: Option<String> = None;
-                    let mut grp_id: Option<u32> = None;
-
-                    for (grp_attr_type, grp_attr_payload) in AttrIter::new(grp_data) {
-                        if grp_attr_type == CtrlAttrMcastGrp::Name as u16 {
-                            grp_name = Some(
-                                std::str::from_utf8(grp_attr_payload)
-                                    .unwrap_or("")
-                                    .trim_end_matches('\0')
-                                    .to_string(),
-                            );
-                        } else if grp_attr_type == CtrlAttrMcastGrp::Id as u16
-                            && grp_attr_payload.len() >= 4
-                        {
-                            grp_id = Some(u32::from_ne_bytes(
-                                grp_attr_payload[..4].try_into().unwrap(),
-                            ));
-                        }
-                    }
-
-                    if grp_name.as_deref() == Some(DEVLINK_MCGRP_NAME) {
-                        monitor_group_id = grp_id;
-                    }
-                }
-            }
-        }
-    }
-
-    match family_id {
-        Some(id) => Ok((id, monitor_group_id)),
-        None => Err(Error::FamilyNotFound {
-            name: DEVLINK_GENL_NAME.to_string(),
-        }),
-    }
-}

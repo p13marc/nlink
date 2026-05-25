@@ -17,7 +17,7 @@ async fn main() -> nlink::Result<()> {
     let links = conn.get_links().await?;
     let bridges: Vec<_> = links
         .iter()
-        .filter(|l| l.link_kind() == Some("bridge"))
+        .filter(|l| l.kind() == Some("bridge"))
         .collect();
 
     if bridges.is_empty() {
@@ -48,8 +48,14 @@ async fn main() -> nlink::Result<()> {
                             if entry.is_permanent() {
                                 print!("permanent ");
                             }
-                            if entry.is_local() {
-                                print!("local ");
+                            if entry.is_self() {
+                                print!("self ");
+                            }
+                            if entry.is_master() {
+                                print!("master ");
+                            }
+                            if entry.is_extern_learn() {
+                                print!("extern_learn ");
                             }
                             println!();
                         }
@@ -73,9 +79,9 @@ async fn main() -> nlink::Result<()> {
 
     // Get all FDB entries for a bridge
     let entries = conn.get_fdb("br0").await?;
-    for entry in &entries {
-        println!("{} vlan={:?}", entry.mac_str(), entry.vlan);
-    }
+    for entry in &entries {{
+        println!("{{}} vlan={{:?}}", entry.mac_str(), entry.vlan);
+    }}
 
     // Get entries for a specific port
     let port_entries = conn.get_fdb_for_port("br0", "veth0").await?;

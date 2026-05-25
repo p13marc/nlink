@@ -77,6 +77,39 @@
 //! let genl: Connection<Generic> = namespace::connection_for("myns")?;
 //! ```
 //!
+//! ## Namespace safety — `_by_index` vs `_by_name`
+//!
+//! Every resource lookup that takes an interface comes in two
+//! flavors: `*_by_index(ifindex: u32)` and `*_by_name(name: &str)`.
+//! The `_by_index` form is **always** safe to call from any process
+//! mount namespace — the kernel ifindex is relative to the
+//! connection's netns, no userspace resolution needed. The
+//! `_by_name` form reads `/sys/class/net/` from the **calling
+//! process's mount namespace**, which is convenient for simple
+//! cases but surprises inside foreign netns (CNI plugins,
+//! multi-tenant managers, integration-test harnesses).
+//!
+//! For namespace-aware code, the canonical pattern is:
+//!
+//! ```ignore
+//! use nlink::{Connection, Route};
+//! let conn = Connection::<Route>::new()?;
+//! // One name resolution at startup, then ifindex everywhere:
+//! let eth0_idx = conn.get_link_by_name("eth0").await?
+//!     .ok_or(nlink::Error::InterfaceNotFound { name: "eth0".into() })?
+//!     .ifindex();
+//! conn.set_link_mtu_by_index(eth0_idx, 9000).await?;
+//! ```
+//!
+//! This is a deliberate design choice. `neli` and
+//! `vishvananda/netlink` both leave namespace handling to the
+//! caller — a documented footgun in
+//! [Cilium issue #40280](https://github.com/cilium/cilium/issues/40280).
+//! nlink's typed `InterfaceRef::Index(u32)` plus the per-method
+//! `_by_index` variants make namespace-correct code natural to
+//! write, while `_by_name` stays available as the deliberate
+//! convenience choice.
+//!
 //! # Event Monitoring
 //!
 //! Use `Connection::subscribe()` to select event types, then `events()` to get a stream:
@@ -121,7 +154,18 @@
 //! }
 //! ```
 
+// The Plan 154 derive macros generate code referencing
+// `::nlink::macros::__rt::*` so the same expansion works
+// uniformly from any downstream crate. Inside `nlink` itself
+// that path would fail to resolve (no external crate named
+// `nlink` from our own perspective); this `extern crate self as
+// nlink` aliases the crate to its own external name so generated
+// paths work here too. Required for the in-tree derive tests in
+// `crate::macros::tests`.
+extern crate self as nlink;
+
 // Core modules (always available)
+pub mod macros;
 pub mod netlink;
 pub mod prelude;
 pub mod util;
@@ -187,3 +231,47 @@ pub use netlink::{Generic, Nftables, Route, Wireguard};
 // boundaries). Use these in new code; the kernel's unit confusion (bits/sec
 // vs bytes/sec, decimal vs binary) is handled at type construction.
 pub use util::{Bytes, Percent, Rate};
+
+// ---- Plan 148 §4.3 re-export hygiene ----------------------------------
+// The route / address / rule builders and the extension traits users
+// implement to add custom link/addr/route/neighbor types. Previously
+// reachable only via deep `nlink::netlink::route::Ipv4Route`-style
+// paths; surface them at the crate root for shorter imports.
+
+// Route builders + nested types.
+pub use netlink::route::{Ipv4Route, Ipv6Route, NextHop, RouteConfig, RouteMetrics};
+// Address builders + extension trait.
+pub use netlink::addr::{AddressConfig, Ipv4Address, Ipv6Address};
+// Rule builder.
+pub use netlink::rule::RuleBuilder;
+// Link + neighbor extension traits for custom impl.
+pub use netlink::link::LinkConfig;
+pub use netlink::neigh::NeighborConfig;
+
+// Connection pool (Plan 159) — bounded mpsc-channel-backed pool
+// for high-fanout consumers.
+pub use netlink::pool::{ConnectionPool, ConnectionPoolBuilder, PooledConnection};
+
+// ENOBUFS resync helper types (Plan 151) — sum type yielded by a
+// resync-aware event consumer, plus boundary markers, plus the
+// pre-baked Stream wrapper (Plan 151 closeout).
+pub use netlink::resync::{ResyncMarker, ResyncStream, ResyncedEvent, events_with_resync};
+
+// Streaming dump API (Plan 149) — yield typed netlink dump
+// messages one at a time.
+pub use netlink::dump_stream::DumpStream;
+
+// nftables flowtable (Plan 150) — flow-table fast path for the
+// netfilter conntrack-cached forwarding bypass.
+pub use netlink::nftables::Flowtable;
+
+// Declarative nftables config (Plan 157) — diff + apply for
+// tables/chains/rules/flowtables, mirroring NetworkConfig's shape.
+pub use netlink::nftables::config::{
+    DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredTable, NftablesConfig,
+    NftablesDiff,
+};
+
+// XFRM IPsec hardware offload (Plan 153.1) — request kernel push
+// SA crypto/packet path onto NIC hardware.
+pub use netlink::xfrm::{XfrmOffloadFlag, XfrmUserOffload};

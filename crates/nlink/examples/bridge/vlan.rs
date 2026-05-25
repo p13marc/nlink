@@ -17,7 +17,7 @@ async fn main() -> nlink::Result<()> {
     let links = conn.get_links().await?;
     let bridges: Vec<_> = links
         .iter()
-        .filter(|l| l.link_kind() == Some("bridge"))
+        .filter(|l| l.kind() == Some("bridge"))
         .collect();
 
     if bridges.is_empty() {
@@ -78,10 +78,10 @@ async fn main() -> nlink::Result<()> {
 
     // Get VLANs for a specific port
     let vlans = conn.get_bridge_vlans("eth0").await?;
-    for vlan in &vlans {
-        println!("VLAN {}: pvid={} untagged={}",
+    for vlan in &vlans {{
+        println!("VLAN {{}}: pvid={{}} untagged={{}}",
             vlan.vid, vlan.flags.pvid, vlan.flags.untagged);
-    }
+    }}
 
     // Get VLANs for all ports of a bridge
     let all_vlans = conn.get_bridge_vlans_all("br0").await?;

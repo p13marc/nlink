@@ -1,0 +1,5 @@
+error: GenlCommand/GenlAttribute/GenlEnum variants must have an explicit `= literal` discriminant — kernel ABI requires stable wire values
+ --> tests/ui/fail/03_missing_discriminants.rs:6:5
+  |
+6 |     A,
+  |     ^

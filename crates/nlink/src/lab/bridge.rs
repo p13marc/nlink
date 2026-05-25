@@ -14,7 +14,7 @@ use super::LabNamespace;
 /// up — the three steps you'd normally sequence yourself in test code.
 ///
 /// This is a tiny convenience wrapper over
-/// [`BridgeLink`](crate::netlink::link::BridgeLink) +
+/// [`BridgeLink`] +
 /// `Connection::enslave` + `Connection::set_link_up`. Each chained
 /// method runs a single rtnetlink op.
 ///

@@ -26,8 +26,14 @@ output = ["dep:serde", "dep:serde_json"]
 namespace_watcher = ["dep:inotify"]
 # Lab / integration-test helpers (LabNamespace, with_namespace, require_root!)
 lab = []
+# Bulk-receive via recvmmsg(2) / sendmmsg(2) — batches up to 32
+# netlink frames per syscall. ≥1.5x wall-clock speedup on
+# dump-heavy workloads (BGP route tables, conntrack tables, nft
+# rulesets). Opt-in for one release while soak runs; default-on
+# planned for 0.17. See Plan 158.
+syscall_batch = []
 # All features
-full = ["sockdiag", "tuntap", "tuntap-async", "output", "namespace_watcher", "lab"]
+full = ["sockdiag", "tuntap", "tuntap-async", "output", "namespace_watcher", "lab", "syscall_batch"]
 # Enable integration tests (require root or network namespace)
 integration = []
 
@@ -43,6 +49,14 @@ winnow = { workspace = true }
 serde_json = { workspace = true, optional = true }
 zerocopy = { workspace = true }
 tokio-stream = { workspace = true }
+# Bitflags newtype generation — used in-tree for DPLL pin
+# capabilities (Plan 156) and re-usable by downstream consumers
+# defining their own GENL families with bitmask fields.
+bitflags = { workspace = true }
+# Proc-macro derives (GenlCommand, GenlAttribute, GenlEnum,
+# eventually GenlMessage + #[genl_family]). Re-exported from
+# `nlink::macros` so downstream code only depends on `nlink`.
+nlink-macros = { workspace = true }
 
 # Optional dependencies
 serde = { workspace = true, optional = true }
@@ -96,6 +110,41 @@ path = "examples/route/error_handling.rs"
 [[example]]
 name = "route_namespaces"
 path = "examples/route/namespaces.rs"
+
+[[example]]
+name = "route_stream_dump"
+path = "examples/route/stream_dump.rs"
+
+[[example]]
+name = "route_mpls"
+path = "examples/route/mpls.rs"
+
+[[example]]
+name = "route_nexthop"
+path = "examples/route/nexthop.rs"
+
+[[example]]
+name = "route_srv6"
+path = "examples/route/srv6.rs"
+
+# Bridge examples
+[[example]]
+name = "bridge_vlan"
+path = "examples/bridge/vlan.rs"
+
+[[example]]
+name = "bridge_fdb"
+path = "examples/bridge/fdb.rs"
+
+# Diagnostics examples
+[[example]]
+name = "diagnostics_health_check"
+path = "examples/diagnostics/health_check.rs"
+
+# Declarative NetworkConfig
+[[example]]
+name = "config_declarative"
+path = "examples/config/declarative.rs"
 
 # Traffic control examples
 [[example]]
@@ -182,6 +231,19 @@ path = "examples/genl/ethtool_rings.rs"
 name = "ethtool_monitor"
 path = "examples/genl/ethtool_monitor.rs"
 
+[[example]]
+name = "genl_dpll"
+path = "examples/genl/dpll.rs"
+
+[[example]]
+name = "genl_net_shaper"
+path = "examples/genl/net_shaper.rs"
+
+# nlink-macros showcase
+[[example]]
+name = "macros_define_taskstats"
+path = "examples/macros/define_taskstats.rs"
+
 # Uevent examples (device hotplug)
 [[example]]
 name = "uevent_device_monitor"
@@ -241,10 +303,23 @@ path = "examples/selinux/selinux_monitor_stream.rs"
 name = "events_multi_source"
 path = "examples/events/multi_source.rs"
 
+[[example]]
+name = "events_resync_loop"
+path = "examples/events/resync_loop.rs"
+
 # nftables examples
 [[example]]
 name = "nftables_firewall"
 path = "examples/nftables/firewall.rs"
+
+[[example]]
+name = "nftables_declarative"
+path = "examples/nftables/declarative.rs"
+
+# Connection pool example
+[[example]]
+name = "pool_parallel_dump"
+path = "examples/pool/parallel_dump.rs"
 
 # nl80211 WiFi examples
 [[example]]

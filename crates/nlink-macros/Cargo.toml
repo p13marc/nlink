@@ -1,0 +1,22 @@
+[package]
+name = "nlink-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Proc-macro derives for the nlink Linux-netlink library — typed GENL family / command / attribute codecs"
+keywords = ["netlink", "linux", "proc-macro", "genl", "derive"]
+categories = ["development-tools::procedural-macro-helpers", "os::linux-apis"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+
+[dev-dependencies]
+trybuild = { workspace = true }

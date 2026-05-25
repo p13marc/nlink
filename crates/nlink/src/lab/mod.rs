@@ -125,7 +125,9 @@ impl LabNamespace {
     /// [`Self::connection_for_async`].
     pub fn connection_for<P>(&self) -> Result<Connection<P>>
     where
-        P: ProtocolState + Default,
+        P: ProtocolState
+            + Default
+            + crate::netlink::construction::SyncConstructible,
     {
         namespace::connection_for(&self.name)
     }
@@ -135,7 +137,7 @@ impl LabNamespace {
     /// Devlink).
     pub async fn connection_for_async<P>(&self) -> Result<Connection<P>>
     where
-        P: AsyncProtocolInit,
+        P: AsyncProtocolInit + crate::netlink::construction::AsyncConstructible,
     {
         namespace::connection_for_async(&self.name).await
     }
@@ -294,6 +296,9 @@ where
 
 /// `true` if the current process has effective UID 0.
 pub fn is_root() -> bool {
+    // SAFETY: `geteuid()` is a POSIX-mandated read-only syscall that
+    // cannot fail and has no preconditions. Always returns the calling
+    // process's effective user ID.
     unsafe { libc::geteuid() == 0 }
 }
 

@@ -238,6 +238,47 @@ pub struct NlMsgError {
     pub msg: NlMsgHdr,
 }
 
+/// `NLMSGERR_ATTR_*` enum from `include/uapi/linux/netlink.h`. Kernel
+/// populates these as nlattr TLVs after the embedded `nlmsghdr` in an
+/// error response, when `NETLINK_EXT_ACK` is enabled on the listening
+/// socket (on by default in nlink — see `socket.rs`).
+pub mod nlmsgerr_attr {
+    /// Human-readable error message string (NUL-terminated).
+    pub const MSG: u16 = 1;
+    /// Offset of the offending attribute inside the original request,
+    /// in bytes from the start of the netlink message.
+    pub const OFFS: u16 = 2;
+    /// Opaque cookie for matching error to request (rarely useful).
+    pub const COOKIE: u16 = 3;
+    /// Nested policy info (rarely useful at the lib level).
+    pub const POLICY: u16 = 4;
+    /// Type of a missing required attribute.
+    pub const MISS_TYPE: u16 = 5;
+    /// Type of a missing required nested attribute.
+    pub const MISS_NEST: u16 = 6;
+}
+
+/// Parsed extended-ack TLVs from a netlink error response.
+///
+/// The kernel attaches these after the embedded `nlmsghdr` when
+/// `NETLINK_EXT_ACK` is enabled. They turn `errno = 22 (EINVAL)`
+/// into actionable diagnostics like
+/// `"attribute IFLA_MTU rejected: value 0 out of range"`.
+///
+/// Most fields are `Option` because not every kernel error path
+/// populates them — older kernels and some subsystems still return
+/// bare errno. Absence is normal, not error.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParsedExtAck {
+    /// Human-readable kernel error string. `None` if the kernel did
+    /// not include `NLMSGERR_ATTR_MSG` or it was empty / malformed.
+    pub message: Option<String>,
+    /// Byte offset into the original request where the kernel
+    /// detected the problem. `None` if the kernel did not include
+    /// `NLMSGERR_ATTR_OFFS`.
+    pub offset: Option<u32>,
+}
+
 impl NlMsgError {
     /// Parse error message from payload.
     pub fn from_bytes(data: &[u8]) -> Result<&Self> {
@@ -262,5 +303,147 @@ impl NlMsgError {
         } else {
             AttrIter::new(&[])
         }
+    }
+
+    /// Construct an [`Error`] from this error message plus the
+    /// extended-ack TLVs in `payload`. Caller is responsible for
+    /// checking `!is_ack()` before calling (this method assumes the
+    /// response represents a real error, not an ACK).
+    ///
+    /// Centralizes the "parse ext-ack + build Error" pattern that's
+    /// repeated across every protocol's response-handling loop.
+    pub fn into_error(&self, payload: &[u8]) -> Error {
+        let ext = self.parsed_ext_ack(payload);
+        Error::from_errno_ext_ack(self.error, ext.message, ext.offset)
+    }
+
+    /// Parse the extended-ack TLVs (`NLMSGERR_ATTR_MSG` +
+    /// `NLMSGERR_ATTR_OFFS`) from an error-response payload.
+    ///
+    /// Returns an all-`None` [`ParsedExtAck`] if no recognized TLVs
+    /// are present. Other recognized TLVs (`COOKIE`, `POLICY`,
+    /// `MISS_TYPE`, `MISS_NEST`) are deliberately ignored at this
+    /// level — they're niche, and surfacing them would inflate the
+    /// `Error` variants without a clear user-value story. They can
+    /// be re-extracted via [`Self::attrs`] if a caller needs them.
+    pub fn parsed_ext_ack(&self, payload: &[u8]) -> ParsedExtAck {
+        let mut out = ParsedExtAck::default();
+        for (attr_type, attr_payload) in self.attrs(payload) {
+            match attr_type {
+                nlmsgerr_attr::MSG => {
+                    // Kernel strings are typically NUL-terminated;
+                    // strip the NUL + tolerate non-UTF8 by lossy
+                    // decode (we'd rather show "?" than swallow the
+                    // whole message).
+                    let trimmed = attr_payload
+                        .iter()
+                        .position(|&b| b == 0)
+                        .map(|n| &attr_payload[..n])
+                        .unwrap_or(attr_payload);
+                    if !trimmed.is_empty() {
+                        out.message = Some(String::from_utf8_lossy(trimmed).into_owned());
+                    }
+                }
+                nlmsgerr_attr::OFFS if attr_payload.len() >= 4 => {
+                    // SAFETY of the unwrap: the guard above ensures
+                    // ≥ 4 bytes; `try_into` on `&[u8; 4]` is infallible
+                    // when the slice is exactly 4 bytes.
+                    let bytes: [u8; 4] = attr_payload[..4].try_into().expect("len ≥ 4");
+                    out.offset = Some(u32::from_ne_bytes(bytes));
+                }
+                _ => {} // ignore COOKIE/POLICY/MISS_TYPE/MISS_NEST + unknown
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod nlmsgerr_tests {
+    use super::*;
+    use crate::netlink::attr::nla_align;
+
+    fn synth_payload_with_ext_ack(error: i32, msg: Option<&str>, offset: Option<u32>) -> Vec<u8> {
+        // NlMsgError: error(i32) + NlMsgHdr (fixed 16 bytes)
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&error.to_ne_bytes());
+        // Zero NlMsgHdr — the test doesn't care about the embedded
+        // original-request header.
+        buf.extend_from_slice(&[0u8; 16]);
+
+        // NLMSGERR_ATTR_MSG TLV
+        if let Some(s) = msg {
+            let mut payload = s.as_bytes().to_vec();
+            payload.push(0); // NUL-terminate
+            let attr_len = 4 + payload.len();
+            buf.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+            buf.extend_from_slice(&nlmsgerr_attr::MSG.to_ne_bytes());
+            buf.extend_from_slice(&payload);
+            // Pad to 4-byte alignment.
+            while buf.len() < nla_align(buf.len()) {
+                buf.push(0);
+            }
+        }
+
+        // NLMSGERR_ATTR_OFFS TLV
+        if let Some(off) = offset {
+            let attr_len: u16 = 4 + 4;
+            buf.extend_from_slice(&attr_len.to_ne_bytes());
+            buf.extend_from_slice(&nlmsgerr_attr::OFFS.to_ne_bytes());
+            buf.extend_from_slice(&off.to_ne_bytes());
+        }
+
+        buf
+    }
+
+    #[test]
+    fn parses_msg_and_offs() {
+        let payload = synth_payload_with_ext_ack(
+            -22,
+            Some("attribute IFLA_MTU rejected: value 0 out of range"),
+            Some(42),
+        );
+        let err = NlMsgError::from_bytes(&payload).expect("parse");
+        assert_eq!(err.error, -22);
+        let parsed = err.parsed_ext_ack(&payload);
+        assert_eq!(
+            parsed.message.as_deref(),
+            Some("attribute IFLA_MTU rejected: value 0 out of range")
+        );
+        assert_eq!(parsed.offset, Some(42));
+    }
+
+    #[test]
+    fn parses_msg_only_when_offs_missing() {
+        let payload = synth_payload_with_ext_ack(-22, Some("policy violation"), None);
+        let err = NlMsgError::from_bytes(&payload).expect("parse");
+        let parsed = err.parsed_ext_ack(&payload);
+        assert_eq!(parsed.message.as_deref(), Some("policy violation"));
+        assert_eq!(parsed.offset, None);
+    }
+
+    #[test]
+    fn empty_payload_yields_all_none() {
+        let payload = synth_payload_with_ext_ack(-22, None, None);
+        let err = NlMsgError::from_bytes(&payload).expect("parse");
+        let parsed = err.parsed_ext_ack(&payload);
+        assert_eq!(parsed.message, None);
+        assert_eq!(parsed.offset, None);
+    }
+
+    #[test]
+    fn malformed_utf8_decodes_lossily_rather_than_failing() {
+        let mut payload = synth_payload_with_ext_ack(-22, None, None);
+        // Inject a NLMSGERR_ATTR_MSG with invalid UTF-8.
+        let bad_bytes = b"\xFF\xFE\xFD\x00"; // NUL-terminated invalid utf-8
+        let attr_len: u16 = 4 + bad_bytes.len() as u16;
+        payload.extend_from_slice(&attr_len.to_ne_bytes());
+        payload.extend_from_slice(&nlmsgerr_attr::MSG.to_ne_bytes());
+        payload.extend_from_slice(bad_bytes);
+        let err = NlMsgError::from_bytes(&payload).expect("parse");
+        let parsed = err.parsed_ext_ack(&payload);
+        // Lossy decode produces replacement characters; what we
+        // actually care about is "we didn't crash / return None".
+        assert!(parsed.message.is_some());
     }
 }

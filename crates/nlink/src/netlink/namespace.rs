@@ -36,7 +36,10 @@ use std::{
 use super::{
     connection::Connection,
     error::{Error, Result},
-    protocol::{AsyncProtocolInit, ProtocolState},
+    protocol::{
+        construction::{AsyncConstructible, SyncConstructible},
+        AsyncProtocolInit, ProtocolState,
+    },
     socket::NetlinkSocket,
 };
 
@@ -87,7 +90,7 @@ impl<'a> NamespaceSpec<'a> {
     /// let conn: Connection<Route> = spec.connection()?;
     /// let links = conn.get_links().await?;
     /// ```
-    pub fn connection<P: ProtocolState + Default>(&self) -> Result<Connection<P>> {
+    pub fn connection<P: ProtocolState + Default + SyncConstructible>(&self) -> Result<Connection<P>> {
         match self {
             NamespaceSpec::Default => Connection::<P>::new(),
             NamespaceSpec::Named(name) => connection_for(name),
@@ -216,7 +219,7 @@ pub const NETNS_RUN_DIR: &str = "/var/run/netns";
 /// let conn: Connection<Route> = namespace::connection_for("production")?;
 /// let links = conn.get_links().await?;
 /// ```
-pub fn connection_for<P: ProtocolState + Default>(name: &str) -> Result<Connection<P>> {
+pub fn connection_for<P: ProtocolState + Default + SyncConstructible>(name: &str) -> Result<Connection<P>> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(name);
     connection_for_path(&path)
 }
@@ -238,7 +241,7 @@ pub fn connection_for<P: ProtocolState + Default>(name: &str) -> Result<Connecti
 /// let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net")?;
 /// let links = conn.get_links().await?;
 /// ```
-pub fn connection_for_path<P: ProtocolState + Default, T: AsRef<Path>>(
+pub fn connection_for_path<P: ProtocolState + Default + SyncConstructible, T: AsRef<Path>>(
     path: T,
 ) -> Result<Connection<P>> {
     Connection::<P>::new_in_namespace_path(path)
@@ -256,7 +259,7 @@ pub fn connection_for_path<P: ProtocolState + Default, T: AsRef<Path>>(
 /// let conn: Connection<Route> = namespace::connection_for_pid(1234)?;
 /// let links = conn.get_links().await?;
 /// ```
-pub fn connection_for_pid<P: ProtocolState + Default>(pid: u32) -> Result<Connection<P>> {
+pub fn connection_for_pid<P: ProtocolState + Default + SyncConstructible>(pid: u32) -> Result<Connection<P>> {
     let path = format!("/proc/{}/ns/net", pid);
     connection_for_path(&path)
 }
@@ -275,7 +278,7 @@ pub fn connection_for_pid<P: ProtocolState + Default>(pid: u32) -> Result<Connec
 /// let conn: Connection<Wireguard> = namespace::connection_for_async("myns").await?;
 /// let device = conn.get_device("wg0").await?;
 /// ```
-pub async fn connection_for_async<P: AsyncProtocolInit>(name: &str) -> Result<Connection<P>> {
+pub async fn connection_for_async<P: AsyncProtocolInit + AsyncConstructible>(name: &str) -> Result<Connection<P>> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(name);
     connection_for_path_async(&path).await
 }
@@ -283,7 +286,7 @@ pub async fn connection_for_async<P: AsyncProtocolInit>(name: &str) -> Result<Co
 /// Get an async-initialized connection for a namespace specified by path.
 ///
 /// See [`connection_for_async`] for details.
-pub async fn connection_for_path_async<P: AsyncProtocolInit, T: AsRef<Path>>(
+pub async fn connection_for_path_async<P: AsyncProtocolInit + AsyncConstructible, T: AsRef<Path>>(
     path: T,
 ) -> Result<Connection<P>> {
     let socket = NetlinkSocket::new_in_namespace_path(P::PROTOCOL, path)?;
@@ -294,7 +297,7 @@ pub async fn connection_for_path_async<P: AsyncProtocolInit, T: AsRef<Path>>(
 /// Get an async-initialized connection for a process's network namespace.
 ///
 /// See [`connection_for_async`] for details.
-pub async fn connection_for_pid_async<P: AsyncProtocolInit>(pid: u32) -> Result<Connection<P>> {
+pub async fn connection_for_pid_async<P: AsyncProtocolInit + AsyncConstructible>(pid: u32) -> Result<Connection<P>> {
     let path = format!("/proc/{}/ns/net", pid);
     connection_for_path_async(&path).await
 }
@@ -439,7 +442,16 @@ impl NamespaceGuard {
 impl Drop for NamespaceGuard {
     fn drop(&mut self) {
         if let Err(e) = self.do_restore() {
-            eprintln!("warning: failed to restore namespace: {}", e);
+            // We cannot return an error from Drop. Emit a structured
+            // tracing event so observers see the failure (replaces the
+            // pre-0.16.0 `eprintln!` — consistent with the broader
+            // eprintln→tracing audit in Plan 147 §9.2). Callers that
+            // need explicit detection should restore the namespace via
+            // an explicit call before dropping the guard.
+            tracing::error!(
+                error = %e,
+                "NamespaceGuard::drop: failed to restore original namespace; thread may be stuck"
+            );
         }
     }
 }

@@ -1567,3 +1567,109 @@ mod tests {
         assert!(matches!(events[1], ConntrackEvent::Destroy(_)));
     }
 }
+
+// =========================================================================
+// Streaming dump support — Plan 149 closeout
+// =========================================================================
+
+use super::dump_stream::DumpStream;
+use super::parse::FromNetlink;
+
+impl FromNetlink for ConntrackEntry {
+    /// Default body: AF_UNSPEC nfgenmsg ("dump everything,
+    /// any family"). Callers who want family-filtered dumps use
+    /// [`stream_conntrack`](Connection::stream_conntrack).
+    fn write_dump_header(buf: &mut Vec<u8>) {
+        buf.push(libc::AF_UNSPEC as u8); // family
+        buf.push(0); // version (NFNETLINK_V0)
+        buf.extend_from_slice(&0u16.to_be_bytes()); // res_id
+    }
+
+    /// Trait-required but not used by the dump-stream path
+    /// (overrides `from_bytes` directly). Consumes the entire input.
+    fn parse(input: &mut &[u8]) -> PResult<Self> {
+        let consumed = *input;
+        *input = &input[input.len()..];
+        Self::from_bytes(consumed).map_err(|_| {
+            winnow::error::ErrMode::Cut(winnow::error::ContextError::new())
+        })
+    }
+
+    /// Parse a post-nlmsghdr conntrack frame: `nfgenmsg + attrs`.
+    /// Delegates to the existing `parse_conntrack_body` so the
+    /// dump path and the multicast-event path share one parser.
+    fn from_bytes(payload: &[u8]) -> Result<Self> {
+        parse_conntrack_body(payload).ok_or_else(|| {
+            super::error::Error::InvalidMessage("malformed conntrack entry".into())
+        })
+    }
+}
+
+impl Connection<Netfilter> {
+    /// Stream conntrack entries for `family` —
+    /// [`libc::AF_INET`] / [`libc::AF_INET6`] / [`libc::AF_UNSPEC`]
+    /// (the last dumps both v4 and v6). One parsed
+    /// [`ConntrackEntry`] per `next().await`, bounded-memory.
+    /// Preferred over the eager
+    /// [`get_conntrack`](Self::get_conntrack) on hosts with large
+    /// conntrack tables (busy NAT gateways, anycast load-balancers
+    /// — millions of entries is routine).
+    ///
+    /// ```ignore
+    /// use tokio_stream::StreamExt;
+    /// let conn = Connection::<Netfilter>::new()?;
+    /// let mut stream = conn.stream_conntrack(libc::AF_INET as u8).await?;
+    /// while let Some(entry) = stream.next().await {
+    ///     let entry = entry?;
+    ///     println!("{:?}", entry.proto);
+    /// }
+    /// ```
+    pub async fn stream_conntrack(
+        &self,
+        family: u8,
+    ) -> Result<DumpStream<'_, Netfilter, ConntrackEntry>> {
+        let mut body = Vec::with_capacity(4);
+        body.push(family);
+        body.push(0); // version
+        body.extend_from_slice(&0u16.to_be_bytes()); // res_id
+        let msg_type = ctnl_msg_type(IPCTNL_MSG_CT_GET);
+        self.dump_stream_with_body::<ConntrackEntry>(msg_type, &body)
+            .await
+    }
+
+    /// Convenience: `stream_conntrack(AF_INET)`.
+    pub async fn stream_conntrack_v4(
+        &self,
+    ) -> Result<DumpStream<'_, Netfilter, ConntrackEntry>> {
+        self.stream_conntrack(libc::AF_INET as u8).await
+    }
+
+    /// Convenience: `stream_conntrack(AF_INET6)`.
+    pub async fn stream_conntrack_v6(
+        &self,
+    ) -> Result<DumpStream<'_, Netfilter, ConntrackEntry>> {
+        self.stream_conntrack(libc::AF_INET6 as u8).await
+    }
+}
+
+#[cfg(test)]
+mod conntrack_stream_tests {
+    use super::*;
+
+    #[test]
+    fn from_netlink_write_dump_header_emits_4byte_nfgenmsg() {
+        let mut buf = Vec::new();
+        <ConntrackEntry as FromNetlink>::write_dump_header(&mut buf);
+        assert_eq!(buf.len(), 4);
+        assert_eq!(buf[0], libc::AF_UNSPEC as u8);
+        assert_eq!(buf[1], 0); // version
+        // res_id = 0 (big-endian)
+        assert_eq!(&buf[2..4], &[0, 0]);
+    }
+
+    #[test]
+    fn from_bytes_rejects_truncated() {
+        let payload = vec![0u8; 3]; // shorter than nfgenmsg
+        assert!(<ConntrackEntry as FromNetlink>::from_bytes(&payload).is_err());
+    }
+}

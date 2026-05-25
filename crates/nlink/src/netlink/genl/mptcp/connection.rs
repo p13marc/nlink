@@ -13,7 +13,7 @@ use crate::netlink::{
     error::{Error, Result},
     genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr},
     message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
-    protocol::{AsyncProtocolInit, Mptcp, ProtocolState},
+    protocol::{AsyncProtocolInit, Mptcp},
     socket::NetlinkSocket,
 };
 
@@ -26,27 +26,6 @@ impl AsyncProtocolInit for Mptcp {
 use crate::netlink::types::mptcp::{mptcp_pm_addr_attr, mptcp_pm_attr, mptcp_pm_cmd};
 
 impl Connection<Mptcp> {
-    /// Create a new MPTCP connection.
-    ///
-    /// This resolves the MPTCP PM GENL family ID during initialization.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use nlink::netlink::{Connection, Mptcp};
-    ///
-    /// let conn = Connection::<Mptcp>::new_async().await?;
-    /// let endpoints = conn.get_endpoints().await?;
-    /// ```
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "new_async"))]
-    pub async fn new_async() -> Result<Self> {
-        let socket = NetlinkSocket::new(Mptcp::PROTOCOL)?;
-        let family_id = resolve_mptcp_family(&socket).await?;
-
-        let state = Mptcp { family_id };
-        Ok(Self::from_parts(socket, state))
-    }
-
     /// Get the MPTCP PM family ID.
     pub fn family_id(&self) -> u16 {
         self.state().family_id
@@ -454,7 +433,7 @@ impl Connection<Mptcp> {
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
                 if !err.is_ack() {
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
                 continue;
             }
@@ -504,7 +483,7 @@ impl Connection<Mptcp> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                     continue;
                 }
@@ -537,7 +516,7 @@ impl Connection<Mptcp> {
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
                 if !err.is_ack() {
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
             }
         }
@@ -579,7 +558,7 @@ async fn resolve_mptcp_family(socket: &NetlinkSocket) -> Result<u16> {
                         name: MPTCP_PM_GENL_NAME.to_string(),
                     });
                 }
-                return Err(Error::from_errno(err.error));
+                return Err(err.into_error(payload));
             }
             continue;
         }

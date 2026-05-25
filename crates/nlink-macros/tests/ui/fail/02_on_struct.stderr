@@ -1,0 +1,5 @@
+error: #[derive(GenlCommand)] is only valid on enums, not structs
+ --> tests/ui/fail/02_on_struct.rs:5:12
+  |
+5 | pub struct NotAnEnum {
+  |            ^^^^^^^^^

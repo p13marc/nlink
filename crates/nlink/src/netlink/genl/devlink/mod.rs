@@ -49,6 +49,13 @@ pub const DEVLINK_CMD_HEALTH_REPORTER_SET: u8 = 53;
 pub const DEVLINK_CMD_HEALTH_REPORTER_RECOVER: u8 = 54;
 pub const DEVLINK_CMD_FLASH_UPDATE: u8 = 58;
 
+// Rate + port-function commands (Plan 153.2).
+pub const DEVLINK_CMD_RATE_GET: u8 = 74;
+pub const DEVLINK_CMD_RATE_SET: u8 = 75;
+pub const DEVLINK_CMD_RATE_NEW: u8 = 76;
+pub const DEVLINK_CMD_RATE_DEL: u8 = 77;
+pub const DEVLINK_CMD_PORT_FUNCTION_SET: u8 = 68;
+
 // Device/Port attributes
 pub const DEVLINK_ATTR_BUS_NAME: u16 = 1;
 pub const DEVLINK_ATTR_DEV_NAME: u16 = 2;
@@ -112,6 +119,36 @@ pub const DEVLINK_ATTR_PARAM_VALUE_CMODE: u16 = 87;
 pub const DEVLINK_CMD_PORT_NEW: u8 = 6;
 pub const DEVLINK_CMD_PORT_DEL: u8 = 7;
 pub const DEVLINK_CMD_FLASH_UPDATE_STATUS: u8 = 60;
+
+// Rate + port-function attributes (Plan 153.2). Values from
+// include/uapi/linux/devlink.h — stable ABI, must not drift.
+pub const DEVLINK_ATTR_RATE_TYPE: u16 = 165;
+pub const DEVLINK_ATTR_RATE_TX_SHARE: u16 = 166;
+pub const DEVLINK_ATTR_RATE_TX_MAX: u16 = 167;
+pub const DEVLINK_ATTR_RATE_NODE_NAME: u16 = 168;
+pub const DEVLINK_ATTR_RATE_PARENT_NODE_NAME: u16 = 169;
+pub const DEVLINK_ATTR_PORT_FUNCTION: u16 = 145;
+
+// Attributes carried INSIDE the `DEVLINK_ATTR_PORT_FUNCTION` nest
+// live in their own namespace, defined by
+// `enum devlink_port_function_attr` in `include/uapi/linux/devlink.h`:
+//
+//   DEVLINK_PORT_FUNCTION_ATTR_UNSPEC   = 0,
+//   DEVLINK_PORT_FUNCTION_ATTR_HW_ADDR  = 1,
+//   DEVLINK_PORT_FN_ATTR_STATE          = 2,  // u8 — DEVLINK_PORT_FN_STATE_*
+//   DEVLINK_PORT_FN_ATTR_OPSTATE        = 3,  // u8
+//   DEVLINK_PORT_FN_ATTR_CAPS           = 4,  // bitfield32
+//
+// NOT to be confused with the outer-namespace attribute IDs.
+pub const DEVLINK_PORT_FN_ATTR_STATE: u16 = 2;
+
+// Rate types — `DEVLINK_RATE_TYPE_*` from devlink.h.
+pub const DEVLINK_RATE_TYPE_LEAF: u16 = 0;
+pub const DEVLINK_RATE_TYPE_NODE: u16 = 1;
+
+// Port-function state — `DEVLINK_PORT_FN_STATE_*` from devlink.h.
+pub const DEVLINK_PORT_FN_STATE_INACTIVE: u8 = 0;
+pub const DEVLINK_PORT_FN_STATE_ACTIVE: u8 = 1;
 
 /// Devlink multicast group name.
 pub const DEVLINK_MCGRP_NAME: &str = "devlink";

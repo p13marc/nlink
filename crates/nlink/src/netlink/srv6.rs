@@ -376,6 +376,32 @@ pub struct Srv6LocalRoute {
 }
 
 impl Srv6LocalRoute {
+    /// The routing table this SID directs traffic into, if the
+    /// action carries one.
+    ///
+    /// SRv6 endpoint actions split into two groups:
+    ///
+    /// - Variants that look traffic up in a specific table:
+    ///   `EndT`, `EndDT4`, `EndDT6`, `EndDT46`. Returns
+    ///   `Some(table_id)`.
+    /// - Variants that don't (deliver direct, push, decap to
+    ///   default table, etc.): `End`, `EndX`, `EndDX2`,
+    ///   `EndDX4`, `EndDX6`, `B6`, `B6Encaps`, …. Returns
+    ///   `None`.
+    ///
+    /// This getter encapsulates the per-variant match so
+    /// callers asking "what table is this SID in?" don't need
+    /// to enumerate the action enum themselves.
+    pub fn table(&self) -> Option<u32> {
+        match &self.action {
+            Srv6Action::EndT { table }
+            | Srv6Action::EndDT4 { table }
+            | Srv6Action::EndDT6 { table }
+            | Srv6Action::EndDT46 { table } => Some(*table),
+            _ => None,
+        }
+    }
+
     /// Parse an SRv6 local route from netlink message payload.
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() < RtMsg::SIZE {
@@ -993,6 +1019,44 @@ mod tests {
         let srh = encap.build_srh();
         // Header (8) + 1 segment (16) = 24 bytes
         assert_eq!(srh.len(), 24);
+    }
+
+    #[test]
+    fn srv6_local_route_table_getter() {
+        let sid: Ipv6Addr = "fc00:1::1".parse().unwrap();
+        let mk = |action| Srv6LocalRoute {
+            sid,
+            prefix_len: 128,
+            action,
+            oif: None,
+            iif: None,
+            protocol: 3,
+        };
+
+        // Variants WITH table → Some.
+        assert_eq!(mk(Srv6Action::EndT { table: 100 }).table(), Some(100));
+        assert_eq!(
+            mk(Srv6Action::EndDT4 { table: 200 }).table(),
+            Some(200),
+        );
+        assert_eq!(
+            mk(Srv6Action::EndDT6 { table: 300 }).table(),
+            Some(300),
+        );
+        assert_eq!(
+            mk(Srv6Action::EndDT46 { table: 400 }).table(),
+            Some(400),
+        );
+
+        // Variants WITHOUT table → None.
+        assert_eq!(mk(Srv6Action::End).table(), None);
+        assert_eq!(
+            mk(Srv6Action::EndX {
+                nexthop: Ipv6Addr::UNSPECIFIED,
+            })
+            .table(),
+            None,
+        );
     }
 
     #[test]

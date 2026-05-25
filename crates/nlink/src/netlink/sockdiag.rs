@@ -310,6 +310,8 @@ impl Connection<SockDiag> {
                             "SOCK_DESTROY failed: {}",
                             std::io::Error::from_raw_os_error(-errno)
                         ),
+                        ext_ack: None,
+                        ext_ack_offset: None,
                     });
                 }
             }

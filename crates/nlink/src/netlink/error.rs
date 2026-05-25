@@ -21,23 +21,47 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 
     /// Kernel returned an error code.
-    #[error("kernel error: {message} (errno {errno})")]
+    ///
+    /// Carries optional extended-ack TLVs ([`ext_ack`](Self::Kernel::ext_ack),
+    /// [`ext_ack_offset`](Self::Kernel::ext_ack_offset)) populated by
+    /// the kernel when `NETLINK_EXT_ACK` is enabled (on by default in
+    /// nlink — see [`Self::is_namespace_restore_failed`] note).
+    #[error("{}", format_kernel(message, *errno, ext_ack.as_deref(), *ext_ack_offset))]
+    #[non_exhaustive]
     Kernel {
         /// The errno value from the kernel.
         errno: i32,
-        /// Human-readable error message.
+        /// Human-readable error message (from `strerror(errno)`).
         message: String,
+        /// Kernel-supplied human-readable detail string from the
+        /// `NLMSGERR_ATTR_MSG` TLV, when present. Often dramatically
+        /// more actionable than the raw errno — for example,
+        /// `errno = 22 (EINVAL)` + `ext_ack = "attribute IFLA_MTU
+        /// rejected: value 0 out of range"`.
+        ext_ack: Option<String>,
+        /// Byte offset into the original request where the kernel
+        /// detected the problem, from `NLMSGERR_ATTR_OFFS`.
+        ext_ack_offset: Option<u32>,
     },
 
     /// Kernel error with operation context.
-    #[error("{operation}: {message} (errno {errno})")]
+    ///
+    /// Like [`Self::Kernel`] but carries the calling-site operation
+    /// label (`"add_link(veth0, kind=veth)"` etc.) for readable
+    /// `tracing` events.
+    #[error("{}", format_kernel_ctx(operation, message, *errno, ext_ack.as_deref(), *ext_ack_offset))]
+    #[non_exhaustive]
     KernelWithContext {
         /// The operation that failed.
         operation: String,
         /// The errno value from the kernel.
         errno: i32,
-        /// Human-readable error message.
+        /// Human-readable error message (from `strerror(errno)`).
         message: String,
+        /// See [`Self::Kernel::ext_ack`].
+        ext_ack: Option<String>,
+        /// See [`Self::Kernel::ext_ack_offset`].
+        ext_ack_offset: Option<u32>,
     },
 
     /// Message was truncated.
@@ -138,6 +162,56 @@ pub enum Error {
     /// ```
     #[error("operation timed out")]
     Timeout,
+
+    /// Connection pool was unable to hand out a connection within
+    /// the configured `acquire_timeout`.
+    ///
+    /// Recover via [`Self::is_pool_exhausted`]. Typical responses:
+    /// retry with a longer timeout, scale the pool size up, or
+    /// shed load.
+    #[error("connection pool exhausted: {size} connections all busy, waited {timeout:?}")]
+    PoolExhausted {
+        /// Configured pool size (total connections, busy + idle).
+        size: usize,
+        /// The acquire timeout that just expired.
+        timeout: std::time::Duration,
+    },
+
+    /// The connection pool was dropped while an `acquire()` was
+    /// pending, or while waiting to send a connection back to it.
+    ///
+    /// Recover via [`Self::is_pool_closed`]. Indicates a teardown
+    /// race; the surviving task should fail through.
+    #[error("connection pool is closed (all handles dropped)")]
+    PoolClosed,
+
+    /// `setns()` failed to restore the calling thread to its original
+    /// network namespace after a `new_in_namespace`-style socket
+    /// creation.
+    ///
+    /// The socket itself was created successfully and lives in the
+    /// target namespace as intended. But the **calling thread** is
+    /// now stuck in the target namespace — every subsequent
+    /// `/sys/class/net/`-reading call from this thread (or any
+    /// other tokio task scheduled on it) will read from the wrong
+    /// namespace. There is no automatic recovery; the calling code
+    /// must decide whether to abort, retry the restore manually, or
+    /// pin work to a different thread.
+    ///
+    /// Previously (≤ 0.15.1) this condition logged to stderr and
+    /// returned the socket anyway. Promoted to an error variant in
+    /// 0.16.0 because silent thread-state corruption was producing
+    /// surprises that took hours to debug.
+    ///
+    /// Recover via [`Error::is_namespace_restore_failed`] for the
+    /// predicate form.
+    #[error("netns restore failed after socket creation; thread \
+             stuck in target netns: {source}")]
+    NamespaceRestoreFailed {
+        /// The underlying `setns()` failure.
+        #[source]
+        source: io::Error,
+    },
 }
 
 /// Structured validation error information.
@@ -174,23 +248,96 @@ fn format_validation_errors(errors: &[ValidationErrorInfo]) -> String {
         .join("; ")
 }
 
+/// Format the Display output for [`Error::Kernel`], stitching the
+/// ext-ack message in when present. Pulled into a free fn so the
+/// `#[error(...)]` attribute stays readable.
+fn format_kernel(
+    message: &str,
+    errno: i32,
+    ext_ack: Option<&str>,
+    ext_ack_offset: Option<u32>,
+) -> String {
+    let mut out = format!("kernel error: {message} (errno {errno})");
+    if let Some(msg) = ext_ack {
+        out.push_str(": ");
+        out.push_str(msg);
+    }
+    if let Some(off) = ext_ack_offset {
+        out.push_str(&format!(" (at request offset {off})"));
+    }
+    out
+}
+
+/// Format the Display output for [`Error::KernelWithContext`].
+fn format_kernel_ctx(
+    operation: &str,
+    message: &str,
+    errno: i32,
+    ext_ack: Option<&str>,
+    ext_ack_offset: Option<u32>,
+) -> String {
+    let mut out = format!("{operation}: {message} (errno {errno})");
+    if let Some(msg) = ext_ack {
+        out.push_str(": ");
+        out.push_str(msg);
+    }
+    if let Some(off) = ext_ack_offset {
+        out.push_str(&format!(" (at request offset {off})"));
+    }
+    out
+}
+
 impl Error {
-    /// Create a kernel error from an errno value.
+    /// Create a kernel error from an errno value (no ext-ack info).
+    ///
+    /// Prefer [`Self::from_errno_ext_ack`] when the kernel response
+    /// carries `NLMSGERR_ATTR_MSG` / `NLMSGERR_ATTR_OFFS` TLVs —
+    /// those become user-visible diagnostics far more actionable than
+    /// the raw errno.
     pub fn from_errno(errno: i32) -> Self {
+        Self::from_errno_ext_ack(errno, None, None)
+    }
+
+    /// Create a kernel error from an errno value plus the parsed
+    /// extended-ack TLVs from the same error response.
+    ///
+    /// Typical use: after `NlMsgError::from_bytes`, call
+    /// `err.parsed_ext_ack(payload)` to get a [`crate::netlink::message::ParsedExtAck`],
+    /// then forward the fields here.
+    pub fn from_errno_ext_ack(
+        errno: i32,
+        ext_ack: Option<String>,
+        ext_ack_offset: Option<u32>,
+    ) -> Self {
         let message = io::Error::from_raw_os_error(-errno).to_string();
         Self::Kernel {
             errno: -errno,
             message,
+            ext_ack,
+            ext_ack_offset,
         }
     }
 
-    /// Create a kernel error with operation context.
+    /// Create a kernel error with operation context (no ext-ack info).
     pub fn from_errno_with_context(errno: i32, operation: impl Into<String>) -> Self {
+        Self::from_errno_with_context_ext_ack(errno, operation, None, None)
+    }
+
+    /// Create a kernel error with operation context plus the parsed
+    /// extended-ack TLVs.
+    pub fn from_errno_with_context_ext_ack(
+        errno: i32,
+        operation: impl Into<String>,
+        ext_ack: Option<String>,
+        ext_ack_offset: Option<u32>,
+    ) -> Self {
         let message = io::Error::from_raw_os_error(-errno).to_string();
         Self::KernelWithContext {
             operation: operation.into(),
             errno: -errno,
             message,
+            ext_ack,
+            ext_ack_offset,
         }
     }
 
@@ -199,10 +346,17 @@ impl Error {
     /// Wraps kernel errors with operation context. Other errors are returned unchanged.
     pub fn with_context(self, operation: impl Into<String>) -> Self {
         match self {
-            Self::Kernel { errno, message } => Self::KernelWithContext {
+            Self::Kernel {
+                errno,
+                message,
+                ext_ack,
+                ext_ack_offset,
+            } => Self::KernelWithContext {
                 operation: operation.into(),
                 errno,
                 message,
+                ext_ack,
+                ext_ack_offset,
             },
             other => other,
         }
@@ -356,6 +510,37 @@ impl Error {
         matches!(self, Self::Timeout) || self.errno() == Some(libc::ETIMEDOUT)
     }
 
+    /// Check if this is a [`Error::PoolExhausted`].
+    ///
+    /// All pool slots were busy when `ConnectionPool::acquire` was
+    /// called, and the `acquire_timeout` elapsed before any returned.
+    /// Typical recovery: retry with a longer timeout, scale the
+    /// pool size up, or shed load.
+    pub fn is_pool_exhausted(&self) -> bool {
+        matches!(self, Self::PoolExhausted { .. })
+    }
+
+    /// Check if this is a [`Error::PoolClosed`].
+    ///
+    /// The pool was dropped while an acquire / return was pending.
+    /// Indicates teardown race; the surviving task should fail
+    /// through.
+    pub fn is_pool_closed(&self) -> bool {
+        matches!(self, Self::PoolClosed)
+    }
+
+    /// Check if this is a namespace-restore failure
+    /// ([`Error::NamespaceRestoreFailed`]).
+    ///
+    /// Indicates that a socket was created successfully in a target
+    /// netns, but the calling thread could not be restored to its
+    /// original netns. The thread is now stuck in the target netns;
+    /// callers typically respond by aborting the affected task or
+    /// pinning subsequent work to a different thread.
+    pub fn is_namespace_restore_failed(&self) -> bool {
+        matches!(self, Self::NamespaceRestoreFailed { .. })
+    }
+
     /// Check if this is an "address already in use" error (EADDRINUSE).
     ///
     /// This typically occurs when trying to add an IP address that is
@@ -486,6 +671,22 @@ mod tests {
         // Kernel ETIMEDOUT should also match
         let err = Error::from_errno(-(libc::ETIMEDOUT));
         assert!(err.is_timeout());
+    }
+
+    #[test]
+    fn test_namespace_restore_failed_predicate() {
+        let err = Error::NamespaceRestoreFailed {
+            source: io::Error::from_raw_os_error(libc::EPERM),
+        };
+        assert!(err.is_namespace_restore_failed());
+        assert!(!err.is_timeout());
+        assert!(!err.is_permission_denied()); // not an errno predicate
+        assert!(err.to_string().contains("netns restore failed"));
+        assert!(err.to_string().contains("thread stuck"));
+
+        // Unrelated errors don't claim to be netns-restore failures.
+        let other = Error::Timeout;
+        assert!(!other.is_namespace_restore_failed());
     }
 
     #[test]

@@ -2,11 +2,11 @@
 to: nlink maintainers
 from: nlink maintainers
 subject: nlink roadmap — active plans only
-target version: 0.15.1 ready to publish (patch); 0.16.0 next
-last updated: 2026-04-26 (0.15.1 cycle complete — Plans 143/144/145
-landed and archived. Workspace bumped to 0.15.1; all acceptance
-gates met locally. Awaiting maintainer `cargo publish -p nlink`
-+ tag `0.15.1`.)
+target version: 0.16.0 late-cycle, ready to cut
+last updated: 2026-05-24 (0.16.0 cycle near-complete on the `0.16`
+branch — 12/13 sub-plans 🟢. Migration guide written. Remaining
+🟡 (Plan 151 stream wrapper) explicitly on hold for design soak;
+⚪ Plan 152 (integration showcases) deprioritized by maintainer.)
 ---
 
 # nlink Roadmap
@@ -15,29 +15,80 @@ Forward-looking index of active plans. Shipped work lives in
 [`CHANGELOG.md`](CHANGELOG.md); detailed plan documents for shipped
 features have been removed (their substance is in the commits +
 changelog). For per-release upgrade notes see
-[`docs/migration_guide/`](docs/migration_guide/README.md).
+[`docs/migration_guide/`](docs/migration_guide/README.md). The
+detailed-plan archive for the in-flight 0.16.0 cycle lives in
+[`plans/`](plans/) with [`plans/INDEX.md`](plans/INDEX.md) as the
+live status tracker.
 
 ## Active plans
 
-**Empty as of 2026-04-26.** The 0.15.1 cycle (Plans 143/144/145)
-shipped and was archived in the same release. Substance lives
-in CHANGELOG `## [0.15.1]`.
+**0.16.0 cycle — late stage** on the long-lived `0.16` branch.
+Per [`plans/INDEX.md`](plans/INDEX.md):
 
-**0.15.0 published 2026-04-26.** Tag `0.15.0`.
+- **12/13 sub-plans 🟢** (147 bug fixes, 148 ergonomics, 149
+  streaming dumps, 150 nftables flowtable, 153 kernel feature
+  bundle, 154 nlink-macros proc-macro crate, 155 neli-parity,
+  156 DPLL, 157 declarative NftablesConfig, 158 syscall
+  batching, 159 ConnectionPool, 160 example-registry audit).
+- **🟡 partials with documented deferrals**: Plan 151
+  (ResyncedEvent + ResyncMarker types shipped; pre-baked
+  Stream wrapper on hold for design soak — hand-rolled loop
+  pattern documented in the recipe is the 0.16 shape).
+- **⚪ deprioritized**: Plan 152 (aya/Prometheus/OTel
+  showcases — both macro dogfoods now in tree as references;
+  showcases can ship later).
 
-**0.15.1 ready to publish** (workspace at `0.15.1`, CHANGELOG
-header `## [0.15.1]`). Cuts as soon as the maintainer runs
-`cargo publish -p nlink && git tag 0.15.1`.
+Headlines that land in 0.16.0:
 
-**Next-up after 0.15.1 publish**: the 0.16.0 quality cycle
-(streaming dump API, MSRV declaration, observability feature,
-`netkit` link kind support, `cargo public-api` snapshot-file
-convention). See [`STRATEGIC_ANALYSIS.md`](STRATEGIC_ANALYSIS.md)
-for the deep analysis driving 0.16+ priorities.
+- **`nlink-macros` proc-macro crate** — define a custom Generic
+  Netlink family in ~30 lines (Plan 154; validated by two
+  in-tree dogfoods, DPLL and net_shaper).
+- **Streaming dump API** — `Connection::stream_*` over rtnetlink
+  + TC + XFRM SA/SP + conntrack + nftables rules (Plan 149).
+- **DPLL family** — kernel 6.7+ clock-synchronization
+  (Plan 156).
+- **`net_shaper` family** — kernel 6.13+ TX hardware shaping
+  (Plan 153.3).
+- **Declarative `NftablesConfig`** — diff + atomic apply +
+  per-rule USERDATA-keyed reconcile (Plan 157 + Plan 157b v2).
+- **`ConnectionPool<P>`** — bounded fanout (Plan 159).
+- **`recvmmsg`/`sendmmsg` syscall batching** behind opt-in
+  `syscall_batch` feature (Plan 158).
+- **Shared GENL multicast-group resolution** + ext-ack error
+  TLV parsing + strict-checking sockopts (Plans 154 Phase 5 /
+  155).
+- **Per-release upgrade guide** — see
+  [`docs/migration_guide/0.15.1-to-0.16.0.md`](docs/migration_guide/0.15.1-to-0.16.0.md).
 
-Other items not in the active set are explicitly demand-gated
-(typed `ct_expect` / nfqueue / nflog surfaces) — open per-PR
-plans only when a downstream user asks.
+**Cut blockers** (per [`plans/INDEX.md`](plans/INDEX.md)
+acceptance gates):
+
+- `cargo publish -p nlink-macros` then `cargo publish -p nlink`
+  (publish-order matters — nlink-macros first; see
+  [`crates/nlink/CLAUDE.md`](crates/nlink/CLAUDE.md) Publishing
+  section).
+- Final `cargo public-api diff` review against the published
+  0.15.1 to confirm only the expected additions.
+- Workspace already bumped to `0.16.0` mid-cycle.
+
+**0.17 backlog** (forward-looking; no plans committed yet):
+
+- Plan 151 pre-baked ENOBUFS-resync Stream wrapper.
+- Plan 152 integration showcases (aya / Prometheus exporter /
+  OTel) if user demand materializes.
+- Refactor `Rule` from `Vec<Expr>` → typed `Vec<Match>` +
+  lowering pass; would enable byte-canonical rule-equivalence
+  diffing (currently the per-rule USERDATA-keyed identity from
+  Plan 157b v2 covers the common case, but anonymous rules
+  still always re-add).
+- `Vec<NetlinkAttrs>` (multi-valued nested groups) + flag-attr
+  typed fields in `nlink-macros` — would unlock `net_shaper`'s
+  `group` command + cleaner caps reply parsing.
+
+Demand-gated tail items remaining from 0.15.0 — typed
+`ct_expect` / nfqueue / nflog surfaces, `mqprio`/`taprio`
+queues-pair grammar — still parked behind "open a plan when
+a downstream user asks."
 
 ## Release plan
 
@@ -83,12 +134,13 @@ plans only when a downstream user asks.
   / `taprio` `queues <count@offset>` pair grammar (~50 LOC, lands
   when someone hits the deferred error).
 
-- **0.16.0** (no plan committed yet): the natural next chunk is
-  the **other-bins typed-units rollout** — see Backlog. Audit
-  each binary, open per-bin plans for any that turn up real
-  work. The demand-gated tail items (typed `ct_expect` / nfqueue
-  / nflog surfaces) also ship in this window if they clear their
-  gates.
+- **0.16.0** (late-cycle on the `0.16` branch as of 2026-05-24,
+  ready to cut once the maintainer runs final `cargo publish`):
+  see "Active plans" above + [`plans/INDEX.md`](plans/INDEX.md)
+  + [`docs/migration_guide/0.15.1-to-0.16.0.md`](docs/migration_guide/0.15.1-to-0.16.0.md)
+  for the full per-feature picture. The cycle was substantial —
+  estimated ~5-6 focused weeks for ~22 distinct deliverables
+  across 14 sub-plans (plans 147-160).
 
 - **1.0.0**: deferred indefinitely. Cut when downstream
   consumption validates the API, not on a calendar. The

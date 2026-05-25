@@ -57,6 +57,16 @@ pub enum Expr {
         mask: Vec<u8>,
         xor: Vec<u8>,
     },
+    /// Add the matched flow to the named flowtable
+    /// (equivalent to nft's `flow add @<ft>` rule clause). The
+    /// kernel installs the flow into the named flowtable so
+    /// matching follow-on packets bypass the rule traversal.
+    /// See [`crate::netlink::nftables::Flowtable`].
+    FlowOffload {
+        /// Name of the flowtable. Must resolve to a flowtable in
+        /// the same owning table as this rule.
+        table: String,
+    },
 }
 
 /// Write a list of expressions into a rule's NFTA_RULE_EXPRESSIONS attribute.
@@ -209,6 +219,16 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
             let xor_nest = builder.nest_start(NFTA_BITWISE_XOR | 0x8000);
             builder.append_attr(NFTA_DATA_VALUE, xor);
             builder.nest_end(xor_nest);
+            builder.nest_end(data);
+        }
+        Expr::FlowOffload { table } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "flow_offload");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            // The flow_offload expression carries a single string
+            // attribute (NFTA_FLOWTABLE_NAME = 2) naming the
+            // flowtable. The kernel resolves the name within the
+            // rule's owning table.
+            builder.append_attr_str(NFTA_FLOWTABLE_NAME, table);
             builder.nest_end(data);
         }
     }

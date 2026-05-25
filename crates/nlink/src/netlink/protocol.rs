@@ -40,6 +40,21 @@ mod private {
     pub trait Sealed {}
 }
 
+/// Macro-only re-export of the private `Sealed` trait so the
+/// `#[genl_family]` attribute macro (`nlink_macros`) can emit
+/// the required `impl Sealed` for user-defined family marker
+/// structs.
+///
+/// **Do not implement directly.** The contract is "go through
+/// `#[genl_family]`"; opting out at this seam silently breaks the
+/// sealed-trait guarantee that downstream consumers rely on for
+/// `Connection::<P>::new_async()`'s `AsyncConstructible` bound.
+#[doc(hidden)]
+pub mod __macro_seal {
+    pub use super::construction::AsyncConstructible as AsyncConstructibleSeal;
+    pub use super::private::Sealed as ProtocolStateSeal;
+}
+
 /// Protocol state trait for typed connections.
 ///
 /// This trait is sealed and cannot be implemented outside this crate.
@@ -73,6 +88,56 @@ pub trait AsyncProtocolInit: ProtocolState {
     where
         Self: Sized;
 }
+
+/// Marker traits used to gate `Connection::<P>::new()` /
+/// `Connection::<P>::new_async()` so the constructor that **actually
+/// works** for each protocol is the only one that compiles.
+///
+/// Before this gate landed, `Connection::<Wireguard>::new()` compiled
+/// but produced a connection with `family_id = 0`; the first operation
+/// failed with a confusing kernel error. Now it's a compile error
+/// pointing the user at `new_async()`.
+///
+/// Both traits are sealed via the same `private::Sealed` supertrait
+/// that `ProtocolState` uses, so downstream code cannot opt a custom
+/// type in.
+pub mod construction {
+    use super::*;
+
+    /// Protocols whose connection can be constructed synchronously
+    /// (no GENL family-ID resolution needed). `Connection::<P>::new()`
+    /// is bounded `where P: SyncConstructible`.
+    pub trait SyncConstructible: ProtocolState {}
+
+    /// Protocols that require async GENL family-ID resolution at
+    /// construction time. `Connection::<P>::new_async()` is bounded
+    /// `where P: AsyncConstructible`.
+    pub trait AsyncConstructible: ProtocolState {}
+}
+
+// Non-GENL protocols — synchronously constructible. Each must also
+// match the existing per-type sealed `Sealed` constraint (i.e. live
+// in this crate).
+impl construction::SyncConstructible for Route {}
+impl construction::SyncConstructible for SockDiag {}
+impl construction::SyncConstructible for Generic {}
+impl construction::SyncConstructible for KobjectUevent {}
+impl construction::SyncConstructible for Connector {}
+impl construction::SyncConstructible for Netfilter {}
+impl construction::SyncConstructible for Xfrm {}
+impl construction::SyncConstructible for FibLookup {}
+impl construction::SyncConstructible for SELinux {}
+impl construction::SyncConstructible for Audit {}
+impl construction::SyncConstructible for Nftables {}
+
+// GENL protocols — must be constructed via `new_async()` so the
+// family ID is resolved before first use.
+impl construction::AsyncConstructible for Wireguard {}
+impl construction::AsyncConstructible for Macsec {}
+impl construction::AsyncConstructible for Mptcp {}
+impl construction::AsyncConstructible for Devlink {}
+impl construction::AsyncConstructible for Nl80211 {}
+impl construction::AsyncConstructible for Ethtool {}
 
 /// Route protocol state (RTNetlink).
 ///
@@ -291,15 +356,16 @@ impl ProtocolState for Mptcp {
 /// Devlink protocol state.
 ///
 /// Used for querying hardware device management via Generic Netlink.
-/// Contains the resolved devlink family ID.
+/// Contains the resolved devlink family ID + the multicast-group
+/// map parsed from `CTRL_CMD_GETFAMILY`.
 ///
 /// Construct with `Connection::<Devlink>::new_async().await?`, not `Connection::new()`.
 #[derive(Debug, Default)]
 pub struct Devlink {
     /// Resolved devlink GENL family ID.
     pub(crate) family_id: u16,
-    /// Multicast group ID for event notifications.
-    pub(crate) monitor_group_id: Option<u32>,
+    /// Multicast groups exposed by the family (name → kernel-assigned ID).
+    pub(crate) mcast_groups: ::std::collections::HashMap<String, u32>,
 }
 
 impl private::Sealed for Devlink {}
@@ -324,18 +390,17 @@ impl ProtocolState for Nftables {
 /// nl80211 protocol state.
 ///
 /// Used for WiFi configuration via Generic Netlink.
-/// Contains the resolved nl80211 family ID.
+/// Contains the resolved nl80211 family ID + the multicast-group
+/// map parsed from `CTRL_CMD_GETFAMILY` (`"scan"`, `"mlme"`,
+/// `"regulatory"`, `"config"`, …).
 ///
 /// Construct with `Connection::<Nl80211>::new_async().await?`, not `Connection::new()`.
 #[derive(Debug, Default)]
 pub struct Nl80211 {
     /// Resolved nl80211 GENL family ID.
     pub(crate) family_id: u16,
-    /// Multicast group IDs for event monitoring.
-    pub(crate) scan_group_id: Option<u32>,
-    pub(crate) mlme_group_id: Option<u32>,
-    pub(crate) regulatory_group_id: Option<u32>,
-    pub(crate) config_group_id: Option<u32>,
+    /// Multicast groups exposed by the family (name → kernel-assigned ID).
+    pub(crate) mcast_groups: ::std::collections::HashMap<String, u32>,
 }
 
 impl private::Sealed for Nl80211 {}
@@ -347,15 +412,15 @@ impl ProtocolState for Nl80211 {
 /// Ethtool protocol state.
 ///
 /// Used for querying and configuring network device settings via Generic Netlink.
-/// Contains the resolved ethtool family ID and monitor group ID.
+/// Contains the resolved ethtool family ID + the multicast-group map.
 ///
 /// Construct with `Connection::<Ethtool>::new_async().await?`, not `Connection::new()`.
 #[derive(Debug, Default)]
 pub struct Ethtool {
     /// Resolved ethtool GENL family ID.
     pub(crate) family_id: u16,
-    /// Monitor multicast group ID (for event notifications).
-    pub(crate) monitor_group_id: Option<u32>,
+    /// Multicast groups exposed by the family (name → kernel-assigned ID).
+    pub(crate) mcast_groups: ::std::collections::HashMap<String, u32>,
 }
 
 impl private::Sealed for Ethtool {}

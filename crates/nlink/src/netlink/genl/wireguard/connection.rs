@@ -17,7 +17,7 @@ use crate::netlink::{
     genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr},
     interface_ref::InterfaceRef,
     message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
-    protocol::{AsyncProtocolInit, ProtocolState, Route, Wireguard},
+    protocol::{AsyncProtocolInit, Route, Wireguard},
     socket::NetlinkSocket,
 };
 
@@ -29,27 +29,6 @@ impl AsyncProtocolInit for Wireguard {
 }
 
 impl Connection<Wireguard> {
-    /// Create a new WireGuard connection.
-    ///
-    /// This resolves the WireGuard GENL family ID during initialization.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use nlink::netlink::{Connection, Wireguard};
-    ///
-    /// let conn = Connection::<Wireguard>::new().await?;
-    /// let device = conn.get_device("wg0").await?;
-    /// ```
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "new_async"))]
-    pub async fn new_async() -> Result<Self> {
-        let socket = NetlinkSocket::new(Wireguard::PROTOCOL)?;
-        let family_id = resolve_wireguard_family(&socket).await?;
-
-        let state = Wireguard { family_id };
-        Ok(Self::from_parts(socket, state))
-    }
-
     /// Get the WireGuard family ID.
     pub fn family_id(&self) -> u16 {
         self.state().family_id
@@ -335,7 +314,7 @@ impl Connection<Wireguard> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                     continue;
                 }
@@ -369,7 +348,7 @@ impl Connection<Wireguard> {
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
                 if !err.is_ack() {
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
             }
         }
@@ -511,7 +490,7 @@ async fn resolve_wireguard_family(socket: &NetlinkSocket) -> Result<u16> {
                         name: WG_GENL_NAME.to_string(),
                     });
                 }
-                return Err(Error::from_errno(err.error));
+                return Err(err.into_error(payload));
             }
             continue;
         }

@@ -62,19 +62,25 @@ pub struct Connection<P: ProtocolState> {
 // Shared methods for protocol types that implement Default
 // ============================================================================
 
-impl<P: ProtocolState + Default> Connection<P> {
+impl<P> Connection<P>
+where
+    P: ProtocolState + Default + crate::netlink::protocol::construction::SyncConstructible,
+{
     /// Create a new connection for this protocol type.
     ///
-    /// This is available for protocols that implement `Default`, but should
-    /// only be used for sync protocol types (`Route`, `SockDiag`, `Generic`,
-    /// `Nftables`).
+    /// Bounded `where P: SyncConstructible` so the GENL protocol
+    /// markers (`Wireguard`, `Macsec`, `Mptcp`, `Ethtool`, `Nl80211`,
+    /// `Devlink`) are a **compile error** here — those families need
+    /// async family-ID resolution and must use `new_async().await`.
+    /// Sync-constructible markers are: `Route`, `SockDiag`, `Generic`,
+    /// `KobjectUevent`, `Connector`, `Netfilter`, `Xfrm`, `FibLookup`,
+    /// `SELinux`, `Audit`, `Nftables`.
     ///
-    /// # Important
-    ///
-    /// **Do not use this for GENL protocol types** (`Wireguard`, `Macsec`,
-    /// `Mptcp`, `Ethtool`, `Nl80211`, `Devlink`). While it compiles, the
-    /// connection will have an unresolved family ID (0) and operations will
-    /// fail. Use `Connection::<Wireguard>::new_async().await?` instead.
+    /// Before 0.16.0 this method took only `P: ProtocolState + Default`,
+    /// which let `Connection::<Wireguard>::new()` compile and return a
+    /// connection with `family_id = 0`; the first operation then failed
+    /// with a confusing kernel error. The new bound prevents that
+    /// class of bug at the type level.
     ///
     /// # Example
     ///
@@ -147,6 +153,53 @@ impl<P: ProtocolState + Default> Connection<P> {
 }
 
 // ============================================================================
+// Generic async constructor for GENL families
+// ============================================================================
+//
+// `new_async()` was hand-rolled per-family in 0.15 (one inherent
+// `impl Connection<Wireguard>::new_async()`, one for `Macsec`, etc.).
+// 0.16's `#[genl_family(...)]` macro emits the `AsyncProtocolInit`
+// impl that this generic constructor needs, so macro-defined
+// families plug into the canonical API automatically. The
+// hand-rolled per-family `new_async()` impls remain for backwards
+// compatibility (the inherent versions take priority over this
+// generic one when both apply).
+
+impl<P> Connection<P>
+where
+    P: super::protocol::AsyncProtocolInit
+        + super::protocol::construction::AsyncConstructible,
+{
+    /// Create a connection for a GENL family whose ID must be
+    /// resolved at construction time.
+    ///
+    /// Generic over any `P: AsyncConstructible + AsyncProtocolInit`
+    /// — the in-tree GENL family markers (`Wireguard`, `Macsec`,
+    /// `Mptcp`, `Devlink`, `Nl80211`, `Ethtool`) and every family
+    /// declared via `#[genl_family(name = ..., version = ...)]`
+    /// satisfy the bound.
+    ///
+    /// Bounded so that sync-only markers (`Route`, `Generic`,
+    /// `SockDiag`, `Netfilter`, etc.) are a **compile error** here
+    /// — those don't need async setup and should call
+    /// [`Self::new`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Wireguard};
+    ///
+    /// let wg = Connection::<Wireguard>::new_async().await?;
+    /// ```
+    #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>()))]
+    pub async fn new_async() -> Result<Self> {
+        let socket = NetlinkSocket::new(P::PROTOCOL)?;
+        let state = P::resolve_async(&socket).await?;
+        Ok(Self::from_parts(socket, state))
+    }
+}
+
+// ============================================================================
 // Shared methods for all protocol types
 // ============================================================================
 
@@ -194,6 +247,51 @@ impl<P: ProtocolState> Connection<P> {
     /// Get the configured timeout.
     pub fn get_timeout(&self) -> Option<Duration> {
         self.timeout
+    }
+
+    /// Enable kernel-side strict checking (`NETLINK_GET_STRICT_CHK`,
+    /// kernel 5.0+). When enabled, the kernel validates dump request
+    /// filters strictly and returns an error if they reference
+    /// unknown attributes — useful for catching client/kernel-version
+    /// mismatches early during development.
+    ///
+    /// Off by default for backwards compatibility with older
+    /// kernels. The setsockopt is silently a no-op on pre-5.0
+    /// kernels (returns `Ok(())` on `ENOPROTOOPT`), so calling
+    /// `enable_strict_checking(true)` unconditionally is safe.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::{Connection, Route};
+    /// let conn = Connection::<Route>::new()?;
+    /// conn.enable_strict_checking(true)?;
+    /// ```
+    pub fn enable_strict_checking(&self, on: bool) -> Result<()> {
+        self.socket.set_strict_checking(on)
+    }
+
+    /// Toggle extended-ack reception (`NETLINK_EXT_ACK`, kernel
+    /// 4.12+). **Enabled by default** during socket construction —
+    /// disabling is rarely useful in practice. Exposed for parity
+    /// with neli's API and for callers that explicitly want to
+    /// suppress the trailing TLVs in error responses.
+    ///
+    /// Silently a no-op on pre-4.12 kernels (returns `Ok(())` on
+    /// `ENOPROTOOPT`).
+    ///
+    /// See [`Error::Kernel::ext_ack`] for what these TLVs contain
+    /// once parsed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::{Connection, Route};
+    /// let conn = Connection::<Route>::new()?;
+    /// conn.set_ext_ack(false)?;  // disable; rarely useful
+    /// ```
+    pub fn set_ext_ack(&self, on: bool) -> Result<()> {
+        self.socket.set_ext_ack(on)
     }
 
     /// Wrap a future with the configured timeout.
@@ -300,42 +398,58 @@ impl<P: ProtocolState> Connection<P> {
 
         let mut responses = Vec::new();
 
-        loop {
-            let data = self.socket.recv_msg().await?;
-            let mut done = false;
+        // Per-batch frame buffer. When the `syscall_batch` feature
+        // is on we collect up to NL_BATCH_SIZE frames per syscall
+        // via recvmmsg(2); otherwise we fall back to per-frame
+        // recv_msg. The frame-processing loop below is identical
+        // either way — it just sees a 1-frame batch vs an N-frame
+        // batch.
+        #[cfg(feature = "syscall_batch")]
+        let mut batch: Vec<Vec<u8>> = Vec::with_capacity(crate::netlink::socket::NL_BATCH_SIZE);
 
-            for result in MessageIter::new(&data) {
-                let (header, payload) = result?;
+        'outer: loop {
+            #[cfg(feature = "syscall_batch")]
+            {
+                batch.clear();
+                self.socket
+                    .recv_batch(&mut batch, crate::netlink::socket::NL_BATCH_SIZE)
+                    .await?;
+            }
+            #[cfg(not(feature = "syscall_batch"))]
+            let batch = {
+                let data = self.socket.recv_msg().await?;
+                vec![data]
+            };
 
-                // Check sequence number
-                if header.nlmsg_seq != seq {
-                    continue;
-                }
+            for data in batch.iter() {
+                for result in MessageIter::new(data) {
+                    let (header, payload) = result?;
 
-                if header.is_error() {
-                    let err = NlMsgError::from_bytes(payload)?;
-                    if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                    // Check sequence number
+                    if header.nlmsg_seq != seq {
+                        continue;
+                    }
+
+                    if header.is_error() {
+                        let err = NlMsgError::from_bytes(payload)?;
+                        if !err.is_ack() {
+                            return Err(err.into_error(payload));
+                        }
+                    }
+
+                    if header.is_done() {
+                        break 'outer;
+                    }
+
+                    // Collect the full message (header + payload)
+                    let msg_len = header.nlmsg_len as usize;
+                    let msg_start = payload.as_ptr() as usize
+                        - data.as_ptr() as usize
+                        - std::mem::size_of::<NlMsgHdr>();
+                    if msg_start + msg_len <= data.len() {
+                        responses.push(data[msg_start..msg_start + msg_len].to_vec());
                     }
                 }
-
-                if header.is_done() {
-                    done = true;
-                    break;
-                }
-
-                // Collect the full message (header + payload)
-                let msg_len = header.nlmsg_len as usize;
-                let msg_start = payload.as_ptr() as usize
-                    - data.as_ptr() as usize
-                    - std::mem::size_of::<NlMsgHdr>();
-                if msg_start + msg_len <= data.len() {
-                    responses.push(data[msg_start..msg_start + msg_len].to_vec());
-                }
-            }
-
-            if done {
-                break;
             }
         }
 
@@ -355,7 +469,7 @@ impl<P: ProtocolState> Connection<P> {
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
                 if !err.is_ack() {
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
             }
         }
@@ -375,7 +489,7 @@ impl<P: ProtocolState> Connection<P> {
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
                 if !err.is_ack() {
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
                 return Ok(());
             }
@@ -644,9 +758,67 @@ impl Connection<Route> {
     ///     println!("{}: {}", link.ifindex(), link.name.as_deref().unwrap_or("?"));
     /// }
     /// ```
+    ///
+    /// **Scale note**: this eager variant collects the full kernel
+    /// response into a `Vec<LinkMessage>` before returning. For
+    /// hosts with thousands of interfaces (containers, VM hosts),
+    /// prefer [`Self::stream_links`] — same data, O(1) memory.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_links"))]
     pub async fn get_links(&self) -> Result<Vec<LinkMessage>> {
         self.dump_typed(NlMsgType::RTM_GETLINK).await
+    }
+
+    /// Stream a link dump frame-by-frame.
+    ///
+    /// O(1) memory in the number of links, vs `get_links` which
+    /// buffers the full response. See [`Self::dump_stream`] for
+    /// the full semantics. On hosts with thousands of interfaces
+    /// (containers, VM hosts), this is the cliff-fix.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use tokio_stream::StreamExt;
+    /// let mut s = conn.stream_links().await?;
+    /// while let Some(link) = s.next().await {
+    ///     let link = link?;
+    ///     // process one link with O(1) memory
+    /// }
+    /// ```
+    pub async fn stream_links(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, LinkMessage>> {
+        self.dump_stream::<LinkMessage>(NlMsgType::RTM_GETLINK).await
+    }
+
+    /// Stream a route dump frame-by-frame. See [`Self::stream_links`].
+    pub async fn stream_routes(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, RouteMessage>> {
+        self.dump_stream::<RouteMessage>(NlMsgType::RTM_GETROUTE)
+            .await
+    }
+
+    /// Stream a neighbor-table dump frame-by-frame. See
+    /// [`Self::stream_links`].
+    ///
+    /// Note: the kernel returns both unicast neighbors and the
+    /// bridge FDB entries together when AF_BRIDGE isn't filtered;
+    /// use the typed-config Connection (`stream_fdb` on
+    /// `Connection<Route>` when added in 0.17) for FDB-only.
+    pub async fn stream_neighbors(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, NeighborMessage>> {
+        self.dump_stream::<NeighborMessage>(NlMsgType::RTM_GETNEIGH)
+            .await
+    }
+
+    /// Stream an address dump frame-by-frame. See [`Self::stream_links`].
+    pub async fn stream_addresses(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, AddressMessage>> {
+        self.dump_stream::<AddressMessage>(NlMsgType::RTM_GETADDR)
+            .await
     }
 
     /// Get a network interface by name.
@@ -676,6 +848,118 @@ impl Connection<Route> {
     pub async fn get_link_by_index(&self, index: u32) -> Result<Option<LinkMessage>> {
         let links = self.get_links().await?;
         Ok(links.into_iter().find(|l| l.ifindex() == index))
+    }
+
+    /// Wait for an interface to reach the `IFF_UP` state.
+    ///
+    /// Polls the interface state with exponential backoff (starting
+    /// at 10ms, capped at 100ms) until `IFF_UP` is observed or
+    /// `timeout` elapses. The polling form is preferred over a
+    /// subscription-based wait because it keeps lifetime concerns
+    /// trivial — no multicast socket to manage, no event-stream
+    /// drop semantics to document.
+    ///
+    /// Returns `Err(Timeout)` on deadline. Returns
+    /// `Err(InterfaceNotFound)` if the interface is removed during
+    /// the wait.
+    ///
+    /// # Namespace safety
+    ///
+    /// Takes `impl Into<InterfaceRef>`. With a `Name` variant the
+    /// lookup goes via netlink (`get_link_by_name`), which queries
+    /// the connection's netns — namespace-correct even from a
+    /// process running in a different mount namespace.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::time::Duration;
+    /// use nlink::{Connection, Route};
+    ///
+    /// let conn = Connection::<Route>::new()?;
+    /// // Bring up the interface, then wait for the operstate to
+    /// // reflect it (kernel may take milliseconds).
+    /// conn.set_link_up_by_name("eth0").await?;
+    /// conn.wait_link_up("eth0", Duration::from_secs(5)).await?;
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "wait_link_up"))]
+    pub async fn wait_link_up(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        timeout: Duration,
+    ) -> Result<()> {
+        let iface = iface.into();
+        let label = match &iface {
+            InterfaceRef::Name(n) => n.clone(),
+            InterfaceRef::Index(i) => i.to_string(),
+        };
+        let deadline = std::time::Instant::now() + timeout;
+        let mut backoff = Duration::from_millis(10);
+        // Resolve once to ifindex so subsequent polls are
+        // namespace-correct + cheaper.
+        let ifindex = self.resolve_interface(&iface).await?;
+
+        loop {
+            let link = self
+                .get_link_by_index(ifindex)
+                .await?
+                .ok_or_else(|| Error::InterfaceNotFound {
+                    name: label.clone(),
+                })?;
+            if link.is_up() {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_millis(100));
+        }
+    }
+
+    /// Get the kernel-reported per-link statistics for the named or
+    /// indexed interface.
+    ///
+    /// Convenience wrapper around `get_link_by_*` + `LinkMessage::stats()`.
+    /// Returns `Err(InterfaceNotFound)` if no interface matches, and
+    /// `Err(InvalidMessage)` if the kernel response didn't include a
+    /// stats attribute (rare — most interfaces always report stats).
+    ///
+    /// # Namespace safety
+    ///
+    /// Takes `impl Into<InterfaceRef>`. With a `Name` variant, the
+    /// initial lookup reads from the namespace this connection is
+    /// bound to (via netlink, not `/sys/class/net/`) — so name
+    /// resolution is namespace-correct.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::{Connection, Route};
+    ///
+    /// let conn = Connection::<Route>::new()?;
+    /// let stats = conn.get_link_stats("eth0").await?;
+    /// println!("rx: {} bytes / {} packets", stats.rx_bytes, stats.rx_packets);
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_stats"))]
+    pub async fn get_link_stats(
+        &self,
+        iface: impl Into<InterfaceRef>,
+    ) -> Result<crate::netlink::messages::LinkStats> {
+        let iface = iface.into();
+        let label = match &iface {
+            InterfaceRef::Name(n) => n.clone(),
+            InterfaceRef::Index(i) => i.to_string(),
+        };
+        let link = self
+            .get_link_by_name(iface)
+            .await?
+            .ok_or_else(|| Error::InterfaceNotFound { name: label.clone() })?;
+        link.stats().copied().ok_or_else(|| {
+            Error::InvalidMessage(format!(
+                "interface {label} response did not include link-stats attribute"
+            ))
+        })
     }
 
     /// Resolve an interface reference to an index.
@@ -1269,6 +1553,55 @@ impl Connection<Route> {
             .into_iter()
             .filter(|f| f.ifindex() == ifindex)
             .collect())
+    }
+
+    /// Stream a qdisc dump frame-by-frame.
+    ///
+    /// O(1) memory in the number of qdiscs, vs `get_qdiscs` which
+    /// buffers the full response. See [`Self::stream_links`] for
+    /// the full semantics. Right answer on hosts with many TC-heavy
+    /// interfaces (BGP peers per-route TC, telecom DPDK fanout,
+    /// per-pod CNI plugins).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use tokio_stream::StreamExt;
+    /// let mut s = conn.stream_qdiscs().await?;
+    /// while let Some(q) = s.next().await {
+    ///     let q = q?;
+    ///     // process one qdisc with O(1) memory
+    /// }
+    /// ```
+    pub async fn stream_qdiscs(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
+        self.dump_stream::<TcMessage>(NlMsgType::RTM_GETQDISC).await
+    }
+
+    /// Stream a TC class dump frame-by-frame. See
+    /// [`Self::stream_qdiscs`].
+    pub async fn stream_classes(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
+        self.dump_stream::<TcMessage>(NlMsgType::RTM_GETTCLASS)
+            .await
+    }
+
+    /// Stream a TC filter dump frame-by-frame. See
+    /// [`Self::stream_qdiscs`].
+    ///
+    /// Note: the kernel returns filters for **all** interfaces
+    /// (matches the eager `get_filters` semantics). Filter
+    /// client-side via `.filter(|f| f.as_ref().map(|f|
+    /// f.ifindex() == my_index).unwrap_or(true))` if you only
+    /// care about one interface — there's no kernel-side
+    /// per-ifindex `RTM_GETTFILTER` dump filter.
+    pub async fn stream_filters(
+        &self,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
+        self.dump_stream::<TcMessage>(NlMsgType::RTM_GETTFILTER)
+            .await
     }
 
     /// Get TC filters for a specific interface, filtered by parent handle.
@@ -2003,7 +2336,7 @@ impl Connection<Generic> {
                             name: name.to_string(),
                         });
                     }
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
                 continue;
             }
@@ -2180,7 +2513,7 @@ impl Connection<Generic> {
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
                     if !err.is_ack() {
-                        return Err(Error::from_errno(err.error));
+                        return Err(err.into_error(payload));
                     }
                     continue;
                 }
@@ -2214,7 +2547,7 @@ impl Connection<Generic> {
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
                 if !err.is_ack() {
-                    return Err(Error::from_errno(err.error));
+                    return Err(err.into_error(payload));
                 }
             }
         }

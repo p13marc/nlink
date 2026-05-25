@@ -341,7 +341,7 @@ impl<'a> Batch<'a> {
                         if err.is_ack() {
                             results[idx] = Some(Ok(()));
                         } else {
-                            results[idx] = Some(Err(Error::from_errno(err.error)));
+                            results[idx] = Some(Err(err.into_error(payload)));
                         }
                         remaining -= 1;
                     }

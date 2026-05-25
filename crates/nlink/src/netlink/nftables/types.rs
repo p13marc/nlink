@@ -324,6 +324,115 @@ impl NatExpr {
 // Table (parsed from dump)
 // =============================================================================
 
+/// An nftables flowtable.
+///
+/// Per-table object that caches established conntrack flows, letting
+/// the kernel bypass the full nftables rule traversal for matching
+/// packets. On capable NICs the flow path can be hardware-offloaded
+/// via `NFT_FLOWTABLE_HW_OFFLOAD`.
+///
+/// Construct via [`Self::new`] + fluent setters; install via
+/// `Connection::<Nftables>::add_flowtable`. List via `get_flowtables`.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::nftables::{Flowtable, Family};
+///
+/// let ft = Flowtable::new(Family::Inet, "filter", "ft")
+///     .device("eth0")
+///     .device("eth1")
+///     .priority(0)
+///     .hw_offload(true);
+/// conn.add_flowtable(&ft).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct Flowtable {
+    /// Owning table family (typically `Inet`, `Ip`, `Ip6`).
+    pub family: Family,
+    /// Owning table name.
+    pub table: String,
+    /// Flowtable name (unique within the table).
+    pub name: String,
+    /// Device names to attach the ingress hook to. Empty = no
+    /// devices (the kernel accepts the add but the flowtable does
+    /// nothing until devices are added in a follow-up update).
+    pub devs: Vec<String>,
+    /// Hook priority. Default 0; `-300` for early ingress.
+    pub priority: i32,
+    /// Flags bitmap. Combine `NFT_FLOWTABLE_HW_OFFLOAD` and
+    /// `NFT_FLOWTABLE_COUNTER` from
+    /// [`crate::netlink::nftables`].
+    pub flags: u32,
+    /// Use-count reported by the kernel (read-only; populated by
+    /// `get_flowtables` parse, ignored on add).
+    pub use_count: u32,
+    /// Kernel-assigned handle (read-only; same as `use_count`).
+    pub handle: u64,
+}
+
+impl Flowtable {
+    /// New builder for a flowtable in the named table.
+    pub fn new(
+        family: Family,
+        table: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            family,
+            table: table.into(),
+            name: name.into(),
+            devs: Vec::new(),
+            priority: 0,
+            flags: 0,
+            use_count: 0,
+            handle: 0,
+        }
+    }
+
+    /// Attach the flowtable's ingress hook to a device. Call
+    /// multiple times to attach to several devices (e.g. both ends
+    /// of a bridge).
+    pub fn device(mut self, dev: impl Into<String>) -> Self {
+        self.devs.push(dev.into());
+        self
+    }
+
+    /// Set the ingress hook priority. Default is 0.
+    pub fn priority(mut self, p: i32) -> Self {
+        self.priority = p;
+        self
+    }
+
+    /// Request hardware offload (`NFT_FLOWTABLE_HW_OFFLOAD`).
+    ///
+    /// Requires a NIC with flow-table offload support (mlx5, hns3,
+    /// etc.) and a kernel built with `CONFIG_NF_FLOW_TABLE_HW`.
+    /// If the NIC doesn't support offload the kernel accepts the
+    /// add and silently falls back to software — there's no in-band
+    /// signal. Check `ethtool -k <dev> | grep hw-tc-offload` or
+    /// inspect per-flow counters to confirm offload engaged.
+    pub fn hw_offload(mut self, on: bool) -> Self {
+        if on {
+            self.flags |= super::NFT_FLOWTABLE_HW_OFFLOAD;
+        } else {
+            self.flags &= !super::NFT_FLOWTABLE_HW_OFFLOAD;
+        }
+        self
+    }
+
+    /// Request per-flow counter tracking
+    /// (`NFT_FLOWTABLE_COUNTER`). Adds overhead.
+    pub fn counter(mut self, on: bool) -> Self {
+        if on {
+            self.flags |= super::NFT_FLOWTABLE_COUNTER;
+        } else {
+            self.flags &= !super::NFT_FLOWTABLE_COUNTER;
+        }
+        self
+    }
+}
+
 /// An nftables table.
 #[derive(Debug, Clone)]
 pub struct Table {
@@ -438,6 +547,7 @@ pub struct Rule {
     pub(crate) family: Family,
     pub(crate) exprs: Vec<super::expr::Expr>,
     pub(crate) position: Option<u64>,
+    pub(crate) comment: Option<String>,
 }
 
 impl Rule {
@@ -449,6 +559,7 @@ impl Rule {
             family: Family::Inet,
             exprs: Vec::new(),
             position: None,
+            comment: None,
         }
     }
 
@@ -462,6 +573,26 @@ impl Rule {
     pub fn position(mut self, pos: u64) -> Self {
         self.position = Some(pos);
         self
+    }
+
+    /// Attach a comment to this rule. Encoded as
+    /// `NFTA_RULE_USERDATA` (libnftnl-compatible TLV); shows up
+    /// in `nft list ruleset` output as inline `comment "..."`.
+    ///
+    /// The declarative-config diff layer uses comments matching
+    /// `nlink:<key>` as the rule's reconciliation identity (Plan
+    /// 157b v2 — analogous to `LinkConfig::name`). Max 122 chars
+    /// for the user-supplied portion (128-byte libnftnl
+    /// `NFTNL_UDATA_COMMENT_MAXLEN` minus the `nlink:` prefix +
+    /// trailing NUL).
+    pub fn comment(mut self, comment: &str) -> Self {
+        self.comment = Some(comment.to_string());
+        self
+    }
+
+    /// Borrow the rule's comment, if any.
+    pub fn comment_ref(&self) -> Option<&str> {
+        self.comment.as_deref()
     }
 
     /// Match TCP destination port.
@@ -1059,6 +1190,7 @@ impl Rule {
 
 /// Rule info parsed from a dump.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RuleInfo {
     /// Table name.
     pub table: String,
@@ -1070,6 +1202,21 @@ pub struct RuleInfo {
     pub handle: u64,
     /// Position in chain.
     pub position: Option<u64>,
+    /// `nlink:<key>` comment extracted from `NFTA_RULE_USERDATA`,
+    /// if any. `Some(key)` when this rule was created by nlink
+    /// (and carries an `nlink:`-prefixed comment); `None` when
+    /// the rule has no comment or a foreign-prefixed one. Plan
+    /// 157b v2 — drives per-rule reconciliation identity.
+    pub comment: Option<String>,
+    /// Raw `NFTA_RULE_USERDATA` payload, preserved verbatim. Lets
+    /// callers round-trip foreign comments (set by `iptables-nft`,
+    /// `nft -f` users, or other tools) without dropping them, even
+    /// though nlink's diff doesn't manage them.
+    pub userdata_raw: Option<Vec<u8>>,
+    /// Raw `NFTA_RULE_EXPRESSIONS` payload, preserved for the
+    /// body-equivalence check in `NftablesDiff::diff` (Plan 157b
+    /// v2). Empty when the rule has no expressions (degenerate).
+    pub expression_bytes: Vec<u8>,
 }
 
 // =============================================================================

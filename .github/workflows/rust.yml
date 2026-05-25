@@ -141,6 +141,22 @@ jobs:
       - name: Run scripts/audit-example-features.sh
         run: bash scripts/audit-example-features.sh
 
+  # Audit script: every `.rs` file under crates/nlink/examples/
+  # MUST be registered as a [[example]] entry in Cargo.toml.
+  # Closes the gap surfaced by Plan 160: cargo doesn't auto-
+  # discover examples in subdirectories, so unregistered files
+  # bit-rot silently against API changes. Known orphans are
+  # exempted via scripts/audit-example-registration.allowlist
+  # (catalogued in plans/160-example-registry-audit.md);
+  # NEW unregistered files fail this job. Pure bash; ~3s.
+  audit-example-registration:
+    name: audit example registration (every .rs in examples/ visible to cargo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scripts/audit-example-registration.sh
+        run: bash scripts/audit-example-registration.sh
+
   # No more `|| true` suppression. Plan 144 cleaned up the
   # pre-existing dead deps in bins/{ss,bridge}; if a NEW unused
   # dep lands, fail loudly so the contributor cleans up before merge.

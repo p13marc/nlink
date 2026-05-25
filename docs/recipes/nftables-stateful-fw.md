@@ -301,6 +301,64 @@ The asymmetric ping result is the firewall doing its job: `lan0` is
 trusted (`match_iif("lan0")` rule), `eth0` is not, so only return
 traffic from a flow already in conntrack survives the forward chain.
 
+## Per-flow counters for offloaded flows
+
+When you create a flowtable with `Flowtable::counter(true)` (the
+`flags counter` syntax in `nft list ruleset`), the offload fastpath
+keeps each offloaded flow's byte/packet counters in sync with its
+underlying conntrack entry. **The counters don't live in any
+nftables message** — `NFT_MSG_GETFLOWTABLE` returns only the
+flowtable's configuration (hooks, devices, flags), not per-flow
+state. The counters are conntrack data, surfaced via the standard
+ctnetlink dump:
+
+```rust,no_run
+use nlink::{Connection, Netfilter};
+use nlink::netlink::netfilter::ConntrackStatus;
+use tokio_stream::StreamExt;
+
+# async fn run() -> nlink::Result<()> {
+let conn = Connection::<Netfilter>::new()?;
+let mut stream = conn.stream_conntrack(libc::AF_INET as u8).await?;
+while let Some(entry) = stream.next().await {
+    let entry = entry?;
+    let Some(status) = entry.status else { continue };
+
+    // IPS_OFFLOAD (sw fastpath) or IPS_HW_OFFLOAD (NIC offload).
+    if !status.contains(ConntrackStatus::OFFLOAD)
+        && !status.contains(ConntrackStatus::HW_OFFLOAD)
+    {
+        continue;
+    }
+
+    if let Some(c) = &entry.counters_orig {
+        tracing::info!(
+            packets = c.packets,
+            bytes = c.bytes,
+            "offloaded flow (orig dir)",
+        );
+    }
+}
+# Ok(())
+# }
+```
+
+This is what `conntrack -L | grep OFFLOAD` does. The status bits
+to filter on:
+
+- `ConntrackStatus::OFFLOAD` (kernel `IPS_OFFLOAD_BIT = 14`) —
+  software fastpath offload (the flow bypasses the conntrack
+  slowpath via the flowtable hook).
+- `ConntrackStatus::HW_OFFLOAD` (kernel `IPS_HW_OFFLOAD_BIT = 15`)
+  — hardware offload (the NIC handles the flow entirely; counters
+  are synced from the NIC driver).
+
+The original Plan 150 §9.1 sketched a `get_flowtable_counters`
+method, but research against `include/uapi/linux/netfilter/nf_tables.h`
+confirmed nftables doesn't carry the per-flow data — closing
+this as a non-API change and pointing here is the correct shape
+([Plan 150 §9.1 closeout](../../plans/150-0.16-nftables-flowtable-plan.md#91-flowtable-counter-introspection--closed-without-new-api-surface)).
+
 ## Caveats
 
 - **Required kernel modules.** The first rule that matches conntrack

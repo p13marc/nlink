@@ -4,7 +4,1237 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-05-25
+
+> See [`docs/migration_guide/0.15.1-to-0.16.0.md`](docs/migration_guide/0.15.1-to-0.16.0.md)
+> for the full upgrade walkthrough (breaking changes, behavior
+> changes, and adoption guide for new features).
+
 ### Added
+
+- **`events_with_resync` + `ResyncStream` re-exported at the
+  crate root** so callers can write
+  `use nlink::{events_with_resync, ResyncStream};` to match the
+  existing pattern (`ResyncedEvent` / `ResyncMarker` /
+  `DumpStream` already lived at the crate root).
+
+- **`events_with_resync(stream, snapshot_fn) -> ResyncStream<...>`
+  (Plan 151 closeout)** — pre-baked `Stream` wrapper that turns
+  any `Stream<Item = Result<T>>` into a `Stream<Item =
+  Result<ResyncedEvent<T>>>`. On `ENOBUFS` it transparently runs
+  the caller-supplied snapshot future, emits `Marker(ResyncStart)`,
+  replays every snapshot frame as `Resynced(T)`, emits
+  `Marker(ResyncEnd)`, and returns to forwarding live events.
+  Non-ENOBUFS errors fuse the stream. Hand-rolled `poll_next`
+  state machine — no `async_stream` dependency. 6 unit tests
+  cover pass-through, replay, empty-snapshot markers, error
+  fusing, snapshot failure, multiple consecutive recoveries.
+
+  Replaces the documented hand-rolled loop pattern in
+  `docs/recipes/multi-namespace-events.md` — that pattern still
+  works (and is still recommended when you want full control of
+  the snapshot lifecycle), but the wrapper saves boilerplate for
+  the common case. Closes Plan 151.
+
+- **20 root-gated integration tests across 6 new files
+  (Plan 166 closeout — pulled into 0.16)**:
+  `tests/integration/ergonomics.rs` (Plan 148 — 3 tests),
+  `streaming.rs` (Plan 149 — 2 tests),
+  `flowtable.rs` (Plan 150 — 2 tests),
+  `nftables_reconcile.rs` (Plan 157 — 7 tests),
+  `syscall_batch.rs` (Plan 158 — 1 test),
+  `pool.rs` (Plan 159 + Plan 162 guard — 5 tests). All gated
+  with `nlink::require_root!()` + `nlink::require_modules!()`
+  so they ship in 0.16 and early-exit cleanly when run as a
+  regular user; runs under the Plan 140 privileged-CI workflow
+  already in tree since 0.15.0
+  (`.github/workflows/integration-tests.yml`) — activates the
+  moment 0.16 merges to master.
+  Hardware-only scenarios (XFRM offload, devlink rate,
+  net_shaper caps round-trip) explicitly out of scope.
+
+- **Plan 150 §9.1 formally closed — flowtable per-flow counters
+  via the existing `stream_conntrack` API** (no new code; the
+  original design's kernel-UAPI premise was wrong). Research
+  against `include/uapi/linux/netfilter/nf_tables.h` confirmed
+  `NFT_MSG_GETFLOWTABLE` returns only the flowtable's
+  configuration (hooks, devices, flags) — there is no per-flow
+  tuple or counter attribute. Per-flow counters live in the
+  underlying conntrack entries (kept in sync by the offload
+  fastpath when `flags counter` is set), surfaced via
+  `CTA_COUNTERS_ORIG` / `_REPLY` on the standard
+  `IPCTNL_MSG_CT_GET` dump. The `IPS_OFFLOAD_BIT` /
+  `IPS_HW_OFFLOAD_BIT` status bits identify which entries were
+  flowtable-offloaded.
+
+  No new API needed — Plan 149's `Connection::<Netfilter>::stream_conntrack`
+  + `ConntrackStatus::OFFLOAD` / `::HW_OFFLOAD` + the existing
+  `ConntrackEntry::counters_orig` / `counters_reply` fields
+  already cover the use case. `docs/recipes/nftables-stateful-fw.md`
+  gains a new "Per-flow counters for offloaded flows" section
+  documenting the pattern. See
+  [Plan 150 §9.1 closeout](plans/150-0.16-nftables-flowtable-plan.md#91-flowtable-counter-introspection--closed-without-new-api-surface)
+  for the kernel-source-cited rationale.
+
+  Closes Plan 150.
+
+- **Per-rule USERDATA-keyed reconciliation for `NftablesConfig`**
+  (Plan 157b v2 — closes Plan 157 §4.3 with a different design
+  than the original).
+
+  `DeclaredRule::handle_key` now does real work: it's encoded as
+  `NFTA_RULE_USERDATA` (libnftnl-compatible TLV — shows up as
+  `comment "nlink:<key>"` in `nft list ruleset` output) on apply,
+  parsed back on dump, and used as the per-rule identity field
+  for the diff. Matches the existing `NetworkConfig` per-object
+  reconciliation pattern (where each link/route/address is
+  individually diffable by name/destination).
+
+  ```rust
+  let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
+      t.chain("input", |c| c.hook(Hook::Input).policy(Policy::Drop))
+          .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(22).accept())
+          .rule_keyed("input", "icmp-allow", |r| r.match_l4proto(1 /* IPPROTO_ICMP */).accept())
+  });
+
+  cfg.diff(&conn).await?.apply(&conn).await?;     // first time: 2 adds
+  cfg.diff(&conn).await?.apply(&conn).await?;     // re-apply: 0 ops (idempotent)
+
+  // Change one rule's body, keep the key.
+  let updated = NftablesConfig::new().table("filter", Family::Inet, |t| {
+      t.chain("input", |c| c.hook(Hook::Input).policy(Policy::Drop))
+          .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(2222).accept())
+          .rule_keyed("input", "icmp-allow", |r| r.match_l4proto(1 /* IPPROTO_ICMP */).accept())
+  });
+  updated.diff(&conn).await?.apply(&conn).await?; // 1 op (replace_rule by handle)
+  ```
+
+  Diff algorithm:
+  - Declared keyed rule with kernel-side `nlink:<key>` match
+    → compare expression bytes; differ → `rules_to_replace`
+    (in-place atomic update via `NFT_MSG_NEWRULE + NLM_F_REPLACE
+    + handle`); same → no-op.
+  - Declared keyed rule with no kernel match → `rules_to_add`.
+  - Kernel rule with `nlink:<key>` comment NOT in declared →
+    `rules_to_delete` (it's ours; it shouldn't be there).
+  - Kernel rule without an `nlink:` prefix → left alone (foreign
+    rule from `iptables-nft`, hand-edited via `nft -f`, etc.).
+  - Declared rule without `handle_key` → always-add + `tracing::warn`
+    (anonymous; no idempotency — pathological, same as a
+    `LinkConfig` without a name).
+
+  **Why this design (research-validated):** the original Plan
+  157 §4.3 called for typed-Match canonicalization + reverse-
+  lowering of kernel-dumped expressions. Research turned up
+  that no production tool implements this — kube-proxy's
+  nftables mode (KEP-3866, GA in K8s 1.33) uses chain-as-unit
+  regeneration, Google's `nftables` Go library uses USERDATA
+  comment-tagging, libnftnl has no equivalence API. The
+  USERDATA-tagging approach is the documented production
+  pattern, robust against `NFTA_RULE_COMPAT` and future kernel
+  attribute additions, and aligns with `NetworkConfig`'s
+  per-object identity model. See
+  [`plans/157b-rule-reconciliation-design.md`](plans/157b-rule-reconciliation-design.md)
+  for the full design rationale.
+
+  New API surface:
+  - `Rule::comment(comment: &str)` — attach a comment that
+    round-trips through `NFTA_RULE_USERDATA`.
+  - `Rule::comment_ref()` — read it back.
+  - `Transaction::replace_rule(rule, handle)` — emit
+    `NFT_MSG_NEWRULE | NLM_F_REPLACE | NFTA_RULE_HANDLE` inside
+    the atomic batch.
+  - `RuleInfo` gains `comment: Option<String>` (parsed nlink-key,
+    if any), `userdata_raw: Option<Vec<u8>>` (preserves foreign
+    comments), `expression_bytes: Vec<u8>` (raw payload for the
+    body-equivalence check).
+  - `NftablesDiff::rules_to_replace: Vec<(table, family, chain,
+    handle, declared)>` — populated by the new diff branch.
+  - `nftables::userdata` module (crate-private) ships the TLV
+    encode/decode helpers; 8 unit tests cover round-trip,
+    over-long key rejection, foreign-prefix skip, unknown-TLV
+    skip, malformed input.
+
+  Implementation:
+  - `crates/nlink/src/netlink/nftables/userdata.rs` — new module.
+  - `crates/nlink/src/netlink/nftables/types.rs` — `Rule.comment`
+    + `RuleInfo` field additions.
+  - `crates/nlink/src/netlink/nftables/connection.rs` — wire
+    USERDATA into `Connection::add_rule` + `Transaction::add_rule`
+    + new `Transaction::replace_rule`; extend `parse_rule` to
+    extract `NFTA_RULE_USERDATA` + `NFTA_RULE_EXPRESSIONS`.
+  - `crates/nlink/src/netlink/nftables/config/diff.rs` — replace
+    the "always re-add" stub with per-rule identity diff.
+  - `crates/nlink/src/netlink/nftables/config/apply.rs` — handle
+    `rules_to_replace` in the atomic batch; auto-wire
+    `handle_key` → `body.comment` at apply boundary.
+
+  Test count: 960 lib tests (was 953 + 7 new — 3 wire-roundtrip,
+  4 diff). End-to-end wire format validated via parse-back round
+  trip; idempotent-reapply + replace + cascade-delete scenarios
+  shipped via Plan 166 (`tests/integration/nftables_reconcile.rs`,
+  7 root-gated scenarios) and run under the Plan 140
+  privileged-CI workflow.
+
+- **`NftablesDiff::apply_reconcile` + declarative-config recipe**
+  (Plan 157 §4.5 + §6). Bounded retry-on-conflict variant of
+  `apply` for concurrent-mutator scenarios (e.g. operator pod +
+  `systemd-resolved` racing on `nft -f`):
+
+  ```rust
+  use nlink::netlink::nftables::config::ReconcileOptions;
+  use std::time::Duration;
+
+  let diff = cfg.diff(&conn).await?;
+  let report = diff
+      .apply_reconcile(&conn, ReconcileOptions::default())
+      .await?;
+  if report.attempts > 1 {
+      tracing::warn!(retries = report.attempts - 1, "transient conflict");
+  }
+  ```
+
+  Default options: 3 retries, 100ms initial backoff (exponential
+  to `backoff × 2^10`). Predicate is
+  `Error::is_busy() || Error::is_try_again()`; non-transient
+  errors surface immediately. Plus a new
+  [`docs/recipes/nftables-declarative-config.md`](docs/recipes/nftables-declarative-config.md)
+  walking through the `diff + apply + reconcile` pattern,
+  including the documented "flush before reapply" workaround for
+  the rule-identity caveat.
+
+  **Plan 157 rule canonicalization (§4.3) deferred to 0.17** —
+  needs a refactor of the `Rule` type. Current `Rule` stores
+  `Vec<Expr>` already-lowered; Plan §4.3's canonicalization
+  design requires sorting at the typed `Vec<Match>` layer
+  *before* lowering. The match-vs-expression layering is the
+  prerequisite, and it's a substantial enough change to warrant
+  its own focused pass.
+
+- **Conntrack + nft-rules streaming dump** (Plan 149 closeout —
+  closes Plan 149). `Connection<Netfilter>::stream_conntrack` /
+  `stream_conntrack_v4` / `stream_conntrack_v6` and
+  `Connection<Nftables>::stream_rules(table, family)` return
+  `DumpStream` for O(1)-memory iteration. The use case that
+  motivated the streaming-dump foundation in the first place:
+  busy NAT gateways with millions of conntrack entries, CDN
+  edges with thousands of per-tenant nft rules.
+
+  ```rust
+  use nlink::netlink::{Connection, Netfilter};
+  use tokio_stream::StreamExt;
+
+  let conn = Connection::<Netfilter>::new()?;
+  let mut stream = conn.stream_conntrack(libc::AF_INET as u8).await?;
+  while let Some(entry) = stream.next().await {
+      let entry = entry?;
+      // ... process one entry, bounded memory
+  }
+  ```
+
+  Required a small extension to the `DumpStream` foundation:
+  new `Connection::dump_stream_with_body<T>(msg_type, body: &[u8])`
+  bypasses `T::write_dump_header` so callers can pass a
+  runtime-parameterized body — conntrack needs `nfgenmsg.family`
+  (varies v4/v6/AF_UNSPEC), nft-rules needs `nfgenmsg + NFTA_RULE_TABLE`
+  filter attribute. The existing `dump_stream` is unchanged and
+  forwards through the same internal `send_with_body_bytes`
+  helper.
+
+  Plus `FromNetlink` impls on `ConntrackEntry` + `RuleInfo`
+  delegating to the existing `parse_conntrack_body` and
+  `parse_rule` (one parser per kind shared with the eager /
+  multicast-event paths). 5 new unit tests (942 lib tests
+  total). End-to-end validated on this kernel — conntrack
+  stream correctly delivered EPERM through the stream item
+  channel (same wire-shape as the eager `get_conntrack` would
+  produce).
+
+- **XFRM streaming dump** (Plan 149 follow-up).
+  `Connection<Xfrm>::stream_sas` and `stream_sps` return
+  `DumpStream<'_, Xfrm, SecurityAssociation>` /
+  `DumpStream<'_, Xfrm, SecurityPolicy>` — O(1)-memory iteration
+  preferred over the eager `get_security_associations` /
+  `get_security_policies` on hosts running scale-out IPsec
+  (cloud gateways, telco aggregation routers with thousands of
+  active SAs).
+
+  ```rust
+  use nlink::netlink::{Connection, Xfrm};
+  use tokio_stream::StreamExt;
+
+  let conn = Connection::<Xfrm>::new()?;
+  let mut stream = conn.stream_sas().await?;
+  while let Some(sa) = stream.next().await {
+      let sa = sa?;
+      tracing::info!(spi = %format!("{:x}", sa.spi), dst = ?sa.dst_addr, "SA");
+  }
+  ```
+
+  Internally: refactored the existing `parse_sa_msg` /
+  `parse_policy_msg` into payload-only `parse_sa_payload` /
+  `parse_sp_payload` helpers (the nlmsghdr-stripped form
+  `DumpStream` needs), then implemented `FromNetlink` for
+  `SecurityAssociation` + `SecurityPolicy` against those
+  helpers. `write_dump_header` pushes the kernel's required
+  `xfrm_usersa_info` / `xfrm_userpolicy_info` body prefix
+  zeroed = "match all." No public API churn — the existing
+  eager methods keep working unchanged. 6 new unit tests
+  (937 lib tests total).
+
+  Conntrack + nft-rules streaming still deferred — they need
+  the dump-stream API to learn how to pass a body prefix
+  parameterized by caller (conntrack needs nfgenmsg.family).
+
+- **`net_shaper` Generic Netlink family** (Plan 153 §4.3 — closes
+  Plan 153). TX hardware shaping (per-NIC, per-queue, or
+  intermediate-node bandwidth/burst/priority/weight) via the
+  kernel-6.13 `net-shaper` family. Surface:
+
+  ```rust
+  use nlink::netlink::{
+      Connection,
+      genl::net_shaper::{
+          NetShaper, NetShaperHandle, NetShaperMetric, NetShaperScope, NetShaperSetRequest,
+      },
+  };
+
+  let conn = Connection::<NetShaper>::new_async().await?;
+
+  // Always check caps before set — drivers vary widely.
+  let caps = conn.get_caps(ifindex, NetShaperScope::Queue).await?;
+  if caps.support_bw_max && caps.support_burst {
+      conn.set_shaper(
+          NetShaperSetRequest::new(ifindex, NetShaperHandle::queue(0))
+              .metric(NetShaperMetric::Bps)
+              .bw_max(1_000_000_000)
+              .burst(1 << 16),
+      ).await?;
+  }
+  ```
+
+  Connection methods: `get_shaper` / `dump_shapers` /
+  `set_shaper` / `del_shaper` / `get_caps` / `dump_caps`. The
+  `group` command (NET_SHAPER_CMD_GROUP — hierarchical
+  reparenting) is deferred: it needs `Vec<NetlinkAttrs>` support
+  in the macro stack which doesn't ship yet (Plan 154
+  follow-up).
+
+  **Second in-tree dogfood of `nlink-macros`** (after DPLL — Plan
+  156). The full family — 5 commands, 10 outer attrs, 10 caps
+  attrs, 2 handle attrs, 2 enums — declares in ~200 lines of
+  macro-derived Rust. The one hand-written piece is
+  `NetShaperCapsReply::from_bytes`, parsing the kernel's
+  presence-flag attributes (`NET_SHAPER_A_CAPS_SUPPORT_*`) into
+  `bool` fields — the macros don't yet model zero-payload flag
+  attributes. 15 new unit tests; 931 lib tests pass total. End-
+  to-end validated on kernel 6.13+ (kernel correctly parses our
+  requests, returns EOPNOTSUPP on loopback as expected). Recipe
+  at [`docs/recipes/tx-hw-shaping.md`](docs/recipes/tx-hw-shaping.md);
+  runnable example at
+  [`crates/nlink/examples/genl/net_shaper.rs`](crates/nlink/examples/genl/net_shaper.rs).
+
+- **DPLL multicast monitor + shared GENL group-resolution infra**
+  (Plan 156 Phase 5 — closes Plan 156). The `Connection<Dpll>`
+  API now exposes a typed push-based event stream:
+
+  ```rust
+  use nlink::netlink::{Connection, genl::dpll::{Dpll, DpllEvent}};
+  use tokio_stream::StreamExt;
+
+  let mut conn = Connection::<Dpll>::new_async().await?;
+  conn.subscribe_monitor()?;            // resolves "monitor" group → kernel ID
+  let mut events = conn.events();
+  while let Some(evt) = events.next().await {
+      match evt? {
+          DpllEvent::DeviceChanged(dev) => println!("device {} → {:?}", dev.id, dev.lock_status),
+          DpllEvent::PinChanged(pin)    => println!("pin {} → {:?}", pin.id, pin.state),
+          DpllEvent::DeviceDeleted { id } | DpllEvent::PinDeleted { id } => {
+              println!("removed: {id}");
+          }
+          _ => {}
+      }
+  }
+  ```
+
+  Sub-millisecond latency on lock-status changes — supersedes the
+  2-second polling pattern previously documented in the recipe
+  (the polling shape stays valid for cross-kernel-version
+  compatibility).
+
+  ### Shared infrastructure
+
+  The work needed new infra that's reusable by every GENL family:
+
+  - **`__rt::resolve_genl_family_with_groups(socket, name)`** —
+    extends the existing family resolver to also parse
+    `CTRL_ATTR_MCAST_GROUPS` from the `CTRL_CMD_GETFAMILY`
+    response, returning `(family_id, HashMap<String, u32>)`. One
+    additional kernel round-trip — none. The old
+    `resolve_genl_family` (id-only) is kept for back-compat.
+  - **`GenlFamily::mcast_group(name) -> Option<u32>`** new trait
+    method (default-impl returns `None`) — hand-written families
+    that don't carry a group map keep working unchanged.
+  - **`#[genl_family]` macro** now emits a `mcast_groups: HashMap<String, u32>`
+    field on every macro-generated marker struct + populates it
+    at construction time + overrides `mcast_group()` with a real
+    HashMap lookup.
+  - **`Connection<F: GenlFamily>::subscribe_group(name)`** generic
+    helper — looks up the named group via the family marker and
+    calls `socket.add_membership(...)`. Returns
+    `Error::FamilyNotFound { name: "<family>::<group>" }` when
+    the kernel doesn't ship the group.
+  - **`Connection<Dpll>::subscribe_monitor()`** family-specific
+    convenience wrapping `subscribe_group("monitor")`.
+  - **`DpllEvent`** enum (6 variants: device/pin × create/delete/change)
+    + parser dispatching on the GENL `cmd` byte.
+  - **`impl EventSource for Dpll`** wires `Connection::events()` /
+    `into_events()` to yield `DpllEvent` items (matches the existing
+    Netfilter/SELinux/Devlink/Nl80211/Ethtool pattern).
+
+  5 new unit tests cover device-change parsing, device-delete
+  ID-only extraction, pin-change parsing, non-notification command
+  rejection, and truncated-payload rejection. 880 lib tests pass
+  (was 875 + 5). Clippy clean across `--all-features`.
+
+  ### Follow-up: existing families now use the shared infra
+
+  Devlink, Nl80211, and Ethtool previously hand-rolled their own
+  per-family multicast-group resolution in `resolve_*_family()`
+  helpers (each ~100 lines of duplicated
+  `CTRL_ATTR_MCAST_GROUPS`-parsing). All three now route through
+  `__rt::resolve_genl_family_with_groups` and implement
+  `GenlFamily` (with a `mcast_group(name) -> Option<u32>` lookup
+  into the parsed map). **Net −254 lines** of duplicated wire
+  parsing across the three connection.rs files. The bespoke
+  `Connection::<F>::subscribe()` methods are preserved as thin
+  wrappers over the generic `subscribe_group(name)`, so calling
+  code is unaffected. The `Ethtool::monitor_group_id()` accessor
+  now delegates to the map lookup. No API change.
+
+- **DPLL Generic Netlink family** (Plan 156, Phases 1-4 + 6
+  partial) — the kernel's clock-synchronization family (SyncE,
+  PTP, GNSS-disciplined oscillators) is now a first-class
+  `Connection<Dpll>` API. **First in-tree user of `nlink-macros`**
+  — every type in `nlink::netlink::genl::dpll::*` is declared
+  via the macro stack: ~430 lines of declarative Rust for the
+  full family (12 commands, 14 device attrs, 31 pin attrs, 8
+  value enums, 1 bitflags newtype, 2 nested attribute groups,
+  3 message structs each for device + pin sides). Compare with
+  the hand-written `wireguard` / `macsec` / `devlink` modules
+  in the same `genl/` directory: 600+ lines each for comparable
+  surface.
+
+  Public surface:
+
+  ```rust
+  use nlink::netlink::{genl::dpll::{Dpll, DpllMode}, Connection};
+  use tokio_stream::StreamExt;
+
+  let conn = Connection::<Dpll>::new_async().await?;
+  let mut devices = conn.dump_devices().await?;
+  while let Some(dev) = devices.next().await {
+      let dev = dev?;
+      println!("device {}: {:?}", dev.id, dev.lock_status);
+  }
+  conn.set_device_mode(0, DpllMode::Automatic).await?;
+  conn.set_pin_priority(pin_id, 0).await?;
+  ```
+
+  Version-gated kernel fields surface as `Option<…>`:
+  - kernel 6.10+: `lock_status_error` + `clock_quality_level`
+  - kernel 6.11+: pin `measured_frequency` + `phase_adjust_gran`
+  - kernel 6.12+: device `phase_offset_monitor` +
+    `frequency_monitor` + `phase_offset_avg_factor`
+
+  Scaling helpers apply the kernel's dividers transparently:
+  `DpllDeviceReply::temp_celsius()`,
+  `DpllPinReply::phase_offset_ns()`,
+  `DpllPinReply::measured_frequency_hz()`. Raw fields stay
+  accessible for high-resolution callers.
+
+  Recipe: [`docs/recipes/dpll-monitor.md`](docs/recipes/dpll-monitor.md).
+  Runnable example:
+  [`crates/nlink/examples/genl/dpll.rs`](crates/nlink/examples/genl/dpll.rs).
+
+  **Multicast monitor (Phase 5) deferred** — the
+  `DPLL_CMD_*_CHANGE_NTF` push-notification path needs new
+  GENL multicast-group-ID resolution infrastructure that didn't
+  fit this commit. Polling pattern in the recipe is the 0.16
+  shape; push semantics land in a follow-up.
+
+- **`#[derive(NetlinkAttrs)]` for nested attribute groups + the
+  `nested` field hint** (Plan 154 Phase 8.5 — closes out the
+  Phase 8 macro-extension batch). The final downstream-unblocker
+  piece. Nested attribute groups (kernel encodes a sub-struct as
+  the contents of a single `NLA_F_NESTED` attribute) now declare
+  via two coordinated derives:
+
+  ```rust
+  #[derive(NetlinkAttrs, Debug, Default)]
+  pub struct ParentDeviceBlock {
+      #[genl_attr(1u16)] pub device_id: u32,
+      #[genl_attr(2u16)] pub label: String,
+  }
+
+  #[derive(GenlMessage, Debug, Default)]
+  #[genl_message(cmd = DpllCmd::PinGet)]
+  pub struct DpllPinReply {
+      #[genl_attr(DpllPinAttr::Id)] pub id: u32,
+      #[genl_attr(DpllPinAttr::ParentDevice, nested)]
+      pub parent_device: Option<ParentDeviceBlock>,
+  }
+  ```
+
+  - `#[derive(NetlinkAttrs)]` emits `impl NetlinkAttrs for T {
+    write_attrs, read_attrs }` — same field-type-mapping table as
+    `GenlMessage` (primitives + `Option<T>` + `Vec<u8>` +
+    `Vec<GenlEnum>` + bitflags + `Option<GenlEnum>`), minus the
+    `CMD` const.
+  - `#[genl_attr(MyAttr::Foo, nested)]` on a `GenlMessage` field
+    routes through the nested type's `write_attrs` / `read_attrs`,
+    wrapping the output in an `NLA_F_NESTED` attribute on the wire.
+  - Like `Option<MyEnum>`, the nested field must be wrapped in
+    `Option<T>` (kernel either emits the group or doesn't; no
+    sensible Default).
+
+  With this, **Plan 156 (DPLL) is fully unblocked** — every DPLL
+  field shape now expressible via the macros. Plan 153.3
+  (`net_shaper`) is similarly clear. Phase 8 complete.
+
+  3 new tests: round-trip a nested group, missing-attr → None,
+  on-wire `NLA_F_NESTED` flag check.
+
+- **`bitflags`-newtype field support in `#[derive(GenlMessage)]`**
+  (Plan 154 Phase 8.4). Bitmask fields (DPLL `pin_capabilities`,
+  devlink port flags, etc.) now declare cleanly via the existing
+  `bitflags::bitflags!` macro:
+
+  ```rust
+  bitflags::bitflags! {
+      pub struct DpllPinCapabilities: u32 {
+          const DIRECTION_CAN_CHANGE = 1;
+          const PRIORITY_CAN_CHANGE  = 2;
+          const STATE_CAN_CHANGE     = 4;
+      }
+  }
+
+  #[derive(GenlMessage, Debug, Clone)]
+  #[genl_message(cmd = DpllCmd::PinGet)]
+  pub struct DpllPinReply {
+      #[genl_attr(DpllPinAttr::Id)] pub id: u32,
+      #[genl_attr(DpllPinAttr::Capabilities, bitflags = "u32")]
+      pub caps: DpllPinCapabilities,
+  }
+  ```
+
+  Emit writes `.bits()` directly through `emit_uN_attr`. Parse
+  uses `Type::from_bits_retain(raw)` so unknown kernel-side bits
+  are preserved verbatim — a newer kernel emitting flags this
+  binary doesn't recognize round-trips through `parse → emit`
+  unchanged instead of silently dropping bits.
+
+  No `Option<>` wrapper needed (unlike `Option<MyEnum>`): a
+  bitflags newtype is self-empty-able via `from_bits_retain(0)`,
+  so missing-attribute defaults to `Type::empty()`. Allowed both
+  at top-level and inside `Option<>` if the caller wants to
+  distinguish "attr absent" from "attr present with no bits set".
+
+  Added `bitflags = "2"` as a workspace dep + nlink dev-dep
+  (downstream consumers bring their own version). 3 new tests:
+  combined-bits round-trip, missing-attr → empty flags,
+  unknown-bit preservation.
+
+- **`Vec<MyEnum>` repeated-attribute support in
+  `#[derive(GenlMessage)]`** (Plan 154 Phase 8.3). When the kernel
+  emits the same attribute type multiple times for list-valued
+  fields (DPLL's `mode_supported`, devlink rate-limit's list
+  fields, etc.), declare the Rust side as
+  `Vec<MyGenlEnum>` and tag the field with the existing
+  `repr = "..."` hint:
+
+  ```rust
+  #[genl_attr(DpllAttr::ModeSupported, repr = "u32")]
+  pub modes_supported: Vec<DpllMode>,
+  ```
+
+  Emit writes one attribute per element; parse accumulates each
+  matching attr into the Vec in arrival order. Empty Vec emits
+  zero attrs (no trailing presence indicator needed).
+
+  `Vec<u8>` keeps its existing meaning ("the whole payload of a
+  single attribute is a byte string") — only `Vec<MyEnum>` with a
+  repr hint produces the repeated shape. Other `Vec<T>` shapes
+  without a hint produce a compile error pointing at the supported
+  forms.
+
+  2 new tests: round-trip a 2-element Vec, empty-Vec emits no
+  attrs of that type.
+
+- **`Option<MyEnum>` field support in `#[derive(GenlMessage)]`**
+  (Plan 154 Phase 8.2 — **the macro-stack headline unblocker**).
+  `#[genl_attr(...)]` now accepts an optional `repr = "u8"|"u16"|"u32"`
+  hint telling the derive a field is a `#[derive(GenlEnum)]`-typed
+  value:
+
+  ```rust
+  #[derive(GenlEnum, Debug, Clone, Copy, PartialEq, Eq)]
+  #[genl_enum(repr = "u32")]
+  enum DpllMode { Manual = 1, Automatic = 2 }
+
+  #[derive(GenlMessage, Debug, Default)]
+  #[genl_message(cmd = DpllCmd::DeviceGet)]
+  pub struct DpllDeviceReply {
+      #[genl_attr(DpllAttr::Id)] pub id: u32,
+      #[genl_attr(DpllAttr::Mode, repr = "u32")] pub mode: Option<DpllMode>,
+  }
+  ```
+
+  Emit routes through `<Repr as From<MyEnum>>::from(field)` (the
+  `GenlEnum` derive ships `From<MyEnum> for Repr`); parse routes
+  through `<MyEnum as TryFrom<Repr>>::try_from(raw)`. Unknown
+  wire values surface as `Error::InvalidMessage` carrying the
+  generated `MyEnumUnknownValue(repr)` Display text.
+
+  **Why `Option<MyEnum>` and not bare `MyEnum`?** Kernel UAPI
+  enums are typically 1-based with no sensible "zero" variant,
+  so `Default` doesn't exist. Wrapping in `Option<T>` makes
+  missing-attribute semantics map cleanly to `None`. The derive
+  emits a compile error pointing at the fix if a bare enum is
+  used.
+
+  Unblocks Plan 156 (DPLL) and Plan 153.3 (`net_shaper`) on
+  scalar-enum fields. Repeated-enum (`Vec<MyEnum>`), bitflags
+  newtypes, and nested attribute groups remain as the rest of
+  Phase 8.
+
+  3 new tests: round-trip `Some(MyEnum)`, missing-attr → `None`,
+  unknown-value → typed error.
+
+- **`i32` field support in `#[derive(GenlMessage)]`** (Plan 154
+  Phase 8.1). The first of the five Phase 8 macro extensions —
+  smallest mechanical piece. Adds `WireKind::I32` to the
+  field-type-mapping table and `emit_i32_attr` / `parse_i32_attr`
+  to `nlink::macros::__rt`. Unblocks DPLL's `temp_mdeg: Option<i32>`
+  and any other signed-int kernel attribute. 2 new tests cover
+  the positive + negative + Option<i32> round-trips.
+
+- **`Transaction::{add_table_with_flags, del_chain, del_rule,
+  add_flowtable, del_flowtable}`** on the nftables batch type
+  (Plan 150 §9.4 / Plan 157 coordination follow-up). The batch
+  now mirrors the imperative `Connection::<Nftables>` mutation
+  surface end-to-end; no operation needs to escape the atomic
+  batch.
+
+- **`NftablesDiff::apply` flips to atomic** (Plan 157 §4.4
+  closeout). With the four new `Transaction` methods above in
+  place, `apply` now bundles every diff operation into one
+  `NFNL_MSG_BATCH_BEGIN ... BATCH_END` round-trip — the kernel
+  either accepts the whole diff (full set visible to other
+  readers in one step) or rolls back the entire batch. No
+  half-applied intermediate state is observable. Operators
+  running long-lived `NftablesConfig` reconcilers no longer
+  have to design around the partial-apply window.
+
+  The 0.16-era non-atomic imperative path is gone — every
+  table/chain/rule/flowtable mutation in a diff (including
+  flagged tables) commits in one batch.
+
+- **TC streaming dump wrappers** (Plan 149 follow-up):
+  `Connection::<Route>::stream_qdiscs()` / `stream_classes()` /
+  `stream_filters()` return `DumpStream<'_, Route, TcMessage>`
+  for O(1)-memory iteration over kernel TC tables. Same shape as
+  the existing `stream_links` / `stream_routes` /
+  `stream_neighbors` / `stream_addresses`. Right answer on hosts
+  with TC-heavy interfaces (per-pod CNI, per-BGP-peer route
+  shaping, telecom DPDK fanout) where the existing eager
+  `get_qdiscs()` / `get_classes()` / `get_filters()` would
+  materialize tens of MB of intermediate buffers.
+
+- **Nftables multicast events** (Plan 150 §9.2): subscribe to
+  `NFNLGRP_NFTABLES` (7) and consume a typed
+  `Stream<Item = Result<NftablesEvent>>`. Mirrors the existing
+  `Connection::<Netfilter>::subscribe` /
+  `Connection::<Netfilter>::events` shape that conntrack consumers
+  already use.
+
+  ```rust
+  use nlink::netlink::{Connection, Nftables};
+  use nlink::netlink::nftables::{NftablesEvent, NftablesGroup};
+  use tokio_stream::StreamExt;
+
+  let mut nft = Connection::<Nftables>::new()?;
+  nft.subscribe(&[NftablesGroup::All])?;
+  let mut events = nft.events();
+  while let Some(evt) = events.next().await {
+      match evt? {
+          NftablesEvent::NewTable(t) => println!("+ table {}", t.name),
+          NftablesEvent::DelRule(r)  => println!("- rule  on {}/{}", r.table, r.chain),
+          _ => {}
+      }
+  }
+  ```
+
+  Eight typed variants: `NewTable`/`DelTable`, `NewChain`/`DelChain`,
+  `NewRule`/`DelRule`, `NewFlowtable`/`DelFlowtable`. Sets +
+  setelem + gen messages aren't parsed today (silently dropped from
+  the stream — wire when a consumer asks). Bonus surface for
+  Plan 157's reconcile mode: the declarative `NftablesConfig` can
+  subscribe to these to drive convergent reapply on external drift.
+
+  4 new unit tests cover group→kernel-id mapping, wrong-subsystem
+  rejection, truncated-body rejection, and unknown-msg-type skip.
+
+- **nlink-macros polish + publish-order docs** (Plan 154 Phase 7,
+  closes out the macro cycle):
+  - `crates/nlink-macros/README.md` — crates.io landing page
+    with the headline taste, the "don't depend on this crate
+    directly" note, and the **publish-order requirement** (the
+    matching `nlink-macros X.Y.Z` must be on crates.io before
+    `cargo publish -p nlink`).
+  - `crates/nlink-macros/src/lib.rs` module docstring refreshed
+    to reflect the full Phase 1–6 shipped surface (was stuck on
+    Phases 1+2 narrative since Phase 3a landed).
+  - Workspace `Cargo.toml` `nlink-macros` dep now carries
+    `version = "..."` alongside the path dep — required for
+    `cargo publish -p nlink` to resolve the dependency on
+    crates.io. Documented inline.
+
+  Plan 154 is now feature-complete for the 0.16 cycle. The
+  `#[derive(NetlinkAttrs)]` derive for nested attribute groups
+  remains as a documented follow-up (the trait is in tree, only
+  the derive's automation is deferred).
+
+- **Worked example + recipe for the macro stack** (Plan 154
+  Phase 6):
+  - [`crates/nlink/examples/macros/define_taskstats.rs`](crates/nlink/examples/macros/define_taskstats.rs)
+    — full kernel taskstats family declared end-to-end in ~30 lines
+    via the macros. Runs the canonical
+    `Connection::<Taskstats>::new_async()` + `conn.send_typed(req)`
+    cycle against a real kernel family.
+  - [`docs/recipes/define-your-own-genl-family.md`](docs/recipes/define-your-own-genl-family.md)
+    — narrative recipe walking through the four macros
+    (`#[genl_family]` + `GenlCommand` + `GenlAttribute` +
+    `GenlMessage`) and the generic dispatch that closes the loop.
+
+- **Generic `Connection::<P: AsyncConstructible>::new_async()`**
+  consolidation. The six in-tree GENL families
+  (`Wireguard`, `Macsec`, `Mptcp`, `Devlink`, `Nl80211`, `Ethtool`)
+  used to each carry a hand-rolled inherent `new_async()`
+  duplicating the same socket-create + `resolve_async` glue.
+  Replaced with a single generic
+  `impl<P: AsyncConstructible + AsyncProtocolInit> Connection<P>`
+  constructor. This is also what makes macro-defined families
+  (`#[genl_family(...)]`) plug into the canonical API for free:
+  the macro emits the `AsyncProtocolInit` impl and the generic
+  constructor does the rest.
+
+  Public API unchanged — `Connection::<Wireguard>::new_async().await?`
+  still works, just routes through the generic impl now.
+
+- **`Connection::<F: GenlFamily>::send_typed<M, R>`** +
+  **`dump_typed_stream<M, R>`** (Plan 154 Phase 5) — the generic
+  send-side dispatch that closes the Plan 154 loop: with
+  `#[genl_family(...)]` + `#[derive(GenlMessage)]`, downstream
+  code now writes one fully-typed round-trip in a single line:
+
+  ```rust
+  let reply: GetReply = conn.send_typed(GetRequest { id: 0 }).await?;
+  ```
+
+  - `send_typed` is the single-request / single-response shape
+    (`NLM_F_REQUEST | NLM_F_ACK`). Missing attributes leave the
+    response fields at their `Default` values — matches the
+    `#[derive(GenlMessage)]` `from_bytes` semantics.
+  - `dump_typed_stream` returns a
+    `GenlTypedDumpStream<'_, F, R>` that implements
+    [`tokio_stream::Stream<Item = Result<R>>`], mirroring the
+    byte-level [`DumpStream`](crate::netlink::dump_stream::DumpStream)
+    state machine with a per-frame
+    `R::from_bytes(payload[GENL_HDRLEN..])` parse step. Honors
+    the `syscall_batch` feature on the recv path.
+
+  The dispatch is gated on a new public **`GenlFamily`** trait
+  (the send-time contract, distinct from the construction-time
+  `AsyncProtocolInit`) that `#[genl_family(...)]` now emits
+  automatically alongside the existing trait impls. Hand-written
+  families can implement `GenlFamily` directly when the macro
+  doesn't fit — see the trait's docstring for the shape.
+
+  6 new tests cover `parse_first_genl_reply` against synthetic
+  frames (typed reply, NLMSG_DONE, pure ACK, ACK-then-reply,
+  kernel-error propagation) and the on-wire header layout that
+  `build_genl_request` emits.
+
+- **`#[genl_family(name = "...", version = N)]`** attribute macro
+  (Plan 154 Phase 4) — rewrites a unit-struct declaration into a
+  complete GENL family marker type with all four trait impls
+  (`ProtocolState` + `AsyncProtocolInit` + the sealed-trait pair
+  `__macro_seal::ProtocolStateSeal` +
+  `__macro_seal::AsyncConstructibleSeal`) plus the `family_id`
+  field, the `NAME`/`VERSION` const accessors, and the
+  `family_id()` getter.
+
+  ```rust
+  use nlink::macros::genl_family;
+
+  #[genl_family(name = "my_family", version = 1)]
+  pub struct MyFamily;
+
+  // Now usable as any in-tree GENL family marker:
+  let conn = Connection::<MyFamily>::new_async().await?;
+  ```
+
+  The `AsyncProtocolInit::resolve_async` impl calls a new
+  `nlink::macros::__rt::resolve_genl_family(socket, name)`
+  helper (matches the body of the existing per-family
+  `resolve_wireguard_family` / `resolve_macsec_family` / etc.
+  helpers, parametrized on family name — a future cleanup pass
+  can rewire those copies through this resolver to eliminate the
+  duplication). The sealed-trait impls go through new
+  `nlink::netlink::__macro_seal` re-exports — `#[doc(hidden)]`
+  paths the macro is the only authorized emitter of; downstream
+  code should not name them directly.
+
+  6 new tests: `NAME`/`VERSION` const generation, default
+  construction with `family_id = 0`, `Debug` impl format,
+  `ProtocolState::PROTOCOL == Protocol::Generic` compile-time
+  check, `AsyncConstructible` + `AsyncProtocolInit` trait-bound
+  satisfaction (proves a macro-defined family plugs into
+  `Connection::<F>::new_async()` exactly like the in-tree
+  hand-written ones), and two macro-defined families coexisting.
+
+- **`#[derive(GenlMessage)]`** (Plan 154 Phase 3b) — the big
+  derive that turns a struct annotation into a complete
+  `GenlMessage` impl. Pairs with the typed-enum codec derives to
+  let downstream authors define a GENL message body in ~10 lines:
+
+  ```rust
+  use nlink::macros::*;
+
+  #[derive(GenlCommand, Debug, Clone, Copy)]
+  #[genl_command(repr = "u8")]
+  enum MyCmd { Get = 2 }
+
+  #[derive(GenlAttribute, Debug, Clone, Copy)]
+  #[genl_attribute(repr = "u16")]
+  enum MyAttr { Id = 1, Name = 2, Description = 3 }
+
+  #[derive(GenlMessage, Debug)]
+  #[genl_message(cmd = MyCmd::Get)]
+  struct GetRequest {
+      #[genl_attr(MyAttr::Id)]      id: u32,
+      #[genl_attr(MyAttr::Name)]    name: String,
+      #[genl_attr(MyAttr::Description)] description: Option<String>,
+  }
+  ```
+
+  Supported field types (0.16 Phase 3b):
+  - `u8` / `u16` / `u32` / `u64`
+  - `String`
+  - `Vec<u8>`
+  - `Option<T>` for any of the above — omitted on `None`,
+    present-when-`Some`, `Some(parsed)` if the kernel returns it.
+
+  Unsupported types (`i32`, nested attribute groups, `IpAddr`,
+  `bool`) produce a compile-time error naming the field +
+  pointing at the supported-types list. Nested-group support
+  via `#[derive(NetlinkAttrs)]` lands in a follow-up phase.
+
+  `from_bytes` semantics: missing attributes produce default
+  values (zero for ints, empty for strings/bytes, `None` for
+  `Option<T>`). Unknown attribute types are silently skipped —
+  forward-compatibility with newer kernels emitting attrs older
+  consumers don't understand.
+
+  Generated locals use a `__` prefix (`__payload`, `__ty`,
+  `__attr_payload`) so they can't collide with user field names
+  — a field named `payload` no longer shadows the function
+  parameter.
+
+  Required for the in-tree derive tests: `extern crate self as
+  nlink;` was added to `lib.rs` so the macro-generated
+  `::nlink::macros::__rt::*` paths resolve uniformly from inside
+  the `nlink` crate itself + from any downstream crate.
+
+  7 new runtime tests (in addition to the 4 substrate tests
+  shipped in Phase 3a): simple round-trip, `Option<T>` omitted-
+  on-None + round-trip-Some, typed-enum composition (CMD comes
+  from `MyCmd::Get as u8`), `Vec<u8>` round-trip, default-fill
+  on empty payload, unknown-attribute skip.
+
+- **`nlink::macros` module** — substrate for the proc-macro
+  derives (Plan 154 Phase 3a). nlink now depends on `nlink-macros`;
+  downstream code writes `use nlink::macros::*;` to pull in the
+  derives + the supporting traits in one shot, no need to depend
+  on `nlink-macros` directly.
+
+  Surface added:
+  - `nlink::macros::GenlCommand` / `GenlAttribute` / `GenlEnum` —
+    the three typed-enum codec derives re-exported from
+    `nlink-macros`.
+  - `nlink::macros::GenlMessage` trait — wire-protocol contract
+    for a GENL message (CMD constant + `to_bytes` + `from_bytes`).
+    Implemented automatically by `#[derive(GenlMessage)]` (Phase 3b);
+    can be hand-implemented today against the `__rt` helpers below.
+  - `nlink::macros::NetlinkAttrs` trait — same shape for nested
+    attribute groups (no CMD, just `write_attrs` / `read_attrs`).
+  - `nlink::macros::__rt` — `#[doc(hidden)]` runtime module the
+    macros emit calls into: `emit_{u8,u16,u32,u64}_attr`,
+    `parse_{u8,u16,u32,u64}_attr`, `emit_str_attr`/`parse_str_attr`,
+    `emit_bytes_attr`/`parse_bytes_attr`, `emit_flag_attr`, and
+    big-endian variants (`*_be_attr`) for nftables-style
+    attributes. Plus an `attr_iter` re-export.
+
+  4 new unit tests cover: a hand-rolled `GenlMessage` impl
+  round-tripping through the runtime helpers, truncated-payload
+  rejection (`u8` / `u32` / `u64`), NUL-termination + lossy-UTF8
+  string parsing, big-endian round-trip.
+
+- **New `nlink-macros` crate** (Plan 154 Phases 1 + 2). Proc-macro
+  crate that downstream consumers will use to define new GENL
+  families in ~20 lines of declarative code (matching neli's
+  `#[neli_enum]` ergonomics on top of nlink's typed
+  `Connection<P>` machinery).
+
+  Phases 1 + 2 ship the three typed-enum codec derives. They
+  share one expansion path (`codec::expand_codec`); each derive
+  differs only in attribute name + accepted repr widths +
+  pointer-at-the-right-derive error hints. The remaining derives
+  (`GenlMessage`, `NetlinkAttrs`) and the `#[genl_family]`
+  attribute macro land in subsequent phases.
+
+  - `#[derive(GenlCommand)]` + `#[genl_command(repr = "u8"|"u16")]`
+    — typed GENL command enum.
+  - `#[derive(GenlAttribute)]` + `#[genl_attribute(repr = "u8"|"u16")]`
+    — typed attribute-kind enum (the u16 attribute-type field
+    on each `nlattr`). Caller manages `NLA_F_NESTED` / `NLA_F_NET_BYTEORDER`
+    flag bits.
+  - `#[derive(GenlEnum)]` + `#[genl_enum(repr = "u8"|"u16"|"u32")]`
+    — typed value enum encoded *inside* an attribute payload.
+    Used for `DPLL_LOCK_STATUS_*`, `DEVLINK_RATE_TYPE_*`, etc.
+    No constraint on 1-based-vs-0-based discriminants (kernel
+    UAPI has both — e.g. `DPLL_FEATURE_STATE_DISABLE = 0`).
+
+  All three generate:
+  - `impl From<EnumType> for ReprType` (infallible — every
+    variant has a known discriminant).
+  - `impl TryFrom<ReprType> for EnumType` returning
+    `EnumTypeUnknownValue(repr)` on unknown wire values.
+  - `EnumTypeUnknownValue` carries the raw bad value + impls
+    `Debug + Display + std::error::Error`.
+
+  Variants must have explicit discriminants (e.g. `Get = 1`) —
+  kernel ABI requires stable wire values; anonymous
+  discriminants are a compile error.
+
+  Test surface: 14 runtime tests across the three derives
+  (round-trips / sparse discriminants / u16+u32 reprs / 0-based
+  outlier / Display contains enum name + bad value /
+  std::error::Error impl) + 5 trybuild compile-fail cases
+  (missing attribute, struct/union target, missing
+  discriminants, invalid repr value, discriminant overflow) +
+  1 compile-pass case. Trybuild baselines committed; re-bless
+  via `TRYBUILD=overwrite cargo test -p nlink-macros --test
+  trybuild` after stable-Rust message-text drift.
+
+  The crate is standalone in 0.16 — `nlink` does not yet depend
+  on it. Wiring lands in Plan 154 Phase 7 once `GenlMessage` +
+  `NetlinkAttrs` + `#[genl_family]` ship.
+
+- **Declarative `NftablesConfig`** — mirror of `NetworkConfig`
+  for the nftables subsystem. `NftablesConfig::new()` →
+  `.table(name, family, |t| ...)` → `.chain(name, |c| ...)` →
+  `.rule(chain, |r| ...)` → `.flowtable(name, |f| ...)`, with
+  closure-style nesting that matches the visual shape of
+  `nft list ruleset`.
+
+  ```ignore
+  let cfg = NftablesConfig::new()
+      .table("filter", Family::Inet, |t| t
+          .persist(true)
+          .chain("input", |c| c
+              .hook(Hook::Input).priority(Priority::Filter).policy(Policy::Drop))
+          .rule("input", |r| r.match_iif("lo").accept())
+          .rule_keyed("input", "allow-icmp", |r| r.match_l4proto(1 /* IPPROTO_ICMP */).accept())
+          .flowtable("ft", |f| f.device("eth0").hw_offload(true)));
+  let diff = cfg.diff(&conn).await?;
+  println!("{}", diff.summary());
+  diff.apply(&conn).await?;
+  ```
+
+  Surface added:
+  - `NftablesConfig` builder + `DeclaredTable` / `DeclaredChain` /
+    `DeclaredRule` / `DeclaredFlowtable` value types
+  - `NftablesDiff` per-object change collections + `summary()` /
+    `change_count()` / `is_empty()`
+  - `NftablesConfig::diff(&conn)` async method
+  - `NftablesDiff::apply(&conn)` async method
+  - `RuleHandle(u64)` newtype for kernel-assigned rule handles
+  - All re-exported at the crate root
+
+  **0.16 scope caveats** (documented in module rustdoc):
+  - Rule identity: name-based via caller-supplied `handle_key`
+    (`rule_keyed`); rules without a key are re-applied on every
+    diff (harmless churn). Full canonicalization-based diff
+    deferred — needs typed `Match` collection refactor that's
+    not in tree yet.
+  - Apply is **not atomic** (the existing `Transaction` doesn't
+    yet cover `del_chain` / `del_rule` / flowtable ops — Plan
+    150 §9.4 coordination point). Operations execute in
+    dependency-correct order so partial failure recovery is
+    converge-on-next-apply. Atomic apply flips on when
+    Transaction grows full coverage post-0.16.
+  - Sets and maps deferred — separate dimension of nftables
+    state warranting its own design pass.
+
+  See Plan 157.
+
+- **Devlink rate + port-function-state**
+  (`Connection::<Devlink>::{add_rate, set_rate, del_rate,
+  set_port_function_state}`). Cloud + SmartNIC users use these to
+  rate-limit SR-IOV VFs at the kernel/firmware boundary (vs in
+  the guest's TC stack) and to activate/deactivate VFs without
+  tearing them down.
+
+  Public surface:
+  - `DevlinkRate` typed builder (bus + device + node_name +
+    optional parent_node + tx_share + tx_max + rate_type) — takes
+    `nlink::Rate` for the bandwidth fields so the bytes/sec
+    convention is enforced by the type system rather than
+    documentation.
+  - `DevlinkRateType::{Leaf, Node}` for terminal-VF vs
+    scheduler-node semantics.
+  - `DevlinkPortFunctionState::{Inactive, Active}` for port-function
+    activation.
+  - `DEVLINK_CMD_RATE_{NEW, SET, DEL, GET}` (74/75/76/77),
+    `DEVLINK_CMD_PORT_FUNCTION_SET` (68),
+    `DEVLINK_ATTR_RATE_*` + `DEVLINK_ATTR_PORT_FUNCTION_STATE`
+    constants — all pinned to kernel UAPI values by unit tests.
+
+  On NICs without rate support (most non-SmartNIC hardware), the
+  kernel returns `EOPNOTSUPP` — callers dispatch via
+  `Error::is_not_supported()`. See Plan 153 §4.2.
+
+- **XFRM IPsec hardware offload** — `XfrmSaBuilder::offload(ifindex,
+  flags)` requests kernel push the SA's crypto / packet path onto a
+  NIC (mlx5, hns3, etc.). `XfrmOffloadFlag` bitwise-newtype with
+  `IPV6` / `INBOUND` / `PACKET` (last needs kernel 6.0+).
+  Wire-encoded as `XFRMA_OFFLOAD_DEV` (= 26) carrying
+  `struct xfrm_user_offload` (4 byte ifindex + 1 byte flags + 3 byte
+  pad). If the NIC doesn't support the requested shape the kernel
+  returns `EOPNOTSUPP` on the add — callers can dispatch via
+  `Error::is_not_supported()` and retry without offload. Unit
+  tests pin the constants against the kernel UAPI. See Plan 153 §4.1.
+
+- **`syscall_batch` feature** — opt-in `recvmmsg(2)` /
+  `sendmmsg(2)` syscall batching. New
+  `NetlinkSocket::recv_batch(&mut Vec<Vec<u8>>, max)` and
+  `NetlinkSocket::send_batch(&[&[u8]])` (both async, AsyncFd-
+  integrated). Batches up to 32 frames per syscall — expected
+  2-5× reduction in syscall count + ~1.5× wall-clock speedup on
+  dump-heavy workloads (BGP route tables, conntrack tables, nft
+  rulesets) per the prior-art measurements in quinn-udp. `MSG_TRUNC`
+  on any slot is promoted to `Error::InvalidMessage` instead of
+  silent truncation. Per-socket recv-buffer pool is thread-local
+  + lazy (~1 MiB on first batched recv per thread). Constants
+  exposed: `NL_BATCH_SIZE` (32), `NL_BUF_SIZE` (32 KiB). Behind
+  the `syscall_batch` feature flag for one release of soak;
+  default-on planned for 0.17. Dump-path wiring (the per-callsite
+  `cfg`-gate that swaps `recv_msg` for `recv_batch`) lands when
+  the bench infrastructure (Plan 158 §5) is in place to measure
+  the speedup. See Plan 158.
+
+- **ENOBUFS resync types** — `ResyncedEvent<T>` sum type
+  (`Event(T)` / `Resynced(T)` / `Marker(...)`) + `ResyncMarker`
+  (`ResyncStart` / `ResyncEnd`) for consumers that want to handle
+  multicast-overflow recovery explicitly. The canonical loop
+  pattern (poll events, on `is_no_buffer_space()` invalidate
+  local state + redump via a separate dump connection + resume)
+  is documented in `docs/recipes/events-with-resync.md`. Pairs
+  naturally with the connection pool from Plan 159 for the dump
+  connection. The pre-baked Stream wrapper that drives this
+  state machine internally (Plan 151 §4.2) is a follow-up — the
+  design needs more soak before locking in. Re-exported at the
+  crate root: `nlink::{ResyncMarker, ResyncedEvent}`. See
+  Plan 151.
+
+- **nftables flowtable support** — `Connection::<Nftables>::add_flowtable`,
+  `del_flowtable`, `list_flowtables`. New `Flowtable` builder
+  (`Flowtable::new(family, table, name).device(d).priority(p).hw_offload(true).counter(true)`).
+  Pairs with the new `Expr::FlowOffload { table }` rule expression
+  for the `flow add @<ft>` rule clause that populates the
+  flowtable from a rule path. Kernel UAPI constants exposed:
+  `NFT_MSG_NEWFLOWTABLE` (= 22), `NFT_MSG_GETFLOWTABLE` (= 23),
+  `NFT_MSG_DELFLOWTABLE` (= 24), `NFTA_FLOWTABLE_*` attribute IDs,
+  `NF_NETDEV_INGRESS` (= 0), `NFT_FLOWTABLE_HW_OFFLOAD` (= 0x1),
+  `NFT_FLOWTABLE_COUNTER` (= 0x2). Unit tests pin the constants
+  against the kernel UAPI header. See Plan 150.
+
+- **Streaming dump API** — `Connection::<P>::dump_stream<T>(msg_type)
+  -> DumpStream<'_, P, T>` plus four typed wrappers on
+  `Connection<Route>`: `stream_links`, `stream_routes`,
+  `stream_neighbors`, `stream_addresses`. Yields parsed messages
+  one at a time as the kernel returns them, instead of buffering
+  the full response into a `Vec<T>` like the eager `get_*`
+  counterparts. O(1) memory in number of messages — the cliff fix
+  for BGP-scale route tables, container-host link counts,
+  busy-gateway conntrack tables.
+
+  Hand-rolled `Stream` impl (no `async-stream` dep) following the
+  same pattern as the multicast `EventSubscription`. The
+  per-message parse failures keep the stream iterating
+  (kernel sometimes ships partially-parseable frames on long
+  dumps); `NLMSG_ERROR` and socket-level errors terminate after
+  yielding the error. The existing `get_links` docstring gains a
+  scale note pointing at `stream_links`. See Plan 149.
+
+- **`ConnectionPool<P>` + `PooledConnection<'p, P>`** — bounded
+  mpsc-channel-backed pool for high-fanout consumers. RAII
+  `PooledConnection` derefs to `&Connection<P>`, returns the
+  connection to the pool on drop (or invalidates it on demand).
+  `ConnectionPoolBuilder::<P>::new().size(N).build()` for sync
+  protocols; `.build_async()` for GENL families — split via the
+  Plan 148 §4.5 sealed `SyncConstructible` / `AsyncConstructible`
+  traits. `ConnectionPool::<P>::for_namespace(ns, size)`
+  convenience for per-namespace pools (the canonical CNI / multi-
+  tenant shape). Two new error variants — `Error::PoolExhausted
+  { size, timeout }` and `Error::PoolClosed` — both with
+  `is_X()` predicates. Re-exported at the crate root as
+  `nlink::{ConnectionPool, ConnectionPoolBuilder, PooledConnection}`.
+  Recipe at `docs/recipes/connection-pool.md`. Partial alternative
+  to the deferred-to-0.17 NlRouter-style multiplexing (see
+  master plan §4 item 6). See Plan 159.
+
+- **`netkit` integration test** — `tests/integration/link.rs`
+  gains `test_create_netkit_pair` covering primary + peer
+  creation, kind verification, and symmetric pair-removal-on-del.
+  Closes the test gap CODE_ANALYSIS.md §4.1 flagged: the
+  `NetkitLink` type has shipped since 0.13 but never had a CI
+  regression test. Gated `require_root!()` + `require_module!("netkit")`.
+  See Plan 148 §4.7.
+
+- **`Connection::<P>::wait_link_up(iface, timeout)`** — polls for
+  `IFF_UP` with exponential backoff (10ms → 100ms cap) until
+  observed or the deadline elapses. `Err(Timeout)` on deadline,
+  `Err(InterfaceNotFound)` if the interface is removed during the
+  wait. Namespace-correct via the existing `resolve_interface`
+  pipeline. See Plan 148 §4.1.
+
+- **Sealed GENL constructor traits** — `Connection::<P>::new()`
+  is now bounded `where P: SyncConstructible`, and the GENL
+  protocol markers (`Wireguard`, `Macsec`, `Mptcp`, `Ethtool`,
+  `Nl80211`, `Devlink`) are excluded from that bound. This turns
+  the silent runtime bug
+  (`Connection::<Wireguard>::new()` returning a connection with
+  `family_id = 0` that fails confusingly on first use) into a
+  **compile error** that points the user at `new_async().await`.
+  GENL constructors are bounded `where P: AsyncConstructible`
+  (added to namespace.rs's `connection_for_async` family).
+  Both marker traits live in `nlink::netlink::protocol::construction`
+  and are sealed via the same `private::Sealed` supertrait as
+  `ProtocolState`. **Breaking-shaped but bug-fix in intent**:
+  any code that compiled with `Connection::<Wireguard>::new()`
+  was already broken at runtime; this surface change just moves
+  the failure to compile time. See Plan 148 §4.5.
+
+- **`docs/recipes/error-handling-patterns.md`** — new cookbook
+  recipe covering `is_*()` predicate dispatch, bounded retry on
+  EAGAIN/ENOBUFS, idempotent `NLM_F_EXCL` create/delete, XFRM
+  SA/SP `update_sa` vs delete-then-add, namespace cleanup on
+  error paths, cross-fork pitfalls, and cancellation safety in
+  async. Linked from `docs/recipes/README.md`. See Plan 148 §4.6.
+
+- **Crate-root re-exports** for route / address / rule builders and
+  the extension traits. Previously reachable only via deep
+  `nlink::netlink::route::Ipv4Route`-style paths; now also surfaced
+  as `nlink::Ipv4Route`, `nlink::Ipv6Route`, `nlink::NextHop`,
+  `nlink::RouteMetrics`, `nlink::RouteConfig`, `nlink::Ipv4Address`,
+  `nlink::Ipv6Address`, `nlink::AddressConfig`, `nlink::RuleBuilder`,
+  `nlink::LinkConfig`, `nlink::NeighborConfig`. Pure additive.
+  See Plan 148 §4.3.
+
+- **`Connection::<Route>::get_link_stats(iface)`** convenience
+  wrapper that returns the kernel-reported per-link `LinkStats`
+  for a named or indexed interface. `Err(InterfaceNotFound)` if no
+  match; `Err(InvalidMessage)` if the kernel response didn't
+  include a stats attribute (rare). See Plan 148 §4.2.
+
+- **`NFT_TABLE_F_PERSIST` (kernel 6.9+) and related table-flag
+  constants** + `Connection::<Nftables>::add_table_with_flags(name,
+  family, flags)` connection method. Lets users create tables that
+  survive `nft flush ruleset` operations issued against the same
+  family. Also exposes `NFT_TABLE_F_DORMANT` and
+  `NFT_TABLE_F_OWNER` (the latter from kernel 5.13+). Existing
+  `add_table(name, family)` is unchanged (defaults to flags = 0).
+  Unit tests pin the constants against the kernel UAPI header
+  values. See Plan 148 §4.8.
+
+- **Namespace-safety doc story** — added a "Namespace safety —
+  `_by_index` vs `_by_name`" section to `lib.rs`'s rustdoc landing
+  page and to `CLAUDE.md` ("Namespace-safe APIs" subsection of
+  "Connections & namespaces"). Documents the existing `_by_index`
+  design as a deliberate distinguishing-feature choice vs neli +
+  vishvananda/netlink (which both leave namespace handling to the
+  caller — the documented Cilium-issue-#40280 footgun). Also added
+  a "Connection diagnostics + sockopts" subsection covering the new
+  `enable_strict_checking` + `set_ext_ack` methods. See Plan 155 §4.4.
+
+- **`Connection::<P>::enable_strict_checking(on: bool)`** — toggles
+  the `NETLINK_GET_STRICT_CHK` sockopt (kernel 5.0+). When enabled,
+  the kernel validates dump request filters strictly and returns an
+  error if they reference unknown attributes — useful for catching
+  client/kernel-version mismatches early. Off by default. Silently
+  a no-op on pre-5.0 kernels (`ENOPROTOOPT` → `Ok(())`). See
+  Plan 155 §4.2.
+
+- **`Connection::<P>::set_ext_ack(on: bool)`** — toggles the
+  `NETLINK_EXT_ACK` sockopt (kernel 4.12+). Enabled by default
+  during socket construction; exposed for parity with neli's API
+  and for callers wanting to explicitly suppress the trailing
+  TLVs in error responses. Silently a no-op on pre-4.12 kernels.
+  See Plan 155 §4.3.
+
+- **Extended-ack TLV parsing from kernel error responses**. The
+  kernel populates `NLMSGERR_ATTR_MSG` (human-readable error
+  string) and `NLMSGERR_ATTR_OFFS` (offset into the offending
+  request) when `NETLINK_EXT_ACK` is enabled (on by default in
+  nlink). Previously these TLVs sat unparsed at the bottom of
+  every error response and the user saw `errno = 22` with no
+  context. Now `Error::Kernel` / `Error::KernelWithContext`
+  carry `ext_ack: Option<String>` and `ext_ack_offset:
+  Option<u32>` fields, and the `Display` output stitches the
+  ext-ack message in when present. Example output:
+  `"add_link(veth0): Invalid argument (errno 22): attribute
+  IFLA_MTU rejected: value 0 out of range (at request offset 24)"`.
+  See Plan 155 §4.1.
+
+  New surface:
+  - `Error::Kernel { errno, message, ext_ack, ext_ack_offset }`
+  - `Error::KernelWithContext { operation, errno, message, ext_ack, ext_ack_offset }`
+  - Both variants now `#[non_exhaustive]` so future field
+    additions are non-breaking
+  - `Error::from_errno_ext_ack(errno, ext_ack, ext_ack_offset)`
+    constructor (plus context variant)
+  - `nlink::netlink::message::ParsedExtAck { message, offset }`
+  - `nlink::netlink::message::NlMsgError::parsed_ext_ack(&self, payload)
+    -> ParsedExtAck`
+  - `nlink::netlink::message::NlMsgError::into_error(&self, payload)
+    -> Error` — convenience for the "early return on non-ACK" pattern
+  - `nlink::netlink::message::nlmsgerr_attr::{MSG, OFFS, COOKIE,
+    POLICY, MISS_TYPE, MISS_NEST}` constants
+
+- **`Error::NamespaceRestoreFailed { source }`** variant +
+  `Error::is_namespace_restore_failed()` predicate. Surfaces the
+  previously-swallowed `setns()` restore failure in
+  `NetlinkSocket::new_in_namespace` — the socket was created in the
+  target netns but the calling thread couldn't be restored. Prior
+  behavior (≤ 0.15.1) was to log to stderr and return the socket
+  anyway, leaving the thread silently stuck in the target ns. This
+  was a real footgun in tokio multi-thread runtimes where another
+  task scheduled on the corrupted thread would read
+  `/sys/class/net/` from the wrong namespace. See Plan 147 §4.1.
+  Variant is additive under `#[non_exhaustive]`.
 
 - **`Rule::match_saddr_v6` / `match_daddr_v6` / `match_saddr_v6_not`
   / `match_daddr_v6_not`** on the nftables rule builder, alongside
@@ -18,6 +1248,64 @@ All notable changes to this project will be documented in this file.
   variants, and the prefix-to-mask byte-boundary case.
 
 ### Fixed
+
+- **`EthtoolBitset::write_to` no longer clones each bitset name on
+  encode** (`genl/ethtool/bitset.rs:283`). Switched
+  `sort_by_key(|(_, name)| (*name).clone())` to
+  `sort_unstable_by_key(|(_, name)| name.as_str())` — one fewer
+  `String` allocation per name per `set_features` call. The
+  earlier clippy-suggested form had picked a key shape that
+  allocated; the borrow form is strictly cheaper. Stable-vs-unstable
+  ordering is immaterial here (names are unique within a bitset).
+
+- **`NamespaceGuard::drop` now emits `tracing::error!` instead of
+  `eprintln!`** on restore failure (`netlink/namespace.rs:442`).
+  Same class of bug as the `socket.rs` Phase 1 fix in this release
+  — unstructured stderr output didn't surface in subscribers,
+  hiding the "thread stuck in foreign netns" hazard. Drop can't
+  return errors, so the structured event is the right escape.
+  Callers that need explicit detection should restore the
+  namespace via an explicit method call before the guard drops.
+
+- **`util/parse.rs` octal parser uses byte indexing instead of
+  `chars().nth(1).unwrap()`** (line 65). The previous form walked
+  the UTF-8 iterator just to peek at byte 1, which is guaranteed
+  to be ASCII by the surrounding `len() > 1` + `starts_with('0')`
+  guards. Cosmetic; no behavior change.
+
+- **SAFETY comment added on `libc::geteuid()` in `lab::is_root`**
+  (`lab/mod.rs:297`). `geteuid` is POSIX-mandated infallible
+  and has no preconditions — documented for the reader.
+
+- **`route.rs` `write_delete_with_interfaces` carries a kernel-source
+  citation explaining why `RTA_METRICS` is deliberately omitted
+  on delete** (Plan 147 §4.2). `fib_table_delete` (IPv4) and
+  `ip6_route_del` (IPv6) match on the route's discriminating-key
+  fields; metrics live in the shared `fib_info` / `fib6_info` and
+  are never part of the match key. The asymmetry with `write_add`
+  (which DOES write metrics) is intentional. Documentation-only;
+  no behavior change.
+
+- **`NetworkConfig::diff` now detects same-kind / different-params
+  qdisc changes** (`config/diff.rs:434`). Previously, changing an
+  HTB's `default_class` from `0x10` to `0x20` (or any other
+  parameter on any qdisc kind) produced an empty diff — the diff
+  loop only compared the `kind` string. Now `diff_qdiscs` renders
+  the declared `DeclaredQdiscType` through `QdiscConfig::write_options`
+  and byte-compares against the kernel's `TCA_OPTIONS` blob.
+  Differences (including known false positives from kernel-side
+  default attributes) push to `qdiscs_to_replace` and trigger
+  idempotent re-apply via the normal `apply` path. See Plan 147 §4.4.
+
+- **`NetlinkSocket::new_in_namespace` no longer silently corrupts
+  thread state on `setns()` restore failure** (`socket.rs:138`).
+  Previously the function used `eprintln!` to warn and returned
+  the (successful) socket regardless. Now it returns
+  `Error::NamespaceRestoreFailed`, drops the socket, and emits a
+  structured `tracing::error!` event. The calling thread is still
+  in the target netns when the error returns — the documented
+  recovery is to abort the affected task or pin subsequent work to
+  a different thread. See Plan 147 §4.1.
 
 - **`Neighbor::write_delete` now propagates `ndm_flags`** so the
   kernel can match flag-keyed entries on delete. The user-visible
@@ -36,6 +1324,123 @@ All notable changes to this project will be documented in this file.
   alongside it. `nlink::netlink::neigh::ntf` is now re-exported
   so callers decoding `NeighborMessage::flags()` don't have to
   redefine kernel constants.
+
+### Changed — semver lockdown (Plan 163, pre-cut)
+
+- **11 new-in-0.16 pub structs gain `#[non_exhaustive]`**:
+  `RuleInfo`, `NftablesDiff`, `ReconcileOptions`, `ReconcileReport`,
+  `DpllDeviceReply`, `DpllPinReply`, `NetShaperReply`,
+  `NetShaperCapsReply`, `ConnectionPool`, `ConnectionPoolBuilder`,
+  `PooledConnection`, `DumpStream`, `ResyncStream`,
+  `GenlTypedDumpStream`. Re-applying the attribute after publish
+  would itself be breaking, so it landed in the pre-cut audit
+  window. (`ResyncStream` + `GenlTypedDumpStream` caught by a
+  post-batch `cargo public-api diff` sweep — see Plan 163.)
+
+  **Caller-visible impact**: `ReconcileOptions` can no longer
+  be constructed with a struct literal. Use the builder pattern:
+  ```rust
+  let opts = ReconcileOptions::default()
+      .max_retries(5)
+      .backoff(Duration::from_millis(50));
+  ```
+  Field access and `Default::default()` continue to work
+  unchanged. All other types in the list are constructed by
+  nlink internals, not user code.
+
+### Changed — Plan 162 `PooledConnection::invalidate` consume-self
+
+- **`PooledConnection::invalidate` now takes `self` by value
+  (consume-self) instead of `&mut self`** (`pool/pooled.rs`).
+  Closes a panic-on-misuse footgun: previously,
+  `p.invalidate(); &*p` would panic at runtime because
+  `invalidate` left `conn: None` and `Deref` unwrapped it. The
+  new shape makes the bug a compile error
+  (E0382: use of moved value). A `compile_fail` rustdoc test
+  on `invalidate()` guards the contract against future
+  regressions.
+
+  **Source-compatible** for the "invalidate then drop" use case
+  (`p.invalidate();` still works — the guard is gone after the
+  call either way). Only breaks the bug-shape.
+
+### Added — diagnostics layer gaps closed (Plan 169)
+
+The Plan 168 orphan-example closeout (above) surfaced
+*evidence* — each phantom symbol in a broken example was a
+record of "an author wanted this and didn't find it". Most
+were rename drift (already-fixed bugs); four were real
+lib-side coverage gaps where the lower-level type carried the
+data but the higher-level diagnostics wrapper dropped it on
+the way through. Plan 169 closes those gaps:
+
+- **`RouteInfo` gains `source: Option<IpAddr>` (RTA_PREFSRC) +
+  `dev_name: Option<String>` (resolved output-interface name)**
+  and is now `#[non_exhaustive]`. The diagnostics scan already
+  fetched both data points internally; they're now stored on
+  RouteInfo for direct access (no longer just a function-return
+  side channel). `#[non_exhaustive]` is added in the same
+  commit so future RTA_* propagation doesn't break callers.
+- **`InterfaceDiag` gains `is_up() -> bool`, `has_carrier() -> bool`,
+  and `is_operational() -> bool`** convenience predicates,
+  mirroring the same-named methods on the lower-level
+  `LinkMessage`. Callers no longer need to bit-test `flags`
+  against `IFF_UP` / `IFF_RUNNING` manually or remember to
+  compare `state` against `OperState::Up`. `is_operational()`
+  combines both checks ("ready to carry traffic right now?").
+- **`Srv6LocalRoute::table() -> Option<u32>`** convenience
+  getter. The kernel UAPI puts the routing-table attribute
+  inside the action's nested encap block, so the lib's parser
+  embeds it in the action variant (`EndT { table }`,
+  `EndDT4 { table }`, etc.). Asking "what table is this SID
+  in?" used to require enumerating all four table-carrying
+  variants; the new getter encapsulates that match.
+
+Four new unit tests cover the new methods (3 for InterfaceDiag,
+1 for Srv6LocalRoute). 970 lib tests (was 966).
+
+### Examples — Plan 160 orphan catalog closed (Plan 168)
+
+- **All 9 orphan example files catalogued by Plan 160 closed.**
+  Five fixed in place + registered: `bridge/vlan.rs`,
+  `bridge/fdb.rs`, `route/mpls.rs`, `route/nexthop.rs`,
+  `route/srv6.rs` (each was either a rename — `.link_kind()` →
+  `.kind()`, `route.gateway` → `route.via`, `nh.is_blackhole()` →
+  `nh.blackhole`, `Srv6LocalRoute::table` → `.protocol`,
+  `FdbEntry::is_local()` → `is_self`/`is_master`/`is_extern_learn` —
+  or a format-string fix where `r#"..."#` literals had unescaped
+  `{}` placeholders the outer `println!` tried to consume).
+- **Three diagnostics demos deleted, one comprehensive replacement
+  written**: `bottleneck.rs` + `connectivity.rs` + `scan.rs` were
+  `println!`-of-doc-string walkthroughs against fields that never
+  existed. Replaced by `diagnostics/health_check.rs` — a single
+  end-to-end demo that runs `Diagnostics::scan()` + prints the
+  full report + calls `find_bottleneck()`. Uses canonical field
+  names verified against `diagnostics.rs`.
+- **`config/declarative.rs` rewritten** to mirror
+  `examples/nftables/declarative.rs`. The old file imported a
+  struct-based API (`LinkConfig`, `AddressConfig`, `RouteConfig`,
+  `QdiscConfig`) that never existed; the actual `NetworkConfig`
+  API is closure-based
+  (`.link(name, |b| b.dummy().up()).address(...).route(...)`).
+  New file demos diff → apply → re-diff (idempotent) → mutate →
+  re-apply → teardown via `apply_with_options(purge=true)`.
+- **`scripts/audit-example-registration.allowlist` deleted** —
+  empty after Phase 3 (script gracefully no-ops when absent per
+  Plan 160 §"Acceptance criteria"). The
+  `audit-example-registration` CI gate now enforces zero
+  orphans from a clean slate; any future bit-rot fails CI loudly
+  with a copy-paste fix block.
+
+### Performance — Plan 164 NftablesConfig::diff hoist
+
+- **`NftablesConfig::diff` no longer issues `list_chains()` +
+  `list_flowtables()` once per declared table.** The two dump
+  calls are hoisted to a single call each at the top of
+  `diff()`, then indexed by `(Family, table_name)` into
+  `HashMap<_, Vec<&_>>` for O(1) per-table lookup. Wire
+  round-trips drop from O(N²+N·R) to O(N+R) for N declared
+  tables and R kernel rules. No public-API change.
 
 ## [0.15.1] - 2026-04-26
 

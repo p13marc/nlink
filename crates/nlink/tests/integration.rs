@@ -74,3 +74,28 @@ mod conntrack;
 
 #[path = "integration/neigh.rs"]
 mod neigh;
+
+// Plan 166 backfill — root-gated tests for the headline 0.16 features.
+// Each module gates on `require_root!()` so this all early-returns
+// when run as a regular user.
+
+#[path = "integration/ergonomics.rs"]
+mod ergonomics;
+
+#[path = "integration/streaming.rs"]
+mod streaming;
+
+#[path = "integration/flowtable.rs"]
+mod flowtable;
+
+#[path = "integration/nftables_diag.rs"]
+mod nftables_diag;
+
+#[path = "integration/nftables_reconcile.rs"]
+mod nftables_reconcile;
+
+#[path = "integration/syscall_batch.rs"]
+mod syscall_batch;
+
+#[path = "integration/pool.rs"]
+mod pool;

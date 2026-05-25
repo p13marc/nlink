@@ -47,6 +47,12 @@ to the hand-rolled netlink primitives if you want to go deeper.
   blocklist set, plus a 3-namespace WAN/router/LAN lab demo. Uses the
   typed `nftables::Transaction` API + `Connection::<Netfilter>` for
   conntrack verification.
+- [**Declarative nftables config**](nftables-declarative-config.md) —
+  manage a whole ruleset from a config file: define `NftablesConfig`,
+  `cfg.diff(&conn).await?`, `diff.apply(&conn).await?` (atomic via
+  single `NFNL_MSG_BATCH_*` commit). `apply_reconcile` retries on
+  EBUSY/EAGAIN for concurrent-mutator scenarios. Mirrors the
+  existing `NetworkConfig` pattern.
 - [**Programmatic conntrack**](conntrack-programmatic.md) — inject /
   update / delete / flush conntrack entries via `ConntrackBuilder` for
   test pre-seeding, NAT control planes, and lab eviction. Covers
@@ -58,6 +64,41 @@ to the hand-rolled netlink primitives if you want to go deeper.
 - [**Multi-namespace event monitoring**](multi-namespace-events.md) —
   watch link/addr/route/TC events across N namespaces concurrently
   with `tokio_stream::StreamMap`.
+
+### Cross-cutting
+
+- [**Events with ENOBUFS resync**](events-with-resync.md) — keep
+  state correct across multicast overflows. Uses `ResyncedEvent<T>`
+  + `ResyncMarker` (Plan 151, 0.16+); pairs with the connection
+  pool below for the dump connection.
+
+- [**Connection pool**](connection-pool.md) — hold a bounded set
+  of `Connection<P>` and round-robin requests across tasks.
+  Right answer when you'd otherwise hand-roll multiple
+  connections for parallel work (exporters, multi-namespace
+  watchers, control planes). Uses `ConnectionPool<P>` +
+  `PooledConnection<'p, P>` (Plan 159, 0.16+).
+
+- [**Error handling patterns**](error-handling-patterns.md) — how
+  to dispatch on `is_*()` predicates (rather than direct variant
+  matching), bounded-retry on EAGAIN/ENOBUFS, idempotent
+  `NLM_F_EXCL` create/delete, XFRM SA/SP `update` vs
+  delete-then-add, namespace cleanup, cross-fork pitfalls,
+  cancellation safety in async.
+
+- [**Define your own GENL family**](define-your-own-genl-family.md)
+  — declare a complete custom Generic Netlink family in ~30 lines
+  via `nlink-macros` (`#[genl_family]` + `#[derive(GenlMessage)]`
+  + `conn.send_typed(req).await?`). Walked through against the
+  kernel's `taskstats` family (Plan 154, 0.16+).
+
+- [**Watch DPLL lock-status transitions**](dpll-monitor.md) —
+  enumerate clock-synchronization hardware (SyncE / PTP / GNSS),
+  poll for lock-status changes, detect holdover acquisition,
+  diagnose lock loss via `DpllLockStatusError`. Telco-RAN,
+  time-sync infrastructure, SmartNIC control-plane use case.
+  Uses `Connection<Dpll>` (Plan 156, 0.16+) — the in-tree dogfood
+  of the nlink-macros stack.
 
 ## Recipe shape
 

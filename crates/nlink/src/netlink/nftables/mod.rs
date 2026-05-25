@@ -31,10 +31,14 @@
 //! ).await?;
 //! ```
 
+pub mod config;
 pub mod connection;
+pub mod events;
 pub mod expr;
 pub mod types;
+pub(crate) mod userdata;
 
+pub use events::{NftablesEvent, NftablesGroup, NFNLGRP_NFTABLES};
 pub use expr::*;
 pub use types::*;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -75,6 +79,43 @@ pub const NFT_MSG_GETSETELEM: u8 = 13;
 pub const NFT_MSG_DELSETELEM: u8 = 14;
 pub const NFT_MSG_NEWGEN: u8 = 15;
 pub const NFT_MSG_GETGEN: u8 = 16;
+/// Create a flowtable (`NFT_MSG_NEWFLOWTABLE`). Kernel 5.x+.
+pub const NFT_MSG_NEWFLOWTABLE: u8 = 22;
+/// Dump flowtables (`NFT_MSG_GETFLOWTABLE`).
+pub const NFT_MSG_GETFLOWTABLE: u8 = 23;
+/// Delete a flowtable (`NFT_MSG_DELFLOWTABLE`).
+pub const NFT_MSG_DELFLOWTABLE: u8 = 24;
+
+// =============================================================================
+// Flowtable Attributes (NFTA_FLOWTABLE_*) — kernel UAPI
+// `include/uapi/linux/netfilter/nf_tables.h`
+// =============================================================================
+
+pub const NFTA_FLOWTABLE_TABLE: u16 = 1;
+pub const NFTA_FLOWTABLE_NAME: u16 = 2;
+pub const NFTA_FLOWTABLE_HOOK: u16 = 3;
+pub const NFTA_FLOWTABLE_USE: u16 = 4;
+pub const NFTA_FLOWTABLE_HANDLE: u16 = 5;
+pub const NFTA_FLOWTABLE_PAD: u16 = 6;
+pub const NFTA_FLOWTABLE_FLAGS: u16 = 7;
+
+// Nested hook attributes.
+pub const NFTA_FLOWTABLE_HOOK_NUM: u16 = 1;
+pub const NFTA_FLOWTABLE_HOOK_PRIORITY: u16 = 2;
+pub const NFTA_FLOWTABLE_HOOK_DEVS: u16 = 3;
+
+// Device attribute (used inside FLOWTABLE_HOOK_DEVS list).
+pub const NFTA_DEVICE_NAME: u16 = 1;
+
+// NF_NETDEV_INGRESS hook id — flowtables always attach here.
+pub const NF_NETDEV_INGRESS: u32 = 0;
+
+/// `NFT_FLOWTABLE_HW_OFFLOAD` — request kernel push the flow path
+/// onto NIC hardware where supported (mlx5, hns3, etc.).
+pub const NFT_FLOWTABLE_HW_OFFLOAD: u32 = 0x1;
+/// `NFT_FLOWTABLE_COUNTER` — track per-flow packet + byte counters.
+/// Pair with `Connection::<Nftables>::get_flowtables` to read.
+pub const NFT_FLOWTABLE_COUNTER: u32 = 0x2;
 
 /// Compute the full netlink message type for an nftables message.
 pub fn nft_msg_type(msg: u8) -> u16 {
@@ -89,6 +130,17 @@ pub const NFTA_TABLE_NAME: u16 = 1;
 pub const NFTA_TABLE_FLAGS: u16 = 2;
 pub const NFTA_TABLE_USE: u16 = 3;
 pub const NFTA_TABLE_HANDLE: u16 = 4;
+
+/// `NFT_TABLE_F_DORMANT` — table is dormant (chains don't fire).
+pub const NFT_TABLE_F_DORMANT: u32 = 0x1;
+/// `NFT_TABLE_F_OWNER` — table is owned by the creating socket
+/// (auto-deleted on socket close). Kernel 5.13+.
+pub const NFT_TABLE_F_OWNER: u32 = 0x2;
+/// `NFT_TABLE_F_PERSIST` — table survives `nft flush ruleset` issued
+/// against the same family. Kernel 6.9+. Pair with
+/// [`Connection<Nftables>::add_table_with_flags`](super::Connection) to
+/// create a table that the operator can't accidentally flush away.
+pub const NFT_TABLE_F_PERSIST: u32 = 0x4;
 
 // =============================================================================
 // Chain Attributes
@@ -115,6 +167,11 @@ pub const NFTA_RULE_CHAIN: u16 = 2;
 pub const NFTA_RULE_HANDLE: u16 = 3;
 pub const NFTA_RULE_EXPRESSIONS: u16 = 4;
 pub const NFTA_RULE_POSITION: u16 = 6;
+/// `NFTA_RULE_USERDATA = 7` — opaque-bytes payload the kernel
+/// preserves verbatim across reads / writes (max
+/// `NFT_USERDATA_MAXLEN = 256` bytes). Used for libnftnl-compatible
+/// TLV-encoded rule comments — see [`userdata`].
+pub const NFTA_RULE_USERDATA: u16 = 7;
 
 // =============================================================================
 // Expression Attributes
@@ -264,3 +321,57 @@ impl NfGenMsg {
 
 /// Size of NfGenMsg header.
 pub const NFGENMSG_HDRLEN: usize = 4;
+
+#[cfg(test)]
+mod table_flag_tests {
+    use super::*;
+
+    #[test]
+    fn nft_table_flags_match_kernel_uapi() {
+        // Values from include/uapi/linux/netfilter/nf_tables.h.
+        // These are part of the public ABI and must not drift.
+        assert_eq!(NFT_TABLE_F_DORMANT, 0x1);
+        assert_eq!(NFT_TABLE_F_OWNER, 0x2);
+        assert_eq!(NFT_TABLE_F_PERSIST, 0x4);
+    }
+
+    #[test]
+    fn nft_flowtable_constants_match_kernel_uapi() {
+        // From include/uapi/linux/netfilter/nf_tables.h. Stable
+        // ABI; must not drift.
+        assert_eq!(NFT_MSG_NEWFLOWTABLE, 22);
+        assert_eq!(NFT_MSG_GETFLOWTABLE, 23);
+        assert_eq!(NFT_MSG_DELFLOWTABLE, 24);
+        assert_eq!(NFT_FLOWTABLE_HW_OFFLOAD, 0x1);
+        assert_eq!(NFT_FLOWTABLE_COUNTER, 0x2);
+        assert_eq!(NF_NETDEV_INGRESS, 0);
+    }
+
+    #[test]
+    fn flowtable_builder_compose() {
+        use super::Family;
+        let ft = super::Flowtable::new(Family::Inet, "filter", "ft")
+            .device("eth0")
+            .device("eth1")
+            .priority(-300)
+            .hw_offload(true)
+            .counter(true);
+        assert_eq!(ft.devs, vec!["eth0", "eth1"]);
+        assert_eq!(ft.priority, -300);
+        assert!(ft.flags & NFT_FLOWTABLE_HW_OFFLOAD != 0);
+        assert!(ft.flags & NFT_FLOWTABLE_COUNTER != 0);
+        // Toggle off:
+        let ft = ft.hw_offload(false);
+        assert!(ft.flags & NFT_FLOWTABLE_HW_OFFLOAD == 0);
+        assert!(ft.flags & NFT_FLOWTABLE_COUNTER != 0);
+    }
+
+    #[test]
+    fn table_flags_compose_via_bitor() {
+        // Verify users can combine flags the natural way.
+        let combined = NFT_TABLE_F_DORMANT | NFT_TABLE_F_PERSIST;
+        assert_eq!(combined & NFT_TABLE_F_DORMANT, NFT_TABLE_F_DORMANT);
+        assert_eq!(combined & NFT_TABLE_F_PERSIST, NFT_TABLE_F_PERSIST);
+        assert_eq!(combined & NFT_TABLE_F_OWNER, 0);
+    }
+}

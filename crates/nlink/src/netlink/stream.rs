@@ -74,10 +74,10 @@ mod private {
 ///
 /// # Implementors
 ///
-/// - [`Route`](super::Route) - Network configuration events (link, address, route, neighbor, TC)
-/// - [`KobjectUevent`](super::KobjectUevent) - Device hotplug events
-/// - [`Connector`](super::Connector) - Process lifecycle events (fork, exec, exit)
-/// - [`SELinux`](super::SELinux) - SELinux policy/enforcement events
+/// - [`Route`] - Network configuration events (link, address, route, neighbor, TC)
+/// - [`KobjectUevent`] - Device hotplug events
+/// - [`Connector`] - Process lifecycle events (fork, exec, exit)
+/// - [`SELinux`] - SELinux policy/enforcement events
 pub trait EventSource: ProtocolState + private::Sealed {
     /// The event type produced by this protocol.
     type Event: Send + 'static;
@@ -500,6 +500,27 @@ impl EventSource for Netfilter {
     }
 }
 
+// Nftables protocol events (NFNLGRP_NFTABLES multicast — table /
+// chain / rule / flowtable mutations).
+impl private::Sealed for super::protocol::Nftables {}
+
+impl EventSource for super::protocol::Nftables {
+    type Event = super::nftables::NftablesEvent;
+
+    fn parse_events(data: &[u8]) -> Vec<super::nftables::NftablesEvent> {
+        let mut events = Vec::new();
+        for (header, payload) in MessageIter::new(data).flatten() {
+            if let Some(evt) = super::nftables::events::parse_nftables_event(
+                header.nlmsg_type,
+                payload,
+            ) {
+                events.push(evt);
+            }
+        }
+        events
+    }
+}
+
 // SELinux protocol events
 impl private::Sealed for SELinux {}
 
@@ -828,6 +849,29 @@ impl EventSource for Ethtool {
 
     fn parse_events(data: &[u8]) -> Vec<Self::Event> {
         parse_ethtool_events(data)
+    }
+}
+
+// DPLL multicast monitor events (Plan 156 Phase 5). Uses the
+// generic GENL-family group-resolution infra in the macro
+// stack — see `Connection::<Dpll>::subscribe_monitor()` and
+// `crates/nlink/src/netlink/genl/dpll/events.rs`.
+impl private::Sealed for super::genl::dpll::Dpll {}
+
+impl EventSource for super::genl::dpll::Dpll {
+    type Event = super::genl::dpll::DpllEvent;
+
+    fn parse_events(data: &[u8]) -> Vec<Self::Event> {
+        let mut events = Vec::new();
+        for msg_result in MessageIter::new(data) {
+            let Ok((_header, payload)) = msg_result else {
+                continue;
+            };
+            if let Some(evt) = super::genl::dpll::events::parse_dpll_event(payload) {
+                events.push(evt);
+            }
+        }
+        events
     }
 }
 

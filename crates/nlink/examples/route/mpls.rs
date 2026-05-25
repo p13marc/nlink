@@ -29,9 +29,12 @@ async fn main() -> nlink::Result<()> {
                                 print!("{} ", l.0);
                             }
                         }
+                        // MplsAction is #[non_exhaustive]; future kernel
+                        // actions (e.g., push-stack) print as a debug fallback.
+                        other => print!("{:?} ", other),
                     }
-                    if let Some(gw) = &route.gateway {
-                        print!("via {} ", gw);
+                    if let Some(via) = &route.via {
+                        print!("via {} ", via);
                     }
                     if let Some(idx) = route.oif {
                         print!("dev ifindex {} ", idx);
@@ -141,9 +144,9 @@ async fn main() -> nlink::Result<()> {
         r#"
     // List all MPLS routes
     let routes = conn.get_mpls_routes().await?;
-    for route in &routes {
-        println!("Label {}: {:?}", route.label.0, route.action);
-    }
+    for route in &routes {{
+        println!("Label {{}}: {{:?}}", route.label.0, route.action);
+    }}
 
     // Delete MPLS route
     conn.del_mpls_route(100).await?;

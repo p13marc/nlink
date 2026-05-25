@@ -63,6 +63,7 @@ const XFRMA_POLICY_TYPE: u16 = 16;
 const XFRMA_ALG_AEAD: u16 = 18;
 const XFRMA_ALG_AUTH_TRUNC: u16 = 20;
 const XFRMA_MARK: u16 = 21;
+const XFRMA_OFFLOAD_DEV: u16 = 26;
 const XFRMA_IF_ID: u16 = 31;
 
 // XFRM modes
@@ -397,6 +398,91 @@ pub struct XfrmMark {
     pub m: u32,
 }
 
+/// `XFRMA_OFFLOAD_DEV` payload — `struct xfrm_user_offload`.
+///
+/// Used to request hardware offload of an SA's crypto and/or
+/// packet path onto a NIC (mlx5, hns3, etc.). Carries the
+/// offload-target ifindex + the offload-shape flags.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct XfrmUserOffload {
+    /// Interface index to offload to.
+    pub ifindex: u32,
+    /// Bitmask of [`XfrmOffloadFlag`] values.
+    pub flags: u8,
+    /// Padding to match the kernel struct layout (the C struct
+    /// has natural padding after the u8 to keep the next field —
+    /// none in this case — at u32 alignment).
+    pub _pad: [u8; 3],
+}
+
+impl XfrmUserOffload {
+    pub fn new(ifindex: u32, flags: XfrmOffloadFlag) -> Self {
+        Self {
+            ifindex,
+            flags: flags.bits(),
+            _pad: [0; 3],
+        }
+    }
+}
+
+/// Flags for [`XfrmUserOffload`] / [`XfrmSaBuilder::offload`].
+///
+/// Kernel reference: `include/uapi/linux/xfrm.h`:
+/// `XFRM_OFFLOAD_IPV6` / `XFRM_OFFLOAD_INBOUND` / `XFRM_OFFLOAD_PACKET`.
+///
+/// `PACKET` requires kernel 6.0+ and full packet-mode-capable NIC
+/// (mlx5 ConnectX-7 + later). Crypto-only offload works on older
+/// kernels with simpler hardware.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct XfrmOffloadFlag(u8);
+
+impl XfrmOffloadFlag {
+    /// Offload an IPv6 SA. Required for IPv6 ESP / IPv6 UDP-encap
+    /// ESP offload.
+    pub const IPV6: Self = Self(0x1);
+    /// Inbound SA (decrypt path). Default is outbound (encrypt).
+    pub const INBOUND: Self = Self(0x2);
+    /// Full packet-mode offload (kernel 6.0+). Without this flag,
+    /// only the crypto path is offloaded; the kernel still
+    /// handles packet framing.
+    pub const PACKET: Self = Self(0x4);
+
+    /// Empty / outbound + crypto-only — the default.
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Compose multiple flags. Idiomatic bit-or via `|` is also
+    /// supported.
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    /// Underlying bitmask value.
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// `true` if `other` is fully contained in `self`.
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+
+impl std::ops::BitOr for XfrmOffloadFlag {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for XfrmOffloadFlag {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
 /// IPsec protocol type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -718,6 +804,7 @@ pub struct XfrmSaBuilder {
     encap: Option<XfrmEncapTmpl>,
     mark: Option<(u32, u32)>,
     if_id: Option<u32>,
+    offload: Option<XfrmUserOffload>,
 }
 
 impl XfrmSaBuilder {
@@ -742,7 +829,40 @@ impl XfrmSaBuilder {
             encap: None,
             mark: None,
             if_id: None,
+            offload: None,
         }
+    }
+
+    /// Request hardware offload of this SA to the given device
+    /// (by ifindex) with the given offload shape.
+    ///
+    /// Kernel 6.11+ extended offload to IPv6 ESP and IPv4 UDP-encap
+    /// ESP; earlier kernels support IPv4 ESP only. NIC support
+    /// varies — mlx5, hns3, and a few others; check
+    /// `ethtool -k <dev> | grep esp` on the target NIC. If the
+    /// NIC doesn't support the requested shape the kernel returns
+    /// `EOPNOTSUPP` on the add; callers can dispatch via
+    /// `Error::is_not_supported()` and retry without offload.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::net::Ipv4Addr;
+    /// use nlink::netlink::xfrm::{XfrmSaBuilder, IpsecProtocol, XfrmOffloadFlag};
+    ///
+    /// let mlx5_ifindex = 3;
+    /// let sa = XfrmSaBuilder::new(
+    ///     Ipv4Addr::new(10, 0, 0, 1).into(),
+    ///     Ipv4Addr::new(10, 0, 0, 2).into(),
+    ///     0x12345678,
+    ///     IpsecProtocol::Esp,
+    /// )
+    /// .auth_hmac_sha256(&[0u8; 32])
+    /// .offload(mlx5_ifindex, XfrmOffloadFlag::PACKET);
+    /// ```
+    pub fn offload(mut self, ifindex: u32, flags: XfrmOffloadFlag) -> Self {
+        self.offload = Some(XfrmUserOffload::new(ifindex, flags));
+        self
     }
 
     pub fn mode(mut self, mode: XfrmMode) -> Self {
@@ -908,6 +1028,11 @@ impl XfrmSaBuilder {
         }
         if let Some(id) = self.if_id {
             b.append_attr_u32(XFRMA_IF_ID, id);
+        }
+        if let Some(off) = &self.offload {
+            // XFRMA_OFFLOAD_DEV carries `struct xfrm_user_offload`
+            // (4 bytes ifindex + 1 byte flags + 3 bytes pad).
+            b.append_attr(XFRMA_OFFLOAD_DEV, off.as_bytes());
         }
     }
 }
@@ -1583,84 +1708,10 @@ impl Connection<Xfrm> {
     /// `Connection::<Xfrm>::parse_sa_msg(...)` without needing a
     /// live socket.
     fn parse_sa_msg(data: &[u8]) -> Option<SecurityAssociation> {
-        if data.len() < NLMSG_HDRLEN + std::mem::size_of::<XfrmUsersaInfo>() {
+        if data.len() < NLMSG_HDRLEN {
             return None;
         }
-
-        let msg_data = &data[NLMSG_HDRLEN..];
-        let (info, _) = XfrmUsersaInfo::ref_from_prefix(msg_data).ok()?;
-
-        let mut sa = SecurityAssociation {
-            src_addr: info.saddr.to_ip(info.family),
-            dst_addr: info.id.daddr.to_ip(info.family),
-            spi: u32::from_be(info.id.spi),
-            protocol: IpsecProtocol::from_u8(info.id.proto),
-            mode: XfrmMode::from_u8(info.mode),
-            reqid: info.reqid,
-            selector: TrafficSelector::from_selector(info.sel),
-            enc_alg: None,
-            auth_alg: None,
-            aead_alg: None,
-            auth_trunc_alg: None,
-            comp_alg: None,
-            encap: None,
-            mark: None,
-            if_id: None,
-            bytes: info.curlft.bytes,
-            packets: info.curlft.packets,
-            replay_window: info.replay_window,
-            flags: info.flags,
-        };
-
-        // Parse attributes
-        let attr_start = NLMSG_HDRLEN + std::mem::size_of::<XfrmUsersaInfo>();
-        if data.len() > attr_start {
-            let mut input = &data[attr_start..];
-            while let Some((attr_type, attr_data)) = parse_nla(&mut input) {
-                match attr_type {
-                    XFRMA_ALG_CRYPT => {
-                        sa.enc_alg = parse_algorithm(attr_data);
-                    }
-                    XFRMA_ALG_AUTH => {
-                        sa.auth_alg = parse_algorithm(attr_data);
-                    }
-                    XFRMA_ALG_AEAD => {
-                        sa.aead_alg = parse_aead_algorithm(attr_data);
-                    }
-                    XFRMA_ALG_AUTH_TRUNC => {
-                        sa.auth_trunc_alg = parse_auth_trunc_algorithm(attr_data);
-                    }
-                    XFRMA_ALG_COMP => {
-                        sa.comp_alg = parse_algorithm(attr_data);
-                    }
-                    XFRMA_ENCAP => {
-                        if attr_data.len() >= std::mem::size_of::<XfrmEncapTmpl>()
-                            && let Ok((encap, _)) = XfrmEncapTmpl::ref_from_prefix(attr_data)
-                        {
-                            sa.encap = Some(*encap);
-                        }
-                    }
-                    XFRMA_MARK => {
-                        if attr_data.len() >= std::mem::size_of::<XfrmMark>()
-                            && let Ok((mark, _)) = XfrmMark::ref_from_prefix(attr_data)
-                        {
-                            sa.mark = Some(*mark);
-                        }
-                    }
-                    XFRMA_IF_ID if attr_data.len() >= 4 => {
-                        sa.if_id = Some(u32::from_ne_bytes([
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                        ]));
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        Some(sa)
+        parse_sa_payload(&data[NLMSG_HDRLEN..])
     }
 
     /// Parse a Security Policy from a netlink message.
@@ -1673,52 +1724,144 @@ impl Connection<Xfrm> {
     /// `Connection::<Xfrm>::parse_policy_msg(...)` without a live
     /// socket.
     fn parse_policy_msg(data: &[u8]) -> Option<SecurityPolicy> {
-        if data.len() < NLMSG_HDRLEN + std::mem::size_of::<XfrmUserpolicyInfo>() {
+        if data.len() < NLMSG_HDRLEN {
             return None;
         }
+        parse_sp_payload(&data[NLMSG_HDRLEN..])
+    }
+}
 
-        let msg_data = &data[NLMSG_HDRLEN..];
-        let (info, _) = XfrmUserpolicyInfo::ref_from_prefix(msg_data).ok()?;
+/// Parse a Security Association from a `xfrm_usersa_info`-prefixed
+/// payload (everything after `nlmsghdr` in a `XFRM_MSG_NEWSA` /
+/// `_GETSA` reply or `XFRM_MSG_EXPIRE` notification). Plumbed via
+/// [`FromNetlink`] for the streaming-dump path
+/// ([`Connection::stream_sas`](super::Connection::stream_sas)).
+pub(crate) fn parse_sa_payload(msg_data: &[u8]) -> Option<SecurityAssociation> {
+    if msg_data.len() < std::mem::size_of::<XfrmUsersaInfo>() {
+        return None;
+    }
+    let (info, _) = XfrmUsersaInfo::ref_from_prefix(msg_data).ok()?;
 
-        let mut policy = SecurityPolicy {
-            selector: TrafficSelector::from_selector(info.sel),
-            direction: PolicyDirection::from_u8(info.dir),
-            action: PolicyAction::from_u8(info.action),
-            priority: info.priority,
-            index: info.index,
-            flags: info.flags,
-            mark: None,
-            if_id: None,
-        };
+    let mut sa = SecurityAssociation {
+        src_addr: info.saddr.to_ip(info.family),
+        dst_addr: info.id.daddr.to_ip(info.family),
+        spi: u32::from_be(info.id.spi),
+        protocol: IpsecProtocol::from_u8(info.id.proto),
+        mode: XfrmMode::from_u8(info.mode),
+        reqid: info.reqid,
+        selector: TrafficSelector::from_selector(info.sel),
+        enc_alg: None,
+        auth_alg: None,
+        aead_alg: None,
+        auth_trunc_alg: None,
+        comp_alg: None,
+        encap: None,
+        mark: None,
+        if_id: None,
+        bytes: info.curlft.bytes,
+        packets: info.curlft.packets,
+        replay_window: info.replay_window,
+        flags: info.flags,
+    };
 
-        // Parse attributes
-        let attr_start = NLMSG_HDRLEN + std::mem::size_of::<XfrmUserpolicyInfo>();
-        if data.len() > attr_start {
-            let mut input = &data[attr_start..];
-            while let Some((attr_type, attr_data)) = parse_nla(&mut input) {
-                match attr_type {
-                    XFRMA_MARK => {
-                        if attr_data.len() >= std::mem::size_of::<XfrmMark>()
-                            && let Ok((mark, _)) = XfrmMark::ref_from_prefix(attr_data)
-                        {
-                            policy.mark = Some(*mark);
-                        }
-                    }
-                    XFRMA_IF_ID if attr_data.len() >= 4 => {
-                        policy.if_id = Some(u32::from_ne_bytes([
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                        ]));
-                    }
-                    _ => {}
+    let attr_start = std::mem::size_of::<XfrmUsersaInfo>();
+    if msg_data.len() > attr_start {
+        let mut input = &msg_data[attr_start..];
+        while let Some((attr_type, attr_data)) = parse_nla(&mut input) {
+            match attr_type {
+                XFRMA_ALG_CRYPT => {
+                    sa.enc_alg = parse_algorithm(attr_data);
                 }
+                XFRMA_ALG_AUTH => {
+                    sa.auth_alg = parse_algorithm(attr_data);
+                }
+                XFRMA_ALG_AEAD => {
+                    sa.aead_alg = parse_aead_algorithm(attr_data);
+                }
+                XFRMA_ALG_AUTH_TRUNC => {
+                    sa.auth_trunc_alg = parse_auth_trunc_algorithm(attr_data);
+                }
+                XFRMA_ALG_COMP => {
+                    sa.comp_alg = parse_algorithm(attr_data);
+                }
+                XFRMA_ENCAP => {
+                    if attr_data.len() >= std::mem::size_of::<XfrmEncapTmpl>()
+                        && let Ok((encap, _)) = XfrmEncapTmpl::ref_from_prefix(attr_data)
+                    {
+                        sa.encap = Some(*encap);
+                    }
+                }
+                XFRMA_MARK => {
+                    if attr_data.len() >= std::mem::size_of::<XfrmMark>()
+                        && let Ok((mark, _)) = XfrmMark::ref_from_prefix(attr_data)
+                    {
+                        sa.mark = Some(*mark);
+                    }
+                }
+                XFRMA_IF_ID if attr_data.len() >= 4 => {
+                    sa.if_id = Some(u32::from_ne_bytes([
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                    ]));
+                }
+                _ => {}
             }
         }
-
-        Some(policy)
     }
+
+    Some(sa)
+}
+
+/// Parse a Security Policy from a `xfrm_userpolicy_info`-prefixed
+/// payload (everything after `nlmsghdr` in a
+/// `XFRM_MSG_NEWPOLICY` / `_GETPOLICY` reply). Plumbed via
+/// [`FromNetlink`] for the streaming-dump path
+/// ([`Connection::stream_sps`](super::Connection::stream_sps)).
+pub(crate) fn parse_sp_payload(msg_data: &[u8]) -> Option<SecurityPolicy> {
+    if msg_data.len() < std::mem::size_of::<XfrmUserpolicyInfo>() {
+        return None;
+    }
+    let (info, _) = XfrmUserpolicyInfo::ref_from_prefix(msg_data).ok()?;
+
+    let mut policy = SecurityPolicy {
+        selector: TrafficSelector::from_selector(info.sel),
+        direction: PolicyDirection::from_u8(info.dir),
+        action: PolicyAction::from_u8(info.action),
+        priority: info.priority,
+        index: info.index,
+        flags: info.flags,
+        mark: None,
+        if_id: None,
+    };
+
+    let attr_start = std::mem::size_of::<XfrmUserpolicyInfo>();
+    if msg_data.len() > attr_start {
+        let mut input = &msg_data[attr_start..];
+        while let Some((attr_type, attr_data)) = parse_nla(&mut input) {
+            match attr_type {
+                XFRMA_MARK => {
+                    if attr_data.len() >= std::mem::size_of::<XfrmMark>()
+                        && let Ok((mark, _)) = XfrmMark::ref_from_prefix(attr_data)
+                    {
+                        policy.mark = Some(*mark);
+                    }
+                }
+                XFRMA_IF_ID if attr_data.len() >= 4 => {
+                    policy.if_id = Some(u32::from_ne_bytes([
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                    ]));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Some(policy)
 }
 
 /// Parse a netlink attribute.
@@ -1878,6 +2021,41 @@ mod tests {
         // New write-path structs:
         assert_eq!(std::mem::size_of::<XfrmUsersaId>(), 24);
         assert_eq!(std::mem::size_of::<XfrmUsersaFlush>(), 8);
+        // Plan 153.1 XFRMA_OFFLOAD_DEV — 4-byte ifindex + 1 byte
+        // flags + 3 bytes pad = 8 bytes per kernel UAPI.
+        assert_eq!(std::mem::size_of::<XfrmUserOffload>(), 8);
+    }
+
+    #[test]
+    fn xfrm_offload_flag_bitops() {
+        let combined = XfrmOffloadFlag::IPV6 | XfrmOffloadFlag::PACKET;
+        assert!(combined.contains(XfrmOffloadFlag::IPV6));
+        assert!(combined.contains(XfrmOffloadFlag::PACKET));
+        assert!(!combined.contains(XfrmOffloadFlag::INBOUND));
+        assert_eq!(combined.bits(), 0x1 | 0x4);
+
+        let mut acc = XfrmOffloadFlag::empty();
+        acc |= XfrmOffloadFlag::INBOUND;
+        assert!(acc.contains(XfrmOffloadFlag::INBOUND));
+        assert!(!acc.contains(XfrmOffloadFlag::IPV6));
+    }
+
+    #[test]
+    fn xfrm_offload_kernel_constants() {
+        // Values from include/uapi/linux/xfrm.h. Stable ABI; must
+        // not drift.
+        assert_eq!(XfrmOffloadFlag::IPV6.bits(), 0x1);
+        assert_eq!(XfrmOffloadFlag::INBOUND.bits(), 0x2);
+        assert_eq!(XfrmOffloadFlag::PACKET.bits(), 0x4);
+        assert_eq!(XFRMA_OFFLOAD_DEV, 26);
+    }
+
+    #[test]
+    fn xfrm_user_offload_struct_init() {
+        let off = XfrmUserOffload::new(7, XfrmOffloadFlag::IPV6 | XfrmOffloadFlag::PACKET);
+        assert_eq!(off.ifindex, 7);
+        assert_eq!(off.flags, 0x5);
+        assert_eq!(off._pad, [0, 0, 0]);
     }
 
     // ==========================================================
@@ -2367,5 +2545,164 @@ mod tests {
         let (got, _) = XfrmUsersaId::ref_from_prefix(&frame[16..16 + 24]).unwrap();
         assert_eq!(u32::from_be(got.spi), 0x1234_5678);
         assert_eq!(got.proto, IpsecProtocol::Ah.number());
+    }
+}
+
+// =========================================================================
+// Streaming dump support — Plan 149 typed-config streams for XFRM
+// =========================================================================
+
+use super::dump_stream::DumpStream;
+use super::parse::{FromNetlink, PResult};
+
+impl FromNetlink for SecurityAssociation {
+    /// Push a zeroed `xfrm_usersa_info` body — the kernel reads it
+    /// as a "match all" filter for the dump request.
+    fn write_dump_header(buf: &mut Vec<u8>) {
+        let sa_info = XfrmUsersaInfo::default();
+        buf.extend_from_slice(sa_info.as_bytes());
+    }
+
+    /// `parse` isn't used by the dump-stream path (it overrides
+    /// `from_bytes` instead), but the trait requires it. Consume
+    /// the entire input via `from_bytes` and advance the cursor
+    /// past it — semantically equivalent on a single-message body.
+    fn parse(input: &mut &[u8]) -> PResult<Self> {
+        let consumed = *input;
+        *input = &input[input.len()..];
+        Self::from_bytes(consumed).map_err(|_| {
+            winnow::error::ErrMode::Cut(winnow::error::ContextError::new())
+        })
+    }
+
+    /// Parse from the post-nlmsghdr body (`xfrm_usersa_info` +
+    /// attrs). Returns `Error::InvalidMessage` on a truncated body.
+    fn from_bytes(payload: &[u8]) -> Result<Self> {
+        parse_sa_payload(payload).ok_or_else(|| {
+            super::error::Error::InvalidMessage(
+                "truncated xfrm_usersa_info body".into(),
+            )
+        })
+    }
+}
+
+impl FromNetlink for SecurityPolicy {
+    /// Push a zeroed `xfrm_userpolicy_info` body — "match all"
+    /// filter for the dump request.
+    fn write_dump_header(buf: &mut Vec<u8>) {
+        let sp_info = XfrmUserpolicyInfo::default();
+        buf.extend_from_slice(sp_info.as_bytes());
+    }
+
+    fn parse(input: &mut &[u8]) -> PResult<Self> {
+        let consumed = *input;
+        *input = &input[input.len()..];
+        Self::from_bytes(consumed).map_err(|_| {
+            winnow::error::ErrMode::Cut(winnow::error::ContextError::new())
+        })
+    }
+
+    fn from_bytes(payload: &[u8]) -> Result<Self> {
+        parse_sp_payload(payload).ok_or_else(|| {
+            super::error::Error::InvalidMessage(
+                "truncated xfrm_userpolicy_info body".into(),
+            )
+        })
+    }
+}
+
+impl Connection<Xfrm> {
+    /// Stream every IPsec Security Association the kernel knows
+    /// about, one parsed [`SecurityAssociation`] per `next().await`.
+    /// Bounded memory (one batch in flight) — preferred over the
+    /// eager [`get_security_associations`](Self::get_security_associations)
+    /// on hosts with thousands of SAs (IPsec scale-out gateways,
+    /// telco aggregation routers).
+    ///
+    /// ```ignore
+    /// use tokio_stream::StreamExt;
+    /// let conn = Connection::<Xfrm>::new()?;
+    /// let mut stream = conn.stream_sas().await?;
+    /// while let Some(sa) = stream.next().await {
+    ///     let sa = sa?;
+    ///     println!("SPI {:x} → {:?}", sa.spi, sa.dst_addr);
+    /// }
+    /// ```
+    pub async fn stream_sas(&self) -> Result<DumpStream<'_, Xfrm, SecurityAssociation>> {
+        self.dump_stream::<SecurityAssociation>(XFRM_MSG_GETSA).await
+    }
+
+    /// Stream every IPsec Security Policy the kernel knows about.
+    /// Same shape as [`stream_sas`](Self::stream_sas) — bounded
+    /// memory, parsed per-frame; preferred over
+    /// [`get_security_policies`](Self::get_security_policies)
+    /// on policy-heavy hosts.
+    pub async fn stream_sps(&self) -> Result<DumpStream<'_, Xfrm, SecurityPolicy>> {
+        self.dump_stream::<SecurityPolicy>(XFRM_MSG_GETPOLICY).await
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    //! Unit tests for the `FromNetlink` impls on `SecurityAssociation`
+    //! and `SecurityPolicy`. Live-socket dump tests need root +
+    //! conntrack/xfrm state; those are covered manually.
+
+    use super::*;
+
+    /// `write_dump_header` writes a fixed-size zero body matching
+    /// the kernel's `xfrm_usersa_info` / `xfrm_userpolicy_info`
+    /// struct size. The kernel parses this as "no filter — dump
+    /// everything."
+    #[test]
+    fn sa_write_dump_header_pushes_zeroed_usersa_info() {
+        let mut buf = Vec::new();
+        <SecurityAssociation as FromNetlink>::write_dump_header(&mut buf);
+        assert_eq!(buf.len(), std::mem::size_of::<XfrmUsersaInfo>());
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn sp_write_dump_header_pushes_zeroed_userpolicy_info() {
+        let mut buf = Vec::new();
+        <SecurityPolicy as FromNetlink>::write_dump_header(&mut buf);
+        assert_eq!(buf.len(), std::mem::size_of::<XfrmUserpolicyInfo>());
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn sa_from_bytes_rejects_truncated_body() {
+        // Just shy of the XfrmUsersaInfo body length.
+        let payload = vec![0u8; std::mem::size_of::<XfrmUsersaInfo>() - 1];
+        let err = <SecurityAssociation as FromNetlink>::from_bytes(&payload);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn sp_from_bytes_rejects_truncated_body() {
+        let payload = vec![0u8; std::mem::size_of::<XfrmUserpolicyInfo>() - 1];
+        let err = <SecurityPolicy as FromNetlink>::from_bytes(&payload);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn sa_from_bytes_round_trips_zeroed_body() {
+        // All-zero body should parse to a default-ish SA — zero
+        // IPs, zero SPI. Exercises the parse path without needing
+        // a real kernel dump frame.
+        let payload = vec![0u8; std::mem::size_of::<XfrmUsersaInfo>()];
+        let sa = <SecurityAssociation as FromNetlink>::from_bytes(&payload)
+            .expect("zero body should parse");
+        assert_eq!(sa.spi, 0);
+        assert_eq!(sa.bytes, 0);
+    }
+
+    #[test]
+    fn sp_from_bytes_round_trips_zeroed_body() {
+        let payload = vec![0u8; std::mem::size_of::<XfrmUserpolicyInfo>()];
+        let sp = <SecurityPolicy as FromNetlink>::from_bytes(&payload)
+            .expect("zero body should parse");
+        assert_eq!(sp.priority, 0);
+        assert_eq!(sp.index, 0);
     }
 }

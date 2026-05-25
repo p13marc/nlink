@@ -113,6 +113,30 @@ pub struct InterfaceDiag {
     pub issues: Vec<Issue>,
 }
 
+impl InterfaceDiag {
+    /// True if the interface is administratively up (`IFF_UP`
+    /// set in `flags`). Mirrors `LinkMessage::is_up()`.
+    pub fn is_up(&self) -> bool {
+        // IFF_UP = 0x1 — see <net/if.h>.
+        self.flags & 0x1 != 0
+    }
+
+    /// True if the link layer detected carrier (`IFF_RUNNING`
+    /// set in `flags`). Mirrors `LinkMessage::has_carrier()`.
+    pub fn has_carrier(&self) -> bool {
+        // IFF_RUNNING = 0x40 — see <net/if.h>.
+        self.flags & 0x40 != 0
+    }
+
+    /// True if the interface is administratively up AND its
+    /// operstate is `OperState::Up`. Convenience predicate
+    /// answering "is this interface ready to carry traffic
+    /// right now?"
+    pub fn is_operational(&self) -> bool {
+        self.is_up() && matches!(self.state, OperState::Up)
+    }
+}
+
 /// Link transfer rates calculated from statistics deltas.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LinkRates {
@@ -325,7 +349,13 @@ pub struct ConnectivityReport {
 }
 
 /// Basic route information.
+///
+/// `#[non_exhaustive]` so future kernel attributes can be added
+/// without an SHV bump. Construct via the diagnostics layer
+/// (`Diagnostics::scan` / `Diagnostics::check_connectivity`);
+/// the struct is not a builder input.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RouteInfo {
     /// Destination prefix.
     pub destination: String,
@@ -335,6 +365,16 @@ pub struct RouteInfo {
     pub gateway: Option<IpAddr>,
     /// Output interface index.
     pub oif: Option<u32>,
+    /// Resolved output-interface name (filled in by the scan
+    /// pass via `Connection::get_link_by_index(oif)`).
+    /// `None` when `oif` is unset or the lookup failed; for
+    /// most kernel-installed routes a value is populated.
+    pub dev_name: Option<String>,
+    /// Preferred source address (RTA_PREFSRC). The address the
+    /// kernel binds when this host originates a connection
+    /// matching this route. Empty for routes with no prefsrc
+    /// hint (most kernel-default routes).
+    pub source: Option<IpAddr>,
     /// Route metric.
     pub metric: Option<u32>,
 }
@@ -753,6 +793,8 @@ impl Diagnostics {
                 prefix_len: r.dst_len(),
                 gateway,
                 oif,
+                dev_name: output_interface.clone(),
+                source: r.prefsrc().copied(),
                 metric: r.priority(),
             };
 
@@ -1253,6 +1295,43 @@ impl IssueStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_iface_diag(flags: u32, state: OperState) -> InterfaceDiag {
+        InterfaceDiag {
+            name: "test0".into(),
+            ifindex: 1,
+            state,
+            flags,
+            mtu: None,
+            stats: LinkStats::default(),
+            rates: LinkRates::default(),
+            tc: None,
+            issues: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn interface_diag_is_up_reads_iff_up_bit() {
+        assert!(!empty_iface_diag(0, OperState::Down).is_up());
+        assert!(empty_iface_diag(0x1, OperState::Down).is_up());
+        // IFF_RUNNING (0x40) without IFF_UP is not "up".
+        assert!(!empty_iface_diag(0x40, OperState::Down).is_up());
+    }
+
+    #[test]
+    fn interface_diag_has_carrier_reads_iff_running_bit() {
+        assert!(!empty_iface_diag(0, OperState::Down).has_carrier());
+        assert!(empty_iface_diag(0x40, OperState::Down).has_carrier());
+        // IFF_UP alone doesn't imply carrier.
+        assert!(!empty_iface_diag(0x1, OperState::Down).has_carrier());
+    }
+
+    #[test]
+    fn interface_diag_is_operational_requires_iff_up_plus_operstate_up() {
+        assert!(!empty_iface_diag(0, OperState::Up).is_operational());
+        assert!(!empty_iface_diag(0x1, OperState::Down).is_operational());
+        assert!(empty_iface_diag(0x1, OperState::Up).is_operational());
+    }
 
     #[test]
     fn test_severity_ordering() {

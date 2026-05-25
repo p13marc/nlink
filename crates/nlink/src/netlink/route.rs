@@ -831,6 +831,19 @@ impl RouteConfig for Ipv4Route {
         // scope, type, RTA_DST, RTA_OIF, RTA_GATEWAY, RTA_PREFSRC,
         // RTA_PRIORITY) so newer kernels match the original add and
         // don't return ESRCH.
+        //
+        // **RTA_METRICS deliberately omitted on delete.** The IPv4
+        // kernel's `fib_table_delete` (`net/ipv4/fib_trie.c`) and the
+        // IPv6 equivalent `ip6_route_del` (`net/ipv6/route.c`) match
+        // on the discriminating-key fields listed above — they don't
+        // key on metrics. Metrics live in the shared `fib_info` /
+        // `fib6_info` object that may be referenced by multiple
+        // route aliases; they're advisory at lookup time, not part
+        // of route identity. Asymmetry with `write_add` (which DOES
+        // write `RTA_METRICS`) is intentional: add carries the
+        // metrics for the kernel to attach to the new route entry;
+        // delete just identifies which entry to remove. Verified by
+        // kernel-source read during the Plan 147 §4.2 audit.
         let table_u8 = if self.table > 255 {
             rt_table::UNSPEC
         } else {

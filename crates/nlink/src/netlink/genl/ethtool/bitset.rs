@@ -280,7 +280,12 @@ impl EthtoolBitset {
         // reproducible (HashMap iteration order is otherwise
         // randomized per run, which would break test fixtures).
         let mut entries: Vec<(&u32, &String)> = self.names.iter().collect();
-        entries.sort_by_key(|(_, name)| (*name).clone());
+        // `sort_unstable_by_key` with a borrowed-`&str` key — avoids one
+        // clone per name on every `set_features` call. Ordering across
+        // equal keys doesn't matter for bitset encoding (names are
+        // unique within a bitset by construction); the unstable variant
+        // is the right choice.
+        entries.sort_unstable_by_key(|(_, name)| name.as_str());
         for (i, (idx, name)) in entries.iter().enumerate() {
             let entry_id = (i as u16) + 1;
             let entry = builder.nest_start(entry_id | NLA_F_NESTED);

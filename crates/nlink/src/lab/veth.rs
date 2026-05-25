@@ -16,7 +16,7 @@ use super::LabNamespace;
 /// local).
 ///
 /// This is a tiny convenience wrapper around
-/// [`VethLink`](crate::netlink::link::VethLink): it chains the
+/// [`VethLink`]: it chains the
 /// rtnetlink create call with peer-namespace placement and returns a
 /// handle carrying both interface names.
 ///

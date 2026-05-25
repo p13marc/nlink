@@ -35,11 +35,15 @@ cargo machete                             # no unused deps
 
 Live under `crates/nlink/tests/integration/` and require root +
 network namespaces. Maintainer runs `cargo test` as a regular
-user, so root-gated tests **bit-rot silently** — they live behind
-the `lab` feature and a privileged-CI gate (Plan 140 / Plan 142
-Phase 0). Until that lands, validate root flows manually with
-`--apply` example runners (e.g., `examples/netfilter/conntrack.rs
---apply`) and document the invocation in the recipe / plan.
+user, so root-gated tests would **bit-rot silently** if they
+weren't both (a) gated with `nlink::require_root!()` (so they
+skip cleanly as non-root) and (b) run under the privileged-CI
+gate that landed in 0.15.0 (Plan 140 — see
+`.github/workflows/integration-tests.yml`; runs on every push/PR
+to master under a container with `CAP_NET_ADMIN` + `CAP_SYS_ADMIN`
++ `seccomp=unconfined`). For local validation as a non-root user,
+the `--apply` example runners stay the canonical channel (e.g.,
+`examples/netfilter/conntrack.rs --apply`).
 
 ```bash
 cargo test --test integration --features lab --no-run
@@ -89,10 +93,10 @@ unsafe pointer casts in `types/`.
 |---|---|
 | `sockdiag` | Socket diagnostics (`NETLINK_SOCK_DIAG`) |
 | `tuntap` | TUN/TAP device management |
-| `tc` | TC qdisc string-arg builders + handle parsing |
 | `output` | JSON/text output formatting helpers |
 | `namespace_watcher` | Inotify-based netns watching |
 | `lab` | `nlink::lab` namespace + integration-test harness |
+| `syscall_batch` | `recvmmsg`/`sendmmsg` batching wired into eager + streaming dump paths (0.16+; opt-in for one soak release) |
 | `full` | All of the above |
 
 ## Type-safe units (Rate / Bytes / Percent)
@@ -252,6 +256,54 @@ The `nlink::lab` module (feature `lab`) provides `LabNamespace`
 and `with_namespace` for integration tests + local CLI demos.
 Drop deletes the namespace; failures `tracing::warn!`.
 
+### Namespace-safe APIs
+
+nlink provides `*_by_index` variants alongside `*_by_name` for
+every resource lookup. The `_by_index` variants take a kernel
+ifindex directly, so they're safe to call from any process mount
+namespace — the index is always relative to the connection's
+netns. The `_by_name` variants read `/sys/class/net/` from the
+calling process's mount namespace, which is convenient for simple
+cases but surprises inside foreign netns. **For namespace-aware
+code (CNI plugins, multi-tenant managers, integration-test
+harnesses that touch foreign netns), prefer the `_by_index`
+variants — or pre-resolve names once via
+`conn.get_link_by_name(...)` and pass the index to subsequent
+calls.**
+
+This is a deliberate design choice that distinguishes nlink from
+`neli` and `vishvananda/netlink`, both of which leave namespace
+handling to the caller — a documented footgun in
+[Cilium issue #40280](https://github.com/cilium/cilium/issues/40280).
+nlink's typed `InterfaceRef::Index(u32)` plus the per-method
+`_by_index` variants make namespace-correct code natural to write.
+
+If you want compile-time enforcement instead of "prefer", use
+the `Index(_)` variant of `InterfaceRef` (or pass a `u32`
+ifindex directly to methods that accept it) — the `_by_name`
+methods become a deliberate convenience choice rather than a
+default.
+
+### Connection diagnostics + sockopts
+
+Two `Connection<P>` methods control kernel-side diagnostic
+surfaces; both are silently no-ops on kernels that don't recognize
+the underlying sockopt:
+
+- `conn.enable_strict_checking(true)?` —
+  `NETLINK_GET_STRICT_CHK` (kernel 5.0+). Validates dump filters
+  against the running kernel's attribute set; surfaces
+  client/kernel-version mismatches as errors instead of silent
+  misbehavior. Off by default; opt in when developing against a
+  specific kernel.
+- `conn.set_ext_ack(true)?` — `NETLINK_EXT_ACK` (kernel 4.12+).
+  **On by default** — disabling is rarely useful. When on (and
+  the kernel cooperates), error responses carry human-readable
+  TLVs that nlink parses and stitches into `Error::Kernel::Display`
+  output. Example: `errno = 22 (EINVAL)` becomes
+  `"attribute IFLA_MTU rejected: value 0 out of range (at request
+  offset 24)"`. See `Error::Kernel::ext_ack`.
+
 ## Errors
 
 All public methods return `nlink::Result<T>`. The error type is
@@ -311,28 +363,145 @@ recipe rather than re-synthesizing:
   — ctnetlink mutation + multicast NEW/DESTROY events.
 - [`nftables-stateful-fw`](docs/recipes/nftables-stateful-fw.md) —
   table/chain/rule plumbing + atomic transactions.
+- [`nftables-declarative-config`](docs/recipes/nftables-declarative-config.md) —
+  declare a whole ruleset, `cfg.diff(&conn)` + `diff.apply(&conn)`
+  (atomic single-batch commit) + `apply_reconcile` for concurrent
+  mutators. Mirror of `NetworkConfig` for nftables.
+- [`define-your-own-genl-family`](docs/recipes/define-your-own-genl-family.md)
+  — declare a complete custom GENL family in ~30 lines via
+  `nlink-macros` (`#[genl_family]` + `#[derive(GenlMessage)]` +
+  `conn.send_typed(req).await?`).
+- [`dpll-monitor`](docs/recipes/dpll-monitor.md) — enumerate
+  clock-synchronization hardware (SyncE / PTP / GNSS) via
+  `Connection<Dpll>`, push-based event stream
+  (`subscribe_monitor()` + `DpllEvent` via `EventSource`), detect
+  holdover acquisition, diagnose lock loss via
+  `DpllLockStatusError`. Telco-RAN / time-sync / SmartNIC
+  control-plane use case (0.16+).
+- [`tx-hw-shaping`](docs/recipes/tx-hw-shaping.md) — TX hardware
+  shaping (per-NIC, per-queue, or scheduler-node bandwidth/burst/
+  priority/weight) via `Connection<NetShaper>` (kernel 6.13+).
+  Capability handshake via `get_caps` before `set_shaper` so
+  drivers with partial support don't surprise you. Telco /
+  SmartNIC / SR-IOV multi-tenancy use case (0.16+).
 
 Per-subsystem runnable examples live under
 `crates/nlink/examples/`: `genl/{wireguard,macsec,mptcp,ethtool_*,
-nl80211,devlink}.rs`, `netfilter/{conntrack,conntrack_events}.rs`,
+nl80211,devlink,dpll,net_shaper}.rs`, `macros/define_taskstats.rs`,
+`netfilter/{conntrack,conntrack_events}.rs`,
 `{audit,bridge,config,connector,diagnostics,events,fib_lookup,
 impair,lab,namespace,nftables,ratelimit,route,selinux,sockdiag,
 uevent,xfrm}/`. Read these directly when learning a subsystem;
-they are kept current.
+registered examples are kept current (see
+[Plan 160](plans/160-example-registry-audit.md) for the 9 known
+orphan files behind a CI gate; they're catalogued for
+maintainer-paced triage).
+
+**Convention — every example .rs MUST be registered in
+`crates/nlink/Cargo.toml`.** Cargo only auto-discovers examples
+at the top level of `examples/`; any file in a subdirectory
+(`examples/route/foo.rs`, `examples/genl/bar.rs`, …) is invisible
+to `cargo build --workspace --all-targets` unless declared as an
+`[[example]] name=… path=…` block. Skipping the registration means
+the example bit-rots silently against API changes — surfaced by
+[Plan 160](plans/160-example-registry-audit.md) which catalogues
+9 such orphans found during the 0.16 cycle. `scripts/audit-
+example-registration.sh` enforces the convention; run it locally
+before merging a new example.
 
 ## Active work
 
-The 0.15.0 typed-API completion arc has shipped — sealed
-`ParseParams` trait + 45 impls, filter side 9/9 typed-first,
-XFRM SA + SP CRUD, typed standalone-action CRUD, and the legacy
-`tc::builders::*` + `tc::options::*` modules deleted. See
-CHANGELOG `## [0.15.0]` for the per-PR breakdown.
+The **0.16 cycle is mid-flight** on the `0.16` branch (do not push
+to master). Plans live in [`plans/`](plans/) with
+[`plans/INDEX.md`](plans/INDEX.md) as the day-to-day status
+tracker. Headlines that landed so far:
 
-Roadmap entry point:
-[`128b-roadmap-overview.md`](128b-roadmap-overview.md). The
-"Active plans" table is empty as of the 0.15.0 cut; new work
-opens fresh plan files at the repo root when scoped (next
-expected: per-bin typed-units audit for `bins/{ip,ss,nft,...}`).
+- **Plan 154 — `nlink-macros` proc-macro crate** (🟢 all 7 main
+  phases + Phase 8.1-8.5 done). Downstream code declares a
+  complete custom GENL family + typed request/response in ~30
+  lines via `#[genl_family(...)]` + `#[derive(GenlMessage)]` +
+  `#[derive(GenlCommand/GenlAttribute/GenlEnum/NetlinkAttrs)]` +
+  `Connection::<F>::send_typed(req).await?`. Field types now
+  cover: primitives + `Option<T>` + `Vec<u8>` + `Vec<GenlEnum>`
+  + bitflags newtypes + `Option<GenlEnum>` + nested attribute
+  groups via `nested` hint. See
+  [`docs/recipes/define-your-own-genl-family.md`](docs/recipes/define-your-own-genl-family.md)
+  + [`crates/nlink/examples/macros/define_taskstats.rs`](crates/nlink/examples/macros/define_taskstats.rs).
+- **Plan 149 — streaming dump API** (🟢): `dump_stream<T>` +
+  `dump_stream_with_body<T>` (caller-parameterized body) +
+  typed wrappers for links/routes/neighbors/addresses + qdiscs/
+  classes/filters + XFRM SAs/SPs (`stream_sas`/`stream_sps`) +
+  conntrack (`stream_conntrack` / `_v4` / `_v6`) +
+  nft-rules (`stream_rules(table, family)`). O(1) memory
+  iteration over BGP/conntrack/IPsec/nft-scale dumps. The
+  `_with_body` extension reuses each family's existing
+  payload parser (parse_conntrack_body, parse_rule, etc.) so
+  one parser per kind serves eager / multicast / streaming
+  paths.
+- **Plan 150 — nftables flowtable** (🟢): full CRUD + multicast
+  events (`Connection::<Nftables>::subscribe` + 8 typed event
+  variants). §9.1 counters introspection formally closed —
+  kernel UAPI premise was wrong (per-flow counters live in
+  conntrack via `CTA_COUNTERS_*`, not in `NFT_MSG_GETFLOWTABLE`);
+  the `stream_conntrack` + `ConntrackStatus::OFFLOAD`/`HW_OFFLOAD`
+  filter pattern is documented in the nftables-stateful-fw recipe.
+- **Plan 151 — ENOBUFS resync** (🟢): `ResyncedEvent<T>` +
+  `ResyncMarker` + recipe shipped earlier; the pre-baked
+  `events_with_resync<S, T, F>` Stream wrapper + `ResyncStream`
+  state machine (`Forwarding` → `RunningSnapshot` → `Replaying`
+  → `Done`) landed in the 2026-05-25 pre-cut audit window. 6
+  unit tests cover pass-through, ENOBUFS+replay, empty-snapshot
+  markers, error fusing, snapshot failure, multiple recoveries.
+- **Plan 153 — kernel feature bundle** (🟢): all three sub-features
+  shipped (§4.1 XFRM IPsec offload + §4.2 Devlink rate +
+  port-function-state + §4.3 `net_shaper` GENL family — second
+  in-tree macro dogfood after DPLL).
+- **Plan 157 — declarative `NftablesConfig`** (🟢): diff + atomic
+  apply via the extended `Transaction` + `apply_reconcile(opts)`
+  + recipe + **per-rule USERDATA-keyed reconciliation identity**
+  (Plan 157b v2 — replaced original §4.3 typed-Match
+  canonicalization design after research showed
+  kube-proxy/Google nftables/etc. all use USERDATA comment-
+  tagging, not canonicalization). `DeclaredRule::handle_key`
+  round-trips as `NFTA_RULE_USERDATA = "nlink:<key>"`; diff
+  matches by key + body-bytes, emits `Transaction::replace_rule`
+  (NLM_F_REPLACE) for in-place body updates. NetworkConfig-
+  symmetric per-rule diff granularity. Sets/maps deferred per
+  original plan scope.
+- **Plan 158 — `syscall_batch` feature** (🟢 opt-in): `recvmmsg` /
+  `sendmmsg` batching wired into both eager dumps + streaming.
+- **Plan 159 — `ConnectionPool<P>`** (🟢): bounded-mpsc-channel-
+  backed pool for parallel fanout.
+- **Plan 156 — DPLL family** (🟢): first in-tree dogfood of the
+  macros. All 6 phases landed — `Connection<Dpll>` with
+  `get/dump/set_*` for devices and pins (all 11 typed enums +
+  nested groups + bitflags), push-based multicast monitor
+  (`subscribe_monitor()` + `DpllEvent` via `EventSource`),
+  recipe + example. ~430 lines of declarative Rust for the full
+  family vs ~600+ lines hand-written. Phase 5 closeout also
+  shipped **shared GENL multicast-group infrastructure**:
+  `__rt::resolve_genl_family_with_groups` +
+  `GenlFamily::mcast_group(name)` +
+  `Connection::<F: GenlFamily>::subscribe_group(name)`.
+  Devlink/Nl80211/Ethtool refactored to use it (−254 lines of
+  duplicated wire parsing).
+
+Pre-cut audit (2026-05-25) added Plans 161-166 — all 🟢:
+- **161** — 4 example companions for headline 0.16 features.
+- **162** — `PooledConnection::invalidate` consume-self (compile
+  error replaces runtime panic).
+- **163** — `#[non_exhaustive]` on 9 new-in-0.16 pub structs
+  (`ReconcileOptions` is now builder-only).
+- **164** — `NftablesConfig::diff` hoists `list_chains()` +
+  `list_flowtables()` out of the table loop (O(N²+N·R) → O(N+R)).
+- **165** — 5 doc-currency cleanups.
+- **166** — 20 root-gated integration tests across 6 new files
+  (~470 LOC) — ship in 0.16, run under privileged CI once
+  Plan 140 lands.
+
+Ready to start (no blockers): Plan 152 (aya/Prometheus/OTel
+showcases — both DPLL and net_shaper now in tree as macro
+reference points). Currently deprioritized per maintainer.
 
 Per-release upgrade guides:
 [`docs/migration_guide/`](docs/migration_guide/README.md) — write
@@ -341,9 +510,18 @@ convention.
 
 ## Publishing
 
-`nlink` is the only publishable crate (binaries have
-`publish = false`).
+Two publishable crates as of 0.16: `nlink` and `nlink-macros` (the
+proc-macro derives `nlink::macros::*` re-exports). Both bins set
+`publish = false`.
+
+**Publish nlink-macros FIRST** when cutting — `nlink`'s `Cargo.toml`
+pins `nlink-macros` with `version = "..."` alongside the path dep
+so `cargo publish -p nlink` resolves the dep on crates.io;
+publishing nlink before nlink-macros fails with "no matching
+version found."
 
 ```bash
+cargo publish -p nlink-macros
+# wait ~30s for crates.io to index
 cargo publish -p nlink
 ```
