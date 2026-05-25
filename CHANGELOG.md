@@ -1362,6 +1362,41 @@ All notable changes to this project will be documented in this file.
   (`p.invalidate();` still works — the guard is gone after the
   call either way). Only breaks the bug-shape.
 
+### Added — diagnostics layer gaps closed (Plan 169)
+
+The Plan 168 orphan-example closeout (above) surfaced
+*evidence* — each phantom symbol in a broken example was a
+record of "an author wanted this and didn't find it". Most
+were rename drift (already-fixed bugs); four were real
+lib-side coverage gaps where the lower-level type carried the
+data but the higher-level diagnostics wrapper dropped it on
+the way through. Plan 169 closes those gaps:
+
+- **`RouteInfo` gains `source: Option<IpAddr>` (RTA_PREFSRC) +
+  `dev_name: Option<String>` (resolved output-interface name)**
+  and is now `#[non_exhaustive]`. The diagnostics scan already
+  fetched both data points internally; they're now stored on
+  RouteInfo for direct access (no longer just a function-return
+  side channel). `#[non_exhaustive]` is added in the same
+  commit so future RTA_* propagation doesn't break callers.
+- **`InterfaceDiag` gains `is_up() -> bool`, `has_carrier() -> bool`,
+  and `is_operational() -> bool`** convenience predicates,
+  mirroring the same-named methods on the lower-level
+  `LinkMessage`. Callers no longer need to bit-test `flags`
+  against `IFF_UP` / `IFF_RUNNING` manually or remember to
+  compare `state` against `OperState::Up`. `is_operational()`
+  combines both checks ("ready to carry traffic right now?").
+- **`Srv6LocalRoute::table() -> Option<u32>`** convenience
+  getter. The kernel UAPI puts the routing-table attribute
+  inside the action's nested encap block, so the lib's parser
+  embeds it in the action variant (`EndT { table }`,
+  `EndDT4 { table }`, etc.). Asking "what table is this SID
+  in?" used to require enumerating all four table-carrying
+  variants; the new getter encapsulates that match.
+
+Four new unit tests cover the new methods (3 for InterfaceDiag,
+1 for Srv6LocalRoute). 970 lib tests (was 966).
+
 ### Examples — Plan 160 orphan catalog closed (Plan 168)
 
 - **All 9 orphan example files catalogued by Plan 160 closed.**
