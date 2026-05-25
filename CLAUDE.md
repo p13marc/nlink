@@ -388,7 +388,10 @@ nl80211,devlink,dpll,net_shaper}.rs`, `macros/define_taskstats.rs`,
 `{audit,bridge,config,connector,diagnostics,events,fib_lookup,
 impair,lab,namespace,nftables,ratelimit,route,selinux,sockdiag,
 uevent,xfrm}/`. Read these directly when learning a subsystem;
-they are kept current.
+registered examples are kept current (see
+[Plan 160](plans/160-example-registry-audit.md) for the 9 known
+orphan files behind a CI gate; they're catalogued for
+maintainer-paced triage).
 
 **Convention — every example .rs MUST be registered in
 `crates/nlink/Cargo.toml`.** Cargo only auto-discovers examples

@@ -112,6 +112,7 @@ impl NetShaperGetRequest {
 /// omits the `BURST` attribute.
 #[derive(GenlMessage, Debug, Default, Clone)]
 #[genl_message(cmd = NetShaperCmd::Get)]
+#[non_exhaustive]
 pub struct NetShaperReply {
     /// Interface ifindex.
     #[genl_attr(NetShaperAttr::Ifindex)]
@@ -310,6 +311,7 @@ impl NetShaperCapsGetRequest {
 /// Hand-implemented `GenlMessage` because the macros don't yet
 /// model presence-flag attributes ("flag" in YNL terms).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NetShaperCapsReply {
     /// Interface ifindex.
     pub ifindex: u32,

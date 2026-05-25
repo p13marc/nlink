@@ -32,6 +32,7 @@ pub(super) struct PoolInner<P: ProtocolState> {
 /// See the [module-level docs][crate::netlink::pool] for the design
 /// rationale, sizing guidance, and the relationship to neli's
 /// deferred-to-0.17 NlRouter-style multiplexing.
+#[non_exhaustive]
 pub struct ConnectionPool<P: ProtocolState> {
     pub(super) inner: Arc<PoolInner<P>>,
 }
@@ -109,6 +110,7 @@ impl<P: ProtocolState + Default + SyncConstructible + 'static> ConnectionPool<P>
 /// protocols (sealed `SyncConstructible`), one for GENL families
 /// (sealed `AsyncConstructible`). See Plan 148 §4.5 for the sealed
 /// trait split.
+#[non_exhaustive]
 pub struct ConnectionPoolBuilder<P: ProtocolState> {
     size: usize,
     acquire_timeout: Duration,

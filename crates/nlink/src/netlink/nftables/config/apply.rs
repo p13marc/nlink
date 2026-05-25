@@ -214,7 +214,21 @@ impl NftablesDiff {
 
 /// Options controlling [`NftablesDiff::apply_reconcile`]'s retry
 /// loop. Defaults: 3 retries, 100ms initial backoff (exponential).
+///
+/// Construct via [`Default::default()`] + the builder-style
+/// setters; struct-literal construction is forbidden by
+/// `#[non_exhaustive]` so future fields can be added without an
+/// SHV bump.
+///
+/// ```
+/// use nlink::netlink::nftables::config::ReconcileOptions;
+/// use std::time::Duration;
+/// let opts = ReconcileOptions::default()
+///     .max_retries(5)
+///     .backoff(Duration::from_millis(50));
+/// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ReconcileOptions {
     /// Maximum number of retries after the initial attempt.
     /// Total apply attempts is `max_retries + 1`. Default: 3.
@@ -233,9 +247,26 @@ impl Default for ReconcileOptions {
     }
 }
 
+impl ReconcileOptions {
+    /// Set `max_retries` (chained builder pattern).
+    #[must_use]
+    pub fn max_retries(mut self, retries: usize) -> Self {
+        self.max_retries = retries;
+        self
+    }
+
+    /// Set `backoff` (chained builder pattern).
+    #[must_use]
+    pub fn backoff(mut self, backoff: Duration) -> Self {
+        self.backoff = backoff;
+        self
+    }
+}
+
 /// Outcome of [`NftablesDiff::apply_reconcile`]. `attempts == 1`
 /// means the first apply succeeded — no contention encountered.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ReconcileReport {
     /// Total number of apply attempts (including retries).
     /// 1 = first try succeeded; 2+ = retried after EBUSY/EAGAIN.

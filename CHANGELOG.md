@@ -4,7 +4,43 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+> See [`docs/migration_guide/0.15.1-to-0.16.0.md`](docs/migration_guide/0.15.1-to-0.16.0.md)
+> for the full upgrade walkthrough (breaking changes, behavior
+> changes, and adoption guide for new features).
+
 ### Added
+
+- **`events_with_resync(stream, snapshot_fn) -> ResyncStream<...>`
+  (Plan 151 closeout)** — pre-baked `Stream` wrapper that turns
+  any `Stream<Item = Result<T>>` into a `Stream<Item =
+  Result<ResyncedEvent<T>>>`. On `ENOBUFS` it transparently runs
+  the caller-supplied snapshot future, emits `Marker(ResyncStart)`,
+  replays every snapshot frame as `Resynced(T)`, emits
+  `Marker(ResyncEnd)`, and returns to forwarding live events.
+  Non-ENOBUFS errors fuse the stream. Hand-rolled `poll_next`
+  state machine — no `async_stream` dependency. 6 unit tests
+  cover pass-through, replay, empty-snapshot markers, error
+  fusing, snapshot failure, multiple consecutive recoveries.
+
+  Replaces the documented hand-rolled loop pattern in
+  `docs/recipes/multi-namespace-events.md` — that pattern still
+  works (and is still recommended when you want full control of
+  the snapshot lifecycle), but the wrapper saves boilerplate for
+  the common case. Closes Plan 151.
+
+- **20 root-gated integration tests across 6 new files
+  (Plan 166 closeout — pulled into 0.16)**:
+  `tests/integration/ergonomics.rs` (Plan 148 — 3 tests),
+  `streaming.rs` (Plan 149 — 2 tests),
+  `flowtable.rs` (Plan 150 — 2 tests),
+  `nftables_reconcile.rs` (Plan 157 — 7 tests),
+  `syscall_batch.rs` (Plan 158 — 1 test),
+  `pool.rs` (Plan 159 + Plan 162 guard — 5 tests). All gated
+  with `nlink::require_root!()` + `nlink::require_modules!()`
+  so they ship in 0.16 and early-exit cleanly when run as a
+  regular user; runs under privileged CI once Plan 140 lands.
+  Hardware-only scenarios (XFRM offload, devlink rate,
+  net_shaper caps round-trip) explicitly out of scope.
 
 - **Plan 150 §9.1 formally closed — flowtable per-flow counters
   via the existing `stream_conntrack` API** (no new code; the
@@ -1275,6 +1311,53 @@ All notable changes to this project will be documented in this file.
   alongside it. `nlink::netlink::neigh::ntf` is now re-exported
   so callers decoding `NeighborMessage::flags()` don't have to
   redefine kernel constants.
+
+### Changed — semver lockdown (Plan 163, pre-cut)
+
+- **9 new-in-0.16 pub structs gain `#[non_exhaustive]`**:
+  `RuleInfo`, `NftablesDiff`, `ReconcileOptions`, `ReconcileReport`,
+  `DpllDeviceReply`, `DpllPinReply`, `NetShaperReply`,
+  `NetShaperCapsReply`, `ConnectionPool`, `ConnectionPoolBuilder`,
+  `PooledConnection`, `DumpStream`. Re-applying the attribute
+  after publish would itself be breaking, so it landed in the
+  pre-cut audit window.
+
+  **Caller-visible impact**: `ReconcileOptions` can no longer
+  be constructed with a struct literal. Use the builder pattern:
+  ```rust
+  let opts = ReconcileOptions::default()
+      .max_retries(5)
+      .backoff(Duration::from_millis(50));
+  ```
+  Field access and `Default::default()` continue to work
+  unchanged. All other types in the list are constructed by
+  nlink internals, not user code.
+
+### Changed — Plan 162 `PooledConnection::invalidate` consume-self
+
+- **`PooledConnection::invalidate` now takes `self` by value
+  (consume-self) instead of `&mut self`** (`pool/pooled.rs`).
+  Closes a panic-on-misuse footgun: previously,
+  `p.invalidate(); &*p` would panic at runtime because
+  `invalidate` left `conn: None` and `Deref` unwrapped it. The
+  new shape makes the bug a compile error
+  (E0382: use of moved value). A `compile_fail` rustdoc test
+  on `invalidate()` guards the contract against future
+  regressions.
+
+  **Source-compatible** for the "invalidate then drop" use case
+  (`p.invalidate();` still works — the guard is gone after the
+  call either way). Only breaks the bug-shape.
+
+### Performance — Plan 164 NftablesConfig::diff hoist
+
+- **`NftablesConfig::diff` no longer issues `list_chains()` +
+  `list_flowtables()` once per declared table.** The two dump
+  calls are hoisted to a single call each at the top of
+  `diff()`, then indexed by `(Family, table_name)` into
+  `HashMap<_, Vec<&_>>` for O(1) per-table lookup. Wire
+  round-trips drop from O(N²+N·R) to O(N+R) for N declared
+  tables and R kernel rules. No public-API change.
 
 ## [0.15.1] - 2026-04-26
 

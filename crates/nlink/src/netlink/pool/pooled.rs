@@ -13,6 +13,7 @@ use crate::netlink::{connection::Connection, protocol::ProtocolState};
 /// underlying `Connection` is returned to the pool. Use
 /// [`Self::invalidate`] to mark the connection as bad and have it
 /// dropped (instead of returned) on guard drop.
+#[non_exhaustive]
 pub struct PooledConnection<'p, P: ProtocolState> {
     pool: &'p ConnectionPool<P>,
     conn: Option<Connection<P>>,
@@ -36,7 +37,21 @@ impl<'p, P: ProtocolState> PooledConnection<'p, P> {
     /// Use when you've observed a recoverable error that suggests
     /// the socket may be in a bad state (rare; most kernel errors
     /// are per-request, not per-socket).
-    pub fn invalidate(&mut self) {
+    ///
+    /// **Consumes the guard** (Plan 162) so a subsequent `&*p`
+    /// is a compile error (E0382 — use of moved value) instead
+    /// of a runtime panic. The "invalidate then drop" use case
+    /// is source-compatible — the guard is gone after the call
+    /// either way.
+    ///
+    /// ```compile_fail
+    /// # use nlink::netlink::pool::PooledConnection;
+    /// # async fn run<P: nlink::netlink::ProtocolState>(p: PooledConnection<'_, P>) {
+    /// p.invalidate();
+    /// let _ = &*p;  // compile error: borrow of moved value `p`
+    /// # }
+    /// ```
+    pub fn invalidate(mut self) {
         // Drop the connection now; the slot will be reclaimed by
         // the next user calling acquire() — *which will block*
         // because the channel is one connection short. Plan 159 §8
@@ -50,6 +65,7 @@ impl<'p, P: ProtocolState> PooledConnection<'p, P> {
             );
             drop(conn);
         }
+        // `self` drops here; Drop sees conn == None and is a no-op.
     }
 }
 
@@ -57,15 +73,21 @@ impl<P: ProtocolState> Deref for PooledConnection<'_, P> {
     type Target = Connection<P>;
 
     fn deref(&self) -> &Connection<P> {
-        // The Option is only `None` after `invalidate()`, after
-        // which the guard is one drop away from gone — no caller
-        // can deref through the guard between `invalidate()` and
-        // the drop because `invalidate` takes `&mut self` and
-        // deref needs `&self`. So this `expect` cannot fire from
-        // safe code.
+        // INVARIANT: `conn` is set on construction and only
+        // cleared by `invalidate(self)` which consumes the guard.
+        // So any live `&self` borrow proves the guard hasn't
+        // been moved, which proves `conn` is still `Some`.
+        // The `debug_assert!` documents the invariant; the
+        // `expect` is statically unreachable from safe code.
+        debug_assert!(
+            self.conn.is_some(),
+            "PooledConnection::conn cleared without consuming \
+             the guard — would imply a use-after-move past the \
+             Rust borrow checker. Bug."
+        );
         self.conn
             .as_ref()
-            .expect("PooledConnection holds a Connection until drop")
+            .expect("PooledConnection holds a Connection until drop (see invariant above)")
     }
 }
 

@@ -63,6 +63,7 @@ use super::{
 /// Borrows `&Connection<P>` for its lifetime. Pin via
 /// `futures::pin_mut!` or store in `Box::pin` if you need to use
 /// it across `await` points held by a struct field.
+#[non_exhaustive]
 pub struct DumpStream<'a, P: ProtocolState, T: FromNetlink + Unpin> {
     conn: &'a Connection<P>,
     expected_seq: u32,

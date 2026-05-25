@@ -1190,6 +1190,7 @@ impl Rule {
 
 /// Rule info parsed from a dump.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RuleInfo {
     /// Table name.
     pub table: String,

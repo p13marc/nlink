@@ -44,6 +44,7 @@ pub struct RuleHandle(pub u64);
 /// `is_empty()` returns true when declared and current already
 /// agree (idempotent reapply).
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct NftablesDiff {
     /// Tables to create.
     pub tables_to_add: Vec<DeclaredTable>,
@@ -211,6 +212,38 @@ impl NftablesConfig {
         // tables_to_add already get installed wholesale by apply
         // (they're nested in the add op). For tables in both,
         // diff chains/rules/flowtables individually.
+
+        // HOIST (Plan 164): list_chains() and list_flowtables()
+        // are kernel-wide dumps; calling them inside the per-table
+        // loop made the diff O(N²) in declared-table count. Pull
+        // them out once, index by (family, table_name) for O(1)
+        // lookups inside the loop. list_rules stays inside (it's
+        // server-side table-scoped — N round-trips is optimal).
+        let all_chains_for_diff = conn.list_chains().await?;
+        let chains_by_table: std::collections::HashMap<
+            (super::super::types::Family, String),
+            Vec<&super::super::types::ChainInfo>,
+        > = all_chains_for_diff
+            .iter()
+            .fold(std::collections::HashMap::new(), |mut acc, c| {
+                acc.entry((c.family, c.table.clone()))
+                    .or_default()
+                    .push(c);
+                acc
+            });
+        let all_flowtables_for_diff = conn.list_flowtables().await?;
+        let flowtables_by_table: std::collections::HashMap<
+            (super::super::types::Family, String),
+            Vec<&super::super::types::Flowtable>,
+        > = all_flowtables_for_diff
+            .iter()
+            .fold(std::collections::HashMap::new(), |mut acc, f| {
+                acc.entry((f.family, f.table.clone()))
+                    .or_default()
+                    .push(f);
+                acc
+            });
+
         for declared in &self.tables {
             // Skip tables in tables_to_add — chains/rules/flowtables
             // for them are added as part of the table-creation.
@@ -238,11 +271,13 @@ impl NftablesConfig {
             }
 
             // Table exists in both — diff chains.
-            let current_chains = conn.list_chains().await?;
-            let chains_in_table: Vec<_> = current_chains
-                .iter()
-                .filter(|c| c.table == declared.name() && c.family == declared.family())
-                .collect();
+            // Lookup into the hoisted index (Plan 164); no per-
+            // table kernel call. Empty slice if no current chains
+            // match this table.
+            let chains_in_table: &[&super::super::types::ChainInfo] = chains_by_table
+                .get(&(declared.family(), declared.name().to_string()))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             let declared_chain_names: HashSet<&str> =
                 declared.chains().iter().map(|c| c.name()).collect();
             let current_chain_names: HashSet<&str> =
@@ -257,7 +292,7 @@ impl NftablesConfig {
                     ));
                 }
             }
-            for c in &chains_in_table {
+            for c in chains_in_table {
                 if !declared_chain_names.contains(c.name.as_str()) {
                     diff.chains_to_delete.push((
                         declared.name().to_string(),
@@ -406,11 +441,11 @@ impl NftablesConfig {
             }
 
             // Flowtables: name-based identity, like chains.
-            let current_flowtables = conn.list_flowtables().await?;
-            let fts_in_table: Vec<_> = current_flowtables
-                .iter()
-                .filter(|f| f.table == declared.name() && f.family == declared.family())
-                .collect();
+            // Lookup into the hoisted index (Plan 164).
+            let fts_in_table: &[&super::super::types::Flowtable] = flowtables_by_table
+                .get(&(declared.family(), declared.name().to_string()))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             let declared_ft_names: HashSet<&str> =
                 declared.flowtables().iter().map(|f| f.name()).collect();
             let current_ft_names: HashSet<&str> =
@@ -420,7 +455,7 @@ impl NftablesConfig {
                     diff.flowtables_to_add.push(f.clone());
                 }
             }
-            for f in &fts_in_table {
+            for f in fts_in_table {
                 if !declared_ft_names.contains(f.name.as_str()) {
                     diff.flowtables_to_delete.push((
                         declared.family(),

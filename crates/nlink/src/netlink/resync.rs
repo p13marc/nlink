@@ -23,10 +23,10 @@
 //!   replay window.
 //!
 //! See `docs/recipes/events-with-resync.md` for the canonical
-//! event-loop pattern using these types. A pre-baked Stream
-//! wrapper that drives the state machine internally (planned in
-//! Plan 151 §4.2) is a follow-up — the design needs more soak
-//! before it's locked in.
+//! event-loop pattern using these types. The [`events_with_resync`]
+//! Stream wrapper (Plan 151 §4.2 — landed in 0.16 after design
+//! soak) drives the state machine internally so the consumer
+//! just `next().await`s `ResyncedEvent<T>` items.
 //!
 //! # Example loop
 //!
@@ -125,6 +125,225 @@ impl<T> ResyncedEvent<T> {
     }
 }
 
+// ============================================================
+// Plan 151 §4.2 — `events_with_resync` Stream wrapper
+// ============================================================
+
+use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use tokio_stream::Stream;
+
+/// Internal state-machine state for [`ResyncStream`].
+enum ResyncState<T> {
+    /// Pulling items from the inner event stream; each item is
+    /// yielded as `Event(T)` or — on ENOBUFS — kicks the state
+    /// machine into `RunningSnapshot`.
+    Forwarding,
+    /// Snapshot future is being driven. When it resolves, we
+    /// flush `Marker(ResyncStart)` + each item as `Resynced(t)` +
+    /// `Marker(ResyncEnd)` via the `Replaying` state.
+    RunningSnapshot(Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send>>),
+    /// Snapshot resolved; draining the queue of yet-to-emit items.
+    /// `did_emit_start` flips true after the leading marker is
+    /// yielded; the trailing marker is yielded when the queue
+    /// empties.
+    Replaying {
+        items: VecDeque<T>,
+        did_emit_start: bool,
+    },
+    /// Stream fused after a non-recoverable error.
+    Done,
+}
+
+/// Stream wrapper around an inner event stream that handles
+/// `ENOBUFS` (multicast overflow) transparently — yields
+/// [`ResyncedEvent<T>`] items, automatically running the
+/// caller-supplied snapshot closure when the kernel reports a
+/// dropped-events condition.
+///
+/// Construct via [`events_with_resync`]. Implements
+/// [`Stream<Item = Result<ResyncedEvent<T>>>`][Stream].
+///
+/// The state machine emitted on each ENOBUFS recovery:
+///
+/// 1. `Ok(Marker(ResyncMarker::ResyncStart))` — cue to invalidate
+///    incremental state.
+/// 2. `Ok(Resynced(item))` for each item the snapshot returned.
+/// 3. `Ok(Marker(ResyncMarker::ResyncEnd))` — cue that the replay
+///    is complete.
+/// 4. Resume `Ok(Event(item))` for subsequent live deltas.
+///
+/// Non-ENOBUFS errors propagate as `Err(e)` and fuse the stream
+/// (subsequent polls return `None`). The closure's own errors
+/// (e.g. snapshot failed) also propagate + fuse.
+#[must_use = "streams do nothing unless polled"]
+pub struct ResyncStream<S, T, F>
+where
+    S: Stream<Item = crate::Result<T>>,
+    F: FnMut() -> Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send>>,
+{
+    inner: S,
+    resync: F,
+    state: ResyncState<T>,
+}
+
+impl<S, T, F> Stream for ResyncStream<S, T, F>
+where
+    S: Stream<Item = crate::Result<T>> + Unpin,
+    F: FnMut() -> Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send>> + Unpin,
+    T: Unpin,
+{
+    type Item = crate::Result<ResyncedEvent<T>>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            // Take the state out so we can match-and-replace
+            // without borrow-checker friction.
+            let state = std::mem::replace(&mut this.state, ResyncState::Done);
+            match state {
+                ResyncState::Done => return Poll::Ready(None),
+
+                ResyncState::Forwarding => {
+                    match Pin::new(&mut this.inner).poll_next(cx) {
+                        Poll::Ready(Some(Ok(item))) => {
+                            this.state = ResyncState::Forwarding;
+                            return Poll::Ready(Some(Ok(ResyncedEvent::Event(item))));
+                        }
+                        Poll::Ready(Some(Err(e))) if e.is_no_buffer_space() => {
+                            // ENOBUFS — kick off snapshot.
+                            let fut = (this.resync)();
+                            this.state = ResyncState::RunningSnapshot(fut);
+                            // Loop around to drive the future.
+                        }
+                        Poll::Ready(Some(Err(e))) => {
+                            this.state = ResyncState::Done;
+                            return Poll::Ready(Some(Err(e)));
+                        }
+                        Poll::Ready(None) => {
+                            this.state = ResyncState::Done;
+                            return Poll::Ready(None);
+                        }
+                        Poll::Pending => {
+                            this.state = ResyncState::Forwarding;
+                            return Poll::Pending;
+                        }
+                    }
+                }
+
+                ResyncState::RunningSnapshot(mut fut) => {
+                    match fut.as_mut().poll(cx) {
+                        Poll::Ready(Ok(items)) => {
+                            // Flush start marker, then drain.
+                            this.state = ResyncState::Replaying {
+                                items: items.into(),
+                                did_emit_start: false,
+                            };
+                            // Loop to emit the start marker.
+                        }
+                        Poll::Ready(Err(e)) => {
+                            // Snapshot failed — fuse.
+                            this.state = ResyncState::Done;
+                            return Poll::Ready(Some(Err(e)));
+                        }
+                        Poll::Pending => {
+                            this.state = ResyncState::RunningSnapshot(fut);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+
+                ResyncState::Replaying {
+                    mut items,
+                    did_emit_start,
+                } => {
+                    if !did_emit_start {
+                        this.state = ResyncState::Replaying {
+                            items,
+                            did_emit_start: true,
+                        };
+                        return Poll::Ready(Some(Ok(ResyncedEvent::Marker(
+                            ResyncMarker::ResyncStart,
+                        ))));
+                    }
+                    if let Some(item) = items.pop_front() {
+                        this.state = ResyncState::Replaying {
+                            items,
+                            did_emit_start: true,
+                        };
+                        return Poll::Ready(Some(Ok(ResyncedEvent::Resynced(item))));
+                    }
+                    // Queue empty — emit end marker, return to Forwarding.
+                    this.state = ResyncState::Forwarding;
+                    return Poll::Ready(Some(Ok(ResyncedEvent::Marker(
+                        ResyncMarker::ResyncEnd,
+                    ))));
+                }
+            }
+        }
+    }
+}
+
+/// Wrap an event stream so ENOBUFS overflows trigger an
+/// automatic snapshot + boundary-marker replay. Returns a
+/// [`ResyncStream`] yielding [`ResyncedEvent<T>`] items.
+///
+/// The `resync` closure is invoked each time the inner stream
+/// reports `ENOBUFS`. It returns a future yielding the snapshot
+/// items (typically by calling the matching `get_*` method on a
+/// fresh connection). Wrap the async body in `Box::pin(...)` so
+/// the future is `Pin<Box<dyn Future + Send>>`.
+///
+/// ```ignore
+/// use nlink::{Connection, Route};
+/// use nlink::netlink::resync::{events_with_resync, ResyncedEvent};
+/// use tokio_stream::StreamExt;
+///
+/// let mut events_conn = Connection::<Route>::new()?;
+/// events_conn.subscribe(&[/* groups */])?;
+/// let raw_events = events_conn.events();
+///
+/// // dump_conn is a separate connection so the resync dump
+/// // doesn't interleave with the live events on the same socket.
+/// let dump_conn = Connection::<Route>::new()?;
+///
+/// let mut stream = events_with_resync(raw_events, move || {
+///     let conn = dump_conn.clone();
+///     Box::pin(async move { conn.get_links().await })
+/// });
+///
+/// while let Some(item) = stream.next().await {
+///     match item? {
+///         ResyncedEvent::Event(ev) => { /* live delta */ }
+///         ResyncedEvent::Marker(ResyncMarker::ResyncStart) => {
+///             /* invalidate incremental state */
+///         }
+///         ResyncedEvent::Resynced(item) => { /* replay item */ }
+///         ResyncedEvent::Marker(ResyncMarker::ResyncEnd) => {
+///             /* state is fully rebuilt; resume normal processing */
+///         }
+///     }
+/// }
+/// ```
+pub fn events_with_resync<S, T, F>(
+    events: S,
+    resync: F,
+) -> ResyncStream<S, T, F>
+where
+    S: Stream<Item = crate::Result<T>> + Unpin,
+    F: FnMut() -> Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send>> + Unpin,
+    T: Unpin,
+{
+    ResyncStream {
+        inner: events,
+        resync,
+        state: ResyncState::Forwarding,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +376,181 @@ mod tests {
         assert_eq!(start.as_inner(), None);
         assert_eq!(event.as_inner(), Some(&42));
         assert_eq!(resynced.as_inner(), Some(&7));
+    }
+
+    // ---- Plan 151 §4.2 — `events_with_resync` Stream wrapper ----
+
+    use tokio_stream::StreamExt;
+
+    /// Synthetic event stream — yields a scripted sequence of
+    /// `Result<u32>` items so we can drive the state machine
+    /// through every branch without a kernel.
+    struct ScriptedStream {
+        items: VecDeque<crate::Result<u32>>,
+    }
+
+    impl Stream for ScriptedStream {
+        type Item = crate::Result<u32>;
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            Poll::Ready(self.items.pop_front())
+        }
+    }
+
+    fn enobufs() -> crate::Error {
+        crate::Error::from_errno(-libc::ENOBUFS)
+    }
+
+    #[tokio::test]
+    async fn resync_stream_passes_events_through() {
+        let s = ScriptedStream {
+            items: vec![Ok(1u32), Ok(2), Ok(3)].into(),
+        };
+        let mut stream = events_with_resync(s, || {
+            Box::pin(async move { Ok::<Vec<u32>, crate::Error>(vec![]) })
+        });
+        let mut got = Vec::new();
+        while let Some(item) = stream.next().await {
+            got.push(item.unwrap());
+        }
+        assert_eq!(got.len(), 3);
+        assert!(matches!(got[0], ResyncedEvent::Event(1)));
+        assert!(matches!(got[1], ResyncedEvent::Event(2)));
+        assert!(matches!(got[2], ResyncedEvent::Event(3)));
+    }
+
+    #[tokio::test]
+    async fn resync_stream_handles_enobufs_with_replay() {
+        let s = ScriptedStream {
+            items: vec![Ok(1u32), Err(enobufs()), Ok(99)].into(),
+        };
+        let mut stream = events_with_resync(s, || {
+            Box::pin(async move { Ok::<Vec<u32>, crate::Error>(vec![10, 20, 30]) })
+        });
+        let mut got = Vec::new();
+        while let Some(item) = stream.next().await {
+            got.push(item.unwrap());
+        }
+        // Expected:
+        //   Event(1)
+        //   Marker(ResyncStart)
+        //   Resynced(10) Resynced(20) Resynced(30)
+        //   Marker(ResyncEnd)
+        //   Event(99)
+        assert_eq!(got.len(), 7);
+        assert!(matches!(got[0], ResyncedEvent::Event(1)));
+        assert!(got[1].is_resync_start());
+        assert!(matches!(got[2], ResyncedEvent::Resynced(10)));
+        assert!(matches!(got[3], ResyncedEvent::Resynced(20)));
+        assert!(matches!(got[4], ResyncedEvent::Resynced(30)));
+        assert!(got[5].is_resync_end());
+        assert!(matches!(got[6], ResyncedEvent::Event(99)));
+    }
+
+    #[tokio::test]
+    async fn resync_stream_replay_with_empty_snapshot_still_emits_markers() {
+        let s = ScriptedStream {
+            items: vec![Err(enobufs()), Ok(1u32)].into(),
+        };
+        let mut stream = events_with_resync(s, || {
+            Box::pin(async move { Ok::<Vec<u32>, crate::Error>(vec![]) })
+        });
+        let mut got = Vec::new();
+        while let Some(item) = stream.next().await {
+            got.push(item.unwrap());
+        }
+        // Even with empty snapshot, both markers must fire so the
+        // consumer can rebuild its state-machine boundary.
+        assert_eq!(got.len(), 3);
+        assert!(got[0].is_resync_start());
+        assert!(got[1].is_resync_end());
+        assert!(matches!(got[2], ResyncedEvent::Event(1)));
+    }
+
+    #[tokio::test]
+    async fn resync_stream_propagates_non_enobufs_error_and_fuses() {
+        let s = ScriptedStream {
+            items: vec![
+                Ok(1u32),
+                Err(crate::Error::from_errno(-libc::EPERM)),
+                Ok(99), // should NOT be yielded
+            ]
+            .into(),
+        };
+        let mut stream = events_with_resync(s, || {
+            Box::pin(async move { Ok::<Vec<u32>, crate::Error>(vec![]) })
+        });
+        let mut results = Vec::new();
+        while let Some(item) = stream.next().await {
+            results.push(item);
+        }
+        // Expected:
+        //   Ok(Event(1))
+        //   Err(EPERM)
+        //   None (fused)
+        assert_eq!(results.len(), 2);
+        assert!(matches!(results[0].as_ref().unwrap(), ResyncedEvent::Event(1)));
+        assert!(results[1].as_ref().unwrap_err().is_permission_denied());
+    }
+
+    #[tokio::test]
+    async fn resync_stream_propagates_snapshot_failure_and_fuses() {
+        let s = ScriptedStream {
+            items: vec![Err(enobufs())].into(),
+        };
+        let mut stream = events_with_resync(s, || {
+            Box::pin(async move {
+                Err::<Vec<u32>, crate::Error>(crate::Error::from_errno(-libc::ENODEV))
+            })
+        });
+        let mut results = Vec::new();
+        while let Some(item) = stream.next().await {
+            results.push(item);
+        }
+        // Snapshot failed → fuse with the snapshot's error.
+        assert_eq!(results.len(), 1);
+        assert!(results[0].as_ref().unwrap_err().errno() == Some(libc::ENODEV));
+    }
+
+    #[tokio::test]
+    async fn resync_stream_handles_multiple_enobufs_recoveries() {
+        let s = ScriptedStream {
+            items: vec![
+                Ok(1u32),
+                Err(enobufs()),
+                Ok(2),
+                Err(enobufs()),
+                Ok(3),
+            ]
+            .into(),
+        };
+        let mut call_count = 0;
+        let mut stream = events_with_resync(s, move || {
+            call_count += 1;
+            let count = call_count;
+            Box::pin(async move { Ok::<Vec<u32>, crate::Error>(vec![count * 100]) })
+        });
+        let mut got = Vec::new();
+        while let Some(item) = stream.next().await {
+            got.push(item.unwrap());
+        }
+        // Expected:
+        //   Event(1)
+        //   Start, Resynced(100), End  (first recovery)
+        //   Event(2)
+        //   Start, Resynced(200), End  (second recovery)
+        //   Event(3)
+        assert_eq!(got.len(), 9);
+        assert!(matches!(got[0], ResyncedEvent::Event(1)));
+        assert!(got[1].is_resync_start());
+        assert!(matches!(got[2], ResyncedEvent::Resynced(100)));
+        assert!(got[3].is_resync_end());
+        assert!(matches!(got[4], ResyncedEvent::Event(2)));
+        assert!(got[5].is_resync_start());
+        assert!(matches!(got[6], ResyncedEvent::Resynced(200)));
+        assert!(got[7].is_resync_end());
+        assert!(matches!(got[8], ResyncedEvent::Event(3)));
     }
 }

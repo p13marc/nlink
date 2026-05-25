@@ -66,6 +66,7 @@ impl DpllDeviceGetRequest {
 ///   [`super::DPLL_TEMP_DIVIDER`] (= 1000) for °C.
 #[derive(GenlMessage, Debug, Default, Clone)]
 #[genl_message(cmd = DpllCmd::DeviceGet)]
+#[non_exhaustive]
 pub struct DpllDeviceReply {
     /// Numeric device ID (stable across the kernel's lifetime).
     #[genl_attr(DpllAttr::Id)]
@@ -199,6 +200,7 @@ impl DpllDeviceReply {
 ///
 /// Wire shape: nested attribute group inside the pin reply.
 #[derive(NetlinkAttrs, Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DpllPinParentDevice {
     /// Parent device's numeric ID.
     #[genl_attr(DpllPinAttr::ParentId)]
@@ -215,6 +217,7 @@ pub struct DpllPinParentDevice {
 ///
 /// Wire shape: nested attribute group inside the pin reply.
 #[derive(NetlinkAttrs, Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DpllPinParentPin {
     /// Parent pin's numeric ID.
     #[genl_attr(DpllPinAttr::ParentId)]
@@ -263,6 +266,7 @@ impl DpllPinGetRequest {
 ///   Hz — [`Self::measured_frequency_hz`] does this.
 #[derive(GenlMessage, Debug, Default, Clone)]
 #[genl_message(cmd = DpllCmd::PinGet)]
+#[non_exhaustive]
 pub struct DpllPinReply {
     /// Pin ID.
     #[genl_attr(DpllPinAttr::Id)]
