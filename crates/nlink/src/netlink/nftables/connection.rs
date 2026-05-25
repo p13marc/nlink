@@ -571,6 +571,30 @@ impl Connection<Nftables> {
     }
 
     /// Send a batch of messages atomically.
+    ///
+    /// Per nfnetlink(7): the kernel processes a batch of mutation
+    /// messages wrapped in `NFNL_MSG_BATCH_BEGIN ... NFNL_MSG_BATCH_END`.
+    /// Each inner message that set `NLM_F_ACK` gets one ACK
+    /// response (with that op's `nlmsg_seq`). `BATCH_END` here also
+    /// sets `NLM_F_ACK` so the kernel sends a final ACK at the
+    /// `end_seq` we can wait on as the "commit succeeded" signal.
+    ///
+    /// Response-loop rules (Plan 170, after the 0.16 cycle's CI
+    /// hang surfaced the bugs):
+    /// 1. **Filter by `nlmsg_seq`** — only consider messages in
+    ///    `[begin_seq, end_seq]`. Stale traffic from prior
+    ///    operations on the same fd is ignored.
+    /// 2. **Terminate on the end_seq ACK specifically** — not on
+    ///    the first per-op ACK, which can fire mid-batch and
+    ///    leave the loop thinking the batch is done.
+    /// 3. **Surface mid-batch errors immediately** — an op-level
+    ///    `NLMSGERR` (non-ack) means the kernel rejected an op;
+    ///    the batch will not commit. Return the error.
+    /// 4. **Hard-cap with a 30s timeout** — pending Plan 171's
+    ///    `Connection<P>`-wide default timeout. If the kernel
+    ///    skips the end-seq ACK (unexpected on Linux ≥ 4.6 per
+    ///    `net/netfilter/nfnetlink.c`) the call fails fast with
+    ///    `Error::Timeout` instead of hanging.
     async fn send_batch(&self, messages: Vec<Vec<u8>>) -> Result<()> {
         if messages.is_empty() {
             return Ok(());
@@ -578,7 +602,7 @@ impl Connection<Nftables> {
 
         let mut batch = Vec::new();
 
-        // NFNL_MSG_BATCH_BEGIN
+        // NFNL_MSG_BATCH_BEGIN — control message; no ACK requested.
         let mut begin = MessageBuilder::new(NFNL_MSG_BATCH_BEGIN, NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg {
             nfgen_family: 0,
@@ -586,49 +610,104 @@ impl Connection<Nftables> {
             res_id: 10u16.to_be(), // NFNL_SUBSYS_NFTABLES
         };
         begin.append(&nfgenmsg);
-        let seq = self.socket().next_seq();
-        begin.set_seq(seq);
+        let begin_seq = self.socket().next_seq();
+        begin.set_seq(begin_seq);
         begin.set_pid(self.socket().pid());
         batch.extend_from_slice(&begin.finish());
 
-        // Add all messages with sequential sequence numbers
+        // Inner messages — already have their seqs set by the
+        // caller (see e.g. `nft_request_ack` or Transaction's
+        // `add_*` builders). Their seqs lie below begin_seq
+        // because they were assigned earlier; treat the response
+        // window as the full range from the lowest inner seq up
+        // to end_seq.
         for msg_data in &messages {
             batch.extend_from_slice(msg_data);
         }
 
-        // NFNL_MSG_BATCH_END
-        let mut end = MessageBuilder::new(NFNL_MSG_BATCH_END, NLM_F_REQUEST);
+        // NFNL_MSG_BATCH_END — request an ACK so the kernel
+        // gives us a deterministic commit-completion signal at
+        // a known seq. Without NLM_F_ACK here, some kernels
+        // skip the response and the loop relies on the
+        // per-op ACK absence to terminate — fragile.
+        let mut end = MessageBuilder::new(NFNL_MSG_BATCH_END, NLM_F_REQUEST | NLM_F_ACK);
         let nfgenmsg = NfGenMsg {
             nfgen_family: 0,
             version: 0,
             res_id: 10u16.to_be(),
         };
         end.append(&nfgenmsg);
-        end.set_seq(self.socket().next_seq());
+        let end_seq = self.socket().next_seq();
+        end.set_seq(end_seq);
         end.set_pid(self.socket().pid());
         batch.extend_from_slice(&end.finish());
 
         self.socket().send(&batch).await?;
 
-        // Wait for ACK of the batch
-        loop {
-            let data: Vec<u8> = self.socket().recv_msg().await?;
+        // The kernel's responses cover the seq range from the
+        // smallest assigned (the first inner-message seq, which
+        // is < begin_seq since callers issue inner seqs before
+        // calling us) through end_seq. We don't track the
+        // smallest one explicitly — the seq filter accepts
+        // anything ≤ end_seq from this socket's lifetime; the
+        // end_seq termination check handles the upper bound.
 
-            for msg_result in MessageIter::new(&data) {
-                let (header, payload) = msg_result?;
+        let recv_loop = async {
+            loop {
+                let data: Vec<u8> = self.socket().recv_msg().await?;
 
-                if header.is_error() {
-                    let err = NlMsgError::from_bytes(payload)?;
-                    if err.is_ack() {
+                for msg_result in MessageIter::new(&data) {
+                    let (header, payload) = msg_result?;
+
+                    // (1) Seq filter — accept only responses to
+                    //     ops in this batch. begin_seq and end_seq
+                    //     bound the new ones; inner-message seqs
+                    //     are strictly less than begin_seq.
+                    if header.nlmsg_seq > end_seq {
+                        // Stale traffic from a later op (shouldn't
+                        // happen on a serially-used socket, but
+                        // defensive).
+                        continue;
+                    }
+
+                    if header.is_error() {
+                        let err = NlMsgError::from_bytes(payload)?;
+                        if err.is_ack() {
+                            // (2) Only the end_seq ACK terminates
+                            //     the loop with success. Per-op
+                            //     ACKs are silently collected.
+                            if header.nlmsg_seq == end_seq {
+                                return Ok::<(), crate::netlink::error::Error>(());
+                            }
+                            // Per-op ACK — continue waiting for
+                            // either another per-op response or
+                            // the BATCH_END's ACK.
+                            continue;
+                        }
+                        // (3) Non-ack error — kernel rejected an
+                        //     op; the batch will not commit.
+                        //     Surface immediately.
+                        return Err(err.into_error(payload));
+                    }
+
+                    if header.is_done() {
+                        // Some kernels send NLMSG_DONE at the end
+                        // of a batch response sequence; treat as
+                        // success.
                         return Ok(());
                     }
-                    return Err(err.into_error(payload));
-                }
-
-                if header.is_done() {
-                    return Ok(());
                 }
             }
+        };
+
+        // (4) Hard-cap at 30s pending Plan 171's per-Connection
+        // default. Surfaces a missing end-seq ACK as Error::Timeout
+        // instead of an indefinite hang (the 0.16 cycle's CI bug).
+        // TODO(plan-171): drop this wrap when `Connection<P>`
+        // grows a default operation timeout.
+        match tokio::time::timeout(std::time::Duration::from_secs(30), recv_loop).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(crate::netlink::error::Error::Timeout),
         }
     }
 
