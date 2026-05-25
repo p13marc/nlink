@@ -58,11 +58,20 @@ nlink ships the types that make this pattern explicit
     complete; subsequent events are real-time deltas again
 - [`ResyncMarker`][rs-marker] — the two boundary variants above
 
-The wrapper Stream that drives this state machine internally is
-planned in Plan 151 §4.2 — for 0.16 you implement the loop by
-hand using the types below. The hand-rolled shape is small and
-the explicitness is arguably a feature: you see exactly when the
-resync happens.
+**Two ways to consume the stream:**
+
+1. **`events_with_resync(stream, snapshot_fn)` (recommended)** —
+   the pre-baked wrapper that drives the state machine internally
+   and yields `Result<ResyncedEvent<T>>`. Caller writes a plain
+   `while let Some(item) = stream.next().await` loop. See the
+   [§ "Using `events_with_resync`"](#using-events_with_resync)
+   section below.
+2. **Hand-rolled loop** — the explicit pattern shown immediately
+   below. Useful when you want full control of the snapshot's
+   lifetime / cancellation, or when the snapshot involves work
+   the wrapper can't represent (multi-source fan-in, derived
+   state). The wrapper internally does exactly what this loop
+   does.
 
 [rs-event]: https://docs.rs/nlink/latest/nlink/struct.ResyncedEvent.html
 [rs-marker]: https://docs.rs/nlink/latest/nlink/enum.ResyncMarker.html
@@ -124,6 +133,61 @@ The `apply` function processes one item; it dispatches on
 `ResyncedEvent` variants so the consumer can distinguish replay
 items from real-time deltas if it cares (sometimes the
 distinction matters for downstream metrics).
+
+## Using `events_with_resync`
+
+The pre-baked wrapper produces the same `ResyncedEvent<T>` stream
+the hand-rolled loop above synthesizes, but drives the state
+machine inside a `Stream` impl so your consumer is a plain
+`while let Some(item) = stream.next().await` loop.
+
+```rust,no_run
+use std::pin::Pin;
+use std::sync::Arc;
+use nlink::netlink::resync::events_with_resync;
+use nlink::{ConnectionPool, Connection, Route, ResyncedEvent, ResyncMarker};
+use nlink::netlink::messages::LinkMessage;
+use tokio_stream::StreamExt;
+
+# async fn run() -> nlink::Result<()> {
+let events_conn: Connection<Route> = Connection::<Route>::new()?;
+let dump_pool: Arc<ConnectionPool<Route>> =
+    Arc::new(ConnectionPool::<Route>::for_namespace("myns", 2).await?);
+
+let live = events_conn.subscribe_links().await?;
+
+let snapshot_pool = Arc::clone(&dump_pool);
+let stream = events_with_resync(live, move || {
+    let pool = Arc::clone(&snapshot_pool);
+    Box::pin(async move {
+        let conn = pool.acquire().await?;
+        conn.get_links().await
+    }) as Pin<Box<_>>
+});
+tokio::pin!(stream);
+
+while let Some(item) = stream.next().await {
+    match item? {
+        ResyncedEvent::Event(_)    => { /* live event */ }
+        ResyncedEvent::Resynced(_) => { /* replayed from snapshot */ }
+        ResyncedEvent::Marker(ResyncMarker::ResyncStart) => { /* invalidate state */ }
+        ResyncedEvent::Marker(ResyncMarker::ResyncEnd)   => { /* state rebuilt */ }
+    }
+}
+# Ok(()) }
+```
+
+Notes:
+
+- The snapshot future is built fresh on every ENOBUFS — supply a
+  closure that calls `pool.acquire().await?` (not a captured
+  guard) so each resync gets a clean connection.
+- The wrapper fuses the stream on snapshot failure or non-ENOBUFS
+  error; downstream `next()` calls return `None` after the
+  fault. This matches the hand-rolled loop's behaviour.
+- Use the hand-rolled loop when the snapshot's lifecycle needs
+  extra control (cancellation, multi-source fan-in, derived
+  state); the wrapper covers the common case.
 
 ## Using `ConnectionPool` for the dump connection
 
@@ -201,8 +265,8 @@ multi-second consumer hiccup doesn't drop events.
   the broader `is_no_buffer_space` / `is_try_again` predicate
   story
 - [`crate::netlink::resync`][resync-mod] — module docs
-- [Plan 151][plan-151] — design history; the wrapper Stream that
-  drives this state machine is a follow-up
+- [Plan 151][plan-151] — design history; the pre-baked wrapper
+  shipped in the 2026-05-25 pre-cut audit window
 
 [resync-mod]: https://docs.rs/nlink/latest/nlink/netlink/resync/index.html
 [plan-151]: ../../plans/151-0.16-enobufs-resync-plan.md

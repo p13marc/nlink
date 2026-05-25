@@ -441,9 +441,13 @@ tracker. Headlines that landed so far:
   conntrack via `CTA_COUNTERS_*`, not in `NFT_MSG_GETFLOWTABLE`);
   the `stream_conntrack` + `ConntrackStatus::OFFLOAD`/`HW_OFFLOAD`
   filter pattern is documented in the nftables-stateful-fw recipe.
-- **Plan 151 — ENOBUFS resync types** (🟡): `ResyncedEvent<T>` +
-  `ResyncMarker` + recipe. Pre-baked Stream wrapper on hold for
-  design soak.
+- **Plan 151 — ENOBUFS resync** (🟢): `ResyncedEvent<T>` +
+  `ResyncMarker` + recipe shipped earlier; the pre-baked
+  `events_with_resync<S, T, F>` Stream wrapper + `ResyncStream`
+  state machine (`Forwarding` → `RunningSnapshot` → `Replaying`
+  → `Done`) landed in the 2026-05-25 pre-cut audit window. 6
+  unit tests cover pass-through, ENOBUFS+replay, empty-snapshot
+  markers, error fusing, snapshot failure, multiple recoveries.
 - **Plan 153 — kernel feature bundle** (🟢): all three sub-features
   shipped (§4.1 XFRM IPsec offload + §4.2 Devlink rate +
   port-function-state + §4.3 `net_shaper` GENL family — second
@@ -477,6 +481,19 @@ tracker. Headlines that landed so far:
   `Connection::<F: GenlFamily>::subscribe_group(name)`.
   Devlink/Nl80211/Ethtool refactored to use it (−254 lines of
   duplicated wire parsing).
+
+Pre-cut audit (2026-05-25) added Plans 161-166 — all 🟢:
+- **161** — 4 example companions for headline 0.16 features.
+- **162** — `PooledConnection::invalidate` consume-self (compile
+  error replaces runtime panic).
+- **163** — `#[non_exhaustive]` on 9 new-in-0.16 pub structs
+  (`ReconcileOptions` is now builder-only).
+- **164** — `NftablesConfig::diff` hoists `list_chains()` +
+  `list_flowtables()` out of the table loop (O(N²+N·R) → O(N+R)).
+- **165** — 5 doc-currency cleanups.
+- **166** — 20 root-gated integration tests across 6 new files
+  (~470 LOC) — ship in 0.16, run under privileged CI once
+  Plan 140 lands.
 
 Ready to start (no blockers): Plan 152 (aya/Prometheus/OTel
 showcases — both DPLL and net_shaper now in tree as macro

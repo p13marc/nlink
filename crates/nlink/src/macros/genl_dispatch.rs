@@ -239,6 +239,7 @@ where
 /// [`DumpStream`](crate::netlink::dump_stream::DumpStream) state
 /// machine, with a per-frame `R::from_bytes(payload[GENL_HDRLEN..])`
 /// parse step.
+#[non_exhaustive]
 pub struct GenlTypedDumpStream<'a, F, R>
 where
     F: ProtocolState + GenlFamily,

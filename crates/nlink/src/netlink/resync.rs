@@ -180,6 +180,7 @@ enum ResyncState<T> {
 /// (subsequent polls return `None`). The closure's own errors
 /// (e.g. snapshot failed) also propagate + fuse.
 #[must_use = "streams do nothing unless polled"]
+#[non_exhaustive]
 pub struct ResyncStream<S, T, F>
 where
     S: Stream<Item = crate::Result<T>>,

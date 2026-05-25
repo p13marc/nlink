@@ -10,6 +10,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`events_with_resync` + `ResyncStream` re-exported at the
+  crate root** so callers can write
+  `use nlink::{events_with_resync, ResyncStream};` to match the
+  existing pattern (`ResyncedEvent` / `ResyncMarker` /
+  `DumpStream` already lived at the crate root).
+
 - **`events_with_resync(stream, snapshot_fn) -> ResyncStream<...>`
   (Plan 151 closeout)** — pre-baked `Stream` wrapper that turns
   any `Stream<Item = Result<T>>` into a `Stream<Item =
@@ -1314,13 +1320,15 @@ All notable changes to this project will be documented in this file.
 
 ### Changed — semver lockdown (Plan 163, pre-cut)
 
-- **9 new-in-0.16 pub structs gain `#[non_exhaustive]`**:
+- **11 new-in-0.16 pub structs gain `#[non_exhaustive]`**:
   `RuleInfo`, `NftablesDiff`, `ReconcileOptions`, `ReconcileReport`,
   `DpllDeviceReply`, `DpllPinReply`, `NetShaperReply`,
   `NetShaperCapsReply`, `ConnectionPool`, `ConnectionPoolBuilder`,
-  `PooledConnection`, `DumpStream`. Re-applying the attribute
-  after publish would itself be breaking, so it landed in the
-  pre-cut audit window.
+  `PooledConnection`, `DumpStream`, `ResyncStream`,
+  `GenlTypedDumpStream`. Re-applying the attribute after publish
+  would itself be breaking, so it landed in the pre-cut audit
+  window. (`ResyncStream` + `GenlTypedDumpStream` caught by a
+  post-batch `cargo public-api diff` sweep — see Plan 163.)
 
   **Caller-visible impact**: `ReconcileOptions` can no longer
   be constructed with a struct literal. Use the builder pattern:

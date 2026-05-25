@@ -253,8 +253,9 @@ pub use netlink::neigh::NeighborConfig;
 pub use netlink::pool::{ConnectionPool, ConnectionPoolBuilder, PooledConnection};
 
 // ENOBUFS resync helper types (Plan 151) — sum type yielded by a
-// resync-aware event consumer, plus boundary markers.
-pub use netlink::resync::{ResyncMarker, ResyncedEvent};
+// resync-aware event consumer, plus boundary markers, plus the
+// pre-baked Stream wrapper (Plan 151 closeout).
+pub use netlink::resync::{ResyncMarker, ResyncStream, ResyncedEvent, events_with_resync};
 
 // Streaming dump API (Plan 149) — yield typed netlink dump
 // messages one at a time.
