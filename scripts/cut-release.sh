@@ -262,6 +262,12 @@ check_cargo_metadata_version
 check_cargo_login
 check_gh_auth
 echo "Pre-flight OK: clean tree, on branch '$CYCLE_BRANCH', Cargo.toml at $VERSION, cargo + gh authenticated."
+echo
+echo "REMINDER: hardware-only features (XFRM offload / devlink rate /"
+echo "          net_shaper) have no CI coverage. Walk the manual"
+echo "          checklist before merging this cut:"
+echo "          docs/release-validation-manual.md"
+confirm "hardware checklist walked (or skipped intentionally)"
 
 step "Phase 2 — CHANGELOG promotion"
 promote_changelog

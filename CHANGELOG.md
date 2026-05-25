@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`docs/release-validation-manual.md` (Plan 176)** — pre-cut
+  hardware-validation checklist for the lib paths no CI can
+  exercise (XFRM IPsec offload, Devlink rate, Devlink port
+  function state, `net_shaper` caps). Documents per-feature
+  expected outcome + failure-mode triage. The cut script
+  (`scripts/cut-release.sh`) points at this file before the
+  irreversible publish step. Introduces the
+  `> ⚠ No CI coverage — manually validated YYYY-MM-DD against
+  > <hardware>` CHANGELOG annotation convention for future
+  hardware-only feature entries. Plans 178+ (sketched in
+  `plans/176-…`) cover the self-hosted-runner / vendor-cloud-
+  lab options for the day a real downstream needs CI coverage
+  on these paths.
+
 - **`scripts/cut-release.sh` (Plan 175)** — one-shot orchestrator
   for an nlink release cut. Walks the Plan 167 sequence end-to-
   end with confirmation prompts at the irreversible steps
