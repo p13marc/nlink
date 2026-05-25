@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 # Minimum Supported Rust Version. Tracks current stable: this
 # project is happy to require contributors and downstream
@@ -85,4 +85,4 @@ nlink = { path = "crates/nlink" }
 # crates.io; bump in lockstep with the workspace version at cycle
 # cut. **Publish nlink-macros first** when releasing — nlink's
 # publication will fail until the matching version is live.
-nlink-macros = { path = "crates/nlink-macros", version = "0.16.0" }
+nlink-macros = { path = "crates/nlink-macros", version = "0.17.0" }

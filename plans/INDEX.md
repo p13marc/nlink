@@ -24,9 +24,11 @@ design plan and lives at
 - **Branch**: all 0.17 work pushes to the `0.17` branch.
   Cycle cut → master merge happens at release time. **Do not
   push to master.**
-- **Workspace version**: still `0.16.0`. Bump to `0.17.0`
-  after the first 0.17-breaking change lands (Plan 171 is the
-  likely trigger).
+- **Workspace version**: `0.17.0` — bumped on Plan 178's
+  closeout (Register discriminant change + `rules_to_delete`
+  tuple shape are the cycle's first semver-major API breaks;
+  Plan 171's default-timeout was behavior-only, didn't trigger
+  the bump).
 - **CI**: a new draft PR `0.17 → master` will drive CI on
   every push (same workflow as the 0.16 cycle's PR #3 —
   GitHub Actions only triggers on master push/PR).

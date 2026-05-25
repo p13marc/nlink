@@ -171,8 +171,13 @@ pub struct NftablesDiff {
     pub chains_to_delete: Vec<(String, Family, String)>,
     /// Rules to add — paired with owning table/chain/family.
     pub rules_to_add: Vec<DeclaredRule>,
-    /// Rules to delete — kernel-assigned handles.
-    pub rules_to_delete: Vec<(String, Family, RuleHandle)>,
+    /// Rules to delete — `(table, family, chain, kernel_handle)`.
+    /// Chain is carried explicitly because the kernel rejects a
+    /// `NFT_MSG_DELRULE` with an empty `NFTA_RULE_CHAIN` even when
+    /// `NFTA_RULE_HANDLE` is supplied (returns `ENOENT`); the
+    /// earlier (table, family, handle) shape relied on a kernel
+    /// behavior that doesn't actually hold. Plan 178 closeout.
+    pub rules_to_delete: Vec<(String, Family, String, RuleHandle)>,
     /// Rules to replace in-place. Each entry is
     /// `(table, family, chain, kernel_handle, replacement)` —
     /// emits `NFT_MSG_NEWRULE | NLM_F_REPLACE | NFTA_RULE_HANDLE`
@@ -242,8 +247,8 @@ impl NftablesDiff {
                 key
             ));
         }
-        for (tbl, fam, h) in &self.rules_to_delete {
-            lines.push(format!("- rule {fam:?} {tbl} (handle={})", h.0));
+        for (tbl, fam, chain, h) in &self.rules_to_delete {
+            lines.push(format!("- rule {fam:?} {tbl}/{chain} (handle={})", h.0));
         }
         for (tbl, fam, chain, h, r) in &self.rules_to_replace {
             let key = r.handle_key().unwrap_or("<anonymous>");
@@ -540,6 +545,7 @@ impl NftablesConfig {
                         diff.rules_to_delete.push((
                             declared.name().to_string(),
                             declared.family(),
+                            chain_name.to_string(),
                             RuleHandle(kr.handle),
                         ));
                     }
@@ -569,6 +575,7 @@ impl NftablesConfig {
                             diff.rules_to_delete.push((
                                 declared.name().to_string(),
                                 declared.family(),
+                                kchain_name.clone(),
                                 RuleHandle(kr.handle),
                             ));
                         }

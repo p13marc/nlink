@@ -4,33 +4,47 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **`Register` discriminants changed (Plan 178)** — switched
+  from `NFT_REG32_xx` (`8..=11`, 4-byte register aliases) to the
+  canonical `NFT_REG_x` form (`1..=4`, 16-byte registers).
+  Downstream code that cast `Register::R0 as u32` and stored
+  the literal value `8` will see `1` instead. The lib's
+  wire-format behavior is unchanged from the kernel's
+  perspective — the kernel canonicalizes both forms to
+  `NFT_REG_1` internally — but anyone matching the raw integer
+  needs an audit. Enum now carries `#[repr(u32)]`, locking the
+  memory layout so the `as u32` cast is well-defined.
+
+- **`NftablesDiff::rules_to_delete` tuple shape**: changed
+  from `Vec<(String, Family, RuleHandle)>` to
+  `Vec<(String, Family, String, RuleHandle)>` — the chain name
+  is now carried explicitly. The kernel rejects a `DELRULE`
+  with an empty `NFTA_RULE_CHAIN` even when
+  `NFTA_RULE_HANDLE` pins the rule, contrary to an earlier
+  assumption. Plan 178 closeout.
+
 ### Fixed
 
 - **`NftablesConfig::diff` body-bytes false-positive (Plan 178)**
   — keyed rules were flagged as `to_replace` on every idempotent
   re-diff, churning kernel state on every reapply for any caller
-  of the declarative-config reconcile loop. Two coordinated
-  fixes:
-  - **`Register` discriminants**: switched from
-    `NFT_REG32_xx` (`8..=11`, 4-byte registers) to the
-    canonical `NFT_REG_x` form (`1..=4`, 16-byte registers).
-    The kernel canonicalizes any 4-byte transfer through
-    `NFT_REG32_00` to `NFT_REG_1` internally and dumps the
-    canonical form, so the lib's submission needs to match.
-    Also enum now `#[repr(u32)]` — locks the layout so the
-    `as u32` wire-format cast is well-defined.
+  of the declarative-config reconcile loop. Three coordinated
+  fixes (see "Breaking changes" above for the two API-level
+  ones; the third is the diff-path internal):
   - **`normalize_tlv` in the diff path**: walks both sides of
     the comparison as TLV trees, strips `NLA_F_NESTED` (`0x8000`)
     and `NLA_F_NET_BYTEORDER` (`0x4000`) hint bits, and sorts
     sibling attributes by type at every depth. Closes the
-    last two divergence sources (the writer set `NLA_F_NESTED`
-    on every nest; the kernel doesn't. The writer emits
-    attributes in source order; the kernel emits them in
-    canonical numeric order).
+    writer-vs-kernel divergence on the NESTED bit (writer set
+    it on every nest; kernel doesn't on its outgoing
+    serialization) and intra-nest attribute ordering (writer
+    emits in source order; kernel in canonical numeric order).
   - Un-ignored 3 `nftables_reconcile::*` tests (idempotent
     reapply, replace, delete) that were `#[ignore]`'d under
     Plan 178 tracking. They now exercise the full diff +
-    apply + re-diff cycle.
+    apply + re-diff cycle including delete-by-handle.
 
 ### Added
 

@@ -58,12 +58,13 @@ impl NftablesDiff {
 
         // 1. Rule deletes — handle-targeted, family-aware.
         //
-        // The diff carries (table, family, handle); chain name is
-        // implicit in the handle. The kernel ignores
-        // NFTA_RULE_CHAIN when a handle is supplied (per
-        // `net/netfilter/nf_tables_api.c`), so chain="" is safe.
-        for (table, family, handle) in &self.rules_to_delete {
-            tx = tx.del_rule(table, "", *family, handle.0);
+        // The diff carries (table, family, chain, handle). The
+        // kernel rejects a DELRULE with an empty NFTA_RULE_CHAIN
+        // (returns ENOENT) even when NFTA_RULE_HANDLE pins the
+        // rule — contrary to an earlier assumption in this code.
+        // Plan 178 closeout.
+        for (table, family, chain, handle) in &self.rules_to_delete {
+            tx = tx.del_rule(table, chain, *family, handle.0);
         }
 
         // 2. Chain deletes.
