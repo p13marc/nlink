@@ -13,7 +13,8 @@ One file per upgrade boundary, named `<from>-to-<to>.md`:
 docs/migration_guide/
 ├── README.md                  ← this file
 ├── 0.13.0-to-0.14.0.md        ← upgrading from 0.13.0
-└── 0.14.0-to-0.15.0.md        ← upgrading from 0.14.0
+├── 0.14.0-to-0.15.0.md        ← upgrading from 0.14.0
+└── 0.15.1-to-0.16.0.md        ← upgrading from 0.15.1
 ```
 
 Files only exist for boundaries that have meaningful migration
