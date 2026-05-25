@@ -66,11 +66,14 @@ day-to-day tracker.
 | [164](164-0.16-nftables-diff-perf-plan.md) | `NftablesConfig::diff` perf — hoist `list_chains()` + `list_flowtables()` out of the table loop; O(N²+N·R) → O(N) kernel round-trips for non-rule data | ~2.5 hours | 18 (audit) | 🟢 | – | Pre-release audit (2026-05-25) finding. **Pulled into 0.16** per maintainer directive. Two `list_*()` calls hoisted to top of `diff()`, indexed by `(Family, table_name)` into `HashMap<_, Vec<&_>>` for O(1) per-table lookup. No public-API change. |
 | [165](165-0.16-precut-polish-plan.md) | 5 minor documentation cleanups identified by the audit: CLAUDE.md "kept current" softening, CHANGELOG migration-guide cross-link, INDEX.md count wording, master plan §2 row + frontmatter, Plan 156 test-count fix | ~20 min | 19 (audit) | 🟢 | – | Pre-release audit (2026-05-25) doc-currency findings. All 5 edits landed in the pre-cut commit batch. |
 | [166](166-0.16-integration-test-backfill-plan.md) | Integration-test backfill for 0.16 features (Plans 148/149/157/158/159/150 + Plan 162 guard) — 20 test scenarios across ~470 LOC | ~3 hours | 20 (audit) | 🟢 | – | Pre-release audit (2026-05-25) finding. **Pulled into 0.16** per maintainer directive. Test code only — all root-gated via `require_root!()`, module-gated via `require_modules!`; ships in 0.16 and early-exits cleanly when run as regular user. Runs under the Plan 140 privileged-CI workflow already in tree since 0.15.0 (`.github/workflows/integration-tests.yml`) — activates the moment 0.16 merges to master. Hardware-only scenarios (XFRM offload, devlink rate, net_shaper) explicitly out of scope — they need real NICs no CI has. |
+| [167](167-0.16-cut-activation-plan.md) | 0.16 cut activation runbook: push, watch PR #3 CI, triage any timing flakes / module gaps, `cargo public-api` review, `cargo publish --dry-run`, merge, tag, publish (`nlink-macros` first, then `nlink`), post-cut housekeeping | ~1-2 hours | 21 (audit) | ⚪ | – | Post-audit verification (2026-05-25) discovered Plan 140's privileged-CI workflow already shipped — Plan 166's 20 new tests activate the moment 0.16 hits PR #3. Plan is the runbook to execute the cut. Includes triage shapes for 2 timing-dependent tests + a `nf_flow_table` modprobe gap that surfaces as test-skip. |
+| [168](168-orphan-examples-closeout-plan.md) | Plan 160 orphan-catalog closeout — fix-or-delete all 9 entries in 3 phases (4 trivial fixes, 3 diagnostics consolidated into one, 2 substantive rewrites). Allowlist file deleted; CI gate now enforces zero orphans from a clean slate. | ~3-5 hours | 22 (audit) | 🟢 | – | Post-audit (2026-05-25) cost-vs-value triage of Plan 160's 9 orphans. All 3 phases shipped in one execution pass. 5 files fixed in-place + registered, 3 deleted, 2 new files (1 rewrite + 1 consolidation). 0 orphans remaining. |
 
 Total focused-work estimate: **~35 – 37 days** original cycle +
-**~8 hours** of pre-cut audit follow-up commits (Plans 161 – 166;
+**~11 hours** of pre-cut audit follow-up commits (Plans 161 – 168;
 the 0.17-targeted plans 164 and 166 were pulled into 0.16 per
-maintainer directive — `breaking changes allowed pre-cut`).
+maintainer directive; Plan 168 also pulled in to close Plan 160's
+orphan catalog before publish — `breaking changes allowed pre-cut`).
 
 ## Sequencing rationale
 

@@ -40,7 +40,7 @@ async fn main() -> nlink::Result<()> {
                         if let Some(idx) = nh.ifindex {
                             print!("dev ifindex {} ", idx);
                         }
-                        if nh.is_blackhole() {
+                        if nh.blackhole {
                             print!("blackhole");
                         }
                         println!();
@@ -150,9 +150,9 @@ async fn main() -> nlink::Result<()> {
     let groups = conn.get_nexthop_groups().await?;
 
     // Get specific nexthop
-    if let Some(nh) = conn.get_nexthop(1).await? {
-        println!("NH 1: gateway={:?}", nh.gateway);
-    }
+    if let Some(nh) = conn.get_nexthop(1).await? {{
+        println!("NH 1: gateway={{:?}}", nh.gateway);
+    }}
 "#
     );
 

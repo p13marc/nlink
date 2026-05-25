@@ -1362,6 +1362,39 @@ All notable changes to this project will be documented in this file.
   (`p.invalidate();` still works — the guard is gone after the
   call either way). Only breaks the bug-shape.
 
+### Examples — Plan 160 orphan catalog closed (Plan 168)
+
+- **All 9 orphan example files catalogued by Plan 160 closed.**
+  Five fixed in place + registered: `bridge/vlan.rs`,
+  `bridge/fdb.rs`, `route/mpls.rs`, `route/nexthop.rs`,
+  `route/srv6.rs` (each was either a rename — `.link_kind()` →
+  `.kind()`, `route.gateway` → `route.via`, `nh.is_blackhole()` →
+  `nh.blackhole`, `Srv6LocalRoute::table` → `.protocol`,
+  `FdbEntry::is_local()` → `is_self`/`is_master`/`is_extern_learn` —
+  or a format-string fix where `r#"..."#` literals had unescaped
+  `{}` placeholders the outer `println!` tried to consume).
+- **Three diagnostics demos deleted, one comprehensive replacement
+  written**: `bottleneck.rs` + `connectivity.rs` + `scan.rs` were
+  `println!`-of-doc-string walkthroughs against fields that never
+  existed. Replaced by `diagnostics/health_check.rs` — a single
+  end-to-end demo that runs `Diagnostics::scan()` + prints the
+  full report + calls `find_bottleneck()`. Uses canonical field
+  names verified against `diagnostics.rs`.
+- **`config/declarative.rs` rewritten** to mirror
+  `examples/nftables/declarative.rs`. The old file imported a
+  struct-based API (`LinkConfig`, `AddressConfig`, `RouteConfig`,
+  `QdiscConfig`) that never existed; the actual `NetworkConfig`
+  API is closure-based
+  (`.link(name, |b| b.dummy().up()).address(...).route(...)`).
+  New file demos diff → apply → re-diff (idempotent) → mutate →
+  re-apply → teardown via `apply_with_options(purge=true)`.
+- **`scripts/audit-example-registration.allowlist` deleted** —
+  empty after Phase 3 (script gracefully no-ops when absent per
+  Plan 160 §"Acceptance criteria"). The
+  `audit-example-registration` CI gate now enforces zero
+  orphans from a clean slate; any future bit-rot fails CI loudly
+  with a copy-paste fix block.
+
 ### Performance — Plan 164 NftablesConfig::diff hoist
 
 - **`NftablesConfig::diff` no longer issues `list_chains()` +

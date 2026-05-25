@@ -115,6 +115,37 @@ path = "examples/route/namespaces.rs"
 name = "route_stream_dump"
 path = "examples/route/stream_dump.rs"
 
+[[example]]
+name = "route_mpls"
+path = "examples/route/mpls.rs"
+
+[[example]]
+name = "route_nexthop"
+path = "examples/route/nexthop.rs"
+
+[[example]]
+name = "route_srv6"
+path = "examples/route/srv6.rs"
+
+# Bridge examples
+[[example]]
+name = "bridge_vlan"
+path = "examples/bridge/vlan.rs"
+
+[[example]]
+name = "bridge_fdb"
+path = "examples/bridge/fdb.rs"
+
+# Diagnostics examples
+[[example]]
+name = "diagnostics_health_check"
+path = "examples/diagnostics/health_check.rs"
+
+# Declarative NetworkConfig
+[[example]]
+name = "config_declarative"
+path = "examples/config/declarative.rs"
+
 # Traffic control examples
 [[example]]
 name = "route_tc_netem"

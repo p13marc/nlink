@@ -2,8 +2,8 @@
 to: nlink maintainers
 from: nlink maintainers (audit triggered during the 0.16 cycle by a code review pass)
 subject: Stale-example audit — 9 orphan example files + CI gap
-status: investigation complete; per-file fixes deferred for maintainer judgement
-target version: 0.16.0 (audit) / 0.17.0 (fixes if not handled at 0.16 cut)
+status: closed by Plan 168 (2026-05-25 post-audit) — all 9 orphans triaged: 5 fixed in place + registered (`bridge/vlan.rs`, `bridge/fdb.rs`, `route/mpls.rs`, `route/nexthop.rs`, `route/srv6.rs`), 3 diagnostics demos deleted and replaced by one comprehensive `diagnostics/health_check.rs`, 1 full rewrite (`config/declarative.rs` — closure-based `NetworkConfig` API). Allowlist file deleted (script gracefully no-ops when absent). The `audit-example-registration` CI gate now enforces zero orphans from a clean slate.
+target version: 0.16.0 (audit + closeout)
 parent: 146-0.16-master-plan.md
 created: 2026-05-24
 ---

@@ -21,10 +21,10 @@ async fn main() -> nlink::Result<()> {
             } else {
                 for route in &routes {
                     println!(
-                        "SID {:?}: {} (table {})",
+                        "SID {:?}: {} (proto {})",
                         route.sid,
                         route.action.name(),
-                        route.table
+                        route.protocol
                     );
                     if let Some(idx) = route.oif {
                         println!("  dev ifindex {}", idx);
@@ -181,9 +181,9 @@ async fn main() -> nlink::Result<()> {
         r#"
     // List SRv6 local SIDs
     let routes = conn.get_srv6_local_routes().await?;
-    for route in &routes {
-        println!("SID {:?}: {}", route.sid, route.action.name());
-    }
+    for route in &routes {{
+        println!("SID {{:?}}: {{}}", route.sid, route.action.name());
+    }}
 
     // Delete SRv6 local route
     conn.del_srv6_local("fc00:1::100".parse()?).await?;
