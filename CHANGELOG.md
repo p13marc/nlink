@@ -47,7 +47,7 @@ All notable changes to this project will be documented in this file.
   let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
       t.chain("input", |c| c.hook(Hook::Input).policy(Policy::Drop))
           .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(22).accept())
-          .rule_keyed("input", "icmp-allow", |r| r.match_proto(Proto::Icmp).accept())
+          .rule_keyed("input", "icmp-allow", |r| r.match_l4proto(1 /* IPPROTO_ICMP */).accept())
   });
 
   cfg.diff(&conn).await?.apply(&conn).await?;     // first time: 2 adds
@@ -57,7 +57,7 @@ All notable changes to this project will be documented in this file.
   let updated = NftablesConfig::new().table("filter", Family::Inet, |t| {
       t.chain("input", |c| c.hook(Hook::Input).policy(Policy::Drop))
           .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(2222).accept())
-          .rule_keyed("input", "icmp-allow", |r| r.match_proto(Proto::Icmp).accept())
+          .rule_keyed("input", "icmp-allow", |r| r.match_l4proto(1 /* IPPROTO_ICMP */).accept())
   });
   updated.diff(&conn).await?.apply(&conn).await?; // 1 op (replace_rule by handle)
   ```
@@ -907,7 +907,7 @@ All notable changes to this project will be documented in this file.
           .chain("input", |c| c
               .hook(Hook::Input).priority(Priority::Filter).policy(Policy::Drop))
           .rule("input", |r| r.match_iif("lo").accept())
-          .rule_keyed("input", "allow-icmp", |r| r.match_proto(Proto::Icmp).accept())
+          .rule_keyed("input", "allow-icmp", |r| r.match_l4proto(1 /* IPPROTO_ICMP */).accept())
           .flowtable("ft", |f| f.device("eth0").hw_offload(true)));
   let diff = cfg.diff(&conn).await?;
   println!("{}", diff.summary());

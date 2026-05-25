@@ -375,10 +375,14 @@ impl Connection<Devlink> {
         let mut builder =
             self.devlink_cmd_builder(DEVLINK_CMD_PORT_FUNCTION_SET, bus, device);
         builder.append_attr_u32(DEVLINK_ATTR_PORT_INDEX, port_index);
-        // DEVLINK_ATTR_PORT_FUNCTION is a NESTED attribute carrying
-        // DEVLINK_ATTR_PORT_FUNCTION_STATE = u8.
+        // DEVLINK_ATTR_PORT_FUNCTION is a NESTED attribute. The
+        // inner attributes live in a SEPARATE namespace defined by
+        // `enum devlink_port_function_attr`:
+        // `DEVLINK_PORT_FN_ATTR_STATE = 2` (u8). Earlier versions
+        // wrongly used 174 (an outer-namespace constant from a
+        // different enum), which the kernel rejected with EINVAL.
         let nested = builder.nest_start(DEVLINK_ATTR_PORT_FUNCTION | 0x8000);
-        builder.append_attr(DEVLINK_ATTR_PORT_FUNCTION_STATE, &[state.as_u8()]);
+        builder.append_attr(DEVLINK_PORT_FN_ATTR_STATE, &[state.as_u8()]);
         builder.nest_end(nested);
         self.devlink_send_ack(builder).await
     }

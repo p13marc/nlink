@@ -128,7 +128,19 @@ pub const DEVLINK_ATTR_RATE_TX_MAX: u16 = 167;
 pub const DEVLINK_ATTR_RATE_NODE_NAME: u16 = 168;
 pub const DEVLINK_ATTR_RATE_PARENT_NODE_NAME: u16 = 169;
 pub const DEVLINK_ATTR_PORT_FUNCTION: u16 = 145;
-pub const DEVLINK_ATTR_PORT_FUNCTION_STATE: u16 = 174;
+
+// Attributes carried INSIDE the `DEVLINK_ATTR_PORT_FUNCTION` nest
+// live in their own namespace, defined by
+// `enum devlink_port_function_attr` in `include/uapi/linux/devlink.h`:
+//
+//   DEVLINK_PORT_FUNCTION_ATTR_UNSPEC   = 0,
+//   DEVLINK_PORT_FUNCTION_ATTR_HW_ADDR  = 1,
+//   DEVLINK_PORT_FN_ATTR_STATE          = 2,  // u8 — DEVLINK_PORT_FN_STATE_*
+//   DEVLINK_PORT_FN_ATTR_OPSTATE        = 3,  // u8
+//   DEVLINK_PORT_FN_ATTR_CAPS           = 4,  // bitfield32
+//
+// NOT to be confused with the outer-namespace attribute IDs.
+pub const DEVLINK_PORT_FN_ATTR_STATE: u16 = 2;
 
 // Rate types — `DEVLINK_RATE_TYPE_*` from devlink.h.
 pub const DEVLINK_RATE_TYPE_LEAF: u16 = 0;

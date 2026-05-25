@@ -117,7 +117,7 @@ use nlink::netlink::nftables::types::{Family, Hook, Policy};
 let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
     t.chain("input", |c| c.hook(Hook::Input).policy(Policy::Drop))
         .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(22).accept())
-        .rule_keyed("input", "icmp-allow", |r| r.match_proto(nlink::netlink::nftables::types::Proto::Icmp).accept())
+        .rule_keyed("input", "icmp-allow", |r| r.match_l4proto(1 /* IPPROTO_ICMP */).accept())
 });
 ```
 

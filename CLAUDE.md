@@ -89,10 +89,10 @@ unsafe pointer casts in `types/`.
 |---|---|
 | `sockdiag` | Socket diagnostics (`NETLINK_SOCK_DIAG`) |
 | `tuntap` | TUN/TAP device management |
-| `tc` | TC qdisc string-arg builders + handle parsing |
 | `output` | JSON/text output formatting helpers |
 | `namespace_watcher` | Inotify-based netns watching |
 | `lab` | `nlink::lab` namespace + integration-test harness |
+| `syscall_batch` | `recvmmsg`/`sendmmsg` batching wired into eager + streaming dump paths (0.16+; opt-in for one soak release) |
 | `full` | All of the above |
 
 ## Type-safe units (Rate / Bytes / Percent)

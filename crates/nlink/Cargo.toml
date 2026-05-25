@@ -111,6 +111,10 @@ path = "examples/route/error_handling.rs"
 name = "route_namespaces"
 path = "examples/route/namespaces.rs"
 
+[[example]]
+name = "route_stream_dump"
+path = "examples/route/stream_dump.rs"
+
 # Traffic control examples
 [[example]]
 name = "route_tc_netem"
@@ -268,10 +272,23 @@ path = "examples/selinux/selinux_monitor_stream.rs"
 name = "events_multi_source"
 path = "examples/events/multi_source.rs"
 
+[[example]]
+name = "events_resync_loop"
+path = "examples/events/resync_loop.rs"
+
 # nftables examples
 [[example]]
 name = "nftables_firewall"
 path = "examples/nftables/firewall.rs"
+
+[[example]]
+name = "nftables_declarative"
+path = "examples/nftables/declarative.rs"
+
+# Connection pool example
+[[example]]
+name = "pool_parallel_dump"
+path = "examples/pool/parallel_dump.rs"
 
 # nl80211 WiFi examples
 [[example]]
