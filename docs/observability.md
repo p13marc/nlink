@@ -161,6 +161,32 @@ prefix and a filterable predicate. The `tracing` macros also expand to
 nothing when no subscriber is attached, whereas `log` macros allocate
 a `Record` regardless of whether a sink is configured.
 
+## Integration tests
+
+If you're writing an integration test against `nlink` (or using the
+`lab` feature for namespace-based test harnesses), the
+`nlink::lab::init_test_tracing()` helper wires a libtest-friendly
+`tracing-subscriber` honoring `RUST_LOG`. It's auto-invoked by
+`nlink::require_root!()` / `nlink::require_root_void!()` — no
+boilerplate per test:
+
+```rust
+#[tokio::test]
+async fn my_root_gated_test() -> nlink::Result<()> {
+    nlink::require_root!();  // <- also calls init_test_tracing()
+    // ... test body emits the lib's #[tracing::instrument] spans ...
+    Ok(())
+}
+```
+
+Set `RUST_LOG=nlink=debug` (or `=trace`) in CI so a failing test
+log includes the in-flight method's span, dramatically cutting
+the "what was happening when this hung?" debug loop. The CI
+workflow in this repo does exactly that for the integration job
+(`RUST_LOG=nlink=debug,nlink::netlink::nftables=trace`).
+
+Shipped in 0.17. Requires the `lab` feature (test/lab-only).
+
 ## Why not feature-gate?
 
 `tracing` is gated behind no feature flag because gating it creates

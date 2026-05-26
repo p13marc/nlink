@@ -14,7 +14,8 @@ docs/migration_guide/
 ├── README.md                  ← this file
 ├── 0.13.0-to-0.14.0.md        ← upgrading from 0.13.0
 ├── 0.14.0-to-0.15.0.md        ← upgrading from 0.14.0
-└── 0.15.1-to-0.16.0.md        ← upgrading from 0.15.1
+├── 0.15.1-to-0.16.0.md        ← upgrading from 0.15.1
+└── 0.16.0-to-0.17.0.md        ← upgrading from 0.16.0
 ```
 
 Files only exist for boundaries that have meaningful migration
@@ -47,6 +48,8 @@ recipes, performance work, dependency bumps.
 |---|---|
 | [`0.13.0-to-0.14.0`](0.13.0-to-0.14.0.md) | Mostly additive: typed-units rollout (25 `parse_params`), reconcile pattern, ctnetlink mutation. **One deprecation**: `nlink::tc::builders::*` and `nlink::tc::options/*` — actual removal shipped in 0.15.0. |
 | [`0.14.0-to-0.15.0`](0.14.0-to-0.15.0.md) | **Major release.** The 0.14.0 deprecations are deleted: `tc::builders::*` and `tc::options/*` removed. Typed XFRM SA/SP CRUD, typed standalone-action CRUD. `bins/tc` behaviour changes for unknown kinds and partial-spec `del`. |
+| [`0.15.1-to-0.16.0`](0.15.1-to-0.16.0.md) | **Substantial-but-mostly-additive.** MSRV bumped 1.85 → 1.95. Sealed-trait bounds on `Connection::<P>::new*` / `namespace::connection_for*` (turns family-id-not-resolved bugs into compile errors). `Error::Kernel*` gain `#[non_exhaustive]` for the new `ext_ack` field. New crate: `nlink-macros` (re-exported via `nlink::macros`). |
+| [`0.16.0-to-0.17.0`](0.16.0-to-0.17.0.md) | **Small but two breaking nftables changes.** `Register` discriminants switched `8..=11` → `1..=4` (canonical `NFT_REG_x`); enum gained `#[repr(u32)]`. `NftablesDiff::rules_to_delete` tuple gained a chain field. Behaviour change: default 30-second operation timeout on every `Connection<P>` (opt-out via `.no_timeout()`). |
 
 > **Upgrading from 0.13.0 to 0.15.0?** 0.14.0 was never
 > published as its own release — its work merged into the 0.15.0

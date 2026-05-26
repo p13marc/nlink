@@ -41,6 +41,14 @@ async fn main() -> nlink::Result<()> {
             println!("  current rate:    {} bytes/sec", b.current_rate);
             println!("  drop rate:       {:.2}%", b.drop_rate * 100.0);
             println!("  total drops:     {}", b.total_drops);
+            // Plan 169 Phase 3 (0.17): a 0.0..=1.0 severity score
+            // combining drop rate (×0.6), backlog pressure (×0.3),
+            // and error rate (×0.1). Backlog and error components
+            // are gated on the bottleneck's type, so a pure
+            // hardware-error bottleneck scores on the error
+            // component alone. Useful for sorting multiple
+            // bottlenecks in a controller dashboard.
+            println!("  score (0..1):    {:.3}", b.score());
             println!("  recommendation:  {}", b.recommendation);
         }
         None => println!("No bottleneck detected."),

@@ -23,17 +23,17 @@ nlink is a from-scratch implementation of Linux netlink-based network management
 ```toml
 # Core netlink functionality (always built — TC, link, address,
 # route, namespace, GENL families, conntrack, XFRM, nftables, etc.
-# all live in always-built modules). 0.16 bundles a re-export of
+# all live in always-built modules). nlink bundles a re-export of
 # `nlink-macros` so downstream code that wants to define its own
 # GENL family pulls in only one dep.
-nlink = "0.16"
+nlink = "0.17"
 
 # With additional features
-nlink = { version = "0.16", features = ["sockdiag", "tuntap", "output"] }
+nlink = { version = "0.17", features = ["sockdiag", "tuntap", "output"] }
 
 # All features (including opt-in syscall_batch — 1.5x speedup on
-# dump-heavy workloads via recvmmsg/sendmmsg, see Plan 158).
-nlink = { version = "0.16", features = ["full"] }
+# dump-heavy workloads via recvmmsg/sendmmsg).
+nlink = { version = "0.17", features = ["full"] }
 ```
 
 > Upgrading from an earlier release? See
@@ -271,7 +271,40 @@ The library API is production-ready for network monitoring and configuration.
 - Name-based address operations (add_address_by_name, replace_address_by_name)
 - Bond/bridge enslavement helper (enslave/enslave_by_index)
 
-**New in 0.16 (in flight on the `0.16` branch):**
+**New in 0.17:**
+
+- **Default 30-second operation timeout on every `Connection<P>`**
+  — every netlink round-trip is wrapped in a tokio timeout so a
+  kernel that never responds surfaces as `Error::Timeout`
+  instead of hanging the caller forever. Override per-Connection
+  with `.timeout(Duration)`; opt out with `.no_timeout()`.
+- **Recv-loop audit across the lib** — every recv-loop now seq-
+  filters and routes through the default-timeout, closing the
+  "hidden hang" class of bugs that surfaced during the 0.16 cut.
+  Canonical recv-loop shape documented in
+  [`CLAUDE.md`](CLAUDE.md#recv-loop-shape-canonical).
+- **`Bottleneck::score: f64`** — a 0.0..=1.0 normalized severity
+  score on `Diagnostics::find_bottleneck()` results, useful for
+  sorting in dashboards.
+- **`?` propagation for parse errors** — `nlink::Error` now
+  carries `From<AddressParseError>` + `From<RouteParseError>`,
+  so `NetworkConfig` builder chains drop their `.map_err(…)`
+  ceremony.
+- **CI observability** — the integration test harness initializes
+  a `tracing-subscriber` (via `nlink::lab::init_test_tracing`,
+  auto-invoked by `require_root!()`) so the lib's
+  `#[tracing::instrument]` spans surface in CI logs.
+- **`scripts/cut-release.sh`** — one-shot orchestrator for a
+  release cut (pre-flight → CHANGELOG promotion → CI green-gate
+  → publish → GitHub release → next-cycle branch) with
+  confirmations at every irreversible step.
+- **Two breaking changes** in nftables — `Register`
+  discriminants switched to canonical `NFT_REG_x` form (was
+  `NFT_REG32_xx`), and `NftablesDiff::rules_to_delete` tuple
+  now carries the chain name explicitly. See
+  [`docs/migration_guide/0.16.0-to-0.17.0.md`](docs/migration_guide/0.16.0-to-0.17.0.md).
+
+**Highlights from 0.16 (shipped 2026-05-25):**
 
 - **`nlink-macros` proc-macro crate** — declare a custom Generic
   Netlink family + typed request/response structs in ~30 lines via
