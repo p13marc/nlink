@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-05-26
+
 ### Breaking changes
 
 - **`Register` discriminants changed (Plan 178)** — switched
