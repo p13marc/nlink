@@ -26,14 +26,16 @@ if [[ ! -f "$CATALOG" ]]; then
 fi
 
 # Extract every test function name following an `#[ignore]` attribute
-# in the integration suite. The match is: look for `#[ignore`, then
-# scan forward across an arbitrary stack of attribute lines / multi-
-# line `#[ignore = "..."]` continuations until the next `fn` or
-# `async fn`; emit the bare identifier.
+# in the integration suite. The match requires the attribute form at
+# the start of a line (optionally indented) — `#[ignore]`,
+# `#[ignore = "..."]`, or the first line of a multi-line
+# `#[ignore = "..."]` continuation. This rejects in-comment mentions
+# like `// see #[ignore]` or `/// **#[ignore] on CI**` that would
+# otherwise false-positive into the catalog audit.
 ignored_tests=$(
     find "$INTEGRATION_DIR" -name '*.rs' -type f -print0 \
         | xargs -0 awk '
-            /#\[ignore/ { in_ignore=1; next }
+            /^[[:space:]]*#\[ignore(\]| = )/ { in_ignore=1; next }
             in_ignore && /^[[:space:]]*(pub[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+/ {
                 sub(/.*fn[[:space:]]+/, "")
                 sub(/[(<].*$/, "")

@@ -88,25 +88,29 @@ fn test_bottleneck_type_display() {
 }
 
 // ============================================================================
-// Integration Tests (require network namespace)
+// Integration Tests (require network namespace — root-gated)
+//
+// Migrated from `#[ignore]` to `nlink::require_root!()` in 0.17
+// (Plan 179) so they run under privileged CI but skip cleanly on
+// non-root developer runs.
 // ============================================================================
 
 #[tokio::test]
-#[ignore] // Requires root privileges for network namespaces
-async fn test_diagnostics_scan() {
-    let ns = TestNamespace::new("diag_scan").unwrap();
+async fn test_diagnostics_scan() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("diag_scan")?;
 
     // Create a dummy interface
-    ns.add_dummy("dummy0").unwrap();
-    ns.link_up("dummy0").unwrap();
-    ns.add_addr("dummy0", "10.0.0.1/24").unwrap();
+    ns.add_dummy("dummy0")?;
+    ns.link_up("dummy0")?;
+    ns.add_addr("dummy0", "10.0.0.1/24")?;
 
     // Create diagnostics runner
-    let conn = ns.connection().unwrap();
+    let conn = ns.connection()?;
     let diag = Diagnostics::new(conn);
 
     // Run scan
-    let report = diag.scan().await.unwrap();
+    let report = diag.scan().await?;
 
     // Verify we got results
     assert!(!report.interfaces.is_empty());
@@ -120,34 +124,36 @@ async fn test_diagnostics_scan() {
 
     assert_eq!(dummy.name, "dummy0");
     assert!(dummy.mtu.is_some());
+    Ok(())
 }
 
 #[tokio::test]
-#[ignore] // Requires root privileges for network namespaces
-async fn test_diagnostics_scan_interface() {
-    let ns = TestNamespace::new("diag_scan_if").unwrap();
+async fn test_diagnostics_scan_interface() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("diag_scan_if")?;
 
     // Create a dummy interface
-    ns.add_dummy("eth0").unwrap();
-    ns.link_up("eth0").unwrap();
-    ns.add_addr("eth0", "192.168.1.1/24").unwrap();
+    ns.add_dummy("eth0")?;
+    ns.link_up("eth0")?;
+    ns.add_addr("eth0", "192.168.1.1/24")?;
 
-    let conn = ns.connection().unwrap();
+    let conn = ns.connection()?;
     let diag = Diagnostics::new(conn);
 
     // Scan specific interface
-    let iface = diag.scan_interface("eth0").await.unwrap();
+    let iface = diag.scan_interface("eth0").await?;
 
     assert_eq!(iface.name, "eth0");
     assert!(iface.mtu.is_some());
+    Ok(())
 }
 
 #[tokio::test]
-#[ignore] // Requires root privileges for network namespaces
-async fn test_diagnostics_scan_interface_not_found() {
-    let ns = TestNamespace::new("diag_notfound").unwrap();
+async fn test_diagnostics_scan_interface_not_found() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("diag_notfound")?;
 
-    let conn = ns.connection().unwrap();
+    let conn = ns.connection()?;
     let diag = Diagnostics::new(conn);
 
     // Try to scan non-existent interface
@@ -156,25 +162,25 @@ async fn test_diagnostics_scan_interface_not_found() {
 
     let err = result.unwrap_err();
     assert!(err.is_not_found());
+    Ok(())
 }
 
 #[tokio::test]
-#[ignore] // Requires root privileges for network namespaces
-async fn test_diagnostics_check_connectivity_no_route() {
-    let ns = TestNamespace::new("diag_conn").unwrap();
+async fn test_diagnostics_check_connectivity_no_route() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("diag_conn")?;
 
     // Create a dummy interface without any routes
-    ns.add_dummy("eth0").unwrap();
-    ns.link_up("eth0").unwrap();
+    ns.add_dummy("eth0")?;
+    ns.link_up("eth0")?;
 
-    let conn = ns.connection().unwrap();
+    let conn = ns.connection()?;
     let diag = Diagnostics::new(conn);
 
     // Check connectivity to external IP - should fail (no route)
     let report = diag
         .check_connectivity("8.8.8.8".parse().unwrap())
-        .await
-        .unwrap();
+        .await?;
 
     // Should have a NoRoute issue
     assert!(!report.issues.is_empty());
@@ -184,66 +190,69 @@ async fn test_diagnostics_check_connectivity_no_route() {
             .iter()
             .any(|i| i.category == IssueCategory::NoRoute)
     );
+    Ok(())
 }
 
 #[tokio::test]
-#[ignore] // Requires root privileges for network namespaces
-async fn test_diagnostics_check_connectivity_with_route() {
-    let ns = TestNamespace::new("diag_route").unwrap();
+async fn test_diagnostics_check_connectivity_with_route() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("diag_route")?;
 
     // Create interface with address and default route
-    ns.add_dummy("eth0").unwrap();
-    ns.link_up("eth0").unwrap();
-    ns.add_addr("eth0", "192.168.1.1/24").unwrap();
+    ns.add_dummy("eth0")?;
+    ns.link_up("eth0")?;
+    ns.add_addr("eth0", "192.168.1.1/24")?;
     // Add a default route (may fail if kernel requires a real gateway)
     let _ = ns.exec("ip", &["route", "add", "default", "via", "192.168.1.254"]);
 
-    let conn = ns.connection().unwrap();
+    let conn = ns.connection()?;
     let diag = Diagnostics::new(conn);
 
     // Check connectivity to local subnet - should have a route
     let report = diag
         .check_connectivity("192.168.1.100".parse().unwrap())
-        .await
-        .unwrap();
+        .await?;
 
     // Should find a route (even if not the default)
     assert!(
         report.route.is_some() || report.issues.is_empty(),
         "Expected route or no issues"
     );
+    Ok(())
 }
 
 #[tokio::test]
-#[ignore] // Requires root privileges for network namespaces
-async fn test_diagnostics_find_bottleneck() {
-    let ns = TestNamespace::new("diag_bottle").unwrap();
+async fn test_diagnostics_find_bottleneck() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("diag_bottle")?;
 
     // Create a dummy interface
-    ns.add_dummy("eth0").unwrap();
-    ns.link_up("eth0").unwrap();
+    ns.add_dummy("eth0")?;
+    ns.link_up("eth0")?;
 
-    let conn = ns.connection().unwrap();
+    let conn = ns.connection()?;
     let diag = Diagnostics::new(conn);
 
     // Find bottleneck - likely none on a fresh interface
-    let bottleneck = diag.find_bottleneck().await.unwrap();
+    let bottleneck = diag.find_bottleneck().await?;
 
     // Fresh interface shouldn't have a bottleneck
     // (unless there's a pre-existing issue)
     if let Some(b) = bottleneck {
         println!("Found bottleneck: {} ({:?})", b.location, b.bottleneck_type);
     }
+    Ok(())
 }
 
 #[tokio::test]
-#[ignore] // Requires root privileges for network namespaces
-async fn test_diagnostics_with_tc() {
-    let ns = TestNamespace::new("diag_tc").unwrap();
+async fn test_diagnostics_with_tc() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("sch_htb");
+    let ns = TestNamespace::new("diag_tc")?;
 
     // Create a dummy interface with TC
-    ns.add_dummy("eth0").unwrap();
-    ns.link_up("eth0").unwrap();
+    ns.add_dummy("eth0")?;
+    ns.link_up("eth0")?;
 
     // Add a qdisc
     ns.exec_ignore(
@@ -253,31 +262,34 @@ async fn test_diagnostics_with_tc() {
         ],
     );
 
-    let conn = ns.connection().unwrap();
+    let conn = ns.connection()?;
     let diag = Diagnostics::new(conn);
 
-    let report = diag.scan().await.unwrap();
+    let report = diag.scan().await?;
 
     // Find eth0 and check TC info
-    let eth0 = report.interfaces.iter().find(|i| i.name == "eth0");
-    assert!(eth0.is_some());
+    let eth0 = report
+        .interfaces
+        .iter()
+        .find(|i| i.name == "eth0")
+        .expect("eth0 not found in report");
 
-    let eth0 = eth0.unwrap();
     if let Some(tc) = &eth0.tc {
         assert_eq!(tc.qdisc, "htb");
     }
+    Ok(())
 }
 
 #[tokio::test]
-#[ignore] // Requires root privileges for network namespaces
-async fn test_diagnostics_link_down_detection() {
-    let ns = TestNamespace::new("diag_down").unwrap();
+async fn test_diagnostics_link_down_detection() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("diag_down")?;
 
     // Create a dummy interface but leave it down
-    ns.add_dummy("eth0").unwrap();
+    ns.add_dummy("eth0")?;
     // Don't bring it up
 
-    let conn = ns.connection().unwrap();
+    let conn = ns.connection()?;
 
     // Use config that doesn't skip down interfaces
     let config = DiagnosticsConfig {
@@ -287,13 +299,14 @@ async fn test_diagnostics_link_down_detection() {
 
     let diag = Diagnostics::with_config(conn, config);
 
-    let report = diag.scan().await.unwrap();
+    let report = diag.scan().await?;
 
     // Find eth0
-    let eth0 = report.interfaces.iter().find(|i| i.name == "eth0");
-    assert!(eth0.is_some());
-
-    let eth0 = eth0.unwrap();
+    let eth0 = report
+        .interfaces
+        .iter()
+        .find(|i| i.name == "eth0")
+        .expect("eth0 not found in report");
 
     // Should have LinkDown issue
     assert!(
@@ -301,28 +314,30 @@ async fn test_diagnostics_link_down_detection() {
             .iter()
             .any(|i| i.category == IssueCategory::LinkDown)
     );
+    Ok(())
 }
 
 #[tokio::test]
-#[ignore] // Requires root privileges for network namespaces
-async fn test_diagnostics_no_address_detection() {
-    let ns = TestNamespace::new("diag_noaddr").unwrap();
+async fn test_diagnostics_no_address_detection() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("diag_noaddr")?;
 
     // Create interface without address
-    ns.add_dummy("eth0").unwrap();
-    ns.link_up("eth0").unwrap();
+    ns.add_dummy("eth0")?;
+    ns.link_up("eth0")?;
     // Don't add any addresses
 
-    let conn = ns.connection().unwrap();
+    let conn = ns.connection()?;
     let diag = Diagnostics::new(conn);
 
-    let report = diag.scan().await.unwrap();
+    let report = diag.scan().await?;
 
     // Find eth0
-    let eth0 = report.interfaces.iter().find(|i| i.name == "eth0");
-    assert!(eth0.is_some());
-
-    let eth0 = eth0.unwrap();
+    let eth0 = report
+        .interfaces
+        .iter()
+        .find(|i| i.name == "eth0")
+        .expect("eth0 not found in report");
 
     // Should have NoAddress issue (info level)
     assert!(
@@ -330,38 +345,39 @@ async fn test_diagnostics_no_address_detection() {
             .iter()
             .any(|i| i.category == IssueCategory::NoAddress)
     );
+    Ok(())
 }
 
 #[tokio::test]
-#[ignore] // Requires root privileges for network namespaces
-async fn test_diagnostics_route_summary() {
-    let ns = TestNamespace::new("diag_routes").unwrap();
+async fn test_diagnostics_route_summary() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("diag_routes")?;
 
     // Create interface and add routes
-    ns.add_dummy("eth0").unwrap();
-    ns.link_up("eth0").unwrap();
-    ns.add_addr("eth0", "10.0.0.1/24").unwrap();
-    ns.exec("ip", &["route", "add", "192.168.0.0/16", "dev", "eth0"])
-        .unwrap();
+    ns.add_dummy("eth0")?;
+    ns.link_up("eth0")?;
+    ns.add_addr("eth0", "10.0.0.1/24")?;
+    ns.exec("ip", &["route", "add", "192.168.0.0/16", "dev", "eth0"])?;
 
-    let conn = ns.connection().unwrap();
+    let conn = ns.connection()?;
     let diag = Diagnostics::new(conn);
 
-    let report = diag.scan().await.unwrap();
+    let report = diag.scan().await?;
 
     // Check route diagnostics
     assert!(report.routes.ipv4_route_count >= 1);
+    Ok(())
 }
 
 #[tokio::test]
-#[ignore] // Requires root privileges for network namespaces
-async fn test_diagnostics_custom_config() {
-    let ns = TestNamespace::new("diag_config").unwrap();
+async fn test_diagnostics_custom_config() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("diag_config")?;
 
-    ns.add_dummy("eth0").unwrap();
-    ns.link_up("eth0").unwrap();
+    ns.add_dummy("eth0")?;
+    ns.link_up("eth0")?;
 
-    let conn = ns.connection().unwrap();
+    let conn = ns.connection()?;
 
     // Custom config with stricter thresholds
     let config = DiagnosticsConfig {
@@ -377,21 +393,23 @@ async fn test_diagnostics_custom_config() {
     assert_eq!(diag.config().packet_loss_threshold, 0.001);
     assert_eq!(diag.config().error_rate_threshold, 0.0001);
 
-    let report = diag.scan().await.unwrap();
+    let report = diag.scan().await?;
     assert!(!report.interfaces.is_empty());
+    Ok(())
 }
 
 #[tokio::test]
-#[ignore] // Requires root privileges for network namespaces
-async fn test_diagnostics_skip_loopback() {
-    let ns = TestNamespace::new("diag_lo").unwrap();
+async fn test_diagnostics_skip_loopback() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("diag_lo")?;
 
-    let conn = ns.connection().unwrap();
+    let conn = ns.connection()?;
 
     // Default config skips loopback
     let diag = Diagnostics::new(conn);
-    let report = diag.scan().await.unwrap();
+    let report = diag.scan().await?;
 
     // lo should not be in the results
     assert!(!report.interfaces.iter().any(|i| i.name == "lo"));
+    Ok(())
 }

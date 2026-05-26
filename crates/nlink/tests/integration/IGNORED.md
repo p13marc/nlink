@@ -39,33 +39,12 @@ file is `#[ignore]`'d, add a row here with a tracking plan.
 
 ## diagnostics.rs
 
-All 12 tests below carry `#[ignore] // Requires root privileges
-for network namespaces`. They're **migration candidates** — the
-conventional pattern across the rest of the suite (see
-`conntrack.rs`, `nftables_reconcile.rs`, `pool.rs`, …) is to
-gate with `nlink::require_root!()` so the test skips on a non-
-root developer machine but runs for real in the privileged CI
-job. Migrating means: drop the `#[ignore]`, add
-`nlink::require_root!();` as the first line of the test body.
-
-Deferred from Plan 174 to keep the observability plan scope-tight.
-Open a small follow-up plan to migrate in bulk (12 mechanical
-edits + one CI iteration to confirm they pass under root).
-
-| Test | Reason | Tracking |
-|---|---|---|
-| `test_diagnostics_scan` | migration candidate | `#[ignore]` → `nlink::require_root!()` |
-| `test_diagnostics_scan_interface` | migration candidate | `#[ignore]` → `nlink::require_root!()` |
-| `test_diagnostics_scan_interface_not_found` | migration candidate | `#[ignore]` → `nlink::require_root!()` |
-| `test_diagnostics_check_connectivity_no_route` | migration candidate | `#[ignore]` → `nlink::require_root!()` |
-| `test_diagnostics_check_connectivity_with_route` | migration candidate | `#[ignore]` → `nlink::require_root!()` |
-| `test_diagnostics_find_bottleneck` | migration candidate | `#[ignore]` → `nlink::require_root!()` |
-| `test_diagnostics_with_tc` | migration candidate | `#[ignore]` → `nlink::require_root!()` |
-| `test_diagnostics_link_down_detection` | migration candidate | `#[ignore]` → `nlink::require_root!()` |
-| `test_diagnostics_no_address_detection` | migration candidate | `#[ignore]` → `nlink::require_root!()` |
-| `test_diagnostics_route_summary` | migration candidate | `#[ignore]` → `nlink::require_root!()` |
-| `test_diagnostics_custom_config` | migration candidate | `#[ignore]` → `nlink::require_root!()` |
-| `test_diagnostics_skip_loopback` | migration candidate | `#[ignore]` → `nlink::require_root!()` |
+All 12 tests in this file were migrated from `#[ignore] //
+Requires root privileges` to `nlink::require_root!()` in 0.17
+(Plan 179). They now run in the privileged-CI job and skip
+cleanly on non-root developer machines. The catalog section is
+kept as a marker — if a future regression here is `#[ignore]`'d,
+add a row with a tracking plan.
 
 ## How to run locally
 
