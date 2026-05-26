@@ -382,12 +382,37 @@ impl<P: ProtocolState> Connection<P> {
         let msg = builder.finish();
         self.socket.send(&msg).await?;
 
-        let response = self.socket.recv_msg().await?;
-        self.process_response(&response, seq).inspect_err(|e| {
-            warn!(errno = ?e.errno(), "kernel returned error for request");
-        })?;
-
-        Ok(response)
+        // Loop until a frame containing a message with the expected
+        // seq arrives. Multicast events delivered while subscribed
+        // (e.g. when this `Connection` is also `subscribe()`d to a
+        // group the request mutates) carry `seq=0` and would
+        // otherwise be mistaken for the response. The 30s default
+        // operation timeout (`with_timeout` in `send_request`)
+        // bounds the loop so a never-ack'd request still surfaces
+        // as `Error::Timeout` instead of hanging.
+        loop {
+            let response = self.socket.recv_msg().await?;
+            let mut found_seq = false;
+            for result in MessageIter::new(&response) {
+                let (header, payload) = result?;
+                if header.nlmsg_seq != seq {
+                    continue;
+                }
+                found_seq = true;
+                if header.is_error() {
+                    let err = NlMsgError::from_bytes(payload)?;
+                    if !err.is_ack() {
+                        warn!(errno = err.error, "kernel returned error for request");
+                        return Err(err.into_error(payload));
+                    }
+                }
+            }
+            if found_seq {
+                return Ok(response);
+            }
+            // No matching seq in this frame — stale multicast or
+            // delayed reply for a previous request. Keep reading.
+        }
     }
 
     #[instrument(level = "trace", skip_all, fields(seq))]
@@ -400,12 +425,26 @@ impl<P: ProtocolState> Connection<P> {
         let msg = builder.finish();
         self.socket.send(&msg).await?;
 
-        let response = self.socket.recv_msg().await?;
-        self.process_ack(&response, seq).inspect_err(|e| {
-            warn!(errno = ?e.errno(), "kernel returned error for ack");
-        })?;
-
-        Ok(())
+        // Same shape as `send_request_inner` — loop until the ACK
+        // with the expected seq lands, skipping unrelated multicast
+        // frames.
+        loop {
+            let response = self.socket.recv_msg().await?;
+            for result in MessageIter::new(&response) {
+                let (header, payload) = result?;
+                if header.nlmsg_seq != seq {
+                    continue;
+                }
+                if header.is_error() {
+                    let err = NlMsgError::from_bytes(payload)?;
+                    if !err.is_ack() {
+                        warn!(errno = err.error, "kernel returned error for ack");
+                        return Err(err.into_error(payload));
+                    }
+                    return Ok(());
+                }
+            }
+        }
     }
 
     #[instrument(level = "trace", skip_all, fields(seq, responses))]
@@ -479,46 +518,6 @@ impl<P: ProtocolState> Connection<P> {
         Ok(responses)
     }
 
-    /// Process a response and check for errors.
-    fn process_response(&self, data: &[u8], expected_seq: u32) -> Result<()> {
-        for result in MessageIter::new(data) {
-            let (header, payload) = result?;
-
-            if header.nlmsg_seq != expected_seq {
-                continue;
-            }
-
-            if header.is_error() {
-                let err = NlMsgError::from_bytes(payload)?;
-                if !err.is_ack() {
-                    return Err(err.into_error(payload));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Process an ACK response.
-    fn process_ack(&self, data: &[u8], expected_seq: u32) -> Result<()> {
-        for result in MessageIter::new(data) {
-            let (header, payload) = result?;
-
-            if header.nlmsg_seq != expected_seq {
-                continue;
-            }
-
-            if header.is_error() {
-                let err = NlMsgError::from_bytes(payload)?;
-                if !err.is_ack() {
-                    return Err(err.into_error(payload));
-                }
-                return Ok(());
-            }
-        }
-
-        Err(Error::InvalidMessage("expected ACK message".into()))
-    }
 }
 
 // ============================================================================

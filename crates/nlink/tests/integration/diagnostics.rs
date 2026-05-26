@@ -322,16 +322,21 @@ async fn test_diagnostics_no_address_detection() -> nlink::Result<()> {
     nlink::require_root!();
     let ns = TestNamespace::new("diag_noaddr")?;
 
-    // Create interface without an IPv4 address. Disable IPv6
-    // before bringing eth0 up — otherwise the kernel auto-
-    // assigns a link-local fe80::/64, which counts as an
-    // address and suppresses the `NoAddress` issue the test
-    // means to verify. (Plan 179 — IPv6 autoconf default
-    // shifted in newer kernels; the test was written when the
-    // GHA env still defaulted disable_ipv6=1 on dummies.)
+    // Create interface without an IPv4 address. After link-up
+    // the kernel auto-assigns an IPv6 link-local fe80::/64
+    // (SLAAC) on modern kernels, which would count as an
+    // address and suppress the `NoAddress` issue the test
+    // means to verify. Flush IPv6 addrs post-up. There's no
+    // RA source in this isolated namespace, so SLAAC won't
+    // re-add anything.
+    //
+    // Avoid `sysctl(8)` here — the CI container
+    // (`rust:bookworm` per integration-tests.yml) installs only
+    // `iproute2 kmod conntrack`; `procps` (sysctl) isn't there.
+    // `ip` is. (Plan 179.)
     ns.add_dummy("eth0")?;
-    let _ = ns.exec("sysctl", &["-w", "net.ipv6.conf.eth0.disable_ipv6=1"]);
     ns.link_up("eth0")?;
+    let _ = ns.exec("ip", &["-6", "addr", "flush", "dev", "eth0"]);
 
     let conn = ns.connection()?;
     let diag = Diagnostics::new(conn);
