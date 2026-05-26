@@ -67,7 +67,7 @@ total=$(wc -l <<<"$ignored_tests")
 if [[ $uncatalogued -gt 0 ]]; then
     echo
     echo "Found $uncatalogued uncatalogued ignored test(s) out of $total total."
-    echo "See plans/174-ci-observability-plan.md for context."
+    echo "See CHANGELOG.md ## [0.17.0] 'CI observability' for context."
     exit 1
 fi
 

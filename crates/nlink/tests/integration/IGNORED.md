@@ -3,7 +3,8 @@
 Every `#[ignore]` in `crates/nlink/tests/integration/*` MUST appear
 in this file. The CI audit script `scripts/audit-ignored-tests.sh`
 fails on any ignored test missing a catalog entry — see
-[Plan 174](../../../../plans/174-ci-observability-plan.md).
+`CHANGELOG.md ## [0.17.0]` "CI observability" for the original
+rationale.
 
 Three legitimate reasons for `#[ignore]`:
 
@@ -29,10 +30,11 @@ or this catalog.
 
 ## nftables_reconcile.rs
 
-All entries here were un-ignored when [Plan 178](../../../../plans/178-nftables-diff-body-bytes-false-positive-plan.md)
-fixed the underlying `NftablesDiff` body-bytes false-positive
-(commit landed as the closeout of Plan 178 §3). The catalog
-section is kept as a marker — if a future regression in this
+All entries here were un-ignored when the `NftablesDiff` body-
+bytes false-positive was fixed in 0.17 (see
+`CHANGELOG.md ## [0.17.0]` "NftablesConfig::diff body-bytes
+false-positive"). The catalog section is kept as a marker —
+if a future regression in this
 file is `#[ignore]`'d, add a row here with a tracking plan.
 
 ## diagnostics.rs

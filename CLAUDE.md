@@ -473,14 +473,15 @@ crates.io). The cycle's headline additions are documented in
 — the cycle's per-plan scaffolding was deleted post-cut per
 convention.
 
-The **0.17 cycle is in flight** on the `0.17` branch (do not push
-to master). Active plans live in [`plans/`](plans/) with
-[`plans/INDEX.md`](plans/INDEX.md) as the day-to-day status
-tracker. Cycle theme: close the "hidden hang" class of bugs that
-the 0.16 CI evidence surfaced, plus sweep up the ergonomic +
-tooling papercuts the cycle revealed. See
-[`plans/177-0.17-master-plan.md`](plans/177-0.17-master-plan.md)
-for the cycle's narrative + sequencing.
+The **0.17 cycle is complete** on the `0.17` branch (do not push
+to master); workspace at 0.17.0 awaiting maintainer cut via
+`scripts/cut-release.sh 0.17.0`. The cycle's narrative + per-
+feature entries live in
+[`CHANGELOG.md ## [Unreleased]`](CHANGELOG.md) (will become
+`## [0.17.0]` on cut) and the migration walkthrough in
+[`docs/migration_guide/0.16.0-to-0.17.0.md`](docs/migration_guide/0.16.0-to-0.17.0.md).
+Day-to-day status tracker for any in-flight or queued follow-ups
+is [`plans/INDEX.md`](plans/INDEX.md).
 
 Per-release upgrade guides:
 [`docs/migration_guide/`](docs/migration_guide/README.md) — write

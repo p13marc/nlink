@@ -99,10 +99,9 @@ All notable changes to this project will be documented in this file.
   irreversible publish step. Introduces the
   `> ⚠ No CI coverage — manually validated YYYY-MM-DD against
   > <hardware>` CHANGELOG annotation convention for future
-  hardware-only feature entries. Plans 178+ (sketched in
-  `plans/176-…`) cover the self-hosted-runner / vendor-cloud-
-  lab options for the day a real downstream needs CI coverage
-  on these paths.
+  hardware-only feature entries. Self-hosted-runner +
+  vendor-cloud-lab paths sketched as future plans for the day
+  a real downstream needs CI coverage on these paths.
 
 - **`scripts/cut-release.sh` (Plan 175)** — one-shot orchestrator
   for an nlink release cut. Walks the Plan 167 sequence end-to-
