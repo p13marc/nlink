@@ -484,6 +484,7 @@ pub struct Chain {
     pub(crate) priority: Option<Priority>,
     pub(crate) chain_type: Option<ChainType>,
     pub(crate) policy: Option<Policy>,
+    pub(crate) device: Option<String>,
 }
 
 impl Chain {
@@ -497,6 +498,7 @@ impl Chain {
             priority: None,
             chain_type: None,
             policy: None,
+            device: None,
         }
     }
 
@@ -529,10 +531,22 @@ impl Chain {
         self.policy = Some(policy);
         self
     }
+
+    /// Bind a `Family::Netdev` base chain to a specific
+    /// interface (`type filter hook ingress device eth0
+    /// priority -150`). **Required** for netdev hooks
+    /// (`Hook::Ingress`/`Egress` with `Family::Netdev`) —
+    /// without this the kernel rejects the chain. Ignored on
+    /// non-netdev families.
+    pub fn device(mut self, dev: impl Into<String>) -> Self {
+        self.device = Some(dev.into());
+        self
+    }
 }
 
 /// Chain info parsed from a dump.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ChainInfo {
     /// Table name.
     pub table: String,
@@ -546,6 +560,10 @@ pub struct ChainInfo {
     pub priority: Option<i32>,
     /// Chain type.
     pub chain_type: Option<String>,
+    /// Bound device name for netdev base chains. `None` on
+    /// other families or when the chain wasn't dump-included
+    /// by the kernel (older kernels omit it for non-netdev).
+    pub device: Option<String>,
     /// Default policy.
     pub policy: Option<u32>,
     /// Kernel handle.

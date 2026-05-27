@@ -27,7 +27,7 @@
 use std::time::Duration;
 
 use nlink::netlink::nftables::config::{NftablesConfig, ReconcileOptions};
-use nlink::netlink::nftables::types::{Family, Hook, Policy, Priority};
+use nlink::netlink::nftables::types::{ChainType, Family, Hook, Policy, Priority};
 use nlink::netlink::{Connection, Nftables, namespace};
 
 use crate::common::TestNamespace;
@@ -233,6 +233,111 @@ async fn apply_reconcile_succeeds_in_one_attempt_when_uncontended() -> nlink::Re
             .await?;
         assert_eq!(report.attempts, 1, "no contention → single attempt");
         assert!(report.change_count >= 4, "expected table+chain+2 rules");
+        Ok(())
+    })
+    .await
+}
+
+// ============================================================================
+// Plan 180 — chain_type + device on DeclaredChain
+// ============================================================================
+
+/// Declared NAT chain round-trips through the kernel with
+/// `chain_type = Nat`. Without it, the kernel rejects
+/// `masquerade`/`snat`/`dnat` verdicts with `EOPNOTSUPP`
+/// inside the batch.
+#[tokio::test]
+async fn nat_chain_chain_type_round_trips() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_nat");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("nat-chain-type")?;
+        let nft = nft_in_ns(&ns)?;
+
+        let cfg = nlink::netlink::nftables::config::NftablesConfig::new().table(
+            "nat-test",
+            Family::Inet,
+            |t| {
+                t.chain("postrouting", |c| {
+                    c.hook(Hook::Postrouting)
+                        .priority(Priority::SrcNat)
+                        .chain_type(ChainType::Nat)
+                })
+            },
+        );
+
+        cfg.diff(&nft).await?.apply(&nft).await?;
+
+        // Dump back and verify chain_type came through.
+        let chains = nft.list_chains().await?;
+        let pr = chains
+            .iter()
+            .find(|c| c.name == "postrouting" && c.table == "nat-test")
+            .expect("postrouting chain must exist after apply");
+        assert_eq!(
+            pr.chain_type.as_deref(),
+            Some("nat"),
+            "expected chain_type=nat in dump; got {:?}",
+            pr.chain_type
+        );
+
+        // Idempotence: re-diff yields zero changes (the 0.17
+        // body-bytes contract; guard it for this code path too).
+        let again = cfg.diff(&nft).await?;
+        assert!(
+            again.is_empty(),
+            "re-diff after no kernel change must be empty; got {}",
+            again.summary()
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+/// Declared netdev chain bound to a device round-trips with
+/// `device` set on dump. Without `NFTA_HOOK_DEV` in the
+/// apply request, the kernel rejects the chain creation.
+#[tokio::test]
+async fn netdev_chain_device_round_trips() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("netdev-chain-dev")?;
+        // Create the dummy interface the chain will bind to.
+        ns.add_dummy("dummy0")?;
+        ns.link_up("dummy0")?;
+
+        let nft = nft_in_ns(&ns)?;
+        let cfg = nlink::netlink::nftables::config::NftablesConfig::new().table(
+            "ft",
+            Family::Netdev,
+            |t| {
+                t.chain("ingress", |c| {
+                    c.hook(Hook::Ingress)
+                        .priority(Priority::Filter)
+                        .chain_type(ChainType::Filter)
+                        .device("dummy0")
+                })
+            },
+        );
+
+        cfg.diff(&nft).await?.apply(&nft).await?;
+
+        let chains = nft.list_chains().await?;
+        let ing = chains
+            .iter()
+            .find(|c| c.name == "ingress" && c.table == "ft")
+            .expect("ingress chain must exist");
+        assert_eq!(
+            ing.device.as_deref(),
+            Some("dummy0"),
+            "expected device=dummy0 in dump; got {:?}",
+            ing.device
+        );
+
         Ok(())
     })
     .await

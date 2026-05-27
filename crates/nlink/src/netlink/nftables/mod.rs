@@ -157,6 +157,10 @@ pub const NFTA_CHAIN_FLAGS: u16 = 10;
 // Chain hook nested attributes
 pub const NFTA_HOOK_HOOKNUM: u16 = 1;
 pub const NFTA_HOOK_PRIORITY: u16 = 2;
+/// Single-device binding for netdev base chains
+/// (`type filter hook ingress device eth0 priority -150`).
+/// Required when `family == Netdev`; ignored on other families.
+pub const NFTA_HOOK_DEV: u16 = 3;
 
 // =============================================================================
 // Rule Attributes

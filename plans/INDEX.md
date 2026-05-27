@@ -47,7 +47,7 @@ medium-size dependent plan.
 
 | Plan | Title | Effort | Order | Status | Notes |
 |------|-------|--------|-------|--------|-------|
-| [180](180-declarative-chain-type-and-device-plan.md) | `DeclaredChainBuilder::chain_type` + `Chain`/`DeclaredChain` `device` for netdev hooks | ~2.5 h | 1 | ⚪ | **Unblocks nlink-lab Plan 158a.** Ask 1 + adjacent netdev-hook gap. |
+| [180](180-declarative-chain-type-and-device-plan.md) | `DeclaredChainBuilder::chain_type` + `Chain`/`DeclaredChain` `device` for netdev hooks | ~2.5 h | 1 | 🟡 | Code + 5 unit + 2 integration tests landed locally; awaiting CI confirmation. Unblocks nlink-lab Plan 158a. |
 | [181](181-list-in-filter-family-plan.md) | `list_{tables,chains,flowtables,sets}_in(table?, family)` server-side filter family | ~2 h | 2 | ⚪ | Ask 2 generalized. **Prerequisite for Plan 185.** |
 | [182](182-error-ext-ack-accessor-plan.md) | `Error::ext_ack()` + `Error::ext_ack_offset()` inherent accessors | ~30 min | 3 | ⚪ | Wishlist 3 — trivial additive on `impl Error`. |
 | [183](183-display-for-diff-types-plan.md) | `impl Display for NftablesDiff` + `NetworkDiff` (wraps existing `summary()`) | ~30 min | 4 | ⚪ | Wishlist 1 — report overestimated at 80 LOC, actual is ~15. |

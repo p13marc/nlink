@@ -278,6 +278,9 @@ impl Connection<Nftables> {
             builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.to_u32());
             let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
             builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
+            if let Some(dev) = &chain.device {
+                builder.append_attr_str(NFTA_HOOK_DEV, dev);
+            }
             builder.nest_end(hook_nest);
         }
 
@@ -878,6 +881,7 @@ pub(crate) fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
         chain_type: None,
         policy: None,
         handle: 0,
+        device: None,
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
@@ -901,6 +905,9 @@ pub(crate) fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
                         NFTA_HOOK_PRIORITY if hook_payload.len() >= 4 => {
                             chain.priority =
                                 Some(i32::from_be_bytes(hook_payload[..4].try_into().unwrap()));
+                        }
+                        NFTA_HOOK_DEV => {
+                            chain.device = attr_str(hook_payload);
                         }
                         _ => {}
                     }
@@ -1082,6 +1089,9 @@ impl Transaction {
             builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.to_u32());
             let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
             builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
+            if let Some(dev) = &chain.device {
+                builder.append_attr_str(NFTA_HOOK_DEV, dev);
+            }
             builder.nest_end(hook_nest);
         }
 
@@ -1408,6 +1418,42 @@ mod transaction_tests {
         // Strings are NUL-terminated on the wire — strip before compare.
         assert_eq!(&table[..table.len().saturating_sub(1)], b"filter");
         assert_eq!(&name[..name.len().saturating_sub(1)], b"input");
+    }
+
+    #[test]
+    fn add_chain_emits_nfta_hook_dev_for_netdev_chain() {
+        // Plan 180 — netdev base chain must carry
+        // NFTA_HOOK_DEV inside the NFTA_CHAIN_HOOK nest.
+        let chain = Chain::new("ft", "ingress")
+            .family(Family::Netdev)
+            .hook(Hook::Ingress)
+            .priority(Priority::Filter)
+            .chain_type(ChainType::Filter)
+            .device("eth0");
+        let tx = new_tx().add_chain(chain);
+        assert_eq!(tx.messages.len(), 1);
+
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        // Pull the NFTA_CHAIN_HOOK nest and look inside it for
+        // NFTA_HOOK_DEV.
+        let hook_nest = find_attr(body, NFTA_CHAIN_HOOK).expect("NFTA_CHAIN_HOOK missing");
+        let dev = find_attr(&hook_nest, NFTA_HOOK_DEV).expect("NFTA_HOOK_DEV missing");
+        assert_eq!(&dev[..dev.len().saturating_sub(1)], b"eth0");
+    }
+
+    #[test]
+    fn add_chain_emits_nfta_chain_type_for_nat_chain() {
+        // Plan 180 — NAT chain must carry NFTA_CHAIN_TYPE="nat"
+        // so the kernel accepts masquerade/snat/dnat verdicts.
+        let chain = Chain::new("nat", "postrouting")
+            .family(Family::Inet)
+            .hook(Hook::Postrouting)
+            .priority(Priority::SrcNat)
+            .chain_type(ChainType::Nat);
+        let tx = new_tx().add_chain(chain);
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        let ct = find_attr(body, NFTA_CHAIN_TYPE).expect("NFTA_CHAIN_TYPE missing");
+        assert_eq!(&ct[..ct.len().saturating_sub(1)], b"nat");
     }
 
     #[test]

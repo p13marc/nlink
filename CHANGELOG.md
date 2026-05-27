@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`DeclaredChainBuilder::chain_type(ChainType)` (Plan 180)**
+  — closes the parity gap between the imperative
+  `Chain::chain_type` and declarative `DeclaredChain` paths.
+  Required for declarative NAT chain reconcile via
+  `NftablesConfig::diff().apply()`: a chain hooking
+  `prerouting`/`postrouting` without `chain_type(ChainType::Nat)`
+  defaults to `ChainType::Filter`, and any `masquerade`/
+  `snat`/`dnat` verdict refuses to load with `EOPNOTSUPP`.
+  Unblocks downstream consumers (e.g. nlink-lab) migrating
+  to the declarative path. Mirrors the imperative builder's
+  rustdoc + invariants.
+
+- **`Chain::device(name)` + `DeclaredChainBuilder::device(name)`
+  (Plan 180, adjacent gap)** — bind a netdev base chain to a
+  specific interface (`type filter hook ingress device eth0
+  priority -150`). Wires `NFTA_HOOK_DEV` (constant 3 inside
+  the `NFTA_CHAIN_HOOK` nest). Required for `Family::Netdev`
+  base chains; ignored on other families. Both imperative and
+  declarative paths gained the setter. `ChainInfo` now exposes
+  `device: Option<String>` populated from dump responses, and
+  is now `#[non_exhaustive]` (only construction site is
+  internal `parse_chain` — no breaking change for downstream).
+
 ## [0.17.0] - 2026-05-26
 
 ### Breaking changes
