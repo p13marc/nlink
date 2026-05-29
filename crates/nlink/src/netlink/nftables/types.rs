@@ -79,6 +79,20 @@ impl ChainType {
             Self::Route => "route",
         }
     }
+
+    /// Parse a kernel-side chain-type string (`"filter"`, `"nat"`,
+    /// `"route"`) into the typed enum. Returns `None` for any
+    /// other string — the kernel can grow new chain types
+    /// (`"netdev"` etc.), and an unrecognised value should not
+    /// silently collapse to one of the known variants.
+    pub fn from_kernel_string(s: &str) -> Option<Self> {
+        match s {
+            "filter" => Some(Self::Filter),
+            "nat" => Some(Self::Nat),
+            "route" => Some(Self::Route),
+            _ => None,
+        }
+    }
 }
 
 /// Chain priority (determines ordering).
@@ -558,8 +572,12 @@ pub struct ChainInfo {
     pub hook: Option<u32>,
     /// Priority (for base chains).
     pub priority: Option<i32>,
-    /// Chain type.
-    pub chain_type: Option<String>,
+    /// Chain type, parsed from the kernel's `NFTA_CHAIN_TYPE`
+    /// string. `None` if the chain is regular (no hook) or the
+    /// kernel emitted an unrecognised value — Plan 180 picked
+    /// the typed form deliberately so callers can pattern-match
+    /// without holding a stringly table.
+    pub chain_type: Option<ChainType>,
     /// Bound device name for netdev base chains. `None` on
     /// other families or when the chain wasn't dump-included
     /// by the kernel (older kernels omit it for non-netdev).

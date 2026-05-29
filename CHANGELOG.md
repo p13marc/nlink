@@ -92,6 +92,21 @@ All notable changes to this project will be documented in this file.
   issue if you need them. `NftablesEvent` carries
   `#[non_exhaustive]` already, so this is non-breaking.
 
+### Audit fixes
+
+- **`ChainInfo.chain_type` is now `Option<ChainType>` (was
+  `Option<String>`) (Plan 180 audit)** — Plan 180 spec called
+  for a typed enum on the dump-side field; the first cut
+  shipped a raw string for parser convenience. Aligned now:
+  `parse_chain` maps the kernel's `"filter"`/`"nat"`/`"route"`
+  string into the typed `ChainType` variant; unrecognised
+  values (kernel can grow new chain types) yield `None`.
+  Added `ChainType::from_kernel_string(&str) -> Option<Self>`
+  as the canonical mapping. Affects only downstream code that
+  read `ChainInfo.chain_type` directly — typed match arms keep
+  working, stringly comparisons (`== Some("nat".into())`) need
+  to become `== Some(ChainType::Nat)`.
+
 ### Breaking changes (lib internals)
 
 - **`events_with_resync` is now lifetime-generic (Plan 185)** —

@@ -1036,7 +1036,9 @@ pub(crate) fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
                 chain.policy = Some(u32::from_be_bytes(payload[..4].try_into().unwrap()));
             }
             NFTA_CHAIN_TYPE => {
-                chain.chain_type = attr_str(payload);
+                chain.chain_type = attr_str(payload)
+                    .as_deref()
+                    .and_then(super::types::ChainType::from_kernel_string);
             }
             _ => {}
         }

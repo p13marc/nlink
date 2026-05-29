@@ -276,9 +276,9 @@ async fn nat_chain_chain_type_round_trips() -> nlink::Result<()> {
             .find(|c| c.name == "postrouting" && c.table == "nat-test")
             .expect("postrouting chain must exist after apply");
         assert_eq!(
-            pr.chain_type.as_deref(),
-            Some("nat"),
-            "expected chain_type=nat in dump; got {:?}",
+            pr.chain_type,
+            Some(ChainType::Nat),
+            "expected chain_type=Nat in dump; got {:?}",
             pr.chain_type
         );
 
