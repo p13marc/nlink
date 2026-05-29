@@ -95,7 +95,14 @@ impl Connection<Nftables> {
     /// `inet`, `arp`, `bridge`, `netdev`). Plan 181.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_tables_in"))]
     pub async fn list_tables_in(&self, family: Family) -> Result<Vec<Table>> {
-        self.list_tables_filtered(family as u8).await
+        let mut tables = self.list_tables_filtered(family as u8).await?;
+        // Defensive: even though the kernel honors `nfgen_family`
+        // on table dumps (unlike chain/flowtable/set dumps where
+        // the table-name attribute is just a hint), filter
+        // client-side too so the contract holds across all
+        // kernel versions.
+        tables.retain(|t| t.family == family);
+        Ok(tables)
     }
 
     async fn list_tables_filtered(&self, family_byte: u8) -> Result<Vec<Table>> {
@@ -231,6 +238,8 @@ impl Connection<Nftables> {
         };
         builder.append(&nfgenmsg);
         if let Some(t) = table {
+            // See `list_chains_filtered` for why we send the
+            // hint AND re-filter client-side.
             builder.append_attr_str(NFTA_FLOWTABLE_TABLE, t);
         }
 
@@ -241,6 +250,9 @@ impl Connection<Nftables> {
             if let Some(ft) = parse_flowtable(payload, family) {
                 out.push(ft);
             }
+        }
+        if let Some(t) = table {
+            out.retain(|f| f.table == t);
         }
         Ok(out)
     }
@@ -362,6 +374,12 @@ impl Connection<Nftables> {
         };
         builder.append(&nfgenmsg);
         if let Some(t) = table {
+            // Plan 181 — kernels prior to ~6.10 ignore
+            // NFTA_CHAIN_TABLE on dump requests (it's an
+            // optimization hint, not a contract). We send it
+            // anyway in case the running kernel honors it, but
+            // re-filter client-side below so the method always
+            // returns the correct narrowed result.
             builder.append_attr_str(NFTA_CHAIN_TABLE, t);
         }
 
@@ -373,6 +391,11 @@ impl Connection<Nftables> {
             if let Some(chain) = parse_chain(payload, family) {
                 chains.push(chain);
             }
+        }
+
+        // Defensive client-side filter — see comment above.
+        if let Some(t) = table {
+            chains.retain(|c| c.table == t);
         }
 
         Ok(chains)
@@ -543,6 +566,8 @@ impl Connection<Nftables> {
         };
         builder.append(&nfgenmsg);
         if let Some(t) = table {
+            // See `list_chains_filtered` for why we send the
+            // hint AND re-filter client-side.
             builder.append_attr_str(NFTA_SET_TABLE, t);
         }
 
@@ -555,7 +580,9 @@ impl Connection<Nftables> {
                 sets.push(set);
             }
         }
-
+        if let Some(t) = table {
+            sets.retain(|s| s.table == t);
+        }
         Ok(sets)
     }
 
