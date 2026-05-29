@@ -29,6 +29,19 @@ All notable changes to this project will be documented in this file.
   is now `#[non_exhaustive]` (only construction site is
   internal `parse_chain` — no breaking change for downstream).
 
+- **`list_tables_in(family)` / `list_chains_in(table, family)`
+  / `list_flowtables_in(table, family)` /
+  `list_sets_in(table, family)` (Plan 181)** — server-side
+  filtered dump methods on `Connection<Nftables>`. Mirror the
+  existing `list_rules(table, family)` shape: each new method
+  emits the corresponding `NFTA_*_TABLE` attribute +
+  `nfgen_family` so the kernel returns only matching entities.
+  More efficient than `list_*().filter(...)` on hosts with
+  many tables. The unfiltered counterparts keep working
+  unchanged. Integration test
+  `list_in_filters_match_only_target_table` exercises all
+  four `_in` shapes against a two-table fixture.
+
 ## [0.17.0] - 2026-05-26
 
 ### Breaking changes

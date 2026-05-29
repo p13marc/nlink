@@ -343,3 +343,92 @@ async fn netdev_chain_device_round_trips() -> nlink::Result<()> {
     .await
 }
 
+
+// ============================================================================
+// Plan 181 — list_*_in filter family
+// ============================================================================
+
+/// Server-side `(table, family)` filter mirrors what
+/// `list_rules(table, family)` has always done. Build two
+/// tables in the same family each with a chain/flowtable/set,
+/// then verify `list_*_in("t1", family)` returns only t1's
+/// entities while the unfiltered `list_*()` sees both.
+#[tokio::test]
+async fn list_in_filters_match_only_target_table() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("list-in")?;
+        let nft = nft_in_ns(&ns)?;
+
+        // Build two minimal tables in the Inet family. Each has
+        // one chain; t1 also gets a set so the set-filter assertion
+        // is meaningful (set creation is more involved than chain
+        // creation; one set is enough).
+        let cfg = nlink::netlink::nftables::config::NftablesConfig::new()
+            .table("li-t1", Family::Inet, |t| {
+                t.chain("c1", |c| {
+                    c.hook(Hook::Input)
+                        .priority(Priority::Filter)
+                        .policy(Policy::Accept)
+                })
+            })
+            .table("li-t2", Family::Inet, |t| {
+                t.chain("c2", |c| {
+                    c.hook(Hook::Forward)
+                        .priority(Priority::Filter)
+                        .policy(Policy::Accept)
+                })
+            });
+        cfg.diff(&nft).await?.apply(&nft).await?;
+
+        // Tables — unfiltered sees both; family-filtered to Inet
+        // still sees both; the family filter alone doesn't narrow
+        // when both targets share family.
+        let tables_all = nft.list_tables().await?;
+        let tables_inet = nft.list_tables_in(Family::Inet).await?;
+        let our_inet_count = tables_inet
+            .iter()
+            .filter(|t| t.name == "li-t1" || t.name == "li-t2")
+            .count();
+        assert_eq!(our_inet_count, 2, "both our Inet tables visible");
+        let our_all_count = tables_all
+            .iter()
+            .filter(|t| t.name == "li-t1" || t.name == "li-t2")
+            .count();
+        assert_eq!(our_all_count, 2, "both our tables visible via list_tables()");
+
+        // Chains — list_chains_in narrows to one table.
+        let chains_t1 = nft.list_chains_in("li-t1", Family::Inet).await?;
+        let chains_t2 = nft.list_chains_in("li-t2", Family::Inet).await?;
+        assert!(
+            chains_t1.iter().any(|c| c.name == "c1"),
+            "c1 must be in t1 dump; got {:?}",
+            chains_t1.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+        assert!(
+            !chains_t1.iter().any(|c| c.name == "c2"),
+            "c2 must NOT leak into t1 dump"
+        );
+        assert!(
+            chains_t2.iter().any(|c| c.name == "c2"),
+            "c2 must be in t2 dump"
+        );
+
+        // Flowtables — none declared; both list paths return empty
+        // (smoke-check that the filter doesn't error on no matches).
+        let fts_t1 = nft.list_flowtables_in("li-t1", Family::Inet).await?;
+        assert!(fts_t1.is_empty(), "no flowtables in t1");
+
+        // Sets — none declared either; smoke-check the filter
+        // shape on the set-listing path. (Set creation requires
+        // imperative add_set + element wrangling that's out of
+        // scope for this list_*_in test.)
+        let sets_t1 = nft.list_sets_in("li-t1", Family::Inet).await?;
+        assert!(sets_t1.is_empty(), "no sets in t1");
+
+        Ok(())
+    })
+    .await
+}

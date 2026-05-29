@@ -85,10 +85,24 @@ impl Connection<Nftables> {
     /// List all nftables tables.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_tables"))]
     pub async fn list_tables(&self) -> Result<Vec<Table>> {
+        self.list_tables_filtered(0).await
+    }
+
+    /// List tables in a specific address family. Server-side
+    /// filtered via `nfgen_family` — more efficient than
+    /// `list_tables().filter(|t| t.family() == family)` on
+    /// hosts with tables in many families (`ip`, `ip6`,
+    /// `inet`, `arp`, `bridge`, `netdev`). Plan 181.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_tables_in"))]
+    pub async fn list_tables_in(&self, family: Family) -> Result<Vec<Table>> {
+        self.list_tables_filtered(family as u8).await
+    }
+
+    async fn list_tables_filtered(&self, family_byte: u8) -> Result<Vec<Table>> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_GETTABLE), NLM_F_REQUEST | NLM_F_DUMP);
         let nfgenmsg = NfGenMsg {
-            nfgen_family: 0, // AF_UNSPEC = all families
+            nfgen_family: family_byte,
             version: 0,
             res_id: 0,
         };
@@ -185,17 +199,40 @@ impl Connection<Nftables> {
     /// the nested hook block.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_flowtables"))]
     pub async fn list_flowtables(&self) -> Result<Vec<super::types::Flowtable>> {
+        self.list_flowtables_filtered(0, None).await
+    }
+
+    /// List flowtables in a specific table+family. Server-side
+    /// filtered via `NFTA_FLOWTABLE_TABLE` + `nfgen_family` —
+    /// more efficient than `list_flowtables().filter(|f|
+    /// f.table == "…")` on hosts with many tables. Plan 181.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_flowtables_in"))]
+    pub async fn list_flowtables_in(
+        &self,
+        table: &str,
+        family: Family,
+    ) -> Result<Vec<super::types::Flowtable>> {
+        self.list_flowtables_filtered(family as u8, Some(table)).await
+    }
+
+    async fn list_flowtables_filtered(
+        &self,
+        family_byte: u8,
+        table: Option<&str>,
+    ) -> Result<Vec<super::types::Flowtable>> {
         let mut builder = MessageBuilder::new(
             nft_msg_type(NFT_MSG_GETFLOWTABLE),
             NLM_F_REQUEST | NLM_F_DUMP,
         );
-        // AF_UNSPEC = all families.
         let nfgenmsg = NfGenMsg {
-            nfgen_family: 0,
+            nfgen_family: family_byte,
             version: 0,
             res_id: 0,
         };
         builder.append(&nfgenmsg);
+        if let Some(t) = table {
+            builder.append_attr_str(NFTA_FLOWTABLE_TABLE, t);
+        }
 
         let responses = self.nft_dump(builder).await?;
         let mut out = Vec::new();
@@ -291,17 +328,42 @@ impl Connection<Nftables> {
         self.nft_request_ack(builder).await
     }
 
-    /// List all chains.
+    /// List all chains. Dumps every family + table — for
+    /// per-table results, use [`Self::list_chains_in`].
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_chains"))]
     pub async fn list_chains(&self) -> Result<Vec<ChainInfo>> {
+        self.list_chains_filtered(0, None).await
+    }
+
+    /// List chains in a specific table+family. Server-side
+    /// filtered via `NFTA_CHAIN_TABLE` + `nfgen_family` —
+    /// more efficient than `list_chains().filter(|c|
+    /// c.table == "…")` on hosts with many tables. Plan 181.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_chains_in"))]
+    pub async fn list_chains_in(
+        &self,
+        table: &str,
+        family: Family,
+    ) -> Result<Vec<ChainInfo>> {
+        self.list_chains_filtered(family as u8, Some(table)).await
+    }
+
+    async fn list_chains_filtered(
+        &self,
+        family_byte: u8,
+        table: Option<&str>,
+    ) -> Result<Vec<ChainInfo>> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_GETCHAIN), NLM_F_REQUEST | NLM_F_DUMP);
         let nfgenmsg = NfGenMsg {
-            nfgen_family: 0,
+            nfgen_family: family_byte,
             version: 0,
             res_id: 0,
         };
         builder.append(&nfgenmsg);
+        if let Some(t) = table {
+            builder.append_attr_str(NFTA_CHAIN_TABLE, t);
+        }
 
         let responses = self.nft_dump(builder).await?;
         let mut chains = Vec::new();
@@ -446,13 +508,43 @@ impl Connection<Nftables> {
         self.nft_request_ack(builder).await
     }
 
-    /// List all sets.
+    /// List all sets in a family. Already family-filtered;
+    /// for `(table, family)`-scoped results use
+    /// [`Self::list_sets_in`].
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_sets"))]
     pub async fn list_sets(&self, family: Family) -> Result<Vec<SetInfo>> {
+        self.list_sets_filtered(family as u8, None).await
+    }
+
+    /// List sets in a specific table+family. Server-side
+    /// filtered via `NFTA_SET_TABLE` + `nfgen_family` —
+    /// more efficient than `list_sets(family).filter(|s|
+    /// s.table == "…")` on hosts with many tables. Plan 181.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_sets_in"))]
+    pub async fn list_sets_in(
+        &self,
+        table: &str,
+        family: Family,
+    ) -> Result<Vec<SetInfo>> {
+        self.list_sets_filtered(family as u8, Some(table)).await
+    }
+
+    async fn list_sets_filtered(
+        &self,
+        family_byte: u8,
+        table: Option<&str>,
+    ) -> Result<Vec<SetInfo>> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_GETSET), NLM_F_REQUEST | NLM_F_DUMP);
-        let nfgenmsg = NfGenMsg::new(family);
+        let nfgenmsg = NfGenMsg {
+            nfgen_family: family_byte,
+            version: 0,
+            res_id: 0,
+        };
         builder.append(&nfgenmsg);
+        if let Some(t) = table {
+            builder.append_attr_str(NFTA_SET_TABLE, t);
+        }
 
         let responses = self.nft_dump(builder).await?;
         let mut sets = Vec::new();
