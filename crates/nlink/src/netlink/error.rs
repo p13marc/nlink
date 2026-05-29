@@ -617,7 +617,22 @@ impl Error {
     /// This typically occurs when the kernel cannot allocate memory
     /// for network operations.
     pub fn is_no_buffer_space(&self) -> bool {
-        self.errno() == Some(libc::ENOBUFS)
+        // Kernel-shape: NLMSGERR with errno set to ENOBUFS.
+        if self.errno() == Some(libc::ENOBUFS) {
+            return true;
+        }
+        // OS-shape: raw `recvmsg(2)` returned -ENOBUFS. The
+        // multicast overflow path takes this branch — the kernel
+        // never wraps it in an NLMSGERR frame, the socket layer
+        // surfaces it directly. Plan 185 integration test
+        // depended on catching this; the wrapper's resync
+        // trigger has to match both shapes.
+        if let Self::Io(io_err) = self
+            && io_err.raw_os_error() == Some(libc::ENOBUFS)
+        {
+            return true;
+        }
+        false
     }
 
     /// Check if this is a "connection refused" error (ECONNREFUSED).
@@ -807,5 +822,35 @@ mod tests {
             Error::InvalidMessage("bad".into()).ext_ack(),
             None
         );
+    }
+
+    // Plan 185 fix — `is_no_buffer_space` must catch the OS-shape
+    // ENOBUFS from a raw `recvmsg`, not just the kernel-shape
+    // NLMSGERR variant. The multicast overflow path takes the
+    // OS branch.
+    #[test]
+    fn is_no_buffer_space_matches_io_enobufs() {
+        let err = Error::Io(std::io::Error::from_raw_os_error(libc::ENOBUFS));
+        assert!(
+            err.is_no_buffer_space(),
+            "Io(ENOBUFS) must be caught by is_no_buffer_space"
+        );
+    }
+
+    #[test]
+    fn is_no_buffer_space_matches_kernel_enobufs() {
+        let err = Error::Kernel {
+            errno: libc::ENOBUFS,
+            message: "ENOBUFS".into(),
+            ext_ack: None,
+            ext_ack_offset: None,
+        };
+        assert!(err.is_no_buffer_space());
+    }
+
+    #[test]
+    fn is_no_buffer_space_rejects_unrelated_io_errors() {
+        let err = Error::Io(std::io::Error::from_raw_os_error(libc::EAGAIN));
+        assert!(!err.is_no_buffer_space());
     }
 }
