@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-05-29
+
 ### Added
 
 - **`DeclaredChainBuilder::chain_type(ChainType)` (Plan 180)**
