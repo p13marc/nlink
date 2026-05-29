@@ -48,12 +48,12 @@ medium-size dependent plan.
 
 | Plan | Title | Effort | Order | Status | Notes |
 |------|-------|--------|-------|--------|-------|
-| [180](180-declarative-chain-type-and-device-plan.md) | `DeclaredChainBuilder::chain_type` + `Chain`/`DeclaredChain` `device` for netdev hooks | ~2.5 h | 1 | 🟡 | Code + 5 unit + 2 integration tests landed locally; awaiting CI confirmation. Unblocks nlink-lab Plan 158a. |
-| [181](181-list-in-filter-family-plan.md) | `list_{tables,chains,flowtables,sets}_in(table?, family)` server-side filter family | ~2 h | 2 | 🟡 | 4 new methods landed; integration test exercises all four. Awaiting CI. Prereq for Plan 185 now unblocked. |
-| [182](182-error-ext-ack-accessor-plan.md) | `Error::ext_ack()` + `Error::ext_ack_offset()` inherent accessors | ~30 min | 3 | 🟡 | Bundled with 183/184; awaiting CI. |
-| [183](183-display-for-diff-types-plan.md) | `impl Display for NftablesDiff` + `ConfigDiff` (wraps existing `summary()`) | ~30 min | 4 | 🟡 | Note: target was `NetworkDiff` per the report, but the actual type name is `ConfigDiff` — used that. Bundled with 182/184. |
-| [184](184-default-route-constructors-plan.md) | `Ipv4Route::default_route()` / `Ipv6Route::default_route()` constructors | ~20 min | 5 | 🟡 | Bundled with 182/183. |
-| [185](185-nftables-subscribe-with-resync-plan.md) | `Connection<Nftables>::subscribe_all_with_resync` | ~4 h | 6 | ⚪ | Wishlist 2 — depends on Plan 181 (`list_*_in`). |
+| [180](180-declarative-chain-type-and-device-plan.md) | `DeclaredChainBuilder::chain_type` + `Chain`/`DeclaredChain` `device` for netdev hooks | ~2.5 h | 1 | 🟢 | Shipped `aa52b09`. All 11 CI jobs green incl. integration. Unblocks nlink-lab Plan 158a. |
+| [181](181-list-in-filter-family-plan.md) | `list_{tables,chains,flowtables,sets}_in(table?, family)` server-side filter family | ~2 h | 2 | 🟢 | Shipped `496378a` + defensive-filter fix `7d0a34b`. Kernel ignores `NFTA_*_TABLE` on dump (only single-get); client-side filter ensures contract holds. |
+| [182](182-error-ext-ack-accessor-plan.md) | `Error::ext_ack()` + `Error::ext_ack_offset()` inherent accessors | ~30 min | 3 | 🟢 | Shipped `7fc03ce` (bundled). |
+| [183](183-display-for-diff-types-plan.md) | `impl Display for NftablesDiff` + `ConfigDiff` (wraps existing `summary()`) | ~30 min | 4 | 🟢 | Shipped `7fc03ce` (bundled). Note: target was `NetworkDiff` per the report, but the actual type name is `ConfigDiff` — used that. |
+| [184](184-default-route-constructors-plan.md) | `Ipv4Route::default_route()` / `Ipv6Route::default_route()` constructors | ~20 min | 5 | 🟢 | Shipped `7fc03ce` (bundled). |
+| [185](185-nftables-subscribe-with-resync-plan.md) | `Connection<Nftables>::subscribe_all_with_resync` | ~4 h → revised | 6 | ⚪ | **Deferred.** Implementation revealed a non-trivial lifetime constraint: `EventSubscription<'_, P>` borrows `&self` but `events_with_resync` requires `'static + Send`. The plan's "snapshot factory closure" pattern works for the snapshot side but not the event-stream side. Resolving needs either (a) lifetime-generic resync wrapper, (b) `into_events()` consumption that breaks "keep using the connection," or (c) a new owned-stream snapshot helper. Worth its own focused session. Plan 181 prereq is satisfied. |
 
 Total estimated focused-work: **~9.5 h** + integration-test CI
 cycle time.
