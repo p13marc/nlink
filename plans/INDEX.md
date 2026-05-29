@@ -21,10 +21,11 @@ chain-attribute pass.
 - **Branch**: all 0.18 work pushes to the `0.18` branch.
   Cycle cut → master merge happens at release time. **Do not
   push to master.**
-- **Workspace version**: still `0.17.0`. Bump to `0.18.0` once
-  the first 0.18-breaking change lands (Plan 181 is additive,
-  Plan 180 is additive, so the bump may not be forced until a
-  later cycle item).
+- **Workspace version**: `0.18.0` — bumped on Plan 180's CI
+  iteration when `cargo-semver-checks` flagged the
+  `#[non_exhaustive]` addition on `ChainInfo` as semver-major
+  (same precedent as 0.17's Register discriminant change in
+  Plan 178).
 - **CI**: open a draft PR `0.18 → master` once the first
   commit lands so the workflow fires on every push.
 - **Seed report**: [`nlink-upstream-asks.md`](../nlink-upstream-asks.md)
