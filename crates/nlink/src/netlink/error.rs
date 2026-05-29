@@ -488,6 +488,41 @@ impl Error {
         }
     }
 
+    /// Return the kernel's `NLMSGERR_ATTR_MSG` extended-ack
+    /// string if this is a kernel error that carries one.
+    /// Plan 182 — sugar over destructuring `Error::Kernel` /
+    /// `Error::KernelWithContext`, both of which are
+    /// `#[non_exhaustive]` and so force a wildcard arm at
+    /// every call site. Equivalent to:
+    ///
+    /// ```ignore
+    /// match &err {
+    ///     Error::Kernel { ext_ack, .. }
+    ///     | Error::KernelWithContext { ext_ack, .. } => ext_ack.as_deref(),
+    ///     _ => None,
+    /// }
+    /// ```
+    pub fn ext_ack(&self) -> Option<&str> {
+        match self {
+            Self::Kernel { ext_ack, .. } | Self::KernelWithContext { ext_ack, .. } => {
+                ext_ack.as_deref()
+            }
+            _ => None,
+        }
+    }
+
+    /// Return the `NLMSGERR_ATTR_OFFS` byte offset pointing at
+    /// the offending attribute in the request payload, if the
+    /// kernel sent one. Pair with [`Self::ext_ack`] when
+    /// constructing structured error reports. Plan 182.
+    pub fn ext_ack_offset(&self) -> Option<u32> {
+        match self {
+            Self::Kernel { ext_ack_offset, .. }
+            | Self::KernelWithContext { ext_ack_offset, .. } => *ext_ack_offset,
+            _ => None,
+        }
+    }
+
     /// Check if this is an "invalid argument" error (EINVAL).
     ///
     /// This typically indicates that the kernel rejected the request
@@ -720,5 +755,57 @@ mod tests {
             interface: "docker0".into(),
         };
         assert_eq!(err.to_string(), "qdisc not found: netem on docker0");
+    }
+
+    // ---- Plan 182 — ext_ack / ext_ack_offset accessors ----
+
+    #[test]
+    fn ext_ack_returns_some_for_kernel_with_ack() {
+        let err = Error::Kernel {
+            errno: 22,
+            message: "Invalid argument".into(),
+            ext_ack: Some("attribute IFLA_MTU rejected: value 0 out of range".into()),
+            ext_ack_offset: Some(24),
+        };
+        assert_eq!(
+            err.ext_ack(),
+            Some("attribute IFLA_MTU rejected: value 0 out of range")
+        );
+        assert_eq!(err.ext_ack_offset(), Some(24));
+    }
+
+    #[test]
+    fn ext_ack_returns_some_for_kernel_with_context() {
+        let err = Error::KernelWithContext {
+            operation: "add_link".into(),
+            errno: 17,
+            message: "File exists".into(),
+            ext_ack: Some("interface 'veth0' already exists".into()),
+            ext_ack_offset: None,
+        };
+        assert_eq!(err.ext_ack(), Some("interface 'veth0' already exists"));
+        assert_eq!(err.ext_ack_offset(), None);
+    }
+
+    #[test]
+    fn ext_ack_returns_none_for_kernel_without_ack() {
+        let err = Error::Kernel {
+            errno: 22,
+            message: "EINVAL".into(),
+            ext_ack: None,
+            ext_ack_offset: None,
+        };
+        assert_eq!(err.ext_ack(), None);
+        assert_eq!(err.ext_ack_offset(), None);
+    }
+
+    #[test]
+    fn ext_ack_returns_none_for_non_kernel_errors() {
+        assert_eq!(Error::Timeout.ext_ack(), None);
+        assert_eq!(Error::Timeout.ext_ack_offset(), None);
+        assert_eq!(
+            Error::InvalidMessage("bad".into()).ext_ack(),
+            None
+        );
     }
 }

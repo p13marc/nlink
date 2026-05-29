@@ -281,6 +281,14 @@ impl NftablesDiff {
     }
 }
 
+/// `Display` mirrors [`NftablesDiff::summary`] so callers can
+/// `println!("{diff}")` directly. Plan 183.
+impl std::fmt::Display for NftablesDiff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.summary())
+    }
+}
+
 impl NftablesConfig {
     /// Compute the diff between this declared config and the
     /// kernel's current state.
@@ -814,5 +822,18 @@ mod tests {
         // correct conservative behavior.
         let garbage = vec![0x64, 0x00, 0x01, 0x00];
         assert_eq!(normalize_tlv(&garbage), garbage);
+    }
+
+    // ---- Plan 183 — Display for NftablesDiff ----
+
+    #[test]
+    fn display_matches_summary() {
+        let diff = NftablesDiff::default();
+        assert_eq!(format!("{diff}"), diff.summary());
+
+        use super::super::super::types::Family;
+        let mut d = NftablesDiff::default();
+        d.tables_to_delete.push((Family::Inet, "foo".to_string()));
+        assert_eq!(format!("{d}"), d.summary());
     }
 }

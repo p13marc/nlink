@@ -50,9 +50,9 @@ medium-size dependent plan.
 |------|-------|--------|-------|--------|-------|
 | [180](180-declarative-chain-type-and-device-plan.md) | `DeclaredChainBuilder::chain_type` + `Chain`/`DeclaredChain` `device` for netdev hooks | ~2.5 h | 1 | 🟡 | Code + 5 unit + 2 integration tests landed locally; awaiting CI confirmation. Unblocks nlink-lab Plan 158a. |
 | [181](181-list-in-filter-family-plan.md) | `list_{tables,chains,flowtables,sets}_in(table?, family)` server-side filter family | ~2 h | 2 | 🟡 | 4 new methods landed; integration test exercises all four. Awaiting CI. Prereq for Plan 185 now unblocked. |
-| [182](182-error-ext-ack-accessor-plan.md) | `Error::ext_ack()` + `Error::ext_ack_offset()` inherent accessors | ~30 min | 3 | ⚪ | Wishlist 3 — trivial additive on `impl Error`. |
-| [183](183-display-for-diff-types-plan.md) | `impl Display for NftablesDiff` + `NetworkDiff` (wraps existing `summary()`) | ~30 min | 4 | ⚪ | Wishlist 1 — report overestimated at 80 LOC, actual is ~15. |
-| [184](184-default-route-constructors-plan.md) | `Ipv4Route::default_route()` / `Ipv6Route::default_route()` constructors | ~20 min | 5 | ⚪ | Wishlist 5 — cosmetic; bundle with 182/183 in one "small additives" PR if desired. |
+| [182](182-error-ext-ack-accessor-plan.md) | `Error::ext_ack()` + `Error::ext_ack_offset()` inherent accessors | ~30 min | 3 | 🟡 | Bundled with 183/184; awaiting CI. |
+| [183](183-display-for-diff-types-plan.md) | `impl Display for NftablesDiff` + `ConfigDiff` (wraps existing `summary()`) | ~30 min | 4 | 🟡 | Note: target was `NetworkDiff` per the report, but the actual type name is `ConfigDiff` — used that. Bundled with 182/184. |
+| [184](184-default-route-constructors-plan.md) | `Ipv4Route::default_route()` / `Ipv6Route::default_route()` constructors | ~20 min | 5 | 🟡 | Bundled with 182/183. |
 | [185](185-nftables-subscribe-with-resync-plan.md) | `Connection<Nftables>::subscribe_all_with_resync` | ~4 h | 6 | ⚪ | Wishlist 2 — depends on Plan 181 (`list_*_in`). |
 
 Total estimated focused-work: **~9.5 h** + integration-test CI

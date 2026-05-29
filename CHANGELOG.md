@@ -42,6 +42,26 @@ All notable changes to this project will be documented in this file.
   `list_in_filters_match_only_target_table` exercises all
   four `_in` shapes against a two-table fixture.
 
+- **`Error::ext_ack() -> Option<&str>` +
+  `Error::ext_ack_offset() -> Option<u32>` (Plan 182)** —
+  inherent accessors over the `Kernel` / `KernelWithContext`
+  variants' fields. Saves consumers from writing a 5-line
+  `match | _ =>` ceremony at every site (forced by the
+  `#[non_exhaustive]` attribute on those variants). Matches
+  the existing `errno() -> Option<i32>` shape.
+
+- **`impl Display for NftablesDiff` + `impl Display for
+  ConfigDiff` (Plan 183)** — `println!("{diff}")` now works
+  directly. Wraps the existing `summary()` methods, so the
+  rendered output is unchanged from `diff.summary()`.
+
+- **`Ipv4Route::default_route()` /
+  `Ipv6Route::default_route()` (Plan 184)** — self-documenting
+  zero-arg constructors for `0.0.0.0/0` and `::/0`.
+  Equivalent to the iproute2-muscle-memory
+  `Ipv4Route::new("0.0.0.0", 0)` form; pick whichever reads
+  better in context.
+
 ## [0.17.0] - 2026-05-26
 
 ### Breaking changes

@@ -167,6 +167,14 @@ impl ConfigDiff {
     }
 }
 
+/// `Display` mirrors [`ConfigDiff::summary`] so callers can
+/// `println!("{diff}")` directly. Plan 183.
+impl std::fmt::Display for ConfigDiff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.summary())
+    }
+}
+
 /// Changes to make to an existing link.
 #[derive(Debug, Default)]
 pub struct LinkChanges {
@@ -613,5 +621,17 @@ mod tests {
         let cfg = DeclaredQdiscType::Clsact;
         assert!(qdisc_params_match(&cfg, Some(&[])));
         assert!(qdisc_params_match(&cfg, None));
+    }
+
+    // ---- Plan 183 — Display for NetworkDiff ----
+
+    #[test]
+    fn display_matches_summary() {
+        let diff = ConfigDiff::default();
+        assert_eq!(format!("{diff}"), diff.summary());
+
+        let mut d = ConfigDiff::default();
+        d.links_to_remove.push("eth0".to_string());
+        assert_eq!(format!("{d}"), d.summary());
     }
 }
