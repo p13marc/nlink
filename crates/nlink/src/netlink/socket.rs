@@ -235,6 +235,35 @@ impl NetlinkSocket {
         Self::set_netlink_sockopt(self.as_raw_fd(), libc::NETLINK_EXT_ACK, on)
     }
 
+    /// Shrink/grow the kernel-side receive buffer (`SO_RCVBUF`).
+    /// `SO_RCVBUFFORCE` is used so callers with `CAP_NET_ADMIN`
+    /// can drop below `net.core.rmem_min` — useful for tests
+    /// that need to provoke `ENOBUFS` overflow on multicast
+    /// subscribers without flooding the kernel for minutes.
+    ///
+    /// Plan 185 integration test depends on this — shrinking the
+    /// nftables multicast subscriber to a few hundred bytes
+    /// makes a handful of rule mutations overflow it
+    /// deterministically. Outside that test scope this is
+    /// rarely the right knob; prefer the kernel default.
+    pub fn set_rcvbuf(&self, bytes: usize) -> Result<()> {
+        let val = bytes as libc::c_int;
+        // SAFETY: SO_RCVBUFFORCE on a valid fd; size matches int.
+        let rc = unsafe {
+            libc::setsockopt(
+                self.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUFFORCE,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc < 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
     /// Enable kernel-side strict checking (`NETLINK_GET_STRICT_CHK`,
     /// kernel 5.0+). When enabled, the kernel validates dump request
     /// filters strictly and returns an error if they reference

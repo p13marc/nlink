@@ -459,6 +459,13 @@ pub struct Ipv4Route {
 }
 
 impl Ipv4Route {
+    /// Build the default IPv4 route (`0.0.0.0/0`). Equivalent
+    /// to [`Ipv4Route::new`]`("0.0.0.0", 0)` but self-documenting.
+    /// Plan 184.
+    pub fn default_route() -> Self {
+        Self::new("0.0.0.0", 0)
+    }
+
     /// Create a new IPv4 route configuration.
     ///
     /// # Arguments
@@ -937,6 +944,13 @@ pub struct Ipv6Route {
 }
 
 impl Ipv6Route {
+    /// Build the default IPv6 route (`::/0`). Equivalent to
+    /// [`Ipv6Route::new`]`("::", 0)` but self-documenting.
+    /// Plan 184.
+    pub fn default_route() -> Self {
+        Self::new("::", 0)
+    }
+
     /// Create a new IPv6 route configuration.
     pub fn new(destination: impl Into<String>, prefix_len: u8) -> Self {
         let dest_str = destination.into();
@@ -1523,5 +1537,42 @@ impl Connection<Route> {
         self.send_ack(builder)
             .await
             .map_err(|e| e.with_context("replace_route"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Plan 184 — default_route constructors ----
+
+    #[test]
+    fn ipv4_default_route_is_unspecified_slash_zero() {
+        let r = Ipv4Route::default_route();
+        assert_eq!(r.destination, Ipv4Addr::UNSPECIFIED);
+        assert_eq!(r.prefix_len, 0);
+    }
+
+    #[test]
+    fn ipv6_default_route_is_unspecified_slash_zero() {
+        let r = Ipv6Route::default_route();
+        assert_eq!(r.destination, Ipv6Addr::UNSPECIFIED);
+        assert_eq!(r.prefix_len, 0);
+    }
+
+    #[test]
+    fn default_route_equals_explicit_new() {
+        // Same destination/prefix as the iproute2-muscle-memory
+        // form. Documents the equivalence + guards against silent
+        // drift if the underlying `new()` ever stops treating
+        // "0.0.0.0"/"::" as the unspecified address.
+        assert_eq!(
+            Ipv4Route::default_route().destination,
+            Ipv4Route::new("0.0.0.0", 0).destination
+        );
+        assert_eq!(
+            Ipv6Route::default_route().destination,
+            Ipv6Route::new("::", 0).destination
+        );
     }
 }

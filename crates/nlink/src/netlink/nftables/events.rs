@@ -17,12 +17,12 @@
 //!
 //! [`Connection::<Nftables>::subscribe`]: crate::netlink::Connection
 
-use super::connection::{parse_chain, parse_flowtable, parse_rule, parse_table};
-use super::types::{ChainInfo, Family, Flowtable, RuleInfo, Table};
+use super::connection::{parse_chain, parse_flowtable, parse_rule, parse_set, parse_table};
+use super::types::{ChainInfo, Family, Flowtable, RuleInfo, SetInfo, Table};
 use super::{
     NFGENMSG_HDRLEN, NFNL_SUBSYS_NFTABLES, NFT_MSG_DELCHAIN, NFT_MSG_DELFLOWTABLE,
-    NFT_MSG_DELRULE, NFT_MSG_DELTABLE, NFT_MSG_NEWCHAIN, NFT_MSG_NEWFLOWTABLE, NFT_MSG_NEWRULE,
-    NFT_MSG_NEWTABLE,
+    NFT_MSG_DELRULE, NFT_MSG_DELSET, NFT_MSG_DELTABLE, NFT_MSG_NEWCHAIN, NFT_MSG_NEWFLOWTABLE,
+    NFT_MSG_NEWRULE, NFT_MSG_NEWSET, NFT_MSG_NEWTABLE,
 };
 
 /// `NFNLGRP_NFTABLES` (7) — the single multicast group on which
@@ -63,9 +63,10 @@ impl NftablesGroup {
 /// An event delivered on the nftables multicast stream.
 ///
 /// One variant per ruleset-mutating wire message the kernel emits.
-/// Sets (`NFT_MSG_NEWSET` / `DELSET` / `*SETELEM` / `NEWGEN`) are
-/// not currently parsed into typed event variants — they're
-/// silently dropped from the stream. Wire when a consumer asks.
+/// Set elements (`NFT_MSG_NEWSETELEM` / `NFT_MSG_DELSETELEM`) and
+/// generation announcements (`NFT_MSG_NEWGEN`) are not currently
+/// parsed into typed event variants — they're silently dropped
+/// from the stream. Wire when a consumer asks.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum NftablesEvent {
@@ -87,6 +88,12 @@ pub enum NftablesEvent {
     NewFlowtable(Flowtable),
     /// `NFT_MSG_DELFLOWTABLE` — a flowtable was destroyed.
     DelFlowtable(Flowtable),
+    /// `NFT_MSG_NEWSET` — a set was created or updated. Sets
+    /// model named collections (anonymous-set elements, verdict
+    /// maps, interval ranges) referenced by rule expressions.
+    NewSet(SetInfo),
+    /// `NFT_MSG_DELSET` — a set was destroyed.
+    DelSet(SetInfo),
 }
 
 /// Build an [`NftablesEvent`] from the netlink message type byte +
@@ -117,6 +124,8 @@ pub(crate) fn parse_nftables_event(msg_type: u16, body: &[u8]) -> Option<Nftable
         NFT_MSG_DELRULE => parse_rule(attrs, family).map(NftablesEvent::DelRule),
         NFT_MSG_NEWFLOWTABLE => parse_flowtable(attrs, family).map(NftablesEvent::NewFlowtable),
         NFT_MSG_DELFLOWTABLE => parse_flowtable(attrs, family).map(NftablesEvent::DelFlowtable),
+        NFT_MSG_NEWSET => parse_set(attrs, family).map(NftablesEvent::NewSet),
+        NFT_MSG_DELSET => parse_set(attrs, family).map(NftablesEvent::DelSet),
         _ => None,
     }
 }
@@ -147,9 +156,9 @@ mod tests {
 
     #[test]
     fn parse_unknown_msg_type_returns_none() {
-        // Valid nftables subsystem byte, but msg=NFT_MSG_NEWSET which we
-        // don't parse into a typed variant.
-        let msg_type = (NFNL_SUBSYS_NFTABLES << 8) | 9u16;
+        // Valid nftables subsystem byte, but msg=NFT_MSG_NEWSETELEM
+        // which we don't parse into a typed variant.
+        let msg_type = (NFNL_SUBSYS_NFTABLES << 8) | 12u16;
         let body = vec![0u8; NFGENMSG_HDRLEN];
         assert!(parse_nftables_event(msg_type, &body).is_none());
     }

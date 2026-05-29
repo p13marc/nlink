@@ -4,6 +4,152 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-05-29
+
+### Added
+
+- **`DeclaredChainBuilder::chain_type(ChainType)` (Plan 180)**
+  — closes the parity gap between the imperative
+  `Chain::chain_type` and declarative `DeclaredChain` paths.
+  Required for declarative NAT chain reconcile via
+  `NftablesConfig::diff().apply()`: a chain hooking
+  `prerouting`/`postrouting` without `chain_type(ChainType::Nat)`
+  defaults to `ChainType::Filter`, and any `masquerade`/
+  `snat`/`dnat` verdict refuses to load with `EOPNOTSUPP`.
+  Unblocks downstream consumers (e.g. nlink-lab) migrating
+  to the declarative path. Mirrors the imperative builder's
+  rustdoc + invariants.
+
+- **`Chain::device(name)` + `DeclaredChainBuilder::device(name)`
+  (Plan 180, adjacent gap)** — bind a netdev base chain to a
+  specific interface (`type filter hook ingress device eth0
+  priority -150`). Wires `NFTA_HOOK_DEV` (constant 3 inside
+  the `NFTA_CHAIN_HOOK` nest). Required for `Family::Netdev`
+  base chains; ignored on other families. Both imperative and
+  declarative paths gained the setter. `ChainInfo` now exposes
+  `device: Option<String>` populated from dump responses, and
+  is now `#[non_exhaustive]` (only construction site is
+  internal `parse_chain` — no breaking change for downstream).
+
+- **`list_tables_in(family)` / `list_chains_in(table, family)`
+  / `list_flowtables_in(table, family)` /
+  `list_sets_in(table, family)` (Plan 181)** — server-side
+  filtered dump methods on `Connection<Nftables>`. Mirror the
+  existing `list_rules(table, family)` shape: each new method
+  emits the corresponding `NFTA_*_TABLE` attribute +
+  `nfgen_family` so the kernel returns only matching entities.
+  More efficient than `list_*().filter(...)` on hosts with
+  many tables. The unfiltered counterparts keep working
+  unchanged. Integration test
+  `list_in_filters_match_only_target_table` exercises all
+  four `_in` shapes against a two-table fixture.
+
+- **`Error::ext_ack() -> Option<&str>` +
+  `Error::ext_ack_offset() -> Option<u32>` (Plan 182)** —
+  inherent accessors over the `Kernel` / `KernelWithContext`
+  variants' fields. Saves consumers from writing a 5-line
+  `match | _ =>` ceremony at every site (forced by the
+  `#[non_exhaustive]` attribute on those variants). Matches
+  the existing `errno() -> Option<i32>` shape.
+
+- **`impl Display for NftablesDiff` + `impl Display for
+  ConfigDiff` (Plan 183)** — `println!("{diff}")` now works
+  directly. Wraps the existing `summary()` methods, so the
+  rendered output is unchanged from `diff.summary()`.
+
+- **`Ipv4Route::default_route()` /
+  `Ipv6Route::default_route()` (Plan 184)** — self-documenting
+  zero-arg constructors for `0.0.0.0/0` and `::/0`.
+  Equivalent to the iproute2-muscle-memory
+  `Ipv4Route::new("0.0.0.0", 0)` form; pick whichever reads
+  better in context.
+
+- **`Connection<Nftables>::into_events_with_resync(factory)` +
+  `subscribe_all_with_resync(factory)` (Plan 185)** —
+  ENOBUFS-resilient nftables event watching. Mirrors
+  `kube_rs::watcher(api, cfg) -> Stream`: hand in a factory
+  closure that opens a fresh `Connection<Nftables>` on demand,
+  receive a `Stream<Item = Result<ResyncedEvent<NftablesEvent>>>`.
+  When the kernel drops events under pressure (`-ENOBUFS`),
+  the wrapper re-dumps the ruleset via a fresh connection and
+  emits the snapshot as `Resynced(...)` items between
+  `ResyncMarker::ResyncStart` / `ResyncEnd` markers. The owned
+  form (`into_events_with_resync`) returns a `'static + Send`
+  stream that's `tokio::spawn`-friendly; the borrowed form
+  (`subscribe_all_with_resync`) keeps `&mut self` around for
+  ad-hoc queries on the same connection. New module
+  `nftables::resync` exports `nftables_snapshot`,
+  `ConnectionFactory`, `ConnectionFuture`, and the
+  `OwnedResyncStream` / `BorrowedResyncStream<'_>` type aliases.
+  Recipe: `docs/recipes/nftables-watch-with-resync.md`.
+  Closes nlink-lab Wishlist item 5.
+
+- **`NftablesEvent::NewSet(SetInfo)` +
+  `DelSet(SetInfo)` (Plan 185, bundled)** — bundled with
+  the resync wrapper because the snapshot enumerates sets, so
+  drift-detection consumers need to see set creates/deletes.
+  Wires `NFT_MSG_NEWSET` / `NFT_MSG_DELSET` through
+  `parse_nftables_event` using the existing `parse_set` parser.
+  Set elements (`NFT_MSG_NEWSETELEM`) remain unwired; open an
+  issue if you need them. `NftablesEvent` carries
+  `#[non_exhaustive]` already, so this is non-breaking.
+
+### Audit fixes
+
+- **`ConnectionFactory<P>` + `ConnectionFuture<P>` are now
+  generic + live at the crate root (Plan 185 audit)** — Plan 185
+  spec called for `ConnectionFactory<P>` at the crate root; the
+  first cut shipped a non-generic `nftables::resync::ConnectionFactory`
+  pinned to `Nftables`. Aligned now: both types live in
+  `nlink::netlink::resync` (re-exported as `nlink::ConnectionFactory<P>`
+  / `nlink::ConnectionFuture<P>`). Existing call sites add the
+  `<Nftables>` turbofish, matching the established
+  `Connection<P>::new()` pattern. Future protocol watchers can
+  reuse the same alias without redefining it.
+
+- **Plan 181 wire-shape unit tests landed** — 4 tests covering
+  `build_list_tables_request` / `build_list_chains_request` /
+  `build_list_flowtables_request` / `build_list_sets_request`,
+  matching Plan 181 §5 acceptance. Extracted the request-builder
+  bodies into free `pub(crate)` functions so the tests can
+  inspect the on-wire bytes without socket I/O. No behavioral
+  change to the public `list_*_in` methods.
+
+- **Plan 185 ENOBUFS-recovery integration test landed** — new
+  `into_events_with_resync_recovers_from_enobufs` (root-gated)
+  drives the wrapper end-to-end through a real kernel overflow:
+  shrinks the multicast subscriber's `SO_RCVBUF` to 256 bytes,
+  spawns a 2k-iteration rule-add flood from a second connection,
+  drains the resync stream slowly, asserts the
+  `ResyncStart → Resynced(...) → ResyncEnd` marker sequence.
+  Needed a new `NetlinkSocket::set_rcvbuf(bytes)` helper
+  (`SO_RCVBUFFORCE` — requires `CAP_NET_ADMIN`, matches the
+  existing root-gated test scope).
+
+- **`ChainInfo.chain_type` is now `Option<ChainType>` (was
+  `Option<String>`) (Plan 180 audit)** — Plan 180 spec called
+  for a typed enum on the dump-side field; the first cut
+  shipped a raw string for parser convenience. Aligned now:
+  `parse_chain` maps the kernel's `"filter"`/`"nat"`/`"route"`
+  string into the typed `ChainType` variant; unrecognised
+  values (kernel can grow new chain types) yield `None`.
+  Added `ChainType::from_kernel_string(&str) -> Option<Self>`
+  as the canonical mapping. Affects only downstream code that
+  read `ChainInfo.chain_type` directly — typed match arms keep
+  working, stringly comparisons (`== Some("nat".into())`) need
+  to become `== Some(ChainType::Nat)`.
+
+### Breaking changes (lib internals)
+
+- **`events_with_resync` is now lifetime-generic (Plan 185)** —
+  the snapshot-future bound went from `Send + 'static` to
+  `Send + 'a`. Existing call sites that handed in `'static`
+  closures keep working unchanged (the `'a` parameter defaults
+  via lifetime elision to whatever satisfies the caller). The
+  refactor unlocks the borrowed `subscribe_all_with_resync`
+  variant whose snapshot future doesn't need to outlive the
+  caller's stack frame.
+
 ## [0.17.0] - 2026-05-26
 
 ### Breaking changes

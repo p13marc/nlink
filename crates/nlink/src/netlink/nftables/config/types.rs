@@ -3,7 +3,7 @@
 
 use super::super::{
     expr::Expr,
-    types::{Family, Hook, Policy, Priority, Rule},
+    types::{ChainType, Family, Hook, Policy, Priority, Rule},
 };
 
 /// A complete declarative nftables ruleset. Construct via
@@ -218,6 +218,8 @@ pub struct DeclaredChain {
     pub(crate) hook: Option<Hook>,
     pub(crate) priority: Option<Priority>,
     pub(crate) policy: Option<Policy>,
+    pub(crate) chain_type: Option<ChainType>,
+    pub(crate) device: Option<String>,
 }
 
 impl DeclaredChain {
@@ -233,6 +235,12 @@ impl DeclaredChain {
     pub fn policy(&self) -> Option<Policy> {
         self.policy
     }
+    pub fn chain_type(&self) -> Option<ChainType> {
+        self.chain_type
+    }
+    pub fn device(&self) -> Option<&str> {
+        self.device.as_deref()
+    }
 
     /// Is this a base chain (one that hooks into the kernel
     /// packet path)? Non-base chains are jump-only.
@@ -246,6 +254,8 @@ pub struct DeclaredChainBuilder {
     hook: Option<Hook>,
     priority: Option<Priority>,
     policy: Option<Policy>,
+    chain_type: Option<ChainType>,
+    device: Option<String>,
 }
 
 impl DeclaredChainBuilder {
@@ -255,6 +265,8 @@ impl DeclaredChainBuilder {
             hook: None,
             priority: None,
             policy: None,
+            chain_type: None,
+            device: None,
         }
     }
 
@@ -279,12 +291,35 @@ impl DeclaredChainBuilder {
         self
     }
 
+    /// Set the chain type. [`ChainType::Filter`] is the kernel
+    /// default for base chains; [`ChainType::Nat`] is
+    /// **required** for `prerouting`/`postrouting` NAT chains —
+    /// without it `masquerade`/`snat`/`dnat` verdicts refuse to
+    /// load with `EOPNOTSUPP` and the apply rolls back.
+    /// Mirrors the imperative [`Chain::chain_type`] setter.
+    pub fn chain_type(mut self, ct: ChainType) -> Self {
+        self.chain_type = Some(ct);
+        self
+    }
+
+    /// Bind a [`Family::Netdev`] base chain to a specific
+    /// interface (`type filter hook ingress device eth0 priority -150`).
+    /// **Required** for netdev hooks; ignored on other
+    /// families. Mirrors the imperative [`Chain::device`]
+    /// setter.
+    pub fn device(mut self, dev: impl Into<String>) -> Self {
+        self.device = Some(dev.into());
+        self
+    }
+
     fn into_chain(self) -> DeclaredChain {
         DeclaredChain {
             name: self.name,
             hook: self.hook,
             priority: self.priority,
             policy: self.policy,
+            chain_type: self.chain_type,
+            device: self.device,
         }
     }
 }
@@ -494,5 +529,52 @@ mod tests {
             t.persist(true).persist(false)
         });
         assert_eq!(cfg.tables()[0].flags() & NFT_TABLE_F_PERSIST, 0);
+    }
+
+    // ---- Plan 180: chain_type + device on DeclaredChain ----
+
+    #[test]
+    fn declared_chain_type_round_trips_to_struct() {
+        let cfg = NftablesConfig::new().table("nat", Family::Inet, |t| {
+            t.chain("postrouting", |c| {
+                c.hook(Hook::Postrouting)
+                    .priority(Priority::SrcNat)
+                    .chain_type(ChainType::Nat)
+            })
+        });
+        let chain = cfg.tables().first().unwrap().chains().first().unwrap();
+        assert_eq!(chain.chain_type(), Some(ChainType::Nat));
+        assert_eq!(chain.device(), None);
+        assert!(chain.is_base());
+    }
+
+    #[test]
+    fn declared_chain_device_round_trips_to_struct() {
+        let cfg = NftablesConfig::new().table("ft", Family::Netdev, |t| {
+            t.chain("ingress", |c| {
+                c.hook(Hook::Ingress)
+                    .priority(Priority::Filter)
+                    .chain_type(ChainType::Filter)
+                    .device("eth0")
+            })
+        });
+        let chain = cfg.tables().first().unwrap().chains().first().unwrap();
+        assert_eq!(chain.chain_type(), Some(ChainType::Filter));
+        assert_eq!(chain.device(), Some("eth0"));
+    }
+
+    #[test]
+    fn declared_chain_omits_chain_type_and_device_by_default() {
+        let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
+            t.chain("input", |c| {
+                c.hook(Hook::Input)
+                    .priority(Priority::Filter)
+                    .policy(Policy::Drop)
+            })
+        });
+        let chain = cfg.tables().first().unwrap().chains().first().unwrap();
+        assert_eq!(chain.chain_type(), None);
+        assert_eq!(chain.device(), None);
+        assert_eq!(chain.policy(), Some(Policy::Drop));
     }
 }

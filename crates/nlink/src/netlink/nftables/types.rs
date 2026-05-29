@@ -79,6 +79,20 @@ impl ChainType {
             Self::Route => "route",
         }
     }
+
+    /// Parse a kernel-side chain-type string (`"filter"`, `"nat"`,
+    /// `"route"`) into the typed enum. Returns `None` for any
+    /// other string — the kernel can grow new chain types
+    /// (`"netdev"` etc.), and an unrecognised value should not
+    /// silently collapse to one of the known variants.
+    pub fn from_kernel_string(s: &str) -> Option<Self> {
+        match s {
+            "filter" => Some(Self::Filter),
+            "nat" => Some(Self::Nat),
+            "route" => Some(Self::Route),
+            _ => None,
+        }
+    }
 }
 
 /// Chain priority (determines ordering).
@@ -484,6 +498,7 @@ pub struct Chain {
     pub(crate) priority: Option<Priority>,
     pub(crate) chain_type: Option<ChainType>,
     pub(crate) policy: Option<Policy>,
+    pub(crate) device: Option<String>,
 }
 
 impl Chain {
@@ -497,6 +512,7 @@ impl Chain {
             priority: None,
             chain_type: None,
             policy: None,
+            device: None,
         }
     }
 
@@ -529,10 +545,22 @@ impl Chain {
         self.policy = Some(policy);
         self
     }
+
+    /// Bind a `Family::Netdev` base chain to a specific
+    /// interface (`type filter hook ingress device eth0
+    /// priority -150`). **Required** for netdev hooks
+    /// (`Hook::Ingress`/`Egress` with `Family::Netdev`) —
+    /// without this the kernel rejects the chain. Ignored on
+    /// non-netdev families.
+    pub fn device(mut self, dev: impl Into<String>) -> Self {
+        self.device = Some(dev.into());
+        self
+    }
 }
 
 /// Chain info parsed from a dump.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ChainInfo {
     /// Table name.
     pub table: String,
@@ -544,8 +572,16 @@ pub struct ChainInfo {
     pub hook: Option<u32>,
     /// Priority (for base chains).
     pub priority: Option<i32>,
-    /// Chain type.
-    pub chain_type: Option<String>,
+    /// Chain type, parsed from the kernel's `NFTA_CHAIN_TYPE`
+    /// string. `None` if the chain is regular (no hook) or the
+    /// kernel emitted an unrecognised value — Plan 180 picked
+    /// the typed form deliberately so callers can pattern-match
+    /// without holding a stringly table.
+    pub chain_type: Option<ChainType>,
+    /// Bound device name for netdev base chains. `None` on
+    /// other families or when the chain wasn't dump-included
+    /// by the kernel (older kernels omit it for non-netdev).
+    pub device: Option<String>,
     /// Default policy.
     pub policy: Option<u32>,
     /// Kernel handle.

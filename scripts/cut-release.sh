@@ -156,10 +156,17 @@ wait_for_ci_green() {
         echo "ERROR: no PR open for branch '$CYCLE_BRANCH'. Open one first (draft is fine)." >&2
         exit 1
     fi
-    echo "Watching CI on PR #$pr_number (Ctrl-C to abort)..."
-    # `gh pr checks --watch` polls and exits non-zero if any check fails.
-    gh pr checks "$pr_number" --watch
-    echo "All checks green on PR #$pr_number."
+    # Status echoes go to stderr so command substitution captures
+    # ONLY the bare PR number on stdout. The 0.17 cut surfaced this:
+    # without the `>&2` redirect, `PR_NUMBER=$(wait_for_ci_green)`
+    # captured the status text plus the gh-checks tabular output
+    # into the variable, breaking the subsequent `gh pr merge`.
+    echo "Watching CI on PR #$pr_number (Ctrl-C to abort)..." >&2
+    # `gh pr checks --watch` polls; both its progress + the final
+    # tabular pass/fail report belong on stderr from our caller's
+    # perspective. Non-zero exit if any check fails.
+    gh pr checks "$pr_number" --watch >&2
+    echo "All checks green on PR #$pr_number." >&2
     echo "$pr_number"
 }
 

@@ -108,6 +108,12 @@ impl NftablesDiff {
             if let Some(pol) = declared.policy() {
                 chain = chain.policy(pol);
             }
+            if let Some(ct) = declared.chain_type() {
+                chain = chain.chain_type(ct);
+            }
+            if let Some(dev) = declared.device() {
+                chain = chain.device(dev);
+            }
             tx = tx.add_chain(chain);
         }
 

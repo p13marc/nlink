@@ -85,15 +85,28 @@ impl Connection<Nftables> {
     /// List all nftables tables.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_tables"))]
     pub async fn list_tables(&self) -> Result<Vec<Table>> {
-        let mut builder =
-            MessageBuilder::new(nft_msg_type(NFT_MSG_GETTABLE), NLM_F_REQUEST | NLM_F_DUMP);
-        let nfgenmsg = NfGenMsg {
-            nfgen_family: 0, // AF_UNSPEC = all families
-            version: 0,
-            res_id: 0,
-        };
-        builder.append(&nfgenmsg);
+        self.list_tables_filtered(0).await
+    }
 
+    /// List tables in a specific address family. Server-side
+    /// filtered via `nfgen_family` — more efficient than
+    /// `list_tables().filter(|t| t.family() == family)` on
+    /// hosts with tables in many families (`ip`, `ip6`,
+    /// `inet`, `arp`, `bridge`, `netdev`). Plan 181.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_tables_in"))]
+    pub async fn list_tables_in(&self, family: Family) -> Result<Vec<Table>> {
+        let mut tables = self.list_tables_filtered(family as u8).await?;
+        // Defensive: even though the kernel honors `nfgen_family`
+        // on table dumps (unlike chain/flowtable/set dumps where
+        // the table-name attribute is just a hint), filter
+        // client-side too so the contract holds across all
+        // kernel versions.
+        tables.retain(|t| t.family == family);
+        Ok(tables)
+    }
+
+    async fn list_tables_filtered(&self, family_byte: u8) -> Result<Vec<Table>> {
+        let builder = build_list_tables_request(family_byte);
         let responses = self.nft_dump(builder).await?;
         let mut tables = Vec::new();
 
@@ -185,18 +198,28 @@ impl Connection<Nftables> {
     /// the nested hook block.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_flowtables"))]
     pub async fn list_flowtables(&self) -> Result<Vec<super::types::Flowtable>> {
-        let mut builder = MessageBuilder::new(
-            nft_msg_type(NFT_MSG_GETFLOWTABLE),
-            NLM_F_REQUEST | NLM_F_DUMP,
-        );
-        // AF_UNSPEC = all families.
-        let nfgenmsg = NfGenMsg {
-            nfgen_family: 0,
-            version: 0,
-            res_id: 0,
-        };
-        builder.append(&nfgenmsg);
+        self.list_flowtables_filtered(0, None).await
+    }
 
+    /// List flowtables in a specific table+family. Server-side
+    /// filtered via `NFTA_FLOWTABLE_TABLE` + `nfgen_family` —
+    /// more efficient than `list_flowtables().filter(|f|
+    /// f.table == "…")` on hosts with many tables. Plan 181.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_flowtables_in"))]
+    pub async fn list_flowtables_in(
+        &self,
+        table: &str,
+        family: Family,
+    ) -> Result<Vec<super::types::Flowtable>> {
+        self.list_flowtables_filtered(family as u8, Some(table)).await
+    }
+
+    async fn list_flowtables_filtered(
+        &self,
+        family_byte: u8,
+        table: Option<&str>,
+    ) -> Result<Vec<super::types::Flowtable>> {
+        let builder = build_list_flowtables_request(family_byte, table);
         let responses = self.nft_dump(builder).await?;
         let mut out = Vec::new();
         for (family_byte, payload) in &responses {
@@ -204,6 +227,9 @@ impl Connection<Nftables> {
             if let Some(ft) = parse_flowtable(payload, family) {
                 out.push(ft);
             }
+        }
+        if let Some(t) = table {
+            out.retain(|f| f.table == t);
         }
         Ok(out)
     }
@@ -278,6 +304,9 @@ impl Connection<Nftables> {
             builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.to_u32());
             let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
             builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
+            if let Some(dev) = &chain.device {
+                builder.append_attr_str(NFTA_HOOK_DEV, dev);
+            }
             builder.nest_end(hook_nest);
         }
 
@@ -288,18 +317,32 @@ impl Connection<Nftables> {
         self.nft_request_ack(builder).await
     }
 
-    /// List all chains.
+    /// List all chains. Dumps every family + table — for
+    /// per-table results, use [`Self::list_chains_in`].
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_chains"))]
     pub async fn list_chains(&self) -> Result<Vec<ChainInfo>> {
-        let mut builder =
-            MessageBuilder::new(nft_msg_type(NFT_MSG_GETCHAIN), NLM_F_REQUEST | NLM_F_DUMP);
-        let nfgenmsg = NfGenMsg {
-            nfgen_family: 0,
-            version: 0,
-            res_id: 0,
-        };
-        builder.append(&nfgenmsg);
+        self.list_chains_filtered(0, None).await
+    }
 
+    /// List chains in a specific table+family. Server-side
+    /// filtered via `NFTA_CHAIN_TABLE` + `nfgen_family` —
+    /// more efficient than `list_chains().filter(|c|
+    /// c.table == "…")` on hosts with many tables. Plan 181.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_chains_in"))]
+    pub async fn list_chains_in(
+        &self,
+        table: &str,
+        family: Family,
+    ) -> Result<Vec<ChainInfo>> {
+        self.list_chains_filtered(family as u8, Some(table)).await
+    }
+
+    async fn list_chains_filtered(
+        &self,
+        family_byte: u8,
+        table: Option<&str>,
+    ) -> Result<Vec<ChainInfo>> {
+        let builder = build_list_chains_request(family_byte, table);
         let responses = self.nft_dump(builder).await?;
         let mut chains = Vec::new();
 
@@ -308,6 +351,11 @@ impl Connection<Nftables> {
             if let Some(chain) = parse_chain(payload, family) {
                 chains.push(chain);
             }
+        }
+
+        // Defensive client-side filter — see comment above.
+        if let Some(t) = table {
+            chains.retain(|c| c.table == t);
         }
 
         Ok(chains)
@@ -443,14 +491,33 @@ impl Connection<Nftables> {
         self.nft_request_ack(builder).await
     }
 
-    /// List all sets.
+    /// List all sets in a family. Already family-filtered;
+    /// for `(table, family)`-scoped results use
+    /// [`Self::list_sets_in`].
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_sets"))]
     pub async fn list_sets(&self, family: Family) -> Result<Vec<SetInfo>> {
-        let mut builder =
-            MessageBuilder::new(nft_msg_type(NFT_MSG_GETSET), NLM_F_REQUEST | NLM_F_DUMP);
-        let nfgenmsg = NfGenMsg::new(family);
-        builder.append(&nfgenmsg);
+        self.list_sets_filtered(family as u8, None).await
+    }
 
+    /// List sets in a specific table+family. Server-side
+    /// filtered via `NFTA_SET_TABLE` + `nfgen_family` —
+    /// more efficient than `list_sets(family).filter(|s|
+    /// s.table == "…")` on hosts with many tables. Plan 181.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_sets_in"))]
+    pub async fn list_sets_in(
+        &self,
+        table: &str,
+        family: Family,
+    ) -> Result<Vec<SetInfo>> {
+        self.list_sets_filtered(family as u8, Some(table)).await
+    }
+
+    async fn list_sets_filtered(
+        &self,
+        family_byte: u8,
+        table: Option<&str>,
+    ) -> Result<Vec<SetInfo>> {
+        let builder = build_list_sets_request(family_byte, table);
         let responses = self.nft_dump(builder).await?;
         let mut sets = Vec::new();
 
@@ -460,7 +527,9 @@ impl Connection<Nftables> {
                 sets.push(set);
             }
         }
-
+        if let Some(t) = table {
+            sets.retain(|s| s.table == t);
+        }
         Ok(sets)
     }
 
@@ -831,6 +900,87 @@ impl Connection<Nftables> {
 }
 
 // =============================================================================
+// Plan 181 — list_*_in request-builder helpers (free functions)
+//
+// Extracted from the `list_*_filtered` methods so the wire-shape
+// unit tests can construct + inspect the request bytes without
+// going through `nft_dump` (which needs an open socket).
+// =============================================================================
+
+pub(crate) fn build_list_tables_request(family_byte: u8) -> MessageBuilder {
+    let mut builder =
+        MessageBuilder::new(nft_msg_type(NFT_MSG_GETTABLE), NLM_F_REQUEST | NLM_F_DUMP);
+    let nfgenmsg = NfGenMsg {
+        nfgen_family: family_byte,
+        version: 0,
+        res_id: 0,
+    };
+    builder.append(&nfgenmsg);
+    builder
+}
+
+pub(crate) fn build_list_chains_request(
+    family_byte: u8,
+    table: Option<&str>,
+) -> MessageBuilder {
+    let mut builder =
+        MessageBuilder::new(nft_msg_type(NFT_MSG_GETCHAIN), NLM_F_REQUEST | NLM_F_DUMP);
+    let nfgenmsg = NfGenMsg {
+        nfgen_family: family_byte,
+        version: 0,
+        res_id: 0,
+    };
+    builder.append(&nfgenmsg);
+    if let Some(t) = table {
+        // Plan 181 — kernels prior to ~6.10 ignore NFTA_CHAIN_TABLE
+        // on dump requests (it's an optimization hint, not a
+        // contract). Send it anyway in case the running kernel
+        // honors it; client-side `retain` in the caller catches
+        // the rest.
+        builder.append_attr_str(NFTA_CHAIN_TABLE, t);
+    }
+    builder
+}
+
+pub(crate) fn build_list_flowtables_request(
+    family_byte: u8,
+    table: Option<&str>,
+) -> MessageBuilder {
+    let mut builder = MessageBuilder::new(
+        nft_msg_type(NFT_MSG_GETFLOWTABLE),
+        NLM_F_REQUEST | NLM_F_DUMP,
+    );
+    let nfgenmsg = NfGenMsg {
+        nfgen_family: family_byte,
+        version: 0,
+        res_id: 0,
+    };
+    builder.append(&nfgenmsg);
+    if let Some(t) = table {
+        builder.append_attr_str(NFTA_FLOWTABLE_TABLE, t);
+    }
+    builder
+}
+
+pub(crate) fn build_list_sets_request(
+    family_byte: u8,
+    table: Option<&str>,
+) -> MessageBuilder {
+    let mut builder =
+        MessageBuilder::new(nft_msg_type(NFT_MSG_GETSET), NLM_F_REQUEST | NLM_F_DUMP);
+    let nfgenmsg = NfGenMsg {
+        nfgen_family: family_byte,
+        version: 0,
+        res_id: 0,
+    };
+    builder.append(&nfgenmsg);
+    if let Some(t) = table {
+        builder.append_attr_str(NFTA_SET_TABLE, t);
+    }
+    builder
+}
+
+// =============================================================================
 // Attribute Parsing
 // =============================================================================
 
@@ -878,6 +1028,7 @@ pub(crate) fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
         chain_type: None,
         policy: None,
         handle: 0,
+        device: None,
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
@@ -902,6 +1053,9 @@ pub(crate) fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
                             chain.priority =
                                 Some(i32::from_be_bytes(hook_payload[..4].try_into().unwrap()));
                         }
+                        NFTA_HOOK_DEV => {
+                            chain.device = attr_str(hook_payload);
+                        }
                         _ => {}
                     }
                 }
@@ -910,7 +1064,9 @@ pub(crate) fn parse_chain(data: &[u8], family: Family) -> Option<ChainInfo> {
                 chain.policy = Some(u32::from_be_bytes(payload[..4].try_into().unwrap()));
             }
             NFTA_CHAIN_TYPE => {
-                chain.chain_type = attr_str(payload);
+                chain.chain_type = attr_str(payload)
+                    .as_deref()
+                    .and_then(super::types::ChainType::from_kernel_string);
             }
             _ => {}
         }
@@ -967,7 +1123,7 @@ pub(crate) fn parse_rule(data: &[u8], family: Family) -> Option<RuleInfo> {
     }
 }
 
-fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
+pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
     let mut set = SetInfo {
         table: String::new(),
         name: String::new(),
@@ -1082,6 +1238,9 @@ impl Transaction {
             builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.to_u32());
             let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
             builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
+            if let Some(dev) = &chain.device {
+                builder.append_attr_str(NFTA_HOOK_DEV, dev);
+            }
             builder.nest_end(hook_nest);
         }
 
@@ -1408,6 +1567,135 @@ mod transaction_tests {
         // Strings are NUL-terminated on the wire — strip before compare.
         assert_eq!(&table[..table.len().saturating_sub(1)], b"filter");
         assert_eq!(&name[..name.len().saturating_sub(1)], b"input");
+    }
+
+    #[test]
+    fn add_chain_emits_nfta_hook_dev_for_netdev_chain() {
+        // Plan 180 — netdev base chain must carry
+        // NFTA_HOOK_DEV inside the NFTA_CHAIN_HOOK nest.
+        let chain = Chain::new("ft", "ingress")
+            .family(Family::Netdev)
+            .hook(Hook::Ingress)
+            .priority(Priority::Filter)
+            .chain_type(ChainType::Filter)
+            .device("eth0");
+        let tx = new_tx().add_chain(chain);
+        assert_eq!(tx.messages.len(), 1);
+
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        // Pull the NFTA_CHAIN_HOOK nest and look inside it for
+        // NFTA_HOOK_DEV.
+        let hook_nest = find_attr(body, NFTA_CHAIN_HOOK).expect("NFTA_CHAIN_HOOK missing");
+        let dev = find_attr(&hook_nest, NFTA_HOOK_DEV).expect("NFTA_HOOK_DEV missing");
+        assert_eq!(&dev[..dev.len().saturating_sub(1)], b"eth0");
+    }
+
+    #[test]
+    fn add_chain_emits_nfta_chain_type_for_nat_chain() {
+        // Plan 180 — NAT chain must carry NFTA_CHAIN_TYPE="nat"
+        // so the kernel accepts masquerade/snat/dnat verdicts.
+        let chain = Chain::new("nat", "postrouting")
+            .family(Family::Inet)
+            .hook(Hook::Postrouting)
+            .priority(Priority::SrcNat)
+            .chain_type(ChainType::Nat);
+        let tx = new_tx().add_chain(chain);
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        let ct = find_attr(body, NFTA_CHAIN_TYPE).expect("NFTA_CHAIN_TYPE missing");
+        assert_eq!(&ct[..ct.len().saturating_sub(1)], b"nat");
+    }
+
+    // ---- Plan 181 wire-shape tests for list_*_in --------------------
+    // Each test constructs the request bytes via the extracted
+    // `build_list_*_request` helper and asserts the right
+    // NFT_MSG_GET* type + NLM_F_REQUEST|DUMP flags + nfgen_family
+    // byte + (where applicable) the NFTA_*_TABLE filter attribute.
+
+    fn body_after_nlmsghdr(msg: &[u8]) -> &[u8] {
+        // Skip nlmsghdr (16 bytes) only — leaves nfgenmsg in front
+        // so the caller can verify the family byte.
+        &msg[16..]
+    }
+
+    #[test]
+    fn build_list_tables_request_carries_family_and_dump_flags() {
+        let bytes =
+            super::build_list_tables_request(super::super::types::Family::Inet as u8).finish();
+        assert_header(
+            &bytes,
+            super::nft_msg_type(super::super::NFT_MSG_GETTABLE),
+            NLM_F_REQUEST | NLM_F_DUMP,
+        );
+        let body = body_after_nlmsghdr(&bytes);
+        assert!(body.len() >= NFGENMSG_HDRLEN, "missing nfgenmsg");
+        assert_eq!(
+            body[0],
+            super::super::types::Family::Inet as u8,
+            "nfgen_family must be Inet"
+        );
+        // No table-name attribute on the tables-list request.
+        let post_nfgen = &body[NFGENMSG_HDRLEN..];
+        assert!(post_nfgen.is_empty(), "tables list must not carry attrs");
+    }
+
+    #[test]
+    fn build_list_chains_request_emits_nfta_chain_table_when_table_present() {
+        let bytes = super::build_list_chains_request(
+            super::super::types::Family::Inet as u8,
+            Some("filter"),
+        )
+        .finish();
+        assert_header(
+            &bytes,
+            super::nft_msg_type(super::super::NFT_MSG_GETCHAIN),
+            NLM_F_REQUEST | NLM_F_DUMP,
+        );
+        let body = body_after_nlmsghdr(&bytes);
+        assert_eq!(body[0], super::super::types::Family::Inet as u8);
+        let post_nfgen = &body[NFGENMSG_HDRLEN..];
+        let table = find_attr(post_nfgen, NFTA_CHAIN_TABLE)
+            .expect("NFTA_CHAIN_TABLE must be present when table arg set");
+        assert_eq!(&table[..table.len().saturating_sub(1)], b"filter");
+    }
+
+    #[test]
+    fn build_list_flowtables_request_emits_nfta_flowtable_table() {
+        let bytes = super::build_list_flowtables_request(
+            super::super::types::Family::Inet as u8,
+            Some("filter"),
+        )
+        .finish();
+        assert_header(
+            &bytes,
+            super::nft_msg_type(super::super::NFT_MSG_GETFLOWTABLE),
+            NLM_F_REQUEST | NLM_F_DUMP,
+        );
+        let body = body_after_nlmsghdr(&bytes);
+        assert_eq!(body[0], super::super::types::Family::Inet as u8);
+        let post_nfgen = &body[NFGENMSG_HDRLEN..];
+        let table = find_attr(post_nfgen, NFTA_FLOWTABLE_TABLE)
+            .expect("NFTA_FLOWTABLE_TABLE must be present");
+        assert_eq!(&table[..table.len().saturating_sub(1)], b"filter");
+    }
+
+    #[test]
+    fn build_list_sets_request_emits_nfta_set_table() {
+        let bytes = super::build_list_sets_request(
+            super::super::types::Family::Inet as u8,
+            Some("filter"),
+        )
+        .finish();
+        assert_header(
+            &bytes,
+            super::nft_msg_type(super::super::NFT_MSG_GETSET),
+            NLM_F_REQUEST | NLM_F_DUMP,
+        );
+        let body = body_after_nlmsghdr(&bytes);
+        assert_eq!(body[0], super::super::types::Family::Inet as u8);
+        let post_nfgen = &body[NFGENMSG_HDRLEN..];
+        let table = find_attr(post_nfgen, NFTA_SET_TABLE)
+            .expect("NFTA_SET_TABLE must be present");
+        assert_eq!(&table[..table.len().saturating_sub(1)], b"filter");
     }
 
     #[test]

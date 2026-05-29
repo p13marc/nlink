@@ -254,8 +254,15 @@ pub use netlink::pool::{ConnectionPool, ConnectionPoolBuilder, PooledConnection}
 
 // ENOBUFS resync helper types (Plan 151) — sum type yielded by a
 // resync-aware event consumer, plus boundary markers, plus the
-// pre-baked Stream wrapper (Plan 151 closeout).
-pub use netlink::resync::{ResyncMarker, ResyncStream, ResyncedEvent, events_with_resync};
+// pre-baked Stream wrapper (Plan 151 closeout). Plan 185 added
+// the generic `ConnectionFactory<P>` / `ConnectionFuture<P>` —
+// the boxed closure shape protocol-specific resync wrappers
+// (e.g. `Connection<Nftables>::into_events_with_resync`) consume
+// to materialise a fresh unicast connection on every ENOBUFS.
+pub use netlink::resync::{
+    ConnectionFactory, ConnectionFuture, ResyncMarker, ResyncStream, ResyncedEvent,
+    events_with_resync,
+};
 
 // Streaming dump API (Plan 149) — yield typed netlink dump
 // messages one at a time.

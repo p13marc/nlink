@@ -488,6 +488,41 @@ impl Error {
         }
     }
 
+    /// Return the kernel's `NLMSGERR_ATTR_MSG` extended-ack
+    /// string if this is a kernel error that carries one.
+    /// Plan 182 — sugar over destructuring `Error::Kernel` /
+    /// `Error::KernelWithContext`, both of which are
+    /// `#[non_exhaustive]` and so force a wildcard arm at
+    /// every call site. Equivalent to:
+    ///
+    /// ```ignore
+    /// match &err {
+    ///     Error::Kernel { ext_ack, .. }
+    ///     | Error::KernelWithContext { ext_ack, .. } => ext_ack.as_deref(),
+    ///     _ => None,
+    /// }
+    /// ```
+    pub fn ext_ack(&self) -> Option<&str> {
+        match self {
+            Self::Kernel { ext_ack, .. } | Self::KernelWithContext { ext_ack, .. } => {
+                ext_ack.as_deref()
+            }
+            _ => None,
+        }
+    }
+
+    /// Return the `NLMSGERR_ATTR_OFFS` byte offset pointing at
+    /// the offending attribute in the request payload, if the
+    /// kernel sent one. Pair with [`Self::ext_ack`] when
+    /// constructing structured error reports. Plan 182.
+    pub fn ext_ack_offset(&self) -> Option<u32> {
+        match self {
+            Self::Kernel { ext_ack_offset, .. }
+            | Self::KernelWithContext { ext_ack_offset, .. } => *ext_ack_offset,
+            _ => None,
+        }
+    }
+
     /// Check if this is an "invalid argument" error (EINVAL).
     ///
     /// This typically indicates that the kernel rejected the request
@@ -582,7 +617,22 @@ impl Error {
     /// This typically occurs when the kernel cannot allocate memory
     /// for network operations.
     pub fn is_no_buffer_space(&self) -> bool {
-        self.errno() == Some(libc::ENOBUFS)
+        // Kernel-shape: NLMSGERR with errno set to ENOBUFS.
+        if self.errno() == Some(libc::ENOBUFS) {
+            return true;
+        }
+        // OS-shape: raw `recvmsg(2)` returned -ENOBUFS. The
+        // multicast overflow path takes this branch — the kernel
+        // never wraps it in an NLMSGERR frame, the socket layer
+        // surfaces it directly. Plan 185 integration test
+        // depended on catching this; the wrapper's resync
+        // trigger has to match both shapes.
+        if let Self::Io(io_err) = self
+            && io_err.raw_os_error() == Some(libc::ENOBUFS)
+        {
+            return true;
+        }
+        false
     }
 
     /// Check if this is a "connection refused" error (ECONNREFUSED).
@@ -720,5 +770,87 @@ mod tests {
             interface: "docker0".into(),
         };
         assert_eq!(err.to_string(), "qdisc not found: netem on docker0");
+    }
+
+    // ---- Plan 182 — ext_ack / ext_ack_offset accessors ----
+
+    #[test]
+    fn ext_ack_returns_some_for_kernel_with_ack() {
+        let err = Error::Kernel {
+            errno: 22,
+            message: "Invalid argument".into(),
+            ext_ack: Some("attribute IFLA_MTU rejected: value 0 out of range".into()),
+            ext_ack_offset: Some(24),
+        };
+        assert_eq!(
+            err.ext_ack(),
+            Some("attribute IFLA_MTU rejected: value 0 out of range")
+        );
+        assert_eq!(err.ext_ack_offset(), Some(24));
+    }
+
+    #[test]
+    fn ext_ack_returns_some_for_kernel_with_context() {
+        let err = Error::KernelWithContext {
+            operation: "add_link".into(),
+            errno: 17,
+            message: "File exists".into(),
+            ext_ack: Some("interface 'veth0' already exists".into()),
+            ext_ack_offset: None,
+        };
+        assert_eq!(err.ext_ack(), Some("interface 'veth0' already exists"));
+        assert_eq!(err.ext_ack_offset(), None);
+    }
+
+    #[test]
+    fn ext_ack_returns_none_for_kernel_without_ack() {
+        let err = Error::Kernel {
+            errno: 22,
+            message: "EINVAL".into(),
+            ext_ack: None,
+            ext_ack_offset: None,
+        };
+        assert_eq!(err.ext_ack(), None);
+        assert_eq!(err.ext_ack_offset(), None);
+    }
+
+    #[test]
+    fn ext_ack_returns_none_for_non_kernel_errors() {
+        assert_eq!(Error::Timeout.ext_ack(), None);
+        assert_eq!(Error::Timeout.ext_ack_offset(), None);
+        assert_eq!(
+            Error::InvalidMessage("bad".into()).ext_ack(),
+            None
+        );
+    }
+
+    // Plan 185 fix — `is_no_buffer_space` must catch the OS-shape
+    // ENOBUFS from a raw `recvmsg`, not just the kernel-shape
+    // NLMSGERR variant. The multicast overflow path takes the
+    // OS branch.
+    #[test]
+    fn is_no_buffer_space_matches_io_enobufs() {
+        let err = Error::Io(std::io::Error::from_raw_os_error(libc::ENOBUFS));
+        assert!(
+            err.is_no_buffer_space(),
+            "Io(ENOBUFS) must be caught by is_no_buffer_space"
+        );
+    }
+
+    #[test]
+    fn is_no_buffer_space_matches_kernel_enobufs() {
+        let err = Error::Kernel {
+            errno: libc::ENOBUFS,
+            message: "ENOBUFS".into(),
+            ext_ack: None,
+            ext_ack_offset: None,
+        };
+        assert!(err.is_no_buffer_space());
+    }
+
+    #[test]
+    fn is_no_buffer_space_rejects_unrelated_io_errors() {
+        let err = Error::Io(std::io::Error::from_raw_os_error(libc::EAGAIN));
+        assert!(!err.is_no_buffer_space());
     }
 }
