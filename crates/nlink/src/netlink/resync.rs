@@ -137,7 +137,16 @@ use std::task::{Context, Poll};
 use tokio_stream::Stream;
 
 /// Internal state-machine state for [`ResyncStream`].
-enum ResyncState<T> {
+///
+/// The `'a` lifetime threads through to the boxed snapshot
+/// future. Plan 185 (0.18) made `events_with_resync`
+/// lifetime-generic so the snapshot closure can borrow from
+/// its environment — required for the borrowed-stream
+/// `Connection<P>::subscribe_all_with_resync(&mut self, ...)`
+/// shape. Closures that produce `'static` futures (the prior
+/// shape) still satisfy `'static: 'a` for any `'a`, so they
+/// keep compiling unchanged.
+enum ResyncState<'a, T> {
     /// Pulling items from the inner event stream; each item is
     /// yielded as `Event(T)` or — on ENOBUFS — kicks the state
     /// machine into `RunningSnapshot`.
@@ -145,7 +154,7 @@ enum ResyncState<T> {
     /// Snapshot future is being driven. When it resolves, we
     /// flush `Marker(ResyncStart)` + each item as `Resynced(t)` +
     /// `Marker(ResyncEnd)` via the `Replaying` state.
-    RunningSnapshot(Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send>>),
+    RunningSnapshot(Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send + 'a>>),
     /// Snapshot resolved; draining the queue of yet-to-emit items.
     /// `did_emit_start` flips true after the leading marker is
     /// yielded; the trailing marker is yielded when the queue
@@ -156,6 +165,10 @@ enum ResyncState<T> {
     },
     /// Stream fused after a non-recoverable error.
     Done,
+    /// Phantom variant to express the `'a` parameter even when
+    /// no live state holds an `'a`-bound future.
+    #[doc(hidden)]
+    _Phantom(std::marker::PhantomData<&'a ()>),
 }
 
 /// Stream wrapper around an inner event stream that handles
@@ -181,20 +194,20 @@ enum ResyncState<T> {
 /// (e.g. snapshot failed) also propagate + fuse.
 #[must_use = "streams do nothing unless polled"]
 #[non_exhaustive]
-pub struct ResyncStream<S, T, F>
+pub struct ResyncStream<'a, S, T, F>
 where
     S: Stream<Item = crate::Result<T>>,
-    F: FnMut() -> Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send>>,
+    F: FnMut() -> Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send + 'a>>,
 {
     inner: S,
     resync: F,
-    state: ResyncState<T>,
+    state: ResyncState<'a, T>,
 }
 
-impl<S, T, F> Stream for ResyncStream<S, T, F>
+impl<'a, S, T, F> Stream for ResyncStream<'a, S, T, F>
 where
     S: Stream<Item = crate::Result<T>> + Unpin,
-    F: FnMut() -> Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send>> + Unpin,
+    F: FnMut() -> Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send + 'a>> + Unpin,
     T: Unpin,
 {
     type Item = crate::Result<ResyncedEvent<T>>;
@@ -207,6 +220,11 @@ where
             let state = std::mem::replace(&mut this.state, ResyncState::Done);
             match state {
                 ResyncState::Done => return Poll::Ready(None),
+                // Phantom variant — never constructed; the
+                // outer enum carries it only to anchor the `'a`
+                // parameter. If we ever land here, treat as
+                // fused.
+                ResyncState::_Phantom(_) => return Poll::Ready(None),
 
                 ResyncState::Forwarding => {
                     match Pin::new(&mut this.inner).poll_next(cx) {
@@ -329,13 +347,13 @@ where
 ///     }
 /// }
 /// ```
-pub fn events_with_resync<S, T, F>(
+pub fn events_with_resync<'a, S, T, F>(
     events: S,
     resync: F,
-) -> ResyncStream<S, T, F>
+) -> ResyncStream<'a, S, T, F>
 where
     S: Stream<Item = crate::Result<T>> + Unpin,
-    F: FnMut() -> Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send>> + Unpin,
+    F: FnMut() -> Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send + 'a>> + Unpin,
     T: Unpin,
 {
     ResyncStream {

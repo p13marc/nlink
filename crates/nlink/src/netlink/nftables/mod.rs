@@ -35,10 +35,14 @@ pub mod config;
 pub mod connection;
 pub mod events;
 pub mod expr;
+pub mod resync;
 pub mod types;
 pub(crate) mod userdata;
 
 pub use events::{NftablesEvent, NftablesGroup, NFNLGRP_NFTABLES};
+pub use resync::{
+    nftables_snapshot, BorrowedResyncStream, ConnectionFactory, ConnectionFuture, OwnedResyncStream,
+};
 pub use expr::*;
 pub use types::*;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};

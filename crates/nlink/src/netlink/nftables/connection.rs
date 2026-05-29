@@ -1093,7 +1093,7 @@ pub(crate) fn parse_rule(data: &[u8], family: Family) -> Option<RuleInfo> {
     }
 }
 
-fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
+pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
     let mut set = SetInfo {
         table: String::new(),
         name: String::new(),

@@ -432,3 +432,92 @@ async fn list_in_filters_match_only_target_table() -> nlink::Result<()> {
     })
     .await
 }
+
+/// Plan 185 — `into_events_with_resync` walks the ruleset
+/// snapshot via a fresh `Connection<Nftables>` from the factory
+/// and yields the snapshot as `Resynced(...)` items between
+/// `ResyncStart` / `ResyncEnd` markers when the multicast stream
+/// reports `ENOBUFS`.
+///
+/// Driving an actual ENOBUFS in CI is flaky (it requires
+/// outpacing the kernel's send buffer), so this test asserts the
+/// *snapshot* shape end-to-end: build a ruleset, point the
+/// factory at a freshly-constructed connection, and verify the
+/// snapshot enumerates every table/chain/set we declared. The
+/// state-machine logic itself is exercised by the lib's
+/// `events_with_resync` unit tests + the Plan 151 recipe.
+#[tokio::test]
+async fn nftables_snapshot_walks_ruleset() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("nft-snap")?;
+        let nft = nft_in_ns(&ns)?;
+
+        // Build a 2-table ruleset so the snapshot has something
+        // structural to enumerate.
+        let cfg = NftablesConfig::new()
+            .table("snap-t1", Family::Inet, |t| {
+                t.chain("input", |c| {
+                    c.hook(Hook::Input)
+                        .priority(Priority::Filter)
+                        .policy(Policy::Accept)
+                })
+            })
+            .table("snap-t2", Family::Inet, |t| {
+                t.chain("fwd", |c| {
+                    c.hook(Hook::Forward)
+                        .priority(Priority::Filter)
+                        .policy(Policy::Accept)
+                })
+            });
+        cfg.diff(&nft).await?.apply(&nft).await?;
+
+        // Build the snapshot directly (skips the multicast
+        // subscribe path). The factory pattern is what
+        // into_events_with_resync would use internally.
+        let snapshot =
+            nlink::netlink::nftables::resync::nftables_snapshot(&nft).await?;
+
+        use nlink::netlink::nftables::NftablesEvent;
+        let mut tables: Vec<&str> = snapshot
+            .iter()
+            .filter_map(|e| match e {
+                NftablesEvent::NewTable(t)
+                    if t.name == "snap-t1" || t.name == "snap-t2" =>
+                {
+                    Some(t.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        tables.sort();
+        assert_eq!(
+            tables,
+            vec!["snap-t1", "snap-t2"],
+            "snapshot must enumerate every declared table"
+        );
+
+        let mut chains: Vec<&str> = snapshot
+            .iter()
+            .filter_map(|e| match e {
+                NftablesEvent::NewChain(c)
+                    if c.table == "snap-t1" || c.table == "snap-t2" =>
+                {
+                    Some(c.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        chains.sort();
+        assert_eq!(
+            chains,
+            vec!["fwd", "input"],
+            "snapshot must enumerate every declared chain"
+        );
+
+        Ok(())
+    })
+    .await
+}

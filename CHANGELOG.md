@@ -62,6 +62,47 @@ All notable changes to this project will be documented in this file.
   `Ipv4Route::new("0.0.0.0", 0)` form; pick whichever reads
   better in context.
 
+- **`Connection<Nftables>::into_events_with_resync(factory)` +
+  `subscribe_all_with_resync(factory)` (Plan 185)** —
+  ENOBUFS-resilient nftables event watching. Mirrors
+  `kube_rs::watcher(api, cfg) -> Stream`: hand in a factory
+  closure that opens a fresh `Connection<Nftables>` on demand,
+  receive a `Stream<Item = Result<ResyncedEvent<NftablesEvent>>>`.
+  When the kernel drops events under pressure (`-ENOBUFS`),
+  the wrapper re-dumps the ruleset via a fresh connection and
+  emits the snapshot as `Resynced(...)` items between
+  `ResyncMarker::ResyncStart` / `ResyncEnd` markers. The owned
+  form (`into_events_with_resync`) returns a `'static + Send`
+  stream that's `tokio::spawn`-friendly; the borrowed form
+  (`subscribe_all_with_resync`) keeps `&mut self` around for
+  ad-hoc queries on the same connection. New module
+  `nftables::resync` exports `nftables_snapshot`,
+  `ConnectionFactory`, `ConnectionFuture`, and the
+  `OwnedResyncStream` / `BorrowedResyncStream<'_>` type aliases.
+  Recipe: `docs/recipes/nftables-watch-with-resync.md`.
+  Closes nlink-lab Wishlist item 5.
+
+- **`NftablesEvent::NewSet(SetInfo)` +
+  `DelSet(SetInfo)` (Plan 185, bundled)** — bundled with
+  the resync wrapper because the snapshot enumerates sets, so
+  drift-detection consumers need to see set creates/deletes.
+  Wires `NFT_MSG_NEWSET` / `NFT_MSG_DELSET` through
+  `parse_nftables_event` using the existing `parse_set` parser.
+  Set elements (`NFT_MSG_NEWSETELEM`) remain unwired; open an
+  issue if you need them. `NftablesEvent` carries
+  `#[non_exhaustive]` already, so this is non-breaking.
+
+### Breaking changes (lib internals)
+
+- **`events_with_resync` is now lifetime-generic (Plan 185)** —
+  the snapshot-future bound went from `Send + 'static` to
+  `Send + 'a`. Existing call sites that handed in `'static`
+  closures keep working unchanged (the `'a` parameter defaults
+  via lifetime elision to whatever satisfies the caller). The
+  refactor unlocks the borrowed `subscribe_all_with_resync`
+  variant whose snapshot future doesn't need to outlive the
+  caller's stack frame.
+
 ## [0.17.0] - 2026-05-26
 
 ### Breaking changes
