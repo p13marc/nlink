@@ -30,6 +30,7 @@ use crate::netlink::{
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Default)]
+#[must_use = "Diffs do nothing unless passed to `.apply()` or stringified via `Display`"]
 pub struct ConfigDiff {
     /// Links to create.
     pub links_to_add: Vec<DeclaredLink>,

@@ -78,6 +78,22 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`#[must_use]` on the diff + result + report types
+  (Plan 201 §2.1, scoped subset)** — `ConfigDiff`,
+  `NftablesDiff`, `ApplyResult`, both `ReconcileReport`s
+  (TC recipe + nftables) gain `#[must_use]` with a
+  specific message pointing the caller at the right
+  accessor (`.apply()`, `.is_success()`, `.is_noop()`).
+  Catches the easy-to-forget shape "build a diff,
+  forget to call apply()." Three in-tree integration
+  test sites that intentionally discarded a
+  `ReconcileReport` were updated to `let _ = ...` to
+  silence the new lint. Plan 201's broader sweep
+  (every `*Builder`, `From`/`Into`, `Display`,
+  `#[inline]`) remains as a polish backlog; this commit
+  ships the highest-leverage subset matching the cycle's
+  existing diff/apply API surface.
+
 - **`RouteMessage::multipath()` accessor + `ParsedNextHop`
   + `RTA_MULTIPATH` parser (Plan 202)** — closes a gap
   surfaced by Plan 193 §2.2's audit: nlink could WRITE

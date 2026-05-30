@@ -109,6 +109,7 @@ impl ApplyOptions {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Default)]
+#[must_use = "Inspect `.is_success()`, `.errors`, or `.summary_text()` to learn the outcome"]
 pub struct ApplyResult {
     /// Number of changes made (or that would be made in dry-run mode).
     pub changes_made: usize,

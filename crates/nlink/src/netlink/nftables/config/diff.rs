@@ -163,6 +163,7 @@ pub struct RuleHandle(pub u64);
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
+#[must_use = "Diffs do nothing unless passed to `.apply()` or stringified via `Display`"]
 pub struct NftablesDiff {
     /// Tables to create.
     pub tables_to_add: Vec<DeclaredTable>,
