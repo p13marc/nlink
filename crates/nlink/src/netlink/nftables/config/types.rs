@@ -53,6 +53,8 @@ impl NftablesConfig {
 
 /// A declared table — name, family, flags, and nested chains +
 /// rules + flowtables.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredTable {
     pub(crate) name: String,
@@ -212,6 +214,8 @@ impl DeclaredTableBuilder {
 
 /// A declared chain — name + optional base-chain hook spec.
 /// Non-base (regular) chains omit the hook fields.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredChain {
     pub(crate) name: String,
@@ -337,12 +341,20 @@ impl DeclaredChainBuilder {
 /// is harmless for write-only rulesets but churns kernel state on
 /// every reconcile. For declarative configs that get re-applied,
 /// supply a `handle_key` via [`DeclaredTableBuilder::rule_keyed`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredRule {
     pub(crate) table: String,
     pub(crate) chain: String,
     pub(crate) family: Family,
     pub(crate) handle_key: Option<String>,
+    // Plan 189: skip the expression body in JSON output —
+    // the Expr tree is wire-format detail. Consumers can
+    // call `body()` programmatically for the Rust value or
+    // `Display`-render it for human-readable text. See
+    // §"Plan 189" of the migration guide.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) body: Rule,
 }
 
@@ -374,6 +386,8 @@ impl DeclaredRule {
 // =============================================================================
 
 /// A declared flowtable inside a table.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredFlowtable {
     pub(crate) family: Family,

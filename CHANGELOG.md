@@ -59,6 +59,37 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`serde` feature flag — opt-in `Serialize` derives on every
+  public diff/result/report type (Plan 189)** — gated by a new
+  top-level `serde` feature (opt-in only; included in `full`).
+  JSON shape conventions: structs use `rename_all = "kebab-case"`
+  (`links-to-add`, not `links_to_add`); enums use
+  `rename_all = "snake_case"` so unit variants emit bare strings
+  (`"inet"`, not `{"Inet": null}`).
+  Types gaining `Serialize` (in this commit):
+  `ConfigDiff`, `NftablesDiff`, `LinkChanges`, `DeclaredLink`,
+  `DeclaredLinkType`, `DeclaredAddress`, `DeclaredRoute`,
+  `DeclaredRouteType`, `DeclaredQdisc`, `DeclaredQdiscType`,
+  `QdiscParent`, `LinkState`, `MacvlanMode`, `BondMode`,
+  `VlanProtocol`, `NetkitMode`, `NetkitPolicy`, `NetkitScrub`,
+  `AdSelect`, `LacpRate`, `Family`, `Hook`, `ChainType`,
+  `Priority`, `Policy`, `DeclaredTable`, `DeclaredChain`,
+  `DeclaredRule` (`body` field skipped), `DeclaredFlowtable`,
+  `RuleHandle`, `ApplyResult`, `ApplyError` (`error` field
+  serialized as the `Display` string), `ReconcileOptions`
+  (tc recipe + nftables — both shapes), `ReconcileReport`
+  (tc recipe + nftables), `StaleObject`, `UnmanagedObject`,
+  `TcHandle`, `FilterPriority`.
+  Use case: `apply --check --json` envelopes for CI gates and
+  IaC tooling. The kebab-case shape matches nlink-lab's
+  existing schema convention. `Deserialize` is **not** derived
+  this commit — the diff types are not user-constructible
+  (they're products of `compute_diff`), so round-trip
+  deserialization adds no consumer value. Closes
+  nlink-feedback §9 + W4.
+  5 new JSON-shape unit tests in `crate::serde_tests` (gated
+  on `feature = "serde"`).
+
 - **`ConfigDiff::apply` inherent method (Plan 188 §2.1)** —
   matches `NftablesDiff::apply`'s shape from Plan 157.
   ```rust

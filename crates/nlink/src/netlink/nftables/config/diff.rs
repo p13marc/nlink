@@ -149,6 +149,7 @@ fn lower_to_expression_bytes(rule: &super::super::types::Rule) -> Vec<u8> {
 }
 
 /// Kernel-assigned rule handle (`NFTA_RULE_HANDLE`).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RuleHandle(pub u64);
 
@@ -158,6 +159,8 @@ pub struct RuleHandle(pub u64);
 ///
 /// `is_empty()` returns true when declared and current already
 /// agree (idempotent reapply).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct NftablesDiff {

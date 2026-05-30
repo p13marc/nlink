@@ -135,6 +135,8 @@ impl NetworkConfig {
 // ============================================================================
 
 /// Declared link configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredLink {
     pub(crate) name: String,
@@ -173,6 +175,8 @@ impl DeclaredLink {
 }
 
 /// Link type for declared configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeclaredLinkType {
@@ -277,6 +281,8 @@ impl DeclaredLinkType {
 }
 
 /// Link state (up or down).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum LinkState {
@@ -290,6 +296,8 @@ pub enum LinkState {
 }
 
 /// Macvlan mode.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum MacvlanMode {
@@ -307,6 +315,8 @@ pub enum MacvlanMode {
 }
 
 /// Bond mode.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum BondMode {
@@ -701,6 +711,8 @@ impl LinkBuilder {
 // ============================================================================
 
 /// Declared address configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredAddress {
     pub(crate) dev: String,
@@ -788,6 +800,8 @@ pub enum AddressParseError {
 // ============================================================================
 
 /// Declared route configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredRoute {
     pub(crate) destination: IpAddr,
@@ -847,6 +861,8 @@ impl DeclaredRoute {
 }
 
 /// Route type for declared configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum DeclaredRouteType {
@@ -1014,6 +1030,8 @@ impl RouteBuilder {
 // ============================================================================
 
 /// Declared qdisc configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredQdisc {
     pub(crate) dev: String,
@@ -1039,6 +1057,8 @@ impl DeclaredQdisc {
 }
 
 /// Qdisc parent location.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum QdiscParent {
@@ -1050,6 +1070,8 @@ pub enum QdiscParent {
 }
 
 /// Qdisc type for declared configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum DeclaredQdiscType {

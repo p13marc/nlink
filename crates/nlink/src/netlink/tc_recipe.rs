@@ -19,6 +19,8 @@ use super::tc_handle::{FilterPriority, TcHandle};
 /// Knobs controlling [`reconcile()`] behavior.
 ///
 /// [`reconcile()`]: super::impair::PerPeerImpairer::reconcile
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
 pub struct ReconcileOptions {
@@ -66,6 +68,8 @@ impl ReconcileOptions {
 /// "did anything change?" check.
 ///
 /// [`reconcile()`]: super::impair::PerPeerImpairer::reconcile
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct ReconcileReport {
@@ -108,6 +112,8 @@ impl ReconcileReport {
 /// An object the helper recognized as belonging to its managed range
 /// (by handle) but that the desired tree no longer references.
 /// `reconcile()` removes these.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct StaleObject {
@@ -121,6 +127,8 @@ pub struct StaleObject {
 
 /// An object outside the helper's managed range. `reconcile()` does not
 /// touch these but reports them so callers can audit drift.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct UnmanagedObject {

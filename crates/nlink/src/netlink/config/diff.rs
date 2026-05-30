@@ -27,6 +27,8 @@ use crate::netlink::{
 };
 
 /// Difference between desired and current network state.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Default)]
 pub struct ConfigDiff {
     /// Links to create.
@@ -215,6 +217,8 @@ impl std::fmt::Display for ConfigDiff {
 }
 
 /// Changes to make to an existing link.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Default)]
 pub struct LinkChanges {
     /// Change state to up.

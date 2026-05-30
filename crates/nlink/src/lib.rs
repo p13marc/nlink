@@ -286,3 +286,75 @@ pub use netlink::nftables::config::{
 // XFRM IPsec hardware offload (Plan 153.1) — request kernel push
 // SA crypto/packet path onto NIC hardware.
 pub use netlink::xfrm::{XfrmOffloadFlag, XfrmUserOffload};
+
+
+// Plan 189 — `serde` feature flag JSON-shape tests.
+// Verifies the kebab-case (struct) / snake_case (enum) JSON
+// shape commitments of the gated `Serialize` impls. Gated on
+// `cfg(feature = "serde")` so the non-serde build skips them.
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use crate::netlink::config::{ConfigDiff, NetworkConfig};
+    use crate::netlink::nftables::config::NftablesDiff;
+    use crate::netlink::nftables::types::Family;
+
+    #[test]
+    fn types_implement_serialize() {
+        fn assert_serialize<T: serde::Serialize>() {}
+        assert_serialize::<ConfigDiff>();
+        assert_serialize::<NftablesDiff>();
+        assert_serialize::<crate::netlink::config::ApplyResult>();
+        assert_serialize::<crate::ReconcileReport>();
+    }
+
+    #[test]
+    fn config_diff_empty_serializes_to_known_shape() {
+        let diff = ConfigDiff::default();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&diff).unwrap()).unwrap();
+        assert!(parsed["links-to-add"].is_array());
+        assert!(parsed["links-to-modify"].is_array());
+        assert!(parsed["addresses-to-add"].is_array());
+        assert!(parsed["routes-to-add"].is_array());
+        assert!(parsed["qdiscs-to-add"].is_array());
+        // No snake_case bleed-through.
+        let json = serde_json::to_string(&diff).unwrap();
+        assert!(!json.contains(r#""links_to_add""#));
+    }
+
+    #[test]
+    fn nftables_diff_empty_serializes_kebab_case_shape() {
+        let diff = NftablesDiff::default();
+        let json = serde_json::to_string(&diff).unwrap();
+        // Spot-check the kebab-case is applied at the outer
+        // diff level (precise field names vary by NftablesDiff
+        // shape; we assert the no-underscore convention).
+        assert!(!json.contains("_to_"), "expected kebab-case throughout: {json}");
+    }
+
+    #[test]
+    fn family_enum_serializes_to_lowercase_string() {
+        // Plan 189 §2.4 — enums are snake_case-renamed, so
+        // unit variants emit bare strings instead of
+        // `{"Inet": null}`-shape.
+        assert_eq!(serde_json::to_string(&Family::Inet).unwrap(), r#""inet""#);
+        assert_eq!(serde_json::to_string(&Family::Ip).unwrap(), r#""ip""#);
+        assert_eq!(serde_json::to_string(&Family::Ip6).unwrap(), r#""ip6""#);
+    }
+
+    #[test]
+    fn config_diff_with_link_carries_kebab_payload() {
+        let cfg = NetworkConfig::new().link("eth0", |b| b.dummy());
+        let mut diff = ConfigDiff::default();
+        diff.links_to_add.push(cfg.links()[0].clone());
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&diff).unwrap()).unwrap();
+        // The link object itself carries kebab-cased field names.
+        assert_eq!(parsed["links-to-add"].as_array().unwrap().len(), 1);
+        let link = &parsed["links-to-add"][0];
+        assert_eq!(link["name"].as_str(), Some("eth0"));
+        // DeclaredLinkType::Dummy serializes as bare string "dummy".
+        assert_eq!(link["link-type"].as_str(), Some("dummy"));
+    }
+}
+

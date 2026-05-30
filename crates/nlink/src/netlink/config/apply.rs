@@ -106,6 +106,8 @@ impl ApplyOptions {
 }
 
 /// Result of applying configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Default)]
 pub struct ApplyResult {
     /// Number of changes made (or that would be made in dry-run mode).
@@ -133,12 +135,27 @@ impl ApplyResult {
 }
 
 /// An error that occurred during configuration application.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug)]
 pub struct ApplyError {
     /// What operation was being performed.
     pub operation: String,
-    /// The underlying error.
+    /// The underlying error. Plan 189: serialized as the
+    /// `Display` string rather than the structural enum
+    /// (the `Error` type is internally varied and not
+    /// shape-stable).
+    #[cfg_attr(feature = "serde", serde(serialize_with = "serialize_error_as_display"))]
     pub error: Error,
+}
+
+#[cfg(feature = "serde")]
+fn serialize_error_as_display<S>(err: &Error, ser: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::Serialize as _;
+    err.to_string().serialize(ser)
 }
 
 impl std::fmt::Display for ApplyError {
