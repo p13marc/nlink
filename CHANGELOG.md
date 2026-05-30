@@ -59,6 +59,27 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Concurrent-stress regression tests (Plan 194)** —
+  two new root-gated integration tests preempting
+  bug-shapes the `rtnetlink` Rust crate hit recently:
+  - `concurrent_dumps_on_shared_connection_route_correctly`
+    spawns 16 concurrent `get_links()` calls on a shared
+    `Arc<Connection>` and asserts every dump sees the
+    pre-created `dummy0`. Pins nlink's seq-routing
+    correctness against the kind of bug rtnetlink #131
+    surfaced (replies routed to the wrong receiver).
+  - `concurrent_namespaces_dont_corrupt_each_other` spawns
+    16 concurrent `LabNamespace::new` calls, each with a
+    uniquely-named dummy interface; verifies each
+    namespace's dump returns only its own dummy. Pins
+    the namespace creation path against rtnetlink #132's
+    race-shape.
+  Both tests are expected to GO GREEN — Plan 170's seq-
+  filter + Plan 172's recv-loop audit defenses are
+  already in place. If either turns red on the
+  privileged-CI gate, a follow-up fix lands per Plan 194
+  §3.2 / §3.3.
+
 - **`ResyncStreamExt` combinators on resync streams
   (Plan 195 §2.1 + §2.3)** — kube-rs-style composable
   adapters over `Connection<{Route,Nftables}>::into_events_with_resync`'s

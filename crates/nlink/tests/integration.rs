@@ -106,3 +106,9 @@ mod syscall_batch;
 
 #[path = "integration/pool.rs"]
 mod pool;
+
+// Plan 194 — concurrent stress + seq-routing regression.
+// Spawns 16 concurrent dumps on a shared Arc<Connection>
+// and 16 concurrent LabNamespace::new calls. Both root-gated.
+#[path = "integration/concurrent_stress.rs"]
+mod concurrent_stress;
