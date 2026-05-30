@@ -77,6 +77,18 @@ All notable changes to this project will be documented in this file.
   RouteBuilder::default_v4().via("192.0.2.1")
   ```
 
+- **Bond options gap-fill: `bond_ad_select`, `bond_lacp_rate`,
+  `bond_downdelay`, `bond_updelay`, `bond_resend_igmp`
+  (Plan 190 §8)** — 5 new declarative-path setters on
+  `LinkBuilder` covering the previously-imperative-only bond
+  knobs. `DeclaredLinkType::Bond` grew matching
+  `Option<...>` fields. The imperative `BondLink` already
+  exposes all of these; the apply-path arm forwards them.
+  Existing `AdSelect` + `LacpRate` enums re-exported via the
+  config types module as `BondAdSelect` / `BondLacpRate` (no
+  new types — single source of truth). Closes the
+  consolidation-pass §8 expansion. 3 new unit tests.
+
 - **`LinkBuilder::vxlan_local` / `vxlan_port` /
   `vxlan_underlay_dev` (Plan 190 §2.1)** — declarative-path
   coverage for the three VXLAN knobs nlink-lab §10 flagged.

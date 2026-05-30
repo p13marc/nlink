@@ -574,6 +574,11 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             miimon,
             xmit_hash_policy,
             min_links,
+            ad_select,
+            lacp_rate,
+            downdelay,
+            updelay,
+            resend_igmp,
         } => {
             let mut config = BondLink::new(&link.name).mode(convert_bond_mode(*mode));
             if let Some(ms) = miimon {
@@ -586,6 +591,21 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             }
             if let Some(count) = min_links {
                 config = config.min_links(*count);
+            }
+            if let Some(sel) = ad_select {
+                config = config.ad_select(*sel);
+            }
+            if let Some(rate) = lacp_rate {
+                config = config.lacp_rate(*rate);
+            }
+            if let Some(ms) = downdelay {
+                config = config.downdelay(*ms);
+            }
+            if let Some(ms) = updelay {
+                config = config.updelay(*ms);
+            }
+            if let Some(count) = resend_igmp {
+                config = config.resend_igmp(*count);
             }
             if let Some(mtu) = link.mtu {
                 config = config.mtu(mtu);

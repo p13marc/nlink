@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 
-pub use crate::netlink::link::VlanProtocol;
+pub use crate::netlink::link::{AdSelect as BondAdSelect, LacpRate as BondLacpRate, VlanProtocol};
 
 /// Declarative network configuration.
 ///
@@ -203,12 +203,25 @@ pub enum DeclaredLinkType {
     },
     /// Macvlan interface.
     Macvlan { parent: String, mode: MacvlanMode },
-    /// Bond interface.
+    /// Bond interface. Plan 190 §8 added 5 new option knobs.
     Bond {
         mode: BondMode,
         miimon: Option<u32>,
         xmit_hash_policy: Option<u8>,
         min_links: Option<u32>,
+        /// 802.3ad aggregator selection logic. Plan 190 §8.
+        ad_select: Option<BondAdSelect>,
+        /// LACPDU transmit rate. Plan 190 §8.
+        lacp_rate: Option<BondLacpRate>,
+        /// Time (ms) to wait before disabling a slave on
+        /// link-down. Plan 190 §8.
+        downdelay: Option<u32>,
+        /// Time (ms) to wait before enabling a slave on
+        /// link-up. Plan 190 §8.
+        updelay: Option<u32>,
+        /// Number of IGMP membership reports to resend on
+        /// failover. Plan 190 §8.
+        resend_igmp: Option<u32>,
     },
     /// IFB (Intermediate Functional Block).
     Ifb,
@@ -434,6 +447,11 @@ impl LinkBuilder {
             miimon: None,
             xmit_hash_policy: None,
             min_links: None,
+            ad_select: None,
+            lacp_rate: None,
+            downdelay: None,
+            updelay: None,
+            resend_igmp: None,
         };
         self
     }
@@ -472,6 +490,51 @@ impl LinkBuilder {
     pub fn min_links(mut self, count: u32) -> Self {
         if let DeclaredLinkType::Bond { min_links, .. } = &mut self.link_type {
             *min_links = Some(count);
+        }
+        self
+    }
+
+    /// Set the 802.3ad aggregator selection logic.
+    /// No-op on non-Bond builders. Plan 190 §8.
+    pub fn bond_ad_select(mut self, sel: BondAdSelect) -> Self {
+        if let DeclaredLinkType::Bond { ad_select, .. } = &mut self.link_type {
+            *ad_select = Some(sel);
+        }
+        self
+    }
+
+    /// Set the LACPDU transmit rate (Slow=30s, Fast=1s).
+    /// No-op on non-Bond builders. Plan 190 §8.
+    pub fn bond_lacp_rate(mut self, rate: BondLacpRate) -> Self {
+        if let DeclaredLinkType::Bond { lacp_rate, .. } = &mut self.link_type {
+            *lacp_rate = Some(rate);
+        }
+        self
+    }
+
+    /// Set the time (ms) to wait before disabling a slave on
+    /// link-down. No-op on non-Bond builders. Plan 190 §8.
+    pub fn bond_downdelay(mut self, ms: u32) -> Self {
+        if let DeclaredLinkType::Bond { downdelay, .. } = &mut self.link_type {
+            *downdelay = Some(ms);
+        }
+        self
+    }
+
+    /// Set the time (ms) to wait before enabling a slave on
+    /// link-up. No-op on non-Bond builders. Plan 190 §8.
+    pub fn bond_updelay(mut self, ms: u32) -> Self {
+        if let DeclaredLinkType::Bond { updelay, .. } = &mut self.link_type {
+            *updelay = Some(ms);
+        }
+        self
+    }
+
+    /// Set the number of IGMP membership reports to resend
+    /// on failover. No-op on non-Bond builders. Plan 190 §8.
+    pub fn bond_resend_igmp(mut self, count: u32) -> Self {
+        if let DeclaredLinkType::Bond { resend_igmp, .. } = &mut self.link_type {
+            *resend_igmp = Some(count);
         }
         self
     }
@@ -1104,6 +1167,74 @@ mod plan_190_tests {
         let lt = DeclaredLinkType::Vrf { table: 7 };
         assert_eq!(lt.kind(), Some("vrf"));
     }
+
+    // -------- Plan 190 §8 — Bond options gap-fill --------
+
+    #[test]
+    fn bond_builder_defaults_all_new_knobs_to_none() {
+        let link = LinkBuilder::new("bond0").bond().build();
+        match link.link_type {
+            DeclaredLinkType::Bond {
+                ad_select,
+                lacp_rate,
+                downdelay,
+                updelay,
+                resend_igmp,
+                ..
+            } => {
+                assert!(ad_select.is_none());
+                assert!(lacp_rate.is_none());
+                assert!(downdelay.is_none());
+                assert!(updelay.is_none());
+                assert!(resend_igmp.is_none());
+            }
+            other => panic!("expected Bond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bond_builder_all_5_setters_round_trip() {
+        let link = LinkBuilder::new("bond0")
+            .bond()
+            .bond_ad_select(BondAdSelect::Bandwidth)
+            .bond_lacp_rate(BondLacpRate::Fast)
+            .bond_downdelay(200)
+            .bond_updelay(500)
+            .bond_resend_igmp(3)
+            .build();
+        match link.link_type {
+            DeclaredLinkType::Bond {
+                ad_select,
+                lacp_rate,
+                downdelay,
+                updelay,
+                resend_igmp,
+                ..
+            } => {
+                assert_eq!(ad_select, Some(BondAdSelect::Bandwidth));
+                assert_eq!(lacp_rate, Some(BondLacpRate::Fast));
+                assert_eq!(downdelay, Some(200));
+                assert_eq!(updelay, Some(500));
+                assert_eq!(resend_igmp, Some(3));
+            }
+            other => panic!("expected Bond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bond_setters_no_op_on_non_bond() {
+        let link = LinkBuilder::new("eth0")
+            .dummy()
+            .bond_ad_select(BondAdSelect::Stable)
+            .bond_lacp_rate(BondLacpRate::Slow)
+            .bond_downdelay(100)
+            .bond_updelay(100)
+            .bond_resend_igmp(1)
+            .build();
+        assert!(matches!(link.link_type, DeclaredLinkType::Dummy));
+    }
+
+    // -------- end Plan 190 §8 --------
 
     // -------- Plan 190 §2.1 — VXLAN extras --------
 
