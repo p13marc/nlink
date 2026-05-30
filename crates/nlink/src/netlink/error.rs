@@ -315,6 +315,17 @@ impl Error {
     /// Create a kernel error from an errno value plus the parsed
     /// extended-ack TLVs from the same error response.
     ///
+    /// **Accepts either sign.** The kernel's `nlmsgerr.error` field
+    /// is signed-negative (`-EEXIST = -17`); the stored
+    /// `Error::Kernel.errno` is always the positive POSIX number
+    /// (`17`). This factory normalizes via `.abs()` so both
+    /// `from_errno_ext_ack(-17, ..)` and `from_errno_ext_ack(17, ..)`
+    /// produce the same EEXIST error.
+    ///
+    /// Prior to 0.19 (Plan 187) this factory silently negated the
+    /// input and a positive-passed `1` produced stored `-1` — a
+    /// footgun nlink-lab hit in their `Error::ext_ack` unit tests.
+    ///
     /// Typical use: after `NlMsgError::from_bytes`, call
     /// `err.parsed_ext_ack(payload)` to get a [`crate::netlink::message::ParsedExtAck`],
     /// then forward the fields here.
@@ -323,9 +334,10 @@ impl Error {
         ext_ack: Option<String>,
         ext_ack_offset: Option<u32>,
     ) -> Self {
-        let message = io::Error::from_raw_os_error(-errno).to_string();
+        let errno = errno.abs();
+        let message = io::Error::from_raw_os_error(errno).to_string();
         Self::Kernel {
-            errno: -errno,
+            errno,
             message,
             ext_ack,
             ext_ack_offset,
@@ -333,22 +345,27 @@ impl Error {
     }
 
     /// Create a kernel error with operation context (no ext-ack info).
+    ///
+    /// Accepts either sign on `errno`; see [`Self::from_errno_ext_ack`].
     pub fn from_errno_with_context(errno: i32, operation: impl Into<String>) -> Self {
         Self::from_errno_with_context_ext_ack(errno, operation, None, None)
     }
 
     /// Create a kernel error with operation context plus the parsed
     /// extended-ack TLVs.
+    ///
+    /// Accepts either sign on `errno`; see [`Self::from_errno_ext_ack`].
     pub fn from_errno_with_context_ext_ack(
         errno: i32,
         operation: impl Into<String>,
         ext_ack: Option<String>,
         ext_ack_offset: Option<u32>,
     ) -> Self {
-        let message = io::Error::from_raw_os_error(-errno).to_string();
+        let errno = errno.abs();
+        let message = io::Error::from_raw_os_error(errno).to_string();
         Self::KernelWithContext {
             operation: operation.into(),
-            errno: -errno,
+            errno,
             message,
             ext_ack,
             ext_ack_offset,
@@ -451,39 +468,50 @@ impl Error {
     }
 
     /// Check if this is a permission error (EPERM, EACCES).
+    ///
+    /// Plan 187 §2.5: matches both `Error::Kernel*` and
+    /// `Error::Io` variants carrying EPERM/EACCES via the
+    /// `errno()` unwrap.
     pub fn is_permission_denied(&self) -> bool {
-        match self {
-            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
-                matches!(*errno, 1 | 13) // EPERM=1, EACCES=13
-            }
-            _ => false,
-        }
+        matches!(self.errno(), Some(libc::EPERM) | Some(libc::EACCES))
     }
 
     /// Check if this is a "already exists" error (EEXIST).
+    ///
+    /// Plan 187 §2.5: matches both `Error::Kernel*` and
+    /// `Error::Io(EEXIST)` shapes.
     pub fn is_already_exists(&self) -> bool {
-        match self {
-            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
-                *errno == 17 // EEXIST=17
-            }
-            _ => false,
-        }
+        self.errno() == Some(libc::EEXIST)
     }
 
     /// Check if this is a "device busy" error (EBUSY).
+    ///
+    /// Plan 187 §2.5: matches both `Error::Kernel*` and
+    /// `Error::Io(EBUSY)` shapes. Used by
+    /// `NftablesConfig::apply_reconcile` for retry
+    /// classification — a missed match here used to silently
+    /// skip the retry budget.
     pub fn is_busy(&self) -> bool {
-        match self {
-            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
-                *errno == 16 // EBUSY=16
-            }
-            _ => false,
-        }
+        self.errno() == Some(libc::EBUSY)
     }
 
-    /// Get the errno value if this is a kernel error.
+    /// Get the POSIX errno value if this error carries one.
+    ///
+    /// Handles three shapes:
+    /// - `Error::Kernel { errno, .. }` — from `NLMSGERR`.
+    /// - `Error::KernelWithContext { errno, .. }` — context-wrapped.
+    /// - `Error::Io(io_err)` — from raw socket-layer errors;
+    ///   reads `io_err.raw_os_error()`. This is the shape
+    ///   `recvmsg` returns `-ENOBUFS` in (the Plan 185 bug
+    ///   class that Plan 187 fixes at the single-point of
+    ///   `errno()`).
+    ///
+    /// Returns `None` for the other variants (Timeout, Truncated,
+    /// InvalidMessage, etc.) — they don't carry an errno.
     pub fn errno(&self) -> Option<i32> {
         match self {
             Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => Some(*errno),
+            Self::Io(io_err) => io_err.raw_os_error(),
             _ => None,
         }
     }
@@ -617,22 +645,12 @@ impl Error {
     /// This typically occurs when the kernel cannot allocate memory
     /// for network operations.
     pub fn is_no_buffer_space(&self) -> bool {
-        // Kernel-shape: NLMSGERR with errno set to ENOBUFS.
-        if self.errno() == Some(libc::ENOBUFS) {
-            return true;
-        }
-        // OS-shape: raw `recvmsg(2)` returned -ENOBUFS. The
-        // multicast overflow path takes this branch — the kernel
-        // never wraps it in an NLMSGERR frame, the socket layer
-        // surfaces it directly. Plan 185 integration test
-        // depended on catching this; the wrapper's resync
-        // trigger has to match both shapes.
-        if let Self::Io(io_err) = self
-            && io_err.raw_os_error() == Some(libc::ENOBUFS)
-        {
-            return true;
-        }
-        false
+        // Plan 187 made `errno()` itself unwrap `Error::Io` via
+        // `raw_os_error()`, so this predicate (and every sibling
+        // predicate) catches both the kernel-shape and the
+        // socket-shape ENOBUFS via the same path. The Plan 185
+        // defensive branch is no longer needed.
+        self.errno() == Some(libc::ENOBUFS)
     }
 
     /// Check if this is a "connection refused" error (ECONNREFUSED).
@@ -852,5 +870,132 @@ mod tests {
     fn is_no_buffer_space_rejects_unrelated_io_errors() {
         let err = Error::Io(std::io::Error::from_raw_os_error(libc::EAGAIN));
         assert!(!err.is_no_buffer_space());
+    }
+
+    // ===== Plan 187 — sign-normalization on the factories. =====
+
+    #[test]
+    fn from_errno_ext_ack_normalizes_negative_input() {
+        let e = Error::from_errno_ext_ack(-libc::EEXIST, None, None);
+        assert_eq!(e.errno(), Some(libc::EEXIST));
+    }
+
+    #[test]
+    fn from_errno_ext_ack_normalizes_positive_input() {
+        let e = Error::from_errno_ext_ack(libc::EEXIST, None, None);
+        assert_eq!(e.errno(), Some(libc::EEXIST));
+    }
+
+    #[test]
+    fn from_errno_ext_ack_zero_stays_zero() {
+        let e = Error::from_errno_ext_ack(0, None, None);
+        assert_eq!(e.errno(), Some(0));
+    }
+
+    #[test]
+    fn from_errno_with_context_ext_ack_normalizes_both_signs() {
+        let neg = Error::from_errno_with_context_ext_ack(
+            -libc::EBUSY,
+            "add_link",
+            None,
+            None,
+        );
+        let pos = Error::from_errno_with_context_ext_ack(
+            libc::EBUSY,
+            "add_link",
+            None,
+            None,
+        );
+        assert_eq!(neg.errno(), pos.errno());
+        assert_eq!(neg.errno(), Some(libc::EBUSY));
+    }
+
+    #[test]
+    fn from_errno_delegates_to_from_errno_ext_ack_for_normalization() {
+        // `from_errno` is a thin wrapper around `from_errno_ext_ack`,
+        // so it inherits the sign-normalization. Pin it.
+        let neg = Error::from_errno(-libc::EINVAL);
+        let pos = Error::from_errno(libc::EINVAL);
+        assert_eq!(neg.errno(), pos.errno());
+        assert_eq!(neg.errno(), Some(libc::EINVAL));
+    }
+
+    // ===== Plan 187 §2.5 — predicate Io-shape sweep. =====
+    //
+    // Every `is_*` predicate must match BOTH `Error::Kernel*`
+    // and `Error::Io` variants carrying the same errno. The
+    // Plan 187 fix to `errno()` (unwrap `Io` via
+    // `raw_os_error()`) makes this work uniformly; this sweep
+    // pins the contract so future predicates inherit it.
+
+    fn assert_predicate_matches_both_shapes(
+        pred: fn(&Error) -> bool,
+        errno: i32,
+        name: &str,
+    ) {
+        let kernel = Error::from_errno_ext_ack(errno, None, None);
+        assert!(
+            pred(&kernel),
+            "{name}: Kernel({errno}) must match the predicate"
+        );
+        let io = Error::Io(std::io::Error::from_raw_os_error(errno));
+        assert!(
+            pred(&io),
+            "{name}: Io({errno}) must match the predicate"
+        );
+        let kctx = Error::from_errno_with_context_ext_ack(
+            errno, "ctx", None, None,
+        );
+        assert!(
+            pred(&kctx),
+            "{name}: KernelWithContext({errno}) must match the predicate"
+        );
+    }
+
+    #[test]
+    fn predicate_io_shape_sweep() {
+        // Each predicate × 3 variants = 36+ assertions via the
+        // shared helper. Adding a new `is_*` predicate later
+        // appends one line here.
+        assert_predicate_matches_both_shapes(
+            Error::is_no_buffer_space, libc::ENOBUFS, "is_no_buffer_space",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_busy, libc::EBUSY, "is_busy",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_try_again, libc::EAGAIN, "is_try_again",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_already_exists, libc::EEXIST, "is_already_exists",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_permission_denied, libc::EACCES, "is_permission_denied",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_invalid_argument, libc::EINVAL, "is_invalid_argument",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_not_supported, libc::EOPNOTSUPP, "is_not_supported",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_network_unreachable, libc::ENETUNREACH, "is_network_unreachable",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_host_unreachable, libc::EHOSTUNREACH, "is_host_unreachable",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_connection_refused, libc::ECONNREFUSED, "is_connection_refused",
+        );
+    }
+
+    #[test]
+    fn predicate_rejects_unrelated_errno_for_each_shape() {
+        // is_busy(EAGAIN) must be false — the predicate is
+        // specific to its target errno, not "any retryable error".
+        let kernel_eagain = Error::from_errno_ext_ack(libc::EAGAIN, None, None);
+        assert!(!kernel_eagain.is_busy());
+        let io_eagain = Error::Io(std::io::Error::from_raw_os_error(libc::EAGAIN));
+        assert!(!io_eagain.is_busy());
     }
 }

@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **`Error::from_errno*` factories now normalize via `.abs()`
+  (Plan 187 §2.1)** — passing positive or negative errno
+  produces the same stored POSIX value. Before 0.19 the
+  factory silently negated the input — `from_errno_ext_ack(1, ..)`
+  produced stored `-1`, surfaced as a footgun in nlink-lab's
+  unit tests. The fix is purely additive for the kernel-side
+  call sites that always passed the kernel's signed-negative
+  errno; only direct test/mock callers asserting `Some(-N)`
+  break — update to `Some(N)`.
+
+### Fixed
+
+- **`Error::is_busy`, `is_already_exists`, `is_permission_denied`
+  catch `Error::Io` variants (Plan 187 §2.5)** — these three
+  predicates matched on `Self::Kernel*` variant directly,
+  missing the `Error::Io(io_err)` case carrying the same
+  errno via `raw_os_error()`. Same bug class as Plan 185's
+  `is_no_buffer_space` fix. Single-point fix: `Error::errno()`
+  now unwraps `Error::Io` via `raw_os_error()`, so every
+  predicate that goes through `errno()` inherits the right
+  shape. `is_busy` and `is_try_again` are used by
+  `NftablesConfig::apply_reconcile` retry classification —
+  a raw `EBUSY`/`EAGAIN` from the socket layer no longer
+  bypasses the retry budget. Plan 185's defensive branch in
+  `is_no_buffer_space` is now redundant and removed. New
+  `predicate_io_shape_sweep` test pins the contract for 10
+  predicates; future additions inherit it.
+
 ### Added
 
 - **Parser robustness policy + CI gate (Plan 193 — Phase 1)** —
