@@ -78,6 +78,34 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`RouteMessage::multipath()` accessor + `ParsedNextHop`
+  + `RTA_MULTIPATH` parser (Plan 202)** — closes a gap
+  surfaced by Plan 193 §2.2's audit: nlink could WRITE
+  multipath routes (`write_multipath_v4` / `_v6`) but
+  didn't PARSE them back. Multipath routes round-tripped
+  through `Connection<Route>::get_routes()` lost their
+  nexthop list. The drift-detection consequence: any
+  `NetworkConfig` carrying a multipath route would see
+  "kernel has no nexthops; config wants 2" forever, even
+  though the kernel ACK'd the write.
+  Adds:
+  - `parse_multipath(data, family)` walker — defensive
+    guards per Plan 193 §2.2 + CLAUDE.md §"Parser
+    robustness" rule 2 (rtnh_len < HDRLEN aborts;
+    rtnh_len > remaining bytes aborts; rtnh_len == 0
+    aborts; `offset.max(HDRLEN)` advance prevents stall).
+  - `ParsedNextHop` struct: `ifindex` + `weight` (1-based,
+    matching `ip route` + imperative `NextHop::weight`) +
+    `flags` + `gateway: Option<IpAddr>`.
+  - `RouteMessage::multipath()` accessor returning
+    `Option<&[ParsedNextHop]>`.
+  - `RTA_MULTIPATH = 9` const in attr_ids.
+  6 unit tests pin the contract: normal walk, empty
+  buffer, zero-length rtnh, undersized rtnh header,
+  truncated chain, garbage nested attrs. The zero-
+  length + truncated tests guard against the
+  netlink-packet-route #152 infinite-loop shape.
+
 - **Concurrent-stress regression tests (Plan 194)** —
   two new root-gated integration tests preempting
   bug-shapes the `rtnetlink` Rust crate hit recently:
