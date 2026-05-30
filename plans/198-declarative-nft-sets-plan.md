@@ -138,6 +138,58 @@ impl DeclaredSetBuilder {
 }
 ```
 
+### 2.2b `FromIterator` for ergonomic batch construction (idiom-pass addition)
+
+Real-world use case: a blocklist comes from a feed (file,
+database, REST API) as a `Vec<IpAddr>`. Let consumers
+collect directly into a `DeclaredSet`:
+
+```rust
+impl FromIterator<SetElement> for DeclaredSet { ... }
+
+impl FromIterator<IpAddr> for DeclaredSet {
+    /// Build a `Ipv{4,6}Addr`-typed set from an iterator of
+    /// addresses. Auto-detects v4 vs v6 from the first
+    /// element; mixed iterators panic at construction time
+    /// (mixed-family sets are not modeled).
+    fn from_iter<I: IntoIterator<Item = IpAddr>>(it: I) -> Self;
+}
+```
+
+Lets:
+
+```rust
+let blocked: DeclaredSet = std::fs::read_to_string("blocklist.txt")?
+    .lines()
+    .map(|s| s.parse::<IpAddr>())
+    .collect::<Result<Vec<_>, _>>()?
+    .into_iter()
+    .collect();
+```
+
+### 2.2c `SetElement::ipv4(addr)` ergonomic constructors (idiom-pass addition)
+
+The research agent's API uses `SetElement::ipv4(addr)`,
+`SetElement::ipv6(addr)`, etc. Each is a one-line const fn.
+Add the full set:
+
+```rust
+impl SetElement {
+    pub const fn ipv4(addr: Ipv4Addr) -> Self;
+    pub const fn ipv6(addr: Ipv6Addr) -> Self;
+    pub const fn ether(mac: [u8; 6]) -> Self;
+    pub fn inet_service(port: u16) -> Self;
+    pub fn inet_proto(proto: u8) -> Self;
+    pub fn mark(mark: u32) -> Self;
+
+    pub fn ipv4_range(net: Ipv4Net) -> Self;     // for interval sets
+    pub fn ipv6_range(net: Ipv6Net) -> Self;
+}
+```
+
+`From<Ipv4Addr> for SetElement` + symmetric impls so consumers
+can `addr.into()` interchangeably.
+
 ### 2.3 Diff integration in `NftablesConfig`
 
 ```rust

@@ -74,12 +74,27 @@ families (196-199 from the "everything in 0.19" directive).
 | **[196](196-declarative-wireguard-plan.md)** (**NEW**) | Declarative `WireguardConfig` — diff + apply + `wg syncconf` semantics + `LinkBuilder::wireguard` | ~14 h | 11 | ⚪ | **Headline #2**. First Rust crate to ship NetworkConfig-style WG reconciliation. |
 | **[197](197-declarative-ovpn-plan.md)** (**NEW**) | ovpn GENL family — imperative + declarative `OvpnConfig` (kernel 6.16+) | ~17.5 h | 12 | ⚪ | New protocol family. First Rust coverage of ovpn declarative. |
 | **[198](198-declarative-nft-sets-plan.md)** (**NEW**) | Declarative nftables sets — `DeclaredTableBuilder::set` with element diff + concat keys + vmaps | ~11 h | 13 | ⚪ | Closes the last declarative-nftables gap. |
-| **[199](199-wireguard-monitor-plan.md)** (**NEW**) | `Connection<Wireguard>::subscribe` + `WireguardEvent` + `into_events_with_resync` — third member of the watcher trinity | ~10 h | 14 | ⚪ | Composes on Plan 196 + Plan 195. |
+| **[199](199-wireguard-monitor-plan.md)** | `Connection<Wireguard>::subscribe` + `WireguardEvent` + `into_events_with_resync` — third member of the watcher trinity | ~10 h | 14 | ⚪ | Composes on Plan 196 + Plan 195. |
+| **[200](200-high-level-facade-api-plan.md)** (**NEW** — Rust-idiomaticity audit) | `nlink::{apply,diff,watch}` modules + `nlink::Stack` unified declarative bundle + `nlink::watch::namespace` multi-protocol watcher | ~12.5 h | 15 | ⚪ | **Newcomer experience headline.** One-line entry points; Stack closes the loop on nlink-lab's TopologyDiff envelope. |
+| **[201](201-rust-idiom-polish-plan.md)** (**NEW** — Rust-idiomaticity audit) | Polish sweep — `#[must_use]`, `From`/`Into`, `Display`, `#[inline]`, `const fn`, iterator combinators + 3 audit CI gates | ~7 h | 16 | ⚪ | Pins conventions; future contributors inherit. |
 
-Total estimated focused-work: **~140-155 h** (was ~63-77 h).
-The "everything in 0.19" directive roughly doubled the cycle
-scope. Three new declarative GENL families + WG monitor +
-in-scope expansion of all defensive plans.
+Total estimated focused-work: **~160-175 h** (was ~140-155 h).
+Plans 200 + 201 add the one-line user-facing entry points +
+the convention pins.
+
+**Per-plan idiom additions during the audit:**
+- **187** — gained `Error::root_cause()`, `Error::contexts()`,
+  named `ChainWalk` iterator (vs anonymous `impl Iterator`)
+- **191** — gained `Connection<Route>::watch(factory)`
+  one-call shortcut; equivalent on Nftables + Wireguard
+- **195** — `Store<K>` switched from `RwLock<HashMap>` to
+  `DashMap` (lock-free per-key, no across-await footgun)
+- **196** — gained `PublicKey` newtype with `FromStr`/`Display`
+  (base64) + `WireguardConfig::client(...)` quick-start +
+  `WireguardConfig::from_wg_config(&str)` parser
+- **198** — gained `FromIterator<IpAddr> for DeclaredSet` +
+  `SetElement::{ipv4,ipv6,ether,inet_service,...}` const
+  constructors
 
 ## Cross-plan dependencies + ordering rationale
 
@@ -128,6 +143,12 @@ in-scope expansion of all defensive plans.
     Plan 190's LinkBuilder::ovpn.
 13. **199 (WireGuard monitor)** — composes on 196 + 195.
 14. **192 (docs + universal tracing audit)** — closes cycle.
+15. **200 (facade APIs)** — lands LAST among feature plans.
+    Depends on every declarative + watcher plan above shipping
+    so the facades have something to wrap. Headline "newcomer
+    one-liner" win.
+16. **201 (Rust idiom polish)** — final sweep. Pins the
+    conventions across everything that landed.
 
 ## Wishlist items NOT scoped this cycle
 

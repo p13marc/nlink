@@ -386,16 +386,25 @@ user-supplied key function. Consumers query the store for
 "what's the current state?" without re-dumping. This is the
 foundation for the next tier of declarative tooling.
 
+Implementation note (idiom-pass): use **`Arc<DashMap<K, T>>`**
+internally rather than `Arc<RwLock<HashMap<K, T>>>` — DashMap
+is lock-free per-shard and matches the read-heavy access
+pattern (consumers query individual keys frequently).
+Eliminates the "holding a guard across await" footgun.
+
 ```rust
 // crates/nlink/src/netlink/resync_ext.rs
 
 /// A reflected view of a resync stream's current state.
 /// Indexed by a user-supplied key function; updated by the
 /// background stream consumer.
+///
+/// Internal storage is `Arc<DashMap<K, T>>` — lock-free
+/// per-key. Cheap to clone; safe to hand to many readers.
 pub struct Store<K, T>
 where K: Hash + Eq, T: Clone,
 {
-    inner: Arc<RwLock<HashMap<K, T>>>,
+    inner: Arc<dashmap::DashMap<K, T>>,
 }
 
 impl<K, T> Store<K, T> {

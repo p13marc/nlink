@@ -216,6 +216,38 @@ pub async fn rtnetlink_snapshot(conn: &Connection<Route>)
 }
 ```
 
+### 2.5b `Connection<Route>::watch(factory)` — single-call high-level convenience (idiom-pass addition)
+
+Mirrors how kube-rs ships `kube::runtime::watcher(api, cfg)`
+as the single-call user-facing entry point alongside the
+multi-step `Api::watch(...)` low-level path. Add:
+
+```rust
+impl Connection<Route> {
+    /// One-call shortcut: subscribe to all + return the
+    /// resync-aware event stream. Equivalent to:
+    ///
+    /// ```ignore
+    /// let mut conn = Connection::<Route>::new()?;
+    /// conn.subscribe_all()?;
+    /// conn.into_events_with_resync(factory)
+    /// ```
+    ///
+    /// The most common entry point for "I want to watch
+    /// everything in this namespace and not care about
+    /// ENOBUFS"; promotes the typed surface to a true one-liner.
+    pub fn watch(self, factory: ConnectionFactory<Route>)
+        -> Result<OwnedResyncStream>;
+}
+```
+
+Plan 200's `nlink::watch::route_changes()` builds on this.
+Equivalent shortcut on `Connection<Nftables>` and
+`Connection<Wireguard>` should follow as part of the same
+idiom-pass — note in the migration guide that
+`into_events_with_resync` stays as the lower-level fully-
+configurable path; `watch` is the convenience.
+
 ### 2.6 `Connection<Route>::into_events_with_resync` + `subscribe_all_with_resync`
 
 Mirror of Plan 185's nftables shape — uses the generic

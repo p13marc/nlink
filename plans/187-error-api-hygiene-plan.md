@@ -110,7 +110,49 @@ behavior was the bug) continues to work; code that relied on
 breakage is the unit-test idiom where the tester observed and
 asserted `Some(-1)`. Migration guide will note this.
 
-### 2.2 `Error::chain_walk` helper (Item #4 / W-side)
+### 2.2 `Error::chain_walk` helper + `root_cause` + `contexts` (Item #4 / W-side; idiom-pass additions)
+
+Three accessors, not just one. `chain_walk` is the iterator
+primitive; `root_cause` and `contexts` are the convenience
+shortcuts ~every consumer reaches for:
+
+```rust
+impl Error {
+    /// Iterator over every `&nlink::Error` in the source chain.
+    pub fn chain_walk<E>(err: &E) -> ChainWalk<'_>
+    where E: std::error::Error + 'static + ?Sized;
+
+    /// The deepest `nlink::Error` in the chain — typically
+    /// the kernel error at the bottom of a wrapper stack.
+    /// Returns `self` if the chain is just this one error.
+    #[inline]
+    pub fn root_cause(&self) -> &Error {
+        Self::chain_walk(self).last().unwrap_or(self)
+    }
+
+    /// All `nlink::Error` layers as a `Vec` (cheap clone of
+    /// the iterator). Useful for serialization or rendering
+    /// every layer of context.
+    pub fn contexts(&self) -> Vec<&Error> {
+        Self::chain_walk(self).collect()
+    }
+}
+
+// Public named iterator type (not anonymous `impl Iterator`)
+// so consumers can name it in function signatures, type
+// aliases, etc.
+pub struct ChainWalk<'a> { ... }
+
+impl<'a> Iterator for ChainWalk<'a> {
+    type Item = &'a Error;
+    fn next(&mut self) -> Option<Self::Item> { ... }
+}
+```
+
+Naming the iterator instead of returning `impl Iterator` is
+the more Rust-idiomatic choice — `tokio_stream::StreamExt` /
+`futures::StreamExt` / `serde_json::Map::iter` all expose
+named types.
 
 ```rust
 // crates/nlink/src/netlink/error.rs

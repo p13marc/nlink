@@ -177,6 +177,86 @@ impl WireguardConfig {
 }
 ```
 
+### 2.3b `PublicKey` newtype + parser (idiom-pass addition)
+
+The research agent's API sketch uses `[u8; 32]` for keys.
+For the public surface use a `PublicKey` newtype with
+`FromStr` (base64 — matching the `wg(8)` config format) +
+`Display` impl + `From<[u8; 32]>` + `AsRef<[u8]>`:
+
+```rust
+/// A WireGuard public key (32-byte Curve25519 point).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PublicKey([u8; 32]);
+
+impl PublicKey {
+    #[inline] pub const fn from_bytes(b: [u8; 32]) -> Self { Self(b) }
+    #[inline] pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
+}
+
+impl From<[u8; 32]> for PublicKey { ... }
+impl FromStr for PublicKey {
+    type Err = WgKeyParseError;
+    /// Parse a base64-encoded 32-byte key, matching the
+    /// canonical `wg(8)` config format.
+    fn from_str(s: &str) -> Result<Self, Self::Err> { ... }
+}
+impl std::fmt::Display for PublicKey {
+    /// Emit the canonical base64 form, matching what `wg(8)`
+    /// writes.
+    fn fmt(...) { ... }
+}
+```
+
+Same newtype + impls for `PresharedKey` (also `[u8; 32]`).
+
+### 2.3c `WireguardConfig::client(remote, our_key)` shortcut (idiom-pass addition)
+
+The common "client connecting to one server" case is verbose
+in the typed API. Add a one-call shortcut for it:
+
+```rust
+impl WireguardConfig {
+    /// Quick-start constructor for the single-peer client case.
+    /// Equivalent to building a config with one peer + the
+    /// `wg-quick`-style defaults.
+    pub fn client(
+        ifname: impl Into<String>,
+        our_private_key: [u8; 32],
+        server_pubkey: PublicKey,
+        server_endpoint: SocketAddr,
+        allowed_ips: impl IntoIterator<Item = IpNet>,
+    ) -> Self;
+}
+```
+
+Reads as a single declarative call. Most newcomers' first
+WG config is this shape. Mirrors `RouteBuilder::default_v4`
+in spirit.
+
+### 2.3d `WireguardConfig::from_wg_config(&str)` parser (idiom-pass addition)
+
+The `wg(8)` config file format is widely used; parsing it
+into a `WireguardConfig` gives consumers a migration path
+from existing `wg-quick` setups:
+
+```rust
+impl WireguardConfig {
+    /// Parse a `wg(8)`-format config file. Mirrors what
+    /// `wg setconf <file>` would accept.
+    ///
+    /// ```ignore
+    /// let raw = std::fs::read_to_string("/etc/wireguard/wg0.conf")?;
+    /// let cfg = WireguardConfig::from_wg_config(&raw)?;
+    /// cfg.apply(&conn).await?;
+    /// ```
+    pub fn from_wg_config(s: &str) -> Result<Self, WgConfigParseError>;
+}
+```
+
+~80 LOC for an INI-style parser. Closes the loop with the
+existing `wg-quick` ecosystem.
+
 ### 2.4 `Display` for `WireguardDiff`
 
 Same shape as `NftablesDiff::Display` (Plan 183) — wraps
