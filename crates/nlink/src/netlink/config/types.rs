@@ -187,8 +187,20 @@ pub enum DeclaredLinkType {
         /// (802.1Q). Use [`VlanProtocol::Dot1ad`] for Q-in-Q.
         protocol: Option<VlanProtocol>,
     },
-    /// VXLAN interface.
-    Vxlan { vni: u32, remote: Option<IpAddr> },
+    /// VXLAN interface. Plan 190 §2.1 added `local`/`port`/`underlay_dev`.
+    Vxlan {
+        vni: u32,
+        remote: Option<IpAddr>,
+        /// Tunnel source IP (`IFLA_VXLAN_LOCAL` /
+        /// `IFLA_VXLAN_LOCAL6`). IPv4 only at the imperative
+        /// layer today — IPv6 source addresses ignored.
+        local: Option<IpAddr>,
+        /// UDP encap port (`IFLA_VXLAN_PORT`, default 4789).
+        port: Option<u16>,
+        /// Underlay parent device by name
+        /// (`IFLA_VXLAN_LINK`).
+        underlay_dev: Option<String>,
+    },
     /// Macvlan interface.
     Macvlan { parent: String, mode: MacvlanMode },
     /// Bond interface.
@@ -344,17 +356,53 @@ impl LinkBuilder {
 
     /// Create a VXLAN interface with the given VNI.
     pub fn vxlan(mut self, vni: u32) -> Self {
-        self.link_type = DeclaredLinkType::Vxlan { vni, remote: None };
+        self.link_type = DeclaredLinkType::Vxlan {
+            vni,
+            remote: None,
+            local: None,
+            port: None,
+            underlay_dev: None,
+        };
         self
     }
 
-    /// Set the VXLAN remote endpoint.
-    pub fn vxlan_remote(mut self, remote: IpAddr) -> Self {
-        if let DeclaredLinkType::Vxlan { vni, .. } = self.link_type {
-            self.link_type = DeclaredLinkType::Vxlan {
-                vni,
-                remote: Some(remote),
-            };
+    /// Set the VXLAN remote endpoint. No-op if the builder
+    /// isn't a VXLAN.
+    pub fn vxlan_remote(mut self, remote_addr: IpAddr) -> Self {
+        if let DeclaredLinkType::Vxlan { remote, .. } = &mut self.link_type {
+            *remote = Some(remote_addr);
+        }
+        self
+    }
+
+    /// Set the VXLAN tunnel source IP (`IFLA_VXLAN_LOCAL`).
+    /// The local address must be configured on the underlay
+    /// interface — the kernel rejects mismatches.
+    /// Plan 190 §2.1.
+    pub fn vxlan_local(mut self, local_addr: IpAddr) -> Self {
+        if let DeclaredLinkType::Vxlan { local, .. } = &mut self.link_type {
+            *local = Some(local_addr);
+        }
+        self
+    }
+
+    /// Set the VXLAN UDP encap port (`IFLA_VXLAN_PORT`,
+    /// default 4789). Plan 190 §2.1.
+    pub fn vxlan_port(mut self, udp_port: u16) -> Self {
+        if let DeclaredLinkType::Vxlan { port, .. } = &mut self.link_type {
+            *port = Some(udp_port);
+        }
+        self
+    }
+
+    /// Set the VXLAN underlay parent device name
+    /// (`IFLA_VXLAN_LINK`). Plan 190 §2.1.
+    pub fn vxlan_underlay_dev(mut self, dev: impl Into<String>) -> Self {
+        if let DeclaredLinkType::Vxlan {
+            underlay_dev, ..
+        } = &mut self.link_type
+        {
+            *underlay_dev = Some(dev.into());
         }
         self
     }
@@ -1056,6 +1104,73 @@ mod plan_190_tests {
         let lt = DeclaredLinkType::Vrf { table: 7 };
         assert_eq!(lt.kind(), Some("vrf"));
     }
+
+    // -------- Plan 190 §2.1 — VXLAN extras --------
+
+    #[test]
+    fn vxlan_builder_defaults_to_none_for_new_knobs() {
+        let link = LinkBuilder::new("vx0").vxlan(42).build();
+        match link.link_type {
+            DeclaredLinkType::Vxlan {
+                vni,
+                remote,
+                local,
+                port,
+                underlay_dev,
+            } => {
+                assert_eq!(vni, 42);
+                assert!(remote.is_none());
+                assert!(local.is_none());
+                assert!(port.is_none());
+                assert!(underlay_dev.is_none());
+            }
+            other => panic!("expected Vxlan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vxlan_builder_local_port_underlay_round_trip() {
+        use std::net::Ipv4Addr;
+        let link = LinkBuilder::new("vx0")
+            .vxlan(100)
+            .vxlan_remote(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+            .vxlan_local(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+            .vxlan_port(4790)
+            .vxlan_underlay_dev("eth0")
+            .build();
+        match link.link_type {
+            DeclaredLinkType::Vxlan {
+                vni,
+                remote,
+                local,
+                port,
+                underlay_dev,
+            } => {
+                assert_eq!(vni, 100);
+                assert_eq!(remote, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+                assert_eq!(local, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+                assert_eq!(port, Some(4790));
+                assert_eq!(underlay_dev.as_deref(), Some("eth0"));
+            }
+            other => panic!("expected Vxlan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vxlan_setters_no_op_on_non_vxlan() {
+        // Each new setter must early-return if the builder
+        // isn't a VXLAN — same shape as vlan_protocol.
+        use std::net::Ipv4Addr;
+        let link = LinkBuilder::new("eth0")
+            .dummy()
+            .vxlan_local(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)))
+            .vxlan_port(4790)
+            .vxlan_underlay_dev("ignored")
+            .build();
+        assert!(matches!(link.link_type, DeclaredLinkType::Dummy));
+    }
+
+    // -------- end Plan 190 §2.1 --------
 
     // -------- Plan 190 §2.2 — VLAN protocol --------
 

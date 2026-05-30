@@ -534,10 +534,30 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             }
             conn.add_link(config).await?;
         }
-        DeclaredLinkType::Vxlan { vni, remote } => {
+        DeclaredLinkType::Vxlan {
+            vni,
+            remote,
+            local,
+            port,
+            underlay_dev,
+        } => {
             let mut config = VxlanLink::new(&link.name, *vni);
             if let Some(IpAddr::V4(remote_v4)) = remote {
                 config = config.remote(*remote_v4);
+            }
+            // Plan 190 §2.1 — local/port/underlay are v4-only
+            // at the imperative VxlanLink layer today (IPv6
+            // tunnel source not yet plumbed); IPv6 local
+            // values are silently dropped, matching the
+            // existing IPv4-only `remote` handling.
+            if let Some(IpAddr::V4(local_v4)) = local {
+                config = config.local(*local_v4);
+            }
+            if let Some(p) = port {
+                config = config.port(*p);
+            }
+            if let Some(dev) = underlay_dev {
+                config = config.dev(dev);
             }
             conn.add_link(config).await?;
         }

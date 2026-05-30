@@ -77,6 +77,26 @@ All notable changes to this project will be documented in this file.
   RouteBuilder::default_v4().via("192.0.2.1")
   ```
 
+- **`LinkBuilder::vxlan_local` / `vxlan_port` /
+  `vxlan_underlay_dev` (Plan 190 §2.1)** — declarative-path
+  coverage for the three VXLAN knobs nlink-lab §10 flagged.
+  `DeclaredLinkType::Vxlan` grew `local: Option<IpAddr>`,
+  `port: Option<u16>`, `underlay_dev: Option<String>`. The
+  imperative VxlanLink already exposes `.local(Ipv4Addr)` /
+  `.port(u16)` / `.dev(name)`; the apply-path arm forwards
+  all three (IPv6 `local` values silently dropped today —
+  the imperative layer is IPv4-only for tunnel-source IPs,
+  matching the existing `remote` handling). 3 new unit
+  tests + 1 root-gated integration test reproducing the
+  nlink-lab 158e Slice 4 case. Note: idempotent re-apply
+  coverage (Plan 190 §2.1 ¶"Idempotence implication") is
+  deferred — VXLAN `compute_diff` parity against the
+  kernel's IFLA_VXLAN_* attribute dump would need an
+  IFLA_INFO_DATA parser; for now re-apply replays the
+  create. **Note**: `DeclaredLinkType::Vxlan` widening
+  (already `#[non_exhaustive]`) requires `..` rest-pattern
+  in downstream matches.
+
 - **`LinkBuilder::vlan_protocol(p)` + `VlanProtocol` enum
   (Plan 190 §2.2)** — declarative-path VLAN protocol selector.
   The imperative `VlanLink` gains a typed `.protocol(VlanProtocol)`

@@ -151,6 +151,55 @@ async fn vlan_parent_dummy_declared_in_either_order() -> Result<()> {
 }
 
 // -------------------------------------------------------------
+// Plan 190 §2.1 — VXLAN local/port/underlay.
+// -------------------------------------------------------------
+
+/// VXLAN with local/port/underlay_dev set via declarative
+/// path. Verifies the apply-path arm builds VxlanLink with
+/// all knobs forwarded.
+#[tokio::test]
+async fn vxlan_with_local_port_underlay_creates() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("vxlan");
+
+    with_timeout(async {
+        use std::net::{IpAddr, Ipv4Addr};
+        let ns = TestNamespace::new("vxlan-extras")?;
+        let conn = conn_in_ns(&ns)?;
+
+        // Need a dummy underlay parent with the address the
+        // VXLAN's local() will reference — the kernel
+        // rejects local IPs not configured on a local link.
+        use nlink::netlink::addr::Ipv4Address;
+        use nlink::netlink::link::DummyLink;
+        conn.add_link(DummyLink::new("eth0")).await?;
+        conn.set_link_up("eth0").await?;
+        conn.add_address(Ipv4Address::new("eth0", Ipv4Addr::new(10, 0, 0, 2), 24))
+            .await?;
+
+        let cfg = NetworkConfig::new().link("vx0", |b| {
+            b.vxlan(42)
+                .vxlan_remote(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)))
+                .vxlan_local(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+                .vxlan_port(4790)
+                .vxlan_underlay_dev("eth0")
+        });
+
+        let result = cfg.apply(&conn).await?;
+        assert_eq!(result.changes_made, 1, "VXLAN should be created");
+
+        let links = conn.get_links().await?;
+        assert!(
+            links.iter().any(|l| l.name() == Some("vx0")),
+            "vx0 must be in the dump"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+// -------------------------------------------------------------
 // Plan 190 §2.3 — VRF declarative path.
 // -------------------------------------------------------------
 
