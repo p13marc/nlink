@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Parser robustness policy + CI gate (Plan 193 — Phase 1)** —
+  CLAUDE.md gains a new §"Parser robustness" section
+  documenting the three defensive-parsing rules used across
+  the lib (accept-larger-than-expected on fixed-size structs,
+  pathological-length input guards on header-driven chain
+  walks, recoverable per-message parse failures in event
+  parsers). New `scripts/audit-recv-loop-error-handling.sh`
+  CI gate fails on a `?` operator inside a `MessageIter::new`
+  walking loop in `stream.rs`. Preempts the bug classes
+  tracked by netlink-packet-route #232, #152, and neli #305.
+  No consumer action required — the lib already follows the
+  rules; the policy + gate prevent future drift.
+
 ## [0.18.0] - 2026-05-29
 
 ### Added

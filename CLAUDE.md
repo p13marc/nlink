@@ -387,6 +387,57 @@ loop {
 Plan 172 enforces this template across all 9 recv-loops in the
 lib. The audit table is in Plan 172 §2.1.
 
+## Parser robustness
+
+Defensive parsing policy for any code that walks attribute
+chains or fixed-size structs out of kernel response bytes.
+Plan 193 (0.19) pinned the conventions; the audit scripts
+under `scripts/audit-recv-loop-error-handling.sh` enforce
+them.
+
+Three rules. Future parsers MUST follow all three.
+
+1. **Accept-larger-than-expected on fixed-size structs.**
+   Use `if buf.len() < EXPECTED_SIZE { error }`, NOT
+   `if buf.len() != EXPECTED_SIZE { error }`. The kernel
+   grows struct-typed attributes over time
+   (`IFLA_INET6_CONF` is the canonical example —
+   netlink-packet-route #232 tracked the bug class). Read
+   the prefix, ignore trailing bytes.
+
+2. **Pathological-length input guards on header-driven
+   loops.** Any chain walker that reads a length-field from
+   each entry header must:
+   - Validate `entry_len >= MIN_HEADER_SIZE` on entry; skip
+     remainder if not (prevents slice-index panic).
+   - Treat `entry_len == 0` as end-of-chain or skip-and-log;
+     never let `offset` fail to advance (prevents infinite
+     loop). The bug class tracks
+     netlink-packet-route #152.
+
+3. **Recoverable per-message parse failures.** Event
+   parsers (`impl EventSource for *`, `parse_*_event`
+   dispatchers) that walk `MessageIter::new(data)` MUST
+   silently skip parse errors rather than propagating via
+   `?`. Use:
+
+   ```rust
+   for (header, payload) in MessageIter::new(data).flatten() { ... }
+   // OR
+   for msg_result in MessageIter::new(data) {
+       let Ok((header, payload)) = msg_result else { continue };
+       ...
+   }
+   ```
+
+   One malformed frame from a future kernel MUST NOT kill a
+   long-lived multicast subscriber. Tracks neli #305.
+
+The `scripts/audit-recv-loop-error-handling.sh` CI gate
+greps for `?` operator inside `MessageIter` walking loops in
+event-parser contexts and fails on hits. New parsers
+inherit the policy.
+
 ## Observability
 
 Every Connection method, every netlink request/ack/dump cycle

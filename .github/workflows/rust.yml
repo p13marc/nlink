@@ -157,6 +157,19 @@ jobs:
       - name: Run scripts/audit-example-registration.sh
         run: bash scripts/audit-example-registration.sh
 
+  # Plan 193 §2.3 — parser robustness. Event parsers walking
+  # MessageIter::new(data) must silently skip malformed frames
+  # (per CLAUDE.md §"Parser robustness" §3) rather than aborting
+  # the whole batch via `?`. Future parser additions inherit
+  # this contract from the CI gate.
+  audit-recv-loop-error-handling:
+    name: audit recv-loop error handling (per-message skip in event parsers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scripts/audit-recv-loop-error-handling.sh
+        run: bash scripts/audit-recv-loop-error-handling.sh
+
   # Audit script: every `#[ignore]` in
   # `crates/nlink/tests/integration/` MUST be catalogued in
   # `crates/nlink/tests/integration/IGNORED.md`. Closes the gap
