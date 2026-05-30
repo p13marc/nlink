@@ -669,3 +669,106 @@ async fn nftables_snapshot_walks_ruleset() -> nlink::Result<()> {
     })
     .await
 }
+
+// ============================================================================
+// Rule::{dnat,snat}_v6 — kernel acceptance + exact wire round-trip
+// ============================================================================
+
+/// An `ip6` DNAT rule built with `Rule::dnat_v6` is accepted by the
+/// kernel *and* its dumped expression bytes match what nlink rendered.
+///
+/// The unit tests in `nftables::types` only assert the in-memory expr
+/// layout (R0 holds the address, the register is marked in use). They
+/// cannot prove the load-bearing claim `dnat_v6` makes about the wire
+/// format: that the kernel accepts `Family::Ip6` in the NAT expr with the
+/// 16-byte `R0` load. Routing the rule through the declarative diff path
+/// gives a far stronger assertion than "expression_bytes is non-empty":
+/// after applying, a second `diff` re-renders the declared rule to bytes
+/// and byte-compares (normalized) against the kernel's dump. An empty
+/// second diff means the kernel stored exactly the expr layout nlink
+/// emitted — a register-layout disagreement would either be rejected at
+/// apply (`EINVAL`) or surface as a non-empty re-diff.
+#[tokio::test]
+async fn dnat_v6_rule_round_trips() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_nat");
+
+    with_timeout(async {
+        use nlink::netlink::nftables::config::NftablesConfig;
+        use std::net::Ipv6Addr;
+
+        let ns = TestNamespace::new("dnat-v6")?;
+        let nft = nft_in_ns(&ns)?;
+
+        let target: Ipv6Addr = "fd30::2".parse().unwrap();
+        let cfg = NftablesConfig::new().table("nat6", Family::Ip6, |t| {
+            t.chain("prerouting", |c| {
+                c.hook(Hook::Prerouting)
+                    .priority(Priority::DstNat)
+                    .chain_type(ChainType::Nat)
+            })
+            .rule_keyed("prerouting", "dnat-v6", |r| {
+                r.match_tcp_dport(80).dnat_v6(target, Some(8080))
+            })
+        });
+
+        cfg.diff(&nft).await?.apply(&nft).await?;
+
+        let again = cfg.diff(&nft).await?;
+        assert!(
+            again.is_empty(),
+            "kernel must store exactly the dnat_v6 expr nlink rendered; \
+             re-diff was non-empty: {}",
+            again.summary()
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+/// The SNAT counterpart to [`dnat_v6_rule_round_trips`]. SNAT and DNAT are
+/// distinct kernel verdicts validated against different hooks, so a v6
+/// SNAT on a `postrouting`/`SrcNat` chain is a separate acceptance path
+/// from DNAT on prerouting — the structural unit test cannot stand in for
+/// it. Same diff-idempotency assertion: an empty second diff proves the
+/// kernel stored the exact `Family::Ip6` SNAT expr nlink emitted.
+#[tokio::test]
+async fn snat_v6_rule_round_trips() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_nat");
+
+    with_timeout(async {
+        use nlink::netlink::nftables::config::NftablesConfig;
+        use std::net::Ipv6Addr;
+
+        let ns = TestNamespace::new("snat-v6")?;
+        let nft = nft_in_ns(&ns)?;
+
+        let target: Ipv6Addr = "fd30::1".parse().unwrap();
+        let cfg = NftablesConfig::new().table("nat6", Family::Ip6, |t| {
+            t.chain("postrouting", |c| {
+                c.hook(Hook::Postrouting)
+                    .priority(Priority::SrcNat)
+                    .chain_type(ChainType::Nat)
+            })
+            .rule_keyed("postrouting", "snat-v6", |r| {
+                r.match_saddr_v6("fd30::100".parse().unwrap(), 128)
+                    .snat_v6(target, Some(8080))
+            })
+        });
+
+        cfg.diff(&nft).await?.apply(&nft).await?;
+
+        let again = cfg.diff(&nft).await?;
+        assert!(
+            again.is_empty(),
+            "kernel must store exactly the snat_v6 expr nlink rendered; \
+             re-diff was non-empty: {}",
+            again.summary()
+        );
+
+        Ok(())
+    })
+    .await
+}

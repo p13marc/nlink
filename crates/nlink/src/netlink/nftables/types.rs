@@ -302,13 +302,49 @@ pub enum NatType {
     Dnat = 1,
 }
 
+/// Whether (and how) a NAT expression's address register (`R0`) is in use.
+///
+/// The encoder emits `NFTA_NAT_REG_ADDR_MIN` for every variant except
+/// [`None`](Self::None). Modeling "register in use" and "the IPv4 address to
+/// record" as one enum makes the illegal `(addr recorded, register not in
+/// use)` state unrepresentable — a v6 NAT loads its 16-byte address into `R0`
+/// but has no `Ipv4Addr` to carry, which [`Reg`](Self::Reg) expresses directly.
+///
+/// Invariant: any variant other than `None` means an [`Expr::Immediate`]
+/// loading the address into `R0` **must** precede this expr in the rule.
+/// Constructing this without the matching load makes the encoder reference an
+/// empty register (`EINVAL` from the kernel). The `Rule::{snat,dnat,snat_v6,
+/// dnat_v6}` builders maintain this for you.
+///
+/// [`Expr::Immediate`]: super::expr::Expr::Immediate
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum NatAddr {
+    /// No address register; the NAT expr rewrites only the port (or nothing).
+    #[default]
+    None,
+    /// An IPv4 address loaded into `R0`. Recorded for a future dump/decode
+    /// path; no decoder currently reads it back.
+    V4(Ipv4Addr),
+    /// An address (e.g. IPv6) loaded into `R0` with no `Ipv4Addr` to record.
+    Reg,
+}
+
+impl NatAddr {
+    /// Whether `R0` holds an address — i.e. the encoder must emit
+    /// `NFTA_NAT_REG_ADDR_MIN`.
+    pub fn reg_in_use(&self) -> bool {
+        !matches!(self, NatAddr::None)
+    }
+}
+
 /// NAT expression data.
 #[derive(Debug, Clone)]
 pub struct NatExpr {
     pub nat_type: NatType,
     pub family: Family,
-    /// IPv4 address to NAT to (loaded into register before nat expr).
-    pub addr: Option<Ipv4Addr>,
+    /// The NAT destination address register state. See [`NatAddr`].
+    pub addr: NatAddr,
     /// Port to NAT to.
     pub port: Option<u16>,
 }
@@ -323,7 +359,7 @@ impl NatExpr {
         Self {
             nat_type: NatType::Snat,
             family,
-            addr: None,
+            addr: NatAddr::None,
             port: None,
         }
     }
@@ -337,14 +373,14 @@ impl NatExpr {
         Self {
             nat_type: NatType::Dnat,
             family,
-            addr: None,
+            addr: NatAddr::None,
             port: None,
         }
     }
 
     /// Set the NAT destination address.
     pub fn addr(mut self, addr: Ipv4Addr) -> Self {
-        self.addr = Some(addr);
+        self.addr = NatAddr::V4(addr);
         self
     }
 
@@ -893,15 +929,32 @@ impl Rule {
         self
     }
 
-    /// Source NAT to an address (and optional port).
-    pub fn snat(mut self, addr: Ipv4Addr, port: Option<u16>) -> Self {
+    /// Push a NAT expression preceded by the register loads it references.
+    ///
+    /// `addr_bytes` is the wire-form destination address (4 bytes for v4, 16
+    /// for v6); it is loaded into `R0`. `addr` is the matching [`NatAddr`]
+    /// recorded on the expr — any variant other than [`NatAddr::None`] makes
+    /// the encoder emit `NFTA_NAT_REG_ADDR_MIN` referencing that load. The
+    /// optional port is loaded into `R1`. Keeping the `R0` load and the
+    /// `NatAddr` in one place is what upholds the [`NatAddr`] invariant that a
+    /// register-in-use variant always has a real `R0` load preceding it.
+    fn push_nat(
+        &mut self,
+        nat_type: NatType,
+        family: Family,
+        addr_bytes: Vec<u8>,
+        addr: NatAddr,
+        port: Option<u16>,
+    ) {
         use super::expr::Expr;
-        // Load address into R0
+        debug_assert!(
+            addr.reg_in_use(),
+            "push_nat always loads R0; addr must be a register-in-use variant"
+        );
         self.exprs.push(Expr::Immediate {
             dreg: Register::R0,
-            data: addr.octets().to_vec(),
+            data: addr_bytes,
         });
-        // Load port into R1 if specified
         if let Some(p) = port {
             self.exprs.push(Expr::Immediate {
                 dreg: Register::R1,
@@ -909,35 +962,44 @@ impl Rule {
             });
         }
         self.exprs.push(Expr::Nat(NatExpr {
-            nat_type: NatType::Snat,
-            family: Family::Ip,
-            addr: Some(addr),
+            nat_type,
+            family,
+            addr,
             port,
         }));
+    }
+
+    /// Source NAT to an address (and optional port).
+    pub fn snat(mut self, addr: Ipv4Addr, port: Option<u16>) -> Self {
+        self.push_nat(NatType::Snat, Family::Ip, addr.octets().to_vec(), NatAddr::V4(addr), port);
         self
     }
 
     /// Destination NAT to an address (and optional port).
     pub fn dnat(mut self, addr: Ipv4Addr, port: Option<u16>) -> Self {
-        use super::expr::Expr;
-        // Load address into R0
-        self.exprs.push(Expr::Immediate {
-            dreg: Register::R0,
-            data: addr.octets().to_vec(),
-        });
-        // Load port into R1 if specified
-        if let Some(p) = port {
-            self.exprs.push(Expr::Immediate {
-                dreg: Register::R1,
-                data: p.to_be_bytes().to_vec(),
-            });
-        }
-        self.exprs.push(Expr::Nat(NatExpr {
-            nat_type: NatType::Dnat,
-            family: Family::Ip,
-            addr: Some(addr),
-            port,
-        }));
+        self.push_nat(NatType::Dnat, Family::Ip, addr.octets().to_vec(), NatAddr::V4(addr), port);
+        self
+    }
+
+    /// Source NAT to an IPv6 address (and optional port).
+    ///
+    /// Use on an `ip6` (or `inet`) NAT chain. The NAT expr's family must match
+    /// the address family, so this emits `Family::Ip6` (not the chain's
+    /// `Family::Inet`). The 16-byte address is loaded into `R0`; the optional
+    /// port into `R1`.
+    pub fn snat_v6(mut self, addr: Ipv6Addr, port: Option<u16>) -> Self {
+        self.push_nat(NatType::Snat, Family::Ip6, addr.octets().to_vec(), NatAddr::Reg, port);
+        self
+    }
+
+    /// Destination NAT to an IPv6 address (and optional port).
+    ///
+    /// Use on an `ip6` (or `inet`) NAT chain. The NAT expr's family must match
+    /// the address family, so this emits `Family::Ip6` (not the chain's
+    /// `Family::Inet`). The 16-byte address is loaded into `R0`; the optional
+    /// port into `R1`.
+    pub fn dnat_v6(mut self, addr: Ipv6Addr, port: Option<u16>) -> Self {
+        self.push_nat(NatType::Dnat, Family::Ip6, addr.octets().to_vec(), NatAddr::Reg, port);
         self
     }
 
@@ -1485,7 +1547,89 @@ mod tests {
         let nat = find_nat_expr(&rule).expect("should have NAT expr");
         assert_eq!(nat.family, Family::Ip);
         assert_eq!(nat.port, Some(1024));
-        assert_eq!(nat.addr, Some("192.168.1.1".parse().unwrap()));
+        assert_eq!(nat.addr, NatAddr::V4("192.168.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn dnat_v6_loads_address_and_marks_register() {
+        let target: Ipv6Addr = "fd30::2".parse().unwrap();
+        let rule = Rule::new("t", "c")
+            .family(Family::Ip6)
+            .match_daddr_v6(Ipv6Addr::LOCALHOST, 128)
+            .match_tcp_dport(80)
+            .dnat_v6(target, None);
+
+        // The 16-byte target address is loaded into R0 immediately before the
+        // NAT expr (after the match exprs).
+        let imm_r0: Vec<&Vec<u8>> = rule
+            .exprs
+            .iter()
+            .filter_map(|e| match e {
+                super::super::expr::Expr::Immediate {
+                    dreg: Register::R0,
+                    data,
+                } => Some(data),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            imm_r0.iter().any(|d| d.as_slice() == target.octets()),
+            "expected a 16-byte Immediate of the target address into R0"
+        );
+
+        let nat = find_nat_expr(&rule).expect("should have NAT expr");
+        assert_eq!(nat.nat_type, NatType::Dnat);
+        assert_eq!(nat.family, Family::Ip6);
+        assert_eq!(nat.addr, NatAddr::Reg, "v6 NAT marks the register, carries no Ipv4Addr");
+        assert!(nat.addr.reg_in_use(), "address register must be marked in use");
+        assert_eq!(nat.port, None);
+    }
+
+    #[test]
+    fn dnat_v6_with_port_loads_proto_register() {
+        let target: Ipv6Addr = "fd30::2".parse().unwrap();
+        let rule = Rule::new("t", "c")
+            .family(Family::Ip6)
+            .dnat_v6(target, Some(8080));
+        let nat = find_nat_expr(&rule).expect("should have NAT expr");
+        assert_eq!(nat.addr, NatAddr::Reg);
+        assert_eq!(nat.port, Some(8080));
+        // Port loaded into R1.
+        let imm_r1 = rule.exprs.iter().any(|e| {
+            matches!(
+                e,
+                super::super::expr::Expr::Immediate {
+                    dreg: Register::R1,
+                    data,
+                } if data.as_slice() == 8080u16.to_be_bytes()
+            )
+        });
+        assert!(imm_r1, "expected port loaded into R1");
+    }
+
+    #[test]
+    fn snat_v6_loads_address_and_marks_register() {
+        let target: Ipv6Addr = "fd30::1".parse().unwrap();
+        let rule = Rule::new("t", "c")
+            .family(Family::Ip6)
+            .snat_v6(target, None);
+
+        let imm_r0 = rule.exprs.iter().any(|e| {
+            matches!(
+                e,
+                super::super::expr::Expr::Immediate {
+                    dreg: Register::R0,
+                    data,
+                } if data.as_slice() == target.octets()
+            )
+        });
+        assert!(imm_r0, "expected a 16-byte Immediate of the target into R0");
+
+        let nat = find_nat_expr(&rule).expect("should have NAT expr");
+        assert_eq!(nat.nat_type, NatType::Snat);
+        assert_eq!(nat.family, Family::Ip6);
+        assert_eq!(nat.addr, NatAddr::Reg, "v6 NAT marks the register, carries no Ipv4Addr");
+        assert!(nat.addr.reg_in_use(), "address register must be marked in use");
     }
 
     // ------------------------------------------------------------

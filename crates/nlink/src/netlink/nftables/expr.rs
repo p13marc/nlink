@@ -160,7 +160,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
                 nat.family
             );
             builder.append_attr_u32_be(NFTA_NAT_FAMILY, nat.family as u32);
-            if nat.addr.is_some() {
+            if nat.addr.reg_in_use() {
                 builder.append_attr_u32_be(NFTA_NAT_REG_ADDR_MIN, Register::R0 as u32);
             }
             if nat.port.is_some() {

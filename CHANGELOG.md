@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`Rule::dnat_v6(Ipv6Addr, Option<u16>)`** — destination NAT to an
+  IPv6 address on an `ip6` (or `inet`) NAT chain. The IPv4-only
+  `Rule::dnat` could not express the cross-node join path's ip6 DNAT.
+  Loads the 16-byte address into `R0` (and the optional port into
+  `R1`), emitting `Family::Ip6` in the NAT expr to match the address
+  family (not the chain's `Family::Inet`).
+- **`Rule::snat_v6(Ipv6Addr, Option<u16>)`** — source NAT to an IPv6
+  address, the counterpart to `dnat_v6`. Same wire shape (16-byte `R0`
+  load, optional `R1` port, `Family::Ip6`); keeps the NAT helper surface
+  symmetric across direction and address family.
+
+### Changed
+
+- **`NatExpr.addr` changed type from `Option<Ipv4Addr>` to the new
+  `NatAddr` enum** (`None` / `V4(Ipv4Addr)` / `Reg`). Previously the
+  encoder emitted `NFTA_NAT_REG_ADDR_MIN` only when `addr.is_some()`, so
+  a v6 NAT (16-byte address in `R0`, no `Ipv4Addr` to record) silently
+  dropped the address register. `NatAddr` models "register in use" and
+  "the IPv4 address to record" as one value, so the illegal
+  `(addr recorded, register unused)` state is unrepresentable: `Reg`
+  covers v6 (and any non-v4 register load), `V4` covers v4, `None`
+  covers port-only NAT. The encoder keys on `addr.reg_in_use()`.
+  **Breaking** for code constructing `NatExpr` as a struct literal or
+  matching on `addr`: use the `NatAddr` variants. The
+  `NatExpr::{snat,dnat}` + `.addr()` and `Rule::{snat,dnat,snat_v6,
+  dnat_v6}` builders are unaffected.
+
 ## [0.18.0] - 2026-05-29
 
 ### Added
