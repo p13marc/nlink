@@ -11,6 +11,41 @@ created: 2026-05-30 (expanded same day during consolidation pass)
 
 # Plan 187 — `Error` API hygiene
 
+## 0. Implementation findings (2026-05-30)
+
+Plan 187 shipped in two commits (`83c417c` + `750cb64`). Both
+phases caught real bugs:
+
+**Phase 1 (sign normalization + predicate Io-shape sweep):**
+the sweep test caught **three real bugs** in `is_busy`,
+`is_already_exists`, `is_permission_denied`. These three
+predicates matched on `Self::Kernel*` variant directly with
+hard-coded errno literals (`*errno == 16` for EBUSY etc.)
+instead of going through `errno()`. Result: `Error::Io(EBUSY)`
+returned `false` from `is_busy`. Since `is_busy` +
+`is_try_again` drive `NftablesConfig::apply_reconcile` retry
+classification, raw EBUSY/EAGAIN from the socket layer was
+silently bypassing the retry budget — silent under-retrying
+on contended workloads.
+
+The single-point fix in `Error::errno()` (unwrap `Error::Io`
+via `raw_os_error()`) cascaded to all 10 `is_*` predicates
+that went through `errno()`. Three predicates were
+re-implemented to go through `errno()` and inherit the fix.
+The Plan 185 defensive branch in `is_no_buffer_space` is now
+redundant and was removed.
+
+**Phase 2 (chain_walk + root_cause + contexts):** the named
+`ChainWalk` iterator (instead of anonymous `impl Iterator`)
+required a lifetime-annotated function signature — kept the
+public API name-able. 6 tests covering inline source, boxed
+source, non-nlink chain, root_cause, contexts, and single-
+layer fallback.
+
+Cycle test count: 980 → 986 → 986 (phase 1's net add was
+zero — the predicate sweep replaced 3 prior is_* tests' value
+with one shared assertion helper covering 30+ assertions).
+
 ## 1. Why this plan exists
 
 Three distinct footguns from the 158b `Error::ext_ack` work +

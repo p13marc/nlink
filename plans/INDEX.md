@@ -62,13 +62,13 @@ families (196-199 from the "everything in 0.19" directive).
 | Plan | Title | Effort | Order | Status | Notes |
 |------|-------|--------|-------|--------|-------|
 | [186](186-vlan-parent-resolution-race-plan.md) | VLAN parent ifindex race — investigation-first + topo-sort + ordering docstring | ~4-12 h | 1 | ⚪ | **HIGH** correctness. Investigation phase = integration repro. |
-| [187](187-error-api-hygiene-plan.md) | `Error` API hygiene — sign normalization + `chain_walk` + Io-shape sweep across all predicates | ~5 h | 2 | ⚪ | Medium footgun bundle. Single-point fix cascades to ~12 predicates. |
-| [188](188-declarative-apply-parity-plan.md) | Declarative apply parity — `ConfigDiff::apply`, builders, `apply_reconcile`, `default_v{4,6}`, idempotent del_*, deprecate `summary()` | ~6.5 h | 3 | ⚪ | Low-priority ergonomic bundle. |
+| [187](187-error-api-hygiene-plan.md) | `Error` API hygiene — sign normalization + `chain_walk` + Io-shape sweep across all predicates | ~5 h | 2 | 🟢 | **Complete.** Shipped `83c417c` + `750cb64`. Predicate sweep caught 3 real bugs in `is_busy`/`is_already_exists`/`is_permission_denied`. |
+| [188](188-declarative-apply-parity-plan.md) | Declarative apply parity — `ConfigDiff::apply`, builders, `apply_reconcile`, `default_v{4,6}`, idempotent del_*, deprecate `summary()` | ~6.5 h | 3 | 🟡 | 6 of 7 sub-items shipped (`d50429b` + `e3c4371` + `64a7288`). Only §2.4 `apply_reconcile` remains. |
 | [189](189-serde-feature-flag-plan.md) | `serde` feature flag — `Serialize` + `Deserialize` on diffs + JSON Schema via `schemars` + runtime parsed-type `Serialize` | ~5.5 h (was 3.5) | 4 | ⚪ | Opt-in feature; expanded with Deserialize + Schema + runtime types. |
 | [190](190-linkbuilder-gaps-plan.md) | `LinkBuilder` gaps — VXLAN advanced + VLAN protocol + VRF + netkit + ovpn link half + IPv4 GSO/GRO caps + bond options + macvlan Source | ~13 h (was 11.5) | 5 | ⚪ | Significantly expanded; bond options + macvlan Source absorbed. |
 | [191](191-route-events-with-resync-plan.md) | `Connection<Route>::subscribe` + `RouteEvent` (18 variants now including TC + Rule) + `into_events_with_resync` | ~14.5 h (was 9.5) | 6 | ⚪ | **Headline #1** of 0.19. TC + Rule event variants added. |
 | [192](192-docs-pass-plan.md) | Doc pass — D1, D4, D5, W7 universal tracing audit, CLAUDE.md namespace-safety spec | ~6.5 h (was 4.5) | 7 | ⚪ | Universal tracing audit expanded beyond Connection<P>. |
-| [193](193-parser-robustness-plan.md) | Parser robustness — defensive parsing + 5 `cargo-fuzz` targets + `proptest` integration | ~10 h (was 7) | 8 | ⚪ | Defensive; fuzz coverage expanded to 5 targets + proptest. |
+| [193](193-parser-robustness-plan.md) | Parser robustness — defensive parsing + 5 `cargo-fuzz` targets + `proptest` integration | ~10 h (was 7) | 8 | 🟡 | Phase 1 (policy doc + CI gate) shipped `be52799`. §2.1 + §2.2 came back N/A (lib already compliant); §2.2's gap surfaced as new [Plan 202](202-rta-multipath-parsing-plan.md). Phase 2 (fuzz target) + phase 3 (proptest) remain. |
 | [194](194-concurrent-stress-plan.md) | Concurrent stress — seq routing + namespace + nftables transaction + ConnectionPool churn | ~7 h (was 4.5) | 9 | ⚪ | Defensive; transaction + pool stress added. |
 | [195](195-stream-combinators-plan.md) | `ResyncStreamExt` — backoff/filter/map + **`reflector`/`Store<K>` + `backon` integration + combinator tracing** | ~10.5 h (was 6.5) | 10 | ⚪ | `Store<K>` reflector pattern + backon + tracing added. |
 | **[196](196-declarative-wireguard-plan.md)** (**NEW**) | Declarative `WireguardConfig` — diff + apply + `wg syncconf` semantics + `LinkBuilder::wireguard` | ~14 h | 11 | ⚪ | **Headline #2**. First Rust crate to ship NetworkConfig-style WG reconciliation. |
@@ -77,10 +77,33 @@ families (196-199 from the "everything in 0.19" directive).
 | **[199](199-wireguard-monitor-plan.md)** | `Connection<Wireguard>::subscribe` + `WireguardEvent` + `into_events_with_resync` — third member of the watcher trinity | ~10 h | 14 | ⚪ | Composes on Plan 196 + Plan 195. |
 | **[200](200-high-level-facade-api-plan.md)** (**NEW** — Rust-idiomaticity audit) | `nlink::{apply,diff,watch}` modules + `nlink::Stack` unified declarative bundle + `nlink::watch::namespace` multi-protocol watcher | ~12.5 h | 15 | ⚪ | **Newcomer experience headline.** One-line entry points; Stack closes the loop on nlink-lab's TopologyDiff envelope. |
 | **[201](201-rust-idiom-polish-plan.md)** (**NEW** — Rust-idiomaticity audit) | Polish sweep — `#[must_use]`, `From`/`Into`, `Display`, `#[inline]`, `const fn`, iterator combinators + 3 audit CI gates | ~7 h | 16 | ⚪ | Pins conventions; future contributors inherit. |
+| **[202](202-rta-multipath-parsing-plan.md)** (**NEW** — Plan 193 phase-1 finding) | RTA_MULTIPATH parser — multipath routes round-trip through `get_routes()` + `NetworkConfig::diff` idempotence | ~7.5 h | between-189-and-190 | ⚪ | Surfaced during Plan 193 phase-1 audit: nlink can WRITE multipath but doesn't PARSE it. Real bug for ECMP consumers (silent drift). Inherits Plan 193 §"Parser robustness" rules. |
 
-Total estimated focused-work: **~160-175 h** (was ~140-155 h).
+Total estimated focused-work: **~167-182 h** (was ~160-175 h
+before Plan 202's +7.5h surfaced during 193's audit).
 Plans 200 + 201 add the one-line user-facing entry points +
 the convention pins.
+
+## Implementation progress (live)
+
+**Commits landed on `0.19` branch** (most recent first):
+
+| Commit | Plan | Phase |
+|---|---|---|
+| `64a7288` | 188 phases 3+4 | `LinkChanges::Display` + `del_*_if_exists` |
+| `e3c4371` | 188 phase 2 | `ApplyOptions` `#[non_exhaustive]` + builders |
+| `d50429b` | 188 phase 1 | `ConfigDiff::apply` + `default_v{4,6}` + `summary()` deprecation |
+| `750cb64` | 187 phase 2 | `Error::chain_walk` + `root_cause` + `contexts` |
+| `83c417c` | 187 phase 1 | Error factory sign normalization + Io-shape predicate sweep (3 real bugs caught) |
+| `be52799` | 193 phase 1 | Parser robustness policy + CI gate |
+
+Lib test count: **992 passing** (was 980 at cycle start; +12).
+Clippy `--deny warnings` clean.
+
+**Plans complete (🟢):** 187.
+**Plans partially shipped (🟡):** 188 (6 of 7), 193 (1 of 4).
+**Plans not started (⚪):** 186, 189, 190, 191, 192, 194, 195,
+196, 197, 198, 199, 200, 201, 202.
 
 **Per-plan idiom additions during the audit:**
 - **187** — gained `Error::root_cause()`, `Error::contexts()`,

@@ -11,6 +11,41 @@ created: 2026-05-30
 
 # Plan 193 — Parser robustness audit
 
+## 0. Phase 1 implementation findings (2026-05-30)
+
+The phase-1 audit was done; the lib's defensive parsing was
+better than the plan assumed. Findings:
+
+- **§2.1 (accept-larger-than-expected size check sweep): N/A.**
+  Every fixed-size struct parser in `types/` + `messages/`
+  ALREADY uses `data.len() < REQUIRED_SIZE` (the defensive
+  form). The `!=` exact-equality smell from
+  netlink-packet-route #232 isn't present in nlink. No
+  changes needed.
+
+- **§2.2 (multipath/nexthop pathological-input guards): N/A
+  here, but surfaced a real gap.** nlink doesn't currently
+  PARSE multipath chains from kernel responses — only writes
+  them. `write_multipath_v4`/`write_multipath_v6` exist; no
+  `parse_multipath_*` symbol. Multipath routes round-tripped
+  through `get_routes()` lose their nexthop list. **This is
+  a real feature gap surfaced by Plan 193 §2.2; it's tracked
+  separately in [Plan 202](202-rta-multipath-parsing-plan.md)
+  for the 0.19 cycle.**
+
+- **§2.3 (recoverable per-message parse failures): policy
+  pinned, code already compliant.** Every event-parser
+  recv-loop in `stream.rs` uses either `.flatten()` or
+  `let Ok(...) = msg_result else { continue };`. The audit
+  script `scripts/audit-recv-loop-error-handling.sh` ran
+  green; CI gate added.
+
+The "Plan 193 didn't find bugs" outcome is itself the
+deliverable for phase 1 — the policy doc + CI gate prevent
+future drift. Phases 2 (fuzz target) + phase 3 (proptest)
+remain for later commits; they're defensive and don't gate
+anything.
+
 ## 1. Why this plan exists
 
 The 0.19 consolidation-pass ecosystem audit surfaced three

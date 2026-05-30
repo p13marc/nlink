@@ -11,6 +11,44 @@ created: 2026-05-30
 
 # Plan 188 — Declarative apply API parity
 
+## 0. Implementation findings (2026-05-30)
+
+Plan 188 shipped in four phases across three commits
+(`d50429b` + `e3c4371` + `64a7288`). Six of seven sub-items
+done:
+
+| § | Item | Status |
+|---|---|---|
+| 2.1 | `ConfigDiff::apply` inherent method | ✓ shipped `d50429b` |
+| 2.2 | `ApplyOptions` `#[non_exhaustive]` + `with_*` builders | ✓ shipped `e3c4371` |
+| 2.3 | `RouteBuilder::default_v{4,6}` | ✓ shipped `d50429b` |
+| 2.4 | `NetworkConfig::apply_reconcile` | ⬜ remaining |
+| 2.5 | `LinkChanges::Display` | ✓ shipped `64a7288` |
+| 2.6 | Deprecate `summary()` × 2 | ✓ shipped `d50429b` |
+| 2.7 | `del_{table,chain,rule}_if_exists` | ✓ shipped `64a7288` |
+
+**Surprises during implementation:**
+
+- **§2.6 deprecation surfaced 5 call sites still using `.summary()`**:
+  `examples/nftables/declarative.rs` (4 sites),
+  `examples/config/declarative.rs` (struct-literal `ApplyOptions`),
+  `tests/integration/{config,nftables_reconcile}.rs` (3 sites).
+  Plus the module-level doctests in
+  `crates/nlink/src/netlink/{config,nftables/config}/mod.rs`
+  still show `println!("{}", diff.summary());` — those should
+  be updated when the deprecation cleanup lands, deferred to
+  the final commit.
+
+- **§2.2 `#[non_exhaustive]` lockdown is a real semver break**
+  for the existing `ApplyOptions { dry_run: true,
+  ..Default::default() }` pattern. Migration to
+  `ApplyOptions::default().with_dry_run(true)` is mechanical
+  but visible. CHANGELOG `### Breaking changes` entry with
+  before/after snippet shipped.
+
+**Cycle test count contribution: 986 → 992 (+6).** Three
+ApplyOptions/LinkChanges tests + 3 RouteBuilder smoke tests.
+
 ## 1. Why this plan exists
 
 Seven small ergonomic asymmetries between the RTNETLINK and
