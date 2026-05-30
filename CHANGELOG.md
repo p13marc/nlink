@@ -77,6 +77,20 @@ All notable changes to this project will be documented in this file.
   RouteBuilder::default_v4().via("192.0.2.1")
   ```
 
+- **`LinkBuilder::vrf(table)` + `DeclaredLinkType::Vrf`
+  (Plan 190 §2.3)** — declarative-path VRF coverage. The
+  imperative `VrfLink` shipped already; this lifts it to
+  `NetworkConfig`. Members enslave via the existing
+  `LinkBuilder::master` chain. The Plan 186 §3c topo-sort
+  makes VRF declared after its members still apply
+  correctly. Three new unit tests + two new root-gated
+  integration tests (gated by `require_module!("vrf")`).
+  Closes nlink-feedback §13 VRF half (WG half deferred to
+  Plan 196 for 0.20). **Note**: this widens the
+  `DeclaredLinkType` enum (already `#[non_exhaustive]`);
+  downstream pattern matches without `..` rest-pattern would
+  break, see migration guide §"Plan 190".
+
 - **Topo-sort `links_to_add` so parent-before-child holds
   regardless of declared order (Plan 186 §3c)** —
   `NetworkConfig::apply` now stable-sorts the new-links list

@@ -150,6 +150,68 @@ async fn vlan_parent_dummy_declared_in_either_order() -> Result<()> {
     .await
 }
 
+// -------------------------------------------------------------
+// Plan 190 §2.3 — VRF declarative path.
+// -------------------------------------------------------------
+
+/// Create a VRF link via `LinkBuilder::vrf(table)`. Verifies
+/// the apply-path arm emits a `vrf`-kind link bound to the
+/// requested routing table.
+#[tokio::test]
+async fn vrf_link_creates_via_declarative_path() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("vrf");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("vrf-create")?;
+        let conn = conn_in_ns(&ns)?;
+
+        let cfg = NetworkConfig::new().link("vrf-red", |b| b.vrf(100));
+        let result = cfg.apply(&conn).await?;
+        assert_eq!(result.changes_made, 1, "VRF link should be created");
+
+        let links = conn.get_links().await?;
+        assert!(
+            links.iter().any(|l| l.name() == Some("vrf-red")),
+            "vrf-red must be in the dump"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+/// VRF + dummy member, with the member enslaved via
+/// `LinkBuilder::master(vrf-name)`. Combined with the Plan 186
+/// topo-sort fix, declared order doesn't matter — both ship.
+#[tokio::test]
+async fn vrf_with_dummy_member_via_master_chain() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("vrf");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("vrf-master")?;
+        let conn = conn_in_ns(&ns)?;
+
+        let cfg = NetworkConfig::new()
+            .link("eth0", |b| b.dummy().master("vrf-red"))
+            .link("vrf-red", |b| b.vrf(200));
+
+        let result = cfg.apply(&conn).await?;
+        assert_eq!(result.changes_made, 2, "both links should be created");
+
+        // Verify both kernel-side.
+        let links = conn.get_links().await?;
+        assert!(links.iter().any(|l| l.name() == Some("vrf-red")));
+        assert!(links.iter().any(|l| l.name() == Some("eth0")));
+
+        Ok(())
+    })
+    .await
+}
+
+// -------------------------------------------------------------
+
 /// Pre-existing parent + VLAN child — control case. Verifies
 /// the working baseline isn't accidentally regressed by Plan
 /// 186 fixes.

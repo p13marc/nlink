@@ -572,6 +572,13 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             let config = IfbLink::new(&link.name);
             conn.add_link(config).await?;
         }
+        DeclaredLinkType::Vrf { table } => {
+            let mut config = crate::netlink::link::VrfLink::new(&link.name, *table);
+            if let Some(mtu) = link.mtu {
+                config = config.mtu(mtu);
+            }
+            conn.add_link(config).await?;
+        }
         DeclaredLinkType::Physical => {
             // Physical interfaces can't be created, only configured
             // This should not be reached

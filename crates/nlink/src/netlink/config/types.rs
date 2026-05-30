@@ -192,6 +192,10 @@ pub enum DeclaredLinkType {
     },
     /// IFB (Intermediate Functional Block).
     Ifb,
+    /// VRF (Virtual Routing & Forwarding) — table-scoped
+    /// forwarding domain. Members enslave via
+    /// [`LinkBuilder::master`]. Plan 190 §2.3.
+    Vrf { table: u32 },
     /// Existing physical interface (not created, only configured).
     Physical,
 }
@@ -208,6 +212,7 @@ impl DeclaredLinkType {
             Self::Macvlan { .. } => Some("macvlan"),
             Self::Bond { .. } => Some("bond"),
             Self::Ifb => Some("ifb"),
+            Self::Vrf { .. } => Some("vrf"),
             Self::Physical => None,
         }
     }
@@ -406,6 +411,19 @@ impl LinkBuilder {
     /// Create an IFB interface.
     pub fn ifb(mut self) -> Self {
         self.link_type = DeclaredLinkType::Ifb;
+        self
+    }
+
+    /// Build a VRF link bound to routing-table `table`.
+    ///
+    /// VRF (Virtual Routing & Forwarding) groups interfaces
+    /// under a per-table forwarding domain; common in
+    /// multi-tenant networks. Members enslave via
+    /// [`LinkBuilder::master`].
+    ///
+    /// Requires the kernel `vrf` module. Plan 190 §2.3.
+    pub fn vrf(mut self, table: u32) -> Self {
+        self.link_type = DeclaredLinkType::Vrf { table };
         self
     }
 
@@ -993,5 +1011,45 @@ impl QdiscBuilder {
                 interval_us: None,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_190_tests {
+    //! Plan 190 — LinkBuilder gaps.
+    //! Unit-level coverage for new DeclaredLinkType variants
+    //! + LinkBuilder setters.
+
+    use super::*;
+
+    #[test]
+    fn vrf_builder_sets_table() {
+        let link = LinkBuilder::new("vrf-red").vrf(100).build();
+        match link.link_type {
+            DeclaredLinkType::Vrf { table } => assert_eq!(table, 100),
+            other => panic!("expected DeclaredLinkType::Vrf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vrf_kind_string_is_vrf() {
+        let lt = DeclaredLinkType::Vrf { table: 7 };
+        assert_eq!(lt.kind(), Some("vrf"));
+    }
+
+    #[test]
+    fn vrf_in_network_config_carries_master_chain() {
+        // The master() chain works alongside vrf(); confirms
+        // recipes that enslave a dummy into a VRF via the
+        // declarative path compose correctly.
+        let cfg = NetworkConfig::new()
+            .link("vrf-red", |b| b.vrf(100))
+            .link("eth0", |b| b.dummy().master("vrf-red"));
+        assert_eq!(cfg.links.len(), 2);
+        assert!(matches!(
+            cfg.links[0].link_type,
+            DeclaredLinkType::Vrf { table: 100 }
+        ));
+        assert_eq!(cfg.links[1].master.as_deref(), Some("vrf-red"));
     }
 }
