@@ -289,6 +289,7 @@ impl<P: ProtocolState> Connection<P> {
     /// let conn = Connection::<Route>::new()?;
     /// conn.enable_strict_checking(true)?;
     /// ```
+    #[instrument(level = "debug", skip(self), fields(method = "enable_strict_checking"))]
     pub fn enable_strict_checking(&self, on: bool) -> Result<()> {
         self.socket.set_strict_checking(on)
     }
@@ -312,6 +313,7 @@ impl<P: ProtocolState> Connection<P> {
     /// let conn = Connection::<Route>::new()?;
     /// conn.set_ext_ack(false)?;  // disable; rarely useful
     /// ```
+    #[instrument(level = "debug", skip(self), fields(method = "set_ext_ack"))]
     pub fn set_ext_ack(&self, on: bool) -> Result<()> {
         self.socket.set_ext_ack(on)
     }
@@ -606,6 +608,7 @@ impl Connection<Route> {
     /// // For the default namespace
     /// let conn = Connection::<Route>::for_namespace(NamespaceSpec::Default)?;
     /// ```
+    #[instrument(level = "info", skip_all, fields(protocol = "Route"))]
     pub fn for_namespace(spec: super::namespace::NamespaceSpec<'_>) -> Result<Self> {
         spec.connection()
     }
@@ -641,6 +644,7 @@ impl Connection<Route> {
     /// conn.subscribe_all()?;
     /// let mut events = conn.events();
     /// ```
+    #[instrument(level = "info", skip_all)]
     pub fn subscribe_all(&mut self) -> Result<()> {
         self.subscribe(&[
             RtnetlinkGroup::Link,
@@ -674,6 +678,7 @@ impl Connection<Route> {
     ///     println!("{}: {:?}", addr.ifindex(), addr.address);
     /// }
     /// ```
+    #[instrument(level = "debug", skip(self), fields(method = "dump_typed", msg_type))]
     pub async fn dump_typed<T: FromNetlink>(&self, msg_type: u16) -> Result<Vec<T>> {
         let mut builder = dump_request(msg_type);
 
@@ -806,6 +811,7 @@ impl Connection<Route> {
     ///     // process one link with O(1) memory
     /// }
     /// ```
+    #[instrument(level = "debug", skip_all, fields(method = "stream_links"))]
     pub async fn stream_links(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, LinkMessage>> {
@@ -813,6 +819,7 @@ impl Connection<Route> {
     }
 
     /// Stream a route dump frame-by-frame. See [`Self::stream_links`].
+    #[instrument(level = "debug", skip_all, fields(method = "stream_routes"))]
     pub async fn stream_routes(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, RouteMessage>> {
@@ -827,6 +834,7 @@ impl Connection<Route> {
     /// bridge FDB entries together when AF_BRIDGE isn't filtered;
     /// use the typed-config Connection (`stream_fdb` on
     /// `Connection<Route>` when added in 0.17) for FDB-only.
+    #[instrument(level = "debug", skip_all, fields(method = "stream_neighbors"))]
     pub async fn stream_neighbors(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, NeighborMessage>> {
@@ -835,6 +843,7 @@ impl Connection<Route> {
     }
 
     /// Stream an address dump frame-by-frame. See [`Self::stream_links`].
+    #[instrument(level = "debug", skip_all, fields(method = "stream_addresses"))]
     pub async fn stream_addresses(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, AddressMessage>> {
@@ -1594,6 +1603,7 @@ impl Connection<Route> {
     ///     // process one qdisc with O(1) memory
     /// }
     /// ```
+    #[instrument(level = "debug", skip_all, fields(method = "stream_qdiscs"))]
     pub async fn stream_qdiscs(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
@@ -1602,6 +1612,7 @@ impl Connection<Route> {
 
     /// Stream a TC class dump frame-by-frame. See
     /// [`Self::stream_qdiscs`].
+    #[instrument(level = "debug", skip_all, fields(method = "stream_classes"))]
     pub async fn stream_classes(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
@@ -1618,6 +1629,7 @@ impl Connection<Route> {
     /// f.ifindex() == my_index).unwrap_or(true))` if you only
     /// care about one interface — there's no kernel-side
     /// per-ifindex `RTM_GETTFILTER` dump filter.
+    #[instrument(level = "debug", skip_all, fields(method = "stream_filters"))]
     pub async fn stream_filters(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {

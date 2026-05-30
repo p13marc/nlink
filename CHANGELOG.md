@@ -59,6 +59,28 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Documentation + tracing-span audit (Plan 192 D4 + W7)** —
+  - **D4**: `link.rs` rewrote 10 "namespace-safe variant that
+    avoids reading from /sys/class/net/" docstrings to remove
+    the misleading claim. The name-based and index-based
+    constructors are both netlink-correct; the difference is
+    purely ergonomic. Plan 186 §1's audit confirmed
+    `resolve_interface` is netlink-based end-to-end.
+  - **W7**: Audit + backfill `#[tracing::instrument]` on
+    `Connection<P>` public methods that grew without spans:
+    `enable_strict_checking`, `set_ext_ack`, `for_namespace`,
+    `subscribe_all`, `dump_typed`, and the 7 streaming-dump
+    wrappers (`stream_links`, `stream_routes`,
+    `stream_neighbors`, `stream_addresses`, `stream_qdiscs`,
+    `stream_classes`, `stream_filters`). Trivial accessors
+    (`socket`, `state`, `timeout`, etc.) deliberately stay
+    bare per CLAUDE.md observability guidance. Closes the
+    "every Connection method, every netlink request/ack/dump
+    cycle" contract from CLAUDE.md §Observability.
+  - D1 / D5 / D6 / D2-D3 already shipped in Plans 186 §3c,
+    188 §2.2, 188 §2.6, 187 respectively (per the 0.19
+    consolidation-pass cross-references).
+
 - **`Connection<Route>::into_events_with_resync` +
   `subscribe_all_with_resync` + `rtnetlink_snapshot`
   (Plan 191 §2.5 + §2.6)** — RTNETLINK twin of Plan 185's
