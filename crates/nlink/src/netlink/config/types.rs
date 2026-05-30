@@ -23,6 +23,20 @@ impl NetworkConfig {
 
     /// Add a link (interface) configuration.
     ///
+    /// **Ordering note (Plan 186 §3c)**: declared order of
+    /// `.link()` calls is preserved at the surface, but the
+    /// internal apply step topologically sorts parent → child
+    /// (e.g., a `vlan` whose parent is also being created in
+    /// this apply). You can declare the VLAN before its parent
+    /// dummy and the apply still works:
+    ///
+    /// ```ignore
+    /// // Either order works — the apply sorts before sending.
+    /// let cfg = NetworkConfig::new()
+    ///     .link("eth0.42", |l| l.vlan("eth0", 42))
+    ///     .link("eth0",    |l| l.dummy());
+    /// ```
+    ///
     /// # Example
     ///
     /// ```ignore

@@ -298,6 +298,16 @@ pub async fn compute_diff(config: &NetworkConfig, conn: &Connection<Route>) -> R
     // Diff links
     diff_links(config, &link_by_name, &mut diff);
 
+    // Plan 186 §3c — topo-sort `links_to_add` so a child whose
+    // parent is also being created in this apply lands AFTER
+    // its parent. Without this, a `NetworkConfig` that declares
+    // a VLAN before its parent (because the declared order is
+    // child-first, or because the source iterated a `HashMap`)
+    // hits `InterfaceNotFound` on the second `create_link`.
+    // Independent links keep their declared order — the sort
+    // is stable.
+    topo_sort_links_to_add(&mut diff.links_to_add);
+
     // Diff addresses
     diff_addresses(config, &current_addresses, &ifindex_to_name, &mut diff);
 
@@ -336,6 +346,75 @@ fn diff_links(
 
     // Note: We don't auto-remove links that aren't in the config
     // That requires explicit purge mode
+}
+
+/// Plan 186 §3c — stable topological sort of `links_to_add`.
+///
+/// A child link (Vlan, Macvlan) whose parent is also in
+/// `links_to_add` must land AFTER its parent. Independent
+/// links keep their declared order — the sort is stable.
+///
+/// Cycles are theoretically impossible for the link types we
+/// model (a `Vlan` parent can't be a `Vlan` child of itself
+/// without a kernel that already would have refused), but we
+/// still degrade gracefully: any node not in a topo order falls
+/// to the tail in its declared position.
+fn topo_sort_links_to_add(links: &mut Vec<DeclaredLink>) {
+    if links.len() < 2 {
+        return;
+    }
+
+    // Build set of names being added in this batch.
+    let names_in_batch: HashSet<String> =
+        links.iter().map(|l| l.name.clone()).collect();
+
+    // For each child, find its parent name IF that parent is
+    // also in this batch (a parent created out-of-band is
+    // resolved on the wire and doesn't need ordering).
+    let parent_of = |link: &DeclaredLink| -> Option<String> {
+        let parent = match &link.link_type {
+            DeclaredLinkType::Vlan { parent, .. } => Some(parent.clone()),
+            DeclaredLinkType::Macvlan { parent, .. } => Some(parent.clone()),
+            _ => None,
+        };
+        parent.filter(|p| names_in_batch.contains(p))
+    };
+
+    // Stable Kahn's algorithm. Iterate `links` in current order;
+    // emit a link only once all its in-batch parents have been
+    // emitted. Use a simple two-pass loop — for the link counts
+    // we expect (single-digit to low-double-digit), the cost is
+    // negligible and the implementation stays obvious.
+    let mut emitted: HashSet<String> = HashSet::new();
+    let mut out: Vec<DeclaredLink> = Vec::with_capacity(links.len());
+    let mut remaining: Vec<DeclaredLink> = std::mem::take(links);
+
+    while !remaining.is_empty() {
+        let before = remaining.len();
+        let mut next_remaining = Vec::with_capacity(remaining.len());
+        for link in remaining.into_iter() {
+            let ready = match parent_of(&link) {
+                Some(parent) => emitted.contains(&parent),
+                None => true,
+            };
+            if ready {
+                emitted.insert(link.name.clone());
+                out.push(link);
+            } else {
+                next_remaining.push(link);
+            }
+        }
+        // No progress this round — cycle or unresolvable
+        // dependency. Append the remainder in declared order
+        // so the apply still attempts them (the kernel will
+        // give the canonical error).
+        if next_remaining.len() == before {
+            out.extend(next_remaining);
+            break;
+        }
+        remaining = next_remaining;
+    }
+    *links = out;
 }
 
 fn compute_link_changes(declared: &DeclaredLink, existing: &LinkMessage) -> LinkChanges {
@@ -621,6 +700,162 @@ fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::netlink::config::types::MacvlanMode;
+
+    fn declared(name: &str, link_type: DeclaredLinkType) -> DeclaredLink {
+        DeclaredLink {
+            name: name.to_string(),
+            link_type,
+            state: LinkState::Unchanged,
+            mtu: None,
+            master: None,
+            address: None,
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Plan 186 §3c — topo-sort regression coverage (unit-level).
+    // -------------------------------------------------------------
+
+    #[test]
+    fn topo_sort_no_op_when_empty_or_singleton() {
+        let mut links: Vec<DeclaredLink> = vec![];
+        topo_sort_links_to_add(&mut links);
+        assert!(links.is_empty());
+
+        let mut links = vec![declared("eth0", DeclaredLinkType::Dummy)];
+        topo_sort_links_to_add(&mut links);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].name, "eth0");
+    }
+
+    #[test]
+    fn topo_sort_independent_links_preserve_declared_order() {
+        let mut links = vec![
+            declared("eth1", DeclaredLinkType::Dummy),
+            declared("eth0", DeclaredLinkType::Dummy),
+            declared("br0", DeclaredLinkType::Bridge),
+        ];
+        topo_sort_links_to_add(&mut links);
+        assert_eq!(
+            links.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
+            vec!["eth1", "eth0", "br0"],
+            "independent links must keep declared order (stable sort)"
+        );
+    }
+
+    #[test]
+    fn topo_sort_promotes_parent_before_child_vlan() {
+        // VLAN declared first, parent dummy declared second.
+        let mut links = vec![
+            declared(
+                "eth0.42",
+                DeclaredLinkType::Vlan {
+                    parent: "eth0".into(),
+                    vlan_id: 42,
+                },
+            ),
+            declared("eth0", DeclaredLinkType::Dummy),
+        ];
+        topo_sort_links_to_add(&mut links);
+        assert_eq!(
+            links.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
+            vec!["eth0", "eth0.42"],
+            "parent must precede child after topo-sort"
+        );
+    }
+
+    #[test]
+    fn topo_sort_keeps_correct_order_when_already_sorted() {
+        // Parent first, child second — already correct; preserved as-is.
+        let mut links = vec![
+            declared("eth0", DeclaredLinkType::Dummy),
+            declared(
+                "eth0.42",
+                DeclaredLinkType::Vlan {
+                    parent: "eth0".into(),
+                    vlan_id: 42,
+                },
+            ),
+        ];
+        topo_sort_links_to_add(&mut links);
+        assert_eq!(
+            links.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
+            vec!["eth0", "eth0.42"]
+        );
+    }
+
+    #[test]
+    fn topo_sort_handles_parent_not_in_batch() {
+        // Parent "eth0" is NOT in links_to_add (created
+        // out-of-band). The VLAN's parent ref doesn't count
+        // for the sort — the link is emitted in declared order.
+        let mut links = vec![
+            declared("br0", DeclaredLinkType::Bridge),
+            declared(
+                "eth0.42",
+                DeclaredLinkType::Vlan {
+                    parent: "eth0".into(), // not in batch
+                    vlan_id: 42,
+                },
+            ),
+        ];
+        topo_sort_links_to_add(&mut links);
+        assert_eq!(
+            links.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
+            vec!["br0", "eth0.42"],
+            "out-of-batch parent does NOT trigger reorder"
+        );
+    }
+
+    #[test]
+    fn topo_sort_handles_macvlan_parent_dep() {
+        let mut links = vec![
+            declared(
+                "macv0",
+                DeclaredLinkType::Macvlan {
+                    parent: "eth0".into(),
+                    mode: MacvlanMode::default(),
+                },
+            ),
+            declared("eth0", DeclaredLinkType::Dummy),
+        ];
+        topo_sort_links_to_add(&mut links);
+        assert_eq!(
+            links.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
+            vec!["eth0", "macv0"]
+        );
+    }
+
+    #[test]
+    fn topo_sort_chain_three_levels() {
+        // Build dummy -> bridge (master via top) -> vlan(parent=bridge).
+        // The chain we model is parent-child via Vlan only; bridge as
+        // a parent reference doesn't fit the link_type's parent slot,
+        // so this test pins a 2-level chain plus an unrelated link.
+        let mut links = vec![
+            declared(
+                "eth0.42",
+                DeclaredLinkType::Vlan {
+                    parent: "eth0".into(),
+                    vlan_id: 42,
+                },
+            ),
+            declared("br0", DeclaredLinkType::Bridge), // unrelated
+            declared("eth0", DeclaredLinkType::Dummy),
+        ];
+        topo_sort_links_to_add(&mut links);
+        // After sort: eth0 + br0 are both root-level (no in-batch
+        // parent dep) and emitted in declared order (eth0.42 deferred,
+        // br0 ready, eth0 ready). Then eth0.42 lands.
+        // Pass 1 ready set: br0, eth0 (declared order: eth0.42 deferred).
+        // The pass iterates remaining in declared order, so output is:
+        //   br0, eth0, eth0.42
+        assert_eq!(
+            links.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
+            vec!["br0", "eth0", "eth0.42"]
+        );
+    }
 
     #[test]
     fn declared_options_bytes_differs_when_param_changes() {

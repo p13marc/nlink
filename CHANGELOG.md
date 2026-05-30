@@ -77,6 +77,19 @@ All notable changes to this project will be documented in this file.
   RouteBuilder::default_v4().via("192.0.2.1")
   ```
 
+- **Topo-sort `links_to_add` so parent-before-child holds
+  regardless of declared order (Plan 186 §3c)** —
+  `NetworkConfig::apply` now stable-sorts the new-links list
+  so a VLAN whose parent dummy is in the same apply lands
+  AFTER the parent. Independent links keep their declared
+  order (the sort is stable). Lifts the "declare parent
+  first" footgun that the nlink-lab 158e Slice 3 case hit
+  — `NetworkConfig` constructed from a `HashMap` (where the
+  child happens to iterate first) now works. The
+  `NetworkConfig::link` docstring documents the new
+  order-independence guarantee. 7 new unit tests pin the
+  sort behavior.
+
 - **Integration repro for the VLAN parent ifindex race
   (Plan 186 phase 1)** — three new root-gated tests in
   `tests/integration/network_config_apply.rs`:
