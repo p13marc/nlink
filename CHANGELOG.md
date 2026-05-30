@@ -77,6 +77,22 @@ All notable changes to this project will be documented in this file.
   RouteBuilder::default_v4().via("192.0.2.1")
   ```
 
+- **GSO/GRO/TSO cap parsing on `LinkMessage` (Plan 190
+  §2.3c)** — 7 new u32 accessors: `gso_max_segs`,
+  `gso_max_size`, `gro_max_size`, `tso_max_size`,
+  `tso_max_segs`, `gso_ipv4_max_size`,
+  `gro_ipv4_max_size`. The 4 legacy caps were already
+  defined in the `IflaAttr` enum but not extracted by the
+  message parser; this commit adds the parsing AND the
+  two new IPv4-specific caps from kernel 6.6+
+  (`IFLA_GSO_IPV4_MAX_SIZE=63`,
+  `IFLA_GRO_IPV4_MAX_SIZE=64`). All 7 accept-larger-than-
+  expected on attribute length per CLAUDE.md
+  §"Parser robustness" rule 1. Useful for throughput
+  tuning on heterogeneous NICs (mixed v4/v6 workloads on
+  the same box). 3 new unit tests: parses all 7 caps,
+  absent-attrs-stay-None, IflaAttr enum numeric pinning.
+
 - **ovpn link half (kernel 6.16+) — `OvpnLink` +
   `LinkBuilder::ovpn` + `DeclaredLinkType::Ovpn`
   (Plan 190 §2.3b)** — minimal in-kernel OpenVPN

@@ -29,6 +29,14 @@ mod attr_ids {
     pub const IFLA_MIN_MTU: u16 = 50;
     pub const IFLA_MAX_MTU: u16 = 51;
     pub const IFLA_PERM_ADDRESS: u16 = 54;
+    // Plan 190 §2.3c — GSO/GRO/TSO caps.
+    pub const IFLA_GSO_MAX_SEGS: u16 = 40;
+    pub const IFLA_GSO_MAX_SIZE: u16 = 41;
+    pub const IFLA_GRO_MAX_SIZE: u16 = 58;
+    pub const IFLA_TSO_MAX_SIZE: u16 = 59;
+    pub const IFLA_TSO_MAX_SEGS: u16 = 60;
+    pub const IFLA_GSO_IPV4_MAX_SIZE: u16 = 63;
+    pub const IFLA_GRO_IPV4_MAX_SIZE: u16 = 64;
 }
 
 /// Nested IFLA_INFO_* attribute IDs.
@@ -82,6 +90,22 @@ pub struct LinkMessage {
     pub(crate) link_info: Option<LinkInfo>,
     /// Statistics (IFLA_STATS64).
     pub(crate) stats: Option<LinkStats>,
+    /// GSO max segments per packet (IFLA_GSO_MAX_SEGS). Plan 190 §2.3c.
+    pub(crate) gso_max_segs: Option<u32>,
+    /// GSO max bytes per packet (IFLA_GSO_MAX_SIZE). Plan 190 §2.3c.
+    pub(crate) gso_max_size: Option<u32>,
+    /// GRO max bytes per packet (IFLA_GRO_MAX_SIZE). Plan 190 §2.3c.
+    pub(crate) gro_max_size: Option<u32>,
+    /// TSO max bytes (IFLA_TSO_MAX_SIZE). Plan 190 §2.3c.
+    pub(crate) tso_max_size: Option<u32>,
+    /// TSO max segments (IFLA_TSO_MAX_SEGS). Plan 190 §2.3c.
+    pub(crate) tso_max_segs: Option<u32>,
+    /// IPv4-specific GSO max bytes (IFLA_GSO_IPV4_MAX_SIZE,
+    /// kernel 6.6+). Plan 190 §2.3c.
+    pub(crate) gso_ipv4_max_size: Option<u32>,
+    /// IPv4-specific GRO max bytes (IFLA_GRO_IPV4_MAX_SIZE,
+    /// kernel 6.6+). Plan 190 §2.3c.
+    pub(crate) gro_ipv4_max_size: Option<u32>,
 }
 
 /// Link type information from IFLA_LINKINFO.
@@ -297,6 +321,45 @@ impl LinkMessage {
     /// Get the interface group.
     pub fn group(&self) -> Option<u32> {
         self.group
+    }
+
+    // Plan 190 §2.3c — GSO/GRO/TSO cap accessors.
+
+    /// Get the GSO max segments per packet (IFLA_GSO_MAX_SEGS).
+    pub fn gso_max_segs(&self) -> Option<u32> {
+        self.gso_max_segs
+    }
+
+    /// Get the GSO max bytes per packet (IFLA_GSO_MAX_SIZE).
+    pub fn gso_max_size(&self) -> Option<u32> {
+        self.gso_max_size
+    }
+
+    /// Get the GRO max bytes per packet (IFLA_GRO_MAX_SIZE).
+    pub fn gro_max_size(&self) -> Option<u32> {
+        self.gro_max_size
+    }
+
+    /// Get the TSO max bytes (IFLA_TSO_MAX_SIZE).
+    pub fn tso_max_size(&self) -> Option<u32> {
+        self.tso_max_size
+    }
+
+    /// Get the TSO max segments (IFLA_TSO_MAX_SEGS).
+    pub fn tso_max_segs(&self) -> Option<u32> {
+        self.tso_max_segs
+    }
+
+    /// Get the IPv4-specific GSO max bytes
+    /// (IFLA_GSO_IPV4_MAX_SIZE; kernel 6.6+).
+    pub fn gso_ipv4_max_size(&self) -> Option<u32> {
+        self.gso_ipv4_max_size
+    }
+
+    /// Get the IPv4-specific GRO max bytes
+    /// (IFLA_GRO_IPV4_MAX_SIZE; kernel 6.6+).
+    pub fn gro_ipv4_max_size(&self) -> Option<u32> {
+        self.gro_ipv4_max_size
     }
 
     /// Get the promiscuity count.
@@ -579,6 +642,36 @@ impl FromNetlink for LinkMessage {
                             collisions: stats.collisions,
                         });
                     }
+                }
+                // Plan 190 §2.3c — GSO/GRO/TSO cap parsing.
+                // accept-larger-than-expected per CLAUDE.md §"Parser robustness" rule 1.
+                attr_ids::IFLA_GSO_MAX_SEGS if attr_data.len() >= 4 => {
+                    msg.gso_max_segs =
+                        Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::IFLA_GSO_MAX_SIZE if attr_data.len() >= 4 => {
+                    msg.gso_max_size =
+                        Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::IFLA_GRO_MAX_SIZE if attr_data.len() >= 4 => {
+                    msg.gro_max_size =
+                        Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::IFLA_TSO_MAX_SIZE if attr_data.len() >= 4 => {
+                    msg.tso_max_size =
+                        Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::IFLA_TSO_MAX_SEGS if attr_data.len() >= 4 => {
+                    msg.tso_max_segs =
+                        Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::IFLA_GSO_IPV4_MAX_SIZE if attr_data.len() >= 4 => {
+                    msg.gso_ipv4_max_size =
+                        Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::IFLA_GRO_IPV4_MAX_SIZE if attr_data.len() >= 4 => {
+                    msg.gro_ipv4_max_size =
+                        Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                 }
                 _ => {} // Ignore unknown attributes
             }
@@ -1234,5 +1327,60 @@ mod tests {
         assert_eq!(msg.ifindex(), 1);
         assert_eq!(msg.name, Some("eth0".to_string()));
         assert_eq!(msg.mtu, Some(1500));
+    }
+
+    // -------- Plan 190 §2.3c — GSO/GRO/TSO cap parsing --------
+
+    fn append_u32_attr(buf: &mut Vec<u8>, attr_type: u16, value: u32) {
+        // 4 header bytes + 4 payload bytes; aligned to 4
+        buf.extend_from_slice(&8u16.to_ne_bytes());
+        buf.extend_from_slice(&attr_type.to_ne_bytes());
+        buf.extend_from_slice(&value.to_ne_bytes());
+    }
+
+    #[test]
+    fn parser_extracts_all_gso_gro_tso_caps() {
+        // 16-byte zero header + 7 u32 attrs.
+        let mut buf = vec![0u8; IfInfoMsg::SIZE];
+        append_u32_attr(&mut buf, attr_ids::IFLA_GSO_MAX_SEGS, 32);
+        append_u32_attr(&mut buf, attr_ids::IFLA_GSO_MAX_SIZE, 65536);
+        append_u32_attr(&mut buf, attr_ids::IFLA_GRO_MAX_SIZE, 65536);
+        append_u32_attr(&mut buf, attr_ids::IFLA_TSO_MAX_SIZE, 65535);
+        append_u32_attr(&mut buf, attr_ids::IFLA_TSO_MAX_SEGS, 16);
+        append_u32_attr(&mut buf, attr_ids::IFLA_GSO_IPV4_MAX_SIZE, 16384);
+        append_u32_attr(&mut buf, attr_ids::IFLA_GRO_IPV4_MAX_SIZE, 16384);
+
+        let mut input = buf.as_slice();
+        let msg = LinkMessage::parse(&mut input).expect("parse should succeed");
+
+        assert_eq!(msg.gso_max_segs(), Some(32));
+        assert_eq!(msg.gso_max_size(), Some(65536));
+        assert_eq!(msg.gro_max_size(), Some(65536));
+        assert_eq!(msg.tso_max_size(), Some(65535));
+        assert_eq!(msg.tso_max_segs(), Some(16));
+        assert_eq!(msg.gso_ipv4_max_size(), Some(16384));
+        assert_eq!(msg.gro_ipv4_max_size(), Some(16384));
+    }
+
+    #[test]
+    fn parser_skips_gso_caps_when_absent() {
+        let buf = vec![0u8; IfInfoMsg::SIZE];
+        let mut input = buf.as_slice();
+        let msg = LinkMessage::parse(&mut input).expect("parse should succeed");
+        // All 7 caps must be None when the dump omits them
+        // (pre-6.6 kernels, older NIC drivers).
+        assert!(msg.gso_max_size().is_none());
+        assert!(msg.gso_ipv4_max_size().is_none());
+        assert!(msg.gro_ipv4_max_size().is_none());
+    }
+
+    #[test]
+    fn ifla_attr_enum_recognizes_new_ipv4_codes() {
+        use crate::netlink::types::link::IflaAttr;
+        // Plan 190 §2.3c numeric pins.
+        assert_eq!(IflaAttr::from(63), IflaAttr::GsoIpv4MaxSize);
+        assert_eq!(IflaAttr::from(64), IflaAttr::GroIpv4MaxSize);
+        assert_eq!(IflaAttr::GsoIpv4MaxSize as u16, 63);
+        assert_eq!(IflaAttr::GroIpv4MaxSize as u16, 64);
     }
 }
