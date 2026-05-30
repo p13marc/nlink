@@ -77,6 +77,18 @@ All notable changes to this project will be documented in this file.
   RouteBuilder::default_v4().via("192.0.2.1")
   ```
 
+- **`LinkChanges::Display` (Plan 188 §2.5)** — `ConfigDiff::Display`
+  can render `links_to_modify` rows compactly:
+  `~ link eth0 (mtu=9000, up)`. Wraps the existing `summary()`
+  (which may itself be deprecated in 0.20).
+
+- **`Connection<Nftables>::del_{table,chain,rule}_if_exists`
+  (Plan 188 §2.7 / feedback W8)** — idempotent siblings of the
+  existing `del_*` methods. Return `Ok(true)` when the resource
+  was deleted, `Ok(false)` when it didn't exist (kernel ENOENT).
+  Replaces the universal `let _ = conn.del_table(...).await;`
+  ignore pattern.
+
 - **`Error::chain_walk` + `root_cause` + `contexts` (Plan 187 §2.2)** —
   iterator over the source chain that transparently unwraps
   `Box<nlink::Error>` (the trap the maintainer hit in their 158b

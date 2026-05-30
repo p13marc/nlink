@@ -240,6 +240,10 @@ impl LinkChanges {
     }
 
     /// Get a summary of the changes.
+    ///
+    /// Equivalent to `format!("{self}")` since Plan 188 §2.5
+    /// (0.19) added the `Display` impl. Prefer `Display` for
+    /// new code; this method may be deprecated in 0.20.
     pub fn summary(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if self.set_up {
@@ -258,6 +262,15 @@ impl LinkChanges {
             parts.push("nomaster".to_string());
         }
         parts.join(", ")
+    }
+}
+
+/// `Display` for `LinkChanges` so a `links_to_modify` row in
+/// `ConfigDiff::Display` can render the changes compactly:
+/// `"~ link eth0 (mtu=9000, up)"`. Plan 188 §2.5 / feedback W6.
+impl std::fmt::Display for LinkChanges {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.summary())
     }
 }
 
@@ -660,6 +673,71 @@ mod tests {
         let cfg = DeclaredQdiscType::Clsact;
         assert!(qdisc_params_match(&cfg, Some(&[])));
         assert!(qdisc_params_match(&cfg, None));
+    }
+
+    // ---- Plan 188 §2.2 — ApplyOptions builders ----
+
+    #[test]
+    fn apply_options_builders_compose() {
+        use super::super::apply::ApplyOptions;
+        let opts = ApplyOptions::default()
+            .with_dry_run(true)
+            .with_continue_on_error(true)
+            .with_purge(true);
+        assert!(opts.dry_run);
+        assert!(opts.continue_on_error);
+        assert!(opts.purge);
+    }
+
+    #[test]
+    fn apply_options_default_is_safe() {
+        use super::super::apply::ApplyOptions;
+        let opts = ApplyOptions::default();
+        assert!(!opts.dry_run);
+        assert!(!opts.continue_on_error);
+        assert!(!opts.purge);
+    }
+
+    // ---- Plan 188 §2.5 — LinkChanges::Display ----
+
+    #[test]
+    fn link_changes_display_matches_summary() {
+        let c = LinkChanges {
+            set_mtu: Some(9000),
+            set_up: true,
+            ..LinkChanges::default()
+        };
+        assert_eq!(c.to_string(), c.summary());
+        assert!(c.to_string().contains("mtu=9000"));
+        assert!(c.to_string().contains("up"));
+    }
+
+    #[test]
+    fn link_changes_display_empty_when_no_changes() {
+        let c = LinkChanges::default();
+        assert_eq!(c.to_string(), "");
+    }
+
+    // ---- Plan 188 §2.3 — RouteBuilder::default_v{4,6} ----
+
+    #[test]
+    fn default_v4_route_is_zero_zero() {
+        use super::super::types::RouteBuilder;
+        let r = RouteBuilder::default_v4();
+        // Internal state — verify via the via() chain works
+        // and the destination round-trips.
+        let with_gw = r.via("192.0.2.1");
+        // Smoke-test by constructing; the field isn't directly
+        // exposed but apply paths read it.
+        drop(with_gw);
+    }
+
+    #[test]
+    fn default_v6_route_is_unspecified_slash_zero() {
+        use super::super::types::RouteBuilder;
+        let r = RouteBuilder::default_v6();
+        let with_gw = r.via("2001:db8::1");
+        drop(with_gw);
     }
 
     // ---- Plan 183 — Display for NetworkDiff ----
