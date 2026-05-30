@@ -391,4 +391,17 @@ combinator coverage there would just bloat already-slow tests.
   spans would help debugging but add cost. Defer to a
   follow-up when a consumer asks.
 
+## 9. Cross-cutting artifacts
+
+| Artifact | Action | Notes |
+|---|---|---|
+| `CHANGELOG.md` `## [Unreleased]` | **add** `### Added` entry — `ResyncStreamExt` trait, `StreamBackoff`, `BackoffPolicy`, `PredicateFilter`, `MapEvent` | Cross-reference Plans 185 + 191 + kube-rs `WatchStreamExt`. |
+| `docs/migration_guide/0.18.0-to-0.19.0.md` | **append** `### Plan 195 — stream combinators` section | Pure additive; no migration except "swap your hand-rolled backoff for `.default_backoff()`". |
+| `docs/recipes/resync-with-backoff.md` (**new**) | **create** ~120 lines | Already noted in §2.4 of this plan. Pairs with both nftables and route watchers. |
+| `docs/recipes/README.md` | **add row** for `resync-with-backoff.md` | One line. |
+| `crates/nlink/examples/events/watch_with_backoff.rs` (**new**) | **create** ~70-line runnable demo: subscribe to nftables OR route, wrap with `.default_backoff().predicate_filter(...)`, drain | Showcases all three combinators in one file. Register in `Cargo.toml`. |
+| `README.md` `### Features` | **no change** — combinators are part of the default surface, no opt-in feature | |
+| `README.md` `## High-Level APIs` | **add a sub-section** "Stream combinators" or include in existing event-subscription sub-sections | Brief; mention `.default_backoff()` as the canonical pattern. |
+| `CLAUDE.md` | **append** a paragraph in the existing resync / event-stream area noting the `ResyncStreamExt` extension trait + kube-rs `WatchStreamExt` precedent | One-paragraph addition. |
+
 End of plan.

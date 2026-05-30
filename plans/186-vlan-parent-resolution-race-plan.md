@@ -393,4 +393,18 @@ fn build_get_link_by_name_request_emits_ifla_ifname() {
   if our analysis is right; revisit only if §3b option 3 fixes
   the symptom by changing the dump shape.
 
+## 9. Cross-cutting artifacts
+
+Files outside `crates/nlink/src/` that ship with or alongside
+this plan. Add a checkmark in the PR description.
+
+| Artifact | Action | Notes |
+|---|---|---|
+| `CHANGELOG.md` `## [Unreleased]` | **add** `### Fixed` entry (race resolution) + `### Added` (topo-sort) | Even if Phase 1 stays green, the topo-sort + docstring are additive wins. |
+| `docs/migration_guide/0.18.0-to-0.19.0.md` | **append** `### Plan 186 — declared-order topo-sort` section | If file doesn't exist yet, this plan creates the stub. (Per landing order, Plan 193 ships first and should create the empty file with header.) |
+| `docs/recipes/network-config-declarative.md` | **create new recipe** | Walks the dummy+VLAN+address declarative path. Plan 186 is the natural moment to ship this — the topo-sort makes it work. |
+| `docs/recipes/README.md` | **add row** for `network-config-declarative.md` | One-line entry. |
+| `crates/nlink/examples/config/declarative_vlan_parent.rs` | **create new example** | ~50-line runnable demo: build a `NetworkConfig` with a dummy + a VLAN child + an address + apply. Register in `crates/nlink/Cargo.toml` per the convention (see CLAUDE.md "audit-example-registration" gate). |
+| `CLAUDE.md` | **append** to the existing namespace-safety / convention area a note about parent-dependent topo-sort policy | One paragraph; references the topo-sort. |
+
 End of plan.

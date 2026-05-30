@@ -331,4 +331,21 @@ jobs:
 - **Proptest integration** — randomized but structured (vs
   fuzz's pure random). Useful complement; defer.
 
+## 9. Cross-cutting artifacts
+
+This plan lands FIRST per the recommended landing order, so
+it owns creating the 0.18 → 0.19 migration guide file +
+adding the row to the migration-guide README index.
+
+| Artifact | Action | Notes |
+|---|---|---|
+| `docs/migration_guide/0.18.0-to-0.19.0.md` (**new** — Plan 193 creates the file since it lands first) | **create** with header + Plan 193's section. Subsequent plans append to it. | One-time setup. Follow the template from `0.17.0-to-0.18.0.md`. |
+| `docs/migration_guide/README.md` | **add row** for `0.18.0-to-0.19.0`. | One line in the existing table. |
+| `CHANGELOG.md` `## [Unreleased]` | **add** `### Fixed` (parser robustness audits) + `### Added` (fuzz infrastructure) | Note links to the three upstream issues (netlink-packet-route #232, #152, neli #305) as precedent. |
+| `CLAUDE.md` | **append** a "## Parser robustness" sub-section under the existing "## Recv-loop shape" area, documenting the accept-larger-than-expected + pathological-input policy | Future contributors writing new parsers inherit the right policy. |
+| `fuzz/` (**new directory**) | **create** with `Cargo.toml`, `fuzz_targets/fuzz_message_iter.rs`, README explaining nightly Rust + cargo-fuzz prerequisites | Lives at workspace root, NOT under `crates/nlink/`. |
+| `.github/workflows/fuzz.yml` (**new**) | **create** | Weekly cron + manual dispatch. |
+| `scripts/audit-recv-loop-error-handling.sh` (**new**) | **create** | Per §2.3. Verifies `?` isn't used inside `MessageIter` walking loops in `stream.rs`. |
+| `.github/workflows/rust.yml` | **add** the recv-loop audit script as a CI gate | Mirrors the existing audit-shape jobs. |
+
 End of plan.

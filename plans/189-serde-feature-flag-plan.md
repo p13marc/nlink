@@ -314,4 +314,17 @@ gate so the gated path doesn't bit-rot.
   `RouteMessage`, etc.) — useful for tools dumping kernel
   state to JSON. Not in this plan; ask in a follow-up.
 
+## 9. Cross-cutting artifacts
+
+| Artifact | Action | Notes |
+|---|---|---|
+| `CHANGELOG.md` `## [Unreleased]` | **add** `### Added` entry for the `serde` feature flag + list of types gaining `Serialize` | Note kebab-case JSON shape commitment. |
+| `docs/migration_guide/0.18.0-to-0.19.0.md` | **append** `### Plan 189` section noting opt-in via `[dependencies] nlink = { version = "0.19", features = ["serde"] }` + JSON field naming convention | One paragraph; the migration is purely additive. |
+| `README.md` `### Features` section | **add `serde` row** to the features table (currently lists `unstable`, `shared-memory`, etc. for zenoh? — verify; nlink's README has its own feature list) | One line. |
+| `crates/nlink/examples/config/serialize_diff.rs` (**new**) | **create** ~60 lines: build a `NetworkConfig`, compute the diff, serialize via `serde_json::to_string_pretty`, print | Demonstrates the kebab-case JSON shape downstream tooling will see. Register in `Cargo.toml`. |
+| `docs/recipes/json-diff-export.md` (**new**) | **create** ~80 lines | Mirrors nlink-lab's `apply --check --json` use case: diff → JSON → stdout. Closes the loop with the maintainer's report. |
+| `docs/recipes/README.md` | **add row** for `json-diff-export.md` | One-line entry. |
+| `CLAUDE.md` `## Feature flags` table | **add** `serde` row | Mirrors the table that lists `sockdiag`, `tuntap`, `output`, etc. |
+| `.github/workflows/rust.yml` | **add** `serde` to the feature-matrix CI runs | Per §4.4 of this plan. |
+
 End of plan.

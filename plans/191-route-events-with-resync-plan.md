@@ -539,4 +539,22 @@ shape, swap `Nftables` for `Route`. Covers:
   needed, the resync stream itself is the natural place
   (re-dump on demand via the factory).
 
+## 9. Cross-cutting artifacts
+
+This is the cycle's headline; the artifact surface is the
+biggest of any 0.19 plan.
+
+| Artifact | Action | Notes |
+|---|---|---|
+| `CHANGELOG.md` `## [Unreleased]` | **add** `### Added` headline entry covering `Connection<Route>::subscribe` + `RouteEvent` + `into_events_with_resync` + `subscribe_all_with_resync` + `rtnetlink_snapshot` | Lead with cross-reference to Plan 185 (the nftables precedent). |
+| `docs/migration_guide/0.18.0-to-0.19.0.md` | **append** `### Plan 191 — RTNETLINK events` substantial section: new `RouteEvent` enum (non-exhaustive — match arms need `_ => ...`), `RtnetlinkGroup` typed enum supersedes raw `u32` constants (deprecated), recipe link | Step-by-step migration of any existing rtnetlink subscriber. |
+| `docs/recipes/route-watch-with-resync.md` (**new**) | **create** ~150 lines mirroring `nftables-watch-with-resync.md` shape | Already noted in §3 of this plan. |
+| `docs/recipes/README.md` | **add row** for `route-watch-with-resync.md` | One-line entry. |
+| `crates/nlink/examples/events/route_watch_with_resync.rs` (**new**) | **create** ~80-line runnable demo using `into_events_with_resync` | Mirrors the existing `examples/events/resync_loop.rs` shape (Plan 151) for the new API. Register in `Cargo.toml`. |
+| `crates/nlink/examples/events/route_subscribe.rs` (**new**) | **create** ~50-line minimal subscribe demo (no resync) | Pedagogical step before the resync recipe; helps newcomers. |
+| `README.md` `## Library Modules` table | **update** the `nlink::netlink` row to mention RouteEvent subscription | One-line update — matches the existing nftables row treatment. |
+| `README.md` `## High-Level APIs` section | **add a sub-section** "RTNETLINK Event Subscription" mirroring the nftables event section | ~10 lines, like the existing nftables section. |
+| `CLAUDE.md` | **append** in the existing protocol section: `Route` now implements `EventSource`; `Connection<Route>::subscribe` is the typed entry point; `RtnetlinkGroup::All` is the convenience grouping | Two-paragraph addition; mention Plan 185 precedent. |
+| Deprecation note: existing raw `RtnetlinkGroup` `const u32` table | **mark deprecated** with `since = "0.19.0"` + point to the typed enum | Two-release cycle (removed 0.20). Document in CHANGELOG `### Deprecated`. |
+
 End of plan.

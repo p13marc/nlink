@@ -562,4 +562,23 @@ Plan 158e Slice 4's blocker (per the maintainer).
   maintainer's own assessment; no downstream signal.
 - **Macvlan Source mode (W9)** — defer; no downstream signal.
 
+## 9. Cross-cutting artifacts
+
+Six new link kinds / attribute groups — significant artifact
+surface. Bundle into the plan's PR.
+
+| Artifact | Action | Notes |
+|---|---|---|
+| `CHANGELOG.md` `## [Unreleased]` | **add** `### Added` with subsections per kind (VXLAN options, VLAN protocol, VRF, netkit, ovpn link half, IPv4 GSO/GRO caps) | Six entries; keep each ≤ 4 lines. |
+| `docs/migration_guide/0.18.0-to-0.19.0.md` | **append** `### Plan 190 — DeclaredLinkType widening` section | Note pattern-match `..` rest-pattern compatibility; mention WireGuard half deferred. |
+| `crates/nlink/examples/route/vrf.rs` (**new**) | **create** ~80-line VRF demo: create a VRF + two dummies enslaved as members | Showcases the `master(vrf)` enslaving path. Register in `Cargo.toml`. |
+| `crates/nlink/examples/route/netkit.rs` (**new**) | **create** ~60-line netkit demo: pair with mode + policy | The existing netkit integration test (Plan 148.7) is private; this is the runnable demo. |
+| `crates/nlink/examples/route/vxlan_advanced.rs` (**new**) | **create** ~70-line VXLAN demo using `local`/`port`/`underlay_dev` | Pairs nicely with the maintainer's 158e Slice 4 closeout. |
+| `crates/nlink/examples/route/ovpn_link.rs` (**new**) | **create** ~30-line ovpn link-half demo + comment block explaining the GENL peer-config split | Sets expectations for the 0.20 plan. |
+| `docs/recipes/vrf-multitenant.md` (**new**) | **create** | VRF is a multitenancy pattern; recipe walks two-tenant setup. ~120 lines. |
+| `docs/recipes/netkit-cilium-style.md` (**new**) | **create** | Cilium uses netkit as veth replacement; recipe shows the Pattern. ~100 lines. |
+| `docs/recipes/README.md` | **add 2 rows** (vrf-multitenant + netkit-cilium-style) | One line each. |
+| `README.md` `## Library Modules` table | **update** the `nlink::netlink` row to mention VRF / netkit / ovpn link kinds | One-line update. |
+| `CLAUDE.md` | **append** to the existing protocol / link-kind documentation area a kernel-version note for netkit (6.7+), ovpn (6.16+), IPv4 GSO caps (6.6+) | Helps consumers running on older kernels know which kinds work. |
+
 End of plan.

@@ -114,6 +114,25 @@ plans.
 9. **195 (Stream combinators)** ninth.
 10. **192 (Docs + tracing audit)** last — closes the cycle.
 
+## Cross-plan artifact ownership
+
+The 0.19 cycle has shared infrastructure that needs a single
+owner. Most artifacts live inside an individual plan; these
+are the ones that span:
+
+| Artifact | Owning plan | Notes |
+|---|---|---|
+| `docs/migration_guide/0.18.0-to-0.19.0.md` | Plan 193 creates the stub (lands first) | Each subsequent plan appends its `### Plan 187`, `### Plan 188`, … section. Stub is in place; commit `b8ab3a2` + this consolidation push. |
+| `docs/migration_guide/README.md` row for 0.19 | Plan 193 inserts the row | Polished at cycle cut with cycle highlights. ✓ inserted in this consolidation push. |
+| `CHANGELOG.md ## [Unreleased]` | All plans append; cycle-cut script promotes to `## [0.19.0] - <date>` | Each plan's §9 "Cross-cutting artifacts" lists its specific subsections. |
+| `CLAUDE.md` updates | Each plan owns its own section; no plan should ever delete or substantively rewrite another plan's section without coordination | Currently planned additions: 186 (parent topo-sort), 187 (Io-shape predicate template), 191 (Connection<Route> EventSource), 192 (util::ifname namespace policy), 193 (parser robustness policy), 194 (single-flight discipline), 195 (ResyncStreamExt). |
+| `README.md` updates | Plans 189 (serde feature row), 190 (Library Modules row), 191 (High-Level APIs section), 195 (combinators sub-section) all touch README | Coordinate at PR review time; small per-plan touches. |
+| `.github/workflows/rust.yml` new CI gates | Plans 189 (serde matrix), 192 (tracing + sysfs audit gates), 193 (recv-loop audit gate) | Four new gates total. |
+| `.github/workflows/fuzz.yml` | Plan 193 creates | New workflow; weekly cron. |
+| `scripts/` audit scripts | Plans 192 + 193 | Three new scripts: audit-tracing-instrument, audit-sysfs-in-lib, audit-recv-loop-error-handling. |
+| `docs/recipes/` new recipes | Plans 186 (network-config-declarative), 189 (json-diff-export), 190 (vrf-multitenant + netkit-cilium-style), 191 (route-watch-with-resync), 195 (resync-with-backoff) | Six new recipes. Update `docs/recipes/README.md` index per plan. |
+| `crates/nlink/examples/` new examples | Plans 186 (declarative_vlan_parent), 188 (existing examples updated for ApplyOptions builder), 189 (serialize_diff), 190 (vrf + netkit + vxlan_advanced + ovpn_link), 191 (route_watch_with_resync + route_subscribe), 195 (watch_with_backoff) | Nine new examples + edits to existing. Register each in `crates/nlink/Cargo.toml` per CLAUDE.md audit-example-registration convention. |
+
 ## Wishlist items NOT scoped this cycle
 
 | Item | Why deferred |

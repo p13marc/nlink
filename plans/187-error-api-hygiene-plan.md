@@ -514,4 +514,14 @@ used implicitly by every operation that produces an
   intermediate layers. Not asked for; the current shape (only
   yield nlink errors) matches what `Error::ext_ack` needs.
 
+## 9. Cross-cutting artifacts
+
+| Artifact | Action | Notes |
+|---|---|---|
+| `CHANGELOG.md` `## [Unreleased]` | **add** `### Breaking changes` (sign normalization) + `### Fixed` (Io-shape predicate sweep) + `### Added` (`chain_walk`) | Three subsections; the predicate fix is the broadest. |
+| `docs/migration_guide/0.18.0-to-0.19.0.md` | **append** `### Plan 187 — Error API` section with the sign-normalization migration ("if you asserted `Some(-1)` from `from_errno_ext_ack(1, ...)`, update to `Some(1)`") | Specific code snippets. |
+| `docs/recipes/error-handling-patterns.md` (exists — Plan 148.6) | **update** with a `chain_walk` example showing it handles `Box<nlink::Error>` source layers | Adds ~30 lines of new recipe content. |
+| `crates/nlink/examples/route/error_handling.rs` (exists) | **update** to demonstrate `Error::chain_walk` walking a wrapped error | The example currently shows basic predicate use; extend with chain_walk. |
+| `CLAUDE.md` | **append** a sub-section under the existing "## Errors" area documenting the Io-shape predicate contract: every new `is_*` predicate must work for both `Kernel*` AND `Io` variants — the `errno()` unwrap handles this | Future contributors adding predicates inherit the right behavior automatically. |
+
 End of plan.

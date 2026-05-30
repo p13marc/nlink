@@ -294,4 +294,15 @@ fn connection_route_is_send_but_check_sync_status() {
   delivered the pool; high-churn behavior wasn't part of
   Plan 162's invalidate test. Could be a follow-up.
 
+## 9. Cross-cutting artifacts
+
+| Artifact | Action | Notes |
+|---|---|---|
+| `CHANGELOG.md` `## [Unreleased]` | **add** `### Added` (regression tests) and IF the tests go red, also `### Fixed` (the concrete bug + fix description) | Link to rtnetlink #131 + #132 as precedent. |
+| `docs/migration_guide/0.18.0-to-0.19.0.md` | **append** `### Plan 194` — usually a no-op section ("regression tests added; no consumer action required") unless a fix surfaces a Send/Sync change | If a fix lands that changes `Connection<P>` trait bounds (e.g. requires `&mut self`), document the migration. |
+| `CLAUDE.md` | **append** a "## Single-flight discipline" sub-section in the existing recv-loop / connection-lifetime area documenting that `Connection<P>` methods are NOT safe to call concurrently from multiple tasks on a shared `&Connection` reference (or the test demonstrates they ARE — update wording based on §3.1's audit outcome) | Future contributors writing new `Connection` methods inherit the right invariant. |
+| `crates/nlink/tests/integration/seq_routing.rs` (**new**) | already in §4.1 of this plan | Root-gated. |
+| `crates/nlink/tests/integration/lab_concurrent.rs` (**new**) | already in §4.2 of this plan | Root-gated. |
+| `docs/recipes/` | **no new recipes** — these are regression tests, not user-facing patterns | |
+
 End of plan.

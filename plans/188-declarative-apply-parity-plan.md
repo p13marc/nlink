@@ -521,13 +521,21 @@ async fn apply_reconcile_retries_on_busy() -> nlink::Result<()> {
 
 ## 8. Out-of-scope follow-ups
 
-- **`ConfigDiff::summary()` vs `Display`** (D6 in feedback) —
-  the maintainer asks when to prefer which. Since `Display`
-  wraps `summary()` byte-for-byte (Plan 183 closed this),
-  `Display` is the canonical surface and `summary()` is
-  legacy. We could deprecate `summary()` here; defer to a
-  follow-up to keep this plan additive-mostly.
+- **D6 deprecation of `summary()`** — moved INTO this plan
+  during the 0.19 consolidation pass (§2.6 above).
 - **`del_*_or_create_idempotent`** — different pattern, not
   asked for.
+
+## 9. Cross-cutting artifacts
+
+| Artifact | Action | Notes |
+|---|---|---|
+| `CHANGELOG.md` `## [Unreleased]` | **add** `### Breaking changes` (`ApplyOptions` `#[non_exhaustive]`) + `### Added` (apply_reconcile, `ConfigDiff::apply`, `default_v{4,6}`, `LinkChanges::Display`, `del_*_if_exists`) + `### Deprecated` (`summary()`) | Four subsections; deprecation note explicitly says "removal in 0.20.0". |
+| `docs/migration_guide/0.18.0-to-0.19.0.md` | **append** `### Plan 188` migration table: struct-literal `ApplyOptions { ... }` → `ApplyOptions::default().with_*(...)` + `summary()` → `Display`/`to_string()` | Mechanical search-and-replace; document the shape. |
+| `docs/recipes/nftables-declarative-config.md` (exists) | **update** with `del_*_if_exists` idempotent-shutdown example | The recipe already shows declarative create; add a teardown section. |
+| `crates/nlink/examples/config/` (existing) | **update** examples that build `ApplyOptions` to use the new `.with_*` builders | Avoid struct-literal in the example code; sets the pattern users copy. |
+| `crates/nlink/examples/route/declarative_routes.rs` (existing or new) | **update or create** to demonstrate `RouteBuilder::default_v4()` | Cleaner than the current `Ipv4Route::new("0.0.0.0", 0)` muscle-memory. |
+| `crates/nlink/examples/nftables/` (existing) | **update** at least one example to show `del_table_if_exists` for clean shutdown | Pattern matters; many users start from these examples. |
+| `CLAUDE.md` | **no change** — the `#[non_exhaustive]` builder pattern is already documented from Plan 163. |
 
 End of plan.

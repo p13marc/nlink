@@ -328,4 +328,16 @@ This is doc + tracing work, no behavioral surface.
   another sweep might be worthwhile but isn't in feedback.
   Defer to its own plan when requested.
 
+## 9. Cross-cutting artifacts
+
+| Artifact | Action | Notes |
+|---|---|---|
+| `CHANGELOG.md` `## [Unreleased]` | **add** `### Changed` (docstring sweep, W7 tracing audit) + `### Added` (namespace-safety CI gate) | Brief; this plan is doc-shaped. |
+| `docs/migration_guide/0.18.0-to-0.19.0.md` | **append** `### Plan 192 — doc additions` section | Nothing user-actionable except W7 (no public API change); just lists the doc improvements. |
+| `docs/observability.md` (exists) | **update** with the W7 CI gate description + the new audit script path | Plan 192 is the natural moment — the observability doc is where the tracing convention lives. |
+| `CLAUDE.md` | **append** the new "## util::ifname sysfs reads — namespace policy" section under the existing namespace-safety strategic section (Plan 155.4) | Per §2.7 of this plan; ~25 lines. |
+| `scripts/audit-tracing-instrument.sh` (**new**) | **create** | Per §2.5. Bash awk-script; ~30 lines. |
+| `scripts/audit-sysfs-in-lib.sh` (**new**) | **create** | Per §2.7. Bash grep-script; ~25 lines. |
+| `.github/workflows/rust.yml` | **add 2 jobs** — `audit tracing-instrument coverage` + `audit sysfs reads in lib` | Mirrors the existing `audit example registration` shape. |
+
 End of plan.
