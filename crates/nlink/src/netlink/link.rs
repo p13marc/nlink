@@ -3628,6 +3628,67 @@ impl LinkConfig for VrfLink {
 }
 
 // ============================================================================
+// OVPN Link (kernel 6.16+)
+// ============================================================================
+
+/// Configuration for an OpenVPN data-channel-offload (DCO)
+/// link interface.
+///
+/// Kernel 6.16+ ships the `ovpn` link kind for in-kernel
+/// data-channel offload. nlink's [`OvpnLink`] covers the
+/// link half — creating the interface so it appears in
+/// dumps and inventory tools — while peer / cipher
+/// configuration lives in the GENL `ovpn` family (deferred
+/// to Plan 197 in 0.20).
+///
+/// Plan 190 §2.3b.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::OvpnLink;
+///
+/// let link = OvpnLink::new("ovpn0");
+/// conn.add_link(link).await?;
+/// ```
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
+pub struct OvpnLink {
+    name: String,
+    mtu: Option<u32>,
+}
+
+impl OvpnLink {
+    /// Create a new ovpn link configuration. Kernel 6.16+.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            mtu: None,
+        }
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+}
+
+impl LinkConfig for OvpnLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "ovpn"
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        write_simple_link(builder, &self.name, "ovpn", self.mtu, None);
+    }
+}
+
+// ============================================================================
 // GRE Link (IPv4)
 // ============================================================================
 

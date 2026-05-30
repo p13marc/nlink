@@ -232,6 +232,10 @@ pub enum DeclaredLinkType {
     /// forwarding domain. Members enslave via
     /// [`LinkBuilder::master`]. Plan 190 §2.3.
     Vrf { table: u32 },
+    /// OpenVPN data-channel-offload link (kernel 6.16+).
+    /// Link-half only — peer / cipher config goes through
+    /// the GENL `ovpn` family (Plan 197 / 0.20). Plan 190 §2.3b.
+    Ovpn,
     /// Netkit BPF-programmable veth pair (kernel 6.7+).
     /// Plan 190 §2.3a.
     Netkit {
@@ -266,6 +270,7 @@ impl DeclaredLinkType {
             Self::Ifb => Some("ifb"),
             Self::Vrf { .. } => Some("vrf"),
             Self::Netkit { .. } => Some("netkit"),
+            Self::Ovpn => Some("ovpn"),
             Self::Physical => None,
         }
     }
@@ -562,6 +567,15 @@ impl LinkBuilder {
     /// Create an IFB interface.
     pub fn ifb(mut self) -> Self {
         self.link_type = DeclaredLinkType::Ifb;
+        self
+    }
+
+    /// Build an OpenVPN data-channel-offload link (kernel
+    /// 6.16+). Link half only — peer / cipher config goes
+    /// through the GENL `ovpn` family (deferred to Plan
+    /// 197). Plan 190 §2.3b.
+    pub fn ovpn(mut self) -> Self {
+        self.link_type = DeclaredLinkType::Ovpn;
         self
     }
 
@@ -1249,6 +1263,21 @@ mod plan_190_tests {
         let lt = DeclaredLinkType::Vrf { table: 7 };
         assert_eq!(lt.kind(), Some("vrf"));
     }
+
+    // -------- Plan 190 §2.3b — ovpn link half --------
+
+    #[test]
+    fn ovpn_builder_creates_ovpn_variant() {
+        let link = LinkBuilder::new("ovpn0").ovpn().build();
+        assert!(matches!(link.link_type, DeclaredLinkType::Ovpn));
+    }
+
+    #[test]
+    fn ovpn_kind_string_is_ovpn() {
+        assert_eq!(DeclaredLinkType::Ovpn.kind(), Some("ovpn"));
+    }
+
+    // -------- end Plan 190 §2.3b --------
 
     // -------- Plan 190 §2.3a — netkit --------
 

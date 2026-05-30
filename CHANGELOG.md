@@ -77,6 +77,18 @@ All notable changes to this project will be documented in this file.
   RouteBuilder::default_v4().via("192.0.2.1")
   ```
 
+- **ovpn link half (kernel 6.16+) — `OvpnLink` +
+  `LinkBuilder::ovpn` + `DeclaredLinkType::Ovpn`
+  (Plan 190 §2.3b)** — minimal in-kernel OpenVPN
+  data-channel-offload link. Imperative `OvpnLink` ~50 LOC
+  (matching the `IfbLink` shape). Declarative path: zero-arg
+  `LinkBuilder::ovpn()` plus the `Ovpn` enum variant.
+  Useful for inventory tools that need to detect ovpn
+  interfaces. Peer / cipher config stays in the GENL `ovpn`
+  family — deferred to Plan 197 in 0.20 as a parallel
+  declarative track alongside WireGuard's peer config.
+  2 new unit tests.
+
 - **netkit declarative path (kernel 6.7+) — `LinkBuilder::netkit`
   + `DeclaredLinkType::Netkit` (Plan 190 §2.3a)** —
   BPF-programmable veth pair. Imperative `NetkitLink` +

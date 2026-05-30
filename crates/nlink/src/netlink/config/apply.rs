@@ -626,6 +626,13 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             }
             conn.add_link(config).await?;
         }
+        DeclaredLinkType::Ovpn => {
+            let mut config = crate::netlink::link::OvpnLink::new(&link.name);
+            if let Some(mtu) = link.mtu {
+                config = config.mtu(mtu);
+            }
+            conn.add_link(config).await?;
+        }
         DeclaredLinkType::Netkit {
             peer,
             mode,
