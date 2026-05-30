@@ -360,7 +360,8 @@ async fn test_config_diff_summary() -> Result<()> {
         .unwrap();
 
     let diff = config.diff(&conn).await?;
-    let summary = diff.summary();
+    // Plan 188 §2.6 — `summary()` deprecated in favor of Display.
+    let summary = diff.to_string();
 
     assert!(summary.contains("dummy0"));
     assert!(summary.contains("10.0.0.1/24"));

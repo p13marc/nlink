@@ -105,7 +105,7 @@ async fn reconcile_idempotent_reapply_yields_empty_diff() -> nlink::Result<()> {
         assert!(
             again.is_empty(),
             "second diff after no kernel state change must be empty; got {}",
-            again.summary()
+            again
         );
         Ok(())
     })
@@ -288,7 +288,7 @@ async fn nat_chain_chain_type_round_trips() -> nlink::Result<()> {
         assert!(
             again.is_empty(),
             "re-diff after no kernel change must be empty; got {}",
-            again.summary()
+            again
         );
 
         Ok(())

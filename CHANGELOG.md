@@ -34,7 +34,35 @@ All notable changes to this project will be documented in this file.
   `predicate_io_shape_sweep` test pins the contract for 10
   predicates; future additions inherit it.
 
+### Deprecated
+
+- **`ConfigDiff::summary()` + `NftablesDiff::summary()`
+  (Plan 188 §2.6)** — Plan 183 (0.18) made the `Display` impl
+  on both diff types share the same renderer; the two methods
+  produce byte-for-byte identical output. Pick the Rust idiom
+  (`Display`); remove the legacy method in 0.20.
+  Update call sites from `diff.summary()` to `diff.to_string()`
+  or use the `{}` placeholder in `format!`/`println!`.
+
 ### Added
+
+- **`ConfigDiff::apply` inherent method (Plan 188 §2.1)** —
+  matches `NftablesDiff::apply`'s shape from Plan 157.
+  ```rust
+  let diff = cfg.diff(&conn).await?;
+  println!("{diff}");
+  diff.apply(&conn, ApplyOptions::default()).await?;
+  ```
+  More efficient than `NetworkConfig::apply` when you already
+  hold a diff — saves one re-dump round-trip.
+
+- **`RouteBuilder::default_v4()` + `default_v6()`
+  (Plan 188 §2.3)** — declarative-side mirror of
+  `Ipv4Route::default_route()` / `Ipv6Route::default_route()`
+  (Plan 184). Self-documenting:
+  ```rust
+  RouteBuilder::default_v4().via("192.0.2.1")
+  ```
 
 - **`Error::chain_walk` + `root_cause` + `contexts` (Plan 187 §2.2)** —
   iterator over the source chain that transparently unwraps

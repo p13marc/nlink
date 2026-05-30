@@ -55,6 +55,31 @@ pub struct ConfigDiff {
 }
 
 impl ConfigDiff {
+    /// Apply this pre-computed diff in-place without re-running
+    /// [`crate::NetworkConfig::compute_diff`].
+    ///
+    /// Mirrors [`crate::netlink::nftables::config::NftablesDiff::apply`]'s
+    /// shape (Plan 188). Use this in the chain pattern when you
+    /// already hold a diff:
+    ///
+    /// ```ignore
+    /// let diff = cfg.diff(&conn).await?;
+    /// println!("{diff}");                  // inspect before commit
+    /// diff.apply(&conn, ApplyOptions::default()).await?;
+    /// ```
+    ///
+    /// More efficient than [`crate::NetworkConfig::apply`] when
+    /// you already have a `ConfigDiff` — the latter re-runs
+    /// `compute_diff` internally, costing one extra round-trip
+    /// of dump traffic.
+    pub async fn apply(
+        &self,
+        conn: &Connection<Route>,
+        opts: super::apply::ApplyOptions,
+    ) -> Result<super::apply::ApplyResult> {
+        super::apply::apply_diff(self, conn, opts).await
+    }
+
     /// Check if no changes are needed.
     pub fn is_empty(&self) -> bool {
         self.links_to_add.is_empty()
@@ -84,6 +109,15 @@ impl ConfigDiff {
     }
 
     /// Get a human-readable summary of the changes.
+    ///
+    /// Equivalent to `format!("{self}")` — Plan 183 (0.18) made
+    /// the [`std::fmt::Display`] impl share the same renderer.
+    /// Prefer the `Display` form (`diff.to_string()` /
+    /// `format!("{diff}")`) for new code.
+    #[deprecated(
+        since = "0.19.0",
+        note = "use `Display` via `format!(\"{}\")` or `diff.to_string()` instead — Plan 188 §2.6"
+    )]
     pub fn summary(&self) -> String {
         let mut lines = Vec::new();
 
@@ -167,10 +201,15 @@ impl ConfigDiff {
     }
 }
 
-/// `Display` mirrors [`ConfigDiff::summary`] so callers can
-/// `println!("{diff}")` directly. Plan 183.
+/// `Display` shares the renderer with the deprecated
+/// `ConfigDiff::summary` so callers can `println!("{diff}")`
+/// directly. Plan 183 (0.18) added this; Plan 188 §2.6 (0.19)
+/// deprecated `summary()` in favor of this form. The
+/// `#[allow(deprecated)]` is for the internal delegation —
+/// users are not on the deprecated path.
 impl std::fmt::Display for ConfigDiff {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[allow(deprecated)]
         f.write_str(&self.summary())
     }
 }
@@ -628,10 +667,15 @@ mod tests {
     #[test]
     fn display_matches_summary() {
         let diff = ConfigDiff::default();
-        assert_eq!(format!("{diff}"), diff.summary());
-
-        let mut d = ConfigDiff::default();
-        d.links_to_remove.push("eth0".to_string());
-        assert_eq!(format!("{d}"), d.summary());
+        // Plan 188 §2.6 — `summary()` is deprecated; this test
+        // pins the equivalence guarantee for the deprecation
+        // window (removed in 0.20).
+        #[allow(deprecated)]
+        {
+            assert_eq!(format!("{diff}"), diff.summary());
+            let mut d = ConfigDiff::default();
+            d.links_to_remove.push("eth0".to_string());
+            assert_eq!(format!("{d}"), d.summary());
+        }
     }
 }

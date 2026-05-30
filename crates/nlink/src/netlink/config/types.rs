@@ -637,6 +637,30 @@ pub struct RouteBuilder {
 }
 
 impl RouteBuilder {
+    /// `RouteBuilder` whose destination is `0.0.0.0/0` — the
+    /// IPv4 default route. Mirrors [`crate::Ipv4Route::default_route`]
+    /// (Plan 184) on the declarative side. Pairs with `.via()` to
+    /// set the gateway:
+    ///
+    /// ```ignore
+    /// use nlink::netlink::config::RouteBuilder;
+    /// let r = RouteBuilder::default_v4().via("192.0.2.1");
+    /// ```
+    ///
+    /// Plan 188 §2.3.
+    pub fn default_v4() -> Self {
+        // 0.0.0.0/0 is always a valid IPv4 CIDR; expect is safe.
+        Self::new("0.0.0.0/0").expect("0.0.0.0/0 is a valid IPv4 CIDR")
+    }
+
+    /// `RouteBuilder` whose destination is `::/0` — the IPv6
+    /// default route. Mirrors [`crate::Ipv6Route::default_route`].
+    ///
+    /// Plan 188 §2.3.
+    pub fn default_v6() -> Self {
+        Self::new("::/0").expect("::/0 is a valid IPv6 CIDR")
+    }
+
     fn new(dst: &str) -> Result<Self, RouteParseError> {
         let (ip_str, prefix_str) = dst
             .split_once('/')

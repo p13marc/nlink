@@ -223,6 +223,15 @@ impl NftablesDiff {
 
     /// Render a one-line-per-change human summary. Useful for
     /// `tracing::info!` or CLI output.
+    ///
+    /// Equivalent to `format!("{self}")` — Plan 183 (0.18) made
+    /// the [`std::fmt::Display`] impl share the same renderer.
+    /// Prefer the `Display` form (`diff.to_string()` /
+    /// `format!("{diff}")`) for new code.
+    #[deprecated(
+        since = "0.19.0",
+        note = "use `Display` via `format!(\"{}\")` or `diff.to_string()` instead — Plan 188 §2.6"
+    )]
     pub fn summary(&self) -> String {
         let mut lines = Vec::new();
         for t in &self.tables_to_add {
@@ -285,6 +294,10 @@ impl NftablesDiff {
 /// `println!("{diff}")` directly. Plan 183.
 impl std::fmt::Display for NftablesDiff {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Plan 188 §2.6 — `summary()` is deprecated in 0.19 in
+        // favor of this Display impl. Internal delegation is
+        // allowed; users are on the Display path.
+        #[allow(deprecated)]
         f.write_str(&self.summary())
     }
 }
@@ -622,6 +635,7 @@ impl NftablesConfig {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // Plan 188 §2.6 — test the deprecated `summary()` shape during its window
 mod tests {
     use super::*;
 
