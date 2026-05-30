@@ -59,6 +59,29 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`ResyncStreamExt` combinators on resync streams
+  (Plan 195 §2.1 + §2.3)** — kube-rs-style composable
+  adapters over `Connection<{Route,Nftables}>::into_events_with_resync`'s
+  output. The trait blanket-impls over any
+  `Stream<Item = Result<ResyncedEvent<T>>> + Unpin`, so it
+  applies to both watchers without per-protocol
+  duplication.
+  Adapters shipped:
+  - `predicate_filter(key_fn)` — drops consecutive
+    `Event(T)` / `Resynced(T)` items whose key matches the
+    previously-emitted item's key; `Marker` items always
+    pass through (they're state-machine signals).
+  - `map_event(f)` — projects the inner `T` to a
+    domain-specific type via the closure; `Marker` items
+    pass through unchanged.
+  `default_backoff()` + `StreamBackoff` (Plan 195 §2.2)
+  deferred — most consumers handle restart backoff at the
+  spawn-loop level via `tokio::time::sleep`; in-stream
+  backoff would need `tokio::time::Sleep` Pin gymnastics
+  that don't justify the LOC without a current consumer
+  ask. 4 new unit tests pin the dedup + map + marker
+  passthrough + error propagation contracts.
+
 - **Documentation + tracing-span audit (Plan 192 D4 + W7)** —
   - **D4**: `link.rs` rewrote 10 "namespace-safe variant that
     avoids reading from /sys/class/net/" docstrings to remove

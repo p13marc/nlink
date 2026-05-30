@@ -106,6 +106,7 @@ pub mod parse_params;
 pub mod pool;
 pub mod dump_stream;
 pub mod resync;
+pub mod resync_ext;
 pub mod route_resync;
 mod protocol;
 pub mod ratelimit;
