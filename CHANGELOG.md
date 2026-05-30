@@ -77,6 +77,20 @@ All notable changes to this project will be documented in this file.
   RouteBuilder::default_v4().via("192.0.2.1")
   ```
 
+- **`NetworkConfig::apply_reconcile` (Plan 188 §2.4)** —
+  bounded-retry sibling of `NetworkConfig::apply`, mirroring
+  `NftablesDiff::apply_reconcile` (Plan 157, 0.16). Retries
+  on `Error::is_busy()` / `is_try_again()` up to
+  `opts.max_retries` times with exponential backoff. For
+  RTNETLINK the transient surface is smaller than nftables —
+  no batch-end races — but VRF table allocation + neighbor
+  cache pressure still benefit. Uses the nftables-side
+  `ReconcileOptions` (the retry-budget shape), NOT the
+  crate-root `ReconcileOptions` (the TC recipe shape with
+  `fallback_to_apply` / `dry_run`). Plan 187's `errno()`
+  Io-shape fix means raw socket-layer `EBUSY`/`EAGAIN`
+  classifies correctly now.
+
 - **`LinkChanges::Display` (Plan 188 §2.5)** — `ConfigDiff::Display`
   can render `links_to_modify` rows compactly:
   `~ link eth0 (mtu=9000, up)`. Wraps the existing `summary()`
