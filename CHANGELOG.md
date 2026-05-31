@@ -186,6 +186,75 @@ All notable changes to this project will be documented in this file.
   helper + 6 unit tests covering well-formed, vendor-prepended,
   missing, truncated, non-UTF-8, and empty IE chains.
 
+- **NetworkConfig correctness pass: 6 silent reconcile-divergence
+  bugs fixed** (Plan 207).
+
+  - **H2 — link `master` change detection** (`config/diff.rs`).
+    Pre-0.19 the diff compared `Option<String>` (declared) vs
+    `Option<u32>` (kernel ifindex) treating any (Some, Some)
+    pair as equal. Bridge-port reassignment (`master: "br0"` vs
+    kernel `master: ifindex(br1)`) silently no-op'd. Now resolves
+    `existing.master()` ifindex → name via the diff's name map
+    and compares strings.
+
+  - **H3 — route gateway / dev / metric change detection**
+    (`config/diff.rs`). Pre-0.19 the diff identity tuple was
+    `(dst, prefix, table)` only; changing the gateway on the
+    same route produced an empty diff. Now compares the full
+    route key (including gateway/oif/metric); any mismatch
+    queues a route for re-emission. `add_route` uses
+    `NLM_F_REPLACE` so the kernel atomically swaps the existing
+    route — no del+add window. Most common reconcile op in
+    multi-router topologies.
+
+  - **H4 — `apply_reconcile` recomputes diff per retry**
+    (`config/mod.rs`). Pre-0.19, on EBUSY the reconcile loop
+    re-ran the full original apply against changed kernel state,
+    producing EEXIST that masked the original EBUSY. Now each
+    retry computes a fresh diff against current state and
+    targets only what's still missing. `change_count` becomes
+    the cumulative sum across attempts. Empty diff at retry
+    start short-circuits as success.
+
+  - **M3 — `remove_route` forwards table identity**
+    (`config/apply.rs`). Pre-0.19 the `_table` parameter was
+    discarded; routes in non-default tables (table ≠ 254)
+    could never be purged — kernel returned ESRCH which
+    `is_not_found()` swallowed silently.
+
+  - **M5 — topo-sort handles VXLAN underlay + master deps**
+    (`config/diff.rs`). Pre-0.19 only `Vlan { parent }` and
+    `Macvlan { parent }` were modeled. Declaring
+    `vxlan42.underlay_dev("eth0")` before `eth0`, or
+    `dummy0.master("br0")` before `br0`, in the same batch
+    silently failed at apply (same shape as Plan 186 §3c).
+
+  - **M10 — `LinkState::Down` uses IFF_UP flag, not OperState**
+    (`config/diff.rs`). Pre-0.19 the comparison read
+    `IFLA_OPERSTATE` (RFC 2863 operational state, carrier-
+    dependent). Dummy/veth interfaces with no carrier stayed
+    non-`Up` operationally even when admin-up, so
+    `LinkState::Down` declared on a no-carrier admin-up
+    interface silently no-op'd. Now reads `ifi_flags & IFF_UP`
+    (admin state).
+
+  - **M18 — atomic `replace_qdisc` via NLM_F_REPLACE**
+    (`config/apply.rs`). Pre-0.19 del+add sequence left a
+    transient `pfifo_fast`/`mq` window between the delete and
+    the new add; if the add failed the interface kept the
+    kernel-default qdisc not the previous declared one. Now
+    uses `Connection::replace_qdisc*` (atomic
+    `RTM_NEWQDISC + NLM_F_REPLACE`). Falls back to del+add for
+    `Ingress`/`Clsact` pseudo-qdiscs (kernel rejects REPLACE
+    on those).
+
+  2 new unit tests pin the topo-sort dep extensions
+  (`topo_sort_promotes_vxlan_underlay_before_vxlan`,
+  `topo_sort_promotes_master_before_slave`). Integration
+  verification for the diff/apply changes lands via the
+  existing `network_config_apply.rs` integration suite under
+  the privileged-CI gate.
+
 - **10 protocol recv-loops wrapped in `with_timeout` + seq
   filter + `NLM_F_DUMP_INTR` detection** (Plan 208 Phase 1+2):
   `xfrm.rs::{get_security_associations, get_security_policies}`,

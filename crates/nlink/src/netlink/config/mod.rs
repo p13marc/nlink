@@ -151,13 +151,43 @@ impl NetworkConfig {
         conn: &Connection<Route>,
         opts: crate::netlink::nftables::config::ReconcileOptions,
     ) -> Result<crate::netlink::nftables::config::ReconcileReport> {
+        // Plan 207e H4 — recompute the diff at the START of each
+        // attempt. Pre-0.19 this loop re-ran the same `apply`
+        // against changed kernel state, causing this failure mode:
+        //
+        //   Attempt 1: link X added OK, address Y add fails with EBUSY
+        //              (kernel netlink is_busy() triggers retry)
+        //   Attempt 2: re-runs full apply → link X already exists →
+        //              add_link fails with EEXIST (NOT is_busy(),
+        //              NOT is_try_again()) → reconcile gives up
+        //              with EEXIST, masking the original EBUSY.
+        //
+        // Recomputing the diff per attempt makes the second attempt
+        // see "link X already in kernel state, no work needed on the
+        // link side; retry only address Y" — which is what users
+        // expect from a reconciler.
+        //
+        // Cumulative `change_count` across attempts is the sum of
+        // each successful apply pass. An empty diff at start of an
+        // attempt is treated as "done", short-circuiting.
         let mut attempt: usize = 0;
+        let mut cumulative_changes: usize = 0;
         loop {
-            match self.apply(conn).await {
+            // Compute fresh diff against current kernel state.
+            let diff = self.diff(conn).await?;
+            if diff.is_empty() {
+                return Ok(crate::netlink::nftables::config::ReconcileReport {
+                    attempts: attempt + 1,
+                    change_count: cumulative_changes,
+                });
+            }
+
+            match apply::apply_diff(&diff, conn, apply::ApplyOptions::default()).await {
                 Ok(result) => {
+                    cumulative_changes += result.changes_made;
                     return Ok(crate::netlink::nftables::config::ReconcileReport {
                         attempts: attempt + 1,
-                        change_count: result.changes_made,
+                        change_count: cumulative_changes,
                     });
                 }
                 Err(e) if (e.is_busy() || e.is_try_again()) && attempt < opts.max_retries => {

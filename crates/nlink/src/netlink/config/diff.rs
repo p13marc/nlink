@@ -23,7 +23,7 @@ use crate::netlink::{
         ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, NetemConfig, PrioConfig,
         QdiscConfig, SfqConfig, TbfConfig,
     },
-    types::{link::OperState, route::RouteType},
+    types::route::RouteType,
 };
 
 /// Difference between desired and current network state.
@@ -300,8 +300,10 @@ pub async fn compute_diff(config: &NetworkConfig, conn: &Connection<Route>) -> R
         .filter_map(|l| l.name.as_deref().map(|n| (l.ifindex(), n)))
         .collect();
 
-    // Diff links
-    diff_links(config, &link_by_name, &mut diff);
+    // Diff links — pass the ifindex→name map so master changes
+    // can be detected by resolving the kernel's master ifindex
+    // back to a name (Plan 207b H2).
+    diff_links(config, &link_by_name, &ifindex_to_name, &mut diff);
 
     // Plan 186 §3c — topo-sort `links_to_add` so a child whose
     // parent is also being created in this apply lands AFTER
@@ -328,6 +330,7 @@ pub async fn compute_diff(config: &NetworkConfig, conn: &Connection<Route>) -> R
 fn diff_links(
     config: &NetworkConfig,
     current: &HashMap<&str, &LinkMessage>,
+    ifindex_to_name: &HashMap<u32, &str>,
     diff: &mut ConfigDiff,
 ) {
     // Note: desired_names would be used for purge mode to find links to remove
@@ -336,7 +339,7 @@ fn diff_links(
     for declared in &config.links {
         if let Some(existing) = current.get(declared.name.as_str()) {
             // Link exists, check if it needs modification
-            let changes = compute_link_changes(declared, existing);
+            let changes = compute_link_changes(declared, existing, ifindex_to_name);
             if !changes.is_empty() {
                 diff.links_to_modify.push((declared.name.clone(), changes));
             }
@@ -373,23 +376,40 @@ fn topo_sort_links_to_add(links: &mut Vec<DeclaredLink>) {
     let names_in_batch: HashSet<String> =
         links.iter().map(|l| l.name.clone()).collect();
 
-    // For each child, find its parent name IF that parent is
-    // also in this batch (a parent created out-of-band is
-    // resolved on the wire and doesn't need ordering).
-    let parent_of = |link: &DeclaredLink| -> Option<String> {
-        let parent = match &link.link_type {
-            DeclaredLinkType::Vlan { parent, .. } => Some(parent.clone()),
-            DeclaredLinkType::Macvlan { parent, .. } => Some(parent.clone()),
-            _ => None,
-        };
-        parent.filter(|p| names_in_batch.contains(p))
-    };
+    // Plan 207c M5 — collect ALL in-batch dependencies for a link.
+    // Pre-0.19 only `Vlan { parent }` and `Macvlan { parent }`
+    // were modeled, missing:
+    //   - VXLAN `underlay_dev` (Plan 190 §2.1 added the field but
+    //     forgot to wire it into topo-sort — same shape as the
+    //     original Plan 186 bug)
+    //   - `master` references (declaring `dummy0.master("br0")`
+    //     before `br0` in the same batch silently failed at apply)
+    fn deps_of(link: &DeclaredLink, names_in_batch: &HashSet<String>) -> Vec<String> {
+        let mut deps = Vec::new();
+        match &link.link_type {
+            DeclaredLinkType::Vlan { parent, .. } => deps.push(parent.clone()),
+            DeclaredLinkType::Macvlan { parent, .. } => deps.push(parent.clone()),
+            DeclaredLinkType::Vxlan {
+                underlay_dev: Some(dev),
+                ..
+            } => deps.push(dev.clone()),
+            _ => {}
+        }
+        // `master` is a separate field on the link itself —
+        // applies to any link type (Dummy, Veth, Bond member,
+        // etc. enslaved to a bridge / bond / VRF master).
+        if let Some(master) = &link.master {
+            deps.push(master.clone());
+        }
+        deps.retain(|d| names_in_batch.contains(d));
+        deps
+    }
 
     // Stable Kahn's algorithm. Iterate `links` in current order;
-    // emit a link only once all its in-batch parents have been
-    // emitted. Use a simple two-pass loop — for the link counts
-    // we expect (single-digit to low-double-digit), the cost is
-    // negligible and the implementation stays obvious.
+    // emit a link only once all its in-batch dependencies have
+    // been emitted. Use a simple two-pass loop — for the link
+    // counts we expect (single-digit to low-double-digit), the
+    // cost is negligible and the implementation stays obvious.
     let mut emitted: HashSet<String> = HashSet::new();
     let mut out: Vec<DeclaredLink> = Vec::with_capacity(links.len());
     let mut remaining: Vec<DeclaredLink> = std::mem::take(links);
@@ -398,10 +418,8 @@ fn topo_sort_links_to_add(links: &mut Vec<DeclaredLink>) {
         let before = remaining.len();
         let mut next_remaining = Vec::with_capacity(remaining.len());
         for link in remaining.into_iter() {
-            let ready = match parent_of(&link) {
-                Some(parent) => emitted.contains(&parent),
-                None => true,
-            };
+            let deps = deps_of(&link, &names_in_batch);
+            let ready = deps.iter().all(|d| emitted.contains(d));
             if ready {
                 emitted.insert(link.name.clone());
                 out.push(link);
@@ -422,18 +440,32 @@ fn topo_sort_links_to_add(links: &mut Vec<DeclaredLink>) {
     *links = out;
 }
 
-fn compute_link_changes(declared: &DeclaredLink, existing: &LinkMessage) -> LinkChanges {
+fn compute_link_changes(
+    declared: &DeclaredLink,
+    existing: &LinkMessage,
+    ifindex_to_name: &HashMap<u32, &str>,
+) -> LinkChanges {
     let mut changes = LinkChanges::default();
 
-    // Check state
+    // Plan 207a M10 — read the IFF_UP administrative flag from
+    // ifi_flags, NOT the OperState (RFC 2863) field. OperState
+    // reports the *carrier-dependent* operational state: dummy /
+    // veth / bridge interfaces with no carrier stay
+    // `Down`/`LowerLayerDown`/`Unknown` even when admin-up. The
+    // pre-0.19 comparison silently no-op'd on
+    // `LinkState::Down`-declared no-carrier admin-up interfaces
+    // (because operstate was never `Up`, so "if up, set_down"
+    // never fired) and unnecessarily fired `set_up` on every
+    // re-apply (because operstate stayed non-`Up`).
+    let is_admin_up = existing.is_up();
     match declared.state {
         LinkState::Up => {
-            if existing.operstate != Some(OperState::Up) {
+            if !is_admin_up {
                 changes.set_up = true;
             }
         }
         LinkState::Down => {
-            if existing.operstate == Some(OperState::Up) {
+            if is_admin_up {
                 changes.set_down = true;
             }
         }
@@ -447,12 +479,32 @@ fn compute_link_changes(declared: &DeclaredLink, existing: &LinkMessage) -> Link
         changes.set_mtu = Some(desired_mtu);
     }
 
-    // Check master
-    // Note: This is simplified - would need ifindex lookup for full implementation
-    if declared.master.is_some() && existing.master.is_none() {
-        changes.set_master = declared.master.clone();
-    } else if declared.master.is_none() && existing.master.is_some() {
-        changes.unset_master = true;
+    // Plan 207b H2 — resolve existing.master (ifindex) → name and
+    // compare against the declared master string. Pre-0.19 the
+    // comparison was `Option<String> vs Option<u32>` treating any
+    // (Some, Some) pair as equal, so bridge-port reassignment
+    // (declared `master: "br0"` vs kernel `master: ifindex(br1)`)
+    // silently no-op'd — the single most common reconcile
+    // operation in lab/CNI environments.
+    let existing_master_name: Option<&str> = existing
+        .master()
+        .and_then(|idx| ifindex_to_name.get(&idx).copied());
+
+    match (declared.master.as_deref(), existing_master_name) {
+        (Some(want), Some(have)) if want == have => {
+            // No change — declared master matches kernel master.
+        }
+        (Some(want), _) => {
+            // Either kernel has no master, or has a different master.
+            // Either way, queue a set_master operation.
+            changes.set_master = Some(want.to_string());
+        }
+        (None, Some(_)) => {
+            changes.unset_master = true;
+        }
+        (None, None) => {
+            // Both no-master — no change.
+        }
     }
 
     changes
@@ -500,51 +552,95 @@ fn diff_routes(
     ifindex_to_name: &HashMap<u32, &str>,
     diff: &mut ConfigDiff,
 ) {
-    // Build set of desired routes: (destination, prefix_len, table)
-    let desired: HashSet<(IpAddr, u8, u32)> = config
-        .routes
+    // Plan 207d H3 — compare the FULL route identity (dst, prefix,
+    // table, gateway, oif, metric) when deciding "no change",
+    // not just (dst, prefix, table). Pre-0.19 a gateway/dev/metric
+    // change on the same `(dst, prefix, table)` silently no-op'd
+    // because the key matched and the diff had no
+    // `routes_to_modify` collection.
+    //
+    // We DON'T grow the diff struct; instead any non-trivial
+    // mismatch goes into `routes_to_add`, and `add_route` uses
+    // `NLM_F_REPLACE` so the kernel atomically swaps the
+    // existing route (Plan 207d implementation).
+
+    // Build a name→ifindex map (inverse of `ifindex_to_name`)
+    // so we can resolve declared `dev: Option<String>` to compare
+    // against the kernel's `oif: Option<u32>`.
+    let name_to_ifindex: HashMap<&str, u32> = ifindex_to_name
         .iter()
-        .map(|r| (r.destination, r.prefix_len, r.table.unwrap_or(254)))
+        .map(|(idx, name)| (*name, *idx))
         .collect();
 
-    // Build set of current routes (only unicast routes we care about)
-    let current_set: HashSet<(IpAddr, u8, u32)> = current
-        .iter()
-        .filter(|r| {
-            // Only consider routes we might have added (protocol static or boot)
-            matches!(
-                r.route_type(),
-                RouteType::Unicast
-                    | RouteType::Blackhole
-                    | RouteType::Unreachable
-                    | RouteType::Prohibit
-            )
-        })
-        .map(|r| {
-            let dst = r.destination.unwrap_or_else(|| {
-                if r.is_ipv4() {
-                    IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-                } else {
-                    IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
-                }
-            });
-            (dst, r.dst_len(), r.table_id())
-        })
-        .collect();
+    // Index current routes by (dst, prefix, table) for fast lookup
+    // of every matching kernel route. ECMP / multi-metric setups
+    // can have multiple entries per key.
+    let mut current_by_key: HashMap<(IpAddr, u8, u32), Vec<&RouteMessage>> = HashMap::new();
+    for r in current.iter().filter(|r| {
+        matches!(
+            r.route_type(),
+            RouteType::Unicast
+                | RouteType::Blackhole
+                | RouteType::Unreachable
+                | RouteType::Prohibit
+        )
+    }) {
+        let dst = r.destination.unwrap_or_else(|| {
+            if r.is_ipv4() {
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+            } else {
+                IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+            }
+        });
+        current_by_key
+            .entry((dst, r.dst_len(), r.table_id()))
+            .or_default()
+            .push(r);
+    }
 
-    // Find routes to add
+    // For each declared route, check if any kernel route at the
+    // same (dst, prefix, table) MATCHES gateway+dev+metric. If yes,
+    // no-op. If not, queue for add (which uses NLM_F_REPLACE).
     for declared in &config.routes {
         let table = declared.table.unwrap_or(254);
         let key = (declared.destination, declared.prefix_len, table);
-        if !current_set.contains(&key) {
+        let declared_oif = declared
+            .dev
+            .as_deref()
+            .and_then(|d| name_to_ifindex.get(d).copied());
+
+        let matches_existing = current_by_key.get(&key).is_some_and(|kernel_routes| {
+            kernel_routes.iter().any(|r| {
+                // Gateway: compare Option<IpAddr> ↔ Option<&IpAddr>.
+                let gw_match = match (declared.gateway, r.gateway()) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a == *b,
+                    _ => false,
+                };
+                // Output interface (ifindex).
+                let dev_match = match (declared_oif, r.oif()) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a == b,
+                    // declared has no `dev` but kernel oif is
+                    // set — accept (the kernel auto-selects oif
+                    // from gateway). Treat as match to avoid
+                    // unnecessary REPLACE churn.
+                    (None, Some(_)) => true,
+                    (Some(_), None) => false,
+                };
+                // Metric (priority). Kernel reports None as 0.
+                let metric_match = declared.metric.unwrap_or(0) == r.priority().unwrap_or(0);
+                gw_match && dev_match && metric_match
+            })
+        });
+
+        if !matches_existing {
             diff.routes_to_add.push(declared.clone());
         }
     }
 
     // Note: We don't auto-remove routes not in config
-    // That requires explicit purge mode
-    let _ = desired;
-    let _ = ifindex_to_name;
+    // That requires explicit purge mode (Plan 205 will wire it).
 }
 
 fn diff_qdiscs(
@@ -978,6 +1074,57 @@ mod tests {
         let r = RouteBuilder::default_v6();
         let with_gw = r.via("2001:db8::1");
         drop(with_gw);
+    }
+
+    // ----- Plan 207c M5 — topo-sort dep coverage -----
+
+    #[test]
+    fn topo_sort_promotes_vxlan_underlay_before_vxlan() {
+        // Pre-Plan 207c, VXLAN underlay was NOT a recognized
+        // dep — declaring VXLAN before underlay dummy
+        // reproduced the Plan 186 bug class.
+        let mut links = vec![
+            declared(
+                "vxlan42",
+                DeclaredLinkType::Vxlan {
+                    vni: 42,
+                    remote: None,
+                    local: None,
+                    port: None,
+                    underlay_dev: Some("eth0".into()),
+                },
+            ),
+            declared("eth0", DeclaredLinkType::Dummy),
+        ];
+        topo_sort_links_to_add(&mut links);
+        let positions: HashMap<String, usize> = links
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l.name.clone(), i))
+            .collect();
+        assert!(
+            positions["eth0"] < positions["vxlan42"],
+            "underlay must be created before VXLAN"
+        );
+    }
+
+    #[test]
+    fn topo_sort_promotes_master_before_slave() {
+        // Declaring `dummy0.master("br0")` before `br0` should
+        // get reordered so br0 lands first.
+        let mut dummy = declared("dummy0", DeclaredLinkType::Dummy);
+        dummy.master = Some("br0".into());
+        let mut links = vec![dummy, declared("br0", DeclaredLinkType::Bridge)];
+        topo_sort_links_to_add(&mut links);
+        let positions: HashMap<String, usize> = links
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l.name.clone(), i))
+            .collect();
+        assert!(
+            positions["br0"] < positions["dummy0"],
+            "master must be created before slave"
+        );
     }
 
     // ---- Plan 183 — Display for NetworkDiff ----

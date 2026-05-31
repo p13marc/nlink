@@ -779,7 +779,13 @@ async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
                 }
             };
 
-            conn.add_route(config).await
+            // Plan 207d H3 — use NLM_F_REPLACE so a change to
+            // gateway/dev/metric on the same `(dst, prefix, table)`
+            // atomically swaps the existing route instead of
+            // failing with EEXIST (and silently no-op'ing because
+            // the pre-0.19 diff didn't notice the gateway change
+            // at all). New routes are also accepted by replace.
+            conn.replace_route(config).await
         }
         IpAddr::V6(dst) => {
             let mut config = Ipv6Route::from_addr(dst, route.prefix_len);
@@ -813,7 +819,13 @@ async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
                 }
             };
 
-            conn.add_route(config).await
+            // Plan 207d H3 — use NLM_F_REPLACE so a change to
+            // gateway/dev/metric on the same `(dst, prefix, table)`
+            // atomically swaps the existing route instead of
+            // failing with EEXIST (and silently no-op'ing because
+            // the pre-0.19 diff didn't notice the gateway change
+            // at all). New routes are also accepted by replace.
+            conn.replace_route(config).await
         }
     }
 }
@@ -822,15 +834,29 @@ async fn remove_route(
     conn: &Connection<Route>,
     dst: IpAddr,
     prefix_len: u8,
-    _table: u32,
+    table: u32,
 ) -> Result<()> {
+    // Plan 207d M3 — forward the table identity to `del_route`.
+    // Pre-0.19 the `_table` parameter was discarded (underscored),
+    // so routes in non-default tables (table != 254 = `main`)
+    // could never be purged — kernel returned `ESRCH` which
+    // `is_not_found()` swallowed silently. Now the del_route
+    // path receives the table; the kernel matches the right
+    // route. Gateway/dev/metric carrying remains future work
+    // for full ECMP disambiguation (only matters under purge).
     match dst {
         IpAddr::V4(v4) => {
-            let route = Ipv4Route::from_addr(v4, prefix_len);
+            let mut route = Ipv4Route::from_addr(v4, prefix_len);
+            if table != 254 {
+                route = route.table(table);
+            }
             conn.del_route(route).await
         }
         IpAddr::V6(v6) => {
-            let route = Ipv6Route::from_addr(v6, prefix_len);
+            let mut route = Ipv6Route::from_addr(v6, prefix_len);
+            if table != 254 {
+                route = route.table(table);
+            }
             conn.del_route(route).await
         }
     }
@@ -919,21 +945,117 @@ async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()
 }
 
 async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()> {
-    // First try to delete the existing qdisc
-    let parent_handle = match qdisc.parent {
-        QdiscParent::Root => crate::TcHandle::ROOT,
-        QdiscParent::Ingress => crate::TcHandle::INGRESS,
-    };
-
-    // Ignore not found errors when deleting
-    match conn.del_qdisc(&qdisc.dev, parent_handle).await {
-        Ok(()) => {}
-        Err(e) if e.is_not_found() => {}
-        Err(e) => return Err(e),
+    // Plan 207f M18 — use atomic `RTM_NEWQDISC` with `NLM_F_REPLACE`
+    // (`Connection::replace_qdisc*`) instead of the pre-0.19
+    // del-then-add sequence. The old sequence had a transient
+    // window between `del_qdisc` (which restored the default
+    // `pfifo_fast`/`mq`) and `add_qdisc` (which installed the
+    // new declared kind). If `add_qdisc` failed mid-window the
+    // interface kept the kernel-default qdisc, NOT the previous
+    // declared one — visible state divergence on apply failure.
+    //
+    // The atomic form is unsupported on a small set of qdiscs
+    // (`Ingress`, `Clsact`) where the kernel rejects REPLACE
+    // semantically; for those we fall back to del+add since the
+    // kind is parent-fixed (ingress / clsact slots).
+    match &qdisc.qdisc_type {
+        DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact => {
+            // Kernel does not accept NLM_F_REPLACE on these
+            // pseudo-qdiscs (the kind IS the slot). Use del+add.
+            let parent_handle = match qdisc.parent {
+                QdiscParent::Root => crate::TcHandle::ROOT,
+                QdiscParent::Ingress => crate::TcHandle::INGRESS,
+            };
+            match conn.del_qdisc(&qdisc.dev, parent_handle).await {
+                Ok(()) => {}
+                Err(e) if e.is_not_found() => {}
+                Err(e) => return Err(e),
+            }
+            return add_qdisc(conn, qdisc).await;
+        }
+        _ => {}
     }
 
-    // Then add the new one
-    add_qdisc(conn, qdisc).await
+    // Atomic replace via NLM_F_REPLACE on RTM_NEWQDISC.
+    match &qdisc.qdisc_type {
+        DeclaredQdiscType::Netem {
+            delay_us,
+            jitter_us,
+            loss_percent,
+            limit,
+        } => {
+            let mut cfg = NetemConfig::new();
+            if let Some(d) = delay_us {
+                cfg = cfg.delay(Duration::from_micros(*d as u64));
+            }
+            if let Some(j) = jitter_us {
+                cfg = cfg.jitter(Duration::from_micros(*j as u64));
+            }
+            if let Some(l) = loss_percent {
+                cfg = cfg.loss(crate::util::Percent::new(*l));
+            }
+            if let Some(lim) = limit {
+                cfg = cfg.limit(*lim);
+            }
+            conn.replace_qdisc(&qdisc.dev, cfg.build()).await
+        }
+        DeclaredQdiscType::Htb { default_class } => {
+            let cfg = HtbQdiscConfig::new().default_class(*default_class);
+            conn.replace_qdisc_full(
+                &qdisc.dev,
+                crate::TcHandle::ROOT,
+                Some(crate::TcHandle::major_only(1)),
+                cfg,
+            )
+            .await
+        }
+        DeclaredQdiscType::FqCodel {
+            limit,
+            target_us,
+            interval_us,
+        } => {
+            let mut cfg = FqCodelConfig::new();
+            if let Some(lim) = limit {
+                cfg = cfg.limit(*lim);
+            }
+            if let Some(t) = target_us {
+                cfg = cfg.target(Duration::from_micros(*t as u64));
+            }
+            if let Some(i) = interval_us {
+                cfg = cfg.interval(Duration::from_micros(*i as u64));
+            }
+            conn.replace_qdisc(&qdisc.dev, cfg).await
+        }
+        DeclaredQdiscType::Tbf {
+            rate_bps,
+            burst_bytes,
+            limit_bytes,
+        } => {
+            let mut cfg = TbfConfig::new()
+                .rate(crate::util::Rate::bytes_per_sec(*rate_bps))
+                .burst(crate::util::Bytes::new(*burst_bytes as u64));
+            if let Some(lim) = limit_bytes {
+                cfg = cfg.limit(crate::util::Bytes::new(*lim as u64));
+            }
+            conn.replace_qdisc(&qdisc.dev, cfg).await
+        }
+        DeclaredQdiscType::Sfq { perturb_secs } => {
+            let mut cfg = SfqConfig::new();
+            if let Some(p) = perturb_secs {
+                cfg = cfg.perturb(*p as i32);
+            }
+            conn.replace_qdisc(&qdisc.dev, cfg).await
+        }
+        DeclaredQdiscType::Prio { bands } => {
+            let mut cfg = PrioConfig::new();
+            if let Some(b) = bands {
+                cfg = cfg.bands(*b as i32);
+            }
+            conn.replace_qdisc(&qdisc.dev, cfg).await
+        }
+        // Ingress/Clsact already handled above.
+        DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact => unreachable!(),
+    }
 }
 
 fn convert_macvlan_mode(mode: MacvlanMode) -> crate::netlink::link::MacvlanMode {
