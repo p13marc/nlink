@@ -20,13 +20,14 @@ plans either shipped or were deferred with documented rationale.
 Documented in `docs/migration_guide/0.18.0-to-0.19.0.md` §"Plan
 186" through §"Plan 202".
 
-**Wave 2** — post-cycle deep audit (`docs/AUDIT_REPORT_2026_05_31.md`)
-surfaced ~96 additional bugs. Plan 203 (master) orchestrated 13
-sub-plans (204-215). **12 of 13 shipped pre-cut**; the 13th
-(Plan 210 examples cleanup) has its HIGH-severity sub-item
-(firewall cleanup leak) + the highest-impact LOW-tier doc-name
-fixes shipped, with the remaining LOW-tier cleanup folded into
-the cut-prep hygiene pass.
+**Wave 2** — post-cycle deep audit surfaced ~96 additional bugs.
+Plan 203 (master) orchestrated 13 sub-plans (204-215). **12 of 13
+shipped pre-cut**; the 13th (Plan 210 examples cleanup) has its
+HIGH-severity sub-item (firewall cleanup leak) + the highest-impact
+LOW-tier doc-name fixes shipped, with the remaining LOW-tier
+cleanup folded into the cut-prep hygiene pass. A subsequent
+four-agent post-cycle audit closed F1 + N1-N9 + Findings A-D
+(durable narrative in `CHANGELOG.md` + `docs/migration_guide/0.18.0-to-0.19.0.md`).
 
 Cumulative breaking changes (full list in migration guide):
 
@@ -39,9 +40,9 @@ Cumulative breaking changes (full list in migration guide):
   new `NetdevEgress` (Plan 211)
 - 0.19-cycle Plans 187, 188, 190 (wave 1)
 
-All wave-2 fixes carry adversarial-verification provenance via
-the audit report; CHANGELOG entries cite the audit finding ID
-for each (C1-C5, H1-H11, M1-M19).
+CHANGELOG entries cite each finding ID (C1-C5, H1-H11, M1-M19
+for the wave-2 audit; N1-N9 + Findings A-D for the post-cycle
+audit) for traceability.
 
 ### Cut checklist (for `scripts/cut-release.sh 0.19.0`)
 
@@ -83,12 +84,6 @@ Wave 2:
 |------|--------|-------|
 | [197](197-declarative-ovpn-plan.md) | deferred to 0.20 | Kernel 6.16+ ovpn GENL UAPI; needs imperative Connection<Ovpn> family + scoped implementation effort. Link half shipped via Plan 190 §2.3b. |
 
-## Deprioritized (parked)
-
-| Plan | Why parked |
-|------|------------|
-| [152](152-0.16-integration-showcases-plan.md) | `aya` co-demo + Prometheus exporter + OTel example. Carried since 0.16 without a real adopter signal. Revisit if a downstream asks. |
-
 ## 0.20 cycle seed
 
 Not yet opened. Topics worth scoping when it kicks off:
@@ -96,16 +91,16 @@ Not yet opened. Topics worth scoping when it kicks off:
 | Topic | Source |
 |-------|--------|
 | Plan 197 — ovpn GENL family imperative + declarative | `plans/197-declarative-ovpn-plan.md` |
-| Plan 205 follow-on — wire purge correctly with kernel-managed-resource exclusion list | Plan 205 §10 deferral note + audit report C5 |
-| F1 follow-on — full NlRouter-style dispatcher task (Mutex serialization shipped in 0.19 Plan 194; dispatcher unlocks per-request pipelining + multicast-events vs request safety) | 0.19 migration guide §"Plan 194" + audit report |
-| Plan 208 Phase 3-4 — GENL command unification + family-resolution unification (15th recv-loop closeout: wg_command stale-frame race) | Plan 208 deferral note + audit report H9 |
+| Plan 205 follow-on — wire purge correctly with kernel-managed-resource exclusion list | Plan 205 §10 deferral note (durable narrative in CHANGELOG) |
+| F1 follow-on — full NlRouter-style dispatcher task (Mutex serialization shipped in 0.19 Plan 194; dispatcher unlocks per-request pipelining + multicast-events vs request safety) | 0.19 migration guide §"Plan 194" (see CHANGELOG) |
+| Plan 208 Phase 3-4 — GENL command unification + family-resolution unification (15th recv-loop closeout: wg_command stale-frame race) | Plan 208 deferral note + CHANGELOG finding H9 |
 | Plan 189 §8 expansions — `Deserialize` + `schemars` JSON Schema | 0.19 migration guide §"Plan 189" |
 | Plan 193 phase 2-3 — `cargo-fuzz` infrastructure + `proptest` integration | 0.19 migration guide §"Plan 193" |
 | Plan 195 — `StreamBackoff` + `Store<K>` reflector + `backon` | 0.19 migration guide §"Plan 195" |
 | Plan 196 follow-ups — `WireguardConfig::client()` shortcut + `from_wg_config()` INI parser | 0.19 migration guide §"Plan 196" |
 | Plan 198 — full declarative `DeclaredSet` + element diff | 0.19 migration guide §"Plan 198" |
 | Plan 201 — broader sweep (`From`/`Into` + `Display` + `#[inline]` on builders) | 0.19 migration guide §"Plan 201" |
-| Audit follow-ups — H7 (`ip vrf exec` real impl) + H8 (`ip xfrm` lib wire-up) | Plan 209 §4-5 + audit report H7/H8 |
+| Audit follow-ups — H7 (`ip vrf exec` real impl) + H8 (`ip xfrm` lib wire-up) | Plan 209 §4-5 + CHANGELOG findings H7/H8 |
 
 These don't have plan files yet; write them when the 0.20
 cycle kicks off (likely after 0.19.0 publishes and a
