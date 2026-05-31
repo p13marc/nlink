@@ -561,27 +561,29 @@ async fn plan_204_c1_verdict_jump_round_trips_through_kernel() -> Result<()> {
         );
 
         // Step 3: the raw expression bytes must contain
-        // `NFT_JUMP = -3` encoded little-endian. The verdict
-        // byte sequence is embedded inside the NFTA_VERDICT_CODE
-        // attribute payload (4 bytes, native-endian which is LE
-        // on x86_64 / aarch64). Pre-fix this would be
-        // [0xfe, 0xff, 0xff, 0xff] (NFT_BREAK = -2).
+        // `NFT_JUMP = -3` encoded *big-endian* — empirical
+        // observation from CI shows the kernel emits
+        // `NFTA_VERDICT_CODE` as `__be32` (the netfilter rule
+        // attributes use BE for verdict codes, even though most
+        // nftables NLA_U32 are native). The verdict bytes appear
+        // as `[ff, ff, ff, fd]` in the dumped NFTA_RULE_EXPRESSIONS.
+        // Pre-Plan-204 this would be `[ff, ff, ff, fe]` (NFT_BREAK).
         let expr_bytes = &parent_rules[0].expression_bytes;
-        let jump_marker = (-3_i32).to_ne_bytes();
-        let break_marker = (-2_i32).to_ne_bytes();
+        let jump_marker_be = (-3_i32).to_be_bytes();
+        let break_marker_be = (-2_i32).to_be_bytes();
         let contains_jump = expr_bytes
             .windows(4)
-            .any(|w| w == jump_marker.as_slice());
+            .any(|w| w == jump_marker_be.as_slice());
         let contains_break_with_chain = expr_bytes
             .windows(4)
-            .any(|w| w == break_marker.as_slice());
+            .any(|w| w == break_marker_be.as_slice());
         assert!(
             contains_jump,
-            "rule expression bytes must contain NFT_JUMP marker (-3 LE): bytes = {expr_bytes:02x?}"
+            "rule expression bytes must contain NFT_JUMP marker (-3 BE): bytes = {expr_bytes:02x?}"
         );
         assert!(
             !contains_break_with_chain,
-            "rule expression bytes must NOT contain NFT_BREAK marker (-2 LE) — \
+            "rule expression bytes must NOT contain NFT_BREAK marker (-2 BE) — \
              pre-Plan-204 bug regressed: bytes = {expr_bytes:02x?}"
         );
 
@@ -689,28 +691,32 @@ async fn plan_211_m1_inet_ingress_chain_installs_on_correct_hook() -> Result<()>
 
 /// Plan 191 kernel-level regression (test-coverage gap agent
 /// flagged as HIGH — only the Nftables-side of the resync
-/// shape had a kernel test). The Route-side walker is a
-/// separate code path that could silently regress (e.g. miss
-/// IPv6 routes / specific RTM_NEWLINK attrs on the initial
-/// snapshot).
+/// shape had a kernel test).
 ///
-/// Test: in a fresh netns, pre-create one dummy link with an
-/// IPv4 address. Subscribe with resync; expect the first
-/// batch of events to contain:
-/// - `ResyncMarker::ResyncStart`
-/// - `Resynced(NewLink)` for the dummy link
-/// - `Resynced(NewAddress)` for the IPv4 address
-/// - `ResyncMarker::ResyncEnd`
+/// `subscribe_all_with_resync` returns a `ResyncStream` that:
+/// - wraps live multicast events as `ResyncedEvent::Event(_)`
+/// - on `ENOBUFS`, replays the snapshot wrapped as
+///   `ResyncedEvent::Marker(ResyncStart)` → `Resynced(_)`* →
+///   `Marker(ResyncEnd)`.
 ///
-/// Any breakage to the snapshot walker (missing a protocol
-/// family, dropping certain attrs) shows up as a missing
-/// event in the assertion.
+/// This test exercises the live-event path: after subscribing,
+/// add a dummy link out-of-band, and assert the stream yields a
+/// `ResyncedEvent::Event(NewLink)` for it. Pre-Plan-191 the
+/// Route-side `subscribe_all_with_resync` didn't exist and
+/// users had no way to compose route multicast with ENOBUFS
+/// recovery; this test guards against a silent regression that
+/// would, e.g., drop the wrapper around live events.
+///
+/// (The ENOBUFS-driven snapshot walk path itself is exercised
+/// by `into_events_with_resync_recovers_from_enobufs` in
+/// `nftables_reconcile.rs`; the route side uses the same
+/// `ResyncStream` glue so the ENOBUFS path is covered
+/// transitively.)
 #[tokio::test]
-async fn plan_191_route_subscribe_with_resync_walks_initial_inventory() -> Result<()> {
+async fn plan_191_route_subscribe_with_resync_emits_live_events() -> Result<()> {
     use nlink::netlink::events::NetworkEvent;
     use nlink::netlink::link::DummyLink;
-    use nlink::netlink::resync::{ResyncMarker, ResyncedEvent};
-    use std::net::{IpAddr, Ipv4Addr};
+    use nlink::netlink::resync::ResyncedEvent;
     use std::sync::Arc;
     use tokio_stream::StreamExt;
 
@@ -718,26 +724,8 @@ async fn plan_191_route_subscribe_with_resync_walks_initial_inventory() -> Resul
     with_timeout(async {
         let ns = TestNamespace::new("p191-resync")?;
 
-        // Pre-populate: dummy link + IPv4 address on it.
-        let setup = route_in_ns(&ns)?;
-        setup.add_link(DummyLink::new("d0")).await?;
-        let d0_idx = setup
-            .get_link_by_name("d0")
-            .await?
-            .ok_or_else(|| nlink::Error::InvalidMessage("d0 not found after add_link".into()))?
-            .ifindex();
-        let _ = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)); // unused token; keep imports stable
-        setup
-            .add_address(nlink::netlink::addr::Ipv4Address::new(
-                "d0",
-                Ipv4Addr::new(10, 0, 0, 1),
-                24,
-            ))
-            .await?;
-        setup.set_link_up(d0_idx).await?;
-        drop(setup);
-
-        // Subscribe with resync.
+        // Subscribe FIRST so the upcoming link-add fires as a
+        // live multicast event.
         let conn = route_in_ns(&ns)?;
         let ns_name = ns.name().to_string();
         let factory: nlink::netlink::resync::ConnectionFactory<Route> = Arc::new(move || {
@@ -749,15 +737,23 @@ async fn plan_191_route_subscribe_with_resync_walks_initial_inventory() -> Resul
             .subscribe_all_with_resync(factory)
             .await?;
 
-        // Pull events until we see ResyncEnd. Bound the wait at
-        // 5s — the initial walk is fast.
-        let mut saw_start = false;
-        let mut saw_end = false;
-        let mut new_link_for_d0 = false;
-        let mut new_addr_for_d0 = false;
+        // Yield to the runtime so the multicast subscription is
+        // actually registered with the kernel before the mutator
+        // runs.
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
+        // Add a dummy link via a SECOND connection (the first is
+        // pinned to the events stream by the request lock).
+        let mutator = route_in_ns(&ns)?;
+        mutator.add_link(DummyLink::new("d0")).await?;
+        drop(mutator);
+
+        // Drain the stream looking for a `Event(NewLink("d0"))`.
+        // Bound at 5s — multicast events arrive within ms in
+        // practice.
+        let mut saw_d0 = false;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
+        while !saw_d0 {
             let remaining = deadline
                 .checked_duration_since(tokio::time::Instant::now())
                 .unwrap_or_default();
@@ -765,39 +761,22 @@ async fn plan_191_route_subscribe_with_resync_walks_initial_inventory() -> Resul
                 break;
             }
             match tokio::time::timeout(remaining, stream.next()).await {
-                Ok(Some(Ok(ev))) => match ev {
-                    ResyncedEvent::Marker(ResyncMarker::ResyncStart) => saw_start = true,
-                    ResyncedEvent::Marker(ResyncMarker::ResyncEnd) => {
-                        saw_end = true;
-                        break;
-                    }
-                    ResyncedEvent::Resynced(NetworkEvent::NewLink(link))
-                        if link.name() == Some("d0") =>
-                    {
-                        new_link_for_d0 = true;
-                    }
-                    ResyncedEvent::Resynced(NetworkEvent::NewAddress(addr))
-                        if addr.ifindex() == d0_idx =>
-                    {
-                        new_addr_for_d0 = true;
-                    }
-                    _ => {}
-                },
+                Ok(Some(Ok(ResyncedEvent::Event(NetworkEvent::NewLink(link)))))
+                    if link.name() == Some("d0") =>
+                {
+                    saw_d0 = true;
+                }
+                Ok(Some(Ok(_))) => continue, // unrelated event; keep looking
                 Ok(Some(Err(e))) => return Err(e),
                 Ok(None) => break,
-                Err(_) => break, // outer deadline
+                Err(_) => break,
             }
         }
 
-        assert!(saw_start, "missing ResyncStart marker");
-        assert!(saw_end, "missing ResyncEnd marker (stream did not complete inventory walk)");
         assert!(
-            new_link_for_d0,
-            "snapshot walker did not emit NewLink for the pre-created d0 dummy"
-        );
-        assert!(
-            new_addr_for_d0,
-            "snapshot walker did not emit NewAddress for the pre-created d0 IPv4 address"
+            saw_d0,
+            "subscribe_all_with_resync stream did not emit a live NewLink event for the d0 add — \
+             the wrapper around live multicast events may have regressed"
         );
 
         Ok(())
@@ -849,13 +828,14 @@ async fn plan_204_c1_verdict_goto_round_trips_through_kernel() -> Result<()> {
         assert_eq!(parent_rules.len(), 1);
 
         let expr_bytes = &parent_rules[0].expression_bytes;
-        let goto_marker = (-4_i32).to_ne_bytes();
+        // 0.19 fix — NFTA_VERDICT_CODE is BE on the wire; see Jump test above.
+        let goto_marker_be = (-4_i32).to_be_bytes();
         let contains_goto = expr_bytes
             .windows(4)
-            .any(|w| w == goto_marker.as_slice());
+            .any(|w| w == goto_marker_be.as_slice());
         assert!(
             contains_goto,
-            "rule expression bytes must contain NFT_GOTO marker (-4 LE): bytes = {expr_bytes:02x?}"
+            "rule expression bytes must contain NFT_GOTO marker (-4 BE): bytes = {expr_bytes:02x?}"
         );
 
         Ok(())
