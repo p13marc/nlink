@@ -170,6 +170,21 @@ jobs:
       - name: Run scripts/audit-recv-loop-error-handling.sh
         run: bash scripts/audit-recv-loop-error-handling.sh
 
+  # Plan 192 §2.7 — namespace-safety. Library code must not
+  # read /sys/class/net/ or /proc/sys/ from the calling
+  # process's mount namespace (the wrong one when called from
+  # a thread bound to a foreign netns). sysctl.rs is the
+  # documented exception. New violations either need to be
+  # added to ALLOWED in the script with a rationale or
+  # replaced with a netlink-based path.
+  audit-sysfs-in-lib:
+    name: audit sysfs/procfs reads outside ALLOWED files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scripts/audit-sysfs-in-lib.sh
+        run: bash scripts/audit-sysfs-in-lib.sh
+
   # Audit script: every `#[ignore]` in
   # `crates/nlink/tests/integration/` MUST be catalogued in
   # `crates/nlink/tests/integration/IGNORED.md`. Closes the gap

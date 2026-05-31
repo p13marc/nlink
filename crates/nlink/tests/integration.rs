@@ -112,3 +112,10 @@ mod pool;
 // and 16 concurrent LabNamespace::new calls. Both root-gated.
 #[path = "integration/concurrent_stress.rs"]
 mod concurrent_stress;
+
+// 0.19 cycle backfill — Plan 188/196/199/200/202 round-trips
+// surfaced by the post-cycle audit as kernel-touching surfaces
+// with only unit-test coverage. All root-gated; WG/nft tests
+// also gated by require_module!().
+#[path = "integration/cycle_0_19_backfill.rs"]
+mod cycle_0_19_backfill;

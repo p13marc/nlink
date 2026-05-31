@@ -38,12 +38,145 @@
 //! `preshared_key` on peers has the same shape and the same
 //! caveat.
 
+use std::fmt;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::time::Duration;
 
 use super::types::{AllowedIp, WG_KEY_LEN, WgDevice, WgPeer, WgPeerBuilder};
 use crate::netlink::protocol::Wireguard;
 use crate::{Connection, Error, Result};
+
+// =============================================================================
+// PublicKey newtype (Plan 196 §2.3b)
+// =============================================================================
+
+/// A WireGuard public key — a 32-byte Curve25519 point.
+///
+/// Round-trips with the canonical base64 representation
+/// (44 chars, `=`-padded) via [`FromStr`] and [`fmt::Display`],
+/// matching what `wg pubkey` / `wg show` emit.
+///
+/// ```ignore
+/// use nlink::netlink::genl::wireguard::PublicKey;
+/// let pk: PublicKey = "fE/wpxQ6/M6OmF5j4dvbY3FbCEXc3KlBL2QqAYjE0WI=".parse()?;
+/// assert_eq!(pk.to_string(), "fE/wpxQ6/M6OmF5j4dvbY3FbCEXc3KlBL2QqAYjE0WI=");
+/// # Ok::<(), nlink::Error>(())
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PublicKey(pub [u8; WG_KEY_LEN]);
+
+impl PublicKey {
+    /// Wrap a raw 32-byte buffer as a key. No validation —
+    /// the kernel rejects invalid points on `SET_DEVICE`.
+    pub fn from_bytes(bytes: [u8; WG_KEY_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the underlying bytes.
+    pub fn as_bytes(&self) -> &[u8; WG_KEY_LEN] {
+        &self.0
+    }
+}
+
+impl From<[u8; WG_KEY_LEN]> for PublicKey {
+    fn from(bytes: [u8; WG_KEY_LEN]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl From<PublicKey> for [u8; WG_KEY_LEN] {
+    fn from(pk: PublicKey) -> Self {
+        pk.0
+    }
+}
+
+impl fmt::Debug for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PublicKey({self})")
+    }
+}
+
+impl fmt::Display for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&b64_encode_32(&self.0))
+    }
+}
+
+impl FromStr for PublicKey {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        b64_decode_32(s)
+            .map(Self)
+            .ok_or_else(|| Error::InvalidMessage(format!("invalid WireGuard public key: {s:?}")))
+    }
+}
+
+/// Encode a 32-byte buffer as 44 base64 chars (RFC 4648,
+/// alphabet `A-Za-z0-9+/`, single `=` pad).
+fn b64_encode_32(bytes: &[u8; WG_KEY_LEN]) -> String {
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(44);
+    // 32 bytes = 10 full triplets (30 bytes) + 2 trailing
+    for chunk in bytes.chunks(3) {
+        match chunk.len() {
+            3 => {
+                let n = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32;
+                out.push(ALPHA[((n >> 18) & 0x3f) as usize] as char);
+                out.push(ALPHA[((n >> 12) & 0x3f) as usize] as char);
+                out.push(ALPHA[((n >> 6) & 0x3f) as usize] as char);
+                out.push(ALPHA[(n & 0x3f) as usize] as char);
+            }
+            2 => {
+                let n = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8);
+                out.push(ALPHA[((n >> 18) & 0x3f) as usize] as char);
+                out.push(ALPHA[((n >> 12) & 0x3f) as usize] as char);
+                out.push(ALPHA[((n >> 6) & 0x3f) as usize] as char);
+                out.push('=');
+            }
+            _ => unreachable!("32 % 3 = 2"),
+        }
+    }
+    out
+}
+
+/// Decode 44 base64 chars (RFC 4648) into a 32-byte buffer.
+/// Returns `None` for any malformed input.
+fn b64_decode_32(s: &str) -> Option<[u8; WG_KEY_LEN]> {
+    if s.len() != 44 || !s.ends_with('=') || s[..43].contains('=') {
+        return None;
+    }
+    let mut out = [0u8; WG_KEY_LEN];
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    let mut written = 0usize;
+    for (i, ch) in s.char_indices() {
+        if i == 43 {
+            // padding char already validated
+            break;
+        }
+        let v = match ch {
+            'A'..='Z' => ch as u32 - 'A' as u32,
+            'a'..='z' => ch as u32 - 'a' as u32 + 26,
+            '0'..='9' => ch as u32 - '0' as u32 + 52,
+            '+' => 62,
+            '/' => 63,
+            _ => return None,
+        };
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out[written] = ((buf >> bits) & 0xff) as u8;
+            written += 1;
+            if written == 32 {
+                break;
+            }
+        }
+    }
+    (written == 32).then_some(out)
+}
 
 /// Desired WireGuard configuration — one or more devices,
 /// each with their peers. Plan 196.
@@ -110,6 +243,37 @@ impl WireguardConfig {
         }
 
         Ok(diff)
+    }
+
+    /// Apply with bounded retry on transient kernel errors
+    /// (EBUSY / EAGAIN). Mirrors
+    /// [`crate::netlink::nftables::config::NftablesDiff::apply_reconcile`]
+    /// and [`crate::NetworkConfig::apply_reconcile`].
+    ///
+    /// Plan 196 §2.3 follow-on (`wg syncconf` reconcile shape).
+    pub async fn apply_reconcile(
+        &self,
+        conn: &Connection<Wireguard>,
+        opts: crate::netlink::nftables::config::ReconcileOptions,
+    ) -> Result<crate::netlink::nftables::config::ReconcileReport> {
+        let mut attempt: usize = 0;
+        loop {
+            match self.apply(conn).await {
+                Ok(result) => {
+                    return Ok(crate::netlink::nftables::config::ReconcileReport {
+                        attempts: attempt + 1,
+                        change_count: result.total_writes(),
+                    });
+                }
+                Err(e) if (e.is_busy() || e.is_try_again()) && attempt < opts.max_retries => {
+                    let backoff = opts.backoff.saturating_mul(1u32 << attempt.min(10));
+                    tokio::time::sleep(backoff).await;
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Apply this configuration: compute the diff, then
@@ -476,6 +640,51 @@ impl WireguardConfigDiff {
     }
 }
 
+impl fmt::Display for WireguardConfigDiff {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_empty() {
+            return f.write_str("WireguardConfigDiff: no changes\n");
+        }
+        writeln!(
+            f,
+            "WireguardConfigDiff: {} kernel call(s)",
+            self.change_count()
+        )?;
+        for (ifname, changes) in &self.devices_to_modify {
+            writeln!(f, "  {ifname}:")?;
+            if changes.private_key_set {
+                writeln!(f, "    set private_key")?;
+            }
+            if changes.listen_port_set {
+                writeln!(f, "    set listen_port")?;
+            }
+            if changes.fwmark_set {
+                writeln!(f, "    set fwmark")?;
+            }
+            for added in &changes.peers_to_add {
+                writeln!(f, "    + peer {}", PublicKey(added.public_key))?;
+            }
+            for (pk, pc) in &changes.peers_to_modify {
+                let bits = [
+                    pc.preshared_key_set.then_some("preshared_key"),
+                    pc.endpoint_set.then_some("endpoint"),
+                    pc.persistent_keepalive_set.then_some("keepalive"),
+                    pc.allowed_ips_set.then_some("allowed_ips"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", ");
+                writeln!(f, "    ~ peer {} ({bits})", PublicKey(*pk))?;
+            }
+            for pk in &changes.peers_to_remove {
+                writeln!(f, "    - peer {}", PublicKey(*pk))?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// What changed on a single device. Plan 196.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -731,6 +940,78 @@ mod tests {
         for (_, pc) in &changes.peers_to_modify {
             assert!(!pc.allowed_ips_set);
         }
+    }
+
+    // -------- PublicKey newtype --------
+
+    #[test]
+    fn public_key_round_trips_through_base64() {
+        // Known WireGuard test vector.
+        let s = "fE/wpxQ6/M6OmF5j4dvbY3FbCEXc3KlBL2QqAYjE0WI=";
+        let pk: PublicKey = s.parse().unwrap();
+        assert_eq!(pk.to_string(), s);
+    }
+
+    #[test]
+    fn public_key_zero_round_trips() {
+        let pk = PublicKey::from_bytes([0u8; WG_KEY_LEN]);
+        let s = pk.to_string();
+        assert_eq!(s.len(), 44);
+        assert_eq!(s.parse::<PublicKey>().unwrap(), pk);
+    }
+
+    #[test]
+    fn public_key_max_round_trips() {
+        let pk = PublicKey::from_bytes([0xffu8; WG_KEY_LEN]);
+        let s = pk.to_string();
+        let back: PublicKey = s.parse().unwrap();
+        assert_eq!(back, pk);
+    }
+
+    #[test]
+    fn public_key_rejects_wrong_length() {
+        assert!("AAA=".parse::<PublicKey>().is_err());
+        assert!("".parse::<PublicKey>().is_err());
+        let too_long = "fE/wpxQ6/M6OmF5j4dvbY3FbCEXc3KlBL2QqAYjE0WIAAAA=";
+        assert!(too_long.parse::<PublicKey>().is_err());
+    }
+
+    #[test]
+    fn public_key_rejects_non_base64_chars() {
+        // 44 chars but contains '!' — invalid.
+        let bad = "fE/wpxQ6/M6OmF5j4dvbY3FbCEXc3KlBL2QqAYjE0W!=";
+        assert!(bad.parse::<PublicKey>().is_err());
+    }
+
+    #[test]
+    fn public_key_debug_uses_display() {
+        let pk = PublicKey::from_bytes([0u8; WG_KEY_LEN]);
+        let d = format!("{pk:?}");
+        assert!(d.starts_with("PublicKey("));
+    }
+
+    // -------- WireguardConfigDiff::Display --------
+
+    #[test]
+    fn diff_display_empty_says_no_changes() {
+        let d = WireguardConfigDiff::default();
+        assert!(d.to_string().contains("no changes"));
+    }
+
+    #[test]
+    fn diff_display_renders_peer_add_remove() {
+        let declared = DeclaredWgDeviceBuilder::new("wg0".into())
+            .peer(key(0xbb), |p| p.persistent_keepalive(Duration::from_secs(25)))
+            .build();
+        let mut curr = empty_device("wg0");
+        curr.peers.push(WgPeer::new(key(0xcc)));
+        let changes = declared.diff_against(&curr);
+        let mut diff = WireguardConfigDiff::default();
+        diff.devices_to_modify.push(("wg0".into(), changes));
+        let s = diff.to_string();
+        assert!(s.contains("wg0"));
+        assert!(s.contains("+ peer "));
+        assert!(s.contains("- peer "));
     }
 
     #[test]

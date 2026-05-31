@@ -78,6 +78,43 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Post-cycle audit backfill** — closes gaps surfaced by
+  the 0.19 plan-by-plan audit:
+  - **Plan 196**: `PublicKey` newtype with `FromStr` (base64)
+    + `Display` round-trip, `Debug` via `Display`. Inline
+    32-byte base64 codec (no new crate dep). 6 new unit
+    tests pin `fE/wpxQ6/M6OmF5j4dvbY3FbCEXc3KlBL2QqAYjE0WI=`
+    test vector + zero/max boundary cases + invalid-input
+    rejection.
+  - **Plan 196**: `Display` impl on `WireguardConfigDiff`
+    rendering `+ peer`, `~ peer (endpoint, allowed_ips)`,
+    `- peer` per change. Empty diff renders "no changes".
+  - **Plan 196**: `WireguardConfig::apply_reconcile(conn,
+    opts)` mirroring `NetworkConfig::apply_reconcile` —
+    bounded EBUSY/EAGAIN retry with exponential backoff,
+    reuses the shared `ReconcileOptions` shape.
+  - **Plan 192 §2.7**: CLAUDE.md `## util::ifname sysfs reads`
+    sub-section under the existing namespace-safety section.
+    New `scripts/audit-sysfs-in-lib.sh` + CI gate in
+    `.github/workflows/rust.yml`. Fails the build if any
+    `/sys/class/net/` or `/proc/sys/` read appears in
+    `crates/nlink/src/netlink/` outside `sysctl.rs`. Skips
+    rustdoc comments via in-script prefix filter.
+  - **Integration test backfill** (`tests/integration/
+    cycle_0_19_backfill.rs`, 6 root-gated tests):
+    - Plan 188 §2.1 `ConfigDiff::apply` round-trip
+    - Plan 188 §2.4 `NetworkConfig::apply_reconcile` happy path
+    - Plan 188 §2.7 `del_table_if_exists` idempotence
+      (cold/warm/cold-again triplet)
+    - Plan 202 §2.3 multipath route round-trip — the
+      headline test the parser plan was named to fix
+    - Plan 200 §2.1 facade `apply::network_in_namespace`
+      composition + diff symmetry
+    - Plan 200 §2.4 `Stack` orchestration + re-apply no-op
+    Plus Plan 196 + Plan 199 module-gated tests
+    (`require_module!("wireguard")`) covering full GENL
+    round-trip + watcher polling.
+
 - **High-level facade APIs (Plan 200)** — three thin
   compositional wrappers + a unified `Stack` type that
   collapse the typed surface's 5–15-line boilerplate into

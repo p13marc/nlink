@@ -284,6 +284,30 @@ ifindex directly to methods that accept it) — the `_by_name`
 methods become a deliberate convenience choice rather than a
 default.
 
+#### `util::ifname` sysfs reads — namespace policy
+
+`util::ifname::{name_to_index, index_to_name, list_interfaces}`
+read from `/sys/class/net/` in the **calling process's mount
+namespace**. They are only used by the `bins/` CLI tools and
+never by internal library paths. The audit script
+`scripts/audit-sysfs-in-lib.sh` (wired into CI as a separate
+gate) fails the build if a `/sys/class/net/` or `/proc/sys/`
+read appears in `crates/nlink/src/netlink/` outside the
+documented exceptions — currently only `sysctl.rs`, where
+`/proc/sys/...` is the kernel-blessed way to read sysctls
+from a process attached to a netns.
+
+For library code touching foreign netns, the policy is:
+
+1. Use `Connection::get_link_by_name` (netlink-based; ifindex
+   resolved through `RTM_GETLINK` in the connection's netns).
+2. Or use the `_by_index` API variants and pre-resolve the
+   ifindex via the connection.
+3. If a new file genuinely needs sysfs (e.g. ethtool fallback,
+   diagnostics), add it to `ALLOWED` in
+   `scripts/audit-sysfs-in-lib.sh` and document the rationale
+   in a rustdoc comment.
+
 ### Connection diagnostics + sockopts
 
 Two `Connection<P>` methods control kernel-side diagnostic
