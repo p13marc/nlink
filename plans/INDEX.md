@@ -1,225 +1,108 @@
 ---
 subject: nlink plan index — 0.19 cycle
-status: live (update as plans land)
+status: cycle-close ready (cut pending)
 target version: 0.19.0
 maintainer: p13marc
-created: 2026-05-29 (post-0.18 cut; 7 plans seeded 2026-05-30; expanded to 10 plans during first consolidation pass; expanded to 14 plans during second consolidation pass under the "everything in 0.19" directive)
+last updated: 2026-05-31 (post-cycle audit + backfill)
 ---
 
 # Plan index — 0.19 cycle
 
-Day-to-day tracker for nlink's 0.19 work. The 0.18 cycle
-shipped 2026-05-29 (both crates on crates.io; tagged `0.18.0`
-on master; GitHub release at
-https://github.com/p13marc/nlink/releases/tag/0.18.0). The 0.18
-cycle's narrative lives in
-[`CHANGELOG.md ## [0.18.0]`](../CHANGELOG.md) +
-[`docs/migration_guide/0.17.0-to-0.18.0.md`](../docs/migration_guide/0.17.0-to-0.18.0.md).
+The 0.19 cycle's narrative lives in
+[`CHANGELOG.md ## [Unreleased]`](../CHANGELOG.md) (will
+become `## [0.19.0]` on cut) and the migration walkthrough
+in
+[`docs/migration_guide/0.18.0-to-0.19.0.md`](../docs/migration_guide/0.18.0-to-0.19.0.md).
 
 ## Quick status
 
-- **Cycle**: 0.19.0 — branched from master post-0.18 cut.
 - **Branch**: all 0.19 work pushes to the `0.19` branch.
-  Cycle cut → master merge happens at release time. **Do not
-  push to master.**
-- **Workspace version**: `0.18.0` → bump to `0.19.0` on the
-  first PR whose change cargo-semver-checks flags as
-  semver-major. Multiple breaking changes:
-  Plan 187 (Error factory sign-normalization),
-  Plan 188 (ApplyOptions `#[non_exhaustive]`),
-  Plan 190 (DeclaredLinkType enum widening),
-  Plan 191 (RouteEvent enum addition + deprecation of raw
-  `RtnetlinkGroup` constants),
-  Plan 196 (`WireguardConfig` is net-new but the existing
-  imperative API stays — no break),
-  Plan 198 (`SetKeyType` enum widening).
-- **CI**: open a draft PR `0.19 → master` once the first
-  commit lands so the workflow fires on every push.
-- **Seed reports**:
-  - [`nlink-feedback.md`](../nlink-feedback.md) (nlink-lab
-    maintainer, 2026-05-30)
-  - 0.19 first consolidation-pass bug-hunt + kernel research
-    (2026-05-30)
-  - 0.19 second consolidation-pass: WireGuard `wg syncconf` +
-    ovpn DCO + nftables sets research (2026-05-30)
+- **Workspace version**: `0.18.0` — bump to `0.19.0` at cut
+  time via `scripts/cut-release.sh 0.19.0`.
+- **CI**: full pipeline green (lib unit + integration +
+  workspace clippy + machete + 4 audit gates).
+- **Lib test count**: 1080 passing as of 2026-05-31.
+- **Plans shipped**: 16 of 17. Plan 197 deferred to 0.20
+  with documented rationale (kernel ABI maturing).
 
 ## Status legend
 
 | Symbol | Meaning |
 |---|---|
-| ⚪ | Planned — not started |
-| 🟡 | In progress — PR open or work underway |
-| 🟢 | Merged to master |
-| 🔵 | Cut & published |
+| ✅ | Shipped (full or scoped subset) |
+| 🟡 | Subset shipped; remainder deferred |
+| ⛔ | Deferred to 0.20 with documented rationale |
 
 ## Sub-plan table
 
-Fourteen plans this cycle. Four groups: feedback-driven
-(186-191 core), defensive (193-194 from ecosystem audit),
-kube-rs-shape (195 stream combinators), GENL declarative
-families (196-199 from the "everything in 0.19" directive).
+| Plan | Title | Status | Notes |
+|------|-------|--------|-------|
+| [186](186-vlan-parent-resolution-race-plan.md) | VLAN parent ifindex race — integration repro + topo-sort | ✅ | Topo-sort in `compute_diff` + 3 root-gated integration tests + 7 unit tests pin sort behavior. |
+| [187](187-error-api-hygiene-plan.md) | Error API hygiene — sign normalization + chain_walk + Io-shape sweep | ✅ | Shipped pre-cycle (commits `83c417c` + `750cb64`). Caught 3 real bugs in `is_busy`/`is_already_exists`/`is_permission_denied`. |
+| [188](188-declarative-apply-parity-plan.md) | Declarative apply parity — `ConfigDiff::apply`, builders, `apply_reconcile`, idempotent del_* | ✅ | All 7 sub-items shipped + 3 root-gated integration tests in `cycle_0_19_backfill.rs`. |
+| [189](189-serde-feature-flag-plan.md) | `serde` feature flag — Serialize derives across 30+ types | 🟡 | Serialize-only (no Deserialize / schemars / runtime-types — documented deferrals). 5 unit tests pin kebab-case / snake_case shape. |
+| [190](190-linkbuilder-gaps-plan.md) | LinkBuilder gaps — VXLAN + VLAN protocol + VRF + netkit + ovpn link + IPv4 GSO/GRO + bond | ✅ | All 6 sub-items + 2 §8 expansions. Parser-only for IPv4 GSO/GRO (declarative-write deferred). |
+| [191](191-route-events-with-resync-plan.md) | `Connection<Route>::into_events_with_resync` + `rtnetlink_snapshot` | ✅ | Re-uses existing `NetworkEvent` enum (not a separate `RouteEvent`). |
+| [192](192-docs-pass-plan.md) | Docs pass — D4 docstrings + W7 tracing + CLAUDE.md namespace-safety + audit script | ✅ | All 4 components shipped including §2.7 backfill (new `audit-sysfs-in-lib.sh` + CI gate). |
+| [193](193-parser-robustness-plan.md) | Parser robustness — phase 1 policy + phase 2 MessageIter fix | 🟡 | Phase 1 + phase 2 + audit gate shipped. Phase 2 surfaced + fixed a REAL infinite-loop bug in `MessageIter::next`. Fuzz + proptest infrastructure deferred. |
+| [194](194-concurrent-stress-plan.md) | Concurrent stress tests — seq routing + namespace isolation | ✅ | 2 root-gated integration tests (consolidated from 3 specified). |
+| [195](195-stream-combinators-plan.md) | `ResyncStreamExt` combinators | 🟡 | `predicate_filter` + `map_event` shipped. `StreamBackoff` + `Store<K>` + `backon` deferred (acknowledged). |
+| [196](196-declarative-wireguard-plan.md) | Declarative `WireguardConfig` — diff + apply + reconcile | ✅ | Full diff/apply/reconcile shipped + `PublicKey` newtype + `Display` for diff + integration tests. INI parser + `client()` shortcut deferred. |
+| [197](197-declarative-ovpn-plan.md) | ovpn GENL family — imperative + declarative | ⛔ | Deferred to 0.20. Kernel 6.16 ovpn UAPI still maturing; the imperative `Connection<Ovpn>` family doesn't exist in nlink yet. Link half ships via Plan 190 §2.3b. |
+| [198](198-declarative-nft-sets-plan.md) | Declarative nftables sets — full `DeclaredSet` + element diff | 🟡 | `SetKeyType::InetProto` + `Concat(Vec<_>)` variants shipped. Full declarative `DeclaredSet` deferred. |
+| [199](199-wireguard-monitor-plan.md) | WireGuard polling watcher (kernel has no multicast) | ✅ | Redesigned after kernel research confirmed `n_mcgrps = 0`. Ships polling-based `WireguardWatcher` + 11 unit tests + integration test (gated by `require_module!("wireguard")`). |
+| [200](200-high-level-facade-api-plan.md) | High-level facade — `nlink::facade::{apply,diff,watch}` + `Stack` | ✅ | 3 modules + Stack shipped + 2 root-gated integration tests. ovpn intentionally absent until Plan 197 lands. |
+| [201](201-rust-idiom-polish-plan.md) | Rust idiom polish — must_use + From/Into + Display + inline | 🟡 | `#[must_use]` on 5 diff/report types shipped. Broader sweep deferred to 0.20. |
+| [202](202-rta-multipath-parsing-plan.md) | RTA_MULTIPATH parser — Plan 193 §2.2 finding | ✅ | Parser + 6 defensive unit tests + root-gated round-trip integration test. |
 
-| Plan | Title | Effort | Order | Status | Notes |
-|------|-------|--------|-------|--------|-------|
-| [186](186-vlan-parent-resolution-race-plan.md) | VLAN parent ifindex race — investigation-first + topo-sort + ordering docstring | ~4-12 h | 1 | ⚪ | **HIGH** correctness. Investigation phase = integration repro. |
-| [187](187-error-api-hygiene-plan.md) | `Error` API hygiene — sign normalization + `chain_walk` + Io-shape sweep across all predicates | ~5 h | 2 | 🟢 | **Complete.** Shipped `83c417c` + `750cb64`. Predicate sweep caught 3 real bugs in `is_busy`/`is_already_exists`/`is_permission_denied`. |
-| [188](188-declarative-apply-parity-plan.md) | Declarative apply parity — `ConfigDiff::apply`, builders, `apply_reconcile`, `default_v{4,6}`, idempotent del_*, deprecate `summary()` | ~6.5 h | 3 | 🟡 | 6 of 7 sub-items shipped (`d50429b` + `e3c4371` + `64a7288`). Only §2.4 `apply_reconcile` remains. |
-| [189](189-serde-feature-flag-plan.md) | `serde` feature flag — `Serialize` + `Deserialize` on diffs + JSON Schema via `schemars` + runtime parsed-type `Serialize` | ~5.5 h (was 3.5) | 4 | ⚪ | Opt-in feature; expanded with Deserialize + Schema + runtime types. |
-| [190](190-linkbuilder-gaps-plan.md) | `LinkBuilder` gaps — VXLAN advanced + VLAN protocol + VRF + netkit + ovpn link half + IPv4 GSO/GRO caps + bond options + macvlan Source | ~13 h (was 11.5) | 5 | ⚪ | Significantly expanded; bond options + macvlan Source absorbed. |
-| [191](191-route-events-with-resync-plan.md) | `Connection<Route>::subscribe` + `RouteEvent` (18 variants now including TC + Rule) + `into_events_with_resync` | ~14.5 h (was 9.5) | 6 | ⚪ | **Headline #1** of 0.19. TC + Rule event variants added. |
-| [192](192-docs-pass-plan.md) | Doc pass — D1, D4, D5, W7 universal tracing audit, CLAUDE.md namespace-safety spec | ~6.5 h (was 4.5) | 7 | ⚪ | Universal tracing audit expanded beyond Connection<P>. |
-| [193](193-parser-robustness-plan.md) | Parser robustness — defensive parsing + 5 `cargo-fuzz` targets + `proptest` integration | ~10 h (was 7) | 8 | 🟡 | Phase 1 (policy doc + CI gate) shipped `be52799`. §2.1 + §2.2 came back N/A (lib already compliant); §2.2's gap surfaced as new [Plan 202](202-rta-multipath-parsing-plan.md). Phase 2 (fuzz target) + phase 3 (proptest) remain. |
-| [194](194-concurrent-stress-plan.md) | Concurrent stress — seq routing + namespace + nftables transaction + ConnectionPool churn | ~7 h (was 4.5) | 9 | ⚪ | Defensive; transaction + pool stress added. |
-| [195](195-stream-combinators-plan.md) | `ResyncStreamExt` — backoff/filter/map + **`reflector`/`Store<K>` + `backon` integration + combinator tracing** | ~10.5 h (was 6.5) | 10 | ⚪ | `Store<K>` reflector pattern + backon + tracing added. |
-| **[196](196-declarative-wireguard-plan.md)** (**NEW**) | Declarative `WireguardConfig` — diff + apply + `wg syncconf` semantics + `LinkBuilder::wireguard` | ~14 h | 11 | ⚪ | **Headline #2**. First Rust crate to ship NetworkConfig-style WG reconciliation. |
-| **[197](197-declarative-ovpn-plan.md)** (**NEW**) | ovpn GENL family — imperative + declarative `OvpnConfig` (kernel 6.16+) | ~17.5 h | 12 | ⚪ | New protocol family. First Rust coverage of ovpn declarative. |
-| **[198](198-declarative-nft-sets-plan.md)** (**NEW**) | Declarative nftables sets — `DeclaredTableBuilder::set` with element diff + concat keys + vmaps | ~11 h | 13 | ⚪ | Closes the last declarative-nftables gap. |
-| **[199](199-wireguard-monitor-plan.md)** | `Connection<Wireguard>::subscribe` + `WireguardEvent` + `into_events_with_resync` — third member of the watcher trinity | ~10 h | 14 | ⚪ | Composes on Plan 196 + Plan 195. |
-| **[200](200-high-level-facade-api-plan.md)** (**NEW** — Rust-idiomaticity audit) | `nlink::{apply,diff,watch}` modules + `nlink::Stack` unified declarative bundle + `nlink::watch::namespace` multi-protocol watcher | ~12.5 h | 15 | ⚪ | **Newcomer experience headline.** One-line entry points; Stack closes the loop on nlink-lab's TopologyDiff envelope. |
-| **[201](201-rust-idiom-polish-plan.md)** (**NEW** — Rust-idiomaticity audit) | Polish sweep — `#[must_use]`, `From`/`Into`, `Display`, `#[inline]`, `const fn`, iterator combinators + 3 audit CI gates | ~7 h | 16 | ⚪ | Pins conventions; future contributors inherit. |
-| **[202](202-rta-multipath-parsing-plan.md)** (**NEW** — Plan 193 phase-1 finding) | RTA_MULTIPATH parser — multipath routes round-trip through `get_routes()` + `NetworkConfig::diff` idempotence | ~7.5 h | between-189-and-190 | ⚪ | Surfaced during Plan 193 phase-1 audit: nlink can WRITE multipath but doesn't PARSE it. Real bug for ECMP consumers (silent drift). Inherits Plan 193 §"Parser robustness" rules. |
+## Headline contributions
 
-Total estimated focused-work: **~167-182 h** (was ~160-175 h
-before Plan 202's +7.5h surfaced during 193's audit).
-Plans 200 + 201 add the one-line user-facing entry points +
-the convention pins.
+1. **Plan 193 phase 2 found a real bug** — `MessageIter::next` returned `Err` from both bounds checks without advancing `self.data`. Plans 185 + 191 long-lived multicast subscribers would have spun on a single malformed kernel frame in production. Two-line fix, four regression tests. Bug class matches neli #305.
+2. **Plan 199 redesigned after kernel research** — verified `drivers/net/wireguard/netlink.c` declares zero multicast groups (`n_mcgrps = 0`). The original spec assumed multicast events that don't exist in the kernel. Ships polling-based watcher matching what every WG monitoring tool does.
+3. **Plan 200 facade ships the "newcomer one-liner" target** — `nlink::facade::apply::network(&cfg).await?` replaces 5-15 lines of typed-surface boilerplate. `Stack` bundles RTNETLINK + nftables + WG with deterministic apply order.
 
-## Implementation progress (live)
+## CI gates (.github/workflows/)
 
-**Commits landed on `0.19` branch** (most recent first):
-
-| Commit | Plan | Phase |
+| Workflow / Job | Purpose | Trigger |
 |---|---|---|
-| `64a7288` | 188 phases 3+4 | `LinkChanges::Display` + `del_*_if_exists` |
-| `e3c4371` | 188 phase 2 | `ApplyOptions` `#[non_exhaustive]` + builders |
-| `d50429b` | 188 phase 1 | `ConfigDiff::apply` + `default_v{4,6}` + `summary()` deprecation |
-| `750cb64` | 187 phase 2 | `Error::chain_walk` + `root_cause` + `contexts` |
-| `83c417c` | 187 phase 1 | Error factory sign normalization + Io-shape predicate sweep (3 real bugs caught) |
-| `be52799` | 193 phase 1 | Parser robustness policy + CI gate |
+| `rust.yml` → `build-test` | `cargo build` + `cargo test --lib` matrix + clippy + machete + workspace doc-build | push/PR to master |
+| `rust.yml` → `audit-example-registration` | New `examples/**/*.rs` files must be registered in `Cargo.toml` | push/PR to master |
+| `rust.yml` → `audit-recv-loop-error-handling` | Plan 193 §2.3 — event parsers walking `MessageIter` must skip per-frame, not abort | push/PR to master |
+| `rust.yml` → `audit-sysfs-in-lib` | Plan 192 §2.7 — no `/sys/class/net/` or `/proc/sys/` reads in `crates/nlink/src/netlink/` outside ALLOWED | push/PR to master |
+| `rust.yml` → `audit-ignored-tests` | Every `#[ignore]` catalogued in `tests/integration/IGNORED.md` | push/PR to master |
+| `integration-tests.yml` | Root-gated integration suite — Debian container with `CAP_NET_ADMIN`+`CAP_SYS_ADMIN`+seccomp=unconfined. Loads kernel modules + runs `cargo test --features lab --test integration -- --test-threads=1` + lib tests + clippy + machete | push/PR to master |
 
-Lib test count: **992 passing** (was 980 at cycle start; +12).
-Clippy `--deny warnings` clean.
+## Documented 0.20 deferrals
 
-**Plans complete (🟢):** 187.
-**Plans partially shipped (🟡):** 188 (6 of 7), 193 (1 of 4).
-**Plans not started (⚪):** 186, 189, 190, 191, 192, 194, 195,
-196, 197, 198, 199, 200, 201, 202.
+| Plan | Why deferred |
+|---|---|
+| 189 — Deserialize + schemars + runtime-types Serialize | Plan 189 §8 expansions; ship Serialize-only first, expand if consumer asks |
+| 193 — cargo-fuzz infrastructure | Requires nightly Rust + `fuzz/` directory; not blocking |
+| 195 — StreamBackoff + Store<K> + backon | StreamBackoff needs `tokio::time::pause` integration tests; Store<K> picks dashmap |
+| 196 — `WireguardConfig::client()` + `from_wg_config()` INI parser | Substantial; defer until consumer asks for the `wg-quick` shape |
+| 197 — ovpn GENL family (full plan) | Kernel UAPI maturing; needs imperative `Connection<Ovpn>` first |
+| 198 — Full declarative `DeclaredSet` + element diff | Substantial; ships imperative SetKeyType extensions now to unblock future declarative work |
+| 201 — Broader sweep (From/Into + Display + #[inline]) | Mechanical; defer until §2.1 must_use bakes in |
 
-**Per-plan idiom additions during the audit:**
-- **187** — gained `Error::root_cause()`, `Error::contexts()`,
-  named `ChainWalk` iterator (vs anonymous `impl Iterator`)
-- **191** — gained `Connection<Route>::watch(factory)`
-  one-call shortcut; equivalent on Nftables + Wireguard
-- **195** — `Store<K>` switched from `RwLock<HashMap>` to
-  `DashMap` (lock-free per-key, no across-await footgun)
-- **196** — gained `PublicKey` newtype with `FromStr`/`Display`
-  (base64) + `WireguardConfig::client(...)` quick-start +
-  `WireguardConfig::from_wg_config(&str)` parser
-- **198** — gained `FromIterator<IpAddr> for DeclaredSet` +
-  `SetElement::{ipv4,ipv6,ether,inet_service,...}` const
-  constructors
+## Cycle cut checklist (for `scripts/cut-release.sh 0.19.0`)
 
-## Cross-plan dependencies + ordering rationale
-
-```
-193 (parser robustness — sanity gate) ──┐
-194 (concurrent stress — sanity gate) ──┤
-                                         │
-187 (Error API + Io-shape sweep) ────────┤
-                                         │
-188 (apply parity, including 187's      │
-     errno predicate fix in retries) ───┤
-                                         │
-186 (VLAN race investigation) ───────────┤
-                                         │
-190 (LinkBuilder gaps — VRF, netkit,    │
-     ovpn LINK half, bond, macvlan) ────┤
-189 (serde + Deserialize + Schema) ──────┤
-                                         │
-191 (RTNETLINK events — headline #1) ────┤
-195 (stream combinators on 185 + 191) ───┤
-                                         │
-196 (declarative WireguardConfig) ───────┤
-197 (declarative OvpnConfig) ────────────┤
-198 (declarative nft sets) ──────────────┤
-199 (WireGuard monitor — uses 195) ──────┤
-                                         │
-192 (docs + universal tracing audit) ────┘ (cycle closer)
-```
-
-**Recommended landing order (revised for expanded cycle):**
-
-1. **193 (parser robustness + fuzz)** — sanity gate.
-2. **194 (concurrent stress)** — sanity gate.
-3. **187 (Error API)** — needed for 188/196/197's
-   `apply_reconcile` retry classification.
-4. **188 (apply parity)** — small ergonomic wins.
-5. **186 (VLAN race)** — investigation may need a day.
-6. **190 (LinkBuilder gaps)** — much new code; sets up
-   `LinkBuilder::ovpn` for 197.
-7. **189 (serde)** — independent.
-8. **191 (RTNETLINK events)** — headline #1.
-9. **195 (stream combinators)** — composes on 191.
-10. **198 (declarative nft sets)** — closes nftables surface.
-11. **196 (declarative WireGuard)** — substantial.
-12. **197 (declarative ovpn)** — substantial; depends on
-    Plan 190's LinkBuilder::ovpn.
-13. **199 (WireGuard monitor)** — composes on 196 + 195.
-14. **192 (docs + universal tracing audit)** — closes cycle.
-15. **200 (facade APIs)** — lands LAST among feature plans.
-    Depends on every declarative + watcher plan above shipping
-    so the facades have something to wrap. Headline "newcomer
-    one-liner" win.
-16. **201 (Rust idiom polish)** — final sweep. Pins the
-    conventions across everything that landed.
-
-## Wishlist items NOT scoped this cycle
-
-| Item | Why deferred |
-|------|--------------|
-| _none from feedback_ | All nlink-lab feedback items are now in 0.19. |
-| miri integration | Genuinely out-of-scope; miri doesn't run native syscalls. |
-| Anonymous nft sets (inline rule expressions like `{22, 80, 443}`) | Different shape than named sets (rule-expr layer); future plan. |
-| OvpnConfig under TLS-handshake automation | Belongs in the higher-level OpenVPN userspace control, not in the kernel data-channel layer. |
+- [ ] Workspace version bumped to `0.19.0` in root + crates' `Cargo.toml`
+- [ ] `CHANGELOG.md ## [Unreleased]` promoted to `## [0.19.0]` with date
+- [ ] `docs/migration_guide/0.18.0-to-0.19.0.md` headline polished
+- [ ] `docs/migration_guide/README.md` row inserted with cycle highlights
+- [ ] `nlink-macros` published before `nlink` (path-dep version pinning)
+- [ ] Per-plan files in `plans/` deleted post-cut per `CLAUDE.md ## Publishing` convention; INDEX.md rewritten for the next cycle
 
 ## Deprioritized (parked)
 
 | Plan | Why parked |
 |------|------------|
-| [152](152-0.16-integration-showcases-plan.md) | `aya` co-demo + Prometheus exporter + OTel example. Carried since 0.16 without a real adopter signal. Revisit if a downstream asks for it. |
-
-## Cross-plan artifact ownership
-
-The 0.19 cycle has shared infrastructure that needs a single
-owner.
-
-| Artifact | Owning plan | Notes |
-|---|---|---|
-| `docs/migration_guide/0.18.0-to-0.19.0.md` | Plan 193 creates the stub (lands first) | Each plan appends its `### Plan NNN` section. Stub in place. |
-| `docs/migration_guide/README.md` row for 0.19 | Plan 193 inserts the row | ✓ in place. Polished at cycle cut with full highlights. |
-| `CHANGELOG.md ## [Unreleased]` | All plans append; cycle-cut script promotes to `## [0.19.0]` | Each plan §9 lists its subsections. |
-| `CLAUDE.md` updates | Each plan owns its own section | 9 plans contribute sections; coordinate at PR review. |
-| `README.md` updates | Plans 189, 190, 191, 195, 196, 197, 198, 199 all touch README | Small per-plan touches; resolve at PR review. |
-| `.github/workflows/*` CI gates | Plans 189, 192, 193 (4 gates total) + 193 fuzz workflow | One workflow file + matrix entries. |
-| `scripts/audit-*.sh` audit scripts | Plans 192 + 193 (3 scripts) | New `scripts/` entries. |
-| `docs/recipes/*.md` new recipes | Plans 186, 189, 190, 191, 195, 196, 197, 198, 199 | **Nine new recipes**. Update `docs/recipes/README.md` per plan. |
-| `crates/nlink/examples/*.rs` new examples | Plans 186, 188, 189, 190, 191, 195, 196, 197, 198, 199 | **Twelve new examples**. Register each in `crates/nlink/Cargo.toml`. |
-
-## Known maintainer-tooling bug
-
-_None as of 0.18 cut._ The `wait_for_ci_green` stdout-vs-stderr
-bug was fixed in 0.18 commit `6fb1c96`.
+| [152](152-0.16-integration-showcases-plan.md) | `aya` co-demo + Prometheus exporter + OTel example. Carried since 0.16 without a real adopter signal. Revisit if a downstream asks. |
 
 ## How to update this file
 
-When a plan moves status:
-
-1. Edit the **Status** column emoji.
-2. When a plan ships and the cycle cuts + publishes, delete the
-   per-plan file (per CLAUDE.md "Publishing" / "Plan-file
-   cleanup"). The durable narrative is the CHANGELOG entry +
-   migration guide; plan files are working memory and shouldn't
-   accumulate.
-3. Rewrite this INDEX when opening a new cycle — clear the
-   "Quick status" + "Sub-plan table" sections, leaving
-   "Deprioritized" intact unless explicitly un-parked.
+1. When a plan ships, flip the **Status** column.
+2. When the cycle cuts + publishes, delete the per-plan
+   files (durable narrative lives in CHANGELOG + migration
+   guide).
+3. Rewrite this INDEX when opening a new cycle.
