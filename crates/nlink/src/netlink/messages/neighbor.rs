@@ -301,6 +301,25 @@ impl ToNetlink for NeighborMessage {
         if self.vlan.is_some() {
             len += nla_size(2);
         }
+        // 0.19 N5 — account for the new emit branches.
+        if self.probes.is_some() {
+            len += nla_size(4);
+        }
+        if self.port.is_some() {
+            len += nla_size(2);
+        }
+        if self.vni.is_some() {
+            len += nla_size(4);
+        }
+        if self.ifindex_attr.is_some() {
+            len += nla_size(4);
+        }
+        if self.master.is_some() {
+            len += nla_size(4);
+        }
+        if self.cache_info.is_some() {
+            len += nla_size(16);
+        }
 
         len
     }
@@ -321,6 +340,30 @@ impl ToNetlink for NeighborMessage {
         if let Some(vlan) = self.vlan {
             write_attr_u16(buf, attr_ids::NDA_VLAN, vlan);
         }
+        // 0.19 N5 — NDA_PROBES / _PORT / _VNI / _IFINDEX / _MASTER /
+        // _CACHEINFO were parsed but never emitted. Blocked typed
+        // VXLAN FDB programming via NeighborMessage; users had to
+        // drop to raw MessageBuilder.
+        if let Some(probes) = self.probes {
+            write_attr_u32(buf, attr_ids::NDA_PROBES, probes);
+        }
+        if let Some(port) = self.port {
+            // NDA_PORT travels big-endian (it's a UDP port — matches
+            // the BE parse on the read side at line 264).
+            write_attr_u16_be(buf, attr_ids::NDA_PORT, port);
+        }
+        if let Some(vni) = self.vni {
+            write_attr_u32(buf, attr_ids::NDA_VNI, vni);
+        }
+        if let Some(ifindex_attr) = self.ifindex_attr {
+            write_attr_u32(buf, attr_ids::NDA_IFINDEX, ifindex_attr);
+        }
+        if let Some(master) = self.master {
+            write_attr_u32(buf, attr_ids::NDA_MASTER, master);
+        }
+        if let Some(ref ci) = self.cache_info {
+            write_attr_cache_info(buf, attr_ids::NDA_CACHEINFO, ci);
+        }
 
         Ok(buf.len() - start)
     }
@@ -338,6 +381,36 @@ fn write_attr_u16(buf: &mut Vec<u8>, attr_type: u16, value: u16) {
     buf.extend_from_slice(&value.to_ne_bytes());
     buf.push(0); // padding
     buf.push(0);
+}
+
+/// Write a u16 attribute in big-endian. 0.19 N5 — used for
+/// `NDA_PORT` which carries a UDP port (VXLAN remote dest port).
+fn write_attr_u16_be(buf: &mut Vec<u8>, attr_type: u16, value: u16) {
+    let len: u16 = 6;
+    buf.extend_from_slice(&len.to_ne_bytes());
+    buf.extend_from_slice(&attr_type.to_ne_bytes());
+    buf.extend_from_slice(&value.to_be_bytes());
+    buf.push(0); // padding
+    buf.push(0);
+}
+
+fn write_attr_u32(buf: &mut Vec<u8>, attr_type: u16, value: u32) {
+    let len: u16 = 8;
+    buf.extend_from_slice(&len.to_ne_bytes());
+    buf.extend_from_slice(&attr_type.to_ne_bytes());
+    buf.extend_from_slice(&value.to_ne_bytes());
+}
+
+/// Write an `NDA_CACHEINFO` attribute — 4×u32 (`ndm_cacheinfo`).
+/// 0.19 N5.
+fn write_attr_cache_info(buf: &mut Vec<u8>, attr_type: u16, ci: &NeighborCacheInfo) {
+    let len: u16 = 4 + 16;
+    buf.extend_from_slice(&len.to_ne_bytes());
+    buf.extend_from_slice(&attr_type.to_ne_bytes());
+    buf.extend_from_slice(&ci.confirmed.to_ne_bytes());
+    buf.extend_from_slice(&ci.used.to_ne_bytes());
+    buf.extend_from_slice(&ci.updated.to_ne_bytes());
+    buf.extend_from_slice(&ci.refcnt.to_ne_bytes());
 }
 
 fn write_attr_bytes(buf: &mut Vec<u8>, attr_type: u16, value: &[u8]) {
@@ -426,6 +499,52 @@ impl NeighborMessageBuilder {
         self
     }
 
+    /// Set the probe count (`NDA_PROBES`). 0.19 N5.
+    pub fn probes(mut self, n: u32) -> Self {
+        self.msg.probes = Some(n);
+        self
+    }
+
+    /// Set the UDP port (`NDA_PORT`). Serialised big-endian on
+    /// the wire (VXLAN-style). 0.19 N5.
+    pub fn port(mut self, udp_port: u16) -> Self {
+        self.msg.port = Some(udp_port);
+        self
+    }
+
+    /// Set the VXLAN VNI (`NDA_VNI`). 0.19 N5.
+    ///
+    /// Combined with [`Self::port`] and [`Self::master`] this lets
+    /// callers express a complete VXLAN FDB entry through the
+    /// typed API.
+    pub fn vni(mut self, vni: u32) -> Self {
+        self.msg.vni = Some(vni);
+        self
+    }
+
+    /// Set the alternative interface-index attribute (`NDA_IFINDEX`).
+    /// Distinct from the header's `ndm_ifindex` — used when the
+    /// neighbor is reached via a different interface than the
+    /// containing message implies. 0.19 N5.
+    pub fn ifindex_attr(mut self, ifindex: u32) -> Self {
+        self.msg.ifindex_attr = Some(ifindex);
+        self
+    }
+
+    /// Set the master device index (`NDA_MASTER`) — typically the
+    /// bridge this FDB entry belongs to. 0.19 N5.
+    pub fn master(mut self, ifindex: u32) -> Self {
+        self.msg.master = Some(ifindex);
+        self
+    }
+
+    /// Set the cache info (`NDA_CACHEINFO`). Mostly useful for
+    /// replay / test fixtures; the kernel computes its own. 0.19 N5.
+    pub fn cache_info(mut self, info: NeighborCacheInfo) -> Self {
+        self.msg.cache_info = Some(info);
+        self
+    }
+
     /// Build the message.
     pub fn build(self) -> NeighborMessage {
         self.msg
@@ -451,5 +570,54 @@ mod tests {
         assert!(msg.is_ipv4());
         assert!(msg.is_permanent());
         assert_eq!(msg.mac_address(), Some("00:11:22:33:44:55".to_string()));
+    }
+
+    /// 0.19 N5 — verify every emitted attribute survives a
+    /// `write_to → parse` round-trip. Pre-fix, `probes`, `port`,
+    /// `vni`, `ifindex_attr`, `master`, and `cache_info` were
+    /// silently dropped on the write side. This blocked
+    /// expressing complete VXLAN FDB entries through
+    /// `NeighborMessageBuilder` — users had to drop to raw
+    /// `MessageBuilder`. Test asserts the typed builder can now
+    /// program a full VXLAN FDB entry end-to-end.
+    #[test]
+    fn write_to_preserves_all_attrs_roundtrip() {
+        let original = NeighborMessageBuilder::new()
+            .ifindex(2)
+            .destination(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+            .lladdr(vec![0x00, 0x11, 0x22, 0x33, 0x44, 0x55])
+            .vlan(100)
+            .probes(0)
+            .port(4789) // VXLAN UDP port
+            .vni(4096)
+            .ifindex_attr(3)
+            .master(7)
+            .cache_info(NeighborCacheInfo {
+                confirmed: 1,
+                used: 2,
+                updated: 3,
+                refcnt: 1,
+            })
+            .permanent()
+            .build();
+
+        let mut buf = Vec::new();
+        original.write_to(&mut buf).unwrap();
+
+        let parsed = NeighborMessage::parse(&mut buf.as_slice()).unwrap();
+
+        assert_eq!(parsed.probes, Some(0));
+        assert_eq!(parsed.port, Some(4789), "NDA_PORT must round-trip BE-encoded");
+        assert_eq!(parsed.vni, Some(4096));
+        assert_eq!(parsed.ifindex_attr, Some(3));
+        assert_eq!(parsed.master, Some(7));
+        let ci = parsed.cache_info.as_ref().expect("NDA_CACHEINFO");
+        assert_eq!(ci.confirmed, 1);
+        assert_eq!(ci.used, 2);
+        assert_eq!(ci.updated, 3);
+        assert_eq!(ci.refcnt, 1);
+        // Spot-check pre-existing fields.
+        assert_eq!(parsed.vlan, Some(100));
+        assert_eq!(parsed.destination, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
     }
 }
