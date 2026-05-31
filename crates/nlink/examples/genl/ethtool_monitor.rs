@@ -34,7 +34,7 @@ async fn main() -> nlink::Result<()> {
     println!("Subscribed to ethtool monitor group\n");
 
     // Receive and display events using the Stream API
-    let mut events = conn.events();
+    let mut events = conn.events().await;
     while let Some(result) = events.next().await {
         match result {
             Ok(event) => {

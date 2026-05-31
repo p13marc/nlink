@@ -37,10 +37,10 @@ async fn main() -> nlink::Result<()> {
     };
 
     // Get event streams - using events() borrows the connection
-    let mut uevent_stream = pin!(uevent_conn.events());
+    let mut uevent_stream = pin!(uevent_conn.events().await);
 
     if let Some(ref conn) = connector_conn {
-        let mut proc_stream = pin!(conn.events());
+        let mut proc_stream = pin!(conn.events().await);
 
         // Monitor both sources with select!
         loop {

@@ -39,7 +39,7 @@ async fn main() -> nlink::Result<()> {
 
     // Subscribe on the subscribe socket; pass the factory for resyncs.
     let conn = Connection::<Nftables>::new()?;
-    let mut events = conn.into_events_with_resync(factory)?;
+    let mut events = conn.into_events_with_resync(factory).await?;
 
     while let Some(item) = events.next().await {
         match item? {

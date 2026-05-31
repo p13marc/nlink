@@ -63,7 +63,7 @@ fn print_overview() {
     let mut nf = Connection::<Netfilter>::new()?;
     nf.subscribe(&[ConntrackGroup::New, ConntrackGroup::Destroy])?;
 
-    let mut events = nf.events();
+    let mut events = nf.events().await;
     while let Some(evt) = events.next().await {{
         match evt? {{
             ConntrackEvent::New(entry)     => println!("NEW     {{:?}}", entry.orig),
@@ -98,7 +98,7 @@ async fn run_watch() -> nlink::Result<()> {
         ConntrackGroup::Update,
         ConntrackGroup::Destroy,
     ])?;
-    let mut events = nf.events();
+    let mut events = nf.events().await;
     while let Some(evt) = events.next().await {
         print_event(&evt?);
     }
@@ -140,7 +140,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     // Spawn a collector that drains events for up to 3s. Using
     // into_events() so we can move the connection into the task.
     let collector = tokio::spawn(async move {
-        let mut stream = sub.into_events();
+        let mut stream = sub.into_events().await;
         let mut collected: Vec<ConntrackEvent> = Vec::new();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {

@@ -223,7 +223,7 @@ use tokio_stream::StreamExt;
 let mut sub = Connection::<Netfilter>::new()?;
 sub.subscribe(&[ConntrackGroup::New, ConntrackGroup::Destroy])?;
 
-let mut events = sub.events();
+let mut events = sub.events().await;
 let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
 
 while tokio::time::Instant::now() < deadline {

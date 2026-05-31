@@ -21,7 +21,7 @@ async fn main() -> nlink::netlink::Result<()> {
     let conn = Connection::<Route>::new()?;
     conn.subscribe(&[RtnetlinkGroup::Tc])?;
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     while let Some(result) = events.next().await {
         let event = result?;

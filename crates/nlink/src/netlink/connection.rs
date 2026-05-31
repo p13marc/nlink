@@ -93,7 +93,12 @@ pub struct Connection<P: ProtocolState> {
     /// Closes the F1 concurrency bug (rtnetlink #131 shape) where
     /// task A's recv loop would consume task B's response from
     /// the socket buffer and drop it. See `Concurrency` above.
-    request_lock: tokio::sync::Mutex<()>,
+    ///
+    /// `Arc<Mutex<()>>` (rather than `Mutex<()>`) so streams
+    /// (`DumpStream`, `EventSubscription`) can take an
+    /// [`tokio::sync::OwnedMutexGuard`] that lives independent
+    /// of the Connection's borrow scope — see 0.19 Finding B.
+    request_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Default operation timeout for `Connection<P>` (Plan 171).
@@ -148,7 +153,7 @@ where
             socket: NetlinkSocket::new(P::PROTOCOL)?,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
-            request_lock: tokio::sync::Mutex::new(()),
+            request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -176,7 +181,7 @@ where
             socket: NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
-            request_lock: tokio::sync::Mutex::new(()),
+            request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -202,7 +207,7 @@ where
             socket: NetlinkSocket::new_in_namespace_path(P::PROTOCOL, ns_path)?,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
-            request_lock: tokio::sync::Mutex::new(()),
+            request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 }
@@ -368,6 +373,15 @@ impl<P: ProtocolState> Connection<P> {
         self.request_lock.lock().await
     }
 
+    /// Acquire the request lock as an *owned* guard. 0.19 Finding B —
+    /// used by stream-shape APIs (`DumpStream`, `EventSubscription`)
+    /// that hold the lock for the stream's whole lifetime; the owned
+    /// guard outlives the `&Connection` borrow scope so the stream
+    /// can store it in its own struct.
+    pub(crate) async fn lock_request_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.request_lock.clone().lock_owned().await
+    }
+
     /// Wrap a future with the configured timeout.
     ///
     /// If no timeout is set, the future runs without time limit.
@@ -393,7 +407,7 @@ impl<P: ProtocolState> Connection<P> {
             socket,
             state,
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
-            request_lock: tokio::sync::Mutex::new(()),
+            request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 

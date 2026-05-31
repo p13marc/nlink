@@ -579,7 +579,7 @@ async fn monitor_events() -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
     conn.subscribe()?;
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
     while let Some(result) = events.next().await {
         match result {
             Ok(event) => {

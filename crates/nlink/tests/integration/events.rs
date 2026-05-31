@@ -27,7 +27,7 @@ async fn test_link_events() -> Result<()> {
     conn.subscribe(&[RtnetlinkGroup::Link])?;
 
     // Create a stream with timeout
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     // Create a dummy interface (will generate NewLink event)
     {
@@ -62,7 +62,7 @@ async fn test_address_events() -> Result<()> {
     // Subscribe to address events
     conn.subscribe(&[RtnetlinkGroup::Ipv4Addr])?;
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     // Add address (will generate NewAddr event)
     {
@@ -102,7 +102,7 @@ async fn test_tc_events() -> Result<()> {
     // Subscribe to TC events
     conn.subscribe(&[RtnetlinkGroup::Tc])?;
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     // Add qdisc (will generate NewQdisc event)
     {
@@ -133,7 +133,7 @@ async fn test_subscribe_all() -> Result<()> {
     conn.subscribe_all()?;
 
     // Verify subscription worked by creating something
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     // Create dummy interface
     {
@@ -187,7 +187,7 @@ async fn test_link_down_event() -> Result<()> {
     // Subscribe to link events
     conn.subscribe(&[RtnetlinkGroup::Link])?;
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     // Bring down interface
     {
@@ -221,7 +221,7 @@ async fn test_del_link_event() -> Result<()> {
     // Subscribe to link events
     conn.subscribe(&[RtnetlinkGroup::Link])?;
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     // Delete interface
     {
@@ -257,7 +257,7 @@ async fn test_del_address_event() -> Result<()> {
     // Subscribe to address events
     conn.subscribe(&[RtnetlinkGroup::Ipv4Addr])?;
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     // Delete address
     {
@@ -288,7 +288,7 @@ async fn test_owned_event_stream() -> Result<()> {
     conn.subscribe(&[RtnetlinkGroup::Link])?;
 
     // Convert to owned stream
-    let mut stream = conn.into_events();
+    let mut stream = conn.into_events().await;
 
     // Create dummy interface from another connection
     {
@@ -320,7 +320,7 @@ async fn test_event_stream_continues() -> Result<()> {
     // Subscribe to link events
     conn.subscribe(&[RtnetlinkGroup::Link])?;
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     // Create multiple interfaces
     let conn2 = ns.connection()?;
@@ -357,7 +357,7 @@ async fn test_ipv6_address_events() -> Result<()> {
     // Subscribe to IPv6 address events
     conn.subscribe(&[RtnetlinkGroup::Ipv6Addr])?;
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     // Add IPv6 address
     {

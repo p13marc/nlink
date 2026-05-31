@@ -28,22 +28,26 @@ use crate::{Connection, Result};
 /// recovery built in. The factory closure (which opens a
 /// fresh connection on every overflow) is constructed for
 /// you.
-pub fn route_changes() -> Result<RouteResyncStream> {
+///
+/// 0.19 Finding B — now `async`.
+pub async fn route_changes() -> Result<RouteResyncStream> {
     let conn = Connection::<Route>::new()?;
     let factory: ConnectionFactory<Route> =
         Arc::new(|| Box::pin(async { Connection::<Route>::new() }));
-    conn.into_events_with_resync(factory)
+    conn.into_events_with_resync(factory).await
 }
 
 /// Watch RTNETLINK changes inside a named namespace.
-pub fn route_changes_in_namespace(ns: &str) -> Result<RouteResyncStream> {
+///
+/// 0.19 Finding B — now `async`.
+pub async fn route_changes_in_namespace(ns: &str) -> Result<RouteResyncStream> {
     let conn = namespace::connection_for::<Route>(ns)?;
     let ns_owned = ns.to_string();
     let factory: ConnectionFactory<Route> = Arc::new(move || {
         let ns = ns_owned.clone();
         Box::pin(async move { namespace::connection_for::<Route>(&ns) })
     });
-    conn.into_events_with_resync(factory)
+    conn.into_events_with_resync(factory).await
 }
 
 // =============================================================================
@@ -52,22 +56,26 @@ pub fn route_changes_in_namespace(ns: &str) -> Result<RouteResyncStream> {
 
 /// Watch nftables ruleset mutations in the host's default
 /// namespace.
-pub fn nftables_changes() -> Result<NftablesResyncStream> {
+///
+/// 0.19 Finding B — now `async`.
+pub async fn nftables_changes() -> Result<NftablesResyncStream> {
     let conn = Connection::<Nftables>::new()?;
     let factory: ConnectionFactory<Nftables> =
         Arc::new(|| Box::pin(async { Connection::<Nftables>::new() }));
-    conn.into_events_with_resync(factory)
+    conn.into_events_with_resync(factory).await
 }
 
 /// Watch nftables ruleset mutations inside a named namespace.
-pub fn nftables_changes_in_namespace(ns: &str) -> Result<NftablesResyncStream> {
+///
+/// 0.19 Finding B — now `async`.
+pub async fn nftables_changes_in_namespace(ns: &str) -> Result<NftablesResyncStream> {
     let conn = namespace::connection_for::<Nftables>(ns)?;
     let ns_owned = ns.to_string();
     let factory: ConnectionFactory<Nftables> = Arc::new(move || {
         let ns = ns_owned.clone();
         Box::pin(async move { namespace::connection_for::<Nftables>(&ns) })
     });
-    conn.into_events_with_resync(factory)
+    conn.into_events_with_resync(factory).await
 }
 
 // =============================================================================

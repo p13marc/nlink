@@ -91,7 +91,7 @@ impl MonitorCmd {
             "Monitoring netlink events (Ctrl+C to stop)...",
         )?;
 
-        let mut events = conn.events();
+        let mut events = conn.events().await;
 
         while let Some(result) = events.next().await {
             let event = result?;

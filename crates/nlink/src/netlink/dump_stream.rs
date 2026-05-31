@@ -70,6 +70,11 @@ pub struct DumpStream<'a, P: ProtocolState, T: FromNetlink + Unpin> {
     pending: VecDeque<Result<T>>,
     done: bool,
     errored: bool,
+    /// 0.19 Finding B — hold the Connection's request lock for the
+    /// stream's lifetime so concurrent dumps / events on a shared
+    /// `Arc<Connection>` don't race on `poll_recv` and steal each
+    /// other's frames. Released when the stream is dropped.
+    _guard: tokio::sync::OwnedMutexGuard<()>,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -104,6 +109,14 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
         msg_type: u16,
         body: &[u8],
     ) -> Result<Self> {
+        // 0.19 Finding B — acquire the request lock BEFORE the send
+        // and hold it for the stream's lifetime. Without this, two
+        // concurrent DumpStreams on a shared `Arc<Connection>` would
+        // both `poll_recv` and steal each other's frames; the
+        // seq-filter would silently drop the foreign frames but
+        // they'd never reach the right stream's pending queue.
+        let guard = conn.lock_request_owned().await;
+
         let mut builder = MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_DUMP);
         if !body.is_empty() {
             builder.append_bytes(body);
@@ -123,6 +136,7 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
             pending: VecDeque::new(),
             done: false,
             errored: false,
+            _guard: guard,
             _marker: PhantomData,
         })
     }
@@ -354,13 +368,15 @@ mod tests {
         }
     }
 
-    fn make_stream<'a>(conn: &'a Connection<crate::netlink::Route>) -> DumpStream<'a, crate::netlink::Route, Dummy> {
+    async fn make_stream<'a>(conn: &'a Connection<crate::netlink::Route>) -> DumpStream<'a, crate::netlink::Route, Dummy> {
+        let guard = conn.lock_request_owned().await;
         DumpStream {
             conn,
             expected_seq: 1,
             pending: VecDeque::new(),
             done: false,
             errored: false,
+            _guard: guard,
             _marker: PhantomData,
         }
     }
@@ -381,7 +397,7 @@ mod tests {
     #[tokio::test]
     async fn drain_recognizes_nlmsg_done() {
         let conn = Connection::<crate::netlink::Route>::new().unwrap();
-        let mut stream = make_stream(&conn);
+        let mut stream = make_stream(&conn).await;
         let done = synth_done_frame(1);
         stream.drain_into_pending(&done);
         assert!(stream.done);
@@ -392,7 +408,7 @@ mod tests {
     #[tokio::test]
     async fn drain_skips_mismatched_seq() {
         let conn = Connection::<crate::netlink::Route>::new().unwrap();
-        let mut stream = make_stream(&conn);
+        let mut stream = make_stream(&conn).await;
         // expected_seq = 1; frame is seq = 42 — should be skipped.
         let other = synth_done_frame(42);
         stream.drain_into_pending(&other);

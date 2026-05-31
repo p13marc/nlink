@@ -486,7 +486,7 @@ async fn into_events_with_resync_recovers_from_enobufs() -> nlink::Result<()> {
             })
         };
 
-        let mut stream = event_conn.into_events_with_resync(factory)?;
+        let mut stream = event_conn.into_events_with_resync(factory).await?;
 
         // Mutator task: tight rule add/delete loop. Runs until
         // we cancel via the abort handle. Uses get_rule + handle

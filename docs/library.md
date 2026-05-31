@@ -70,7 +70,7 @@ use tokio_stream::StreamExt;
 let mut conn = Connection::<Route>::new()?;
 conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Ipv4Addr, RtnetlinkGroup::Tc])?;
 
-let mut events = conn.events();
+let mut events = conn.events().await;
 while let Some(result) = events.next().await {
     match result? {
         NetworkEvent::NewLink(link) => println!("Link added: {}", link.name_or("?")),
@@ -89,7 +89,7 @@ use tokio_stream::StreamExt;
 // Monitor events in a named namespace
 let mut conn = namespace::connection_for("myns")?;
 conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
-let mut events = conn.events();
+let mut events = conn.events().await;
 
 // Or by PID
 let mut conn = namespace::connection_for_pid(1234)?;

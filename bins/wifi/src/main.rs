@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
         let conn = Connection::<Nl80211>::new_async().await?;
         conn.subscribe()?;
         eprintln!("Monitoring WiFi events (Ctrl+C to stop)...");
-        let mut events = conn.events();
+        let mut events = conn.events().await;
         while let Some(result) = events.next().await {
             match result {
                 Ok(event) => println!("{event:?}"),

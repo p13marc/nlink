@@ -141,13 +141,15 @@ impl Connection<Route> {
     /// need to retain borrowed access to the connection.
     ///
     /// Plan 191 §2.6.
+    /// 0.19 Finding B — now `async` to acquire the request lock
+    /// via the underlying `into_events().await`.
     #[tracing::instrument(level = "info", skip_all)]
-    pub fn into_events_with_resync(
+    pub async fn into_events_with_resync(
         self,
         factory: ConnectionFactory<Route>,
     ) -> Result<OwnedResyncStream> {
         self.subscribe_all()?;
-        let stream = self.into_events();
+        let stream = self.into_events().await;
         Ok(events_with_resync(stream, make_snapshot_fn(factory)))
     }
 
@@ -159,14 +161,15 @@ impl Connection<Route> {
     /// [`Self::into_events_with_resync`] (the owned form is
     /// `'static + Send`).
     ///
-    /// Plan 191 §2.6.
+    /// Plan 191 §2.6. 0.19 Finding A — `&self` (was `&mut self`).
+    /// 0.19 Finding B — now `async`.
     #[tracing::instrument(level = "info", skip_all)]
-    pub fn subscribe_all_with_resync(
-        &mut self,
+    pub async fn subscribe_all_with_resync(
+        &self,
         factory: ConnectionFactory<Route>,
     ) -> Result<BorrowedResyncStream<'_>> {
         self.subscribe_all()?;
-        let stream = self.events();
+        let stream = self.events().await;
         Ok(events_with_resync(stream, make_snapshot_fn(factory)))
     }
 }

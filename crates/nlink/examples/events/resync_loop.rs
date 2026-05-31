@@ -38,7 +38,7 @@ async fn main() -> nlink::Result<()> {
     println!("subscribed to RTNLGRP_LINK; Ctrl-C to exit");
     println!("event ENOBUFS will trigger an automatic re-snapshot");
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
     let mut event_count = 0usize;
     let mut resync_count = 0usize;
 

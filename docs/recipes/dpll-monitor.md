@@ -261,7 +261,7 @@ use tokio_stream::StreamExt;
 # async fn run() -> nlink::Result<()> {
 let mut conn = Connection::<Dpll>::new_async().await?;
 conn.subscribe_monitor()?;       // resolves "monitor" group via the macro stack
-let mut events = conn.events();
+let mut events = conn.events().await;
 
 while let Some(evt) = events.next().await {
     match evt? {

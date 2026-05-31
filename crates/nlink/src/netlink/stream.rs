@@ -115,14 +115,21 @@ pub struct EventSubscription<'a, P: EventSource> {
     conn: &'a Connection<P>,
     buffer: Vec<u8>,
     pending: Vec<P::Event>,
+    /// 0.19 Finding B — hold the Connection's request lock for the
+    /// subscription's lifetime so concurrent dumps / other streams
+    /// on a shared `Arc<Connection>` don't race on `poll_recv`. The
+    /// lock is acquired in [`Connection::events`] (now async) and
+    /// released when the stream is dropped.
+    _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl<'a, P: EventSource> EventSubscription<'a, P> {
-    pub(crate) fn new(conn: &'a Connection<P>) -> Self {
+    pub(crate) fn new(conn: &'a Connection<P>, guard: tokio::sync::OwnedMutexGuard<()>) -> Self {
         Self {
             conn,
             buffer: Vec::new(),
             pending: Vec::new(),
+            _guard: guard,
         }
     }
 }
@@ -201,14 +208,22 @@ pub struct OwnedEventStream<P: EventSource> {
     conn: Connection<P>,
     buffer: Vec<u8>,
     pending: Vec<P::Event>,
+    /// 0.19 Finding B — same role as `EventSubscription::_guard`.
+    /// Because the lock is held by the OwnedMutexGuard wrapping
+    /// the Connection's own request_lock Arc, and the Connection
+    /// is owned by this struct, dropping the stream releases the
+    /// guard which drops the Arc reference (alongside the
+    /// Connection itself).
+    _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl<P: EventSource> OwnedEventStream<P> {
-    pub(crate) fn new(conn: Connection<P>) -> Self {
+    pub(crate) fn new(conn: Connection<P>, guard: tokio::sync::OwnedMutexGuard<()>) -> Self {
         Self {
             conn,
             buffer: Vec::new(),
             pending: Vec::new(),
+            _guard: guard,
         }
     }
 
@@ -218,8 +233,13 @@ impl<P: EventSource> OwnedEventStream<P> {
     }
 
     /// Consume this stream and return the underlying connection.
+    /// 0.19 Finding B — the guard is dropped here, releasing the
+    /// Connection's request lock so subsequent requests can proceed.
     pub fn into_connection(self) -> Connection<P> {
-        self.conn
+        // Drop the guard explicitly via struct destructure so the
+        // released lock is observable before we return.
+        let Self { conn, .. } = self;
+        conn
     }
 }
 
@@ -276,7 +296,17 @@ impl<P: EventSource> Connection<P> {
     /// Create an event stream that borrows this connection.
     ///
     /// Returns a [`Stream`] that borrows the connection. The connection
-    /// remains usable for queries while the stream is active.
+    /// remains usable for **non-recv** operations (`set_strict_checking`,
+    /// `subscribe` to add more groups, etc.) while the stream is active.
+    ///
+    /// **0.19 Finding B — now `async`.** Acquires the connection's
+    /// request lock for the subscription's lifetime so concurrent
+    /// streams (multiple `events()`, `events()` + `dump_stream()`)
+    /// no longer race on `poll_recv` and steal each other's frames.
+    /// Concurrent dumps on a connection with an active events stream
+    /// will block until the events stream is dropped — use a second
+    /// Connection (or `ConnectionPool`) for query-in-parallel
+    /// patterns.
     ///
     /// # Example
     ///
@@ -286,8 +316,8 @@ impl<P: EventSource> Connection<P> {
     ///
     /// let conn = Connection::<KobjectUevent>::new()?;
     ///
-    /// // Borrow connection for streaming
-    /// let mut events = conn.events();
+    /// // Borrow connection for streaming (0.19: now async).
+    /// let mut events = conn.events().await;
     /// while let Some(event) = events.try_next().await? {
     ///     if event.is_add() {
     ///         println!("Device added: {}", event.devpath);
@@ -297,8 +327,9 @@ impl<P: EventSource> Connection<P> {
     /// // Connection still usable
     /// drop(events);
     /// ```
-    pub fn events(&self) -> EventSubscription<'_, P> {
-        EventSubscription::new(self)
+    pub async fn events(&self) -> EventSubscription<'_, P> {
+        let guard = self.lock_request_owned().await;
+        EventSubscription::new(self, guard)
     }
 
     /// Convert this connection into an owned event stream.
@@ -313,7 +344,7 @@ impl<P: EventSource> Connection<P> {
     /// use tokio_stream::StreamExt;
     ///
     /// let conn = Connection::<SELinux>::new()?;
-    /// let mut stream = conn.into_events();
+    /// let mut stream = conn.into_events().await;
     ///
     /// while let Some(event) = stream.try_next().await? {
     ///     println!("{:?}", event);
@@ -322,8 +353,12 @@ impl<P: EventSource> Connection<P> {
     /// // Recover connection if needed
     /// let conn = stream.into_connection();
     /// ```
-    pub fn into_events(self) -> OwnedEventStream<P> {
-        OwnedEventStream::new(self)
+    ///
+    /// **0.19 Finding B — now `async`.** Same locking semantics as
+    /// [`Self::events`]; see that method's docstring for the trade-off.
+    pub async fn into_events(self) -> OwnedEventStream<P> {
+        let guard = self.lock_request_owned().await;
+        OwnedEventStream::new(self, guard)
     }
 }
 

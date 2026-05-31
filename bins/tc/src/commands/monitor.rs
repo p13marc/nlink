@@ -69,7 +69,7 @@ impl MonitorCmd {
             .iter()
             .any(|o| matches!(o, TcEventType::Filter | TcEventType::All));
 
-        let mut events = conn.events();
+        let mut events = conn.events().await;
 
         while let Some(result) = events.next().await {
             let event = result?;
