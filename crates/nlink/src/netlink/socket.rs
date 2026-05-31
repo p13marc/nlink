@@ -526,7 +526,7 @@ impl NetlinkSocket {
     ///
     /// Pushes each successfully-received frame as an owned `Vec<u8>`
     /// onto `out` (not cleared). Returns the count received in
-    /// this call. `max` is clamped to [`NL_BATCH_SIZE`].
+    /// this call. `max` is clamped to `NL_BATCH_SIZE` (32 frames).
     ///
     /// On `EAGAIN`/`EWOULDBLOCK` returns `Ok(0)` after the
     /// `AsyncFd` re-arms — caller can poll again or back off.
@@ -629,7 +629,7 @@ impl NetlinkSocket {
 
     /// Send up to `msgs.len()` netlink request frames in one
     /// `sendmmsg(2)` syscall. `msgs.len()` clamped to
-    /// [`NL_BATCH_SIZE`].
+    /// `NL_BATCH_SIZE` (32 frames).
     ///
     /// Returns the count successfully sent. Partial sends are
     /// possible — per `sendmmsg(2)`, if slot K errors the call

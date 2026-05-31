@@ -75,7 +75,7 @@ impl NlMsgHdr {
     /// dump stream was generated after the mutation; `iproute2` warns,
     /// `vishvananda/netlink` retries up to N times, Cilium's
     /// `safenetlink` wrapper retries up to 30. nlink surfaces this as
-    /// [`Error::DumpInterrupted`] from [`crate::Connection::send_dump`] so
+    /// [`Error::DumpInterrupted`] from `Connection::send_dump` so
     /// callers can choose their own retry policy via the
     /// [`Error::is_dump_interrupted`] predicate.
     ///

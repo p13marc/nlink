@@ -23,7 +23,7 @@ impl NftablesConfig {
     }
 
     /// Declare a table. The closure receives a
-    /// [`DeclaredTableBuilder`] that lets you nest chains, rules,
+    /// `DeclaredTableBuilder` that lets you nest chains, rules,
     /// and flowtables inside the table — matching the visual
     /// hierarchy of `nft list ruleset`.
     pub fn table<F>(mut self, name: impl Into<String>, family: Family, f: F) -> Self
@@ -340,7 +340,7 @@ impl DeclaredChainBuilder {
 /// diff sees it as "not in current state" and re-installs it. This
 /// is harmless for write-only rulesets but churns kernel state on
 /// every reconcile. For declarative configs that get re-applied,
-/// supply a `handle_key` via [`DeclaredTableBuilder::rule_keyed`].
+/// supply a `handle_key` via `DeclaredTableBuilder::rule_keyed`.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]

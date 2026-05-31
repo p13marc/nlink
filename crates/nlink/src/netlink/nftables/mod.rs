@@ -176,7 +176,7 @@ pub const NFTA_RULE_POSITION: u16 = 6;
 /// `NFTA_RULE_USERDATA = 7` — opaque-bytes payload the kernel
 /// preserves verbatim across reads / writes (max
 /// `NFT_USERDATA_MAXLEN = 256` bytes). Used for libnftnl-compatible
-/// TLV-encoded rule comments — see [`userdata`].
+/// TLV-encoded rule comments — see the internal `userdata` module.
 pub const NFTA_RULE_USERDATA: u16 = 7;
 
 // =============================================================================
