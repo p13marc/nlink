@@ -1,4 +1,4 @@
-//! Composable combinators on top of [`ResyncStream`] —
+//! Composable combinators on top of resync streams —
 //! kube-rs-style stream extensions.
 //!
 //! Plan 195 ships a small `ResyncStreamExt` trait providing

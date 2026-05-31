@@ -254,7 +254,7 @@ impl WireguardConfig {
     /// Apply with bounded retry on transient kernel errors
     /// (EBUSY / EAGAIN). Mirrors
     /// [`crate::netlink::nftables::config::NftablesDiff::apply_reconcile`]
-    /// and [`crate::NetworkConfig::apply_reconcile`].
+    /// and [`crate::netlink::config::NetworkConfig::apply_reconcile`].
     ///
     /// Plan 196 §2.3 follow-on (`wg syncconf` reconcile shape).
     pub async fn apply_reconcile(

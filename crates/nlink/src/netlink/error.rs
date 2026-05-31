@@ -221,10 +221,9 @@ pub enum Error {
     /// }
     /// ```
     ///
-    /// See [`NlMsgHdr::is_dump_interrupted`] for kernel semantics and
-    /// `crates/nlink/src/netlink/message.rs`. Reference: kernel
-    /// netlink intro docs, `vishvananda/netlink #1163`,
-    /// `pyroute2 #874`.
+    /// See [`crate::netlink::message::NlMsgHdr::is_dump_interrupted`]
+    /// for kernel semantics. Reference: kernel netlink intro docs,
+    /// `vishvananda/netlink #1163`, `pyroute2 #874`.
     #[error("netlink dump interrupted by concurrent mutation (NLM_F_DUMP_INTR) — retry")]
     DumpInterrupted,
 

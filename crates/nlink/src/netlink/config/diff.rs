@@ -65,7 +65,7 @@ pub struct ConfigDiff {
 
 impl ConfigDiff {
     /// Apply this pre-computed diff in-place without re-running
-    /// [`crate::NetworkConfig::compute_diff`].
+    /// [`crate::netlink::config::NetworkConfig::diff`].
     ///
     /// Mirrors [`crate::netlink::nftables::config::NftablesDiff::apply`]'s
     /// shape (Plan 188). Use this in the chain pattern when you
@@ -77,7 +77,7 @@ impl ConfigDiff {
     /// diff.apply(&conn, ApplyOptions::default()).await?;
     /// ```
     ///
-    /// More efficient than [`crate::NetworkConfig::apply`] when
+    /// More efficient than [`crate::netlink::config::NetworkConfig::apply`] when
     /// you already have a `ConfigDiff` — the latter re-runs
     /// `compute_diff` internally, costing one extra round-trip
     /// of dump traffic.
