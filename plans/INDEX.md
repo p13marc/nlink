@@ -97,7 +97,7 @@ Not yet opened. Topics worth scoping when it kicks off:
 |-------|--------|
 | Plan 197 — ovpn GENL family imperative + declarative | `plans/197-declarative-ovpn-plan.md` |
 | Plan 205 follow-on — wire purge correctly with kernel-managed-resource exclusion list | Plan 205 §10 deferral note + audit report C5 |
-| F1 architectural concurrency fix — NlRouter dispatch / per-Connection Mutex | Plan 212 M15 docstring + audit report |
+| F1 follow-on — full NlRouter-style dispatcher task (Mutex serialization shipped in 0.19 Plan 194; dispatcher unlocks per-request pipelining + multicast-events vs request safety) | 0.19 migration guide §"Plan 194" + audit report |
 | Plan 208 Phase 3-4 — GENL command unification + family-resolution unification (15th recv-loop closeout: wg_command stale-frame race) | Plan 208 deferral note + audit report H9 |
 | Plan 189 §8 expansions — `Deserialize` + `schemars` JSON Schema | 0.19 migration guide §"Plan 189" |
 | Plan 193 phase 2-3 — `cargo-fuzz` infrastructure + `proptest` integration | 0.19 migration guide §"Plan 193" |

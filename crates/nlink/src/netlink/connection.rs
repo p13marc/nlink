@@ -53,41 +53,47 @@ use super::{
 /// let wg = Connection::<Wireguard>::new_async().await?;
 /// ```
 ///
-/// # Concurrency caveat (Plan 212 M15)
+/// # Concurrency
 ///
-/// `Connection<P>` implements `Send + Sync`, so it compiles
-/// shared across tokio tasks via `Arc<Connection<P>>`. **However**,
-/// the underlying netlink socket is single-flight: concurrent
-/// `.await`-ed calls on the same connection race on the recv side.
-/// The seq filter in `send_request_inner` protects against stale-
-/// frame corruption but does **not** prevent task A from consuming
-/// task B's response in flight.
+/// `Connection<P>` is `Send + Sync` and safe to share across
+/// tokio tasks via `Arc<Connection<P>>`. As of 0.19 (closing the
+/// F1 architectural concurrency issue), each request/response
+/// pair acquires an internal `tokio::sync::Mutex` so concurrent
+/// callers on a shared `Arc<Connection>` serialize cleanly
+/// instead of racing on the recv side.
 ///
-/// What can happen: two tasks both call `.add_link()` simultaneously.
-/// Task A's `recv_msg().await` polls before task B's; the kernel
-/// delivers task B's response first; A sees `seq != A` and skips it
-/// (correct), then polls again and blocks until the 30s timeout
-/// fires (incorrect — B's response was consumed and dropped); B
-/// blocks because A's response now sits in the kernel buffer with
-/// no waiter. Both tasks return `Error::Timeout`.
+/// The lock is held for one send + one drain-until-DONE/ACK
+/// cycle, so concurrent dumps on a shared connection complete
+/// in sequence rather than in parallel. For true parallel
+/// throughput, use [`crate::netlink::pool::ConnectionPool<P>`]
+/// — each task acquires its own connection (and therefore its
+/// own netlink socket, which the kernel processes in parallel).
 ///
-/// **Recommended usage**:
+/// What the lock fixes — without it, two tasks calling
+/// `get_links()` on a shared connection would race on `recv_msg`:
+/// task A could consume task B's response from the socket
+/// buffer, the seq filter would `continue` past it (correct
+/// from A's view) but B then blocks forever waiting for a
+/// response that's gone. The seq filter remains as a defensive
+/// backstop against stale multicast/cross-process frames, but
+/// no longer load-bears against multi-task races.
 ///
-/// - One `Connection<P>` per task.
-/// - To fan out concurrent work, use
-///   [`nlink::netlink::pool::ConnectionPool<P>`]
-///   — each task acquires a connection from the pool, uses it
-///   serially, and returns it.
-/// - A shared `Connection<P>` across tasks is OK only if the tasks
-///   guarantee they never concurrently `.await` on the same
-///   connection (e.g. an outer `Mutex<Arc<Connection>>`).
-///
-/// The architectural fix (NlRouter-style dispatch task that fans
-/// responses out by seq) is tracked for 0.20.
+/// What the lock does **not** fix — multicast `events()` streams
+/// running concurrently with requests still race the recv side
+/// (event streams tap the socket directly and don't acquire the
+/// request lock). The proper fix is a per-seq response router
+/// (NlRouter-style dispatch task) — queued for 0.20.
 pub struct Connection<P: ProtocolState> {
     socket: NetlinkSocket,
     state: P,
     timeout: Option<Duration>,
+    /// Serialize concurrent request/response cycles on a shared
+    /// `Arc<Connection<P>>`. Held by every higher-level method
+    /// that does `socket.send(...) + recv-loop-until-DONE`.
+    /// Closes the F1 concurrency bug (rtnetlink #131 shape) where
+    /// task A's recv loop would consume task B's response from
+    /// the socket buffer and drop it. See `Concurrency` above.
+    request_lock: tokio::sync::Mutex<()>,
 }
 
 /// Default operation timeout for `Connection<P>` (Plan 171).
@@ -142,6 +148,7 @@ where
             socket: NetlinkSocket::new(P::PROTOCOL)?,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
+            request_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -169,6 +176,7 @@ where
             socket: NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
+            request_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -194,6 +202,7 @@ where
             socket: NetlinkSocket::new_in_namespace_path(P::PROTOCOL, ns_path)?,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
+            request_lock: tokio::sync::Mutex::new(()),
         })
     }
 }
@@ -350,6 +359,20 @@ impl<P: ProtocolState> Connection<P> {
         self.socket.set_ext_ack(on)
     }
 
+    /// Acquire the per-connection request lock for the duration of
+    /// a `send + recv-loop` cycle.
+    ///
+    /// Every higher-level method that does `socket.send(...)` followed
+    /// by a `recv_msg`/`recv_batch` loop MUST hold this guard for the
+    /// whole flow. Otherwise concurrent callers on a shared
+    /// `Arc<Connection<P>>` race on the recv side and lose frames.
+    ///
+    /// This closes the F1 architectural concurrency issue (rtnetlink
+    /// #131 shape). See the struct-level `Concurrency` docstring.
+    pub(crate) async fn lock_request(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.request_lock.lock().await
+    }
+
     /// Wrap a future with the configured timeout.
     ///
     /// If no timeout is set, the future runs without time limit.
@@ -375,6 +398,7 @@ impl<P: ProtocolState> Connection<P> {
             socket,
             state,
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
+            request_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -408,6 +432,11 @@ impl<P: ProtocolState> Connection<P> {
 
     #[instrument(level = "trace", skip_all, fields(seq))]
     async fn send_request_inner(&self, mut builder: MessageBuilder) -> Result<Vec<u8>> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See struct-level "Concurrency" docstring.
+        let _guard = self.request_lock.lock().await;
+
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -451,6 +480,9 @@ impl<P: ProtocolState> Connection<P> {
 
     #[instrument(level = "trace", skip_all, fields(seq))]
     async fn send_ack_inner(&self, mut builder: MessageBuilder) -> Result<()> {
+        // F1 fix — see send_request_inner.
+        let _guard = self.request_lock.lock().await;
+
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -495,6 +527,9 @@ impl<P: ProtocolState> Connection<P> {
 
     #[instrument(level = "trace", skip_all, fields(seq, responses))]
     async fn send_dump_inner(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
+        // F1 fix — see send_request_inner.
+        let _guard = self.request_lock.lock().await;
+
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());

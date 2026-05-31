@@ -39,12 +39,6 @@ use nlink::netlink::{
 use crate::common::TestNamespace;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "F1 — Connection isn't safe for shared-Arc concurrent dumps; \
-            the seq-filter at connection.rs:536 drops other tasks' \
-            frames with `continue`, leaving them stuck. Use \
-            ConnectionPool<Route> (Plan 159) for concurrent fanout. \
-            Architectural fix (per-seq response router / NlRouter) \
-            queued for 0.20 — see plans/INDEX.md F1 row."]
 async fn concurrent_dumps_on_shared_connection_route_correctly() -> Result<()> {
     nlink::require_root!();
 

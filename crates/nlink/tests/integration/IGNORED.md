@@ -30,9 +30,11 @@ or this catalog.
 
 ## concurrent_stress.rs
 
-| Test | Reason | Tracking |
-|---|---|---|
-| `concurrent_dumps_on_shared_connection_route_correctly` | tracking-plan-deferred | Documents the F1 architectural concurrency limitation: `Connection` isn't safe for shared-`Arc` concurrent dumps — the seq-filter at `connection.rs:536` drops other tasks' frames via `continue`, leaving them stuck. Workaround today is `ConnectionPool<Route>` (Plan 159). The proper fix (per-seq response router / NlRouter dispatch) is the F1 row in `plans/INDEX.md` ## 0.20 cycle seed. Un-ignore when F1 lands. |
+All entries here were un-ignored when the F1 concurrency fix
+landed in 0.19 — see `CHANGELOG.md ## [0.19.0]` "F1 — shared
+`Arc<Connection>` concurrent ops". The catalog section is kept
+as a marker; if a future regression in this file is `#[ignore]`'d,
+add a row with a tracking plan.
 
 ## nftables_reconcile.rs
 
