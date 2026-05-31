@@ -3,11 +3,11 @@
 //! This example demonstrates how to query routes
 //! using the high-level Connection API.
 //!
-//! Run with: cargo run -p nlink --example routes
+//! Run with: cargo run -p nlink --example route_routes
 //!
 //! Filter by address family:
-//!   cargo run -p nlink --example routes -- v4
-//!   cargo run -p nlink --example routes -- v6
+//!   cargo run -p nlink --example route_routes -- v4
+//!   cargo run -p nlink --example route_routes -- v6
 
 use std::env;
 

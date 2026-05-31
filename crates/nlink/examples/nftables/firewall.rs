@@ -19,6 +19,19 @@ use nlink::netlink::{
 
 #[tokio::main]
 async fn main() -> nlink::netlink::Result<()> {
+    // Plan 210 H10 — pre-0.19 this example had no root check;
+    // non-root invocation got partway through then errored with
+    // EPERM, leaving the `example` nftables table behind on any
+    // host that already had the unprivileged_ports sysctl
+    // permissive. Now skip cleanly.
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!(
+            "nftables_firewall example requires root (CAP_NET_ADMIN). \
+             Run with `sudo` to actually create the firewall, or skip."
+        );
+        return Ok(());
+    }
+
     let conn = Connection::<Nftables>::new()?;
 
     // List existing tables
@@ -28,6 +41,23 @@ async fn main() -> nlink::netlink::Result<()> {
         println!("  {} ({:?})", table.name, table.family);
     }
 
+    // Plan 210 H10 — wrap the demo body so cleanup runs even if
+    // a mid-flight op fails (leaving the `example` table in the
+    // kernel). Pre-0.19 the example used `?` throughout and the
+    // teardown was unreachable on partial failure.
+    let result = run_demo(&conn).await;
+
+    // Cleanup unconditionally — `flush_table` + `del_table` are
+    // best-effort, so failures here don't override the body's
+    // result.
+    let _ = conn.flush_table("example", Family::Inet).await;
+    let _ = conn.del_table("example", Family::Inet).await;
+    println!("\nCleaned up example table.");
+
+    result
+}
+
+async fn run_demo(conn: &Connection<Nftables>) -> nlink::netlink::Result<()> {
     // Create a filter table with input chain
     println!("\n=== Creating Firewall ===");
 
@@ -145,11 +175,6 @@ async fn main() -> nlink::netlink::Result<()> {
     for rule in &rules {
         println!("  chain={} handle={}", rule.chain, rule.handle);
     }
-
-    // Cleanup
-    conn.flush_table("example", Family::Inet).await?;
-    conn.del_table("example", Family::Inet).await?;
-    println!("\nCleaned up example table.");
 
     Ok(())
 }

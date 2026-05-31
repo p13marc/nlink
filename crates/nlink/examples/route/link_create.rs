@@ -3,15 +3,15 @@
 //! This example demonstrates how to create various types of virtual
 //! network interfaces using the high-level Connection API.
 //!
-//! Run with: cargo run -p nlink --example link_create
+//! Run with: cargo run -p nlink --example route_link_create
 //!
 //! Requires root privileges.
 //!
 //! Examples:
-//!   sudo cargo run -p nlink --example link_create -- dummy test0
-//!   sudo cargo run -p nlink --example link_create -- veth veth0 veth1
-//!   sudo cargo run -p nlink --example link_create -- bridge br0
-//!   sudo cargo run -p nlink --example link_create -- del test0
+//!   sudo cargo run -p nlink --example route_link_create -- dummy test0
+//!   sudo cargo run -p nlink --example route_link_create -- veth veth0 veth1
+//!   sudo cargo run -p nlink --example route_link_create -- bridge br0
+//!   sudo cargo run -p nlink --example route_link_create -- del test0
 
 use std::env;
 

@@ -3,11 +3,11 @@
 //! This example demonstrates how to query, add, and delete IP addresses
 //! using the high-level Connection API.
 //!
-//! Run with: cargo run -p nlink --example addresses
+//! Run with: cargo run -p nlink --example route_addresses
 //!
 //! To add/delete addresses (requires root):
-//!   cargo run -p nlink --example addresses -- add 10.0.0.1/24 eth0
-//!   cargo run -p nlink --example addresses -- del 10.0.0.1/24 eth0
+//!   cargo run -p nlink --example route_addresses -- add 10.0.0.1/24 eth0
+//!   cargo run -p nlink --example route_addresses -- del 10.0.0.1/24 eth0
 
 use std::{env, net::IpAddr};
 
