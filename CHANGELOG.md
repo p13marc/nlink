@@ -78,6 +78,31 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`SetKeyType::InetProto` + `Concat(Vec<_>)` (Plan 198
+  §2.1, scoped subset)** — extends the nftables set key
+  taxonomy with the two real-world variants the
+  research-agent audit flagged: `InetProto` (single u8
+  protocol — `tcp`/`udp`/`icmp`) and `Concat(Vec<_>)`
+  (composite key used in rules like `ip saddr . tcp
+  dport`). `type_id()` for `Concat` packs each
+  component's 6-bit type ID into sequential slots,
+  matching the kernel's `nft_set_ext_concat`
+  layout. `len()` returns the per-component sum after
+  4-byte alignment padding. **Note**: `SetKeyType` lost
+  `Copy` (the `Concat` variant carries a `Vec`); the
+  enum is `#[non_exhaustive]` so this is mitigated, but
+  any downstream `let k: SetKeyType = ...;` that
+  expected `Copy` semantics needs a `.clone()`. The
+  imperative `Set` builder + downstream wire-emit code
+  in the lib was unaffected.
+  The fuller Plan 198 — `DeclaredSet` declarative type,
+  `SetFlags` bitflags, element diff, `DeclaredTableBuilder::set`
+  — stays as a 0.20 follow-up; this commit ships the
+  imperative taxonomy extension so future declarative
+  work has the right wire types. 5 new unit tests pin
+  `InetProto` wire constants + `Concat` length/packing
+  on 1/2/3-component shapes.
+
 - **`#[must_use]` on the diff + result + report types
   (Plan 201 §2.1, scoped subset)** — `ConfigDiff`,
   `NftablesDiff`, `ApplyResult`, both `ReconcileReport`s
