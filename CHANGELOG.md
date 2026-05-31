@@ -186,6 +186,30 @@ All notable changes to this project will be documented in this file.
   helper + 6 unit tests covering well-formed, vendor-prepended,
   missing, truncated, non-UTF-8, and empty IE chains.
 
+- **`bins/nft` rejects unknown `--type` and `--policy` tokens**
+  (Plan 209 H5 — security UX). Pre-0.19 a typo on `--policy`
+  silently fell through to ACCEPT (`--policy drpo` for `drop`
+  produced an accept-everything firewall). Same hazard for
+  `--type` chain type. Now both error explicitly:
+  `unknown policy `drpo` — expected `drop` or `accept``.
+
+- **`bins/wg set --private-key /path` propagates file read
+  errors** (Plan 209 H6 — security UX). Pre-0.19 a missing
+  private-key file or base64-decode failure silently dropped the
+  key set; `wg set wg0 --private-key /typo` exited 0 and the
+  user believed the new key was installed. Now the read error
+  surfaces immediately via `?`.
+
+- **`bins/tc action` parses TC action attributes via zerocopy
+  `ref_from_prefix` instead of raw-pointer casts** (Plan 209
+  H11). Pre-0.19 the code did
+  `unsafe { &*(attr_data.as_ptr() as *const TcGact) }` which is
+  UB on strict-alignment architectures (some ARM, MIPS) — `Vec<u8>`'s
+  data pointer has no alignment guarantee. Now uses zerocopy's
+  alignment-checked parser, eliminating the UB. Three sites
+  updated (`gact`, `mirred`, `police` parameter blocks, both
+  JSON and text formatters).
+
 - **NetworkConfig correctness pass: 6 silent reconcile-divergence
   bugs fixed** (Plan 207).
 

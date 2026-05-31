@@ -217,8 +217,14 @@ fn print_action_options_json(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
     match kind {
         "gact" => {
             for (attr_type, attr_data) in AttrIter::new(opts_data) {
-                if attr_type == TCA_GACT_PARMS && attr_data.len() >= std::mem::size_of::<TcGact>() {
-                    let gact = unsafe { &*(attr_data.as_ptr() as *const TcGact) };
+                // Plan 209 H11 — use zerocopy alignment-checked
+                // ref_from_prefix instead of raw-pointer cast. The
+                // old `*const TcGact` cast was UB on strict-
+                // alignment targets (ARM/MIPS) — Vec<u8>'s data
+                // pointer has no alignment guarantee.
+                if attr_type == TCA_GACT_PARMS
+                    && let Ok((gact, _rest)) = <TcGact as zerocopy::FromBytes>::ref_from_prefix(attr_data)
+                {
                     write!(
                         w,
                         "\"action\":\"{}\",\"ref\":{},\"bind\":{}",
@@ -231,10 +237,10 @@ fn print_action_options_json(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
         }
         "mirred" => {
             for (attr_type, attr_data) in AttrIter::new(opts_data) {
+                // Plan 209 H11 — zerocopy alignment-safe parse.
                 if attr_type == TCA_MIRRED_PARMS
-                    && attr_data.len() >= std::mem::size_of::<TcMirred>()
+                    && let Ok((m, _rest)) = <TcMirred as zerocopy::FromBytes>::ref_from_prefix(attr_data)
                 {
-                    let m = unsafe { &*(attr_data.as_ptr() as *const TcMirred) };
                     write!(
                         w,
                         "\"mirred_action\":\"{}\",\"ifindex\":{},\"action\":\"{}\",\"ref\":{},\"bind\":{}",
@@ -249,9 +255,10 @@ fn print_action_options_json(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
         }
         "police" => {
             for (attr_type, attr_data) in AttrIter::new(opts_data) {
-                if attr_type == TCA_POLICE_TBF && attr_data.len() >= std::mem::size_of::<TcPolice>()
+                // Plan 209 H11 — zerocopy alignment-safe parse.
+                if attr_type == TCA_POLICE_TBF
+                    && let Ok((p, _rest)) = <TcPolice as zerocopy::FromBytes>::ref_from_prefix(attr_data)
                 {
-                    let p = unsafe { &*(attr_data.as_ptr() as *const TcPolice) };
                     write!(
                         w,
                         "\"rate\":{},\"burst\":{},\"mtu\":{},\"action\":\"{}\",\"ref\":{},\"bind\":{}",
@@ -276,8 +283,14 @@ fn print_action_options_text(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
     match kind {
         "gact" => {
             for (attr_type, attr_data) in AttrIter::new(opts_data) {
-                if attr_type == TCA_GACT_PARMS && attr_data.len() >= std::mem::size_of::<TcGact>() {
-                    let gact = unsafe { &*(attr_data.as_ptr() as *const TcGact) };
+                // Plan 209 H11 — use zerocopy alignment-checked
+                // ref_from_prefix instead of raw-pointer cast. The
+                // old `*const TcGact` cast was UB on strict-
+                // alignment targets (ARM/MIPS) — Vec<u8>'s data
+                // pointer has no alignment guarantee.
+                if attr_type == TCA_GACT_PARMS
+                    && let Ok((gact, _rest)) = <TcGact as zerocopy::FromBytes>::ref_from_prefix(attr_data)
+                {
                     write!(w, "{}", action::format_action_result(gact.action))?;
                     writeln!(w)?;
                     write!(w, "\tref {} bind {}", gact.refcnt, gact.bindcnt)?;
@@ -286,10 +299,10 @@ fn print_action_options_text(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
         }
         "mirred" => {
             for (attr_type, attr_data) in AttrIter::new(opts_data) {
+                // Plan 209 H11 — zerocopy alignment-safe parse.
                 if attr_type == TCA_MIRRED_PARMS
-                    && attr_data.len() >= std::mem::size_of::<TcMirred>()
+                    && let Ok((m, _rest)) = <TcMirred as zerocopy::FromBytes>::ref_from_prefix(attr_data)
                 {
-                    let m = unsafe { &*(attr_data.as_ptr() as *const TcMirred) };
                     write!(
                         w,
                         "({} to device ifindex {}) {}",
@@ -304,9 +317,10 @@ fn print_action_options_text(w: &mut impl Write, kind: &str, opts_data: &[u8]) -
         }
         "police" => {
             for (attr_type, attr_data) in AttrIter::new(opts_data) {
-                if attr_type == TCA_POLICE_TBF && attr_data.len() >= std::mem::size_of::<TcPolice>()
+                // Plan 209 H11 — zerocopy alignment-safe parse.
+                if attr_type == TCA_POLICE_TBF
+                    && let Ok((p, _rest)) = <TcPolice as zerocopy::FromBytes>::ref_from_prefix(attr_data)
                 {
-                    let p = unsafe { &*(attr_data.as_ptr() as *const TcPolice) };
                     write!(
                         w,
                         "rate {} burst {} mtu {} action {}",

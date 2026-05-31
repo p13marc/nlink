@@ -540,6 +540,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+ "zerocopy",
 ]
 
 [[package]]

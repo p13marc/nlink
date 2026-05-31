@@ -313,19 +313,40 @@ async fn main() -> Result<()> {
                 if let Some(ref p) = priority {
                     chain = chain.priority(parse_priority(p));
                 }
+                // Plan 209 H5 — reject unknown chain_type tokens.
+                // Pre-0.19 a typo on `--type` silently fell through
+                // to `Filter`, producing a chain semantically
+                // different from what the user asked for.
                 if let Some(ref t) = chain_type {
-                    chain = chain.chain_type(match t.as_str() {
+                    let ct = match t.as_str() {
                         "filter" => ChainType::Filter,
                         "nat" => ChainType::Nat,
                         "route" => ChainType::Route,
-                        _ => ChainType::Filter,
-                    });
+                        other => {
+                            return Err(nlink::netlink::Error::InvalidAttribute(format!(
+                                "unknown chain type `{other}` — expected one of \
+                                 `filter`, `nat`, `route`"
+                            )));
+                        }
+                    };
+                    chain = chain.chain_type(ct);
                 }
+                // Plan 209 H5 — security UX. Pre-0.19 a typo on
+                // `--policy` silently flipped the firewall default
+                // to ACCEPT. `--policy drpo` (typo of `drop`) →
+                // ACCEPT instead of DROP. For a firewall tool this
+                // is the textbook footgun.
                 if let Some(ref p) = policy {
-                    chain = chain.policy(match p.as_str() {
+                    let pol = match p.as_str() {
                         "drop" => Policy::Drop,
-                        _ => Policy::Accept,
-                    });
+                        "accept" => Policy::Accept,
+                        other => {
+                            return Err(nlink::netlink::Error::InvalidAttribute(format!(
+                                "unknown policy `{other}` — expected `drop` or `accept`"
+                            )));
+                        }
+                    };
+                    chain = chain.policy(pol);
                 }
 
                 conn.add_chain(chain).await?;

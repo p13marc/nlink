@@ -59,13 +59,22 @@ pub async fn run(args: SetArgs) -> Result<()> {
 
     // Set device parameters if any device-level options are specified
     if args.listen_port.is_some() || args.private_key.is_some() || args.fwmark.is_some() {
+        // Plan 209 H6 — security UX. Pre-0.19 a missing private-key
+        // file or a base64-decode failure silently dropped the key
+        // set; `wg set wg0 --private-key /path/typo` exited 0 and
+        // the user believed the new key was installed. Now propagate
+        // the read error so the user sees the typo immediately.
+        let private_key = if let Some(ref path) = args.private_key {
+            Some(read_key_file(path)?)
+        } else {
+            None
+        };
+
         conn.set_device(&args.interface, |mut dev| {
             if let Some(port) = args.listen_port {
                 dev = dev.listen_port(port);
             }
-            if let Some(ref path) = args.private_key
-                && let Ok(key) = read_key_file(path)
-            {
+            if let Some(key) = private_key {
                 dev = dev.private_key(key);
             }
             if let Some(mark) = args.fwmark {
