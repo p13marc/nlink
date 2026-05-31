@@ -3,7 +3,7 @@
 //! This example demonstrates how to query and display network interfaces
 //! using the high-level Connection API.
 //!
-//! Run with: cargo run -p rip --example list_interfaces
+//! Run with: cargo run -p nlink --example route_list_interfaces
 
 use nlink::netlink::{Connection, Route};
 

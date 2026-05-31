@@ -18,7 +18,7 @@ use tokio_stream::StreamExt;
 async fn main() -> nlink::netlink::Result<()> {
     println!("Monitoring network events (Ctrl+C to stop)...\n");
 
-    let mut conn = Connection::<Route>::new()?;
+    let conn = Connection::<Route>::new()?;
     conn.subscribe(&[
         RtnetlinkGroup::Link,
         RtnetlinkGroup::Ipv4Addr,
@@ -28,7 +28,7 @@ async fn main() -> nlink::netlink::Result<()> {
         RtnetlinkGroup::Neigh,
     ])?;
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     while let Some(result) = events.next().await {
         let event = result?;

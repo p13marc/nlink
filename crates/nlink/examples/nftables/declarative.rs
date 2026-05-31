@@ -54,7 +54,7 @@ async fn main() -> nlink::Result<()> {
         }
         Err(e) => return Err(e),
     };
-    println!("initial diff:\n{}", diff.summary());
+    println!("initial diff:\n{}", diff);
 
     // -- Step 3: apply atomically -------------------------------
     let applied = diff.apply(&conn).await?;
@@ -65,9 +65,9 @@ async fn main() -> nlink::Result<()> {
     assert!(
         reapply_diff.is_empty(),
         "idempotent re-apply should produce empty diff; got: {}",
-        reapply_diff.summary(),
+        reapply_diff,
     );
-    println!("reapply diff: {} (empty — idempotent ✓)\n", reapply_diff.summary());
+    println!("reapply diff: {} (empty — idempotent ✓)\n", reapply_diff);
 
     // -- Step 5: mutate one rule, keep the key ------------------
     let updated = NftablesConfig::new().table("filter_demo", Family::Inet, |t| {
@@ -80,7 +80,7 @@ async fn main() -> nlink::Result<()> {
         .rule_keyed("input", "icmp-allow", |r| r.match_l4proto(1).accept())
     });
     let mut_diff = updated.diff(&conn).await?;
-    println!("after port change:\n{}", mut_diff.summary());
+    println!("after port change:\n{}", mut_diff);
     assert_eq!(
         mut_diff.rules_to_replace.len(),
         1,
@@ -93,7 +93,7 @@ async fn main() -> nlink::Result<()> {
     // -- Step 6: cleanup ---------------------------------------
     let teardown = NftablesConfig::new(); // empty → delete everything we own
     let drop_diff = teardown.diff(&conn).await?;
-    println!("teardown diff:\n{}", drop_diff.summary());
+    println!("teardown diff:\n{}", drop_diff);
     let applied = drop_diff.apply(&conn).await?;
     println!("\nteardown applied {applied} ops — demo complete");
 

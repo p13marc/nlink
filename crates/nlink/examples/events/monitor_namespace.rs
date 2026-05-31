@@ -17,7 +17,7 @@ use tokio_stream::StreamExt;
 async fn main() -> nlink::netlink::Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    let mut conn = match args.get(1).map(|s| s.as_str()) {
+    let conn = match args.get(1).map(|s| s.as_str()) {
         Some("--pid") => {
             let pid: u32 = args
                 .get(2)
@@ -59,7 +59,7 @@ async fn main() -> nlink::netlink::Result<()> {
 
     println!("{}", "-".repeat(50));
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     while let Some(result) = events.next().await {
         let event = result?;

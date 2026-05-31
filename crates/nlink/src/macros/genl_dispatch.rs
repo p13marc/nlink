@@ -123,13 +123,13 @@ where
     ///     println!("{:?}", evt?);
     /// }
     /// ```
-    pub fn subscribe_group(&mut self, name: &str) -> Result<()> {
+    pub fn subscribe_group(&self, name: &str) -> Result<()> {
         let id = self.state().mcast_group(name).ok_or_else(|| {
             crate::Error::FamilyNotFound {
                 name: ::std::format!("{}::{}", F::NAME, name),
             }
         })?;
-        self.socket_mut().add_membership(id)?;
+        self.socket().add_membership(id)?;
         Ok(())
     }
 

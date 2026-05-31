@@ -5,6 +5,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use super::expr::Expr;
 
 /// nftables address family.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 #[non_exhaustive]
@@ -38,6 +40,23 @@ impl Family {
 }
 
 /// Netfilter hook point.
+///
+/// **Plan 211 M1 (0.19) breaking change**: `Ingress` was split into
+/// `NetdevIngress` and `InetIngress` because the kernel hook
+/// numbers differ by family. Pre-0.19 the singular `Ingress`
+/// always encoded `0`, which was correct only for
+/// `Family::Netdev` / `Family::Bridge` (`NF_NETDEV_INGRESS = 0`).
+/// On `Family::Inet`/`Ipv4`/`Ipv6`, ingress is
+/// `NF_INET_INGRESS = 5`, so the old encoding installed the
+/// chain on `Prerouting` instead — silent wrong-hook attachment.
+///
+/// `NetdevEgress` is also new (`NF_NETDEV_EGRESS = 1`).
+///
+/// Migration: callers must pick the variant matching the chain's
+/// family. Use [`Hook::is_valid_for_family`] to validate at
+/// build time.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Hook {
@@ -46,23 +65,64 @@ pub enum Hook {
     Forward,
     Output,
     Postrouting,
-    Ingress,
+    /// Ingress hook for `Family::Netdev` / `Family::Bridge`.
+    /// Encodes `NF_NETDEV_INGRESS = 0`.
+    NetdevIngress,
+    /// Ingress hook for `Family::Inet` / `Family::Ipv4` /
+    /// `Family::Ipv6`. Encodes `NF_INET_INGRESS = 5`. Available
+    /// since kernel 5.10.
+    InetIngress,
+    /// Egress hook for `Family::Netdev`. Encodes
+    /// `NF_NETDEV_EGRESS = 1`. Available since kernel 5.16.
+    NetdevEgress,
 }
 
 impl Hook {
+    /// Returns the kernel hook number. Verified against
+    /// `include/uapi/linux/netfilter.h` (`enum nf_inet_hooks`) and
+    /// `include/uapi/linux/netfilter_netdev.h`
+    /// (`enum nf_dev_hooks`).
     pub fn to_u32(self) -> u32 {
         match self {
-            Self::Prerouting => 0,
-            Self::Input => 1,
-            Self::Forward => 2,
-            Self::Output => 3,
-            Self::Postrouting => 4,
-            Self::Ingress => 0,
+            Self::Prerouting => 0,    // NF_INET_PRE_ROUTING
+            Self::Input => 1,         // NF_INET_LOCAL_IN
+            Self::Forward => 2,       // NF_INET_FORWARD
+            Self::Output => 3,        // NF_INET_LOCAL_OUT
+            Self::Postrouting => 4,   // NF_INET_POST_ROUTING
+            Self::InetIngress => 5,   // NF_INET_INGRESS
+            Self::NetdevIngress => 0, // NF_NETDEV_INGRESS
+            Self::NetdevEgress => 1,  // NF_NETDEV_EGRESS
+        }
+    }
+
+    /// Returns `true` if this hook is valid for the given family.
+    /// Useful for validating chain definitions at build time before
+    /// the kernel rejects them with EINVAL.
+    pub fn is_valid_for_family(self, family: Family) -> bool {
+        match (self, family) {
+            // Netdev hooks need Netdev family.
+            (Self::NetdevIngress | Self::NetdevEgress, Family::Netdev) => true,
+            // NetdevIngress is also valid on Bridge family.
+            (Self::NetdevIngress, Family::Bridge) => true,
+            // InetIngress needs an Inet/Ipv4/Ipv6 family.
+            (Self::InetIngress, Family::Inet | Family::Ip | Family::Ip6) => true,
+            // Standard L3 hooks valid on Inet/Ip/Ip6/Bridge/Arp.
+            (
+                Self::Prerouting
+                | Self::Input
+                | Self::Forward
+                | Self::Output
+                | Self::Postrouting,
+                Family::Inet | Family::Ip | Family::Ip6 | Family::Bridge | Family::Arp,
+            ) => true,
+            _ => false,
         }
     }
 }
 
 /// Chain type string for the kernel.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChainType {
@@ -96,6 +156,8 @@ impl ChainType {
 }
 
 /// Chain priority (determines ordering).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Priority {
@@ -123,6 +185,8 @@ impl Priority {
 }
 
 /// Default policy for a base chain.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Policy {
@@ -1343,7 +1407,11 @@ pub struct RuleInfo {
 // =============================================================================
 
 /// Key type for nftables sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Plan 198 §2.1 added `InetProto` (single u8 protocol — e.g.
+/// `tcp`, `udp`, `icmp`) and `Concat(Vec<_>)` (composite key
+/// used in rules like `ip saddr . tcp dport`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SetKeyType {
     /// IPv4 address (4 bytes).
@@ -1358,11 +1426,28 @@ pub enum SetKeyType {
     IfIndex,
     /// Mark value (4 bytes).
     Mark,
+    /// IP protocol number — single u8 padded to 4 bytes
+    /// (`tcp` = 6, `udp` = 17, `icmp` = 1). Plan 198 §2.1.
+    InetProto,
+    /// Concatenated key — packs multiple component keys
+    /// end-to-end with 4-byte alignment between. Common in
+    /// rules like `ip saddr . tcp dport`. Plan 198 §2.1.
+    ///
+    /// The vector MUST be non-empty (a single-component concat
+    /// is degenerate but accepted — the kernel treats it as a
+    /// normal key).
+    Concat(Vec<SetKeyType>),
 }
 
 impl SetKeyType {
     /// Kernel type ID (from nf_tables.h NFT_DATA_*).
-    pub fn type_id(self) -> u32 {
+    ///
+    /// `Concat` builds a per-component type list packed as
+    /// `u32`s into a single u64 wire value: shift each
+    /// component's `type_id()` by `i * 6` bits and OR. This
+    /// matches the kernel's `nft_set_ext_concat` layout
+    /// (each type packed into 6-bit slots).
+    pub fn type_id(&self) -> u32 {
         match self {
             Self::Ipv4Addr => 7,     // ipv4_addr
             Self::Ipv6Addr => 8,     // ipv6_addr
@@ -1370,12 +1455,29 @@ impl SetKeyType {
             Self::InetService => 13, // inet_service
             Self::IfIndex => 15,     // ifindex (meta)
             Self::Mark => 12,        // mark
+            Self::InetProto => 14,   // inet_proto
+            Self::Concat(parts) => {
+                // Pack each component's 6-bit type-id into
+                // sequential slots. Per nf_tables.h
+                // CONCAT_TYPE_BITS = 6. Truncates beyond u32
+                // (>5 components in the list packs partially
+                // — the kernel UAPI documents up to 16
+                // components; nlink reports the lower-32-bit
+                // window which covers single-stack
+                // 4-component concats).
+                parts
+                    .iter()
+                    .enumerate()
+                    .fold(0u32, |acc, (i, t)| acc | ((t.type_id() & 0x3F) << (i * 6)))
+            }
         }
     }
 
     /// Key length in bytes (always non-zero for all variants).
+    /// For `Concat`, the sum of each component's length
+    /// padded to 4-byte alignment.
     #[allow(clippy::len_without_is_empty)]
-    pub fn len(self) -> u32 {
+    pub fn len(&self) -> u32 {
         match self {
             Self::Ipv4Addr => 4,
             Self::Ipv6Addr => 16,
@@ -1383,6 +1485,13 @@ impl SetKeyType {
             Self::InetService => 2,
             Self::IfIndex => 4,
             Self::Mark => 4,
+            Self::InetProto => 1,
+            Self::Concat(parts) => {
+                // Each component is padded to 4-byte
+                // alignment before the next starts (per kernel
+                // `nft_set_ext_concat` layout).
+                parts.iter().map(|t| (t.len() + 3) & !3).sum()
+            }
         }
     }
 }
@@ -1502,6 +1611,63 @@ fn prefix_to_mask(width: usize, prefix: u8) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------- Plan 198 §2.1 — SetKeyType extensions --------
+
+    #[test]
+    fn set_key_type_inet_proto_wire_constants() {
+        // NFT_DATA_INET_PROTO = 14, 1 byte. Plan 198 §2.1.
+        assert_eq!(SetKeyType::InetProto.type_id(), 14);
+        assert_eq!(SetKeyType::InetProto.len(), 1);
+    }
+
+    #[test]
+    fn set_key_type_concat_len_pads_each_component() {
+        // ip saddr (4B) . tcp dport (2B → 4B after pad) = 8B.
+        let k = SetKeyType::Concat(vec![
+            SetKeyType::Ipv4Addr,
+            SetKeyType::InetService,
+        ]);
+        assert_eq!(k.len(), 8);
+    }
+
+    #[test]
+    fn set_key_type_concat_packs_six_bit_type_ids() {
+        // Plan 198 §2.1 pack contract:
+        //   slot 0 = component[0].type_id() & 0x3F
+        //   slot 1 = component[1].type_id() << 6
+        // Ipv4Addr(7) + InetService(13) → 7 | (13 << 6) = 7 | 832 = 839.
+        let k = SetKeyType::Concat(vec![
+            SetKeyType::Ipv4Addr,
+            SetKeyType::InetService,
+        ]);
+        assert_eq!(k.type_id(), 7 | (13 << 6));
+    }
+
+    #[test]
+    fn set_key_type_concat_single_component_degenerate() {
+        // One-component concat reports the wrapped type's
+        // own type_id (no second slot). Kernel treats this as
+        // a normal key.
+        let k = SetKeyType::Concat(vec![SetKeyType::Ipv4Addr]);
+        assert_eq!(k.type_id(), 7);
+        assert_eq!(k.len(), 4);
+    }
+
+    #[test]
+    fn set_key_type_concat_three_components_padding_round_trip() {
+        // ether_addr (8B padded) . ip saddr (4B) . inet_service (4B padded) = 16B.
+        let k = SetKeyType::Concat(vec![
+            SetKeyType::EtherAddr,
+            SetKeyType::Ipv4Addr,
+            SetKeyType::InetService,
+        ]);
+        assert_eq!(k.len(), 16);
+        // type_id slot composition: EtherAddr(9), Ipv4Addr(7), InetService(13).
+        assert_eq!(k.type_id(), 9 | (7 << 6) | (13 << 12));
+    }
+
+    // -------- end Plan 198 §2.1 --------
 
     fn find_nat_expr(rule: &Rule) -> Option<&NatExpr> {
         rule.exprs.iter().find_map(|e| match e {

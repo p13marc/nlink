@@ -2,6 +2,11 @@
 
 use std::net::IpAddr;
 
+pub use crate::netlink::link::{
+    AdSelect as BondAdSelect, LacpRate as BondLacpRate, NetkitMode, NetkitPolicy, NetkitScrub,
+    VlanProtocol,
+};
+
 /// Declarative network configuration.
 ///
 /// Represents the desired state of network resources. Use the builder methods
@@ -22,6 +27,20 @@ impl NetworkConfig {
     }
 
     /// Add a link (interface) configuration.
+    ///
+    /// **Ordering note (Plan 186 §3c)**: declared order of
+    /// `.link()` calls is preserved at the surface, but the
+    /// internal apply step topologically sorts parent → child
+    /// (e.g., a `vlan` whose parent is also being created in
+    /// this apply). You can declare the VLAN before its parent
+    /// dummy and the apply still works:
+    ///
+    /// ```ignore
+    /// // Either order works — the apply sorts before sending.
+    /// let cfg = NetworkConfig::new()
+    ///     .link("eth0.42", |l| l.vlan("eth0", 42))
+    ///     .link("eth0",    |l| l.dummy());
+    /// ```
     ///
     /// # Example
     ///
@@ -116,6 +135,8 @@ impl NetworkConfig {
 // ============================================================================
 
 /// Declared link configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredLink {
     pub(crate) name: String,
@@ -154,6 +175,8 @@ impl DeclaredLink {
 }
 
 /// Link type for declared configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeclaredLinkType {
@@ -163,21 +186,76 @@ pub enum DeclaredLinkType {
     Veth { peer: String },
     /// Bridge interface.
     Bridge,
-    /// VLAN interface.
-    Vlan { parent: String, vlan_id: u16 },
-    /// VXLAN interface.
-    Vxlan { vni: u32, remote: Option<IpAddr> },
+    /// VLAN interface. Plan 190 §2.2 added `protocol`.
+    Vlan {
+        parent: String,
+        vlan_id: u16,
+        /// VLAN tagging protocol; `None` == kernel default
+        /// (802.1Q). Use [`VlanProtocol::Dot1ad`] for Q-in-Q.
+        protocol: Option<VlanProtocol>,
+    },
+    /// VXLAN interface. Plan 190 §2.1 added `local`/`port`/`underlay_dev`.
+    Vxlan {
+        vni: u32,
+        remote: Option<IpAddr>,
+        /// Tunnel source IP (`IFLA_VXLAN_LOCAL` /
+        /// `IFLA_VXLAN_LOCAL6`). IPv4 only at the imperative
+        /// layer today — IPv6 source addresses ignored.
+        local: Option<IpAddr>,
+        /// UDP encap port (`IFLA_VXLAN_PORT`, default 4789).
+        port: Option<u16>,
+        /// Underlay parent device by name
+        /// (`IFLA_VXLAN_LINK`).
+        underlay_dev: Option<String>,
+    },
     /// Macvlan interface.
     Macvlan { parent: String, mode: MacvlanMode },
-    /// Bond interface.
+    /// Bond interface. Plan 190 §8 added 5 new option knobs.
     Bond {
         mode: BondMode,
         miimon: Option<u32>,
         xmit_hash_policy: Option<u8>,
         min_links: Option<u32>,
+        /// 802.3ad aggregator selection logic. Plan 190 §8.
+        ad_select: Option<BondAdSelect>,
+        /// LACPDU transmit rate. Plan 190 §8.
+        lacp_rate: Option<BondLacpRate>,
+        /// Time (ms) to wait before disabling a slave on
+        /// link-down. Plan 190 §8.
+        downdelay: Option<u32>,
+        /// Time (ms) to wait before enabling a slave on
+        /// link-up. Plan 190 §8.
+        updelay: Option<u32>,
+        /// Number of IGMP membership reports to resend on
+        /// failover. Plan 190 §8.
+        resend_igmp: Option<u32>,
     },
     /// IFB (Intermediate Functional Block).
     Ifb,
+    /// VRF (Virtual Routing & Forwarding) — table-scoped
+    /// forwarding domain. Members enslave via
+    /// [`LinkBuilder::master`]. Plan 190 §2.3.
+    Vrf { table: u32 },
+    /// OpenVPN data-channel-offload link (kernel 6.16+).
+    /// Link-half only — peer / cipher config goes through
+    /// the GENL `ovpn` family (Plan 197 / 0.20). Plan 190 §2.3b.
+    Ovpn,
+    /// Netkit BPF-programmable veth pair (kernel 6.7+).
+    /// Plan 190 §2.3a.
+    Netkit {
+        /// Name of the peer interface.
+        peer: String,
+        /// L2 vs L3 operating mode.
+        mode: Option<NetkitMode>,
+        /// Default policy on the primary peer.
+        primary_policy: Option<NetkitPolicy>,
+        /// Default policy on the peer interface.
+        peer_policy: Option<NetkitPolicy>,
+        /// Scrub mode on the primary peer (kernel 6.10+).
+        scrub: Option<NetkitScrub>,
+        /// Scrub mode on the peer interface (kernel 6.10+).
+        peer_scrub: Option<NetkitScrub>,
+    },
     /// Existing physical interface (not created, only configured).
     Physical,
 }
@@ -194,12 +272,17 @@ impl DeclaredLinkType {
             Self::Macvlan { .. } => Some("macvlan"),
             Self::Bond { .. } => Some("bond"),
             Self::Ifb => Some("ifb"),
+            Self::Vrf { .. } => Some("vrf"),
+            Self::Netkit { .. } => Some("netkit"),
+            Self::Ovpn => Some("ovpn"),
             Self::Physical => None,
         }
     }
 }
 
 /// Link state (up or down).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum LinkState {
@@ -213,6 +296,8 @@ pub enum LinkState {
 }
 
 /// Macvlan mode.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum MacvlanMode {
@@ -230,6 +315,8 @@ pub enum MacvlanMode {
 }
 
 /// Bond mode.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum BondMode {
@@ -299,23 +386,71 @@ impl LinkBuilder {
         self.link_type = DeclaredLinkType::Vlan {
             parent: parent.to_string(),
             vlan_id,
+            protocol: None,
         };
+        self
+    }
+
+    /// Set the VLAN tagging protocol. Defaults to 802.1Q
+    /// (kernel default) when unset. Use
+    /// [`VlanProtocol::Dot1ad`] for Q-in-Q stacked VLAN
+    /// encap. Plan 190 §2.2. No-op if the link isn't a VLAN.
+    pub fn vlan_protocol(mut self, p: VlanProtocol) -> Self {
+        if let DeclaredLinkType::Vlan { protocol, .. } = &mut self.link_type {
+            *protocol = Some(p);
+        }
         self
     }
 
     /// Create a VXLAN interface with the given VNI.
     pub fn vxlan(mut self, vni: u32) -> Self {
-        self.link_type = DeclaredLinkType::Vxlan { vni, remote: None };
+        self.link_type = DeclaredLinkType::Vxlan {
+            vni,
+            remote: None,
+            local: None,
+            port: None,
+            underlay_dev: None,
+        };
         self
     }
 
-    /// Set the VXLAN remote endpoint.
-    pub fn vxlan_remote(mut self, remote: IpAddr) -> Self {
-        if let DeclaredLinkType::Vxlan { vni, .. } = self.link_type {
-            self.link_type = DeclaredLinkType::Vxlan {
-                vni,
-                remote: Some(remote),
-            };
+    /// Set the VXLAN remote endpoint. No-op if the builder
+    /// isn't a VXLAN.
+    pub fn vxlan_remote(mut self, remote_addr: IpAddr) -> Self {
+        if let DeclaredLinkType::Vxlan { remote, .. } = &mut self.link_type {
+            *remote = Some(remote_addr);
+        }
+        self
+    }
+
+    /// Set the VXLAN tunnel source IP (`IFLA_VXLAN_LOCAL`).
+    /// The local address must be configured on the underlay
+    /// interface — the kernel rejects mismatches.
+    /// Plan 190 §2.1.
+    pub fn vxlan_local(mut self, local_addr: IpAddr) -> Self {
+        if let DeclaredLinkType::Vxlan { local, .. } = &mut self.link_type {
+            *local = Some(local_addr);
+        }
+        self
+    }
+
+    /// Set the VXLAN UDP encap port (`IFLA_VXLAN_PORT`,
+    /// default 4789). Plan 190 §2.1.
+    pub fn vxlan_port(mut self, udp_port: u16) -> Self {
+        if let DeclaredLinkType::Vxlan { port, .. } = &mut self.link_type {
+            *port = Some(udp_port);
+        }
+        self
+    }
+
+    /// Set the VXLAN underlay parent device name
+    /// (`IFLA_VXLAN_LINK`). Plan 190 §2.1.
+    pub fn vxlan_underlay_dev(mut self, dev: impl Into<String>) -> Self {
+        if let DeclaredLinkType::Vxlan {
+            underlay_dev, ..
+        } = &mut self.link_type
+        {
+            *underlay_dev = Some(dev.into());
         }
         self
     }
@@ -347,6 +482,11 @@ impl LinkBuilder {
             miimon: None,
             xmit_hash_policy: None,
             min_links: None,
+            ad_select: None,
+            lacp_rate: None,
+            downdelay: None,
+            updelay: None,
+            resend_igmp: None,
         };
         self
     }
@@ -389,9 +529,138 @@ impl LinkBuilder {
         self
     }
 
+    /// Set the 802.3ad aggregator selection logic.
+    /// No-op on non-Bond builders. Plan 190 §8.
+    pub fn bond_ad_select(mut self, sel: BondAdSelect) -> Self {
+        if let DeclaredLinkType::Bond { ad_select, .. } = &mut self.link_type {
+            *ad_select = Some(sel);
+        }
+        self
+    }
+
+    /// Set the LACPDU transmit rate (Slow=30s, Fast=1s).
+    /// No-op on non-Bond builders. Plan 190 §8.
+    pub fn bond_lacp_rate(mut self, rate: BondLacpRate) -> Self {
+        if let DeclaredLinkType::Bond { lacp_rate, .. } = &mut self.link_type {
+            *lacp_rate = Some(rate);
+        }
+        self
+    }
+
+    /// Set the time (ms) to wait before disabling a slave on
+    /// link-down. No-op on non-Bond builders. Plan 190 §8.
+    pub fn bond_downdelay(mut self, ms: u32) -> Self {
+        if let DeclaredLinkType::Bond { downdelay, .. } = &mut self.link_type {
+            *downdelay = Some(ms);
+        }
+        self
+    }
+
+    /// Set the time (ms) to wait before enabling a slave on
+    /// link-up. No-op on non-Bond builders. Plan 190 §8.
+    pub fn bond_updelay(mut self, ms: u32) -> Self {
+        if let DeclaredLinkType::Bond { updelay, .. } = &mut self.link_type {
+            *updelay = Some(ms);
+        }
+        self
+    }
+
+    /// Set the number of IGMP membership reports to resend
+    /// on failover. No-op on non-Bond builders. Plan 190 §8.
+    pub fn bond_resend_igmp(mut self, count: u32) -> Self {
+        if let DeclaredLinkType::Bond { resend_igmp, .. } = &mut self.link_type {
+            *resend_igmp = Some(count);
+        }
+        self
+    }
+
     /// Create an IFB interface.
     pub fn ifb(mut self) -> Self {
         self.link_type = DeclaredLinkType::Ifb;
+        self
+    }
+
+    /// Build an OpenVPN data-channel-offload link (kernel
+    /// 6.16+). Link half only — peer / cipher config goes
+    /// through the GENL `ovpn` family (deferred to Plan
+    /// 197). Plan 190 §2.3b.
+    pub fn ovpn(mut self) -> Self {
+        self.link_type = DeclaredLinkType::Ovpn;
+        self
+    }
+
+    /// Build a netkit BPF-programmable veth pair (kernel
+    /// 6.7+). The `peer` argument names the peer interface;
+    /// both ends are created atomically. Use
+    /// [`LinkBuilder::netkit_mode`] / `netkit_primary_policy` /
+    /// `netkit_peer_policy` / `netkit_scrub` /
+    /// `netkit_peer_scrub` to refine. Plan 190 §2.3a.
+    pub fn netkit(mut self, peer: impl Into<String>) -> Self {
+        self.link_type = DeclaredLinkType::Netkit {
+            peer: peer.into(),
+            mode: None,
+            primary_policy: None,
+            peer_policy: None,
+            scrub: None,
+            peer_scrub: None,
+        };
+        self
+    }
+
+    /// Set netkit L2 vs L3 mode. No-op on non-netkit builders.
+    pub fn netkit_mode(mut self, m: NetkitMode) -> Self {
+        if let DeclaredLinkType::Netkit { mode, .. } = &mut self.link_type {
+            *mode = Some(m);
+        }
+        self
+    }
+
+    /// Set the netkit primary-peer default policy. No-op on
+    /// non-netkit builders.
+    pub fn netkit_primary_policy(mut self, p: NetkitPolicy) -> Self {
+        if let DeclaredLinkType::Netkit { primary_policy, .. } = &mut self.link_type {
+            *primary_policy = Some(p);
+        }
+        self
+    }
+
+    /// Set the netkit peer default policy. No-op on
+    /// non-netkit builders.
+    pub fn netkit_peer_policy(mut self, p: NetkitPolicy) -> Self {
+        if let DeclaredLinkType::Netkit { peer_policy, .. } = &mut self.link_type {
+            *peer_policy = Some(p);
+        }
+        self
+    }
+
+    /// Set the netkit primary-peer scrub mode (kernel 6.10+).
+    /// No-op on non-netkit builders.
+    pub fn netkit_scrub(mut self, s: NetkitScrub) -> Self {
+        if let DeclaredLinkType::Netkit { scrub, .. } = &mut self.link_type {
+            *scrub = Some(s);
+        }
+        self
+    }
+
+    /// Set the netkit peer scrub mode (kernel 6.10+). No-op
+    /// on non-netkit builders.
+    pub fn netkit_peer_scrub(mut self, s: NetkitScrub) -> Self {
+        if let DeclaredLinkType::Netkit { peer_scrub, .. } = &mut self.link_type {
+            *peer_scrub = Some(s);
+        }
+        self
+    }
+
+    /// Build a VRF link bound to routing-table `table`.
+    ///
+    /// VRF (Virtual Routing & Forwarding) groups interfaces
+    /// under a per-table forwarding domain; common in
+    /// multi-tenant networks. Members enslave via
+    /// [`LinkBuilder::master`].
+    ///
+    /// Requires the kernel `vrf` module. Plan 190 §2.3.
+    pub fn vrf(mut self, table: u32) -> Self {
+        self.link_type = DeclaredLinkType::Vrf { table };
         self
     }
 
@@ -442,6 +711,8 @@ impl LinkBuilder {
 // ============================================================================
 
 /// Declared address configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredAddress {
     pub(crate) dev: String,
@@ -529,6 +800,8 @@ pub enum AddressParseError {
 // ============================================================================
 
 /// Declared route configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredRoute {
     pub(crate) destination: IpAddr,
@@ -588,6 +861,8 @@ impl DeclaredRoute {
 }
 
 /// Route type for declared configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum DeclaredRouteType {
@@ -637,6 +912,30 @@ pub struct RouteBuilder {
 }
 
 impl RouteBuilder {
+    /// `RouteBuilder` whose destination is `0.0.0.0/0` — the
+    /// IPv4 default route. Mirrors [`crate::Ipv4Route::default_route`]
+    /// (Plan 184) on the declarative side. Pairs with `.via()` to
+    /// set the gateway:
+    ///
+    /// ```ignore
+    /// use nlink::netlink::config::RouteBuilder;
+    /// let r = RouteBuilder::default_v4().via("192.0.2.1");
+    /// ```
+    ///
+    /// Plan 188 §2.3.
+    pub fn default_v4() -> Self {
+        // 0.0.0.0/0 is always a valid IPv4 CIDR; expect is safe.
+        Self::new("0.0.0.0/0").expect("0.0.0.0/0 is a valid IPv4 CIDR")
+    }
+
+    /// `RouteBuilder` whose destination is `::/0` — the IPv6
+    /// default route. Mirrors [`crate::Ipv6Route::default_route`].
+    ///
+    /// Plan 188 §2.3.
+    pub fn default_v6() -> Self {
+        Self::new("::/0").expect("::/0 is a valid IPv6 CIDR")
+    }
+
     fn new(dst: &str) -> Result<Self, RouteParseError> {
         let (ip_str, prefix_str) = dst
             .split_once('/')
@@ -731,6 +1030,8 @@ impl RouteBuilder {
 // ============================================================================
 
 /// Declared qdisc configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredQdisc {
     pub(crate) dev: String,
@@ -756,6 +1057,8 @@ impl DeclaredQdisc {
 }
 
 /// Qdisc parent location.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum QdiscParent {
@@ -767,6 +1070,8 @@ pub enum QdiscParent {
 }
 
 /// Qdisc type for declared configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum DeclaredQdiscType {
@@ -955,5 +1260,311 @@ impl QdiscBuilder {
                 interval_us: None,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_190_tests {
+    //! Plan 190 — LinkBuilder gaps.
+    //! Unit-level coverage for new DeclaredLinkType variants
+    //! + LinkBuilder setters.
+
+    use super::*;
+
+    #[test]
+    fn vrf_builder_sets_table() {
+        let link = LinkBuilder::new("vrf-red").vrf(100).build();
+        match link.link_type {
+            DeclaredLinkType::Vrf { table } => assert_eq!(table, 100),
+            other => panic!("expected DeclaredLinkType::Vrf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vrf_kind_string_is_vrf() {
+        let lt = DeclaredLinkType::Vrf { table: 7 };
+        assert_eq!(lt.kind(), Some("vrf"));
+    }
+
+    // -------- Plan 190 §2.3b — ovpn link half --------
+
+    #[test]
+    fn ovpn_builder_creates_ovpn_variant() {
+        let link = LinkBuilder::new("ovpn0").ovpn().build();
+        assert!(matches!(link.link_type, DeclaredLinkType::Ovpn));
+    }
+
+    #[test]
+    fn ovpn_kind_string_is_ovpn() {
+        assert_eq!(DeclaredLinkType::Ovpn.kind(), Some("ovpn"));
+    }
+
+    // -------- end Plan 190 §2.3b --------
+
+    // -------- Plan 190 §2.3a — netkit --------
+
+    #[test]
+    fn netkit_builder_peer_carried_others_default_none() {
+        let link = LinkBuilder::new("nk0").netkit("nk1").build();
+        match link.link_type {
+            DeclaredLinkType::Netkit {
+                peer,
+                mode,
+                primary_policy,
+                peer_policy,
+                scrub,
+                peer_scrub,
+            } => {
+                assert_eq!(peer, "nk1");
+                assert!(mode.is_none());
+                assert!(primary_policy.is_none());
+                assert!(peer_policy.is_none());
+                assert!(scrub.is_none());
+                assert!(peer_scrub.is_none());
+            }
+            other => panic!("expected Netkit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn netkit_builder_full_setter_chain() {
+        let link = LinkBuilder::new("nk0")
+            .netkit("nk1")
+            .netkit_mode(NetkitMode::L2)
+            .netkit_primary_policy(NetkitPolicy::Forward)
+            .netkit_peer_policy(NetkitPolicy::Blackhole)
+            .netkit_scrub(NetkitScrub::Default)
+            .netkit_peer_scrub(NetkitScrub::None)
+            .build();
+        match link.link_type {
+            DeclaredLinkType::Netkit {
+                peer,
+                mode,
+                primary_policy,
+                peer_policy,
+                scrub,
+                peer_scrub,
+            } => {
+                assert_eq!(peer, "nk1");
+                assert_eq!(mode, Some(NetkitMode::L2));
+                assert_eq!(primary_policy, Some(NetkitPolicy::Forward));
+                assert_eq!(peer_policy, Some(NetkitPolicy::Blackhole));
+                assert_eq!(scrub, Some(NetkitScrub::Default));
+                assert_eq!(peer_scrub, Some(NetkitScrub::None));
+            }
+            other => panic!("expected Netkit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn netkit_kind_string_is_netkit() {
+        let lt = DeclaredLinkType::Netkit {
+            peer: "x".into(),
+            mode: None,
+            primary_policy: None,
+            peer_policy: None,
+            scrub: None,
+            peer_scrub: None,
+        };
+        assert_eq!(lt.kind(), Some("netkit"));
+    }
+
+    // -------- end Plan 190 §2.3a --------
+
+    // -------- Plan 190 §8 — Bond options gap-fill --------
+
+    #[test]
+    fn bond_builder_defaults_all_new_knobs_to_none() {
+        let link = LinkBuilder::new("bond0").bond().build();
+        match link.link_type {
+            DeclaredLinkType::Bond {
+                ad_select,
+                lacp_rate,
+                downdelay,
+                updelay,
+                resend_igmp,
+                ..
+            } => {
+                assert!(ad_select.is_none());
+                assert!(lacp_rate.is_none());
+                assert!(downdelay.is_none());
+                assert!(updelay.is_none());
+                assert!(resend_igmp.is_none());
+            }
+            other => panic!("expected Bond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bond_builder_all_5_setters_round_trip() {
+        let link = LinkBuilder::new("bond0")
+            .bond()
+            .bond_ad_select(BondAdSelect::Bandwidth)
+            .bond_lacp_rate(BondLacpRate::Fast)
+            .bond_downdelay(200)
+            .bond_updelay(500)
+            .bond_resend_igmp(3)
+            .build();
+        match link.link_type {
+            DeclaredLinkType::Bond {
+                ad_select,
+                lacp_rate,
+                downdelay,
+                updelay,
+                resend_igmp,
+                ..
+            } => {
+                assert_eq!(ad_select, Some(BondAdSelect::Bandwidth));
+                assert_eq!(lacp_rate, Some(BondLacpRate::Fast));
+                assert_eq!(downdelay, Some(200));
+                assert_eq!(updelay, Some(500));
+                assert_eq!(resend_igmp, Some(3));
+            }
+            other => panic!("expected Bond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bond_setters_no_op_on_non_bond() {
+        let link = LinkBuilder::new("eth0")
+            .dummy()
+            .bond_ad_select(BondAdSelect::Stable)
+            .bond_lacp_rate(BondLacpRate::Slow)
+            .bond_downdelay(100)
+            .bond_updelay(100)
+            .bond_resend_igmp(1)
+            .build();
+        assert!(matches!(link.link_type, DeclaredLinkType::Dummy));
+    }
+
+    // -------- end Plan 190 §8 --------
+
+    // -------- Plan 190 §2.1 — VXLAN extras --------
+
+    #[test]
+    fn vxlan_builder_defaults_to_none_for_new_knobs() {
+        let link = LinkBuilder::new("vx0").vxlan(42).build();
+        match link.link_type {
+            DeclaredLinkType::Vxlan {
+                vni,
+                remote,
+                local,
+                port,
+                underlay_dev,
+            } => {
+                assert_eq!(vni, 42);
+                assert!(remote.is_none());
+                assert!(local.is_none());
+                assert!(port.is_none());
+                assert!(underlay_dev.is_none());
+            }
+            other => panic!("expected Vxlan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vxlan_builder_local_port_underlay_round_trip() {
+        use std::net::Ipv4Addr;
+        let link = LinkBuilder::new("vx0")
+            .vxlan(100)
+            .vxlan_remote(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+            .vxlan_local(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+            .vxlan_port(4790)
+            .vxlan_underlay_dev("eth0")
+            .build();
+        match link.link_type {
+            DeclaredLinkType::Vxlan {
+                vni,
+                remote,
+                local,
+                port,
+                underlay_dev,
+            } => {
+                assert_eq!(vni, 100);
+                assert_eq!(remote, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+                assert_eq!(local, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+                assert_eq!(port, Some(4790));
+                assert_eq!(underlay_dev.as_deref(), Some("eth0"));
+            }
+            other => panic!("expected Vxlan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vxlan_setters_no_op_on_non_vxlan() {
+        // Each new setter must early-return if the builder
+        // isn't a VXLAN — same shape as vlan_protocol.
+        use std::net::Ipv4Addr;
+        let link = LinkBuilder::new("eth0")
+            .dummy()
+            .vxlan_local(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)))
+            .vxlan_port(4790)
+            .vxlan_underlay_dev("ignored")
+            .build();
+        assert!(matches!(link.link_type, DeclaredLinkType::Dummy));
+    }
+
+    // -------- end Plan 190 §2.1 --------
+
+    // -------- Plan 190 §2.2 — VLAN protocol --------
+
+    #[test]
+    fn vlan_builder_protocol_defaults_to_none() {
+        let link = LinkBuilder::new("eth0.100").vlan("eth0", 100).build();
+        match link.link_type {
+            DeclaredLinkType::Vlan { protocol, .. } => assert!(protocol.is_none()),
+            other => panic!("expected Vlan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vlan_builder_protocol_setter_records_dot1ad() {
+        let link = LinkBuilder::new("eth0.100")
+            .vlan("eth0", 100)
+            .vlan_protocol(VlanProtocol::Dot1ad)
+            .build();
+        match link.link_type {
+            DeclaredLinkType::Vlan { protocol, .. } => {
+                assert_eq!(protocol, Some(VlanProtocol::Dot1ad));
+            }
+            other => panic!("expected Vlan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vlan_protocol_setter_no_op_on_non_vlan() {
+        // Calling vlan_protocol() on a builder that isn't a
+        // VLAN should leave the link_type unchanged.
+        let link = LinkBuilder::new("eth0")
+            .dummy()
+            .vlan_protocol(VlanProtocol::Dot1ad)
+            .build();
+        assert!(matches!(link.link_type, DeclaredLinkType::Dummy));
+    }
+
+    #[test]
+    fn vlan_protocol_wire_values() {
+        // 802.1Q == 0x8100, 802.1ad == 0x88a8. Pins the wire
+        // contract for IFLA_VLAN_PROTOCOL emission.
+        assert_eq!(VlanProtocol::Dot1q.as_u16(), 0x8100);
+        assert_eq!(VlanProtocol::Dot1ad.as_u16(), 0x88a8);
+    }
+
+    // -------- end Plan 190 §2.2 --------
+
+    #[test]
+    fn vrf_in_network_config_carries_master_chain() {
+        // The master() chain works alongside vrf(); confirms
+        // recipes that enslave a dummy into a VRF via the
+        // declarative path compose correctly.
+        let cfg = NetworkConfig::new()
+            .link("vrf-red", |b| b.vrf(100))
+            .link("eth0", |b| b.dummy().master("vrf-red"));
+        assert_eq!(cfg.links.len(), 2);
+        assert!(matches!(
+            cfg.links[0].link_type,
+            DeclaredLinkType::Vrf { table: 100 }
+        ));
+        assert_eq!(cfg.links[1].master.as_deref(), Some("vrf-red"));
     }
 }

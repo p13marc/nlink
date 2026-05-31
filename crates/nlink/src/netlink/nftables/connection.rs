@@ -246,6 +246,21 @@ impl Connection<Nftables> {
         self.nft_request_ack(builder).await
     }
 
+    /// Delete a table if it exists. Returns `Ok(true)` if the
+    /// table was deleted, `Ok(false)` if it didn't exist.
+    /// Unlike [`Self::del_table`], does NOT error on `ENOENT`.
+    ///
+    /// Saves the `let _ = conn.del_table(...).await;` ignore
+    /// pattern that nearly all callers reach for. Plan 188 §2.7 / feedback W8.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_table_if_exists"))]
+    pub async fn del_table_if_exists(&self, name: &str, family: Family) -> Result<bool> {
+        match self.del_table(name, family).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Flush all rules from a table (keeps chains).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_table"))]
     pub async fn flush_table(&self, name: &str, family: Family) -> Result<()> {
@@ -374,6 +389,23 @@ impl Connection<Nftables> {
         self.nft_request_ack(builder).await
     }
 
+    /// Delete a chain if it exists. Returns `Ok(true)` if the
+    /// chain was deleted, `Ok(false)` if it didn't exist.
+    /// Plan 188 §2.7 / feedback W8.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_chain_if_exists"))]
+    pub async fn del_chain_if_exists(
+        &self,
+        table: &str,
+        name: &str,
+        family: Family,
+    ) -> Result<bool> {
+        match self.del_chain(table, name, family).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     // =========================================================================
     // Rules
     // =========================================================================
@@ -459,6 +491,26 @@ impl Connection<Nftables> {
         builder.append_attr_u64_be(NFTA_RULE_HANDLE, handle);
 
         self.nft_request_ack(builder).await
+    }
+
+    /// Delete a rule by handle if it exists. Returns
+    /// `Ok(true)` if the rule was deleted, `Ok(false)` if it
+    /// didn't exist (kernel returned ENOENT — typical when a
+    /// stale handle survives a transaction rollback).
+    /// Plan 188 §2.7 / feedback W8.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rule_if_exists"))]
+    pub async fn del_rule_if_exists(
+        &self,
+        table: &str,
+        chain: &str,
+        family: Family,
+        handle: u64,
+    ) -> Result<bool> {
+        match self.del_rule(table, chain, family, handle).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     // =========================================================================
@@ -669,6 +721,10 @@ impl Connection<Nftables> {
             return Ok(());
         }
 
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let mut batch = Vec::new();
 
         // NFNL_MSG_BATCH_BEGIN — control message; no ACK requested.
@@ -823,9 +879,9 @@ impl Connection<Nftables> {
     /// }
     /// ```
     #[tracing::instrument(level = "info", skip(self), fields(groups = ?groups))]
-    pub fn subscribe(&mut self, groups: &[super::events::NftablesGroup]) -> Result<()> {
+    pub fn subscribe(&self, groups: &[super::events::NftablesGroup]) -> Result<()> {
         for g in groups {
-            self.socket_mut().add_membership(g.to_kernel_group())?;
+            self.socket().add_membership(g.to_kernel_group())?;
         }
         Ok(())
     }
@@ -835,7 +891,7 @@ impl Connection<Nftables> {
     /// Convenience for the typical "watch any ruleset mutation"
     /// pattern. Today equivalent to `subscribe(&[NftablesGroup::All])`;
     /// future kernel additions are picked up automatically.
-    pub fn subscribe_all(&mut self) -> Result<()> {
+    pub fn subscribe_all(&self) -> Result<()> {
         self.subscribe(&[super::events::NftablesGroup::All])
     }
 
@@ -843,6 +899,10 @@ impl Connection<Nftables> {
     ///
     /// Returns (nfgen_family, payload_after_nfgenmsg) tuples.
     async fn nft_dump(&self, mut builder: MessageBuilder) -> Result<Vec<(u8, Vec<u8>)>> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let seq = self.socket().next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
@@ -1575,7 +1635,7 @@ mod transaction_tests {
         // NFTA_HOOK_DEV inside the NFTA_CHAIN_HOOK nest.
         let chain = Chain::new("ft", "ingress")
             .family(Family::Netdev)
-            .hook(Hook::Ingress)
+            .hook(Hook::NetdevIngress)
             .priority(Priority::Filter)
             .chain_type(ChainType::Filter)
             .device("eth0");

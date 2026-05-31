@@ -7,10 +7,10 @@
 //! For GENL protocols (WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink),
 //! use `connection_for_async()` which handles async family resolution.
 //!
-//! Run with: cargo run -p nlink --example namespaces
+//! Run with: cargo run -p nlink --example route_namespaces
 //!
 //! Query a specific namespace:
-//!   cargo run -p nlink --example namespaces -- myns
+//!   cargo run -p nlink --example route_namespaces -- myns
 //!
 //! First create a namespace with: sudo ip netns add myns
 

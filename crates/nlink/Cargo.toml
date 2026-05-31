@@ -35,8 +35,14 @@ lab = ["dep:tracing-subscriber"]
 # rulesets). Opt-in for one release while soak runs; default-on
 # planned for 0.17. See Plan 158.
 syscall_batch = []
+# Serialize derives on public diff + result + report types
+# for JSON-shape ABI stability. See Plan 189.
+# JSON field naming: kebab-case for structs (`links-to-add`),
+# snake_case for enum variants. Opt-in only — no runtime
+# cost when disabled.
+serde = ["dep:serde"]
 # All features
-full = ["sockdiag", "tuntap", "tuntap-async", "output", "namespace_watcher", "lab", "syscall_batch"]
+full = ["sockdiag", "tuntap", "tuntap-async", "output", "namespace_watcher", "lab", "syscall_batch", "serde"]
 # Enable integration tests (require root or network namespace)
 integration = []
 
@@ -72,6 +78,8 @@ tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Plan 189: JSON-shape stability tests for the `serde` feature.
+serde_json = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true

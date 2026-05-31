@@ -2,10 +2,11 @@
 
 use std::net::IpAddr;
 
-use winnow::{binary::le_u16, prelude::*, token::take};
+use winnow::{prelude::*, token::take};
 use zerocopy::FromBytes;
 
 use crate::netlink::{
+    attr::NLA_TYPE_MASK,
     parse::{FromNetlink, PResult, parse_ip_addr},
     types::rule::{FibRuleAction, FibRuleHdr, FibRulePortRange, FibRuleUidRange},
 };
@@ -166,8 +167,15 @@ impl FromNetlink for RuleMessage {
 
         // Parse attributes
         while input.len() >= 4 {
-            let attr_len: u16 = le_u16.parse_next(input)?;
-            let attr_type: u16 = le_u16.parse_next(input)?;
+            // 0.19 N9 — `struct nlattr` `nla_len` / `nla_type` are
+            // kernel native-endian. Pre-fix used `le_u16` which is
+            // silently broken on big-endian platforms (s390x,
+            // sparc64). winnow 1.0 has no `ne_u16` primitive so we
+            // take 2 bytes and decode with `from_ne_bytes`.
+            let len_bytes: &[u8] = take(2usize).parse_next(input)?;
+            let type_bytes: &[u8] = take(2usize).parse_next(input)?;
+            let attr_len = u16::from_ne_bytes(len_bytes.try_into().unwrap());
+            let attr_type = u16::from_ne_bytes(type_bytes.try_into().unwrap());
 
             if attr_len < 4 {
                 break;
@@ -186,8 +194,13 @@ impl FromNetlink for RuleMessage {
                 let _ = take(padding).parse_next(input)?;
             }
 
-            // Mask off NLA_F_NESTED and other flags
-            let attr_type_masked = attr_type & 0x7fff;
+            // 0.19 N9 — mask off both NLA_F_NESTED (0x8000) AND
+            // NLA_F_NET_BYTEORDER (0x4000) via the canonical
+            // `NLA_TYPE_MASK` (0x3fff). Pre-fix used `0x7fff`
+            // which left bit 14 set, so any future kernel attr
+            // shipped with NET_BYTEORDER set would silently miss
+            // every match arm.
+            let attr_type_masked = attr_type & NLA_TYPE_MASK;
 
             match attr_type_masked {
                 attr_ids::FRA_PRIORITY if attr_data.len() >= 4 => {

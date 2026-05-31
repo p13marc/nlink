@@ -77,7 +77,7 @@ impl NamespaceEventSubscriber {
     /// - Socket creation fails
     /// - Multicast group subscription fails (may require CAP_NET_ADMIN)
     pub async fn new() -> Result<Self> {
-        let mut socket = NetlinkSocket::new(Protocol::Route)?;
+        let socket = NetlinkSocket::new(Protocol::Route)?;
 
         // Subscribe to namespace ID multicast group
         socket.add_membership(RTNLGRP_NSID)?;

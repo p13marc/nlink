@@ -3,7 +3,7 @@
 //! This example demonstrates various error handling patterns
 //! when working with netlink operations.
 //!
-//! Run with: cargo run -p nlink --example error_handling
+//! Run with: cargo run -p nlink --example route_error_handling
 
 use nlink::netlink::{Connection, Route};
 

@@ -81,7 +81,7 @@ impl MonitorCmd {
         let groups = EventType::to_groups(&self.objects);
 
         // Create connection and subscribe
-        let mut conn = Connection::<Route>::new()?;
+        let conn = Connection::<Route>::new()?;
         conn.subscribe(&groups)?;
 
         let mut stdout = std::io::stdout().lock();
@@ -91,7 +91,7 @@ impl MonitorCmd {
             "Monitoring netlink events (Ctrl+C to stop)...",
         )?;
 
-        let mut events = conn.events();
+        let mut events = conn.events().await;
 
         while let Some(result) = events.next().await {
             let event = result?;

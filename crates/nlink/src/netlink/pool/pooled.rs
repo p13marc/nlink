@@ -26,23 +26,33 @@ impl<'p, P: ProtocolState> PooledConnection<'p, P> {
             conn: Some(conn),
         }
     }
+}
 
-    /// Mark this connection as unhealthy. On drop it will be
-    /// dropped (closing its socket) instead of being returned to
-    /// the pool — the next acquire of a fresh connection will
-    /// block until the pool refills, since the pool's
-    /// builder-on-acquire-rebuild is a deliberate 0.17 follow-up
-    /// (see Plan 159 §8 risk note).
+impl<'p, P: ProtocolState + Send + Sync + 'static> PooledConnection<'p, P> {
+
+    /// Mark this connection as unhealthy. On drop, the connection
+    /// is closed AND the pool schedules an async task to build a
+    /// replacement and put it back into the pool (0.19 Finding C
+    /// — closes the silent capacity decay where every `invalidate`
+    /// permanently shrank the pool by one connection).
     ///
     /// Use when you've observed a recoverable error that suggests
     /// the socket may be in a bad state (rare; most kernel errors
     /// are per-request, not per-socket).
     ///
+    /// **Replenish race window.** The replacement is built on a
+    /// `tokio::spawn` (off the drop path because it's async).
+    /// Between invalidate and the new connection landing in the
+    /// pool there is a brief window where `acquire()` may block —
+    /// up to the `acquire_timeout`. If replacement construction
+    /// itself fails (kernel module missing, namespace gone,
+    /// permission revoked), the failure is `tracing::error!`-logged
+    /// and the pool's effective capacity drops by one. Subsequent
+    /// invalidates that succeed restore capacity.
+    ///
     /// **Consumes the guard** (Plan 162) so a subsequent `&*p`
     /// is a compile error (E0382 — use of moved value) instead
-    /// of a runtime panic. The "invalidate then drop" use case
-    /// is source-compatible — the guard is gone after the call
-    /// either way.
+    /// of a runtime panic.
     ///
     /// ```compile_fail
     /// # use nlink::netlink::pool::PooledConnection;
@@ -52,18 +62,47 @@ impl<'p, P: ProtocolState> PooledConnection<'p, P> {
     /// # }
     /// ```
     pub fn invalidate(mut self) {
-        // Drop the connection now; the slot will be reclaimed by
-        // the next user calling acquire() — *which will block*
-        // because the channel is one connection short. Plan 159 §8
-        // documents this as the deliberate 0.16 trade-off: simpler
-        // implementation, with a manual `invalidate-then-refill`
-        // escape if needed.
         if let Some(conn) = self.conn.take() {
             tracing::warn!(
                 ns = ?self.pool.namespace(),
-                "PooledConnection::invalidate: dropping pooled connection"
+                "PooledConnection::invalidate: dropping pooled connection, replenishing in background"
             );
+            // Close the broken fd first so the kernel reclaims it
+            // before we attempt to spawn a replacement that may
+            // share the same protocol fd quota.
             drop(conn);
+
+            // 0.19 Finding C — schedule a replenish on the tokio
+            // runtime. We capture the Arc<PoolInner> not the
+            // `&'p ConnectionPool<P>` so the spawned task
+            // outlives the guard's borrow scope.
+            let inner = self.pool.inner.clone();
+            tokio::spawn(async move {
+                match inner.factory.build().await {
+                    Ok(fresh) => match inner.available.try_send(fresh) {
+                        Ok(()) => {
+                            tracing::debug!(
+                                ns = ?inner.namespace,
+                                "PooledConnection::invalidate: replacement connection added to pool"
+                            );
+                        }
+                        Err(_) => {
+                            // Channel closed (pool dropped) — fine,
+                            // the replacement drops here.
+                            tracing::debug!(
+                                "PooledConnection::invalidate: pool closed before replenish"
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            ns = ?inner.namespace,
+                            "PooledConnection::invalidate: replenish failed; pool capacity reduced by one"
+                        );
+                    }
+                }
+            });
         }
         // `self` drops here; Drop sees conn == None and is a no-op.
     }

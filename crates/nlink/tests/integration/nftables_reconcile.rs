@@ -105,7 +105,7 @@ async fn reconcile_idempotent_reapply_yields_empty_diff() -> nlink::Result<()> {
         assert!(
             again.is_empty(),
             "second diff after no kernel state change must be empty; got {}",
-            again.summary()
+            again
         );
         Ok(())
     })
@@ -288,7 +288,7 @@ async fn nat_chain_chain_type_round_trips() -> nlink::Result<()> {
         assert!(
             again.is_empty(),
             "re-diff after no kernel change must be empty; got {}",
-            again.summary()
+            again
         );
 
         Ok(())
@@ -316,7 +316,7 @@ async fn netdev_chain_device_round_trips() -> nlink::Result<()> {
             Family::Netdev,
             |t| {
                 t.chain("ingress", |c| {
-                    c.hook(Hook::Ingress)
+                    c.hook(Hook::NetdevIngress)
                         .priority(Priority::Filter)
                         .chain_type(ChainType::Filter)
                         .device("dummy0")
@@ -486,7 +486,7 @@ async fn into_events_with_resync_recovers_from_enobufs() -> nlink::Result<()> {
             })
         };
 
-        let mut stream = event_conn.into_events_with_resync(factory)?;
+        let mut stream = event_conn.into_events_with_resync(factory).await?;
 
         // Mutator task: tight rule add/delete loop. Runs until
         // we cancel via the abort handle. Uses get_rule + handle
@@ -718,8 +718,7 @@ async fn dnat_v6_rule_round_trips() -> nlink::Result<()> {
         assert!(
             again.is_empty(),
             "kernel must store exactly the dnat_v6 expr nlink rendered; \
-             re-diff was non-empty: {}",
-            again.summary()
+             re-diff was non-empty: {again}"
         );
 
         Ok(())
@@ -764,8 +763,7 @@ async fn snat_v6_rule_round_trips() -> nlink::Result<()> {
         assert!(
             again.is_empty(),
             "kernel must store exactly the snat_v6 expr nlink rendered; \
-             re-diff was non-empty: {}",
-            again.summary()
+             re-diff was non-empty: {again}"
         );
 
         Ok(())

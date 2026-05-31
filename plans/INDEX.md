@@ -1,95 +1,116 @@
 ---
-subject: nlink plan index — 0.18 cycle
-status: live (update as plans land)
-target version: 0.18.0
-maintainer: p13marc
-created: 2026-05-26 (post-0.17 cut; 0.17 published 2026-05-26 as `0.17.0` + `v0.16.0` alias)
+subject: nlink plan index — 0.19 cycle-close ready
+status: 0.19 cycle CUT-PENDING; second-batch (Plans 203-215) shipped; only Plan 210 LOW-tier remainder + maintainer cut left
+last updated: 2026-05-31
 ---
 
-# Plan index — 0.18 cycle
+# Plan index
 
-Day-to-day tracker for nlink's 0.18 work. The 0.17 cycle
-shipped 2026-05-26 (both crates on crates.io; tagged `0.17.0`
-on master). The 0.18 cycle's seed surface is the upstream-asks
-report from the nlink-lab maintainer (2026-05-27), with one
-adjacent-gap finding (netdev hook `device`) bundled into the
-chain-attribute pass.
+Day-to-day plan tracker. Per `CLAUDE.md ## Publishing` /
+`Plan-file cleanup`, plan files are working memory and get
+deleted when a cycle cuts. The durable narrative lives in
+`CHANGELOG.md` + `docs/migration_guide/`.
 
-## Quick status
+## 0.19 cycle — cut-pending
 
-- **Cycle**: 0.18.0 — branched from master post-0.17 cut.
-- **Branch**: all 0.18 work pushes to the `0.18` branch.
-  Cycle cut → master merge happens at release time. **Do not
-  push to master.**
-- **Workspace version**: `0.18.0` — bumped on Plan 180's CI
-  iteration when `cargo-semver-checks` flagged the
-  `#[non_exhaustive]` addition on `ChainInfo` as semver-major
-  (same precedent as 0.17's Register discriminant change in
-  Plan 178).
-- **CI**: open a draft PR `0.18 → master` once the first
-  commit lands so the workflow fires on every push.
-- **Seed report**: [`nlink-upstream-asks.md`](../nlink-upstream-asks.md)
-  (committed in repo root; nlink-lab maintainer, 2026-05-27).
+The 0.19 cycle ships **two waves**:
 
-## Status legend
+**Wave 1** — original 0.19 plan suite (Plans 186-202). All 16
+plans either shipped or were deferred with documented rationale.
+Documented in `docs/migration_guide/0.18.0-to-0.19.0.md` §"Plan
+186" through §"Plan 202".
 
-| Symbol | Meaning |
-|---|---|
-| ⚪ | Planned — not started |
-| 🟡 | In progress — PR open or work underway |
-| 🟢 | Merged to master |
-| 🔵 | Cut & published |
+**Wave 2** — post-cycle deep audit surfaced ~96 additional bugs.
+Plan 203 (master) orchestrated 13 sub-plans (204-215). **12 of 13
+shipped pre-cut**; the 13th (Plan 210 examples cleanup) has its
+HIGH-severity sub-item (firewall cleanup leak) + the highest-impact
+LOW-tier doc-name fixes shipped, with the remaining LOW-tier
+cleanup folded into the cut-prep hygiene pass. A subsequent
+four-agent post-cycle audit closed F1 + N1-N9 + Findings A-D
+(durable narrative in `CHANGELOG.md` + `docs/migration_guide/0.18.0-to-0.19.0.md`).
 
-## Sub-plan table
+Cumulative breaking changes (full list in migration guide):
 
-Ordered by recommended landing sequence: unblocker first, then
-the larger ergonomic surface, then the trivials, then the
-medium-size dependent plan.
+- nftables `NFT_JUMP`/`NFT_GOTO` constant values corrected
+  (Plan 204 C1)
+- `ApplyOptions::with_purge` + `ConfigDiff::*_to_remove`
+  removed (Plan 205)
+- `DpllPin::phase_offset` widened to `Option<i64>` (Plan 206)
+- `Hook::Ingress` split into `NetdevIngress`/`InetIngress` +
+  new `NetdevEgress` (Plan 211)
+- 0.19-cycle Plans 187, 188, 190 (wave 1)
 
-| Plan | Title | Effort | Order | Status | Notes |
-|------|-------|--------|-------|--------|-------|
-| [180](180-declarative-chain-type-and-device-plan.md) | `DeclaredChainBuilder::chain_type` + `Chain`/`DeclaredChain` `device` for netdev hooks | ~2.5 h | 1 | 🟢 | Shipped `aa52b09`. All 11 CI jobs green incl. integration. Unblocks nlink-lab Plan 158a. |
-| [181](181-list-in-filter-family-plan.md) | `list_{tables,chains,flowtables,sets}_in(table?, family)` server-side filter family | ~2 h | 2 | 🟢 | Shipped `496378a` + defensive-filter fix `7d0a34b`. Kernel ignores `NFTA_*_TABLE` on dump (only single-get); client-side filter ensures contract holds. |
-| [182](182-error-ext-ack-accessor-plan.md) | `Error::ext_ack()` + `Error::ext_ack_offset()` inherent accessors | ~30 min | 3 | 🟢 | Shipped `7fc03ce` (bundled). |
-| [183](183-display-for-diff-types-plan.md) | `impl Display for NftablesDiff` + `ConfigDiff` (wraps existing `summary()`) | ~30 min | 4 | 🟢 | Shipped `7fc03ce` (bundled). Note: target was `NetworkDiff` per the report, but the actual type name is `ConfigDiff` — used that. |
-| [184](184-default-route-constructors-plan.md) | `Ipv4Route::default_route()` / `Ipv6Route::default_route()` constructors | ~20 min | 5 | 🟢 | Shipped `7fc03ce` (bundled). |
-| [185](185-nftables-subscribe-with-resync-plan.md) | `Connection<Nftables>::{into_events_with_resync, subscribe_all_with_resync}(factory)` — kube-rs-shaped watcher with built-in ENOBUFS recovery; both owned + borrowed forms | ~5 h | 6 | 🟢 | Shipped `adf386d`. All 12 CI gates green incl. integration (2m48s). Lifetime-generic `events_with_resync` + `NftablesEvent::{NewSet,DelSet}` + `nftables::resync` module + recipe + migration guide all bundled. Closes nlink-lab Wishlist 5. |
+CHANGELOG entries cite each finding ID (C1-C5, H1-H11, M1-M19
+for the wave-2 audit; N1-N9 + Findings A-D for the post-cycle
+audit) for traceability.
 
-Total estimated focused-work: **~9.5 h** + integration-test CI
-cycle time.
+### Cut checklist (for `scripts/cut-release.sh 0.19.0`)
 
-## Wishlist items NOT scoped this cycle
+- [ ] Workspace version bumped to `0.19.0`
+- [ ] `CHANGELOG.md ## [Unreleased]` promoted to `## [0.19.0]`
+      with date
+- [ ] `docs/migration_guide/README.md` row updated with 0.19
+      highlights (NFT verdicts, XFRM, DPLL i64, Hook split,
+      purge removal)
+- [ ] `nlink-macros` published before `nlink` (path-dep version
+      pinning)
 
-| Item | Why deferred |
-|------|--------------|
-| `for_each_namespace_async` (Wishlist 4) | Too opinionated for core (hardcodes thread-per-ns + current_thread runtime). Belongs in `nlink::lab` if anywhere. Defer — let consumers compose `namespace::with_namespace_async` themselves. |
-| `NetworkConfig` per-object reconcile parity (Wishlist 6) | Multi-cycle scope. RTNETLINK lacks BATCH_BEGIN/END so "atomic apply" needs best-effort rollback design. Warrants a design doc before any code. Open a doc-only plan when there's bandwidth. |
+### Headline contributions (for the release notes)
 
-## Deprioritized (parked)
+Wave 1:
+1. **Plan 193 phase 2** found and fixed `MessageIter::next`
+   no-progress on malformed frames.
+2. **Plan 199** redesigned WireguardWatcher as polling.
+3. **Plan 200** facade APIs collapsed boilerplate.
 
-| Plan | Why parked |
-|------|------------|
-| [152](152-0.16-integration-showcases-plan.md) | `aya` co-demo + Prometheus exporter + OTel example. Carried from 0.16 without a real adopter signal. Revisit if a downstream asks for it. |
+Wave 2:
+4. **Plan 204** — four CRITICAL wire-format defects fixed (nft
+   verdicts wrong since enum shipped; XFRM `add_sp` broken on
+   every kernel; XFRM `del_sp` brittle on strict-checking
+   kernels; devlink mcast subscribe broken entirely).
+5. **Plan 213** — build-time `sizeof(struct ...)` CI gate
+   prevents wire-format drift from recurring. Surfaced a
+   sibling bug (`XfrmUserTmpl` 62→64) the moment it shipped.
+6. **Plan 207** — NetworkConfig correctness pass closes 7
+   silent reconcile-divergence bugs (master change, route
+   gateway change, IFF_UP vs OperState, atomic qdisc replace,
+   etc.).
+7. **Plan 206** — DPLL `phase_offset` widened to `i64`,
+   closing silent value corruption for telco/PTP/SyncE workloads.
 
-## Known maintainer-tooling bug
+## Active plans (carrying past 0.19)
 
-- `scripts/cut-release.sh` Phase 3 captures the PR number AND the
-  `gh pr checks --watch` status lines into `PR_NUMBER` (output
-  capture vs. stdout). Fix: send status echoes to stderr
-  (`echo ... >&2`) and emit only the bare PR number on stdout.
-  Surfaced during the 0.17.0 cut; ~5-line patch on the script.
-  Do this before the next cut.
+| Plan | Status | Notes |
+|------|--------|-------|
+| [197](197-declarative-ovpn-plan.md) | deferred to 0.20 | Kernel 6.16+ ovpn GENL UAPI; needs imperative Connection<Ovpn> family + scoped implementation effort. Link half shipped via Plan 190 §2.3b. |
+
+## 0.20 cycle seed
+
+Not yet opened. Topics worth scoping when it kicks off:
+
+| Topic | Source |
+|-------|--------|
+| Plan 197 — ovpn GENL family imperative + declarative | `plans/197-declarative-ovpn-plan.md` |
+| Plan 205 follow-on — wire purge correctly with kernel-managed-resource exclusion list | Plan 205 §10 deferral note (durable narrative in CHANGELOG) |
+| F1 follow-on — full NlRouter-style dispatcher task (Mutex serialization shipped in 0.19 Plan 194; dispatcher unlocks per-request pipelining + multicast-events vs request safety) | 0.19 migration guide §"Plan 194" (see CHANGELOG) |
+| Plan 208 Phase 3-4 — GENL command unification + family-resolution unification (15th recv-loop closeout: wg_command stale-frame race) | Plan 208 deferral note + CHANGELOG finding H9 |
+| Plan 189 §8 expansions — `Deserialize` + `schemars` JSON Schema | 0.19 migration guide §"Plan 189" |
+| Plan 193 phase 2-3 — `cargo-fuzz` infrastructure + `proptest` integration | 0.19 migration guide §"Plan 193" |
+| Plan 195 — `StreamBackoff` + `Store<K>` reflector + `backon` | 0.19 migration guide §"Plan 195" |
+| Plan 196 follow-ups — `WireguardConfig::client()` shortcut + `from_wg_config()` INI parser | 0.19 migration guide §"Plan 196" |
+| Plan 198 — full declarative `DeclaredSet` + element diff | 0.19 migration guide §"Plan 198" |
+| Plan 201 — broader sweep (`From`/`Into` + `Display` + `#[inline]` on builders) | 0.19 migration guide §"Plan 201" |
+| Audit follow-ups — H7 (`ip vrf exec` real impl) + H8 (`ip xfrm` lib wire-up) | Plan 209 §4-5 + CHANGELOG findings H7/H8 |
+
+These don't have plan files yet; write them when the 0.20
+cycle kicks off (likely after 0.19.0 publishes and a
+maintainer-cadence pause).
 
 ## How to update this file
 
-When a plan moves status:
-
-1. Edit the **Status** column emoji.
-2. When a plan ships and the cycle cuts + publishes, delete the
-   per-plan file (per CLAUDE.md "Publishing" / "Plan-file
-   cleanup"). The durable narrative is the CHANGELOG entry +
-   migration guide; plan files are working memory and shouldn't
-   accumulate.
-3. Rewrite this INDEX when opening a new cycle — clear the
-   "Quick status" + "Sub-plan table" sections, leaving
-   "Deprioritized" intact unless explicitly un-parked.
+1. When a cycle opens, add the new plan rows + a "Cycle X.Y"
+   section at the top.
+2. When a plan ships and the cycle cuts + publishes, delete
+   the per-plan file in the cut commit. The CHANGELOG entry
+   + migration-guide section carry the durable narrative.
+3. Keep this file slim — it's a pointer, not an archive.

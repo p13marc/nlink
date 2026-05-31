@@ -17,6 +17,11 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
+# Plan 209 H11 — alignment-safe parsing of TC action attribute
+# bytes via zerocopy::FromBytes::ref_from_prefix. Replaces raw-
+# pointer casts that were UB on strict-alignment architectures
+# (ARM/MIPS).
+zerocopy = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2"

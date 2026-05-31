@@ -129,6 +129,10 @@ pub enum IflaAttr {
     TsoMaxSize = 59,
     TsoMaxSegs = 60,
     Allmulti = 61,
+    /// Plan 190 §2.3c — IPv4-specific GSO max size (kernel 6.6+).
+    GsoIpv4MaxSize = 63,
+    /// Plan 190 §2.3c — IPv4-specific GRO max size (kernel 6.6+).
+    GroIpv4MaxSize = 64,
 }
 
 impl From<u16> for IflaAttr {
@@ -196,6 +200,8 @@ impl From<u16> for IflaAttr {
             59 => Self::TsoMaxSize,
             60 => Self::TsoMaxSegs,
             61 => Self::Allmulti,
+            63 => Self::GsoIpv4MaxSize,
+            64 => Self::GroIpv4MaxSize,
             _ => Self::Unspec,
         }
     }

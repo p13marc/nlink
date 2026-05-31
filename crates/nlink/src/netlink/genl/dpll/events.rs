@@ -134,7 +134,7 @@ impl crate::netlink::Connection<Dpll> {
     /// (with the `"dpll::monitor"` name) when the kernel doesn't
     /// register the group — typically a kernel-too-old / DPLL-
     /// driver-not-loaded mismatch.
-    pub fn subscribe_monitor(&mut self) -> crate::Result<()> {
+    pub fn subscribe_monitor(&self) -> crate::Result<()> {
         self.subscribe_group("monitor")
     }
 }

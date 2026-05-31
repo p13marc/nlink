@@ -28,6 +28,14 @@ or this catalog.
 |---|---|---|
 | `ct_subscribe_observes_destroy_event_on_del` | kernel-build-dependent | Synthetic ctnetlink-injected entries don't reliably generate visible Destroy events on every kernel build/config; the lib path works (other conntrack tests cover delete + subscribe independently). Run with `--ignored` locally to verify on a kernel where it works. |
 
+## concurrent_stress.rs
+
+All entries here were un-ignored when the F1 concurrency fix
+landed in 0.19 — see `CHANGELOG.md ## [0.19.0]` "F1 — shared
+`Arc<Connection>` concurrent ops". The catalog section is kept
+as a marker; if a future regression in this file is `#[ignore]`'d,
+add a row with a tracking plan.
+
 ## nftables_reconcile.rs
 
 All entries here were un-ignored when the `NftablesDiff` body-

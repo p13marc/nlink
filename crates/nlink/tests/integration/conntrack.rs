@@ -206,10 +206,10 @@ async fn ct_subscribe_observes_new_event() -> nlink::Result<()> {
     let ns = TestNamespace::new("ct-events")?;
     // Two namespace-scoped connections: one to mutate, one to subscribe.
     let nf_mut: Connection<Netfilter> = namespace::connection_for(ns.name())?;
-    let mut nf_sub: Connection<Netfilter> = namespace::connection_for(ns.name())?;
+    let nf_sub: Connection<Netfilter> = namespace::connection_for(ns.name())?;
 
     nf_sub.subscribe(&[ConntrackGroup::New])?;
-    let mut events = nf_sub.events();
+    let mut events = nf_sub.events().await;
 
     let orig = ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2))
         .ports(50001, 443);
@@ -302,7 +302,7 @@ async fn ct_subscribe_observes_destroy_event_on_del() -> nlink::Result<()> {
     }
 
     let nf_mut: Connection<Netfilter> = namespace::connection_for(ns.name())?;
-    let mut nf_sub: Connection<Netfilter> = namespace::connection_for(ns.name())?;
+    let nf_sub: Connection<Netfilter> = namespace::connection_for(ns.name())?;
 
     // Inject first so there's something to destroy.
     let orig = ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2))
@@ -318,7 +318,7 @@ async fn ct_subscribe_observes_destroy_event_on_del() -> nlink::Result<()> {
     // print shows everything that arrives — useful breadcrumb if
     // this ever times out again.
     nf_sub.subscribe_all()?;
-    let mut events = nf_sub.events();
+    let mut events = nf_sub.events().await;
 
     // Small sleep so the multicast subscription is fully registered
     // before triggering the event. (Race window is real for the

@@ -50,7 +50,7 @@ impl Connection<Devlink> {
     /// `"config"` group (the only one devlink ships in-tree).
     /// After subscribing, use `events()` or `into_events()` to
     /// receive events.
-    pub fn subscribe(&mut self) -> Result<()> {
+    pub fn subscribe(&self) -> Result<()> {
         self.subscribe_group(DEVLINK_MCGRP_NAME)
     }
 
@@ -471,6 +471,10 @@ impl Connection<Devlink> {
 
     /// Send a GENL dump request (no device filter).
     async fn devlink_dump(&self, cmd: u8) -> Result<Vec<Vec<u8>>> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -494,6 +498,10 @@ impl Connection<Devlink> {
         bus: &str,
         device: &str,
     ) -> Result<Vec<Vec<u8>>> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -514,6 +522,10 @@ impl Connection<Devlink> {
 
     /// Send a GENL GET request for a specific device.
     async fn devlink_get(&self, cmd: u8, bus: &str, device: &str) -> Result<Vec<u8>> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -588,6 +600,10 @@ impl Connection<Devlink> {
 
     /// Send a command and wait for ACK.
     async fn devlink_send_ack(&self, mut builder: MessageBuilder) -> Result<()> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let seq = self.socket().next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());

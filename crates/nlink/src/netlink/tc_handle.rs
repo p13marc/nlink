@@ -38,6 +38,7 @@ use super::types::tc::tc_handle as raw;
 /// Internally `(major as u32) << 16 | minor as u32`, matching the
 /// kernel's encoding. Round-trips with `tc(8)` notation via
 /// [`FromStr`] and [`fmt::Display`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TcHandle(u32);
 
@@ -163,6 +164,7 @@ pub enum TcHandleParseError {
 /// Outside callers can use [`FilterPriority::new`] for any value or the
 /// [`recipe`](Self::recipe), [`app`](Self::app), [`system`](Self::system)
 /// constructors as documentation-bearing shortcuts.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct FilterPriority(u16);
 

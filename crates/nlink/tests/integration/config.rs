@@ -133,7 +133,7 @@ fn test_vlan_link_builder() {
     let link = &config.links()[0];
     assert!(matches!(
         link.link_type(),
-        DeclaredLinkType::Vlan { parent, vlan_id } if parent == "eth0" && *vlan_id == 100
+        DeclaredLinkType::Vlan { parent, vlan_id, .. } if parent == "eth0" && *vlan_id == 100
     ));
 }
 
@@ -304,10 +304,9 @@ async fn test_config_dry_run() -> Result<()> {
     let result = config
         .apply_with_options(
             &conn,
-            ApplyOptions {
-                dry_run: true,
-                ..Default::default()
-            },
+            // Plan 188 §2.2 — ApplyOptions is `#[non_exhaustive]`;
+            // builder methods replace struct-literal construction.
+            ApplyOptions::default().with_dry_run(true),
         )
         .await?;
 
@@ -360,7 +359,8 @@ async fn test_config_diff_summary() -> Result<()> {
         .unwrap();
 
     let diff = config.diff(&conn).await?;
-    let summary = diff.summary();
+    // Plan 188 §2.6 — `summary()` deprecated in favor of Display.
+    let summary = diff.to_string();
 
     assert!(summary.contains("dummy0"));
     assert!(summary.contains("10.0.0.1/24"));

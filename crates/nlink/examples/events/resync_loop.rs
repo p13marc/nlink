@@ -32,13 +32,13 @@ use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
-    let mut conn = Connection::<Route>::new()?;
+    let conn = Connection::<Route>::new()?;
     conn.subscribe(&[RtnetlinkGroup::Link])?;
 
     println!("subscribed to RTNLGRP_LINK; Ctrl-C to exit");
     println!("event ENOBUFS will trigger an automatic re-snapshot");
 
-    let mut events = conn.events();
+    let mut events = conn.events().await;
     let mut event_count = 0usize;
     let mut resync_count = 0usize;
 

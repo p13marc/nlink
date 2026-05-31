@@ -26,24 +26,82 @@ use crate::netlink::{
 };
 
 /// Options for applying configuration.
+///
+/// Construct via `Default::default()` + the `with_*` builder
+/// methods, NOT via struct-literal syntax:
+///
+/// ```ignore
+/// use nlink::netlink::config::ApplyOptions;
+/// let opts = ApplyOptions::default()
+///     .with_dry_run(true)
+///     .with_continue_on_error(false);
+/// ```
+///
+/// # Default semantics
+///
+/// `ApplyOptions::default()` produces conservative defaults:
+///
+/// - `dry_run: false` — operations actually run against the
+///   kernel.
+/// - `continue_on_error: false` — the first error propagates
+///   as `Err`, halting further ops. Partially-applied state
+///   is left in the kernel.
+///
+/// This is the right default; opt in to each surface
+/// individually via the builders.
+///
+/// Plan 188 §2.2 made this `#[non_exhaustive]` so we can grow
+/// the option set in future minors without semver breakage —
+/// the trade-off is that struct-literal construction is no
+/// longer allowed by downstream code. Mirrors `ReconcileOptions`
+/// (Plan 163).
+///
+/// **Plan 205 (0.19) breaking change**: the `purge` flag and
+/// `with_purge(bool)` builder were removed because the feature
+/// was non-functional in 0.18 (silent no-op — the `*_to_remove`
+/// collections were never populated by the diff phase). Code
+/// that called `.with_purge(true)` thinking removal would
+/// happen needs to switch to the imperative API
+/// (`Connection::del_link` / `del_address` / `del_route` /
+/// `del_qdisc`) to delete kernel resources, since
+/// `NetworkConfig` no longer offers a purge knob. A full
+/// re-wired purge with a kernel-managed-resource exclusion
+/// list (IPv6 link-local, multicast, `lo`, link-local prefix
+/// routes) is queued for 0.20.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ApplyOptions {
     /// Don't actually make changes, just compute what would be done.
     pub dry_run: bool,
     /// Continue applying changes even if some operations fail.
     pub continue_on_error: bool,
-    /// Remove resources that are not in the configuration.
-    ///
-    /// When enabled, interfaces, addresses, and routes that exist
-    /// but are not declared in the config will be removed.
-    ///
-    /// **Warning**: Use with caution! This can remove important
-    /// system interfaces if they're not in your config.
-    pub purge: bool,
+}
+
+impl ApplyOptions {
+    /// Toggle dry-run mode. With dry-run on, no kernel
+    /// mutations occur — every operation just records what
+    /// it WOULD do in `ApplyResult::summary`.
+    pub fn with_dry_run(mut self, on: bool) -> Self {
+        self.dry_run = on;
+        self
+    }
+
+    /// Toggle continue-on-error. With this on, the first
+    /// per-op failure records into `ApplyResult::errors`
+    /// instead of halting `apply`. The remaining operations
+    /// still run. Useful for "best-effort" reconciliation
+    /// where partial progress is preferable to no progress.
+    pub fn with_continue_on_error(mut self, on: bool) -> Self {
+        self.continue_on_error = on;
+        self
+    }
 }
 
 /// Result of applying configuration.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Default)]
+#[must_use = "Inspect `.is_success()`, `.errors`, or `.summary_text()` to learn the outcome"]
 pub struct ApplyResult {
     /// Number of changes made (or that would be made in dry-run mode).
     pub changes_made: usize,
@@ -70,12 +128,27 @@ impl ApplyResult {
 }
 
 /// An error that occurred during configuration application.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug)]
 pub struct ApplyError {
     /// What operation was being performed.
     pub operation: String,
-    /// The underlying error.
+    /// The underlying error. Plan 189: serialized as the
+    /// `Display` string rather than the structural enum
+    /// (the `Error` type is internally varied and not
+    /// shape-stable).
+    #[cfg_attr(feature = "serde", serde(serialize_with = "serialize_error_as_display"))]
     pub error: Error,
+}
+
+#[cfg(feature = "serde")]
+fn serialize_error_as_display<S>(err: &Error, ser: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::Serialize as _;
+    err.to_string().serialize(ser)
 }
 
 impl std::fmt::Display for ApplyError {
@@ -290,133 +363,18 @@ pub async fn apply_diff(
         }
     }
 
-    // 6. Remove old resources (if purge enabled)
-    if options.purge {
-        // Remove qdiscs
-        for (dev, parent) in &diff.qdiscs_to_remove {
-            let op = format!("remove qdisc on {} ({:?})", dev, parent);
-            if options.dry_run {
-                result.summary.push(format!("Would {}", op));
-                result.changes_made += 1;
-            } else {
-                let parent_handle = match parent {
-                    QdiscParent::Root => crate::TcHandle::ROOT,
-                    QdiscParent::Ingress => crate::TcHandle::INGRESS,
-                };
-                match conn.del_qdisc(dev, parent_handle).await {
-                    Ok(()) => {
-                        result.summary.push(format!("Removed qdisc on {}", dev));
-                        result.changes_made += 1;
-                    }
-                    Err(e) if e.is_not_found() => {
-                        // Already gone, that's fine
-                    }
-                    Err(e) => {
-                        if options.continue_on_error {
-                            result.errors.push(ApplyError {
-                                operation: op,
-                                error: e,
-                            });
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Remove routes
-        for (dst, prefix_len, table) in &diff.routes_to_remove {
-            let op = format!("remove route {}/{}", dst, prefix_len);
-            if options.dry_run {
-                result.summary.push(format!("Would {}", op));
-                result.changes_made += 1;
-            } else {
-                match remove_route(conn, *dst, *prefix_len, *table).await {
-                    Ok(()) => {
-                        result
-                            .summary
-                            .push(format!("Removed route {}/{}", dst, prefix_len));
-                        result.changes_made += 1;
-                    }
-                    Err(e) if e.is_not_found() => {
-                        // Already gone
-                    }
-                    Err(e) => {
-                        if options.continue_on_error {
-                            result.errors.push(ApplyError {
-                                operation: op,
-                                error: e,
-                            });
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Remove addresses
-        for (dev, addr, prefix_len) in &diff.addresses_to_remove {
-            let op = format!("remove address {}/{} from {}", addr, prefix_len, dev);
-            if options.dry_run {
-                result.summary.push(format!("Would {}", op));
-                result.changes_made += 1;
-            } else {
-                match remove_address(conn, dev, *addr, *prefix_len).await {
-                    Ok(()) => {
-                        result.summary.push(format!(
-                            "Removed address {}/{} from {}",
-                            addr, prefix_len, dev
-                        ));
-                        result.changes_made += 1;
-                    }
-                    Err(e) if e.is_not_found() => {
-                        // Already gone
-                    }
-                    Err(e) => {
-                        if options.continue_on_error {
-                            result.errors.push(ApplyError {
-                                operation: op,
-                                error: e,
-                            });
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Remove links (in reverse order of creation)
-        for name in &diff.links_to_remove {
-            let op = format!("remove link {}", name);
-            if options.dry_run {
-                result.summary.push(format!("Would {}", op));
-                result.changes_made += 1;
-            } else {
-                match conn.del_link(name).await {
-                    Ok(()) => {
-                        result.summary.push(format!("Removed link {}", name));
-                        result.changes_made += 1;
-                    }
-                    Err(e) if e.is_not_found() => {
-                        // Already gone
-                    }
-                    Err(e) => {
-                        if options.continue_on_error {
-                            result.errors.push(ApplyError {
-                                operation: op,
-                                error: e,
-                            });
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Plan 205 (0.19) — `purge` was removed because the
+    // `*_to_remove` collections were never populated by the diff
+    // phase, so the apply-side branch was dead code that lied
+    // about what it did. Pre-0.19 `ApplyOptions::with_purge(true)`
+    // silently no-op'd; users believed kernel state was being
+    // reconciled when it wasn't. For the "remove undeclared
+    // resources" use case, the imperative API
+    // (`Connection::del_link` / `del_address` / `del_route` /
+    // `del_qdisc`) is the canonical 0.19 channel. A fully wired
+    // purge with a kernel-managed-resource exclusion list
+    // (IPv6 link-local, multicast, `lo`, link-local prefix
+    // routes) is queued for 0.20.
 
     Ok(result)
 }
@@ -457,17 +415,44 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             }
             conn.add_link(config).await?;
         }
-        DeclaredLinkType::Vlan { parent, vlan_id } => {
+        DeclaredLinkType::Vlan {
+            parent,
+            vlan_id,
+            protocol,
+        } => {
             let mut config = VlanLink::new(&link.name, parent, *vlan_id);
             if let Some(mtu) = link.mtu {
                 config = config.mtu(mtu);
             }
+            if let Some(p) = protocol {
+                config = config.protocol(*p);
+            }
             conn.add_link(config).await?;
         }
-        DeclaredLinkType::Vxlan { vni, remote } => {
+        DeclaredLinkType::Vxlan {
+            vni,
+            remote,
+            local,
+            port,
+            underlay_dev,
+        } => {
             let mut config = VxlanLink::new(&link.name, *vni);
             if let Some(IpAddr::V4(remote_v4)) = remote {
                 config = config.remote(*remote_v4);
+            }
+            // Plan 190 §2.1 — local/port/underlay are v4-only
+            // at the imperative VxlanLink layer today (IPv6
+            // tunnel source not yet plumbed); IPv6 local
+            // values are silently dropped, matching the
+            // existing IPv4-only `remote` handling.
+            if let Some(IpAddr::V4(local_v4)) = local {
+                config = config.local(*local_v4);
+            }
+            if let Some(p) = port {
+                config = config.port(*p);
+            }
+            if let Some(dev) = underlay_dev {
+                config = config.dev(dev);
             }
             conn.add_link(config).await?;
         }
@@ -484,6 +469,11 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             miimon,
             xmit_hash_policy,
             min_links,
+            ad_select,
+            lacp_rate,
+            downdelay,
+            updelay,
+            resend_igmp,
         } => {
             let mut config = BondLink::new(&link.name).mode(convert_bond_mode(*mode));
             if let Some(ms) = miimon {
@@ -497,6 +487,21 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(count) = min_links {
                 config = config.min_links(*count);
             }
+            if let Some(sel) = ad_select {
+                config = config.ad_select(*sel);
+            }
+            if let Some(rate) = lacp_rate {
+                config = config.lacp_rate(*rate);
+            }
+            if let Some(ms) = downdelay {
+                config = config.downdelay(*ms);
+            }
+            if let Some(ms) = updelay {
+                config = config.updelay(*ms);
+            }
+            if let Some(count) = resend_igmp {
+                config = config.resend_igmp(*count);
+            }
             if let Some(mtu) = link.mtu {
                 config = config.mtu(mtu);
             }
@@ -507,6 +512,49 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
         }
         DeclaredLinkType::Ifb => {
             let config = IfbLink::new(&link.name);
+            conn.add_link(config).await?;
+        }
+        DeclaredLinkType::Vrf { table } => {
+            let mut config = crate::netlink::link::VrfLink::new(&link.name, *table);
+            if let Some(mtu) = link.mtu {
+                config = config.mtu(mtu);
+            }
+            conn.add_link(config).await?;
+        }
+        DeclaredLinkType::Ovpn => {
+            let mut config = crate::netlink::link::OvpnLink::new(&link.name);
+            if let Some(mtu) = link.mtu {
+                config = config.mtu(mtu);
+            }
+            conn.add_link(config).await?;
+        }
+        DeclaredLinkType::Netkit {
+            peer,
+            mode,
+            primary_policy,
+            peer_policy,
+            scrub,
+            peer_scrub,
+        } => {
+            let mut config = crate::netlink::link::NetkitLink::new(&link.name, peer);
+            if let Some(m) = mode {
+                config = config.mode(*m);
+            }
+            if let Some(p) = primary_policy {
+                config = config.policy(*p);
+            }
+            if let Some(p) = peer_policy {
+                config = config.peer_policy(*p);
+            }
+            if let Some(s) = scrub {
+                config = config.scrub(*s);
+            }
+            if let Some(s) = peer_scrub {
+                config = config.peer_scrub(*s);
+            }
+            if let Some(mtu) = link.mtu {
+                config = config.mtu(mtu);
+            }
             conn.add_link(config).await?;
         }
         DeclaredLinkType::Physical => {
@@ -560,15 +608,6 @@ async fn add_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result
     }
 }
 
-async fn remove_address(
-    conn: &Connection<Route>,
-    dev: &str,
-    addr: IpAddr,
-    prefix_len: u8,
-) -> Result<()> {
-    conn.del_address(dev, addr, prefix_len).await
-}
-
 async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()> {
     match route.destination {
         IpAddr::V4(dst) => {
@@ -608,7 +647,13 @@ async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
                 }
             };
 
-            conn.add_route(config).await
+            // Plan 207d H3 — use NLM_F_REPLACE so a change to
+            // gateway/dev/metric on the same `(dst, prefix, table)`
+            // atomically swaps the existing route instead of
+            // failing with EEXIST (and silently no-op'ing because
+            // the pre-0.19 diff didn't notice the gateway change
+            // at all). New routes are also accepted by replace.
+            conn.replace_route(config).await
         }
         IpAddr::V6(dst) => {
             let mut config = Ipv6Route::from_addr(dst, route.prefix_len);
@@ -642,25 +687,13 @@ async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
                 }
             };
 
-            conn.add_route(config).await
-        }
-    }
-}
-
-async fn remove_route(
-    conn: &Connection<Route>,
-    dst: IpAddr,
-    prefix_len: u8,
-    _table: u32,
-) -> Result<()> {
-    match dst {
-        IpAddr::V4(v4) => {
-            let route = Ipv4Route::from_addr(v4, prefix_len);
-            conn.del_route(route).await
-        }
-        IpAddr::V6(v6) => {
-            let route = Ipv6Route::from_addr(v6, prefix_len);
-            conn.del_route(route).await
+            // Plan 207d H3 — use NLM_F_REPLACE so a change to
+            // gateway/dev/metric on the same `(dst, prefix, table)`
+            // atomically swaps the existing route instead of
+            // failing with EEXIST (and silently no-op'ing because
+            // the pre-0.19 diff didn't notice the gateway change
+            // at all). New routes are also accepted by replace.
+            conn.replace_route(config).await
         }
     }
 }
@@ -748,21 +781,117 @@ async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()
 }
 
 async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()> {
-    // First try to delete the existing qdisc
-    let parent_handle = match qdisc.parent {
-        QdiscParent::Root => crate::TcHandle::ROOT,
-        QdiscParent::Ingress => crate::TcHandle::INGRESS,
-    };
-
-    // Ignore not found errors when deleting
-    match conn.del_qdisc(&qdisc.dev, parent_handle).await {
-        Ok(()) => {}
-        Err(e) if e.is_not_found() => {}
-        Err(e) => return Err(e),
+    // Plan 207f M18 — use atomic `RTM_NEWQDISC` with `NLM_F_REPLACE`
+    // (`Connection::replace_qdisc*`) instead of the pre-0.19
+    // del-then-add sequence. The old sequence had a transient
+    // window between `del_qdisc` (which restored the default
+    // `pfifo_fast`/`mq`) and `add_qdisc` (which installed the
+    // new declared kind). If `add_qdisc` failed mid-window the
+    // interface kept the kernel-default qdisc, NOT the previous
+    // declared one — visible state divergence on apply failure.
+    //
+    // The atomic form is unsupported on a small set of qdiscs
+    // (`Ingress`, `Clsact`) where the kernel rejects REPLACE
+    // semantically; for those we fall back to del+add since the
+    // kind is parent-fixed (ingress / clsact slots).
+    match &qdisc.qdisc_type {
+        DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact => {
+            // Kernel does not accept NLM_F_REPLACE on these
+            // pseudo-qdiscs (the kind IS the slot). Use del+add.
+            let parent_handle = match qdisc.parent {
+                QdiscParent::Root => crate::TcHandle::ROOT,
+                QdiscParent::Ingress => crate::TcHandle::INGRESS,
+            };
+            match conn.del_qdisc(&qdisc.dev, parent_handle).await {
+                Ok(()) => {}
+                Err(e) if e.is_not_found() => {}
+                Err(e) => return Err(e),
+            }
+            return add_qdisc(conn, qdisc).await;
+        }
+        _ => {}
     }
 
-    // Then add the new one
-    add_qdisc(conn, qdisc).await
+    // Atomic replace via NLM_F_REPLACE on RTM_NEWQDISC.
+    match &qdisc.qdisc_type {
+        DeclaredQdiscType::Netem {
+            delay_us,
+            jitter_us,
+            loss_percent,
+            limit,
+        } => {
+            let mut cfg = NetemConfig::new();
+            if let Some(d) = delay_us {
+                cfg = cfg.delay(Duration::from_micros(*d as u64));
+            }
+            if let Some(j) = jitter_us {
+                cfg = cfg.jitter(Duration::from_micros(*j as u64));
+            }
+            if let Some(l) = loss_percent {
+                cfg = cfg.loss(crate::util::Percent::new(*l));
+            }
+            if let Some(lim) = limit {
+                cfg = cfg.limit(*lim);
+            }
+            conn.replace_qdisc(&qdisc.dev, cfg.build()).await
+        }
+        DeclaredQdiscType::Htb { default_class } => {
+            let cfg = HtbQdiscConfig::new().default_class(*default_class);
+            conn.replace_qdisc_full(
+                &qdisc.dev,
+                crate::TcHandle::ROOT,
+                Some(crate::TcHandle::major_only(1)),
+                cfg,
+            )
+            .await
+        }
+        DeclaredQdiscType::FqCodel {
+            limit,
+            target_us,
+            interval_us,
+        } => {
+            let mut cfg = FqCodelConfig::new();
+            if let Some(lim) = limit {
+                cfg = cfg.limit(*lim);
+            }
+            if let Some(t) = target_us {
+                cfg = cfg.target(Duration::from_micros(*t as u64));
+            }
+            if let Some(i) = interval_us {
+                cfg = cfg.interval(Duration::from_micros(*i as u64));
+            }
+            conn.replace_qdisc(&qdisc.dev, cfg).await
+        }
+        DeclaredQdiscType::Tbf {
+            rate_bps,
+            burst_bytes,
+            limit_bytes,
+        } => {
+            let mut cfg = TbfConfig::new()
+                .rate(crate::util::Rate::bytes_per_sec(*rate_bps))
+                .burst(crate::util::Bytes::new(*burst_bytes as u64));
+            if let Some(lim) = limit_bytes {
+                cfg = cfg.limit(crate::util::Bytes::new(*lim as u64));
+            }
+            conn.replace_qdisc(&qdisc.dev, cfg).await
+        }
+        DeclaredQdiscType::Sfq { perturb_secs } => {
+            let mut cfg = SfqConfig::new();
+            if let Some(p) = perturb_secs {
+                cfg = cfg.perturb(*p as i32);
+            }
+            conn.replace_qdisc(&qdisc.dev, cfg).await
+        }
+        DeclaredQdiscType::Prio { bands } => {
+            let mut cfg = PrioConfig::new();
+            if let Some(b) = bands {
+                cfg = cfg.bands(*b as i32);
+            }
+            conn.replace_qdisc(&qdisc.dev, cfg).await
+        }
+        // Ingress/Clsact already handled above.
+        DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact => unreachable!(),
+    }
 }
 
 fn convert_macvlan_mode(mode: MacvlanMode) -> crate::netlink::link::MacvlanMode {

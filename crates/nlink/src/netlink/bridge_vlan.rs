@@ -951,7 +951,25 @@ fn parse_af_spec_vlans(data: &[u8], ifindex: u32, entries: &mut Vec<BridgeVlanEn
             let flags = BridgeVlanFlags::from_raw(vlan_info.flags);
 
             if vlan_info.is_range_begin() {
-                // Start of range - remember it
+                // 0.19 N8 — Plan 193 rule 2 defensive: if a previous
+                // RANGE_BEGIN never saw its matching RANGE_END (a
+                // truncated kernel emit / future protocol extension),
+                // emit the orphan as a single VLAN before starting
+                // the new range. Pre-fix silently overwrote
+                // `range_start` and dropped the prior VLAN entirely.
+                if let Some((prev_vid, prev_flags)) = range_start.take() {
+                    tracing::warn!(
+                        ifindex,
+                        prev_vid,
+                        new_vid = vlan_info.vid,
+                        "BRIDGE_VLAN_INFO RANGE_BEGIN before matching RANGE_END — emitting truncated range as single VLAN",
+                    );
+                    entries.push(BridgeVlanEntry {
+                        ifindex,
+                        vid: prev_vid,
+                        flags: BridgeVlanFlags::from_raw(prev_flags),
+                    });
+                }
                 range_start = Some((vlan_info.vid, vlan_info.flags));
             } else if vlan_info.is_range_end() {
                 // End of range - emit all VLANs in range
@@ -974,6 +992,21 @@ fn parse_af_spec_vlans(data: &[u8], ifindex: u32, entries: &mut Vec<BridgeVlanEn
                 });
             }
         }
+    }
+
+    // 0.19 N8 — trailing unterminated range at end of chain. Same
+    // defensive handling: emit as a single VLAN rather than dropping.
+    if let Some((prev_vid, prev_flags)) = range_start {
+        tracing::warn!(
+            ifindex,
+            prev_vid,
+            "BRIDGE_VLAN_INFO RANGE_BEGIN with no matching RANGE_END at end of chain — emitting as single VLAN",
+        );
+        entries.push(BridgeVlanEntry {
+            ifindex,
+            vid: prev_vid,
+            flags: BridgeVlanFlags::from_raw(prev_flags),
+        });
     }
 }
 
@@ -1040,6 +1073,22 @@ fn parse_af_spec_tunnels(data: &[u8], ifindex: u32, entries: &mut Vec<BridgeVlan
                 let is_range_end = flags & bridge_vlan_flags::RANGE_END != 0;
 
                 if is_range_begin {
+                    // 0.19 N8 — emit orphan prior RANGE_BEGIN as a
+                    // single tunnel mapping rather than silently
+                    // dropping. See parse_af_spec_vlans.
+                    if let Some((prev_vid, prev_tunnel_id)) = range_start.take() {
+                        tracing::warn!(
+                            ifindex,
+                            prev_vid,
+                            new_vid = v,
+                            "BRIDGE_VLAN_TUNNEL_INFO RANGE_BEGIN before matching RANGE_END — emitting truncated range as single mapping",
+                        );
+                        entries.push(BridgeVlanTunnelEntry {
+                            ifindex,
+                            vid: prev_vid,
+                            tunnel_id: prev_tunnel_id,
+                        });
+                    }
                     range_start = Some((v, t));
                 } else if is_range_end {
                     // End of range - emit all mappings (1:1 mapping)

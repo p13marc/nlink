@@ -63,7 +63,7 @@ fn print_overview() {
     let mut nf = Connection::<Netfilter>::new()?;
     nf.subscribe(&[ConntrackGroup::New, ConntrackGroup::Destroy])?;
 
-    let mut events = nf.events();
+    let mut events = nf.events().await;
     while let Some(evt) = events.next().await {{
         match evt? {{
             ConntrackEvent::New(entry)     => println!("NEW     {{:?}}", entry.orig),
@@ -92,13 +92,13 @@ async fn run_watch() -> nlink::Result<()> {
     }
 
     println!("=== Watching host conntrack events (Ctrl-C to exit) ===\n");
-    let mut nf = Connection::<Netfilter>::new()?;
+    let nf = Connection::<Netfilter>::new()?;
     nf.subscribe(&[
         ConntrackGroup::New,
         ConntrackGroup::Update,
         ConntrackGroup::Destroy,
     ])?;
-    let mut events = nf.events();
+    let mut events = nf.events().await;
     while let Some(evt) = events.next().await {
         print_event(&evt?);
     }
@@ -131,7 +131,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     //   - sub: subscribed to multicast NEW + DESTROY, owned by the
     //     collector task.
     //   - act: used to inject + delete entries (which trigger events).
-    let mut sub: Connection<Netfilter> = namespace::connection_for(ns_name)?;
+    let sub: Connection<Netfilter> = namespace::connection_for(ns_name)?;
     sub.subscribe(&[ConntrackGroup::New, ConntrackGroup::Destroy])?;
     let act: Connection<Netfilter> = namespace::connection_for(ns_name)?;
 
@@ -140,7 +140,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     // Spawn a collector that drains events for up to 3s. Using
     // into_events() so we can move the connection into the task.
     let collector = tokio::spawn(async move {
-        let mut stream = sub.into_events();
+        let mut stream = sub.into_events().await;
         let mut collected: Vec<ConntrackEvent> = Vec::new();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {

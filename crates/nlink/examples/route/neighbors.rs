@@ -3,10 +3,10 @@
 //! This example demonstrates how to query neighbor (ARP/NDP) entries
 //! using the high-level Connection API.
 //!
-//! Run with: cargo run -p nlink --example neighbors
+//! Run with: cargo run -p nlink --example route_neighbors
 //!
 //! Filter by interface:
-//!   cargo run -p nlink --example neighbors -- eth0
+//!   cargo run -p nlink --example route_neighbors -- eth0
 
 use std::env;
 

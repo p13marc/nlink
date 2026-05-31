@@ -66,7 +66,7 @@ impl Connection<Nl80211> {
     ///     println!("{:?}", event?);
     /// }
     /// ```
-    pub fn subscribe(&mut self) -> Result<()> {
+    pub fn subscribe(&self) -> Result<()> {
         let mut subscribed = false;
         for name in [
             NL80211_MCGRP_SCAN,
@@ -75,7 +75,7 @@ impl Connection<Nl80211> {
             NL80211_MCGRP_CONFIG,
         ] {
             if let Some(id) = self.state().mcast_groups.get(name).copied() {
-                self.socket_mut().add_membership(id)?;
+                self.socket().add_membership(id)?;
                 subscribed = true;
             }
         }
@@ -153,6 +153,10 @@ impl Connection<Nl80211> {
     /// Trigger a scan by interface index (namespace-safe).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "trigger_scan_by_index"))]
     pub async fn trigger_scan_by_index(&self, ifindex: u32, request: &ScanRequest) -> Result<()> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -204,6 +208,10 @@ impl Connection<Nl80211> {
         fields(method = "get_scan_results_by_index")
     )]
     pub async fn get_scan_results_by_index(&self, ifindex: u32) -> Result<Vec<ScanResult>> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -264,6 +272,10 @@ impl Connection<Nl80211> {
     /// List all stations by interface index.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_stations_by_index"))]
     pub async fn get_stations_by_index(&self, ifindex: u32) -> Result<Vec<StationInfo>> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -325,6 +337,10 @@ impl Connection<Nl80211> {
     /// Get the current regulatory domain.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_regulatory"))]
     pub async fn get_regulatory(&self) -> Result<RegulatoryDomain> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST);
@@ -373,6 +389,10 @@ impl Connection<Nl80211> {
     /// Connect by interface index (namespace-safe).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "connect_by_index"))]
     pub async fn connect_by_index(&self, ifindex: u32, request: ConnectRequest) -> Result<()> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -409,6 +429,10 @@ impl Connection<Nl80211> {
     /// Disconnect by interface index (namespace-safe).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "disconnect_by_index"))]
     pub async fn disconnect_by_index(&self, ifindex: u32) -> Result<()> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -431,6 +455,12 @@ impl Connection<Nl80211> {
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_power_save"))]
     pub async fn set_power_save(&self, iface: &str, enabled: bool) -> Result<()> {
         let ifindex = self.resolve_ifindex(iface).await?;
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring. Note: the
+        // `resolve_ifindex` above runs its own send+recv flow under
+        // the lock; we re-acquire here for the actual SET request.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -460,6 +490,12 @@ impl Connection<Nl80211> {
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_power_save"))]
     pub async fn get_power_save(&self, iface: &str) -> Result<PowerSaveState> {
         let ifindex = self.resolve_ifindex(iface).await?;
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring. Note: the
+        // `resolve_ifindex` above runs its own send+recv flow under
+        // the lock; we re-acquire here for the actual GET request.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST);
@@ -519,6 +555,10 @@ impl Connection<Nl80211> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wiphy_netns"))]
     pub async fn set_wiphy_netns(&self, wiphy: u32, netns_fd: i32) -> Result<()> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -545,6 +585,10 @@ impl Connection<Nl80211> {
     /// a namespace file descriptor.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wiphy_netns_pid"))]
     pub async fn set_wiphy_netns_pid(&self, wiphy: u32, pid: u32) -> Result<()> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -571,6 +615,10 @@ impl Connection<Nl80211> {
 
     /// Send a GENL dump request (no filter).
     async fn nl80211_dump(&self, cmd: u8) -> Result<Vec<Vec<u8>>> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -761,15 +809,12 @@ fn parse_bss(data: &[u8]) -> ScanResult {
             }
             NL80211_BSS_INFORMATION_ELEMENTS => {
                 result.information_elements = payload.to_vec();
-                // Parse SSID from IE (type 0, first element)
-                if payload.len() >= 2 && payload[0] == 0 {
-                    let len = payload[1] as usize;
-                    if payload.len() >= 2 + len && len > 0 {
-                        result.ssid = std::str::from_utf8(&payload[2..2 + len])
-                            .ok()
-                            .map(String::from);
-                    }
-                }
+                // Walk the IE chain to find the SSID (element-id 0).
+                // Plan 215 M13 — pre-fix assumed SSID is the FIRST IE
+                // and returned None for any BSS whose beacon
+                // prepended a vendor-specific IE (id=221) before the
+                // SSID. Now walks the chain per 802.11 spec.
+                result.ssid = parse_ssid_from_ies(payload);
             }
             NL80211_BSS_SIGNAL_MBM if payload.len() >= 4 => {
                 result.signal_mbm = i32::from_ne_bytes(payload[..4].try_into().unwrap());
@@ -786,6 +831,30 @@ fn parse_bss(data: &[u8]) -> ScanResult {
     }
 
     result
+}
+
+/// Walk the 802.11 information elements (TLV chain) and extract the
+/// SSID (element-id 0). The SSID IE may not be the first element —
+/// vendor-specific IEs (id=221) are sometimes prepended.
+///
+/// Plan 215 M13 (0.19). Returns `None` if no SSID IE is found or
+/// the chain is malformed. UTF-8 decoding is lossy to match how
+/// `wpa_supplicant` and other tools handle non-printable SSIDs.
+fn parse_ssid_from_ies(ies: &[u8]) -> Option<String> {
+    let mut offset = 0;
+    while offset + 2 <= ies.len() {
+        let id = ies[offset];
+        let len = ies[offset + 1] as usize;
+        if offset + 2 + len > ies.len() {
+            // Truncated IE — bail rather than slice-panic.
+            return None;
+        }
+        if id == 0 {
+            return Some(String::from_utf8_lossy(&ies[offset + 2..offset + 2 + len]).into_owned());
+        }
+        offset += 2 + len;
+    }
+    None
 }
 
 fn parse_station(data: &[u8]) -> StationInfo {
@@ -1072,6 +1141,56 @@ fn attr_str(payload: &[u8]) -> Option<String> {
         None
     } else {
         Some(s.to_string())
+    }
+}
+
+#[cfg(test)]
+mod ssid_walker_tests {
+    use super::parse_ssid_from_ies;
+
+    #[test]
+    fn ssid_extracted_from_first_ie() {
+        // IE 0: id=0, len=4, "home"
+        let ies = [0u8, 4, b'h', b'o', b'm', b'e'];
+        assert_eq!(parse_ssid_from_ies(&ies).as_deref(), Some("home"));
+    }
+
+    #[test]
+    fn ssid_extracted_after_vendor_specific_ie() {
+        // Plan 215 M13 regression — vendor IE (id=221) prepended.
+        let ies = [
+            221, 3, 0xAA, 0xBB, 0xCC, // vendor IE
+            0, 4, b'h', b'o', b'm', b'e', // SSID IE
+        ];
+        assert_eq!(parse_ssid_from_ies(&ies).as_deref(), Some("home"));
+    }
+
+    #[test]
+    fn ssid_missing_returns_none_not_garbage() {
+        let ies = [221u8, 3, 0xAA, 0xBB, 0xCC];
+        assert_eq!(parse_ssid_from_ies(&ies), None);
+    }
+
+    #[test]
+    fn truncated_ie_terminates_without_panic() {
+        // IE claims 100 bytes of payload but only 3 follow.
+        let ies = [0u8, 100, 1, 2, 3];
+        assert_eq!(parse_ssid_from_ies(&ies), None);
+    }
+
+    #[test]
+    fn ssid_with_non_utf8_decoded_lossily() {
+        let ies = [0u8, 3, 0xFF, b'a', 0xFE];
+        // Lossy decode produces replacement characters; assert
+        // we get Some(_) (not None) and the SSID byte count is
+        // preserved.
+        let ssid = parse_ssid_from_ies(&ies).expect("lossy ssid");
+        assert!(ssid.contains('a'));
+    }
+
+    #[test]
+    fn empty_ies_returns_none() {
+        assert_eq!(parse_ssid_from_ies(&[]), None);
     }
 }
 

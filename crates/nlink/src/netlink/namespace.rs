@@ -518,11 +518,66 @@ pub fn create(name: &str) -> Result<()> {
         Error::InvalidMessage(format!("cannot create namespace file '{}': {}", name, e))
     })?;
 
+    // 0.19 N1 fix — isolate the unshare+mount+setns sequence on
+    // a dedicated OS thread.
+    //
+    // The kernel scopes `unshare(CLONE_NEWNET)` to the *calling
+    // thread*, not the process. When this function is called from
+    // an async context (tokio `LabNamespace::new`, integration
+    // test setup), the calling thread is a tokio worker. Until
+    // the matching `setns()` restores the original netns, every
+    // other tokio task scheduled on that worker temporarily
+    // observes the new (empty) namespace — including any
+    // `Connection<P>` they construct in that window, which
+    // silently binds to the wrong netns. The same mechanism
+    // affects sync callers from a multi-threaded program because
+    // `mount(2)` can block on disk I/O long enough for any other
+    // thread to be scheduled.
+    //
+    // The fix: do the unshare+mount+setns on a freshly-spawned
+    // `std::thread`, then `join()`. The dedicated thread has no
+    // co-scheduled work, and its destructor is the only observer
+    // of the transient netns membership; we wait for setns to
+    // complete before returning.
+    let ns_path_owned = ns_path.clone();
+    let name_owned = name.to_string();
+    let thread_result = std::thread::spawn(move || -> Result<()> {
+        create_namespace_in_current_thread(&name_owned, &ns_path_owned)
+    })
+    .join();
+
+    match thread_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            // The worker thread cleaned up its file already, but
+            // belt-and-braces: try once more from this thread in
+            // case it raced.
+            let _ = std::fs::remove_file(&ns_path);
+            Err(e)
+        }
+        Err(_panic) => {
+            // Worker panicked — leaves the bind mount in an
+            // undefined state. Remove the file so we don't leak
+            // an empty netns marker.
+            let _ = std::fs::remove_file(&ns_path);
+            Err(Error::InvalidMessage(format!(
+                "namespace '{}' worker thread panicked during create",
+                name
+            )))
+        }
+    }
+}
+
+/// Inner half of [`create`] — runs on a dedicated `std::thread`
+/// so the `unshare(CLONE_NEWNET)` + `mount(MS_BIND)` + `setns()`
+/// sequence is isolated from tokio worker threads. See [`create`]
+/// for the rationale.
+fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> {
     // Save the current namespace so we can restore after unshare.
     // Without this, unshare(CLONE_NEWNET) permanently changes the calling
     // thread's namespace, breaking subsequent namespace operations.
     let original_ns = File::open("/proc/thread-self/ns/net").map_err(|e| {
-        let _ = std::fs::remove_file(&ns_path);
+        let _ = std::fs::remove_file(ns_path);
         Error::InvalidMessage(format!("cannot save current namespace: {}", e))
     })?;
 
@@ -532,14 +587,14 @@ pub fn create(name: &str) -> Result<()> {
     let ret = unsafe { libc::unshare(libc::CLONE_NEWNET) };
     if ret < 0 {
         // Clean up the file we created
-        let _ = std::fs::remove_file(&ns_path);
+        let _ = std::fs::remove_file(ns_path);
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
 
     // Bind mount the namespace to the file
-    let ns_path_cstr =
-        std::ffi::CString::new(ns_path.to_string_lossy().as_bytes()).map_err(|_| {
-            let _ = std::fs::remove_file(&ns_path);
+    let ns_path_cstr = std::ffi::CString::new(ns_path.to_string_lossy().as_bytes())
+        .map_err(|_| {
+            let _ = std::fs::remove_file(ns_path);
             Error::InvalidMessage("invalid namespace path".to_string())
         })?;
 
@@ -561,7 +616,7 @@ pub fn create(name: &str) -> Result<()> {
         let err = std::io::Error::last_os_error();
         // Try to restore original namespace before returning
         unsafe { libc::setns(original_ns.as_raw_fd(), libc::CLONE_NEWNET) };
-        let _ = std::fs::remove_file(&ns_path);
+        let _ = std::fs::remove_file(ns_path);
         return Err(Error::Io(err));
     }
 
@@ -571,7 +626,9 @@ pub fn create(name: &str) -> Result<()> {
     let ret = unsafe { libc::setns(original_ns.as_raw_fd(), libc::CLONE_NEWNET) };
     if ret < 0 {
         // The namespace was created and persisted via bind mount, but we
-        // failed to restore. Log a warning — this is a serious issue.
+        // failed to restore. The dedicated thread will exit shortly so
+        // the bleed is bounded, but surface the error so the caller knows
+        // the create succeeded with a degraded cleanup.
         return Err(Error::InvalidMessage(format!(
             "namespace '{}' created but failed to restore original namespace: {}",
             name,

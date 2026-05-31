@@ -170,13 +170,22 @@ pub struct XfrmUsersaFlush {
 
 /// `xfrm_userpolicy_id` — body of `XFRM_MSG_DELPOLICY` /
 /// `GETPOLICY` requests. Selector + index + direction byte.
+///
+/// Wire size: 64 bytes (verified against `include/uapi/linux/xfrm.h`
+/// `struct xfrm_userpolicy_id` — 56 (selector) + 4 (index) + 1 (dir) +
+/// 3 (pad to u32 align)). Pre-0.19 nlink used `_pad: [u8; 7]` (68
+/// bytes total); strict-checking kernels (≥5.0 with
+/// `NETLINK_GET_STRICT_CHK`, enableable via Plan 155.2's
+/// `enable_strict_checking`) rejected the oversized body with EINVAL.
+/// Lenient kernels silently skipped the trailing 4 bytes as a
+/// malformed nlattr. Plan 204 C3 trim.
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct XfrmUserpolicyId {
     pub sel: XfrmSelector,
     pub index: u32,
     pub dir: u8,
-    pub _pad: [u8; 7],
+    pub _pad: [u8; 3],
 }
 
 /// `xfrm_user_tmpl` — one entry in an SP's `XFRMA_TMPL` array.
@@ -188,6 +197,15 @@ pub struct XfrmUserpolicyId {
 pub struct XfrmUserTmpl {
     pub id: XfrmId,
     pub family: u16,
+    /// Padding between `family` (u16, offset 24) and the natural-alignment
+    /// boundary that the kernel's non-packed C struct enforces for
+    /// `saddr`. (`saddr` is `[u8; 16]` with align 1, but the kernel
+    /// header originally declared a 2-byte gap here as part of the
+    /// architecturally-stable layout.) Without this pad the total
+    /// size is 62 instead of the kernel's 64; strict-checking kernels
+    /// reject the message. Discovered by Plan 213's sizeof regression
+    /// test.
+    pub _pad_saddr: [u8; 2],
     pub saddr: XfrmAddress,
     pub reqid: u32,
     pub mode: u8,
@@ -312,6 +330,19 @@ pub struct XfrmUsersaInfo {
 }
 
 /// XFRM userpolicy_info (main policy structure).
+///
+/// Wire size: 168 bytes (verified against `include/uapi/linux/xfrm.h`
+/// `struct xfrm_userpolicy_info`). The kernel struct uses natural
+/// alignment (not packed); after the four trailing `__u8` fields
+/// (`dir, action, flags, share`) the struct pads to the next u64
+/// boundary (alignment requirement from the u64 fields in
+/// `xfrm_lifetime_*`) — that's 4 trailing pad bytes for a 168-byte
+/// total. Pre-0.19 nlink had no trailing pad and emitted a 164-byte
+/// body; the kernel's `xfrm_add_policy()` called
+/// `nlmsg_parse_deprecated(nlh, sizeof(*p), ...)` requiring
+/// `nlmsg_len >= NLMSG_HDRLEN + 168` and rejected `add_sp` with
+/// EINVAL on every kernel version since the XFRM family shipped.
+/// Plan 204 C2 — add `_pad: [u8; 4]`.
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct XfrmUserpolicyInfo {
@@ -333,6 +364,11 @@ pub struct XfrmUserpolicyInfo {
     pub flags: u8,
     /// Share mode.
     pub share: u8,
+    /// Padding to natural u64 alignment — kernel struct uses natural
+    /// (non-packed) alignment, padding the trailing four `__u8`
+    /// fields to the next 8-byte boundary. Without this nlink emits
+    /// a 164-byte body and the kernel rejects `add_sp` with EINVAL.
+    pub _pad: [u8; 4],
 }
 
 /// XFRM algorithm.
@@ -1125,6 +1161,7 @@ impl XfrmUserTmpl {
                 _pad: [0; 3],
             },
             family: family_for_pair(src, dst),
+            _pad_saddr: [0; 2],
             saddr: ip_to_xfrm_addr(src),
             reqid,
             mode: mode.number(),
@@ -1274,6 +1311,7 @@ impl XfrmSpBuilder {
             action: self.action.number(),
             flags: self.flags,
             share: self.share,
+            _pad: [0; 4],
         }
     }
 
@@ -1475,7 +1513,7 @@ impl Connection<Xfrm> {
             sel,
             index: 0,
             dir: direction.number(),
-            _pad: [0; 7],
+            _pad: [0; 3],
         };
         b.append_bytes(id.as_bytes());
         self.send_ack(b).await
@@ -1502,7 +1540,7 @@ impl Connection<Xfrm> {
             sel,
             index: 0,
             dir: direction.number(),
-            _pad: [0; 7],
+            _pad: [0; 3],
         };
         b.append_bytes(id.as_bytes());
 
@@ -1534,77 +1572,99 @@ impl Connection<Xfrm> {
         fields(method = "get_security_associations")
     )]
     pub async fn get_security_associations(&self) -> Result<Vec<SecurityAssociation>> {
-        let seq = self.socket().next_seq();
-        let pid = self.socket().pid();
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring. Acquired
+        // BEFORE the with_timeout wrapper so the lock spans the
+        // entire timeout window.
+        let _guard = self.lock_request().await;
+        // Plan 208 Phase 1+2 — wrap in with_timeout, add seq filter,
+        // detect NLM_F_DUMP_INTR.
+        self.with_timeout(async move {
+            let seq = self.socket().next_seq();
+            let pid = self.socket().pid();
 
-        // Build request message
-        let mut buf = Vec::with_capacity(64);
+            let mut buf = Vec::with_capacity(64);
+            buf.extend_from_slice(&0u32.to_ne_bytes());
+            buf.extend_from_slice(&XFRM_MSG_GETSA.to_ne_bytes());
+            buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes());
+            buf.extend_from_slice(&seq.to_ne_bytes());
+            buf.extend_from_slice(&pid.to_ne_bytes());
 
-        // Netlink header (16 bytes)
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
-        buf.extend_from_slice(&XFRM_MSG_GETSA.to_ne_bytes()); // nlmsg_type
-        buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes()); // nlmsg_flags
-        buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
-        buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
+            let sa_info = XfrmUsersaInfo::default();
+            buf.extend_from_slice(sa_info.as_bytes());
 
-        // xfrm_usersa_info (filled with zeros for dump)
-        let sa_info = XfrmUsersaInfo::default();
-        buf.extend_from_slice(sa_info.as_bytes());
+            let len = buf.len() as u32;
+            buf[0..4].copy_from_slice(&len.to_ne_bytes());
 
-        // Update length
-        let len = buf.len() as u32;
-        buf[0..4].copy_from_slice(&len.to_ne_bytes());
+            self.socket().send(&buf).await?;
 
-        // Send request
-        self.socket().send(&buf).await?;
+            let mut sas = Vec::new();
 
-        // Receive responses
-        let mut sas = Vec::new();
+            loop {
+                let data = self.socket().recv_msg().await?;
 
-        loop {
-            let data = self.socket().recv_msg().await?;
+                let mut offset = 0;
+                while offset + NLMSG_HDRLEN <= data.len() {
+                    let nlmsg_len = u32::from_ne_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]) as usize;
 
-            let mut offset = 0;
-            while offset + NLMSG_HDRLEN <= data.len() {
-                let nlmsg_len = u32::from_ne_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ]) as usize;
+                    let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
+                    let nlmsg_flags = u16::from_ne_bytes([data[offset + 6], data[offset + 7]]);
+                    let nlmsg_seq = u32::from_ne_bytes([
+                        data[offset + 8],
+                        data[offset + 9],
+                        data[offset + 10],
+                        data[offset + 11],
+                    ]);
 
-                let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
+                    if nlmsg_len < NLMSG_HDRLEN || offset + nlmsg_len > data.len() {
+                        break;
+                    }
+                    if nlmsg_seq != seq {
+                        offset += (nlmsg_len + 3) & !3;
+                        continue;
+                    }
+                    // NLM_F_DUMP_INTR = 0x10
+                    if nlmsg_flags & 0x10 != 0 {
+                        return Err(crate::netlink::Error::DumpInterrupted);
+                    }
 
-                if nlmsg_len < NLMSG_HDRLEN || offset + nlmsg_len > data.len() {
-                    break;
-                }
-
-                match nlmsg_type {
-                    NLMSG_DONE => return Ok(sas),
-                    NLMSG_ERROR => {
-                        if nlmsg_len >= 20 {
-                            let errno = i32::from_ne_bytes([
-                                data[offset + 16],
-                                data[offset + 17],
-                                data[offset + 18],
-                                data[offset + 19],
-                            ]);
-                            if errno != 0 {
-                                return Err(super::error::Error::from_errno(-errno));
+                    match nlmsg_type {
+                        NLMSG_DONE => return Ok(sas),
+                        NLMSG_ERROR => {
+                            if nlmsg_len >= 20 {
+                                let errno = i32::from_ne_bytes([
+                                    data[offset + 16],
+                                    data[offset + 17],
+                                    data[offset + 18],
+                                    data[offset + 19],
+                                ]);
+                                if errno != 0 {
+                                    return Err(
+                                        super::error::Error::from_errno(-errno),
+                                    );
+                                }
+                            }
+                        }
+                        _ => {
+                            if let Some(sa) =
+                                self.parse_sa(&data[offset..offset + nlmsg_len])
+                            {
+                                sas.push(sa);
                             }
                         }
                     }
-                    _ => {
-                        if let Some(sa) = self.parse_sa(&data[offset..offset + nlmsg_len]) {
-                            sas.push(sa);
-                        }
-                    }
-                }
 
-                // Align to 4 bytes
-                offset += (nlmsg_len + 3) & !3;
+                    offset += (nlmsg_len + 3) & !3;
+                }
             }
-        }
+        })
+        .await
     }
 
     /// Get all Security Policies.
@@ -1624,77 +1684,98 @@ impl Connection<Xfrm> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_security_policies"))]
     pub async fn get_security_policies(&self) -> Result<Vec<SecurityPolicy>> {
-        let seq = self.socket().next_seq();
-        let pid = self.socket().pid();
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring. Acquired
+        // BEFORE the with_timeout wrapper so the lock spans the
+        // entire timeout window.
+        let _guard = self.lock_request().await;
+        // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
+        // NLM_F_DUMP_INTR detection.
+        self.with_timeout(async move {
+            let seq = self.socket().next_seq();
+            let pid = self.socket().pid();
 
-        // Build request message
-        let mut buf = Vec::with_capacity(64);
+            let mut buf = Vec::with_capacity(64);
+            buf.extend_from_slice(&0u32.to_ne_bytes());
+            buf.extend_from_slice(&XFRM_MSG_GETPOLICY.to_ne_bytes());
+            buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes());
+            buf.extend_from_slice(&seq.to_ne_bytes());
+            buf.extend_from_slice(&pid.to_ne_bytes());
 
-        // Netlink header (16 bytes)
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
-        buf.extend_from_slice(&XFRM_MSG_GETPOLICY.to_ne_bytes()); // nlmsg_type
-        buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes()); // nlmsg_flags
-        buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
-        buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
+            let pol_info = XfrmUserpolicyInfo::default();
+            buf.extend_from_slice(pol_info.as_bytes());
 
-        // xfrm_userpolicy_info (filled with zeros for dump)
-        let pol_info = XfrmUserpolicyInfo::default();
-        buf.extend_from_slice(pol_info.as_bytes());
+            let len = buf.len() as u32;
+            buf[0..4].copy_from_slice(&len.to_ne_bytes());
 
-        // Update length
-        let len = buf.len() as u32;
-        buf[0..4].copy_from_slice(&len.to_ne_bytes());
+            self.socket().send(&buf).await?;
 
-        // Send request
-        self.socket().send(&buf).await?;
+            let mut policies = Vec::new();
 
-        // Receive responses
-        let mut policies = Vec::new();
+            loop {
+                let data = self.socket().recv_msg().await?;
 
-        loop {
-            let data = self.socket().recv_msg().await?;
+                let mut offset = 0;
+                while offset + NLMSG_HDRLEN <= data.len() {
+                    let nlmsg_len = u32::from_ne_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]) as usize;
 
-            let mut offset = 0;
-            while offset + NLMSG_HDRLEN <= data.len() {
-                let nlmsg_len = u32::from_ne_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ]) as usize;
+                    let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
+                    let nlmsg_flags = u16::from_ne_bytes([data[offset + 6], data[offset + 7]]);
+                    let nlmsg_seq = u32::from_ne_bytes([
+                        data[offset + 8],
+                        data[offset + 9],
+                        data[offset + 10],
+                        data[offset + 11],
+                    ]);
 
-                let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
+                    if nlmsg_len < NLMSG_HDRLEN || offset + nlmsg_len > data.len() {
+                        break;
+                    }
+                    if nlmsg_seq != seq {
+                        offset += (nlmsg_len + 3) & !3;
+                        continue;
+                    }
+                    if nlmsg_flags & 0x10 != 0 {
+                        return Err(crate::netlink::Error::DumpInterrupted);
+                    }
 
-                if nlmsg_len < NLMSG_HDRLEN || offset + nlmsg_len > data.len() {
-                    break;
-                }
-
-                match nlmsg_type {
-                    NLMSG_DONE => return Ok(policies),
-                    NLMSG_ERROR => {
-                        if nlmsg_len >= 20 {
-                            let errno = i32::from_ne_bytes([
-                                data[offset + 16],
-                                data[offset + 17],
-                                data[offset + 18],
-                                data[offset + 19],
-                            ]);
-                            if errno != 0 {
-                                return Err(super::error::Error::from_errno(-errno));
+                    match nlmsg_type {
+                        NLMSG_DONE => return Ok(policies),
+                        NLMSG_ERROR => {
+                            if nlmsg_len >= 20 {
+                                let errno = i32::from_ne_bytes([
+                                    data[offset + 16],
+                                    data[offset + 17],
+                                    data[offset + 18],
+                                    data[offset + 19],
+                                ]);
+                                if errno != 0 {
+                                    return Err(
+                                        super::error::Error::from_errno(-errno),
+                                    );
+                                }
+                            }
+                        }
+                        _ => {
+                            if let Some(pol) =
+                                self.parse_policy(&data[offset..offset + nlmsg_len])
+                            {
+                                policies.push(pol);
                             }
                         }
                     }
-                    _ => {
-                        if let Some(pol) = self.parse_policy(&data[offset..offset + nlmsg_len]) {
-                            policies.push(pol);
-                        }
-                    }
-                }
 
-                // Align to 4 bytes
-                offset += (nlmsg_len + 3) & !3;
+                    offset += (nlmsg_len + 3) & !3;
+                }
             }
-        }
+        })
+        .await
     }
 
     /// Parse a Security Association from a netlink message.
@@ -1870,8 +1951,13 @@ fn parse_nla<'a>(input: &mut &'a [u8]) -> Option<(u16, &'a [u8])> {
         return None;
     }
 
-    let len = u16::from_le_bytes([input[0], input[1]]) as usize;
-    let attr_type = u16::from_le_bytes([input[2], input[3]]);
+    // 0.19 N3 — netlink attribute nla_len / nla_type are kernel
+    // native-endian (per `struct nlattr` in include/uapi/linux/netlink.h
+    // and nlink's canonical `NlAttr` in `attr.rs` using zerocopy
+    // native-endian). Was `from_le_bytes` — silently broken on
+    // BE platforms.
+    let len = u16::from_ne_bytes([input[0], input[1]]) as usize;
+    let attr_type = u16::from_ne_bytes([input[2], input[3]]);
     *input = &input[4..];
 
     if len < 4 {
@@ -1904,7 +1990,8 @@ fn parse_algorithm(data: &[u8]) -> Option<XfrmAlgorithm> {
     }
 
     let name = parse_cstring(&data[..64]);
-    let key_len = u32::from_le_bytes([data[64], data[65], data[66], data[67]]);
+    // 0.19 N3 — `unsigned int alg_key_len` in xfrm.h is host-order.
+    let key_len = u32::from_ne_bytes([data[64], data[65], data[66], data[67]]);
     let key_bytes = (key_len as usize).div_ceil(8);
     let key = if data.len() >= 68 + key_bytes {
         data[68..68 + key_bytes].to_vec()
@@ -1923,8 +2010,9 @@ fn parse_aead_algorithm(data: &[u8]) -> Option<XfrmAlgorithmAead> {
     }
 
     let name = parse_cstring(&data[..64]);
-    let key_len = u32::from_le_bytes([data[64], data[65], data[66], data[67]]);
-    let icv_len = u32::from_le_bytes([data[68], data[69], data[70], data[71]]);
+    // 0.19 N3 — `alg_key_len` / `alg_icv_len` are host-order.
+    let key_len = u32::from_ne_bytes([data[64], data[65], data[66], data[67]]);
+    let icv_len = u32::from_ne_bytes([data[68], data[69], data[70], data[71]]);
     let key_bytes = (key_len as usize).div_ceil(8);
     let key = if data.len() >= 72 + key_bytes {
         data[72..72 + key_bytes].to_vec()
@@ -1948,8 +2036,9 @@ fn parse_auth_trunc_algorithm(data: &[u8]) -> Option<XfrmAlgorithmAuthTrunc> {
     }
 
     let name = parse_cstring(&data[..64]);
-    let key_len = u32::from_le_bytes([data[64], data[65], data[66], data[67]]);
-    let trunc_len = u32::from_le_bytes([data[68], data[69], data[70], data[71]]);
+    // 0.19 N3 — `alg_key_len` / `alg_trunc_len` are host-order.
+    let key_len = u32::from_ne_bytes([data[64], data[65], data[66], data[67]]);
+    let trunc_len = u32::from_ne_bytes([data[68], data[69], data[70], data[71]]);
     let key_bytes = (key_len as usize).div_ceil(8);
     let key = if data.len() >= 72 + key_bytes {
         data[72..72 + key_bytes].to_vec()
@@ -2435,7 +2524,7 @@ mod tests {
             sel,
             index: 0,
             dir: PolicyDirection::Out.number(),
-            _pad: [0; 7],
+            _pad: [0; 3],
         };
         b.append_bytes(id.as_bytes());
         let frame = b.finish();
@@ -2458,7 +2547,7 @@ mod tests {
             sel,
             index: 0,
             dir: PolicyDirection::In.number(),
-            _pad: [0; 7],
+            _pad: [0; 3],
         };
         b.append_bytes(id.as_bytes());
         let frame = b.finish();

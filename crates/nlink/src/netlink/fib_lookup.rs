@@ -353,64 +353,76 @@ impl Connection<FibLookup> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "lookup_with_options"))]
     pub async fn lookup_with_options(&self, request: FibResultNl) -> Result<FibLookupResult> {
-        let seq = self.socket().next_seq();
-        let pid = self.socket().pid();
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring. Acquired
+        // BEFORE the with_timeout wrapper so the lock spans the
+        // entire timeout window.
+        let _guard = self.lock_request().await;
+        // Plan 208 Phase 1 — wrap in with_timeout + seq filter loop.
+        // Pre-0.19 this raw-recv'd a single frame with no seq check
+        // and no timeout. A kernel that dropped the response hung
+        // forever; a stale frame on the socket would have been
+        // mistaken for the response.
+        self.with_timeout(async move {
+            let seq = self.socket().next_seq();
+            let pid = self.socket().pid();
 
-        // Build request message
-        let mut buf = Vec::with_capacity(64);
+            let mut buf = Vec::with_capacity(64);
+            buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len
+            buf.extend_from_slice(&0u16.to_ne_bytes()); // nlmsg_type
+            buf.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+            buf.extend_from_slice(&seq.to_ne_bytes());
+            buf.extend_from_slice(&pid.to_ne_bytes());
+            buf.extend_from_slice(request.as_bytes());
 
-        // Netlink header (16 bytes)
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
-        buf.extend_from_slice(&0u16.to_ne_bytes()); // nlmsg_type (0 for FIB lookup)
-        buf.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes()); // nlmsg_flags
-        buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
-        buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
+            let len = buf.len() as u32;
+            buf[0..4].copy_from_slice(&len.to_ne_bytes());
 
-        // FIB result structure
-        buf.extend_from_slice(request.as_bytes());
+            self.socket().send(&buf).await?;
 
-        // Update length
-        let len = buf.len() as u32;
-        buf[0..4].copy_from_slice(&len.to_ne_bytes());
+            loop {
+                let data = self.socket().recv_msg().await?;
+                if data.len() < NLMSG_HDRLEN {
+                    return Err(Error::InvalidMessage("response too short".into()));
+                }
 
-        // Send request
-        self.socket().send(&buf).await?;
+                let resp_seq =
+                    u32::from_ne_bytes([data[8], data[9], data[10], data[11]]);
+                if resp_seq != seq {
+                    continue;
+                }
 
-        // Receive response
-        let data = self.socket().recv_msg().await?;
+                let nlmsg_type = u16::from_ne_bytes([data[4], data[5]]);
+                if nlmsg_type == NLMSG_ERROR && data.len() >= 20 {
+                    let errno =
+                        i32::from_ne_bytes([data[16], data[17], data[18], data[19]]);
+                    if errno != 0 {
+                        return Err(Error::from_errno(-errno));
+                    }
+                }
 
-        if data.len() < NLMSG_HDRLEN {
-            return Err(Error::InvalidMessage("response too short".into()));
-        }
+                if data.len() < NLMSG_HDRLEN + std::mem::size_of::<FibResultNl>() {
+                    return Err(Error::InvalidMessage(
+                        "response too short for FIB result".into(),
+                    ));
+                }
 
-        let nlmsg_type = u16::from_ne_bytes([data[4], data[5]]);
+                let (result, _) = FibResultNl::ref_from_prefix(&data[NLMSG_HDRLEN..])
+                    .map_err(|_| Error::InvalidMessage("failed to parse FIB result".into()))?;
 
-        if nlmsg_type == NLMSG_ERROR && data.len() >= 20 {
-            let errno = i32::from_ne_bytes([data[16], data[17], data[18], data[19]]);
-            if errno != 0 {
-                return Err(Error::from_errno(-errno));
+                return Ok(FibLookupResult {
+                    addr: result.addr(),
+                    table_id: result.tb_id,
+                    prefix_len: result.prefixlen,
+                    route_type: RouteType::from_u8(result.route_type),
+                    scope: RouteScope::from_u8(result.scope),
+                    nh_sel: result.nh_sel,
+                    error: result.err,
+                });
             }
-        }
-
-        // Parse the response
-        if data.len() < NLMSG_HDRLEN + std::mem::size_of::<FibResultNl>() {
-            return Err(Error::InvalidMessage(
-                "response too short for FIB result".into(),
-            ));
-        }
-
-        let (result, _) = FibResultNl::ref_from_prefix(&data[NLMSG_HDRLEN..])
-            .map_err(|_| Error::InvalidMessage("failed to parse FIB result".into()))?;
-
-        Ok(FibLookupResult {
-            addr: result.addr(),
-            table_id: result.tb_id,
-            prefix_len: result.prefixlen,
-            route_type: RouteType::from_u8(result.route_type),
-            scope: RouteScope::from_u8(result.scope),
-            nh_sel: result.nh_sel,
-            error: result.err,
         })
+        .await
     }
 }
 

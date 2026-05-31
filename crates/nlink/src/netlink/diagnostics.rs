@@ -1037,10 +1037,10 @@ impl Diagnostics {
     ///
     /// Returns a stream of issues detected from network events.
     pub async fn watch(&self) -> Result<IssueStream> {
-        let mut conn = Connection::<Route>::new()?;
+        let conn = Connection::<Route>::new()?;
         conn.subscribe_all()?;
         Ok(IssueStream {
-            events: conn.into_events(),
+            events: conn.into_events().await,
             config: self.config.clone(),
         })
     }

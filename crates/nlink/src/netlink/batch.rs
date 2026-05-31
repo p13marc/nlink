@@ -309,6 +309,12 @@ impl<'a> Batch<'a> {
     }
 
     async fn send_chunk(&self, ops: &[BatchOp]) -> Result<Vec<std::result::Result<(), Error>>> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring. Acquired
+        // BEFORE the with_timeout wrapper so the lock spans the
+        // entire timeout window.
+        let _guard = self.conn.lock_request().await;
         // Concatenate messages into a single buffer
         let total_size: usize = ops.iter().map(|o| o.msg.len()).sum();
         let mut buf = Vec::with_capacity(total_size);
@@ -319,37 +325,47 @@ impl<'a> Batch<'a> {
         // Single sendmsg()
         self.conn.socket().send(&buf).await?;
 
-        // Collect ACKs matched by sequence number
-        let mut results: Vec<Option<std::result::Result<(), Error>>> =
-            (0..ops.len()).map(|_| None).collect();
-        let mut remaining = ops.len();
+        // Collect ACKs matched by sequence number. The recv loop runs
+        // under the connection's configured timeout (Plan 171: 30s
+        // default) so a kernel that drops one of the ACKs for a
+        // batched op surfaces as `Error::Timeout` rather than an
+        // indefinite hang. Pre-0.19 this loop ran without any timeout
+        // wrap, so a chunk where any op silently lost its ACK would
+        // block forever.
+        self.conn
+            .with_timeout(async move {
+                let mut results: Vec<Option<std::result::Result<(), Error>>> =
+                    (0..ops.len()).map(|_| None).collect();
+                let mut remaining = ops.len();
 
-        while remaining > 0 {
-            let response = self.conn.socket().recv_msg().await?;
+                while remaining > 0 {
+                    let response = self.conn.socket().recv_msg().await?;
 
-            for result in MessageIter::new(&response) {
-                let (header, payload) = result?;
+                    for result in MessageIter::new(&response) {
+                        let (header, payload) = result?;
 
-                // Find which op this ACK belongs to
-                if let Some(idx) = ops.iter().position(|op| op.seq == header.nlmsg_seq) {
-                    if results[idx].is_some() {
-                        continue; // Already got this one
-                    }
+                        // Find which op this ACK belongs to (per-op seq match).
+                        if let Some(idx) = ops.iter().position(|op| op.seq == header.nlmsg_seq) {
+                            if results[idx].is_some() {
+                                continue; // Already got this one — kernel duplicate
+                            }
 
-                    if header.is_error() {
-                        let err = NlMsgError::from_bytes(payload)?;
-                        if err.is_ack() {
-                            results[idx] = Some(Ok(()));
-                        } else {
-                            results[idx] = Some(Err(err.into_error(payload)));
+                            if header.is_error() {
+                                let err = NlMsgError::from_bytes(payload)?;
+                                if err.is_ack() {
+                                    results[idx] = Some(Ok(()));
+                                } else {
+                                    results[idx] = Some(Err(err.into_error(payload)));
+                                }
+                                remaining -= 1;
+                            }
                         }
-                        remaining -= 1;
                     }
                 }
-            }
-        }
 
-        Ok(results.into_iter().map(|r| r.unwrap_or(Ok(()))).collect())
+                Ok(results.into_iter().map(|r| r.unwrap_or(Ok(()))).collect())
+            })
+            .await
     }
 }
 

@@ -135,10 +135,22 @@ impl MessageBuilder {
     }
 
     /// End a nested attribute started with `nest_start`.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if the nested attribute's total length exceeds
+    /// `u16::MAX` (kernel `nla_len` wire limit). Release builds saturate the
+    /// header to `u16::MAX` so the kernel rejects the malformed message rather
+    /// than misinterpreting a silently-wrapped length.
     pub fn nest_end(&mut self, token: NestToken) {
         let len = self.buf.len() - token.offset;
+        debug_assert!(
+            len <= u16::MAX as usize,
+            "MessageBuilder::nest_end: nested attribute is {len} bytes, exceeds \
+             u16::MAX wire limit; the kernel cannot represent this nla_len"
+        );
         // Update the length in the nested attribute header
-        let len_bytes = (len as u16).to_ne_bytes();
+        let len_bytes = (len.min(u16::MAX as usize) as u16).to_ne_bytes();
         self.buf[token.offset] = len_bytes[0];
         self.buf[token.offset + 1] = len_bytes[1];
         // Ensure alignment
@@ -208,5 +220,47 @@ mod tests {
         let msg = builder.finish();
 
         assert!(msg.len() > NLMSG_HDRLEN);
+    }
+
+    // ----- 0.19 regression: u16 nla_len overflow class -----
+    //
+    // Pre-0.19 the silent `(len as u16)` cast in `nest_end` and the
+    // matching cast in `NlAttr::new` would silently produce a corrupt
+    // nla_len when a payload crossed the 65535-byte wire limit. The
+    // kernel would either reject the message (best case) or interpret
+    // the wrapped length as a tiny attribute and skip past the real
+    // payload bytes (worst case). The debug_assert kills the bug class
+    // at test time; the saturating cast keeps release builds
+    // kernel-rejectable rather than silently miswritten.
+
+    #[test]
+    fn nest_end_just_under_u16_max_boundary_succeeds() {
+        // u16::MAX == 65_535. nla_len is u16, and alignment rounds up to
+        // 4-byte boundaries — so the largest representable aligned
+        // nested region is 65_532. Build exactly that.
+        // Layout: nest_start hdr (4) + inner attr hdr (4) + payload (P)
+        //         + alignment padding. We pick P so the inner is
+        //         already 4-aligned (no padding) and the nest total is
+        //         65_532.
+        let mut builder = MessageBuilder::new(16, NLM_F_REQUEST);
+        let nest = builder.nest_start(1);
+        // 4 (nest hdr) + 4 (inner hdr) + 65_524 (payload) = 65_532
+        let payload = vec![0xabu8; 65_524];
+        builder.append_attr(2, &payload);
+        builder.nest_end(nest); // must NOT panic — nested len = 65_532 ≤ u16::MAX
+        let msg = builder.finish();
+        assert!(msg.len() > NLMSG_HDRLEN + 65_000);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "exceeds u16::MAX")]
+    fn nest_end_over_u16_max_panics_in_debug() {
+        let mut builder = MessageBuilder::new(16, NLM_F_REQUEST);
+        let nest = builder.nest_start(1);
+        // Force the nested region to exceed u16::MAX.
+        let payload = vec![0u8; (u16::MAX as usize) + 8];
+        builder.append_attr(2, &payload);
+        builder.nest_end(nest);
     }
 }

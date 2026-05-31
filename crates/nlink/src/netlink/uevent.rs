@@ -173,7 +173,7 @@ impl Connection<KobjectUevent> {
     /// let conn = Connection::<KobjectUevent>::new()?;
     /// ```
     pub fn new() -> Result<Self> {
-        let mut socket = NetlinkSocket::new(KobjectUevent::PROTOCOL)?;
+        let socket = NetlinkSocket::new(KobjectUevent::PROTOCOL)?;
         socket.add_membership(UEVENT_GROUP)?;
         Ok(Self::from_parts(socket, KobjectUevent))
     }

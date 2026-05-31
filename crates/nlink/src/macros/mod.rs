@@ -212,6 +212,12 @@ pub mod __rt {
     pub fn emit_i32_attr(b: &mut MessageBuilder, attr_type: u16, v: i32) {
         b.append_attr_u32(attr_type, v as u32);
     }
+    /// Plan 206 — emit a signed 64-bit attribute (kernel `s64`).
+    /// Used by DPLL `phase_offset` (attoseconds × 1000, can
+    /// exceed `i32::MAX` easily).
+    pub fn emit_i64_attr(b: &mut MessageBuilder, attr_type: u16, v: i64) {
+        b.append_attr_u64(attr_type, v as u64);
+    }
     pub fn emit_str_attr(b: &mut MessageBuilder, attr_type: u16, v: &str) {
         b.append_attr_str(attr_type, v);
     }
@@ -291,6 +297,26 @@ pub mod __rt {
         Ok(i32::from_ne_bytes([
             payload[0], payload[1], payload[2], payload[3],
         ]))
+    }
+    /// Plan 206 — parse a signed 64-bit attribute (kernel `s64`).
+    /// Accepts payloads >= 8 bytes per CLAUDE.md `## Parser robustness`
+    /// rule 1 (kernel may grow the attribute in future versions; we
+    /// take the prefix and ignore trailing bytes). Pre-0.19 DPLL's
+    /// `phase_offset` was incorrectly typed as `i32` and routed
+    /// through `parse_i32_attr` — the high 4 bytes of the kernel's
+    /// 8-byte payload were silently dropped on LE platforms, yielding
+    /// nonsense readings for any value > ~2.147 seconds in
+    /// attoseconds × 1000 (essentially always for real PTP/SyncE).
+    pub fn parse_i64_attr(payload: &[u8]) -> Result<i64> {
+        if payload.len() < 8 {
+            return Err(Error::Truncated {
+                expected: 8,
+                actual: payload.len(),
+            });
+        }
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&payload[..8]);
+        Ok(i64::from_ne_bytes(a))
     }
     pub fn parse_str_attr(payload: &[u8]) -> Result<String> {
         // Kernel strings are NUL-terminated; strip and decode

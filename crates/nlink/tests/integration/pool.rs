@@ -131,6 +131,50 @@ async fn pool_invalidate_drops_connection_and_pool_keeps_working() -> nlink::Res
     Ok(())
 }
 
+/// 0.19 Finding C — `PooledConnection::invalidate` schedules an
+/// async replenish so the pool's effective capacity is restored
+/// instead of decaying with each invalidate. Pre-fix, every
+/// invalidate permanently shrank the pool by one connection;
+/// after N invalidates a pool of size N would deadlock on every
+/// subsequent `acquire()`.
+///
+/// Test: build a pool of size 2; invalidate ALL connections in
+/// rapid succession; assert subsequent acquires still succeed
+/// within a generous timeout (the replenish runs on a tokio
+/// spawn and takes a few ms per Connection construction).
+#[tokio::test]
+async fn pool_invalidate_replenishes_capacity() -> nlink::Result<()> {
+    require_root!();
+
+    let ns = TestNamespace::new("pool-replenish")?;
+    let pool = ConnectionPoolBuilder::<Route>::new()
+        .namespace(ns.name())
+        .size(2)
+        .acquire_timeout(Duration::from_secs(5))
+        .build()
+        .await?;
+
+    // Drain + invalidate both connections.
+    let g1 = pool.acquire().await?;
+    let g2 = pool.acquire().await?;
+    g1.invalidate();
+    g2.invalidate();
+
+    // Allow the spawn'd replenish tasks to run. 200ms is plenty
+    // for two RTNETLINK Connection::new() calls + a setns each.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Pool capacity should be back to 2. Acquire both freshly.
+    let g3 = pool.acquire().await?;
+    let g4 = pool.acquire().await?;
+
+    // Both work.
+    let _ = g3.get_links().await?;
+    let _ = g4.get_links().await?;
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn pool_for_namespace_isolates_per_netns() -> nlink::Result<()> {
     require_root!();

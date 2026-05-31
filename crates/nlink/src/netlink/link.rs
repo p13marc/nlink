@@ -647,6 +647,33 @@ pub struct VlanFlags {
     pub mask: u32,
 }
 
+/// VLAN tagging protocol (`IFLA_VLAN_PROTOCOL` wire value).
+///
+/// 802.1Q (Dot1q) is the kernel default; 802.1ad (Dot1ad) is
+/// stacked VLAN encap (Q-in-Q). Plan 190 §2.2.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VlanProtocol {
+    /// 802.1Q (single-tag).
+    Dot1q,
+    /// 802.1ad (Q-in-Q stacked).
+    Dot1ad,
+}
+
+impl VlanProtocol {
+    /// Wire-format value used in `IFLA_VLAN_PROTOCOL`.
+    /// Big-endian (network byte order) on the wire — callers
+    /// emitting raw attributes must `to_be()` this value.
+    pub fn as_u16(self) -> u16 {
+        match self {
+            Self::Dot1q => 0x8100,
+            Self::Dot1ad => 0x88a8,
+        }
+    }
+}
+
 impl VlanLink {
     /// Create a new VLAN interface configuration.
     ///
@@ -669,7 +696,12 @@ impl VlanLink {
 
     /// Create a new VLAN interface with parent specified by index.
     ///
-    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    /// Takes a kernel ifindex directly — useful when the caller
+    /// already has the index (e.g. from `get_link_by_name` on a
+    /// matching `Connection<Route>`). Both the name- and index-
+    /// taking constructors are namespace-correct at the netlink
+    /// layer; the difference is purely ergonomic. See the
+    /// `LinkBuilder`-level "InterfaceRef trade-offs" section.
     ///
     /// # Arguments
     ///
@@ -703,6 +735,15 @@ impl VlanLink {
     /// Set to 802.1ad (QinQ) protocol instead of 802.1Q.
     pub fn qinq(mut self) -> Self {
         self.protocol = Some(0x88a8);
+        self
+    }
+
+    /// Set the VLAN tagging protocol via the typed
+    /// [`VlanProtocol`] enum. Defaults to 802.1Q when unset.
+    /// Use [`VlanProtocol::Dot1ad`] for Q-in-Q stacked VLAN
+    /// encap. Plan 190 §2.2.
+    pub fn protocol(mut self, p: VlanProtocol) -> Self {
+        self.protocol = Some(p.as_u16());
         self
     }
 
@@ -958,7 +999,12 @@ impl VxlanLink {
 
     /// Set the underlying device by interface index.
     ///
-    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    /// Takes a kernel ifindex directly — useful when the caller
+    /// already has the index (e.g. from `get_link_by_name` on a
+    /// matching `Connection<Route>`). Both the name- and index-
+    /// taking constructors are namespace-correct at the netlink
+    /// layer; the difference is purely ergonomic. See the
+    /// `LinkBuilder`-level "InterfaceRef trade-offs" section.
     pub fn dev_index(mut self, index: u32) -> Self {
         self.dev = Some(InterfaceRef::Index(index));
         self
@@ -1188,7 +1234,12 @@ impl MacvlanLink {
 
     /// Create a new macvlan interface with parent specified by index.
     ///
-    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    /// Takes a kernel ifindex directly — useful when the caller
+    /// already has the index (e.g. from `get_link_by_name` on a
+    /// matching `Connection<Route>`). Both the name- and index-
+    /// taking constructors are namespace-correct at the netlink
+    /// layer; the difference is purely ergonomic. See the
+    /// `LinkBuilder`-level "InterfaceRef trade-offs" section.
     pub fn with_parent_index(name: impl Into<String>, parent_index: u32) -> Self {
         Self {
             name: name.into(),
@@ -1332,7 +1383,12 @@ impl IpvlanLink {
 
     /// Create a new ipvlan interface with parent specified by index.
     ///
-    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    /// Takes a kernel ifindex directly — useful when the caller
+    /// already has the index (e.g. from `get_link_by_name` on a
+    /// matching `Connection<Route>`). Both the name- and index-
+    /// taking constructors are namespace-correct at the netlink
+    /// layer; the difference is purely ergonomic. See the
+    /// `LinkBuilder`-level "InterfaceRef trade-offs" section.
     pub fn with_parent_index(name: impl Into<String>, parent_index: u32) -> Self {
         Self {
             name: name.into(),
@@ -1502,7 +1558,12 @@ impl MacvtapLink {
 
     /// Create a new macvtap interface with parent specified by index.
     ///
-    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    /// Takes a kernel ifindex directly — useful when the caller
+    /// already has the index (e.g. from `get_link_by_name` on a
+    /// matching `Connection<Route>`). Both the name- and index-
+    /// taking constructors are namespace-correct at the netlink
+    /// layer; the difference is purely ergonomic. See the
+    /// `LinkBuilder`-level "InterfaceRef trade-offs" section.
     pub fn with_parent_index(name: impl Into<String>, parent_index: u32) -> Self {
         Self {
             name: name.into(),
@@ -2027,6 +2088,8 @@ pub struct NetkitLink {
 }
 
 /// Netkit operating mode.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NetkitMode {
@@ -2037,6 +2100,8 @@ pub enum NetkitMode {
 }
 
 /// Netkit default policy.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NetkitPolicy {
@@ -2047,6 +2112,8 @@ pub enum NetkitPolicy {
 }
 
 /// Netkit scrub mode.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NetkitScrub {
@@ -2276,7 +2343,12 @@ impl VirtWifiLink {
 
     /// Create a new virtual WiFi interface with underlying link specified by index.
     ///
-    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    /// Takes a kernel ifindex directly — useful when the caller
+    /// already has the index (e.g. from `get_link_by_name` on a
+    /// matching `Connection<Route>`). Both the name- and index-
+    /// taking constructors are namespace-correct at the netlink
+    /// layer; the difference is purely ergonomic. See the
+    /// `LinkBuilder`-level "InterfaceRef trade-offs" section.
     pub fn with_link_index(name: impl Into<String>, link_index: u32) -> Self {
         Self {
             name: name.into(),
@@ -2403,7 +2475,12 @@ impl VtiLink {
 
     /// Set the underlying link device by index.
     ///
-    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    /// Takes a kernel ifindex directly — useful when the caller
+    /// already has the index (e.g. from `get_link_by_name` on a
+    /// matching `Connection<Route>`). Both the name- and index-
+    /// taking constructors are namespace-correct at the netlink
+    /// layer; the difference is purely ergonomic. See the
+    /// `LinkBuilder`-level "InterfaceRef trade-offs" section.
     pub fn link_index(mut self, index: u32) -> Self {
         self.link = Some(InterfaceRef::Index(index));
         self
@@ -2533,7 +2610,12 @@ impl Vti6Link {
 
     /// Set the underlying link device by index.
     ///
-    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    /// Takes a kernel ifindex directly — useful when the caller
+    /// already has the index (e.g. from `get_link_by_name` on a
+    /// matching `Connection<Route>`). Both the name- and index-
+    /// taking constructors are namespace-correct at the netlink
+    /// layer; the difference is purely ergonomic. See the
+    /// `LinkBuilder`-level "InterfaceRef trade-offs" section.
     pub fn link_index(mut self, index: u32) -> Self {
         self.link = Some(InterfaceRef::Index(index));
         self
@@ -2730,7 +2812,12 @@ impl Ip6GreLink {
 
     /// Set the underlying link device by index.
     ///
-    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    /// Takes a kernel ifindex directly — useful when the caller
+    /// already has the index (e.g. from `get_link_by_name` on a
+    /// matching `Connection<Route>`). Both the name- and index-
+    /// taking constructors are namespace-correct at the netlink
+    /// layer; the difference is purely ergonomic. See the
+    /// `LinkBuilder`-level "InterfaceRef trade-offs" section.
     pub fn link_index(mut self, index: u32) -> Self {
         self.link = Some(InterfaceRef::Index(index));
         self
@@ -2874,7 +2961,12 @@ impl Ip6GretapLink {
 
     /// Set the underlying link device by index.
     ///
-    /// This is the namespace-safe variant that avoids reading from /sys/class/net/.
+    /// Takes a kernel ifindex directly — useful when the caller
+    /// already has the index (e.g. from `get_link_by_name` on a
+    /// matching `Connection<Route>`). Both the name- and index-
+    /// taking constructors are namespace-correct at the netlink
+    /// layer; the difference is purely ergonomic. See the
+    /// `LinkBuilder`-level "InterfaceRef trade-offs" section.
     pub fn link_index(mut self, index: u32) -> Self {
         self.link = Some(InterfaceRef::Index(index));
         self
@@ -3011,6 +3103,8 @@ impl TryFrom<u8> for XmitHashPolicy {
 }
 
 /// LACP rate for 802.3ad mode.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 #[non_exhaustive]
@@ -3067,6 +3161,8 @@ pub enum ArpValidate {
 }
 
 /// Ad (802.3ad) selection logic.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 #[non_exhaustive]
@@ -3590,6 +3686,67 @@ impl LinkConfig for VrfLink {
         builder.nest_end(data);
 
         builder.nest_end(linkinfo);
+    }
+}
+
+// ============================================================================
+// OVPN Link (kernel 6.16+)
+// ============================================================================
+
+/// Configuration for an OpenVPN data-channel-offload (DCO)
+/// link interface.
+///
+/// Kernel 6.16+ ships the `ovpn` link kind for in-kernel
+/// data-channel offload. nlink's [`OvpnLink`] covers the
+/// link half — creating the interface so it appears in
+/// dumps and inventory tools — while peer / cipher
+/// configuration lives in the GENL `ovpn` family (deferred
+/// to Plan 197 in 0.20).
+///
+/// Plan 190 §2.3b.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::link::OvpnLink;
+///
+/// let link = OvpnLink::new("ovpn0");
+/// conn.add_link(link).await?;
+/// ```
+#[derive(Debug, Clone)]
+#[must_use = "builders do nothing unless used"]
+pub struct OvpnLink {
+    name: String,
+    mtu: Option<u32>,
+}
+
+impl OvpnLink {
+    /// Create a new ovpn link configuration. Kernel 6.16+.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            mtu: None,
+        }
+    }
+
+    /// Set the MTU.
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
+}
+
+impl LinkConfig for OvpnLink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> &str {
+        "ovpn"
+    }
+
+    fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
+        write_simple_link(builder, &self.name, "ovpn", self.mtu, None);
     }
 }
 

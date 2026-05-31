@@ -3,7 +3,7 @@
 //! This example demonstrates how to use StatsTracker to calculate
 //! bandwidth usage in real-time.
 //!
-//! Run with: cargo run -p rip --example stats
+//! Run with: cargo run -p nlink --example route_stats
 
 use std::time::Duration;
 

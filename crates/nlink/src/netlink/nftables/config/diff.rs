@@ -149,6 +149,7 @@ fn lower_to_expression_bytes(rule: &super::super::types::Rule) -> Vec<u8> {
 }
 
 /// Kernel-assigned rule handle (`NFTA_RULE_HANDLE`).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RuleHandle(pub u64);
 
@@ -158,8 +159,11 @@ pub struct RuleHandle(pub u64);
 ///
 /// `is_empty()` returns true when declared and current already
 /// agree (idempotent reapply).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
+#[must_use = "Diffs do nothing unless passed to `.apply()` or stringified via `Display`"]
 pub struct NftablesDiff {
     /// Tables to create.
     pub tables_to_add: Vec<DeclaredTable>,
@@ -223,6 +227,15 @@ impl NftablesDiff {
 
     /// Render a one-line-per-change human summary. Useful for
     /// `tracing::info!` or CLI output.
+    ///
+    /// Equivalent to `format!("{self}")` — Plan 183 (0.18) made
+    /// the [`std::fmt::Display`] impl share the same renderer.
+    /// Prefer the `Display` form (`diff.to_string()` /
+    /// `format!("{diff}")`) for new code.
+    #[deprecated(
+        since = "0.19.0",
+        note = "use `Display` via `format!(\"{}\")` or `diff.to_string()` instead — Plan 188 §2.6"
+    )]
     pub fn summary(&self) -> String {
         let mut lines = Vec::new();
         for t in &self.tables_to_add {
@@ -285,6 +298,10 @@ impl NftablesDiff {
 /// `println!("{diff}")` directly. Plan 183.
 impl std::fmt::Display for NftablesDiff {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Plan 188 §2.6 — `summary()` is deprecated in 0.19 in
+        // favor of this Display impl. Internal delegation is
+        // allowed; users are on the Display path.
+        #[allow(deprecated)]
         f.write_str(&self.summary())
     }
 }
@@ -622,6 +639,7 @@ impl NftablesConfig {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // Plan 188 §2.6 — test the deprecated `summary()` shape during its window
 mod tests {
     use super::*;
 

@@ -310,14 +310,41 @@ impl NetlinkSocket {
     }
 
     /// Subscribe to multicast groups.
-    pub fn add_membership(&mut self, group: u32) -> Result<()> {
-        self.fd.get_mut().add_membership(group)?;
-        Ok(())
+    ///
+    /// Takes `&self` (changed in 0.19, Finding A). The underlying
+    /// syscall is `setsockopt(SOL_NETLINK, NETLINK_ADD_MEMBERSHIP)`
+    /// which is fd-level — no shared state to mutate. Matches the
+    /// pattern set by [`Self::set_strict_checking`] /
+    /// [`Self::set_ext_ack`]. The `&mut` requirement was a stale
+    /// artefact of routing through `AsyncFd::get_mut`; it blocked
+    /// subscribe-through-`ConnectionPool` and concurrent
+    /// subscribe-from-different-tasks, both legitimate uses.
+    pub fn add_membership(&self, group: u32) -> Result<()> {
+        Self::set_membership_sockopt(self.as_raw_fd(), libc::NETLINK_ADD_MEMBERSHIP, group)
     }
 
-    /// Unsubscribe from multicast groups.
-    pub fn drop_membership(&mut self, group: u32) -> Result<()> {
-        self.fd.get_mut().drop_membership(group)?;
+    /// Unsubscribe from multicast groups. See [`Self::add_membership`].
+    pub fn drop_membership(&self, group: u32) -> Result<()> {
+        Self::set_membership_sockopt(self.as_raw_fd(), libc::NETLINK_DROP_MEMBERSHIP, group)
+    }
+
+    /// Internal helper: `setsockopt(SOL_NETLINK, optname, group)`.
+    fn set_membership_sockopt(fd: RawFd, optname: libc::c_int, group: u32) -> Result<()> {
+        let val: libc::c_int = group as libc::c_int;
+        // SAFETY: setsockopt with a valid fd + SOL_NETLINK level +
+        // pointer to a stack-allocated int + correct size.
+        let rc = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_NETLINK,
+                optname,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc < 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
         Ok(())
     }
 
@@ -499,7 +526,7 @@ impl NetlinkSocket {
     ///
     /// Pushes each successfully-received frame as an owned `Vec<u8>`
     /// onto `out` (not cleared). Returns the count received in
-    /// this call. `max` is clamped to [`NL_BATCH_SIZE`].
+    /// this call. `max` is clamped to `NL_BATCH_SIZE` (32 frames).
     ///
     /// On `EAGAIN`/`EWOULDBLOCK` returns `Ok(0)` after the
     /// `AsyncFd` re-arms — caller can poll again or back off.
@@ -602,7 +629,7 @@ impl NetlinkSocket {
 
     /// Send up to `msgs.len()` netlink request frames in one
     /// `sendmmsg(2)` syscall. `msgs.len()` clamped to
-    /// [`NL_BATCH_SIZE`].
+    /// `NL_BATCH_SIZE` (32 frames).
     ///
     /// Returns the count successfully sent. Partial sends are
     /// possible — per `sendmmsg(2)`, if slot K errors the call

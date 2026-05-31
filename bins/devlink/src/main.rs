@@ -150,10 +150,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     // Monitor needs a mutable connection for subscribe()
     if matches!(cli.command, Command::Monitor) {
-        let mut conn = Connection::<Devlink>::new_async().await?;
+        let conn = Connection::<Devlink>::new_async().await?;
         conn.subscribe()?;
         eprintln!("Monitoring devlink events (Ctrl+C to stop)...");
-        let mut events = conn.events();
+        let mut events = conn.events().await;
         while let Some(result) = events.next().await {
             match result {
                 Ok(event) => println!("{event:?}"),

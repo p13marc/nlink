@@ -4,34 +4,1297 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-05-31
+
+### Breaking changes
+
+- **`ApplyOptions::with_purge` removed; `ConfigDiff::*_to_remove`
+  collections removed** (Plan 205 Option B). The feature was
+  silently non-functional in 0.18 — the diff phase never
+  populated the `*_to_remove` collections, so the apply path's
+  `if options.purge { ... }` branches were dead code that lied
+  about what they did. Pre-0.19 callers passing
+  `.with_purge(true)` thought kernel state was being reconciled;
+  it wasn't. Rather than continue shipping the silent lie, the
+  knob is now gone. Migration: for the "remove undeclared
+  resources" use case, use the imperative API
+  (`Connection::del_link` / `del_address` / `del_route` /
+  `del_qdisc`). A correctly-wired purge with a kernel-managed-
+  resource exclusion list (IPv6 link-local, multicast, `lo`,
+  link-local prefix routes) is queued for 0.20.
+
+- **`DpllPin::phase_offset` field type: `Option<i32>` →
+  `Option<i64>`** (Plan 206 H1). The kernel field is declared
+  `s64` per `Documentation/netlink/specs/dpll.yaml` (atto-
+  seconds × 1000). Pre-0.19 nlink routed the attribute through
+  `parse_i32_attr` which reads only the low 4 bytes of the 8-
+  byte payload, silently truncating high bits on LE platforms.
+  Telco/PTP/SyncE values routinely exceed `i32::MAX` (a 1 ns
+  offset = 1e9 in those units), producing nonsense readings.
+  Now correctly typed as `i64` and parsed via a new
+  `__rt::parse_i64_attr` / `emit_i64_attr` helper pair; the
+  `GenlMessage` derive recognizes `i64` field types. Migration:
+  callers reading `.phase_offset` explicitly need to update the
+  type annotation; `.phase_offset_ns()` accessor unchanged
+  (still `Option<i64>`). 1 new regression test
+  (`pin_phase_offset_round_trips_value_above_i32_max`) pins
+  the high-bit round-trip.
+
+- **`Hook::Ingress` split into `Hook::NetdevIngress` and
+  `Hook::InetIngress`; `Hook::NetdevEgress` added** (Plan 211 M1).
+  Pre-0.19 `Hook::Ingress` always encoded `0`, which was correct
+  only for `Family::Netdev` / `Family::Bridge`. On `Family::Inet`,
+  ingress is `NF_INET_INGRESS = 5`, so the old encoding silently
+  installed the chain on `Prerouting` (also hook 0) — every
+  `Family::Inet` ingress chain was attached to the wrong hook.
+  Migration: pick the variant matching the chain family.
+  `Hook::is_valid_for_family(Family)` validates at build time.
+  Verified against `include/uapi/linux/netfilter.h` and
+  `include/uapi/linux/netfilter_netdev.h`. New `nft_hook` module
+  in `sys_sizeof` pins the kernel hook numbers.
+
+- **nftables verdict constants `NFT_JUMP` / `NFT_GOTO` corrected
+  to match kernel UAPI** (Plan 204 C1). Pre-0.19 nlink shipped
+  `NFT_JUMP = -2` and `NFT_GOTO = -3`. The kernel's
+  `enum nft_verdicts` defines them as `-3` and `-4` respectively;
+  `-2` is `NFT_BREAK` (terminate rule evaluation). Code building
+  `Verdict::Jump(chain)` previously wrote `-2` on the wire, which
+  the kernel interpreted as "terminate", silently breaking every
+  subroutine rule. The new `NFT_BREAK = -2` constant is added for
+  completeness. Source-level no-op for users of `Verdict::Jump` /
+  `Verdict::Goto`; runtime behavior changes from silently broken
+  to kernel-correct. Verified against kernel
+  `include/uapi/linux/netfilter/nf_tables.h`.
+
 ### Added
 
-- **`Rule::dnat_v6(Ipv6Addr, Option<u16>)`** — destination NAT to an
-  IPv6 address on an `ip6` (or `inet`) NAT chain. The IPv4-only
-  `Rule::dnat` could not express the cross-node join path's ip6 DNAT.
-  Loads the 16-byte address into `R0` (and the optional port into
-  `R1`), emitting `Family::Ip6` in the NAT expr to match the address
-  family (not the chain's `Family::Inet`).
-- **`Rule::snat_v6(Ipv6Addr, Option<u16>)`** — source NAT to an IPv6
-  address, the counterpart to `dnat_v6`. Same wire shape (16-byte `R0`
-  load, optional `R1` port, `Family::Ip6`); keeps the NAT helper surface
-  symmetric across direction and address family.
+- **`nlink::netlink::sys_sizeof` module + 9 wire-format byte-exact
+  regression tests** (Plan 213). Hosts the kernel UAPI struct
+  sizes (`XfrmUserpolicyInfo` = 168 bytes, `XfrmUserpolicyId` =
+  64 bytes, etc.) and the nft verdict constants, with a test
+  per type asserting `size_of::<NlinkType>() == KERNEL_SIZE`.
+  Catches the Plan 204 class of silent wire-format defects at
+  `cargo test` time; future struct field changes that drift from
+  the kernel layout fail the test immediately. The test pass
+  surfaced an additional latent bug: `XfrmUserTmpl` was 62
+  bytes (kernel: 64) — fixed by adding a 2-byte explicit pad
+  between `family` and `saddr` to match kernel natural
+  alignment.
 
-### Changed
+### Fixed
 
-- **`NatExpr.addr` changed type from `Option<Ipv4Addr>` to the new
-  `NatAddr` enum** (`None` / `V4(Ipv4Addr)` / `Reg`). Previously the
-  encoder emitted `NFTA_NAT_REG_ADDR_MIN` only when `addr.is_some()`, so
-  a v6 NAT (16-byte address in `R0`, no `Ipv4Addr` to record) silently
-  dropped the address register. `NatAddr` models "register in use" and
-  "the IPv4 address to record" as one value, so the illegal
-  `(addr recorded, register unused)` state is unrepresentable: `Reg`
-  covers v6 (and any non-v4 register load), `V4` covers v4, `None`
-  covers port-only NAT. The encoder keys on `addr.reg_in_use()`.
-  **Breaking** for code constructing `NatExpr` as a struct literal or
-  matching on `addr`: use the `NatAddr` variants. The
-  `NatExpr::{snat,dnat}` + `.addr()` and `Rule::{snat,dnat,snat_v6,
-  dnat_v6}` builders are unaffected.
+- **`NatExpr.addr` re-typed from `Option<Ipv4Addr>` to the
+  `NatAddr` enum (PR #6, @avionix-g)** — `NatAddr` has three
+  variants: `None` (port-only NAT), `V4(Ipv4Addr)` (IPv4
+  address recorded), and `Reg` (a non-v4 address — e.g. v6 —
+  loaded into `R0` with no `Ipv4Addr` to record). Before this
+  change, the encoder emitted `NFTA_NAT_REG_ADDR_MIN` only
+  when `addr.is_some()`, so a v6 NAT (16-byte address in
+  `R0`, no `Ipv4Addr` to carry) silently dropped the address
+  register. The enum models "register in use" and "the IPv4
+  value to record" as one value so the illegal
+  `(addr recorded, register unused)` state is
+  unrepresentable. Breaking for code constructing `NatExpr`
+  as a struct literal or matching on `addr`. The
+  `NatExpr::{snat,dnat}` + `.addr()` and
+  `Rule::{snat,dnat,snat_v6,dnat_v6}` builders are
+  unaffected. v4 wire output is byte-identical.
+
+- **`ApplyOptions` is now `#[non_exhaustive]` + builder-shaped
+  (Plan 188 §2.2)** — struct-literal construction no longer
+  compiles. Build via `with_*` setters instead:
+  ```rust
+  // Before
+  ApplyOptions { dry_run: true, ..Default::default() }
+  // 0.19+
+  ApplyOptions::default().with_dry_run(true)
+  ```
+  Mirrors `ReconcileOptions` (Plan 163). The lockdown enables
+  growing the option set in future minors without semver
+  breakage.
+
+- **`Error::from_errno*` factories now normalize via `.abs()`
+  (Plan 187 §2.1)** — passing positive or negative errno
+  produces the same stored POSIX value. Before 0.19 the
+  factory silently negated the input — `from_errno_ext_ack(1, ..)`
+  produced stored `-1`, surfaced as a footgun in nlink-lab's
+  unit tests. The fix is purely additive for the kernel-side
+  call sites that always passed the kernel's signed-negative
+  errno; only direct test/mock callers asserting `Some(-N)`
+  break — update to `Some(N)`.
+
+### Added
+
+- **`Error::DumpInterrupted` variant + `is_dump_interrupted()`
+  predicate (post-cycle bug-hunt)** — the kernel sets the
+  `NLM_F_DUMP_INTR` flag on a dump message when the snapshot
+  iterator's underlying data structure was mutated between
+  frames, signaling that the returned set is inconsistent. Pre-
+  0.19 nlink silently accepted the partial dump; the user had no
+  way to know the data was stale. Now `Connection::send_dump`
+  (and every typed dump wrapper that goes through it —
+  `get_links`, `get_routes`, `get_neighbors`, `get_addrs`,
+  `get_rules`, `get_qdiscs`, `get_classes`, `get_filters`,
+  `get_nexthops`, `get_actions`) returns
+  `Error::DumpInterrupted`. Callers can retry with their own
+  bound — Cilium uses 30 attempts, vishvananda/netlink uses 24,
+  `iproute2` warns once and accepts the partial. The new
+  `NlMsgHdr::is_dump_interrupted()` accessor also lets stream
+  consumers detect interruption on individual frames.
+  References: kernel docs/userspace-api/netlink/intro.html,
+  `vishvananda/netlink#1163`, `pyroute2#874`, Cilium safenetlink.
+
+### Fixed
+
+- **`XfrmUserpolicyInfo` body was 4 bytes shorter than kernel
+  expected — `add_sp` rejected with EINVAL on every kernel
+  version** (Plan 204 C2). The kernel's
+  `struct xfrm_userpolicy_info` uses natural alignment (not
+  packed); after the four trailing `__u8` fields the struct
+  pads to the next u64 boundary for a total of 168 bytes.
+  nlink used `#[repr(C, packed)]` with no trailing pad,
+  emitting 164 bytes. Kernel `xfrm_add_policy()` calls
+  `nlmsg_parse_deprecated(nlh, sizeof(*p), ...)` requiring
+  `nlmsg_len >= NLMSG_HDRLEN + 168`. The `add_sp` API has been
+  silently non-functional since the XFRM family shipped. Fix
+  adds explicit `_pad: [u8; 4]` and a `sys_sizeof` regression
+  test.
+
+- **`XfrmUserpolicyId` body was 4 bytes longer than kernel
+  expected — `del_sp` / `get_sp` brittle on strict-checking
+  kernels** (Plan 204 C3). nlink's `_pad: [u8; 7]` produced a
+  68-byte body; the kernel struct is 64 bytes (selector + u32
+  index + u8 dir + 3 pad). On lenient kernels the extra 4
+  bytes were parsed as a malformed trailing nlattr and silently
+  skipped. On strict-checking kernels (≥5.0 with
+  `NETLINK_GET_STRICT_CHK`, enableable via Plan 155.2), the
+  kernel rejected with EINVAL. Fix trims `_pad` to `[u8; 3]`.
+
+- **`XfrmUserTmpl` was 62 bytes (kernel: 64) — discovered by
+  Plan 213 sizeof test** (Plan 204 hidden sibling of C2/C3).
+  The kernel struct uses natural alignment (not packed); the
+  2-byte gap between `family` (u16 at offset 24) and `saddr`
+  (xfrm_address_t, align 4) was missing from nlink's packed
+  representation. Fix adds explicit `_pad_saddr: [u8; 2]`
+  between the two fields.
+
+- **Devlink multicast subscription was broken — group name
+  mismatch** (Plan 204 C4). nlink looked up `"devlink"` in the
+  kernel's CTRL_ATTR_MCAST_GROUPS table; the kernel registers
+  the group as `"config"` (per `DEVLINK_GENL_MCGRP_CONFIG_NAME`
+  in `include/uapi/linux/devlink.h`). Every
+  `Connection::<Devlink>::subscribe()` call returned
+  `Error::FamilyNotFound`. Fix changes the constant to
+  `"config"` plus the `sys_sizeof` regression test.
+
+- **`Error::is_not_found` now matches `Error::Io(ENOENT)` and
+  `Error::Io(ENODEV)`** (Plan 212 M9). Brings the predicate
+  into symmetry with `is_busy`, `is_permission_denied`,
+  `is_already_exists` which Plan 187 §2.5 already routed
+  through `errno()`. Code calling `e.is_not_found()` on an
+  `Error::Io` carrying ENOENT/ENODEV now correctly returns
+  `true`. 3 new regression tests.
+
+- **`Connection::send_ack_inner` surfaces explicit error on
+  unexpected matching-seq data response** (Plan 212 M16) instead
+  of silently looping for the next frame (which would hit the
+  30s timeout). Defense-in-depth against kernel behavior
+  divergence.
+
+- **`Connection::cache` RwLock poison handling** (Plan 212
+  M17): previously `read/write().unwrap()` would panic on
+  poisoning; now recovers via `unwrap_or_else(into_inner)`.
+  Hardens against future panics inside the locked region
+  (currently unreachable; defense-in-depth).
+
+- **WireGuard `PublicKey` accepts unpadded base64** (Plan 215
+  M12). Pre-0.19 the decoder required exactly 44 chars + the
+  trailing `=`; some YAML/JSON serializers strip optional
+  base64 padding (RFC 4648 §3.2). Now both 43-char and 44-char
+  forms decode correctly. 1 new regression test.
+
+- **nl80211 SSID parser walks the IE chain** (Plan 215 M13)
+  instead of assuming element-id 0 is the first IE.
+  Vendor-specific IEs (id=221) sometimes precede the SSID;
+  pre-fix those BSSes returned `None`. New `parse_ssid_from_ies`
+  helper + 6 unit tests covering well-formed, vendor-prepended,
+  missing, truncated, non-UTF-8, and empty IE chains.
+
+- **`bins/nft` rejects unknown `--type` and `--policy` tokens**
+  (Plan 209 H5 — security UX). Pre-0.19 a typo on `--policy`
+  silently fell through to ACCEPT (`--policy drpo` for `drop`
+  produced an accept-everything firewall). Same hazard for
+  `--type` chain type. Now both error explicitly:
+  `unknown policy `drpo` — expected `drop` or `accept``.
+
+- **`bins/wg set --private-key /path` propagates file read
+  errors** (Plan 209 H6 — security UX). Pre-0.19 a missing
+  private-key file or base64-decode failure silently dropped the
+  key set; `wg set wg0 --private-key /typo` exited 0 and the
+  user believed the new key was installed. Now the read error
+  surfaces immediately via `?`.
+
+- **`bins/tc action` parses TC action attributes via zerocopy
+  `ref_from_prefix` instead of raw-pointer casts** (Plan 209
+  H11). Pre-0.19 the code did
+  `unsafe { &*(attr_data.as_ptr() as *const TcGact) }` which is
+  UB on strict-alignment architectures (some ARM, MIPS) — `Vec<u8>`'s
+  data pointer has no alignment guarantee. Now uses zerocopy's
+  alignment-checked parser, eliminating the UB. Three sites
+  updated (`gact`, `mirred`, `police` parameter blocks, both
+  JSON and text formatters).
+
+- **NetworkConfig correctness pass: 6 silent reconcile-divergence
+  bugs fixed** (Plan 207).
+
+  - **H2 — link `master` change detection** (`config/diff.rs`).
+    Pre-0.19 the diff compared `Option<String>` (declared) vs
+    `Option<u32>` (kernel ifindex) treating any (Some, Some)
+    pair as equal. Bridge-port reassignment (`master: "br0"` vs
+    kernel `master: ifindex(br1)`) silently no-op'd. Now resolves
+    `existing.master()` ifindex → name via the diff's name map
+    and compares strings.
+
+  - **H3 — route gateway / dev / metric change detection**
+    (`config/diff.rs`). Pre-0.19 the diff identity tuple was
+    `(dst, prefix, table)` only; changing the gateway on the
+    same route produced an empty diff. Now compares the full
+    route key (including gateway/oif/metric); any mismatch
+    queues a route for re-emission. `add_route` uses
+    `NLM_F_REPLACE` so the kernel atomically swaps the existing
+    route — no del+add window. Most common reconcile op in
+    multi-router topologies.
+
+  - **H4 — `apply_reconcile` recomputes diff per retry**
+    (`config/mod.rs`). Pre-0.19, on EBUSY the reconcile loop
+    re-ran the full original apply against changed kernel state,
+    producing EEXIST that masked the original EBUSY. Now each
+    retry computes a fresh diff against current state and
+    targets only what's still missing. `change_count` becomes
+    the cumulative sum across attempts. Empty diff at retry
+    start short-circuits as success.
+
+  - **M3 — `remove_route` forwards table identity**
+    (`config/apply.rs`). Pre-0.19 the `_table` parameter was
+    discarded; routes in non-default tables (table ≠ 254)
+    could never be purged — kernel returned ESRCH which
+    `is_not_found()` swallowed silently.
+
+  - **M5 — topo-sort handles VXLAN underlay + master deps**
+    (`config/diff.rs`). Pre-0.19 only `Vlan { parent }` and
+    `Macvlan { parent }` were modeled. Declaring
+    `vxlan42.underlay_dev("eth0")` before `eth0`, or
+    `dummy0.master("br0")` before `br0`, in the same batch
+    silently failed at apply (same shape as Plan 186 §3c).
+
+  - **M10 — `LinkState::Down` uses IFF_UP flag, not OperState**
+    (`config/diff.rs`). Pre-0.19 the comparison read
+    `IFLA_OPERSTATE` (RFC 2863 operational state, carrier-
+    dependent). Dummy/veth interfaces with no carrier stayed
+    non-`Up` operationally even when admin-up, so
+    `LinkState::Down` declared on a no-carrier admin-up
+    interface silently no-op'd. Now reads `ifi_flags & IFF_UP`
+    (admin state).
+
+  - **M18 — atomic `replace_qdisc` via NLM_F_REPLACE**
+    (`config/apply.rs`). Pre-0.19 del+add sequence left a
+    transient `pfifo_fast`/`mq` window between the delete and
+    the new add; if the add failed the interface kept the
+    kernel-default qdisc not the previous declared one. Now
+    uses `Connection::replace_qdisc*` (atomic
+    `RTM_NEWQDISC + NLM_F_REPLACE`). Falls back to del+add for
+    `Ingress`/`Clsact` pseudo-qdiscs (kernel rejects REPLACE
+    on those).
+
+  2 new unit tests pin the topo-sort dep extensions
+  (`topo_sort_promotes_vxlan_underlay_before_vxlan`,
+  `topo_sort_promotes_master_before_slave`). Integration
+  verification for the diff/apply changes lands via the
+  existing `network_config_apply.rs` integration suite under
+  the privileged-CI gate.
+
+- **10 protocol recv-loops wrapped in `with_timeout` + seq
+  filter + `NLM_F_DUMP_INTR` detection** (Plan 208 Phase 1+2):
+  `xfrm.rs::{get_security_associations, get_security_policies}`,
+  `netfilter.rs::get_conntrack_family`,
+  `fib_lookup.rs::lookup_with_options`,
+  `sockdiag.rs::{query_inet_family, query_unix_typed,
+  query_netlink_typed}`,
+  `Connection::<Generic>::{query_family, command, dump_command}`.
+  Pre-0.19 each could hang indefinitely if the kernel dropped a
+  response, and dump variants would silently use an
+  interrupted-dump snapshot. Now surface as `Error::Timeout`
+  after the configured budget and `Error::DumpInterrupted` per
+  the Plan 208 contract. `wg_command` stale-frame race deferred
+  pending GENL command unification (Plan 208 Phase 3+4 — bigger
+  refactor).
+
+### Documentation
+
+- **`Connection<P>` doc-comment now describes the concurrent-
+  use caveat** (Plan 212 M15). The type implements `Sync` but
+  concurrent `.await`-ed calls on a shared connection race on
+  recv and can produce dual `Error::Timeout`. Recommended
+  pattern: one `Connection<P>` per task, or use
+  `ConnectionPool<P>` for fan-out. Architectural NlRouter-style
+  dispatch fix tracked for 0.20.
+
+- **README.md updated to 0.19 install lines** + `tuntap-async`
+  and `serde` features added to the features table.
+
+- **lib.rs landing-page doc-comment updated** (Plan 214):
+  the stale "`_by_name` reads `/sys/class/net/`" claim removed
+  (Plan 192 D4 made both lookups netlink-correct); `addr.address`
+  doctest reference updated to `addr.address()` accessor.
+
+- **`Error::is_dump_interrupted` doctest type fix** (Plan 214):
+  was `Vec<nlink::Link>` (doesn't exist), now
+  `Vec<nlink::netlink::LinkMessage>`.
+
+- **`nftables-declarative-config.md` recipe uses `Display`
+  instead of deprecated `.summary()`** (Plan 214).
+
+### Earlier post-cycle fixes (`5ef0808`)
+
+- **`Batch::send_chunk` could hang indefinitely on dropped
+  per-op ACK (post-cycle bug-hunt)** — the nftables/route batch
+  send-chunk recv loop did NOT run under `Connection::with_timeout`,
+  so a kernel that lost the ACK for any single batched op would
+  leave the call waiting forever. Plan 171's 30s default
+  Connection timeout was supposed to catch every recv-loop;
+  Plan 172 missed wiring it here. Now the recv loop is wrapped
+  in `with_timeout`, so a dropped ACK surfaces as `Error::Timeout`
+  after the configured budget instead of an indefinite hang.
+
+- **`audit.rs::{get_status, get_tty_status, get_features}` had
+  no timeout + no seq filter (post-cycle bug-hunt)** — the three
+  Audit RPCs raw-`recv_msg()`-looped without `with_timeout`, so
+  a kernel that dropped the response hung forever; they also
+  matched on `nlmsg_type` only and would have accepted a stale
+  frame from a prior request on the same socket. Both now match
+  `nlmsg_seq` first and run under the connection timeout. Same
+  hazard class as Plan 172 but on a non-rtnetlink protocol that
+  the original audit missed.
+
+- **`sockdiag.rs::destroy_tcp_socket` bypassed
+  `Error::from_errno*` factory + had no seq filter / timeout
+  (post-cycle bug-hunt)** — constructed `Error::Kernel { errno: -errno, ... }`
+  by hand instead of routing through
+  `Error::from_errno_with_context_ext_ack`, so the stored errno
+  shape diverged from the Plan 187 sign-normalization invariant
+  and ext-ack info was dropped. Now uses the factory + seq filter
+  + 30s timeout wrap.
+
+- **`MessageBuilder::nest_end` + `NlAttr::new` silently
+  truncated `nla_len` to `u16` on > 65 KB payloads (post-cycle
+  bug-hunt)** — the kernel's `nla_len` field is a `u16`, so a
+  caller building a >64 KB nested attribute would have its
+  header silently wrap to a tiny value, producing a malformed
+  message the kernel would either reject (best case) or
+  misinterpret the wrapped length and skip past the real payload
+  bytes (worst case). No caller hit this today — the bug was
+  latent waiting for a future caller — but the silent-corruption
+  shape was identical to PR #7's `tcm_info` packing footgun
+  (where transposed bytes silently broke every TC filter add).
+  Now: `debug_assert!` panic with a clear "exceeds u16::MAX wire
+  limit" message in debug builds, saturating cast in release so
+  the kernel rejects the message rather than misinterpreting a
+  wrapped length. 2 new boundary tests
+  (`nest_end_just_under_u16_max_boundary_succeeds`,
+  `nest_end_over_u16_max_panics_in_debug`) pin the contract.
+
+- **`AttrIter` parser-robustness contract was unverified (post-
+  cycle bug-hunt)** — `AttrIter` is the equivalent of `MessageIter`
+  for nested attribute walking; every parser in the lib uses it
+  (hundreds of call sites). Plan 193 §2.3 added robustness tests
+  for `MessageIter` (found a real infinite-loop bug in the
+  process), but the matching `AttrIter` had **zero tests** —
+  future refactors could silently turn the safe `return None`
+  paths into panics or infinite loops. 13 new tests pin the
+  three CLAUDE.md `## Parser robustness` rules on `AttrIter`:
+  zero-length attribute terminates iteration without loop;
+  truncated `len > buffer` terminates; under-min `len < NLA_HDRLEN`
+  terminates; accept-larger-than-expected payload is forward-
+  compatible; `NLA_F_NESTED` / `NLA_F_NET_BYTEORDER` flag bits
+  are masked from `kind()` (preventing the vishvananda/netlink
+  #1104 bug class). Same bug-by-test-writing pattern as Plan 193
+  §2.3.
+
+- **TC filter `tcm_info` packing — kernel-EINVAL on every
+  `add_filter*` call with explicit protocol+priority (PR #7,
+  @nuclearcat)** — `add_filter_by_index_full` (and the
+  sibling `replace`/`change`/`delete` paths in `filter.rs`,
+  plus the ratelimit ingress filter) packed `tcm_info` as
+  `(protocol << 16) | priority` with no `htons`. The kernel
+  uses `TC_H_MAKE(prio << 16, htons(proto))` — priority in
+  the upper 16 bits, ethernet protocol in the lower 16 bits
+  in network byte order. With the halves transposed the
+  kernel read e.g. protocol=0x0800/prio=200 as
+  protocol=200/prio=2048 and returned EINVAL; every TC
+  filter add with an explicit ethernet protocol failed. The
+  ratelimit ingress filter was silently installed under the
+  wrong ethertype. Fix routes every pack site through a
+  single `TcMsg::with_filter_info(protocol, priority)`
+  chokepoint, restores accessor symmetry on
+  `TcMessage::protocol()` / `priority()` (which were
+  self-inconsistently broken — matched the buggy pack while
+  the unused `filter_protocol()` / `filter_priority()`
+  matched the kernel). 4 new unit tests pin iproute2's
+  exact wire layout + add the
+  `pre_fix_layout_was_transposed` regression guard
+  documenting what the kernel parsed pre-fix. 1 new
+  root-gated integration test
+  (`test_filter_add_explicit_protocol_priority`) asserts a
+  real filter add accepts. **Runtime semantic break** for
+  `TcMessage::protocol()` / `priority()` accessor return
+  values — they now return the kernel-correct values
+  instead of the transposed garbage; signature unchanged so
+  `cargo-semver-checks` doesn't flag it, but document the
+  shift. Verified on kernel 6.17.
+
+- **IPv6 NAT silently dropped the address register
+  (PR #6, @avionix-g)** — see the `### Breaking changes`
+  entry on `NatExpr.addr` → `NatAddr` for the type-level
+  fix. New `Rule::dnat_v6(Ipv6Addr, Option<u16>)` and
+  `Rule::snat_v6(Ipv6Addr, Option<u16>)` builders emit
+  `Family::Ip6` in the NAT expr (matching the address
+  family, not the chain's `Family::Inet`), load the 16-byte
+  address into `R0` + optional port into `R1`. 3 new unit
+  tests + 2 root-gated diff-idempotency integration tests
+  (`dnat_v6_rule_round_trips`, `snat_v6_rule_round_trips`)
+  on separate hooks (postrouting/`SrcNat` vs
+  prerouting/`DstNat`) prove the kernel stored exactly the
+  expr bytes nlink rendered.
+
+- **`Error::is_busy`, `is_already_exists`, `is_permission_denied`
+  catch `Error::Io` variants (Plan 187 §2.5)** — these three
+  predicates matched on `Self::Kernel*` variant directly,
+  missing the `Error::Io(io_err)` case carrying the same
+  errno via `raw_os_error()`. Same bug class as Plan 185's
+  `is_no_buffer_space` fix. Single-point fix: `Error::errno()`
+  now unwraps `Error::Io` via `raw_os_error()`, so every
+  predicate that goes through `errno()` inherits the right
+  shape. `is_busy` and `is_try_again` are used by
+  `NftablesConfig::apply_reconcile` retry classification —
+  a raw `EBUSY`/`EAGAIN` from the socket layer no longer
+  bypasses the retry budget. Plan 185's defensive branch in
+  `is_no_buffer_space` is now redundant and removed. New
+  `predicate_io_shape_sweep` test pins the contract for 10
+  predicates; future additions inherit it.
+
+- **`MessageIter` infinite loop on truncated / malformed
+  netlink frames (Plan 193 §2.3 + CLAUDE.md §"Parser
+  robustness" rule 2)** — surfaced while writing the
+  parse-events skip regression tests this cycle:
+  `MessageIter::next` returned `Some(Err(...))` on both
+  the `NlMsgHdr::from_bytes` failure and the
+  `msg_len < HDRLEN || msg_len > data.len()` guard, but
+  forgot to advance `self.data` past the malformed
+  bytes. Subsequent `next()` calls returned the same
+  `Err` indefinitely, hanging the long-lived multicast
+  subscribers Plans 185 + 191 introduced. Fix: in both
+  error branches, set `self.data = &[]` before
+  returning so the next poll yields `None`. Bug class
+  matches neli #305 (whole-batch abort on one malformed
+  message) — same shape, different surface. 4 new
+  `stream.rs` tests pin the contract: empty buffer,
+  unknown msg-type, garbage payload on known msg-type,
+  truncated frame.
+
+### Deprecated
+
+- **`ConfigDiff::summary()` + `NftablesDiff::summary()`
+  (Plan 188 §2.6)** — Plan 183 (0.18) made the `Display` impl
+  on both diff types share the same renderer; the two methods
+  produce byte-for-byte identical output. Pick the Rust idiom
+  (`Display`); remove the legacy method in 0.20.
+  Update call sites from `diff.summary()` to `diff.to_string()`
+  or use the `{}` placeholder in `format!`/`println!`.
+
+### Added
+
+- **`Rule::dnat_v6(Ipv6Addr, Option<u16>)` + `Rule::snat_v6(Ipv6Addr,
+  Option<u16>)` (PR #6, @avionix-g)** — IPv6 NAT helpers, the
+  counterparts to `dnat` / `snat`. Each loads the 16-byte address
+  into `R0` (and the optional port into `R1`) and emits `Family::Ip6`
+  in the NAT expr to match the address family (not the chain's
+  `Family::Inet`). Use on `ip6` or `inet` NAT chains. Closes a silent
+  encoder bug where `addr.is_some()` was used as the proxy for
+  "register in use" — see the breaking-change entry on `NatExpr.addr`.
+
+- **Post-cycle audit backfill** — closes gaps surfaced by
+  the 0.19 plan-by-plan audit:
+  - **Plan 196**: `PublicKey` newtype with `FromStr` (base64)
+    + `Display` round-trip, `Debug` via `Display`. Inline
+    32-byte base64 codec (no new crate dep). 6 new unit
+    tests pin `fE/wpxQ6/M6OmF5j4dvbY3FbCEXc3KlBL2QqAYjE0WI=`
+    test vector + zero/max boundary cases + invalid-input
+    rejection.
+  - **Plan 196**: `Display` impl on `WireguardConfigDiff`
+    rendering `+ peer`, `~ peer (endpoint, allowed_ips)`,
+    `- peer` per change. Empty diff renders "no changes".
+  - **Plan 196**: `WireguardConfig::apply_reconcile(conn,
+    opts)` mirroring `NetworkConfig::apply_reconcile` —
+    bounded EBUSY/EAGAIN retry with exponential backoff,
+    reuses the shared `ReconcileOptions` shape.
+  - **Plan 192 §2.7**: CLAUDE.md `## util::ifname sysfs reads`
+    sub-section under the existing namespace-safety section.
+    New `scripts/audit-sysfs-in-lib.sh` + CI gate in
+    `.github/workflows/rust.yml`. Fails the build if any
+    `/sys/class/net/` or `/proc/sys/` read appears in
+    `crates/nlink/src/netlink/` outside `sysctl.rs`. Skips
+    rustdoc comments via in-script prefix filter.
+  - **Integration test backfill** (`tests/integration/
+    cycle_0_19_backfill.rs`, 6 root-gated tests):
+    - Plan 188 §2.1 `ConfigDiff::apply` round-trip
+    - Plan 188 §2.4 `NetworkConfig::apply_reconcile` happy path
+    - Plan 188 §2.7 `del_table_if_exists` idempotence
+      (cold/warm/cold-again triplet)
+    - Plan 202 §2.3 multipath route round-trip — the
+      headline test the parser plan was named to fix
+    - Plan 200 §2.1 facade `apply::network_in_namespace`
+      composition + diff symmetry
+    - Plan 200 §2.4 `Stack` orchestration + re-apply no-op
+    Plus Plan 196 + Plan 199 module-gated tests
+    (`require_module!("wireguard")`) covering full GENL
+    round-trip + watcher polling.
+
+- **High-level facade APIs (Plan 200)** — three thin
+  compositional wrappers + a unified `Stack` type that
+  collapse the typed surface's 5–15-line boilerplate into
+  one-liners.
+  - `nlink::facade::apply::network(cfg).await?` — opens a
+    fresh `Connection<Route>` + calls `apply`.
+    Same shape for `nftables(...)` (computes diff +
+    applies), `wireguard(...)` (uses the async GENL
+    family-resolution path). `*_in_namespace(ns, cfg)`
+    siblings for each.
+  - `nlink::facade::diff::*` — symmetric drift-detection
+    wrappers (NetworkConfig → ConfigDiff, NftablesConfig →
+    NftablesDiff, WireguardConfig → WireguardConfigDiff).
+  - `nlink::facade::watch::route_changes()` —
+    one-line resync-wrapped event stream for RTNETLINK
+    (mirrors Plan 191's `into_events_with_resync` with the
+    factory closure built for you). `nftables_changes()`
+    same for Plan 185. `wireguard_changes(opts).await?`
+    returns a `WireguardWatcher` for the polling path
+    (Plan 199 — kernel has no multicast).
+  - `nlink::facade::Stack` — bundles `NetworkConfig` +
+    `NftablesConfig` + `WireguardConfig` with optional
+    layers. `Stack::apply` calls them in dependency order
+    (RTNETLINK → nftables → WireGuard), returning a
+    `StackApplyReport` with per-layer counters.
+    `Stack::diff` aggregates per-layer diffs into
+    `StackDiff::is_empty()` for fast "is anything dirty"
+    checks.
+  - ovpn intentionally absent — the kernel ovpn family is
+    bleeding-edge (6.16+) and nlink ships only the link
+    half (Plan 190 §2.3b). Plan 197 (GENL-side ovpn
+    declarative) needs the imperative ovpn GENL family
+    implemented first; deferred to a future cycle for
+    kernel-ABI stability.
+  3 unit tests on the `StackDiff` / `StackApplyReport`
+  no-op semantics.
+
+- **Declarative WireGuard configuration (Plan 196)** —
+  the GENL-family twin of `NetworkConfig` / `NftablesConfig`.
+  `WireguardConfig::new().device("wg0", |d| ...)` builder
+  shape with `.private_key`, `.listen_port`, `.fwmark`,
+  and `.peer(public_key, |p| ...)` accepting `.endpoint`,
+  `.persistent_keepalive`, `.preshared_key`, `.allowed_ip`.
+  `cfg.diff(&conn).await` computes the symmetric diff
+  against current kernel state; `cfg.apply(&conn).await`
+  dispatches the kernel mutations.
+  - `WireguardConfigDiff` / `DeviceChanges` / `PeerChanges`
+    public diff types. `change_count` counts kernel
+    calls, not dirty fields (a single SET_DEVICE collapses
+    all device-level changes into one write).
+  - `allowed_ips` diff is order-independent — declaring
+    in one order vs the kernel reporting in another
+    doesn't churn.
+  - `WireguardApplyResult` reports `device_writes` +
+    `peer_writes` + `peer_removals` separately.
+  - **Privacy-key caveat**: the kernel never returns
+    `private_key` / `preshared_key` on `GET_DEVICE`. When
+    declared in the config, they're ALWAYS written
+    (idempotent at the WG protocol layer — no handshake
+    storm — but costs one extra SET call per re-apply).
+    Omit them after first apply for zero-op re-applies.
+  - Apply uses `replace_allowed_ips()` for in-config peers
+    so the declarative model is "this is the full set",
+    not "merge."
+  13 new unit tests on the pure diff logic: builder
+  round-trips, private-key dirty semantics, listen_port
+  match/mismatch, peer add/remove/modify, endpoint
+  change, allowed_ips set difference, allowed_ips
+  order-independent comparison, change_count
+  aggregation.
+
+- **WireGuard polling watcher (Plan 199, redesigned)** —
+  the kernel `wireguard` GENL family declares
+  `n_mcgrps = 0`; verified 2026-05-31 via
+  `drivers/net/wireguard/netlink.c` upstream. There is no
+  native event-subscription surface — every WG monitoring
+  tool polls `GET_DEVICE` on a cadence. nlink now ships a
+  typed poll-and-diff primitive so consumers don't
+  re-implement that machinery per app.
+  - `WireguardEvent` enum: `PeerAdded`, `PeerRemoved`,
+    `PeerEndpointChanged`, `PeerHandshakeRefreshed`,
+    `PeerAllowedIpsChanged`. First poll emits `PeerAdded`
+    for every existing peer (initial-inventory semantics,
+    matching Plan 185 / 191 snapshot shape).
+  - `WireguardWatchOptions` builder: `.interval(d)` +
+    `.interface(name)`. Default cadence 1 s. The watcher
+    does NOT auto-enumerate WG-kind interfaces — caller
+    specifies the set explicitly.
+  - `WireguardWatcher::new(conn, opts)` returns `Result`
+    (validates non-empty interfaces);
+    `next_events().await -> Result<Vec<WireguardEvent>>`
+    sleeps then polls + diffs. `connection()` /
+    `into_connection()` give callers their socket back.
+  - `diff_device_states(ifname, prev, curr)` pure
+    function exposed for callers wiring custom polling
+    cadences.
+  - If the kernel grows multicast support (Linus Lotz's
+    2021 patch is "Awaiting Upstream" — never merged),
+    this watcher will be replaced with a multicast
+    subscriber and the polling path will become a
+    compatibility shim. The `WireguardEvent` enum shape
+    stays the same either way.
+  11 new unit tests on the pure-function diff. Closes
+  what Plan 191 §8 punted to a separate plan.
+
+- **`SetKeyType::InetProto` + `Concat(Vec<_>)` (Plan 198
+  §2.1, scoped subset)** — extends the nftables set key
+  taxonomy with the two real-world variants the
+  research-agent audit flagged: `InetProto` (single u8
+  protocol — `tcp`/`udp`/`icmp`) and `Concat(Vec<_>)`
+  (composite key used in rules like `ip saddr . tcp
+  dport`). `type_id()` for `Concat` packs each
+  component's 6-bit type ID into sequential slots,
+  matching the kernel's `nft_set_ext_concat`
+  layout. `len()` returns the per-component sum after
+  4-byte alignment padding. **Note**: `SetKeyType` lost
+  `Copy` (the `Concat` variant carries a `Vec`); the
+  enum is `#[non_exhaustive]` so this is mitigated, but
+  any downstream `let k: SetKeyType = ...;` that
+  expected `Copy` semantics needs a `.clone()`. The
+  imperative `Set` builder + downstream wire-emit code
+  in the lib was unaffected.
+  The fuller Plan 198 — `DeclaredSet` declarative type,
+  `SetFlags` bitflags, element diff, `DeclaredTableBuilder::set`
+  — stays as a 0.20 follow-up; this commit ships the
+  imperative taxonomy extension so future declarative
+  work has the right wire types. 5 new unit tests pin
+  `InetProto` wire constants + `Concat` length/packing
+  on 1/2/3-component shapes.
+
+- **`#[must_use]` on the diff + result + report types
+  (Plan 201 §2.1, scoped subset)** — `ConfigDiff`,
+  `NftablesDiff`, `ApplyResult`, both `ReconcileReport`s
+  (TC recipe + nftables) gain `#[must_use]` with a
+  specific message pointing the caller at the right
+  accessor (`.apply()`, `.is_success()`, `.is_noop()`).
+  Catches the easy-to-forget shape "build a diff,
+  forget to call apply()." Three in-tree integration
+  test sites that intentionally discarded a
+  `ReconcileReport` were updated to `let _ = ...` to
+  silence the new lint. Plan 201's broader sweep
+  (every `*Builder`, `From`/`Into`, `Display`,
+  `#[inline]`) remains as a polish backlog; this commit
+  ships the highest-leverage subset matching the cycle's
+  existing diff/apply API surface.
+
+- **`RouteMessage::multipath()` accessor + `ParsedNextHop`
+  + `RTA_MULTIPATH` parser (Plan 202)** — closes a gap
+  surfaced by Plan 193 §2.2's audit: nlink could WRITE
+  multipath routes (`write_multipath_v4` / `_v6`) but
+  didn't PARSE them back. Multipath routes round-tripped
+  through `Connection<Route>::get_routes()` lost their
+  nexthop list. The drift-detection consequence: any
+  `NetworkConfig` carrying a multipath route would see
+  "kernel has no nexthops; config wants 2" forever, even
+  though the kernel ACK'd the write.
+  Adds:
+  - `parse_multipath(data, family)` walker — defensive
+    guards per Plan 193 §2.2 + CLAUDE.md §"Parser
+    robustness" rule 2 (rtnh_len < HDRLEN aborts;
+    rtnh_len > remaining bytes aborts; rtnh_len == 0
+    aborts; `offset.max(HDRLEN)` advance prevents stall).
+  - `ParsedNextHop` struct: `ifindex` + `weight` (1-based,
+    matching `ip route` + imperative `NextHop::weight`) +
+    `flags` + `gateway: Option<IpAddr>`.
+  - `RouteMessage::multipath()` accessor returning
+    `Option<&[ParsedNextHop]>`.
+  - `RTA_MULTIPATH = 9` const in attr_ids.
+  6 unit tests pin the contract: normal walk, empty
+  buffer, zero-length rtnh, undersized rtnh header,
+  truncated chain, garbage nested attrs. The zero-
+  length + truncated tests guard against the
+  netlink-packet-route #152 infinite-loop shape.
+
+- **Concurrent-stress regression tests (Plan 194)** —
+  two new root-gated integration tests preempting
+  bug-shapes the `rtnetlink` Rust crate hit recently:
+  - `concurrent_dumps_on_shared_connection_route_correctly`
+    spawns 16 concurrent `get_links()` calls on a shared
+    `Arc<Connection>` and asserts every dump sees the
+    pre-created `dummy0`. Pins nlink's seq-routing
+    correctness against the kind of bug rtnetlink #131
+    surfaced (replies routed to the wrong receiver).
+  - `concurrent_namespaces_dont_corrupt_each_other` spawns
+    16 concurrent `LabNamespace::new` calls, each with a
+    uniquely-named dummy interface; verifies each
+    namespace's dump returns only its own dummy. Pins
+    the namespace creation path against rtnetlink #132's
+    race-shape.
+  Both tests are expected to GO GREEN — Plan 170's seq-
+  filter + Plan 172's recv-loop audit defenses are
+  already in place. If either turns red on the
+  privileged-CI gate, a follow-up fix lands per Plan 194
+  §3.2 / §3.3.
+
+- **`ResyncStreamExt` combinators on resync streams
+  (Plan 195 §2.1 + §2.3)** — kube-rs-style composable
+  adapters over `Connection<{Route,Nftables}>::into_events_with_resync`'s
+  output. The trait blanket-impls over any
+  `Stream<Item = Result<ResyncedEvent<T>>> + Unpin`, so it
+  applies to both watchers without per-protocol
+  duplication.
+  Adapters shipped:
+  - `predicate_filter(key_fn)` — drops consecutive
+    `Event(T)` / `Resynced(T)` items whose key matches the
+    previously-emitted item's key; `Marker` items always
+    pass through (they're state-machine signals).
+  - `map_event(f)` — projects the inner `T` to a
+    domain-specific type via the closure; `Marker` items
+    pass through unchanged.
+  `default_backoff()` + `StreamBackoff` (Plan 195 §2.2)
+  deferred — most consumers handle restart backoff at the
+  spawn-loop level via `tokio::time::sleep`; in-stream
+  backoff would need `tokio::time::Sleep` Pin gymnastics
+  that don't justify the LOC without a current consumer
+  ask. 4 new unit tests pin the dedup + map + marker
+  passthrough + error propagation contracts.
+
+- **Documentation + tracing-span audit (Plan 192 D4 + W7)** —
+  - **D4**: `link.rs` rewrote 10 "namespace-safe variant that
+    avoids reading from /sys/class/net/" docstrings to remove
+    the misleading claim. The name-based and index-based
+    constructors are both netlink-correct; the difference is
+    purely ergonomic. Plan 186 §1's audit confirmed
+    `resolve_interface` is netlink-based end-to-end.
+  - **W7**: Audit + backfill `#[tracing::instrument]` on
+    `Connection<P>` public methods that grew without spans:
+    `enable_strict_checking`, `set_ext_ack`, `for_namespace`,
+    `subscribe_all`, `dump_typed`, and the 7 streaming-dump
+    wrappers (`stream_links`, `stream_routes`,
+    `stream_neighbors`, `stream_addresses`, `stream_qdiscs`,
+    `stream_classes`, `stream_filters`). Trivial accessors
+    (`socket`, `state`, `timeout`, etc.) deliberately stay
+    bare per CLAUDE.md observability guidance. Closes the
+    "every Connection method, every netlink request/ack/dump
+    cycle" contract from CLAUDE.md §Observability.
+  - D1 / D5 / D6 / D2-D3 already shipped in Plans 186 §3c,
+    188 §2.2, 188 §2.6, 187 respectively (per the 0.19
+    consolidation-pass cross-references).
+
+- **`Connection<Route>::into_events_with_resync` +
+  `subscribe_all_with_resync` + `rtnetlink_snapshot`
+  (Plan 191 §2.5 + §2.6)** — RTNETLINK twin of Plan 185's
+  nftables resync wrappers. The infra (`ConnectionFactory<P>`
+  + `events_with_resync` from Plan 185 + `impl EventSource
+  for Route` + `RtnetlinkGroup` enum from 0.17) was already
+  in place; this commit ships the Route-specific layer:
+  `rtnetlink_snapshot()` walks the current state via the
+  existing `get_links` / `get_addresses` / `get_routes` /
+  `get_neighbors` methods, returning a `Vec<NetworkEvent>`
+  of `New*` variants in the kernel's natural emit order.
+  `Connection<Route>::into_events_with_resync(factory)` is
+  the spawn-friendly owned form; `subscribe_all_with_resync`
+  borrows for caller-held queries. Both subscribe to every
+  rtnetlink multicast group before returning the stream.
+  Closes nlink-feedback §15 + W2 (lab Plan 158d's polling
+  fallback can now become subscribe-based watch).
+
+- **`serde` feature flag — opt-in `Serialize` derives on every
+  public diff/result/report type (Plan 189)** — gated by a new
+  top-level `serde` feature (opt-in only; included in `full`).
+  JSON shape conventions: structs use `rename_all = "kebab-case"`
+  (`links-to-add`, not `links_to_add`); enums use
+  `rename_all = "snake_case"` so unit variants emit bare strings
+  (`"inet"`, not `{"Inet": null}`).
+  Types gaining `Serialize` (in this commit):
+  `ConfigDiff`, `NftablesDiff`, `LinkChanges`, `DeclaredLink`,
+  `DeclaredLinkType`, `DeclaredAddress`, `DeclaredRoute`,
+  `DeclaredRouteType`, `DeclaredQdisc`, `DeclaredQdiscType`,
+  `QdiscParent`, `LinkState`, `MacvlanMode`, `BondMode`,
+  `VlanProtocol`, `NetkitMode`, `NetkitPolicy`, `NetkitScrub`,
+  `AdSelect`, `LacpRate`, `Family`, `Hook`, `ChainType`,
+  `Priority`, `Policy`, `DeclaredTable`, `DeclaredChain`,
+  `DeclaredRule` (`body` field skipped), `DeclaredFlowtable`,
+  `RuleHandle`, `ApplyResult`, `ApplyError` (`error` field
+  serialized as the `Display` string), `ReconcileOptions`
+  (tc recipe + nftables — both shapes), `ReconcileReport`
+  (tc recipe + nftables), `StaleObject`, `UnmanagedObject`,
+  `TcHandle`, `FilterPriority`.
+  Use case: `apply --check --json` envelopes for CI gates and
+  IaC tooling. The kebab-case shape matches nlink-lab's
+  existing schema convention. `Deserialize` is **not** derived
+  this commit — the diff types are not user-constructible
+  (they're products of `compute_diff`), so round-trip
+  deserialization adds no consumer value. Closes
+  nlink-feedback §9 + W4.
+  5 new JSON-shape unit tests in `crate::serde_tests` (gated
+  on `feature = "serde"`).
+
+- **`ConfigDiff::apply` inherent method (Plan 188 §2.1)** —
+  matches `NftablesDiff::apply`'s shape from Plan 157.
+  ```rust
+  let diff = cfg.diff(&conn).await?;
+  println!("{diff}");
+  diff.apply(&conn, ApplyOptions::default()).await?;
+  ```
+  More efficient than `NetworkConfig::apply` when you already
+  hold a diff — saves one re-dump round-trip.
+
+- **`RouteBuilder::default_v4()` + `default_v6()`
+  (Plan 188 §2.3)** — declarative-side mirror of
+  `Ipv4Route::default_route()` / `Ipv6Route::default_route()`
+  (Plan 184). Self-documenting:
+  ```rust
+  RouteBuilder::default_v4().via("192.0.2.1")
+  ```
+
+- **GSO/GRO/TSO cap parsing on `LinkMessage` (Plan 190
+  §2.3c)** — 7 new u32 accessors: `gso_max_segs`,
+  `gso_max_size`, `gro_max_size`, `tso_max_size`,
+  `tso_max_segs`, `gso_ipv4_max_size`,
+  `gro_ipv4_max_size`. The 4 legacy caps were already
+  defined in the `IflaAttr` enum but not extracted by the
+  message parser; this commit adds the parsing AND the
+  two new IPv4-specific caps from kernel 6.6+
+  (`IFLA_GSO_IPV4_MAX_SIZE=63`,
+  `IFLA_GRO_IPV4_MAX_SIZE=64`). All 7 accept-larger-than-
+  expected on attribute length per CLAUDE.md
+  §"Parser robustness" rule 1. Useful for throughput
+  tuning on heterogeneous NICs (mixed v4/v6 workloads on
+  the same box). 3 new unit tests: parses all 7 caps,
+  absent-attrs-stay-None, IflaAttr enum numeric pinning.
+
+- **ovpn link half (kernel 6.16+) — `OvpnLink` +
+  `LinkBuilder::ovpn` + `DeclaredLinkType::Ovpn`
+  (Plan 190 §2.3b)** — minimal in-kernel OpenVPN
+  data-channel-offload link. Imperative `OvpnLink` ~50 LOC
+  (matching the `IfbLink` shape). Declarative path: zero-arg
+  `LinkBuilder::ovpn()` plus the `Ovpn` enum variant.
+  Useful for inventory tools that need to detect ovpn
+  interfaces. Peer / cipher config stays in the GENL `ovpn`
+  family — deferred to Plan 197 in 0.20 as a parallel
+  declarative track alongside WireGuard's peer config.
+  2 new unit tests.
+
+- **netkit declarative path (kernel 6.7+) — `LinkBuilder::netkit`
+  + `DeclaredLinkType::Netkit` (Plan 190 §2.3a)** —
+  BPF-programmable veth pair. Imperative `NetkitLink` +
+  `NetkitMode` + `NetkitPolicy` + `NetkitScrub` already
+  shipped in 0.16; this lifts them to `NetworkConfig`. Five
+  setters: `netkit_mode` (L2/L3), `netkit_primary_policy` /
+  `netkit_peer_policy` (Forward/Blackhole),
+  `netkit_scrub` / `netkit_peer_scrub` (kernel 6.10+).
+  Enums re-exported via `nlink::netlink::config::types`.
+  Use case: Cilium-style no-bridge service-mesh data plane.
+  3 new unit tests.
+
+- **Bond options gap-fill: `bond_ad_select`, `bond_lacp_rate`,
+  `bond_downdelay`, `bond_updelay`, `bond_resend_igmp`
+  (Plan 190 §8)** — 5 new declarative-path setters on
+  `LinkBuilder` covering the previously-imperative-only bond
+  knobs. `DeclaredLinkType::Bond` grew matching
+  `Option<...>` fields. The imperative `BondLink` already
+  exposes all of these; the apply-path arm forwards them.
+  Existing `AdSelect` + `LacpRate` enums re-exported via the
+  config types module as `BondAdSelect` / `BondLacpRate` (no
+  new types — single source of truth). Closes the
+  consolidation-pass §8 expansion. 3 new unit tests.
+
+- **`LinkBuilder::vxlan_local` / `vxlan_port` /
+  `vxlan_underlay_dev` (Plan 190 §2.1)** — declarative-path
+  coverage for the three VXLAN knobs nlink-lab §10 flagged.
+  `DeclaredLinkType::Vxlan` grew `local: Option<IpAddr>`,
+  `port: Option<u16>`, `underlay_dev: Option<String>`. The
+  imperative VxlanLink already exposes `.local(Ipv4Addr)` /
+  `.port(u16)` / `.dev(name)`; the apply-path arm forwards
+  all three (IPv6 `local` values silently dropped today —
+  the imperative layer is IPv4-only for tunnel-source IPs,
+  matching the existing `remote` handling). 3 new unit
+  tests + 1 root-gated integration test reproducing the
+  nlink-lab 158e Slice 4 case. Note: idempotent re-apply
+  coverage (Plan 190 §2.1 ¶"Idempotence implication") is
+  deferred — VXLAN `compute_diff` parity against the
+  kernel's IFLA_VXLAN_* attribute dump would need an
+  IFLA_INFO_DATA parser; for now re-apply replays the
+  create. **Note**: `DeclaredLinkType::Vxlan` widening
+  (already `#[non_exhaustive]`) requires `..` rest-pattern
+  in downstream matches.
+
+- **`LinkBuilder::vlan_protocol(p)` + `VlanProtocol` enum
+  (Plan 190 §2.2)** — declarative-path VLAN protocol selector.
+  The imperative `VlanLink` gains a typed `.protocol(VlanProtocol)`
+  setter alongside the existing `.qinq()` shortcut.
+  `DeclaredLinkType::Vlan` grew a `protocol: Option<VlanProtocol>`
+  field; `None` == kernel default (802.1Q). Use
+  `VlanProtocol::Dot1ad` for Q-in-Q. `VlanProtocol` is
+  `#[non_exhaustive]`. Closes nlink-feedback §12. **Note**:
+  widens `DeclaredLinkType::Vlan` — downstream pattern matches
+  must use `..` rest-pattern (the in-tree integration test
+  config.rs:136 was updated to demonstrate).
+  4 new unit tests.
+
+- **`LinkBuilder::vrf(table)` + `DeclaredLinkType::Vrf`
+  (Plan 190 §2.3)** — declarative-path VRF coverage. The
+  imperative `VrfLink` shipped already; this lifts it to
+  `NetworkConfig`. Members enslave via the existing
+  `LinkBuilder::master` chain. The Plan 186 §3c topo-sort
+  makes VRF declared after its members still apply
+  correctly. Three new unit tests + two new root-gated
+  integration tests (gated by `require_module!("vrf")`).
+  Closes nlink-feedback §13 VRF half (WG half deferred to
+  Plan 196 for 0.20). **Note**: this widens the
+  `DeclaredLinkType` enum (already `#[non_exhaustive]`);
+  downstream pattern matches without `..` rest-pattern would
+  break, see migration guide §"Plan 190".
+
+- **Topo-sort `links_to_add` so parent-before-child holds
+  regardless of declared order (Plan 186 §3c)** —
+  `NetworkConfig::apply` now stable-sorts the new-links list
+  so a VLAN whose parent dummy is in the same apply lands
+  AFTER the parent. Independent links keep their declared
+  order (the sort is stable). Lifts the "declare parent
+  first" footgun that the nlink-lab 158e Slice 3 case hit
+  — `NetworkConfig` constructed from a `HashMap` (where the
+  child happens to iterate first) now works. The
+  `NetworkConfig::link` docstring documents the new
+  order-independence guarantee. 7 new unit tests pin the
+  sort behavior.
+
+- **Integration repro for the VLAN parent ifindex race
+  (Plan 186 phase 1)** — three new root-gated tests in
+  `tests/integration/network_config_apply.rs`:
+  `vlan_parent_dummy_in_same_apply_succeeds` (headline),
+  `vlan_parent_dummy_declared_in_either_order` (hash-defeating
+  order; tolerantly records pre-topo-sort behavior),
+  `vlan_parent_already_exists_in_kernel` (control). Plan 186's
+  audit found nlink's `resolve_interface` is netlink-based
+  end-to-end (no cache, no sysfs) — the maintainer's
+  hypotheses were wrong. The integration repro ships as a
+  permanent regression guard; if green, the symptom may not be
+  reproducible in our harness and the topo-sort + ordering
+  docstring still ship as defensive additions.
+
+- **`NetworkConfig::apply_reconcile` (Plan 188 §2.4)** —
+  bounded-retry sibling of `NetworkConfig::apply`, mirroring
+  `NftablesDiff::apply_reconcile` (Plan 157, 0.16). Retries
+  on `Error::is_busy()` / `is_try_again()` up to
+  `opts.max_retries` times with exponential backoff. For
+  RTNETLINK the transient surface is smaller than nftables —
+  no batch-end races — but VRF table allocation + neighbor
+  cache pressure still benefit. Uses the nftables-side
+  `ReconcileOptions` (the retry-budget shape), NOT the
+  crate-root `ReconcileOptions` (the TC recipe shape with
+  `fallback_to_apply` / `dry_run`). Plan 187's `errno()`
+  Io-shape fix means raw socket-layer `EBUSY`/`EAGAIN`
+  classifies correctly now.
+
+- **`LinkChanges::Display` (Plan 188 §2.5)** — `ConfigDiff::Display`
+  can render `links_to_modify` rows compactly:
+  `~ link eth0 (mtu=9000, up)`. Wraps the existing `summary()`
+  (which may itself be deprecated in 0.20).
+
+- **`Connection<Nftables>::del_{table,chain,rule}_if_exists`
+  (Plan 188 §2.7 / feedback W8)** — idempotent siblings of the
+  existing `del_*` methods. Return `Ok(true)` when the resource
+  was deleted, `Ok(false)` when it didn't exist (kernel ENOENT).
+  Replaces the universal `let _ = conn.del_table(...).await;`
+  ignore pattern.
+
+- **`Error::chain_walk` + `root_cause` + `contexts` (Plan 187 §2.2)** —
+  iterator over the source chain that transparently unwraps
+  `Box<nlink::Error>` (the trap the maintainer hit in their 158b
+  work). Plus two convenience shortcuts: `root_cause()` returns
+  the deepest `nlink::Error` in the chain, `contexts()` collects
+  every layer outer-to-inner. New named `ChainWalk` iterator
+  struct exposed at the crate root. Rustdoc on `Error::Kernel`
+  warns about the boxed-source trap + points consumers at
+  `chain_walk` as the escape hatch.
+
+- **Parser robustness policy + CI gate (Plan 193 — Phase 1)** —
+  CLAUDE.md gains a new §"Parser robustness" section
+  documenting the three defensive-parsing rules used across
+  the lib (accept-larger-than-expected on fixed-size structs,
+  pathological-length input guards on header-driven chain
+  walks, recoverable per-message parse failures in event
+  parsers). New `scripts/audit-recv-loop-error-handling.sh`
+  CI gate fails on a `?` operator inside a `MessageIter::new`
+  walking loop in `stream.rs`. Preempts the bug classes
+  tracked by netlink-packet-route #232, #152, and neli #305.
+  No consumer action required — the lib already follows the
+  rules; the policy + gate prevent future drift.
+
+### Post-cycle audit batch (closes F1 + N1-N9 + Findings A-D)
+
+A four-agent adversarial audit run after the main 0.19 cycle
+work surfaced one more architectural bug, twelve correctness
+bugs, and four test-coverage gaps. All eleven verified findings
+shipped; Finding E was refuted (false-positive). Tracked
+internally as Plan 194 closeout + the post-audit batch.
+
+#### Breaking changes (post-cycle batch)
+
+- **`Connection<P>::events()` / `into_events()` are now `async`
+  (Finding B).** Acquires the connection's request lock for the
+  stream's lifetime so concurrent streams on a shared
+  `Arc<Connection>` no longer race on `poll_recv`. Same change
+  cascades through:
+  - `Connection<Route>::into_events_with_resync` / `subscribe_all_with_resync` → `async fn`
+  - `Connection<Nftables>::into_events_with_resync` / `subscribe_all_with_resync` → `async fn`
+  - `nlink::facade::watch::{route_changes,route_changes_in_namespace,nftables_changes,nftables_changes_in_namespace}` → `async fn`
+
+  Migration: add `.await` at every call site. ~30 line changes
+  across nlink's own bins/examples; downstream consumers will
+  see a wave of "future used without await" errors during the
+  bump.
+
+- **`Connection<P>::subscribe()` / `subscribe_all()` /
+  `subscribe_group()` flipped `&mut self` → `&self`
+  (Finding A).** The underlying syscall is
+  `setsockopt(SOL_NETLINK, NETLINK_ADD_MEMBERSHIP)` which is
+  fd-level; the `&mut` was a stale artefact of routing through
+  `AsyncFd::get_mut`. Same fix on:
+  - `Connection<Nftables>::subscribe` / `subscribe_all` / `subscribe_all_with_resync`
+  - `Connection<Netfilter>::subscribe` / `subscribe_all`
+  - `Connection<Wireguard|Macsec|Mptcp|Ethtool|Nl80211|Devlink>::subscribe`
+  - `Connection<Route>::subscribe_all_with_resync`
+  - GENL macro-generated `subscribe_group` on macro-defined families
+  - Internal `NetlinkSocket::add_membership` / `drop_membership`
+
+  Migration: remove `mut` from `Connection<P>` bindings if it
+  was only there for `subscribe*`. ConnectionPool's
+  `PooledConnection` now supports `pool.acquire().await?.subscribe_all()?`
+  — concurrent subscribe from multiple tasks sharing
+  `Arc<Connection>` is also a legitimate pattern now.
+
+- **`Connection::socket_mut()` removed.** Was the last
+  `&mut self` accessor on Connection; obsolete now that
+  `add_membership` is `&self`. Internal API (`pub(crate)`);
+  the lib's own callers refactored to `self.socket().add_membership(group)`.
+
+- **`Connection<P>::request_lock` field type:
+  `Mutex<()>` → `Arc<Mutex<()>>` (Finding B prerequisite).**
+  Required so streams can hold an `OwnedMutexGuard` whose
+  lifetime is independent of the parent's borrow scope.
+  `#[non_exhaustive]` struct so this is source-compatible for
+  downstream code that never constructed a Connection literal,
+  which is all of them (the constructor is `Connection::<P>::new()`).
+
+#### Concurrency: F1 closed across all protocols
+
+- **F1 — `Connection<P>` request lock** closes the rtnetlink
+  #131 shape: two tasks sharing `Arc<Connection<P>>` would race
+  on the recv side, with task A's recv loop consuming task B's
+  response from the socket buffer and discarding it via the
+  seq filter. Both tasks then blocked indefinitely (or surfaced
+  `Error::Timeout` after Plan 171's 30s default). Added
+  `tokio::sync::Mutex` on `Connection<P>`, acquired at every
+  send+recv-loop method via a new `pub(crate) lock_request()`
+  helper.
+
+  Coverage swept across the central methods in `connection.rs`
+  (send_request_inner, send_ack_inner, send_dump_inner) plus
+  every protocol-specific send+recv-loop in
+  `genl/{wireguard,macsec,mptcp,ethtool,nl80211,devlink}/connection.rs`,
+  `nftables/connection.rs`, `sockdiag.rs`, `xfrm.rs`, `audit.rs`,
+  `netfilter.rs`, `fib_lookup.rs`, `batch.rs`, plus the public
+  GENL escape hatches `Connection<P>::command()` /
+  `dump_command()` (initially missed in the lock sweep — closed
+  in a follow-up commit). 42+ acquire sites across 14 files.
+
+  Regression coverage: Plan 194's
+  `concurrent_dumps_on_shared_connection_route_correctly` test
+  (originally `#[ignore]`'d when this bug was discovered) is
+  now green on CI. A second
+  `concurrent_ack_requests_on_shared_connection_succeed` test
+  added for ACK-style coverage.
+
+  Trade-off: concurrent ops on a shared `Arc<Connection>` now
+  serialize cleanly (the kernel processes a single socket FIFO
+  anyway). For true parallel throughput use
+  `ConnectionPool<P>` — each task gets its own connection.
+
+- **Finding B — `DumpStream` + `EventSubscription` lifetime
+  lock.** Stream-shape APIs were the remaining concurrency
+  hole: two `DumpStream`s on a shared connection would both
+  call `socket.poll_recv` and steal each other's frames.
+  Closed by storing an `OwnedMutexGuard<()>` inside each stream
+  struct; acquired in the async constructor, released on stream
+  drop. See breaking-change entries above for the API-shape
+  fallout.
+
+#### Verified bugs (post-cycle audit)
+
+- **N1 (CRITICAL) — `namespace::create` thread-bleed.**
+  `unshare(CLONE_NEWNET)` is scoped to the calling *thread*,
+  not the process. When called from a tokio worker thread
+  (`LabNamespace::new` in tests, app code that creates netns
+  via tokio runtime), every other tokio task scheduled on that
+  worker temporarily observed the new empty namespace until the
+  matching `setns()` restored it — including any `Connection<P>`
+  they constructed, which silently bound to the wrong netns.
+  Fix: isolate the unshare+mount+setns sequence on a freshly
+  `std::thread::spawn`'d worker so the bleed is bounded to a
+  dedicated thread that does nothing else.
+
+- **N2 (HIGH) — Malformed multicast frame killed unrelated
+  request.** When a `Connection<P>` was both subscribed
+  (multicast) and performing requests, the recv loop saw both
+  unicast replies AND multicast frames through the same
+  `recv_msg().await`. A `?` propagation on `MessageIter` parse
+  errors fired BEFORE the seq filter could discard the frame,
+  killing the request. Fixed: skip parse failures silently in
+  the per-frame loop (extends Plan 193 §2.3 rule 3 to
+  subscribed-connection request paths). 3 recv loops in
+  connection.rs touched.
+
+- **N3 (HIGH) — `xfrm.rs` `from_le_bytes` on host-order fields.**
+  4 sites used `u16::from_le_bytes` / `u32::from_le_bytes` for
+  netlink attribute headers and XFRM algo fields, which the
+  kernel emits in host byte order. Silently broken on big-endian
+  platforms (s390x, sparc64, PowerPC-BE). Fixed to
+  `from_ne_bytes`. On LE hosts `to_le_bytes` and `to_ne_bytes`
+  coincide so this regressed silently; the audit caught it via
+  kernel-source cross-check.
+
+- **N4 (HIGH) — `RouteMessage::write_to` dropped 5 fields.**
+  `source`, `iif`, `pref`, `expires`, `multipath` (the Plan 202
+  ECMP nexthop chain) were parsed but never written, silently
+  dropping them on `get → mutate → set` round-trips. Added 5
+  builder setters (`.source(addr, prefix_len)`, `.iif(ifindex)`,
+  `.pref(p)`, `.expires(secs)`, `.multipath(Vec<ParsedNextHop>)`)
+  + 5 emit branches + a `write_attr_multipath` helper that
+  mirrors `parse_multipath` (rtnexthop chain with nested
+  RTA_GATEWAY). ECMP route replay through the typed API works
+  now. Roundtrip regression test added.
+
+- **N5 (HIGH) — `NeighborMessage::write_to` dropped 6 fields.**
+  `probes`, `port` (BIG-endian — VXLAN UDP port), `vni`,
+  `ifindex_attr`, `master`, `cache_info` were parsed but never
+  written. Blocked typed VXLAN FDB programming via
+  `NeighborMessageBuilder` — users had to drop to raw
+  `MessageBuilder`. Added 6 builder setters + 6 emit branches +
+  `write_attr_u16_be` (for NDA_PORT) + `write_attr_cache_info`.
+  Roundtrip regression test added.
+
+- **N6 (HIGH) — `WireguardWatcher::next_events` first-failure
+  killed whole watcher.** Plan 199's per-interface loop used
+  `?` to propagate `get_device_by_name` errors. Deleting one
+  watched interface out-of-band aborted the entire poll cycle —
+  all other interfaces' updates silently dropped, watcher
+  stuck. Fixed: `match` on each per-iface result, log
+  `tracing::warn!` on error, emit `PeerRemoved` for tracked
+  peers on the failed iface, drop it from `self.previous`,
+  continue.
+
+- **N7 (HIGH) — `Stack::apply` had no pre-flight validation.**
+  Failure in the WireGuard layer after network + nftables
+  succeeded left the host in a partial state (interfaces +
+  firewall up, no VPN). Fixed: call `self.diff().await?` first
+  to validate every set layer against current kernel state
+  before any mutation. Catches the high-value failure modes
+  (missing kernel module, invalid key, family-resolution
+  failure, permission, missing netns). Residual race window
+  documented in the rustdoc.
+
+- **N8 (MEDIUM) — `parse_af_spec_vlans` / `_tunnels` dropped
+  orphan RANGE_BEGIN.** Consecutive RANGE_BEGIN markers (no
+  intervening RANGE_END) silently overwrote the prior
+  `range_start` and dropped the entire prior range. Trailing
+  RANGE_BEGIN at end of chain also dropped. Plan 193 rule 2
+  ("pathological-length input guards") requires defensive
+  handling. Fixed: emit prior `range_start` as a single
+  VLAN/tunnel with a `tracing::warn!`, then start the new
+  range. Symmetric fix for the VLAN + tunnel parsers.
+
+- **N9 (MEDIUM) — 6 sibling parsers used `le_u16` for
+  host-order `nla_len`/`nla_type` + wrong mask in `rule.rs`.**
+  `messages/{rule,address,link,neighbor,route,tc}.rs` all
+  parsed `struct nlattr` headers as little-endian. Also
+  `rule.rs` masked `0x7fff` instead of canonical
+  `NLA_TYPE_MASK = 0x3fff`, so any future kernel attr shipped
+  with `NLA_F_NET_BYTEORDER` would silently miss every match
+  arm. Fixed all 6 to `take(2)` + `from_ne_bytes` (winnow has
+  no `ne_u16`); rule.rs uses `NLA_TYPE_MASK`.
+
+- **Finding A (HIGH) — subscribe blocked through ConnectionPool.**
+  See breaking changes above.
+
+- **Finding C (MEDIUM) — `Pool::invalidate` capacity decay.**
+  `PooledConnection::invalidate` dropped the broken connection
+  without replacing it. After N invalidates a size-N pool's
+  `acquire()` would block indefinitely. Fixed: added a
+  `Factory<P>` trait on `PoolInner` capturing the namespace +
+  sync/async build mode. `invalidate` now `tokio::spawn`s a
+  task that calls `factory.build().await` and `try_send`s the
+  replacement into the pool's mpsc. Capacity recovers.
+  Integration test
+  (`pool_invalidate_replenishes_capacity`) asserts the
+  replenish lands.
+
+- **Finding D (LOW) — `Connector::send_proc_control` missed F1
+  lock.** Send-only path didn't acquire `request_lock`,
+  violating the doc invariant. Fixed: acquire the lock for the
+  send. Also corrected misleading comment "NLMSG_DONE" → the
+  actual value (0) is NLMSG_NOOP. No ACK to drain
+  (`NLM_F_ACK` is not set; cn_proc doesn't emit one).
+
+- **Finding E — `Batch::send_chunk` stale-seq window: REFUTED.**
+  Original audit agent claimed the recv loop's seq matching
+  accepted stale frames from earlier requests via a `> end_seq`
+  window check. Re-read: the code uses per-op exact seq
+  matching (`ops.iter().position(|op| op.seq == header.nlmsg_seq)`),
+  not a window. Agent hallucinated the check. No fix needed;
+  documented for future audit cycles.
+
+#### Test backfill
+
+- **Plan 204 C1 — Verdict::Jump + Verdict::Goto kernel
+  round-trip.** Asserts the rule survives the kernel commit
+  AND the raw `NFTA_RULE_EXPRESSIONS` bytes contain the
+  big-endian encoding of the correct verdict constants
+  (`NFT_JUMP = -3`, `NFT_GOTO = -4`) and NOT the pre-fix wrong
+  constant (`NFT_BREAK = -2`). CI surfaced that
+  `NFTA_VERDICT_CODE` is actually `__be32` on the wire — the
+  test correctly uses `to_be_bytes()` to assert the
+  protocol-correct encoding.
+
+- **Plan 211 M1 — `Hook::InetIngress` kernel acceptance.**
+  Installs a Prerouting chain AND an InetIngress chain at the
+  same priority on the same Inet family table. Pre-fix the
+  second chain would EEXIST (both aliased to hook 0); post-fix
+  InetIngress = NF_INET_INGRESS (5) so they coexist. Skips
+  gracefully on kernels < 5.10.
+
+- **Plan 191 — Route `subscribe_all_with_resync` live events.**
+  Asserts that a live multicast event (a dummy link addition)
+  arrives wrapped in `ResyncedEvent::Event(NewLink)` through the
+  resync stream. The Route-side glue is a separate code path
+  from the Nftables side; this guards against a silent
+  regression that would drop the wrapper.
+
+- **F1 sweep gap — `concurrent_ack_requests_on_shared_connection_succeed`.**
+  Extends Plan 194's regression coverage to ACK-style ops.
+  16 concurrent `add_link` calls on a shared
+  `Arc<Connection<Route>>`; all must succeed and the final
+  dump must see all 16 dummies.
 
 ## [0.18.0] - 2026-05-29
 

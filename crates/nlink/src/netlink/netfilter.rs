@@ -867,9 +867,9 @@ impl Connection<Netfilter> {
     /// }
     /// ```
     #[tracing::instrument(level = "info", skip(self), fields(groups = ?groups))]
-    pub fn subscribe(&mut self, groups: &[ConntrackGroup]) -> Result<()> {
+    pub fn subscribe(&self, groups: &[ConntrackGroup]) -> Result<()> {
         for g in groups {
-            self.socket_mut().add_membership(g.to_kernel_group())?;
+            self.socket().add_membership(g.to_kernel_group())?;
         }
         Ok(())
     }
@@ -878,7 +878,7 @@ impl Connection<Netfilter> {
     /// `Destroy`). Skips the expectation groups (`ExpNew` /
     /// `ExpDestroy`) — those carry expectation messages, not entry
     /// messages, and can't be parsed as `ConntrackEntry`.
-    pub fn subscribe_all(&mut self) -> Result<()> {
+    pub fn subscribe_all(&self) -> Result<()> {
         self.subscribe(&[
             ConntrackGroup::New,
             ConntrackGroup::Update,
@@ -888,86 +888,104 @@ impl Connection<Netfilter> {
 
     /// Get connection tracking entries for a specific address family.
     async fn get_conntrack_family(&self, family: u8) -> Result<Vec<ConntrackEntry>> {
-        let seq = self.socket().next_seq();
-        let pid = self.socket().pid();
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring. Acquired
+        // BEFORE the with_timeout wrapper so the lock spans the
+        // entire timeout window.
+        let _guard = self.lock_request().await;
+        // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
+        // NLM_F_DUMP_INTR detection.
+        self.with_timeout(async move {
+            let seq = self.socket().next_seq();
+            let pid = self.socket().pid();
 
-        // Build request
-        let mut buf = Vec::with_capacity(64);
+            let mut buf = Vec::with_capacity(64);
+            let msg_type =
+                ((NFNL_SUBSYS_CTNETLINK as u16) << 8) | (IPCTNL_MSG_CT_GET as u16);
 
-        // Netlink header (16 bytes)
-        // Message type: (NFNL_SUBSYS_CTNETLINK << 8) | IPCTNL_MSG_CT_GET
-        let msg_type = ((NFNL_SUBSYS_CTNETLINK as u16) << 8) | (IPCTNL_MSG_CT_GET as u16);
+            buf.extend_from_slice(&0u32.to_ne_bytes());
+            buf.extend_from_slice(&msg_type.to_ne_bytes());
+            buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes());
+            buf.extend_from_slice(&seq.to_ne_bytes());
+            buf.extend_from_slice(&pid.to_ne_bytes());
 
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
-        buf.extend_from_slice(&msg_type.to_ne_bytes()); // nlmsg_type
-        buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes()); // nlmsg_flags
-        buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
-        buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
+            buf.push(family);
+            buf.push(0); // NFNETLINK_V0
+            buf.extend_from_slice(&0u16.to_be_bytes());
 
-        // nfgenmsg (4 bytes)
-        buf.push(family); // nfgen_family
-        buf.push(0); // version (NFNETLINK_V0)
-        buf.extend_from_slice(&0u16.to_be_bytes()); // res_id
+            let len = buf.len() as u32;
+            buf[0..4].copy_from_slice(&len.to_ne_bytes());
 
-        // Update length
-        let len = buf.len() as u32;
-        buf[0..4].copy_from_slice(&len.to_ne_bytes());
+            self.socket().send(&buf).await?;
 
-        // Send request
-        self.socket().send(&buf).await?;
+            let mut entries = Vec::new();
 
-        // Receive responses
-        let mut entries = Vec::new();
+            loop {
+                let data = self.socket().recv_msg().await?;
 
-        loop {
-            let data = self.socket().recv_msg().await?;
+                let mut offset = 0;
+                while offset + 16 <= data.len() {
+                    let nlmsg_len = u32::from_ne_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]) as usize;
 
-            let mut offset = 0;
-            while offset + 16 <= data.len() {
-                let nlmsg_len = u32::from_ne_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ]) as usize;
+                    let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
+                    let nlmsg_flags = u16::from_ne_bytes([data[offset + 6], data[offset + 7]]);
+                    let nlmsg_seq = u32::from_ne_bytes([
+                        data[offset + 8],
+                        data[offset + 9],
+                        data[offset + 10],
+                        data[offset + 11],
+                    ]);
 
-                let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
+                    if nlmsg_len < 16 || offset + nlmsg_len > data.len() {
+                        break;
+                    }
+                    if nlmsg_seq != seq {
+                        offset += (nlmsg_len + 3) & !3;
+                        continue;
+                    }
+                    if nlmsg_flags & 0x10 != 0 {
+                        return Err(crate::netlink::Error::DumpInterrupted);
+                    }
 
-                if nlmsg_len < 16 || offset + nlmsg_len > data.len() {
-                    break;
-                }
-
-                match nlmsg_type {
-                    NLMSG_DONE => return Ok(entries),
-                    NLMSG_ERROR => {
-                        if nlmsg_len >= 20 {
-                            let errno = i32::from_ne_bytes([
-                                data[offset + 16],
-                                data[offset + 17],
-                                data[offset + 18],
-                                data[offset + 19],
-                            ]);
-                            if errno != 0 {
-                                return Err(super::error::Error::from_errno(-errno));
+                    match nlmsg_type {
+                        NLMSG_DONE => return Ok(entries),
+                        NLMSG_ERROR => {
+                            if nlmsg_len >= 20 {
+                                let errno = i32::from_ne_bytes([
+                                    data[offset + 16],
+                                    data[offset + 17],
+                                    data[offset + 18],
+                                    data[offset + 19],
+                                ]);
+                                if errno != 0 {
+                                    return Err(
+                                        super::error::Error::from_errno(-errno),
+                                    );
+                                }
+                            }
+                        }
+                        _ => {
+                            let subsys = (nlmsg_type >> 8) as u8;
+                            if subsys == NFNL_SUBSYS_CTNETLINK
+                                && let Some(entry) =
+                                    self.parse_conntrack(&data[offset..offset + nlmsg_len])
+                            {
+                                entries.push(entry);
                             }
                         }
                     }
-                    _ => {
-                        // Check if it's a conntrack message
-                        let subsys = (nlmsg_type >> 8) as u8;
-                        if subsys == NFNL_SUBSYS_CTNETLINK
-                            && let Some(entry) =
-                                self.parse_conntrack(&data[offset..offset + nlmsg_len])
-                        {
-                            entries.push(entry);
-                        }
-                    }
-                }
 
-                // Align to 4 bytes
-                offset += (nlmsg_len + 3) & !3;
+                    offset += (nlmsg_len + 3) & !3;
+                }
             }
-        }
+        })
+        .await
     }
 
     /// Parse a conntrack message (full netlink frame including the

@@ -284,6 +284,30 @@ ifindex directly to methods that accept it) — the `_by_name`
 methods become a deliberate convenience choice rather than a
 default.
 
+#### `util::ifname` sysfs reads — namespace policy
+
+`util::ifname::{name_to_index, index_to_name, list_interfaces}`
+read from `/sys/class/net/` in the **calling process's mount
+namespace**. They are only used by the `bins/` CLI tools and
+never by internal library paths. The audit script
+`scripts/audit-sysfs-in-lib.sh` (wired into CI as a separate
+gate) fails the build if a `/sys/class/net/` or `/proc/sys/`
+read appears in `crates/nlink/src/netlink/` outside the
+documented exceptions — currently only `sysctl.rs`, where
+`/proc/sys/...` is the kernel-blessed way to read sysctls
+from a process attached to a netns.
+
+For library code touching foreign netns, the policy is:
+
+1. Use `Connection::get_link_by_name` (netlink-based; ifindex
+   resolved through `RTM_GETLINK` in the connection's netns).
+2. Or use the `_by_index` API variants and pre-resolve the
+   ifindex via the connection.
+3. If a new file genuinely needs sysfs (e.g. ethtool fallback,
+   diagnostics), add it to `ALLOWED` in
+   `scripts/audit-sysfs-in-lib.sh` and document the rationale
+   in a rustdoc comment.
+
 ### Connection diagnostics + sockopts
 
 Two `Connection<P>` methods control kernel-side diagnostic
@@ -303,6 +327,51 @@ the underlying sockopt:
   output. Example: `errno = 22 (EINVAL)` becomes
   `"attribute IFLA_MTU rejected: value 0 out of range (at request
   offset 24)"`. See `Error::Kernel::ext_ack`.
+
+### Concurrency (0.19 F1 fix)
+
+`Connection<P>` is `Send + Sync` and safe to share across tokio
+tasks via `Arc<Connection<P>>`. Every request/response method
+acquires an internal `tokio::sync::Mutex` so concurrent callers
+serialize cleanly instead of racing on `recv_msg`. Trade-off:
+shared-`Arc<Connection>` requests run in sequence rather than
+in parallel. For true parallel throughput use
+`ConnectionPool<P>` — each task gets its own connection (and
+its own kernel-side socket queue, which the kernel processes
+in parallel).
+
+**Stream-shape APIs hold the lock for their lifetime.**
+`conn.events().await`, `conn.into_events().await`,
+`conn.dump_stream::<T>(...).await?` and the
+`*_with_resync` constructors are now **async** (0.19 Finding B).
+A long-lived events subscriber blocks concurrent requests on
+the same Connection until dropped. Use a second Connection
+or `ConnectionPool` for query-in-parallel patterns.
+
+```rust
+// Sharing a Connection across tasks — serialized but correct.
+let conn = Arc::new(Connection::<Route>::new()?);
+for _ in 0..16 {
+    let c = conn.clone();
+    tokio::spawn(async move { c.get_links().await });
+}
+
+// Parallel fanout via the pool — each task gets its own socket.
+let pool = Arc::new(ConnectionPool::<Route>::new(8)?);
+for _ in 0..16 {
+    let p = pool.clone();
+    tokio::spawn(async move { p.acquire().await?.get_links().await });
+}
+
+// subscribe() is now `&self` (0.19 Finding A) — works through
+// the pool, and concurrent subscribe from multiple tasks
+// sharing an Arc<Connection> is a legitimate pattern.
+pool.acquire().await?.subscribe_all()?;
+```
+
+The full per-seq response router (NlRouter-style dispatcher)
+that would unlock interleaved events + requests on a single
+socket is queued for 0.20 — see `plans/INDEX.md` "F1 follow-on".
 
 ## Errors
 
@@ -387,6 +456,57 @@ loop {
 Plan 172 enforces this template across all 9 recv-loops in the
 lib. The audit table is in Plan 172 §2.1.
 
+## Parser robustness
+
+Defensive parsing policy for any code that walks attribute
+chains or fixed-size structs out of kernel response bytes.
+Plan 193 (0.19) pinned the conventions; the audit scripts
+under `scripts/audit-recv-loop-error-handling.sh` enforce
+them.
+
+Three rules. Future parsers MUST follow all three.
+
+1. **Accept-larger-than-expected on fixed-size structs.**
+   Use `if buf.len() < EXPECTED_SIZE { error }`, NOT
+   `if buf.len() != EXPECTED_SIZE { error }`. The kernel
+   grows struct-typed attributes over time
+   (`IFLA_INET6_CONF` is the canonical example —
+   netlink-packet-route #232 tracked the bug class). Read
+   the prefix, ignore trailing bytes.
+
+2. **Pathological-length input guards on header-driven
+   loops.** Any chain walker that reads a length-field from
+   each entry header must:
+   - Validate `entry_len >= MIN_HEADER_SIZE` on entry; skip
+     remainder if not (prevents slice-index panic).
+   - Treat `entry_len == 0` as end-of-chain or skip-and-log;
+     never let `offset` fail to advance (prevents infinite
+     loop). The bug class tracks
+     netlink-packet-route #152.
+
+3. **Recoverable per-message parse failures.** Event
+   parsers (`impl EventSource for *`, `parse_*_event`
+   dispatchers) that walk `MessageIter::new(data)` MUST
+   silently skip parse errors rather than propagating via
+   `?`. Use:
+
+   ```rust
+   for (header, payload) in MessageIter::new(data).flatten() { ... }
+   // OR
+   for msg_result in MessageIter::new(data) {
+       let Ok((header, payload)) = msg_result else { continue };
+       ...
+   }
+   ```
+
+   One malformed frame from a future kernel MUST NOT kill a
+   long-lived multicast subscriber. Tracks neli #305.
+
+The `scripts/audit-recv-loop-error-handling.sh` CI gate
+greps for `?` operator inside `MessageIter` walking loops in
+event-parser contexts and fails on hits. New parsers
+inherit the policy.
+
 ## Observability
 
 Every Connection method, every netlink request/ack/dump cycle
@@ -467,21 +587,17 @@ run it locally before merging a new example.
 
 ## Active work
 
-**0.16.0 shipped 2026-05-25** (`v0.16.0` tagged; both crates on
-crates.io). The cycle's headline additions are documented in
-`CHANGELOG.md ## [0.16.0]` + `docs/migration_guide/0.15.1-to-0.16.0.md`
-— the cycle's per-plan scaffolding was deleted post-cut per
-convention.
+**0.18.0 shipped 2026-05-29** (`v0.18.0` tagged; both crates on
+crates.io). Headline additions in `CHANGELOG.md ## [0.18.0]`
++ `docs/migration_guide/0.17.0-to-0.18.0.md`.
 
-The **0.17 cycle is complete** on the `0.17` branch (do not push
-to master); workspace at 0.17.0 awaiting maintainer cut via
-`scripts/cut-release.sh 0.17.0`. The cycle's narrative + per-
-feature entries live in
+The **0.19 cycle is complete** on the `0.19` branch (do not push
+to master); workspace at 0.19.0 awaiting maintainer cut via
+`scripts/cut-release.sh 0.19.0`. The cycle's narrative lives in
 [`CHANGELOG.md ## [Unreleased]`](CHANGELOG.md) (will become
-`## [0.17.0]` on cut) and the migration walkthrough in
-[`docs/migration_guide/0.16.0-to-0.17.0.md`](docs/migration_guide/0.16.0-to-0.17.0.md).
-Day-to-day status tracker for any in-flight or queued follow-ups
-is [`plans/INDEX.md`](plans/INDEX.md).
+`## [0.19.0]` on cut) and the migration walkthrough in
+[`docs/migration_guide/0.18.0-to-0.19.0.md`](docs/migration_guide/0.18.0-to-0.19.0.md).
+Day-to-day status tracker is [`plans/INDEX.md`](plans/INDEX.md).
 
 Per-release upgrade guides:
 [`docs/migration_guide/`](docs/migration_guide/README.md) — write

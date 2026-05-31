@@ -66,7 +66,7 @@ let mut streams = StreamMap::new();
 // Default (host) namespace.
 let mut host = Connection::<Route>::new()?;
 host.subscribe_all()?;
-streams.insert("default".to_string(), host.into_events());
+streams.insert("default".to_string(), host.into_events().await);
 
 // Two named namespaces (assumed to exist — `ip netns add tenant-a / tenant-b`).
 for ns in ["tenant-a", "tenant-b"] {
@@ -79,7 +79,7 @@ for ns in ["tenant-a", "tenant-b"] {
         RtnetlinkGroup::Ipv6Route,
         RtnetlinkGroup::Tc,
     ])?;
-    streams.insert(ns.to_string(), conn.into_events());
+    streams.insert(ns.to_string(), conn.into_events().await);
 }
 
 // Fan-in: each event comes with its namespace key.
@@ -157,7 +157,7 @@ loop {
                 NamespaceEvent::Created { name } => {
                     let mut conn: Connection<Route> = namespace::connection_for(&name)?;
                     conn.subscribe_all()?;
-                    streams.insert(name, conn.into_events());
+                    streams.insert(name, conn.into_events().await);
                 }
                 NamespaceEvent::Deleted { name } => {
                     streams.remove(&name);

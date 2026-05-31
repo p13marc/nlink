@@ -19,7 +19,7 @@ async fn main() -> nlink::Result<()> {
     println!("Press Ctrl+C to exit.\n");
 
     // Use events() to get a borrowed stream - connection remains usable
-    let mut events = conn.events();
+    let mut events = conn.events().await;
 
     while let Some(result) = events.next().await {
         let event = result?;

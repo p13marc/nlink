@@ -115,14 +115,21 @@ pub struct EventSubscription<'a, P: EventSource> {
     conn: &'a Connection<P>,
     buffer: Vec<u8>,
     pending: Vec<P::Event>,
+    /// 0.19 Finding B — hold the Connection's request lock for the
+    /// subscription's lifetime so concurrent dumps / other streams
+    /// on a shared `Arc<Connection>` don't race on `poll_recv`. The
+    /// lock is acquired in [`Connection::events`] (now async) and
+    /// released when the stream is dropped.
+    _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl<'a, P: EventSource> EventSubscription<'a, P> {
-    pub(crate) fn new(conn: &'a Connection<P>) -> Self {
+    pub(crate) fn new(conn: &'a Connection<P>, guard: tokio::sync::OwnedMutexGuard<()>) -> Self {
         Self {
             conn,
             buffer: Vec::new(),
             pending: Vec::new(),
+            _guard: guard,
         }
     }
 }
@@ -201,14 +208,22 @@ pub struct OwnedEventStream<P: EventSource> {
     conn: Connection<P>,
     buffer: Vec<u8>,
     pending: Vec<P::Event>,
+    /// 0.19 Finding B — same role as `EventSubscription::_guard`.
+    /// Because the lock is held by the OwnedMutexGuard wrapping
+    /// the Connection's own request_lock Arc, and the Connection
+    /// is owned by this struct, dropping the stream releases the
+    /// guard which drops the Arc reference (alongside the
+    /// Connection itself).
+    _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl<P: EventSource> OwnedEventStream<P> {
-    pub(crate) fn new(conn: Connection<P>) -> Self {
+    pub(crate) fn new(conn: Connection<P>, guard: tokio::sync::OwnedMutexGuard<()>) -> Self {
         Self {
             conn,
             buffer: Vec::new(),
             pending: Vec::new(),
+            _guard: guard,
         }
     }
 
@@ -218,8 +233,13 @@ impl<P: EventSource> OwnedEventStream<P> {
     }
 
     /// Consume this stream and return the underlying connection.
+    /// 0.19 Finding B — the guard is dropped here, releasing the
+    /// Connection's request lock so subsequent requests can proceed.
     pub fn into_connection(self) -> Connection<P> {
-        self.conn
+        // Drop the guard explicitly via struct destructure so the
+        // released lock is observable before we return.
+        let Self { conn, .. } = self;
+        conn
     }
 }
 
@@ -276,7 +296,17 @@ impl<P: EventSource> Connection<P> {
     /// Create an event stream that borrows this connection.
     ///
     /// Returns a [`Stream`] that borrows the connection. The connection
-    /// remains usable for queries while the stream is active.
+    /// remains usable for **non-recv** operations (`set_strict_checking`,
+    /// `subscribe` to add more groups, etc.) while the stream is active.
+    ///
+    /// **0.19 Finding B — now `async`.** Acquires the connection's
+    /// request lock for the subscription's lifetime so concurrent
+    /// streams (multiple `events()`, `events()` + `dump_stream()`)
+    /// no longer race on `poll_recv` and steal each other's frames.
+    /// Concurrent dumps on a connection with an active events stream
+    /// will block until the events stream is dropped — use a second
+    /// Connection (or `ConnectionPool`) for query-in-parallel
+    /// patterns.
     ///
     /// # Example
     ///
@@ -286,8 +316,8 @@ impl<P: EventSource> Connection<P> {
     ///
     /// let conn = Connection::<KobjectUevent>::new()?;
     ///
-    /// // Borrow connection for streaming
-    /// let mut events = conn.events();
+    /// // Borrow connection for streaming (0.19: now async).
+    /// let mut events = conn.events().await;
     /// while let Some(event) = events.try_next().await? {
     ///     if event.is_add() {
     ///         println!("Device added: {}", event.devpath);
@@ -297,8 +327,9 @@ impl<P: EventSource> Connection<P> {
     /// // Connection still usable
     /// drop(events);
     /// ```
-    pub fn events(&self) -> EventSubscription<'_, P> {
-        EventSubscription::new(self)
+    pub async fn events(&self) -> EventSubscription<'_, P> {
+        let guard = self.lock_request_owned().await;
+        EventSubscription::new(self, guard)
     }
 
     /// Convert this connection into an owned event stream.
@@ -313,7 +344,7 @@ impl<P: EventSource> Connection<P> {
     /// use tokio_stream::StreamExt;
     ///
     /// let conn = Connection::<SELinux>::new()?;
-    /// let mut stream = conn.into_events();
+    /// let mut stream = conn.into_events().await;
     ///
     /// while let Some(event) = stream.try_next().await? {
     ///     println!("{:?}", event);
@@ -322,8 +353,12 @@ impl<P: EventSource> Connection<P> {
     /// // Recover connection if needed
     /// let conn = stream.into_connection();
     /// ```
-    pub fn into_events(self) -> OwnedEventStream<P> {
-        OwnedEventStream::new(self)
+    ///
+    /// **0.19 Finding B — now `async`.** Same locking semantics as
+    /// [`Self::events`]; see that method's docstring for the trade-off.
+    pub async fn into_events(self) -> OwnedEventStream<P> {
+        let guard = self.lock_request_owned().await;
+        OwnedEventStream::new(self, guard)
     }
 }
 
@@ -1150,6 +1185,106 @@ fn parse_ethtool_event(cmd: u8, data: &[u8]) -> Option<super::genl::ethtool::Eth
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------
+    // Plan 193 §2.3 — parse-error skip regression coverage.
+    //
+    // Per CLAUDE.md §"Parser robustness" rule 3, event parsers
+    // walking `MessageIter::new(data)` must skip malformed
+    // frames rather than propagate via `?`. One bad frame from
+    // a future kernel must NOT kill a long-lived multicast
+    // subscriber. These tests pin the contract.
+    //
+    // The audit script `scripts/audit-recv-loop-error-handling.sh`
+    // is the CI-side defense (Plan 193 phase 1); these tests
+    // are the runtime-side defense.
+    // -------------------------------------------------------------
+
+    /// Build a length-tagged netlink frame: nlmsg_len (u32) +
+    /// nlmsg_type (u16) + flags (u16) + seq (u32) + pid (u32)
+    /// + payload. Used for the parse_events skip tests.
+    fn build_nl_frame(msg_type: u16, payload: &[u8]) -> Vec<u8> {
+        // Netlink header is 16 bytes.
+        let mut frame = Vec::with_capacity(16 + payload.len());
+        let total_len = 16 + payload.len() as u32;
+        frame.extend_from_slice(&total_len.to_ne_bytes());
+        frame.extend_from_slice(&msg_type.to_ne_bytes());
+        frame.extend_from_slice(&0u16.to_ne_bytes()); // flags
+        frame.extend_from_slice(&0u32.to_ne_bytes()); // seq
+        frame.extend_from_slice(&0u32.to_ne_bytes()); // pid
+        frame.extend_from_slice(payload);
+        // Align to 4 bytes.
+        while frame.len() % 4 != 0 {
+            frame.push(0);
+        }
+        frame
+    }
+
+    /// Build a frame with a header that claims more bytes than
+    /// the actual buffer carries — `MessageIter` should report
+    /// the truncation as an Err the event parser silently skips.
+    fn build_truncated_frame(msg_type: u16, claimed_payload_size: usize) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(16);
+        // Claim a payload size that goes beyond what we'll write.
+        let total_len = (16 + claimed_payload_size) as u32;
+        frame.extend_from_slice(&total_len.to_ne_bytes());
+        frame.extend_from_slice(&msg_type.to_ne_bytes());
+        frame.extend_from_slice(&0u16.to_ne_bytes());
+        frame.extend_from_slice(&0u32.to_ne_bytes());
+        frame.extend_from_slice(&0u32.to_ne_bytes());
+        // ... but write NO payload bytes. Iter advances past
+        // the header, then sees the buffer is too short.
+        frame
+    }
+
+    #[test]
+    fn route_parse_events_skips_unknown_msg_type() {
+        // Build a frame with an unknown msg type. Per Plan 193
+        // §2.3, the iterator surfaces it; parse_route_event
+        // returns None; parse_events yields an empty vec rather
+        // than panicking. Pins the kernel-version-forward
+        // compatibility contract.
+        let payload = vec![0u8; 16];
+        let frame = build_nl_frame(0xFFFF, &payload);
+        let events = Route::parse_events(&frame);
+        assert!(events.is_empty(), "unknown msg-type must skip silently");
+    }
+
+    #[test]
+    fn route_parse_events_skips_truncated_frame_without_panic() {
+        // A frame that claims 100 bytes of payload but carries
+        // 0. MessageIter should report the truncation; the
+        // event parser ignores it and yields an empty vec.
+        let frame = build_truncated_frame(NlMsgType::RTM_NEWLINK, 100);
+        let events = Route::parse_events(&frame);
+        // No panic, no infinite loop.
+        let _: Vec<NetworkEvent> = events;
+    }
+
+    #[test]
+    fn route_parse_events_skips_garbage_payload_on_known_msg_type() {
+        // Known msg_type (RTM_NEWLINK) but a 4-byte payload
+        // that won't satisfy IfInfoMsg::SIZE (16 bytes). The
+        // typed parser returns Err; the event parser drops
+        // the result via `.ok()` per the lib's parse contract.
+        let bogus_payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let frame = build_nl_frame(NlMsgType::RTM_NEWLINK, &bogus_payload);
+        let events = Route::parse_events(&frame);
+        // The parser silently dropped the malformed frame —
+        // exactly the "one malformed frame must NOT kill the
+        // subscriber" contract.
+        assert!(
+            events.is_empty(),
+            "malformed payload on known msg-type must skip"
+        );
+    }
+
+    #[test]
+    fn route_parse_events_handles_empty_buffer_without_loop() {
+        // Empty data — must terminate immediately, not spin.
+        let events = Route::parse_events(&[]);
+        assert!(events.is_empty());
+    }
 
     #[test]
     fn event_subscription_is_unpin() {

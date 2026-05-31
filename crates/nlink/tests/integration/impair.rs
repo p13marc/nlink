@@ -410,7 +410,7 @@ async fn test_reconcile_modify_netem() -> nlink::Result<()> {
 
     let imp_a = PerPeerImpairer::new("test0")
         .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms());
-    imp_a.reconcile(&conn).await?;
+    let _ = imp_a.reconcile(&conn).await?;
 
     // Now bump the delay and reconcile.
     let imp_b = PerPeerImpairer::new("test0").impair_dst_ip(
@@ -439,7 +439,7 @@ async fn test_reconcile_remove_rule() -> nlink::Result<()> {
     conn.add_link(DummyLink::new("test0")).await?;
     conn.set_link_up("test0").await?;
 
-    PerPeerImpairer::new("test0")
+    let _ = PerPeerImpairer::new("test0")
         .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
         .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 2).into(), netem_50ms())
         .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 3).into(), netem_50ms())
@@ -542,7 +542,7 @@ async fn test_reconcile_with_fallback_to_apply() -> nlink::Result<()> {
     )
     .await?;
 
-    PerPeerImpairer::new("test0")
+    let _ = PerPeerImpairer::new("test0")
         .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
         .reconcile_with_options(&conn, ReconcileOptions::new().with_fallback_to_apply(true))
         .await?;

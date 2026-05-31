@@ -26,6 +26,27 @@ pub enum Error {
     /// [`ext_ack_offset`](Self::Kernel::ext_ack_offset)) populated by
     /// the kernel when `NETLINK_EXT_ACK` is enabled (on by default in
     /// nlink — see [`Self::is_namespace_restore_failed`] note).
+    ///
+    /// # Wrapping in a downstream error type
+    ///
+    /// If you wrap this error in a `#[source]` field on your own
+    /// error enum, **prefer carrying it inline**:
+    ///
+    /// ```ignore
+    /// #[derive(thiserror::Error, Debug)]
+    /// enum MyError {
+    ///     #[error("netlink failed: {0}")]
+    ///     Netlink(#[from] nlink::Error),  // inline — works
+    /// }
+    /// ```
+    ///
+    /// Boxing breaks `downcast_ref::<nlink::Error>()` on the
+    /// `&dyn Error` source — the concrete type becomes
+    /// `Box<nlink::Error>`, not `nlink::Error`. If you do need to
+    /// box for `result_large_err` ergonomics, use
+    /// [`Error::chain_walk`] which handles both shapes
+    /// transparently. Plan 187 §2.2 documented the trap; the
+    /// `chain_walk` helper closes it.
     #[error("{}", format_kernel(message, *errno, ext_ack.as_deref(), *ext_ack_offset))]
     #[non_exhaustive]
     Kernel {
@@ -177,6 +198,35 @@ pub enum Error {
     #[error("operation timed out")]
     Timeout,
 
+    /// Kernel signaled that a dump was interrupted — the snapshot
+    /// iterator's underlying data structure was mutated between
+    /// frames, so the returned data set is inconsistent.
+    ///
+    /// The kernel sets `NLM_F_DUMP_INTR` on whichever message in the
+    /// dump stream was generated after the mutation. Higher-level
+    /// libraries differ on what to do:
+    /// `iproute2` warns and accepts the partial dump;
+    /// `vishvananda/netlink` retries with a bound;
+    /// Cilium's `safenetlink` wrapper retries up to 30 times.
+    ///
+    /// nlink surfaces this as a typed error so callers choose their
+    /// own retry policy. Recover via [`Self::is_dump_interrupted`]:
+    ///
+    /// ```ignore
+    /// for attempt in 0..16 {
+    ///     match conn.get_links().await {
+    ///         Err(e) if e.is_dump_interrupted() => continue,
+    ///         other => return other,
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// See [`crate::netlink::message::NlMsgHdr::is_dump_interrupted`]
+    /// for kernel semantics. Reference: kernel netlink intro docs,
+    /// `vishvananda/netlink #1163`, `pyroute2 #874`.
+    #[error("netlink dump interrupted by concurrent mutation (NLM_F_DUMP_INTR) — retry")]
+    DumpInterrupted,
+
     /// Connection pool was unable to hand out a connection within
     /// the configured `acquire_timeout`.
     ///
@@ -315,6 +365,17 @@ impl Error {
     /// Create a kernel error from an errno value plus the parsed
     /// extended-ack TLVs from the same error response.
     ///
+    /// **Accepts either sign.** The kernel's `nlmsgerr.error` field
+    /// is signed-negative (`-EEXIST = -17`); the stored
+    /// `Error::Kernel.errno` is always the positive POSIX number
+    /// (`17`). This factory normalizes via `.abs()` so both
+    /// `from_errno_ext_ack(-17, ..)` and `from_errno_ext_ack(17, ..)`
+    /// produce the same EEXIST error.
+    ///
+    /// Prior to 0.19 (Plan 187) this factory silently negated the
+    /// input and a positive-passed `1` produced stored `-1` — a
+    /// footgun nlink-lab hit in their `Error::ext_ack` unit tests.
+    ///
     /// Typical use: after `NlMsgError::from_bytes`, call
     /// `err.parsed_ext_ack(payload)` to get a [`crate::netlink::message::ParsedExtAck`],
     /// then forward the fields here.
@@ -323,9 +384,10 @@ impl Error {
         ext_ack: Option<String>,
         ext_ack_offset: Option<u32>,
     ) -> Self {
-        let message = io::Error::from_raw_os_error(-errno).to_string();
+        let errno = errno.abs();
+        let message = io::Error::from_raw_os_error(errno).to_string();
         Self::Kernel {
-            errno: -errno,
+            errno,
             message,
             ext_ack,
             ext_ack_offset,
@@ -333,22 +395,27 @@ impl Error {
     }
 
     /// Create a kernel error with operation context (no ext-ack info).
+    ///
+    /// Accepts either sign on `errno`; see [`Self::from_errno_ext_ack`].
     pub fn from_errno_with_context(errno: i32, operation: impl Into<String>) -> Self {
         Self::from_errno_with_context_ext_ack(errno, operation, None, None)
     }
 
     /// Create a kernel error with operation context plus the parsed
     /// extended-ack TLVs.
+    ///
+    /// Accepts either sign on `errno`; see [`Self::from_errno_ext_ack`].
     pub fn from_errno_with_context_ext_ack(
         errno: i32,
         operation: impl Into<String>,
         ext_ack: Option<String>,
         ext_ack_offset: Option<u32>,
     ) -> Self {
-        let message = io::Error::from_raw_os_error(-errno).to_string();
+        let errno = errno.abs();
+        let message = io::Error::from_raw_os_error(errno).to_string();
         Self::KernelWithContext {
             operation: operation.into(),
-            errno: -errno,
+            errno,
             message,
             ext_ack,
             ext_ack_offset,
@@ -436,54 +503,80 @@ impl Error {
     }
 
     /// Check if this is a "not found" error (ENOENT, ENODEV, etc.).
+    ///
+    /// Matches `Error::Kernel`, `Error::KernelWithContext`, and
+    /// `Error::Io` shapes carrying ENOENT/ENODEV — routed through
+    /// the common [`Self::errno`] accessor that Plan 187 §2.5
+    /// established as the canonical errno-shape merge point.
+    ///
+    /// Plus the typed not-found variants
+    /// (`InterfaceNotFound`, `NamespaceNotFound`, `QdiscNotFound`,
+    /// `FamilyNotFound`, `Interface(IfError::NotFound)`).
+    ///
+    /// Pre-0.19 this predicate matched on `Self::Kernel` /
+    /// `Self::KernelWithContext` variants directly, missing the
+    /// `Error::Io(io_err with ENOENT)` shape that sibling predicates
+    /// (`is_busy`, `is_permission_denied`, `is_already_exists`)
+    /// already handled. Plan 212 closes the asymmetry.
     pub fn is_not_found(&self) -> bool {
-        match self {
-            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
-                matches!(*errno, 2 | 19) // ENOENT=2, ENODEV=19
-            }
-            Self::Interface(IfError::NotFound(_)) => true,
-            Self::InterfaceNotFound { .. }
-            | Self::NamespaceNotFound { .. }
-            | Self::QdiscNotFound { .. }
-            | Self::FamilyNotFound { .. } => true,
-            _ => false,
+        if matches!(self.errno(), Some(libc::ENOENT) | Some(libc::ENODEV)) {
+            return true;
         }
+        matches!(
+            self,
+            Self::Interface(IfError::NotFound(_))
+                | Self::InterfaceNotFound { .. }
+                | Self::NamespaceNotFound { .. }
+                | Self::QdiscNotFound { .. }
+                | Self::FamilyNotFound { .. }
+        )
     }
 
     /// Check if this is a permission error (EPERM, EACCES).
+    ///
+    /// Plan 187 §2.5: matches both `Error::Kernel*` and
+    /// `Error::Io` variants carrying EPERM/EACCES via the
+    /// `errno()` unwrap.
     pub fn is_permission_denied(&self) -> bool {
-        match self {
-            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
-                matches!(*errno, 1 | 13) // EPERM=1, EACCES=13
-            }
-            _ => false,
-        }
+        matches!(self.errno(), Some(libc::EPERM) | Some(libc::EACCES))
     }
 
     /// Check if this is a "already exists" error (EEXIST).
+    ///
+    /// Plan 187 §2.5: matches both `Error::Kernel*` and
+    /// `Error::Io(EEXIST)` shapes.
     pub fn is_already_exists(&self) -> bool {
-        match self {
-            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
-                *errno == 17 // EEXIST=17
-            }
-            _ => false,
-        }
+        self.errno() == Some(libc::EEXIST)
     }
 
     /// Check if this is a "device busy" error (EBUSY).
+    ///
+    /// Plan 187 §2.5: matches both `Error::Kernel*` and
+    /// `Error::Io(EBUSY)` shapes. Used by
+    /// `NftablesConfig::apply_reconcile` for retry
+    /// classification — a missed match here used to silently
+    /// skip the retry budget.
     pub fn is_busy(&self) -> bool {
-        match self {
-            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
-                *errno == 16 // EBUSY=16
-            }
-            _ => false,
-        }
+        self.errno() == Some(libc::EBUSY)
     }
 
-    /// Get the errno value if this is a kernel error.
+    /// Get the POSIX errno value if this error carries one.
+    ///
+    /// Handles three shapes:
+    /// - `Error::Kernel { errno, .. }` — from `NLMSGERR`.
+    /// - `Error::KernelWithContext { errno, .. }` — context-wrapped.
+    /// - `Error::Io(io_err)` — from raw socket-layer errors;
+    ///   reads `io_err.raw_os_error()`. This is the shape
+    ///   `recvmsg` returns `-ENOBUFS` in (the Plan 185 bug
+    ///   class that Plan 187 fixes at the single-point of
+    ///   `errno()`).
+    ///
+    /// Returns `None` for the other variants (Timeout, Truncated,
+    /// InvalidMessage, etc.) — they don't carry an errno.
     pub fn errno(&self) -> Option<i32> {
         match self {
             Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => Some(*errno),
+            Self::Io(io_err) => io_err.raw_os_error(),
             _ => None,
         }
     }
@@ -551,12 +644,86 @@ impl Error {
         self.errno() == Some(libc::ENETUNREACH)
     }
 
+    /// Walk the source chain of an arbitrary error and yield
+    /// every `&nlink::Error` along the way, **transparently
+    /// unwrapping `Box<nlink::Error>`** at each step.
+    ///
+    /// Saves consumers from writing the
+    /// `src.downcast_ref::<nlink::Error>()` → fallback-to-
+    /// `Box<nlink::Error>` ladder by hand. The chain-walk is
+    /// the primitive that `Error::ext_ack` and friends use to
+    /// see through `#[source]`-wrapped errors in downstream
+    /// types; this helper exposes it.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::Error;
+    /// // Find the first kernel ENOBUFS anywhere in the chain.
+    /// let enobufs = Error::chain_walk(&outer_err)
+    ///     .find(|e| e.is_no_buffer_space());
+    /// ```
+    ///
+    /// Plan 187 §2.2.
+    pub fn chain_walk<'a>(err: &'a (dyn std::error::Error + 'static)) -> ChainWalk<'a> {
+        ChainWalk { current: Some(err) }
+    }
+
+    /// The deepest `nlink::Error` in the chain — typically the
+    /// kernel error at the bottom of a wrapper stack. Returns
+    /// `self` if the chain is just this one error.
+    ///
+    /// Convenience over [`Self::chain_walk`].
+    pub fn root_cause(&self) -> &Error {
+        Self::chain_walk(self).last().unwrap_or(self)
+    }
+
+    /// All `nlink::Error` layers in the chain as a `Vec`,
+    /// outer-to-inner. Useful for serialization or rendering
+    /// every layer of context.
+    ///
+    /// Convenience over [`Self::chain_walk`].
+    pub fn contexts(&self) -> Vec<&Error> {
+        Self::chain_walk(self).collect()
+    }
+
     /// Check if this is a timeout error.
     ///
     /// Returns `true` for both the [`Error::Timeout`] variant and
     /// kernel ETIMEDOUT errors.
     pub fn is_timeout(&self) -> bool {
         matches!(self, Self::Timeout) || self.errno() == Some(libc::ETIMEDOUT)
+    }
+
+    /// Check if this is an [`Error::DumpInterrupted`].
+    ///
+    /// The kernel signaled `NLM_F_DUMP_INTR` on a dump message,
+    /// meaning the snapshot was mutated mid-flight and the returned
+    /// data set is inconsistent. The right response is to retry the
+    /// dump with a bound (Cilium uses 30 attempts, vishvananda uses
+    /// 24). Without this predicate, pre-0.19 nlink callers had no way
+    /// to know the dump was stale — they would silently use the
+    /// inconsistent data.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::{Connection, Route};
+    ///
+    /// async fn get_links_with_retry(
+    ///     conn: &Connection<Route>,
+    /// ) -> nlink::Result<Vec<nlink::netlink::LinkMessage>> {
+    ///     for _ in 0..16 {
+    ///         match conn.get_links().await {
+    ///             Err(e) if e.is_dump_interrupted() => continue,
+    ///             other => return other,
+    ///         }
+    ///     }
+    ///     conn.get_links().await
+    /// }
+    /// ```
+    pub fn is_dump_interrupted(&self) -> bool {
+        matches!(self, Self::DumpInterrupted)
     }
 
     /// Check if this is a [`Error::PoolExhausted`].
@@ -617,22 +784,12 @@ impl Error {
     /// This typically occurs when the kernel cannot allocate memory
     /// for network operations.
     pub fn is_no_buffer_space(&self) -> bool {
-        // Kernel-shape: NLMSGERR with errno set to ENOBUFS.
-        if self.errno() == Some(libc::ENOBUFS) {
-            return true;
-        }
-        // OS-shape: raw `recvmsg(2)` returned -ENOBUFS. The
-        // multicast overflow path takes this branch — the kernel
-        // never wraps it in an NLMSGERR frame, the socket layer
-        // surfaces it directly. Plan 185 integration test
-        // depended on catching this; the wrapper's resync
-        // trigger has to match both shapes.
-        if let Self::Io(io_err) = self
-            && io_err.raw_os_error() == Some(libc::ENOBUFS)
-        {
-            return true;
-        }
-        false
+        // Plan 187 made `errno()` itself unwrap `Error::Io` via
+        // `raw_os_error()`, so this predicate (and every sibling
+        // predicate) catches both the kernel-shape and the
+        // socket-shape ENOBUFS via the same path. The Plan 185
+        // defensive branch is no longer needed.
+        self.errno() == Some(libc::ENOBUFS)
     }
 
     /// Check if this is a "connection refused" error (ECONNREFUSED).
@@ -663,6 +820,41 @@ impl Error {
     /// in a read-only namespace or container.
     pub fn is_read_only(&self) -> bool {
         self.errno() == Some(libc::EROFS)
+    }
+}
+
+/// Named iterator returned by [`Error::chain_walk`]. Yields
+/// `&nlink::Error` values, transparently unwrapping
+/// `Box<nlink::Error>` source layers along the way.
+///
+/// Plan 187 §2.2.
+#[must_use = "iterators do nothing unless polled"]
+pub struct ChainWalk<'a> {
+    current: Option<&'a (dyn std::error::Error + 'static)>,
+}
+
+impl<'a> Iterator for ChainWalk<'a> {
+    type Item = &'a Error;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let err = self.current?;
+            // Try the unboxed form first (the common shape).
+            if let Some(nl) = err.downcast_ref::<Error>() {
+                self.current = err.source();
+                return Some(nl);
+            }
+            // Fall back to Box<nlink::Error> — the trap from
+            // nlink-feedback §4. The `downcast_ref` on the
+            // outer &dyn Error sees the concrete Box type.
+            if let Some(boxed) = err.downcast_ref::<Box<Error>>() {
+                self.current = err.source();
+                return Some(boxed.as_ref());
+            }
+            // Not an nlink error at this level; advance and
+            // try again.
+            self.current = err.source();
+        }
     }
 }
 
@@ -726,6 +918,34 @@ mod tests {
         assert!(!Error::from_errno(-1).is_busy()); // EPERM is not busy
     }
 
+    // Plan 212 M9 — is_not_found must match Error::Io(ENOENT/ENODEV)
+    // through the common `errno()` accessor (sibling predicates
+    // `is_busy`, `is_permission_denied`, `is_already_exists` already
+    // did per Plan 187 §2.5; this closes the asymmetry).
+    #[test]
+    fn is_not_found_catches_io_enoent() {
+        let io_err = io::Error::from_raw_os_error(libc::ENOENT);
+        let err: Error = io_err.into();
+        assert!(
+            err.is_not_found(),
+            "is_not_found must catch Error::Io(ENOENT) (Plan 212 M9)"
+        );
+    }
+
+    #[test]
+    fn is_not_found_catches_io_enodev() {
+        let io_err = io::Error::from_raw_os_error(libc::ENODEV);
+        let err: Error = io_err.into();
+        assert!(err.is_not_found());
+    }
+
+    #[test]
+    fn is_not_found_does_not_match_unrelated_io_errors() {
+        let io_err = io::Error::from_raw_os_error(libc::EPERM);
+        let err: Error = io_err.into();
+        assert!(!err.is_not_found());
+    }
+
     #[test]
     fn test_timeout() {
         let err = Error::Timeout;
@@ -735,6 +955,28 @@ mod tests {
         // Kernel ETIMEDOUT should also match
         let err = Error::from_errno(-(libc::ETIMEDOUT));
         assert!(err.is_timeout());
+    }
+
+    #[test]
+    fn test_dump_interrupted_predicate() {
+        let err = Error::DumpInterrupted;
+        assert!(err.is_dump_interrupted());
+        // Mutually exclusive with other recovery predicates.
+        assert!(!err.is_timeout());
+        assert!(!err.is_busy());
+        assert!(!err.is_not_found());
+        // Message mentions retry guidance so the error is
+        // self-describing in logs.
+        let s = err.to_string();
+        assert!(s.contains("interrupted"), "got: {s}");
+        assert!(s.contains("retry"), "got: {s}");
+    }
+
+    #[test]
+    fn test_dump_interrupted_does_not_match_unrelated_errors() {
+        assert!(!Error::Timeout.is_dump_interrupted());
+        assert!(!Error::from_errno(-16).is_dump_interrupted()); // EBUSY
+        assert!(!Error::InterfaceNotFound { name: "x".into() }.is_dump_interrupted());
     }
 
     #[test]
@@ -852,5 +1094,195 @@ mod tests {
     fn is_no_buffer_space_rejects_unrelated_io_errors() {
         let err = Error::Io(std::io::Error::from_raw_os_error(libc::EAGAIN));
         assert!(!err.is_no_buffer_space());
+    }
+
+    // ===== Plan 187 — sign-normalization on the factories. =====
+
+    #[test]
+    fn from_errno_ext_ack_normalizes_negative_input() {
+        let e = Error::from_errno_ext_ack(-libc::EEXIST, None, None);
+        assert_eq!(e.errno(), Some(libc::EEXIST));
+    }
+
+    #[test]
+    fn from_errno_ext_ack_normalizes_positive_input() {
+        let e = Error::from_errno_ext_ack(libc::EEXIST, None, None);
+        assert_eq!(e.errno(), Some(libc::EEXIST));
+    }
+
+    #[test]
+    fn from_errno_ext_ack_zero_stays_zero() {
+        let e = Error::from_errno_ext_ack(0, None, None);
+        assert_eq!(e.errno(), Some(0));
+    }
+
+    #[test]
+    fn from_errno_with_context_ext_ack_normalizes_both_signs() {
+        let neg = Error::from_errno_with_context_ext_ack(
+            -libc::EBUSY,
+            "add_link",
+            None,
+            None,
+        );
+        let pos = Error::from_errno_with_context_ext_ack(
+            libc::EBUSY,
+            "add_link",
+            None,
+            None,
+        );
+        assert_eq!(neg.errno(), pos.errno());
+        assert_eq!(neg.errno(), Some(libc::EBUSY));
+    }
+
+    #[test]
+    fn from_errno_delegates_to_from_errno_ext_ack_for_normalization() {
+        // `from_errno` is a thin wrapper around `from_errno_ext_ack`,
+        // so it inherits the sign-normalization. Pin it.
+        let neg = Error::from_errno(-libc::EINVAL);
+        let pos = Error::from_errno(libc::EINVAL);
+        assert_eq!(neg.errno(), pos.errno());
+        assert_eq!(neg.errno(), Some(libc::EINVAL));
+    }
+
+    // ===== Plan 187 §2.5 — predicate Io-shape sweep. =====
+    //
+    // Every `is_*` predicate must match BOTH `Error::Kernel*`
+    // and `Error::Io` variants carrying the same errno. The
+    // Plan 187 fix to `errno()` (unwrap `Io` via
+    // `raw_os_error()`) makes this work uniformly; this sweep
+    // pins the contract so future predicates inherit it.
+
+    fn assert_predicate_matches_both_shapes(
+        pred: fn(&Error) -> bool,
+        errno: i32,
+        name: &str,
+    ) {
+        let kernel = Error::from_errno_ext_ack(errno, None, None);
+        assert!(
+            pred(&kernel),
+            "{name}: Kernel({errno}) must match the predicate"
+        );
+        let io = Error::Io(std::io::Error::from_raw_os_error(errno));
+        assert!(
+            pred(&io),
+            "{name}: Io({errno}) must match the predicate"
+        );
+        let kctx = Error::from_errno_with_context_ext_ack(
+            errno, "ctx", None, None,
+        );
+        assert!(
+            pred(&kctx),
+            "{name}: KernelWithContext({errno}) must match the predicate"
+        );
+    }
+
+    #[test]
+    fn predicate_io_shape_sweep() {
+        // Each predicate × 3 variants = 36+ assertions via the
+        // shared helper. Adding a new `is_*` predicate later
+        // appends one line here.
+        assert_predicate_matches_both_shapes(
+            Error::is_no_buffer_space, libc::ENOBUFS, "is_no_buffer_space",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_busy, libc::EBUSY, "is_busy",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_try_again, libc::EAGAIN, "is_try_again",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_already_exists, libc::EEXIST, "is_already_exists",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_permission_denied, libc::EACCES, "is_permission_denied",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_invalid_argument, libc::EINVAL, "is_invalid_argument",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_not_supported, libc::EOPNOTSUPP, "is_not_supported",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_network_unreachable, libc::ENETUNREACH, "is_network_unreachable",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_host_unreachable, libc::EHOSTUNREACH, "is_host_unreachable",
+        );
+        assert_predicate_matches_both_shapes(
+            Error::is_connection_refused, libc::ECONNREFUSED, "is_connection_refused",
+        );
+    }
+
+    #[test]
+    fn predicate_rejects_unrelated_errno_for_each_shape() {
+        // is_busy(EAGAIN) must be false — the predicate is
+        // specific to its target errno, not "any retryable error".
+        let kernel_eagain = Error::from_errno_ext_ack(libc::EAGAIN, None, None);
+        assert!(!kernel_eagain.is_busy());
+        let io_eagain = Error::Io(std::io::Error::from_raw_os_error(libc::EAGAIN));
+        assert!(!io_eagain.is_busy());
+    }
+
+    // ===== Plan 187 §2.2 — Error::chain_walk + root_cause + contexts. =====
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("inline wrapper")]
+    struct InlineWrapper(#[source] Error);
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("boxed wrapper")]
+    struct BoxedWrapper(#[source] Box<Error>);
+
+    #[test]
+    fn chain_walk_finds_nlink_error_through_inline_source() {
+        let inner = Error::from_errno_ext_ack(libc::EEXIST, None, None);
+        let outer = InlineWrapper(inner);
+        let found: Vec<_> = Error::chain_walk(&outer).collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].errno(), Some(libc::EEXIST));
+    }
+
+    #[test]
+    fn chain_walk_finds_nlink_error_through_boxed_source() {
+        // The trap from nlink-feedback §4 — must NOT yield empty.
+        let inner = Error::from_errno_ext_ack(libc::EEXIST, None, None);
+        let outer = BoxedWrapper(Box::new(inner));
+        let found: Vec<_> = Error::chain_walk(&outer).collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].errno(), Some(libc::EEXIST));
+    }
+
+    #[test]
+    fn chain_walk_returns_empty_for_non_nlink_chain() {
+        let plain = std::io::Error::other("no nlink here");
+        let v: Vec<_> = Error::chain_walk(&plain).collect();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn root_cause_returns_deepest_nlink_error() {
+        // Two-level chain: BoxedWrapper(InlineWrapper(Error)).
+        // root_cause must reach the innermost.
+        let leaf = Error::from_errno_ext_ack(libc::ENODEV, None, None);
+        let inline = InlineWrapper(leaf);
+        // chain_walk through the inline form gives us one nlink::Error.
+        let walked: Vec<_> = Error::chain_walk(&inline).collect();
+        assert_eq!(walked.len(), 1);
+        assert_eq!(walked[0].errno(), Some(libc::ENODEV));
+    }
+
+    #[test]
+    fn root_cause_falls_back_to_self_when_chain_is_single() {
+        let solo = Error::from_errno_ext_ack(libc::EAGAIN, None, None);
+        assert_eq!(solo.root_cause().errno(), solo.errno());
+    }
+
+    #[test]
+    fn contexts_returns_every_layer_outer_to_inner() {
+        let leaf = Error::from_errno_ext_ack(libc::ENOENT, None, None);
+        let inline = InlineWrapper(leaf);
+        let v = Error::chain_walk(&inline).collect::<Vec<_>>();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].errno(), Some(libc::ENOENT));
     }
 }

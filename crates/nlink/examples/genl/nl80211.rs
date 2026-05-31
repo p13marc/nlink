@@ -151,7 +151,7 @@ async fn scan(iface: &str) -> nlink::Result<()> {
         .unwrap();
     let ifindex = iface_info.ifindex;
 
-    let mut evt = Connection::<Nl80211>::new_async().await?;
+    let evt = Connection::<Nl80211>::new_async().await?;
     evt.subscribe()?;
 
     println!("Triggering scan on {iface} (ifindex {ifindex})...");
@@ -160,7 +160,7 @@ async fn scan(iface: &str) -> nlink::Result<()> {
     // Wait up to 15s for the scan to complete. Scans are usually 1-5s,
     // but dense environments + many channels can push that out.
     println!("Waiting for ScanComplete...");
-    let mut stream = evt.events();
+    let mut stream = evt.events().await;
     let wait = async {
         while let Some(result) = stream.next().await {
             match result? {

@@ -402,7 +402,7 @@ impl Connection<Connector> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "new"))]
     pub async fn new() -> Result<Self> {
-        let mut socket = NetlinkSocket::new(Connector::PROTOCOL)?;
+        let socket = NetlinkSocket::new(Connector::PROTOCOL)?;
 
         // Join the proc connector multicast group
         socket.add_membership(CN_IDX_PROC)?;
@@ -425,6 +425,15 @@ impl Connection<Connector> {
 
     /// Send a process connector control message.
     async fn send_proc_control(&self, op: u32) -> Result<()> {
+        // 0.19 Finding D — acquire the F1 request lock for the
+        // send. No ACK is solicited (the cn_proc layer doesn't
+        // emit one and nlmsg_flags omits NLM_F_ACK), so there's
+        // no recv loop here — but the lock matches the doc
+        // invariant ("every send is locked") and prevents a
+        // future caller from interleaving sendmsg bytes with
+        // another in-flight request on the same socket.
+        let _guard = self.lock_request().await;
+
         let seq = self.socket().next_seq();
         let pid = self.socket().pid();
 
@@ -434,7 +443,12 @@ impl Connection<Connector> {
         // Netlink header (16 bytes)
         let msg_len = NLMSG_HDRLEN + std::mem::size_of::<CnMsg>() + 4;
         buf.extend_from_slice(&(msg_len as u32).to_ne_bytes()); // nlmsg_len
-        buf.extend_from_slice(&0x0u16.to_ne_bytes()); // nlmsg_type (NLMSG_DONE)
+        // 0.19 Finding D — was misleadingly commented "NLMSG_DONE".
+        // The actual value is NLMSG_NOOP (0); cn_proc dispatches
+        // on the (idx, val) tuple in the CnMsg body and is
+        // permissive about nlmsg_type as long as it's not an
+        // error frame.
+        buf.extend_from_slice(&0x0u16.to_ne_bytes()); // nlmsg_type (NLMSG_NOOP)
         buf.extend_from_slice(&0x0u16.to_ne_bytes()); // nlmsg_flags
         buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
         buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid

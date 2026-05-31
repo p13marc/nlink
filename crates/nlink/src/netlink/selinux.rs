@@ -100,7 +100,7 @@ impl Connection<SELinux> {
     /// let conn = Connection::<SELinux>::new()?;
     /// ```
     pub fn new() -> Result<Self> {
-        let mut socket = NetlinkSocket::new(SELinux::PROTOCOL)?;
+        let socket = NetlinkSocket::new(SELinux::PROTOCOL)?;
 
         // Bind to the AVC multicast group to receive events
         socket.add_membership(SELNLGRP_AVC)?;

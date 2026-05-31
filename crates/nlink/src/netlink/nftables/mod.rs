@@ -176,7 +176,7 @@ pub const NFTA_RULE_POSITION: u16 = 6;
 /// `NFTA_RULE_USERDATA = 7` — opaque-bytes payload the kernel
 /// preserves verbatim across reads / writes (max
 /// `NFT_USERDATA_MAXLEN = 256` bytes). Used for libnftnl-compatible
-/// TLV-encoded rule comments — see [`userdata`].
+/// TLV-encoded rule comments — see the internal `userdata` module.
 pub const NFTA_RULE_USERDATA: u16 = 7;
 
 // =============================================================================
@@ -284,13 +284,20 @@ pub const NFT_SET_CONSTANT: u32 = 0x2;
 pub const NFT_SET_INTERVAL: u32 = 0x4;
 pub const NFT_SET_MAP: u32 = 0x8;
 
-// Verdict codes
+// Verdict codes — verified against `include/uapi/linux/netfilter/nf_tables.h`
+// enum `nft_verdicts`. Plan 204 (0.19) corrected `NFT_JUMP` and `NFT_GOTO`,
+// which previously emitted `-2` and `-3` respectively. Pre-0.19 a
+// `Verdict::Jump(chain)` wrote `-2` on the wire which the kernel
+// interpreted as `NFT_BREAK` (terminate rule eval) — every subroutine
+// rule was silently broken. The new `NFT_BREAK = -2` constant is added
+// for completeness.
 pub const NF_DROP: i32 = 0;
 pub const NF_ACCEPT: i32 = 1;
 pub const NFT_CONTINUE: i32 = -1;
+pub const NFT_BREAK: i32 = -2;
+pub const NFT_JUMP: i32 = -3;
+pub const NFT_GOTO: i32 = -4;
 pub const NFT_RETURN: i32 = -5;
-pub const NFT_JUMP: i32 = -2;
-pub const NFT_GOTO: i32 = -3;
 
 // =============================================================================
 // NfGenMsg Header (zerocopy)

@@ -163,13 +163,15 @@ impl Connection<Nftables> {
     /// Subscribes to `NftablesGroup::All` before returning. Use
     /// [`Self::subscribe_all_with_resync`] if you need to retain
     /// borrowed access to the connection.
+    /// 0.19 Finding B — now `async` to acquire the request lock
+    /// via `into_events().await`.
     #[tracing::instrument(level = "info", skip_all)]
-    pub fn into_events_with_resync(
-        mut self,
+    pub async fn into_events_with_resync(
+        self,
         factory: ConnectionFactory<Nftables>,
     ) -> Result<OwnedResyncStream> {
         self.subscribe_all()?;
-        let stream = self.into_events();
+        let stream = self.into_events().await;
         Ok(events_with_resync(stream, make_snapshot_fn(factory)))
     }
 
@@ -180,13 +182,15 @@ impl Connection<Nftables> {
     /// to spawn the stream onto a tokio task, prefer
     /// [`Self::into_events_with_resync`] (the owned form is
     /// `'static + Send`).
+    ///
+    /// 0.19 Finding A — `&self` (was `&mut self`). Finding B — now `async`.
     #[tracing::instrument(level = "info", skip_all)]
-    pub fn subscribe_all_with_resync(
-        &mut self,
+    pub async fn subscribe_all_with_resync(
+        &self,
         factory: ConnectionFactory<Nftables>,
     ) -> Result<BorrowedResyncStream<'_>> {
         self.subscribe_all()?;
-        let stream = self.events();
+        let stream = self.events().await;
         Ok(events_with_resync(stream, make_snapshot_fn(factory)))
     }
 }

@@ -52,10 +52,53 @@ use super::{
 /// // Async construction (Wireguard, Macsec, Mptcp, Ethtool, Nl80211, Devlink)
 /// let wg = Connection::<Wireguard>::new_async().await?;
 /// ```
+///
+/// # Concurrency
+///
+/// `Connection<P>` is `Send + Sync` and safe to share across
+/// tokio tasks via `Arc<Connection<P>>`. As of 0.19 (closing the
+/// F1 architectural concurrency issue), each request/response
+/// pair acquires an internal `tokio::sync::Mutex` so concurrent
+/// callers on a shared `Arc<Connection>` serialize cleanly
+/// instead of racing on the recv side.
+///
+/// The lock is held for one send + one drain-until-DONE/ACK
+/// cycle, so concurrent dumps on a shared connection complete
+/// in sequence rather than in parallel. For true parallel
+/// throughput, use [`crate::netlink::pool::ConnectionPool<P>`]
+/// — each task acquires its own connection (and therefore its
+/// own netlink socket, which the kernel processes in parallel).
+///
+/// What the lock fixes — without it, two tasks calling
+/// `get_links()` on a shared connection would race on `recv_msg`:
+/// task A could consume task B's response from the socket
+/// buffer, the seq filter would `continue` past it (correct
+/// from A's view) but B then blocks forever waiting for a
+/// response that's gone. The seq filter remains as a defensive
+/// backstop against stale multicast/cross-process frames, but
+/// no longer load-bears against multi-task races.
+///
+/// What the lock does **not** fix — multicast `events()` streams
+/// running concurrently with requests still race the recv side
+/// (event streams tap the socket directly and don't acquire the
+/// request lock). The proper fix is a per-seq response router
+/// (NlRouter-style dispatch task) — queued for 0.20.
 pub struct Connection<P: ProtocolState> {
     socket: NetlinkSocket,
     state: P,
     timeout: Option<Duration>,
+    /// Serialize concurrent request/response cycles on a shared
+    /// `Arc<Connection<P>>`. Held by every higher-level method
+    /// that does `socket.send(...) + recv-loop-until-DONE`.
+    /// Closes the F1 concurrency bug (rtnetlink #131 shape) where
+    /// task A's recv loop would consume task B's response from
+    /// the socket buffer and drop it. See `Concurrency` above.
+    ///
+    /// `Arc<Mutex<()>>` (rather than `Mutex<()>`) so streams
+    /// (`DumpStream`, `EventSubscription`) can take an
+    /// [`tokio::sync::OwnedMutexGuard`] that lives independent
+    /// of the Connection's borrow scope — see 0.19 Finding B.
+    request_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Default operation timeout for `Connection<P>` (Plan 171).
@@ -110,6 +153,7 @@ where
             socket: NetlinkSocket::new(P::PROTOCOL)?,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
+            request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -137,6 +181,7 @@ where
             socket: NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
+            request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -162,6 +207,7 @@ where
             socket: NetlinkSocket::new_in_namespace_path(P::PROTOCOL, ns_path)?,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
+            request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 }
@@ -221,11 +267,6 @@ impl<P: ProtocolState> Connection<P> {
     /// Get the underlying socket.
     pub fn socket(&self) -> &NetlinkSocket {
         &self.socket
-    }
-
-    /// Get a mutable reference to the underlying socket.
-    pub(crate) fn socket_mut(&mut self) -> &mut NetlinkSocket {
-        &mut self.socket
     }
 
     /// Get the protocol state.
@@ -289,6 +330,7 @@ impl<P: ProtocolState> Connection<P> {
     /// let conn = Connection::<Route>::new()?;
     /// conn.enable_strict_checking(true)?;
     /// ```
+    #[instrument(level = "debug", skip(self), fields(method = "enable_strict_checking"))]
     pub fn enable_strict_checking(&self, on: bool) -> Result<()> {
         self.socket.set_strict_checking(on)
     }
@@ -312,8 +354,32 @@ impl<P: ProtocolState> Connection<P> {
     /// let conn = Connection::<Route>::new()?;
     /// conn.set_ext_ack(false)?;  // disable; rarely useful
     /// ```
+    #[instrument(level = "debug", skip(self), fields(method = "set_ext_ack"))]
     pub fn set_ext_ack(&self, on: bool) -> Result<()> {
         self.socket.set_ext_ack(on)
+    }
+
+    /// Acquire the per-connection request lock for the duration of
+    /// a `send + recv-loop` cycle.
+    ///
+    /// Every higher-level method that does `socket.send(...)` followed
+    /// by a `recv_msg`/`recv_batch` loop MUST hold this guard for the
+    /// whole flow. Otherwise concurrent callers on a shared
+    /// `Arc<Connection<P>>` race on the recv side and lose frames.
+    ///
+    /// This closes the F1 architectural concurrency issue (rtnetlink
+    /// #131 shape). See the struct-level `Concurrency` docstring.
+    pub(crate) async fn lock_request(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.request_lock.lock().await
+    }
+
+    /// Acquire the request lock as an *owned* guard. 0.19 Finding B —
+    /// used by stream-shape APIs (`DumpStream`, `EventSubscription`)
+    /// that hold the lock for the stream's whole lifetime; the owned
+    /// guard outlives the `&Connection` borrow scope so the stream
+    /// can store it in its own struct.
+    pub(crate) async fn lock_request_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.request_lock.clone().lock_owned().await
     }
 
     /// Wrap a future with the configured timeout.
@@ -341,6 +407,7 @@ impl<P: ProtocolState> Connection<P> {
             socket,
             state,
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
+            request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -374,6 +441,11 @@ impl<P: ProtocolState> Connection<P> {
 
     #[instrument(level = "trace", skip_all, fields(seq))]
     async fn send_request_inner(&self, mut builder: MessageBuilder) -> Result<Vec<u8>> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See struct-level "Concurrency" docstring.
+        let _guard = self.request_lock.lock().await;
+
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -394,7 +466,21 @@ impl<P: ProtocolState> Connection<P> {
             let response = self.socket.recv_msg().await?;
             let mut found_seq = false;
             for result in MessageIter::new(&response) {
-                let (header, payload) = result?;
+                // 0.19 N2 — Plan 193 §2.3 rule 3 extension. When a
+                // `Connection<P>` is both subscribed (multicast) and
+                // performing requests, the recv loop sees BOTH our
+                // unicast reply AND unrelated multicast frames. A
+                // malformed multicast frame (corrupted kernel, future
+                // protocol extension) used to kill the unrelated
+                // request via `?`. Skip parse failures silently so
+                // long-lived subscribers + requests on the same
+                // socket survive a single malformed frame.
+                let Ok((header, payload)) = result else {
+                    tracing::trace!(
+                        "send_request: skipping malformed frame in shared recv loop"
+                    );
+                    continue;
+                };
                 if header.nlmsg_seq != seq {
                     continue;
                 }
@@ -417,6 +503,9 @@ impl<P: ProtocolState> Connection<P> {
 
     #[instrument(level = "trace", skip_all, fields(seq))]
     async fn send_ack_inner(&self, mut builder: MessageBuilder) -> Result<()> {
+        // F1 fix — see send_request_inner.
+        let _guard = self.request_lock.lock().await;
+
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -431,7 +520,13 @@ impl<P: ProtocolState> Connection<P> {
         loop {
             let response = self.socket.recv_msg().await?;
             for result in MessageIter::new(&response) {
-                let (header, payload) = result?;
+                // 0.19 N2 — see send_request_inner.
+                let Ok((header, payload)) = result else {
+                    tracing::trace!(
+                        "send_ack: skipping malformed frame in shared recv loop"
+                    );
+                    continue;
+                };
                 if header.nlmsg_seq != seq {
                     continue;
                 }
@@ -443,12 +538,27 @@ impl<P: ProtocolState> Connection<P> {
                     }
                     return Ok(());
                 }
+                // Matching seq + non-error response on an ack-only
+                // operation is unexpected (kernel returned a data
+                // message for what nlink considered a SET-style
+                // request). Pre-0.19 this fell through and looped to
+                // the next recv, blocking until the 30s timeout. Now
+                // we surface explicitly so the caller can react
+                // (Plan 212 M16).
+                return Err(Error::InvalidMessage(format!(
+                    "send_ack: expected ACK or error for seq {}, got nlmsg_type {} \
+                     (kernel returned data on an ack-only request)",
+                    seq, header.nlmsg_type
+                )));
             }
         }
     }
 
     #[instrument(level = "trace", skip_all, fields(seq, responses))]
     async fn send_dump_inner(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
+        // F1 fix — see send_request_inner.
+        let _guard = self.request_lock.lock().await;
+
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
@@ -484,11 +594,28 @@ impl<P: ProtocolState> Connection<P> {
 
             for data in batch.iter() {
                 for result in MessageIter::new(data) {
-                    let (header, payload) = result?;
+                    // 0.19 N2 — see send_request_inner.
+                    let Ok((header, payload)) = result else {
+                        tracing::trace!(
+                            "send_dump: skipping malformed frame in shared recv loop"
+                        );
+                        continue;
+                    };
 
                     // Check sequence number
                     if header.nlmsg_seq != seq {
                         continue;
+                    }
+
+                    // Plan 193 follow-up — surface NLM_F_DUMP_INTR.
+                    // The kernel sets this when the dump iterator's
+                    // underlying data structure was mutated since the
+                    // dump started; per kernel docs the userspace
+                    // should retry. Pre-0.19 nlink silently used the
+                    // inconsistent snapshot. Caller can retry via
+                    // `Error::is_dump_interrupted()`.
+                    if header.is_dump_interrupted() {
+                        return Err(Error::DumpInterrupted);
                     }
 
                     if header.is_error() {
@@ -606,6 +733,7 @@ impl Connection<Route> {
     /// // For the default namespace
     /// let conn = Connection::<Route>::for_namespace(NamespaceSpec::Default)?;
     /// ```
+    #[instrument(level = "info", skip_all, fields(protocol = "Route"))]
     pub fn for_namespace(spec: super::namespace::NamespaceSpec<'_>) -> Result<Self> {
         spec.connection()
     }
@@ -621,7 +749,7 @@ impl Connection<Route> {
     /// conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
     /// ```
     #[instrument(level = "info", skip(self), fields(groups = ?groups))]
-    pub fn subscribe(&mut self, groups: &[RtnetlinkGroup]) -> Result<()> {
+    pub fn subscribe(&self, groups: &[RtnetlinkGroup]) -> Result<()> {
         for group in groups {
             self.socket.add_membership(group.to_group())?;
         }
@@ -641,7 +769,8 @@ impl Connection<Route> {
     /// conn.subscribe_all()?;
     /// let mut events = conn.events();
     /// ```
-    pub fn subscribe_all(&mut self) -> Result<()> {
+    #[instrument(level = "info", skip_all)]
+    pub fn subscribe_all(&self) -> Result<()> {
         self.subscribe(&[
             RtnetlinkGroup::Link,
             RtnetlinkGroup::Ipv4Addr,
@@ -674,6 +803,7 @@ impl Connection<Route> {
     ///     println!("{}: {:?}", addr.ifindex(), addr.address);
     /// }
     /// ```
+    #[instrument(level = "debug", skip(self), fields(method = "dump_typed", msg_type))]
     pub async fn dump_typed<T: FromNetlink>(&self, msg_type: u16) -> Result<Vec<T>> {
         let mut builder = dump_request(msg_type);
 
@@ -806,6 +936,7 @@ impl Connection<Route> {
     ///     // process one link with O(1) memory
     /// }
     /// ```
+    #[instrument(level = "debug", skip_all, fields(method = "stream_links"))]
     pub async fn stream_links(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, LinkMessage>> {
@@ -813,6 +944,7 @@ impl Connection<Route> {
     }
 
     /// Stream a route dump frame-by-frame. See [`Self::stream_links`].
+    #[instrument(level = "debug", skip_all, fields(method = "stream_routes"))]
     pub async fn stream_routes(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, RouteMessage>> {
@@ -827,6 +959,7 @@ impl Connection<Route> {
     /// bridge FDB entries together when AF_BRIDGE isn't filtered;
     /// use the typed-config Connection (`stream_fdb` on
     /// `Connection<Route>` when added in 0.17) for FDB-only.
+    #[instrument(level = "debug", skip_all, fields(method = "stream_neighbors"))]
     pub async fn stream_neighbors(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, NeighborMessage>> {
@@ -835,6 +968,7 @@ impl Connection<Route> {
     }
 
     /// Stream an address dump frame-by-frame. See [`Self::stream_links`].
+    #[instrument(level = "debug", skip_all, fields(method = "stream_addresses"))]
     pub async fn stream_addresses(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, AddressMessage>> {
@@ -1594,6 +1728,7 @@ impl Connection<Route> {
     ///     // process one qdisc with O(1) memory
     /// }
     /// ```
+    #[instrument(level = "debug", skip_all, fields(method = "stream_qdiscs"))]
     pub async fn stream_qdiscs(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
@@ -1602,6 +1737,7 @@ impl Connection<Route> {
 
     /// Stream a TC class dump frame-by-frame. See
     /// [`Self::stream_qdiscs`].
+    #[instrument(level = "debug", skip_all, fields(method = "stream_classes"))]
     pub async fn stream_classes(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
@@ -1618,6 +1754,7 @@ impl Connection<Route> {
     /// f.ifindex() == my_index).unwrap_or(true))` if you only
     /// care about one interface — there's no kernel-side
     /// per-ifindex `RTM_GETTFILTER` dump filter.
+    #[instrument(level = "debug", skip_all, fields(method = "stream_filters"))]
     pub async fn stream_filters(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
@@ -2267,9 +2404,16 @@ impl Connection<Generic> {
     /// ```
     #[instrument(level = "info", skip(self), fields(family = %name, id, cached))]
     pub async fn get_family(&self, name: &str) -> Result<FamilyInfo> {
-        // Check cache first
+        // Check cache first. Poison-tolerant unwrap (Plan 212 M17)
+        // — the locked region is panic-free, so poisoning is
+        // unreachable; the `unwrap_or_else(into_inner)` recovers if
+        // a future panic surfaces (hardening rather than fix).
         {
-            let cache = self.state.cache.read().unwrap();
+            let cache = self
+                .state
+                .cache
+                .read()
+                .unwrap_or_else(|p| p.into_inner());
             if let Some(info) = cache.get(name) {
                 let span = tracing::Span::current();
                 span.record("id", info.id);
@@ -2286,7 +2430,11 @@ impl Connection<Generic> {
 
         // Cache the result
         {
-            let mut cache = self.state.cache.write().unwrap();
+            let mut cache = self
+                .state
+                .cache
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
             cache.insert(name.to_string(), info.clone());
         }
 
@@ -2306,7 +2454,11 @@ impl Connection<Generic> {
     /// This is rarely needed, but may be useful if families are
     /// dynamically loaded/unloaded.
     pub fn clear_cache(&self) {
-        let mut cache = self.state.cache.write().unwrap();
+        let mut cache = self
+            .state
+            .cache
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
         cache.clear();
     }
 
@@ -2322,19 +2474,33 @@ impl Connection<Generic> {
         // Append family name attribute
         builder.append_attr_str(CtrlAttr::FamilyName as u16, name);
 
-        // Send request
-        let seq = self.socket.next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket.pid());
+        // Plan 208 Phase 1 — wrap in with_timeout. High blast radius:
+        // every hand-rolled GENL family resolution touches this
+        // method. Pre-0.19 had no timeout; a dropped CTRL_CMD_GETFAMILY
+        // response would hang `new_async()` indefinitely.
+        //
+        // Note: parse_family_response already filters by seq, but the
+        // single-recv pattern means a stale frame on the socket would
+        // be swallowed once and then the kernel's real reply would
+        // arrive on the next recv — outside the bounds of this call.
+        // The minimum-risk fix is to keep the single-recv but add the
+        // timeout wrap. A full loop+seq-filter refactor (Plan 208
+        // Phase 4) is queued separately because parse_family_response
+        // conflates "stale frame" and "real ENOENT" into the same
+        // FamilyNotFound error and disambiguating that requires
+        // refactoring the parse side.
+        self.with_timeout(async move {
+            let seq = self.socket.next_seq();
+            builder.set_seq(seq);
+            builder.set_pid(self.socket.pid());
 
-        let msg = builder.finish();
-        self.socket.send(&msg).await?;
+            let msg = builder.finish();
+            self.socket.send(&msg).await?;
 
-        // Receive response
-        let response = self.socket.recv_msg().await?;
-
-        // Parse response
-        self.parse_family_response(&response, seq, name)
+            let response = self.socket.recv_msg().await?;
+            self.parse_family_response(&response, seq, name)
+        })
+        .await
     }
 
     /// Parse a CTRL_CMD_GETFAMILY response.
@@ -2469,27 +2635,36 @@ impl Connection<Generic> {
         build_attrs: impl FnOnce(&mut MessageBuilder),
     ) -> Result<Vec<u8>> {
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
-
-        // Append GENL header
         let genl_hdr = GenlMsgHdr::new(cmd, version);
         builder.append(&genl_hdr);
-
-        // Let caller append attributes
         build_attrs(&mut builder);
 
-        // Send request
-        let seq = self.socket.next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket.pid());
+        // F1 fix — these public escape hatches for custom GENL
+        // commands were missed in the 0.19 lock sweep. Without this,
+        // `conn.command(...)` running concurrently with `conn.get_links()`
+        // on a shared `Arc<Connection>` races on the recv side
+        // exactly like the pre-F1 bug. Lock acquired BEFORE
+        // with_timeout so the lock spans the 30s op-timeout window.
+        let _guard = self.lock_request().await;
 
-        let msg = builder.finish();
-        self.socket.send(&msg).await?;
+        // Plan 208 Phase 1 — wrap in with_timeout. Pre-0.19 a kernel
+        // that dropped the ACK for any custom GENL command hung
+        // indefinitely. `process_genl_response` already does
+        // seq-filter; the timeout closes the indefinite-hang class.
+        self.with_timeout(async move {
+            let seq = self.socket.next_seq();
+            builder.set_seq(seq);
+            builder.set_pid(self.socket.pid());
 
-        // Receive response
-        let response = self.socket.recv_msg().await?;
-        self.process_genl_response(&response, seq)?;
+            let msg = builder.finish();
+            self.socket.send(&msg).await?;
 
-        Ok(response)
+            let response = self.socket.recv_msg().await?;
+            self.process_genl_response(&response, seq)?;
+
+            Ok(response)
+        })
+        .await
     }
 
     /// Send a GENL dump command and collect all responses.
@@ -2502,58 +2677,67 @@ impl Connection<Generic> {
         build_attrs: impl FnOnce(&mut MessageBuilder),
     ) -> Result<Vec<Vec<u8>>> {
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
-
-        // Append GENL header
         let genl_hdr = GenlMsgHdr::new(cmd, version);
         builder.append(&genl_hdr);
-
-        // Let caller append attributes
         build_attrs(&mut builder);
 
-        // Send request
-        let seq = self.socket.next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket.pid());
+        // F1 fix — see `command()` above.
+        let _guard = self.lock_request().await;
 
-        let msg = builder.finish();
-        self.socket.send(&msg).await?;
+        // Plan 208 Phase 1+2 — wrap in with_timeout, add
+        // NLM_F_DUMP_INTR detection. Pre-0.19 every custom GENL
+        // dump could hang indefinitely on a dropped response AND
+        // silently use an inconsistent snapshot when the kernel
+        // signaled mid-dump mutation.
+        self.with_timeout(async move {
+            let seq = self.socket.next_seq();
+            builder.set_seq(seq);
+            builder.set_pid(self.socket.pid());
 
-        let mut responses = Vec::new();
+            let msg = builder.finish();
+            self.socket.send(&msg).await?;
 
-        loop {
-            let data = self.socket.recv_msg().await?;
-            let mut done = false;
+            let mut responses = Vec::new();
 
-            for result in MessageIter::new(&data) {
-                let (header, payload) = result?;
+            loop {
+                let data = self.socket.recv_msg().await?;
+                let mut done = false;
 
-                if header.nlmsg_seq != seq {
-                    continue;
-                }
+                for result in MessageIter::new(&data) {
+                    let (header, payload) = result?;
 
-                if header.is_error() {
-                    let err = NlMsgError::from_bytes(payload)?;
-                    if !err.is_ack() {
-                        return Err(err.into_error(payload));
+                    if header.nlmsg_seq != seq {
+                        continue;
                     }
-                    continue;
+
+                    if header.is_dump_interrupted() {
+                        return Err(Error::DumpInterrupted);
+                    }
+
+                    if header.is_error() {
+                        let err = NlMsgError::from_bytes(payload)?;
+                        if !err.is_ack() {
+                            return Err(err.into_error(payload));
+                        }
+                        continue;
+                    }
+
+                    if header.is_done() {
+                        done = true;
+                        break;
+                    }
+
+                    responses.push(payload.to_vec());
                 }
 
-                if header.is_done() {
-                    done = true;
+                if done {
                     break;
                 }
-
-                // Include the payload (with GENL header)
-                responses.push(payload.to_vec());
             }
 
-            if done {
-                break;
-            }
-        }
-
-        Ok(responses)
+            Ok(responses)
+        })
+        .await
     }
 
     /// Process a GENL response, checking for errors.

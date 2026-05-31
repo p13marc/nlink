@@ -234,6 +234,8 @@ impl NftablesDiff {
 ///     .max_retries(5)
 ///     .backoff(Duration::from_millis(50));
 /// ```
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ReconcileOptions {
@@ -272,8 +274,11 @@ impl ReconcileOptions {
 
 /// Outcome of [`NftablesDiff::apply_reconcile`]. `attempts == 1`
 /// means the first apply succeeded — no contention encountered.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
+#[must_use = "Inspect `.attempts` to detect retried apply paths"]
 pub struct ReconcileReport {
     /// Total number of apply attempts (including retries).
     /// 1 = first try succeeded; 2+ = retried after EBUSY/EAGAIN.

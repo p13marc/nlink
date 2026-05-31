@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 
-use winnow::{binary::le_u16, prelude::*, token::take};
+use winnow::{prelude::*, token::take};
 
 use crate::netlink::{
     error::Result,
@@ -19,10 +19,17 @@ mod attr_ids {
     pub const RTA_GATEWAY: u16 = 5;
     pub const RTA_PRIORITY: u16 = 6;
     pub const RTA_PREFSRC: u16 = 7;
+    /// Plan 202 — multipath nexthop chain (`RTA_MULTIPATH`).
+    pub const RTA_MULTIPATH: u16 = 9;
     pub const RTA_TABLE: u16 = 15;
     pub const RTA_PREF: u16 = 20;
     pub const RTA_EXPIRES: u16 = 23;
 }
+
+/// Header size of `struct rtnexthop`
+/// (`include/uapi/linux/rtnetlink.h`): `rtnh_len(u16) +
+/// rtnh_flags(u8) + rtnh_hops(u8) + rtnh_ifindex(u32)` = 8.
+const RTNH_HDRLEN: usize = 8;
 
 /// Strongly-typed route message with all attributes parsed.
 #[derive(Debug, Clone, Default)]
@@ -49,6 +56,32 @@ pub struct RouteMessage {
     pub(crate) pref: Option<u8>,
     /// Expiration time (RTA_EXPIRES).
     pub(crate) expires: Option<u32>,
+    /// Multipath nexthops (`RTA_MULTIPATH`). Plan 202.
+    /// `None` if the route is single-path; `Some(vec)` with the
+    /// parsed nexthop chain otherwise.
+    pub(crate) multipath: Option<Vec<ParsedNextHop>>,
+}
+
+/// One nexthop parsed from an `RTA_MULTIPATH` chain. Plan 202.
+///
+/// Mirrors the kernel's `struct rtnexthop` plus the nested
+/// per-nexthop attributes (`RTA_GATEWAY` at minimum). The
+/// `weight` field is derived from the kernel's `rtnh_hops`
+/// (which counts from 0; nlink's `NextHop::weight` counts from
+/// 1, matching `ip route` syntax).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedNextHop {
+    /// Output interface index (`rtnh_ifindex`).
+    pub ifindex: u32,
+    /// Nexthop weight (1-based). Kernel stores as `rtnh_hops`
+    /// (0-based); we add 1 on parse to match nlink's
+    /// imperative `NextHop::weight` convention + `ip route`.
+    pub weight: u8,
+    /// Kernel `rtnh_flags` byte.
+    pub flags: u8,
+    /// Nexthop gateway (`RTA_GATEWAY` nested within the
+    /// `rtnexthop` block), if present.
+    pub gateway: Option<IpAddr>,
 }
 
 impl RouteMessage {
@@ -139,6 +172,16 @@ impl RouteMessage {
     /// Get the expiration time.
     pub fn expires(&self) -> Option<u32> {
         self.expires
+    }
+
+    /// Get the multipath nexthop list parsed from
+    /// `RTA_MULTIPATH`. Plan 202.
+    ///
+    /// `None` for single-path routes (where `gateway()` /
+    /// `oif()` carry the egress). `Some(&[..])` for ECMP /
+    /// weighted-multipath routes.
+    pub fn multipath(&self) -> Option<&[ParsedNextHop]> {
+        self.multipath.as_deref()
     }
 
     // =========================================================================
@@ -304,8 +347,11 @@ impl FromNetlink for RouteMessage {
 
         // Parse attributes
         while !input.is_empty() && input.len() >= 4 {
-            let len = le_u16.parse_next(input)? as usize;
-            let attr_type = le_u16.parse_next(input)?;
+            // 0.19 N9 — nla_len/nla_type are host-order, not LE.
+            let len_bytes: &[u8] = take(2usize).parse_next(input)?;
+            let type_bytes: &[u8] = take(2usize).parse_next(input)?;
+            let len = u16::from_ne_bytes(len_bytes.try_into().unwrap()) as usize;
+            let attr_type = u16::from_ne_bytes(type_bytes.try_into().unwrap());
 
             if len < 4 {
                 break;
@@ -365,12 +411,101 @@ impl FromNetlink for RouteMessage {
                 attr_ids::RTA_EXPIRES if attr_data.len() >= 4 => {
                     msg.expires = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                 }
+                attr_ids::RTA_MULTIPATH => {
+                    // Plan 202 — parse the nexthop chain.
+                    // Defensive guards live inside the helper:
+                    // rtnh_len < HDRLEN OR > remaining bytes
+                    // aborts the walk (Plan 193 §2.2; tracks
+                    // netlink-packet-route #152).
+                    let nexthops = parse_multipath(attr_data, header.rtm_family);
+                    if !nexthops.is_empty() {
+                        msg.multipath = Some(nexthops);
+                    }
+                }
                 _ => {} // Ignore unknown attributes
             }
         }
 
         Ok(msg)
     }
+}
+
+/// Walk an `RTA_MULTIPATH` payload (`data`) and parse each
+/// `rtnexthop` block into a [`ParsedNextHop`]. Plan 202.
+///
+/// `family` is `AF_INET` (2) or `AF_INET6` (10) — passed in so
+/// the nested `RTA_GATEWAY` attr is decoded with the correct
+/// address width.
+///
+/// Defensive guards (Plan 193 §2.2 + CLAUDE.md §"Parser
+/// robustness" rule 2):
+///
+/// - `rtnh_len < RTNH_HDRLEN` aborts the walk (entry header
+///   too short to be valid).
+/// - `offset + rtnh_len > data.len()` aborts the walk
+///   (truncated chain).
+/// - `rtnh_len == 0` aborts the walk (would cause infinite
+///   loop on `offset` not advancing). Tracks
+///   netlink-packet-route #152.
+fn parse_multipath(data: &[u8], family: u8) -> Vec<ParsedNextHop> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+
+    while offset + RTNH_HDRLEN <= data.len() {
+        // Read the rtnexthop header: rtnh_len (u16) +
+        // rtnh_flags (u8) + rtnh_hops (u8) + rtnh_ifindex (u32).
+        let rtnh_len = u16::from_ne_bytes([data[offset], data[offset + 1]]) as usize;
+        let flags = data[offset + 2];
+        let hops = data[offset + 3];
+        let ifindex = u32::from_ne_bytes([
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
+        ]);
+
+        // Defensive guards — see fn-level docstring.
+        if rtnh_len < RTNH_HDRLEN || offset + rtnh_len > data.len() {
+            break;
+        }
+
+        // Nested attributes after the rtnexthop header.
+        let nested_start = offset + RTNH_HDRLEN;
+        let nested_end = offset + rtnh_len;
+        let mut gateway = None;
+        let mut nested = nested_start;
+        while nested + 4 <= nested_end {
+            let nla_len =
+                u16::from_ne_bytes([data[nested], data[nested + 1]]) as usize;
+            let nla_type =
+                u16::from_ne_bytes([data[nested + 2], data[nested + 3]]);
+            if nla_len < 4 || nested + nla_len > nested_end {
+                break;
+            }
+            let payload = &data[nested + 4..nested + nla_len];
+            if (nla_type & 0x3FFF) == attr_ids::RTA_GATEWAY
+                && let Ok(addr) = parse_ip_addr(payload, family)
+            {
+                gateway = Some(addr);
+            }
+            // Align to 4 bytes for the next nested attr.
+            let aligned = (nla_len + 3) & !3;
+            nested += aligned.max(4); // never let `nested` stall
+        }
+
+        out.push(ParsedNextHop {
+            ifindex,
+            weight: hops.saturating_add(1),
+            flags,
+            gateway,
+        });
+
+        // Align to 4 bytes for the next nexthop entry.
+        let aligned = (rtnh_len + 3) & !3;
+        offset += aligned.max(RTNH_HDRLEN); // never stall
+    }
+
+    out
 }
 
 impl ToNetlink for RouteMessage {
@@ -424,6 +559,24 @@ impl ToNetlink for RouteMessage {
         if let Some(table) = self.table {
             write_attr_u32(buf, attr_ids::RTA_TABLE, table);
         }
+        // 0.19 N4 — RTA_SRC + RTA_IIF + RTA_PREF + RTA_EXPIRES +
+        // RTA_MULTIPATH were parsed but never emitted, silently
+        // dropping these fields on `get → mutate → set` roundtrips.
+        if let Some(ref src) = self.source {
+            write_attr_ip(buf, attr_ids::RTA_SRC, src);
+        }
+        if let Some(iif) = self.iif {
+            write_attr_u32(buf, attr_ids::RTA_IIF, iif);
+        }
+        if let Some(pref) = self.pref {
+            write_attr_u8_padded(buf, attr_ids::RTA_PREF, pref);
+        }
+        if let Some(expires) = self.expires {
+            write_attr_u32(buf, attr_ids::RTA_EXPIRES, expires);
+        }
+        if let Some(ref nexthops) = self.multipath {
+            write_attr_multipath(buf, attr_ids::RTA_MULTIPATH, nexthops);
+        }
 
         Ok(buf.len() - start)
     }
@@ -455,6 +608,71 @@ fn write_attr_ip(buf: &mut Vec<u8>, attr_type: u16, addr: &IpAddr) {
     for _ in 0..(aligned - len) {
         buf.push(0);
     }
+}
+
+/// Write a u8-valued attribute (payload padded to 4 bytes).
+/// 0.19 N4 — used for `RTA_PREF` (RFC 4191 router preference).
+fn write_attr_u8_padded(buf: &mut Vec<u8>, attr_type: u16, value: u8) {
+    let len: u16 = 5;
+    buf.extend_from_slice(&len.to_ne_bytes());
+    buf.extend_from_slice(&attr_type.to_ne_bytes());
+    buf.push(value);
+    // Pad to 4-byte alignment: 5 bytes → 8.
+    buf.extend_from_slice(&[0u8; 3]);
+}
+
+/// Write an `RTA_MULTIPATH` chain — one nested `struct rtnexthop`
+/// per `ParsedNextHop`, each followed by an optional nested
+/// `RTA_GATEWAY` attribute. 0.19 N4.
+///
+/// Wire format (mirrors the parse side at
+/// `parse_multipath`): nla_len(u16) + nla_type(u16) | for each nh:
+/// `rtnh_len`(u16) + `rtnh_flags`(u8) + `rtnh_hops`(u8) +
+/// `rtnh_ifindex`(u32) + nested attrs | per-nh 4-byte align +
+/// outer 4-byte align.
+fn write_attr_multipath(buf: &mut Vec<u8>, attr_type: u16, nexthops: &[ParsedNextHop]) {
+    let attr_header_offset = buf.len();
+    // Placeholder for nla_len; backfilled below.
+    buf.extend_from_slice(&0u16.to_ne_bytes());
+    buf.extend_from_slice(&attr_type.to_ne_bytes());
+    let body_start = buf.len();
+
+    for nh in nexthops {
+        let nh_start = buf.len();
+        // Placeholder for rtnh_len.
+        buf.extend_from_slice(&0u16.to_ne_bytes());
+        // Convert nlink's 1-based weight to kernel's 0-based
+        // `rtnh_hops`.
+        buf.push(nh.flags);
+        buf.push(nh.weight.saturating_sub(1));
+        buf.extend_from_slice(&nh.ifindex.to_ne_bytes());
+
+        if let Some(ref gw) = nh.gateway {
+            write_attr_ip(buf, attr_ids::RTA_GATEWAY, gw);
+        }
+
+        // Backfill rtnh_len.
+        let rtnh_len = (buf.len() - nh_start) as u16;
+        buf[nh_start..nh_start + 2].copy_from_slice(&rtnh_len.to_ne_bytes());
+
+        // Pad to 4-byte alignment.
+        let pad = (4 - ((buf.len() - nh_start) & 3)) & 3;
+        for _ in 0..pad {
+            buf.push(0);
+        }
+    }
+
+    // Backfill nla_len.
+    let nla_len = (buf.len() - attr_header_offset) as u16;
+    buf[attr_header_offset..attr_header_offset + 2].copy_from_slice(&nla_len.to_ne_bytes());
+
+    // Outer 4-byte alignment.
+    let total = buf.len() - attr_header_offset;
+    let pad = (4 - (total & 3)) & 3;
+    for _ in 0..pad {
+        buf.push(0);
+    }
+    let _ = body_start;
 }
 
 /// Builder for constructing RouteMessage.
@@ -545,6 +763,49 @@ impl RouteMessageBuilder {
         self
     }
 
+    /// Set the source address with prefix length (`RTA_SRC`).
+    /// 0.19 N4 — closes the `get → mutate → set` write-parse
+    /// asymmetry where `source` was parsed but never emitted.
+    pub fn source(mut self, addr: IpAddr, prefix_len: u8) -> Self {
+        match addr {
+            IpAddr::V4(_) => self.msg.header.rtm_family = libc::AF_INET as u8,
+            IpAddr::V6(_) => self.msg.header.rtm_family = libc::AF_INET6 as u8,
+        }
+        self.msg.header.rtm_src_len = prefix_len;
+        self.msg.source = Some(addr);
+        self
+    }
+
+    /// Set the input interface index (`RTA_IIF`). 0.19 N4.
+    pub fn iif(mut self, ifindex: u32) -> Self {
+        self.msg.iif = Some(ifindex);
+        self
+    }
+
+    /// Set the route preference (`RTA_PREF`, RFC 4191 router
+    /// preference). 0.19 N4.
+    pub fn pref(mut self, pref: u8) -> Self {
+        self.msg.pref = Some(pref);
+        self
+    }
+
+    /// Set the route expiry in seconds (`RTA_EXPIRES`). 0.19 N4.
+    pub fn expires(mut self, seconds: u32) -> Self {
+        self.msg.expires = Some(seconds);
+        self
+    }
+
+    /// Set the multipath nexthop chain (`RTA_MULTIPATH`). 0.19 N4.
+    ///
+    /// Uses [`ParsedNextHop`] (the round-trip type) — the imperative
+    /// [`crate::netlink::route::NextHop`] carries an unresolved
+    /// `InterfaceRef` and is not appropriate for replaying a
+    /// previously-dumped route.
+    pub fn multipath(mut self, nexthops: Vec<ParsedNextHop>) -> Self {
+        self.msg.multipath = Some(nexthops);
+        self
+    }
+
     /// Build the message.
     pub fn build(self) -> RouteMessage {
         self.msg
@@ -570,6 +831,149 @@ mod tests {
         assert_eq!(msg.dst_len(), 8);
         assert!(msg.has_gateway());
         assert_eq!(msg.oif, Some(2));
+    }
+
+    /// 0.19 N4 — verify every emitted attribute survives a
+    /// `write_to → parse` round-trip. Pre-fix, `source`, `iif`,
+    /// `pref`, `expires`, and `multipath` were silently dropped
+    /// on the write side (parsed-only).
+    #[test]
+    fn write_to_preserves_all_attrs_roundtrip() {
+        let nexthops = vec![
+            ParsedNextHop {
+                ifindex: 7,
+                weight: 1,
+                flags: 0,
+                gateway: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            },
+            ParsedNextHop {
+                ifindex: 9,
+                weight: 2,
+                flags: 0,
+                gateway: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+            },
+        ];
+        let original = RouteMessageBuilder::new()
+            .destination(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)), 8)
+            .source(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0)), 24)
+            .iif(3)
+            .oif(7)
+            .priority(100)
+            .pref(0)
+            .expires(3600)
+            .multipath(nexthops.clone())
+            .build();
+
+        let mut buf = Vec::new();
+        original.write_to(&mut buf).unwrap();
+
+        let parsed = RouteMessage::parse(&mut buf.as_slice()).unwrap();
+
+        assert_eq!(parsed.source, Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0))));
+        assert_eq!(parsed.iif, Some(3));
+        assert_eq!(parsed.pref, Some(0));
+        assert_eq!(parsed.expires, Some(3600));
+        assert_eq!(parsed.multipath, Some(nexthops));
+        // Spot-check the pre-existing fields too.
+        assert_eq!(parsed.destination, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0))));
+        assert_eq!(parsed.oif, Some(7));
+        assert_eq!(parsed.priority, Some(100));
+    }
+
+    // --------- Plan 202 — parse_multipath ---------
+
+    /// Helper: build one IPv4 rtnexthop entry — 8-byte header
+    /// plus 8-byte nested RTA_GATEWAY (4-byte address + 4-byte
+    /// attr header).
+    fn rtnh_v4(weight: u8, ifindex: u32, gw: Option<[u8; 4]>) -> Vec<u8> {
+        let nested_len = gw.map(|_| 4 + 4).unwrap_or(0);
+        let total_len = (RTNH_HDRLEN + nested_len) as u16;
+        let mut e = Vec::with_capacity(total_len as usize);
+        e.extend_from_slice(&total_len.to_ne_bytes());
+        e.push(0); // rtnh_flags
+        e.push(weight.saturating_sub(1)); // rtnh_hops
+        e.extend_from_slice(&ifindex.to_ne_bytes());
+        if let Some(addr) = gw {
+            e.extend_from_slice(&(8u16).to_ne_bytes()); // nla_len
+            e.extend_from_slice(&attr_ids::RTA_GATEWAY.to_ne_bytes());
+            e.extend_from_slice(&addr);
+        }
+        e
+    }
+
+    #[test]
+    fn parse_multipath_walks_normal_v4_chain() {
+        let mut buf = Vec::new();
+        buf.extend(rtnh_v4(1, 7, Some([10, 0, 0, 1])));
+        buf.extend(rtnh_v4(2, 9, Some([10, 0, 1, 1])));
+        let parsed = parse_multipath(&buf, /* AF_INET = */ 2);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].ifindex, 7);
+        assert_eq!(parsed[0].weight, 1);
+        assert_eq!(
+            parsed[0].gateway,
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        );
+        assert_eq!(parsed[1].ifindex, 9);
+        assert_eq!(parsed[1].weight, 2);
+    }
+
+    #[test]
+    fn parse_multipath_handles_empty_buffer() {
+        let parsed = parse_multipath(&[], 2);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn parse_multipath_handles_zero_length_rtnh_without_loop() {
+        // rtnh_len = 0 — degenerate. Plan 193 §2.2 + rule 2:
+        // the walker must abort, not spin.
+        let buf = vec![0u8; 8];
+        let start = std::time::Instant::now();
+        let parsed = parse_multipath(&buf, 2);
+        assert!(start.elapsed() < std::time::Duration::from_millis(100));
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn parse_multipath_handles_undersized_rtnh_header() {
+        // rtnh_len = 1 — less than the 8-byte header.
+        let mut buf = vec![0u8; 8];
+        buf[0] = 1;
+        buf[1] = 0;
+        let parsed = parse_multipath(&buf, 2);
+        assert!(parsed.is_empty(), "undersized rtnh_len must abort walk");
+    }
+
+    #[test]
+    fn parse_multipath_handles_truncated_chain() {
+        // First entry claims 100 bytes total; buffer carries
+        // only 16. Walker must NOT walk past the buffer.
+        let mut buf = vec![0u8; 16];
+        let claimed_len = 100u16;
+        buf[0..2].copy_from_slice(&claimed_len.to_ne_bytes());
+        let parsed = parse_multipath(&buf, 2);
+        assert!(parsed.is_empty(), "truncated chain must abort walk");
+    }
+
+    #[test]
+    fn parse_multipath_ignores_garbage_nested_attrs() {
+        // Header advertises 16-byte entry (8 hdr + 8 nested);
+        // nested attr is well-formed but has unknown nla_type
+        // (0x55). Walker emits the nexthop with gateway=None.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&16u16.to_ne_bytes());
+        buf.push(0); // flags
+        buf.push(0); // hops
+        buf.extend_from_slice(&3u32.to_ne_bytes()); // ifindex
+        buf.extend_from_slice(&8u16.to_ne_bytes()); // nla_len
+        buf.extend_from_slice(&0x55u16.to_ne_bytes()); // garbage nla_type
+        buf.extend_from_slice(&[0, 0, 0, 0]); // payload
+
+        let parsed = parse_multipath(&buf, 2);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].ifindex, 3);
+        assert!(parsed[0].gateway.is_none());
     }
 
     #[test]
