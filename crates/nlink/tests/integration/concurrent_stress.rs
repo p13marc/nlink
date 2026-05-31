@@ -133,7 +133,7 @@ async fn concurrent_ack_requests_on_shared_connection_succeed() -> Result<()> {
     for i in 0..16 {
         let c = conn.clone();
         handles.push(tokio::spawn(async move {
-            c.add_link(DummyLink::new(&format!("ack{i}"))).await
+            c.add_link(DummyLink::new(format!("ack{i}"))).await
         }));
     }
 

@@ -303,6 +303,17 @@ impl WireguardWatcher {
     ///
     /// Returns an empty vector if all watched interfaces
     /// report identical state to the previous poll.
+    ///
+    /// **Per-interface resilience (0.19 N6 fix).** A failure on
+    /// one watched interface (the iface was deleted out-of-band,
+    /// momentarily unavailable, etc.) no longer aborts the whole
+    /// poll cycle. If the previous poll had peers for that iface,
+    /// `PeerRemoved` events are emitted for them and the
+    /// interface drops out of `self.previous`. Other interfaces
+    /// continue to be polled. Pre-0.19 the first iface error
+    /// propagated `?` and silently abandoned all unprocessed
+    /// interfaces — Plan 199's reliability claim depended on
+    /// this fix.
     pub async fn next_events(&mut self) -> Result<Vec<WireguardEvent>> {
         if !self.first_poll {
             tokio::time::sleep(self.opts.interval).await;
@@ -311,11 +322,29 @@ impl WireguardWatcher {
 
         let mut all_events = Vec::new();
         for ifname in self.opts.interfaces.clone() {
-            let device = self.conn.get_device_by_name(&ifname).await?;
-            let prev = self.previous.get(&ifname);
-            let events = diff_device_states(&ifname, prev, &device);
-            all_events.extend(events);
-            self.previous.insert(ifname, device);
+            match self.conn.get_device_by_name(&ifname).await {
+                Ok(device) => {
+                    let prev = self.previous.get(&ifname);
+                    let events = diff_device_states(&ifname, prev, &device);
+                    all_events.extend(events);
+                    self.previous.insert(ifname, device);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        ifname = %ifname,
+                        error = %e,
+                        "WireguardWatcher: failed to poll interface; emitting PeerRemoved for any tracked peers and continuing",
+                    );
+                    if let Some(prev_device) = self.previous.remove(&ifname) {
+                        for peer in &prev_device.peers {
+                            all_events.push(WireguardEvent::PeerRemoved {
+                                ifname: ifname.clone(),
+                                public_key: peer.public_key,
+                            });
+                        }
+                    }
+                }
+            }
         }
         Ok(all_events)
     }

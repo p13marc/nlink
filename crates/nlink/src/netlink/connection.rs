@@ -2604,6 +2604,14 @@ impl Connection<Generic> {
         builder.append(&genl_hdr);
         build_attrs(&mut builder);
 
+        // F1 fix — these public escape hatches for custom GENL
+        // commands were missed in the 0.19 lock sweep. Without this,
+        // `conn.command(...)` running concurrently with `conn.get_links()`
+        // on a shared `Arc<Connection>` races on the recv side
+        // exactly like the pre-F1 bug. Lock acquired BEFORE
+        // with_timeout so the lock spans the 30s op-timeout window.
+        let _guard = self.lock_request().await;
+
         // Plan 208 Phase 1 — wrap in with_timeout. Pre-0.19 a kernel
         // that dropped the ACK for any custom GENL command hung
         // indefinitely. `process_genl_response` already does
@@ -2637,6 +2645,9 @@ impl Connection<Generic> {
         let genl_hdr = GenlMsgHdr::new(cmd, version);
         builder.append(&genl_hdr);
         build_attrs(&mut builder);
+
+        // F1 fix — see `command()` above.
+        let _guard = self.lock_request().await;
 
         // Plan 208 Phase 1+2 — wrap in with_timeout, add
         // NLM_F_DUMP_INTR detection. Pre-0.19 every custom GENL
