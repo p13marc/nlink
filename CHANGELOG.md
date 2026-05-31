@@ -78,6 +78,40 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Declarative WireGuard configuration (Plan 196)** —
+  the GENL-family twin of `NetworkConfig` / `NftablesConfig`.
+  `WireguardConfig::new().device("wg0", |d| ...)` builder
+  shape with `.private_key`, `.listen_port`, `.fwmark`,
+  and `.peer(public_key, |p| ...)` accepting `.endpoint`,
+  `.persistent_keepalive`, `.preshared_key`, `.allowed_ip`.
+  `cfg.diff(&conn).await` computes the symmetric diff
+  against current kernel state; `cfg.apply(&conn).await`
+  dispatches the kernel mutations.
+  - `WireguardConfigDiff` / `DeviceChanges` / `PeerChanges`
+    public diff types. `change_count` counts kernel
+    calls, not dirty fields (a single SET_DEVICE collapses
+    all device-level changes into one write).
+  - `allowed_ips` diff is order-independent — declaring
+    in one order vs the kernel reporting in another
+    doesn't churn.
+  - `WireguardApplyResult` reports `device_writes` +
+    `peer_writes` + `peer_removals` separately.
+  - **Privacy-key caveat**: the kernel never returns
+    `private_key` / `preshared_key` on `GET_DEVICE`. When
+    declared in the config, they're ALWAYS written
+    (idempotent at the WG protocol layer — no handshake
+    storm — but costs one extra SET call per re-apply).
+    Omit them after first apply for zero-op re-applies.
+  - Apply uses `replace_allowed_ips()` for in-config peers
+    so the declarative model is "this is the full set",
+    not "merge."
+  13 new unit tests on the pure diff logic: builder
+  round-trips, private-key dirty semantics, listen_port
+  match/mismatch, peer add/remove/modify, endpoint
+  change, allowed_ips set difference, allowed_ips
+  order-independent comparison, change_count
+  aggregation.
+
 - **WireGuard polling watcher (Plan 199, redesigned)** —
   the kernel `wireguard` GENL family declares
   `n_mcgrps = 0`; verified 2026-05-31 via
