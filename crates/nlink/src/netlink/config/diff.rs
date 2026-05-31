@@ -34,27 +34,33 @@ use crate::netlink::{
 pub struct ConfigDiff {
     /// Links to create.
     pub links_to_add: Vec<DeclaredLink>,
-    /// Links to remove (names).
-    pub links_to_remove: Vec<String>,
     /// Links to modify (name, changes).
     pub links_to_modify: Vec<(String, LinkChanges)>,
 
     /// Addresses to add.
     pub addresses_to_add: Vec<DeclaredAddress>,
-    /// Addresses to remove (dev, address, prefix_len).
-    pub addresses_to_remove: Vec<(String, IpAddr, u8)>,
 
     /// Routes to add.
     pub routes_to_add: Vec<DeclaredRoute>,
-    /// Routes to remove (destination, prefix_len, table).
-    pub routes_to_remove: Vec<(IpAddr, u8, u32)>,
 
     /// Qdiscs to add.
     pub qdiscs_to_add: Vec<DeclaredQdisc>,
-    /// Qdiscs to remove (dev, parent).
-    pub qdiscs_to_remove: Vec<(String, QdiscParent)>,
     /// Qdiscs to replace (same position, different config).
     pub qdiscs_to_replace: Vec<DeclaredQdisc>,
+    // Plan 205 (0.19) — removed `links_to_remove`,
+    // `addresses_to_remove`, `routes_to_remove`, `qdiscs_to_remove`.
+    // They were never populated by the diff phase (the
+    // `diff_addresses`/`diff_routes` etc. functions had explicit
+    // "We don't auto-remove" comments and silenced the
+    // `desired` HashSet to no-op). The apply path's
+    // `if options.purge { ... }` branches read from these
+    // collections and so silently did nothing — `with_purge(true)`
+    // was a silent lie. For the "remove undeclared resources"
+    // use case, use the imperative API:
+    // `Connection::del_link`/`del_address`/`del_route`/`del_qdisc`.
+    // A correctly-wired purge with a kernel-managed-resource
+    // exclusion list (IPv6 link-local, multicast, `lo`,
+    // link-local prefix routes) is queued for 0.20.
 }
 
 impl ConfigDiff {
@@ -86,28 +92,20 @@ impl ConfigDiff {
     /// Check if no changes are needed.
     pub fn is_empty(&self) -> bool {
         self.links_to_add.is_empty()
-            && self.links_to_remove.is_empty()
             && self.links_to_modify.is_empty()
             && self.addresses_to_add.is_empty()
-            && self.addresses_to_remove.is_empty()
             && self.routes_to_add.is_empty()
-            && self.routes_to_remove.is_empty()
             && self.qdiscs_to_add.is_empty()
-            && self.qdiscs_to_remove.is_empty()
             && self.qdiscs_to_replace.is_empty()
     }
 
     /// Get the total number of changes.
     pub fn change_count(&self) -> usize {
         self.links_to_add.len()
-            + self.links_to_remove.len()
             + self.links_to_modify.len()
             + self.addresses_to_add.len()
-            + self.addresses_to_remove.len()
             + self.routes_to_add.len()
-            + self.routes_to_remove.len()
             + self.qdiscs_to_add.len()
-            + self.qdiscs_to_remove.len()
             + self.qdiscs_to_replace.len()
     }
 
@@ -132,9 +130,6 @@ impl ConfigDiff {
                 link.link_type.kind().unwrap_or("physical")
             ));
         }
-        for name in &self.links_to_remove {
-            lines.push(format!("- link {}", name));
-        }
         for (name, changes) in &self.links_to_modify {
             lines.push(format!("~ link {} ({})", name, changes.summary()));
         }
@@ -146,10 +141,6 @@ impl ConfigDiff {
                 addr.address, addr.prefix_len, addr.dev
             ));
         }
-        for (dev, addr, prefix) in &self.addresses_to_remove {
-            lines.push(format!("- address {}/{} on {}", addr, prefix, dev));
-        }
-
         // Routes
         for route in &self.routes_to_add {
             let via = route
@@ -166,15 +157,6 @@ impl ConfigDiff {
                 route.destination, route.prefix_len, via, dev
             ));
         }
-        for (dst, prefix, table) in &self.routes_to_remove {
-            let table_str = if *table != 254 {
-                format!(" table {}", table)
-            } else {
-                String::new()
-            };
-            lines.push(format!("- route {}/{}{}", dst, prefix, table_str));
-        }
-
         // Qdiscs
         for qdisc in &self.qdiscs_to_add {
             lines.push(format!(
@@ -183,9 +165,6 @@ impl ConfigDiff {
                 qdisc.dev,
                 qdisc.parent
             ));
-        }
-        for (dev, parent) in &self.qdiscs_to_remove {
-            lines.push(format!("- qdisc on {} ({:?})", dev, parent));
         }
         for qdisc in &self.qdiscs_to_replace {
             lines.push(format!(
@@ -1018,11 +997,9 @@ mod tests {
         use super::super::apply::ApplyOptions;
         let opts = ApplyOptions::default()
             .with_dry_run(true)
-            .with_continue_on_error(true)
-            .with_purge(true);
+            .with_continue_on_error(true);
         assert!(opts.dry_run);
         assert!(opts.continue_on_error);
-        assert!(opts.purge);
     }
 
     #[test]
@@ -1031,7 +1008,6 @@ mod tests {
         let opts = ApplyOptions::default();
         assert!(!opts.dry_run);
         assert!(!opts.continue_on_error);
-        assert!(!opts.purge);
     }
 
     // ---- Plan 188 §2.5 — LinkChanges::Display ----
@@ -1134,12 +1110,16 @@ mod tests {
         let diff = ConfigDiff::default();
         // Plan 188 §2.6 — `summary()` is deprecated; this test
         // pins the equivalence guarantee for the deprecation
-        // window (removed in 0.20).
+        // window (removed in 0.20). Plan 205 (0.19) removed the
+        // `links_to_remove` collection along with the purge knob,
+        // so the second assertion now exercises the
+        // `links_to_modify` collection instead.
         #[allow(deprecated)]
         {
             assert_eq!(format!("{diff}"), diff.summary());
             let mut d = ConfigDiff::default();
-            d.links_to_remove.push("eth0".to_string());
+            d.links_to_modify
+                .push(("eth0".to_string(), LinkChanges::default()));
             assert_eq!(format!("{d}"), d.summary());
         }
     }

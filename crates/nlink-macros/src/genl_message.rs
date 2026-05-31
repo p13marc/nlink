@@ -187,6 +187,9 @@ enum WireKind {
     U32,
     U64,
     I32,
+    /// Plan 206 — kernel `s64`. Used by DPLL `phase_offset`
+    /// (attoseconds × 1000); routinely exceeds `i32::MAX`.
+    I64,
     Str,
     Bytes,
     /// A `#[derive(GenlEnum)]`-typed field. `type_path` is the
@@ -317,6 +320,7 @@ impl WireKind {
             Self::U32 => quote! { u32 },
             Self::U64 => quote! { u64 },
             Self::I32 => quote! { i32 },
+            Self::I64 => quote! { i64 },
             Self::Str => quote! { ::std::string::String },
             Self::Bytes => quote! { ::std::vec::Vec<u8> },
             Self::Enum { type_path, .. } => quote! { #type_path },
@@ -338,6 +342,7 @@ impl WireKind {
         match self {
             Self::U8 | Self::U16 | Self::U32 | Self::U64 => quote! { 0 },
             Self::I32 => quote! { 0i32 },
+            Self::I64 => quote! { 0i64 },
             Self::Str => quote! { ::std::string::String::new() },
             Self::Bytes => quote! { ::std::vec::Vec::new() },
             Self::Enum { .. } => {
@@ -371,6 +376,7 @@ impl WireKind {
             Self::U32 => quote! { ::nlink::macros::__rt::parse_u32_attr },
             Self::U64 => quote! { ::nlink::macros::__rt::parse_u64_attr },
             Self::I32 => quote! { ::nlink::macros::__rt::parse_i32_attr },
+            Self::I64 => quote! { ::nlink::macros::__rt::parse_i64_attr },
             Self::Str => quote! { ::nlink::macros::__rt::parse_str_attr },
             Self::Bytes => quote! { ::nlink::macros::__rt::parse_bytes_attr },
             Self::Enum { repr, .. }
@@ -420,6 +426,9 @@ impl WireKind {
             },
             Self::I32 => quote! {
                 ::nlink::macros::__rt::emit_i32_attr(#builder, (#attr_expr) as u16, #value_expr);
+            },
+            Self::I64 => quote! {
+                ::nlink::macros::__rt::emit_i64_attr(#builder, (#attr_expr) as u16, #value_expr);
             },
             Self::Str => quote! {
                 ::nlink::macros::__rt::emit_str_attr(#builder, (#attr_expr) as u16, #value_expr);
@@ -689,6 +698,7 @@ fn classify_type_inner(
         "u32" => Ok(WireKind::U32),
         "u64" => Ok(WireKind::U64),
         "i32" => Ok(WireKind::I32),
+        "i64" => Ok(WireKind::I64),
         "String" => Ok(WireKind::Str),
         "Vec" => {
             // Vec<u8> = whole-payload byte string (the existing

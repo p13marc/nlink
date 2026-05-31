@@ -34,8 +34,7 @@ use crate::netlink::{
 /// use nlink::netlink::config::ApplyOptions;
 /// let opts = ApplyOptions::default()
 ///     .with_dry_run(true)
-///     .with_continue_on_error(false)
-///     .with_purge(false);
+///     .with_continue_on_error(false);
 /// ```
 ///
 /// # Default semantics
@@ -47,9 +46,6 @@ use crate::netlink::{
 /// - `continue_on_error: false` — the first error propagates
 ///   as `Err`, halting further ops. Partially-applied state
 ///   is left in the kernel.
-/// - `purge: false` — removals (links / addresses / routes
-///   present in the kernel but absent from the config) are
-///   skipped, not propagated as deletions.
 ///
 /// This is the right default; opt in to each surface
 /// individually via the builders.
@@ -59,6 +55,19 @@ use crate::netlink::{
 /// the trade-off is that struct-literal construction is no
 /// longer allowed by downstream code. Mirrors `ReconcileOptions`
 /// (Plan 163).
+///
+/// **Plan 205 (0.19) breaking change**: the `purge` flag and
+/// `with_purge(bool)` builder were removed because the feature
+/// was non-functional in 0.18 (silent no-op — the `*_to_remove`
+/// collections were never populated by the diff phase). Code
+/// that called `.with_purge(true)` thinking removal would
+/// happen needs to switch to the imperative API
+/// (`Connection::del_link` / `del_address` / `del_route` /
+/// `del_qdisc`) to delete kernel resources, since
+/// `NetworkConfig` no longer offers a purge knob. A full
+/// re-wired purge with a kernel-managed-resource exclusion
+/// list (IPv6 link-local, multicast, `lo`, link-local prefix
+/// routes) is queued for 0.20.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct ApplyOptions {
@@ -66,14 +75,6 @@ pub struct ApplyOptions {
     pub dry_run: bool,
     /// Continue applying changes even if some operations fail.
     pub continue_on_error: bool,
-    /// Remove resources that are not in the configuration.
-    ///
-    /// When enabled, interfaces, addresses, and routes that exist
-    /// but are not declared in the config will be removed.
-    ///
-    /// **Warning**: Use with caution! This can remove important
-    /// system interfaces if they're not in your config.
-    pub purge: bool,
 }
 
 impl ApplyOptions {
@@ -92,15 +93,6 @@ impl ApplyOptions {
     /// where partial progress is preferable to no progress.
     pub fn with_continue_on_error(mut self, on: bool) -> Self {
         self.continue_on_error = on;
-        self
-    }
-
-    /// Toggle purge mode. With purge on, kernel resources
-    /// (links/addresses/routes) absent from the config are
-    /// scheduled for removal. Use with caution — sweeps away
-    /// undeclared interfaces.
-    pub fn with_purge(mut self, on: bool) -> Self {
-        self.purge = on;
         self
     }
 }
@@ -371,133 +363,18 @@ pub async fn apply_diff(
         }
     }
 
-    // 6. Remove old resources (if purge enabled)
-    if options.purge {
-        // Remove qdiscs
-        for (dev, parent) in &diff.qdiscs_to_remove {
-            let op = format!("remove qdisc on {} ({:?})", dev, parent);
-            if options.dry_run {
-                result.summary.push(format!("Would {}", op));
-                result.changes_made += 1;
-            } else {
-                let parent_handle = match parent {
-                    QdiscParent::Root => crate::TcHandle::ROOT,
-                    QdiscParent::Ingress => crate::TcHandle::INGRESS,
-                };
-                match conn.del_qdisc(dev, parent_handle).await {
-                    Ok(()) => {
-                        result.summary.push(format!("Removed qdisc on {}", dev));
-                        result.changes_made += 1;
-                    }
-                    Err(e) if e.is_not_found() => {
-                        // Already gone, that's fine
-                    }
-                    Err(e) => {
-                        if options.continue_on_error {
-                            result.errors.push(ApplyError {
-                                operation: op,
-                                error: e,
-                            });
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Remove routes
-        for (dst, prefix_len, table) in &diff.routes_to_remove {
-            let op = format!("remove route {}/{}", dst, prefix_len);
-            if options.dry_run {
-                result.summary.push(format!("Would {}", op));
-                result.changes_made += 1;
-            } else {
-                match remove_route(conn, *dst, *prefix_len, *table).await {
-                    Ok(()) => {
-                        result
-                            .summary
-                            .push(format!("Removed route {}/{}", dst, prefix_len));
-                        result.changes_made += 1;
-                    }
-                    Err(e) if e.is_not_found() => {
-                        // Already gone
-                    }
-                    Err(e) => {
-                        if options.continue_on_error {
-                            result.errors.push(ApplyError {
-                                operation: op,
-                                error: e,
-                            });
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Remove addresses
-        for (dev, addr, prefix_len) in &diff.addresses_to_remove {
-            let op = format!("remove address {}/{} from {}", addr, prefix_len, dev);
-            if options.dry_run {
-                result.summary.push(format!("Would {}", op));
-                result.changes_made += 1;
-            } else {
-                match remove_address(conn, dev, *addr, *prefix_len).await {
-                    Ok(()) => {
-                        result.summary.push(format!(
-                            "Removed address {}/{} from {}",
-                            addr, prefix_len, dev
-                        ));
-                        result.changes_made += 1;
-                    }
-                    Err(e) if e.is_not_found() => {
-                        // Already gone
-                    }
-                    Err(e) => {
-                        if options.continue_on_error {
-                            result.errors.push(ApplyError {
-                                operation: op,
-                                error: e,
-                            });
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Remove links (in reverse order of creation)
-        for name in &diff.links_to_remove {
-            let op = format!("remove link {}", name);
-            if options.dry_run {
-                result.summary.push(format!("Would {}", op));
-                result.changes_made += 1;
-            } else {
-                match conn.del_link(name).await {
-                    Ok(()) => {
-                        result.summary.push(format!("Removed link {}", name));
-                        result.changes_made += 1;
-                    }
-                    Err(e) if e.is_not_found() => {
-                        // Already gone
-                    }
-                    Err(e) => {
-                        if options.continue_on_error {
-                            result.errors.push(ApplyError {
-                                operation: op,
-                                error: e,
-                            });
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Plan 205 (0.19) — `purge` was removed because the
+    // `*_to_remove` collections were never populated by the diff
+    // phase, so the apply-side branch was dead code that lied
+    // about what it did. Pre-0.19 `ApplyOptions::with_purge(true)`
+    // silently no-op'd; users believed kernel state was being
+    // reconciled when it wasn't. For the "remove undeclared
+    // resources" use case, the imperative API
+    // (`Connection::del_link` / `del_address` / `del_route` /
+    // `del_qdisc`) is the canonical 0.19 channel. A fully wired
+    // purge with a kernel-managed-resource exclusion list
+    // (IPv6 link-local, multicast, `lo`, link-local prefix
+    // routes) is queued for 0.20.
 
     Ok(result)
 }
@@ -731,15 +608,6 @@ async fn add_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result
     }
 }
 
-async fn remove_address(
-    conn: &Connection<Route>,
-    dev: &str,
-    addr: IpAddr,
-    prefix_len: u8,
-) -> Result<()> {
-    conn.del_address(dev, addr, prefix_len).await
-}
-
 async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()> {
     match route.destination {
         IpAddr::V4(dst) => {
@@ -826,38 +694,6 @@ async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
             // the pre-0.19 diff didn't notice the gateway change
             // at all). New routes are also accepted by replace.
             conn.replace_route(config).await
-        }
-    }
-}
-
-async fn remove_route(
-    conn: &Connection<Route>,
-    dst: IpAddr,
-    prefix_len: u8,
-    table: u32,
-) -> Result<()> {
-    // Plan 207d M3 — forward the table identity to `del_route`.
-    // Pre-0.19 the `_table` parameter was discarded (underscored),
-    // so routes in non-default tables (table != 254 = `main`)
-    // could never be purged — kernel returned `ESRCH` which
-    // `is_not_found()` swallowed silently. Now the del_route
-    // path receives the table; the kernel matches the right
-    // route. Gateway/dev/metric carrying remains future work
-    // for full ECMP disambiguation (only matters under purge).
-    match dst {
-        IpAddr::V4(v4) => {
-            let mut route = Ipv4Route::from_addr(v4, prefix_len);
-            if table != 254 {
-                route = route.table(table);
-            }
-            conn.del_route(route).await
-        }
-        IpAddr::V6(v6) => {
-            let mut route = Ipv6Route::from_addr(v6, prefix_len);
-            if table != 254 {
-                route = route.table(table);
-            }
-            conn.del_route(route).await
         }
     }
 }

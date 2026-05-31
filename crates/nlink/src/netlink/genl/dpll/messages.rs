@@ -328,8 +328,17 @@ pub struct DpllPinReply {
     pub phase_adjust: Option<i32>,
     /// Measured phase offset (attoseconds × 1000 — use
     /// [`Self::phase_offset_ns`] for nanoseconds).
+    ///
+    /// Wire type: kernel `s64` per
+    /// `Documentation/netlink/specs/dpll.yaml`. Plan 206 (0.19)
+    /// corrected this from `Option<i32>` to `Option<i64>` — the
+    /// pre-0.19 type silently truncated the high 4 bytes on LE
+    /// platforms, producing nonsense readings for any offset
+    /// above ~2.147 seconds in attoseconds × 1000 units
+    /// (essentially always; a 1 ns offset is 1e9 in those units,
+    /// well past `i32::MAX`).
     #[genl_attr(DpllPinAttr::PhaseOffset)]
-    pub phase_offset: Option<i32>,
+    pub phase_offset: Option<i64>,
     /// ESYNC carrier frequency (kernel 6.10+).
     #[genl_attr(DpllPinAttr::EsyncFrequency)]
     pub esync_frequency: Option<u64>,
@@ -353,8 +362,9 @@ impl DpllPinReply {
     /// Pin phase offset in nanoseconds, if reported.
     /// Applies the kernel's `DPLL_PHASE_OFFSET_DIVIDER = 1000`.
     pub fn phase_offset_ns(&self) -> Option<i64> {
-        self.phase_offset
-            .map(|p| p as i64 / super::DPLL_PHASE_OFFSET_DIVIDER)
+        // Plan 206: phase_offset is now already i64; no truncation
+        // cast needed.
+        self.phase_offset.map(|p| p / super::DPLL_PHASE_OFFSET_DIVIDER)
     }
 
     /// Measured pin frequency in Hz, if reported (kernel 6.11+).
@@ -631,6 +641,40 @@ mod tests {
         assert_eq!(reply.measured_frequency_hz(), Some(10_000_000));
         assert_eq!(DpllPinReply::default().phase_offset_ns(), None);
         assert_eq!(DpllPinReply::default().measured_frequency_hz(), None);
+    }
+
+    /// Plan 206 regression — phase_offset is now `Option<i64>` so
+    /// kernel values exceeding `i32::MAX` round-trip correctly.
+    /// Pre-fix the value was silently truncated to the low 4 bytes
+    /// on parse (`5_000_000_000` as `i32` → `705_032_704`),
+    /// producing nonsense readings. A 5ns offset
+    /// (5_000_000_000_000 attoseconds × 1000) is a realistic
+    /// telco/PTP/SyncE value.
+    #[test]
+    fn pin_phase_offset_round_trips_value_above_i32_max() {
+        let big_offset: i64 = 5_000_000_000_000; // 5 ns × DIVIDER
+        assert!(
+            big_offset > i32::MAX as i64,
+            "test value must exceed i32::MAX to expose pre-fix truncation"
+        );
+        let original = DpllPinReply {
+            id: 7,
+            phase_offset: Some(big_offset),
+            ..DpllPinReply::default()
+        };
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        original.to_bytes(&mut b).expect("emit");
+        let bytes = &b.as_bytes()[start..];
+
+        let parsed = DpllPinReply::from_bytes(bytes).expect("parse");
+        assert_eq!(
+            parsed.phase_offset,
+            Some(big_offset),
+            "Plan 206 — i64 round-trip must preserve high bits"
+        );
+        // phase_offset_ns divides by 1000.
+        assert_eq!(parsed.phase_offset_ns(), Some(5_000_000_000));
     }
 
     #[test]

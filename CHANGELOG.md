@@ -6,6 +6,38 @@ All notable changes to this project will be documented in this file.
 
 ### Breaking changes
 
+- **`ApplyOptions::with_purge` removed; `ConfigDiff::*_to_remove`
+  collections removed** (Plan 205 Option B). The feature was
+  silently non-functional in 0.18 — the diff phase never
+  populated the `*_to_remove` collections, so the apply path's
+  `if options.purge { ... }` branches were dead code that lied
+  about what they did. Pre-0.19 callers passing
+  `.with_purge(true)` thought kernel state was being reconciled;
+  it wasn't. Rather than continue shipping the silent lie, the
+  knob is now gone. Migration: for the "remove undeclared
+  resources" use case, use the imperative API
+  (`Connection::del_link` / `del_address` / `del_route` /
+  `del_qdisc`). A correctly-wired purge with a kernel-managed-
+  resource exclusion list (IPv6 link-local, multicast, `lo`,
+  link-local prefix routes) is queued for 0.20.
+
+- **`DpllPin::phase_offset` field type: `Option<i32>` →
+  `Option<i64>`** (Plan 206 H1). The kernel field is declared
+  `s64` per `Documentation/netlink/specs/dpll.yaml` (atto-
+  seconds × 1000). Pre-0.19 nlink routed the attribute through
+  `parse_i32_attr` which reads only the low 4 bytes of the 8-
+  byte payload, silently truncating high bits on LE platforms.
+  Telco/PTP/SyncE values routinely exceed `i32::MAX` (a 1 ns
+  offset = 1e9 in those units), producing nonsense readings.
+  Now correctly typed as `i64` and parsed via a new
+  `__rt::parse_i64_attr` / `emit_i64_attr` helper pair; the
+  `GenlMessage` derive recognizes `i64` field types. Migration:
+  callers reading `.phase_offset` explicitly need to update the
+  type annotation; `.phase_offset_ns()` accessor unchanged
+  (still `Option<i64>`). 1 new regression test
+  (`pin_phase_offset_round_trips_value_above_i32_max`) pins
+  the high-bit round-trip.
+
 - **`Hook::Ingress` split into `Hook::NetdevIngress` and
   `Hook::InetIngress`; `Hook::NetdevEgress` added** (Plan 211 M1).
   Pre-0.19 `Hook::Ingress` always encoded `0`, which was correct

@@ -116,7 +116,14 @@ async fn main() -> nlink::Result<()> {
             &conn,
             // Plan 188 §2.2 — `#[non_exhaustive]` now;
             // construct via the `with_*` builder methods.
-            ApplyOptions::default().with_purge(true),
+            //
+            // Plan 205 (0.19) — `with_purge(true)` was removed
+            // because the feature was non-functional (silent
+            // no-op). For teardown, this example just applies
+            // the empty config; undeclared resources are NOT
+            // removed automatically. To remove them, use the
+            // imperative API (`conn.del_link(...)` etc.).
+            ApplyOptions::default(),
         )
         .await?;
     println!(
