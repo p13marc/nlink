@@ -51,12 +51,36 @@ impl TcMsg {
         self
     }
 
-    /// Set the info field.
+    /// Set the raw `tcm_info` field.
     ///
-    /// For filters, this contains (protocol << 16) | priority.
+    /// For filters this is a packed field — prefer
+    /// [`with_filter_info`](Self::with_filter_info), which lays out the
+    /// protocol and priority the way the kernel expects.
     pub fn with_info(mut self, info: u32) -> Self {
         self.tcm_info = info;
         self
+    }
+
+    /// Set `tcm_info` from a TC filter's ethernet protocol + priority.
+    ///
+    /// The kernel packs a filter's `tcm_info` as
+    /// `TC_H_MAKE(prio << 16, protocol)` (see
+    /// `include/uapi/linux/pkt_sched.h`): the **priority** occupies the upper
+    /// 16 bits (the "major" half) and the **ethernet protocol** the lower 16
+    /// bits (the "minor" half). The protocol additionally travels in
+    /// **network byte order** — iproute2 stores `htons(ethertype)` there, and
+    /// the kernel compares it against `skb->protocol` (also network byte
+    /// order) when walking the per-protocol classifier dispatch.
+    ///
+    /// Getting the field order wrong makes the kernel reject the add with
+    /// `EINVAL` (it reads the priority value as the protocol and vice versa);
+    /// getting the byte order wrong registers the filter under an ethertype
+    /// no packet ever carries, so it silently never matches.
+    ///
+    /// `protocol` and `priority` are taken in host byte order; the byte swap
+    /// happens here (`u16::to_be` is a no-op on big-endian hosts).
+    pub fn with_filter_info(self, protocol: u16, priority: u16) -> Self {
+        self.with_info(((priority as u32) << 16) | (protocol.to_be() as u32))
     }
 
     /// Convert to bytes.
@@ -2788,5 +2812,79 @@ pub mod action {
                 <Self as IntoBytes>::as_bytes(self)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Mirror of include/uapi/linux/pkt_sched.h.
+    const TC_H_MAJ_MASK: u32 = 0xFFFF_0000;
+    const TC_H_MIN_MASK: u32 = 0x0000_FFFF;
+
+    #[test]
+    fn with_filter_info_matches_iproute2_wire_format() {
+        // `tc filter add ... protocol ip prio 100` builds
+        // tcm_info = TC_H_MAKE(prio << 16, htons(ETH_P_IP)).
+        let info = TcMsg::new().with_filter_info(0x0800, 100).tcm_info;
+
+        // Kernel-side extraction (net/sched/cls_api.c, tc_new_tfilter):
+        //   prio     = TC_H_MAJ(tcm_info)
+        //   protocol = TC_H_MIN(tcm_info)   // __be16
+        let kernel_prio = (info & TC_H_MAJ_MASK) >> 16;
+        let kernel_proto_be = (info & TC_H_MIN_MASK) as u16;
+
+        assert_eq!(kernel_prio, 100, "priority -> major (upper) half");
+        assert_eq!(
+            kernel_proto_be,
+            0x0800u16.to_be(),
+            "protocol -> minor (lower) half, network byte order"
+        );
+        assert_eq!(u16::from_be(kernel_proto_be), 0x0800, "decodes to ETH_P_IP");
+
+        // The exact 32-bit value iproute2 emits for this filter on a
+        // little-endian host: prio 0x0064 high, htons(0x0800) = 0x0008 low.
+        #[cfg(target_endian = "little")]
+        assert_eq!(info, 0x0064_0008);
+    }
+
+    #[test]
+    fn with_filter_info_round_trips_priority_and_protocol() {
+        for (proto, prio) in [(0x0800u16, 100u16), (0x86DD, 200), (0x0003, 1), (0x0806, 49)] {
+            let info = TcMsg::new().with_filter_info(proto, prio).tcm_info;
+            assert_eq!((info >> 16) as u16, prio, "priority {prio:#x}");
+            assert_eq!(
+                u16::from_be((info & 0xFFFF) as u16),
+                proto,
+                "protocol {proto:#x}"
+            );
+        }
+    }
+
+    /// Regression guard for the pre-0.18 swap bug. The old
+    /// `add_filter_by_index_full` packed `(protocol << 16) | priority` with no
+    /// byte swap, so the kernel read protocol and priority transposed and
+    /// rejected the add with EINVAL (or registered a never-matching filter).
+    #[test]
+    fn pre_fix_layout_was_transposed() {
+        // protocol = 0x0800 (ETH_P_IP), priority = 100.
+        let buggy = (0x0800u32 << 16) | 100u32; // old packing
+
+        // What the kernel would have parsed out of the buggy value:
+        assert_eq!(
+            (buggy & TC_H_MIN_MASK) as u16,
+            100,
+            "kernel read the priority value (100) as the protocol"
+        );
+        assert_eq!(
+            (buggy & TC_H_MAJ_MASK) >> 16,
+            0x0800,
+            "kernel read the protocol value (0x0800) as the priority"
+        );
+
+        // The fix produces a different, kernel-correct value.
+        let fixed = TcMsg::new().with_filter_info(0x0800, 100).tcm_info;
+        assert_ne!(buggy, fixed);
     }
 }

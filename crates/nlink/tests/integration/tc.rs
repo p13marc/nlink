@@ -505,6 +505,45 @@ async fn test_add_flower_filter() -> Result<()> {
     Ok(())
 }
 
+/// Regression test for the `tcm_info` protocol/priority packing bug
+/// (see `TcMsg::with_filter_info`).
+///
+/// Adding a filter with an explicit ethernet protocol **and** a non-zero
+/// priority must be accepted by the kernel. Before the fix, `tcm_info` packed
+/// `(protocol << 16) | priority` (with no byte swap), so the kernel read the
+/// two transposed and rejected the add with `EINVAL` — every filter add with
+/// an explicit priority failed. A successful add is the regression guard:
+/// verified to return `EINVAL` on the pre-fix code and `Ok` after.
+///
+/// The assertion is on the add, not a dump read-back: `get_filters` issues an
+/// `RTM_GETTFILTER` dump with `tcm_ifindex = 0`, which returns nothing on
+/// modern kernels (a separate nlink limitation), so a read-back here would be
+/// flaky for reasons unrelated to this fix.
+#[tokio::test]
+async fn test_filter_add_explicit_protocol_priority() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_htb", "cls_matchall");
+
+    let (_ns, conn) = setup_tc_ns("filterpp").await?;
+
+    let htb = HtbQdiscConfig::new().default_class(0x30).build();
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
+        .await?;
+    let class = HtbClassConfig::new(nlink::Rate::mbit(10)).build();
+    conn.add_class("dummy0", TcHandle::major_only(1), TcHandle::new(1, 10), class)
+        .await?;
+
+    // Explicit IPv4 protocol + non-zero priority: the exact combination that
+    // returned EINVAL before the tcm_info packing fix.
+    const ETH_P_IP: u16 = 0x0800;
+    let filter = MatchallFilter::new().classid(TcHandle::new(1, 0x10)).build();
+    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, ETH_P_IP, 200, filter)
+        .await
+        .expect("filter add with explicit protocol + priority must be accepted (pre-fix: EINVAL)");
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_matchall_on_ingress() -> Result<()> {
     require_root!();

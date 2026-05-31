@@ -192,21 +192,29 @@ impl TcMessage {
         self.header.tcm_parent
     }
 
-    /// Get the info field.
+    /// Get the raw `tcm_info` field.
     ///
-    /// For filters, this contains protocol (upper 16 bits) and priority (lower 16 bits).
+    /// For filters this packs the priority (upper 16 bits) and the ethernet
+    /// protocol (lower 16 bits, network byte order); see
+    /// [`protocol`](Self::protocol) / [`priority`](Self::priority) to unpack,
+    /// and `TcMsg::with_filter_info` for the packing side.
     pub fn info(&self) -> u32 {
         self.header.tcm_info
     }
 
-    /// For filters: get the protocol from tcm_info.
+    /// For filters: the ethernet protocol (e.g. `0x0800` for IPv4), in host
+    /// byte order.
+    ///
+    /// The protocol lives in the lower 16 bits of `tcm_info` in network byte
+    /// order (the kernel compares it against `skb->protocol`), so this
+    /// converts back from big-endian.
     pub fn protocol(&self) -> u16 {
-        (self.header.tcm_info >> 16) as u16
+        u16::from_be((self.header.tcm_info & 0xFFFF) as u16)
     }
 
-    /// For filters: get the priority from tcm_info.
+    /// For filters: the priority, held in the upper 16 bits of `tcm_info`.
     pub fn priority(&self) -> u16 {
-        (self.header.tcm_info & 0xFFFF) as u16
+        (self.header.tcm_info >> 16) as u16
     }
 
     /// Get the kind (type name) if present.
@@ -453,26 +461,18 @@ impl TcMessage {
         self.header.tcm_info != 0
     }
 
-    /// Get the filter protocol (ETH_P_* value), if this is a filter.
-    ///
-    /// Returns the protocol in host byte order.
+    /// Get the filter protocol (`ETH_P_*` value), in host byte order, if this
+    /// is a filter. `Option` wrapper over [`protocol`](Self::protocol).
     #[inline]
     pub fn filter_protocol(&self) -> Option<u16> {
-        if self.is_filter() {
-            Some((self.header.tcm_info & 0xFFFF) as u16)
-        } else {
-            None
-        }
+        self.is_filter().then(|| self.protocol())
     }
 
-    /// Get the filter priority, if this is a filter.
+    /// Get the filter priority, if this is a filter. `Option` wrapper over
+    /// [`priority`](Self::priority).
     #[inline]
     pub fn filter_priority(&self) -> Option<u16> {
-        if self.is_filter() {
-            Some((self.header.tcm_info >> 16) as u16)
-        } else {
-            None
-        }
+        self.is_filter().then(|| self.priority())
     }
 
     /// Get the handle as a human-readable string (e.g., "1:0", "ffff:").
@@ -840,12 +840,24 @@ mod tests {
 
     #[test]
     fn test_filter_protocol_priority() {
+        // Pack tcm_info the way the kernel expects (priority in the upper 16
+        // bits, ethernet protocol in the lower 16 bits, network byte order),
+        // then confirm the getters unpack it back to host-order values.
         let mut msg = TcMessage::new();
-        // tcm_info = (protocol << 16) | priority
-        // protocol = 0x0800 (ETH_P_IP), priority = 100
-        msg.header.tcm_info = (0x0800 << 16) | 100;
+        msg.header = TcMsg::new().with_filter_info(0x0800, 100);
 
-        assert_eq!(msg.protocol(), 0x0800);
+        assert_eq!(msg.protocol(), 0x0800, "ETH_P_IP, host byte order");
         assert_eq!(msg.priority(), 100);
+        assert_eq!(msg.filter_protocol(), Some(0x0800));
+        assert_eq!(msg.filter_priority(), Some(100));
+
+        // Layout check: priority is the major half, protocol the minor half.
+        let info = msg.info();
+        assert_eq!(info >> 16, 100, "priority occupies the upper 16 bits");
+        assert_eq!(
+            u16::from_be((info & 0xFFFF) as u16),
+            0x0800,
+            "protocol occupies the lower 16 bits in network byte order"
+        );
     }
 }

@@ -438,7 +438,7 @@ impl RateLimiter {
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
             .with_parent(tc_handle::INGRESS)
-            .with_info((0x0003u16 as u32) << 16 | 1); // ETH_P_ALL, priority 1
+            .with_filter_info(0x0003, 1); // ETH_P_ALL, priority 1
 
         let mut builder = ack_request(NlMsgType::RTM_NEWTFILTER);
         builder.append(&tcmsg);

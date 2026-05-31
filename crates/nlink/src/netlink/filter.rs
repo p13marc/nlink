@@ -3532,14 +3532,11 @@ impl Connection<Route> {
         let parent_handle = parent.as_raw();
         let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
-        // tcm_info = (protocol << 16) | priority
-        let info = ((protocol as u32) << 16) | (priority as u32);
-
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
             .with_handle(filter_handle)
-            .with_info(info);
+            .with_filter_info(protocol, priority);
 
         let mut builder = create_request(NlMsgType::RTM_NEWTFILTER);
         builder.append(&tcmsg);
@@ -3632,13 +3629,11 @@ impl Connection<Route> {
         let parent_handle = parent.as_raw();
         let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
-        let info = ((protocol as u32) << 16) | (priority as u32);
-
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
             .with_handle(filter_handle)
-            .with_info(info);
+            .with_filter_info(protocol, priority);
 
         let mut builder = replace_request(NlMsgType::RTM_NEWTFILTER);
         builder.append(&tcmsg);
@@ -3734,13 +3729,11 @@ impl Connection<Route> {
         let parent_handle = parent.as_raw();
         let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
-        let info = ((protocol as u32) << 16) | (priority as u32);
-
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
             .with_handle(filter_handle)
-            .with_info(info);
+            .with_filter_info(protocol, priority);
 
         let mut builder = ack_request(NlMsgType::RTM_NEWTFILTER);
         builder.append(&tcmsg);
@@ -3791,12 +3784,11 @@ impl Connection<Route> {
         priority: u16,
     ) -> Result<()> {
         let parent_handle = parent.as_raw();
-        let info = ((protocol as u32) << 16) | (priority as u32);
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
             .with_parent(parent_handle)
-            .with_info(info);
+            .with_filter_info(protocol, priority);
 
         let mut builder = create_request(NlMsgType::RTM_DELTFILTER);
         builder.append(&tcmsg);
