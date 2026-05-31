@@ -493,6 +493,17 @@ impl<P: ProtocolState> Connection<P> {
                         continue;
                     }
 
+                    // Plan 193 follow-up — surface NLM_F_DUMP_INTR.
+                    // The kernel sets this when the dump iterator's
+                    // underlying data structure was mutated since the
+                    // dump started; per kernel docs the userspace
+                    // should retry. Pre-0.19 nlink silently used the
+                    // inconsistent snapshot. Caller can retry via
+                    // `Error::is_dump_interrupted()`.
+                    if header.is_dump_interrupted() {
+                        return Err(Error::DumpInterrupted);
+                    }
+
                     if header.is_error() {
                         let err = NlMsgError::from_bytes(payload)?;
                         if !err.is_ack() {

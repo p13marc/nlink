@@ -294,30 +294,53 @@ impl Connection<SockDiag> {
         let len = buf.len() as u32;
         buf[0..4].copy_from_slice(&len.to_ne_bytes());
 
-        // Send request
-        self.socket().send(&buf).await?;
+        // Wrapped in with_timeout (Plan 171). Filters by seq so the
+        // ACK is matched to the in-flight request even if other
+        // queries on the same socket leave stale frames.
+        self.with_timeout(async move {
+            // Send request inside the timeout window so the whole
+            // send+ack budget is bounded together.
+            self.socket().send(&buf).await?;
 
-        // Wait for ACK
-        let data: Vec<u8> = self.socket().recv_msg().await?;
-        if data.len() >= 20 {
-            let msg_type = u16::from_ne_bytes([data[4], data[5]]);
-            if msg_type == NLMSG_ERROR {
-                let errno = i32::from_ne_bytes([data[16], data[17], data[18], data[19]]);
-                if errno != 0 {
-                    return Err(crate::netlink::Error::Kernel {
-                        errno: -errno,
-                        message: format!(
-                            "SOCK_DESTROY failed: {}",
-                            std::io::Error::from_raw_os_error(-errno)
-                        ),
-                        ext_ack: None,
-                        ext_ack_offset: None,
-                    });
+            loop {
+                let data: Vec<u8> = self.socket().recv_msg().await?;
+                if data.len() < 16 {
+                    return Err(crate::netlink::Error::InvalidMessage(
+                        "response too short".into(),
+                    ));
                 }
+                let resp_seq =
+                    u32::from_ne_bytes([data[8], data[9], data[10], data[11]]);
+                if resp_seq != seq {
+                    continue;
+                }
+                let msg_type = u16::from_ne_bytes([data[4], data[5]]);
+                if msg_type == NLMSG_ERROR {
+                    if data.len() >= 20 {
+                        let errno =
+                            i32::from_ne_bytes([data[16], data[17], data[18], data[19]]);
+                        if errno != 0 {
+                            // Route through the `from_errno_with_context_ext_ack`
+                            // factory so the stored errno is the
+                            // canonical positive POSIX value (Plan 187).
+                            return Err(
+                                crate::netlink::Error::from_errno_with_context_ext_ack(
+                                    errno,
+                                    "SOCK_DESTROY",
+                                    None,
+                                    None,
+                                ),
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
+                // Non-error response with matching seq is unusual for
+                // SOCK_DESTROY but treat as success ACK semantics.
+                return Ok(());
             }
-        }
-
-        Ok(())
+        })
+        .await
     }
 
     /// Destroy all TCP sockets matching the given filter.

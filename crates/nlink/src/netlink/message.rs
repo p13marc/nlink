@@ -67,6 +67,27 @@ impl NlMsgHdr {
         self.nlmsg_flags & NLM_F_MULTI != 0
     }
 
+    /// Check if the kernel signaled that the dump was interrupted —
+    /// the snapshot iterator's underlying data structure was mutated
+    /// between dump frames, so the returned data is inconsistent.
+    ///
+    /// The kernel sets `NLM_F_DUMP_INTR` on whichever message in the
+    /// dump stream was generated after the mutation; `iproute2` warns,
+    /// `vishvananda/netlink` retries up to N times, Cilium's
+    /// `safenetlink` wrapper retries up to 30. nlink surfaces this as
+    /// [`Error::DumpInterrupted`] from [`Connection::send_dump`] so
+    /// callers can choose their own retry policy via the
+    /// [`Error::is_dump_interrupted`] predicate.
+    ///
+    /// Reference: [kernel netlink intro docs][1], `vishvananda #1163`,
+    /// `pyroute2 #874`. Tracks the bug class Cilium issue #40280
+    /// classified as "the dump never told us its data is stale."
+    ///
+    /// [1]: https://docs.kernel.org/userspace-api/netlink/intro.html
+    pub fn is_dump_interrupted(&self) -> bool {
+        self.nlmsg_flags & NLM_F_DUMP_INTR != 0
+    }
+
     /// Convert header to bytes.
     pub fn as_bytes(&self) -> &[u8] {
         <Self as IntoBytes>::as_bytes(self)
@@ -462,5 +483,52 @@ mod nlmsgerr_tests {
         // Lossy decode produces replacement characters; what we
         // actually care about is "we didn't crash / return None".
         assert!(parsed.message.is_some());
+    }
+}
+
+#[cfg(test)]
+mod dump_intr_tests {
+    use super::*;
+
+    #[test]
+    fn nlmsghdr_reports_dump_interrupted_when_flag_set() {
+        let h = NlMsgHdr {
+            nlmsg_len: NLMSG_HDRLEN as u32,
+            nlmsg_type: NlMsgType::DONE,
+            nlmsg_flags: NLM_F_MULTI | NLM_F_DUMP_INTR,
+            nlmsg_seq: 42,
+            nlmsg_pid: 0,
+        };
+        assert!(h.is_dump_interrupted());
+        assert!(h.is_done());
+    }
+
+    #[test]
+    fn nlmsghdr_does_not_report_dump_interrupted_for_clean_done() {
+        let h = NlMsgHdr {
+            nlmsg_len: NLMSG_HDRLEN as u32,
+            nlmsg_type: NlMsgType::DONE,
+            nlmsg_flags: NLM_F_MULTI,
+            nlmsg_seq: 42,
+            nlmsg_pid: 0,
+        };
+        assert!(!h.is_dump_interrupted());
+    }
+
+    #[test]
+    fn nlmsghdr_reports_dump_interrupted_on_data_frame_too() {
+        // The kernel may set NLM_F_DUMP_INTR on any frame in the
+        // dump stream, not just NLMSG_DONE. Pin that we detect it
+        // on a mid-dump RTM_NEWLINK frame.
+        let h = NlMsgHdr {
+            nlmsg_len: NLMSG_HDRLEN as u32,
+            nlmsg_type: NlMsgType::RTM_NEWLINK,
+            nlmsg_flags: NLM_F_MULTI | NLM_F_DUMP_INTR,
+            nlmsg_seq: 42,
+            nlmsg_pid: 0,
+        };
+        assert!(h.is_dump_interrupted());
+        assert!(!h.is_done());
+        assert!(h.is_multi());
     }
 }

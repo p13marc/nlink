@@ -198,6 +198,36 @@ pub enum Error {
     #[error("operation timed out")]
     Timeout,
 
+    /// Kernel signaled that a dump was interrupted — the snapshot
+    /// iterator's underlying data structure was mutated between
+    /// frames, so the returned data set is inconsistent.
+    ///
+    /// The kernel sets `NLM_F_DUMP_INTR` on whichever message in the
+    /// dump stream was generated after the mutation. Higher-level
+    /// libraries differ on what to do:
+    /// `iproute2` warns and accepts the partial dump;
+    /// `vishvananda/netlink` retries with a bound;
+    /// Cilium's `safenetlink` wrapper retries up to 30 times.
+    ///
+    /// nlink surfaces this as a typed error so callers choose their
+    /// own retry policy. Recover via [`Self::is_dump_interrupted`]:
+    ///
+    /// ```ignore
+    /// for attempt in 0..16 {
+    ///     match conn.get_links().await {
+    ///         Err(e) if e.is_dump_interrupted() => continue,
+    ///         other => return other,
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// See [`NlMsgHdr::is_dump_interrupted`] for kernel semantics and
+    /// `crates/nlink/src/netlink/message.rs`. Reference: kernel
+    /// netlink intro docs, `vishvananda/netlink #1163`,
+    /// `pyroute2 #874`.
+    #[error("netlink dump interrupted by concurrent mutation (NLM_F_DUMP_INTR) — retry")]
+    DumpInterrupted,
+
     /// Connection pool was unable to hand out a connection within
     /// the configured `acquire_timeout`.
     ///
@@ -651,6 +681,37 @@ impl Error {
         matches!(self, Self::Timeout) || self.errno() == Some(libc::ETIMEDOUT)
     }
 
+    /// Check if this is an [`Error::DumpInterrupted`].
+    ///
+    /// The kernel signaled `NLM_F_DUMP_INTR` on a dump message,
+    /// meaning the snapshot was mutated mid-flight and the returned
+    /// data set is inconsistent. The right response is to retry the
+    /// dump with a bound (Cilium uses 30 attempts, vishvananda uses
+    /// 24). Without this predicate, pre-0.19 nlink callers had no way
+    /// to know the dump was stale — they would silently use the
+    /// inconsistent data.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::{Connection, Route};
+    ///
+    /// async fn get_links_with_retry(
+    ///     conn: &Connection<Route>,
+    /// ) -> nlink::Result<Vec<nlink::Link>> {
+    ///     for _ in 0..16 {
+    ///         match conn.get_links().await {
+    ///             Err(e) if e.is_dump_interrupted() => continue,
+    ///             other => return other,
+    ///         }
+    ///     }
+    ///     conn.get_links().await
+    /// }
+    /// ```
+    pub fn is_dump_interrupted(&self) -> bool {
+        matches!(self, Self::DumpInterrupted)
+    }
+
     /// Check if this is a [`Error::PoolExhausted`].
     ///
     /// All pool slots were busy when `ConnectionPool::acquire` was
@@ -852,6 +913,28 @@ mod tests {
         // Kernel ETIMEDOUT should also match
         let err = Error::from_errno(-(libc::ETIMEDOUT));
         assert!(err.is_timeout());
+    }
+
+    #[test]
+    fn test_dump_interrupted_predicate() {
+        let err = Error::DumpInterrupted;
+        assert!(err.is_dump_interrupted());
+        // Mutually exclusive with other recovery predicates.
+        assert!(!err.is_timeout());
+        assert!(!err.is_busy());
+        assert!(!err.is_not_found());
+        // Message mentions retry guidance so the error is
+        // self-describing in logs.
+        let s = err.to_string();
+        assert!(s.contains("interrupted"), "got: {s}");
+        assert!(s.contains("retry"), "got: {s}");
+    }
+
+    #[test]
+    fn test_dump_interrupted_does_not_match_unrelated_errors() {
+        assert!(!Error::Timeout.is_dump_interrupted());
+        assert!(!Error::from_errno(-16).is_dump_interrupted()); // EBUSY
+        assert!(!Error::InterfaceNotFound { name: "x".into() }.is_dump_interrupted());
     }
 
     #[test]

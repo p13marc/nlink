@@ -46,7 +46,92 @@ All notable changes to this project will be documented in this file.
   errno; only direct test/mock callers asserting `Some(-N)`
   break — update to `Some(N)`.
 
+### Added
+
+- **`Error::DumpInterrupted` variant + `is_dump_interrupted()`
+  predicate (post-cycle bug-hunt)** — the kernel sets the
+  `NLM_F_DUMP_INTR` flag on a dump message when the snapshot
+  iterator's underlying data structure was mutated between
+  frames, signaling that the returned set is inconsistent. Pre-
+  0.19 nlink silently accepted the partial dump; the user had no
+  way to know the data was stale. Now `Connection::send_dump`
+  (and every typed dump wrapper that goes through it —
+  `get_links`, `get_routes`, `get_neighbors`, `get_addrs`,
+  `get_rules`, `get_qdiscs`, `get_classes`, `get_filters`,
+  `get_nexthops`, `get_actions`) returns
+  `Error::DumpInterrupted`. Callers can retry with their own
+  bound — Cilium uses 30 attempts, vishvananda/netlink uses 24,
+  `iproute2` warns once and accepts the partial. The new
+  `NlMsgHdr::is_dump_interrupted()` accessor also lets stream
+  consumers detect interruption on individual frames.
+  References: kernel docs/userspace-api/netlink/intro.html,
+  `vishvananda/netlink#1163`, `pyroute2#874`, Cilium safenetlink.
+
 ### Fixed
+
+- **`Batch::send_chunk` could hang indefinitely on dropped
+  per-op ACK (post-cycle bug-hunt)** — the nftables/route batch
+  send-chunk recv loop did NOT run under `Connection::with_timeout`,
+  so a kernel that lost the ACK for any single batched op would
+  leave the call waiting forever. Plan 171's 30s default
+  Connection timeout was supposed to catch every recv-loop;
+  Plan 172 missed wiring it here. Now the recv loop is wrapped
+  in `with_timeout`, so a dropped ACK surfaces as `Error::Timeout`
+  after the configured budget instead of an indefinite hang.
+
+- **`audit.rs::{get_status, get_tty_status, get_features}` had
+  no timeout + no seq filter (post-cycle bug-hunt)** — the three
+  Audit RPCs raw-`recv_msg()`-looped without `with_timeout`, so
+  a kernel that dropped the response hung forever; they also
+  matched on `nlmsg_type` only and would have accepted a stale
+  frame from a prior request on the same socket. Both now match
+  `nlmsg_seq` first and run under the connection timeout. Same
+  hazard class as Plan 172 but on a non-rtnetlink protocol that
+  the original audit missed.
+
+- **`sockdiag.rs::destroy_tcp_socket` bypassed
+  `Error::from_errno*` factory + had no seq filter / timeout
+  (post-cycle bug-hunt)** — constructed `Error::Kernel { errno: -errno, ... }`
+  by hand instead of routing through
+  `Error::from_errno_with_context_ext_ack`, so the stored errno
+  shape diverged from the Plan 187 sign-normalization invariant
+  and ext-ack info was dropped. Now uses the factory + seq filter
+  + 30s timeout wrap.
+
+- **`MessageBuilder::nest_end` + `NlAttr::new` silently
+  truncated `nla_len` to `u16` on > 65 KB payloads (post-cycle
+  bug-hunt)** — the kernel's `nla_len` field is a `u16`, so a
+  caller building a >64 KB nested attribute would have its
+  header silently wrap to a tiny value, producing a malformed
+  message the kernel would either reject (best case) or
+  misinterpret the wrapped length and skip past the real payload
+  bytes (worst case). No caller hit this today — the bug was
+  latent waiting for a future caller — but the silent-corruption
+  shape was identical to PR #7's `tcm_info` packing footgun
+  (where transposed bytes silently broke every TC filter add).
+  Now: `debug_assert!` panic with a clear "exceeds u16::MAX wire
+  limit" message in debug builds, saturating cast in release so
+  the kernel rejects the message rather than misinterpreting a
+  wrapped length. 2 new boundary tests
+  (`nest_end_just_under_u16_max_boundary_succeeds`,
+  `nest_end_over_u16_max_panics_in_debug`) pin the contract.
+
+- **`AttrIter` parser-robustness contract was unverified (post-
+  cycle bug-hunt)** — `AttrIter` is the equivalent of `MessageIter`
+  for nested attribute walking; every parser in the lib uses it
+  (hundreds of call sites). Plan 193 §2.3 added robustness tests
+  for `MessageIter` (found a real infinite-loop bug in the
+  process), but the matching `AttrIter` had **zero tests** —
+  future refactors could silently turn the safe `return None`
+  paths into panics or infinite loops. 13 new tests pin the
+  three CLAUDE.md `## Parser robustness` rules on `AttrIter`:
+  zero-length attribute terminates iteration without loop;
+  truncated `len > buffer` terminates; under-min `len < NLA_HDRLEN`
+  terminates; accept-larger-than-expected payload is forward-
+  compatible; `NLA_F_NESTED` / `NLA_F_NET_BYTEORDER` flag bits
+  are masked from `kind()` (preventing the vishvananda/netlink
+  #1104 bug class). Same bug-by-test-writing pattern as Plan 193
+  §2.3.
 
 - **TC filter `tcm_info` packing — kernel-EINVAL on every
   `add_filter*` call with explicit protocol+priority (PR #7,

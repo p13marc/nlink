@@ -403,48 +403,63 @@ impl Connection<Audit> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_status"))]
     pub async fn get_status(&self) -> Result<AuditStatus> {
-        let seq = self.socket().next_seq();
-        let pid = self.socket().pid();
+        // Wrapped in with_timeout (Plan 171: 30s default) so a kernel
+        // that drops the response surfaces as `Error::Timeout` rather
+        // than an indefinite hang. Pre-0.19 this method could hang
+        // forever waiting for an ACK that never arrived.
+        self.with_timeout(async move {
+            let seq = self.socket().next_seq();
+            let pid = self.socket().pid();
 
-        // Build request message
-        let mut buf = Vec::with_capacity(32);
+            // Build request message
+            let mut buf = Vec::with_capacity(32);
 
-        // Netlink header (16 bytes)
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
-        buf.extend_from_slice(&AUDIT_GET.to_ne_bytes()); // nlmsg_type
-        buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes()); // nlmsg_flags
-        buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
-        buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
+            // Netlink header (16 bytes)
+            buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
+            buf.extend_from_slice(&AUDIT_GET.to_ne_bytes()); // nlmsg_type
+            buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes()); // nlmsg_flags
+            buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
+            buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
 
-        // Update length
-        let len = buf.len() as u32;
-        buf[0..4].copy_from_slice(&len.to_ne_bytes());
+            // Update length
+            let len = buf.len() as u32;
+            buf[0..4].copy_from_slice(&len.to_ne_bytes());
 
-        // Send request
-        self.socket().send(&buf).await?;
+            // Send request
+            self.socket().send(&buf).await?;
 
-        // Receive response
-        let data = self.socket().recv_msg().await?;
+            // Receive responses, filtering by seq (skip any stale
+            // frames from prior queries on the same socket).
+            loop {
+                let data = self.socket().recv_msg().await?;
 
-        if data.len() < NLMSG_HDRLEN {
-            return Err(Error::InvalidMessage("response too short".into()));
-        }
-
-        let nlmsg_type = u16::from_ne_bytes([data[4], data[5]]);
-
-        if nlmsg_type == NLMSG_ERROR {
-            if data.len() >= 20 {
-                let errno = i32::from_ne_bytes([data[16], data[17], data[18], data[19]]);
-                if errno != 0 {
-                    return Err(Error::from_errno(-errno));
+                if data.len() < NLMSG_HDRLEN {
+                    return Err(Error::InvalidMessage("response too short".into()));
                 }
-            }
-            // errno == 0 means success ACK, wait for actual response
-            let data = self.socket().recv_msg().await?;
-            return self.parse_status_response(&data);
-        }
 
-        self.parse_status_response(&data)
+                let resp_seq = u32::from_ne_bytes([data[8], data[9], data[10], data[11]]);
+                if resp_seq != seq {
+                    continue; // Stale frame from prior request.
+                }
+
+                let nlmsg_type = u16::from_ne_bytes([data[4], data[5]]);
+
+                if nlmsg_type == NLMSG_ERROR {
+                    if data.len() >= 20 {
+                        let errno =
+                            i32::from_ne_bytes([data[16], data[17], data[18], data[19]]);
+                        if errno != 0 {
+                            return Err(Error::from_errno(-errno));
+                        }
+                    }
+                    // errno == 0 means success ACK, wait for actual response
+                    continue;
+                }
+
+                return self.parse_status_response(&data);
+            }
+        })
+        .await
     }
 
     /// Parse status response.
@@ -509,65 +524,77 @@ impl Connection<Audit> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_tty_status"))]
     pub async fn get_tty_status(&self) -> Result<AuditTtyStatus> {
-        let seq = self.socket().next_seq();
-        let pid = self.socket().pid();
+        // See `get_status` for the timeout/seq-filter rationale.
+        self.with_timeout(async move {
+            let seq = self.socket().next_seq();
+            let pid = self.socket().pid();
 
-        // Build request message
-        let mut buf = Vec::with_capacity(32);
+            // Build request message
+            let mut buf = Vec::with_capacity(32);
 
-        // Netlink header (16 bytes)
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
-        buf.extend_from_slice(&AUDIT_TTY_GET.to_ne_bytes()); // nlmsg_type
-        buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes()); // nlmsg_flags
-        buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
-        buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
+            // Netlink header (16 bytes)
+            buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
+            buf.extend_from_slice(&AUDIT_TTY_GET.to_ne_bytes()); // nlmsg_type
+            buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes()); // nlmsg_flags
+            buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
+            buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
 
-        // Update length
-        let len = buf.len() as u32;
-        buf[0..4].copy_from_slice(&len.to_ne_bytes());
+            // Update length
+            let len = buf.len() as u32;
+            buf[0..4].copy_from_slice(&len.to_ne_bytes());
 
-        // Send request
-        self.socket().send(&buf).await?;
+            // Send request
+            self.socket().send(&buf).await?;
 
-        // Receive response - skip ACK
-        loop {
-            let data = self.socket().recv_msg().await?;
+            // Receive response - skip ACK; filter by seq.
+            loop {
+                let data = self.socket().recv_msg().await?;
 
-            if data.len() < NLMSG_HDRLEN {
-                return Err(Error::InvalidMessage("response too short".into()));
-            }
+                if data.len() < NLMSG_HDRLEN {
+                    return Err(Error::InvalidMessage("response too short".into()));
+                }
 
-            let nlmsg_type = u16::from_ne_bytes([data[4], data[5]]);
+                let resp_seq = u32::from_ne_bytes([data[8], data[9], data[10], data[11]]);
+                if resp_seq != seq {
+                    continue;
+                }
 
-            if nlmsg_type == NLMSG_ERROR {
-                if data.len() >= 20 {
-                    let errno = i32::from_ne_bytes([data[16], data[17], data[18], data[19]]);
-                    if errno != 0 {
-                        return Err(Error::from_errno(-errno));
+                let nlmsg_type = u16::from_ne_bytes([data[4], data[5]]);
+
+                if nlmsg_type == NLMSG_ERROR {
+                    if data.len() >= 20 {
+                        let errno =
+                            i32::from_ne_bytes([data[16], data[17], data[18], data[19]]);
+                        if errno != 0 {
+                            return Err(Error::from_errno(-errno));
+                        }
                     }
-                }
-                // ACK, continue to next message
-                continue;
-            }
-
-            if nlmsg_type == AUDIT_TTY_GET {
-                if data.len() < NLMSG_HDRLEN + std::mem::size_of::<AuditTtyStatus>() {
-                    return Err(Error::InvalidMessage(
-                        "TTY status response too short".into(),
-                    ));
+                    // ACK, continue to next message
+                    continue;
                 }
 
-                let (status, _) = AuditTtyStatus::ref_from_prefix(&data[NLMSG_HDRLEN..])
-                    .map_err(|_| Error::InvalidMessage("failed to parse TTY status".into()))?;
+                if nlmsg_type == AUDIT_TTY_GET {
+                    if data.len() < NLMSG_HDRLEN + std::mem::size_of::<AuditTtyStatus>() {
+                        return Err(Error::InvalidMessage(
+                            "TTY status response too short".into(),
+                        ));
+                    }
 
-                return Ok(*status);
+                    let (status, _) = AuditTtyStatus::ref_from_prefix(&data[NLMSG_HDRLEN..])
+                        .map_err(|_| {
+                            Error::InvalidMessage("failed to parse TTY status".into())
+                        })?;
+
+                    return Ok(*status);
+                }
+
+                return Err(Error::InvalidMessage(format!(
+                    "unexpected message type: {}",
+                    nlmsg_type
+                )));
             }
-
-            return Err(Error::InvalidMessage(format!(
-                "unexpected message type: {}",
-                nlmsg_type
-            )));
-        }
+        })
+        .await
     }
 
     /// Get audit features.
@@ -586,63 +613,77 @@ impl Connection<Audit> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_features"))]
     pub async fn get_features(&self) -> Result<AuditFeatures> {
-        let seq = self.socket().next_seq();
-        let pid = self.socket().pid();
+        // See `get_status` for the timeout/seq-filter rationale.
+        self.with_timeout(async move {
+            let seq = self.socket().next_seq();
+            let pid = self.socket().pid();
 
-        // Build request message
-        let mut buf = Vec::with_capacity(32);
+            // Build request message
+            let mut buf = Vec::with_capacity(32);
 
-        // Netlink header (16 bytes)
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
-        buf.extend_from_slice(&AUDIT_GET_FEATURE.to_ne_bytes()); // nlmsg_type
-        buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes()); // nlmsg_flags
-        buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
-        buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
+            // Netlink header (16 bytes)
+            buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
+            buf.extend_from_slice(&AUDIT_GET_FEATURE.to_ne_bytes()); // nlmsg_type
+            buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes()); // nlmsg_flags
+            buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
+            buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
 
-        // Update length
-        let len = buf.len() as u32;
-        buf[0..4].copy_from_slice(&len.to_ne_bytes());
+            // Update length
+            let len = buf.len() as u32;
+            buf[0..4].copy_from_slice(&len.to_ne_bytes());
 
-        // Send request
-        self.socket().send(&buf).await?;
+            // Send request
+            self.socket().send(&buf).await?;
 
-        // Receive response - skip ACK
-        loop {
-            let data = self.socket().recv_msg().await?;
+            // Receive response - skip ACK; filter by seq.
+            loop {
+                let data = self.socket().recv_msg().await?;
 
-            if data.len() < NLMSG_HDRLEN {
-                return Err(Error::InvalidMessage("response too short".into()));
-            }
+                if data.len() < NLMSG_HDRLEN {
+                    return Err(Error::InvalidMessage("response too short".into()));
+                }
 
-            let nlmsg_type = u16::from_ne_bytes([data[4], data[5]]);
+                let resp_seq = u32::from_ne_bytes([data[8], data[9], data[10], data[11]]);
+                if resp_seq != seq {
+                    continue;
+                }
 
-            if nlmsg_type == NLMSG_ERROR {
-                if data.len() >= 20 {
-                    let errno = i32::from_ne_bytes([data[16], data[17], data[18], data[19]]);
-                    if errno != 0 {
-                        return Err(Error::from_errno(-errno));
+                let nlmsg_type = u16::from_ne_bytes([data[4], data[5]]);
+
+                if nlmsg_type == NLMSG_ERROR {
+                    if data.len() >= 20 {
+                        let errno =
+                            i32::from_ne_bytes([data[16], data[17], data[18], data[19]]);
+                        if errno != 0 {
+                            return Err(Error::from_errno(-errno));
+                        }
                     }
-                }
-                // ACK, continue to next message
-                continue;
-            }
-
-            if nlmsg_type == AUDIT_GET_FEATURE {
-                if data.len() < NLMSG_HDRLEN + std::mem::size_of::<AuditFeatures>() {
-                    return Err(Error::InvalidMessage("features response too short".into()));
+                    // ACK, continue to next message
+                    continue;
                 }
 
-                let (features, _) = AuditFeatures::ref_from_prefix(&data[NLMSG_HDRLEN..])
-                    .map_err(|_| Error::InvalidMessage("failed to parse features".into()))?;
+                if nlmsg_type == AUDIT_GET_FEATURE {
+                    if data.len() < NLMSG_HDRLEN + std::mem::size_of::<AuditFeatures>() {
+                        return Err(Error::InvalidMessage(
+                            "features response too short".into(),
+                        ));
+                    }
 
-                return Ok(*features);
+                    let (features, _) = AuditFeatures::ref_from_prefix(&data[NLMSG_HDRLEN..])
+                        .map_err(|_| {
+                            Error::InvalidMessage("failed to parse features".into())
+                        })?;
+
+                    return Ok(*features);
+                }
+
+                return Err(Error::InvalidMessage(format!(
+                    "unexpected message type: {}",
+                    nlmsg_type
+                )));
             }
-
-            return Err(Error::InvalidMessage(format!(
-                "unexpected message type: {}",
-                nlmsg_type
-            )));
-        }
+        })
+        .await
     }
 }
 
