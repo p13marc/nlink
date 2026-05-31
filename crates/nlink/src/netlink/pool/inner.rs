@@ -1,6 +1,6 @@
 //! `ConnectionPool<P>` and its builder.
 
-use std::{marker::PhantomData, sync::Arc, time::Duration};
+use std::{future::Future, marker::PhantomData, pin::Pin, sync::Arc, time::Duration};
 
 use tokio::sync::{mpsc, Mutex};
 
@@ -15,6 +15,20 @@ use crate::netlink::{
     },
 };
 
+/// Boxed future returned by [`Factory::build`]. 0.19 Finding C —
+/// invalidate-then-refill closes the silent pool capacity decay
+/// that left long-running pools degraded to zero.
+pub(super) type FactoryFuture<P> =
+    Pin<Box<dyn Future<Output = Result<Connection<P>>> + Send>>;
+
+/// Async factory used by [`PooledConnection::invalidate`] to
+/// reconstruct a replacement connection. Erases the
+/// `SyncConstructible` / `AsyncConstructible` split so the
+/// `PoolInner` carries one trait object for either case.
+pub(super) trait Factory<P: ProtocolState>: Send + Sync + 'static {
+    fn build(&self) -> FactoryFuture<P>;
+}
+
 pub(super) struct PoolInner<P: ProtocolState> {
     /// Bounded mpsc channel — capacity == pool size. `acquire` is
     /// `recv()` (waits when the pool is exhausted); `release` is
@@ -25,6 +39,12 @@ pub(super) struct PoolInner<P: ProtocolState> {
     pub(super) namespace: Option<String>,
     pub(super) size: usize,
     pub(super) acquire_timeout: Duration,
+    /// 0.19 Finding C — async factory invoked by
+    /// `PooledConnection::invalidate` to rebuild the dropped
+    /// connection off the drop path. Without this the pool's
+    /// effective capacity decayed with each invalidate, eventually
+    /// blocking every `acquire()` indefinitely.
+    pub(super) factory: Arc<dyn Factory<P>>,
 }
 
 /// A bounded async pool of [`Connection<P>`] instances.
@@ -190,6 +210,10 @@ where
             };
             tx.send(conn).await.map_err(|_| Error::PoolClosed)?;
         }
+        let factory: Arc<dyn Factory<P>> = Arc::new(SyncFactory {
+            namespace: namespace.clone(),
+            _phantom: PhantomData,
+        });
         Ok(ConnectionPool {
             inner: Arc::new(PoolInner {
                 available: tx,
@@ -197,7 +221,29 @@ where
                 namespace,
                 size: self.size,
                 acquire_timeout: self.acquire_timeout,
+                factory,
             }),
+        })
+    }
+}
+
+/// 0.19 Finding C — concrete factory for SyncConstructible protocols.
+struct SyncFactory<P: ProtocolState + Default + SyncConstructible + 'static> {
+    namespace: Option<String>,
+    _phantom: PhantomData<fn() -> P>,
+}
+
+impl<P> Factory<P> for SyncFactory<P>
+where
+    P: ProtocolState + Default + SyncConstructible + 'static,
+{
+    fn build(&self) -> FactoryFuture<P> {
+        let namespace = self.namespace.clone();
+        Box::pin(async move {
+            match &namespace {
+                Some(ns) => namespace::connection_for::<P>(ns),
+                None => Connection::<P>::new(),
+            }
         })
     }
 }
@@ -228,6 +274,10 @@ where
             };
             tx.send(conn).await.map_err(|_| Error::PoolClosed)?;
         }
+        let factory: Arc<dyn Factory<P>> = Arc::new(AsyncFactory {
+            namespace: namespace.clone(),
+            _phantom: PhantomData,
+        });
         Ok(ConnectionPool {
             inner: Arc::new(PoolInner {
                 available: tx,
@@ -235,7 +285,35 @@ where
                 namespace,
                 size: self.size,
                 acquire_timeout: self.acquire_timeout,
+                factory,
             }),
+        })
+    }
+}
+
+/// 0.19 Finding C — concrete factory for AsyncConstructible
+/// (GENL-family) protocols. Each replacement Connection
+/// re-resolves the family ID, just like the initial seed.
+struct AsyncFactory<P: ProtocolState + AsyncProtocolInit + AsyncConstructible + 'static> {
+    namespace: Option<String>,
+    _phantom: PhantomData<fn() -> P>,
+}
+
+impl<P> Factory<P> for AsyncFactory<P>
+where
+    P: ProtocolState + AsyncProtocolInit + AsyncConstructible + 'static,
+{
+    fn build(&self) -> FactoryFuture<P> {
+        let namespace = self.namespace.clone();
+        Box::pin(async move {
+            match &namespace {
+                Some(ns) => namespace::connection_for_async::<P>(ns).await,
+                None => {
+                    let socket = crate::netlink::socket::NetlinkSocket::new(P::PROTOCOL)?;
+                    let state = P::resolve_async(&socket).await?;
+                    Ok(Connection::from_parts(socket, state))
+                }
+            }
         })
     }
 }
