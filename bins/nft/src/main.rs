@@ -206,13 +206,20 @@ fn parse_family(s: &str) -> Result<Family> {
 }
 
 fn parse_hook(s: &str) -> Result<Hook> {
+    // Plan 211 M1 — `Hook::Ingress` was split into `NetdevIngress`
+    // (kernel `NF_NETDEV_INGRESS = 0`) and `InetIngress` (kernel
+    // `NF_INET_INGRESS = 5`). This CLI uses a `netdev:`/`inet:`
+    // prefix to disambiguate; bare `ingress` defaults to the
+    // netdev variant for backwards-compat with pre-0.19 commands.
     match s {
         "prerouting" => Ok(Hook::Prerouting),
         "input" => Ok(Hook::Input),
         "forward" => Ok(Hook::Forward),
         "output" => Ok(Hook::Output),
         "postrouting" => Ok(Hook::Postrouting),
-        "ingress" => Ok(Hook::Ingress),
+        "ingress" | "netdev:ingress" => Ok(Hook::NetdevIngress),
+        "inet:ingress" => Ok(Hook::InetIngress),
+        "netdev:egress" => Ok(Hook::NetdevEgress),
         _ => Err(nlink::netlink::Error::InvalidAttribute(format!(
             "unknown hook: {s}"
         ))),

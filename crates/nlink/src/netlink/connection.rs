@@ -2404,19 +2404,33 @@ impl Connection<Generic> {
         // Append family name attribute
         builder.append_attr_str(CtrlAttr::FamilyName as u16, name);
 
-        // Send request
-        let seq = self.socket.next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket.pid());
+        // Plan 208 Phase 1 — wrap in with_timeout. High blast radius:
+        // every hand-rolled GENL family resolution touches this
+        // method. Pre-0.19 had no timeout; a dropped CTRL_CMD_GETFAMILY
+        // response would hang `new_async()` indefinitely.
+        //
+        // Note: parse_family_response already filters by seq, but the
+        // single-recv pattern means a stale frame on the socket would
+        // be swallowed once and then the kernel's real reply would
+        // arrive on the next recv — outside the bounds of this call.
+        // The minimum-risk fix is to keep the single-recv but add the
+        // timeout wrap. A full loop+seq-filter refactor (Plan 208
+        // Phase 4) is queued separately because parse_family_response
+        // conflates "stale frame" and "real ENOENT" into the same
+        // FamilyNotFound error and disambiguating that requires
+        // refactoring the parse side.
+        self.with_timeout(async move {
+            let seq = self.socket.next_seq();
+            builder.set_seq(seq);
+            builder.set_pid(self.socket.pid());
 
-        let msg = builder.finish();
-        self.socket.send(&msg).await?;
+            let msg = builder.finish();
+            self.socket.send(&msg).await?;
 
-        // Receive response
-        let response = self.socket.recv_msg().await?;
-
-        // Parse response
-        self.parse_family_response(&response, seq, name)
+            let response = self.socket.recv_msg().await?;
+            self.parse_family_response(&response, seq, name)
+        })
+        .await
     }
 
     /// Parse a CTRL_CMD_GETFAMILY response.
@@ -2551,27 +2565,28 @@ impl Connection<Generic> {
         build_attrs: impl FnOnce(&mut MessageBuilder),
     ) -> Result<Vec<u8>> {
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
-
-        // Append GENL header
         let genl_hdr = GenlMsgHdr::new(cmd, version);
         builder.append(&genl_hdr);
-
-        // Let caller append attributes
         build_attrs(&mut builder);
 
-        // Send request
-        let seq = self.socket.next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket.pid());
+        // Plan 208 Phase 1 — wrap in with_timeout. Pre-0.19 a kernel
+        // that dropped the ACK for any custom GENL command hung
+        // indefinitely. `process_genl_response` already does
+        // seq-filter; the timeout closes the indefinite-hang class.
+        self.with_timeout(async move {
+            let seq = self.socket.next_seq();
+            builder.set_seq(seq);
+            builder.set_pid(self.socket.pid());
 
-        let msg = builder.finish();
-        self.socket.send(&msg).await?;
+            let msg = builder.finish();
+            self.socket.send(&msg).await?;
 
-        // Receive response
-        let response = self.socket.recv_msg().await?;
-        self.process_genl_response(&response, seq)?;
+            let response = self.socket.recv_msg().await?;
+            self.process_genl_response(&response, seq)?;
 
-        Ok(response)
+            Ok(response)
+        })
+        .await
     }
 
     /// Send a GENL dump command and collect all responses.
@@ -2584,58 +2599,64 @@ impl Connection<Generic> {
         build_attrs: impl FnOnce(&mut MessageBuilder),
     ) -> Result<Vec<Vec<u8>>> {
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
-
-        // Append GENL header
         let genl_hdr = GenlMsgHdr::new(cmd, version);
         builder.append(&genl_hdr);
-
-        // Let caller append attributes
         build_attrs(&mut builder);
 
-        // Send request
-        let seq = self.socket.next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket.pid());
+        // Plan 208 Phase 1+2 — wrap in with_timeout, add
+        // NLM_F_DUMP_INTR detection. Pre-0.19 every custom GENL
+        // dump could hang indefinitely on a dropped response AND
+        // silently use an inconsistent snapshot when the kernel
+        // signaled mid-dump mutation.
+        self.with_timeout(async move {
+            let seq = self.socket.next_seq();
+            builder.set_seq(seq);
+            builder.set_pid(self.socket.pid());
 
-        let msg = builder.finish();
-        self.socket.send(&msg).await?;
+            let msg = builder.finish();
+            self.socket.send(&msg).await?;
 
-        let mut responses = Vec::new();
+            let mut responses = Vec::new();
 
-        loop {
-            let data = self.socket.recv_msg().await?;
-            let mut done = false;
+            loop {
+                let data = self.socket.recv_msg().await?;
+                let mut done = false;
 
-            for result in MessageIter::new(&data) {
-                let (header, payload) = result?;
+                for result in MessageIter::new(&data) {
+                    let (header, payload) = result?;
 
-                if header.nlmsg_seq != seq {
-                    continue;
-                }
-
-                if header.is_error() {
-                    let err = NlMsgError::from_bytes(payload)?;
-                    if !err.is_ack() {
-                        return Err(err.into_error(payload));
+                    if header.nlmsg_seq != seq {
+                        continue;
                     }
-                    continue;
+
+                    if header.is_dump_interrupted() {
+                        return Err(Error::DumpInterrupted);
+                    }
+
+                    if header.is_error() {
+                        let err = NlMsgError::from_bytes(payload)?;
+                        if !err.is_ack() {
+                            return Err(err.into_error(payload));
+                        }
+                        continue;
+                    }
+
+                    if header.is_done() {
+                        done = true;
+                        break;
+                    }
+
+                    responses.push(payload.to_vec());
                 }
 
-                if header.is_done() {
-                    done = true;
+                if done {
                     break;
                 }
-
-                // Include the payload (with GENL header)
-                responses.push(payload.to_vec());
             }
 
-            if done {
-                break;
-            }
-        }
-
-        Ok(responses)
+            Ok(responses)
+        })
+        .await
     }
 
     /// Process a GENL response, checking for errors.

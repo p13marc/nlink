@@ -316,7 +316,7 @@ async fn netdev_chain_device_round_trips() -> nlink::Result<()> {
             Family::Netdev,
             |t| {
                 t.chain("ingress", |c| {
-                    c.hook(Hook::Ingress)
+                    c.hook(Hook::NetdevIngress)
                         .priority(Priority::Filter)
                         .chain_type(ChainType::Filter)
                         .device("dummy0")

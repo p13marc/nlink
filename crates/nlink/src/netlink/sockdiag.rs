@@ -415,92 +415,102 @@ impl Connection<SockDiag> {
         filter: &InetFilter,
         family: AddressFamily,
     ) -> Result<Vec<InetSocket>> {
-        let seq = self.socket().next_seq();
-        let pid = self.socket().pid();
+        // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
+        // NLM_F_DUMP_INTR detection.
+        self.with_timeout(async move {
+            let seq = self.socket().next_seq();
+            let pid = self.socket().pid();
 
-        // Build request
-        let mut buf = Vec::with_capacity(256);
+            let mut buf = Vec::with_capacity(256);
+            let msg_type = SOCK_DIAG_BY_FAMILY;
 
-        // Netlink header (16 bytes)
-        let msg_type = SOCK_DIAG_BY_FAMILY;
+            buf.extend_from_slice(&0u32.to_ne_bytes());
+            buf.extend_from_slice(&msg_type.to_ne_bytes());
+            buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes());
+            buf.extend_from_slice(&seq.to_ne_bytes());
+            buf.extend_from_slice(&pid.to_ne_bytes());
 
-        // Will fill in length later
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len
-        buf.extend_from_slice(&msg_type.to_ne_bytes()); // nlmsg_type
-        buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes()); // nlmsg_flags
-        buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
-        buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
+            buf.push(family as u8);
+            buf.push(filter.protocol.number());
+            buf.push(filter.extensions);
+            buf.push(0);
+            buf.extend_from_slice(&filter.states.to_ne_bytes());
 
-        // inet_diag_req_v2 structure (56 bytes)
-        buf.push(family as u8); // sdiag_family
-        buf.push(filter.protocol.number()); // sdiag_protocol
-        buf.push(filter.extensions); // idiag_ext
-        buf.push(0); // pad
-        buf.extend_from_slice(&filter.states.to_ne_bytes()); // idiag_states
+            buf.extend_from_slice(&0u16.to_be_bytes());
+            buf.extend_from_slice(&0u16.to_be_bytes());
+            buf.extend_from_slice(&[0u8; 16]);
+            buf.extend_from_slice(&[0u8; 16]);
+            buf.extend_from_slice(&0u32.to_ne_bytes());
+            buf.extend_from_slice(&[0u8; 8]);
 
-        // inet_diag_sockid (48 bytes)
-        buf.extend_from_slice(&0u16.to_be_bytes()); // idiag_sport
-        buf.extend_from_slice(&0u16.to_be_bytes()); // idiag_dport
-        buf.extend_from_slice(&[0u8; 16]); // idiag_src
-        buf.extend_from_slice(&[0u8; 16]); // idiag_dst
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // idiag_if
-        buf.extend_from_slice(&[0u8; 8]); // idiag_cookie
+            let len = buf.len() as u32;
+            buf[0..4].copy_from_slice(&len.to_ne_bytes());
 
-        // Update length
-        let len = buf.len() as u32;
-        buf[0..4].copy_from_slice(&len.to_ne_bytes());
+            self.socket().send(&buf).await?;
 
-        // Send request
-        self.socket().send(&buf).await?;
+            let mut sockets = Vec::new();
 
-        // Receive responses
-        let mut sockets = Vec::new();
+            loop {
+                let data: Vec<u8> = self.socket().recv_msg().await?;
 
-        loop {
-            let data: Vec<u8> = self.socket().recv_msg().await?;
+                let mut offset = 0;
+                while offset + 16 <= data.len() {
+                    let nlmsg_len = u32::from_ne_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]) as usize;
 
-            let mut offset = 0;
-            while offset + 16 <= data.len() {
-                let nlmsg_len = u32::from_ne_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ]) as usize;
+                    let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
+                    let nlmsg_flags = u16::from_ne_bytes([data[offset + 6], data[offset + 7]]);
+                    let nlmsg_seq = u32::from_ne_bytes([
+                        data[offset + 8],
+                        data[offset + 9],
+                        data[offset + 10],
+                        data[offset + 11],
+                    ]);
 
-                let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
-
-                if nlmsg_len < 16 || offset + nlmsg_len > data.len() {
-                    break;
-                }
-
-                match nlmsg_type {
-                    NLMSG_DONE => return Ok(sockets),
-                    NLMSG_ERROR if nlmsg_len >= 20 => {
-                        let errno = i32::from_ne_bytes([
-                            data[offset + 16],
-                            data[offset + 17],
-                            data[offset + 18],
-                            data[offset + 19],
-                        ]);
-                        if errno != 0 {
-                            return Err(super::error::Error::from_errno(-errno));
-                        }
+                    if nlmsg_len < 16 || offset + nlmsg_len > data.len() {
+                        break;
                     }
-                    SOCK_DIAG_BY_FAMILY | TCPDIAG_GETSOCK => {
-                        if let Some(sock) =
-                            parse_inet_msg(&data[offset..offset + nlmsg_len], filter.protocol)
-                        {
-                            sockets.push(sock);
-                        }
+                    if nlmsg_seq != seq {
+                        offset += (nlmsg_len + 3) & !3;
+                        continue;
                     }
-                    _ => {}
-                }
+                    if nlmsg_flags & 0x10 != 0 {
+                        return Err(crate::netlink::Error::DumpInterrupted);
+                    }
 
-                // Align to 4 bytes
-                offset += (nlmsg_len + 3) & !3;
+                    match nlmsg_type {
+                        NLMSG_DONE => return Ok(sockets),
+                        NLMSG_ERROR if nlmsg_len >= 20 => {
+                            let errno = i32::from_ne_bytes([
+                                data[offset + 16],
+                                data[offset + 17],
+                                data[offset + 18],
+                                data[offset + 19],
+                            ]);
+                            if errno != 0 {
+                                return Err(super::error::Error::from_errno(-errno));
+                            }
+                        }
+                        SOCK_DIAG_BY_FAMILY | TCPDIAG_GETSOCK => {
+                            if let Some(sock) = parse_inet_msg(
+                                &data[offset..offset + nlmsg_len],
+                                filter.protocol,
+                            ) {
+                                sockets.push(sock);
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    offset += (nlmsg_len + 3) & !3;
+                }
             }
-        }
+        })
+        .await
     }
 
     async fn query_unix(&self, filter: &UnixFilter) -> Result<Vec<SocketInfo>> {
@@ -509,80 +519,93 @@ impl Connection<SockDiag> {
     }
 
     async fn query_unix_typed(&self, filter: &UnixFilter) -> Result<Vec<UnixSocket>> {
-        let seq = self.socket().next_seq();
-        let pid = self.socket().pid();
+        // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
+        // NLM_F_DUMP_INTR detection.
+        self.with_timeout(async move {
+            let seq = self.socket().next_seq();
+            let pid = self.socket().pid();
 
-        // Build request
-        let mut buf = Vec::with_capacity(64);
+            let mut buf = Vec::with_capacity(64);
+            buf.extend_from_slice(&0u32.to_ne_bytes());
+            buf.extend_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes());
+            buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes());
+            buf.extend_from_slice(&seq.to_ne_bytes());
+            buf.extend_from_slice(&pid.to_ne_bytes());
 
-        // Netlink header (16 bytes)
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
-        buf.extend_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes()); // nlmsg_type
-        buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes()); // nlmsg_flags
-        buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
-        buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
+            buf.push(libc::AF_UNIX as u8);
+            buf.push(0);
+            buf.extend_from_slice(&0u16.to_ne_bytes());
+            buf.extend_from_slice(&filter.states.to_ne_bytes());
+            buf.extend_from_slice(&filter.inode.unwrap_or(0).to_ne_bytes());
+            buf.extend_from_slice(&filter.show.to_ne_bytes());
+            buf.extend_from_slice(&[0u8; 8]);
 
-        // unix_diag_req structure (20 bytes)
-        buf.push(libc::AF_UNIX as u8); // sdiag_family
-        buf.push(0); // sdiag_protocol
-        buf.extend_from_slice(&0u16.to_ne_bytes()); // pad
-        buf.extend_from_slice(&filter.states.to_ne_bytes()); // udiag_states
-        buf.extend_from_slice(&filter.inode.unwrap_or(0).to_ne_bytes()); // udiag_ino
-        buf.extend_from_slice(&filter.show.to_ne_bytes()); // udiag_show
-        buf.extend_from_slice(&[0u8; 8]); // udiag_cookie
+            let len = buf.len() as u32;
+            buf[0..4].copy_from_slice(&len.to_ne_bytes());
 
-        // Update length
-        let len = buf.len() as u32;
-        buf[0..4].copy_from_slice(&len.to_ne_bytes());
+            self.socket().send(&buf).await?;
 
-        // Send request
-        self.socket().send(&buf).await?;
+            let mut sockets = Vec::new();
 
-        // Receive responses
-        let mut sockets = Vec::new();
+            loop {
+                let data: Vec<u8> = self.socket().recv_msg().await?;
 
-        loop {
-            let data: Vec<u8> = self.socket().recv_msg().await?;
+                let mut offset = 0;
+                while offset + 16 <= data.len() {
+                    let nlmsg_len = u32::from_ne_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]) as usize;
 
-            let mut offset = 0;
-            while offset + 16 <= data.len() {
-                let nlmsg_len = u32::from_ne_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ]) as usize;
+                    let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
+                    let nlmsg_flags = u16::from_ne_bytes([data[offset + 6], data[offset + 7]]);
+                    let nlmsg_seq = u32::from_ne_bytes([
+                        data[offset + 8],
+                        data[offset + 9],
+                        data[offset + 10],
+                        data[offset + 11],
+                    ]);
 
-                let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
-
-                if nlmsg_len < 16 || offset + nlmsg_len > data.len() {
-                    break;
-                }
-
-                match nlmsg_type {
-                    NLMSG_DONE => return Ok(sockets),
-                    NLMSG_ERROR if nlmsg_len >= 20 => {
-                        let errno = i32::from_ne_bytes([
-                            data[offset + 16],
-                            data[offset + 17],
-                            data[offset + 18],
-                            data[offset + 19],
-                        ]);
-                        if errno != 0 {
-                            return Err(super::error::Error::from_errno(-errno));
-                        }
+                    if nlmsg_len < 16 || offset + nlmsg_len > data.len() {
+                        break;
                     }
-                    SOCK_DIAG_BY_FAMILY => {
-                        if let Some(sock) = parse_unix_msg(&data[offset..offset + nlmsg_len]) {
-                            sockets.push(sock);
-                        }
+                    if nlmsg_seq != seq {
+                        offset += (nlmsg_len + 3) & !3;
+                        continue;
                     }
-                    _ => {}
-                }
+                    if nlmsg_flags & 0x10 != 0 {
+                        return Err(crate::netlink::Error::DumpInterrupted);
+                    }
 
-                offset += (nlmsg_len + 3) & !3;
+                    match nlmsg_type {
+                        NLMSG_DONE => return Ok(sockets),
+                        NLMSG_ERROR if nlmsg_len >= 20 => {
+                            let errno = i32::from_ne_bytes([
+                                data[offset + 16],
+                                data[offset + 17],
+                                data[offset + 18],
+                                data[offset + 19],
+                            ]);
+                            if errno != 0 {
+                                return Err(super::error::Error::from_errno(-errno));
+                            }
+                        }
+                        SOCK_DIAG_BY_FAMILY => {
+                            if let Some(sock) = parse_unix_msg(&data[offset..offset + nlmsg_len])
+                            {
+                                sockets.push(sock);
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    offset += (nlmsg_len + 3) & !3;
+                }
             }
-        }
+        })
+        .await
     }
 
     async fn query_netlink(&self, filter: &NetlinkFilter) -> Result<Vec<SocketInfo>> {
@@ -594,89 +617,101 @@ impl Connection<SockDiag> {
         &self,
         filter: &NetlinkFilter,
     ) -> Result<Vec<crate::sockdiag::socket::NetlinkSocket>> {
-        let seq = self.socket().next_seq();
-        let pid = self.socket().pid();
+        // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
+        // NLM_F_DUMP_INTR detection.
+        self.with_timeout(async move {
+            let seq = self.socket().next_seq();
+            let pid = self.socket().pid();
 
-        // Build netlink_diag_req
-        let mut buf = Vec::with_capacity(64);
+            let mut buf = Vec::with_capacity(64);
+            buf.extend_from_slice(&0u32.to_ne_bytes());
+            buf.extend_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes());
+            buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes());
+            buf.extend_from_slice(&seq.to_ne_bytes());
+            buf.extend_from_slice(&pid.to_ne_bytes());
 
-        // Netlink header (16 bytes)
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len (fill later)
-        buf.extend_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes()); // nlmsg_type
-        buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes()); // nlmsg_flags
-        buf.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
-        buf.extend_from_slice(&pid.to_ne_bytes()); // nlmsg_pid
+            buf.push(libc::AF_NETLINK as u8);
+            buf.push(filter.protocol.unwrap_or(0xff));
+            buf.extend_from_slice(&0u16.to_ne_bytes());
 
-        // netlink_diag_req structure (24 bytes)
-        buf.push(libc::AF_NETLINK as u8); // sdiag_family
-        buf.push(filter.protocol.unwrap_or(0xff)); // sdiag_protocol (0xff = all)
-        buf.extend_from_slice(&0u16.to_ne_bytes()); // pad
-
-        buf.extend_from_slice(&0u32.to_ne_bytes()); // ndiag_ino
-        let mut show: u32 = 0;
-        if filter.show_meminfo {
-            show |= NDIAG_SHOW_MEMINFO;
-        }
-        if filter.show_groups {
-            show |= NDIAG_SHOW_GROUPS;
-        }
-        buf.extend_from_slice(&show.to_ne_bytes()); // ndiag_show
-        buf.extend_from_slice(&[0u8; 8]); // ndiag_cookie
-
-        // Update length
-        let len = buf.len() as u32;
-        buf[0..4].copy_from_slice(&len.to_ne_bytes());
-
-        // Send request
-        self.socket().send(&buf).await?;
-
-        // Receive responses
-        let mut sockets = Vec::new();
-
-        loop {
-            let data: Vec<u8> = self.socket().recv_msg().await?;
-
-            let mut offset = 0;
-            while offset + 16 <= data.len() {
-                let nlmsg_len = u32::from_ne_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ]) as usize;
-
-                let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
-
-                if nlmsg_len < 16 || offset + nlmsg_len > data.len() {
-                    break;
-                }
-
-                match nlmsg_type {
-                    NLMSG_DONE => return Ok(sockets),
-                    NLMSG_ERROR if nlmsg_len >= 20 => {
-                        let errno = i32::from_ne_bytes([
-                            data[offset + 16],
-                            data[offset + 17],
-                            data[offset + 18],
-                            data[offset + 19],
-                        ]);
-                        if errno != 0 {
-                            return Err(super::error::Error::from_errno(-errno));
-                        }
-                    }
-                    SOCK_DIAG_BY_FAMILY => {
-                        if let Some(sock) =
-                            parse_netlink_msg(&data[offset..offset + nlmsg_len], filter)
-                        {
-                            sockets.push(sock);
-                        }
-                    }
-                    _ => {}
-                }
-
-                offset += (nlmsg_len + 3) & !3;
+            buf.extend_from_slice(&0u32.to_ne_bytes());
+            let mut show: u32 = 0;
+            if filter.show_meminfo {
+                show |= NDIAG_SHOW_MEMINFO;
             }
-        }
+            if filter.show_groups {
+                show |= NDIAG_SHOW_GROUPS;
+            }
+            buf.extend_from_slice(&show.to_ne_bytes());
+            buf.extend_from_slice(&[0u8; 8]);
+
+            let len = buf.len() as u32;
+            buf[0..4].copy_from_slice(&len.to_ne_bytes());
+
+            self.socket().send(&buf).await?;
+
+            let mut sockets = Vec::new();
+
+            loop {
+                let data: Vec<u8> = self.socket().recv_msg().await?;
+
+                let mut offset = 0;
+                while offset + 16 <= data.len() {
+                    let nlmsg_len = u32::from_ne_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]) as usize;
+
+                    let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
+                    let nlmsg_flags = u16::from_ne_bytes([data[offset + 6], data[offset + 7]]);
+                    let nlmsg_seq = u32::from_ne_bytes([
+                        data[offset + 8],
+                        data[offset + 9],
+                        data[offset + 10],
+                        data[offset + 11],
+                    ]);
+
+                    if nlmsg_len < 16 || offset + nlmsg_len > data.len() {
+                        break;
+                    }
+                    if nlmsg_seq != seq {
+                        offset += (nlmsg_len + 3) & !3;
+                        continue;
+                    }
+                    if nlmsg_flags & 0x10 != 0 {
+                        return Err(crate::netlink::Error::DumpInterrupted);
+                    }
+
+                    match nlmsg_type {
+                        NLMSG_DONE => return Ok(sockets),
+                        NLMSG_ERROR if nlmsg_len >= 20 => {
+                            let errno = i32::from_ne_bytes([
+                                data[offset + 16],
+                                data[offset + 17],
+                                data[offset + 18],
+                                data[offset + 19],
+                            ]);
+                            if errno != 0 {
+                                return Err(super::error::Error::from_errno(-errno));
+                            }
+                        }
+                        SOCK_DIAG_BY_FAMILY => {
+                            if let Some(sock) =
+                                parse_netlink_msg(&data[offset..offset + nlmsg_len], filter)
+                            {
+                                sockets.push(sock);
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    offset += (nlmsg_len + 3) & !3;
+                }
+            }
+        })
+        .await
     }
 
     async fn query_packet(&self, _filter: &PacketFilter) -> Result<Vec<SocketInfo>> {

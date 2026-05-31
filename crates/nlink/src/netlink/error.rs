@@ -713,7 +713,7 @@ impl Error {
     ///
     /// async fn get_links_with_retry(
     ///     conn: &Connection<Route>,
-    /// ) -> nlink::Result<Vec<nlink::Link>> {
+    /// ) -> nlink::Result<Vec<nlink::netlink::LinkMessage>> {
     ///     for _ in 0..16 {
     ///         match conn.get_links().await {
     ///             Err(e) if e.is_dump_interrupted() => continue,

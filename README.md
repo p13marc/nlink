@@ -26,14 +26,14 @@ nlink is a from-scratch implementation of Linux netlink-based network management
 # all live in always-built modules). nlink bundles a re-export of
 # `nlink-macros` so downstream code that wants to define its own
 # GENL family pulls in only one dep.
-nlink = "0.17"
+nlink = "0.19"
 
 # With additional features
-nlink = { version = "0.17", features = ["sockdiag", "tuntap", "output"] }
+nlink = { version = "0.19", features = ["sockdiag", "tuntap", "output"] }
 
 # All features (including opt-in syscall_batch — 1.5x speedup on
 # dump-heavy workloads via recvmmsg/sendmmsg).
-nlink = { version = "0.17", features = ["full"] }
+nlink = { version = "0.19", features = ["full"] }
 ```
 
 > Upgrading from an earlier release? See
@@ -50,6 +50,8 @@ nlink = { version = "0.17", features = ["full"] }
 | `namespace_watcher` | Namespace watching via inotify |
 | `lab` | `nlink::lab` namespace + integration-test harness |
 | `syscall_batch` | `recvmmsg`/`sendmmsg` batching on dumps + streams (0.16+, opt-in) |
+| `tuntap-async` | Async TUN/TAP wrapper (variant of `tuntap`) |
+| `serde` | `Serialize` derives on diff + config types |
 | `full` | All features enabled |
 
 ## Quick Start

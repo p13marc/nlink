@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ### Breaking changes
 
+- **`Hook::Ingress` split into `Hook::NetdevIngress` and
+  `Hook::InetIngress`; `Hook::NetdevEgress` added** (Plan 211 M1).
+  Pre-0.19 `Hook::Ingress` always encoded `0`, which was correct
+  only for `Family::Netdev` / `Family::Bridge`. On `Family::Inet`,
+  ingress is `NF_INET_INGRESS = 5`, so the old encoding silently
+  installed the chain on `Prerouting` (also hook 0) — every
+  `Family::Inet` ingress chain was attached to the wrong hook.
+  Migration: pick the variant matching the chain family.
+  `Hook::is_valid_for_family(Family)` validates at build time.
+  Verified against `include/uapi/linux/netfilter.h` and
+  `include/uapi/linux/netfilter_netdev.h`. New `nft_hook` module
+  in `sys_sizeof` pins the kernel hook numbers.
+
 - **nftables verdict constants `NFT_JUMP` / `NFT_GOTO` corrected
   to match kernel UAPI** (Plan 204 C1). Pre-0.19 nlink shipped
   `NFT_JUMP = -2` and `NFT_GOTO = -3`. The kernel's
@@ -173,19 +186,21 @@ All notable changes to this project will be documented in this file.
   helper + 6 unit tests covering well-formed, vendor-prepended,
   missing, truncated, non-UTF-8, and empty IE chains.
 
-- **3 protocol recv-loops wrapped in `with_timeout` + seq
-  filter + `NLM_F_DUMP_INTR` detection** (Plan 208 Phase 1+2
-  partial): `xfrm.rs::get_security_associations`,
-  `xfrm.rs::get_security_policies`,
+- **10 protocol recv-loops wrapped in `with_timeout` + seq
+  filter + `NLM_F_DUMP_INTR` detection** (Plan 208 Phase 1+2):
+  `xfrm.rs::{get_security_associations, get_security_policies}`,
   `netfilter.rs::get_conntrack_family`,
-  `fib_lookup.rs::lookup_with_options`. Pre-0.19 each could
-  hang indefinitely if the kernel dropped a response and would
-  silently use an interrupted-dump snapshot. Now surface as
-  `Error::Timeout` after the configured budget and
-  `Error::DumpInterrupted` per the Plan 208 contract. The
-  remaining 7 recv-loops (sockdiag × 3, Generic GENL × 3,
-  wg_command stale-frame race) are queued for a follow-up
-  commit.
+  `fib_lookup.rs::lookup_with_options`,
+  `sockdiag.rs::{query_inet_family, query_unix_typed,
+  query_netlink_typed}`,
+  `Connection::<Generic>::{query_family, command, dump_command}`.
+  Pre-0.19 each could hang indefinitely if the kernel dropped a
+  response, and dump variants would silently use an
+  interrupted-dump snapshot. Now surface as `Error::Timeout`
+  after the configured budget and `Error::DumpInterrupted` per
+  the Plan 208 contract. `wg_command` stale-frame race deferred
+  pending GENL command unification (Plan 208 Phase 3+4 — bigger
+  refactor).
 
 ### Documentation
 
@@ -196,6 +211,21 @@ All notable changes to this project will be documented in this file.
   pattern: one `Connection<P>` per task, or use
   `ConnectionPool<P>` for fan-out. Architectural NlRouter-style
   dispatch fix tracked for 0.20.
+
+- **README.md updated to 0.19 install lines** + `tuntap-async`
+  and `serde` features added to the features table.
+
+- **lib.rs landing-page doc-comment updated** (Plan 214):
+  the stale "`_by_name` reads `/sys/class/net/`" claim removed
+  (Plan 192 D4 made both lookups netlink-correct); `addr.address`
+  doctest reference updated to `addr.address()` accessor.
+
+- **`Error::is_dump_interrupted` doctest type fix** (Plan 214):
+  was `Vec<nlink::Link>` (doesn't exist), now
+  `Vec<nlink::netlink::LinkMessage>`.
+
+- **`nftables-declarative-config.md` recipe uses `Display`
+  instead of deprecated `.summary()`** (Plan 214).
 
 ### Earlier post-cycle fixes (`5ef0808`)
 

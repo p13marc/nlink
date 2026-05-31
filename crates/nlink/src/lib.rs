@@ -81,13 +81,14 @@
 //!
 //! Every resource lookup that takes an interface comes in two
 //! flavors: `*_by_index(ifindex: u32)` and `*_by_name(name: &str)`.
-//! The `_by_index` form is **always** safe to call from any process
-//! mount namespace — the kernel ifindex is relative to the
-//! connection's netns, no userspace resolution needed. The
-//! `_by_name` form reads `/sys/class/net/` from the **calling
-//! process's mount namespace**, which is convenient for simple
-//! cases but surprises inside foreign netns (CNI plugins,
-//! multi-tenant managers, integration-test harnesses).
+//! The `_by_index` form takes a kernel ifindex, which is **always**
+//! relative to the connection's netns — safe to call from any
+//! process mount namespace. The `_by_name` form goes through
+//! `Connection::get_link_by_name(...)` which resolves via
+//! `RTM_GETLINK` over the same socket (Plan 192 D4 corrected an
+//! earlier `_by_name reads /sys/class/net/` design — both variants
+//! are now netlink-correct; the difference is ergonomic, not a
+//! namespace-safety footgun).
 //!
 //! For namespace-aware code, the canonical pattern is:
 //!
@@ -125,7 +126,7 @@
 //! while let Some(event) = events.next().await {
 //!     match event? {
 //!         NetworkEvent::NewLink(link) => println!("New link: {:?}", link.name),
-//!         NetworkEvent::NewAddress(addr) => println!("New address: {:?}", addr.address),
+//!         NetworkEvent::NewAddress(addr) => println!("New address: {:?}", addr.address()),
 //!         _ => {}
 //!     }
 //! }

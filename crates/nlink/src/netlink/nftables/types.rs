@@ -40,6 +40,21 @@ impl Family {
 }
 
 /// Netfilter hook point.
+///
+/// **Plan 211 M1 (0.19) breaking change**: `Ingress` was split into
+/// `NetdevIngress` and `InetIngress` because the kernel hook
+/// numbers differ by family. Pre-0.19 the singular `Ingress`
+/// always encoded `0`, which was correct only for
+/// `Family::Netdev` / `Family::Bridge` (`NF_NETDEV_INGRESS = 0`).
+/// On `Family::Inet`/`Ipv4`/`Ipv6`, ingress is
+/// `NF_INET_INGRESS = 5`, so the old encoding installed the
+/// chain on `Prerouting` instead — silent wrong-hook attachment.
+///
+/// `NetdevEgress` is also new (`NF_NETDEV_EGRESS = 1`).
+///
+/// Migration: callers must pick the variant matching the chain's
+/// family. Use [`Hook::is_valid_for_family`] to validate at
+/// build time.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,18 +65,57 @@ pub enum Hook {
     Forward,
     Output,
     Postrouting,
-    Ingress,
+    /// Ingress hook for `Family::Netdev` / `Family::Bridge`.
+    /// Encodes `NF_NETDEV_INGRESS = 0`.
+    NetdevIngress,
+    /// Ingress hook for `Family::Inet` / `Family::Ipv4` /
+    /// `Family::Ipv6`. Encodes `NF_INET_INGRESS = 5`. Available
+    /// since kernel 5.10.
+    InetIngress,
+    /// Egress hook for `Family::Netdev`. Encodes
+    /// `NF_NETDEV_EGRESS = 1`. Available since kernel 5.16.
+    NetdevEgress,
 }
 
 impl Hook {
+    /// Returns the kernel hook number. Verified against
+    /// `include/uapi/linux/netfilter.h` (`enum nf_inet_hooks`) and
+    /// `include/uapi/linux/netfilter_netdev.h`
+    /// (`enum nf_dev_hooks`).
     pub fn to_u32(self) -> u32 {
         match self {
-            Self::Prerouting => 0,
-            Self::Input => 1,
-            Self::Forward => 2,
-            Self::Output => 3,
-            Self::Postrouting => 4,
-            Self::Ingress => 0,
+            Self::Prerouting => 0,    // NF_INET_PRE_ROUTING
+            Self::Input => 1,         // NF_INET_LOCAL_IN
+            Self::Forward => 2,       // NF_INET_FORWARD
+            Self::Output => 3,        // NF_INET_LOCAL_OUT
+            Self::Postrouting => 4,   // NF_INET_POST_ROUTING
+            Self::InetIngress => 5,   // NF_INET_INGRESS
+            Self::NetdevIngress => 0, // NF_NETDEV_INGRESS
+            Self::NetdevEgress => 1,  // NF_NETDEV_EGRESS
+        }
+    }
+
+    /// Returns `true` if this hook is valid for the given family.
+    /// Useful for validating chain definitions at build time before
+    /// the kernel rejects them with EINVAL.
+    pub fn is_valid_for_family(self, family: Family) -> bool {
+        match (self, family) {
+            // Netdev hooks need Netdev family.
+            (Self::NetdevIngress | Self::NetdevEgress, Family::Netdev) => true,
+            // NetdevIngress is also valid on Bridge family.
+            (Self::NetdevIngress, Family::Bridge) => true,
+            // InetIngress needs an Inet/Ipv4/Ipv6 family.
+            (Self::InetIngress, Family::Inet | Family::Ip | Family::Ip6) => true,
+            // Standard L3 hooks valid on Inet/Ip/Ip6/Bridge/Arp.
+            (
+                Self::Prerouting
+                | Self::Input
+                | Self::Forward
+                | Self::Output
+                | Self::Postrouting,
+                Family::Inet | Family::Ip | Family::Ip6 | Family::Bridge | Family::Arp,
+            ) => true,
+            _ => false,
         }
     }
 }

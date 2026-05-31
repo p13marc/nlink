@@ -61,7 +61,9 @@ let conn = Connection::<Nftables>::new()?;
 
 // 1. Compute the diff against current kernel state.
 let diff = cfg.diff(&conn).await?;
-tracing::info!("{}", diff.summary());
+// 0.19: NftablesDiff implements Display directly; .summary() was
+// deprecated in Plan 188 §2.6 in favor of the Display impl.
+tracing::info!("{}", diff);
 
 // 2. Apply atomically — single NFNL_MSG_BATCH_BEGIN ... BATCH_END
 //    commit. Kernel either accepts the whole batch or rolls back.

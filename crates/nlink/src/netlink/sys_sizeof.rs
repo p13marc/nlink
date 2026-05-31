@@ -95,6 +95,29 @@ pub mod nft_verdict {
 /// the kernel doesn't register) to `"config"`.
 pub const DEVLINK_MCGRP_CONFIG_NAME: &str = "config";
 
+/// Netfilter hook numbers — `include/uapi/linux/netfilter.h` enum
+/// `nf_inet_hooks` and `include/uapi/linux/netfilter_netdev.h` enum
+/// `nf_dev_hooks`. Plan 211 M1 made `Hook::Ingress` distinguish
+/// between the two families.
+pub mod nf_hook {
+    /// `NF_INET_PRE_ROUTING`.
+    pub const PRE_ROUTING: u32 = 0;
+    /// `NF_INET_LOCAL_IN`.
+    pub const LOCAL_IN: u32 = 1;
+    /// `NF_INET_FORWARD`.
+    pub const FORWARD: u32 = 2;
+    /// `NF_INET_LOCAL_OUT`.
+    pub const LOCAL_OUT: u32 = 3;
+    /// `NF_INET_POST_ROUTING`.
+    pub const POST_ROUTING: u32 = 4;
+    /// `NF_INET_INGRESS` (kernel 5.10+).
+    pub const INET_INGRESS: u32 = 5;
+    /// `NF_NETDEV_INGRESS`.
+    pub const NETDEV_INGRESS: u32 = 0;
+    /// `NF_NETDEV_EGRESS` (kernel 5.16+).
+    pub const NETDEV_EGRESS: u32 = 1;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +236,57 @@ mod tests {
             "DEVLINK_MCGRP_NAME was \"devlink\" pre-0.19 (Plan 204 C4); \
              kernel registers it as \"config\"."
         );
+    }
+
+    // ----- Plan 211 M1 — Hook variant kernel hook numbers -----
+
+    /// Plan 211 M1 regression guard. Pre-fix `Hook::Ingress`
+    /// always encoded `0`, which silently installed `Family::Inet`
+    /// ingress chains on `Prerouting` instead of the real
+    /// `NF_INET_INGRESS = 5` hook.
+    #[test]
+    fn nft_hook_variants_match_kernel_uapi() {
+        use crate::netlink::nftables::Hook;
+
+        assert_eq!(Hook::Prerouting.to_u32(), nf_hook::PRE_ROUTING);
+        assert_eq!(Hook::Input.to_u32(), nf_hook::LOCAL_IN);
+        assert_eq!(Hook::Forward.to_u32(), nf_hook::FORWARD);
+        assert_eq!(Hook::Output.to_u32(), nf_hook::LOCAL_OUT);
+        assert_eq!(Hook::Postrouting.to_u32(), nf_hook::POST_ROUTING);
+        assert_eq!(
+            Hook::InetIngress.to_u32(),
+            nf_hook::INET_INGRESS,
+            "InetIngress was Hook::Ingress=0 pre-0.19 (Plan 211 M1); \
+             kernel expects NF_INET_INGRESS=5"
+        );
+        assert_eq!(Hook::NetdevIngress.to_u32(), nf_hook::NETDEV_INGRESS);
+        assert_eq!(Hook::NetdevEgress.to_u32(), nf_hook::NETDEV_EGRESS);
+    }
+
+    /// Plan 211 M1 — `is_valid_for_family` correctly disambiguates
+    /// hook + family combinations the kernel would reject.
+    #[test]
+    fn nft_hook_is_valid_for_family_disambiguates_correctly() {
+        use crate::netlink::nftables::{Family, Hook};
+
+        // NetdevIngress on Netdev: OK
+        assert!(Hook::NetdevIngress.is_valid_for_family(Family::Netdev));
+        // NetdevIngress on Inet: NOT OK (was a silent wire-shape
+        // bug pre-Plan 211)
+        assert!(!Hook::NetdevIngress.is_valid_for_family(Family::Inet));
+        // InetIngress on Inet: OK
+        assert!(Hook::InetIngress.is_valid_for_family(Family::Inet));
+        // InetIngress on Netdev: NOT OK
+        assert!(!Hook::InetIngress.is_valid_for_family(Family::Netdev));
+        // Standard L3 hooks on Inet/Ip/Ip6: OK
+        assert!(Hook::Prerouting.is_valid_for_family(Family::Inet));
+        assert!(Hook::Forward.is_valid_for_family(Family::Ip6));
+        // Standard L3 hooks on Netdev: NOT OK
+        assert!(!Hook::Prerouting.is_valid_for_family(Family::Netdev));
+        // NetdevEgress on Netdev: OK
+        assert!(Hook::NetdevEgress.is_valid_for_family(Family::Netdev));
+        // NetdevEgress on Bridge: NOT OK (NetdevIngress allowed on
+        // Bridge, but NetdevEgress is Netdev-only).
+        assert!(!Hook::NetdevEgress.is_valid_for_family(Family::Bridge));
     }
 }

@@ -1627,7 +1627,7 @@ mod transaction_tests {
         // NFTA_HOOK_DEV inside the NFTA_CHAIN_HOOK nest.
         let chain = Chain::new("ft", "ingress")
             .family(Family::Netdev)
-            .hook(Hook::Ingress)
+            .hook(Hook::NetdevIngress)
             .priority(Priority::Filter)
             .chain_type(ChainType::Filter)
             .device("eth0");

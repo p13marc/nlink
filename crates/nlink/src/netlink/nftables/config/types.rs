@@ -566,7 +566,7 @@ mod tests {
     fn declared_chain_device_round_trips_to_struct() {
         let cfg = NftablesConfig::new().table("ft", Family::Netdev, |t| {
             t.chain("ingress", |c| {
-                c.hook(Hook::Ingress)
+                c.hook(Hook::NetdevIngress)
                     .priority(Priority::Filter)
                     .chain_type(ChainType::Filter)
                     .device("eth0")
