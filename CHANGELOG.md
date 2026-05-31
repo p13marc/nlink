@@ -6,6 +6,36 @@ All notable changes to this project will be documented in this file.
 
 ### Breaking changes
 
+- **nftables verdict constants `NFT_JUMP` / `NFT_GOTO` corrected
+  to match kernel UAPI** (Plan 204 C1). Pre-0.19 nlink shipped
+  `NFT_JUMP = -2` and `NFT_GOTO = -3`. The kernel's
+  `enum nft_verdicts` defines them as `-3` and `-4` respectively;
+  `-2` is `NFT_BREAK` (terminate rule evaluation). Code building
+  `Verdict::Jump(chain)` previously wrote `-2` on the wire, which
+  the kernel interpreted as "terminate", silently breaking every
+  subroutine rule. The new `NFT_BREAK = -2` constant is added for
+  completeness. Source-level no-op for users of `Verdict::Jump` /
+  `Verdict::Goto`; runtime behavior changes from silently broken
+  to kernel-correct. Verified against kernel
+  `include/uapi/linux/netfilter/nf_tables.h`.
+
+### Added
+
+- **`nlink::netlink::sys_sizeof` module + 9 wire-format byte-exact
+  regression tests** (Plan 213). Hosts the kernel UAPI struct
+  sizes (`XfrmUserpolicyInfo` = 168 bytes, `XfrmUserpolicyId` =
+  64 bytes, etc.) and the nft verdict constants, with a test
+  per type asserting `size_of::<NlinkType>() == KERNEL_SIZE`.
+  Catches the Plan 204 class of silent wire-format defects at
+  `cargo test` time; future struct field changes that drift from
+  the kernel layout fail the test immediately. The test pass
+  surfaced an additional latent bug: `XfrmUserTmpl` was 62
+  bytes (kernel: 64) — fixed by adding a 2-byte explicit pad
+  between `family` and `saddr` to match kernel natural
+  alignment.
+
+### Fixed
+
 - **`NatExpr.addr` re-typed from `Option<Ipv4Addr>` to the
   `NatAddr` enum (PR #6, @avionix-g)** — `NatAddr` has three
   variants: `None` (port-only NAT), `V4(Ipv4Addr)` (IPv4
@@ -68,6 +98,106 @@ All notable changes to this project will be documented in this file.
   `vishvananda/netlink#1163`, `pyroute2#874`, Cilium safenetlink.
 
 ### Fixed
+
+- **`XfrmUserpolicyInfo` body was 4 bytes shorter than kernel
+  expected — `add_sp` rejected with EINVAL on every kernel
+  version** (Plan 204 C2). The kernel's
+  `struct xfrm_userpolicy_info` uses natural alignment (not
+  packed); after the four trailing `__u8` fields the struct
+  pads to the next u64 boundary for a total of 168 bytes.
+  nlink used `#[repr(C, packed)]` with no trailing pad,
+  emitting 164 bytes. Kernel `xfrm_add_policy()` calls
+  `nlmsg_parse_deprecated(nlh, sizeof(*p), ...)` requiring
+  `nlmsg_len >= NLMSG_HDRLEN + 168`. The `add_sp` API has been
+  silently non-functional since the XFRM family shipped. Fix
+  adds explicit `_pad: [u8; 4]` and a `sys_sizeof` regression
+  test.
+
+- **`XfrmUserpolicyId` body was 4 bytes longer than kernel
+  expected — `del_sp` / `get_sp` brittle on strict-checking
+  kernels** (Plan 204 C3). nlink's `_pad: [u8; 7]` produced a
+  68-byte body; the kernel struct is 64 bytes (selector + u32
+  index + u8 dir + 3 pad). On lenient kernels the extra 4
+  bytes were parsed as a malformed trailing nlattr and silently
+  skipped. On strict-checking kernels (≥5.0 with
+  `NETLINK_GET_STRICT_CHK`, enableable via Plan 155.2), the
+  kernel rejected with EINVAL. Fix trims `_pad` to `[u8; 3]`.
+
+- **`XfrmUserTmpl` was 62 bytes (kernel: 64) — discovered by
+  Plan 213 sizeof test** (Plan 204 hidden sibling of C2/C3).
+  The kernel struct uses natural alignment (not packed); the
+  2-byte gap between `family` (u16 at offset 24) and `saddr`
+  (xfrm_address_t, align 4) was missing from nlink's packed
+  representation. Fix adds explicit `_pad_saddr: [u8; 2]`
+  between the two fields.
+
+- **Devlink multicast subscription was broken — group name
+  mismatch** (Plan 204 C4). nlink looked up `"devlink"` in the
+  kernel's CTRL_ATTR_MCAST_GROUPS table; the kernel registers
+  the group as `"config"` (per `DEVLINK_GENL_MCGRP_CONFIG_NAME`
+  in `include/uapi/linux/devlink.h`). Every
+  `Connection::<Devlink>::subscribe()` call returned
+  `Error::FamilyNotFound`. Fix changes the constant to
+  `"config"` plus the `sys_sizeof` regression test.
+
+- **`Error::is_not_found` now matches `Error::Io(ENOENT)` and
+  `Error::Io(ENODEV)`** (Plan 212 M9). Brings the predicate
+  into symmetry with `is_busy`, `is_permission_denied`,
+  `is_already_exists` which Plan 187 §2.5 already routed
+  through `errno()`. Code calling `e.is_not_found()` on an
+  `Error::Io` carrying ENOENT/ENODEV now correctly returns
+  `true`. 3 new regression tests.
+
+- **`Connection::send_ack_inner` surfaces explicit error on
+  unexpected matching-seq data response** (Plan 212 M16) instead
+  of silently looping for the next frame (which would hit the
+  30s timeout). Defense-in-depth against kernel behavior
+  divergence.
+
+- **`Connection::cache` RwLock poison handling** (Plan 212
+  M17): previously `read/write().unwrap()` would panic on
+  poisoning; now recovers via `unwrap_or_else(into_inner)`.
+  Hardens against future panics inside the locked region
+  (currently unreachable; defense-in-depth).
+
+- **WireGuard `PublicKey` accepts unpadded base64** (Plan 215
+  M12). Pre-0.19 the decoder required exactly 44 chars + the
+  trailing `=`; some YAML/JSON serializers strip optional
+  base64 padding (RFC 4648 §3.2). Now both 43-char and 44-char
+  forms decode correctly. 1 new regression test.
+
+- **nl80211 SSID parser walks the IE chain** (Plan 215 M13)
+  instead of assuming element-id 0 is the first IE.
+  Vendor-specific IEs (id=221) sometimes precede the SSID;
+  pre-fix those BSSes returned `None`. New `parse_ssid_from_ies`
+  helper + 6 unit tests covering well-formed, vendor-prepended,
+  missing, truncated, non-UTF-8, and empty IE chains.
+
+- **3 protocol recv-loops wrapped in `with_timeout` + seq
+  filter + `NLM_F_DUMP_INTR` detection** (Plan 208 Phase 1+2
+  partial): `xfrm.rs::get_security_associations`,
+  `xfrm.rs::get_security_policies`,
+  `netfilter.rs::get_conntrack_family`,
+  `fib_lookup.rs::lookup_with_options`. Pre-0.19 each could
+  hang indefinitely if the kernel dropped a response and would
+  silently use an interrupted-dump snapshot. Now surface as
+  `Error::Timeout` after the configured budget and
+  `Error::DumpInterrupted` per the Plan 208 contract. The
+  remaining 7 recv-loops (sockdiag × 3, Generic GENL × 3,
+  wg_command stale-frame race) are queued for a follow-up
+  commit.
+
+### Documentation
+
+- **`Connection<P>` doc-comment now describes the concurrent-
+  use caveat** (Plan 212 M15). The type implements `Sync` but
+  concurrent `.await`-ed calls on a shared connection race on
+  recv and can produce dual `Error::Timeout`. Recommended
+  pattern: one `Connection<P>` per task, or use
+  `ConnectionPool<P>` for fan-out. Architectural NlRouter-style
+  dispatch fix tracked for 0.20.
+
+### Earlier post-cycle fixes (`5ef0808`)
 
 - **`Batch::send_chunk` could hang indefinitely on dropped
   per-op ACK (post-cycle bug-hunt)** — the nftables/route batch

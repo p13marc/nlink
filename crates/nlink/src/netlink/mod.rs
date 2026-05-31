@@ -119,6 +119,7 @@ mod socket;
 pub mod srv6;
 pub mod stats;
 mod stream;
+pub mod sys_sizeof;
 pub mod sysctl;
 pub mod tc;
 pub mod tc_handle;

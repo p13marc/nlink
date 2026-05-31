@@ -504,18 +504,33 @@ impl Error {
     }
 
     /// Check if this is a "not found" error (ENOENT, ENODEV, etc.).
+    ///
+    /// Matches `Error::Kernel`, `Error::KernelWithContext`, and
+    /// `Error::Io` shapes carrying ENOENT/ENODEV — routed through
+    /// the common [`Self::errno`] accessor that Plan 187 §2.5
+    /// established as the canonical errno-shape merge point.
+    ///
+    /// Plus the typed not-found variants
+    /// (`InterfaceNotFound`, `NamespaceNotFound`, `QdiscNotFound`,
+    /// `FamilyNotFound`, `Interface(IfError::NotFound)`).
+    ///
+    /// Pre-0.19 this predicate matched on `Self::Kernel` /
+    /// `Self::KernelWithContext` variants directly, missing the
+    /// `Error::Io(io_err with ENOENT)` shape that sibling predicates
+    /// (`is_busy`, `is_permission_denied`, `is_already_exists`)
+    /// already handled. Plan 212 closes the asymmetry.
     pub fn is_not_found(&self) -> bool {
-        match self {
-            Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => {
-                matches!(*errno, 2 | 19) // ENOENT=2, ENODEV=19
-            }
-            Self::Interface(IfError::NotFound(_)) => true,
-            Self::InterfaceNotFound { .. }
-            | Self::NamespaceNotFound { .. }
-            | Self::QdiscNotFound { .. }
-            | Self::FamilyNotFound { .. } => true,
-            _ => false,
+        if matches!(self.errno(), Some(libc::ENOENT) | Some(libc::ENODEV)) {
+            return true;
         }
+        matches!(
+            self,
+            Self::Interface(IfError::NotFound(_))
+                | Self::InterfaceNotFound { .. }
+                | Self::NamespaceNotFound { .. }
+                | Self::QdiscNotFound { .. }
+                | Self::FamilyNotFound { .. }
+        )
     }
 
     /// Check if this is a permission error (EPERM, EACCES).
@@ -902,6 +917,34 @@ mod tests {
     fn test_is_busy() {
         assert!(Error::from_errno(-16).is_busy()); // EBUSY
         assert!(!Error::from_errno(-1).is_busy()); // EPERM is not busy
+    }
+
+    // Plan 212 M9 — is_not_found must match Error::Io(ENOENT/ENODEV)
+    // through the common `errno()` accessor (sibling predicates
+    // `is_busy`, `is_permission_denied`, `is_already_exists` already
+    // did per Plan 187 §2.5; this closes the asymmetry).
+    #[test]
+    fn is_not_found_catches_io_enoent() {
+        let io_err = io::Error::from_raw_os_error(libc::ENOENT);
+        let err: Error = io_err.into();
+        assert!(
+            err.is_not_found(),
+            "is_not_found must catch Error::Io(ENOENT) (Plan 212 M9)"
+        );
+    }
+
+    #[test]
+    fn is_not_found_catches_io_enodev() {
+        let io_err = io::Error::from_raw_os_error(libc::ENODEV);
+        let err: Error = io_err.into();
+        assert!(err.is_not_found());
+    }
+
+    #[test]
+    fn is_not_found_does_not_match_unrelated_io_errors() {
+        let io_err = io::Error::from_raw_os_error(libc::EPERM);
+        let err: Error = io_err.into();
+        assert!(!err.is_not_found());
     }
 
     #[test]

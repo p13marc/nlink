@@ -52,6 +52,38 @@ use super::{
 /// // Async construction (Wireguard, Macsec, Mptcp, Ethtool, Nl80211, Devlink)
 /// let wg = Connection::<Wireguard>::new_async().await?;
 /// ```
+///
+/// # Concurrency caveat (Plan 212 M15)
+///
+/// `Connection<P>` implements `Send + Sync`, so it compiles
+/// shared across tokio tasks via `Arc<Connection<P>>`. **However**,
+/// the underlying netlink socket is single-flight: concurrent
+/// `.await`-ed calls on the same connection race on the recv side.
+/// The seq filter in `send_request_inner` protects against stale-
+/// frame corruption but does **not** prevent task A from consuming
+/// task B's response in flight.
+///
+/// What can happen: two tasks both call `.add_link()` simultaneously.
+/// Task A's `recv_msg().await` polls before task B's; the kernel
+/// delivers task B's response first; A sees `seq != A` and skips it
+/// (correct), then polls again and blocks until the 30s timeout
+/// fires (incorrect — B's response was consumed and dropped); B
+/// blocks because A's response now sits in the kernel buffer with
+/// no waiter. Both tasks return `Error::Timeout`.
+///
+/// **Recommended usage**:
+///
+/// - One `Connection<P>` per task.
+/// - To fan out concurrent work, use
+///   [`nlink::netlink::pool::ConnectionPool<P>`]
+///   — each task acquires a connection from the pool, uses it
+///   serially, and returns it.
+/// - A shared `Connection<P>` across tasks is OK only if the tasks
+///   guarantee they never concurrently `.await` on the same
+///   connection (e.g. an outer `Mutex<Arc<Connection>>`).
+///
+/// The architectural fix (NlRouter-style dispatch task that fans
+/// responses out by seq) is tracked for 0.20.
 pub struct Connection<P: ProtocolState> {
     socket: NetlinkSocket,
     state: P,
@@ -445,6 +477,18 @@ impl<P: ProtocolState> Connection<P> {
                     }
                     return Ok(());
                 }
+                // Matching seq + non-error response on an ack-only
+                // operation is unexpected (kernel returned a data
+                // message for what nlink considered a SET-style
+                // request). Pre-0.19 this fell through and looped to
+                // the next recv, blocking until the 30s timeout. Now
+                // we surface explicitly so the caller can react
+                // (Plan 212 M16).
+                return Err(Error::InvalidMessage(format!(
+                    "send_ack: expected ACK or error for seq {}, got nlmsg_type {} \
+                     (kernel returned data on an ack-only request)",
+                    seq, header.nlmsg_type
+                )));
             }
         }
     }
@@ -2290,9 +2334,16 @@ impl Connection<Generic> {
     /// ```
     #[instrument(level = "info", skip(self), fields(family = %name, id, cached))]
     pub async fn get_family(&self, name: &str) -> Result<FamilyInfo> {
-        // Check cache first
+        // Check cache first. Poison-tolerant unwrap (Plan 212 M17)
+        // — the locked region is panic-free, so poisoning is
+        // unreachable; the `unwrap_or_else(into_inner)` recovers if
+        // a future panic surfaces (hardening rather than fix).
         {
-            let cache = self.state.cache.read().unwrap();
+            let cache = self
+                .state
+                .cache
+                .read()
+                .unwrap_or_else(|p| p.into_inner());
             if let Some(info) = cache.get(name) {
                 let span = tracing::Span::current();
                 span.record("id", info.id);
@@ -2309,7 +2360,11 @@ impl Connection<Generic> {
 
         // Cache the result
         {
-            let mut cache = self.state.cache.write().unwrap();
+            let mut cache = self
+                .state
+                .cache
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
             cache.insert(name.to_string(), info.clone());
         }
 
@@ -2329,7 +2384,11 @@ impl Connection<Generic> {
     /// This is rarely needed, but may be useful if families are
     /// dynamically loaded/unloaded.
     pub fn clear_cache(&self) {
-        let mut cache = self.state.cache.write().unwrap();
+        let mut cache = self
+            .state
+            .cache
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
         cache.clear();
     }
 

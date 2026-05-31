@@ -141,21 +141,27 @@ fn b64_encode_32(bytes: &[u8; WG_KEY_LEN]) -> String {
     out
 }
 
-/// Decode 44 base64 chars (RFC 4648) into a 32-byte buffer.
-/// Returns `None` for any malformed input.
+/// Decode 43 (unpadded) or 44 (padded) base64 chars (RFC 4648) into
+/// a 32-byte buffer. Returns `None` for any malformed input.
+///
+/// Plan 215 (0.19) — pre-fix this required exactly 44 chars with the
+/// trailing `=`. WireGuard's `wg pubkey` tool emits padded form, so
+/// `wg`-tool round-trips worked, but some YAML/JSON serializers strip
+/// base64 padding (it's technically optional per RFC 4648 §3.2), and
+/// nlink-side decoding of those config files failed silently. Now
+/// accepts both forms.
 fn b64_decode_32(s: &str) -> Option<[u8; WG_KEY_LEN]> {
-    if s.len() != 44 || !s.ends_with('=') || s[..43].contains('=') {
+    // Accept both padded (44 chars ending in `=`) and unpadded (43
+    // chars) base64. Strip the optional trailing `=`.
+    let trimmed = s.trim_end_matches('=');
+    if trimmed.len() != 43 {
         return None;
     }
     let mut out = [0u8; WG_KEY_LEN];
     let mut buf = 0u32;
     let mut bits = 0u32;
     let mut written = 0usize;
-    for (i, ch) in s.char_indices() {
-        if i == 43 {
-            // padding char already validated
-            break;
-        }
+    for ch in trimmed.chars() {
         let v = match ch {
             'A'..='Z' => ch as u32 - 'A' as u32,
             'a'..='z' => ch as u32 - 'a' as u32 + 26,
@@ -966,6 +972,18 @@ mod tests {
         let s = pk.to_string();
         let back: PublicKey = s.parse().unwrap();
         assert_eq!(back, pk);
+    }
+
+    /// Plan 215 M12 — b64_decode_32 must accept unpadded base64.
+    /// Pre-fix this would return None for the 43-char form because
+    /// the gate required exactly 44 chars + trailing `=`.
+    #[test]
+    fn public_key_accepts_unpadded_base64() {
+        let padded = "fE/wpxQ6/M6OmF5j4dvbY3FbCEXc3KlBL2QqAYjE0WI=";
+        let unpadded = padded.trim_end_matches('=');
+        let from_padded: PublicKey = padded.parse().unwrap();
+        let from_unpadded: PublicKey = unpadded.parse().unwrap();
+        assert_eq!(from_padded, from_unpadded);
     }
 
     #[test]
