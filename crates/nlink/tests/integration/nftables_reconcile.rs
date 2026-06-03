@@ -772,19 +772,10 @@ async fn snat_v6_rule_round_trips() -> nlink::Result<()> {
 }
 
 /// Address matches in an `inet` chain must round-trip to an empty
-/// re-diff. The kernel inserts a `meta nfproto == ip{v4,v6}` L3
-/// dependency before every `ip/ip6 saddr/daddr` match in an `inet`
-/// chain; nlink must render the same guard or `diff` (which
-/// byte-compares the lowered expression list against the kernel's
-/// stored `NFTA_RULE_EXPRESSIONS`) reports a permanent phantom diff.
-///
-/// This is the flavor-C "golden" assertion: the kernel is the golden
-/// value, live — an empty re-diff *is* byte-equality. The exact-match
-/// legs (`/32`, `/128`) prove the nfproto-guard fix; the v4 legs guard
-/// the asymmetry where the v6 matchers had the guard but the v4 matchers
-/// did not. The `/24` and `/64` prefix legs additionally exercise the
-/// masked (`Bitwise`) lowering path, which the kernel canonicalizes with
-/// an `NFTA_BITWISE_OP` attribute nlink now emits.
+/// re-diff (an empty re-diff is byte-equality against the kernel's
+/// stored rule). Covers all four legs: v4/v6 × exact (`/32`, `/128`,
+/// the nfproto guard) and prefix (`/24`, `/64`, the masked `Bitwise`
+/// path); the v4 legs guard against the v4/v6 guard asymmetry.
 #[tokio::test]
 async fn inet_addr_matches_round_trip() -> nlink::Result<()> {
     require_root!();
@@ -822,12 +813,9 @@ async fn inet_addr_matches_round_trip() -> nlink::Result<()> {
     .await
 }
 
-/// Addr-only SNAT (no port) must round-trip. Guards the
-/// `NFTA_NAT_FLAGS` derivation: with an address but no port the kernel
-/// stores `NF_NAT_RANGE_MAP_IPS` only (flags=1), so nlink must emit
-/// exactly that. The `snat_v6_rule_round_trips` / `dnat_v6_rule_round_trips`
-/// tests cover the addr+port case (flags=3); this covers the addr-only
-/// leg the formula must also get right.
+/// Addr-only SNAT (no port) must round-trip — guards the `NFTA_NAT_FLAGS`
+/// derivation for the `MAP_IPS`-only case (flags=1). The snat/dnat
+/// round-trip tests cover the addr+port case (flags=3).
 #[tokio::test]
 async fn snat_v6_addr_only_round_trips() -> nlink::Result<()> {
     require_root!();

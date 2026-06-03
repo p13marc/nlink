@@ -160,10 +160,9 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
                 nat.family
             );
             builder.append_attr_u32_be(NFTA_NAT_FAMILY, nat.family as u32);
-            // For a single-value (non-range) NAT the kernel sets the MAX
-            // register equal to MIN and derives NFTA_NAT_FLAGS from which
-            // registers are in use, echoing all three back on dump. Emit
-            // them so `NftablesConfig::diff` round-trips byte-clean.
+            // Emit MAX (= MIN for a single-value NAT) and the derived
+            // flags explicitly: the kernel fills them in and echoes them
+            // on dump, so omitting them breaks the round-trip diff.
             let mut flags = 0u32;
             if nat.addr.reg_in_use() {
                 builder.append_attr_u32_be(NFTA_NAT_REG_ADDR_MIN, Register::R0 as u32);
@@ -223,8 +222,8 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
             builder.append_attr_u32_be(NFTA_BITWISE_SREG, *sreg as u32);
             builder.append_attr_u32_be(NFTA_BITWISE_DREG, *dreg as u32);
             builder.append_attr_u32_be(NFTA_BITWISE_LEN, *len);
-            // The kernel defaults the op to BOOL and echoes it on dump;
-            // emit it so `NftablesConfig::diff` round-trips byte-clean.
+            // Kernel defaults this to BOOL and echoes it on dump; emit
+            // it so the round-trip diff stays byte-clean.
             builder.append_attr_u32_be(NFTA_BITWISE_OP, NFT_BITWISE_BOOL);
             let mask_nest = builder.nest_start(NFTA_BITWISE_MASK | 0x8000);
             builder.append_attr(NFTA_DATA_VALUE, mask);

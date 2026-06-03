@@ -225,9 +225,7 @@ pub const NFTA_BITWISE_LEN: u16 = 3;
 pub const NFTA_BITWISE_MASK: u16 = 4;
 pub const NFTA_BITWISE_XOR: u16 = 5;
 pub const NFTA_BITWISE_OP: u16 = 6;
-/// `NFT_BITWISE_BOOL` — the mask/xor boolean op. The kernel defaults
-/// `NFTA_BITWISE_OP` to this when absent and echoes it back on dump,
-/// so we emit it explicitly to keep the round-trip diff byte-clean.
+/// `NFT_BITWISE_BOOL` — the mask/xor boolean op (`NFTA_BITWISE_OP`).
 pub const NFT_BITWISE_BOOL: u32 = 0;
 
 // Conntrack
@@ -248,11 +246,9 @@ pub const NFTA_NAT_REG_ADDR_MAX: u16 = 4;
 pub const NFTA_NAT_REG_PROTO_MIN: u16 = 5;
 pub const NFTA_NAT_REG_PROTO_MAX: u16 = 6;
 pub const NFTA_NAT_FLAGS: u16 = 7;
-/// `NF_NAT_RANGE_MAP_IPS` — this NAT rewrites the address. Set in
-/// `NFTA_NAT_FLAGS` when an address register is in use.
+/// `NF_NAT_RANGE_MAP_IPS` — `NFTA_NAT_FLAGS` bit: NAT rewrites the address.
 pub const NF_NAT_RANGE_MAP_IPS: u32 = 1;
-/// `NF_NAT_RANGE_PROTO_SPECIFIED` — this NAT rewrites the L4 port.
-/// Set in `NFTA_NAT_FLAGS` when a proto (port) register is in use.
+/// `NF_NAT_RANGE_PROTO_SPECIFIED` — `NFTA_NAT_FLAGS` bit: NAT rewrites the port.
 pub const NF_NAT_RANGE_PROTO_SPECIFIED: u32 = 2;
 
 // Log

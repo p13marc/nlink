@@ -81,8 +81,7 @@ jobs:
             nf_tables
             nf_flow_table
             # nftables NAT — without this the snat/dnat round-trip
-            # tests silently skip via require_modules!("nft_nat"), so
-            # the NAT lowering path goes untested in CI.
+            # tests silently skip via `require_modules!("nft_nat")`
             nft_nat
             nf_nat
             # tc qdiscs

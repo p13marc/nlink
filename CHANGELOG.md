@@ -4,36 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- **Prepend a `meta nfproto == ip{v4,v6}` guard to the IPv4 and IPv6
-  address matchers** (`match_{s,d}addr_{v4,v6}` and their `_not`
-  variants). This is the L3-protocol dependency `nft` itself emits
-  before every `ip`/`ip6 saddr/daddr` match: without it, the bare
-  `Payload(Network)` load is ambiguous in an `inet`-family chain (the
-  kernel evaluates it for the wrong L3 protocol, reading the wrong
-  header bytes) and `nft list ruleset` cannot recover the symbolic
-  form, printing raw `@nh,...`. It also left the declarative
-  `NftablesConfig::diff` reporting a permanent phantom diff for such
-  rules, since the diff byte-compares nlink's lowered expressions
-  against the guard-bearing list the kernel stores back. The guard is a
-  redundant always-true in a single-family `ip`/`ip6` chain, so it is
-  emitted unconditionally.
+### Fixed
 
-- **Emit the kernel's canonical `bitwise`/`nat` expression attributes
-  so masked-prefix and NAT rules round-trip in `NftablesConfig::diff`.**
-  The `bitwise` writer omitted `NFTA_BITWISE_OP` and the `nat` writer
-  omitted `NFTA_NAT_REG_{ADDR,PROTO}_MAX` and `NFTA_NAT_FLAGS` — all of
-  which the kernel fills in with canonical values and echoes back on
-  dump. The rules worked, but the diff's byte-comparison saw the
-  kernel's fuller form as "changed" and emitted a permanent phantom
-  diff for every prefix-masked address match (`/24`, `/64`, …) and
-  every `snat`/`dnat` rule. nlink now emits all three: `NFTA_BITWISE_OP
-  = NFT_BITWISE_BOOL`, the MAX registers equal to their MIN
-  counterparts, and `NFTA_NAT_FLAGS` derived from address/port presence
-  (`NF_NAT_RANGE_MAP_IPS | NF_NAT_RANGE_PROTO_SPECIFIED`). Latent since
-  the original nftables support (0.10.0); surfaced once the per-rule
-  round-trip diff landed. The CI integration job now modprobes
-  `nft_nat` so the NAT round-trip tests run for real instead of
-  skipping.
+- **Fix permanent phantom diffs in `NftablesConfig::diff` for address,
+  masked-prefix, and NAT rules.** The diff byte-compares nlink's
+  lowered expressions against what the kernel stores and echoes on
+  dump; three cases lowered to less than the kernel's canonical form,
+  so a reapply re-emitted the rule on every reconcile. Now fixed:
+  - The IPv4/IPv6 address matchers (`match_{s,d}addr_{v4,v6}` and their
+    `_not` variants) now prepend the `meta nfproto == ip{v4,v6}` L3
+    guard `nft` itself emits. Besides the diff, its absence made the
+    bare `Payload(Network)` load ambiguous in an `inet` chain (matched
+    the wrong L3 protocol) and unrecoverable by `nft list ruleset`
+    (printed raw `@nh,...`).
+  - The `bitwise` writer now emits `NFTA_BITWISE_OP` (affects every
+    prefix-masked match, `/24`, `/64`, …) and the `nat` writer emits
+    `NFTA_NAT_REG_{ADDR,PROTO}_MAX` and `NFTA_NAT_FLAGS` (affects every
+    `snat`/`dnat`) — all attributes the kernel fills in and echoes.
+
+  The NAT/bitwise gap was latent since the original nftables support
+  (0.10.0). The CI integration job now modprobes `nft_nat` so the NAT
+  round-trip tests run for real instead of skipping.
 
 ## [0.19.0] - 2026-05-31
 

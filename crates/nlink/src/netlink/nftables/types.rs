@@ -308,17 +308,13 @@ pub enum Register {
     R3 = 4,
 }
 
-/// `NFPROTO_IPV4` — the L3-protocol value `meta nfproto` loads for
-/// an IPv4 packet. Used as the guard prepended to v4 address matches
-/// (see [`Rule::match_saddr_v4`]).
+/// `meta nfproto` L3-protocol values, used as the guard prepended to
+/// the address matchers (see [`Rule::match_saddr_v4`] / `_v6`).
 pub(crate) const NFPROTO_IPV4: u8 = 2;
-/// `NFPROTO_IPV6` — the L3-protocol value `meta nfproto` loads for
-/// an IPv6 packet. Used as the guard prepended to v6 address matches
-/// (see [`Rule::match_saddr_v6`]).
 pub(crate) const NFPROTO_IPV6: u8 = 10;
 
-// L4-protocol values `meta l4proto` loads, used as the guard the
-// transport-layer matchers prepend before a `Payload(Transport)` load.
+/// `meta l4proto` values, used as the guard prepended by the
+/// transport-layer matchers.
 const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
@@ -850,9 +846,8 @@ impl Rule {
         });
     }
 
-    /// Push `meta <key> == <value>` — load a 1-byte metadata field into
-    /// `R0` and compare it for equality. The shared shape behind every
-    /// L3/L4 protocol guard the matchers prepend (`nfproto`, `l4proto`).
+    /// Push `meta <key> == <value>` (a 1-byte metadata load + Eq compare
+    /// in `R0`) — the shared shape of the nfproto/l4proto matcher guards.
     fn push_meta_eq(&mut self, key: MetaKey, value: u8) {
         self.exprs.push(Expr::Meta {
             dreg: Register::R0,
@@ -865,17 +860,14 @@ impl Rule {
         });
     }
 
-    /// Prepend the `meta nfproto == ipv6` L3 dependency `nft` inserts
-    /// before every `ip6 saddr/daddr` match. Required for round-trip
-    /// byte-equality in `inet` chains (and how the kernel stores the
-    /// match, so `nft list` recovers the symbolic form). See
-    /// [`Rule::match_saddr_v6`].
+    /// Prepend the `meta nfproto == ip{v4,v6}` L3 guard `nft` inserts
+    /// before every `ip`/`ip6 saddr/daddr` match. Without it the address
+    /// load is ambiguous in an `inet` chain, and the declarative diff
+    /// phantom-diffs (the kernel stores the guard; nlink must too).
     fn push_nfproto_ipv6(&mut self) {
         self.push_meta_eq(MetaKey::NfProto, NFPROTO_IPV6);
     }
 
-    /// Prepend the `meta nfproto == ipv4` L3 dependency `nft` inserts
-    /// before every `ip saddr/daddr` match. See [`Self::push_nfproto_ipv6`].
     fn push_nfproto_ipv4(&mut self) {
         self.push_meta_eq(MetaKey::NfProto, NFPROTO_IPV4);
     }
@@ -1821,11 +1813,8 @@ mod tests {
             .collect()
     }
 
-    /// `Cmp` exprs with the leading `meta nfproto == ip{v4,v6}` L3 guard
-    /// stripped by position (not by value), so the address-match
-    /// assertions stay focused on the address comparison itself. Dropping
-    /// by position avoids silently swallowing an unrelated future matcher
-    /// that happens to compare a 1-byte field against `2` or `10`.
+    /// `Cmp` exprs with the leading nfproto guard stripped by position,
+    /// so address-match assertions see only the address comparison.
     fn cmp_exprs(rule: &Rule) -> Vec<(CmpOp, Vec<u8>)> {
         strip_nfproto_guard(&rule.exprs)
             .iter()
@@ -1837,7 +1826,7 @@ mod tests {
     }
 
     /// The expression slice with a leading `Meta{NfProto} + Cmp{Eq}`
-    /// guard pair removed, if present. Anything else is returned as-is.
+    /// guard pair removed, if present.
     fn strip_nfproto_guard(exprs: &[Expr]) -> &[Expr] {
         match exprs {
             [
@@ -1849,8 +1838,8 @@ mod tests {
         }
     }
 
-    /// True if `rule` opens with exactly `meta nfproto == <proto>` as its
-    /// first two expressions (Meta at index 0, its Eq Cmp at index 1).
+    /// True if `rule` opens with `meta nfproto == <proto>` (Meta at
+    /// index 0, its Eq Cmp at index 1).
     fn has_nfproto_guard(rule: &Rule, proto: u8) -> bool {
         matches!(
             rule.exprs.as_slice(),
@@ -1947,11 +1936,8 @@ mod tests {
 
     #[test]
     fn addr_matchers_prepend_nfproto_guard() {
-        // Every address matcher must open with `meta nfproto == <proto>`
-        // (Meta at index 0, its Eq Cmp at index 1) so the match is
-        // unambiguous in an `inet` chain and `nft` recovers the symbolic
-        // `ip/ip6 saddr/daddr` form. The address Payload must come next, at
-        // index 2 — the guard is strictly a two-expr prefix.
+        // Every address matcher opens with the two-expr nfproto guard
+        // (Meta@0, Eq Cmp@1), with the address Payload immediately after.
         let v4: Ipv4Addr = "10.0.0.1".parse().unwrap();
         let v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
         let cases = [

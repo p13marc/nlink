@@ -729,8 +729,7 @@ mod tests {
         assert!(lower_to_expression_bytes(&r).is_empty());
     }
 
-    /// Walk `bytes` as a netlink TLV stream, returning each
-    /// `(type_without_hint_bits, payload)`. Test-only.
+    /// Walk `bytes` as a TLV stream → `(type_without_hint_bits, payload)`.
     fn walk(bytes: &[u8]) -> Vec<(u16, &[u8])> {
         let mut out = Vec::new();
         let mut pos = 0;
@@ -767,9 +766,6 @@ mod tests {
 
     #[test]
     fn masked_match_lowers_bitwise_op() {
-        // A prefix (masked) match must carry NFTA_BITWISE_OP, which the
-        // kernel canonicalizes onto every bitwise expr and echoes on
-        // dump. Without it the round-trip diff phantom-diffs forever.
         use super::super::super::NFTA_BITWISE_OP;
         use super::super::super::types::Rule;
         use std::net::Ipv4Addr;
@@ -781,7 +777,7 @@ mod tests {
             expr_has_attr(&masked, "bitwise", NFTA_BITWISE_OP),
             "masked match must emit NFTA_BITWISE_OP"
         );
-        // The exact-match path has no bitwise expr at all.
+        // Exact match has no bitwise expr at all.
         let exact = lower_to_expression_bytes(
             &Rule::new("f", "input").match_saddr_v4(v4, 32).accept(),
         );
@@ -793,9 +789,6 @@ mod tests {
 
     #[test]
     fn nat_lowers_max_regs_and_flags() {
-        // SNAT/DNAT must carry the MAX registers (= MIN for a single
-        // value) and NFTA_NAT_FLAGS, both of which the kernel
-        // canonicalizes and echoes on dump.
         use super::super::super::{
             NFTA_NAT_FLAGS, NFTA_NAT_REG_ADDR_MAX, NFTA_NAT_REG_PROTO_MAX,
         };
