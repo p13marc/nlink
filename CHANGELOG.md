@@ -30,6 +30,12 @@ All notable changes to this project will be documented in this file.
     `NFTA_NAT_REG_{ADDR,PROTO}_MAX` + `NFTA_NAT_FLAGS` (every
     `snat`/`dnat`) — attributes the kernel fills in and echoes. Latent
     since the original nftables support (0.10.0).
+  - The `nat` writer skips `NFTA_NAT_FLAGS` when the derived
+    `flags == 0` (no addr and no port), mirroring `nft_nat_dump`'s
+    own behaviour. Without this, the no-addr-no-port path
+    (`Expr::Nat(NatExpr::snat(family))` constructed via the typed
+    internals, bypassing the fluent `Rule::snat_*` helpers) would
+    reintroduce a phantom diff that the rest of this fix removes.
   - **One-time migration impact for `apply_reconcile` users**:
     rulesets installed by nlink ≤ 0.19 will diff non-empty on the
     first post-upgrade reconcile because the in-kernel form lacks

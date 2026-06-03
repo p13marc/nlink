@@ -803,6 +803,33 @@ mod tests {
         assert!(expr_has_attr(&body, "nat", NFTA_NAT_FLAGS));
     }
 
+    /// Empty-NAT case (`NatExpr::snat(family)` with no addr, no port):
+    /// `nft_nat_dump` skips `NFTA_NAT_FLAGS` when `priv->flags == 0`,
+    /// so we mirror that — emitting `FLAGS=0` would reintroduce a
+    /// phantom diff for any rule constructed via the internal builders
+    /// without the fluent `Rule::snat_*` / `Rule::dnat_*` helpers.
+    #[test]
+    fn empty_nat_omits_flags() {
+        use super::super::super::{NFTA_NAT_FLAGS, NFTA_NAT_REG_ADDR_MAX, NFTA_NAT_REG_PROTO_MAX};
+        use super::super::super::expr::Expr;
+        use super::super::super::types::{Family, NatExpr, Rule};
+        let mut rule = Rule::new("n", "post");
+        rule.exprs.push(Expr::Nat(NatExpr::snat(Family::Ip)));
+        let body = lower_to_expression_bytes(&rule);
+        assert!(
+            !expr_has_attr(&body, "nat", NFTA_NAT_FLAGS),
+            "empty NAT must NOT emit NFTA_NAT_FLAGS (kernel dump skips it when flags==0)"
+        );
+        assert!(
+            !expr_has_attr(&body, "nat", NFTA_NAT_REG_ADDR_MAX),
+            "empty NAT must NOT emit addr-max register"
+        );
+        assert!(
+            !expr_has_attr(&body, "nat", NFTA_NAT_REG_PROTO_MAX),
+            "empty NAT must NOT emit proto-max register"
+        );
+    }
+
     #[test]
     fn summary_renders_rules_to_replace() {
         use super::super::super::types::{Family, Rule};

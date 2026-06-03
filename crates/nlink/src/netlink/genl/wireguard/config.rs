@@ -29,12 +29,17 @@
 //! re-apply a no-op, omit `private_key` from the config after the
 //! first apply. Peer `preshared_key` is written the same way.
 //!
-//! For callers that read device state directly: the kernel returns
-//! `WGDEVICE_A_PRIVATE_KEY` on `GET_DEVICE` to a caller holding
-//! `CAP_NET_ADMIN` in the device's netns (as `wg showconf` does),
-//! and omits it otherwise — so [`WgDevice::private_key`] is set for
-//! privileged reads and `None` for unprivileged ones. Peer
-//! `preshared_key` is never returned to any caller.
+//! For callers that read device state directly: `WG_CMD_GET_DEVICE`
+//! is gated behind `CAP_NET_ADMIN` in the device's netns at the
+//! command level (`uns-admin-perm` in the kernel's netlink spec).
+//! Privileged callers get the device including `WGDEVICE_A_PRIVATE_KEY`
+//! (as `wg showconf` does); unprivileged callers hit the gate and
+//! see `Error::Kernel { errno: EPERM }` on the whole call — there's
+//! no partial-reply path where `WgDevice::private_key` comes back as
+//! `None` due to insufficient privilege. [`WgDevice::private_key`]
+//! is `None` only when the device has no key configured (i.e. before
+//! any `set_device(... .private_key(...))`). Peer `preshared_key` is
+//! never returned to any caller — write-only.
 //!
 //! [`WgDevice::private_key`]: super::types::WgDevice::private_key
 

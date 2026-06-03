@@ -163,6 +163,9 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
             // Emit MAX (= MIN for a single-value NAT) and the derived
             // flags explicitly: the kernel fills them in and echoes them
             // on dump, so omitting them breaks the round-trip diff.
+            // nft_nat_dump skips NFTA_NAT_FLAGS when flags == 0, so we
+            // mirror that to avoid a phantom diff in the no-addr-no-port
+            // case (reachable via NatExpr::snat/dnat without setters).
             let mut flags = 0u32;
             if nat.addr.reg_in_use() {
                 builder.append_attr_u32_be(NFTA_NAT_REG_ADDR_MIN, Register::R0 as u32);
@@ -174,7 +177,9 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
                 builder.append_attr_u32_be(NFTA_NAT_REG_PROTO_MAX, Register::R1 as u32);
                 flags |= NF_NAT_RANGE_PROTO_SPECIFIED;
             }
-            builder.append_attr_u32_be(NFTA_NAT_FLAGS, flags);
+            if flags != 0 {
+                builder.append_attr_u32_be(NFTA_NAT_FLAGS, flags);
+            }
             builder.nest_end(data);
         }
         Expr::Redirect { port } => {

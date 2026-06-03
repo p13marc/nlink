@@ -779,6 +779,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_private_key_oversize_payload_uses_first_32() {
+        // Future kernel that ships a >32-byte key payload (e.g. a TLV
+        // tail or an unrelated forward-grow). The length guard accepts
+        // anything ≥ WG_KEY_LEN and reads only the first 32 bytes —
+        // CLAUDE.md parser-robustness rule 1 (accept-larger-than-expected
+        // on fixed-size structs).
+        let key = [0xCDu8; WG_KEY_LEN];
+        let mut payload = key.to_vec();
+        payload.extend_from_slice(&[0xFFu8; 8]); // 8 trailing bytes the parser must ignore
+        let buf = make_attr(WgDeviceAttr::PrivateKey as u16, &payload);
+        let device = parse_buf(&buf);
+        assert_eq!(device.private_key, Some(key));
+    }
+
+    #[test]
     fn test_sockaddr_v4_roundtrip() {
         let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 51820));
         let bytes = sockaddr_to_bytes(&addr);
