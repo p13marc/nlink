@@ -372,28 +372,10 @@ impl Connection<Wireguard> {
     /// Parse device attributes from a GENL response.
     fn parse_device_attrs(&self, data: &[u8], device: &mut WgDevice) -> Result<()> {
         for (attr_type, payload) in AttrIter::new(data) {
-            match attr_type {
-                t if t == WgDeviceAttr::Ifindex as u16 => {
-                    device.ifindex = Some(get::u32_ne(payload)?);
-                }
-                t if t == WgDeviceAttr::Ifname as u16 => {
-                    device.ifname = Some(get::string(payload)?.to_string());
-                }
-                t if t == WgDeviceAttr::PublicKey as u16 && payload.len() >= WG_KEY_LEN => {
-                    let mut key = [0u8; WG_KEY_LEN];
-                    key.copy_from_slice(&payload[..WG_KEY_LEN]);
-                    device.public_key = Some(key);
-                }
-                t if t == WgDeviceAttr::ListenPort as u16 => {
-                    device.listen_port = Some(get::u16_ne(payload)?);
-                }
-                t if t == WgDeviceAttr::Fwmark as u16 => {
-                    device.fwmark = Some(get::u32_ne(payload)?);
-                }
-                t if t == WgDeviceAttr::Peers as u16 => {
-                    self.parse_peers_attr(payload, &mut device.peers)?;
-                }
-                _ => {}
+            if attr_type == WgDeviceAttr::Peers as u16 {
+                self.parse_peers_attr(payload, &mut device.peers)?;
+            } else {
+                parse_device_attr_scalar(attr_type, payload, device)?;
             }
         }
         Ok(())
@@ -462,6 +444,53 @@ impl Connection<Wireguard> {
         }
         Ok(())
     }
+}
+
+/// Read a `WG_KEY_LEN` key from the front of `payload`, mapping the kernel's
+/// all-zeros sentinel to `None`.
+///
+/// The kernel returns 32 zero bytes (not an absent attribute) for a key field
+/// of a keyless device on a privileged `GET_DEVICE`. All-zeros is not a usable
+/// key, so it's reported as `None` — the same normalization the peer
+/// `PresharedKey` arm applies. Callers must guard `payload.len() >= WG_KEY_LEN`
+/// before calling.
+fn parse_key(payload: &[u8]) -> Option<[u8; WG_KEY_LEN]> {
+    let mut key = [0u8; WG_KEY_LEN];
+    key.copy_from_slice(&payload[..WG_KEY_LEN]);
+    key.iter().any(|&b| b != 0).then_some(key)
+}
+
+/// Parse scalar (non-nested) device attributes into `device`.
+///
+/// Split out from `Connection::parse_device_attrs` so the scalar parsing path
+/// is testable without a live socket.
+fn parse_device_attr_scalar(
+    attr_type: u16,
+    payload: &[u8],
+    device: &mut WgDevice,
+) -> Result<()> {
+    match attr_type {
+        t if t == WgDeviceAttr::Ifindex as u16 => {
+            device.ifindex = Some(get::u32_ne(payload)?);
+        }
+        t if t == WgDeviceAttr::Ifname as u16 => {
+            device.ifname = Some(get::string(payload)?.to_string());
+        }
+        t if t == WgDeviceAttr::PrivateKey as u16 && payload.len() >= WG_KEY_LEN => {
+            device.private_key = parse_key(payload);
+        }
+        t if t == WgDeviceAttr::PublicKey as u16 && payload.len() >= WG_KEY_LEN => {
+            device.public_key = parse_key(payload);
+        }
+        t if t == WgDeviceAttr::ListenPort as u16 => {
+            device.listen_port = Some(get::u16_ne(payload)?);
+        }
+        t if t == WgDeviceAttr::Fwmark as u16 => {
+            device.fwmark = Some(get::u32_ne(payload)?);
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Resolve the WireGuard GENL family ID.
@@ -679,6 +708,75 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use super::*;
+    use crate::netlink::attr::{NLA_HDRLEN, NlAttr, nla_align};
+
+    /// Build a minimal NLA buffer: [u16 len LE][u16 type LE][payload][pad to 4].
+    fn make_attr(attr_type: u16, payload: &[u8]) -> Vec<u8> {
+        let hdr = NlAttr::new(attr_type, payload.len());
+        let total = NLA_HDRLEN + payload.len();
+        let aligned = nla_align(total);
+        let mut buf = vec![0u8; aligned];
+        buf[..NLA_HDRLEN].copy_from_slice(hdr.as_bytes());
+        buf[NLA_HDRLEN..NLA_HDRLEN + payload.len()].copy_from_slice(payload);
+        buf
+    }
+
+    /// Drive `parse_device_attr_scalar` via `AttrIter` over a single-attr buffer.
+    fn parse_buf(buf: &[u8]) -> WgDevice {
+        let mut device = WgDevice::default();
+        for (attr_type, payload) in AttrIter::new(buf) {
+            parse_device_attr_scalar(attr_type, payload, &mut device).unwrap();
+        }
+        device
+    }
+
+    #[test]
+    fn parse_private_key_present() {
+        let key = [0xCDu8; WG_KEY_LEN];
+        let buf = make_attr(WgDeviceAttr::PrivateKey as u16, &key);
+        let device = parse_buf(&buf);
+        assert_eq!(device.private_key, Some(key));
+    }
+
+    #[test]
+    fn parse_private_key_all_zero_is_none() {
+        // Privileged read of a keyless device: the kernel emits 32 zero bytes.
+        // All-zeros is not a usable key, so it normalizes to None (matching the
+        // peer PresharedKey arm).
+        let buf = make_attr(WgDeviceAttr::PrivateKey as u16, &[0u8; WG_KEY_LEN]);
+        let device = parse_buf(&buf);
+        assert_eq!(device.private_key, None);
+    }
+
+    #[test]
+    fn parse_public_key_present_and_all_zero() {
+        let key = [0xCDu8; WG_KEY_LEN];
+        let buf = make_attr(WgDeviceAttr::PublicKey as u16, &key);
+        assert_eq!(parse_buf(&buf).public_key, Some(key));
+
+        // Keyless device: same all-zeros-to-None normalization as private_key.
+        let zero = make_attr(WgDeviceAttr::PublicKey as u16, &[0u8; WG_KEY_LEN]);
+        assert_eq!(parse_buf(&zero).public_key, None);
+    }
+
+    #[test]
+    fn parse_private_key_short_payload_ignored() {
+        // payload shorter than WG_KEY_LEN — length guard must hold, no panic
+        let short = [0xCDu8; WG_KEY_LEN - 1];
+        let buf = make_attr(WgDeviceAttr::PrivateKey as u16, &short);
+        let device = parse_buf(&buf);
+        assert_eq!(device.private_key, None);
+    }
+
+    #[test]
+    fn parse_private_key_absent() {
+        // Buffer with only a ListenPort attr — no PrivateKey attr at all
+        let port: u16 = 51820;
+        let buf = make_attr(WgDeviceAttr::ListenPort as u16, &port.to_ne_bytes());
+        let device = parse_buf(&buf);
+        assert_eq!(device.private_key, None);
+        assert_eq!(device.listen_port, Some(51820));
+    }
 
     #[test]
     fn test_sockaddr_v4_roundtrip() {

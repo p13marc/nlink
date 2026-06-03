@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Make `Connection::<Wireguard>::get_device*` return the device
+  `private_key` for privileged callers.** The parse path is factored
+  through a shared `parse_key()` helper that also normalizes the
+  kernel's all-zeros sentinel (returned for a keyless device on a
+  privileged read) to `None` for both `private_key` and
+  `public_key`, matching the peer `preshared_key` arm. The `wg` bin
+  renders the real key when set instead of a hardcoded
+  `(hidden)`/`(none)`.
+
 ## [0.19.0] - 2026-05-31
 
 ### Breaking changes

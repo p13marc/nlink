@@ -989,3 +989,57 @@ async fn plan_204_c1_verdict_goto_round_trips_through_kernel() -> Result<()> {
     })
     .await
 }
+
+/// WireGuard private-key readback round-trip.
+///
+/// Verifies that `get_device_by_name` returns `Some(private_key)` for a
+/// privileged caller after `set_device` wrote the key. This is the kernel
+/// acceptance gate for the fix to `parse_device_attrs` (the `PrivateKey`
+/// attribute was previously silently dropped).
+#[tokio::test]
+async fn wg_private_key_readback_round_trips() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("wireguard");
+    with_timeout(async {
+        use nlink::netlink::Wireguard;
+
+        let ns = TestNamespace::new("wg-pkey-rb")?;
+
+        // The module is present (require_module! above), so a failure here is
+        // a genuine environment fault, not a skip condition — fail hard rather
+        // than green-washing a broken parser.
+        let status = std::process::Command::new("ip")
+            .args([
+                "netns", "exec", ns.name(),
+                "ip", "link", "add", "wg0", "type", "wireguard",
+            ])
+            .status()?;
+        assert!(
+            status.success(),
+            "ip link add wg0 type wireguard failed in netns {}",
+            ns.name()
+        );
+
+        let conn = namespace::connection_for_async::<Wireguard>(ns.name()).await?;
+
+        let private_key = [0xCDu8; 32];
+        conn.set_device("wg0", |b| b.private_key(private_key)).await?;
+
+        // The kernel clamps the X25519 secret on store
+        // (curve25519_clamp_secret in wg_noise_set_static_identity_private_key),
+        // so GET_DEVICE returns the clamped key, not the bytes we set.
+        let mut expected = private_key;
+        expected[0] &= 248;
+        expected[31] = (expected[31] & 127) | 64;
+
+        let device = conn.get_device_by_name("wg0").await?;
+        assert_eq!(
+            device.private_key,
+            Some(expected),
+            "clamped private key must round-trip through GET_DEVICE for a privileged caller"
+        );
+
+        Ok(())
+    })
+    .await
+}

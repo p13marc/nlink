@@ -19,24 +19,24 @@
 //! [`set_peer`]: crate::Connection
 //! [`del_peer`]: crate::Connection
 //!
-//! # The `private_key` caveat
+//! # Key writes and readback
 //!
-//! The kernel **never** returns a peer's private key on
-//! `GET_DEVICE` (security — the kernel zeros it out before
-//! the reply). Diffing a config's `private_key` against the
-//! kernel state is therefore impossible: we can't tell
-//! whether the key changed.
+//! [`WireguardConfig::apply`] writes a declared `private_key` on
+//! every apply, without diffing it against the kernel's current
+//! value. This is idempotent at the WireGuard protocol layer —
+//! re-applying the same key triggers no handshake storm — but it
+//! costs one extra `SET_DEVICE` call per re-apply. To make a
+//! re-apply a no-op, omit `private_key` from the config after the
+//! first apply. Peer `preshared_key` is written the same way.
 //!
-//! Strategy: when a `DeclaredWgDevice` carries a
-//! `private_key`, [`WireguardConfig::apply`] ALWAYS writes
-//! it. This is idempotent — re-applying the same key is a
-//! no-op at the WireGuard protocol layer (no handshake
-//! storm) — but it does cost one extra `SET_DEVICE` call
-//! per re-apply. If you want truly zero-op re-applies, omit
-//! `private_key` from the config after the first apply.
+//! For callers that read device state directly: the kernel returns
+//! `WGDEVICE_A_PRIVATE_KEY` on `GET_DEVICE` to a caller holding
+//! `CAP_NET_ADMIN` in the device's netns (as `wg showconf` does),
+//! and omits it otherwise — so [`WgDevice::private_key`] is set for
+//! privileged reads and `None` for unprivileged ones. Peer
+//! `preshared_key` is never returned to any caller.
 //!
-//! `preshared_key` on peers has the same shape and the same
-//! caveat.
+//! [`WgDevice::private_key`]: super::types::WgDevice::private_key
 
 use std::fmt;
 use std::net::SocketAddr;

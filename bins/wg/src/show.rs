@@ -86,8 +86,11 @@ pub async fn run(args: ShowArgs) -> Result<()> {
                 }
             }
             Some(ShowField::PrivateKey) => {
-                // Private key is never returned by kernel
-                println!("(none)");
+                if let Some(ref pk) = device.private_key {
+                    println!("{}", base64_encode(pk));
+                } else {
+                    println!("(hidden)");
+                }
             }
             Some(ShowField::ListenPort) => {
                 println!("{}", device.listen_port.unwrap_or(0));
@@ -241,7 +244,11 @@ fn print_device(device: &WgDevice) {
     if let Some(ref pk) = device.public_key {
         println!("  public key: {}", base64_encode(pk));
     }
-    println!("  private key: (hidden)");
+    if let Some(ref sk) = device.private_key {
+        println!("  private key: {}", base64_encode(sk));
+    } else {
+        println!("  private key: (hidden)");
+    }
 
     if let Some(port) = device.listen_port
         && port != 0
@@ -300,7 +307,11 @@ fn print_peer(peer: &WgPeer) {
 /// Print device in machine-readable dump format.
 fn print_dump(device: &WgDevice) {
     let ifname = device.ifname.as_deref().unwrap_or("?");
-    let private_key = "(none)"; // Never returned by kernel
+    let private_key = device
+        .private_key
+        .as_ref()
+        .map(|k| base64_encode(k))
+        .unwrap_or_else(|| "(none)".to_string());
     let public_key = device
         .public_key
         .as_ref()

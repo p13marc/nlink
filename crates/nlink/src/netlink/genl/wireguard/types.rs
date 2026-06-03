@@ -15,9 +15,13 @@ pub struct WgDevice {
     pub ifindex: Option<u32>,
     /// Interface name.
     pub ifname: Option<String>,
-    /// Private key (only set, never returned by kernel for security).
+    /// Private key. Returned by the kernel only to callers holding
+    /// `CAP_NET_ADMIN` in the device's netns (as `wg showconf` does); `None`
+    /// for unprivileged callers or a device with no key configured (the
+    /// kernel's all-zeros sentinel is normalized to `None`).
     pub private_key: Option<[u8; WG_KEY_LEN]>,
-    /// Public key (derived from private key).
+    /// Public key (derived from private key). `None` for a device with no key
+    /// configured (the kernel's all-zeros sentinel is normalized to `None`).
     pub public_key: Option<[u8; WG_KEY_LEN]>,
     /// UDP listen port (0 = kernel chooses).
     pub listen_port: Option<u16>,

@@ -98,6 +98,8 @@ jobs:
             xfrm_user xfrm4_tunnel xfrm6_tunnel
             # macsec (GENL family)
             macsec
+            # wireguard (GENL family — get_device private-key readback)
+            wireguard
           )
           for m in "${modules[@]}"; do
             modprobe "$m" 2>/dev/null && echo "loaded: $m" || echo "skip: $m (not available; tests will skip via require_module!)"
