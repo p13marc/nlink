@@ -850,6 +850,29 @@ impl Rule {
         });
     }
 
+    /// Emit `meta nfproto == NFPROTO_IPV6` (the L3-protocol dependency `nft`
+    /// itself prepends to every `ip6 saddr/daddr` match).
+    ///
+    /// In an `inet`-family chain the address `Payload(Network)` load is
+    /// otherwise ambiguous: without this guard the kernel evaluates it for
+    /// IPv4 packets too (reading the wrong header bytes), and `nft list
+    /// ruleset` cannot recover the symbolic `ip6 saddr ...` form, printing the
+    /// raw `@nh,64,128 ...` instead. The guard is a redundant always-true in an
+    /// `ip6`-family chain, so it is safe to emit unconditionally.
+    fn push_nfproto_ipv6(&mut self) {
+        // NFPROTO_IPV6 = 10, compared as the single byte `meta nfproto` loads.
+        const NFPROTO_IPV6: u8 = 10;
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key: MetaKey::NfProto,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: vec![NFPROTO_IPV6],
+        });
+    }
+
     /// Match source IPv4 address with prefix length. Operates on the
     /// IP header (`PayloadBase::Network`), so use only on chains that
     /// see IPv4 traffic (`ip`/`inet`/`netdev` family).
@@ -864,6 +887,7 @@ impl Rule {
     /// (`ip6`/`inet`/`netdev` family).
     pub fn match_saddr_v6(mut self, addr: Ipv6Addr, prefix: u8) -> Self {
         // Source IP at offset 8 in the IPv6 header.
+        self.push_nfproto_ipv6();
         self.push_addr_match(&addr.octets(), 8, prefix, 128, CmpOp::Eq);
         self
     }
@@ -880,6 +904,7 @@ impl Rule {
     /// the IP header, so use only on chains that see IPv6 traffic.
     pub fn match_daddr_v6(mut self, addr: Ipv6Addr, prefix: u8) -> Self {
         // Destination IP at offset 24 in the IPv6 header.
+        self.push_nfproto_ipv6();
         self.push_addr_match(&addr.octets(), 24, prefix, 128, CmpOp::Eq);
         self
     }
@@ -1271,6 +1296,7 @@ impl Rule {
     /// For prefixes shorter than 128, "not equal" means "outside the
     /// subnet" — the load is masked before comparison.
     pub fn match_saddr_v6_not(mut self, addr: Ipv6Addr, prefix: u8) -> Self {
+        self.push_nfproto_ipv6();
         self.push_addr_match(&addr.octets(), 8, prefix, 128, CmpOp::Neq);
         self
     }
@@ -1287,6 +1313,7 @@ impl Rule {
     /// For prefixes shorter than 128, "not equal" means "outside the
     /// subnet" — the load is masked before comparison.
     pub fn match_daddr_v6_not(mut self, addr: Ipv6Addr, prefix: u8) -> Self {
+        self.push_nfproto_ipv6();
         self.push_addr_match(&addr.octets(), 24, prefix, 128, CmpOp::Neq);
         self
     }
@@ -1816,14 +1843,34 @@ mod tests {
             .collect()
     }
 
+    /// All `Cmp` exprs except the `meta nfproto == ipv6` L3 guard that the v6
+    /// matchers prepend, so the address-match assertions stay focused on the
+    /// address comparison itself.
     fn cmp_exprs(rule: &Rule) -> Vec<(CmpOp, Vec<u8>)> {
         rule.exprs
             .iter()
             .filter_map(|e| match e {
+                // Skip the nfproto guard: a 1-byte Eq against NFPROTO_IPV6 (10).
+                Expr::Cmp { op, data, .. }
+                    if *op == CmpOp::Eq && data.as_slice() == [10] =>
+                {
+                    None
+                }
                 Expr::Cmp { op, data, .. } => Some((*op, data.clone())),
                 _ => None,
             })
             .collect()
+    }
+
+    /// True if `rule` begins with the `meta nfproto == NFPROTO_IPV6` guard.
+    fn has_nfproto_ipv6_guard(rule: &Rule) -> bool {
+        matches!(
+            rule.exprs.first(),
+            Some(Expr::Meta { key: MetaKey::NfProto, .. })
+        ) && rule.exprs.iter().any(|e| matches!(
+            e,
+            Expr::Cmp { op: CmpOp::Eq, data, .. } if data.as_slice() == [10]
+        ))
     }
 
     fn bitwise_exprs(rule: &Rule) -> Vec<Vec<u8>> {
@@ -1907,6 +1954,40 @@ mod tests {
         assert_eq!(payloads, vec![(PayloadBase::Network, 24, 16)]);
         assert_eq!(cmps.len(), 1);
         assert_eq!(cmps[0].0, CmpOp::Neq);
+    }
+
+    #[test]
+    fn v6_matchers_prepend_nfproto_ipv6_guard() {
+        // Every v6 address matcher must emit the `meta nfproto == ipv6` L3
+        // dependency first, so the match is unambiguous in an `inet` chain and
+        // `nft` can recover the symbolic `ip6 saddr/daddr` form. The Meta must
+        // come before the address Payload load.
+        let addr: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        for rule in [
+            Rule::new("filter", "input").match_saddr_v6(addr, 64),
+            Rule::new("filter", "output").match_daddr_v6(addr, 64),
+            Rule::new("filter", "input").match_saddr_v6_not(addr, 64),
+            Rule::new("filter", "output").match_daddr_v6_not(addr, 64),
+        ] {
+            assert!(
+                has_nfproto_ipv6_guard(&rule),
+                "v6 matcher must prepend meta nfproto ipv6 guard"
+            );
+            let meta_idx = rule
+                .exprs
+                .iter()
+                .position(|e| matches!(e, Expr::Meta { key: MetaKey::NfProto, .. }))
+                .expect("nfproto Meta present");
+            let payload_idx = rule
+                .exprs
+                .iter()
+                .position(|e| matches!(e, Expr::Payload { .. }))
+                .expect("address Payload present");
+            assert!(
+                meta_idx < payload_idx,
+                "nfproto guard must precede the address payload load"
+            );
+        }
     }
 
     #[test]
