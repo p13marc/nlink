@@ -255,19 +255,30 @@ fn write_verdict_expr(builder: &mut MessageBuilder, verdict: &Verdict) {
     let imm_data = builder.nest_start(NFTA_IMMEDIATE_DATA | 0x8000);
     let verdict_nest = builder.nest_start(NFTA_DATA_VERDICT | 0x8000);
 
+    // The deprecated String-shaped variants and the typed
+    // `JumpTo(ChainName)` / `GotoTo(ChainName)` variants emit identical
+    // wire bytes — the ChainName newtype just constrains the input
+    // boundary. `#[allow(deprecated)]` because the lib still needs to
+    // be able to emit wire bytes for the old variants while callers
+    // migrate.
+    #[allow(deprecated)]
     let code = match verdict {
         Verdict::Accept => NF_ACCEPT,
         Verdict::Drop => NF_DROP,
         Verdict::Continue => NFT_CONTINUE,
         Verdict::Return => NFT_RETURN,
-        Verdict::Jump(_) => NFT_JUMP,
-        Verdict::Goto(_) => NFT_GOTO,
+        Verdict::Jump(_) | Verdict::JumpTo(_) => NFT_JUMP,
+        Verdict::Goto(_) | Verdict::GotoTo(_) => NFT_GOTO,
     };
     builder.append_attr_u32_be(NFTA_VERDICT_CODE, code as u32);
 
+    #[allow(deprecated)]
     match verdict {
         Verdict::Jump(chain) | Verdict::Goto(chain) => {
             builder.append_attr_str(NFTA_VERDICT_CHAIN, chain);
+        }
+        Verdict::JumpTo(chain) | Verdict::GotoTo(chain) => {
+            builder.append_attr_str(NFTA_VERDICT_CHAIN, chain.as_str());
         }
         _ => {}
     }
@@ -275,4 +286,46 @@ fn write_verdict_expr(builder: &mut MessageBuilder, verdict: &Verdict) {
     builder.nest_end(verdict_nest);
     builder.nest_end(imm_data);
     builder.nest_end(expr_data);
+}
+
+#[cfg(test)]
+mod plan_230_tests {
+    //! Plan 230 — wire-format parity between deprecated `Verdict::Jump(String)`
+    //! and the typed `Verdict::JumpTo(ChainName)`.
+
+    use super::*;
+
+    fn encode_verdict(verdict: &Verdict) -> Vec<u8> {
+        // Synthesize a minimal builder just to capture verdict bytes.
+        // The MessageBuilder API mirrors what the rule encoder uses;
+        // we only need byte equality between the two variants.
+        let mut b = MessageBuilder::new(0, 0);
+        write_verdict_expr(&mut b, verdict);
+        b.as_bytes().to_vec()
+    }
+
+    #[test]
+    fn jump_string_and_jumpto_chainname_emit_identical_bytes() {
+        #[allow(deprecated)]
+        let legacy = Verdict::Jump("input_filter".to_string());
+        let typed = Verdict::JumpTo(ChainName::new("input_filter").unwrap());
+        assert_eq!(encode_verdict(&legacy), encode_verdict(&typed));
+    }
+
+    #[test]
+    fn goto_string_and_gototo_chainname_emit_identical_bytes() {
+        #[allow(deprecated)]
+        let legacy = Verdict::Goto("output_chain".to_string());
+        let typed = Verdict::GotoTo(ChainName::new("output_chain").unwrap());
+        assert_eq!(encode_verdict(&legacy), encode_verdict(&typed));
+    }
+
+    #[test]
+    fn typed_and_legacy_diverge_when_names_differ() {
+        // Sanity: different chain names produce different bytes; ensures
+        // the parity test above is exercising the byte path, not no-op.
+        let a = Verdict::JumpTo(ChainName::new("a").unwrap());
+        let b = Verdict::JumpTo(ChainName::new("b").unwrap());
+        assert_ne!(encode_verdict(&a), encode_verdict(&b));
+    }
 }
