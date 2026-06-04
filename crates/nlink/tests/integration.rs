@@ -131,3 +131,9 @@ mod xfrm_hotfix;
 // + the declarative OvpnConfig diff + apply cycle.
 #[path = "integration/ovpn.rs"]
 mod ovpn;
+
+// Plan 234 (0.21) — Dispatcher foundation: ENOBUFS routing to
+// ResyncMarker::ResyncStart, per-family wiring smoke checks,
+// concurrent-request coexistence with dispatcher subscribers.
+#[path = "integration/dispatcher.rs"]
+mod dispatcher;

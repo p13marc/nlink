@@ -328,7 +328,7 @@ the underlying sockopt:
   `"attribute IFLA_MTU rejected: value 0 out of range (at request
   offset 24)"`. See `Error::Kernel::ext_ack`.
 
-### Concurrency (0.19 F1 fix)
+### Concurrency (0.19 F1 fix + 0.21 dispatcher foundation)
 
 `Connection<P>` is `Send + Sync` and safe to share across tokio
 tasks via `Arc<Connection<P>>`. Every request/response method
@@ -347,6 +347,25 @@ in parallel).
 A long-lived events subscriber blocks concurrent requests on
 the same Connection until dropped. Use a second Connection
 or `ConnectionPool` for query-in-parallel patterns.
+
+**0.21 Plan 234 — Dispatcher foundation lands.** The
+per-Connection `Dispatcher` (accessible via `conn.dispatcher()`)
+ships the broadcast-channel infrastructure for multicast
+subscribers and the canonical `ENOBUFS → ResyncMarker::ResyncStart`
+routing. Slow multicast subscribers that overflow the kernel's
+multicast queue see the marker on a per-group broadcast channel
+even though the original `recv_msg` call also surfaces the error
+— Plan 151's `*_with_resync` wrappers consume the marker and
+re-issue the appropriate dump. This deliberately diverges from
+neli's behaviour (silent drop) and from the bare `netlink-sys`
+crate (caller handles the error).
+
+The full `NlRouter`-style per-seq unicast dispatcher that
+retires the F1 mutex is the architectural follow-up to Plan
+234 — the broadcast-channel and ENOBUFS-routing infrastructure
+that lands now is the foundation it plugs into. Until then,
+shared-`Arc<Connection>` requests still serialize through the
+F1 mutex; use `ConnectionPool<P>` for true many-fd parallelism.
 
 ```rust
 // Sharing a Connection across tasks — serialized but correct.

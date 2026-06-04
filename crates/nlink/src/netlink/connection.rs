@@ -6,6 +6,7 @@ use tracing::{instrument, warn};
 
 use super::{
     builder::MessageBuilder,
+    dispatcher::Dispatcher,
     error::{Error, Result},
     interface_ref::InterfaceRef,
     message::{
@@ -99,7 +100,21 @@ pub struct Connection<P: ProtocolState> {
     /// (`DumpStream`, `EventSubscription`) can take an
     /// [`tokio::sync::OwnedMutexGuard`] that lives independent
     /// of the Connection's borrow scope — see 0.19 Finding B.
+    ///
+    /// Plan 234 (0.21.0) — kept alongside the new
+    /// [`Dispatcher`] foundation. The dispatcher handles
+    /// multicast fan-out + `ResyncMarker::ResyncStart` ENOBUFS
+    /// routing today; the full per-seq unicast router that
+    /// retires this mutex lands incrementally on top of the
+    /// dispatcher's infrastructure (see `dispatcher.rs`).
     request_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Plan 234 — per-Connection dispatcher. Routes ENOBUFS into
+    /// `ResyncMarker::ResyncStart` for every active multicast
+    /// subscriber and fans out multicast frames to per-group
+    /// broadcast channels. The recv path on `NetlinkSocket`
+    /// consults the connection's dispatcher when it sees ENOBUFS
+    /// so the marker reaches the right place (Plan 234 §4).
+    dispatcher: Dispatcher,
 }
 
 /// Default operation timeout for `Connection<P>` (Plan 171).
@@ -150,11 +165,18 @@ where
     /// ```
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>()))]
     pub fn new() -> Result<Self> {
+        let socket = NetlinkSocket::new(P::PROTOCOL)?;
+        let dispatcher = Dispatcher::new();
+        // Plan 234 — install dispatcher hook so socket.recv_msg's
+        // ENOBUFS path fans out ResyncMarker::ResyncStart to active
+        // multicast subscribers.
+        socket.install_dispatcher(dispatcher.clone());
         Ok(Self {
-            socket: NetlinkSocket::new(P::PROTOCOL)?,
+            socket,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            dispatcher,
         })
     }
 
@@ -178,11 +200,15 @@ where
     /// ```
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_fd))]
     pub fn new_in_namespace(ns_fd: RawFd) -> Result<Self> {
+        let socket = NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?;
+        let dispatcher = Dispatcher::new();
+        socket.install_dispatcher(dispatcher.clone());
         Ok(Self {
-            socket: NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?,
+            socket,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            dispatcher,
         })
     }
 
@@ -204,11 +230,15 @@ where
     /// ```
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_path = %ns_path.as_ref().display()))]
     pub fn new_in_namespace_path<T: AsRef<Path>>(ns_path: T) -> Result<Self> {
+        let socket = NetlinkSocket::new_in_namespace_path(P::PROTOCOL, ns_path)?;
+        let dispatcher = Dispatcher::new();
+        socket.install_dispatcher(dispatcher.clone());
         Ok(Self {
-            socket: NetlinkSocket::new_in_namespace_path(P::PROTOCOL, ns_path)?,
+            socket,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            dispatcher,
         })
     }
 }
@@ -383,6 +413,23 @@ impl<P: ProtocolState> Connection<P> {
         self.request_lock.clone().lock_owned().await
     }
 
+    /// Plan 234 — access this Connection's dispatcher.
+    ///
+    /// The dispatcher routes ENOBUFS into
+    /// [`ResyncMarker::ResyncStart`](super::resync::ResyncMarker)
+    /// for every active multicast subscriber and fans out multicast
+    /// frames to per-group broadcast channels. Public so subscriber
+    /// constructors (events, conntrack, nftables, devlink, dpll,
+    /// nl80211 multicast) can register their broadcast receivers
+    /// alongside the kernel-side `add_membership` call.
+    ///
+    /// The dispatcher is cheap to clone (`Arc`-wrapped internally);
+    /// returning `&Dispatcher` keeps the ownership story simple
+    /// (the Connection owns the canonical handle).
+    pub fn dispatcher(&self) -> &Dispatcher {
+        &self.dispatcher
+    }
+
     /// Wrap a future with the configured timeout.
     ///
     /// If no timeout is set, the future runs without time limit.
@@ -404,11 +451,14 @@ impl<P: ProtocolState> Connection<P> {
     /// This is primarily used internally for protocols that require
     /// async initialization (like WireGuard which needs family ID resolution).
     pub(crate) fn from_parts(socket: NetlinkSocket, state: P) -> Self {
+        let dispatcher = Dispatcher::new();
+        socket.install_dispatcher(dispatcher.clone());
         Self {
             socket,
             state,
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            dispatcher,
         }
     }
 
