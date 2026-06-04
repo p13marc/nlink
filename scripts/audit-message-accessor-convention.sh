@@ -57,10 +57,13 @@ audit_file() {
         match($0, /^[[:space:]]*pub struct ([A-Za-z_][A-Za-z0-9_]*Message)([^A-Za-z0-9_]|$)/, m) {
             struct_name = m[1]
 
-            # Look back 5 lines for #[non_exhaustive].
+            # Look back 5 lines for #[non_exhaustive] — but only
+            # match a real attribute (line starts with optional
+            # whitespace then `#[non_exhaustive]`), not a mention
+            # inside a doc comment or string.
             non_exh = 0
             for (j = 1; j <= 5 && (NR - j) >= 1; j++) {
-                if (history[NR - j] ~ /#\[non_exhaustive\]/) {
+                if (history[NR - j] ~ /^[[:space:]]*#\[non_exhaustive\]/) {
                     non_exh = 1
                     break
                 }
