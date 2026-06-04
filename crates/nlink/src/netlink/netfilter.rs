@@ -1081,9 +1081,13 @@ fn parse_nla<'a>(input: &mut &'a [u8]) -> Option<(u16, &'a [u8])> {
         return None;
     }
 
-    // Parse length and type from first 4 bytes
-    let len = u16::from_le_bytes([input[0], input[1]]) as usize;
-    let attr_type = u16::from_le_bytes([input[2], input[3]]);
+    // Plan 223 — netlink attribute nla_len / nla_type are kernel
+    // native-endian (per `struct nlattr` in include/uapi/linux/netlink.h
+    // and nlink's canonical `NlAttr` in `attr.rs` using zerocopy
+    // native-endian). Was `from_le_bytes` — silently broken on
+    // BE platforms.
+    let len = u16::from_ne_bytes([input[0], input[1]]) as usize;
+    let attr_type = u16::from_ne_bytes([input[2], input[3]]);
     *input = &input[4..];
 
     if len < 4 {
