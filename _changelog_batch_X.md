@@ -33,4 +33,10 @@ for the deprecation removals.
   `AddressFamily`) are renamed back to the original names —
   there's only one form now, and it's the safe one. Migration:
   `flush_rules(libc::AF_INET as u8)` → `flush_rules(AddressFamily::v4())`.
+- **`QdiscBuilder::loss(f64)` removed.** Use `loss_pct(Percent)`
+  with `Percent::new(1.5)` (percent value) or
+  `Percent::from_fraction(0.015)` (fraction). The raw-`f64` form
+  silently accepted out-of-range and NaN values; the typed form
+  clamps to `[0, 100]` and surfaces the units-confusion footgun
+  at the construction boundary. Plan 228 closeout.
 

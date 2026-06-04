@@ -99,8 +99,9 @@ impl NetworkConfig {
     /// # Example
     ///
     /// ```ignore
+    /// use nlink::util::Percent;
     /// let config = NetworkConfig::new()
-    ///     .qdisc("eth0", |q| q.netem().delay_ms(100).loss(1.0))
+    ///     .qdisc("eth0", |q| q.netem().delay_ms(100).loss_pct(Percent::new(1.0)))
     ///     .qdisc("eth1", |q| q.htb().default_class(0x30));
     /// ```
     pub fn qdisc(mut self, dev: &str, f: impl FnOnce(QdiscBuilder) -> QdiscBuilder) -> Self {
@@ -1175,33 +1176,18 @@ impl QdiscBuilder {
         self
     }
 
-    /// Set netem packet loss percentage.
-    ///
-    /// **Deprecated** in 0.20.1: use [`Self::loss_pct`] with the typed
-    /// [`crate::util::Percent`] newtype. The raw-`f64` form silently
-    /// accepts out-of-range and NaN values; the typed sibling clamps
-    /// to `[0, 100]` and rejects non-finite inputs through `Percent::new`.
-    ///
-    /// The unit-confusion footgun (fraction vs percent) is the bug class
-    /// `Percent::from_fraction` was added to kill.
-    #[deprecated(
-        since = "0.20.1",
-        note = "use loss_pct(Percent::new(x)) instead — closes the units-confusion bug class"
-    )]
-    pub fn loss(mut self, percent: f64) -> Self {
-        if let Some(DeclaredQdiscType::Netem { loss_percent, .. }) = &mut self.qdisc_type {
-            *loss_percent = Some(percent);
-        }
-        self
-    }
-
     /// Set netem packet loss as a typed [`crate::util::Percent`].
     ///
-    /// This is the typed sibling of the deprecated [`Self::loss`].
     /// Internally stores the clamped `f64` so the wire-format diff
     /// machinery (which compares with `PartialEq` on `Option<f64>`)
-    /// stays stable. The boundary type at the setter is what kills
+    /// stays stable. The typed boundary at the setter is what kills
     /// the wrong-units footgun.
+    ///
+    /// (The 0.20.1 deprecated `loss(f64)` form was removed in 0.21
+    /// per the typed-units rollout. Construct the argument with
+    /// `Percent::new(1.5)` for percent values or
+    /// `Percent::from_fraction(0.015)` for fractional values — both
+    /// produce identical wire bytes.)
     pub fn loss_pct(mut self, percent: crate::util::Percent) -> Self {
         if let Some(DeclaredQdiscType::Netem { loss_percent, .. }) = &mut self.qdisc_type {
             *loss_percent = Some(percent.as_percent());
@@ -1615,13 +1601,13 @@ mod plan_228_tests {
     }
 
     #[test]
-    fn loss_pct_parity_with_loss_for_sane_input() {
-        let typed = QdiscBuilder::new("eth0").netem().loss_pct(Percent::new(1.5));
-        let typed_q = typed.build();
-        #[allow(deprecated)]
-        let raw = QdiscBuilder::new("eth0").netem().loss(1.5);
-        let raw_q = raw.build();
-        assert_eq!(netem_loss(&typed_q), netem_loss(&raw_q));
+    fn loss_pct_stores_clamped_f64_internally() {
+        // The typed boundary kills the bug at construction; the f64
+        // that lands in DeclaredQdiscType is what wire-format diff
+        // compares.
+        let q = QdiscBuilder::new("eth0").netem().loss_pct(Percent::new(1.5));
+        let built = q.build();
+        assert_eq!(netem_loss(&built), Some(1.5));
     }
 
     #[test]
