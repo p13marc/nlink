@@ -28,10 +28,10 @@
 //! use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
 //! use tokio_stream::StreamExt;
 //!
-//! let mut conn = Connection::<Route>::new()?;
+//! let conn = Connection::<Route>::new()?;
 //! conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Ipv4Addr])?;
 //!
-//! let mut events = conn.events();
+//! let mut events = conn.events().await;
 //! while let Some(event) = events.next().await {
 //!     match event? {
 //!         NetworkEvent::NewLink(link) => println!("New link: {:?}", link.name),

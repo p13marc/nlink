@@ -21,26 +21,26 @@ async fn main() -> nlink::Result<()> {
             } else {
                 for nh in &nexthops {
                     if nh.is_group() {
-                        print!("Nexthop Group {}: ", nh.id);
-                        if let Some(group) = &nh.group {
+                        print!("Nexthop Group {}: ", nh.id());
+                        if let Some(group) = nh.group() {
                             let members: Vec<_> = group
                                 .iter()
-                                .map(|m| format!("{}(weight={})", m.id, m.weight))
+                                .map(|m| format!("{}(weight={})", m.id(), m.weight()))
                                 .collect();
                             println!("{}", members.join(", "));
                         }
-                        if nh.resilient.is_some() {
+                        if nh.resilient().is_some() {
                             println!("  Type: resilient");
                         }
                     } else {
-                        print!("Nexthop {}: ", nh.id);
-                        if let Some(gw) = &nh.gateway {
+                        print!("Nexthop {}: ", nh.id());
+                        if let Some(gw) = nh.gateway() {
                             print!("via {} ", gw);
                         }
-                        if let Some(idx) = nh.ifindex {
+                        if let Some(idx) = nh.ifindex() {
                             print!("dev ifindex {} ", idx);
                         }
-                        if nh.blackhole {
+                        if nh.is_blackhole() {
                             print!("blackhole");
                         }
                         println!();
@@ -151,7 +151,7 @@ async fn main() -> nlink::Result<()> {
 
     // Get specific nexthop
     if let Some(nh) = conn.get_nexthop(1).await? {{
-        println!("NH 1: gateway={{:?}}", nh.gateway);
+        println!("NH 1: gateway={{:?}}", nh.gateway());
     }}
 "#
     );

@@ -699,6 +699,11 @@ fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
             jitter_us,
             loss_percent,
             limit,
+            duplicate_percent,
+            corrupt_percent,
+            reorder_percent,
+            loss_correlation,
+            delay_correlation,
         } => {
             let mut cfg = NetemConfig::new();
             if let Some(d) = delay_us {
@@ -712,6 +717,21 @@ fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
             }
             if let Some(lim) = limit {
                 cfg = cfg.limit(*lim);
+            }
+            if let Some(d) = duplicate_percent {
+                cfg = cfg.duplicate(crate::util::Percent::new(*d));
+            }
+            if let Some(c) = corrupt_percent {
+                cfg = cfg.corrupt(crate::util::Percent::new(*c));
+            }
+            if let Some(r) = reorder_percent {
+                cfg = cfg.reorder(crate::util::Percent::new(*r));
+            }
+            if let Some(corr) = loss_correlation {
+                cfg = cfg.loss_correlation(crate::util::Percent::new(*corr));
+            }
+            if let Some(corr) = delay_correlation {
+                cfg = cfg.delay_correlation(crate::util::Percent::new(*corr));
             }
             cfg.build().write_options(&mut builder)
         }
@@ -953,6 +973,11 @@ mod tests {
             jitter_us: Some(10_000),
             loss_percent: Some(0.5),
             limit: Some(1000),
+            duplicate_percent: None,
+            corrupt_percent: None,
+            reorder_percent: None,
+            loss_correlation: None,
+            delay_correlation: None,
         };
         assert_eq!(declared_options_bytes(&cfg), declared_options_bytes(&cfg));
     }
@@ -964,12 +989,22 @@ mod tests {
             jitter_us: None,
             loss_percent: None,
             limit: None,
+            duplicate_percent: None,
+            corrupt_percent: None,
+            reorder_percent: None,
+            loss_correlation: None,
+            delay_correlation: None,
         };
         let b = DeclaredQdiscType::Netem {
             delay_us: Some(200_000),
             jitter_us: None,
             loss_percent: None,
             limit: None,
+            duplicate_percent: None,
+            corrupt_percent: None,
+            reorder_percent: None,
+            loss_correlation: None,
+            delay_correlation: None,
         };
         assert_ne!(declared_options_bytes(&a), declared_options_bytes(&b));
     }

@@ -111,46 +111,132 @@ pub struct ResilientParams {
 
 /// A nexthop group member entry.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct NexthopGroupMember {
     /// Nexthop ID.
-    pub id: u32,
+    pub(crate) id: u32,
     /// Weight (1-256, where 0 means 1).
-    pub weight: u8,
+    pub(crate) weight: u8,
+}
+
+impl NexthopGroupMember {
+    /// Construct a new group-member descriptor. Used by builders
+    /// (the parser path goes through `Nexthop::parse`).
+    pub fn new(id: u32, weight: u8) -> Self {
+        Self { id, weight }
+    }
+
+    /// Nexthop ID.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// Weight (`1..=256`, where `0` is treated by the kernel as 1).
+    pub fn weight(&self) -> u8 {
+        self.weight
+    }
 }
 
 /// Nexthop information.
 ///
 /// Represents a single nexthop object which can be used by routes
 /// either directly or as part of a nexthop group.
+///
+/// Fields are `pub(crate)`; consumers read via the per-field
+/// accessor methods. The struct is `#[non_exhaustive]` so the
+/// kernel can grow new nexthop attribute fields without it being
+/// a breaking change.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Nexthop {
     /// Nexthop ID.
-    pub id: u32,
+    pub(crate) id: u32,
     /// Gateway address.
-    pub gateway: Option<IpAddr>,
+    pub(crate) gateway: Option<IpAddr>,
     /// Output interface index.
-    pub ifindex: Option<u32>,
+    pub(crate) ifindex: Option<u32>,
     /// Address family (AF_INET or AF_INET6).
-    pub family: u8,
+    pub(crate) family: u8,
     /// Nexthop flags (see nhf module).
-    pub flags: u32,
+    pub(crate) flags: u32,
     /// Protocol that installed this nexthop.
-    pub protocol: u8,
+    pub(crate) protocol: u8,
     /// Scope.
-    pub scope: u8,
+    pub(crate) scope: u8,
     /// Is this a blackhole nexthop?
-    pub blackhole: bool,
+    pub(crate) blackhole: bool,
     /// Is this an FDB nexthop?
-    pub fdb: bool,
+    pub(crate) fdb: bool,
     /// Group members (only set if this is a group).
-    pub group: Option<Vec<NexthopGroupMember>>,
+    pub(crate) group: Option<Vec<NexthopGroupMember>>,
     /// Group type (only set if this is a group).
-    pub group_type: Option<NexthopGroupType>,
+    pub(crate) group_type: Option<NexthopGroupType>,
     /// Resilient group parameters (only set for resilient groups).
-    pub resilient: Option<ResilientParams>,
+    pub(crate) resilient: Option<ResilientParams>,
 }
 
 impl Nexthop {
+    /// Nexthop ID.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// Gateway address, if set.
+    pub fn gateway(&self) -> Option<IpAddr> {
+        self.gateway
+    }
+
+    /// Output interface index, if set.
+    pub fn ifindex(&self) -> Option<u32> {
+        self.ifindex
+    }
+
+    /// Address family (`AF_INET` / `AF_INET6`).
+    pub fn family(&self) -> u8 {
+        self.family
+    }
+
+    /// Nexthop flags (see `nhf` module).
+    pub fn flags(&self) -> u32 {
+        self.flags
+    }
+
+    /// Protocol that installed the nexthop (`RTPROT_*`).
+    pub fn protocol(&self) -> u8 {
+        self.protocol
+    }
+
+    /// Route scope byte.
+    pub fn scope(&self) -> u8 {
+        self.scope
+    }
+
+    /// `true` if the nexthop is a blackhole.
+    pub fn is_blackhole(&self) -> bool {
+        self.blackhole
+    }
+
+    /// `true` if the nexthop is an FDB nexthop (used by VXLAN).
+    pub fn is_fdb(&self) -> bool {
+        self.fdb
+    }
+
+    /// Group members, if this nexthop is a group.
+    pub fn group(&self) -> Option<&[NexthopGroupMember]> {
+        self.group.as_deref()
+    }
+
+    /// Group type, if this nexthop is a group.
+    pub fn group_type(&self) -> Option<NexthopGroupType> {
+        self.group_type
+    }
+
+    /// Resilient-group parameters, if this nexthop is a resilient
+    /// group.
+    pub fn resilient(&self) -> Option<&ResilientParams> {
+        self.resilient.as_ref()
+    }
+
     /// Parse a nexthop from a netlink message.
     pub fn parse(data: &[u8]) -> Result<Self> {
         let nhmsg = NhMsg::from_bytes(data)?;

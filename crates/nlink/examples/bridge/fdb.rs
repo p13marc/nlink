@@ -39,10 +39,10 @@ async fn main() -> nlink::Result<()> {
                     } else {
                         for entry in &entries {
                             print!("  {} ", entry.mac_str());
-                            if let Some(vlan) = entry.vlan {
+                            if let Some(vlan) = entry.vlan() {
                                 print!("vlan {} ", vlan);
                             }
-                            if let Some(dst) = &entry.dst {
+                            if let Some(dst) = entry.dst() {
                                 print!("dst {} ", dst);
                             }
                             if entry.is_permanent() {
@@ -80,7 +80,7 @@ async fn main() -> nlink::Result<()> {
     // Get all FDB entries for a bridge
     let entries = conn.get_fdb("br0").await?;
     for entry in &entries {{
-        println!("{{}} vlan={{:?}}", entry.mac_str(), entry.vlan);
+        println!("{{}} vlan={{:?}}", entry.mac_str(), entry.vlan());
     }}
 
     // Get entries for a specific port

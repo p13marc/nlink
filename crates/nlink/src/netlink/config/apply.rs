@@ -705,6 +705,11 @@ async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()
             jitter_us,
             loss_percent,
             limit,
+            duplicate_percent,
+            corrupt_percent,
+            reorder_percent,
+            loss_correlation,
+            delay_correlation,
         } => {
             let mut config = NetemConfig::new();
             if let Some(delay) = delay_us {
@@ -718,6 +723,21 @@ async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()
             }
             if let Some(lim) = limit {
                 config = config.limit(*lim);
+            }
+            if let Some(d) = duplicate_percent {
+                config = config.duplicate(crate::util::Percent::new(*d));
+            }
+            if let Some(c) = corrupt_percent {
+                config = config.corrupt(crate::util::Percent::new(*c));
+            }
+            if let Some(r) = reorder_percent {
+                config = config.reorder(crate::util::Percent::new(*r));
+            }
+            if let Some(corr) = loss_correlation {
+                config = config.loss_correlation(crate::util::Percent::new(*corr));
+            }
+            if let Some(corr) = delay_correlation {
+                config = config.delay_correlation(crate::util::Percent::new(*corr));
             }
             conn.add_qdisc(&qdisc.dev, config.build()).await
         }
@@ -819,6 +839,11 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
             jitter_us,
             loss_percent,
             limit,
+            duplicate_percent,
+            corrupt_percent,
+            reorder_percent,
+            loss_correlation,
+            delay_correlation,
         } => {
             let mut cfg = NetemConfig::new();
             if let Some(d) = delay_us {
@@ -832,6 +857,21 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
             }
             if let Some(lim) = limit {
                 cfg = cfg.limit(*lim);
+            }
+            if let Some(d) = duplicate_percent {
+                cfg = cfg.duplicate(crate::util::Percent::new(*d));
+            }
+            if let Some(c) = corrupt_percent {
+                cfg = cfg.corrupt(crate::util::Percent::new(*c));
+            }
+            if let Some(r) = reorder_percent {
+                cfg = cfg.reorder(crate::util::Percent::new(*r));
+            }
+            if let Some(corr) = loss_correlation {
+                cfg = cfg.loss_correlation(crate::util::Percent::new(*corr));
+            }
+            if let Some(corr) = delay_correlation {
+                cfg = cfg.delay_correlation(crate::util::Percent::new(*corr));
             }
             conn.replace_qdisc(&qdisc.dev, cfg.build()).await
         }

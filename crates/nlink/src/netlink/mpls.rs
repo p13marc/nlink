@@ -313,21 +313,52 @@ impl MplsAction {
 // ============================================================================
 
 /// A parsed MPLS route.
+///
+/// Fields are `pub(crate)`; consumers read via the per-field
+/// accessor methods. The struct is `#[non_exhaustive]` so the
+/// kernel can grow new MPLS attribute fields without it being a
+/// breaking change.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MplsRoute {
     /// Incoming label.
-    pub label: MplsLabel,
+    pub(crate) label: MplsLabel,
     /// Forwarding action.
-    pub action: MplsAction,
+    pub(crate) action: MplsAction,
     /// Output interface index.
-    pub oif: Option<u32>,
+    pub(crate) oif: Option<u32>,
     /// Next hop address.
-    pub via: Option<IpAddr>,
+    pub(crate) via: Option<IpAddr>,
     /// Route protocol.
-    pub protocol: u8,
+    pub(crate) protocol: u8,
 }
 
 impl MplsRoute {
+    /// Incoming MPLS label.
+    pub fn label(&self) -> MplsLabel {
+        self.label
+    }
+
+    /// Forwarding action (pop / swap / …).
+    pub fn action(&self) -> &MplsAction {
+        &self.action
+    }
+
+    /// Output interface index, if reported.
+    pub fn oif(&self) -> Option<u32> {
+        self.oif
+    }
+
+    /// Next-hop address, if reported.
+    pub fn via(&self) -> Option<IpAddr> {
+        self.via
+    }
+
+    /// Route protocol byte (`RTPROT_*` from `linux/rtnetlink.h`).
+    pub fn protocol(&self) -> u8 {
+        self.protocol
+    }
+
     /// Parse an MPLS route from netlink message payload.
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() < RtMsg::SIZE {

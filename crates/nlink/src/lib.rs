@@ -119,13 +119,13 @@
 //! use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
 //! use tokio_stream::StreamExt;
 //!
-//! let mut conn = Connection::<Route>::new()?;
+//! let conn = Connection::<Route>::new()?;
 //! conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Ipv4Addr])?;
 //!
-//! let mut events = conn.events();
+//! let mut events = conn.events().await;
 //! while let Some(event) = events.next().await {
 //!     match event? {
-//!         NetworkEvent::NewLink(link) => println!("New link: {:?}", link.name),
+//!         NetworkEvent::NewLink(link) => println!("New link: {:?}", link.name()),
 //!         NetworkEvent::NewAddress(addr) => println!("New address: {:?}", addr.address()),
 //!         _ => {}
 //!     }
@@ -142,13 +142,13 @@
 //!
 //! let mut streams = StreamMap::new();
 //!
-//! let mut conn1 = Connection::<Route>::new()?;
+//! let conn1 = Connection::<Route>::new()?;
 //! conn1.subscribe_all()?;
-//! streams.insert("default", conn1.into_events());
+//! streams.insert("default", conn1.into_events().await);
 //!
-//! let mut conn2 = Connection::<Route>::new_in_namespace("ns1")?;
+//! let conn2 = Connection::<Route>::new_in_namespace("ns1")?;
 //! conn2.subscribe_all()?;
-//! streams.insert("ns1", conn2.into_events());
+//! streams.insert("ns1", conn2.into_events().await);
 //!
 //! while let Some((ns, event)) = streams.next().await {
 //!     println!("[{}] {:?}", ns, event?);

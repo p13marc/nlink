@@ -90,17 +90,38 @@ impl BridgeVlanFlags {
 }
 
 /// Bridge VLAN entry information.
+///
+/// Fields are `pub(crate)`; consumers read via the per-field
+/// accessor methods. The struct is `#[non_exhaustive]` so the
+/// kernel can grow new VLAN attribute fields without it being
+/// a breaking change.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BridgeVlanEntry {
     /// Interface index (bridge port or bridge itself)
-    pub ifindex: u32,
+    pub(crate) ifindex: u32,
     /// VLAN ID (1-4094)
-    pub vid: u16,
+    pub(crate) vid: u16,
     /// VLAN flags
-    pub flags: BridgeVlanFlags,
+    pub(crate) flags: BridgeVlanFlags,
 }
 
 impl BridgeVlanEntry {
+    /// Interface index of the bridge port (or bridge device itself).
+    pub fn ifindex(&self) -> u32 {
+        self.ifindex
+    }
+
+    /// VLAN ID (1-4094).
+    pub fn vid(&self) -> u16 {
+        self.vid
+    }
+
+    /// Combined VLAN flags (PVID / untagged).
+    pub fn flags(&self) -> BridgeVlanFlags {
+        self.flags
+    }
+
     /// Check if this is the PVID for this port.
     pub fn is_pvid(&self) -> bool {
         self.flags.pvid

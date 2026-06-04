@@ -687,7 +687,7 @@ async fn plan_204_c1_verdict_jump_round_trips_through_kernel() -> Result<()> {
         // without error.
         let jump_rule = Rule::new("t", "parent")
             .family(Family::Inet)
-            .jump("child");
+            .try_jump("child")?;
 
         conn.transaction()
             .add_rule(jump_rule)
@@ -960,7 +960,7 @@ async fn plan_204_c1_verdict_goto_round_trips_through_kernel() -> Result<()> {
 
         let goto_rule = Rule::new("t", "parent")
             .family(Family::Inet)
-            .goto("child");
+            .try_goto("child")?;
 
         conn.transaction()
             .add_rule(goto_rule)

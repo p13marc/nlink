@@ -36,6 +36,7 @@ mod stats2_ids {
 /// The specific type is determined by the netlink message type (RTM_NEWQDISC,
 /// RTM_NEWTCLASS, RTM_NEWTFILTER).
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct TcMessage {
     /// Fixed-size header (struct tcmsg).
     pub(crate) header: TcMsg,

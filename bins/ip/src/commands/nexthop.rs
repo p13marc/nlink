@@ -136,31 +136,31 @@ async fn show_nexthops(
 }
 
 fn print_nexthop(nh: &Nexthop) {
-    print!("id {} ", nh.id);
+    print!("id {} ", nh.id());
 
-    if let Some(ref group) = nh.group {
+    if let Some(group) = nh.group() {
         // This is a group
         print!("group ");
         let members: Vec<String> = group
             .iter()
             .map(|m| {
-                if m.weight > 1 {
-                    format!("{},{}", m.id, m.weight)
+                if m.weight() > 1 {
+                    format!("{},{}", m.id(), m.weight())
                 } else {
-                    format!("{}", m.id)
+                    format!("{}", m.id())
                 }
             })
             .collect();
         print!("{} ", members.join("/"));
 
-        if let Some(group_type) = nh.group_type {
+        if let Some(group_type) = nh.group_type() {
             match group_type {
                 nlink::netlink::nexthop::NexthopGroupType::Multipath => {
                     print!("type mpath ");
                 }
                 nlink::netlink::nexthop::NexthopGroupType::Resilient => {
                     print!("type resilient ");
-                    if let Some(ref res) = nh.resilient {
+                    if let Some(res) = nh.resilient() {
                         if res.buckets > 0 {
                             print!("buckets {} ", res.buckets);
                         }
@@ -179,13 +179,13 @@ fn print_nexthop(nh: &Nexthop) {
         }
     } else {
         // Individual nexthop
-        if nh.blackhole {
+        if nh.is_blackhole() {
             print!("blackhole ");
         } else {
-            if let Some(gw) = nh.gateway {
+            if let Some(gw) = nh.gateway() {
                 print!("via {} ", gw);
             }
-            if let Some(ifindex) = nh.ifindex {
+            if let Some(ifindex) = nh.ifindex() {
                 // Try to resolve interface name
                 if let Some(name) = get_ifname(ifindex) {
                     print!("dev {} ", name);
@@ -196,7 +196,7 @@ fn print_nexthop(nh: &Nexthop) {
         }
 
         // Scope
-        let scope = match nh.scope {
+        let scope = match nh.scope() {
             0 => "global",
             200 => "site",
             253 => "link",
@@ -219,12 +219,12 @@ fn print_nexthop(nh: &Nexthop) {
     if nh.is_linkdown() {
         print!("linkdown ");
     }
-    if nh.fdb {
+    if nh.is_fdb() {
         print!("fdb ");
     }
 
     // Protocol
-    let proto = match nh.protocol {
+    let proto = match nh.protocol() {
         0 => "",
         2 => "proto kernel ",
         4 => "proto static ",
@@ -240,45 +240,45 @@ fn nexthops_to_json(nexthops: &[Nexthop]) -> Vec<serde_json::Value> {
         .iter()
         .map(|nh| {
             let mut obj = serde_json::json!({
-                "id": nh.id,
+                "id": nh.id(),
             });
 
-            if let Some(ref group) = nh.group {
+            if let Some(group) = nh.group() {
                 let members: Vec<serde_json::Value> = group
                     .iter()
                     .map(|m| {
                         serde_json::json!({
-                            "id": m.id,
-                            "weight": m.weight,
+                            "id": m.id(),
+                            "weight": m.weight(),
                         })
                     })
                     .collect();
                 obj["group"] = serde_json::json!(members);
-                if let Some(gt) = nh.group_type {
+                if let Some(gt) = nh.group_type() {
                     obj["type"] = match gt {
                         nlink::netlink::nexthop::NexthopGroupType::Multipath => "mpath".into(),
                         nlink::netlink::nexthop::NexthopGroupType::Resilient => "resilient".into(),
                         _ => "unknown".into(),
                     };
                 }
-                if let Some(ref res) = nh.resilient {
+                if let Some(res) = nh.resilient() {
                     obj["buckets"] = res.buckets.into();
                     obj["idle_timer"] = res.idle_timer.into();
                     obj["unbalanced_timer"] = res.unbalanced_timer.into();
                 }
             } else {
-                if nh.blackhole {
+                if nh.is_blackhole() {
                     obj["blackhole"] = true.into();
                 }
-                if let Some(gw) = nh.gateway {
+                if let Some(gw) = nh.gateway() {
                     obj["gateway"] = gw.to_string().into();
                 }
-                if let Some(ifindex) = nh.ifindex {
+                if let Some(ifindex) = nh.ifindex() {
                     obj["dev"] = get_ifname(ifindex)
                         .unwrap_or_else(|| ifindex.to_string())
                         .into();
                 }
-                obj["scope"] = match nh.scope {
+                obj["scope"] = match nh.scope() {
                     0 => "global",
                     200 => "site",
                     253 => "link",
@@ -299,14 +299,14 @@ fn nexthops_to_json(nexthops: &[Nexthop]) -> Vec<serde_json::Value> {
             if nh.is_linkdown() {
                 flags.push("linkdown");
             }
-            if nh.fdb {
+            if nh.is_fdb() {
                 flags.push("fdb");
             }
             if !flags.is_empty() {
                 obj["flags"] = flags.into();
             }
 
-            obj["protocol"] = match nh.protocol {
+            obj["protocol"] = match nh.protocol() {
                 2 => "kernel",
                 4 => "static",
                 _ => "unspec",
@@ -410,15 +410,15 @@ async fn flush_nexthops(conn: &Connection<Route>) -> Result<()> {
 
     // Delete groups first (they depend on individual nexthops)
     for nh in &groups {
-        if let Err(e) = conn.del_nexthop(nh.id).await {
-            eprintln!("Warning: failed to delete group {}: {}", nh.id, e);
+        if let Err(e) = conn.del_nexthop(nh.id()).await {
+            eprintln!("Warning: failed to delete group {}: {}", nh.id(), e);
         }
     }
 
     // Then delete individual nexthops
     for nh in &individuals {
-        if let Err(e) = conn.del_nexthop(nh.id).await {
-            eprintln!("Warning: failed to delete nexthop {}: {}", nh.id, e);
+        if let Err(e) = conn.del_nexthop(nh.id()).await {
+            eprintln!("Warning: failed to delete nexthop {}: {}", nh.id(), e);
         }
     }
 

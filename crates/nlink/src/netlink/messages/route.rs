@@ -33,6 +33,7 @@ const RTNH_HDRLEN: usize = 8;
 
 /// Strongly-typed route message with all attributes parsed.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct RouteMessage {
     /// Fixed-size header.
     pub(crate) header: RtMsg,

@@ -39,7 +39,7 @@
 //!     Connection::<Nftables>::new()
 //! }));
 //!
-//! let mut conn = Connection::<Nftables>::new()?;
+//! let conn = Connection::<Nftables>::new()?;
 //! conn.subscribe_all()?;
 //! let mut events = conn.into_events_with_resync(factory);
 //!
