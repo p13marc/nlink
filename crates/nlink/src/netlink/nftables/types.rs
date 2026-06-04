@@ -360,6 +360,16 @@ pub enum MetaKey {
 }
 
 /// Conntrack key.
+/// Conntrack key — matches `enum nft_ct_keys` in the kernel UAPI
+/// (`include/uapi/linux/netfilter/nf_tables.h`).
+///
+/// Plan 221: `Expiration` was hardcoded to `7`, which is
+/// `NFT_CT_L3PROTOCOL`. Every rule using `Expr::Ct { key:
+/// CtKey::Expiration }` was reading the conntrack L3 protocol byte
+/// instead of the expiration time in milliseconds — silent
+/// type+value mismatch. Corrected to `5`, and the variants `Secmark`,
+/// `Helper`, `L3Protocol` were added so the previously-shadowed
+/// kernel values are reachable through the typed enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CtKey {
@@ -367,7 +377,10 @@ pub enum CtKey {
     Direction = 1,
     Status = 2,
     Mark = 3,
-    Expiration = 7,
+    Secmark = 4,
+    Expiration = 5,
+    Helper = 6,
+    L3Protocol = 7,
 }
 
 /// NAT type.
