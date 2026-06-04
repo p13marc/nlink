@@ -318,6 +318,74 @@ pub mod __rt {
         a.copy_from_slice(&payload[..8]);
         Ok(i64::from_ne_bytes(a))
     }
+
+    // ============================================================
+    // Plan 226 (0.20.1) — kernel `nla_get_sint` / `nla_put_sint`
+    // helpers. Variable-length signed integer: 4 bytes if the value
+    // fits in s32, 8 bytes otherwise. The kernel uses this for DPLL
+    // FFO, phase_offset, and other "natural-i32-but-occasionally-i64"
+    // fields. Without sint-aware parsing, an 8-byte payload routed
+    // through `parse_i32_attr` silently truncates to the low 32 bits
+    // (the bug Plan 226 closes for the i32 field; the full i64
+    // widening is queued for 0.21 when nlink can take a breaking
+    // type change).
+    // ============================================================
+
+    /// Plan 226 — read a kernel `sint` attribute as `i64`.
+    ///
+    /// Returns `Ok` for 4-byte (`s32` widened to `i64`) and 8-byte
+    /// payloads. Returns `Err(Truncated)` for any other length.
+    pub fn parse_sint_attr_as_i64(payload: &[u8]) -> Result<i64> {
+        match payload.len() {
+            4 => {
+                let bytes: [u8; 4] = [payload[0], payload[1], payload[2], payload[3]];
+                Ok(i32::from_ne_bytes(bytes) as i64)
+            }
+            n if n >= 8 => {
+                let mut a = [0u8; 8];
+                a.copy_from_slice(&payload[..8]);
+                Ok(i64::from_ne_bytes(a))
+            }
+            actual => Err(Error::Truncated { expected: 4, actual }),
+        }
+    }
+
+    /// Plan 226 — read a kernel `sint` attribute as `i32`.
+    ///
+    /// Returns the value cast as `i32` when it fits, returns
+    /// `Err(InvalidMessage)` (with a descriptive message) when the
+    /// kernel's 8-byte payload doesn't fit in `i32`. The caller
+    /// derives `Option<i32>` semantics via the macro: out-of-range
+    /// becomes `None`.
+    ///
+    /// **Backward-compat note**: the previous `parse_i32_attr` path
+    /// silently truncated the low 32 bits of an 8-byte payload.
+    /// Routing the FFO field through this helper changes the
+    /// silently-wrong behaviour to a clean parse error — the macro
+    /// surfaces it as a `Truncated`-class error, which the derived
+    /// `from_bytes` propagates via `?` so the message parse fails
+    /// outright. That's the correct semantics: it surfaces the
+    /// overflow rather than burying it in a junk reading.
+    pub fn parse_sint_attr_as_i32(payload: &[u8]) -> Result<i32> {
+        let widened = parse_sint_attr_as_i64(payload)?;
+        i32::try_from(widened).map_err(|_| {
+            Error::InvalidMessage(format!(
+                "sint attribute value {widened} does not fit in i32 (kernel emitted 8-byte sint; \
+                 field needs i64 widening — see Plan 226 / Plan 226 follow-on 0.21)"
+            ))
+        })
+    }
+
+    /// Plan 226 — write a kernel `sint` attribute (minimum-width on
+    /// the wire). Mirrors `nla_put_sint`. Values in `i32` range emit
+    /// 4 bytes; everything else emits 8 bytes.
+    pub fn emit_sint_attr(b: &mut MessageBuilder, attr_type: u16, value: i64) {
+        if (i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+            b.append_attr_u32(attr_type, value as i32 as u32);
+        } else {
+            b.append_attr_u64(attr_type, value as u64);
+        }
+    }
     pub fn parse_str_attr(payload: &[u8]) -> Result<String> {
         // Kernel strings are NUL-terminated; strip and decode
         // lossily so non-UTF8 doesn't poison the whole parse.
@@ -660,6 +728,131 @@ mod tests {
 
         let s = __rt::parse_str_attr(b"\xFF\xFE\0").unwrap();
         assert!(!s.is_empty());
+    }
+
+    // -- Plan 226 sint helpers ---------------------------------
+
+    #[test]
+    fn plan_226_parse_sint_as_i64_handles_4_and_8_byte_payloads() {
+        // 4-byte: sign-extends to i64.
+        let four = (-1_i32).to_ne_bytes();
+        assert_eq!(__rt::parse_sint_attr_as_i64(&four).unwrap(), -1);
+
+        let four = i32::MIN.to_ne_bytes();
+        assert_eq!(
+            __rt::parse_sint_attr_as_i64(&four).unwrap(),
+            i32::MIN as i64
+        );
+
+        let four = i32::MAX.to_ne_bytes();
+        assert_eq!(
+            __rt::parse_sint_attr_as_i64(&four).unwrap(),
+            i32::MAX as i64
+        );
+
+        // 8-byte: parses as i64.
+        let eight = (i32::MAX as i64 + 1).to_ne_bytes();
+        assert_eq!(
+            __rt::parse_sint_attr_as_i64(&eight).unwrap(),
+            i32::MAX as i64 + 1
+        );
+
+        let eight = i64::MAX.to_ne_bytes();
+        assert_eq!(__rt::parse_sint_attr_as_i64(&eight).unwrap(), i64::MAX);
+
+        // Pathological lengths.
+        for n in [0_usize, 1, 2, 3, 5, 6, 7] {
+            let buf = vec![0u8; n];
+            assert!(__rt::parse_sint_attr_as_i64(&buf).is_err(),
+                "sint parser should reject {n}-byte payload");
+        }
+
+        // Larger-than-expected (>=8): accept prefix per CLAUDE.md
+        // parser-robustness rule 1.
+        let eleven = vec![0u8; 11];
+        assert!(__rt::parse_sint_attr_as_i64(&eleven).is_ok());
+    }
+
+    #[test]
+    fn plan_226_parse_sint_as_i32_handles_4_and_8_byte_in_range() {
+        // 4-byte: exact i32.
+        let four = (-42_i32).to_ne_bytes();
+        assert_eq!(__rt::parse_sint_attr_as_i32(&four).unwrap(), -42);
+
+        // 8-byte that fits: in-range cast.
+        let eight = (1_000_000_i64).to_ne_bytes();
+        assert_eq!(
+            __rt::parse_sint_attr_as_i32(&eight).unwrap(),
+            1_000_000_i32
+        );
+
+        // 8-byte that overflows i32: surfaces error rather than
+        // silent truncation (the Plan 226 fix).
+        let overflow = (i32::MAX as i64 + 1).to_ne_bytes();
+        let err = __rt::parse_sint_attr_as_i32(&overflow).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidMessage(_)),
+            "expected InvalidMessage for i32-overflow sint payload"
+        );
+    }
+
+    #[test]
+    fn plan_226_emit_sint_picks_minimum_width() {
+        use crate::netlink::MessageBuilder;
+
+        // In-range -> 4-byte attr (NLA hdr 4 + payload 4 = 8 bytes,
+        // with NLA padding rounding to 4-byte boundary).
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        __rt::emit_sint_attr(&mut b, 99, 1_000_000_i64);
+        let bytes = &b.as_bytes()[start..];
+        // First u16 is the NLA length (header + payload, pre-padding).
+        let len = u16::from_ne_bytes([bytes[0], bytes[1]]) as usize;
+        assert_eq!(len, 8, "in-range sint should emit 4-byte payload");
+
+        // Out-of-range -> 8-byte attr.
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        __rt::emit_sint_attr(&mut b, 99, i64::MAX);
+        let bytes = &b.as_bytes()[start..];
+        let len = u16::from_ne_bytes([bytes[0], bytes[1]]) as usize;
+        assert_eq!(len, 12, "out-of-range sint should emit 8-byte payload");
+    }
+
+    #[test]
+    fn plan_226_sint_round_trip_via_runtime_helpers() {
+        use crate::netlink::MessageBuilder;
+
+        for value in [
+            0_i64,
+            1,
+            -1,
+            i32::MAX as i64,
+            i32::MIN as i64,
+            i32::MAX as i64 + 1,
+            i32::MIN as i64 - 1,
+            i64::MAX,
+            i64::MIN,
+        ] {
+            let mut b = MessageBuilder::new(0, 0);
+            let start = b.len();
+            __rt::emit_sint_attr(&mut b, 42, value);
+            let bytes = &b.as_bytes()[start..];
+            let mut found = None;
+            for (ty, payload) in __rt::attr_iter(bytes) {
+                if ty == 42 {
+                    found = Some(
+                        __rt::parse_sint_attr_as_i64(payload)
+                            .expect("round-trip parse"),
+                    );
+                }
+            }
+            assert_eq!(
+                found,
+                Some(value),
+                "round-trip failed for value {value}"
+            );
+        }
     }
 
     #[test]
