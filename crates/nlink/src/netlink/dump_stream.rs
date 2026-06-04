@@ -70,6 +70,12 @@ pub struct DumpStream<'a, P: ProtocolState, T: FromNetlink + Unpin> {
     pending: VecDeque<Result<T>>,
     done: bool,
     errored: bool,
+    /// Plan 233 (0.20.1) — opt-in: skip malformed frames instead of
+    /// fusing the stream. Each skip logs at `tracing::warn!`.
+    /// Default `false` preserves the snapshot-completeness contract
+    /// that dump APIs imply. See
+    /// [`Self::with_skip_malformed`].
+    skip_malformed: bool,
     /// 0.19 Finding B — hold the Connection's request lock for the
     /// stream's lifetime so concurrent dumps / events on a shared
     /// `Arc<Connection>` don't race on `poll_recv` and steal each
@@ -136,19 +142,61 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
             pending: VecDeque::new(),
             done: false,
             errored: false,
+            skip_malformed: false,
             _guard: guard,
             _marker: PhantomData,
         })
     }
 
+    /// Plan 233 (0.20.1) — continue past malformed frames instead of
+    /// fusing the stream. Each skip logs at `tracing::warn!` level
+    /// with the parse error.
+    ///
+    /// Default is hard-fail (the snapshot-completeness contract that
+    /// dump APIs imply). Use this when the caller would rather have
+    /// a partial dump than no dump at all — e.g. exporting a
+    /// best-effort metric to a dashboard.
+    ///
+    /// # Dump vs event policy
+    ///
+    /// CLAUDE.md `## Parser robustness` rule 3 (skip + log on
+    /// malformed frames) applies to **event** subscribers (`events()`,
+    /// `into_events()`, `subscribe_*()`), not dumps. Dump APIs
+    /// intentionally fuse on malformed frames because the caller
+    /// asked for the full snapshot; silently delivering a partial
+    /// one would deliver wrong-data-with-no-error to a reconcile loop
+    /// or audit log. This setter is the explicit opt-out for the
+    /// best-effort case.
+    ///
+    /// Event APIs follow rule 3 unconditionally — there is no
+    /// matching "fail on first bad event" opt-in because failing a
+    /// long-lived multicast stream only widens the event-loss window.
+    pub fn with_skip_malformed(mut self, skip: bool) -> Self {
+        self.skip_malformed = skip;
+        self
+    }
+
     /// Parse `data` into per-message items and push them onto the
     /// pending queue. Sets `done` on `NLMSG_DONE`. Pushes
     /// `Err(...)` and sets `errored` on `NLMSG_ERROR`.
+    ///
+    /// Plan 233 (0.20.1) — when `skip_malformed` is set, malformed
+    /// MessageIter frames and typed-parse failures log at WARN and
+    /// continue iteration instead of fusing the stream.
     fn drain_into_pending(&mut self, data: &[u8]) {
         for result in MessageIter::new(data) {
             let (header, payload) = match result {
                 Ok(p) => p,
                 Err(e) => {
+                    if self.skip_malformed {
+                        tracing::warn!(
+                            error = %e,
+                            "DumpStream: skip malformed MessageIter frame (Plan 233 opt-in)"
+                        );
+                        // Plan 233 — MessageIter consumed the bad
+                        // frame internally; continue with the next.
+                        continue;
+                    }
                     self.pending.push_back(Err(e));
                     self.errored = true;
                     return;
@@ -166,11 +214,23 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
                             // Spurious ACK during a dump — skip.
                             continue;
                         }
+                        // NLMSG_ERROR is NOT a "malformed frame" —
+                        // it's the kernel reporting that the request
+                        // itself failed. Always fuse here regardless
+                        // of skip_malformed; the caller wants to know
+                        // their dump errored at the source.
                         self.pending.push_back(Err(err.into_error(payload)));
                         self.errored = true;
                         return;
                     }
                     Err(e) => {
+                        if self.skip_malformed {
+                            tracing::warn!(
+                                error = %e,
+                                "DumpStream: skip malformed NLMSG_ERROR payload (Plan 233 opt-in)"
+                            );
+                            continue;
+                        }
                         self.pending.push_back(Err(e));
                         self.errored = true;
                         return;
@@ -187,13 +247,25 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
             //
             // The payload Iterator gives us the body bytes (after
             // the NlMsgHdr). FromNetlink::from_bytes is the typed
-            // parse step. Malformed frames push Err(...) but
-            // don't terminate the stream — kernel sometimes
-            // ships partially-parseable frames during long dumps.
+            // parse step. Without Plan 233's opt-in, malformed
+            // frames push Err(...) into the queue; the next poll
+            // yields the error and (because the stream doesn't fuse
+            // on typed-parse errors specifically) iteration
+            // continues. With `skip_malformed`, the bad frame logs
+            // at WARN and is dropped silently.
             let _ = header; // header is used above for seq/error/done checks
             match T::from_bytes(payload) {
                 Ok(item) => self.pending.push_back(Ok(item)),
-                Err(e) => self.pending.push_back(Err(e)),
+                Err(e) => {
+                    if self.skip_malformed {
+                        tracing::warn!(
+                            error = %e,
+                            "DumpStream: skip malformed typed payload (Plan 233 opt-in)"
+                        );
+                        continue;
+                    }
+                    self.pending.push_back(Err(e));
+                }
             }
         }
     }
@@ -376,6 +448,7 @@ mod tests {
             pending: VecDeque::new(),
             done: false,
             errored: false,
+            skip_malformed: false,
             _guard: guard,
             _marker: PhantomData,
         }
@@ -415,5 +488,124 @@ mod tests {
         assert!(!stream.done);
         assert!(!stream.errored);
         assert!(stream.pending.is_empty());
+    }
+
+    // -- Plan 233 (0.20.1) — skip_malformed opt-in -----------------
+
+    /// Per-message payload that only parses for a body of "OK"; any
+    /// other body produces a typed parse error. Used to feed
+    /// drain_into_pending synthetic malformed frames.
+    #[derive(Debug, PartialEq)]
+    struct Strict;
+
+    impl FromNetlink for Strict {
+        fn parse(_input: &mut &[u8]) -> super::super::parse::PResult<Self> {
+            // Always fail — synthesizes a typed-parse error class
+            // for tests below. The point of `skip_malformed` is to
+            // suppress these.
+            use winnow::error::{ContextError, ErrMode};
+            Err(ErrMode::Backtrack(ContextError::new()))
+        }
+    }
+
+    fn synth_data_frame(seq: u32, msg_type: u16, body: &[u8]) -> Vec<u8> {
+        let total = NLMSG_HDRLEN + body.len();
+        // Round up to 4-byte boundary per NLMSG_ALIGN.
+        let padded = (total + 3) & !3;
+        let mut buf = vec![0u8; padded];
+        buf[0..4].copy_from_slice(&(total as u32).to_ne_bytes());
+        buf[4..6].copy_from_slice(&msg_type.to_ne_bytes());
+        buf[6..8].copy_from_slice(&0u16.to_ne_bytes());
+        buf[8..12].copy_from_slice(&seq.to_ne_bytes());
+        buf[12..16].copy_from_slice(&0u32.to_ne_bytes());
+        buf[NLMSG_HDRLEN..total].copy_from_slice(body);
+        buf
+    }
+
+    async fn make_stream_strict<'a>(
+        conn: &'a Connection<crate::netlink::Route>,
+    ) -> DumpStream<'a, crate::netlink::Route, Strict> {
+        let guard = conn.lock_request_owned().await;
+        DumpStream {
+            conn,
+            expected_seq: 1,
+            pending: VecDeque::new(),
+            done: false,
+            errored: false,
+            skip_malformed: false,
+            _guard: guard,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Plan 233 — default behaviour: typed-parse failures push Err
+    /// into pending (the existing pre-Plan-233 contract — does NOT
+    /// fuse on typed-parse alone, only on MessageIter / NLMSG_ERROR).
+    #[tokio::test]
+    async fn plan_233_default_typed_parse_failure_pushes_err_without_fusing() {
+        let conn = Connection::<crate::netlink::Route>::new().unwrap();
+        let mut stream = make_stream_strict(&conn).await;
+
+        // A valid data frame whose typed parse will fail (Strict
+        // always errors).
+        let bad = synth_data_frame(1, /* RTM_NEWLINK */ 16, b"x");
+        stream.drain_into_pending(&bad);
+
+        // Pre-Plan-233 contract preserved: one Err in pending,
+        // stream not fused (errored stays false for typed-parse
+        // failures specifically — only NLMSG_ERROR / MessageIter
+        // errors fuse).
+        assert_eq!(stream.pending.len(), 1);
+        assert!(stream.pending.front().unwrap().is_err());
+        assert!(!stream.errored);
+        assert!(!stream.done);
+    }
+
+    /// Plan 233 — skip_malformed = true: typed-parse failures drop
+    /// silently (and the pending queue stays empty for that frame).
+    #[tokio::test]
+    async fn plan_233_skip_malformed_drops_typed_parse_failure() {
+        let conn = Connection::<crate::netlink::Route>::new().unwrap();
+        let mut stream = make_stream_strict(&conn).await;
+        stream.skip_malformed = true;
+
+        let bad = synth_data_frame(1, /* RTM_NEWLINK */ 16, b"x");
+        stream.drain_into_pending(&bad);
+
+        assert!(
+            stream.pending.is_empty(),
+            "skip_malformed should drop typed-parse failures silently"
+        );
+        assert!(!stream.errored);
+        assert!(!stream.done);
+    }
+
+    /// Plan 233 — skip_malformed = true still terminates on
+    /// NLMSG_DONE (the opt-in suppresses *malformed* frames, not
+    /// kernel signaling).
+    #[tokio::test]
+    async fn plan_233_skip_malformed_still_terminates_on_done() {
+        let conn = Connection::<crate::netlink::Route>::new().unwrap();
+        let mut stream = make_stream_strict(&conn).await;
+        stream.skip_malformed = true;
+
+        let done = synth_done_frame(1);
+        stream.drain_into_pending(&done);
+
+        assert!(stream.done, "NLMSG_DONE must terminate even with skip_malformed");
+        assert!(stream.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn plan_233_with_skip_malformed_setter_toggles_field() {
+        // Builder-style verification — the setter consumes and
+        // returns Self with the field flipped.
+        let conn = Connection::<crate::netlink::Route>::new().unwrap();
+        let stream = make_stream(&conn).await;
+        assert!(!stream.skip_malformed, "default is false");
+        let stream = stream.with_skip_malformed(true);
+        assert!(stream.skip_malformed);
+        let stream = stream.with_skip_malformed(false);
+        assert!(!stream.skip_malformed);
     }
 }
