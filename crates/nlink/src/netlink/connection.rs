@@ -1524,7 +1524,7 @@ impl Connection<Route> {
     /// ```ignore
     /// let rules = conn.get_rules().await?;
     /// for rule in rules {
-    ///     println!("{}: {:?} -> table {}", rule.priority, rule.source, rule.table);
+    ///     println!("{}: {:?} -> table {}", rule.priority(), rule.source(), rule.table_id());
     /// }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules"))]
@@ -1635,11 +1635,11 @@ impl Connection<Route> {
 
         for rule in rules {
             // Skip default rules
-            if rule.priority == 0 || rule.priority == 32766 || rule.priority == 32767 {
+            if rule.is_default() {
                 continue;
             }
             let _ = self
-                .del_rule_by_priority(family, rule.priority)
+                .del_rule_by_priority(family, rule.priority())
                 .await;
         }
 

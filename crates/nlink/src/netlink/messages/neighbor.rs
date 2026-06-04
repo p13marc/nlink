@@ -25,6 +25,7 @@ mod attr_ids {
 
 /// Strongly-typed neighbor message with all attributes parsed.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct NeighborMessage {
     /// Fixed-size header.
     pub(crate) header: NdMsg,

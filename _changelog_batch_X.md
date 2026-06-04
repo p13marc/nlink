@@ -54,4 +54,18 @@ for the deprecation removals.
   `.jump("name")` becomes either `.jump(ChainName::new("name")?)`
   (if a `Result` context exists upstream) or `.try_jump("name")?`
   (one fewer line). Plan 230 closeout.
+- **`*Message` fields demoted to `pub(crate)` + `#[non_exhaustive]`
+  added.** Plan 231 closeout. Six message types affected:
+  `AddressMessage`, `LinkMessage`, `NeighborMessage`, `NsIdMessage`,
+  `RouteMessage`, `TcMessage` gain `#[non_exhaustive]`;
+  `RuleMessage` and `NsIdMessage` additionally have their fields
+  flipped from `pub` to `pub(crate)`. Consumers read via the
+  per-field accessor methods (`rule.priority()` etc.) — the 0.20.1
+  Plan 231 batch shipped the accessors additively; 0.21 closes
+  the convention by hiding the fields. Direct field-access in
+  downstream code must become accessor-call. A new
+  `scripts/audit-message-accessor-convention.sh` CI gate keeps
+  the convention closed against drift, with a sibling
+  `test-audit-message-accessor-convention.sh` self-test guarding
+  the audit script itself (Plan 237 pattern).
 

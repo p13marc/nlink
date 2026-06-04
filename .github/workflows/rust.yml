@@ -185,6 +185,20 @@ jobs:
       - name: Run scripts/audit-sysfs-in-lib.sh
         run: bash scripts/audit-sysfs-in-lib.sh
 
+  # Plan 231 (0.21) — message-accessor convention. Every *Message
+  # struct in crates/nlink/src/netlink/messages/ must have
+  # #[non_exhaustive] + pub(crate) fields + accessor methods.
+  # The audit fires on bare pub fields (which leak parser
+  # internals) and missing #[non_exhaustive] (which lets external
+  # destructuring break on any kernel-side schema growth).
+  audit-message-accessor-convention:
+    name: audit *Message accessor convention
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scripts/audit-message-accessor-convention.sh
+        run: bash scripts/audit-message-accessor-convention.sh
+
   # Plan 223 — endianness drift. NLA headers (struct nlattr) and
   # the kernel's attribute payloads are native-endian. The 0.19 N3
   # fix swept `from_le_bytes` out of xfrm.rs; 0.20 cycled the
