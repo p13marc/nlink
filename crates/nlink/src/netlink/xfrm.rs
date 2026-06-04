@@ -39,31 +39,50 @@ const NLM_F_ACK: u16 = 0x04;
 const NLM_F_DUMP: u16 = 0x300;
 const NLM_F_CREATE: u16 = 0x400;
 const NLM_F_EXCL: u16 = 0x200;
+// Plan 221: production code no longer sets NLM_F_REPLACE (XFRM ignores it
+// and dispatches by nlmsg_type alone); kept for the regression test that
+// asserts it's never accidentally re-added to the dispatch flags.
+#[allow(dead_code)]
 const NLM_F_REPLACE: u16 = 0x100;
 
-// XFRM message types (from linux/xfrm.h)
+// XFRM message types (from linux/xfrm.h enum, counted from XFRM_MSG_BASE = 0x10 = 16)
 const XFRM_MSG_NEWSA: u16 = 16;
 const XFRM_MSG_DELSA: u16 = 17;
 const XFRM_MSG_GETSA: u16 = 18;
 const XFRM_MSG_NEWPOLICY: u16 = 19;
 const XFRM_MSG_DELPOLICY: u16 = 20;
 const XFRM_MSG_GETPOLICY: u16 = 21;
-const XFRM_MSG_FLUSHSA: u16 = 25;
-const XFRM_MSG_FLUSHPOLICY: u16 = 28;
+// Plan 221: UPDPOLICY=25 (was missing; nlink had value 25 mis-assigned to FLUSHSA),
+// UPDSA=26 (was missing). Needed for the corrected update_sp / update_sa dispatch.
+const XFRM_MSG_UPDPOLICY: u16 = 25;
+const XFRM_MSG_UPDSA: u16 = 26;
+// Plan 221: FLUSHSA was hardcoded to 25 (which is UPDPOLICY); flush_sa() was sending
+// XFRM_MSG_UPDPOLICY with an 8-byte xfrm_usersa_flush body the kernel expected to be a
+// 168-byte xfrm_userpolicy_info. Corrected to the kernel UAPI value 28.
+const XFRM_MSG_FLUSHSA: u16 = 28;
+// Plan 221: FLUSHPOLICY was hardcoded to 28 (which is FLUSHSA); flush_policy() was
+// SILENTLY FLUSHING ALL SAs instead of all SPs. Corrected to the kernel UAPI value 29.
+const XFRM_MSG_FLUSHPOLICY: u16 = 29;
 
-// XFRM attribute types
+// XFRM attribute types (from linux/xfrm.h enum xfrm_attr_type_t)
 const XFRMA_ALG_AUTH: u16 = 1;
 const XFRMA_ALG_CRYPT: u16 = 2;
 const XFRMA_ALG_COMP: u16 = 3;
 const XFRMA_ENCAP: u16 = 4;
 const XFRMA_TMPL: u16 = 5;
-const XFRMA_SRCADDR: u16 = 9;
+// Plan 221: SRCADDR was hardcoded to 9 (which is XFRMA_LTIME_VAL); every del_sa/get_sa
+// with a src-addr filter was attaching a 16-byte address under the lifetime-attr ID.
+// Corrected to the kernel UAPI value 13.
+const XFRMA_SRCADDR: u16 = 13;
 #[allow(dead_code)] // for the future "main vs sub" policy-type slice
 const XFRMA_POLICY_TYPE: u16 = 16;
 const XFRMA_ALG_AEAD: u16 = 18;
 const XFRMA_ALG_AUTH_TRUNC: u16 = 20;
 const XFRMA_MARK: u16 = 21;
-const XFRMA_OFFLOAD_DEV: u16 = 26;
+// Plan 221: OFFLOAD_DEV was hardcoded to 26 (which is XFRMA_ADDRESS_FILTER); every
+// Plan 153.1 offload(...) call was emitting an 8-byte xfrm_user_offload under the
+// address-filter attr ID. Corrected to the kernel UAPI value 28.
+const XFRMA_OFFLOAD_DEV: u16 = 28;
 const XFRMA_IF_ID: u16 = 31;
 
 // XFRM modes
@@ -1406,10 +1425,11 @@ impl Connection<Xfrm> {
     /// unprotected).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "update_sa"))]
     pub async fn update_sa(&self, sa: XfrmSaBuilder) -> Result<()> {
-        let mut b = MessageBuilder::new(
-            XFRM_MSG_NEWSA,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
-        );
+        // Plan 221: was XFRM_MSG_NEWSA + NLM_F_CREATE | NLM_F_REPLACE. XFRM dispatches
+        // by `nlmsg_type` alone (net/xfrm/xfrm_user.c:917-921) and IGNORES NLM_F_REPLACE,
+        // so NEWSA always called xfrm_state_add → EEXIST whenever the target SA existed.
+        // The correct dispatch for "replace in place" is XFRM_MSG_UPDSA, no REPLACE flag.
+        let mut b = MessageBuilder::new(XFRM_MSG_UPDSA, NLM_F_REQUEST | NLM_F_ACK);
         sa.write_into(&mut b);
         self.send_ack(b).await
     }
@@ -1496,10 +1516,11 @@ impl Connection<Xfrm> {
     /// `(selector, dir)` from the body.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "update_sp"))]
     pub async fn update_sp(&self, sp: XfrmSpBuilder) -> Result<()> {
-        let mut b = MessageBuilder::new(
-            XFRM_MSG_NEWPOLICY,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
-        );
+        // Plan 221: same bug class as update_sa above — was XFRM_MSG_NEWPOLICY with
+        // NLM_F_CREATE | NLM_F_REPLACE; XFRM ignores NLM_F_REPLACE and dispatches by
+        // nlmsg_type, so NEWPOLICY called xfrm_policy_insert(excl=1) → EEXIST. The
+        // correct dispatch for "replace in place" is XFRM_MSG_UPDPOLICY.
+        let mut b = MessageBuilder::new(XFRM_MSG_UPDPOLICY, NLM_F_REQUEST | NLM_F_ACK);
         sp.write_into(&mut b);
         self.send_ack(b).await
     }
@@ -2132,11 +2153,40 @@ mod tests {
     #[test]
     fn xfrm_offload_kernel_constants() {
         // Values from include/uapi/linux/xfrm.h. Stable ABI; must
-        // not drift.
+        // not drift. Plan 221: XFRMA_OFFLOAD_DEV was previously
+        // hardcoded to 26 — which is XFRMA_ADDRESS_FILTER, a 24-byte
+        // struct, not the 8-byte xfrm_user_offload. Every offload(...)
+        // call was silently emitting under the wrong attribute id and
+        // the kernel was either rejecting it with EINVAL (strict-check
+        // kernels) or silently dropping the offload (lenient kernels).
+        // Correct value is 28.
         assert_eq!(XfrmOffloadFlag::IPV6.bits(), 0x1);
         assert_eq!(XfrmOffloadFlag::INBOUND.bits(), 0x2);
         assert_eq!(XfrmOffloadFlag::PACKET.bits(), 0x4);
-        assert_eq!(XFRMA_OFFLOAD_DEV, 26);
+        assert_eq!(XFRMA_OFFLOAD_DEV, 28);
+    }
+
+    /// Plan 221: lock all 5 XFRM constants that were mis-counted from
+    /// the kernel UAPI enum. Without this assertion-bundle, a future
+    /// commit could re-introduce the off-by-N error. Plan 222.1 adds
+    /// a sibling sys_sizeof module pinning the same constants against
+    /// an independently-mirrored kernel reference; both gates must
+    /// agree.
+    #[test]
+    fn xfrm_msg_and_attr_constants_match_kernel_uapi() {
+        // Kernel UAPI v6.13 — include/uapi/linux/xfrm.h.
+        assert_eq!(XFRM_MSG_NEWSA, 16);
+        assert_eq!(XFRM_MSG_DELSA, 17);
+        assert_eq!(XFRM_MSG_GETSA, 18);
+        assert_eq!(XFRM_MSG_NEWPOLICY, 19);
+        assert_eq!(XFRM_MSG_DELPOLICY, 20);
+        assert_eq!(XFRM_MSG_GETPOLICY, 21);
+        assert_eq!(XFRM_MSG_UPDPOLICY, 25);
+        assert_eq!(XFRM_MSG_UPDSA, 26);
+        assert_eq!(XFRM_MSG_FLUSHSA, 28);
+        assert_eq!(XFRM_MSG_FLUSHPOLICY, 29);
+        assert_eq!(XFRMA_SRCADDR, 13);
+        assert_eq!(XFRMA_OFFLOAD_DEV, 28);
     }
 
     #[test]
@@ -2350,16 +2400,21 @@ mod tests {
     // ==========================================================
 
     fn build_update_sa_frame(sa: XfrmSaBuilder) -> Vec<u8> {
-        let mut b = MessageBuilder::new(
-            XFRM_MSG_NEWSA,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
-        );
+        // Plan 221: mirror the corrected update_sa shape (XFRM_MSG_UPDSA,
+        // no NLM_F_CREATE | NLM_F_REPLACE — XFRM dispatches by nlmsg_type
+        // alone and ignores those flags).
+        let mut b = MessageBuilder::new(XFRM_MSG_UPDSA, NLM_F_REQUEST | NLM_F_ACK);
         sa.write_into(&mut b);
         b.finish()
     }
 
     #[test]
-    fn xfrm_update_sa_uses_create_and_replace_flags_not_excl() {
+    fn xfrm_update_sa_uses_upds_a_message_type() {
+        // Plan 221: the previous version of this test asserted that
+        // update_sa set CREATE+REPLACE. That LOCKED THE BUG — XFRM
+        // dispatches by nlmsg_type alone (net/xfrm/xfrm_user.c:917-921);
+        // NLM_F_REPLACE is ignored. The correct dispatch is
+        // XFRM_MSG_UPDSA with no extra flags.
         let sa = XfrmSaBuilder::new(
             "10.0.0.1".parse().unwrap(),
             "10.0.0.2".parse().unwrap(),
@@ -2371,10 +2426,17 @@ mod tests {
 
         let frame = build_update_sa_frame(sa);
 
-        // nlmsghdr.flags is at offset 6..8 (after len + type).
+        // nlmsghdr.type is at offset 4..6, flags is 6..8.
+        let nlmsg_type = u16::from_le_bytes([frame[4], frame[5]]);
         let flags = u16::from_le_bytes([frame[6], frame[7]]);
-        let want = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
-        assert_eq!(flags, want, "update_sa must set CREATE+REPLACE, not EXCL");
+        assert_eq!(
+            nlmsg_type, XFRM_MSG_UPDSA,
+            "update_sa MUST send XFRM_MSG_UPDSA (26), not NEWSA — XFRM dispatches by type"
+        );
+        assert_eq!(
+            flags & NLM_F_REPLACE, 0,
+            "update_sa MUST NOT set NLM_F_REPLACE — XFRM ignores it; dispatch is by type"
+        );
         assert_eq!(flags & NLM_F_EXCL, 0, "EXCL must NOT be set");
     }
 

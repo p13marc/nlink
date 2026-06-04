@@ -4,7 +4,89 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Fixed
+## [0.20.0] - 2026-06-04
+
+**Emergency release with breaking wire-format corrections.**
+
+`Connection::<Xfrm>::flush_sp()` was silently flushing all
+Security Associations instead of all Security Policies since the
+XFRM family shipped. Four XFRM constants (`XFRM_MSG_FLUSHSA`,
+`XFRM_MSG_FLUSHPOLICY`, `XFRMA_SRCADDR`, `XFRMA_OFFLOAD_DEV`)
+were miscounted from the kernel UAPI enum and produced
+catastrophically wrong wire bytes. Plus two dispatch errors
+(`update_sa`/`update_sp` always returned EEXIST) and a
+`CtKey::Expiration` discriminant change that was loading the
+wrong conntrack field.
+
+The `CtKey::Expiration` discriminant change (`7 → 5`) is a
+breaking ABI change at the byte level: pre-0.20 anyone using
+`CtKey::Expiration as u32` got `7` (the wrong value); post-0.20
+they get `5` (the correct value). The change requires a minor
+version bump in 0.x.y semver. The remainder of the 0.20-cycle
+plan suite (sweeps 222.2-237 + the typed-API tightening +
+discretionary 197/234/235) slides forward into 0.21.0.
+
+All shipped nlink versions yanked back to 0.15.x; the
+minimum-viable version is now 0.20.0.
+
+### Fixed — XFRM constants (Plan 221)
+
+- **CRITICAL: `Connection::<Xfrm>::flush_sp()` was silently
+  flushing all Security Associations instead of all Security
+  Policies.** Root cause: `XFRM_MSG_FLUSHPOLICY` was hardcoded
+  to `28`, which is the kernel UAPI value for `XFRM_MSG_FLUSHSA`.
+  Same miscount also broke `flush_sa()` (was sending
+  `XFRM_MSG_UPDPOLICY = 25` with an 8-byte body the kernel
+  expected to be 168 bytes).
+- **CRITICAL: `Connection::<Xfrm>::update_sa()` and `update_sp()`
+  always returned EEXIST when the target existed.** Both methods
+  sent `XFRM_MSG_NEWSA`/`NEWPOLICY` with `NLM_F_REPLACE`; XFRM
+  dispatches by `nlmsg_type` alone and ignores `NLM_F_REPLACE`,
+  so the kernel called `xfrm_state_add`/`xfrm_policy_insert(excl=1)`
+  → EEXIST whenever the target SA/SP existed. Fixed to use
+  `XFRM_MSG_UPDSA` / `XFRM_MSG_UPDPOLICY` (newly added constants
+  with the corrected values 26 and 25).
+- **CRITICAL: `XFRMA_SRCADDR` attribute ID was `9` (= `XFRMA_LTIME_VAL`).**
+  Every `del_sa`/`get_sa` with a src-address filter was emitting
+  a 16-byte address under the lifetime-struct attribute ID.
+  Strict-checking kernels EINVALed; lenient ones silently
+  dropped the filter. Corrected to `13`.
+- **CRITICAL: `XFRMA_OFFLOAD_DEV` attribute ID was `26`
+  (= `XFRMA_ADDRESS_FILTER`).** Plan 153.1's IPsec offload
+  feature has been broken since it shipped — strict-checking
+  kernels EINVALed on the size mismatch; lenient kernels parsed
+  8 bytes as a truncated `xfrm_address_filter` and silently
+  installed a software-only SA. Corrected to `28`.
+
+### Fixed — nftables `CtKey::Expiration` constant (Plan 221)
+
+- **HIGH: `CtKey::Expiration` enum discriminant was `7`
+  (= `NFT_CT_L3PROTOCOL`).** Every rule using
+  `Expr::Ct { key: CtKey::Expiration }` was loading the conntrack
+  L3 protocol byte instead of the relative expiration time in
+  milliseconds. Corrected to `5`; the previously-shadowed
+  variants `CtKey::Secmark`, `CtKey::Helper`, and
+  `CtKey::L3Protocol` were added so the kernel values are all
+  reachable through the typed enum.
+
+### Added — constant-value sizeof gate (Plan 222.1)
+
+- **New `sys_sizeof::xfrm_msg_type` / `xfrm_attr` / `nft_ct_keys`
+  modules.** Mirror the kernel UAPI v6.13 values for every
+  constant the Plan 221 hotfix touched + the surrounding common
+  values for safety. A new test family
+  `plan_222_1_*_match_kernel_uapi` locks the corrected discriminants
+  at build time so a future commit can't re-introduce the
+  off-by-N enum-counting error. The pre-existing
+  `sys_sizeof::xfrm` (struct sizes) + `nft_verdict` (verdict
+  values) gates cover adjacent territory; this is the
+  constant-ID half.
+
+### Fixed — 0.20-cycle pre-work (PRs #9, #10, follow-up)
+
+These three changes already shipped to master between the 0.19.0
+cut and this hotfix. They are not 0.19.1-specific but are
+included in 0.19.1 by virtue of the master state.
 
 - **Make `Connection::<Wireguard>::get_device*` return the device
   `private_key` for privileged callers.** The parse path is factored
@@ -41,7 +123,13 @@ All notable changes to this project will be documented in this file.
     first post-upgrade reconcile because the in-kernel form lacks
     the new attributes. The diff converges after one apply.
 
-- **Modprobe `nft_nat` in CI** so NAT round-trip tests run instead of skipping.
+- **Modprobe `nft_nat` and `wireguard` in CI** so the related
+  round-trip tests run instead of silently skipping.
+
+### Yanked
+
+- `0.19.0`, `0.18.0`, `0.17.0`, `0.16.0`, `0.15.x` — all shipped
+  with the XFRM constant defects. Use 0.20.0+.
 
 ## [0.19.0] - 2026-05-31
 

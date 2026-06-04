@@ -119,3 +119,9 @@ mod concurrent_stress;
 // also gated by require_module!().
 #[path = "integration/cycle_0_19_backfill.rs"]
 mod cycle_0_19_backfill;
+
+// Plan 221 — 0.19.1 XFRM hotfix regression tests. Root-gated +
+// `xfrm_user` module-gated. Lock the corrected constant + dispatch
+// values so a future commit can't re-introduce the bug class.
+#[path = "integration/xfrm_hotfix.rs"]
+mod xfrm_hotfix;
