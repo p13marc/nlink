@@ -290,9 +290,12 @@ impl TryFrom<String> for ChainName {
 /// Rule verdict.
 ///
 /// `#[non_exhaustive]` so new variants can be added additively.
-/// The 0.20.1 cycle deprecates [`Verdict::Jump`] and [`Verdict::Goto`]
-/// in favour of [`Verdict::JumpTo`] / [`Verdict::GotoTo`], which carry
-/// a validated [`ChainName`] instead of a bare `String`.
+/// [`Verdict::JumpTo`] and [`Verdict::GotoTo`] carry a validated
+/// [`ChainName`] — interior NULs / overlong / empty names are
+/// rejected at construction rather than at kernel apply time.
+///
+/// (The 0.20.1 `Verdict::Jump(String)` / `Verdict::Goto(String)`
+/// variants were removed in 0.21.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Verdict {
@@ -300,28 +303,6 @@ pub enum Verdict {
     Drop,
     Continue,
     Return,
-    /// Jump to a named chain (push-and-continue).
-    ///
-    /// **Deprecated** in 0.20.1: use [`Verdict::JumpTo`] with
-    /// [`ChainName::new`]. The bare-`String` form lets interior NULs
-    /// and overlong names through to a kernel rejection at apply time;
-    /// the typed sibling surfaces those at construction.
-    #[deprecated(
-        since = "0.20.1",
-        note = "use Verdict::JumpTo(ChainName::new(...)?) — validates the chain name \
-                and rejects interior NULs"
-    )]
-    Jump(String),
-    /// Goto a named chain (tail-call).
-    ///
-    /// **Deprecated** in 0.20.1: use [`Verdict::GotoTo`] with
-    /// [`ChainName::new`].
-    #[deprecated(
-        since = "0.20.1",
-        note = "use Verdict::GotoTo(ChainName::new(...)?) — validates the chain name \
-                and rejects interior NULs"
-    )]
-    Goto(String),
     /// Jump to a named chain (push-and-continue). Validated against
     /// the kernel chain-name contract at construction.
     JumpTo(ChainName),
@@ -1162,56 +1143,51 @@ impl Rule {
 
     /// Jump to another chain.
     ///
-    /// Infallible-by-API; if the name violates the kernel chain-name
-    /// contract (interior NUL, empty, or `len > 255`) the kernel will
-    /// reject the rule at apply time. For early validation, construct
-    /// a [`ChainName`] explicitly and use [`Self::jump_to`].
-    pub fn jump(mut self, chain: &str) -> Self {
-        // Prefer the typed variant when the contract is satisfied;
-        // fall back to the deprecated String form so the infallible
-        // public signature is preserved.
-        let verdict = match ChainName::new(chain) {
-            Ok(name) => Verdict::JumpTo(name),
-            #[allow(deprecated)]
-            Err(_) => Verdict::Jump(chain.to_string()),
-        };
-        self.exprs.push(super::expr::Expr::Verdict(verdict));
-        self
-    }
-
-    /// Jump to another chain, typed.
-    ///
-    /// The chain name is validated at construction via
-    /// [`ChainName::new`] — surfaces interior-NUL / overlong / empty
-    /// names at the input boundary instead of as a kernel rejection
-    /// at apply time.
-    pub fn jump_to(mut self, chain: ChainName) -> Self {
+    /// Pre-validated form — pass a constructed [`ChainName`] when you
+    /// already hold one. For the `&str` form that validates the name
+    /// at construction, see [`Self::try_jump`].
+    pub fn jump(mut self, chain: ChainName) -> Self {
         self.exprs
             .push(super::expr::Expr::Verdict(Verdict::JumpTo(chain)));
         self
     }
 
-    /// Goto another chain (no return).
+    /// Jump to another chain, validating the name at construction.
     ///
-    /// Infallible-by-API; if the name violates the kernel chain-name
-    /// contract the kernel will reject the rule at apply time. For
-    /// early validation, construct a [`ChainName`] explicitly and use
-    /// [`Self::goto_to`].
-    pub fn goto(mut self, chain: &str) -> Self {
-        let verdict = match ChainName::new(chain) {
-            Ok(name) => Verdict::GotoTo(name),
-            #[allow(deprecated)]
-            Err(_) => Verdict::Goto(chain.to_string()),
-        };
-        self.exprs.push(super::expr::Expr::Verdict(verdict));
-        self
+    /// Returns `Err` if the name violates the kernel chain-name
+    /// contract (empty, interior NUL, or `len > 255`). The fallible
+    /// signature surfaces the validation at the input boundary
+    /// instead of as a kernel rejection at apply time.
+    ///
+    /// (Renamed from the 0.20.1 infallible `jump(&str)` shim in 0.21.
+    /// The deprecated `Verdict::Jump(String)` fallback path is gone;
+    /// the kernel-name contract is enforced at construction.)
+    pub fn try_jump(mut self, chain: &str) -> Result<Self> {
+        let name = ChainName::new(chain)?;
+        self.exprs
+            .push(super::expr::Expr::Verdict(Verdict::JumpTo(name)));
+        Ok(self)
     }
 
-    /// Goto another chain (no return), typed.
-    pub fn goto_to(mut self, chain: ChainName) -> Self {
+    /// Goto another chain (no return).
+    ///
+    /// Pre-validated form — pass a constructed [`ChainName`]. For
+    /// the `&str` form that validates at construction, see
+    /// [`Self::try_goto`].
+    pub fn goto(mut self, chain: ChainName) -> Self {
         self.exprs
             .push(super::expr::Expr::Verdict(Verdict::GotoTo(chain)));
         self
+    }
+
+    /// Goto another chain (no return), validating the name at
+    /// construction. Returns `Err` if the name violates the kernel
+    /// chain-name contract.
+    pub fn try_goto(mut self, chain: &str) -> Result<Self> {
+        let name = ChainName::new(chain)?;
+        self.exprs
+            .push(super::expr::Expr::Verdict(Verdict::GotoTo(name)));
+        Ok(self)
     }
 
     /// Add a packet/byte counter.

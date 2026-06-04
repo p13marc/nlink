@@ -39,4 +39,19 @@ for the deprecation removals.
   silently accepted out-of-range and NaN values; the typed form
   clamps to `[0, 100]` and surfaces the units-confusion footgun
   at the construction boundary. Plan 228 closeout.
+- **`Verdict::Jump(String)` and `Verdict::Goto(String)` removed.**
+  Use `Verdict::JumpTo(ChainName::new(...)?)` and
+  `Verdict::GotoTo(ChainName::new(...)?)`. The `String` variants
+  let interior NULs and overlong names through to a kernel
+  rejection at apply time; the typed `ChainName` newtype
+  validates the kernel chain-name contract at construction.
+- **`RuleBuilder::jump(&str)` / `goto(&str)` reworked.** The 0.20.1
+  infallible shim that fell back to the deprecated `String`
+  variants on bad names is gone. The 0.21 form takes a
+  pre-validated `ChainName` and stays infallible. New `try_jump`
+  / `try_goto` siblings take `&str` and return `Result<Self>` —
+  validation happens at construction. Migration: code calling
+  `.jump("name")` becomes either `.jump(ChainName::new("name")?)`
+  (if a `Result` context exists upstream) or `.try_jump("name")?`
+  (one fewer line). Plan 230 closeout.
 
