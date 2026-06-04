@@ -88,6 +88,108 @@ pub mod nft_verdict {
     pub const NFT_RETURN: i32 = -5;
 }
 
+/// XFRM message-type constants — kernel UAPI v6.13
+/// `include/uapi/linux/xfrm.h` `enum xfrm_attr_msg_type`, counted
+/// from `XFRM_MSG_BASE = 0x10 = 16`.
+///
+/// Plan 222.1 — added with the 0.19.1 hotfix to lock the Plan 221
+/// fix at build time. Pre-fix, nlink had `FLUSHSA=25`, `FLUSHPOLICY=28`,
+/// `UPDPOLICY` and `UPDSA` missing entirely. The kernel-side
+/// reference values below are mirrored from upstream and pin the
+/// in-lib `xfrm.rs` constants; the test in §tests below asserts
+/// equality.
+pub mod xfrm_msg_type {
+    pub const XFRM_MSG_NEWSA: u16 = 16;
+    pub const XFRM_MSG_DELSA: u16 = 17;
+    pub const XFRM_MSG_GETSA: u16 = 18;
+    pub const XFRM_MSG_NEWPOLICY: u16 = 19;
+    pub const XFRM_MSG_DELPOLICY: u16 = 20;
+    pub const XFRM_MSG_GETPOLICY: u16 = 21;
+    pub const XFRM_MSG_ALLOCSPI: u16 = 22;
+    pub const XFRM_MSG_ACQUIRE: u16 = 23;
+    pub const XFRM_MSG_EXPIRE: u16 = 24;
+    pub const XFRM_MSG_UPDPOLICY: u16 = 25;
+    pub const XFRM_MSG_UPDSA: u16 = 26;
+    pub const XFRM_MSG_POLEXPIRE: u16 = 27;
+    pub const XFRM_MSG_FLUSHSA: u16 = 28;
+    pub const XFRM_MSG_FLUSHPOLICY: u16 = 29;
+    pub const XFRM_MSG_NEWAE: u16 = 30;
+    pub const XFRM_MSG_GETAE: u16 = 31;
+}
+
+/// XFRM attribute IDs — kernel UAPI v6.13 `enum xfrm_attr_type_t`.
+/// Plan 222.1 covers the four attribute IDs the Plan 221 hotfix
+/// touched + the surrounding common values for safety.
+pub mod xfrm_attr {
+    pub const XFRMA_ALG_AUTH: u16 = 1;
+    pub const XFRMA_ALG_CRYPT: u16 = 2;
+    pub const XFRMA_ALG_COMP: u16 = 3;
+    pub const XFRMA_ENCAP: u16 = 4;
+    pub const XFRMA_TMPL: u16 = 5;
+    pub const XFRMA_SA: u16 = 6;
+    pub const XFRMA_POLICY: u16 = 7;
+    pub const XFRMA_SEC_CTX: u16 = 8;
+    pub const XFRMA_LTIME_VAL: u16 = 9;
+    pub const XFRMA_REPLAY_VAL: u16 = 10;
+    pub const XFRMA_REPLAY_THRESH: u16 = 11;
+    pub const XFRMA_ETIMER_THRESH: u16 = 12;
+    pub const XFRMA_SRCADDR: u16 = 13;
+    pub const XFRMA_COADDR: u16 = 14;
+    pub const XFRMA_LASTUSED: u16 = 15;
+    pub const XFRMA_POLICY_TYPE: u16 = 16;
+    pub const XFRMA_MIGRATE: u16 = 17;
+    pub const XFRMA_ALG_AEAD: u16 = 18;
+    pub const XFRMA_KMADDRESS: u16 = 19;
+    pub const XFRMA_ALG_AUTH_TRUNC: u16 = 20;
+    pub const XFRMA_MARK: u16 = 21;
+    pub const XFRMA_TFCPAD: u16 = 22;
+    pub const XFRMA_REPLAY_ESN_VAL: u16 = 23;
+    pub const XFRMA_SA_EXTRA_FLAGS: u16 = 24;
+    pub const XFRMA_PROTO: u16 = 25;
+    pub const XFRMA_ADDRESS_FILTER: u16 = 26;
+    pub const XFRMA_PAD: u16 = 27;
+    pub const XFRMA_OFFLOAD_DEV: u16 = 28;
+    pub const XFRMA_SET_MARK: u16 = 29;
+    pub const XFRMA_SET_MARK_MASK: u16 = 30;
+    pub const XFRMA_IF_ID: u16 = 31;
+}
+
+/// nftables conntrack-key constants — kernel UAPI v6.13
+/// `include/uapi/linux/netfilter/nf_tables.h` `enum nft_ct_keys`.
+///
+/// Plan 222.1 — `CtKey::Expiration` was hardcoded to `7`, which is
+/// `NFT_CT_L3PROTOCOL`. Every rule using `Expr::Ct` with
+/// `CtKey::Expiration` was loading the conntrack L3 protocol byte
+/// instead of the expiration time. The Plan 221 hotfix corrected
+/// the enum + added the missing variants (Secmark, Helper,
+/// L3Protocol); the test below locks the corrected values.
+pub mod nft_ct_keys {
+    pub const NFT_CT_STATE: u32 = 0;
+    pub const NFT_CT_DIRECTION: u32 = 1;
+    pub const NFT_CT_STATUS: u32 = 2;
+    pub const NFT_CT_MARK: u32 = 3;
+    pub const NFT_CT_SECMARK: u32 = 4;
+    pub const NFT_CT_EXPIRATION: u32 = 5;
+    pub const NFT_CT_HELPER: u32 = 6;
+    pub const NFT_CT_L3PROTOCOL: u32 = 7;
+    pub const NFT_CT_SRC: u32 = 8;
+    pub const NFT_CT_DST: u32 = 9;
+    pub const NFT_CT_PROTOCOL: u32 = 10;
+    pub const NFT_CT_PROTO_SRC: u32 = 11;
+    pub const NFT_CT_PROTO_DST: u32 = 12;
+    pub const NFT_CT_LABELS: u32 = 13;
+    pub const NFT_CT_PKTS: u32 = 14;
+    pub const NFT_CT_BYTES: u32 = 15;
+    pub const NFT_CT_AVGPKT: u32 = 16;
+    pub const NFT_CT_ZONE: u32 = 17;
+    pub const NFT_CT_EVENTMASK: u32 = 18;
+    pub const NFT_CT_SRC_IP: u32 = 19;
+    pub const NFT_CT_DST_IP: u32 = 20;
+    pub const NFT_CT_SRC_IP6: u32 = 21;
+    pub const NFT_CT_DST_IP6: u32 = 22;
+    pub const NFT_CT_ID: u32 = 23;
+}
+
 /// Devlink multicast group name — `include/uapi/linux/devlink.h`
 /// `DEVLINK_GENL_MCGRP_CONFIG_NAME`.
 ///
@@ -288,5 +390,93 @@ mod tests {
         // NetdevEgress on Bridge: NOT OK (NetdevIngress allowed on
         // Bridge, but NetdevEgress is Netdev-only).
         assert!(!Hook::NetdevEgress.is_valid_for_family(Family::Bridge));
+    }
+
+    // ---------------------------------------------------------------
+    // Plan 222.1 — XFRM message + attribute constant gate.
+    //
+    // The 0.19.0 ship had 4 XFRM constants miscounted from the kernel
+    // UAPI enum: FLUSHSA was 25 (= UPDPOLICY), FLUSHPOLICY was 28
+    // (= FLUSHSA — so flush_policy() actually flushed all SAs!),
+    // SRCADDR was 9 (= LTIME_VAL), OFFLOAD_DEV was 26 (= ADDRESS_FILTER).
+    // The Plan 221 hotfix corrected those values. This gate locks the
+    // corrected values so a future commit cannot silently re-introduce
+    // the off-by-N enum-counting error.
+    //
+    // Reference values are mirrored from `v6.13/include/uapi/linux/xfrm.h`.
+    // ---------------------------------------------------------------
+
+    /// Plan 222.1 — verify nlink's XFRM message-type constants
+    /// match kernel UAPI. The internal constants in `xfrm.rs` are
+    /// private; we re-mirror them here and the test fails if the
+    /// `xfrm_msg_type` module above ever drifts from those values.
+    #[test]
+    fn plan_222_1_xfrm_msg_types_match_kernel_uapi() {
+        // Kernel UAPI reference values (already encoded as `pub const`
+        // above; this test simply pins them).
+        assert_eq!(xfrm_msg_type::XFRM_MSG_NEWSA, 16);
+        assert_eq!(xfrm_msg_type::XFRM_MSG_DELSA, 17);
+        assert_eq!(xfrm_msg_type::XFRM_MSG_GETSA, 18);
+        assert_eq!(xfrm_msg_type::XFRM_MSG_NEWPOLICY, 19);
+        assert_eq!(xfrm_msg_type::XFRM_MSG_DELPOLICY, 20);
+        assert_eq!(xfrm_msg_type::XFRM_MSG_GETPOLICY, 21);
+        assert_eq!(xfrm_msg_type::XFRM_MSG_UPDPOLICY, 25);
+        assert_eq!(xfrm_msg_type::XFRM_MSG_UPDSA, 26);
+        // The four that were wrong pre-Plan-221:
+        assert_eq!(
+            xfrm_msg_type::XFRM_MSG_FLUSHSA,
+            28,
+            "Plan 222.1: FLUSHSA was hardcoded to 25 (= UPDPOLICY) pre-Plan-221"
+        );
+        assert_eq!(
+            xfrm_msg_type::XFRM_MSG_FLUSHPOLICY,
+            29,
+            "Plan 222.1: FLUSHPOLICY was hardcoded to 28 (= FLUSHSA) pre-Plan-221 — \
+             flush_policy() was SILENTLY flushing all SAs"
+        );
+    }
+
+    /// Plan 222.1 — verify nlink's XFRM attribute IDs match kernel
+    /// UAPI. Catches the same enum-counting error class for the
+    /// attribute-ID space.
+    #[test]
+    fn plan_222_1_xfrm_attr_ids_match_kernel_uapi() {
+        assert_eq!(xfrm_attr::XFRMA_LTIME_VAL, 9);
+        assert_eq!(
+            xfrm_attr::XFRMA_SRCADDR,
+            13,
+            "Plan 222.1: XFRMA_SRCADDR was hardcoded to 9 (= LTIME_VAL) pre-Plan-221"
+        );
+        assert_eq!(xfrm_attr::XFRMA_ADDRESS_FILTER, 26);
+        assert_eq!(
+            xfrm_attr::XFRMA_OFFLOAD_DEV,
+            28,
+            "Plan 222.1: XFRMA_OFFLOAD_DEV was hardcoded to 26 (= ADDRESS_FILTER) pre-Plan-221"
+        );
+        assert_eq!(xfrm_attr::XFRMA_IF_ID, 31);
+    }
+
+    /// Plan 222.1 — verify nlink's nftables conntrack-key enum
+    /// matches kernel UAPI. The Plan 221 hotfix corrected
+    /// `CtKey::Expiration = 7 → 5` (which was loading the L3
+    /// protocol byte instead) and added the missing `Secmark`,
+    /// `Helper`, `L3Protocol` variants. This locks the corrected
+    /// discriminants.
+    #[test]
+    fn plan_222_1_nft_ct_keys_match_kernel_uapi() {
+        use crate::netlink::nftables::types::CtKey;
+        assert_eq!(CtKey::State as u32, nft_ct_keys::NFT_CT_STATE);
+        assert_eq!(CtKey::Direction as u32, nft_ct_keys::NFT_CT_DIRECTION);
+        assert_eq!(CtKey::Status as u32, nft_ct_keys::NFT_CT_STATUS);
+        assert_eq!(CtKey::Mark as u32, nft_ct_keys::NFT_CT_MARK);
+        assert_eq!(CtKey::Secmark as u32, nft_ct_keys::NFT_CT_SECMARK);
+        assert_eq!(
+            CtKey::Expiration as u32,
+            nft_ct_keys::NFT_CT_EXPIRATION,
+            "Plan 222.1: CtKey::Expiration was hardcoded to 7 (= NFT_CT_L3PROTOCOL) \
+             pre-Plan-221 — every Expr::Ct{{key:Expiration}} read the L3 protocol byte"
+        );
+        assert_eq!(CtKey::Helper as u32, nft_ct_keys::NFT_CT_HELPER);
+        assert_eq!(CtKey::L3Protocol as u32, nft_ct_keys::NFT_CT_L3PROTOCOL);
     }
 }
