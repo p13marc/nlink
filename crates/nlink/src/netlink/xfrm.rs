@@ -2427,8 +2427,8 @@ mod tests {
         let frame = build_update_sa_frame(sa);
 
         // nlmsghdr.type is at offset 4..6, flags is 6..8.
-        let nlmsg_type = u16::from_le_bytes([frame[4], frame[5]]);
-        let flags = u16::from_le_bytes([frame[6], frame[7]]);
+        let nlmsg_type = u16::from_ne_bytes([frame[4], frame[5]]);
+        let flags = u16::from_ne_bytes([frame[6], frame[7]]);
         assert_eq!(
             nlmsg_type, XFRM_MSG_UPDSA,
             "update_sa MUST send XFRM_MSG_UPDSA (26), not NEWSA — XFRM dispatches by type"
@@ -2559,7 +2559,7 @@ mod tests {
         let attr_present = frame.windows(2).any(|w| {
             // Look for the XFRMA_TMPL nlattr type byte. nlattr is
             // {len: u16, type: u16}; type is at +2.
-            u16::from_le_bytes([w[0], w[1]]) == want_attr_payload_len as u16 + 4
+            u16::from_ne_bytes([w[0], w[1]]) == want_attr_payload_len as u16 + 4
         });
         assert!(
             attr_present,
@@ -2592,7 +2592,7 @@ mod tests {
         let frame = b.finish();
 
         // nlmsg_type = DELPOLICY (offset 4..6)
-        assert_eq!(u16::from_le_bytes([frame[4], frame[5]]), XFRM_MSG_DELPOLICY);
+        assert_eq!(u16::from_ne_bytes([frame[4], frame[5]]), XFRM_MSG_DELPOLICY);
 
         // XfrmUserpolicyId starts at offset 16. Direction byte
         // sits at offset 16 + size_of::<XfrmSelector>() + 4 (index).
@@ -2614,9 +2614,9 @@ mod tests {
         b.append_bytes(id.as_bytes());
         let frame = b.finish();
 
-        let nlmsg_type = u16::from_le_bytes([frame[4], frame[5]]);
+        let nlmsg_type = u16::from_ne_bytes([frame[4], frame[5]]);
         assert_eq!(nlmsg_type, XFRM_MSG_GETPOLICY);
-        let flags = u16::from_le_bytes([frame[6], frame[7]]);
+        let flags = u16::from_ne_bytes([frame[6], frame[7]]);
         assert_eq!(flags & NLM_F_DUMP, 0, "get_sp must NOT use DUMP");
         assert_eq!(flags & NLM_F_ACK, 0, "get_sp must NOT use ACK");
         assert!(flags & NLM_F_REQUEST != 0);
@@ -2629,7 +2629,7 @@ mod tests {
         // Just the 16-byte nlmsghdr — no XfrmUserpolicyId body.
         assert_eq!(frame.len(), 16);
         assert_eq!(
-            u16::from_le_bytes([frame[4], frame[5]]),
+            u16::from_ne_bytes([frame[4], frame[5]]),
             XFRM_MSG_FLUSHPOLICY
         );
     }
@@ -2683,11 +2683,11 @@ mod tests {
         let frame = b.finish();
 
         // nlmsg_type at offset 4..6
-        let nlmsg_type = u16::from_le_bytes([frame[4], frame[5]]);
+        let nlmsg_type = u16::from_ne_bytes([frame[4], frame[5]]);
         assert_eq!(nlmsg_type, XFRM_MSG_GETSA);
 
         // nlmsg_flags at offset 6..8 — REQUEST only, no DUMP / ACK.
-        let flags = u16::from_le_bytes([frame[6], frame[7]]);
+        let flags = u16::from_ne_bytes([frame[6], frame[7]]);
         assert_eq!(flags & NLM_F_DUMP, 0, "get_sa must NOT use DUMP");
         assert_eq!(flags & NLM_F_ACK, 0, "get_sa must NOT use ACK");
         assert!(flags & NLM_F_REQUEST != 0);

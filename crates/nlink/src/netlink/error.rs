@@ -94,6 +94,43 @@ pub enum Error {
         actual: usize,
     },
 
+    /// A netlink frame exceeded the recv buffer (kernel-side
+    /// `MSG_TRUNC`). Distinct from [`Self::Truncated`] which is
+    /// the parser short-buffer case. `received` is the actual
+    /// frame size the kernel reported via `MSG_TRUNC`;
+    /// `buffer_size` is what was allocated. nlink auto-grows the
+    /// recv buffer up to 1 MiB before surfacing this error.
+    ///
+    /// Added in 0.20.1 (Plan 224 — closes B4).
+    #[error(
+        "netlink frame truncated: kernel emitted {received} bytes, \
+         nlink's recv buffer is {buffer_size} bytes (1 MiB cap reached); \
+         file an issue with the kernel version + subsystem"
+    )]
+    FrameTruncated {
+        /// Actual kernel frame size as reported by `MSG_TRUNC`.
+        received: usize,
+        /// Buffer size nlink had allocated.
+        buffer_size: usize,
+    },
+
+    /// Kernel send buffer is full and back-to-back `WouldBlock`
+    /// returns from `send` have exceeded the backpressure
+    /// threshold. The 30 s connection timeout (Plan 171) would
+    /// eventually surface as `Timeout`, but `Backpressure` lets
+    /// the caller react faster.
+    ///
+    /// Added in 0.20.1 (Plan 232 — closes B19).
+    #[error(
+        "netlink send: kernel send buffer full ({send_buffer_full}); \
+         try again later or back off"
+    )]
+    Backpressure {
+        /// True when caused by send-buffer-full back-to-back
+        /// WouldBlock returns from the kernel.
+        send_buffer_full: bool,
+    },
+
     /// Invalid message format.
     #[error("invalid message: {0}")]
     InvalidMessage(String),
@@ -693,6 +730,24 @@ impl Error {
     /// kernel ETIMEDOUT errors.
     pub fn is_timeout(&self) -> bool {
         matches!(self, Self::Timeout) || self.errno() == Some(libc::ETIMEDOUT)
+    }
+
+    /// Check if this is an [`Error::FrameTruncated`] error — the
+    /// kernel emitted a netlink frame larger than nlink's
+    /// auto-grow recv buffer cap (1 MiB).
+    ///
+    /// Added in 0.20.1 (Plan 224 — closes B4).
+    pub fn is_truncated(&self) -> bool {
+        matches!(self, Self::FrameTruncated { .. })
+    }
+
+    /// Check if this is an [`Error::Backpressure`] error — the
+    /// kernel send buffer is full and back-to-back `WouldBlock`
+    /// returns exceeded the backpressure threshold.
+    ///
+    /// Added in 0.20.1 (Plan 232 — closes B19).
+    pub fn is_backpressure(&self) -> bool {
+        matches!(self, Self::Backpressure { .. })
     }
 
     /// Check if this is an [`Error::DumpInterrupted`].

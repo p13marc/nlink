@@ -349,7 +349,15 @@ impl NetlinkSocket {
     }
 
     /// Send a message.
+    ///
+    /// Plan 232 B19 — surface backpressure as
+    /// [`Error::Backpressure`] after [`SEND_WOULDBLOCK_LIMIT`]
+    /// back-to-back `WouldBlock` returns from the kernel. The 30 s
+    /// connection timeout (Plan 171) would eventually surface as
+    /// `Timeout`; surfacing backpressure sooner lets a caller back
+    /// off without waiting the full timeout window.
     pub async fn send(&self, msg: &[u8]) -> Result<()> {
+        let mut would_block_count: u32 = 0;
         loop {
             let mut guard = self.fd.ready(Interest::WRITABLE).await?;
 
@@ -358,27 +366,59 @@ impl NetlinkSocket {
                     result?;
                     return Ok(());
                 }
-                Err(_would_block) => continue,
+                Err(_would_block) => {
+                    would_block_count += 1;
+                    if would_block_count >= SEND_WOULDBLOCK_LIMIT {
+                        return Err(Error::Backpressure {
+                            send_buffer_full: true,
+                        });
+                    }
+                    continue;
+                }
             }
         }
     }
 
     /// Receive a message, allocating a buffer.
+    ///
+    /// Plan 224 — passes `MSG_TRUNC` to recv so the kernel reports
+    /// the actual frame size. On truncation, auto-grows the recv
+    /// buffer (rounded up to the next 4 KiB) and re-attempts, up
+    /// to [`RECV_MAX_CAPACITY`] (1 MiB). If the kernel emits a
+    /// frame past the cap, returns [`Error::FrameTruncated`]
+    /// instead of silently losing the tail.
     pub async fn recv_msg(&self) -> Result<Vec<u8>> {
-        // Allocate buffer with capacity - don't resize, let recv fill it
-        let mut buf = BytesMut::with_capacity(32768);
-
+        let mut capacity = RECV_INITIAL_CAPACITY;
         loop {
-            let mut guard = self.fd.ready(Interest::READABLE).await?;
-
-            match guard.try_io(|inner| inner.get_ref().recv(&mut buf, 0)) {
-                Ok(result) => {
-                    let _n = result?;
-                    // buf has been advanced by recv, so buf[..] contains the data
-                    return Ok(buf.to_vec());
+            let mut buf = BytesMut::with_capacity(capacity);
+            let received = loop {
+                let mut guard = self.fd.ready(Interest::READABLE).await?;
+                match guard.try_io(|inner| {
+                    inner.get_ref().recv(&mut buf, libc::MSG_TRUNC)
+                }) {
+                    Ok(result) => break result?,
+                    Err(_would_block) => continue,
                 }
-                Err(_would_block) => continue,
+            };
+
+            if received <= capacity {
+                // Fast path. The bytes already in buf are the
+                // complete frame.
+                return Ok(buf.to_vec());
             }
+
+            // Truncated. The kernel reports the actual size in
+            // `received`. Re-attempt with that size (rounded up
+            // to the next 4 KiB), capped at RECV_MAX_CAPACITY.
+            let next = received.next_multiple_of(4096);
+            if next > RECV_MAX_CAPACITY {
+                return Err(Error::FrameTruncated {
+                    received,
+                    buffer_size: capacity,
+                });
+            }
+            capacity = next;
+            // Loop and re-attempt the recv with the larger buffer.
         }
     }
 
@@ -386,8 +426,16 @@ impl NetlinkSocket {
     ///
     /// This is the poll-based version of `recv_msg()` for use with `Stream` implementations.
     /// Returns `Poll::Ready(Ok(data))` when data is available.
+    ///
+    /// Plan 224 — passes `MSG_TRUNC` so kernel-side truncation is
+    /// detected. `poll_recv` cannot auto-grow inside a single poll
+    /// (it would have to return `Pending` after re-arming with a
+    /// larger buffer), so on first truncation it surfaces
+    /// [`Error::FrameTruncated`]. Stream-shape callers
+    /// (`events()`, `dump_stream`) propagate the error cleanly.
     pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Result<Vec<u8>>> {
-        let mut buf = BytesMut::with_capacity(32768);
+        let capacity = RECV_INITIAL_CAPACITY;
+        let mut buf = BytesMut::with_capacity(capacity);
 
         loop {
             let mut guard = match self.fd.poll_read_ready(cx) {
@@ -396,9 +444,19 @@ impl NetlinkSocket {
                 Poll::Pending => return Poll::Pending,
             };
 
-            match guard.try_io(|inner| inner.get_ref().recv(&mut buf, 0)) {
+            match guard.try_io(|inner| {
+                inner.get_ref().recv(&mut buf, libc::MSG_TRUNC)
+            }) {
                 Ok(result) => match result {
-                    Ok(_n) => return Poll::Ready(Ok(buf.to_vec())),
+                    Ok(received) => {
+                        if received > capacity {
+                            return Poll::Ready(Err(Error::FrameTruncated {
+                                received,
+                                buffer_size: capacity,
+                            }));
+                        }
+                        return Poll::Ready(Ok(buf.to_vec()));
+                    }
                     Err(e) => return Poll::Ready(Err(e.into())),
                 },
                 Err(_would_block) => continue,
@@ -406,6 +464,33 @@ impl NetlinkSocket {
         }
     }
 }
+
+/// Plan 232 B19 — back-to-back `WouldBlock` returns from `send`
+/// that exceed this threshold surface as
+/// [`Error::Backpressure`]. The kernel send buffer is full and
+/// retrying immediately is futile.
+///
+/// 32 matches the historic `NL_BATCH_SIZE` heuristic. The full
+/// 30 s connection timeout (Plan 171) is still in place as an
+/// upper bound; this lets callers react faster.
+pub(crate) const SEND_WOULDBLOCK_LIMIT: u32 = 32;
+
+/// Initial recv buffer capacity for [`NetlinkSocket::recv_msg`]
+/// (Plan 224). 32 KiB matches the historic single-frame cap; the
+/// auto-grow loop handles anything larger.
+pub(crate) const RECV_INITIAL_CAPACITY: usize = 32 * 1024;
+
+/// Max recv buffer capacity for [`NetlinkSocket::recv_msg`]
+/// (Plan 224). 1 MiB is the cap before nlink surfaces
+/// [`Error::FrameTruncated`] instead of growing further.
+///
+/// The kernel's `NLMSG_GOODSIZE` per-frame budget is roughly
+/// `SKB_WITH_OVERHEAD(PAGE_SIZE_MAX)` (≈32-64 KiB on x86, up to
+/// ~56 KiB on 64 KiB-page arm64). 1 MiB covers every plausible
+/// kernel-side frame with a 16× margin; anything beyond is a
+/// kernel bug or a protocol-extension nlink hasn't been
+/// updated for.
+pub(crate) const RECV_MAX_CAPACITY: usize = 1024 * 1024;
 
 impl AsRawFd for NetlinkSocket {
     fn as_raw_fd(&self) -> RawFd {
@@ -747,6 +832,95 @@ mod batch_tests {
         assert_eq!(bufs.msgs[0].msg_len, 0);
         assert_eq!(bufs.msgs[0].msg_hdr.msg_flags, 0);
         assert_eq!(bufs.msgs[5].msg_len, 0);
+    }
+}
+
+/// Plan 224 — recv_msg MSG_TRUNC handling tests. The constants
+/// and the auto-grow size math are testable without a live
+/// socket; the truncation behaviour itself is covered by the
+/// integration test in `crates/nlink/tests/integration/`.
+#[cfg(test)]
+mod recv_msg_truncate_tests {
+    use super::*;
+
+    #[test]
+    fn recv_msg_size_math() {
+        // Sanity-check the constants — sane values.
+        const _: () = assert!(RECV_INITIAL_CAPACITY <= RECV_MAX_CAPACITY);
+        assert_eq!(RECV_INITIAL_CAPACITY, 32 * 1024);
+        assert_eq!(RECV_MAX_CAPACITY, 1024 * 1024);
+    }
+
+    #[test]
+    fn next_multiple_of_4096_overshoots_at_cap_boundary() {
+        // `1 MiB + 1` rounds up past the cap so the auto-grow
+        // surfaces FrameTruncated instead of growing again.
+        let received = 1_048_577_usize; // 1 MiB + 1
+        let next = received.next_multiple_of(4096);
+        assert!(
+            next > RECV_MAX_CAPACITY,
+            "1 MiB + 1 should overshoot the cap"
+        );
+    }
+
+    #[test]
+    fn next_multiple_of_4096_doesnt_grow_in_fast_path() {
+        // A frame that fits the initial buffer must not trigger
+        // auto-grow — the `received <= capacity` fast path
+        // returns directly.
+        let capacity = RECV_INITIAL_CAPACITY;
+        let received = 8_000_usize;
+        assert!(received <= capacity);
+    }
+
+    #[test]
+    fn auto_grow_step_matches_actual_frame() {
+        // For a frame of size N where `INITIAL < N < MAX`, the
+        // next capacity is `N` rounded up to 4 KiB — enough to
+        // cover the same frame on retry.
+        let received = 60_000_usize; // ~60 KiB
+        let next = received.next_multiple_of(4096);
+        assert!(next >= received);
+        assert!(next <= RECV_MAX_CAPACITY);
+        assert_eq!(next % 4096, 0);
+    }
+
+    #[test]
+    fn b19_backpressure_predicate_and_constant() {
+        // Plan 232 B19 — the SEND_WOULDBLOCK_LIMIT constant is the
+        // threshold past which back-to-back WouldBlocks surface
+        // as Backpressure instead of looping into the 30s
+        // connection timeout. Verify the constant is sane.
+        assert_eq!(SEND_WOULDBLOCK_LIMIT, 32);
+
+        let err = Error::Backpressure {
+            send_buffer_full: true,
+        };
+        assert!(err.is_backpressure());
+        // Other errors must NOT match.
+        assert!(!Error::Timeout.is_backpressure());
+    }
+
+    #[test]
+    fn frame_truncated_predicate() {
+        // Construct the error variant directly and assert the
+        // predicate matches.
+        let err = Error::FrameTruncated {
+            received: 2_000_000,
+            buffer_size: RECV_MAX_CAPACITY,
+        };
+        assert!(err.is_truncated());
+        // Non-truncated errors must NOT match.
+        let other = Error::Timeout;
+        assert!(!other.is_truncated());
+        let other2 = Error::Truncated {
+            expected: 8,
+            actual: 4,
+        };
+        // The pre-existing parser-short-buffer `Truncated`
+        // variant has a different semantic; `is_truncated()`
+        // surfaces frame-truncation specifically.
+        assert!(!other2.is_truncated());
     }
 }
 

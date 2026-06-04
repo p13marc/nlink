@@ -81,11 +81,16 @@ fn try_walk_tlvs(bytes: &[u8]) -> Option<Vec<(u16, Vec<u8>)>> {
         if pos + 4 > bytes.len() {
             return None;
         }
-        let len = u16::from_le_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+        // Plan 223 — netlink attribute nla_len / nla_type are kernel
+        // native-endian (per `struct nlattr` in include/uapi/linux/netlink.h
+        // and nlink's canonical `NlAttr` in `attr.rs` using zerocopy
+        // native-endian). Was `from_le_bytes` — silently broken on
+        // BE platforms.
+        let len = u16::from_ne_bytes([bytes[pos], bytes[pos + 1]]) as usize;
         if len < 4 || pos + len > bytes.len() {
             return None;
         }
-        let raw_type = u16::from_le_bytes([bytes[pos + 2], bytes[pos + 3]]);
+        let raw_type = u16::from_ne_bytes([bytes[pos + 2], bytes[pos + 3]]);
         // Strip NLA_F_NESTED (0x8000) and NLA_F_NET_BYTEORDER (0x4000)
         // hint bits — these are parser hints, not stored state, so
         // the kernel and the lib can legitimately differ on whether
@@ -734,8 +739,9 @@ mod tests {
         let mut out = Vec::new();
         let mut pos = 0;
         while pos + 4 <= bytes.len() {
-            let len = u16::from_le_bytes([bytes[pos], bytes[pos + 1]]) as usize;
-            let ty = u16::from_le_bytes([bytes[pos + 2], bytes[pos + 3]]) & 0x3fff;
+            // Plan 223 — kernel-native endian.
+            let len = u16::from_ne_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+            let ty = u16::from_ne_bytes([bytes[pos + 2], bytes[pos + 3]]) & 0x3fff;
             if len < 4 || pos + len > bytes.len() {
                 break;
             }
@@ -801,6 +807,33 @@ mod tests {
         assert!(expr_has_attr(&body, "nat", NFTA_NAT_REG_ADDR_MAX));
         assert!(expr_has_attr(&body, "nat", NFTA_NAT_REG_PROTO_MAX));
         assert!(expr_has_attr(&body, "nat", NFTA_NAT_FLAGS));
+    }
+
+    /// Empty-NAT case (`NatExpr::snat(family)` with no addr, no port):
+    /// `nft_nat_dump` skips `NFTA_NAT_FLAGS` when `priv->flags == 0`,
+    /// so we mirror that — emitting `FLAGS=0` would reintroduce a
+    /// phantom diff for any rule constructed via the internal builders
+    /// without the fluent `Rule::snat_*` / `Rule::dnat_*` helpers.
+    #[test]
+    fn empty_nat_omits_flags() {
+        use super::super::super::{NFTA_NAT_FLAGS, NFTA_NAT_REG_ADDR_MAX, NFTA_NAT_REG_PROTO_MAX};
+        use super::super::super::expr::Expr;
+        use super::super::super::types::{Family, NatExpr, Rule};
+        let mut rule = Rule::new("n", "post");
+        rule.exprs.push(Expr::Nat(NatExpr::snat(Family::Ip)));
+        let body = lower_to_expression_bytes(&rule);
+        assert!(
+            !expr_has_attr(&body, "nat", NFTA_NAT_FLAGS),
+            "empty NAT must NOT emit NFTA_NAT_FLAGS (kernel dump skips it when flags==0)"
+        );
+        assert!(
+            !expr_has_attr(&body, "nat", NFTA_NAT_REG_ADDR_MAX),
+            "empty NAT must NOT emit addr-max register"
+        );
+        assert!(
+            !expr_has_attr(&body, "nat", NFTA_NAT_REG_PROTO_MAX),
+            "empty NAT must NOT emit proto-max register"
+        );
     }
 
     #[test]

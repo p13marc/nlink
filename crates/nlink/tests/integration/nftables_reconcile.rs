@@ -882,3 +882,42 @@ async fn snat_v6_addr_only_round_trips() -> nlink::Result<()> {
     })
     .await
 }
+
+/// Combine all three PR #10 fixes in one rule: a `Family::Inet`
+/// postrouting chain with `chain_type=nat`, a prefix-masked source
+/// match (`match_saddr_v6(.., 64)` — exercises the `bitwise OP`
+/// emit) preceded by the `meta nfproto == ipv6` guard, then `snat_v6`
+/// to a single address (exercises NAT MAX-regs + FLAGS=MAP_IPS).
+/// All three fixes are load-bearing for the second `diff` to be empty.
+#[tokio::test]
+async fn inet_snat_with_prefix_source_round_trips() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_nat");
+    with_timeout(async {
+        use std::net::Ipv6Addr;
+        let ns = TestNamespace::new("inet-snat-prefix-src")?;
+        let nft = nft_in_ns(&ns)?;
+        let src_prefix: Ipv6Addr = "fd30:beef::".parse().unwrap();
+        let target: Ipv6Addr = "fd30::1".parse().unwrap();
+        let cfg = NftablesConfig::new().table("n", Family::Inet, |t| {
+            t.chain("post", |c| {
+                c.hook(Hook::Postrouting)
+                    .priority(Priority::SrcNat)
+                    .chain_type(ChainType::Nat)
+            })
+            .rule_keyed("post", "snat-prefix", |r| {
+                r.match_saddr_v6(src_prefix, 64).snat_v6(target, None)
+            })
+        });
+        cfg.diff(&nft).await?.apply(&nft).await?;
+        let again = cfg.diff(&nft).await?;
+        assert!(
+            again.is_empty(),
+            "inet-chain prefix-masked-source SNAT must round-trip — \
+             requires all three fixes (nfproto guard + bitwise OP + \
+             NAT MAX/FLAGS); re-diff was non-empty: {again}"
+        );
+        Ok(())
+    })
+    .await
+}

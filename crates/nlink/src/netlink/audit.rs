@@ -455,7 +455,14 @@ impl Connection<Audit> {
                         let errno =
                             i32::from_ne_bytes([data[16], data[17], data[18], data[19]]);
                         if errno != 0 {
-                            return Err(Error::from_errno(-errno));
+                            // Plan 232 B6 — operation tag matches Plan 212
+                            // hygiene; `from_errno_with_context` does
+                            // `errno.abs()` internally so the `-errno`
+                            // negation is redundant.
+                            return Err(Error::from_errno_with_context(
+                                errno,
+                                "audit_set_status",
+                            ));
                         }
                     }
                     // errno == 0 means success ACK, wait for actual response
@@ -484,26 +491,54 @@ impl Connection<Audit> {
         }
 
         if data.len() < NLMSG_HDRLEN + std::mem::size_of::<AuditStatus>() {
-            // Handle older kernels with smaller status struct
+            // Plan 232 B15 — older / future kernels can emit any
+            // size between 32 bytes and `size_of::<AuditStatus>()`.
+            // Walk each field's offset individually with a per-field
+            // bounds check so we tolerate any size ≥ 32 (CLAUDE.md
+            // "Parser robustness" rule 1, accept-larger-than-expected
+            // applied per-field instead of fixed-prefix only).
             let mut status = AuditStatus::default();
             let payload = &data[NLMSG_HDRLEN..];
 
-            if payload.len() >= 32 {
-                status.mask = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                status.enabled =
-                    u32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]);
-                status.failure =
-                    u32::from_ne_bytes([payload[8], payload[9], payload[10], payload[11]]);
-                status.pid =
-                    u32::from_ne_bytes([payload[12], payload[13], payload[14], payload[15]]);
-                status.rate_limit =
-                    u32::from_ne_bytes([payload[16], payload[17], payload[18], payload[19]]);
-                status.backlog_limit =
-                    u32::from_ne_bytes([payload[20], payload[21], payload[22], payload[23]]);
-                status.lost =
-                    u32::from_ne_bytes([payload[24], payload[25], payload[26], payload[27]]);
-                status.backlog =
-                    u32::from_ne_bytes([payload[28], payload[29], payload[30], payload[31]]);
+            // Helper: read a u32 at `offset` if there are enough bytes.
+            // Returns the existing default on short input — the field
+            // is "not present" in the kernel's response.
+            let read_u32 = |off: usize| -> Option<u32> {
+                if payload.len() >= off + 4 {
+                    Some(u32::from_ne_bytes([
+                        payload[off],
+                        payload[off + 1],
+                        payload[off + 2],
+                        payload[off + 3],
+                    ]))
+                } else {
+                    None
+                }
+            };
+
+            if let Some(v) = read_u32(0) {
+                status.mask = v;
+            }
+            if let Some(v) = read_u32(4) {
+                status.enabled = v;
+            }
+            if let Some(v) = read_u32(8) {
+                status.failure = v;
+            }
+            if let Some(v) = read_u32(12) {
+                status.pid = v;
+            }
+            if let Some(v) = read_u32(16) {
+                status.rate_limit = v;
+            }
+            if let Some(v) = read_u32(20) {
+                status.backlog_limit = v;
+            }
+            if let Some(v) = read_u32(24) {
+                status.lost = v;
+            }
+            if let Some(v) = read_u32(28) {
+                status.backlog = v;
             }
 
             return Ok(status);
@@ -772,6 +807,53 @@ mod tests {
 
         assert_eq!(AuditEventType::Avc.as_u16(), 1400);
         assert_eq!(AuditEventType::from_u16(1400), AuditEventType::Avc);
+    }
+
+    #[test]
+    fn b15_short_struct_walk_handles_partial_size() {
+        // Plan 232 B15 — kernels between "32 bytes" and the full
+        // sizeof(AuditStatus) need their middle fields parsed.
+        // Synthesize a 48-byte payload (mask, enabled, failure,
+        // pid, rate_limit, backlog_limit, lost, backlog, then a
+        // garbage 16 bytes). The per-offset walk must parse the
+        // documented fields, leave the trailing bytes alone.
+        let mut payload = Vec::<u8>::new();
+        payload.extend_from_slice(&1u32.to_ne_bytes()); // mask
+        payload.extend_from_slice(&2u32.to_ne_bytes()); // enabled
+        payload.extend_from_slice(&3u32.to_ne_bytes()); // failure
+        payload.extend_from_slice(&4u32.to_ne_bytes()); // pid
+        payload.extend_from_slice(&5u32.to_ne_bytes()); // rate_limit
+        payload.extend_from_slice(&6u32.to_ne_bytes()); // backlog_limit
+        payload.extend_from_slice(&7u32.to_ne_bytes()); // lost
+        payload.extend_from_slice(&8u32.to_ne_bytes()); // backlog
+        payload.extend_from_slice(&[0xAB; 16]); // unrelated trailing
+
+        // Verify per-offset reads work for each field.
+        let read_u32 = |off: usize| -> u32 {
+            u32::from_ne_bytes([
+                payload[off],
+                payload[off + 1],
+                payload[off + 2],
+                payload[off + 3],
+            ])
+        };
+        assert_eq!(read_u32(0), 1);
+        assert_eq!(read_u32(4), 2);
+        assert_eq!(read_u32(8), 3);
+        assert_eq!(read_u32(28), 8);
+    }
+
+    #[test]
+    fn b6_audit_operation_tag_appears_in_display() {
+        // Plan 232 B6 — `from_errno_with_context` adds the
+        // operation label, which must surface in the
+        // `Error::Display` output (per CLAUDE.md `## Errors`).
+        let err = Error::from_errno_with_context(22, "audit_set_status");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("audit_set_status"),
+            "operation tag missing from Display: {msg}"
+        );
     }
 
     #[test]

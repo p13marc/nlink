@@ -29,12 +29,17 @@
 //! re-apply a no-op, omit `private_key` from the config after the
 //! first apply. Peer `preshared_key` is written the same way.
 //!
-//! For callers that read device state directly: the kernel returns
-//! `WGDEVICE_A_PRIVATE_KEY` on `GET_DEVICE` to a caller holding
-//! `CAP_NET_ADMIN` in the device's netns (as `wg showconf` does),
-//! and omits it otherwise — so [`WgDevice::private_key`] is set for
-//! privileged reads and `None` for unprivileged ones. Peer
-//! `preshared_key` is never returned to any caller.
+//! For callers that read device state directly: `WG_CMD_GET_DEVICE`
+//! is gated behind `CAP_NET_ADMIN` in the device's netns at the
+//! command level (`uns-admin-perm` in the kernel's netlink spec).
+//! Privileged callers get the device including `WGDEVICE_A_PRIVATE_KEY`
+//! (as `wg showconf` does); unprivileged callers hit the gate and
+//! see `Error::Kernel { errno: EPERM }` on the whole call — there's
+//! no partial-reply path where `WgDevice::private_key` comes back as
+//! `None` due to insufficient privilege. [`WgDevice::private_key`]
+//! is `None` only when the device has no key configured (i.e. before
+//! any `set_device(... .private_key(...))`). Peer `preshared_key` is
+//! never returned to any caller — write-only.
 //!
 //! [`WgDevice::private_key`]: super::types::WgDevice::private_key
 
@@ -292,11 +297,21 @@ impl WireguardConfig {
             // Apply device-level changes (private_key,
             // listen_port, fwmark). All optional — only
             // fields that were declared get written.
+            // Plan 232 B11 — surface as a typed error instead of
+            // panicking. Invariant should hold because `diff` is
+            // computed against `self`; if a future refactor lets
+            // `self` mutate between the diff and apply, this
+            // path returns a clean error instead of crashing the
+            // caller's task.
             let declared = self
                 .devices
                 .iter()
                 .find(|d| &d.ifname == ifname)
-                .expect("declared device must exist for entry in diff");
+                .ok_or_else(|| {
+                    crate::netlink::Error::InvalidMessage(format!(
+                        "wireguard apply: diff references undeclared device `{ifname}`"
+                    ))
+                })?;
 
             if changes.has_device_level_change() {
                 conn.set_device_by_name(ifname, |mut b| {
@@ -322,11 +337,16 @@ impl WireguardConfig {
             }
 
             for (pk, peer_changes) in &changes.peers_to_modify {
+                // Plan 232 B11 — same shape as the device lookup above.
                 let declared_peer = declared
                     .peers
                     .iter()
                     .find(|p| &p.public_key == pk)
-                    .expect("declared peer must exist for diff entry");
+                    .ok_or_else(|| {
+                        crate::netlink::Error::InvalidMessage(format!(
+                            "wireguard apply: diff references undeclared peer for `{ifname}`"
+                        ))
+                    })?;
                 conn.set_peer_by_name(ifname, *pk, |b| {
                     declared_peer.apply_changes_to_builder(b, peer_changes)
                 })

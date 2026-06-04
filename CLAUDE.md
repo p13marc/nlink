@@ -587,17 +587,15 @@ run it locally before merging a new example.
 
 ## Active work
 
-**0.18.0 shipped 2026-05-29** (`v0.18.0` tagged; both crates on
-crates.io). Headline additions in `CHANGELOG.md ## [0.18.0]`
-+ `docs/migration_guide/0.17.0-to-0.18.0.md`.
+**0.19.0 shipped 2026-05-31** (`v0.19.0` tagged; both crates on
+crates.io). Headline narrative in `CHANGELOG.md ## [0.19.0]`
++ `docs/migration_guide/0.18.0-to-0.19.0.md`.
 
-The **0.19 cycle is complete** on the `0.19` branch (do not push
-to master); workspace at 0.19.0 awaiting maintainer cut via
-`scripts/cut-release.sh 0.19.0`. The cycle's narrative lives in
-[`CHANGELOG.md ## [Unreleased]`](CHANGELOG.md) (will become
-`## [0.19.0]` on cut) and the migration walkthrough in
-[`docs/migration_guide/0.18.0-to-0.19.0.md`](docs/migration_guide/0.18.0-to-0.19.0.md).
-Day-to-day status tracker is [`plans/INDEX.md`](plans/INDEX.md).
+The **0.20 cycle is open** on the `0.20` branch (do not push to
+master). No plans written yet; seed topics queued in
+[`plans/INDEX.md ## 0.20 cycle seed`](plans/INDEX.md). New work
+lands in `CHANGELOG.md ## [Unreleased]` and is promoted to
+`## [0.20.0]` at cut time.
 
 Per-release upgrade guides:
 [`docs/migration_guide/`](docs/migration_guide/README.md) — write

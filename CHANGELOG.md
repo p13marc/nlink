@@ -4,6 +4,114 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-06-04
+
+Patch release. **Additive only** — no breaking changes; `cargo-semver-checks`
+clean against `v0.20.0`. Closes the remaining audit-derived plans the
+0.20.0 emergency hotfix had to defer.
+
+### Added
+
+- **Plan 222.2-4 — Sizeof gate broader coverage.** Extended the
+  `sys_sizeof.rs` constant-value gate (shipped in 0.20.0 with XFRM + nft
+  CT phase) to cover TC HTB / flower keys, IFLA / RTA / ctnetlink, and
+  DPLL / devlink / ethtool. Each module pins ~10-20 most-used constants
+  against kernel UAPI v6.13 reference values.
+- **Plan 223 — Big-endian wire-parsing sweep.** Three `from_le_bytes`
+  sites that 0.19 N3 missed (`netfilter.rs`, `tc/action.rs`,
+  `nftables/config/diff.rs`) corrected to `from_ne_bytes`. New
+  `scripts/audit-bytes-le.sh` CI gate fails the build if `from_le_bytes`
+  reappears in `crates/nlink/src/netlink/`. New `cargo check
+  --target s390x-unknown-linux-gnu` CI job locks the BE-compile
+  contract.
+- **Plan 224 — `recv_msg` MSG_TRUNC handling + auto-grow.** `recv_msg`
+  passes `MSG_TRUNC`, detects kernel-side truncation against the buffer
+  size, auto-grows up to a 1 MiB cap and retries once, then escalates to
+  a new `Error::Truncated { received, buffer_size }` variant with
+  `is_truncated()` predicate. New `Error::Backpressure` variant for
+  `EWOULDBLOCK` retry exhaustion (B19).
+- **Plan 225 — WireGuard `parse_timespec` robustness.** Validates
+  `secs >= 0` + `0 <= nanos < 1e9` before constructing `Duration`;
+  uses `SystemTime::checked_add` to handle far-future overflow.
+  Returns `None` on malformed input instead of panicking. Closes
+  AUDIT_BUGS B5 (verified by reviewer repro).
+- **Plan 226 — DPLL `sint` codegen runtime.** Added `nlink-macros`
+  runtime support for the kernel's variable-length signed-integer wire
+  format (`nla_put_sint`: 4 bytes if value fits in s32, 8 bytes
+  otherwise). New `DpllPin::fractional_frequency_offset_ppt_i64:
+  Option<i64>` field holds the full-width value alongside the existing
+  (now deprecated) `Option<i32>` field. New `ffo_ppt_i64()` accessor.
+- **Plan 227 — Typed `AddressFamily` newtype.** New
+  `nlink::AddressFamily(u8)` with `v4()` / `v6()` / `bridge()` / etc.
+  constructors. New `*_typed` methods on `Connection<Route>`
+  (`flush_rules_typed`, `get_rules_typed`,
+  `del_rule_by_priority_typed`) take `AddressFamily`. The raw-`u8`
+  originals are deprecated (removal 0.21).
+- **Plan 228 — Typed `Percent` on `QdiscBuilder::loss`.** New
+  `loss_pct(Percent)` setter validates / clamps; original `loss(f64)`
+  deprecated (removal 0.21). Mirrors the 0.13 typed-units rollout —
+  closes the units-confusion bug class for the declarative path.
+  Scope limited to `loss`; the other 5 netem setters
+  (`duplicate` / `corrupt` / `reorder` / `loss_correlation` /
+  `delay_correlation`) don't exist on the declarative `QdiscBuilder`
+  (imperative `NetemConfig` already takes `Percent`); deferred to 0.21.
+- **Plan 230 — Typed `ChainName` + `Verdict::JumpTo` / `Verdict::GotoTo`
+  variants.** New `nftables::ChainName(String)` newtype validates
+  non-empty / no-interior-NUL / `<= NFT_NAME_MAXLEN-1`. New
+  `Verdict::JumpTo(ChainName)` and `Verdict::GotoTo(ChainName)` variants
+  ride the existing `#[non_exhaustive]` enum. The `Verdict::Jump(String)`
+  / `Verdict::Goto(String)` originals are deprecated (removal 0.21).
+- **Plan 231 — `RuleMessage` per-field accessors.** 19 new accessor
+  methods alongside the existing `pub` fields. `family_typed()` returns
+  the new `AddressFamily` from Plan 227. Field visibility unchanged —
+  field-to-pub(crate) demotion deferred to 0.21 alongside the
+  audit-script gate.
+- **Plan 232 — Bug-hunt LOW-tier batch.** Closes B6 (`Error::from_errno`
+  redundancy), B9 (`send_dump_inner` `msg_start` underflow), B10
+  (`parse_string_from_bytes` UTF-8 swallowing — now logs at WARN), B11
+  (`WireguardConfig::apply` `.expect` panic path), B15
+  (`audit.rs::AuditStatus` size check uses `>=`), B18 (`nlmsg_align`
+  overflow on > 2 GiB; new `nlmsg_align_checked`), B19
+  (`socket::send` `EWOULDBLOCK` retry — new `Error::Backpressure`).
+  B13 / B14 / B17 / B20 deferred or judged non-bugs; documented
+  inline.
+- **Plan 233 — `DumpStream::with_skip_malformed` opt-in.** Default
+  behaviour stays fuse-on-malformed (correctness > liveness for snapshot
+  dumps). New `.with_skip_malformed(true)` setter switches to
+  flatten-mode with WARN-level `tracing` per skip. Per-stream-API
+  audit table + dump-vs-event policy documented inline.
+- **Plan 237 — Audit-script self-test pattern.** Four new
+  `scripts/test-audit-*.sh` self-tests verify the failure paths of the
+  audit-by-grep CI scripts (recv-loop, sysfs-in-lib, example-registration,
+  example-feature-gating). Each test injects a deliberately-broken
+  fixture and asserts non-zero exit + message match. Closes the
+  silent-broken-script class.
+
+### Deprecated (removal: 0.21.0)
+
+- `DpllPin::fractional_frequency_offset_ppt: Option<i32>` — silently
+  truncates kernel-supplied FFO values that don't fit in s32. Use the
+  new `_i64` field or `ffo_ppt_i64()` accessor.
+- `Connection::<Route>::flush_rules(family: u8)` — use
+  `flush_rules_typed(AddressFamily)`. Same for `get_rules_for_family`
+  and `del_rule_by_priority` (raw-`u8` variants).
+- `QdiscBuilder::loss(f64)` — use `loss_pct(Percent)`. Closes the
+  units-confusion bug class for the declarative netem path.
+- `Verdict::Jump(String)` and `Verdict::Goto(String)` — use
+  `Verdict::JumpTo(ChainName::new(...)?)` / `Verdict::GotoTo(...)`
+  which validate the chain name and reject interior NULs.
+
+### Deferred to 0.21.0
+
+- Plan 229 (doc-drift sweep) — to be done in 0.21 after the
+  typed-API surface stabilises.
+- Plan 234 (NlRouter dispatcher), Plan 235 (GENL command unification),
+  Plan 236 (adversarial-input rubric — meta-plan with no code), Plan
+  197 (declarative ovpn) — discretionary plans, slotted into 0.21
+  cycle.
+- Various per-plan extensions documented inline in commit messages and
+  the `_changelog_batch_*.md` stubs preserved in git history.
+
 ## [0.20.0] - 2026-06-04
 
 **Emergency release with breaking wire-format corrections.**

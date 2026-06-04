@@ -502,7 +502,8 @@ impl Connection<SockDiag> {
                                 data[offset + 19],
                             ]);
                             if errno != 0 {
-                                return Err(super::error::Error::from_errno(-errno));
+                                // Plan 232 B6 — operation tag matches Plan 212 hygiene.
+                                return Err(super::error::Error::from_errno_with_context(errno, "sock_destroy"));
                             }
                         }
                         SOCK_DIAG_BY_FAMILY | TCPDIAG_GETSOCK => {
@@ -605,7 +606,8 @@ impl Connection<SockDiag> {
                                 data[offset + 19],
                             ]);
                             if errno != 0 {
-                                return Err(super::error::Error::from_errno(-errno));
+                                // Plan 232 B6 — operation tag matches Plan 212 hygiene.
+                                return Err(super::error::Error::from_errno_with_context(errno, "sock_destroy"));
                             }
                         }
                         SOCK_DIAG_BY_FAMILY => {
@@ -716,7 +718,8 @@ impl Connection<SockDiag> {
                                 data[offset + 19],
                             ]);
                             if errno != 0 {
-                                return Err(super::error::Error::from_errno(-errno));
+                                // Plan 232 B6 — operation tag matches Plan 212 hygiene.
+                                return Err(super::error::Error::from_errno_with_context(errno, "sock_destroy"));
                             }
                         }
                         SOCK_DIAG_BY_FAMILY => {

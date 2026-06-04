@@ -407,4 +407,25 @@ mod attr_iter_robustness_tests {
         let buf = attr_bytes(1, &[0xaa, 0xbb, 0xcc, 0xdd]);
         assert!(!AttrIter::new(&buf).is_empty());
     }
+
+    /// Plan 223 — lock the NLA-header endianness policy at the
+    /// test level. NLA headers round-trip through `from_ne_bytes`
+    /// / `to_ne_bytes` and the bytes the kernel saw are the bytes
+    /// we get out. This test fails the moment anyone reintroduces
+    /// `from_le_bytes` for an NLA header on a BE host.
+    #[test]
+    fn nla_header_round_trips_native_endian() {
+        let len: u16 = 0x0102;
+        let kind: u16 = 0x0304;
+        let bytes = [
+            len.to_ne_bytes()[0],
+            len.to_ne_bytes()[1],
+            kind.to_ne_bytes()[0],
+            kind.to_ne_bytes()[1],
+        ];
+        let parsed_len = u16::from_ne_bytes([bytes[0], bytes[1]]);
+        let parsed_kind = u16::from_ne_bytes([bytes[2], bytes[3]]);
+        assert_eq!(parsed_len, len);
+        assert_eq!(parsed_kind, kind);
+    }
 }

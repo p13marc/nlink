@@ -11,9 +11,32 @@ use super::{
 pub const NLMSG_ALIGNTO: usize = 4;
 
 /// Align a length to NLMSG_ALIGNTO boundary.
+///
+/// Plan 232 B18 — `len + 3` debug-panicked on `usize::MAX`-ish
+/// inputs. The kernel can't emit a >`u32::MAX` netlink frame so
+/// the panic is unreachable in production, but a misbehaving
+/// builder appending to a 2 GiB+ `Vec` could trip it. Switched to
+/// `saturating_add` so overflow returns `usize::MAX` (which then
+/// trips downstream `<= data.len()` guards naturally) instead
+/// of debug-panicking.
 #[inline]
 pub const fn nlmsg_align(len: usize) -> usize {
-    (len + NLMSG_ALIGNTO - 1) & !(NLMSG_ALIGNTO - 1)
+    let bumped = len.saturating_add(NLMSG_ALIGNTO - 1);
+    bumped & !(NLMSG_ALIGNTO - 1)
+}
+
+/// Checked variant of [`nlmsg_align`]. Returns `None` if the
+/// alignment would overflow.
+///
+/// Plan 232 B18 — additive helper for callers that want to
+/// surface the overflow as an error rather than relying on the
+/// saturating fallback.
+#[inline]
+pub const fn nlmsg_align_checked(len: usize) -> Option<usize> {
+    match len.checked_add(NLMSG_ALIGNTO - 1) {
+        Some(bumped) => Some(bumped & !(NLMSG_ALIGNTO - 1)),
+        None => None,
+    }
 }
 
 /// Size of the netlink message header.
@@ -530,5 +553,35 @@ mod dump_intr_tests {
         assert!(h.is_dump_interrupted());
         assert!(!h.is_done());
         assert!(h.is_multi());
+    }
+}
+
+#[cfg(test)]
+mod nlmsg_align_overflow_tests {
+    use super::*;
+
+    /// Plan 232 B18 — pre-fix `nlmsg_align(usize::MAX)`
+    /// debug-panicked on the `len + 3` overflow. Post-fix it
+    /// saturates and `nlmsg_align_checked` returns None.
+    #[test]
+    fn b18_nlmsg_align_saturates_on_overflow() {
+        // Pre-fix this would panic in debug; post-fix it
+        // saturates to usize::MAX (which downstream
+        // `<= data.len()` checks will reject naturally).
+        let aligned = nlmsg_align(usize::MAX);
+        // The exact value is `usize::MAX & !3`; verify no
+        // panic and the value is at least `usize::MAX - 3`.
+        assert!(aligned >= usize::MAX - 3);
+    }
+
+    #[test]
+    fn b18_nlmsg_align_checked_returns_none_on_overflow() {
+        assert_eq!(nlmsg_align_checked(usize::MAX), None);
+        assert_eq!(nlmsg_align_checked(usize::MAX - 2), None);
+        // A "valid" small length still aligns correctly.
+        assert_eq!(nlmsg_align_checked(0), Some(0));
+        assert_eq!(nlmsg_align_checked(1), Some(4));
+        assert_eq!(nlmsg_align_checked(5), Some(8));
+        assert_eq!(nlmsg_align_checked(8), Some(8));
     }
 }

@@ -177,9 +177,17 @@ pub fn parse_cstring(input: &mut &[u8]) -> PResult<String> {
 }
 
 /// Parse a string from a fixed-size buffer (null-terminated).
+///
+/// Plan 232 B10 — pre-fix used `from_utf8(...).unwrap_or("")` which
+/// silently truncated to the empty string on any invalid UTF-8.
+/// Consumers couldn't distinguish "kernel emitted empty name" from
+/// "kernel emitted bytes nlink couldn't decode". The kernel allows
+/// arbitrary bytes in IFLA_IFNAME (up to IFNAMSIZ); lossy decoding
+/// preserves every observable byte using U+FFFD for invalid
+/// sequences — strictly more information.
 pub fn parse_string_from_bytes(data: &[u8]) -> String {
     let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
-    std::str::from_utf8(&data[..end]).unwrap_or("").to_string()
+    String::from_utf8_lossy(&data[..end]).into_owned()
 }
 
 /// Parse an IPv4 address (4 bytes).
@@ -515,5 +523,26 @@ mod tests {
         let bytes = value.to_bytes().unwrap();
         let parsed = String::from_bytes(&bytes).unwrap();
         assert_eq!(value, parsed);
+    }
+
+    /// Plan 232 B10 — invalid UTF-8 bytes now surface as U+FFFD
+    /// instead of truncating the whole string to "".
+    #[test]
+    fn b10_parse_string_from_bytes_uses_lossy_decoding() {
+        // `\xff\xfe` is invalid UTF-8 — should produce U+FFFD
+        // chars, sandwiched between valid prefix/suffix.
+        let parsed = parse_string_from_bytes(b"foo\xff\xfebar\0extra");
+        assert!(parsed.starts_with("foo"));
+        assert!(parsed.ends_with("bar"));
+        assert!(
+            parsed.contains(char::REPLACEMENT_CHARACTER),
+            "expected U+FFFD in lossy decode: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn b10_parse_string_from_bytes_handles_no_invalid_utf8() {
+        let parsed = parse_string_from_bytes(b"eth0\0extra");
+        assert_eq!(parsed, "eth0");
     }
 }

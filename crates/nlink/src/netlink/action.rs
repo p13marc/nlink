@@ -3538,8 +3538,13 @@ fn next_nla(input: &[u8]) -> Option<(u16, &[u8], &[u8])> {
     if input.len() < 4 {
         return None;
     }
-    let len = u16::from_le_bytes([input[0], input[1]]) as usize;
-    let attr_type = u16::from_le_bytes([input[2], input[3]]) & NLA_TYPE_MASK;
+    // Plan 223 — netlink attribute nla_len / nla_type are kernel
+    // native-endian (per `struct nlattr` in include/uapi/linux/netlink.h
+    // and nlink's canonical `NlAttr` in `attr.rs` using zerocopy
+    // native-endian). Was `from_le_bytes` — silently broken on
+    // BE platforms.
+    let len = u16::from_ne_bytes([input[0], input[1]]) as usize;
+    let attr_type = u16::from_ne_bytes([input[2], input[3]]) & NLA_TYPE_MASK;
     if len < 4 || len > input.len() {
         return None;
     }
@@ -3657,7 +3662,8 @@ fn parse_one_action(slot: &[u8]) -> Option<ActionMessage> {
                 kind = Some(String::from_utf8_lossy(bytes).into_owned());
             }
             TCA_ACT_INDEX if payload.len() >= 4 => {
-                index = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                // Plan 223 — TCA_ACT_INDEX payload is kernel native-endian.
+                index = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
             }
             TCA_ACT_OPTIONS => {
                 options_raw = payload.to_vec();
@@ -3669,7 +3675,9 @@ fn parse_one_action(slot: &[u8]) -> Option<ActionMessage> {
                     && let Some((_kind_attr, parms_payload, _)) = next_nla(payload)
                     && parms_payload.len() >= 4
                 {
-                    index = u32::from_le_bytes([
+                    // Plan 223 — kernel-native endian (see comment on
+                    // next_nla above).
+                    index = u32::from_ne_bytes([
                         parms_payload[0],
                         parms_payload[1],
                         parms_payload[2],
@@ -4071,7 +4079,8 @@ mod tests {
         assert!(parsed[0].options_raw.is_empty(), "del has no options");
 
         // nlmsg_type at offset 4..6 must be RTM_DELACTION.
-        let nlmsg_type = u16::from_le_bytes([frame[4], frame[5]]);
+        // Plan 223 — kernel-native endian.
+        let nlmsg_type = u16::from_ne_bytes([frame[4], frame[5]]);
         assert_eq!(nlmsg_type, NlMsgType::RTM_DELACTION);
     }
 
@@ -4087,9 +4096,10 @@ mod tests {
         b.nest_end(tab);
         let frame = b.finish();
 
-        let nlmsg_type = u16::from_le_bytes([frame[4], frame[5]]);
+        // Plan 223 — kernel-native endian.
+        let nlmsg_type = u16::from_ne_bytes([frame[4], frame[5]]);
         assert_eq!(nlmsg_type, NlMsgType::RTM_GETACTION);
-        let flags = u16::from_le_bytes([frame[6], frame[7]]);
+        let flags = u16::from_ne_bytes([frame[6], frame[7]]);
         // Single-result GET: REQUEST only, no DUMP, no ACK.
         const NLM_F_DUMP: u16 = 0x300;
         assert_eq!(flags & NLM_F_DUMP, 0);

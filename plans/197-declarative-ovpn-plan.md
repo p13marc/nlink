@@ -1,13 +1,27 @@
 ---
 to: nlink maintainers
-from: 0.19 second consolidation-pass + ovpn GENL research agent (2026-05-30)
+from: 0.19 second consolidation-pass + ovpn GENL research agent (2026-05-30); re-targeted to 0.20 at cycle open (2026-06-04)
 subject: ovpn GENL family — full imperative + declarative `OvpnConfig` (kernel 6.16+)
-status: queued for 0.19 — medium (substantial; new GENL family + declarative wrapper)
-target version: 0.19.0
-parent: (none — was previously deferred to 0.20)
-source: kernel 6.16 ovpn netlink spec + 0.19 research agent on OpenVPN 2.7 DCO + ovpn-dco-cli
-created: 2026-05-30
+status: discretionary — carried from 0.19 seed; ships only if 0.20 cycle budget remains after Plans 221-233
+target version: 0.20.0 (discretionary)
+parent: [Plan 220 master](220-0.20-master-plan.md) §3.5
+source: kernel 6.16 ovpn netlink spec (`Documentation/netlink/specs/ovpn.yaml` — 8 commands + 3 notifications) + 0.19 research agent on OpenVPN 2.7 DCO + ovpn-dco-cli
+created: 2026-05-30 (updated 2026-06-04 for 0.20 cycle absorption)
 ---
+
+> **Cycle-status note (2026-06-04)**: This plan was originally
+> queued for 0.19 under the "everything-in-0.19" directive
+> (2026-05-30). The 0.19 cycle cut without it (the audit-derived
+> hotfix took priority). It carries to 0.20 as a discretionary
+> plan per [Plan 220 master](220-0.20-master-plan.md) §3.5 —
+> ship only if 221-233 finish with cycle budget remaining,
+> otherwise slide to 0.21.
+
+> **Command-count correction**: The original framing below claims
+> "11 GENL commands". The upstream `Documentation/netlink/specs/ovpn.yaml`
+> actually defines **8 GENL commands** + **3 multicast
+> notifications**. The plan body uses the 11-command count in
+> several places; treat as 8+3 when sizing the work.
 
 # Plan 197 — Declarative ovpn (OpenVPN data-channel offload)
 

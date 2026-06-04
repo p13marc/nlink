@@ -1,8 +1,10 @@
 //! nftables data types: Family, Hook, Chain, Rule, Table, etc.
 
+use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use super::expr::Expr;
+use crate::netlink::error::{Error, Result};
 
 /// nftables address family.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -203,7 +205,94 @@ impl Policy {
     }
 }
 
+/// A validated nftables chain name.
+///
+/// Chain identity in nftables is a `(family, table_name, chain_name)`
+/// triple, all case-sensitive. The kernel enforces
+/// `NFT_NAME_MAXLEN = 256` (per
+/// `include/uapi/linux/netfilter/nf_tables.h`) and rejects interior
+/// NULs (the attribute is a NUL-terminated C string at the wire layer).
+///
+/// Construction validates:
+/// - Non-empty.
+/// - No interior NUL bytes (`\0`).
+/// - At most 255 bytes (one byte reserved for the NUL terminator).
+///
+/// Round-trip note: `ChainName` is `Display` for natural use in
+/// log messages and `AsRef<str>` so it slots into existing
+/// `&str`-shaped APIs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChainName(String);
+
+impl ChainName {
+    /// Maximum chain-name length on the wire, in bytes.
+    /// Matches kernel `NFT_NAME_MAXLEN - 1` (the kernel slot is
+    /// 256 bytes including the trailing NUL).
+    pub const MAX_LEN: usize = 255;
+
+    /// Construct a chain name, validating against the kernel contract.
+    pub fn new(s: impl Into<String>) -> Result<Self> {
+        let s = s.into();
+        if s.is_empty() {
+            return Err(Error::InvalidMessage(
+                "ChainName: empty chain names are rejected by nftables".into(),
+            ));
+        }
+        if s.len() > Self::MAX_LEN {
+            return Err(Error::InvalidMessage(format!(
+                "ChainName: {} bytes exceeds NFT_NAME_MAXLEN-1 ({} bytes)",
+                s.len(),
+                Self::MAX_LEN,
+            )));
+        }
+        if s.contains('\0') {
+            return Err(Error::InvalidMessage(
+                "ChainName: interior NUL bytes are rejected — nftables wire format is a \
+                 NUL-terminated C string"
+                    .into(),
+            ));
+        }
+        Ok(Self(s))
+    }
+
+    /// View as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for ChainName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ChainName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<&str> for ChainName {
+    type Error = Error;
+    fn try_from(s: &str) -> Result<Self> {
+        Self::new(s)
+    }
+}
+
+impl TryFrom<String> for ChainName {
+    type Error = Error;
+    fn try_from(s: String) -> Result<Self> {
+        Self::new(s)
+    }
+}
+
 /// Rule verdict.
+///
+/// `#[non_exhaustive]` so new variants can be added additively.
+/// The 0.20.1 cycle deprecates [`Verdict::Jump`] and [`Verdict::Goto`]
+/// in favour of [`Verdict::JumpTo`] / [`Verdict::GotoTo`], which carry
+/// a validated [`ChainName`] instead of a bare `String`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Verdict {
@@ -211,8 +300,83 @@ pub enum Verdict {
     Drop,
     Continue,
     Return,
+    /// Jump to a named chain (push-and-continue).
+    ///
+    /// **Deprecated** in 0.20.1: use [`Verdict::JumpTo`] with
+    /// [`ChainName::new`]. The bare-`String` form lets interior NULs
+    /// and overlong names through to a kernel rejection at apply time;
+    /// the typed sibling surfaces those at construction.
+    #[deprecated(
+        since = "0.20.1",
+        note = "use Verdict::JumpTo(ChainName::new(...)?) — validates the chain name \
+                and rejects interior NULs"
+    )]
     Jump(String),
+    /// Goto a named chain (tail-call).
+    ///
+    /// **Deprecated** in 0.20.1: use [`Verdict::GotoTo`] with
+    /// [`ChainName::new`].
+    #[deprecated(
+        since = "0.20.1",
+        note = "use Verdict::GotoTo(ChainName::new(...)?) — validates the chain name \
+                and rejects interior NULs"
+    )]
     Goto(String),
+    /// Jump to a named chain (push-and-continue). Validated against
+    /// the kernel chain-name contract at construction.
+    JumpTo(ChainName),
+    /// Goto a named chain (tail-call). Validated against the kernel
+    /// chain-name contract at construction.
+    GotoTo(ChainName),
+}
+
+#[cfg(test)]
+mod chainname_tests {
+    use super::*;
+
+    #[test]
+    fn chainname_accepts_short_ascii() {
+        assert!(ChainName::new("foo").is_ok());
+    }
+
+    #[test]
+    fn chainname_rejects_empty() {
+        assert!(ChainName::new("").is_err());
+    }
+
+    #[test]
+    fn chainname_rejects_interior_nul() {
+        assert!(ChainName::new("foo\0bar").is_err());
+    }
+
+    #[test]
+    fn chainname_rejects_overlong() {
+        let s = "a".repeat(256); // 256 bytes > 255 max
+        assert!(ChainName::new(s).is_err());
+    }
+
+    #[test]
+    fn chainname_accepts_at_max_len() {
+        let s = "a".repeat(ChainName::MAX_LEN);
+        assert!(ChainName::new(s).is_ok());
+    }
+
+    #[test]
+    fn chainname_display_matches_str() {
+        let c = ChainName::new("filter_input").unwrap();
+        assert_eq!(c.to_string(), "filter_input");
+        assert_eq!(c.as_str(), "filter_input");
+        let s: &str = c.as_ref();
+        assert_eq!(s, "filter_input");
+    }
+
+    #[test]
+    fn chainname_tryfrom_str() {
+        let c: ChainName = "input".try_into().unwrap();
+        assert_eq!(c.as_str(), "input");
+        let r: Result<ChainName> = "".try_into();
+        assert!(r.is_err());
+    }
 }
 
 /// Connection tracking state flags.
@@ -997,16 +1161,56 @@ impl Rule {
     }
 
     /// Jump to another chain.
+    ///
+    /// Infallible-by-API; if the name violates the kernel chain-name
+    /// contract (interior NUL, empty, or `len > 255`) the kernel will
+    /// reject the rule at apply time. For early validation, construct
+    /// a [`ChainName`] explicitly and use [`Self::jump_to`].
     pub fn jump(mut self, chain: &str) -> Self {
+        // Prefer the typed variant when the contract is satisfied;
+        // fall back to the deprecated String form so the infallible
+        // public signature is preserved.
+        let verdict = match ChainName::new(chain) {
+            Ok(name) => Verdict::JumpTo(name),
+            #[allow(deprecated)]
+            Err(_) => Verdict::Jump(chain.to_string()),
+        };
+        self.exprs.push(super::expr::Expr::Verdict(verdict));
+        self
+    }
+
+    /// Jump to another chain, typed.
+    ///
+    /// The chain name is validated at construction via
+    /// [`ChainName::new`] — surfaces interior-NUL / overlong / empty
+    /// names at the input boundary instead of as a kernel rejection
+    /// at apply time.
+    pub fn jump_to(mut self, chain: ChainName) -> Self {
         self.exprs
-            .push(super::expr::Expr::Verdict(Verdict::Jump(chain.to_string())));
+            .push(super::expr::Expr::Verdict(Verdict::JumpTo(chain)));
         self
     }
 
     /// Goto another chain (no return).
+    ///
+    /// Infallible-by-API; if the name violates the kernel chain-name
+    /// contract the kernel will reject the rule at apply time. For
+    /// early validation, construct a [`ChainName`] explicitly and use
+    /// [`Self::goto_to`].
     pub fn goto(mut self, chain: &str) -> Self {
+        let verdict = match ChainName::new(chain) {
+            Ok(name) => Verdict::GotoTo(name),
+            #[allow(deprecated)]
+            Err(_) => Verdict::Goto(chain.to_string()),
+        };
+        self.exprs.push(super::expr::Expr::Verdict(verdict));
+        self
+    }
+
+    /// Goto another chain (no return), typed.
+    pub fn goto_to(mut self, chain: ChainName) -> Self {
         self.exprs
-            .push(super::expr::Expr::Verdict(Verdict::Goto(chain.to_string())));
+            .push(super::expr::Expr::Verdict(Verdict::GotoTo(chain)));
         self
     }
 

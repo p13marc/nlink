@@ -197,6 +197,263 @@ pub mod nft_ct_keys {
 /// the kernel doesn't register) to `"config"`.
 pub const DEVLINK_MCGRP_CONFIG_NAME: &str = "config";
 
+/// Plan 222.2 — TC HTB attribute IDs.
+///
+/// Kernel UAPI v6.13 `include/uapi/linux/pkt_sched.h` `enum`
+/// (the unnamed enum for `TCA_HTB_*` in pkt_sched.h).
+///
+/// nlink declares these in `types::tc::qdisc::htb` (TCA_HTB_UNSPEC..
+/// TCA_HTB_OFFLOAD). The gate locks the kernel-side values so a
+/// future edit cannot silently re-introduce off-by-N drift. Pre-0.20
+/// the audit (W14) noted `TCA_HTB_OFFLOAD = 8` was already in tree
+/// but unused on the encode path; we mirror the full enum here to
+/// catch any silent renumbering.
+pub mod tca_htb_attr {
+    pub const TCA_HTB_UNSPEC: u16 = 0;
+    pub const TCA_HTB_PARMS: u16 = 1;
+    pub const TCA_HTB_INIT: u16 = 2;
+    pub const TCA_HTB_CTAB: u16 = 3;
+    pub const TCA_HTB_RTAB: u16 = 4;
+    pub const TCA_HTB_DIRECT_QLEN: u16 = 5;
+    pub const TCA_HTB_RATE64: u16 = 6;
+    pub const TCA_HTB_CEIL64: u16 = 7;
+    pub const TCA_HTB_OFFLOAD: u16 = 8;
+}
+
+/// Plan 222.2 — TC flower-classifier KEY attribute IDs.
+///
+/// Kernel UAPI v6.13 `include/uapi/linux/pkt_cls.h` `enum`.
+/// Mirrors the IDs nlink encodes in `flower::TcFlowerKey` /
+/// `types::tc` (subset of the ~80 in the kernel enum — the most
+/// load-bearing classifier dimensions that nlink actually emits).
+///
+/// `// TODO 0.21: extend to the full enum (>80 IDs) including ENC_OPTS,
+/// MPLS, ARP, CT_*, HASH_*, and the spi/CFM groupings added in 6.6+.`
+pub mod tca_flower_key {
+    pub const TCA_FLOWER_KEY_ETH_DST: u16 = 4;
+    pub const TCA_FLOWER_KEY_ETH_DST_MASK: u16 = 5;
+    pub const TCA_FLOWER_KEY_ETH_SRC: u16 = 6;
+    pub const TCA_FLOWER_KEY_ETH_SRC_MASK: u16 = 7;
+    pub const TCA_FLOWER_KEY_ETH_TYPE: u16 = 8;
+    pub const TCA_FLOWER_KEY_IP_PROTO: u16 = 9;
+    pub const TCA_FLOWER_KEY_IPV4_SRC: u16 = 10;
+    pub const TCA_FLOWER_KEY_IPV4_SRC_MASK: u16 = 11;
+    pub const TCA_FLOWER_KEY_IPV4_DST: u16 = 12;
+    pub const TCA_FLOWER_KEY_IPV4_DST_MASK: u16 = 13;
+    pub const TCA_FLOWER_KEY_IPV6_SRC: u16 = 14;
+    pub const TCA_FLOWER_KEY_IPV6_DST: u16 = 16;
+    pub const TCA_FLOWER_KEY_TCP_SRC: u16 = 18;
+    pub const TCA_FLOWER_KEY_TCP_DST: u16 = 19;
+    pub const TCA_FLOWER_KEY_UDP_SRC: u16 = 20;
+    pub const TCA_FLOWER_KEY_UDP_DST: u16 = 21;
+    pub const TCA_FLOWER_KEY_VLAN_ID: u16 = 23;
+    pub const TCA_FLOWER_KEY_VLAN_PRIO: u16 = 24;
+    pub const TCA_FLOWER_KEY_VLAN_ETH_TYPE: u16 = 25;
+    pub const TCA_FLOWER_KEY_ENC_KEY_ID: u16 = 26;
+}
+
+/// Plan 222.3 — RTNetlink IFLA attribute IDs.
+///
+/// Kernel UAPI v6.13 `include/uapi/linux/if_link.h` `enum`. nlink
+/// uses these in `messages::link::attr_ids` (private module). The
+/// gate mirrors the kernel values to catch the same off-by-N drift
+/// class the XFRM hotfix exposed.
+///
+/// `// TODO 0.21: extend to the rest of the IFLA_* enum (~70 entries
+/// including IFF_*, IFLA_AF_SPEC, IFLA_VFINFO, IFLA_XDP, ...).`
+pub mod ifla_attr {
+    pub const IFLA_ADDRESS: u16 = 1;
+    pub const IFLA_BROADCAST: u16 = 2;
+    pub const IFLA_IFNAME: u16 = 3;
+    pub const IFLA_MTU: u16 = 4;
+    pub const IFLA_LINK: u16 = 5;
+    pub const IFLA_QDISC: u16 = 6;
+    pub const IFLA_STATS: u16 = 7;
+    pub const IFLA_MASTER: u16 = 10;
+    pub const IFLA_TXQLEN: u16 = 13;
+    pub const IFLA_OPERSTATE: u16 = 16;
+    pub const IFLA_LINKMODE: u16 = 17;
+    pub const IFLA_LINKINFO: u16 = 18;
+    pub const IFLA_STATS64: u16 = 23;
+    pub const IFLA_GROUP: u16 = 27;
+    pub const IFLA_NUM_VF: u16 = 21;
+    pub const IFLA_PROMISCUITY: u16 = 30;
+    pub const IFLA_NUM_TX_QUEUES: u16 = 31;
+    pub const IFLA_NUM_RX_QUEUES: u16 = 32;
+    pub const IFLA_CARRIER: u16 = 33;
+    pub const IFLA_GSO_MAX_SEGS: u16 = 40;
+    pub const IFLA_GSO_MAX_SIZE: u16 = 41;
+    pub const IFLA_MIN_MTU: u16 = 50;
+    pub const IFLA_MAX_MTU: u16 = 51;
+    pub const IFLA_PERM_ADDRESS: u16 = 54;
+    pub const IFLA_GRO_MAX_SIZE: u16 = 58;
+    pub const IFLA_TSO_MAX_SIZE: u16 = 59;
+    pub const IFLA_TSO_MAX_SEGS: u16 = 60;
+    pub const IFLA_GSO_IPV4_MAX_SIZE: u16 = 63;
+    pub const IFLA_GRO_IPV4_MAX_SIZE: u16 = 64;
+}
+
+/// Plan 222.3 — RTNetlink RTA attribute IDs (route messages).
+///
+/// Kernel UAPI v6.13 `include/uapi/linux/rtnetlink.h` `enum rtattr_type_t`.
+/// nlink uses these in `messages::route::attr_ids`.
+///
+/// `// TODO 0.21: extend to RTA_FLOW, RTA_CACHEINFO, RTA_MARK,
+/// RTA_TTL_PROPAGATE, RTA_VIA, RTA_NEWDST, RTA_ENCAP*, RTA_NH_ID,
+/// RTA_SPORT, RTA_DPORT, RTA_PROTOCOL — currently 30+ in the kernel.`
+pub mod rta_attr {
+    pub const RTA_UNSPEC: u16 = 0;
+    pub const RTA_DST: u16 = 1;
+    pub const RTA_SRC: u16 = 2;
+    pub const RTA_IIF: u16 = 3;
+    pub const RTA_OIF: u16 = 4;
+    pub const RTA_GATEWAY: u16 = 5;
+    pub const RTA_PRIORITY: u16 = 6;
+    pub const RTA_PREFSRC: u16 = 7;
+    pub const RTA_METRICS: u16 = 8;
+    pub const RTA_MULTIPATH: u16 = 9;
+    pub const RTA_PROTOINFO: u16 = 10;
+    pub const RTA_FLOW: u16 = 11;
+    pub const RTA_CACHEINFO: u16 = 12;
+    pub const RTA_TABLE: u16 = 15;
+    pub const RTA_MARK: u16 = 16;
+    pub const RTA_PREF: u16 = 20;
+    pub const RTA_EXPIRES: u16 = 23;
+}
+
+/// Plan 222.3 — ctnetlink (conntrack) attribute IDs.
+///
+/// Kernel UAPI v6.13 `include/uapi/linux/netfilter/nfnetlink_conntrack.h`
+/// `enum ctattr_type`. nlink uses these in `netfilter.rs`'s
+/// private `CTA_*` constants.
+///
+/// `// TODO 0.21: extend to CTA_NAT_*, CTA_LABELS, CTA_SYNPROXY,
+/// CTA_FILTER, CTA_TIMESTAMP* — currently ~28 in the kernel.`
+pub mod ctnetlink_attr {
+    pub const CTA_UNSPEC: u16 = 0;
+    pub const CTA_TUPLE_ORIG: u16 = 1;
+    pub const CTA_TUPLE_REPLY: u16 = 2;
+    pub const CTA_STATUS: u16 = 3;
+    pub const CTA_PROTOINFO: u16 = 4;
+    pub const CTA_HELP: u16 = 5;
+    pub const CTA_NAT_SRC: u16 = 6;
+    pub const CTA_TIMEOUT: u16 = 7;
+    pub const CTA_MARK: u16 = 8;
+    pub const CTA_COUNTERS_ORIG: u16 = 9;
+    pub const CTA_COUNTERS_REPLY: u16 = 10;
+    pub const CTA_USE: u16 = 11;
+    pub const CTA_ID: u16 = 12;
+    pub const CTA_NAT_DST: u16 = 13;
+    pub const CTA_TUPLE_MASTER: u16 = 14;
+    pub const CTA_ZONE: u16 = 18;
+}
+
+/// Plan 222.4 — DPLL device-side attribute IDs.
+///
+/// Kernel UAPI YAML spec
+/// `Documentation/netlink/specs/dpll.yaml` (v6.13). nlink declares
+/// the discriminants in `genl::dpll::types::DpllAttr` (via
+/// `#[derive(GenlAttribute)]`); the gate locks the kernel-side
+/// reference values so any silent renumbering trips the test.
+///
+/// `// TODO 0.21: cover the full DPLL_A_PIN_* set (32 entries) +
+/// DPLL_A_PHASE_OFFSET_MONITOR/FREQUENCY_MONITOR additions in 6.12+
+/// + any future 6.13+ additions.`
+pub mod dpll_a {
+    /// `DPLL_A_ID`.
+    pub const ID: u16 = 1;
+    /// `DPLL_A_MODULE_NAME`.
+    pub const MODULE_NAME: u16 = 2;
+    /// `DPLL_A_PAD`.
+    pub const PAD: u16 = 3;
+    /// `DPLL_A_CLOCK_ID`.
+    pub const CLOCK_ID: u16 = 4;
+    /// `DPLL_A_MODE`.
+    pub const MODE: u16 = 5;
+    /// `DPLL_A_MODE_SUPPORTED`.
+    pub const MODE_SUPPORTED: u16 = 6;
+    /// `DPLL_A_LOCK_STATUS`.
+    pub const LOCK_STATUS: u16 = 7;
+    /// `DPLL_A_TEMP`.
+    pub const TEMP: u16 = 8;
+    /// `DPLL_A_TYPE`.
+    pub const TYPE: u16 = 9;
+    /// `DPLL_A_LOCK_STATUS_ERROR` (kernel 6.10+).
+    pub const LOCK_STATUS_ERROR: u16 = 10;
+    /// `DPLL_A_CLOCK_QUALITY_LEVEL` (kernel 6.11+).
+    pub const CLOCK_QUALITY_LEVEL: u16 = 11;
+    /// `DPLL_A_PHASE_OFFSET_MONITOR` (kernel 6.12+).
+    pub const PHASE_OFFSET_MONITOR: u16 = 12;
+
+    // ---- Pin-side (DPLL_A_PIN_*) — the most load-bearing IDs ----
+
+    /// `DPLL_A_PIN_ID`.
+    pub const PIN_ID: u16 = 1;
+    /// `DPLL_A_PIN_FREQUENCY`.
+    pub const PIN_FREQUENCY: u16 = 11;
+    /// `DPLL_A_PIN_STATE`.
+    pub const PIN_STATE: u16 = 16;
+    /// `DPLL_A_PIN_PHASE_OFFSET` (sint per kernel emit; see
+    /// Plan 226).
+    pub const PIN_PHASE_OFFSET: u16 = 23;
+    /// `DPLL_A_PIN_FRACTIONAL_FREQUENCY_OFFSET` (sint).
+    pub const PIN_FRACTIONAL_FREQUENCY_OFFSET: u16 = 24;
+    /// `DPLL_A_PIN_FRACTIONAL_FREQUENCY_OFFSET_PPT` (kernel 6.11+;
+    /// sint per `nla_put_sint`).
+    pub const PIN_FRACTIONAL_FREQUENCY_OFFSET_PPT: u16 = 30;
+    /// `DPLL_A_PIN_MEASURED_FREQUENCY` (kernel 6.11+).
+    pub const PIN_MEASURED_FREQUENCY: u16 = 31;
+}
+
+/// Plan 222.4 — Devlink attribute IDs.
+///
+/// Kernel UAPI v6.13 `include/uapi/linux/devlink.h` `enum
+/// devlink_attr`. nlink already exports `DEVLINK_ATTR_*` constants
+/// in `genl::devlink::mod`; the test in `tests` below pins them
+/// against the kernel reference values.
+///
+/// `// TODO 0.21: cover the full DEVLINK_ATTR_* enum (~150 entries
+/// including param, region, health-reporter, trap, rate, line-card,
+/// SF/VF/PCI groupings) — this batch covers the most load-bearing
+/// ~15.`
+pub mod devlink_attr {
+    pub const DEVLINK_ATTR_UNSPEC: u16 = 0;
+    pub const DEVLINK_ATTR_BUS_NAME: u16 = 1;
+    pub const DEVLINK_ATTR_DEV_NAME: u16 = 2;
+    pub const DEVLINK_ATTR_PORT_INDEX: u16 = 3;
+    pub const DEVLINK_ATTR_PORT_TYPE: u16 = 4;
+    pub const DEVLINK_ATTR_PORT_NETDEV_IFINDEX: u16 = 6;
+    pub const DEVLINK_ATTR_PORT_NETDEV_NAME: u16 = 7;
+    pub const DEVLINK_ATTR_PORT_IBDEV_NAME: u16 = 8;
+    pub const DEVLINK_ATTR_PORT_SPLIT_COUNT: u16 = 9;
+    pub const DEVLINK_ATTR_PORT_SPLIT_GROUP: u16 = 10;
+    pub const DEVLINK_ATTR_PORT_FLAVOUR: u16 = 77;
+    pub const DEVLINK_ATTR_PORT_NUMBER: u16 = 78;
+    pub const DEVLINK_ATTR_INFO_DRIVER_NAME: u16 = 98;
+    pub const DEVLINK_ATTR_INFO_SERIAL_NUMBER: u16 = 99;
+    pub const DEVLINK_ATTR_INFO_VERSION_FIXED: u16 = 100;
+    pub const DEVLINK_ATTR_INFO_VERSION_RUNNING: u16 = 101;
+    pub const DEVLINK_ATTR_INFO_VERSION_STORED: u16 = 102;
+}
+
+/// Plan 222.4 — Ethtool header attribute IDs.
+///
+/// Kernel UAPI v6.13 `include/uapi/linux/ethtool_netlink.h` `enum`.
+/// nlink declares `EthtoolHeaderAttr` (DevIndex=1, DevName=2,
+/// Flags=3, PhyIndex=4) in `genl::ethtool::mod`; the gate locks
+/// those.
+///
+/// `// TODO 0.21: cover ETHTOOL_A_LINKINFO_*, ETHTOOL_A_LINKMODES_*,
+/// ETHTOOL_A_LINKSTATE_*, ETHTOOL_A_CHANNELS_*, ETHTOOL_A_RINGS_* —
+/// the ~50 attribute groups currently used by ethtool(8) sub-commands.`
+pub mod ethtool_a {
+    pub const ETHTOOL_A_HEADER_UNSPEC: u16 = 0;
+    pub const ETHTOOL_A_HEADER_DEV_INDEX: u16 = 1;
+    pub const ETHTOOL_A_HEADER_DEV_NAME: u16 = 2;
+    pub const ETHTOOL_A_HEADER_FLAGS: u16 = 3;
+    pub const ETHTOOL_A_HEADER_PHY_INDEX: u16 = 4;
+}
+
 /// Netfilter hook numbers — `include/uapi/linux/netfilter.h` enum
 /// `nf_inet_hooks` and `include/uapi/linux/netfilter_netdev.h` enum
 /// `nf_dev_hooks`. Plan 211 M1 made `Hook::Ingress` distinguish
@@ -478,5 +735,197 @@ mod tests {
         );
         assert_eq!(CtKey::Helper as u32, nft_ct_keys::NFT_CT_HELPER);
         assert_eq!(CtKey::L3Protocol as u32, nft_ct_keys::NFT_CT_L3PROTOCOL);
+    }
+
+    // ---------------------------------------------------------------
+    // Plan 222.2 — TC HTB + flower-key constant gate.
+    //
+    // Cross-checks the public attribute IDs in
+    // `crate::netlink::types::tc::qdisc::htb` against the kernel
+    // UAPI reference values. Flower keys are pinned by literal
+    // value (the in-tree constants live in private module scope).
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn plan_222_2_tca_htb_attr_ids_match_kernel_uapi() {
+        use crate::netlink::types::tc::qdisc::htb;
+        assert_eq!(htb::TCA_HTB_UNSPEC, tca_htb_attr::TCA_HTB_UNSPEC);
+        assert_eq!(htb::TCA_HTB_PARMS, tca_htb_attr::TCA_HTB_PARMS);
+        assert_eq!(htb::TCA_HTB_INIT, tca_htb_attr::TCA_HTB_INIT);
+        assert_eq!(htb::TCA_HTB_CTAB, tca_htb_attr::TCA_HTB_CTAB);
+        assert_eq!(htb::TCA_HTB_RTAB, tca_htb_attr::TCA_HTB_RTAB);
+        assert_eq!(htb::TCA_HTB_DIRECT_QLEN, tca_htb_attr::TCA_HTB_DIRECT_QLEN);
+        assert_eq!(htb::TCA_HTB_RATE64, tca_htb_attr::TCA_HTB_RATE64);
+        assert_eq!(htb::TCA_HTB_CEIL64, tca_htb_attr::TCA_HTB_CEIL64);
+        assert_eq!(htb::TCA_HTB_OFFLOAD, tca_htb_attr::TCA_HTB_OFFLOAD);
+    }
+
+    #[test]
+    fn plan_222_2_tca_flower_key_ids_match_kernel_uapi() {
+        // Reference-only pin (the in-tree flower constants live in
+        // private scope at types/tc.rs:1514+; this test catches
+        // accidental drift of the kernel-side reference table).
+        assert_eq!(tca_flower_key::TCA_FLOWER_KEY_ETH_DST, 4);
+        assert_eq!(tca_flower_key::TCA_FLOWER_KEY_ETH_TYPE, 8);
+        assert_eq!(tca_flower_key::TCA_FLOWER_KEY_IP_PROTO, 9);
+        assert_eq!(tca_flower_key::TCA_FLOWER_KEY_IPV4_DST, 12);
+        assert_eq!(tca_flower_key::TCA_FLOWER_KEY_IPV6_SRC, 14);
+        assert_eq!(tca_flower_key::TCA_FLOWER_KEY_TCP_DST, 19);
+        assert_eq!(tca_flower_key::TCA_FLOWER_KEY_UDP_SRC, 20);
+        assert_eq!(tca_flower_key::TCA_FLOWER_KEY_VLAN_ID, 23);
+        assert_eq!(tca_flower_key::TCA_FLOWER_KEY_ENC_KEY_ID, 26);
+    }
+
+    // ---------------------------------------------------------------
+    // Plan 222.3 — IFLA + RTA + ctnetlink reference-value pins.
+    //
+    // nlink's IFLA / RTA / CTA constants are declared in private
+    // `attr_ids` modules at the per-message-type sites
+    // (`messages::link::attr_ids`, `messages::route::attr_ids`,
+    // `netfilter.rs` `CTA_*`). These tests pin the kernel-side
+    // reference values so any drift caught by audit-uapi-constants
+    // (planned for 0.21) lines up against a known anchor.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn plan_222_3_ifla_attr_ids_match_kernel_uapi() {
+        assert_eq!(ifla_attr::IFLA_IFNAME, 3);
+        assert_eq!(ifla_attr::IFLA_MTU, 4);
+        assert_eq!(ifla_attr::IFLA_LINK, 5);
+        assert_eq!(ifla_attr::IFLA_QDISC, 6);
+        assert_eq!(ifla_attr::IFLA_MASTER, 10);
+        assert_eq!(ifla_attr::IFLA_OPERSTATE, 16);
+        assert_eq!(ifla_attr::IFLA_LINKINFO, 18);
+        assert_eq!(ifla_attr::IFLA_STATS64, 23);
+        assert_eq!(ifla_attr::IFLA_CARRIER, 33);
+        assert_eq!(ifla_attr::IFLA_MIN_MTU, 50);
+        assert_eq!(ifla_attr::IFLA_MAX_MTU, 51);
+        assert_eq!(ifla_attr::IFLA_PERM_ADDRESS, 54);
+    }
+
+    #[test]
+    fn plan_222_3_rta_attr_ids_match_kernel_uapi() {
+        assert_eq!(rta_attr::RTA_DST, 1);
+        assert_eq!(rta_attr::RTA_SRC, 2);
+        assert_eq!(rta_attr::RTA_OIF, 4);
+        assert_eq!(rta_attr::RTA_GATEWAY, 5);
+        assert_eq!(rta_attr::RTA_PRIORITY, 6);
+        assert_eq!(rta_attr::RTA_PREFSRC, 7);
+        assert_eq!(rta_attr::RTA_MULTIPATH, 9);
+        assert_eq!(rta_attr::RTA_TABLE, 15);
+        assert_eq!(rta_attr::RTA_PREF, 20);
+        assert_eq!(rta_attr::RTA_EXPIRES, 23);
+    }
+
+    #[test]
+    fn plan_222_3_ctnetlink_attr_ids_match_kernel_uapi() {
+        assert_eq!(ctnetlink_attr::CTA_TUPLE_ORIG, 1);
+        assert_eq!(ctnetlink_attr::CTA_TUPLE_REPLY, 2);
+        assert_eq!(ctnetlink_attr::CTA_STATUS, 3);
+        assert_eq!(ctnetlink_attr::CTA_TIMEOUT, 7);
+        assert_eq!(ctnetlink_attr::CTA_MARK, 8);
+        assert_eq!(ctnetlink_attr::CTA_COUNTERS_ORIG, 9);
+        assert_eq!(ctnetlink_attr::CTA_COUNTERS_REPLY, 10);
+        assert_eq!(ctnetlink_attr::CTA_ID, 12);
+        assert_eq!(ctnetlink_attr::CTA_ZONE, 18);
+    }
+
+    // ---------------------------------------------------------------
+    // Plan 222.4 — DPLL + Devlink + Ethtool attribute ID gate.
+    //
+    // Cross-checks nlink's public discriminants against the kernel
+    // reference values.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn plan_222_4_dpll_a_attr_ids_match_kernel_uapi() {
+        use crate::netlink::genl::dpll::types::{DpllAttr, DpllPinAttr};
+        // Device-side
+        assert_eq!(DpllAttr::Id as u16, dpll_a::ID);
+        assert_eq!(DpllAttr::ModuleName as u16, dpll_a::MODULE_NAME);
+        assert_eq!(DpllAttr::ClockId as u16, dpll_a::CLOCK_ID);
+        assert_eq!(DpllAttr::Mode as u16, dpll_a::MODE);
+        assert_eq!(DpllAttr::LockStatus as u16, dpll_a::LOCK_STATUS);
+        assert_eq!(DpllAttr::Type as u16, dpll_a::TYPE);
+        assert_eq!(DpllAttr::LockStatusError as u16, dpll_a::LOCK_STATUS_ERROR);
+        // Pin-side
+        assert_eq!(DpllPinAttr::Id as u16, dpll_a::PIN_ID);
+        assert_eq!(DpllPinAttr::Frequency as u16, dpll_a::PIN_FREQUENCY);
+        assert_eq!(DpllPinAttr::State as u16, dpll_a::PIN_STATE);
+        assert_eq!(DpllPinAttr::PhaseOffset as u16, dpll_a::PIN_PHASE_OFFSET);
+        assert_eq!(
+            DpllPinAttr::FractionalFrequencyOffset as u16,
+            dpll_a::PIN_FRACTIONAL_FREQUENCY_OFFSET
+        );
+        assert_eq!(
+            DpllPinAttr::FractionalFrequencyOffsetPpt as u16,
+            dpll_a::PIN_FRACTIONAL_FREQUENCY_OFFSET_PPT
+        );
+        assert_eq!(
+            DpllPinAttr::MeasuredFrequency as u16,
+            dpll_a::PIN_MEASURED_FREQUENCY
+        );
+    }
+
+    #[test]
+    fn plan_222_4_devlink_attr_ids_match_kernel_uapi() {
+        use crate::netlink::genl::devlink;
+        assert_eq!(
+            devlink::DEVLINK_ATTR_BUS_NAME,
+            devlink_attr::DEVLINK_ATTR_BUS_NAME
+        );
+        assert_eq!(
+            devlink::DEVLINK_ATTR_DEV_NAME,
+            devlink_attr::DEVLINK_ATTR_DEV_NAME
+        );
+        assert_eq!(
+            devlink::DEVLINK_ATTR_PORT_INDEX,
+            devlink_attr::DEVLINK_ATTR_PORT_INDEX
+        );
+        assert_eq!(
+            devlink::DEVLINK_ATTR_PORT_TYPE,
+            devlink_attr::DEVLINK_ATTR_PORT_TYPE
+        );
+        assert_eq!(
+            devlink::DEVLINK_ATTR_PORT_NETDEV_IFINDEX,
+            devlink_attr::DEVLINK_ATTR_PORT_NETDEV_IFINDEX
+        );
+        assert_eq!(
+            devlink::DEVLINK_ATTR_PORT_FLAVOUR,
+            devlink_attr::DEVLINK_ATTR_PORT_FLAVOUR
+        );
+        assert_eq!(
+            devlink::DEVLINK_ATTR_PORT_NUMBER,
+            devlink_attr::DEVLINK_ATTR_PORT_NUMBER
+        );
+        assert_eq!(
+            devlink::DEVLINK_ATTR_INFO_DRIVER_NAME,
+            devlink_attr::DEVLINK_ATTR_INFO_DRIVER_NAME
+        );
+    }
+
+    #[test]
+    fn plan_222_4_ethtool_a_header_attr_ids_match_kernel_uapi() {
+        use crate::netlink::genl::ethtool::EthtoolHeaderAttr;
+        assert_eq!(
+            EthtoolHeaderAttr::Unspec as u16,
+            ethtool_a::ETHTOOL_A_HEADER_UNSPEC
+        );
+        assert_eq!(
+            EthtoolHeaderAttr::DevIndex as u16,
+            ethtool_a::ETHTOOL_A_HEADER_DEV_INDEX
+        );
+        assert_eq!(
+            EthtoolHeaderAttr::DevName as u16,
+            ethtool_a::ETHTOOL_A_HEADER_DEV_NAME
+        );
+        assert_eq!(
+            EthtoolHeaderAttr::Flags as u16,
+            ethtool_a::ETHTOOL_A_HEADER_FLAGS
+        );
+        assert_eq!(
+            EthtoolHeaderAttr::PhyIndex as u16,
+            ethtool_a::ETHTOOL_A_HEADER_PHY_INDEX
+        );
     }
 }

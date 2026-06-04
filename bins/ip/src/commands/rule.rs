@@ -180,7 +180,8 @@ impl RuleCmd {
         family: Option<u8>,
     ) -> Result<()> {
         let raw_rules = if let Some(fam) = family {
-            conn.get_rules_for_family(fam).await?
+            conn.get_rules_for_family_typed(nlink::AddressFamily::from_raw(fam))
+                .await?
         } else {
             conn.get_rules().await?
         };
@@ -458,12 +459,12 @@ impl RuleCmd {
     async fn flush(conn: &Connection<Route>, family: Option<u8>) -> Result<()> {
         // Flush IPv4 rules
         if family.is_none() || family == Some(libc::AF_INET as u8) {
-            conn.flush_rules(libc::AF_INET as u8).await?;
+            conn.flush_rules_typed(nlink::AddressFamily::v4()).await?;
         }
 
         // Flush IPv6 rules
         if family.is_none() || family == Some(libc::AF_INET6 as u8) {
-            conn.flush_rules(libc::AF_INET6 as u8).await?;
+            conn.flush_rules_typed(nlink::AddressFamily::v6()).await?;
         }
 
         Ok(())

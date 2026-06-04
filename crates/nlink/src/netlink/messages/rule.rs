@@ -85,9 +85,20 @@ impl RuleMessage {
         Self::default()
     }
 
-    /// Get the address family.
+    /// Get the address family as the raw `AF_*` byte (kernel wire form).
     pub fn family(&self) -> u8 {
         self.header.family
+    }
+
+    /// Get the address family as a typed [`crate::AddressFamily`] (Plan 227).
+    ///
+    /// Prefer this over the raw [`Self::family`] in new code — the typed
+    /// form lets the caller compare against `AddressFamily::v4()` /
+    /// `AddressFamily::v6()` without remembering `AF_*` magic numbers,
+    /// and gracefully exposes unmodelled bytes via
+    /// [`crate::AddressFamily::is_known`].
+    pub fn family_typed(&self) -> crate::AddressFamily {
+        crate::AddressFamily::from_raw(self.header.family)
     }
 
     /// Check if this is an IPv4 rule.
@@ -143,6 +154,112 @@ impl RuleMessage {
     /// Check if this is a default rule (priority 0, 32766, or 32767).
     pub fn is_default(&self) -> bool {
         self.priority == 0 || self.priority == 32766 || self.priority == 32767
+    }
+
+    // -------- Plan 231 — per-field accessors -----------------
+    //
+    // These mirror the existing `pub` fields with method-call ergonomics.
+    // The fields stay `pub` for additivity (0.20.1 is a patch release —
+    // changing visibility is breaking). New code should prefer the
+    // accessors; they read as a single chain alongside `.family_typed()`
+    // and keep the wire-format struct details (header.* lookups) out of
+    // call sites.
+
+    /// Rule priority (FRA_PRIORITY). Returns `0` when the kernel
+    /// did not set the attribute.
+    pub fn priority(&self) -> u32 {
+        self.priority
+    }
+
+    /// Source address (FRA_SRC), if present.
+    pub fn source(&self) -> Option<IpAddr> {
+        self.source
+    }
+
+    /// Destination address (FRA_DST), if present.
+    pub fn destination(&self) -> Option<IpAddr> {
+        self.destination
+    }
+
+    /// Input interface name (FRA_IIFNAME), if present.
+    pub fn iifname(&self) -> Option<&str> {
+        self.iifname.as_deref()
+    }
+
+    /// Output interface name (FRA_OIFNAME), if present.
+    pub fn oifname(&self) -> Option<&str> {
+        self.oifname.as_deref()
+    }
+
+    /// Firewall mark (FRA_FWMARK), if present.
+    pub fn fwmark(&self) -> Option<u32> {
+        self.fwmark
+    }
+
+    /// Firewall mark mask (FRA_FWMASK), if present.
+    pub fn fwmask(&self) -> Option<u32> {
+        self.fwmask
+    }
+
+    /// Routing table ID. Returns the 32-bit `FRA_TABLE` override
+    /// when present, else the 8-bit `header.table`.
+    pub fn table(&self) -> u32 {
+        self.table
+    }
+
+    /// Goto target rule priority (FRA_GOTO), if present.
+    pub fn goto(&self) -> Option<u32> {
+        self.goto
+    }
+
+    /// Flow classification ID (FRA_FLOW), if present.
+    pub fn flow(&self) -> Option<u32> {
+        self.flow
+    }
+
+    /// Tunnel ID (FRA_TUN_ID), if present.
+    pub fn tun_id(&self) -> Option<u64> {
+        self.tun_id
+    }
+
+    /// Suppress interface group (FRA_SUPPRESS_IFGROUP), if present.
+    pub fn suppress_ifgroup(&self) -> Option<u32> {
+        self.suppress_ifgroup
+    }
+
+    /// Suppress prefix length (FRA_SUPPRESS_PREFIXLEN), if present.
+    pub fn suppress_prefixlen(&self) -> Option<u32> {
+        self.suppress_prefixlen
+    }
+
+    /// L3 master device flag (FRA_L3MDEV), if present.
+    pub fn l3mdev(&self) -> Option<u8> {
+        self.l3mdev
+    }
+
+    /// UID range (FRA_UID_RANGE), if present.
+    pub fn uid_range(&self) -> Option<FibRuleUidRange> {
+        self.uid_range
+    }
+
+    /// Rule protocol (FRA_PROTOCOL), if present.
+    pub fn protocol(&self) -> Option<u8> {
+        self.protocol
+    }
+
+    /// IP protocol for port matching (FRA_IP_PROTO), if present.
+    pub fn ip_proto(&self) -> Option<u8> {
+        self.ip_proto
+    }
+
+    /// Source port range (FRA_SPORT_RANGE), if present.
+    pub fn sport_range(&self) -> Option<FibRulePortRange> {
+        self.sport_range
+    }
+
+    /// Destination port range (FRA_DPORT_RANGE), if present.
+    pub fn dport_range(&self) -> Option<FibRulePortRange> {
+        self.dport_range
     }
 }
 
@@ -285,4 +402,118 @@ fn parse_string(data: &[u8]) -> Option<String> {
     // Find null terminator
     let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
     std::str::from_utf8(&data[..end]).ok().map(String::from)
+}
+
+#[cfg(test)]
+mod plan_231_tests {
+    //! Plan 231 — accessor parity between the pub fields and the new
+    //! per-field accessor methods.
+    //!
+    //! The fields stay `pub` (additivity in a patch release prohibits
+    //! flipping their visibility), but every load-bearing field gets an
+    //! accessor sibling. New code should prefer the accessors.
+
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::*;
+
+    #[test]
+    fn accessor_round_trip_matches_field_state() {
+        let mut r = RuleMessage::new();
+        r.header.family = libc::AF_INET as u8;
+        r.priority = 1000;
+        r.source = Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)));
+        r.iifname = Some("eth0".into());
+        r.fwmark = Some(0x42);
+        r.table = 100;
+
+        assert_eq!(r.priority(), 1000);
+        assert_eq!(r.family(), libc::AF_INET as u8);
+        assert_eq!(r.family_typed(), crate::AddressFamily::v4());
+        assert_eq!(r.source(), Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0))));
+        assert_eq!(r.iifname(), Some("eth0"));
+        assert_eq!(r.fwmark(), Some(0x42));
+        assert_eq!(r.table(), 100);
+    }
+
+    #[test]
+    fn family_typed_handles_unknown_byte() {
+        let mut r = RuleMessage::new();
+        r.header.family = 99;
+        let af = r.family_typed();
+        assert!(!af.is_known());
+        assert_eq!(af.as_u8(), 99);
+    }
+
+    #[test]
+    fn family_typed_v6() {
+        let mut r = RuleMessage::new();
+        r.header.family = libc::AF_INET6 as u8;
+        assert_eq!(r.family_typed(), crate::AddressFamily::v6());
+        assert!(r.is_ipv6());
+    }
+
+    #[test]
+    fn accessors_default_to_none_for_optional_fields() {
+        let r = RuleMessage::new();
+        assert!(r.source().is_none());
+        assert!(r.destination().is_none());
+        assert!(r.iifname().is_none());
+        assert!(r.oifname().is_none());
+        assert!(r.fwmark().is_none());
+        assert!(r.fwmask().is_none());
+        assert!(r.goto().is_none());
+        assert!(r.flow().is_none());
+        assert!(r.tun_id().is_none());
+        assert!(r.suppress_ifgroup().is_none());
+        assert!(r.suppress_prefixlen().is_none());
+        assert!(r.l3mdev().is_none());
+        assert!(r.uid_range().is_none());
+        assert!(r.protocol().is_none());
+        assert!(r.ip_proto().is_none());
+        assert!(r.sport_range().is_none());
+        assert!(r.dport_range().is_none());
+    }
+
+    #[test]
+    fn accessor_returns_match_field_reads() {
+        // Catalogue test: every accessor returns the same value the
+        // direct pub-field read does. This is the additive convention's
+        // contract: the field stays the source of truth; the accessor
+        // is sugar.
+        let mut r = RuleMessage::new();
+        r.priority = 50;
+        r.source = Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
+        r.destination = Some(IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8)));
+        r.iifname = Some("a".into());
+        r.oifname = Some("b".into());
+        r.fwmark = Some(1);
+        r.fwmask = Some(2);
+        r.table = 99;
+        r.goto = Some(3);
+        r.flow = Some(4);
+        r.tun_id = Some(5);
+        r.suppress_ifgroup = Some(6);
+        r.suppress_prefixlen = Some(7);
+        r.l3mdev = Some(8);
+        r.protocol = Some(9);
+        r.ip_proto = Some(10);
+
+        assert_eq!(r.priority(), r.priority);
+        assert_eq!(r.source(), r.source);
+        assert_eq!(r.destination(), r.destination);
+        assert_eq!(r.iifname(), r.iifname.as_deref());
+        assert_eq!(r.oifname(), r.oifname.as_deref());
+        assert_eq!(r.fwmark(), r.fwmark);
+        assert_eq!(r.fwmask(), r.fwmask);
+        assert_eq!(r.table(), r.table);
+        assert_eq!(r.goto(), r.goto);
+        assert_eq!(r.flow(), r.flow);
+        assert_eq!(r.tun_id(), r.tun_id);
+        assert_eq!(r.suppress_ifgroup(), r.suppress_ifgroup);
+        assert_eq!(r.suppress_prefixlen(), r.suppress_prefixlen);
+        assert_eq!(r.l3mdev(), r.l3mdev);
+        assert_eq!(r.protocol(), r.protocol);
+        assert_eq!(r.ip_proto(), r.ip_proto);
+    }
 }

@@ -185,6 +185,48 @@ jobs:
       - name: Run scripts/audit-sysfs-in-lib.sh
         run: bash scripts/audit-sysfs-in-lib.sh
 
+  # Plan 223 — endianness drift. NLA headers (struct nlattr) and
+  # the kernel's attribute payloads are native-endian. The 0.19 N3
+  # fix swept `from_le_bytes` out of xfrm.rs; 0.20 cycled the
+  # remaining sites (netfilter / action / nftables diff). This
+  # script keeps the class closed: any new `from_le_bytes` in
+  # crates/nlink/src/netlink/ fails the build unless it's in the
+  # ALLOWED list (currently empty).
+  audit-bytes-le:
+    name: audit from_le_bytes (NLA / TLV native-endian policy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scripts/audit-bytes-le.sh
+        run: bash scripts/audit-bytes-le.sh
+
+  # Plan 223 — big-endian compile gate. nlink targets Linux on any
+  # endian; the lib must compile clean for s390x as a structural
+  # guard against future width / alignment / endianness drift.
+  # Compile-only — no tests are run (no BE hardware in CI).
+  big-endian-check:
+    name: cargo check (s390x, BE)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: s390x-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install s390x cross-linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-s390x-linux-gnu
+      - name: Configure cross-linker
+        run: |
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+          [target.s390x-unknown-linux-gnu]
+          linker = "s390x-linux-gnu-gcc"
+          EOF
+      - name: cargo check --target s390x-unknown-linux-gnu
+        run: cargo check --target s390x-unknown-linux-gnu -p nlink
+
   # Audit script: every `#[ignore]` in
   # `crates/nlink/tests/integration/` MUST be catalogued in
   # `crates/nlink/tests/integration/IGNORED.md`. Closes the gap

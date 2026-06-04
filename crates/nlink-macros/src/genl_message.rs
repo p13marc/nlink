@@ -240,6 +240,14 @@ struct GenlAttrArgs {
     /// True if the field annotation supplied the `nested` keyword.
     /// Mutually exclusive with `width`.
     nested: bool,
+    /// Plan 226 (0.20.1) — the `sint` keyword. Marks an `i32` or
+    /// `i64` field as variable-length signed integer per the
+    /// kernel's `nla_put_sint` / `nla_get_sint` contract: 4 bytes
+    /// when the value fits in s32, 8 bytes otherwise. Parses both
+    /// widths cleanly instead of silently truncating the 8-byte
+    /// case to the low 32 bits. Mutually exclusive with `repr` /
+    /// `bitflags` / `nested`.
+    sint: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +263,7 @@ impl Parse for GenlAttrArgs {
         let attr_expr: Expr = input.parse()?;
         let mut width: Option<(ReprWidth, WidthKind)> = None;
         let mut nested = false;
+        let mut sint = false;
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
             if input.is_empty() {
@@ -264,12 +273,12 @@ impl Parse for GenlAttrArgs {
             let key = ident.to_string();
             match key.as_str() {
                 "repr" | "bitflags" => {
-                    if width.is_some() || nested {
+                    if width.is_some() || nested || sint {
                         return Err(syn::Error::new(
                             ident.span(),
                             "#[genl_attr] accepts at most one of `repr` / \
-                             `bitflags` / `nested` (mutually exclusive — pick the \
-                             field-kind that matches your type)",
+                             `bitflags` / `nested` / `sint` (mutually exclusive — \
+                             pick the field-kind that matches your type)",
                         ));
                     }
                     input.parse::<Token![=]>()?;
@@ -283,15 +292,26 @@ impl Parse for GenlAttrArgs {
                     width = Some((w, kind));
                 }
                 "nested" => {
-                    if width.is_some() || nested {
+                    if width.is_some() || nested || sint {
                         return Err(syn::Error::new(
                             ident.span(),
                             "#[genl_attr] accepts at most one of `repr` / \
-                             `bitflags` / `nested` (mutually exclusive — pick the \
-                             field-kind that matches your type)",
+                             `bitflags` / `nested` / `sint` (mutually exclusive — \
+                             pick the field-kind that matches your type)",
                         ));
                     }
                     nested = true;
+                }
+                "sint" => {
+                    if width.is_some() || nested || sint {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "#[genl_attr] accepts at most one of `repr` / \
+                             `bitflags` / `nested` / `sint` (mutually exclusive — \
+                             pick the field-kind that matches your type)",
+                        ));
+                    }
+                    sint = true;
                 }
                 other => {
                     return Err(syn::Error::new(
@@ -300,13 +320,15 @@ impl Parse for GenlAttrArgs {
                             "unknown #[genl_attr] key `{other}`; expected \
                              `repr = \"u8\"|\"u16\"|\"u32\"` (GenlEnum-typed), \
                              `bitflags = \"u8\"|\"u16\"|\"u32\"` (bitflags newtype), \
-                             or `nested` (NetlinkAttrs-typed nested group)"
+                             `nested` (NetlinkAttrs-typed nested group), or \
+                             `sint` (variable-length signed integer per kernel's \
+                             `nla_put_sint`; Plan 226)"
                         ),
                     ))
                 }
             }
         }
-        Ok(Self { attr_expr, width, nested })
+        Ok(Self { attr_expr, width, nested, sint })
     }
 }
 
@@ -507,10 +529,112 @@ pub(crate) struct FieldSpec {
     pub(crate) ident: Ident,
     pub(crate) attr_expr: Expr,
     kind: WireKind,
+    /// Plan 226 — true if the field carries `#[genl_attr(..., sint)]`.
+    /// Forces parse/emit through the variable-length sint helpers.
+    /// Only valid on `i32` / `Option<i32>` / `i64` / `Option<i64>`.
+    sint: bool,
 }
 
 impl FieldSpec {
+    /// Plan 226 — when `sint` is set, returns the special-case codegen
+    /// that bypasses the WireKind dispatch and routes through the
+    /// `emit_sint_attr` / `parse_sint_attr_as_*` helpers. Returns
+    /// `None` otherwise so the regular codegen path applies.
+    fn sint_emit_call(&self) -> Option<TokenStream2> {
+        if !self.sint {
+            return None;
+        }
+        let ident = &self.ident;
+        let attr = &self.attr_expr;
+        Some(match &self.kind {
+            WireKind::I32 => quote! {
+                ::nlink::macros::__rt::emit_sint_attr(
+                    builder,
+                    (#attr) as u16,
+                    self.#ident as i64,
+                );
+            },
+            WireKind::I64 => quote! {
+                ::nlink::macros::__rt::emit_sint_attr(
+                    builder,
+                    (#attr) as u16,
+                    self.#ident,
+                );
+            },
+            WireKind::Optional(inner) => match inner.as_ref() {
+                WireKind::I32 => quote! {
+                    if let ::core::option::Option::Some(v) = self.#ident {
+                        ::nlink::macros::__rt::emit_sint_attr(
+                            builder,
+                            (#attr) as u16,
+                            v as i64,
+                        );
+                    }
+                },
+                WireKind::I64 => quote! {
+                    if let ::core::option::Option::Some(v) = self.#ident {
+                        ::nlink::macros::__rt::emit_sint_attr(
+                            builder,
+                            (#attr) as u16,
+                            v,
+                        );
+                    }
+                },
+                _ => quote! { compile_error!("internal: sint Optional inner not i32/i64") },
+            },
+            _ => quote! { compile_error!("internal: sint kind not i32/i64") },
+        })
+    }
+
+    /// Plan 226 — sint parse-arm codegen. See `sint_emit_call`.
+    fn sint_parse_arm(&self) -> Option<TokenStream2> {
+        if !self.sint {
+            return None;
+        }
+        let ident = &self.ident;
+        let attr = &self.attr_expr;
+        Some(match &self.kind {
+            WireKind::I32 => quote! {
+                __ty if __ty == (#attr) as u16 => {
+                    #ident = ::nlink::macros::__rt::parse_sint_attr_as_i32(__attr_payload)?;
+                }
+            },
+            WireKind::I64 => quote! {
+                __ty if __ty == (#attr) as u16 => {
+                    #ident = ::nlink::macros::__rt::parse_sint_attr_as_i64(__attr_payload)?;
+                }
+            },
+            WireKind::Optional(inner) => match inner.as_ref() {
+                WireKind::I32 => quote! {
+                    __ty if __ty == (#attr) as u16 => {
+                        // Plan 226 — accept 4- or 8-byte sint payloads.
+                        // For overflow values (kernel emits 8 bytes that
+                        // don't fit in i32), the parse fails outright via
+                        // `?`. Until the i64 field widening lands in 0.21
+                        // this surfaces the overflow rather than silently
+                        // truncating it.
+                        #ident = ::core::option::Option::Some(
+                            ::nlink::macros::__rt::parse_sint_attr_as_i32(__attr_payload)?,
+                        );
+                    }
+                },
+                WireKind::I64 => quote! {
+                    __ty if __ty == (#attr) as u16 => {
+                        #ident = ::core::option::Option::Some(
+                            ::nlink::macros::__rt::parse_sint_attr_as_i64(__attr_payload)?,
+                        );
+                    }
+                },
+                _ => quote! { compile_error!("internal: sint Optional inner not i32/i64") },
+            },
+            _ => quote! { compile_error!("internal: sint kind not i32/i64") },
+        })
+    }
+
     pub(crate) fn emit_call(&self) -> TokenStream2 {
+        if let Some(sint) = self.sint_emit_call() {
+            return sint;
+        }
         let ident = &self.ident;
         let attr = &self.attr_expr;
         let builder = quote! { builder };
@@ -565,6 +689,9 @@ impl FieldSpec {
     }
 
     pub(crate) fn parse_arm(&self) -> TokenStream2 {
+        if let Some(sint) = self.sint_parse_arm() {
+            return sint;
+        }
         let ident = &self.ident;
         let attr = &self.attr_expr;
         let parse_fn = self.kind.parse_fn();
@@ -652,19 +779,37 @@ pub(crate) fn parse_field(field: &Field) -> syn::Result<FieldSpec> {
         )
     })?;
 
-    // #[genl_attr(EXPR [, repr | bitflags | nested ...])]
+    // #[genl_attr(EXPR [, repr | bitflags | nested | sint ...])]
     let GenlAttrArgs {
         attr_expr,
         width,
         nested,
+        sint,
     } = ml.parse_args()?;
 
     let kind = classify_type(&field.ty, width, nested)?;
+
+    // Plan 226 — `sint` only makes sense on signed-integer fields.
+    if sint {
+        let ok = matches!(&kind, WireKind::I32 | WireKind::I64)
+            || matches!(&kind, WireKind::Optional(inner)
+                if matches!(inner.as_ref(), WireKind::I32 | WireKind::I64));
+        if !ok {
+            return Err(syn::Error::new_spanned(
+                &field.ty,
+                "#[genl_attr(..., sint)] requires field type `i32`, `Option<i32>`, \
+                 `i64`, or `Option<i64>` — sint is the kernel's variable-length \
+                 signed-integer wire format (4 bytes if it fits in s32, 8 bytes \
+                 otherwise; see Plan 226)",
+            ));
+        }
+    }
 
     Ok(FieldSpec {
         ident,
         attr_expr,
         kind,
+        sint,
     })
 }
 
