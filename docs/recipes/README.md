@@ -31,6 +31,11 @@ to the hand-rolled netlink primitives if you want to go deeper.
   install matching SA + SP on each side via typed `Connection<Xfrm>`
   CRUD; ESP-tunnel + HMAC-SHA256 + AES-CBC. Includes key rotation
   via `update_sa` and a NAT-T pointer.
+- [**OpenVPN data-channel offload (DCO)**](openvpn-dco.md) — push the
+  OpenVPN 2.7 data-channel into the kernel via `Connection<Ovpn>` +
+  `OvpnConfig` (declarative). Covers peer + key install, atomic
+  `key_swap` rekey cutover, multicast notifications, key-material
+  zeroization. Kernel 6.16+ (Plan 197).
 
 ### Per-process / per-cgroup classification
 

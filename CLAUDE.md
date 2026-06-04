@@ -563,6 +563,12 @@ recipe rather than re-synthesizing:
   Capability handshake via `get_caps` before `set_shaper` so
   drivers with partial support don't surprise you. Telco /
   SmartNIC / SR-IOV multi-tenancy use case (0.16+).
+- [`openvpn-dco`](docs/recipes/openvpn-dco.md) — OpenVPN 2.7
+  data-channel offload via `Connection<Ovpn>` + the declarative
+  `OvpnConfig` mirror of `WireguardConfig`. Peers + AEAD keys
+  installed in-kernel; atomic `key_swap` rekey cutover;
+  multicast `peer-del-ntf` / `key-swap-ntf` / `peer-float-ntf`.
+  Kernel 6.16+ (0.21+, Plan 197).
 
 Per-subsystem runnable examples live under
 `crates/nlink/examples/`: `genl/{wireguard,macsec,mptcp,ethtool_*,
