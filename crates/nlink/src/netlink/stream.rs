@@ -910,6 +910,30 @@ impl EventSource for super::genl::dpll::Dpll {
     }
 }
 
+// OVPN multicast `peers` group events (Plan 197). Mirrors the
+// DPLL pattern: forward-compat skip on parse errors, dispatch
+// via the GENL header's cmd byte. See
+// `Connection::<Ovpn>::subscribe_peers()` and
+// `crates/nlink/src/netlink/genl/ovpn/events.rs`.
+impl private::Sealed for super::genl::ovpn::Ovpn {}
+
+impl EventSource for super::genl::ovpn::Ovpn {
+    type Event = super::genl::ovpn::OvpnEvent;
+
+    fn parse_events(data: &[u8]) -> Vec<Self::Event> {
+        let mut events = Vec::new();
+        for msg_result in MessageIter::new(data) {
+            let Ok((_header, payload)) = msg_result else {
+                continue;
+            };
+            if let Some(evt) = super::genl::ovpn::events::parse_ovpn_event(payload) {
+                events.push(evt);
+            }
+        }
+        events
+    }
+}
+
 fn parse_ethtool_events(data: &[u8]) -> Vec<super::genl::ethtool::EthtoolEvent> {
     use super::genl::{GENL_HDRLEN, GenlMsgHdr};
 
