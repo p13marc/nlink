@@ -1534,34 +1534,12 @@ impl Connection<Route> {
 
     /// Get routing rules for a specific address family.
     ///
-    /// # Arguments
-    ///
-    /// * `family` - Address family: `libc::AF_INET` for IPv4, `libc::AF_INET6` for IPv6
-    ///
-    /// **Deprecated** in 0.20.1: pass [`AddressFamily`] to
-    /// [`Self::get_rules_for_family_typed`]. The raw-`u8` form silently
-    /// returns an empty `Vec` for unmodelled family bytes; the typed form
-    /// surfaces the same call as a type-checked constructor (`AddressFamily::v4()`).
-    #[deprecated(
-        since = "0.20.1",
-        note = "use get_rules_for_family_typed(AddressFamily::v4()) — \
-                raw u8 silently returns empty for unknown families"
-    )]
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_for_family"))]
-    pub async fn get_rules_for_family(&self, family: u8) -> Result<Vec<RuleMessage>> {
-        let rules = self.get_rules().await?;
-        Ok(rules.into_iter().filter(|r| r.family() == family).collect())
-    }
-
-    /// Get routing rules for a specific address family, typed.
-    ///
     /// Pass `AddressFamily::unspec()` to dump every family.
     ///
-    /// This is the typed sibling of the deprecated [`Self::get_rules_for_family`].
-    /// Internally delegates through the same dump path; the typed signature
-    /// just constrains the input boundary.
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_for_family_typed"))]
-    pub async fn get_rules_for_family_typed(
+    /// (Renamed from `get_rules_for_family_typed` in 0.21 — the raw-`u8`
+    /// sibling was removed in the same release.)
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_for_family"))]
+    pub async fn get_rules_for_family(
         &self,
         family: AddressFamily,
     ) -> Result<Vec<RuleMessage>> {
@@ -1577,13 +1555,13 @@ impl Connection<Route> {
     /// Get IPv4 routing rules.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_v4"))]
     pub async fn get_rules_v4(&self) -> Result<Vec<RuleMessage>> {
-        self.get_rules_for_family_typed(AddressFamily::v4()).await
+        self.get_rules_for_family(AddressFamily::v4()).await
     }
 
     /// Get IPv6 routing rules.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_v6"))]
     pub async fn get_rules_v6(&self) -> Result<Vec<RuleMessage>> {
-        self.get_rules_for_family_typed(AddressFamily::v6()).await
+        self.get_rules_for_family(AddressFamily::v6()).await
     }
 
     /// Add a routing rule.
@@ -1633,30 +1611,10 @@ impl Connection<Route> {
 
     /// Delete a rule by priority.
     ///
-    /// **Deprecated** in 0.20.1: use [`Self::del_rule_by_priority_typed`]
-    /// with [`AddressFamily`].
-    #[deprecated(
-        since = "0.20.1",
-        note = "use del_rule_by_priority_typed(AddressFamily::v4(), priority) instead"
-    )]
+    /// (Renamed from `del_rule_by_priority_typed` in 0.21 — the raw-`u8`
+    /// sibling was removed in the same release.)
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rule_by_priority"))]
-    pub async fn del_rule_by_priority(&self, family: u8, priority: u32) -> Result<()> {
-        let rule = super::rule::RuleBuilder::new(family).priority(priority);
-        self.del_rule(rule).await
-    }
-
-    /// Delete a rule by priority, typed.
-    ///
-    /// Typed sibling of the deprecated [`Self::del_rule_by_priority`].
-    /// Internally converts [`AddressFamily`] to the raw `AF_*` byte and
-    /// delegates to the same `RuleBuilder` path — behaviour is identical
-    /// for the modelled families; the typed boundary is the safety net.
-    #[tracing::instrument(
-        level = "debug",
-        skip_all,
-        fields(method = "del_rule_by_priority_typed")
-    )]
-    pub async fn del_rule_by_priority_typed(
+    pub async fn del_rule_by_priority(
         &self,
         family: AddressFamily,
         priority: u32,
@@ -1669,17 +1627,10 @@ impl Connection<Route> {
     ///
     /// This deletes all rules except the default ones (priority 0, 32766, 32767).
     ///
-    /// **Deprecated** in 0.20.1: use [`Self::flush_rules_typed`] with
-    /// [`AddressFamily`]. The raw-`u8` form silently no-ops for unknown
-    /// family bytes (the per-family filter yields zero matches).
-    #[deprecated(
-        since = "0.20.1",
-        note = "use flush_rules_typed(AddressFamily::v4()) instead — \
-                raw u8 silently no-ops for unknown families"
-    )]
+    /// (Renamed from `flush_rules_typed` in 0.21 — the raw-`u8` sibling
+    /// was removed in the same release.)
     #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_rules"))]
-    pub async fn flush_rules(&self, family: u8) -> Result<()> {
-        #[allow(deprecated)]
+    pub async fn flush_rules(&self, family: AddressFamily) -> Result<()> {
         let rules = self.get_rules_for_family(family).await?;
 
         for rule in rules {
@@ -1687,31 +1638,8 @@ impl Connection<Route> {
             if rule.priority == 0 || rule.priority == 32766 || rule.priority == 32767 {
                 continue;
             }
-
-            // Delete by priority
-            #[allow(deprecated)]
-            let _ = self.del_rule_by_priority(family, rule.priority).await;
-        }
-
-        Ok(())
-    }
-
-    /// Flush all non-default routing rules for a family, typed.
-    ///
-    /// Typed sibling of the deprecated [`Self::flush_rules`]. Internally
-    /// delegates through the typed dump + delete path; behaviour matches
-    /// for modelled families.
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_rules_typed"))]
-    pub async fn flush_rules_typed(&self, family: AddressFamily) -> Result<()> {
-        let rules = self.get_rules_for_family_typed(family).await?;
-
-        for rule in rules {
-            // Skip default rules
-            if rule.priority == 0 || rule.priority == 32766 || rule.priority == 32767 {
-                continue;
-            }
             let _ = self
-                .del_rule_by_priority_typed(family, rule.priority)
+                .del_rule_by_priority(family, rule.priority)
                 .await;
         }
 

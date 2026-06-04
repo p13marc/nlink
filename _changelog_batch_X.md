@@ -26,4 +26,11 @@ for the deprecation removals.
   escape-hatch helper `ffo_ppt_i64_from_payload(&[u8])` stays
   for callers that hold the raw attribute bytes but not a
   parsed struct.
+- **Route-rule API: `Connection::<Route>::flush_rules`,
+  `get_rules_for_family`, `del_rule_by_priority` collapsed to a
+  single typed form.** The raw-`u8` family signature deprecated
+  in 0.20.1 is gone. The typed siblings (`*_typed`, taking
+  `AddressFamily`) are renamed back to the original names —
+  there's only one form now, and it's the safe one. Migration:
+  `flush_rules(libc::AF_INET as u8)` → `flush_rules(AddressFamily::v4())`.
 
