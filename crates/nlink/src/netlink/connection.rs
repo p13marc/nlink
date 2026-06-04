@@ -6,6 +6,7 @@ use tracing::{instrument, warn};
 
 use super::{
     builder::MessageBuilder,
+    dispatcher::Dispatcher,
     error::{Error, Result},
     interface_ref::InterfaceRef,
     message::{
@@ -99,7 +100,21 @@ pub struct Connection<P: ProtocolState> {
     /// (`DumpStream`, `EventSubscription`) can take an
     /// [`tokio::sync::OwnedMutexGuard`] that lives independent
     /// of the Connection's borrow scope — see 0.19 Finding B.
+    ///
+    /// Plan 234 (0.21.0) — kept alongside the new
+    /// [`Dispatcher`] foundation. The dispatcher handles
+    /// multicast fan-out + `ResyncMarker::ResyncStart` ENOBUFS
+    /// routing today; the full per-seq unicast router that
+    /// retires this mutex lands incrementally on top of the
+    /// dispatcher's infrastructure (see `dispatcher.rs`).
     request_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Plan 234 — per-Connection dispatcher. Routes ENOBUFS into
+    /// `ResyncMarker::ResyncStart` for every active multicast
+    /// subscriber and fans out multicast frames to per-group
+    /// broadcast channels. The recv path on `NetlinkSocket`
+    /// consults the connection's dispatcher when it sees ENOBUFS
+    /// so the marker reaches the right place (Plan 234 §4).
+    dispatcher: Dispatcher,
 }
 
 /// Default operation timeout for `Connection<P>` (Plan 171).
@@ -150,11 +165,18 @@ where
     /// ```
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>()))]
     pub fn new() -> Result<Self> {
+        let socket = NetlinkSocket::new(P::PROTOCOL)?;
+        let dispatcher = Dispatcher::new();
+        // Plan 234 — install dispatcher hook so socket.recv_msg's
+        // ENOBUFS path fans out ResyncMarker::ResyncStart to active
+        // multicast subscribers.
+        socket.install_dispatcher(dispatcher.clone());
         Ok(Self {
-            socket: NetlinkSocket::new(P::PROTOCOL)?,
+            socket,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            dispatcher,
         })
     }
 
@@ -178,11 +200,15 @@ where
     /// ```
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_fd))]
     pub fn new_in_namespace(ns_fd: RawFd) -> Result<Self> {
+        let socket = NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?;
+        let dispatcher = Dispatcher::new();
+        socket.install_dispatcher(dispatcher.clone());
         Ok(Self {
-            socket: NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?,
+            socket,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            dispatcher,
         })
     }
 
@@ -204,11 +230,15 @@ where
     /// ```
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_path = %ns_path.as_ref().display()))]
     pub fn new_in_namespace_path<T: AsRef<Path>>(ns_path: T) -> Result<Self> {
+        let socket = NetlinkSocket::new_in_namespace_path(P::PROTOCOL, ns_path)?;
+        let dispatcher = Dispatcher::new();
+        socket.install_dispatcher(dispatcher.clone());
         Ok(Self {
-            socket: NetlinkSocket::new_in_namespace_path(P::PROTOCOL, ns_path)?,
+            socket,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            dispatcher,
         })
     }
 }
@@ -383,6 +413,23 @@ impl<P: ProtocolState> Connection<P> {
         self.request_lock.clone().lock_owned().await
     }
 
+    /// Plan 234 — access this Connection's dispatcher.
+    ///
+    /// The dispatcher routes ENOBUFS into
+    /// [`ResyncMarker::ResyncStart`](super::resync::ResyncMarker)
+    /// for every active multicast subscriber and fans out multicast
+    /// frames to per-group broadcast channels. Public so subscriber
+    /// constructors (events, conntrack, nftables, devlink, dpll,
+    /// nl80211 multicast) can register their broadcast receivers
+    /// alongside the kernel-side `add_membership` call.
+    ///
+    /// The dispatcher is cheap to clone (`Arc`-wrapped internally);
+    /// returning `&Dispatcher` keeps the ownership story simple
+    /// (the Connection owns the canonical handle).
+    pub fn dispatcher(&self) -> &Dispatcher {
+        &self.dispatcher
+    }
+
     /// Wrap a future with the configured timeout.
     ///
     /// If no timeout is set, the future runs without time limit.
@@ -404,11 +451,14 @@ impl<P: ProtocolState> Connection<P> {
     /// This is primarily used internally for protocols that require
     /// async initialization (like WireGuard which needs family ID resolution).
     pub(crate) fn from_parts(socket: NetlinkSocket, state: P) -> Self {
+        let dispatcher = Dispatcher::new();
+        socket.install_dispatcher(dispatcher.clone());
         Self {
             socket,
             state,
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            dispatcher,
         }
     }
 
@@ -670,9 +720,9 @@ impl<P: ProtocolState> Connection<P> {
 /// ```ignore
 /// use nlink::netlink::{Connection, Route, RtnetlinkGroup};
 ///
-/// let mut conn = Connection::<Route>::new()?;
+/// let conn = Connection::<Route>::new()?;
 /// conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
-/// let mut events = conn.events();
+/// let mut events = conn.events().await;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -755,7 +805,7 @@ impl Connection<Route> {
     /// ```ignore
     /// use nlink::netlink::{Connection, Route, RtnetlinkGroup};
     ///
-    /// let mut conn = Connection::<Route>::new()?;
+    /// let conn = Connection::<Route>::new()?;
     /// conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
     /// ```
     #[instrument(level = "info", skip(self), fields(groups = ?groups))]
@@ -775,9 +825,9 @@ impl Connection<Route> {
     /// ```ignore
     /// use nlink::netlink::{Connection, Route};
     ///
-    /// let mut conn = Connection::<Route>::new()?;
+    /// let conn = Connection::<Route>::new()?;
     /// conn.subscribe_all()?;
-    /// let mut events = conn.events();
+    /// let mut events = conn.events().await;
     /// ```
     #[instrument(level = "info", skip_all)]
     pub fn subscribe_all(&self) -> Result<()> {
@@ -1524,7 +1574,7 @@ impl Connection<Route> {
     /// ```ignore
     /// let rules = conn.get_rules().await?;
     /// for rule in rules {
-    ///     println!("{}: {:?} -> table {}", rule.priority, rule.source, rule.table);
+    ///     println!("{}: {:?} -> table {}", rule.priority(), rule.source(), rule.table_id());
     /// }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules"))]
@@ -1534,34 +1584,12 @@ impl Connection<Route> {
 
     /// Get routing rules for a specific address family.
     ///
-    /// # Arguments
-    ///
-    /// * `family` - Address family: `libc::AF_INET` for IPv4, `libc::AF_INET6` for IPv6
-    ///
-    /// **Deprecated** in 0.20.1: pass [`AddressFamily`] to
-    /// [`Self::get_rules_for_family_typed`]. The raw-`u8` form silently
-    /// returns an empty `Vec` for unmodelled family bytes; the typed form
-    /// surfaces the same call as a type-checked constructor (`AddressFamily::v4()`).
-    #[deprecated(
-        since = "0.20.1",
-        note = "use get_rules_for_family_typed(AddressFamily::v4()) — \
-                raw u8 silently returns empty for unknown families"
-    )]
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_for_family"))]
-    pub async fn get_rules_for_family(&self, family: u8) -> Result<Vec<RuleMessage>> {
-        let rules = self.get_rules().await?;
-        Ok(rules.into_iter().filter(|r| r.family() == family).collect())
-    }
-
-    /// Get routing rules for a specific address family, typed.
-    ///
     /// Pass `AddressFamily::unspec()` to dump every family.
     ///
-    /// This is the typed sibling of the deprecated [`Self::get_rules_for_family`].
-    /// Internally delegates through the same dump path; the typed signature
-    /// just constrains the input boundary.
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_for_family_typed"))]
-    pub async fn get_rules_for_family_typed(
+    /// (Renamed from `get_rules_for_family_typed` in 0.21 — the raw-`u8`
+    /// sibling was removed in the same release.)
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_for_family"))]
+    pub async fn get_rules_for_family(
         &self,
         family: AddressFamily,
     ) -> Result<Vec<RuleMessage>> {
@@ -1577,13 +1605,13 @@ impl Connection<Route> {
     /// Get IPv4 routing rules.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_v4"))]
     pub async fn get_rules_v4(&self) -> Result<Vec<RuleMessage>> {
-        self.get_rules_for_family_typed(AddressFamily::v4()).await
+        self.get_rules_for_family(AddressFamily::v4()).await
     }
 
     /// Get IPv6 routing rules.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_v6"))]
     pub async fn get_rules_v6(&self) -> Result<Vec<RuleMessage>> {
-        self.get_rules_for_family_typed(AddressFamily::v6()).await
+        self.get_rules_for_family(AddressFamily::v6()).await
     }
 
     /// Add a routing rule.
@@ -1633,30 +1661,10 @@ impl Connection<Route> {
 
     /// Delete a rule by priority.
     ///
-    /// **Deprecated** in 0.20.1: use [`Self::del_rule_by_priority_typed`]
-    /// with [`AddressFamily`].
-    #[deprecated(
-        since = "0.20.1",
-        note = "use del_rule_by_priority_typed(AddressFamily::v4(), priority) instead"
-    )]
+    /// (Renamed from `del_rule_by_priority_typed` in 0.21 — the raw-`u8`
+    /// sibling was removed in the same release.)
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rule_by_priority"))]
-    pub async fn del_rule_by_priority(&self, family: u8, priority: u32) -> Result<()> {
-        let rule = super::rule::RuleBuilder::new(family).priority(priority);
-        self.del_rule(rule).await
-    }
-
-    /// Delete a rule by priority, typed.
-    ///
-    /// Typed sibling of the deprecated [`Self::del_rule_by_priority`].
-    /// Internally converts [`AddressFamily`] to the raw `AF_*` byte and
-    /// delegates to the same `RuleBuilder` path — behaviour is identical
-    /// for the modelled families; the typed boundary is the safety net.
-    #[tracing::instrument(
-        level = "debug",
-        skip_all,
-        fields(method = "del_rule_by_priority_typed")
-    )]
-    pub async fn del_rule_by_priority_typed(
+    pub async fn del_rule_by_priority(
         &self,
         family: AddressFamily,
         priority: u32,
@@ -1669,49 +1677,19 @@ impl Connection<Route> {
     ///
     /// This deletes all rules except the default ones (priority 0, 32766, 32767).
     ///
-    /// **Deprecated** in 0.20.1: use [`Self::flush_rules_typed`] with
-    /// [`AddressFamily`]. The raw-`u8` form silently no-ops for unknown
-    /// family bytes (the per-family filter yields zero matches).
-    #[deprecated(
-        since = "0.20.1",
-        note = "use flush_rules_typed(AddressFamily::v4()) instead — \
-                raw u8 silently no-ops for unknown families"
-    )]
+    /// (Renamed from `flush_rules_typed` in 0.21 — the raw-`u8` sibling
+    /// was removed in the same release.)
     #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_rules"))]
-    pub async fn flush_rules(&self, family: u8) -> Result<()> {
-        #[allow(deprecated)]
+    pub async fn flush_rules(&self, family: AddressFamily) -> Result<()> {
         let rules = self.get_rules_for_family(family).await?;
 
         for rule in rules {
             // Skip default rules
-            if rule.priority == 0 || rule.priority == 32766 || rule.priority == 32767 {
-                continue;
-            }
-
-            // Delete by priority
-            #[allow(deprecated)]
-            let _ = self.del_rule_by_priority(family, rule.priority).await;
-        }
-
-        Ok(())
-    }
-
-    /// Flush all non-default routing rules for a family, typed.
-    ///
-    /// Typed sibling of the deprecated [`Self::flush_rules`]. Internally
-    /// delegates through the typed dump + delete path; behaviour matches
-    /// for modelled families.
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_rules_typed"))]
-    pub async fn flush_rules_typed(&self, family: AddressFamily) -> Result<()> {
-        let rules = self.get_rules_for_family_typed(family).await?;
-
-        for rule in rules {
-            // Skip default rules
-            if rule.priority == 0 || rule.priority == 32766 || rule.priority == 32767 {
+            if rule.is_default() {
                 continue;
             }
             let _ = self
-                .del_rule_by_priority_typed(family, rule.priority)
+                .del_rule_by_priority(family, rule.priority())
                 .await;
         }
 

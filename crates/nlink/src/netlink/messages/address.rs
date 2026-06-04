@@ -23,6 +23,7 @@ mod attr_ids {
 
 /// Strongly-typed address message with all attributes parsed.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct AddressMessage {
     /// Fixed-size header.
     pub(crate) header: IfAddrMsg,

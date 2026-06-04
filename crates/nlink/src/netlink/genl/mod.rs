@@ -54,6 +54,7 @@ pub mod macsec;
 pub mod mptcp;
 pub mod net_shaper;
 pub mod nl80211;
+pub mod ovpn;
 pub mod wireguard;
 
 // Control family constants (fixed, not dynamically assigned)

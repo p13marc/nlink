@@ -255,6 +255,11 @@ path = "examples/genl/dpll.rs"
 name = "genl_net_shaper"
 path = "examples/genl/net_shaper.rs"
 
+[[example]]
+name = "genl_ovpn"
+path = "examples/genl/ovpn.rs"
+required-features = ["lab"]
+
 # nlink-macros showcase
 [[example]]
 name = "macros_define_taskstats"

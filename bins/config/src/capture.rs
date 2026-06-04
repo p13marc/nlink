@@ -296,21 +296,21 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
                 continue;
             }
 
-            let from = rule.source.map(|addr| {
+            let from = rule.source().map(|addr| {
                 if rule.src_len() == 0 {
                     "all".to_string()
                 } else {
                     format!("{}/{}", addr, rule.src_len())
                 }
             });
-            let to = rule.destination.map(|addr| {
+            let to = rule.destination().map(|addr| {
                 if rule.dst_len() == 0 {
                     "all".to_string()
                 } else {
                     format!("{}/{}", addr, rule.dst_len())
                 }
             });
-            let fwmark = rule.fwmark.map(|m| format!("0x{:x}", m));
+            let fwmark = rule.fwmark().map(|m| format!("0x{:x}", m));
             let table = {
                 let t = rule.table_id();
                 match t {
@@ -330,7 +330,7 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
             };
 
             rule_configs.push(RuleConfig {
-                priority: rule.priority,
+                priority: rule.priority(),
                 from,
                 to,
                 fwmark,

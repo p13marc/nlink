@@ -18,7 +18,7 @@
 //! let conn = Connection::<KobjectUevent>::new()?;
 //!
 //! // Get event stream (borrows connection)
-//! let mut events = conn.events();
+//! let mut events = conn.events().await;
 //! while let Some(event) = events.try_next().await? {
 //!     println!("[{}] {}", event.action, event.devpath);
 //! }
@@ -37,8 +37,8 @@
 //! let uevent_conn = Connection::<KobjectUevent>::new()?;
 //! let selinux_conn = Connection::<SELinux>::new()?;
 //!
-//! let mut uevent_events = pin!(uevent_conn.events());
-//! let mut selinux_events = pin!(selinux_conn.events());
+//! let mut uevent_events = pin!(uevent_conn.events().await);
+//! let mut selinux_events = pin!(selinux_conn.events().await);
 //!
 //! loop {
 //!     tokio::select! {
@@ -105,7 +105,7 @@ pub trait EventSource: ProtocolState + private::Sealed {
 /// use tokio_stream::StreamExt;
 ///
 /// let conn = Connection::<KobjectUevent>::new()?;
-/// let mut events = conn.events();
+/// let mut events = conn.events().await;
 ///
 /// while let Some(event) = events.try_next().await? {
 ///     println!("{:?}", event);
@@ -195,7 +195,7 @@ impl<P: EventSource> Unpin for EventSubscription<'_, P> {}
 /// use tokio_stream::StreamExt;
 ///
 /// let conn = Connection::<SELinux>::new()?;
-/// let mut stream = conn.into_events();
+/// let mut stream = conn.into_events().await;
 ///
 /// while let Some(event) = stream.try_next().await? {
 ///     println!("{:?}", event);
@@ -903,6 +903,30 @@ impl EventSource for super::genl::dpll::Dpll {
                 continue;
             };
             if let Some(evt) = super::genl::dpll::events::parse_dpll_event(payload) {
+                events.push(evt);
+            }
+        }
+        events
+    }
+}
+
+// OVPN multicast `peers` group events (Plan 197). Mirrors the
+// DPLL pattern: forward-compat skip on parse errors, dispatch
+// via the GENL header's cmd byte. See
+// `Connection::<Ovpn>::subscribe_peers()` and
+// `crates/nlink/src/netlink/genl/ovpn/events.rs`.
+impl private::Sealed for super::genl::ovpn::Ovpn {}
+
+impl EventSource for super::genl::ovpn::Ovpn {
+    type Event = super::genl::ovpn::OvpnEvent;
+
+    fn parse_events(data: &[u8]) -> Vec<Self::Event> {
+        let mut events = Vec::new();
+        for msg_result in MessageIter::new(data) {
+            let Ok((_header, payload)) = msg_result else {
+                continue;
+            };
+            if let Some(evt) = super::genl::ovpn::events::parse_ovpn_event(payload) {
                 events.push(evt);
             }
         }

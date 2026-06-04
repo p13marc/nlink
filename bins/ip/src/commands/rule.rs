@@ -180,7 +180,7 @@ impl RuleCmd {
         family: Option<u8>,
     ) -> Result<()> {
         let raw_rules = if let Some(fam) = family {
-            conn.get_rules_for_family_typed(nlink::AddressFamily::from_raw(fam))
+            conn.get_rules_for_family(nlink::AddressFamily::from_raw(fam))
                 .await?
         } else {
             conn.get_rules().await?
@@ -194,18 +194,18 @@ impl RuleCmd {
                 src_len: r.src_len(),
                 dst_len: r.dst_len(),
                 action: r.action(),
-                priority: r.priority,
-                table: r.table,
-                source: r.source.map(|a| a.to_string()),
-                destination: r.destination.map(|a| a.to_string()),
-                iif: r.iifname.clone(),
-                oif: r.oifname.clone(),
-                fwmark: r.fwmark,
-                fwmask: r.fwmask,
-                ipproto: r.ip_proto,
-                sport: r.sport_range,
-                dport: r.dport_range,
-                uid_range: r.uid_range,
+                priority: r.priority(),
+                table: r.table_id(),
+                source: r.source().map(|a| a.to_string()),
+                destination: r.destination().map(|a| a.to_string()),
+                iif: r.iifname().map(|s| s.to_string()),
+                oif: r.oifname().map(|s| s.to_string()),
+                fwmark: r.fwmark(),
+                fwmask: r.fwmask(),
+                ipproto: r.ip_proto(),
+                sport: r.sport_range(),
+                dport: r.dport_range(),
+                uid_range: r.uid_range(),
             })
             .collect();
 
@@ -459,12 +459,12 @@ impl RuleCmd {
     async fn flush(conn: &Connection<Route>, family: Option<u8>) -> Result<()> {
         // Flush IPv4 rules
         if family.is_none() || family == Some(libc::AF_INET as u8) {
-            conn.flush_rules_typed(nlink::AddressFamily::v4()).await?;
+            conn.flush_rules(nlink::AddressFamily::v4()).await?;
         }
 
         // Flush IPv6 rules
         if family.is_none() || family == Some(libc::AF_INET6 as u8) {
-            conn.flush_rules_typed(nlink::AddressFamily::v6()).await?;
+            conn.flush_rules(nlink::AddressFamily::v6()).await?;
         }
 
         Ok(())

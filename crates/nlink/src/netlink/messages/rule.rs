@@ -35,48 +35,54 @@ mod attr_ids {
 }
 
 /// Strongly-typed routing rule message with all attributes parsed.
+///
+/// Fields are `pub(crate)`; consumers read via the per-field accessor
+/// methods (see [`Self::priority`], [`Self::source`], etc.). The
+/// struct is `#[non_exhaustive]` so the kernel can grow new attribute
+/// fields without it being a breaking change.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct RuleMessage {
     /// Fixed-size header.
-    pub header: FibRuleHdr,
+    pub(crate) header: FibRuleHdr,
     /// Rule priority (FRA_PRIORITY).
-    pub priority: u32,
+    pub(crate) priority: u32,
     /// Source address (FRA_SRC).
-    pub source: Option<IpAddr>,
+    pub(crate) source: Option<IpAddr>,
     /// Destination address (FRA_DST).
-    pub destination: Option<IpAddr>,
+    pub(crate) destination: Option<IpAddr>,
     /// Input interface name (FRA_IIFNAME).
-    pub iifname: Option<String>,
+    pub(crate) iifname: Option<String>,
     /// Output interface name (FRA_OIFNAME).
-    pub oifname: Option<String>,
+    pub(crate) oifname: Option<String>,
     /// Firewall mark (FRA_FWMARK).
-    pub fwmark: Option<u32>,
+    pub(crate) fwmark: Option<u32>,
     /// Firewall mark mask (FRA_FWMASK).
-    pub fwmask: Option<u32>,
+    pub(crate) fwmask: Option<u32>,
     /// Routing table ID (FRA_TABLE, overrides header.table).
-    pub table: u32,
+    pub(crate) table: u32,
     /// Goto target rule priority (FRA_GOTO).
-    pub goto: Option<u32>,
+    pub(crate) goto: Option<u32>,
     /// Flow classification ID (FRA_FLOW).
-    pub flow: Option<u32>,
+    pub(crate) flow: Option<u32>,
     /// Tunnel ID (FRA_TUN_ID).
-    pub tun_id: Option<u64>,
+    pub(crate) tun_id: Option<u64>,
     /// Suppress interface group (FRA_SUPPRESS_IFGROUP).
-    pub suppress_ifgroup: Option<u32>,
+    pub(crate) suppress_ifgroup: Option<u32>,
     /// Suppress prefix length (FRA_SUPPRESS_PREFIXLEN).
-    pub suppress_prefixlen: Option<u32>,
+    pub(crate) suppress_prefixlen: Option<u32>,
     /// L3 master device (FRA_L3MDEV).
-    pub l3mdev: Option<u8>,
+    pub(crate) l3mdev: Option<u8>,
     /// UID range (FRA_UID_RANGE).
-    pub uid_range: Option<FibRuleUidRange>,
+    pub(crate) uid_range: Option<FibRuleUidRange>,
     /// Rule protocol (FRA_PROTOCOL).
-    pub protocol: Option<u8>,
+    pub(crate) protocol: Option<u8>,
     /// IP protocol for port matching (FRA_IP_PROTO).
-    pub ip_proto: Option<u8>,
+    pub(crate) ip_proto: Option<u8>,
     /// Source port range (FRA_SPORT_RANGE).
-    pub sport_range: Option<FibRulePortRange>,
+    pub(crate) sport_range: Option<FibRulePortRange>,
     /// Destination port range (FRA_DPORT_RANGE).
-    pub dport_range: Option<FibRulePortRange>,
+    pub(crate) dport_range: Option<FibRulePortRange>,
 }
 
 impl RuleMessage {
@@ -156,14 +162,13 @@ impl RuleMessage {
         self.priority == 0 || self.priority == 32766 || self.priority == 32767
     }
 
-    // -------- Plan 231 — per-field accessors -----------------
+    // -------- Per-field accessors -----------------
     //
-    // These mirror the existing `pub` fields with method-call ergonomics.
-    // The fields stay `pub` for additivity (0.20.1 is a patch release —
-    // changing visibility is breaking). New code should prefer the
-    // accessors; they read as a single chain alongside `.family_typed()`
-    // and keep the wire-format struct details (header.* lookups) out of
-    // call sites.
+    // As of 0.21 the fields themselves are `pub(crate)` and these
+    // accessors are the public surface. The 0.20.1 transition shipped
+    // the accessors additively (with pub fields still visible); 0.21
+    // closes the convention by demoting field visibility and adding
+    // #[non_exhaustive] to the struct.
 
     /// Rule priority (FRA_PRIORITY). Returns `0` when the kernel
     /// did not set the attribute.

@@ -40,8 +40,8 @@ async fn main() -> nlink::Result<()> {
                         // Group by interface
                         let mut current_ifindex = 0;
                         for vlan in &vlans {
-                            if vlan.ifindex != current_ifindex {
-                                current_ifindex = vlan.ifindex;
+                            if vlan.ifindex() != current_ifindex {
+                                current_ifindex = vlan.ifindex();
                                 let ifname = links
                                     .iter()
                                     .find(|l| l.ifindex() == current_ifindex)
@@ -49,11 +49,11 @@ async fn main() -> nlink::Result<()> {
                                     .unwrap_or("?");
                                 println!("  Port: {}", ifname);
                             }
-                            print!("    VLAN {}", vlan.vid);
-                            if vlan.flags.pvid {
+                            print!("    VLAN {}", vlan.vid());
+                            if vlan.flags().pvid {
                                 print!(" PVID");
                             }
-                            if vlan.flags.untagged {
+                            if vlan.flags().untagged {
                                 print!(" Egress Untagged");
                             }
                             println!();
@@ -80,7 +80,7 @@ async fn main() -> nlink::Result<()> {
     let vlans = conn.get_bridge_vlans("eth0").await?;
     for vlan in &vlans {{
         println!("VLAN {{}}: pvid={{}} untagged={{}}",
-            vlan.vid, vlan.flags.pvid, vlan.flags.untagged);
+            vlan.vid(), vlan.flags().pvid, vlan.flags().untagged);
     }}
 
     // Get VLANs for all ports of a bridge

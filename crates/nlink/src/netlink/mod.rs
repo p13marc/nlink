@@ -28,10 +28,10 @@
 //! use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
 //! use tokio_stream::StreamExt;
 //!
-//! let mut conn = Connection::<Route>::new()?;
+//! let conn = Connection::<Route>::new()?;
 //! conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Ipv4Addr])?;
 //!
-//! let mut events = conn.events();
+//! let mut events = conn.events().await;
 //! while let Some(event) = events.next().await {
 //!     match event? {
 //!         NetworkEvent::NewLink(link) => println!("New link: {:?}", link.name),
@@ -79,6 +79,7 @@ pub mod config;
 pub mod connection;
 pub mod connector;
 pub mod diagnostics;
+pub mod dispatcher;
 mod error;
 pub mod events;
 pub mod fdb;
@@ -134,6 +135,7 @@ pub use attr::{AttrIter, NlAttr};
 pub use batch::{Batch, BatchResults};
 pub use builder::{MessageBuilder, NestToken};
 pub use connection::{Connection, RtnetlinkGroup};
+pub use dispatcher::{Dispatcher, DispatcherEvent};
 pub use error::{ChainWalk, Error, Result};
 pub use events::NetworkEvent;
 pub use interface_ref::InterfaceRef;

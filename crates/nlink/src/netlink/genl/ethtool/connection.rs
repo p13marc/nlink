@@ -1301,10 +1301,10 @@ impl Connection<Ethtool> {
     /// use nlink::netlink::{Connection, Ethtool};
     /// use tokio_stream::StreamExt;
     ///
-    /// let mut conn = Connection::<Ethtool>::new_async().await?;
+    /// let conn = Connection::<Ethtool>::new_async().await?;
     /// conn.subscribe()?;
     ///
-    /// let mut events = conn.events();
+    /// let mut events = conn.events().await;
     /// while let Some(event) = events.next().await {
     ///     println!("{:?}", event?);
     /// }

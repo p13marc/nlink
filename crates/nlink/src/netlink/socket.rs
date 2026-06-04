@@ -12,7 +12,10 @@ use bytes::BytesMut;
 use netlink_sys::{Socket, SocketAddr, protocols};
 use tokio::io::{Interest, unix::AsyncFd};
 
-use super::error::{Error, Result};
+use super::{
+    dispatcher::Dispatcher,
+    error::{Error, Result},
+};
 
 /// Netlink protocol families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +82,18 @@ pub struct NetlinkSocket {
     pid: u32,
     /// Protocol this socket uses.
     protocol: Protocol,
+    /// Plan 234 (0.21.0) — optional Dispatcher hook. When the recv
+    /// path detects ENOBUFS, it calls `dispatcher.emit_enobufs()`
+    /// to fan `ResyncMarker::ResyncStart` out to every active
+    /// multicast subscriber. Set by `Connection::new()` via
+    /// [`Self::install_dispatcher`]; absent for sockets constructed
+    /// directly (the standalone `NetlinkSocket::new` path used by
+    /// integration tests and macro-emitted family-resolution code
+    /// — those don't have multicast subscribers anyway).
+    ///
+    /// Atomic load/store via `OnceLock` so the read path on `recv_msg`
+    /// is a single relaxed load.
+    dispatcher: std::sync::OnceLock<Dispatcher>,
 }
 
 impl NetlinkSocket {
@@ -204,7 +219,47 @@ impl NetlinkSocket {
             seq: AtomicU32::new(1),
             pid,
             protocol,
+            dispatcher: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Plan 234 — install the per-Connection
+    /// [`Dispatcher`] hook on this socket. Called once by
+    /// `Connection::new()` / `from_parts()`; the recv path then
+    /// fans ENOBUFS into the dispatcher's broadcast channels via
+    /// `dispatcher.emit_enobufs()`.
+    ///
+    /// No-op if already installed (subsequent calls are silently
+    /// ignored by `OnceLock::set`). The contract is "set once per
+    /// socket, at Connection construction time."
+    pub fn install_dispatcher(&self, dispatcher: Dispatcher) {
+        let _ = self.dispatcher.set(dispatcher);
+    }
+
+    /// Plan 234 — internal helper. If a Dispatcher is installed,
+    /// forward an ENOBUFS event to every active subscriber.
+    /// Called from the recv error paths.
+    fn fan_out_enobufs(&self) {
+        if let Some(d) = self.dispatcher.get() {
+            d.emit_enobufs();
+        }
+    }
+
+    /// Plan 234 — test-only synthetic ENOBUFS injection so the
+    /// dispatcher path can be exercised without a real overflowing
+    /// kernel queue. Hidden from the public surface; only the
+    /// integration tests under `crates/nlink/tests/` call this.
+    #[cfg(any(test, feature = "lab"))]
+    pub fn synth_enobufs_for_test(&self) {
+        self.fan_out_enobufs();
+    }
+
+    /// Plan 234 — accessor for tests that need to confirm the
+    /// dispatcher is wired up. Returns `None` if `install_dispatcher`
+    /// was never called.
+    #[cfg(any(test, feature = "lab"))]
+    pub fn dispatcher_for_test(&self) -> Option<&Dispatcher> {
+        self.dispatcher.get()
     }
 
     /// Get the next sequence number.
@@ -351,7 +406,7 @@ impl NetlinkSocket {
     /// Send a message.
     ///
     /// Plan 232 B19 — surface backpressure as
-    /// [`Error::Backpressure`] after [`SEND_WOULDBLOCK_LIMIT`]
+    /// [`Error::Backpressure`] after a small number of
     /// back-to-back `WouldBlock` returns from the kernel. The 30 s
     /// connection timeout (Plan 171) would eventually surface as
     /// `Timeout`; surfacing backpressure sooner lets a caller back
@@ -384,8 +439,8 @@ impl NetlinkSocket {
     /// Plan 224 — passes `MSG_TRUNC` to recv so the kernel reports
     /// the actual frame size. On truncation, auto-grows the recv
     /// buffer (rounded up to the next 4 KiB) and re-attempts, up
-    /// to [`RECV_MAX_CAPACITY`] (1 MiB). If the kernel emits a
-    /// frame past the cap, returns [`Error::FrameTruncated`]
+    /// to a 1 MiB cap. If the kernel emits a frame past the cap,
+    /// returns [`Error::FrameTruncated`]
     /// instead of silently losing the tail.
     pub async fn recv_msg(&self) -> Result<Vec<u8>> {
         let mut capacity = RECV_INITIAL_CAPACITY;
@@ -396,7 +451,22 @@ impl NetlinkSocket {
                 match guard.try_io(|inner| {
                     inner.get_ref().recv(&mut buf, libc::MSG_TRUNC)
                 }) {
-                    Ok(result) => break result?,
+                    Ok(Ok(n)) => break n,
+                    Ok(Err(e)) => {
+                        // Plan 234 §4 — route ENOBUFS to multicast
+                        // subscribers via the dispatcher BEFORE
+                        // propagating the error to the caller. Slow
+                        // subscribers see `ResyncMarker::ResyncStart`
+                        // even though the request path also surfaces
+                        // the error. Pre-dispatcher, ENOBUFS
+                        // surfaced into whichever caller happened to
+                        // be in `recv_msg` — typically a request,
+                        // not the subscriber that should care.
+                        if e.raw_os_error() == Some(libc::ENOBUFS) {
+                            self.fan_out_enobufs();
+                        }
+                        return Err(e.into());
+                    }
                     Err(_would_block) => continue,
                 }
             };
@@ -457,7 +527,19 @@ impl NetlinkSocket {
                         }
                         return Poll::Ready(Ok(buf.to_vec()));
                     }
-                    Err(e) => return Poll::Ready(Err(e.into())),
+                    Err(e) => {
+                        // Plan 234 §4 — see recv_msg for the
+                        // ENOBUFS routing rationale. poll_recv is
+                        // the streaming entrypoint, so a multicast
+                        // subscriber that overflows will see the
+                        // error AND get a ResyncStart marker
+                        // delivered to any other subscriber sharing
+                        // this socket's dispatcher.
+                        if e.raw_os_error() == Some(libc::ENOBUFS) {
+                            self.fan_out_enobufs();
+                        }
+                        return Poll::Ready(Err(e.into()));
+                    }
                 },
                 Err(_would_block) => continue,
             }

@@ -222,7 +222,7 @@ fn print_vlans_text(entries: &[BridgeVlanEntry], names: &std::collections::HashM
     let mut by_dev: std::collections::HashMap<u32, Vec<&BridgeVlanEntry>> =
         std::collections::HashMap::new();
     for entry in entries {
-        by_dev.entry(entry.ifindex).or_default().push(entry);
+        by_dev.entry(entry.ifindex()).or_default().push(entry);
     }
 
     println!("{:<12} vlan-id", "port");
@@ -247,7 +247,7 @@ fn print_vlans_text(entries: &[BridgeVlanEntry], names: &std::collections::HashM
                 format!(" {}", flags.join(" "))
             };
 
-            println!("{:<12} {}{}", port_col, vlan.vid, flags_str);
+            println!("{:<12} {}{}", port_col, vlan.vid(), flags_str);
         }
     }
 }
@@ -261,7 +261,7 @@ fn print_vlans_json(
     let mut by_dev: std::collections::HashMap<u32, Vec<&BridgeVlanEntry>> =
         std::collections::HashMap::new();
     for entry in entries {
-        by_dev.entry(entry.ifindex).or_default().push(entry);
+        by_dev.entry(entry.ifindex()).or_default().push(entry);
     }
 
     let json_output: Vec<serde_json::Value> = by_dev
@@ -276,7 +276,7 @@ fn print_vlans_json(
                 .iter()
                 .map(|v| {
                     serde_json::json!({
-                        "vid": v.vid,
+                        "vid": v.vid(),
                         "pvid": v.is_pvid(),
                         "untagged": v.is_untagged(),
                     })

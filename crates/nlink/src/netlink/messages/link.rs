@@ -49,6 +49,7 @@ mod info_ids {
 
 /// Strongly-typed link message with all attributes parsed.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct LinkMessage {
     /// Fixed-size header.
     pub(crate) header: IfInfoMsg,

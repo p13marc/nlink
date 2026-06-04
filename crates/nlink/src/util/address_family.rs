@@ -2,8 +2,9 @@
 //!
 //! Used at routing-rule (`rule.rs`) boundaries and adjacent netlink surfaces
 //! that speak `AF_*` constants directly. Closes the raw-`u8` family footgun
-//! at the type level — `flush_rules_typed(AddressFamily::v4())` cannot be
-//! silently mis-called with an unmodelled byte the way `flush_rules(4)` can.
+//! at the type level — `flush_rules(AddressFamily::v4())` cannot be
+//! silently mis-called with an unmodelled byte the way the pre-0.21
+//! `flush_rules(4_u8)` could.
 //!
 //! Distinct from [`crate::netlink::nftables::types::Family`] — that type
 //! speaks `NFPROTO_*` (NFPROTO_INET=1 has no libc equivalent). Mixing the

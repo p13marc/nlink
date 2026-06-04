@@ -20,8 +20,8 @@ async fn main() -> nlink::Result<()> {
                 println!("No MPLS routes configured.\n");
             } else {
                 for route in &routes {
-                    print!("Label {}: ", route.label.0);
-                    match &route.action {
+                    print!("Label {}: ", route.label().0);
+                    match route.action() {
                         nlink::netlink::mpls::MplsAction::Pop => print!("pop "),
                         nlink::netlink::mpls::MplsAction::Swap(labels) => {
                             print!("swap ");
@@ -33,10 +33,10 @@ async fn main() -> nlink::Result<()> {
                         // actions (e.g., push-stack) print as a debug fallback.
                         other => print!("{:?} ", other),
                     }
-                    if let Some(via) = &route.via {
+                    if let Some(via) = route.via() {
                         print!("via {} ", via);
                     }
-                    if let Some(idx) = route.oif {
+                    if let Some(idx) = route.oif() {
                         print!("dev ifindex {} ", idx);
                     }
                     println!();
@@ -145,7 +145,7 @@ async fn main() -> nlink::Result<()> {
     // List all MPLS routes
     let routes = conn.get_mpls_routes().await?;
     for route in &routes {{
-        println!("Label {{}}: {{:?}}", route.label.0, route.action);
+        println!("Label {{}}: {{:?}}", route.label().0, route.action);
     }}
 
     // Delete MPLS route

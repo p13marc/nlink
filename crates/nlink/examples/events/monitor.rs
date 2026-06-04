@@ -185,16 +185,16 @@ async fn main() -> nlink::netlink::Result<()> {
                 println!(
                     "[FDB+] {} on ifindex={} vlan={:?}",
                     fdb.mac_str(),
-                    fdb.ifindex,
-                    fdb.vlan
+                    fdb.ifindex(),
+                    fdb.vlan()
                 );
             }
             NetworkEvent::DelFdb(fdb) => {
                 println!(
                     "[FDB-] {} on ifindex={} vlan={:?}",
                     fdb.mac_str(),
-                    fdb.ifindex,
-                    fdb.vlan
+                    fdb.ifindex(),
+                    fdb.vlan()
                 );
             }
             _ => {}

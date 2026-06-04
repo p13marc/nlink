@@ -5,23 +5,59 @@
 use crate::netlink::{attr::AttrIter, types::nsid::netnsa};
 
 /// Parsed namespace ID message from RTM_NEWNSID/RTM_DELNSID.
+///
+/// Fields are `pub(crate)`; consumers read via the per-field
+/// accessor methods. The struct is `#[non_exhaustive]` so the
+/// kernel can grow new `NETNSA_*` attribute fields without it
+/// being a breaking change.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct NsIdMessage {
     /// Address family (usually AF_UNSPEC = 0)
-    pub family: u8,
+    pub(crate) family: u8,
     /// Namespace ID
-    pub nsid: Option<u32>,
+    pub(crate) nsid: Option<u32>,
     /// Process ID that owns/triggered the namespace
-    pub pid: Option<u32>,
+    pub(crate) pid: Option<u32>,
     /// File descriptor (for fd-based references)
-    pub fd: Option<i32>,
+    pub(crate) fd: Option<i32>,
     /// Target namespace ID (for queries)
-    pub target_nsid: Option<u32>,
+    pub(crate) target_nsid: Option<u32>,
     /// Current namespace ID
-    pub current_nsid: Option<u32>,
+    pub(crate) current_nsid: Option<u32>,
 }
 
 impl NsIdMessage {
+    /// Address family byte (typically `AF_UNSPEC = 0`).
+    pub fn family(&self) -> u8 {
+        self.family
+    }
+
+    /// Namespace ID (`NETNSA_NSID`), if reported.
+    pub fn nsid(&self) -> Option<u32> {
+        self.nsid
+    }
+
+    /// Owning / triggering process ID (`NETNSA_PID`), if reported.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// File descriptor reference (`NETNSA_FD`), if reported.
+    pub fn fd(&self) -> Option<i32> {
+        self.fd
+    }
+
+    /// Target namespace ID (`NETNSA_TARGET_NSID`), if reported.
+    pub fn target_nsid(&self) -> Option<u32> {
+        self.target_nsid
+    }
+
+    /// Current namespace ID (`NETNSA_CURRENT_NSID`), if reported.
+    pub fn current_nsid(&self) -> Option<u32> {
+        self.current_nsid
+    }
+
     /// Parse a namespace ID message from raw bytes.
     ///
     /// The input should be the payload after the netlink header (16 bytes).
@@ -83,9 +119,9 @@ mod tests {
         ];
 
         let msg = NsIdMessage::parse(&data).unwrap();
-        assert_eq!(msg.family, 0);
-        assert_eq!(msg.nsid, Some(66));
-        assert_eq!(msg.pid, None);
+        assert_eq!(msg.family(), 0);
+        assert_eq!(msg.nsid(), Some(66));
+        assert_eq!(msg.pid(), None);
     }
 
     #[test]
@@ -99,8 +135,8 @@ mod tests {
         ];
 
         let msg = NsIdMessage::parse(&data).unwrap();
-        assert_eq!(msg.nsid, Some(1));
-        assert_eq!(msg.pid, Some(1000));
+        assert_eq!(msg.nsid(), Some(1));
+        assert_eq!(msg.pid(), Some(1000));
     }
 
     #[test]
@@ -113,7 +149,7 @@ mod tests {
         // Just the rtgenmsg header, no attributes
         let data = [0x00, 0x00, 0x00, 0x00];
         let msg = NsIdMessage::parse(&data).unwrap();
-        assert_eq!(msg.family, 0);
-        assert_eq!(msg.nsid, None);
+        assert_eq!(msg.family(), 0);
+        assert_eq!(msg.nsid(), None);
     }
 }

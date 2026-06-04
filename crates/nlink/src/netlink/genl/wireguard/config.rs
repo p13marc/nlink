@@ -715,8 +715,12 @@ impl fmt::Display for WireguardConfigDiff {
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct DeviceChanges {
-    /// `private_key` declared in the config (always
-    /// dirty when declared — kernel never reports it).
+    /// `private_key` declared in the config. As of PR #9 (0.20)
+    /// the kernel does return the private key over `WG_CMD_GET_DEVICE`
+    /// to privileged callers (CAP_NET_ADMIN), so the diff field is
+    /// always "dirty when declared" — the config write encodes the
+    /// declared key whether or not it matches the kernel's; a future
+    /// release may add a real comparison.
     pub private_key_set: bool,
     /// `listen_port` differs from the kernel's current.
     pub listen_port_set: bool,

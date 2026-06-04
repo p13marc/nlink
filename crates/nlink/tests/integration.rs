@@ -125,3 +125,15 @@ mod cycle_0_19_backfill;
 // values so a future commit can't re-introduce the bug class.
 #[path = "integration/xfrm_hotfix.rs"]
 mod xfrm_hotfix;
+
+// Plan 197 — OVPN GENL family integration tests. Root-gated +
+// `ovpn` module-gated (kernel 6.16+). Exercises peer + key ops
+// + the declarative OvpnConfig diff + apply cycle.
+#[path = "integration/ovpn.rs"]
+mod ovpn;
+
+// Plan 234 (0.21) — Dispatcher foundation: ENOBUFS routing to
+// ResyncMarker::ResyncStart, per-family wiring smoke checks,
+// concurrent-request coexistence with dispatcher subscribers.
+#[path = "integration/dispatcher.rs"]
+mod dispatcher;

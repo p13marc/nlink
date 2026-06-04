@@ -132,25 +132,25 @@ async fn show_fdb(
 
 fn print_fdb_text(entries: &[FdbEntry], names: &std::collections::HashMap<u32, String>) {
     for entry in entries {
-        let dev = names.get(&entry.ifindex).map(|s| s.as_str()).unwrap_or("?");
+        let dev = names.get(&entry.ifindex()).map(|s| s.as_str()).unwrap_or("?");
 
         let mut line = format!("{} dev {}", entry.mac_str(), dev);
 
-        if let Some(master_idx) = entry.master
+        if let Some(master_idx) = entry.master()
             && let Some(master) = names.get(&master_idx)
         {
             line.push_str(&format!(" master {}", master));
         }
 
-        if let Some(vlan) = entry.vlan {
+        if let Some(vlan) = entry.vlan() {
             line.push_str(&format!(" vlan {}", vlan));
         }
 
-        if let Some(dst) = entry.dst {
+        if let Some(dst) = entry.dst() {
             line.push_str(&format!(" dst {}", dst));
         }
 
-        if let Some(vni) = entry.vni {
+        if let Some(vni) = entry.vni() {
             line.push_str(&format!(" vni {}", vni));
         }
 
@@ -181,29 +181,29 @@ fn print_fdb_json(
         .map(|entry| {
             let mut obj = serde_json::json!({
                 "mac": entry.mac_str(),
-                "ifindex": entry.ifindex,
+                "ifindex": entry.ifindex(),
             });
 
-            if let Some(dev) = names.get(&entry.ifindex) {
+            if let Some(dev) = names.get(&entry.ifindex()) {
                 obj["dev"] = serde_json::json!(dev);
             }
 
-            if let Some(master_idx) = entry.master {
+            if let Some(master_idx) = entry.master() {
                 obj["master_ifindex"] = serde_json::json!(master_idx);
                 if let Some(master) = names.get(&master_idx) {
                     obj["master"] = serde_json::json!(master);
                 }
             }
 
-            if let Some(vlan) = entry.vlan {
+            if let Some(vlan) = entry.vlan() {
                 obj["vlan"] = serde_json::json!(vlan);
             }
 
-            if let Some(dst) = &entry.dst {
+            if let Some(dst) = &entry.dst() {
                 obj["dst"] = serde_json::json!(dst.to_string());
             }
 
-            if let Some(vni) = entry.vni {
+            if let Some(vni) = entry.vni() {
                 obj["vni"] = serde_json::json!(vni);
             }
 

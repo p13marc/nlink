@@ -4,6 +4,117 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-06-04
+
+**Major release.** Closes the remaining audit-derived plans from the
+0.20-cycle suite plus the discretionary plans (197, 234) that were
+seeded at cycle open. Breaks ABI on five APIs that were deprecated in
+0.20.1 and on five `*Message` types that get field-visibility tightening.
+
+### Breaking changes
+
+- **`DpllPin::fractional_frequency_offset_ppt` widened from `Option<i32>`
+  to `Option<i64>`.** Silent truncation on overflow was the audit
+  finding that motivated the 0.20.1 deprecation. The
+  `_i64` parallel field added in 0.20.1 is now the single field; the
+  deprecated `i32` field is removed.
+- **Raw-`u8` route-rule API removed.** `Connection::<Route>::flush_rules`,
+  `get_rules_for_family`, and `del_rule_by_priority` no longer take
+  `family: u8`. The `_typed(AddressFamily)` siblings from 0.20.1 take
+  over the original names; the `_typed` suffix is dropped.
+- **`QdiscBuilder::loss(f64)` removed.** Use `loss_pct(Percent)`.
+- **`Verdict::Jump(String)` and `Verdict::Goto(String)` removed.** Use
+  `Verdict::JumpTo(ChainName)` / `Verdict::GotoTo(ChainName)`.
+  `RuleBuilder::jump` / `goto` now take pre-validated `ChainName`
+  infallibly; new `try_jump` / `try_goto` siblings take `&str` and
+  return `Result<Self>`.
+- **`RuleMessage` fields demoted from `pub` to `pub(crate)`** + `#[non_exhaustive]`.
+  Use the per-field accessor methods shipped in 0.20.1 Plan 231.
+  Sibling types — `BridgeVlanEntry`, `FdbEntry`, `MplsRoute`,
+  `Nexthop`, `NexthopGroupMember`, `NsIdMessage` — get the same
+  treatment plus accessor methods. New
+  `scripts/audit-message-accessor-convention.sh` CI gate locks the
+  convention. `AddressMessage` / `LinkMessage` / `NeighborMessage` /
+  `RouteMessage` / `TcMessage` gain `#[non_exhaustive]` (fields stay
+  `pub`; bin construction is the source of literals).
+
+### Added
+
+- **Plan 197 — Declarative `OvpnConfig` for OpenVPN data-channel
+  offload.** New `Connection<Ovpn>` GENL family covers 8 commands +
+  3 multicast notifications (kernel 6.16+): `peer_new` / `peer_set`
+  / `peer_get` / `peer_dump` / `peer_del`, `key_new` / `key_get` /
+  `key_swap` / `key_del`, plus the `peer-del-ntf` / `key-swap-ntf` /
+  `peer-float-ntf` multicast notifications via `subscribe_peers()`.
+  Declarative `OvpnConfig::diff().apply()` and `apply_reconcile`
+  mirror `WireguardConfig`'s pattern. Recipe at
+  `docs/recipes/openvpn-dco.md`. Runnable example at
+  `crates/nlink/examples/genl/ovpn.rs`. 44 lib + 7 root-gated
+  integration tests. The `attach_socket` cross-netns SCM_RIGHTS
+  helper is plumbed but returns `Error::NotSupported` pending a
+  sendmsg-layer cmsghdr refactor (deferred to 0.21.x); same-netns
+  callers already work via `OvpnPeer::socket = Some(fd)`.
+
+- **Plan 234 — F1 follow-on: Dispatcher foundation + ENOBUFS
+  routing.** New `netlink::dispatcher` module provides an
+  `Arc`-shared, `Send + Sync` broadcast surface that the
+  `NetlinkSocket` recv path routes ENOBUFS into. Every multicast
+  subscriber sharing an `Arc<Connection>` receives
+  `ResyncMarker::ResyncStart` on socket overflow (deliberate
+  divergence from neli's silent-drop behaviour — see CLAUDE.md
+  `## Concurrency`). `Connection<P>` exposes `dispatcher() -> &Dispatcher`.
+  The F1 `tokio::sync::Mutex` stays for unicast requests pending the
+  per-seq pipelining batch (queued as 0.21.x follow-on); this commit
+  is the broadcast-side foundation + the socket hook + 24 new tests
+  (13 unit + 11 integration including per-family wiring smoke checks
+  for wireguard / macsec / mptcp / ethtool / nl80211 / devlink / dpll).
+
+- **Plan 228 extension — Declarative netem parity setters.** Five
+  new `*_pct(Percent)` setters on the declarative `QdiscBuilder` for
+  netem: `duplicate_pct`, `corrupt_pct`, `reorder_pct`,
+  `loss_correlation_pct`, `delay_correlation_pct`. Closes the
+  declarative-vs-imperative netem gap noted in 0.20.1's "Deferred to
+  0.21" list.
+
+- **Plan 231 extension — Sibling `*Message` accessor sweep.** Four
+  more types from `crates/nlink/src/netlink/{bridge_vlan,fdb,mpls,nexthop}`
+  get per-field accessors + `#[non_exhaustive]` + `pub(crate)` field
+  demotion. `audit-message-accessor-convention.sh` extended to
+  cover them.
+
+- **Plan 229 — Doc-drift sweep + new CI gates.** ~16 doc-comment
+  sites flipped (sync `conn.events()` → `.await`, deprecated builder
+  references replaced, WG `private_key` corrected post-PR-#9). New
+  `scripts/audit-recipe-drift.sh` (blocking) catches stale recipe
+  patterns. New `doctest-nlink` GHA job runs `cargo test --doc`
+  non-blocking initially (per Plan 229 §3 — promoted to blocking
+  after one cycle of stability).
+
+- **Migration guide.** `docs/migration_guide/0.20.0-to-0.21.0.md`
+  with before/after code samples for every breaking removal +
+  quick-fix cheat sheet. README index updated.
+
+### Deferred to 0.21.x
+
+- Plan 234 per-seq unicast pipelining — the dispatcher's
+  broadcast-side foundation ships here; per-seq oneshot
+  registration + pending-map demux through the dispatcher's recv
+  loop is the obvious next batch (~30 callsites across 6 files).
+  The public API stays unchanged so the follow-on is a pure
+  internal refactor.
+- `attach_socket` cross-netns SCM_RIGHTS helper (Plan 197) —
+  needs a sendmsg-layer `cmsghdr` refactor of `NetlinkSocket`.
+  Same-netns fd passing already works.
+
+### Notes
+
+- `cargo-semver-checks` against `v0.20.1` is expected to fail on the
+  breaking changes — that's the point of 0.21.0.
+- Discretionary plans 235 (GENL command unification — was paired with
+  Plan 234) and 236 (adversarial-input rubric — meta-plan, folded
+  into per-plan test docs) are not in this release; 235 becomes a
+  natural pairing for the Plan 234 unicast-pipelining follow-on.
+
 ## [0.20.1] - 2026-06-04
 
 Patch release. **Additive only** — no breaking changes; `cargo-semver-checks`

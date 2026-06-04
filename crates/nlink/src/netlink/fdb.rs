@@ -84,24 +84,30 @@ mod nud {
 /// Represents a bridge forwarding database entry, containing MAC address
 /// to port mappings, optional VLAN information, and VXLAN remote endpoint
 /// data.
+///
+/// Fields are `pub(crate)`; consumers read via the per-field
+/// accessor methods. The struct is `#[non_exhaustive]` so the
+/// kernel can grow new FDB attribute fields without it being a
+/// breaking change.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct FdbEntry {
     /// Interface index (bridge port)
-    pub ifindex: u32,
+    pub(crate) ifindex: u32,
     /// MAC address (6 bytes)
-    pub mac: [u8; 6],
+    pub(crate) mac: [u8; 6],
     /// VLAN ID (if VLAN filtering is enabled)
-    pub vlan: Option<u16>,
+    pub(crate) vlan: Option<u16>,
     /// Destination IP (for VXLAN remote VTEP)
-    pub dst: Option<IpAddr>,
+    pub(crate) dst: Option<IpAddr>,
     /// VNI (for VXLAN)
-    pub vni: Option<u32>,
+    pub(crate) vni: Option<u32>,
     /// Entry state (permanent, reachable, etc.)
-    pub state: NeighborState,
+    pub(crate) state: NeighborState,
     /// Entry flags (NTF_SELF, NTF_MASTER, etc.)
-    pub flags: u8,
+    pub(crate) flags: u8,
     /// Master device index (bridge interface)
-    pub master: Option<u32>,
+    pub(crate) master: Option<u32>,
 }
 
 impl FdbEntry {
@@ -127,6 +133,46 @@ impl FdbEntry {
             flags: msg.flags(),
             master: msg.master(),
         })
+    }
+
+    /// Interface index (bridge port).
+    pub fn ifindex(&self) -> u32 {
+        self.ifindex
+    }
+
+    /// MAC address (6 bytes).
+    pub fn mac(&self) -> [u8; 6] {
+        self.mac
+    }
+
+    /// VLAN ID, if VLAN filtering is enabled on the bridge.
+    pub fn vlan(&self) -> Option<u16> {
+        self.vlan
+    }
+
+    /// Destination IP for VXLAN remote VTEP, if set.
+    pub fn dst(&self) -> Option<IpAddr> {
+        self.dst
+    }
+
+    /// VNI for VXLAN tunnels, if set.
+    pub fn vni(&self) -> Option<u32> {
+        self.vni
+    }
+
+    /// Entry state (permanent / reachable / stale / …).
+    pub fn state(&self) -> NeighborState {
+        self.state
+    }
+
+    /// Entry flags (NTF_SELF / NTF_MASTER / NTF_EXT_LEARNED / …).
+    pub fn flags(&self) -> u8 {
+        self.flags
+    }
+
+    /// Master device index (bridge interface), if set.
+    pub fn master(&self) -> Option<u32> {
+        self.master
     }
 
     /// Check if this is a permanent (static) entry.
