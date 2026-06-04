@@ -144,9 +144,9 @@ impl OvpnKeyconf {
 /// The byte-order-sensitive fields (`remote_ipv4`, `remote_port`,
 /// `vpn_ipv4`, `local_ipv4`, `local_port`) are stored as raw
 /// `Vec<u8>` payloads in network (big-endian) order. Use the
-/// typed helpers on this struct ([`Self::remote_socket_v4`],
-/// [`Self::set_remote_v4`], …) to convert to/from `std::net`
-/// types.
+/// typed helpers on this struct ([`Self::remote_socket`],
+/// [`Self::set_remote_v4`], [`Self::set_remote_v6`]) to convert
+/// to/from `std::net` types.
 #[derive(NetlinkAttrs, Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct OvpnPeer {

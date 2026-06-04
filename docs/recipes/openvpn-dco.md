@@ -147,7 +147,7 @@ use tokio_stream::StreamExt;
 let mut conn = Connection::<Ovpn>::new_async().await?;
 conn.subscribe_peers()?;
 
-let mut events = conn.events();
+let mut events = conn.events().await;
 while let Some(evt) = events.next().await {
     match evt? {
         OvpnEvent::PeerDeleted(reply) => {

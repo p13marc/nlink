@@ -258,6 +258,7 @@ path = "examples/genl/net_shaper.rs"
 [[example]]
 name = "genl_ovpn"
 path = "examples/genl/ovpn.rs"
+required-features = ["lab"]
 
 # nlink-macros showcase
 [[example]]

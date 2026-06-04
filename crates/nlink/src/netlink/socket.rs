@@ -406,7 +406,7 @@ impl NetlinkSocket {
     /// Send a message.
     ///
     /// Plan 232 B19 — surface backpressure as
-    /// [`Error::Backpressure`] after [`SEND_WOULDBLOCK_LIMIT`]
+    /// [`Error::Backpressure`] after a small number of
     /// back-to-back `WouldBlock` returns from the kernel. The 30 s
     /// connection timeout (Plan 171) would eventually surface as
     /// `Timeout`; surfacing backpressure sooner lets a caller back
@@ -439,8 +439,8 @@ impl NetlinkSocket {
     /// Plan 224 — passes `MSG_TRUNC` to recv so the kernel reports
     /// the actual frame size. On truncation, auto-grows the recv
     /// buffer (rounded up to the next 4 KiB) and re-attempts, up
-    /// to [`RECV_MAX_CAPACITY`] (1 MiB). If the kernel emits a
-    /// frame past the cap, returns [`Error::FrameTruncated`]
+    /// to a 1 MiB cap. If the kernel emits a frame past the cap,
+    /// returns [`Error::FrameTruncated`]
     /// instead of silently losing the tail.
     pub async fn recv_msg(&self) -> Result<Vec<u8>> {
         let mut capacity = RECV_INITIAL_CAPACITY;

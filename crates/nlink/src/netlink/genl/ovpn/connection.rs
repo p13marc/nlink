@@ -15,7 +15,7 @@
 //! (the kernel resolves it via `sockfd_lookup`). Cross-namespace
 //! fd passing requires SCM_RIGHTS in the sendmsg auxiliary control
 //! message; that path is deferred to a follow-up — see
-//! [`attach_socket`][Self::attach_socket] for the call shape so
+//! `Connection::<Ovpn>::attach_socket` for the call shape so
 //! consumers can plan ahead.
 
 use std::os::fd::RawFd;
@@ -44,8 +44,8 @@ impl Connection<Ovpn> {
     /// `peer.id` must be set and unique among the interface's
     /// peers. The peer's UDP/TCP socket can be specified via
     /// `peer.socket` (a fd value in the caller's process — same
-    /// netns). Cross-netns fd passing isn't yet supported; use
-    /// [`attach_socket`][Self::attach_socket] in a future release.
+    /// netns). Cross-netns fd passing isn't yet supported; the
+    /// `attach_socket` method will land in a follow-up release.
     pub async fn peer_new(&self, ifindex: u32, peer: OvpnPeer) -> Result<()> {
         let _: OvpnPeerReply = self
             .send_typed(OvpnPeerNewRequest::new(ifindex, peer))
