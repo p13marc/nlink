@@ -27,9 +27,9 @@
 //! use nlink::netlink::{Connection, genl::dpll::{Dpll, DpllEvent}};
 //! use tokio_stream::StreamExt;
 //!
-//! let mut conn = Connection::<Dpll>::new_async().await?;
+//! let conn = Connection::<Dpll>::new_async().await?;
 //! conn.subscribe_monitor()?;
-//! let mut events = conn.events();
+//! let mut events = conn.events().await;
 //! while let Some(evt) = events.next().await {
 //!     match evt? {
 //!         DpllEvent::DeviceChanged(dev) => {

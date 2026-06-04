@@ -2643,9 +2643,11 @@ pub enum CakeAckFilter {
 /// in a single self-tuning qdisc.
 ///
 /// This is the typed builder mirroring the rest of the qdisc lineup.
-/// The legacy string-args interface in `tc/options/cake.rs` remains
-/// for `Connection::add_qdisc("eth0", "cake", &["bandwidth", ...])`
-/// callers, but the typed builder is preferred for new code.
+/// (The legacy string-args `tc/options/cake.rs` interface was
+/// removed in 0.15.0; the typed builder is the only public API.
+/// Construct it via `CakeConfig::new()` + fluent setters, or via
+/// `CakeConfig::parse_params(&["bandwidth", "100mbit", ...])`
+/// per the [`ParseParams`](crate::ParseParams) contract.)
 ///
 /// # Example
 ///

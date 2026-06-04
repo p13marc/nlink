@@ -58,10 +58,10 @@ impl Connection<Nl80211> {
     /// use nlink::netlink::{Connection, Nl80211};
     /// use tokio_stream::StreamExt;
     ///
-    /// let mut conn = Connection::<Nl80211>::new_async().await?;
+    /// let conn = Connection::<Nl80211>::new_async().await?;
     /// conn.subscribe()?;
     ///
-    /// let mut events = conn.events();
+    /// let mut events = conn.events().await;
     /// while let Some(event) = events.next().await {
     ///     println!("{:?}", event?);
     /// }

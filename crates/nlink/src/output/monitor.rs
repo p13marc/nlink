@@ -14,9 +14,9 @@
 //!     .with_timestamp(true)
 //!     .with_format(OutputFormat::Text);
 //!
-//! let mut conn = Connection::<Route>::new()?;
+//! let conn = Connection::<Route>::new()?;
 //! conn.subscribe(&[RtnetlinkGroup::Link])?;
-//! let mut events = conn.events();
+//! let mut events = conn.events().await;
 //!
 //! while let Some(result) = events.next().await {
 //!     let event = result?;

@@ -366,7 +366,7 @@ where
 ///
 /// let mut events_conn = Connection::<Route>::new()?;
 /// events_conn.subscribe(&[/* groups */])?;
-/// let raw_events = events_conn.events();
+/// let raw_events = events_conn.events().await;
 ///
 /// // dump_conn is a separate connection so the resync dump
 /// // doesn't interleave with the live events on the same socket.

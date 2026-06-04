@@ -670,9 +670,9 @@ impl<P: ProtocolState> Connection<P> {
 /// ```ignore
 /// use nlink::netlink::{Connection, Route, RtnetlinkGroup};
 ///
-/// let mut conn = Connection::<Route>::new()?;
+/// let conn = Connection::<Route>::new()?;
 /// conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
-/// let mut events = conn.events();
+/// let mut events = conn.events().await;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -755,7 +755,7 @@ impl Connection<Route> {
     /// ```ignore
     /// use nlink::netlink::{Connection, Route, RtnetlinkGroup};
     ///
-    /// let mut conn = Connection::<Route>::new()?;
+    /// let conn = Connection::<Route>::new()?;
     /// conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
     /// ```
     #[instrument(level = "info", skip(self), fields(groups = ?groups))]
@@ -775,9 +775,9 @@ impl Connection<Route> {
     /// ```ignore
     /// use nlink::netlink::{Connection, Route};
     ///
-    /// let mut conn = Connection::<Route>::new()?;
+    /// let conn = Connection::<Route>::new()?;
     /// conn.subscribe_all()?;
-    /// let mut events = conn.events();
+    /// let mut events = conn.events().await;
     /// ```
     #[instrument(level = "info", skip_all)]
     pub fn subscribe_all(&self) -> Result<()> {

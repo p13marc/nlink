@@ -71,6 +71,28 @@ for the deprecation removals.
 
 ### Added
 
+- **Plan 229 — doc-drift sweep + CI gates.** Closes the 0.19 F1
+  async-ification gap and the cumulative gap from later breaking
+  waves. Three deliverables:
+  1. Rustdoc + module-doc sweep: `conn.events()` /
+     `conn.into_events()` calls now show `.await`,
+     `let mut conn = ...` flipped to `let conn = ...` where only
+     subscribe / events / dump usage follows, `tc/options/cake.rs`
+     reference replaced with the `ParseParams` constructor,
+     `link.name` doc updated to `link.name()`, WG `private_key`
+     comment corrected to reflect PR #9's kernel-readback fix.
+  2. New `scripts/audit-recipe-drift.sh` CI gate — grep-based audit
+     that catches known-stale API patterns in `docs/recipes/`.
+     Patterns covered: sync `events()` / `into_events()` calls,
+     `.loss(f64)`, `Hook::Ingress`, `with_purge`, `tc/options/`,
+     `Verdict::Jump("…")`, `flush_rules(libc::AF_*)`, and
+     the WG private-key "always-None" claim. Recipes currently
+     pass clean.
+  3. New `doctest-nlink` GHA job — runs `cargo test --doc -p nlink`.
+     Wired in as `continue-on-error: true` for one cycle (per Plan
+     229 §3 rollout); promote to blocking once one cycle's PRs
+     merge with it green.
+
 - **Plan 228 extension — declarative netem parity setters.**
   `QdiscBuilder` (declarative path) gains
   `duplicate_pct(Percent)`, `corrupt_pct(Percent)`,

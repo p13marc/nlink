@@ -199,6 +199,38 @@ jobs:
       - name: Run scripts/audit-message-accessor-convention.sh
         run: bash scripts/audit-message-accessor-convention.sh
 
+  # Plan 229 (0.21) — recipe-drift audit. Cheap grep-based gate
+  # that catches known-stale API patterns in docs/recipes/. The
+  # full compile-test harness for recipe blocks is queued; this
+  # is the stop-gap.
+  audit-recipe-drift:
+    name: audit recipe doc-drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scripts/audit-recipe-drift.sh
+        run: bash scripts/audit-recipe-drift.sh
+
+  # Plan 229 (0.21) — doctest CI gate. Compile (not run) every
+  # rustdoc example in the nlink crate. The 0.19 F1
+  # async-ification gap was a documentation drift: events() /
+  # into_events() / dump_stream became `async` but the rustdoc
+  # snippets stayed sync. This gate catches that class. Non-blocking
+  # for one cycle (continue-on-error: true) while the sweep stabilises;
+  # promote to blocking once one cycle's PRs merge with it green.
+  doctest-nlink:
+    name: doctest (nlink lib, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --doc -p nlink
+        run: cargo test --doc -p nlink
+
   # Plan 223 — endianness drift. NLA headers (struct nlattr) and
   # the kernel's attribute payloads are native-endian. The 0.19 N3
   # fix swept `from_le_bytes` out of xfrm.rs; 0.20 cycled the
