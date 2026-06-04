@@ -323,6 +323,25 @@ impl std::fmt::Display for AllowedIp {
 /// Parse a timespec from WireGuard's last_handshake attribute.
 ///
 /// The kernel sends this as two i64 values: seconds and nanoseconds.
+///
+/// Returns `None` on any malformed input: short buffer, the
+/// kernel's documented `(0, 0)` no-handshake sentinel, negative
+/// seconds, out-of-range nanoseconds, or far-future overflow.
+///
+/// # Plan 225 — robustness
+///
+/// Pre-fix this did `Duration::new(secs as u64, nsecs as u32)`
+/// followed by `UNIX_EPOCH + duration`, which panicked in
+/// release mode on negative `secs` (the widen to `u64` produces
+/// a huge unsigned value; the `SystemTime + Duration` add
+/// overflowed). One malformed kernel frame killed the entire
+/// `watch()` task, violating CLAUDE.md `## Parser robustness`
+/// rule 3 (recoverable per-message parse failures).
+///
+/// The function's contract was always `Option<SystemTime>`
+/// with `None` for malformed input — the panic violated the
+/// contract. The set of inputs returning `None` is strictly
+/// broader post-fix; no caller needs to change.
 pub fn parse_timespec(data: &[u8]) -> Option<SystemTime> {
     if data.len() < 16 {
         return None;
@@ -336,11 +355,27 @@ pub fn parse_timespec(data: &[u8]) -> Option<SystemTime> {
     ]);
 
     if secs == 0 && nsecs == 0 {
-        return None; // No handshake yet
+        return None; // No handshake yet — documented sentinel.
     }
 
+    // Reject impossible/garbage timestamps. Pre-1970 makes no
+    // sense for a WireGuard last-handshake. Out-of-range nsecs
+    // are kernel-side garbage; `Duration::new` would normalize
+    // them but the carry can re-overflow secs.
+    if secs < 0 {
+        return None;
+    }
+    if !(0..1_000_000_000).contains(&nsecs) {
+        return None;
+    }
+
+    // Safe to widen: secs is non-negative, nsecs is in
+    // [0, 10^9). `Duration::new` cannot panic here.
     let duration = Duration::new(secs as u64, nsecs as u32);
-    Some(UNIX_EPOCH + duration)
+
+    // `SystemTime::checked_add` returns None on overflow rather
+    // than panicking — required by the function's contract.
+    UNIX_EPOCH.checked_add(duration)
 }
 
 #[cfg(test)]
@@ -403,5 +438,87 @@ mod tests {
         let time = parse_timespec(&data).unwrap();
         let expected = UNIX_EPOCH + Duration::from_secs(1609459200);
         assert_eq!(time, expected);
+    }
+
+    /// Plan 225 — adversarial input cases that pre-fix would have
+    /// panicked in release mode via `UNIX_EPOCH + Duration`. The
+    /// function's contract is `None` on malformed input; every
+    /// row below must return None without panic.
+    mod parse_timespec_adversarial {
+        use super::*;
+
+        fn bytes(secs: i64, nsecs: i64) -> [u8; 16] {
+            let mut out = [0u8; 16];
+            out[..8].copy_from_slice(&secs.to_ne_bytes());
+            out[8..].copy_from_slice(&nsecs.to_ne_bytes());
+            out
+        }
+
+        #[test]
+        fn returns_none_on_too_short_input() {
+            assert!(parse_timespec(&[0u8; 15]).is_none());
+            assert!(parse_timespec(&[]).is_none());
+        }
+
+        #[test]
+        fn returns_none_on_zero_zero_no_handshake_sentinel() {
+            assert!(parse_timespec(&bytes(0, 0)).is_none());
+        }
+
+        #[test]
+        fn returns_none_on_negative_secs() {
+            // Pre-fix: `secs as u64` produces u64::MAX-ish, and
+            // `UNIX_EPOCH + Duration::from_secs(huge)` panics.
+            assert!(parse_timespec(&bytes(-1, 0)).is_none());
+            assert!(parse_timespec(&bytes(i64::MIN, 0)).is_none());
+            assert!(parse_timespec(&bytes(-1, 500_000_000)).is_none());
+        }
+
+        #[test]
+        fn returns_none_on_negative_nsecs() {
+            assert!(parse_timespec(&bytes(0, -1)).is_none());
+            assert!(parse_timespec(&bytes(100, -1)).is_none());
+            assert!(parse_timespec(&bytes(100, i64::MIN)).is_none());
+        }
+
+        #[test]
+        fn returns_none_on_out_of_range_nsecs() {
+            // Anything >= 1_000_000_000 is kernel-garbage. Pre-fix,
+            // Duration::new normalized via carry which could
+            // overflow secs.
+            assert!(parse_timespec(&bytes(0, 1_000_000_000)).is_none());
+            assert!(parse_timespec(&bytes(0, 1_500_000_000)).is_none());
+            assert!(parse_timespec(&bytes(0, i64::MAX)).is_none());
+        }
+
+        #[test]
+        fn handles_far_future_without_panic() {
+            // i64::MAX seconds is the maximum a valid kernel
+            // timespec can carry. Pre-fix this would either parse
+            // with a wildly-out-of-range u64 cast or panic on the
+            // subsequent `UNIX_EPOCH + duration`. Post-fix we use
+            // `checked_add` so the function returns either Some
+            // (if the platform's `SystemTime` representation can
+            // hold that many post-epoch seconds, which Linux's
+            // Duration-backed impl can) or None (if it can't) —
+            // either is a valid contract; the must-not-panic
+            // property is what we lock here.
+            let _ = parse_timespec(&bytes(i64::MAX, 0));
+            // And the saturating case where nsecs is at the
+            // boundary of allowed range.
+            let _ = parse_timespec(&bytes(i64::MAX, 999_999_999));
+        }
+
+        #[test]
+        fn returns_some_on_a_real_handshake_timestamp() {
+            // 2024-01-01 00:00:00 UTC — well within range.
+            let secs = 1_704_067_200_i64;
+            let nsecs = 123_456_789_i64;
+            let st = parse_timespec(&bytes(secs, nsecs))
+                .expect("real timestamp must parse");
+            let d = st.duration_since(UNIX_EPOCH).unwrap();
+            assert_eq!(d.as_secs(), secs as u64);
+            assert_eq!(d.subsec_nanos(), nsecs as u32);
+        }
     }
 }
