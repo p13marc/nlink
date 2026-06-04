@@ -103,7 +103,11 @@ fn test_route_parsing_errors() {
 #[test]
 fn test_qdisc_builder() {
     let config = NetworkConfig::new()
-        .qdisc("eth0", |q| q.netem().delay_ms(100).loss(1.0))
+        .qdisc("eth0", |q| {
+            q.netem()
+                .delay_ms(100)
+                .loss_pct(nlink::Percent::new(1.0))
+        })
         .qdisc("eth1", |q| q.htb().default_class(0x30));
 
     assert_eq!(config.qdiscs().len(), 2);
