@@ -350,7 +350,25 @@ pub struct DpllPinReply {
     pub phase_adjust_gran: Option<u32>,
     /// Fractional frequency offset in parts-per-trillion
     /// (kernel 6.11+).
-    #[genl_attr(DpllPinAttr::FractionalFrequencyOffsetPpt)]
+    ///
+    /// **0.20.1 Plan 226**: the kernel emits this field as `sint`
+    /// (variable-length signed integer per `nla_put_sint`) — 4 bytes
+    /// if it fits in `s32`, 8 bytes otherwise. Pre-0.20.1 the field
+    /// was decoded via fixed-4-byte `parse_i32_attr`, which silently
+    /// truncated the low 32 bits of an 8-byte payload. With the
+    /// `sint` flag the macro routes through `parse_sint_attr_as_i32`:
+    /// 4-byte payloads parse to the exact i32 value, 8-byte payloads
+    /// in range parse to the i32-castable value, and 8-byte payloads
+    /// that overflow i32 surface as a clean parse error instead of
+    /// silent truncation.
+    ///
+    /// The full i64 widening is deferred to 0.21 — it's a breaking
+    /// type change. In 0.20.1, an FFO value that overflows i32 will
+    /// fail the entire `DpllPinReply` parse via `?`; the
+    /// `ffo_ppt_i64` accessor below provides a manual escape hatch
+    /// for those who need the full-width value without taking the
+    /// 0.21 breaking change. See Plan 226 §3.
+    #[genl_attr(DpllPinAttr::FractionalFrequencyOffsetPpt, sint)]
     pub fractional_frequency_offset_ppt: Option<i32>,
     /// Measured frequency in mHz × 1000 (kernel 6.11+) — use
     /// [`Self::measured_frequency_hz`] for Hz.
@@ -373,6 +391,42 @@ impl DpllPinReply {
     pub fn measured_frequency_hz(&self) -> Option<u64> {
         self.measured_frequency
             .map(|m| m / super::DPLL_PIN_MEASURED_FREQUENCY_DIVIDER)
+    }
+
+    /// Plan 226 (0.20.1) — fractional frequency offset as `i64`,
+    /// parsed from a raw `DpllPinReply` payload without the i32
+    /// width restriction. Use this when the kernel may emit an FFO
+    /// value larger than `i32::MAX` (typical at SyncE link
+    /// bring-up; the kernel's `nla_put_sint` ships such values as
+    /// 8-byte payloads).
+    ///
+    /// Returns:
+    /// - `Some(value)` when the payload contains a 4- or 8-byte
+    ///   `DPLL_A_PIN_FRACTIONAL_FREQUENCY_OFFSET_PPT` attribute.
+    /// - `None` when the attribute is absent.
+    ///
+    /// The `fractional_frequency_offset_ppt` field on the struct
+    /// holds the same value truncated to `i32`. When the kernel
+    /// emits an 8-byte sint that overflows `i32`, the entire
+    /// `DpllPinReply::from_bytes` fails — call this helper directly
+    /// on the original payload bytes (which the caller stashes
+    /// before invoking `from_bytes`) to recover the full-width
+    /// value.
+    ///
+    /// The i64 widening of the struct field itself is queued for
+    /// 0.21 (breaking type change). This helper is the 0.20.1
+    /// stop-gap.
+    pub fn ffo_ppt_i64_from_payload(payload: &[u8]) -> Option<i64> {
+        for (attr_type, attr_payload)
+            in crate::macros::__rt::attr_iter(payload)
+        {
+            if attr_type as u32
+                == super::types::DpllPinAttr::FractionalFrequencyOffsetPpt as u32
+            {
+                return crate::macros::__rt::parse_sint_attr_as_i64(attr_payload).ok();
+            }
+        }
+        None
     }
 }
 
@@ -713,6 +767,104 @@ mod tests {
             DpllDeviceReply::default().temp_celsius(),
             None,
             "missing temp_mdeg → None"
+        );
+    }
+
+    // -- Plan 226 DPLL FFO sint coverage ----------------------------
+
+    /// Plan 226 (0.20.1) — small FFO values (in i32 range) still
+    /// parse correctly through the new sint path.
+    #[test]
+    fn plan_226_ffo_ppt_small_value_round_trips_via_sint() {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        // Emit as 4-byte sint (mimics what the kernel does for
+        // values that fit in s32).
+        __rt::emit_sint_attr(
+            &mut b,
+            DpllPinAttr::FractionalFrequencyOffsetPpt as u16,
+            -42_i64,
+        );
+        let bytes = &b.as_bytes()[start..];
+
+        // The macro-derived parse arm uses parse_sint_attr_as_i32;
+        // a 4-byte payload becomes Some(-42).
+        let parsed = DpllPinReply::from_bytes(bytes).expect("parse");
+        assert_eq!(parsed.fractional_frequency_offset_ppt, Some(-42));
+    }
+
+    /// Plan 226 (0.20.1) — 8-byte FFO that fits in i32 parses cleanly
+    /// (pre-Plan-226 would have silently truncated to the low 32 bits).
+    #[test]
+    fn plan_226_ffo_ppt_8_byte_in_range_parses_correctly() {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        // Force 8-byte emit by routing through the u64-attr path
+        // (mimics a kernel that ships a small value via the wider
+        // sint width — e.g. a future kernel taking the always-8-byte
+        // path for sint emission).
+        b.append_attr_u64(
+            DpllPinAttr::FractionalFrequencyOffsetPpt as u16,
+            1_000_000_i64 as u64,
+        );
+        let bytes = &b.as_bytes()[start..];
+
+        let parsed = DpllPinReply::from_bytes(bytes).expect("parse");
+        assert_eq!(
+            parsed.fractional_frequency_offset_ppt,
+            Some(1_000_000),
+            "8-byte sint payload that fits in i32 must parse exactly \
+             (Plan 226 fix; pre-fix this would silently truncate)"
+        );
+    }
+
+    /// Plan 226 (0.20.1) — 8-byte FFO that overflows i32 surfaces as
+    /// a clean parse error instead of silent truncation. The 0.21
+    /// breaking i64 widening will replace this behaviour; for 0.20.1
+    /// the parse-fail-with-helper-escape is the additive contract.
+    #[test]
+    fn plan_226_ffo_ppt_8_byte_overflow_surfaces_error_and_helper_recovers() {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        let overflow = i32::MAX as i64 + 1_000_000;
+        b.append_attr_u64(
+            DpllPinAttr::FractionalFrequencyOffsetPpt as u16,
+            overflow as u64,
+        );
+        let bytes = &b.as_bytes()[start..];
+
+        // The struct parse fails cleanly.
+        let parse_err = DpllPinReply::from_bytes(bytes).unwrap_err();
+        assert!(
+            matches!(parse_err, crate::Error::InvalidMessage(_)),
+            "expected InvalidMessage for overflowing sint; got {parse_err:?}"
+        );
+
+        // The escape-hatch helper recovers the full i64 value from
+        // the same payload.
+        let recovered = DpllPinReply::ffo_ppt_i64_from_payload(bytes);
+        assert_eq!(
+            recovered,
+            Some(overflow),
+            "Plan 226 helper recovers the full-width i64 sint value \
+             when the i32 struct field can't fit it"
+        );
+    }
+
+    /// Plan 226 (0.20.1) — the helper returns None when the FFO
+    /// attribute is absent (rather than spuriously synthesizing a
+    /// value).
+    #[test]
+    fn plan_226_ffo_helper_returns_none_when_attribute_absent() {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        b.append_attr_u32(DpllPinAttr::Id as u16, 7);
+        let bytes = &b.as_bytes()[start..];
+
+        assert_eq!(
+            DpllPinReply::ffo_ppt_i64_from_payload(bytes),
+            None,
+            "absent FFO attr → None"
         );
     }
 }
