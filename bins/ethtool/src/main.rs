@@ -254,6 +254,35 @@ fn duplex_str(d: Duplex) -> &'static str {
     }
 }
 
+fn mdix_str(m: nlink::netlink::genl::ethtool::MdiX) -> &'static str {
+    use nlink::netlink::genl::ethtool::MdiX;
+    match m {
+        MdiX::Mdi => "MDI",
+        MdiX::MdiX => "MDI-X",
+        MdiX::Auto => "Auto",
+        _ => "Unknown",
+    }
+}
+
+fn ext_state_str(s: nlink::netlink::genl::ethtool::LinkExtState) -> &'static str {
+    use nlink::netlink::genl::ethtool::LinkExtState;
+    match s {
+        LinkExtState::Ok => "ok",
+        LinkExtState::Autoneg => "autoneg",
+        LinkExtState::LinkTrainingFailure => "link-training-failure",
+        LinkExtState::LinkLogicalMismatch => "link-logical-mismatch",
+        LinkExtState::BadSignalIntegrity => "bad-signal-integrity",
+        LinkExtState::NoCable => "no-cable",
+        LinkExtState::CableIssue => "cable-issue",
+        LinkExtState::EepromIssue => "eeprom-issue",
+        LinkExtState::CalibrationFailure => "calibration-failure",
+        LinkExtState::PowerBudgetExceeded => "power-budget-exceeded",
+        LinkExtState::Overheat => "overheat",
+        LinkExtState::ModuleNotPresent => "module-not-present",
+        _ => "unknown",
+    }
+}
+
 async fn show_device(device: &str, json: bool) -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
 
@@ -267,10 +296,17 @@ async fn show_device(device: &str, json: bool) -> nlink::Result<()> {
         print_json(&serde_json::json!({
             "device": device,
             "link_detected": state.link,
+            "link_ext_state": state.ext_state.map(ext_state_str),
+            "link_ext_substate": state.ext_substate,
+            "sqi": state.sqi,
+            "sqi_max": state.sqi_max,
             "speed_mbps": modes.speed,
             "duplex": modes.duplex.map(duplex_str),
             "autoneg": modes.autoneg,
             "port": info.port.map(|p| format!("{p:?}")),
+            "phyad": info.phyaddr,
+            "mdix": info.tp_mdix.map(mdix_str),
+            "mdix_ctrl": info.tp_mdix_ctrl.map(mdix_str),
             "transceiver": info.transceiver.map(|t| format!("{t:?}")),
             "supported_modes": supported,
             "advertised_modes": advertised,
@@ -279,7 +315,33 @@ async fn show_device(device: &str, json: bool) -> nlink::Result<()> {
     }
 
     println!("Settings for {}:", device);
+    if let Some(phyad) = info.phyaddr {
+        println!("\tPHYAD: {}", phyad);
+    }
+    if let Some(mdix) = info.tp_mdix {
+        let ctrl = info
+            .tp_mdix_ctrl
+            .map(|c| format!(" (configured: {})", mdix_str(c)))
+            .unwrap_or_default();
+        println!("\tMDI-X: {}{}", mdix_str(mdix), ctrl);
+    }
+    if let Some(sqi) = state.sqi {
+        match state.sqi_max {
+            Some(max) => println!("\tSQI: {}/{}", sqi, max),
+            None => println!("\tSQI: {}", sqi),
+        }
+    }
     println!("\tLink detected: {}", if state.link { "yes" } else { "no" });
+    // Only meaningful when the link is down: why.
+    if let Some(ext) = state.ext_state
+        && ext != nlink::netlink::genl::ethtool::LinkExtState::Ok
+    {
+        print!("\tLink extended state: {}", ext_state_str(ext));
+        if let Some(sub) = state.ext_substate {
+            print!(" (substate {})", sub);
+        }
+        println!();
+    }
     if let Some(speed) = modes.speed {
         println!("\tSpeed: {}Mb/s", speed);
     } else {
@@ -532,6 +594,10 @@ async fn show_pause(device: &str, json: bool) -> nlink::Result<()> {
             "autoneg": pause.autoneg,
             "rx": pause.rx,
             "tx": pause.tx,
+            "stats": pause.stats.as_ref().map(|s| serde_json::json!({
+                "tx_pause_frames": s.tx_frames,
+                "rx_pause_frames": s.rx_frames,
+            })),
         }));
         return Ok(());
     }
@@ -546,6 +612,15 @@ async fn show_pause(device: &str, json: bool) -> nlink::Result<()> {
     }
     if let Some(v) = pause.tx {
         println!("\tTX:\t\t{}", if v { "on" } else { "off" });
+    }
+    if let Some(ref s) = pause.stats {
+        println!("\tStatistics:");
+        if let Some(n) = s.tx_frames {
+            println!("\t\ttx_pause_frames: {}", n);
+        }
+        if let Some(n) = s.rx_frames {
+            println!("\t\trx_pause_frames: {}", n);
+        }
     }
 
     Ok(())
@@ -883,6 +958,15 @@ mod tests {
         // The whole point: typos must error, not default to Full.
         assert!(parse_duplex("ful").is_err());
         assert!(parse_duplex("").is_err());
+    }
+
+    #[test]
+    fn mdix_and_ext_state_render() {
+        use nlink::netlink::genl::ethtool::{LinkExtState, MdiX};
+        assert_eq!(mdix_str(MdiX::MdiX), "MDI-X");
+        assert_eq!(mdix_str(MdiX::Auto), "Auto");
+        assert_eq!(ext_state_str(LinkExtState::NoCable), "no-cable");
+        assert_eq!(ext_state_str(LinkExtState::Ok), "ok");
     }
 
     #[test]
