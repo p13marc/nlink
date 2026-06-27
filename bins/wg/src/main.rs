@@ -6,6 +6,7 @@ mod keys;
 mod output;
 mod set;
 mod show;
+mod watch;
 
 use clap::{Parser, Subcommand};
 use nlink::netlink::Result;
@@ -41,6 +42,15 @@ enum Command {
 
     /// Generate a preshared key
     Genpsk,
+
+    /// Watch interfaces for peer/handshake/endpoint changes
+    Watch {
+        /// Interface(s) to watch.
+        interfaces: Vec<String>,
+        /// Poll interval in seconds.
+        #[arg(long, default_value_t = 1)]
+        interval: u64,
+    },
 }
 
 #[tokio::main]
@@ -55,5 +65,9 @@ async fn main() -> Result<()> {
         Some(Command::Genkey) => keys::genkey(),
         Some(Command::Pubkey) => keys::pubkey(),
         Some(Command::Genpsk) => keys::genpsk(),
+        Some(Command::Watch {
+            interfaces,
+            interval,
+        }) => watch::run(interfaces, interval).await,
     }
 }
