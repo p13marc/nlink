@@ -15,6 +15,10 @@ use nlink::netlink::{
 #[derive(Parser)]
 #[command(name = "nft", version, about = "nftables firewall management utility")]
 struct Cli {
+    /// Emit machine-readable JSON for `list` commands.
+    #[arg(long, short, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -191,6 +195,14 @@ enum FlushWhat {
     Ruleset,
 }
 
+/// Print a list of JSON values as a pretty-printed JSON array.
+fn print_json(items: &Vec<serde_json::Value>) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(items).expect("JSON serialization")
+    );
+}
+
 fn parse_family(s: &str) -> Result<Family> {
     match s {
         "inet" => Ok(Family::Inet),
@@ -254,24 +266,48 @@ fn parse_priority(s: &str) -> Result<Priority> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let json = cli.json;
     let conn = Connection::<Nftables>::new()?;
 
     match cli.command {
         Command::List { what } => match what {
             ListWhat::Tables => {
                 let tables = conn.list_tables().await?;
-                for t in &tables {
-                    println!("table {:?} {}", t.family, t.name);
+                if json {
+                    print_json(
+                        &tables
+                            .iter()
+                            .map(|t| serde_json::json!({"family": format!("{:?}", t.family), "name": t.name}))
+                            .collect(),
+                    );
+                } else {
+                    for t in &tables {
+                        println!("table {:?} {}", t.family, t.name);
+                    }
                 }
             }
             ListWhat::Chains => {
                 let chains = conn.list_chains().await?;
-                for c in &chains {
-                    print!("chain {:?} {} {}", c.family, c.table, c.name);
-                    if let Some(ref hook) = c.hook {
-                        print!(" {{ type filter hook {hook} }}");
+                if json {
+                    print_json(
+                        &chains
+                            .iter()
+                            .map(|c| serde_json::json!({
+                                "family": format!("{:?}", c.family),
+                                "table": c.table,
+                                "name": c.name,
+                                "hook": c.hook,
+                            }))
+                            .collect(),
+                    );
+                } else {
+                    for c in &chains {
+                        print!("chain {:?} {} {}", c.family, c.table, c.name);
+                        if let Some(ref hook) = c.hook {
+                            print!(" {{ type filter hook {hook} }}");
+                        }
+                        println!();
                     }
-                    println!();
                 }
             }
             ListWhat::Rules {
@@ -281,17 +317,36 @@ async fn main() -> Result<()> {
             } => {
                 let family = parse_family(&family)?;
                 let rules = conn.list_rules(&table, family).await?;
-                for r in &rules {
-                    if r.chain == chain {
-                        println!("  handle {}", r.handle);
+                if json {
+                    print_json(
+                        &rules
+                            .iter()
+                            .filter(|r| r.chain == chain)
+                            .map(|r| serde_json::json!({"chain": r.chain, "handle": r.handle}))
+                            .collect(),
+                    );
+                } else {
+                    for r in &rules {
+                        if r.chain == chain {
+                            println!("  handle {}", r.handle);
+                        }
                     }
                 }
             }
             ListWhat::Sets { family } => {
                 let family = parse_family(&family)?;
                 let sets = conn.list_sets(family).await?;
-                for s in &sets {
-                    println!("set {} {} ({})", s.table, s.name, s.flags);
+                if json {
+                    print_json(
+                        &sets
+                            .iter()
+                            .map(|s| serde_json::json!({"table": s.table, "name": s.name, "flags": s.flags}))
+                            .collect(),
+                    );
+                } else {
+                    for s in &sets {
+                        println!("set {} {} ({})", s.table, s.name, s.flags);
+                    }
                 }
             }
         },
