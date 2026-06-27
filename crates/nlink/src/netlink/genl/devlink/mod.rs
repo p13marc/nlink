@@ -49,6 +49,55 @@ pub const DEVLINK_CMD_HEALTH_REPORTER_SET: u8 = 53;
 pub const DEVLINK_CMD_HEALTH_REPORTER_RECOVER: u8 = 54;
 pub const DEVLINK_CMD_FLASH_UPDATE: u8 = 58;
 
+// Shared-buffer / resource / region / trap read commands. Values from
+// `enum devlink_command` in include/uapi/linux/devlink.h. SB_GET,
+// REGION_GET, TRAP_GET and TRAP_GROUP_GET are dumpit-capable; while
+// RESOURCE_DUMP is a per-device doit requiring bus+device.
+pub const DEVLINK_CMD_SB_GET: u8 = 11;
+pub const DEVLINK_CMD_RESOURCE_DUMP: u8 = 36;
+pub const DEVLINK_CMD_REGION_GET: u8 = 42;
+pub const DEVLINK_CMD_TRAP_GET: u8 = 61;
+
+// Shared-buffer attributes (`DEVLINK_ATTR_SB_*`).
+pub const DEVLINK_ATTR_SB_INDEX: u16 = 11;
+pub const DEVLINK_ATTR_SB_SIZE: u16 = 12;
+pub const DEVLINK_ATTR_SB_INGRESS_POOL_COUNT: u16 = 13;
+pub const DEVLINK_ATTR_SB_EGRESS_POOL_COUNT: u16 = 14;
+pub const DEVLINK_ATTR_SB_INGRESS_TC_COUNT: u16 = 15;
+pub const DEVLINK_ATTR_SB_EGRESS_TC_COUNT: u16 = 16;
+
+// Resource attributes (`DEVLINK_ATTR_RESOURCE_*`).
+pub const DEVLINK_ATTR_RESOURCE_LIST: u16 = 63;
+pub const DEVLINK_ATTR_RESOURCE: u16 = 64;
+pub const DEVLINK_ATTR_RESOURCE_NAME: u16 = 65;
+pub const DEVLINK_ATTR_RESOURCE_ID: u16 = 66;
+pub const DEVLINK_ATTR_RESOURCE_SIZE: u16 = 67;
+pub const DEVLINK_ATTR_RESOURCE_SIZE_VALID: u16 = 69;
+pub const DEVLINK_ATTR_RESOURCE_UNIT: u16 = 73;
+pub const DEVLINK_ATTR_RESOURCE_OCC: u16 = 74;
+
+// Region attributes (`DEVLINK_ATTR_REGION_*`).
+pub const DEVLINK_ATTR_REGION_NAME: u16 = 88;
+pub const DEVLINK_ATTR_REGION_SIZE: u16 = 89;
+pub const DEVLINK_ATTR_REGION_SNAPSHOTS: u16 = 90;
+
+// Trap attributes (`DEVLINK_ATTR_TRAP_*`).
+pub const DEVLINK_ATTR_TRAP_NAME: u16 = 130;
+pub const DEVLINK_ATTR_TRAP_ACTION: u16 = 131;
+pub const DEVLINK_ATTR_TRAP_TYPE: u16 = 132;
+pub const DEVLINK_ATTR_TRAP_GENERIC: u16 = 133;
+pub const DEVLINK_ATTR_TRAP_GROUP_NAME: u16 = 135;
+
+// Trap actions (`DEVLINK_TRAP_ACTION_*`).
+pub const DEVLINK_TRAP_ACTION_DROP: u8 = 0;
+pub const DEVLINK_TRAP_ACTION_TRAP: u8 = 1;
+pub const DEVLINK_TRAP_ACTION_MIRROR: u8 = 2;
+
+// Trap types (`DEVLINK_TRAP_TYPE_*`).
+pub const DEVLINK_TRAP_TYPE_DROP: u8 = 0;
+pub const DEVLINK_TRAP_TYPE_EXCEPTION: u8 = 1;
+pub const DEVLINK_TRAP_TYPE_CONTROL: u8 = 2;
+
 // Rate + port-function commands (Plan 153.2).
 pub const DEVLINK_CMD_RATE_GET: u8 = 74;
 pub const DEVLINK_CMD_RATE_SET: u8 = 75;

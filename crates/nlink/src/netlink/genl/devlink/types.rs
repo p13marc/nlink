@@ -614,6 +614,135 @@ impl DevlinkRate {
     }
 }
 
+/// A devlink shared-buffer instance (`devlink sb show`).
+#[derive(Debug, Clone)]
+pub struct SharedBuffer {
+    /// Bus name.
+    pub bus: String,
+    /// Device name.
+    pub device: String,
+    /// Shared-buffer index.
+    pub index: u32,
+    /// Total buffer size in bytes.
+    pub size: u32,
+    /// Number of ingress pools.
+    pub ingress_pools: u32,
+    /// Number of egress pools.
+    pub egress_pools: u32,
+    /// Number of ingress traffic classes.
+    pub ingress_tcs: u32,
+    /// Number of egress traffic classes.
+    pub egress_tcs: u32,
+}
+
+/// Action a packet trap takes when it fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TrapAction {
+    /// Silently drop.
+    Drop,
+    /// Trap to the CPU.
+    Trap,
+    /// Mirror to the CPU while forwarding.
+    Mirror,
+    /// Unknown action value (forward-compat).
+    Unknown(u8),
+}
+
+impl TrapAction {
+    /// Stable lowercase name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrapAction::Drop => "drop",
+            TrapAction::Trap => "trap",
+            TrapAction::Mirror => "mirror",
+            TrapAction::Unknown(_) => "unknown",
+        }
+    }
+}
+
+/// Classification of a packet trap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TrapType {
+    /// Drop trap.
+    Drop,
+    /// Exception trap.
+    Exception,
+    /// Control trap.
+    Control,
+    /// Unknown type value (forward-compat).
+    Unknown(u8),
+}
+
+impl TrapType {
+    /// Stable lowercase name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrapType::Drop => "drop",
+            TrapType::Exception => "exception",
+            TrapType::Control => "control",
+            TrapType::Unknown(_) => "unknown",
+        }
+    }
+}
+
+/// A devlink packet trap (`devlink trap show`).
+#[derive(Debug, Clone)]
+pub struct DevlinkTrap {
+    /// Bus name.
+    pub bus: String,
+    /// Device name.
+    pub device: String,
+    /// Trap name.
+    pub name: String,
+    /// Action taken when the trap fires.
+    pub action: TrapAction,
+    /// Trap classification.
+    pub trap_type: TrapType,
+    /// `true` for a kernel-generic trap.
+    pub generic: bool,
+    /// Owning trap group, if reported.
+    pub group: Option<String>,
+}
+
+/// A devlink hardware resource (`devlink resource show`).
+///
+/// Resources form a tree; [`name`](Self::name) is the full
+/// slash-joined path from the root (e.g. `"kvd/linear"`).
+#[derive(Debug, Clone)]
+pub struct DevlinkResource {
+    /// Bus name.
+    pub bus: String,
+    /// Device name.
+    pub device: String,
+    /// Slash-joined resource path.
+    pub name: String,
+    /// Resource ID.
+    pub id: u64,
+    /// Configured size.
+    pub size: u64,
+    /// Current occupancy, if the driver reports it.
+    pub occ: Option<u64>,
+    /// `true` if `size` reflects a valid (driver-acked) value.
+    pub size_valid: bool,
+}
+
+/// A devlink address region (`devlink region show`).
+#[derive(Debug, Clone)]
+pub struct DevlinkRegion {
+    /// Bus name.
+    pub bus: String,
+    /// Device name.
+    pub device: String,
+    /// Region name.
+    pub name: String,
+    /// Region size in bytes, if reported.
+    pub size: Option<u64>,
+    /// Number of snapshots currently held.
+    pub snapshot_count: usize,
+}
+
 #[cfg(test)]
 mod rate_tests {
     use super::*;
