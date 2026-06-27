@@ -62,6 +62,12 @@ enum Commands {
         /// Device name
         device: String,
     },
+    /// Show standardized NIC statistics (IEEE 802.3 / RMON groups)
+    #[command(short_flag = 'S')]
+    Stats {
+        /// Device name
+        device: String,
+    },
     /// Set ring buffer sizes
     #[command(short_flag = 'G')]
     SetRings {
@@ -184,6 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Channels { device } => show_channels(&device, json).await?,
         Commands::Coalesce { device } => show_coalesce(&device, json).await?,
         Commands::Pause { device } => show_pause(&device, json).await?,
+        Commands::Stats { device } => show_stats(&device, json).await?,
         Commands::SetRings { device, rx, tx } => set_rings(&device, rx, tx).await?,
         Commands::SetChannels {
             device,
@@ -539,6 +546,59 @@ async fn show_pause(device: &str, json: bool) -> nlink::Result<()> {
     }
     if let Some(v) = pause.tx {
         println!("\tTX:\t\t{}", if v { "on" } else { "off" });
+    }
+
+    Ok(())
+}
+
+async fn show_stats(device: &str, json: bool) -> nlink::Result<()> {
+    use nlink::netlink::genl::ethtool::{StatGroup, standard_stat_name, stats_group};
+
+    let conn = Connection::<Ethtool>::new_async().await?;
+    let stats = conn.get_eth_stats(device).await?;
+
+    // (group label, kernel group id, the group's values).
+    let groups: [(&str, u32, &Option<StatGroup>); 4] = [
+        ("eth-phy", stats_group::ETH_PHY, &stats.eth_phy),
+        ("eth-mac", stats_group::ETH_MAC, &stats.eth_mac),
+        ("eth-ctrl", stats_group::ETH_CTRL, &stats.eth_ctrl),
+        ("rmon", stats_group::RMON, &stats.rmon),
+    ];
+
+    if json {
+        let mut obj = serde_json::Map::new();
+        for (label, gid, group) in groups {
+            if let Some(g) = group {
+                let mut gobj = serde_json::Map::new();
+                for (&index, &value) in &g.values {
+                    let key = standard_stat_name(gid, index)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| index.to_string());
+                    gobj.insert(key, serde_json::json!(value));
+                }
+                obj.insert(label.to_string(), serde_json::Value::Object(gobj));
+            }
+        }
+        print_json(&serde_json::json!({ "device": device, "groups": obj }));
+        return Ok(());
+    }
+
+    println!("Standardized statistics for {device}:");
+    let mut any = false;
+    for (label, gid, group) in groups {
+        if let Some(g) = group {
+            any = true;
+            println!("  {label}:");
+            for (&index, &value) in &g.values {
+                match standard_stat_name(gid, index) {
+                    Some(name) => println!("\t{name}: {value}"),
+                    None => println!("\t[{index}]: {value}"),
+                }
+            }
+        }
+    }
+    if !any {
+        println!("  (no standardized stat groups reported by this device)");
     }
 
     Ok(())

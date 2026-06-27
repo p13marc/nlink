@@ -616,17 +616,58 @@ pub enum EthtoolPauseAttr {
 // =============================================================================
 
 /// Attributes for statistics.
+///
+/// # Warning — discriminants are off by one (kept for ABI stability)
+///
+/// These values are **wrong** versus the kernel: the real
+/// `ETHTOOL_A_STATS_*` enum has `PAD` at index 1, so the header is 2,
+/// groups 3, grp 4, src 5. Correcting these discriminants on a
+/// `#[repr(u16)]` enum is a breaking change, so the fix is deferred to
+/// the next major bump. Internal STATS_GET code uses the correct
+/// private `stats_attr` constants in the ethtool connection module
+/// instead; prefer those if you build raw STATS requests yourself.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EthtoolStatsAttr {
     Unspec = 0,
-    /// Request header (nested).
+    /// Request header (nested). **Wrong**: kernel value is 2.
     Header = 1,
-    /// Stat groups to query (bitset).
+    /// Stat groups to query (bitset). **Wrong**: kernel value is 3.
     Groups = 2,
-    /// GRP nested stats.
+    /// GRP nested stats. **Wrong**: kernel value is 4.
     Grp = 3,
-    /// Source for stats (u32).
+    /// Source for stats (u32). **Wrong**: kernel value is 5.
     Src = 4,
+}
+
+/// Attributes nested under `ETHTOOL_A_STATS_GRP` (`ETHTOOL_A_STATS_GRP_*`).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EthtoolStatsGrpAttr {
+    Unspec = 0,
+    /// Padding (index 1).
+    Pad = 1,
+    /// Group id (u32) — one of [`stats_group`].
+    Id = 2,
+    /// String-set id (u32).
+    SsId = 3,
+    /// One stat: a nested attr whose type is the stat index and
+    /// whose payload is a `u64` value.
+    Stat = 4,
+}
+
+/// Standardized stat-group ids (`enum stats_group` in
+/// `ethtool_netlink.h`), used as `ETHTOOL_A_STATS_GRP_ID` values and
+/// as bit positions in the request `Groups` bitset.
+pub mod stats_group {
+    /// IEEE 802.3 PHY stats.
+    pub const ETH_PHY: u32 = 0;
+    /// IEEE 802.3 MAC stats.
+    pub const ETH_MAC: u32 = 1;
+    /// IEEE 802.3 MAC-control stats.
+    pub const ETH_CTRL: u32 = 2;
+    /// RMON (RFC 2819) stats.
+    pub const RMON: u32 = 3;
 }
