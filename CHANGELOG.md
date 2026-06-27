@@ -93,6 +93,10 @@ All notable changes to this project will be documented in this file.
   hook *name* (family-aware: netdev → ingress/egress, else the L3 hooks),
   `priority`, default `policy`, and bound `device` from the kernel's
   `ChainInfo`.
+- **`devlink` bin: readable `monitor` output (#26).** `devlink monitor`
+  printed raw `{:?}` Debug for each event. It now renders a concise line
+  per event (`new device …`, `new port … (eth3)`, `health event …`,
+  `flash update …`), with a Debug fallback for future event variants.
 
 ## [0.21.0] - 2026-06-04
 
