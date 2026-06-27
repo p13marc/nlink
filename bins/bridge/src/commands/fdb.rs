@@ -113,10 +113,15 @@ async fn show_fdb(
     let entries = if let Some(ref name) = dev {
         conn.get_fdb(name).await?
     } else {
-        // Show all requires a bridge device to be specified
-        return Err(Error::InvalidMessage(
-            "please specify a bridge device".into(),
-        ));
+        // No device: aggregate FDB entries across every bridge in the
+        // namespace, matching `bridge fdb show` with no device.
+        let mut all = Vec::new();
+        for link in conn.get_links().await? {
+            if link.link_info().and_then(|i| i.kind()) == Some("bridge") {
+                all.extend(conn.get_fdb_by_index(link.ifindex()).await?);
+            }
+        }
+        all
     };
 
     // Build ifindex -> name map

@@ -199,11 +199,15 @@ async fn show_vlans(
     let entries = if let Some(ref name) = dev {
         conn.get_bridge_vlans(name).await?
     } else {
-        // Get all bridge VLANs - we need to dump all links with VLAN filter
-        // For now, return an error suggesting to specify a device
-        return Err(Error::InvalidMessage(
-            "please specify a device with --dev".into(),
-        ));
+        // No --dev: aggregate VLAN entries across every bridge in the
+        // namespace, matching `bridge vlan show` with no device.
+        let mut all = Vec::new();
+        for link in conn.get_links().await? {
+            if link.link_info().and_then(|i| i.kind()) == Some("bridge") {
+                all.extend(conn.get_bridge_vlans_all_by_index(link.ifindex()).await?);
+            }
+        }
+        all
     };
 
     // Build ifindex -> name map
