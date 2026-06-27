@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`ip` bin: `ip link set <dev> --netns <name|pid>` (#17).** Moves a
+  device into another network namespace, wiring the existing
+  `set_link_netns_by_index` / `set_link_netns_pid_by_index` library APIs.
+  The ifindex is resolved once up front so the move is namespace-safe; a
+  numeric argument is treated as a target PID, anything else as a named
+  netns under `/var/run/netns` (mirrors iproute2).
+
 ### Fixed
 
 - **`ip` bin: strict-parse the link-add mode helpers (#17).** The bond

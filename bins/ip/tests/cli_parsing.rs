@@ -66,7 +66,18 @@ mod link_command {
             .success()
             .stdout(predicate::str::contains("--up"))
             .stdout(predicate::str::contains("--down"))
-            .stdout(predicate::str::contains("--mtu"));
+            .stdout(predicate::str::contains("--mtu"))
+            .stdout(predicate::str::contains("--netns"));
+    }
+
+    #[test]
+    fn test_link_set_netns_accepts_value() {
+        // `--netns` must parse (name or PID); failure here would mean the flag
+        // wasn't wired. We only check arg parsing, not the privileged move.
+        ip_cmd()
+            .args(["link", "set", "eth0", "--netns", "myns", "--help"])
+            .assert()
+            .success();
     }
 
     #[test]
