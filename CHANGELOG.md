@@ -69,6 +69,12 @@ All notable changes to this project will be documented in this file.
   `OutputOptions::default()`), and `nexthop show` always pretty-printed
   JSON regardless of `-p`. Both now thread the real `OutputOptions`
   through, so `-j`/`-p` behave consistently with the other objects.
+- **`devlink` bin: type-aware `param set` (#26).** The value was inferred
+  lossily (bool → u32 → string), so a `u8`/`u16` parameter or an all-digit
+  string label silently became a `u32`. `param set` now reads the
+  parameter's declared type via `get_param` first and parses the value
+  into it — rejecting out-of-range or non-boolean input — and only falls
+  back to inference when the parameter can't be read.
 
 ## [0.21.0] - 2026-06-04
 
