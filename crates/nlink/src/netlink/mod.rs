@@ -91,6 +91,7 @@ pub mod genl;
 pub mod impair;
 mod interface_ref;
 pub mod link;
+pub mod mdb;
 pub mod message;
 pub mod messages;
 pub mod mpls;

@@ -3,6 +3,7 @@
 pub mod addr;
 pub mod link;
 pub mod macsec;
+pub mod mdb;
 pub mod mpls;
 pub mod mptcp;
 pub mod neigh;
