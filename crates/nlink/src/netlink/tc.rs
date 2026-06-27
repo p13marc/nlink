@@ -46,7 +46,7 @@ use super::{
     tc_handle::TcHandle,
     types::tc::{
         TcMsg, TcaAttr,
-        qdisc::{TcRateSpec, fq_codel, htb, netem::*, prio, sfq, tbf},
+        qdisc::{TcRateSpec, codel, fq, fq_codel, htb, netem::*, prio, sfq, tbf},
     },
 };
 
@@ -806,6 +806,419 @@ impl QdiscConfig for FqCodelConfig {
         }
         if let Some(mem) = self.memory_limit {
             builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_MEMORY_LIMIT, mem);
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// CodelConfig
+// ============================================================================
+
+/// Controlled Delay (codel) qdisc configuration.
+///
+/// Plain CoDel — a single-queue AQM. For per-flow fairness use
+/// [`FqCodelConfig`] instead.
+///
+/// ```ignore
+/// use nlink::netlink::tc::CodelConfig;
+/// use std::time::Duration;
+///
+/// let cfg = CodelConfig::new()
+///     .target(Duration::from_millis(5))
+///     .interval(Duration::from_millis(100))
+///     .ecn(true)
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct CodelConfig {
+    /// Target queue delay.
+    pub target: Option<Duration>,
+    /// Sliding-window interval.
+    pub interval: Option<Duration>,
+    /// Hard queue limit in packets.
+    pub limit: Option<u32>,
+    /// ECN marking instead of dropping (`Some(false)` = explicit noecn).
+    pub ecn: Option<bool>,
+    /// CE threshold for ECN marking.
+    pub ce_threshold: Option<Duration>,
+}
+
+impl CodelConfig {
+    /// Create a new codel configuration builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the target queue delay (default: 5ms).
+    pub fn target(mut self, target: Duration) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    /// Set the sliding-window interval (default: 100ms).
+    pub fn interval(mut self, interval: Duration) -> Self {
+        self.interval = Some(interval);
+        self
+    }
+
+    /// Set the hard queue limit in packets.
+    pub fn limit(mut self, packets: u32) -> Self {
+        self.limit = Some(packets);
+        self
+    }
+
+    /// Enable or disable ECN marking.
+    pub fn ecn(mut self, enable: bool) -> Self {
+        self.ecn = Some(enable);
+        self
+    }
+
+    /// Set the CE threshold for ECN marking.
+    pub fn ce_threshold(mut self, threshold: Duration) -> Self {
+        self.ce_threshold = Some(threshold);
+        self
+    }
+
+    /// Terminal no-op for builder symmetry.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style codel params slice.
+    ///
+    /// Recognised tokens: `limit <packets>`, `target <time>`,
+    /// `interval <time>`, `ce_threshold <time>`, `ecn`/`noecn`.
+    /// Strict: unknown tokens, missing values, and unparseable
+    /// values all error.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("codel: `{key}` requires a value"))
+                })
+            };
+            match key {
+                "limit" => {
+                    let s = need_value()?;
+                    cfg.limit = Some(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("codel: invalid limit `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "target" => {
+                    let s = need_value()?;
+                    cfg.target = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "codel: invalid target `{s}` (expected tc-style time)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "interval" => {
+                    let s = need_value()?;
+                    cfg.interval = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "codel: invalid interval `{s}` (expected tc-style time)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "ce_threshold" => {
+                    let s = need_value()?;
+                    cfg.ce_threshold = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "codel: invalid ce_threshold `{s}` (expected tc-style time)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "ecn" => {
+                    cfg.ecn = Some(true);
+                    i += 1;
+                }
+                "noecn" => {
+                    cfg.ecn = Some(false);
+                    i += 1;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!("codel: unknown token `{other}`")));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+impl QdiscConfig for CodelConfig {
+    fn kind(&self) -> &'static str {
+        "codel"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        if let Some(target) = self.target {
+            builder.append_attr_u32(codel::TCA_CODEL_TARGET, target.as_micros() as u32);
+        }
+        if let Some(interval) = self.interval {
+            builder.append_attr_u32(codel::TCA_CODEL_INTERVAL, interval.as_micros() as u32);
+        }
+        if let Some(limit) = self.limit {
+            builder.append_attr_u32(codel::TCA_CODEL_LIMIT, limit);
+        }
+        if let Some(ecn) = self.ecn {
+            builder.append_attr_u32(codel::TCA_CODEL_ECN, u32::from(ecn));
+        }
+        if let Some(ce) = self.ce_threshold {
+            builder.append_attr_u32(codel::TCA_CODEL_CE_THRESHOLD, ce.as_micros() as u32);
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// FqConfig
+// ============================================================================
+
+/// Fair Queue (fq) qdisc configuration — the pacing-aware scheduler
+/// used with BBR. Distinct from [`FqCodelConfig`] (which is an AQM).
+///
+/// ```ignore
+/// use nlink::netlink::tc::FqConfig;
+/// use nlink::Rate;
+///
+/// let cfg = FqConfig::new()
+///     .limit(10_000)
+///     .flow_limit(100)
+///     .maxrate(Rate::mbit(100))
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct FqConfig {
+    /// Total packet limit across the queue.
+    pub limit: Option<u32>,
+    /// Per-flow packet limit.
+    pub flow_limit: Option<u32>,
+    /// Round-robin quantum in bytes.
+    pub quantum: Option<u32>,
+    /// Initial quantum for a new flow, in bytes.
+    pub initial_quantum: Option<u32>,
+    /// Per-flow maximum rate.
+    pub maxrate: Option<crate::util::Rate>,
+    /// Low-rate threshold below which flows are not throttled.
+    pub low_rate_threshold: Option<crate::util::Rate>,
+    /// Flow credit refill delay.
+    pub refill_delay: Option<Duration>,
+    /// Mask applied to the orphaned-skb hash.
+    pub orphan_mask: Option<u32>,
+    /// ECN CE marking threshold.
+    pub ce_threshold: Option<Duration>,
+    /// Enable/disable pacing (`Some(false)` = explicit nopacing).
+    pub pacing: Option<bool>,
+}
+
+impl FqConfig {
+    /// Create a new fq configuration builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the total packet limit.
+    pub fn limit(mut self, packets: u32) -> Self {
+        self.limit = Some(packets);
+        self
+    }
+
+    /// Set the per-flow packet limit.
+    pub fn flow_limit(mut self, packets: u32) -> Self {
+        self.flow_limit = Some(packets);
+        self
+    }
+
+    /// Set the round-robin quantum in bytes.
+    pub fn quantum(mut self, bytes: u32) -> Self {
+        self.quantum = Some(bytes);
+        self
+    }
+
+    /// Set the initial quantum for new flows, in bytes.
+    pub fn initial_quantum(mut self, bytes: u32) -> Self {
+        self.initial_quantum = Some(bytes);
+        self
+    }
+
+    /// Set the per-flow maximum rate.
+    pub fn maxrate(mut self, rate: crate::util::Rate) -> Self {
+        self.maxrate = Some(rate);
+        self
+    }
+
+    /// Set the low-rate threshold.
+    pub fn low_rate_threshold(mut self, rate: crate::util::Rate) -> Self {
+        self.low_rate_threshold = Some(rate);
+        self
+    }
+
+    /// Set the flow credit refill delay.
+    pub fn refill_delay(mut self, delay: Duration) -> Self {
+        self.refill_delay = Some(delay);
+        self
+    }
+
+    /// Set the orphan mask.
+    pub fn orphan_mask(mut self, mask: u32) -> Self {
+        self.orphan_mask = Some(mask);
+        self
+    }
+
+    /// Set the ECN CE marking threshold.
+    pub fn ce_threshold(mut self, threshold: Duration) -> Self {
+        self.ce_threshold = Some(threshold);
+        self
+    }
+
+    /// Enable or disable pacing.
+    pub fn pacing(mut self, enable: bool) -> Self {
+        self.pacing = Some(enable);
+        self
+    }
+
+    /// Terminal no-op for builder symmetry.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style fq params slice.
+    ///
+    /// Recognised tokens: `limit <packets>`, `flow_limit <packets>`,
+    /// `quantum <bytes>`, `initial_quantum <bytes>`, `maxrate <rate>`,
+    /// `low_rate_threshold <rate>`, `refill_delay <time>`,
+    /// `orphan_mask <n>`, `ce_threshold <time>`, `pacing`/`nopacing`.
+    /// Strict: unknown tokens, missing values, and unparseable values
+    /// all error.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params
+                    .get(i + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("fq: `{key}` requires a value")))
+            };
+            let parse_u32 = |s: &str, what: &str| {
+                s.parse::<u32>().map_err(|_| {
+                    Error::InvalidMessage(format!("fq: invalid {what} `{s}` (expected integer)"))
+                })
+            };
+            let parse_rate = |s: &str, what: &str| {
+                crate::util::Rate::parse(s).map_err(|_| {
+                    Error::InvalidMessage(format!("fq: invalid {what} `{s}` (expected tc-style rate)"))
+                })
+            };
+            let parse_time = |s: &str, what: &str| {
+                crate::util::parse::get_time(s).map_err(|_| {
+                    Error::InvalidMessage(format!("fq: invalid {what} `{s}` (expected tc-style time)"))
+                })
+            };
+            match key {
+                "limit" => {
+                    cfg.limit = Some(parse_u32(need_value()?, "limit")?);
+                    i += 2;
+                }
+                "flow_limit" => {
+                    cfg.flow_limit = Some(parse_u32(need_value()?, "flow_limit")?);
+                    i += 2;
+                }
+                "quantum" => {
+                    cfg.quantum = Some(parse_u32(need_value()?, "quantum")?);
+                    i += 2;
+                }
+                "initial_quantum" => {
+                    cfg.initial_quantum = Some(parse_u32(need_value()?, "initial_quantum")?);
+                    i += 2;
+                }
+                "maxrate" => {
+                    cfg.maxrate = Some(parse_rate(need_value()?, "maxrate")?);
+                    i += 2;
+                }
+                "low_rate_threshold" => {
+                    cfg.low_rate_threshold = Some(parse_rate(need_value()?, "low_rate_threshold")?);
+                    i += 2;
+                }
+                "refill_delay" => {
+                    cfg.refill_delay = Some(parse_time(need_value()?, "refill_delay")?);
+                    i += 2;
+                }
+                "orphan_mask" => {
+                    cfg.orphan_mask = Some(parse_u32(need_value()?, "orphan_mask")?);
+                    i += 2;
+                }
+                "ce_threshold" => {
+                    cfg.ce_threshold = Some(parse_time(need_value()?, "ce_threshold")?);
+                    i += 2;
+                }
+                "pacing" => {
+                    cfg.pacing = Some(true);
+                    i += 1;
+                }
+                "nopacing" => {
+                    cfg.pacing = Some(false);
+                    i += 1;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!("fq: unknown token `{other}`")));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+impl QdiscConfig for FqConfig {
+    fn kind(&self) -> &'static str {
+        "fq"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        if let Some(limit) = self.limit {
+            builder.append_attr_u32(fq::TCA_FQ_PLIMIT, limit);
+        }
+        if let Some(flow_limit) = self.flow_limit {
+            builder.append_attr_u32(fq::TCA_FQ_FLOW_PLIMIT, flow_limit);
+        }
+        if let Some(quantum) = self.quantum {
+            builder.append_attr_u32(fq::TCA_FQ_QUANTUM, quantum);
+        }
+        if let Some(iq) = self.initial_quantum {
+            builder.append_attr_u32(fq::TCA_FQ_INITIAL_QUANTUM, iq);
+        }
+        if let Some(maxrate) = self.maxrate {
+            builder.append_attr_u32(
+                fq::TCA_FQ_FLOW_MAX_RATE,
+                maxrate.as_u32_bytes_per_sec_saturating(),
+            );
+        }
+        if let Some(lrt) = self.low_rate_threshold {
+            builder.append_attr_u32(
+                fq::TCA_FQ_LOW_RATE_THRESHOLD,
+                lrt.as_u32_bytes_per_sec_saturating(),
+            );
+        }
+        if let Some(rd) = self.refill_delay {
+            builder.append_attr_u32(fq::TCA_FQ_FLOW_REFILL_DELAY, rd.as_micros() as u32);
+        }
+        if let Some(mask) = self.orphan_mask {
+            builder.append_attr_u32(fq::TCA_FQ_ORPHAN_MASK, mask);
+        }
+        if let Some(ce) = self.ce_threshold {
+            builder.append_attr_u32(fq::TCA_FQ_CE_THRESHOLD, ce.as_micros() as u32);
+        }
+        if let Some(pacing) = self.pacing {
+            builder.append_attr_u32(fq::TCA_FQ_RATE_ENABLE, u32::from(pacing));
         }
         Ok(())
     }
@@ -7453,5 +7866,52 @@ mod tests {
         let _: HfscClassConfig = <HfscClassConfig as ParseParams>::parse_params(&[]).unwrap();
         let _: DrrClassConfig = <DrrClassConfig as ParseParams>::parse_params(&[]).unwrap();
         let _: QfqClassConfig = <QfqClassConfig as ParseParams>::parse_params(&[]).unwrap();
+    }
+
+    #[test]
+    fn codel_parse_params() {
+        let cfg = CodelConfig::parse_params(&[
+            "limit", "1000", "target", "5ms", "interval", "100ms", "ecn",
+        ])
+        .unwrap();
+        assert_eq!(cfg.limit, Some(1000));
+        assert_eq!(cfg.target, Some(Duration::from_millis(5)));
+        assert_eq!(cfg.interval, Some(Duration::from_millis(100)));
+        assert_eq!(cfg.ecn, Some(true));
+        assert_eq!(cfg.kind(), "codel");
+
+        // noecn distinct from unset
+        assert_eq!(CodelConfig::parse_params(&["noecn"]).unwrap().ecn, Some(false));
+        assert_eq!(CodelConfig::parse_params(&[]).unwrap().ecn, None);
+
+        // strict
+        assert!(CodelConfig::parse_params(&["bogus"]).is_err());
+        assert!(CodelConfig::parse_params(&["limit"]).is_err()); // missing value
+        assert!(CodelConfig::parse_params(&["target", "notatime"]).is_err());
+    }
+
+    #[test]
+    fn fq_parse_params() {
+        let cfg = FqConfig::parse_params(&[
+            "limit", "10000", "flow_limit", "100", "quantum", "3028", "maxrate", "100mbit",
+            "nopacing",
+        ])
+        .unwrap();
+        assert_eq!(cfg.limit, Some(10000));
+        assert_eq!(cfg.flow_limit, Some(100));
+        assert_eq!(cfg.quantum, Some(3028));
+        // 100 mbit = 12_500_000 bytes/sec
+        assert_eq!(
+            cfg.maxrate.unwrap().as_u32_bytes_per_sec_saturating(),
+            12_500_000
+        );
+        assert_eq!(cfg.pacing, Some(false));
+        assert_eq!(cfg.kind(), "fq");
+
+        // strict
+        assert!(FqConfig::parse_params(&["bogus"]).is_err());
+        assert!(FqConfig::parse_params(&["maxrate"]).is_err()); // missing value
+        assert!(FqConfig::parse_params(&["maxrate", "notarate"]).is_err());
+        assert!(FqConfig::parse_params(&["limit", "notanumber"]).is_err());
     }
 }

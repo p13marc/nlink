@@ -8,10 +8,10 @@ use nlink::{
         message::NlMsgType,
         messages::TcMessage,
         tc::{
-            BfifoConfig, CakeConfig, ClsactConfig, DrrConfig, EtfConfig, FqCodelConfig,
-            FqPieConfig, HfscConfig, HtbQdiscConfig, IngressConfig, MqprioConfig, NetemConfig,
-            PfifoConfig, PieConfig, PlugConfig, PrioConfig, QdiscConfig, QfqConfig, RedConfig,
-            SfqConfig, TaprioConfig, TbfConfig,
+            BfifoConfig, CakeConfig, ClsactConfig, CodelConfig, DrrConfig, EtfConfig, FqCodelConfig,
+            FqConfig, FqPieConfig, HfscConfig, HtbQdiscConfig, IngressConfig, MqprioConfig,
+            NetemConfig, PfifoConfig, PieConfig, PlugConfig, PrioConfig, QdiscConfig, QfqConfig,
+            RedConfig, SfqConfig, TaprioConfig, TbfConfig,
         },
     },
     output::{OutputFormat, OutputOptions, print_all},
@@ -304,6 +304,8 @@ async fn dispatch_qdisc(
         "sfq" => dispatch!(SfqConfig),
         "prio" => dispatch!(PrioConfig),
         "fq_codel" => dispatch!(FqCodelConfig),
+        "fq" => dispatch!(FqConfig),
+        "codel" => dispatch!(CodelConfig),
         "fq_pie" => dispatch!(FqPieConfig),
         "pfifo" => dispatch!(PfifoConfig),
         "bfifo" => dispatch!(BfifoConfig),
@@ -319,7 +321,7 @@ async fn dispatch_qdisc(
         "etf" => dispatch!(EtfConfig),
         "taprio" => dispatch!(TaprioConfig),
         other => Err(Error::InvalidMessage(format!(
-            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, etf, taprio)"
+            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, etf, taprio)"
         ))),
     }
 }
