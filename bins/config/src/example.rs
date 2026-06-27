@@ -430,3 +430,28 @@ qdiscs:
     parent: root
     kind: fq_codel
 "#;
+
+#[cfg(test)]
+mod tests {
+    use crate::schema::ConfigFile;
+
+    // Regression for the "example output can't be loaded" gap: every
+    // shipped example MUST deserialize through the canonical schema,
+    // so `nlink-config example` output is loadable by `apply`/`diff`.
+    #[test]
+    fn every_example_parses_as_config_file() {
+        let examples = [
+            ("basic", super::BASIC_EXAMPLE),
+            ("bridge", super::BRIDGE_EXAMPLE),
+            ("vxlan", super::VXLAN_EXAMPLE),
+            ("qos", super::QOS_EXAMPLE),
+            ("container", super::CONTAINER_EXAMPLE),
+            ("bond", super::BOND_EXAMPLE),
+            ("full", super::FULL_EXAMPLE),
+        ];
+        for (name, text) in examples {
+            let parsed: std::result::Result<ConfigFile, _> = serde_yaml::from_str(text);
+            assert!(parsed.is_ok(), "example `{name}` failed to parse: {parsed:?}");
+        }
+    }
+}
