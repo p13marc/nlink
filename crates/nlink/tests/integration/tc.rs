@@ -219,8 +219,11 @@ async fn test_add_ingress_qdisc() -> Result<()> {
 
     let (_ns, conn) = setup_tc_ns("ingress").await?;
 
-    // Add ingress qdisc
-    conn.add_qdisc("dummy0", IngressConfig::new()).await?;
+    // Add ingress qdisc. The ingress qdisc is not a root qdisc — it must
+    // attach to the special ingress parent (TC_H_INGRESS, ffff:fff1).
+    // Adding it at the root parent makes the kernel return EOPNOTSUPP.
+    conn.add_qdisc_full("dummy0", TcHandle::INGRESS, None, IngressConfig::new())
+        .await?;
 
     // Verify
     let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
@@ -551,8 +554,10 @@ async fn test_matchall_on_ingress() -> Result<()> {
 
     let (_ns, conn) = setup_tc_ns("matchinq").await?;
 
-    // Add ingress qdisc
-    conn.add_qdisc("dummy0", IngressConfig::new()).await?;
+    // Add ingress qdisc at the special ingress parent (see
+    // test_add_ingress_qdisc) — root-parent ingress is EOPNOTSUPP.
+    conn.add_qdisc_full("dummy0", TcHandle::INGRESS, None, IngressConfig::new())
+        .await?;
 
     // Add matchall filter on ingress (without actions - just classifying)
     let filter = MatchallFilter::new().build();
