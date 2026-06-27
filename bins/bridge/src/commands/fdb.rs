@@ -60,9 +60,17 @@ struct FdbAddArgs {
     #[arg(long)]
     dst: Option<IpAddr>,
 
+    /// VXLAN VNI for the remote destination
+    #[arg(long)]
+    vni: Option<u32>,
+
     /// Permanent (static) entry
     #[arg(long)]
     permanent: bool,
+
+    /// Dynamic (ageable) entry — the kernel default, explicit for clarity
+    #[arg(long)]
+    dynamic: bool,
 
     /// Self entry (entry on the device itself)
     #[arg(long, name = "self")]
@@ -129,13 +137,17 @@ async fn show_fdb(
 
     match format {
         OutputFormat::Json => print_fdb_json(&entries, &names, opts),
-        OutputFormat::Text => print_fdb_text(&entries, &names),
+        OutputFormat::Text => print_fdb_text(&entries, &names, opts),
     }
 
     Ok(())
 }
 
-fn print_fdb_text(entries: &[FdbEntry], names: &std::collections::HashMap<u32, String>) {
+fn print_fdb_text(
+    entries: &[FdbEntry],
+    names: &std::collections::HashMap<u32, String>,
+    opts: &OutputOptions,
+) {
     for entry in entries {
         let dev = names.get(&entry.ifindex()).map(|s| s.as_str()).unwrap_or("?");
 
@@ -170,6 +182,12 @@ fn print_fdb_text(entries: &[FdbEntry], names: &std::collections::HashMap<u32, S
         }
         if entry.is_extern_learn() {
             line.push_str(" extern_learn");
+        }
+
+        // -d/--details: surface the raw NUD state (REACHABLE, STALE, …)
+        // that the summary "permanent/dynamic" line hides.
+        if opts.details {
+            line.push_str(&format!(" state {}", entry.state().name()));
         }
 
         println!("{}", line);
@@ -262,8 +280,20 @@ async fn add_fdb(conn: &Connection<Route>, args: FdbAddArgs, replace: bool) -> R
         builder = builder.dst(dst);
     }
 
+    if let Some(vni) = args.vni {
+        builder = builder.vni(vni);
+    }
+
+    if args.permanent && args.dynamic {
+        return Err(Error::InvalidMessage(
+            "bridge fdb: --permanent and --dynamic are mutually exclusive".into(),
+        ));
+    }
     if args.permanent {
         builder = builder.permanent();
+    }
+    if args.dynamic {
+        builder = builder.dynamic();
     }
 
     if args.self_entry {
