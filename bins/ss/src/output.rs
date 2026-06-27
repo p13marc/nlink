@@ -155,6 +155,13 @@ pub fn print_text(sockets: &[SocketInfo], opts: &DisplayOptions) -> io::Result<(
     let stdout = io::stdout();
     let mut handle = stdout.lock();
 
+    // -p/--processes: build the socket-inode → process map once.
+    let procs = if opts.processes {
+        crate::procmap::build()
+    } else {
+        crate::procmap::ProcMap::new()
+    };
+
     if !opts.no_header {
         writeln!(
             handle,
@@ -165,8 +172,8 @@ pub fn print_text(sockets: &[SocketInfo], opts: &DisplayOptions) -> io::Result<(
 
     for sock in sockets {
         match sock {
-            SocketInfo::Inet(inet) => print_inet_socket(&mut handle, inet, opts)?,
-            SocketInfo::Unix(unix) => print_unix_socket(&mut handle, unix, opts)?,
+            SocketInfo::Inet(inet) => print_inet_socket(&mut handle, inet, opts, &procs)?,
+            SocketInfo::Unix(unix) => print_unix_socket(&mut handle, unix, opts, &procs)?,
             SocketInfo::Netlink(nl) => {
                 writeln!(
                     handle,
@@ -201,19 +208,27 @@ fn print_inet_socket(
     handle: &mut impl Write,
     sock: &InetSocket,
     opts: &DisplayOptions,
+    procs: &crate::procmap::ProcMap,
 ) -> io::Result<()> {
     let local = format_addr(&sock.local, opts.numeric);
     let remote = format_addr(&sock.remote, opts.numeric);
 
+    let users = if opts.processes {
+        crate::procmap::format_users(procs, sock.inode)
+    } else {
+        String::new()
+    };
+
     writeln!(
         handle,
-        "{:<8} {:<12} {:>6} {:>6} {:>25} {:>25}",
+        "{:<8} {:<12} {:>6} {:>6} {:>25} {:>25}{}",
         sock.netid(),
         sock.state.name(),
         sock.recv_q,
         sock.send_q,
         local,
-        remote
+        remote,
+        users
     )?;
 
     // Extended info
@@ -334,6 +349,7 @@ fn print_unix_socket(
     handle: &mut impl Write,
     sock: &UnixSocket,
     opts: &DisplayOptions,
+    procs: &crate::procmap::ProcMap,
 ) -> io::Result<()> {
     let path = sock.name();
     let path_display = if path.is_empty() {
@@ -348,15 +364,22 @@ fn print_unix_socket(
         "*".to_string()
     };
 
+    let users = if opts.processes {
+        crate::procmap::format_users(procs, sock.inode)
+    } else {
+        String::new()
+    };
+
     writeln!(
         handle,
-        "{:<8} {:<12} {:>6} {:>6} {:>25} {:>25}",
+        "{:<8} {:<12} {:>6} {:>6} {:>25} {:>25}{}",
         sock.netid(),
         sock.state.name(),
         sock.recv_q.unwrap_or(0),
         sock.send_q.unwrap_or(0),
         path_display,
-        peer
+        peer,
+        users
     )?;
 
     if opts.extended {

@@ -4,6 +4,7 @@
 //! providing detailed socket information for TCP, UDP, Unix, and other sockets.
 
 mod output;
+mod procmap;
 
 use std::net::IpAddr;
 
