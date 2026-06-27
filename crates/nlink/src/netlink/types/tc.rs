@@ -414,6 +414,24 @@ pub mod qdisc {
         pub const TCA_FQ_CODEL_MEMORY_LIMIT: u16 = 9;
     }
 
+    /// ETS (Enhanced Transmission Selection) qdisc attributes
+    /// (`enum` TCA_ETS_*). `QUANTA` and `PRIOMAP` are nested lists.
+    pub mod ets {
+        pub const TCA_ETS_UNSPEC: u16 = 0;
+        /// Total number of bands (u8).
+        pub const TCA_ETS_NBANDS: u16 = 1;
+        /// Number of strict-priority bands (u8).
+        pub const TCA_ETS_NSTRICT: u16 = 2;
+        /// Nested list of per-band quanta.
+        pub const TCA_ETS_QUANTA: u16 = 3;
+        /// One band's DRR quantum (u32), inside the `QUANTA` nest.
+        pub const TCA_ETS_QUANTA_BAND: u16 = 1;
+        /// Nested priority → band map.
+        pub const TCA_ETS_PRIOMAP: u16 = 4;
+        /// One priority's band (u8), inside the `PRIOMAP` nest.
+        pub const TCA_ETS_PRIOMAP_BAND: u16 = 1;
+    }
+
     /// TBF qdisc-specific attributes.
     pub mod tbf {
         use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
