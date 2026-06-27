@@ -8,7 +8,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use nlink::netlink::{
     Connection, Error, Nl80211, Result,
-    genl::nl80211::{ConnectRequest, Nl80211Event, ScanRequest},
+    genl::nl80211::{AuthType, ConnectRequest, Nl80211Event, ScanRequest},
 };
 use tokio_stream::StreamExt;
 
@@ -63,6 +63,15 @@ enum Command {
         interface: String,
         /// SSID to connect to.
         ssid: String,
+        /// Restrict to a specific BSSID (aa:bb:cc:dd:ee:ff).
+        #[arg(long)]
+        bssid: Option<String>,
+        /// Restrict to a specific frequency in MHz.
+        #[arg(long)]
+        freq: Option<u32>,
+        /// Authentication type: open, shared, sae, ft, eap.
+        #[arg(long)]
+        auth: Option<String>,
     },
 
     /// Disconnect from the current network.
@@ -88,6 +97,38 @@ fn format_mac(mac: &[u8; 6]) -> String {
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     )
+}
+
+/// Parse a `aa:bb:cc:dd:ee:ff` MAC string into 6 bytes.
+fn parse_mac(s: &str) -> Result<[u8; 6]> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        return Err(Error::InvalidMessage(format!(
+            "wifi: invalid BSSID `{s}` (expected aa:bb:cc:dd:ee:ff)"
+        )));
+    }
+    let mut mac = [0u8; 6];
+    for (i, p) in parts.iter().enumerate() {
+        mac[i] = u8::from_str_radix(p, 16).map_err(|_| {
+            Error::InvalidMessage(format!("wifi: invalid BSSID byte `{p}` in `{s}`"))
+        })?;
+    }
+    Ok(mac)
+}
+
+/// Parse an authentication-type token. Strict — an unknown value is
+/// an error, not a silent fall-through to open-system.
+fn parse_auth_type(s: &str) -> Result<AuthType> {
+    match s.to_lowercase().as_str() {
+        "open" | "open-system" => Ok(AuthType::OpenSystem),
+        "shared" | "shared-key" => Ok(AuthType::SharedKey),
+        "sae" => Ok(AuthType::Sae),
+        "ft" => Ok(AuthType::Ft),
+        "eap" | "network-eap" => Ok(AuthType::NetworkEap),
+        other => Err(Error::InvalidMessage(format!(
+            "wifi: unknown auth type `{other}` (expected open/shared/sae/ft/eap)"
+        ))),
+    }
 }
 
 /// Render a monitored nl80211 event as a readable line instead of the
@@ -165,6 +206,15 @@ async fn main() -> Result<()> {
                     }
                     if let Some(ssid) = &iface.ssid {
                         println!("  SSID: {ssid}");
+                    }
+                    // Link quality — previously parsed into
+                    // WirelessInterface but never printed.
+                    if let Some(signal) = iface.signal_dbm {
+                        println!("  Signal: {signal} dBm");
+                    }
+                    if let Some(bitrate) = iface.tx_bitrate {
+                        // Stored in 100kbps units.
+                        println!("  TX bitrate: {:.1} Mbps", f64::from(bitrate) / 10.0);
                     }
                 }
                 None => {
@@ -295,8 +345,23 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Connect { interface, ssid } => {
-            let request = ConnectRequest::new(ssid.as_bytes());
+        Command::Connect {
+            interface,
+            ssid,
+            bssid,
+            freq,
+            auth,
+        } => {
+            let mut request = ConnectRequest::new(ssid.as_bytes());
+            if let Some(b) = &bssid {
+                request = request.bssid(parse_mac(b)?);
+            }
+            if let Some(f) = freq {
+                request = request.frequency(f);
+            }
+            if let Some(a) = &auth {
+                request = request.auth_type(parse_auth_type(a)?);
+            }
             conn.connect(&interface, request).await?;
             eprintln!("Connect request sent for SSID: {ssid}");
         }
@@ -357,5 +422,25 @@ fn print_scan_results(results: &[nlink::netlink::genl::nl80211::ScanResult]) {
             print!("  [secured]");
         }
         println!();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mac_parse_strict() {
+        assert_eq!(parse_mac("00:11:22:33:44:55").unwrap(), [0, 17, 34, 51, 68, 85]);
+        assert!(parse_mac("00:11:22:33:44").is_err()); // too short
+        assert!(parse_mac("zz:11:22:33:44:55").is_err()); // bad byte
+    }
+
+    #[test]
+    fn auth_type_parse_strict() {
+        assert!(matches!(parse_auth_type("open"), Ok(AuthType::OpenSystem)));
+        assert!(matches!(parse_auth_type("SAE"), Ok(AuthType::Sae)));
+        // The point: an unknown value errors, never silently opens.
+        assert!(parse_auth_type("wpa9").is_err());
     }
 }
