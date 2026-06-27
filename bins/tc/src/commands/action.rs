@@ -120,13 +120,13 @@ impl ActionCmd {
         conn: &Connection<Route>,
         kind: &str,
         format: OutputFormat,
-        _opts: &OutputOptions,
+        opts: &OutputOptions,
     ) -> Result<()> {
         let actions = conn.dump_actions(kind).await?;
         let stdout = io::stdout();
         let mut handle = stdout.lock();
         for am in &actions {
-            print_action_message(&mut handle, am, format)?;
+            print_action_message(&mut handle, am, format, opts)?;
         }
         Ok(())
     }
@@ -136,13 +136,13 @@ impl ActionCmd {
         kind: &str,
         index: u32,
         format: OutputFormat,
-        _opts: &OutputOptions,
+        opts: &OutputOptions,
     ) -> Result<()> {
         match conn.get_action(kind, index).await? {
             Some(am) => {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
-                print_action_message(&mut handle, &am, format)?;
+                print_action_message(&mut handle, &am, format, opts)?;
             }
             None => {
                 eprintln!("action {} index {} not found", kind, index);
@@ -191,15 +191,28 @@ fn print_action_message(
     w: &mut impl Write,
     am: &ActionMessage,
     format: OutputFormat,
+    opts: &OutputOptions,
 ) -> Result<()> {
     match format {
         OutputFormat::Json => {
-            write!(w, "{{\"kind\":\"{}\",\"index\":{}", am.kind, am.index)?;
+            // Build a real serde_json value rather than hand-splicing
+            // strings — escaping is handled and `-p/--pretty` works.
+            let mut obj = serde_json::Map::new();
+            obj.insert("kind".into(), serde_json::Value::from(am.kind.clone()));
+            obj.insert("index".into(), serde_json::Value::from(am.index));
             if !am.options_raw.is_empty() {
-                write!(w, ",")?;
-                print_action_options_json(w, &am.kind, &am.options_raw)?;
+                for (k, v) in action_options_json(&am.kind, &am.options_raw) {
+                    obj.insert(k, v);
+                }
             }
-            writeln!(w, "}}")?;
+            let value = serde_json::Value::Object(obj);
+            let rendered = if opts.pretty {
+                serde_json::to_string_pretty(&value)
+            } else {
+                serde_json::to_string(&value)
+            }
+            .expect("JSON serialization");
+            writeln!(w, "{rendered}")?;
         }
         OutputFormat::Text => {
             write!(w, "action {} index {} ", am.kind, am.index)?;
@@ -212,70 +225,65 @@ fn print_action_message(
     Ok(())
 }
 
-/// Print action options in JSON format.
-fn print_action_options_json(w: &mut impl Write, kind: &str, opts_data: &[u8]) -> Result<()> {
+/// Extract an action's kind-specific options as JSON fields.
+fn action_options_json(kind: &str, opts_data: &[u8]) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::Value;
+    let mut obj = serde_json::Map::new();
     match kind {
         "gact" => {
             for (attr_type, attr_data) in AttrIter::new(opts_data) {
-                // Plan 209 H11 — use zerocopy alignment-checked
-                // ref_from_prefix instead of raw-pointer cast. The
-                // old `*const TcGact` cast was UB on strict-
-                // alignment targets (ARM/MIPS) — Vec<u8>'s data
-                // pointer has no alignment guarantee.
+                // Plan 209 H11 — alignment-safe zerocopy parse.
                 if attr_type == TCA_GACT_PARMS
                     && let Ok((gact, _rest)) = <TcGact as zerocopy::FromBytes>::ref_from_prefix(attr_data)
                 {
-                    write!(
-                        w,
-                        "\"action\":\"{}\",\"ref\":{},\"bind\":{}",
-                        action::format_action_result(gact.action),
-                        gact.refcnt,
-                        gact.bindcnt
-                    )?;
+                    obj.insert(
+                        "action".into(),
+                        Value::from(action::format_action_result(gact.action)),
+                    );
+                    obj.insert("ref".into(), Value::from(gact.refcnt));
+                    obj.insert("bind".into(), Value::from(gact.bindcnt));
                 }
             }
         }
         "mirred" => {
             for (attr_type, attr_data) in AttrIter::new(opts_data) {
-                // Plan 209 H11 — zerocopy alignment-safe parse.
                 if attr_type == TCA_MIRRED_PARMS
                     && let Ok((m, _rest)) = <TcMirred as zerocopy::FromBytes>::ref_from_prefix(attr_data)
                 {
-                    write!(
-                        w,
-                        "\"mirred_action\":\"{}\",\"ifindex\":{},\"action\":\"{}\",\"ref\":{},\"bind\":{}",
-                        mirred::format_mirred_action(m.eaction),
-                        m.ifindex,
-                        action::format_action_result(m.action),
-                        m.refcnt,
-                        m.bindcnt
-                    )?;
+                    obj.insert(
+                        "mirred_action".into(),
+                        Value::from(mirred::format_mirred_action(m.eaction)),
+                    );
+                    obj.insert("ifindex".into(), Value::from(m.ifindex));
+                    obj.insert(
+                        "action".into(),
+                        Value::from(action::format_action_result(m.action)),
+                    );
+                    obj.insert("ref".into(), Value::from(m.refcnt));
+                    obj.insert("bind".into(), Value::from(m.bindcnt));
                 }
             }
         }
         "police" => {
             for (attr_type, attr_data) in AttrIter::new(opts_data) {
-                // Plan 209 H11 — zerocopy alignment-safe parse.
                 if attr_type == TCA_POLICE_TBF
                     && let Ok((p, _rest)) = <TcPolice as zerocopy::FromBytes>::ref_from_prefix(attr_data)
                 {
-                    write!(
-                        w,
-                        "\"rate\":{},\"burst\":{},\"mtu\":{},\"action\":\"{}\",\"ref\":{},\"bind\":{}",
-                        p.rate.rate,
-                        p.burst,
-                        p.mtu,
-                        action::format_action_result(p.action),
-                        p.refcnt,
-                        p.bindcnt
-                    )?;
+                    obj.insert("rate".into(), Value::from(p.rate.rate));
+                    obj.insert("burst".into(), Value::from(p.burst));
+                    obj.insert("mtu".into(), Value::from(p.mtu));
+                    obj.insert(
+                        "action".into(),
+                        Value::from(action::format_action_result(p.action)),
+                    );
+                    obj.insert("ref".into(), Value::from(p.refcnt));
+                    obj.insert("bind".into(), Value::from(p.bindcnt));
                 }
             }
         }
         _ => {}
     }
-
-    Ok(())
+    obj
 }
 
 /// Print action options in text format.
