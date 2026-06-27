@@ -12,7 +12,7 @@ dependency). CLI binaries (`ip`, `tc`, `ss`, `nft`, `wg`, `bridge`, `devlink`,
 ## Install
 
 ```toml
-nlink = "0.19"
+nlink = "0.21"
 ```
 
 Feature flags: `sockdiag`, `tuntap`, `tuntap-async`, `output`, `namespace_watcher`,
