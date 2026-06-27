@@ -52,14 +52,29 @@ pub async fn run(args: ScanArgs, json: bool, verbose: bool) -> Result<()> {
 
     let report = diag.scan().await?;
 
+    // --min-severity gates *every* surface (per-interface issues, the
+    // top-level issue list, text and JSON alike) — not just the text
+    // summary. Defaults to Info (show everything).
+    let min_severity = args.min_severity.unwrap_or(Severity::Info);
+    let keep = |i: &&Issue| i.severity >= min_severity;
+
+    // --bottleneck is honored in both output modes (was text-only).
+    let bottleneck = if args.bottleneck {
+        diag.find_bottleneck().await?
+    } else {
+        None
+    };
+
     if json {
-        // Build JSON output
+        // Build JSON output. Enum-typed fields serialize via their
+        // stable Display impls, never Debug — Debug names drift with
+        // refactors and would silently break JSON consumers.
         let output = serde_json::json!({
             "interfaces": report.interfaces.iter().map(|iface| {
                 serde_json::json!({
                     "name": iface.name,
                     "ifindex": iface.ifindex,
-                    "state": format!("{:?}", iface.state),
+                    "state": oper_state_str(iface.state),
                     "mtu": iface.mtu,
                     "stats": {
                         "rx_bytes": iface.stats.rx_bytes(),
@@ -87,7 +102,7 @@ pub async fn run(args: ScanArgs, json: bool, verbose: bool) -> Result<()> {
                             "rate_bps": tc.rate_bps,
                         })
                     }),
-                    "issues": iface.issues.iter().map(issue_to_json).collect::<Vec<_>>(),
+                    "issues": iface.issues.iter().filter(keep).map(issue_to_json).collect::<Vec<_>>(),
                 })
             }).collect::<Vec<_>>(),
             "routes": {
@@ -98,7 +113,14 @@ pub async fn run(args: ScanArgs, json: bool, verbose: bool) -> Result<()> {
                 "default_gateway_v4": report.routes.default_gateway_v4.map(|g| g.to_string()),
                 "default_gateway_v6": report.routes.default_gateway_v6.map(|g| g.to_string()),
             },
-            "issues": report.issues.iter().map(issue_to_json).collect::<Vec<_>>(),
+            "issues": report.issues.iter().filter(keep).map(issue_to_json).collect::<Vec<_>>(),
+            "bottleneck": bottleneck.as_ref().map(|b| serde_json::json!({
+                "location": b.location,
+                "type": b.bottleneck_type.to_string(),
+                "drop_rate": b.drop_rate,
+                "total_drops": b.total_drops,
+                "recommendation": b.recommendation,
+            })),
         });
         println!(
             "{}",
@@ -165,19 +187,14 @@ pub async fn run(args: ScanArgs, json: bool, verbose: bool) -> Result<()> {
                 );
             }
 
-            for issue in &iface.issues {
+            for issue in iface.issues.iter().filter(keep) {
                 println!("    {} {}", severity_icon(issue.severity), issue.message);
             }
         }
         println!();
 
         // Issues summary
-        let min_severity = args.min_severity.unwrap_or(Severity::Info);
-        let filtered_issues: Vec<_> = report
-            .issues
-            .iter()
-            .filter(|i| i.severity >= min_severity)
-            .collect();
+        let filtered_issues: Vec<_> = report.issues.iter().filter(keep).collect();
 
         if filtered_issues.is_empty() {
             println!("No issues detected.");
@@ -191,7 +208,7 @@ pub async fn run(args: ScanArgs, json: bool, verbose: bool) -> Result<()> {
         // Bottleneck detection
         if args.bottleneck {
             println!();
-            if let Some(bottleneck) = diag.find_bottleneck().await? {
+            if let Some(ref bottleneck) = bottleneck {
                 println!("Bottleneck Detected:");
                 println!("  Location: {}", bottleneck.location);
                 println!("  Type: {}", bottleneck.bottleneck_type);
@@ -208,13 +225,29 @@ pub async fn run(args: ScanArgs, json: bool, verbose: bool) -> Result<()> {
 }
 
 fn issue_to_json(issue: &Issue) -> serde_json::Value {
+    // Display (not Debug) — stable, refactor-proof enum strings.
     serde_json::json!({
-        "severity": format!("{:?}", issue.severity),
-        "category": format!("{:?}", issue.category),
+        "severity": issue.severity.to_string(),
+        "category": issue.category.to_string(),
         "message": issue.message,
         "details": issue.details,
         "interface": issue.interface,
     })
+}
+
+/// Stable string for an interface oper-state in JSON output.
+fn oper_state_str(state: nlink::netlink::types::link::OperState) -> &'static str {
+    use nlink::netlink::types::link::OperState;
+    match state {
+        OperState::Up => "up",
+        OperState::Down => "down",
+        OperState::Dormant => "dormant",
+        OperState::NotPresent => "not-present",
+        OperState::LowerLayerDown => "lower-layer-down",
+        OperState::Testing => "testing",
+        OperState::Unknown => "unknown",
+        _ => "unknown",
+    }
 }
 
 fn severity_icon(severity: Severity) -> &'static str {
