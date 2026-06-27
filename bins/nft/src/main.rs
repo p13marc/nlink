@@ -226,22 +226,29 @@ fn parse_hook(s: &str) -> Result<Hook> {
     }
 }
 
-fn parse_priority(s: &str) -> Priority {
-    match s {
+// Plan 209 H5 (extended) — reject unknown priority tokens. Pre-fix a
+// typo on `--priority` silently fell through to `Filter`, installing a
+// chain at a different priority than the user asked for (the same
+// security footgun the chain_type/policy parsers were hardened against;
+// priority was left out of that pass).
+fn parse_priority(s: &str) -> Result<Priority> {
+    Ok(match s {
         "raw" => Priority::Raw,
         "mangle" => Priority::Mangle,
         "dstnat" => Priority::DstNat,
         "filter" => Priority::Filter,
         "security" => Priority::Security,
         "srcnat" => Priority::SrcNat,
-        _ => {
-            if let Ok(n) = s.parse::<i32>() {
-                Priority::Custom(n)
-            } else {
-                Priority::Filter
+        _ => match s.parse::<i32>() {
+            Ok(n) => Priority::Custom(n),
+            Err(_) => {
+                return Err(nlink::netlink::Error::InvalidAttribute(format!(
+                    "unknown priority `{s}` — expected a name (raw, mangle, dstnat, \
+                     filter, security, srcnat) or a signed integer"
+                )));
             }
-        }
-    }
+        },
+    })
 }
 
 #[tokio::main]
@@ -311,7 +318,7 @@ async fn main() -> Result<()> {
                     chain = chain.hook(parse_hook(h)?);
                 }
                 if let Some(ref p) = priority {
-                    chain = chain.priority(parse_priority(p));
+                    chain = chain.priority(parse_priority(p)?);
                 }
                 // Plan 209 H5 — reject unknown chain_type tokens.
                 // Pre-0.19 a typo on `--type` silently fell through
@@ -361,121 +368,128 @@ async fn main() -> Result<()> {
                 let family = parse_family(&family)?;
                 let mut rule = Rule::new(&table, &chain).family(family);
 
-                // Simple rule spec parsing
+                // Rule-spec parsing. STRICT: every token is either
+                // consumed by a recognised arm or rejected with an error.
+                // Silently skipping unknown/unparseable tokens would let a
+                // mistyped rule (e.g. `tcp dpot 22 accept`) be sent to the
+                // kernel missing its intended match/verb — a firewall
+                // failing open. Mirrors the CLAUDE.md strict-parser
+                // contract and the chain_type/policy/priority hardening.
                 let spec_str = spec.join(" ");
                 let tokens: Vec<&str> = spec_str.split_whitespace().collect();
                 let mut i = 0;
                 while i < tokens.len() {
                     match tokens[i] {
                         "tcp" if tokens.get(i + 1) == Some(&"dport") => {
-                            if let Some(port) = tokens.get(i + 2).and_then(|s| s.parse().ok()) {
-                                rule = rule.match_tcp_dport(port);
-                                i += 3;
-                                continue;
-                            }
+                            let port = parse_rule_port(tokens.get(i + 2), "tcp dport")?;
+                            rule = rule.match_tcp_dport(port);
+                            i += 3;
                         }
                         "udp" if tokens.get(i + 1) == Some(&"dport") => {
-                            if let Some(port) = tokens.get(i + 2).and_then(|s| s.parse().ok()) {
-                                rule = rule.match_udp_dport(port);
-                                i += 3;
-                                continue;
-                            }
+                            let port = parse_rule_port(tokens.get(i + 2), "udp dport")?;
+                            rule = rule.match_udp_dport(port);
+                            i += 3;
                         }
                         "accept" => {
                             rule = rule.accept();
+                            i += 1;
                         }
                         "drop" => {
                             rule = rule.drop();
+                            i += 1;
                         }
                         "counter" => {
                             rule = rule.counter();
+                            i += 1;
                         }
                         "masquerade" => {
                             rule = rule.masquerade();
+                            i += 1;
                         }
                         "dnat" if tokens.get(i + 1) == Some(&"to") => {
-                            if let Some(target) = tokens.get(i + 2) {
-                                let (addr, port) = parse_nat_target(target);
-                                if let Some(ip) = addr {
-                                    rule = rule.dnat(ip, port);
-                                    i += 3;
-                                    continue;
-                                }
-                            }
+                            let (ip, port) = parse_rule_nat(tokens.get(i + 2), "dnat to")?;
+                            rule = rule.dnat(ip, port);
+                            i += 3;
                         }
                         "snat" if tokens.get(i + 1) == Some(&"to") => {
-                            if let Some(target) = tokens.get(i + 2) {
-                                let (addr, port) = parse_nat_target(target);
-                                if let Some(ip) = addr {
-                                    rule = rule.snat(ip, port);
-                                    i += 3;
-                                    continue;
-                                }
-                            }
+                            let (ip, port) = parse_rule_nat(tokens.get(i + 2), "snat to")?;
+                            rule = rule.snat(ip, port);
+                            i += 3;
                         }
                         "redirect" if tokens.get(i + 1) == Some(&"to") => {
-                            if let Some(port) = tokens.get(i + 2).and_then(|s| s.parse().ok()) {
-                                rule = rule.redirect(Some(port));
-                                i += 3;
-                                continue;
-                            }
+                            let port = parse_rule_port(tokens.get(i + 2), "redirect to")?;
+                            rule = rule.redirect(Some(port));
+                            i += 3;
                         }
                         "redirect" => {
                             rule = rule.redirect(None);
+                            i += 1;
                         }
                         "iif" | "iifname" => {
-                            if let Some(name) = tokens.get(i + 1) {
-                                rule = rule.match_iif(name);
-                                i += 2;
-                                continue;
-                            }
+                            let name = tokens.get(i + 1).ok_or_else(|| {
+                                nlink::netlink::Error::InvalidAttribute(format!(
+                                    "nft: `{}` requires an interface name",
+                                    tokens[i]
+                                ))
+                            })?;
+                            rule = rule.match_iif(name);
+                            i += 2;
                         }
                         "oif" | "oifname" => {
-                            if let Some(name) = tokens.get(i + 1) {
-                                rule = rule.match_oif(name);
-                                i += 2;
-                                continue;
-                            }
+                            let name = tokens.get(i + 1).ok_or_else(|| {
+                                nlink::netlink::Error::InvalidAttribute(format!(
+                                    "nft: `{}` requires an interface name",
+                                    tokens[i]
+                                ))
+                            })?;
+                            rule = rule.match_oif(name);
+                            i += 2;
                         }
                         "ct" if tokens.get(i + 1) == Some(&"state") => {
-                            if let Some(state_str) = tokens.get(i + 2) {
-                                use nlink::netlink::nftables::CtState;
-                                let mut state = CtState(0);
-                                for s in state_str.split(',') {
-                                    match s.trim() {
-                                        "established" => state |= CtState::ESTABLISHED,
-                                        "related" => state |= CtState::RELATED,
-                                        "new" => state |= CtState::NEW,
-                                        "invalid" => state |= CtState::INVALID,
-                                        _ => {}
+                            use nlink::netlink::nftables::CtState;
+                            let state_str = tokens.get(i + 2).ok_or_else(|| {
+                                nlink::netlink::Error::InvalidAttribute(
+                                    "nft: `ct state` requires a comma-separated state list".into(),
+                                )
+                            })?;
+                            let mut state = CtState(0);
+                            for s in state_str.split(',') {
+                                match s.trim() {
+                                    "established" => state |= CtState::ESTABLISHED,
+                                    "related" => state |= CtState::RELATED,
+                                    "new" => state |= CtState::NEW,
+                                    "invalid" => state |= CtState::INVALID,
+                                    other => {
+                                        return Err(nlink::netlink::Error::InvalidAttribute(
+                                            format!(
+                                                "nft: unknown ct state `{other}` — expected \
+                                                 established/related/new/invalid"
+                                            ),
+                                        ));
                                     }
                                 }
-                                rule = rule.match_ct_state(state);
-                                i += 3;
-                                continue;
                             }
+                            rule = rule.match_ct_state(state);
+                            i += 3;
                         }
                         "ip" if tokens.get(i + 1) == Some(&"saddr") => {
-                            if let Some(addr_str) = tokens.get(i + 2)
-                                && let Some((ip, prefix)) = parse_cidr(addr_str)
-                            {
-                                rule = rule.match_saddr_v4(ip, prefix);
-                                i += 3;
-                                continue;
-                            }
+                            let (ip, prefix) = parse_rule_cidr(tokens.get(i + 2), "ip saddr")?;
+                            rule = rule.match_saddr_v4(ip, prefix);
+                            i += 3;
                         }
                         "ip" if tokens.get(i + 1) == Some(&"daddr") => {
-                            if let Some(addr_str) = tokens.get(i + 2)
-                                && let Some((ip, prefix)) = parse_cidr(addr_str)
-                            {
-                                rule = rule.match_daddr_v4(ip, prefix);
-                                i += 3;
-                                continue;
-                            }
+                            let (ip, prefix) = parse_rule_cidr(tokens.get(i + 2), "ip daddr")?;
+                            rule = rule.match_daddr_v4(ip, prefix);
+                            i += 3;
                         }
-                        _ => {}
+                        other => {
+                            return Err(nlink::netlink::Error::InvalidAttribute(format!(
+                                "nft: unrecognized rule token `{other}` in spec `{spec_str}` \
+                                 (a mistyped or unmodelled token is rejected rather than \
+                                 silently dropped — see the rule-spec grammar in `--help`)"
+                            )));
+                        }
                     }
-                    i += 1;
                 }
 
                 conn.add_rule(rule).await?;
@@ -614,5 +628,100 @@ fn parse_cidr(s: &str) -> Option<(Ipv4Addr, u8)> {
         Some((addr.parse().ok()?, prefix.parse().ok()?))
     } else {
         Some((s.parse().ok()?, 32))
+    }
+}
+
+/// Strict port parse for a rule-spec token: rejects a missing or
+/// unparseable value instead of silently dropping the clause.
+fn parse_rule_port(tok: Option<&&str>, what: &str) -> Result<u16> {
+    let s = tok.ok_or_else(|| {
+        nlink::netlink::Error::InvalidAttribute(format!("nft: `{what}` requires a port number"))
+    })?;
+    s.parse::<u16>().map_err(|_| {
+        nlink::netlink::Error::InvalidAttribute(format!(
+            "nft: invalid {what} `{s}` (expected port number 0-65535)"
+        ))
+    })
+}
+
+/// Strict NAT-target parse: rejects a missing target or one whose
+/// address won't parse, rather than sending a NAT rule to the kernel
+/// missing its target.
+fn parse_rule_nat(tok: Option<&&str>, what: &str) -> Result<(Ipv4Addr, Option<u16>)> {
+    let s = tok.ok_or_else(|| {
+        nlink::netlink::Error::InvalidAttribute(format!(
+            "nft: `{what}` requires an address (IP or IP:port)"
+        ))
+    })?;
+    let (addr, port) = parse_nat_target(s);
+    let ip = addr.ok_or_else(|| {
+        nlink::netlink::Error::InvalidAttribute(format!(
+            "nft: invalid {what} target `{s}` (expected IPv4 address or IPv4:port)"
+        ))
+    })?;
+    Ok((ip, port))
+}
+
+/// Strict CIDR parse for a rule-spec token.
+fn parse_rule_cidr(tok: Option<&&str>, what: &str) -> Result<(Ipv4Addr, u8)> {
+    let s = tok.ok_or_else(|| {
+        nlink::netlink::Error::InvalidAttribute(format!("nft: `{what}` requires an address"))
+    })?;
+    parse_cidr(s).ok_or_else(|| {
+        nlink::netlink::Error::InvalidAttribute(format!(
+            "nft: invalid {what} `{s}` (expected IPv4 address or CIDR like 10.0.0.0/8)"
+        ))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_priority_known_and_custom() {
+        assert!(matches!(parse_priority("filter"), Ok(Priority::Filter)));
+        assert!(matches!(parse_priority("-150"), Ok(Priority::Custom(-150))));
+    }
+
+    #[test]
+    fn parse_priority_rejects_typo() {
+        // The whole point: a typo must NOT silently become Filter.
+        assert!(parse_priority("filtr").is_err());
+        assert!(parse_priority("").is_err());
+    }
+
+    #[test]
+    fn rule_port_strict() {
+        assert_eq!(parse_rule_port(Some(&"22"), "tcp dport").unwrap(), 22);
+        assert!(parse_rule_port(None, "tcp dport").is_err());
+        assert!(parse_rule_port(Some(&"nope"), "tcp dport").is_err());
+        assert!(parse_rule_port(Some(&"70000"), "tcp dport").is_err());
+    }
+
+    #[test]
+    fn rule_nat_strict() {
+        let (ip, port) = parse_rule_nat(Some(&"10.0.0.1:8080"), "dnat to").unwrap();
+        assert_eq!(ip, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(port, Some(8080));
+        let (ip, port) = parse_rule_nat(Some(&"10.0.0.2"), "dnat to").unwrap();
+        assert_eq!(ip, Ipv4Addr::new(10, 0, 0, 2));
+        assert_eq!(port, None);
+        assert!(parse_rule_nat(None, "dnat to").is_err());
+        assert!(parse_rule_nat(Some(&"not-an-ip"), "dnat to").is_err());
+    }
+
+    #[test]
+    fn rule_cidr_strict() {
+        assert_eq!(
+            parse_rule_cidr(Some(&"192.168.0.0/16"), "ip saddr").unwrap(),
+            (Ipv4Addr::new(192, 168, 0, 0), 16)
+        );
+        assert_eq!(
+            parse_rule_cidr(Some(&"10.0.0.1"), "ip saddr").unwrap(),
+            (Ipv4Addr::new(10, 0, 0, 1), 32)
+        );
+        assert!(parse_rule_cidr(None, "ip saddr").is_err());
+        assert!(parse_rule_cidr(Some(&"garbage"), "ip saddr").is_err());
     }
 }
