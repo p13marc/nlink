@@ -7,7 +7,10 @@ use nlink::netlink::{
     Connection, Result, Route,
     types::{route::RouteType, rule::FibRuleAction},
 };
-use serde::Serialize;
+
+use crate::schema::{
+    AddressConfig, ConfigFile, LinkConfig, QdiscConfig, RouteConfig, RuleConfig,
+};
 
 #[derive(Args)]
 pub struct CaptureArgs {
@@ -40,86 +43,6 @@ pub struct CaptureArgs {
 pub enum OutputFormat {
     Yaml,
     Json,
-}
-
-#[derive(Debug, Serialize)]
-pub struct NetworkConfig {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub links: Vec<LinkConfig>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub addresses: Vec<AddressConfig>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub routes: Vec<RouteConfig>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub rules: Vec<RuleConfig>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub qdiscs: Vec<QdiscConfig>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct LinkConfig {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    pub state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mtu: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub master: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mac: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AddressConfig {
-    pub dev: String,
-    pub address: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub broadcast: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RouteConfig {
-    pub destination: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gateway: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dev: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metric: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "type")]
-    pub route_type: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleConfig {
-    pub priority: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub from: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub to: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fwmark: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct QdiscConfig {
-    pub dev: String,
-    pub parent: String,
-    pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub handle: Option<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub options: BTreeMap<String, serde_json::Value>,
 }
 
 pub async fn run(args: CaptureArgs) -> Result<()> {
@@ -167,10 +90,11 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
         link_configs.push(LinkConfig {
             name: name.to_string(),
             kind,
-            state,
+            state: Some(state),
             mtu,
             master,
             mac,
+            options: BTreeMap::new(),
         });
     }
 
@@ -392,7 +316,7 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
         }
     }
 
-    let config = NetworkConfig {
+    let config = ConfigFile {
         links: link_configs,
         addresses: addr_configs,
         routes: route_configs,
