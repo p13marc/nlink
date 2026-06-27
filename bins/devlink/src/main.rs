@@ -278,7 +278,7 @@ async fn main() -> Result<()> {
         let mut events = conn.events().await;
         while let Some(result) = events.next().await {
             match result {
-                Ok(event) => println!("{event:?}"),
+                Ok(event) => println!("{}", format_event(&event)),
                 Err(e) => eprintln!("Error: {e}"),
             }
         }
@@ -826,6 +826,54 @@ fn infer_param_value(value: String) -> ParamData {
     }
 }
 
+/// Render a monitored devlink event as a readable line instead of the raw
+/// `{:?}` Debug form.
+fn format_event(event: &nlink::netlink::genl::devlink::DevlinkEvent) -> String {
+    use nlink::netlink::genl::devlink::DevlinkEvent;
+    match event {
+        DevlinkEvent::NewDevice { bus, device } => format!("new device {bus}/{device}"),
+        DevlinkEvent::DelDevice { bus, device } => format!("del device {bus}/{device}"),
+        DevlinkEvent::NewPort {
+            bus,
+            device,
+            port_index,
+            netdev_name,
+        } => {
+            let nd = netdev_name
+                .as_deref()
+                .map(|n| format!(" ({n})"))
+                .unwrap_or_default();
+            format!("new port {bus}/{device} port {port_index}{nd}")
+        }
+        DevlinkEvent::DelPort {
+            bus,
+            device,
+            port_index,
+        } => format!("del port {bus}/{device} port {port_index}"),
+        DevlinkEvent::HealthEvent {
+            bus,
+            device,
+            reporter,
+        } => {
+            let r = reporter.as_deref().unwrap_or("?");
+            format!("health event {bus}/{device} reporter {r}")
+        }
+        DevlinkEvent::FlashUpdate(p) => {
+            let comp = p
+                .component
+                .as_deref()
+                .map(|c| format!(" [{c}]"))
+                .unwrap_or_default();
+            let msg = p.message.as_deref().unwrap_or("");
+            format!("flash update{comp} {}/{} {msg}", p.done, p.total)
+                .trim_end()
+                .to_string()
+        }
+        // DevlinkEvent is #[non_exhaustive]; future variants fall back.
+        other => format!("{other:?}"),
+    }
+}
+
 /// Print a JSON value as pretty-printed JSON on stdout.
 fn print_json(value: &serde_json::Value) {
     println!(
@@ -843,6 +891,27 @@ mod tests {
         assert!(parse_rate("100mbit").is_ok());
         assert!(parse_rate("1gbit").is_ok());
         assert!(parse_rate("notarate").is_err());
+    }
+
+    #[test]
+    fn format_event_renders_readable() {
+        use nlink::netlink::genl::devlink::DevlinkEvent;
+        assert_eq!(
+            format_event(&DevlinkEvent::NewDevice {
+                bus: "pci".into(),
+                device: "0000:01:00.0".into()
+            }),
+            "new device pci/0000:01:00.0"
+        );
+        assert_eq!(
+            format_event(&DevlinkEvent::NewPort {
+                bus: "pci".into(),
+                device: "d".into(),
+                port_index: 3,
+                netdev_name: Some("eth3".into()),
+            }),
+            "new port pci/d port 3 (eth3)"
+        );
     }
 
     #[test]
