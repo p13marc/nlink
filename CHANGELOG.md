@@ -23,6 +23,11 @@ All notable changes to this project will be documented in this file.
   `PublicKey` are hard errors (matching real `wg setconf`, which rejects
   wg-quick-only keys like `Address`/`DNS`/`MTU`). No library change; the
   parser lives in the binary (precedent: the `config` binary's schema).
+- **`wg` bin: `--json` for `show` and `showconf` (#23).** Both gain
+  `-j/--json` (+ `-p/--pretty`) emitting a stable device/peer shape. `show`
+  hides the private/preshared keys (mirroring the `(hidden)` text output);
+  `showconf --json` reveals them, since it is a config dump. Brings `wg`
+  into line with the other binaries' machine-readable output.
 
 ### Fixed
 

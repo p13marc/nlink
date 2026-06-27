@@ -555,6 +555,8 @@ dependencies = [
  "clap",
  "nlink",
  "rand",
+ "serde",
+ "serde_json",
  "tokio",
  "x25519-dalek",
 ]
