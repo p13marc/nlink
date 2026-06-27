@@ -381,6 +381,49 @@ pub mod bridge_af {
     pub const IFLA_BRIDGE_MST: u16 = 6;
 }
 
+/// Bridge port attributes (`IFLA_BRPORT_*`), carried inside the
+/// `IFLA_PROTINFO` nest of an `RTM_SETLINK` with `ifi_family =
+/// AF_BRIDGE`. These configure a single port's behaviour on its
+/// bridge (`bridge link set dev <port> ...`). Only the subset
+/// modelled by [`BridgePortConfig`](crate::netlink::link::BridgePortConfig)
+/// is listed.
+pub mod brport {
+    /// STP port state (u8): 0 disabled, 1 listening, 2 learning,
+    /// 3 forwarding, 4 blocking.
+    pub const IFLA_BRPORT_STATE: u16 = 1;
+    /// STP port priority (u16).
+    pub const IFLA_BRPORT_PRIORITY: u16 = 2;
+    /// STP path cost (u32).
+    pub const IFLA_BRPORT_COST: u16 = 3;
+    /// Hairpin mode (u8 bool) — reflect frames back out the
+    /// receiving port.
+    pub const IFLA_BRPORT_MODE: u16 = 4;
+    /// BPDU guard (u8 bool) — disable port on BPDU receipt.
+    pub const IFLA_BRPORT_GUARD: u16 = 5;
+    /// Root block / `bpdu_guard`'s sibling (u8 bool) — reject
+    /// superior BPDUs (a.k.a. `root_block`).
+    pub const IFLA_BRPORT_PROTECT: u16 = 6;
+    /// Fast leave for IGMP snooping (u8 bool).
+    pub const IFLA_BRPORT_FAST_LEAVE: u16 = 7;
+    /// MAC learning (u8 bool).
+    pub const IFLA_BRPORT_LEARNING: u16 = 8;
+    /// Unknown-unicast flooding (u8 bool).
+    pub const IFLA_BRPORT_UNICAST_FLOOD: u16 = 9;
+    /// Proxy ARP (u8 bool).
+    pub const IFLA_BRPORT_PROXYARP: u16 = 10;
+    /// Multicast flooding (u8 bool).
+    pub const IFLA_BRPORT_MCAST_FLOOD: u16 = 23;
+    /// Multicast-to-unicast (u8 bool).
+    pub const IFLA_BRPORT_MCAST_TO_UCAST: u16 = 24;
+    /// Broadcast flooding (u8 bool).
+    pub const IFLA_BRPORT_BCAST_FLOOD: u16 = 30;
+    /// Neighbour suppression (u8 bool).
+    pub const IFLA_BRPORT_NEIGH_SUPPRESS: u16 = 32;
+    /// Port isolation (u8 bool) — isolated ports cannot talk to
+    /// each other.
+    pub const IFLA_BRPORT_ISOLATED: u16 = 33;
+}
+
 /// Bridge VLAN tunnel info nested attributes (IFLA_BRIDGE_VLAN_TUNNEL_*).
 pub mod bridge_vlan_tunnel {
     /// Tunnel ID (VNI for VXLAN)
