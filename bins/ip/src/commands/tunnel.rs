@@ -200,7 +200,7 @@ impl TunnelCmd {
         name_filter: Option<&str>,
         mode_filter: Option<&str>,
         format: OutputFormat,
-        _opts: &OutputOptions,
+        opts: &OutputOptions,
     ) -> Result<()> {
         // Get all links and filter for tunnel types
         let links = conn.get_links().await?;
@@ -263,7 +263,7 @@ impl TunnelCmd {
             });
         }
 
-        print_all(&tunnels, format, &OutputOptions::default())?;
+        print_all(&tunnels, format, opts)?;
 
         Ok(())
     }
