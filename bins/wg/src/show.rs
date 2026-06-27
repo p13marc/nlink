@@ -16,6 +16,15 @@ pub struct ShowArgs {
     /// Show only specific field
     #[arg(value_enum)]
     pub field: Option<ShowField>,
+
+    /// Emit JSON instead of the human-readable layout (ignored when a
+    /// specific field is requested).
+    #[arg(long, short = 'j')]
+    pub json: bool,
+
+    /// Pretty-print JSON (with `--json`).
+    #[arg(long, short = 'p')]
+    pub pretty: bool,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -47,14 +56,34 @@ pub enum ShowField {
 }
 
 /// Run show for all WireGuard interfaces.
-pub async fn run_all() -> Result<()> {
+pub async fn run_all(json: bool, pretty: bool) -> Result<()> {
     let wg_interfaces = get_wireguard_interfaces().await?;
 
     if wg_interfaces.is_empty() {
+        if json {
+            println!("[]");
+        }
         return Ok(());
     }
 
     let conn = Connection::<Wireguard>::new_async().await?;
+
+    if json {
+        let mut devices = Vec::new();
+        for ifname in &wg_interfaces {
+            match conn.get_device(ifname).await {
+                Ok(device) => devices.push(crate::json::DeviceJson::from_device(&device, false)),
+                Err(e) => eprintln!("Error reading {}: {}", ifname, e),
+            }
+        }
+        let out = if pretty {
+            serde_json::to_string_pretty(&devices)
+        } else {
+            serde_json::to_string(&devices)
+        };
+        println!("{}", out.unwrap_or_else(|_| "[]".to_string()));
+        return Ok(());
+    }
 
     let mut first = true;
     for ifname in &wg_interfaces {
@@ -77,6 +106,13 @@ pub async fn run(args: ShowArgs) -> Result<()> {
     if let Some(interface) = args.interface {
         let conn = Connection::<Wireguard>::new_async().await?;
         let device = conn.get_device(&interface).await?;
+
+        // `--json` applies to the full-device view; individual fields keep
+        // their existing single-value text form (already machine-readable).
+        if args.json && args.field.is_none() {
+            crate::json::print_device(&device, false, args.pretty);
+            return Ok(());
+        }
 
         match args.field {
             None => print_device(&device),
@@ -187,16 +223,22 @@ pub async fn run(args: ShowArgs) -> Result<()> {
             }
         }
     } else {
-        run_all().await?;
+        run_all(args.json, args.pretty).await?;
     }
 
     Ok(())
 }
 
-/// Run showconf command - output in wg-quick format.
-pub async fn run_conf(interface: &str) -> Result<()> {
+/// Run showconf command - output in wg-quick format (or JSON with `--json`).
+pub async fn run_conf(interface: &str, json: bool, pretty: bool) -> Result<()> {
     let conn = Connection::<Wireguard>::new_async().await?;
     let device = conn.get_device(interface).await?;
+
+    if json {
+        // showconf is a config dump, so reveal the private/preshared keys.
+        crate::json::print_device(&device, true, pretty);
+        return Ok(());
+    }
 
     println!("[Interface]");
     // The privileged GET_DEVICE does return the private key, and the
