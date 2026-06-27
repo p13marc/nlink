@@ -290,6 +290,15 @@ async fn main() -> Result<()> {
                 if let Some(signal) = sta.signal_dbm {
                     println!("  Signal: {signal} dBm");
                 }
+                if let Some(avg) = sta.signal_avg_dbm {
+                    println!("  Signal avg: {avg} dBm");
+                }
+                if let Some(secs) = sta.connected_time_secs {
+                    println!("  Connected time: {secs} s");
+                }
+                if let Some(ms) = sta.inactive_time_ms {
+                    println!("  Inactive time: {ms} ms");
+                }
                 if let Some(ref rx) = sta.rx_bitrate
                     && let Some(mbps) = rx.mbps()
                 {
