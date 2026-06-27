@@ -254,7 +254,9 @@ fn print_inet_socket(
         let mut parts = Vec::new();
 
         if let Some(ref cong) = sock.congestion {
-            parts.push(format!("cubic:{}", cong));
+            // `cong` already holds the algorithm name (cubic, bbr, …);
+            // don't hardcode a `cubic:` prefix in front of it.
+            parts.push(cong.clone());
         }
 
         parts.push(format!("wscale:{}:{}", info.wscale >> 4, info.wscale & 0xf));
