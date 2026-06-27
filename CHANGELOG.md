@@ -61,6 +61,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`ip` bin: namespace-safe `neighbor show`/`flush` device filter (#17).**
+  Both resolved the device via `get_neighbors_by_name`, which reads the
+  name from the host `/sys` and so returns wrong results inside a foreign
+  netns. They now resolve the ifindex over netlink (`get_link_by_name`)
+  and use `get_neighbors_by_index`, per the CLAUDE.md "prefer `_by_index`"
+  policy. A missing device is now a clear error instead of an empty list.
 - **`ip` bin: strict-parse the link-add mode helpers (#17).** The bond
   `mode`/`xmit_hash_policy`/`lacp_rate`, `macvlan`/`macvtap` `mode`,
   `ipvlan` `mode`, and VLAN `protocol` parsers silently mapped unknown

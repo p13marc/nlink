@@ -130,11 +130,7 @@ impl NeighborCmd {
         family: Option<u8>,
     ) -> Result<()> {
         // Get neighbors (optionally filtered by device)
-        let neighbors = if let Some(dev_name) = dev {
-            conn.get_neighbors_by_name(dev_name).await?
-        } else {
-            conn.get_neighbors().await?
-        };
+        let neighbors = neighbors_for_dev(conn, dev).await?;
 
         // Filter by family if specified
         let neighbors: Vec<_> = if let Some(fam) = family {
@@ -210,11 +206,7 @@ impl NeighborCmd {
 
     async fn flush(conn: &Connection<Route>, dev: Option<&str>, family: Option<u8>) -> Result<()> {
         // Get all neighbor entries
-        let neighbors = if let Some(dev_name) = dev {
-            conn.get_neighbors_by_name(dev_name).await?
-        } else {
-            conn.get_neighbors().await?
-        };
+        let neighbors = neighbors_for_dev(conn, dev).await?;
 
         // Filter by family if specified, and skip permanent/noarp entries
         let neighbors_to_delete: Vec<_> = neighbors
@@ -249,5 +241,31 @@ impl NeighborCmd {
         }
 
         Ok(())
+    }
+}
+
+/// Fetch neighbor entries, optionally scoped to a device.
+///
+/// When a device is given, its ifindex is resolved over netlink
+/// (`get_link_by_name` → `RTM_GETLINK`) and the indexed dump variant is
+/// used, instead of `get_neighbors_by_name` which resolves the name from
+/// the host `/sys` and so misbehaves inside a foreign netns (CLAUDE.md
+/// "prefer `_by_index`").
+async fn neighbors_for_dev(
+    conn: &Connection<Route>,
+    dev: Option<&str>,
+) -> Result<Vec<nlink::netlink::messages::NeighborMessage>> {
+    match dev {
+        Some(name) => {
+            let ifindex = conn
+                .get_link_by_name(name)
+                .await?
+                .ok_or_else(|| {
+                    nlink::netlink::Error::InvalidMessage(format!("device `{name}` not found"))
+                })?
+                .ifindex();
+            conn.get_neighbors_by_index(ifindex).await
+        }
+        None => conn.get_neighbors().await,
     }
 }
