@@ -52,6 +52,11 @@ All notable changes to this project will be documented in this file.
   together is rejected as contradictory). `ip rule … nop`/`goto`, which
   the rule builder does not model, now error instead of silently sending
   a plain table-lookup rule.
+- **`ip` bin: honor `-j`/`-p` in `tunnel show` and `nexthop show` (#17).**
+  `tunnel show` discarded the user's output flags entirely (it passed
+  `OutputOptions::default()`), and `nexthop show` always pretty-printed
+  JSON regardless of `-p`. Both now thread the real `OutputOptions`
+  through, so `-j`/`-p` behave consistently with the other objects.
 
 ## [0.21.0] - 2026-06-04
 

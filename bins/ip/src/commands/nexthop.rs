@@ -101,7 +101,7 @@ impl NexthopCmd {
 async fn show_nexthops(
     conn: &Connection<Route>,
     format: OutputFormat,
-    _opts: &nlink::output::OutputOptions,
+    opts: &nlink::output::OutputOptions,
     id: Option<u32>,
     groups_only: bool,
 ) -> Result<()> {
@@ -121,8 +121,14 @@ async fn show_nexthops(
 
     match format {
         OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(&nexthops_to_json(&nexthops))
-                .map_err(|e| Error::InvalidMessage(e.to_string()))?;
+            // Honor -p/--pretty instead of always pretty-printing.
+            let value = nexthops_to_json(&nexthops);
+            let json = if opts.pretty {
+                serde_json::to_string_pretty(&value)
+            } else {
+                serde_json::to_string(&value)
+            }
+            .map_err(|e| Error::InvalidMessage(e.to_string()))?;
             println!("{}", json);
         }
         OutputFormat::Text => {
