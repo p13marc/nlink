@@ -1,13 +1,17 @@
 //! ip xfrm command implementation.
 //!
-//! IPSec/XFRM transformation management.
-//! Manages Security Associations (SAs) and Security Policies (SPs).
+//! IPSec/XFRM transformation management. Manages Security
+//! Associations (SAs) and Security Policies (SPs) over the kernel's
+//! NETLINK_XFRM interface via `Connection<Xfrm>`.
 
-use std::{fs, io::Write, net::IpAddr};
+use std::{io::Write, net::IpAddr};
 
 use clap::{Args, Subcommand};
 use nlink::{
-    netlink::Result,
+    netlink::{
+        Connection, Result, Xfrm,
+        xfrm::{SecurityAssociation, SecurityPolicy},
+    },
     output::{OutputFormat, OutputOptions, Printable, print_all},
 };
 
@@ -61,68 +65,91 @@ enum PolicyAction {
     Count,
 }
 
-/// XFRM state information parsed from /proc/net/xfrm_stat.
-#[derive(Debug)]
-struct XfrmState {
-    src: IpAddr,
-    dst: IpAddr,
-    proto: String,
-    spi: u32,
-    mode: String,
-    reqid: u32,
+fn addr_or_any(a: Option<IpAddr>) -> String {
+    a.map(|ip| ip.to_string()).unwrap_or_else(|| "any".into())
 }
 
-impl Printable for XfrmState {
+/// Wrapper so we can implement the local `Printable` trait for the
+/// library's `SecurityAssociation` (orphan rule).
+struct SaRow(SecurityAssociation);
+
+impl Printable for SaRow {
     fn print_text<W: Write>(&self, w: &mut W, _opts: &OutputOptions) -> std::io::Result<()> {
-        writeln!(w, "src {} dst {}", self.src, self.dst)?;
+        let sa = &self.0;
         writeln!(
             w,
-            "\tproto {} spi 0x{:08x} reqid {} mode {}",
-            self.proto, self.spi, self.reqid, self.mode
+            "src {} dst {}",
+            addr_or_any(sa.src_addr),
+            addr_or_any(sa.dst_addr)
         )?;
+        writeln!(
+            w,
+            "\tproto {:?} spi 0x{:08x} reqid {} mode {:?}",
+            sa.protocol, sa.spi, sa.reqid, sa.mode
+        )?;
+        if let Some(ref a) = sa.aead_alg {
+            writeln!(w, "\taead {} ({} bits)", a.name, a.key_len)?;
+        }
+        if let Some(ref a) = sa.enc_alg {
+            writeln!(w, "\tenc {} ({} bits)", a.name, a.key_len)?;
+        }
+        if let Some(ref a) = sa.auth_alg {
+            writeln!(w, "\tauth {} ({} bits)", a.name, a.key_len)?;
+        }
         Ok(())
     }
 
     fn to_json(&self) -> serde_json::Value {
+        let sa = &self.0;
         serde_json::json!({
-            "src": self.src.to_string(),
-            "dst": self.dst.to_string(),
-            "proto": self.proto,
-            "spi": format!("0x{:08x}", self.spi),
-            "reqid": self.reqid,
-            "mode": self.mode,
+            "src": sa.src_addr.map(|a| a.to_string()),
+            "dst": sa.dst_addr.map(|a| a.to_string()),
+            "proto": format!("{:?}", sa.protocol),
+            "spi": format!("0x{:08x}", sa.spi),
+            "reqid": sa.reqid,
+            "mode": format!("{:?}", sa.mode),
+            "enc": sa.enc_alg.as_ref().map(|a| a.name.clone()),
+            "auth": sa.auth_alg.as_ref().map(|a| a.name.clone()),
+            "aead": sa.aead_alg.as_ref().map(|a| a.name.clone()),
         })
     }
 }
 
-/// XFRM policy information.
-#[derive(Debug)]
-struct XfrmPolicy {
-    src: String,
-    dst: String,
-    dir: String,
-    priority: u32,
-    action: String,
-}
+/// Wrapper so we can implement `Printable` for `SecurityPolicy`.
+struct SpRow(SecurityPolicy);
 
-impl Printable for XfrmPolicy {
+impl Printable for SpRow {
     fn print_text<W: Write>(&self, w: &mut W, _opts: &OutputOptions) -> std::io::Result<()> {
-        writeln!(w, "src {} dst {}", self.src, self.dst)?;
+        let sp = &self.0;
+        let sel = &sp.selector;
         writeln!(
             w,
-            "\tdir {} priority {} action {}",
-            self.dir, self.priority, self.action
+            "src {}/{} dst {}/{}",
+            addr_or_any(sel.src_addr),
+            sel.src_prefix_len,
+            addr_or_any(sel.dst_addr),
+            sel.dst_prefix_len
+        )?;
+        writeln!(
+            w,
+            "\tdir {:?} priority {} action {:?} index {}",
+            sp.direction, sp.priority, sp.action, sp.index
         )?;
         Ok(())
     }
 
     fn to_json(&self) -> serde_json::Value {
+        let sp = &self.0;
+        let sel = &sp.selector;
         serde_json::json!({
-            "src": self.src,
-            "dst": self.dst,
-            "dir": self.dir,
-            "priority": self.priority,
-            "action": self.action,
+            "src": sel.src_addr.map(|a| a.to_string()),
+            "src_prefix_len": sel.src_prefix_len,
+            "dst": sel.dst_addr.map(|a| a.to_string()),
+            "dst_prefix_len": sel.dst_prefix_len,
+            "dir": format!("{:?}", sp.direction),
+            "priority": sp.priority,
+            "action": format!("{:?}", sp.action),
+            "index": sp.index,
         })
     }
 }
@@ -131,96 +158,73 @@ impl XfrmCmd {
     pub async fn run(&self, format: OutputFormat, opts: &OutputOptions) -> Result<()> {
         match &self.action {
             XfrmAction::State { action } => match action.as_ref().unwrap_or(&StateAction::Show) {
-                StateAction::Show | StateAction::List => self.show_states(format, opts).await,
-                StateAction::Flush => self.flush_states().await,
-                StateAction::Count => self.count_states().await,
+                StateAction::Show | StateAction::List => Self::show_states(format, opts).await,
+                StateAction::Flush => Self::flush_states().await,
+                StateAction::Count => Self::count_states().await,
             },
             XfrmAction::Policy { action } => match action.as_ref().unwrap_or(&PolicyAction::Show) {
-                PolicyAction::Show | PolicyAction::List => self.show_policies(format, opts).await,
-                PolicyAction::Flush => self.flush_policies().await,
-                PolicyAction::Count => self.count_policies().await,
+                PolicyAction::Show | PolicyAction::List => Self::show_policies(format, opts).await,
+                PolicyAction::Flush => Self::flush_policies().await,
+                PolicyAction::Count => Self::count_policies().await,
             },
-            XfrmAction::Monitor => self.monitor().await,
+            XfrmAction::Monitor => Self::monitor().await,
         }
     }
 
-    async fn show_states(&self, format: OutputFormat, opts: &OutputOptions) -> Result<()> {
-        // Read states from /proc/net/xfrm_state
-        // Note: Full implementation would use XFRM netlink messages
-        // For now, parse the proc file which gives basic info
-
-        let states = parse_xfrm_states()?;
-        print_all(&states, format, opts)?;
+    async fn show_states(format: OutputFormat, opts: &OutputOptions) -> Result<()> {
+        let conn = Connection::<Xfrm>::new()?;
+        let rows: Vec<SaRow> = conn
+            .get_security_associations()
+            .await?
+            .into_iter()
+            .map(SaRow)
+            .collect();
+        print_all(&rows, format, opts)?;
         Ok(())
     }
 
-    async fn flush_states(&self) -> Result<()> {
-        // Would require XFRM_MSG_FLUSHSA netlink message
-        // For now, indicate this is not fully implemented
-        eprintln!("Note: Full XFRM netlink support requires additional implementation");
-        eprintln!("Use 'ip xfrm state flush' from iproute2 for now");
+    async fn flush_states() -> Result<()> {
+        let conn = Connection::<Xfrm>::new()?;
+        conn.flush_sa().await?;
+        eprintln!("Flushed all XFRM states");
         Ok(())
     }
 
-    async fn count_states(&self) -> Result<()> {
-        let states = parse_xfrm_states()?;
-        println!("{}", states.len());
+    async fn count_states() -> Result<()> {
+        let conn = Connection::<Xfrm>::new()?;
+        println!("{}", conn.get_security_associations().await?.len());
         Ok(())
     }
 
-    async fn show_policies(&self, format: OutputFormat, opts: &OutputOptions) -> Result<()> {
-        let policies = parse_xfrm_policies()?;
-        print_all(&policies, format, opts)?;
+    async fn show_policies(format: OutputFormat, opts: &OutputOptions) -> Result<()> {
+        let conn = Connection::<Xfrm>::new()?;
+        let rows: Vec<SpRow> = conn
+            .get_security_policies()
+            .await?
+            .into_iter()
+            .map(SpRow)
+            .collect();
+        print_all(&rows, format, opts)?;
         Ok(())
     }
 
-    async fn flush_policies(&self) -> Result<()> {
-        // Would require XFRM_MSG_FLUSHPOLICY netlink message
-        eprintln!("Note: Full XFRM netlink support requires additional implementation");
-        eprintln!("Use 'ip xfrm policy flush' from iproute2 for now");
+    async fn flush_policies() -> Result<()> {
+        let conn = Connection::<Xfrm>::new()?;
+        conn.flush_sp().await?;
+        eprintln!("Flushed all XFRM policies");
         Ok(())
     }
 
-    async fn count_policies(&self) -> Result<()> {
-        let policies = parse_xfrm_policies()?;
-        println!("{}", policies.len());
+    async fn count_policies() -> Result<()> {
+        let conn = Connection::<Xfrm>::new()?;
+        println!("{}", conn.get_security_policies().await?.len());
         Ok(())
     }
 
-    async fn monitor(&self) -> Result<()> {
-        // Would require subscribing to XFRM netlink multicast group
-        eprintln!("XFRM monitoring requires netlink XFRM support");
-        eprintln!("Use 'ip xfrm monitor' from iproute2 for now");
+    async fn monitor() -> Result<()> {
+        // XFRM multicast event subscription isn't exposed by the
+        // library yet (no subscribe/events on Connection<Xfrm>).
+        eprintln!("ip xfrm monitor is not yet implemented (no XFRM event API)");
         Ok(())
     }
-}
-
-/// Parse XFRM states from the kernel.
-/// Note: This is a simplified implementation that reads from proc.
-/// A full implementation would use XFRM netlink messages.
-fn parse_xfrm_states() -> Result<Vec<XfrmState>> {
-    let states = Vec::new();
-
-    // Try to read from /proc/net/xfrm_stat first for statistics
-    if let Ok(content) = fs::read_to_string("/proc/net/xfrm_stat") {
-        // This file contains statistics, not state entries
-        // State entries require netlink XFRM_MSG_GETSA
-        let _ = content; // Statistics parsing could be added
-    }
-
-    // For actual state listing, we would need netlink
-    // Return empty for now - this is a placeholder
-    // In production, implement XFRM_MSG_GETSA
-
-    Ok(states)
-}
-
-/// Parse XFRM policies from the kernel.
-fn parse_xfrm_policies() -> Result<Vec<XfrmPolicy>> {
-    let policies = Vec::new();
-
-    // For actual policy listing, we would need netlink
-    // This is a placeholder - implement XFRM_MSG_GETPOLICY
-
-    Ok(policies)
 }
