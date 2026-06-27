@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ip` bin: strict-parse the link-add mode helpers (#17).** The bond
+  `mode`/`xmit_hash_policy`/`lacp_rate`, `macvlan`/`macvtap` `mode`,
+  `ipvlan` `mode`, and VLAN `protocol` parsers silently mapped unknown
+  input to a default (e.g. `mode bogus` → `balance-rr`), hiding typos.
+  They now return `Error::InvalidMessage` on unrecognized input, in line
+  with the CLAUDE.md strict-parse contract.
+
 ## [0.21.0] - 2026-06-04
 
 **Major release.** Closes the remaining audit-derived plans from the
