@@ -4,9 +4,14 @@
 //! via Generic Netlink.
 
 use clap::{Parser, Subcommand};
-use nlink::netlink::{
-    Connection, Devlink, Result,
-    genl::devlink::{ConfigMode, FlashRequest, ParamData, ReloadAction},
+use nlink::{
+    Rate,
+    netlink::{
+        Connection, Devlink, Result,
+        genl::devlink::{
+            ConfigMode, DevlinkRate, DevlinkRateType, FlashRequest, ParamData, ReloadAction,
+        },
+    },
 };
 use tokio_stream::StreamExt;
 
@@ -76,6 +81,67 @@ enum Command {
         /// Reload action: "driver_reinit" or "fw_activate".
         #[arg(long, default_value = "driver_reinit")]
         action: String,
+    },
+
+    /// Manage rate objects (port-function / scheduler-node shaping).
+    Rate {
+        #[command(subcommand)]
+        action: RateAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum RateAction {
+    /// Add a rate object (leaf by default; --node for a scheduler node).
+    Add {
+        /// Bus name.
+        bus: String,
+        /// Device name.
+        device: String,
+        /// Rate-object node name.
+        node: String,
+        /// Create a scheduler node instead of a leaf.
+        #[arg(long)]
+        node_type: bool,
+        /// Guaranteed share (tc-style rate, e.g. `100mbit`).
+        #[arg(long)]
+        tx_share: Option<String>,
+        /// Maximum cap (tc-style rate, e.g. `1gbit`).
+        #[arg(long)]
+        tx_max: Option<String>,
+        /// Parent scheduler node name.
+        #[arg(long)]
+        parent: Option<String>,
+    },
+    /// Set parameters on an existing rate object.
+    Set {
+        /// Bus name.
+        bus: String,
+        /// Device name.
+        device: String,
+        /// Rate-object node name.
+        node: String,
+        /// Create/treat as a scheduler node instead of a leaf.
+        #[arg(long)]
+        node_type: bool,
+        /// Guaranteed share (tc-style rate).
+        #[arg(long)]
+        tx_share: Option<String>,
+        /// Maximum cap (tc-style rate).
+        #[arg(long)]
+        tx_max: Option<String>,
+        /// Parent scheduler node name.
+        #[arg(long)]
+        parent: Option<String>,
+    },
+    /// Delete a rate object.
+    Del {
+        /// Bus name.
+        bus: String,
+        /// Device name.
+        device: String,
+        /// Rate-object node name.
+        node: String,
     },
 }
 
@@ -333,7 +399,116 @@ async fn main() -> Result<()> {
             conn.reload(&bus, &device, action).await?;
             eprintln!("Reload complete");
         }
+
+        Command::Rate { action } => match action {
+            RateAction::Add {
+                bus,
+                device,
+                node,
+                node_type,
+                tx_share,
+                tx_max,
+                parent,
+            } => {
+                let rate =
+                    build_rate(&bus, &device, &node, node_type, &tx_share, &tx_max, &parent)?;
+                conn.add_rate(&rate).await?;
+                eprintln!("Rate object {node} added");
+            }
+            RateAction::Set {
+                bus,
+                device,
+                node,
+                node_type,
+                tx_share,
+                tx_max,
+                parent,
+            } => {
+                let rate =
+                    build_rate(&bus, &device, &node, node_type, &tx_share, &tx_max, &parent)?;
+                conn.set_rate(&rate).await?;
+                eprintln!("Rate object {node} updated");
+            }
+            RateAction::Del { bus, device, node } => {
+                conn.del_rate(&bus, &device, &node).await?;
+                eprintln!("Rate object {node} deleted");
+            }
+        },
     }
 
     Ok(())
+}
+
+/// Parse a tc-style rate string (`100mbit`, `1gbit`, ...).
+fn parse_rate(s: &str) -> Result<Rate> {
+    s.parse::<Rate>().map_err(|_| {
+        nlink::netlink::Error::InvalidMessage(format!(
+            "devlink rate: invalid rate `{s}` (expected tc-style rate like `100mbit`)"
+        ))
+    })
+}
+
+/// Build a `DevlinkRate` from CLI args, parsing the rate strings.
+fn build_rate(
+    bus: &str,
+    device: &str,
+    node: &str,
+    node_type: bool,
+    tx_share: &Option<String>,
+    tx_max: &Option<String>,
+    parent: &Option<String>,
+) -> Result<DevlinkRate> {
+    let mut rate = DevlinkRate::new(bus, device, node);
+    if node_type {
+        rate = rate.rate_type(DevlinkRateType::Node);
+    }
+    if let Some(s) = tx_share {
+        rate = rate.tx_share(parse_rate(s)?);
+    }
+    if let Some(s) = tx_max {
+        rate = rate.tx_max(parse_rate(s)?);
+    }
+    if let Some(p) = parent {
+        rate = rate.parent_node(p);
+    }
+    Ok(rate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_parse_strict() {
+        assert!(parse_rate("100mbit").is_ok());
+        assert!(parse_rate("1gbit").is_ok());
+        assert!(parse_rate("notarate").is_err());
+    }
+
+    #[test]
+    fn build_rate_sets_type_and_fields() {
+        let leaf = build_rate("pci", "0000:01:00.0", "vf0", false, &None, &None, &None).unwrap();
+        assert_eq!(leaf.rate_type, DevlinkRateType::Leaf);
+        assert_eq!(leaf.node_name, "vf0");
+
+        let node = build_rate(
+            "pci",
+            "0000:01:00.0",
+            "group0",
+            true,
+            &Some("100mbit".to_string()),
+            &Some("1gbit".to_string()),
+            &Some("root".to_string()),
+        )
+        .unwrap();
+        assert_eq!(node.rate_type, DevlinkRateType::Node);
+        assert_eq!(node.parent_node.as_deref(), Some("root"));
+        assert!(node.tx_share.is_some());
+        assert!(node.tx_max.is_some());
+
+        // bad rate string propagates
+        assert!(
+            build_rate("pci", "d", "n", false, &Some("bad".into()), &None, &None).is_err()
+        );
+    }
 }
