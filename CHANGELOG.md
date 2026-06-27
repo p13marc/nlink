@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`wg` bin: incremental allowed-ips + private-key unset (#23).** `wg set
+  … --allowed-ips` now honors the `+` prefix to *add* ranges without
+  replacing the peer's set (a plain list still replaces, matching real
+  `wg set`); a `-` prefix (single-range removal) returns a clear "not
+  modelled" error since the library lacks the WGALLOWEDIP remove flag, and
+  mixing plain/`+` is rejected. `wg set … --private-key /dev/null` (or an
+  empty file) now unsets the device key (all-zero key = remove) instead of
+  failing the length check.
 - **`ip` bin: `ip link set <dev> --netns <name|pid>` (#17).** Moves a
   device into another network namespace, wiring the existing
   `set_link_netns_by_index` / `set_link_netns_pid_by_index` library APIs.
