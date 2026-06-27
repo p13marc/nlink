@@ -52,6 +52,10 @@ pub const NL80211_CMD_GET_KEY: u8 = 9;
 pub const NL80211_CMD_GET_STATION: u8 = 17;
 pub const NL80211_CMD_DEL_STATION: u8 = 20;
 pub const NL80211_CMD_SET_REG: u8 = 26;
+/// User-space country hint (`iw reg set`). Unlike `SET_REG` (the
+/// CRDA full-regdom path), this only carries an alpha2 and lets the
+/// kernel's regulatory core apply the matching domain.
+pub const NL80211_CMD_REQ_SET_REG: u8 = 27;
 pub const NL80211_CMD_GET_REG: u8 = 31;
 pub const NL80211_CMD_GET_SCAN: u8 = 32;
 pub const NL80211_CMD_TRIGGER_SCAN: u8 = 33;

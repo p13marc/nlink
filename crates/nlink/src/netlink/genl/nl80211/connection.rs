@@ -371,6 +371,36 @@ impl Connection<Nl80211> {
         Ok(domain)
     }
 
+    /// Request a regulatory-domain change by ISO 3166-1 alpha-2
+    /// country code (e.g. `"US"`, `"DE"`, or `"00"` for the world
+    /// domain). This is the `iw reg set` path
+    /// (`NL80211_CMD_REQ_SET_REG`): a user hint that the kernel's
+    /// regulatory core applies, not the full-regdom CRDA upload.
+    ///
+    /// Requires `CAP_NET_ADMIN`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_regulatory"))]
+    pub async fn set_regulatory(&self, alpha2: &str) -> Result<()> {
+        let code = normalize_alpha2(alpha2)?;
+
+        let _guard = self.lock_request().await;
+        let family_id = self.state().family_id;
+
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
+        let genl_hdr = GenlMsgHdr::new(NL80211_CMD_REQ_SET_REG, NL80211_GENL_VERSION);
+        builder.append(&genl_hdr);
+        // alpha2 is a NUL-terminated 2-char string (matches `iw`).
+        builder.append_attr_str(NL80211_ATTR_REG_ALPHA2, &code);
+
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        self.wait_ack(seq).await
+    }
+
     // =========================================================================
     // Station Mode (Phase 2)
     // =========================================================================
@@ -1129,6 +1159,24 @@ fn parse_reg_rule(data: &[u8]) -> RegulatoryRule {
     rule
 }
 
+/// Validate + normalize an ISO 3166-1 alpha-2 country code to the
+/// uppercase 2-char form the kernel expects. Accepts the special
+/// `"00"` world domain. Rejects anything that isn't exactly two
+/// ASCII letters (or `00`) — strict, so a typo errors rather than
+/// silently requesting a bogus domain.
+fn normalize_alpha2(s: &str) -> Result<String> {
+    let t = s.trim();
+    if t == "00" {
+        return Ok("00".to_string());
+    }
+    if t.len() == 2 && t.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return Ok(t.to_ascii_uppercase());
+    }
+    Err(Error::InvalidMessage(format!(
+        "invalid regulatory country code `{s}` (expected a 2-letter code like `US`, or `00` for the world domain)"
+    )))
+}
+
 /// Extract a null-terminated string from attribute payload.
 fn attr_str(payload: &[u8]) -> Option<String> {
     if payload.is_empty() {
@@ -1141,6 +1189,23 @@ fn attr_str(payload: &[u8]) -> Option<String> {
         None
     } else {
         Some(s.to_string())
+    }
+}
+
+#[cfg(test)]
+mod alpha2_tests {
+    use super::normalize_alpha2;
+
+    #[test]
+    fn normalizes_and_validates() {
+        assert_eq!(normalize_alpha2("us").unwrap(), "US");
+        assert_eq!(normalize_alpha2(" DE ").unwrap(), "DE");
+        assert_eq!(normalize_alpha2("00").unwrap(), "00"); // world domain
+        // strict — typos and junk error rather than silently apply
+        assert!(normalize_alpha2("USA").is_err());
+        assert!(normalize_alpha2("U").is_err());
+        assert!(normalize_alpha2("U1").is_err());
+        assert!(normalize_alpha2("").is_err());
     }
 }
 
