@@ -72,6 +72,11 @@ enum LinkAction {
         /// Remove from master device.
         #[arg(long)]
         nomaster: bool,
+
+        /// Move the device into a network namespace (a netns name under
+        /// /var/run/netns, or a numeric PID whose netns to join).
+        #[arg(long)]
+        netns: Option<String>,
     },
 }
 
@@ -96,9 +101,10 @@ impl LinkCmd {
                 address,
                 master,
                 nomaster,
+                netns,
             } => {
                 Self::set(
-                    conn, &dev, up, down, mtu, name, txqlen, address, master, nomaster,
+                    conn, &dev, up, down, mtu, name, txqlen, address, master, nomaster, netns,
                 )
                 .await
             }
@@ -143,6 +149,7 @@ impl LinkCmd {
         address: Option<String>,
         master: Option<String>,
         nomaster: bool,
+        netns: Option<String>,
     ) -> Result<()> {
         // Set up/down state
         if up {
@@ -179,6 +186,26 @@ impl LinkCmd {
             conn.set_link_master(dev, &master_name).await?;
         } else if nomaster {
             conn.set_link_nomaster(dev).await?;
+        }
+
+        // Move the device into a network namespace. Resolve the ifindex once
+        // (namespace-safe, per CLAUDE.md "prefer _by_index") then use the
+        // by-index setters. A purely-numeric argument is treated as a target
+        // PID; anything else as a named netns under /var/run/netns — mirroring
+        // iproute2's `ip link set DEV netns { PID | NAME }`.
+        if let Some(ns) = netns {
+            let ifindex = conn
+                .get_link_by_name(dev)
+                .await?
+                .ok_or_else(|| {
+                    nlink::netlink::Error::InvalidMessage(format!("device `{dev}` not found"))
+                })?
+                .ifindex();
+            if let Ok(pid) = ns.parse::<u32>() {
+                conn.set_link_netns_pid_by_index(ifindex, pid).await?;
+            } else {
+                conn.set_link_netns_by_index(ifindex, &ns).await?;
+            }
         }
 
         Ok(())
