@@ -19,6 +19,10 @@ struct Cli {
     /// Device name (when no subcommand is given)
     #[arg(global = true)]
     device: Option<String>,
+
+    /// Emit machine-readable JSON instead of the default text output
+    #[arg(long, short, global = true)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -171,14 +175,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let json = cli.json;
     match command {
-        Commands::Show { device } => show_device(&device).await?,
-        Commands::Features { device } => show_features(&device).await?,
+        Commands::Show { device } => show_device(&device, json).await?,
+        Commands::Features { device } => show_features(&device, json).await?,
         Commands::SetFeatures { device, features } => set_features_cmd(&device, &features).await?,
-        Commands::Rings { device } => show_rings(&device).await?,
-        Commands::Channels { device } => show_channels(&device).await?,
-        Commands::Coalesce { device } => show_coalesce(&device).await?,
-        Commands::Pause { device } => show_pause(&device).await?,
+        Commands::Rings { device } => show_rings(&device, json).await?,
+        Commands::Channels { device } => show_channels(&device, json).await?,
+        Commands::Coalesce { device } => show_coalesce(&device, json).await?,
+        Commands::Pause { device } => show_pause(&device, json).await?,
         Commands::SetRings { device, rx, tx } => set_rings(&device, rx, tx).await?,
         Commands::SetChannels {
             device,
@@ -225,59 +230,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn show_device(device: &str) -> nlink::Result<()> {
+/// Print a value as pretty JSON on stdout.
+fn print_json(value: &serde_json::Value) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).expect("JSON serialization")
+    );
+}
+
+fn duplex_str(d: Duplex) -> &'static str {
+    match d {
+        Duplex::Full => "Full",
+        Duplex::Half => "Half",
+        Duplex::Unknown => "Unknown",
+        _ => "?",
+    }
+}
+
+async fn show_device(device: &str, json: bool) -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
 
-    println!("Settings for {}:", device);
-
-    // Link state
     let state = conn.get_link_state(device).await?;
-    println!("\tLink detected: {}", if state.link { "yes" } else { "no" });
-
-    // Link modes
     let modes = conn.get_link_modes(device).await?;
+    let info = conn.get_link_info(device).await?;
+    let supported = modes.supported_modes();
+    let advertised = modes.advertised_modes();
+
+    if json {
+        print_json(&serde_json::json!({
+            "device": device,
+            "link_detected": state.link,
+            "speed_mbps": modes.speed,
+            "duplex": modes.duplex.map(duplex_str),
+            "autoneg": modes.autoneg,
+            "port": info.port.map(|p| format!("{p:?}")),
+            "transceiver": info.transceiver.map(|t| format!("{t:?}")),
+            "supported_modes": supported,
+            "advertised_modes": advertised,
+        }));
+        return Ok(());
+    }
+
+    println!("Settings for {}:", device);
+    println!("\tLink detected: {}", if state.link { "yes" } else { "no" });
     if let Some(speed) = modes.speed {
         println!("\tSpeed: {}Mb/s", speed);
     } else {
         println!("\tSpeed: Unknown");
     }
     if let Some(duplex) = modes.duplex {
-        let duplex_str = match duplex {
-            Duplex::Full => "Full",
-            Duplex::Half => "Half",
-            Duplex::Unknown => "Unknown",
-            _ => "?",
-        };
-        println!("\tDuplex: {}", duplex_str);
+        println!("\tDuplex: {}", duplex_str(duplex));
     }
     println!(
         "\tAuto-negotiation: {}",
         if modes.autoneg { "on" } else { "off" }
     );
-
-    // Link info
-    let info = conn.get_link_info(device).await?;
     if let Some(port) = info.port {
         println!("\tPort: {:?}", port);
     }
     if let Some(transceiver) = info.transceiver {
         println!("\tTransceiver: {:?}", transceiver);
     }
-
-    // Supported modes
-    let supported = modes.supported_modes();
     if !supported.is_empty() {
         println!("\tSupported link modes:");
-        for mode in supported {
+        for mode in &supported {
             println!("\t\t{}", mode);
         }
     }
-
-    // Advertised modes
-    let advertised = modes.advertised_modes();
     if !advertised.is_empty() {
         println!("\tAdvertised link modes:");
-        for mode in advertised {
+        for mode in &advertised {
             println!("\t\t{}", mode);
         }
     }
@@ -285,15 +307,30 @@ async fn show_device(device: &str) -> nlink::Result<()> {
     Ok(())
 }
 
-async fn show_features(device: &str) -> nlink::Result<()> {
+async fn show_features(device: &str, json: bool) -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
     let features = conn.get_features(device).await?;
-
-    println!("Features for {}:", device);
 
     let mut items: Vec<_> = features.iter().collect();
     items.sort_by(|a, b| a.0.cmp(b.0));
 
+    if json {
+        let arr: Vec<_> = items
+            .iter()
+            .map(|(name, enabled)| {
+                serde_json::json!({
+                    "name": name,
+                    "enabled": enabled,
+                    "hw_supported": features.is_hw_supported(name),
+                    "changeable": features.is_changeable(name),
+                })
+            })
+            .collect();
+        print_json(&serde_json::json!({ "device": device, "features": arr }));
+        return Ok(());
+    }
+
+    println!("Features for {}:", device);
     for (name, enabled) in items {
         let hw_supported = features.is_hw_supported(name);
         let changeable = features.is_changeable(name);
@@ -317,9 +354,24 @@ async fn show_features(device: &str) -> nlink::Result<()> {
     Ok(())
 }
 
-async fn show_rings(device: &str) -> nlink::Result<()> {
+async fn show_rings(device: &str, json: bool) -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
     let rings = conn.get_rings(device).await?;
+
+    if json {
+        print_json(&serde_json::json!({
+            "device": device,
+            "max": {
+                "rx": rings.rx_max, "rx_mini": rings.rx_mini_max,
+                "rx_jumbo": rings.rx_jumbo_max, "tx": rings.tx_max,
+            },
+            "current": {
+                "rx": rings.rx, "rx_mini": rings.rx_mini,
+                "rx_jumbo": rings.rx_jumbo, "tx": rings.tx,
+            },
+        }));
+        return Ok(());
+    }
 
     println!("Ring parameters for {}:", device);
 
@@ -354,9 +406,24 @@ async fn show_rings(device: &str) -> nlink::Result<()> {
     Ok(())
 }
 
-async fn show_channels(device: &str) -> nlink::Result<()> {
+async fn show_channels(device: &str, json: bool) -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
     let channels = conn.get_channels(device).await?;
+
+    if json {
+        print_json(&serde_json::json!({
+            "device": device,
+            "max": {
+                "rx": channels.rx_max, "tx": channels.tx_max,
+                "other": channels.other_max, "combined": channels.combined_max,
+            },
+            "current": {
+                "rx": channels.rx_count, "tx": channels.tx_count,
+                "other": channels.other_count, "combined": channels.combined_count,
+            },
+        }));
+        return Ok(());
+    }
 
     println!("Channel parameters for {}:", device);
 
@@ -391,9 +458,26 @@ async fn show_channels(device: &str) -> nlink::Result<()> {
     Ok(())
 }
 
-async fn show_coalesce(device: &str) -> nlink::Result<()> {
+async fn show_coalesce(device: &str, json: bool) -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
     let coalesce = conn.get_coalesce(device).await?;
+
+    if json {
+        print_json(&serde_json::json!({
+            "device": device,
+            "rx_usecs": coalesce.rx_usecs,
+            "rx_frames": coalesce.rx_max_frames,
+            "rx_usecs_irq": coalesce.rx_usecs_irq,
+            "rx_frames_irq": coalesce.rx_max_frames_irq,
+            "tx_usecs": coalesce.tx_usecs,
+            "tx_frames": coalesce.tx_max_frames,
+            "tx_usecs_irq": coalesce.tx_usecs_irq,
+            "tx_frames_irq": coalesce.tx_max_frames_irq,
+            "adaptive_rx": coalesce.use_adaptive_rx,
+            "adaptive_tx": coalesce.use_adaptive_tx,
+        }));
+        return Ok(());
+    }
 
     println!("Coalesce parameters for {}:", device);
 
@@ -431,9 +515,19 @@ async fn show_coalesce(device: &str) -> nlink::Result<()> {
     Ok(())
 }
 
-async fn show_pause(device: &str) -> nlink::Result<()> {
+async fn show_pause(device: &str, json: bool) -> nlink::Result<()> {
     let conn = Connection::<Ethtool>::new_async().await?;
     let pause = conn.get_pause(device).await?;
+
+    if json {
+        print_json(&serde_json::json!({
+            "device": device,
+            "autoneg": pause.autoneg,
+            "rx": pause.rx,
+            "tx": pause.tx,
+        }));
+        return Ok(());
+    }
 
     println!("Pause parameters for {}:", device);
 
