@@ -224,6 +224,40 @@ fn print_json(items: &Vec<serde_json::Value>) {
     );
 }
 
+/// Map a kernel hook number to its name for display. Netdev base chains
+/// use `ingress`/`egress`; every other family uses the standard L3 hooks.
+/// (Bridge can technically host a netdev-ingress chain too, but the L3
+/// names are the overwhelmingly common case; an unknown number prints raw.)
+fn hook_name(family: Family, n: u32) -> String {
+    let name = if matches!(family, Family::Netdev) {
+        match n {
+            0 => Some("ingress"),
+            1 => Some("egress"),
+            _ => None,
+        }
+    } else {
+        match n {
+            0 => Some("prerouting"),
+            1 => Some("input"),
+            2 => Some("forward"),
+            3 => Some("output"),
+            4 => Some("postrouting"),
+            5 => Some("ingress"),
+            _ => None,
+        }
+    };
+    name.map(str::to_string).unwrap_or_else(|| n.to_string())
+}
+
+/// Map a base-chain default policy (`NF_DROP` / `NF_ACCEPT`) to its name.
+fn policy_name(p: u32) -> &'static str {
+    match p {
+        0 => "drop",
+        1 => "accept",
+        _ => "unknown",
+    }
+}
+
 fn parse_family(s: &str) -> Result<Family> {
     match s {
         "inet" => Ok(Family::Inet),
@@ -484,15 +518,30 @@ async fn main() -> Result<()> {
                                 "family": format!("{:?}", c.family),
                                 "table": c.table,
                                 "name": c.name,
-                                "hook": c.hook,
+                                "type": c.chain_type.map(|t| t.as_str()),
+                                "hook": c.hook.map(|h| hook_name(c.family, h)),
+                                "priority": c.priority,
+                                "policy": c.policy.map(policy_name),
+                                "device": c.device,
                             }))
                             .collect(),
                     );
                 } else {
                     for c in &chains {
                         print!("chain {:?} {} {}", c.family, c.table, c.name);
-                        if let Some(ref hook) = c.hook {
-                            print!(" {{ type filter hook {hook} }}");
+                        // A base chain carries a hook + type; print the real
+                        // values from the kernel rather than a hardcoded
+                        // `type filter hook ...`.
+                        if let Some(hook) = c.hook {
+                            let ty = c.chain_type.map(|t| t.as_str()).unwrap_or("filter");
+                            print!(" {{ type {ty} hook {}", hook_name(c.family, hook));
+                            if let Some(prio) = c.priority {
+                                print!(" priority {prio};");
+                            }
+                            if let Some(policy) = c.policy {
+                                print!(" policy {};", policy_name(policy));
+                            }
+                            print!(" }}");
                         }
                         println!();
                     }
@@ -955,6 +1004,23 @@ mod tests {
         assert!(matches!(parse_hook("ingress"), Ok(Hook::NetdevIngress)));
         assert!(matches!(parse_hook("inet:ingress"), Ok(Hook::InetIngress)));
         assert!(parse_hook("sideways").is_err());
+    }
+
+    #[test]
+    fn hook_name_maps_per_family() {
+        assert_eq!(hook_name(Family::Inet, 1), "input");
+        assert_eq!(hook_name(Family::Ip, 4), "postrouting");
+        assert_eq!(hook_name(Family::Netdev, 0), "ingress");
+        assert_eq!(hook_name(Family::Netdev, 1), "egress");
+        // Unknown number prints raw.
+        assert_eq!(hook_name(Family::Inet, 99), "99");
+    }
+
+    #[test]
+    fn policy_name_maps() {
+        assert_eq!(policy_name(0), "drop");
+        assert_eq!(policy_name(1), "accept");
+        assert_eq!(policy_name(7), "unknown");
     }
 
     #[test]

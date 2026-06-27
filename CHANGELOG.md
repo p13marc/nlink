@@ -75,6 +75,12 @@ All notable changes to this project will be documented in this file.
   parameter's declared type via `get_param` first and parses the value
   into it — rejecting out-of-range or non-boolean input — and only falls
   back to inference when the parameter can't be read.
+- **`nft` bin: real chain type/hook/priority/policy in `list chains` (#21).**
+  The text and JSON output hardcoded `type filter hook <n>` and showed the
+  raw hook *number*. `list chains` now prints the actual `chain_type`,
+  hook *name* (family-aware: netdev → ingress/egress, else the L3 hooks),
+  `priority`, default `policy`, and bound `device` from the kernel's
+  `ChainInfo`.
 
 ## [0.21.0] - 2026-06-04
 
