@@ -277,13 +277,13 @@ impl TunnelCmd {
         remote: &str,
         local: Option<&str>,
         ttl: Option<u8>,
-        _tos: Option<u8>,
+        tos: Option<u8>,
         key: Option<u32>,
         ikey: Option<u32>,
         okey: Option<u32>,
-        _pmtudisc: bool,
-        _nopmtudisc: bool,
-        _dev: Option<&str>,
+        pmtudisc: bool,
+        nopmtudisc: bool,
+        dev: Option<&str>,
     ) -> Result<()> {
         // Parse addresses
         let remote_addr: Ipv4Addr = remote.parse().map_err(|_| {
@@ -294,6 +294,22 @@ impl TunnelCmd {
             Some(l.parse().map_err(|_| {
                 nlink::netlink::Error::InvalidMessage(format!("invalid local address: {}", l))
             })?)
+        } else {
+            None
+        };
+
+        // Resolve the path-MTU-discovery tri-state: --pmtudisc enables,
+        // --nopmtudisc disables, neither leaves the kernel default. Both at
+        // once is contradictory and must error, not silently pick one.
+        if pmtudisc && nopmtudisc {
+            return Err(nlink::netlink::Error::InvalidMessage(
+                "cannot specify both --pmtudisc and --nopmtudisc".into(),
+            ));
+        }
+        let pmtudisc_val = if pmtudisc {
+            Some(true)
+        } else if nopmtudisc {
+            Some(false)
         } else {
             None
         };
@@ -310,6 +326,15 @@ impl TunnelCmd {
                 if let Some(t) = ttl {
                     link = link.ttl(t);
                 }
+                if let Some(t) = tos {
+                    link = link.tos(t);
+                }
+                if let Some(p) = pmtudisc_val {
+                    link = link.pmtudisc(p);
+                }
+                if let Some(d) = dev {
+                    link = link.link(d);
+                }
                 if let Some(k) = effective_key {
                     link = link.key(k);
                 }
@@ -322,6 +347,15 @@ impl TunnelCmd {
                 }
                 if let Some(t) = ttl {
                     link = link.ttl(t);
+                }
+                if let Some(t) = tos {
+                    link = link.tos(t);
+                }
+                if let Some(p) = pmtudisc_val {
+                    link = link.pmtudisc(p);
+                }
+                if let Some(d) = dev {
+                    link = link.link(d);
                 }
                 if let Some(k) = effective_key {
                     link = link.key(k);
@@ -336,6 +370,15 @@ impl TunnelCmd {
                 if let Some(t) = ttl {
                     link = link.ttl(t);
                 }
+                if let Some(t) = tos {
+                    link = link.tos(t);
+                }
+                if let Some(p) = pmtudisc_val {
+                    link = link.pmtudisc(p);
+                }
+                if let Some(d) = dev {
+                    link = link.link(d);
+                }
                 conn.add_link(link).await?;
             }
             "sit" | "ipv6/ip" => {
@@ -346,12 +389,36 @@ impl TunnelCmd {
                 if let Some(t) = ttl {
                     link = link.ttl(t);
                 }
+                if let Some(t) = tos {
+                    link = link.tos(t);
+                }
+                if let Some(p) = pmtudisc_val {
+                    link = link.pmtudisc(p);
+                }
+                if let Some(d) = dev {
+                    link = link.link(d);
+                }
                 conn.add_link(link).await?;
             }
             "vti" => {
+                // VtiLink models neither tos nor pmtudisc — reject rather than
+                // silently dropping them (CLAUDE.md "never silently fall back").
+                if tos.is_some() {
+                    return Err(nlink::netlink::Error::InvalidMessage(
+                        "tos is not modelled for vti tunnels".into(),
+                    ));
+                }
+                if pmtudisc_val.is_some() {
+                    return Err(nlink::netlink::Error::InvalidMessage(
+                        "pmtudisc is not modelled for vti tunnels".into(),
+                    ));
+                }
                 let mut link = VtiLink::new(name).remote(remote_addr);
                 if let Some(local) = local_addr {
                     link = link.local(local);
+                }
+                if let Some(d) = dev {
+                    link = link.link(d);
                 }
                 if let Some(k) = effective_key {
                     link = link.ikey(k).okey(k);

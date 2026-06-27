@@ -183,13 +183,23 @@ impl AddressCmd {
         label: Option<&str>,
         broadcast: Option<&str>,
         scope: Option<&str>,
-        _peer: Option<&str>,
+        peer: Option<&str>,
     ) -> Result<()> {
         use nlink::util::addr::parse_prefix;
 
         let (addr, prefix) = parse_prefix(address).map_err(|e| {
             nlink::netlink::Error::InvalidMessage(format!("invalid address: {}", e))
         })?;
+
+        // Parse the optional peer address (point-to-point) up front so a bad
+        // value is a hard error rather than a silent no-op.
+        let peer_addr = peer
+            .map(|p| {
+                p.parse::<IpAddr>().map_err(|e| {
+                    nlink::netlink::Error::InvalidMessage(format!("invalid peer address: {}", e))
+                })
+            })
+            .transpose()?;
 
         // Parse scope
         let scope_val = if let Some(s) = scope {
@@ -212,10 +222,31 @@ impl AddressCmd {
                     config = config.broadcast(brd_addr);
                 }
 
+                if let Some(p) = peer_addr {
+                    let IpAddr::V4(p4) = p else {
+                        return Err(nlink::netlink::Error::InvalidMessage(
+                            "peer address family must match the local address (expected IPv4)"
+                                .into(),
+                        ));
+                    };
+                    config = config.peer(p4);
+                }
+
                 conn.add_address(config).await
             }
             IpAddr::V6(v6) => {
-                let config = Ipv6Address::new(dev, v6, prefix).scope(scope_val);
+                let mut config = Ipv6Address::new(dev, v6, prefix).scope(scope_val);
+
+                if let Some(p) = peer_addr {
+                    let IpAddr::V6(p6) = p else {
+                        return Err(nlink::netlink::Error::InvalidMessage(
+                            "peer address family must match the local address (expected IPv6)"
+                                .into(),
+                        ));
+                    };
+                    config = config.peer(p6);
+                }
+
                 conn.add_address(config).await
             }
         }
