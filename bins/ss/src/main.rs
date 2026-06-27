@@ -3,6 +3,7 @@
 //! This is a Rust implementation of the `ss` utility from iproute2,
 //! providing detailed socket information for TCP, UDP, Unix, and other sockets.
 
+mod dns;
 mod output;
 mod procmap;
 
