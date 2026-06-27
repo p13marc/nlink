@@ -292,3 +292,54 @@ fn format_bytes(bytes: u64) -> String {
         format!("{}B", bytes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nlink::netlink::types::link::OperState;
+
+    use super::*;
+
+    #[test]
+    fn parse_severity_accepts_known_and_aliases() {
+        assert_eq!(parse_severity("info").unwrap(), Severity::Info);
+        assert_eq!(parse_severity("WARN").unwrap(), Severity::Warning);
+        assert_eq!(parse_severity("warning").unwrap(), Severity::Warning);
+        assert_eq!(parse_severity("Error").unwrap(), Severity::Error);
+        assert_eq!(parse_severity("critical").unwrap(), Severity::Critical);
+    }
+
+    #[test]
+    fn parse_severity_rejects_unknown() {
+        let e = parse_severity("fatal").unwrap_err();
+        assert!(e.contains("Unknown severity: fatal"), "{e}");
+    }
+
+    #[test]
+    fn severity_ordering_gates_min_severity() {
+        // The `issue.severity >= min_severity` filter relies on this order.
+        assert!(Severity::Critical > Severity::Error);
+        assert!(Severity::Error > Severity::Warning);
+        assert!(Severity::Warning > Severity::Info);
+    }
+
+    #[test]
+    fn oper_state_str_maps_states() {
+        assert_eq!(oper_state_str(OperState::Up), "up");
+        assert_eq!(oper_state_str(OperState::Down), "down");
+        assert_eq!(oper_state_str(OperState::LowerLayerDown), "lower-layer-down");
+    }
+
+    #[test]
+    fn severity_icon_renders() {
+        assert_eq!(severity_icon(Severity::Info), "[INFO]");
+        assert_eq!(severity_icon(Severity::Critical), "[CRIT]");
+    }
+
+    #[test]
+    fn format_bytes_scales_units() {
+        assert_eq!(format_bytes(512), "512B");
+        assert_eq!(format_bytes(1024), "1.0K");
+        assert_eq!(format_bytes(1024 * 1024), "1.0M");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0G");
+    }
+}

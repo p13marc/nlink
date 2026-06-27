@@ -172,3 +172,41 @@ impl LinkCmd {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::OnOff;
+
+    #[test]
+    fn parses_on_aliases() {
+        for s in ["on", "1", "yes", "true"] {
+            let Ok(v) = OnOff::from_str(s) else {
+                panic!("{s} should parse");
+            };
+            assert!(v.0, "{s} should be true");
+        }
+    }
+
+    #[test]
+    fn parses_off_aliases() {
+        for s in ["off", "0", "no", "false"] {
+            let Ok(v) = OnOff::from_str(s) else {
+                panic!("{s} should parse");
+            };
+            assert!(!v.0, "{s} should be false");
+        }
+    }
+
+    #[test]
+    fn rejects_unknown() {
+        match OnOff::from_str("maybe") {
+            Ok(_) => panic!("`maybe` should be rejected"),
+            Err(e) => assert!(
+                e.to_string().contains("invalid on/off value `maybe`"),
+                "{e}"
+            ),
+        }
+    }
+}

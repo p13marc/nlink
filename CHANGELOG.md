@@ -28,6 +28,12 @@ All notable changes to this project will be documented in this file.
   hides the private/preshared keys (mirroring the `(hidden)` text output);
   `showconf --json` reveals them, since it is a config dump. Brings `wg`
   into line with the other binaries' machine-readable output.
+- **`bridge` / `diag` bins: unit tests for the pure parse/format helpers
+  (#25, #28).** Both binaries previously shipped with zero tests. Added
+  non-root unit coverage for `bridge`'s `parse_vid_range` (VLAN id/range)
+  and `OnOff` flag parser, and `diag`'s `parse_severity`, `severity_icon`,
+  `oper_state_str`, `format_bytes`, plus the severity ordering the
+  `--min-severity` filter relies on.
 
 ### Fixed
 

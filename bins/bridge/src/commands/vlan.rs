@@ -394,3 +394,36 @@ async fn del_tunnel(conn: &Connection<Route>, args: TunnelDelArgs) -> Result<()>
         conn.del_vlan_tunnel(&args.dev, args.vid).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_single_vid() {
+        assert_eq!(parse_vid_range("100").unwrap(), (100, None));
+    }
+
+    #[test]
+    fn parses_vid_range() {
+        assert_eq!(parse_vid_range("100-110").unwrap(), (100, Some(110)));
+    }
+
+    #[test]
+    fn rejects_reversed_range() {
+        let e = parse_vid_range("110-100").unwrap_err().to_string();
+        assert!(e.contains("start must be <= end"), "{e}");
+    }
+
+    #[test]
+    fn rejects_zero_and_out_of_band() {
+        assert!(parse_vid_range("0").is_err());
+        assert!(parse_vid_range("4095").is_err());
+        assert!(parse_vid_range("1-4095").is_err());
+    }
+
+    #[test]
+    fn rejects_non_numeric() {
+        assert!(parse_vid_range("abc").is_err());
+    }
+}
