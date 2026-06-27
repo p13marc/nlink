@@ -12,6 +12,17 @@ All notable changes to this project will be documented in this file.
   The ifindex is resolved once up front so the move is namespace-safe; a
   numeric argument is treated as a target PID, anything else as a named
   netns under `/var/run/netns` (mirrors iproute2).
+- **`wg` bin: `setconf` / `syncconf` config-file apply (#23).** A new
+  bin-local parser reads the kernel-level WireGuard config-file format
+  (`[Interface]` PrivateKey/ListenPort/FwMark, `[Peer]`
+  PublicKey/PresharedKey/Endpoint/AllowedIPs/PersistentKeepalive) into the
+  library's `WireguardConfig`, then `wg setconf <if> <file>` applies it and
+  `wg syncconf <if> <file>` applies it with bounded retry (the documented
+  reconcile shape). The parser is the inverse of `wg showconf` and is
+  **strict** — unknown keys, malformed values, and a `[Peer]` without a
+  `PublicKey` are hard errors (matching real `wg setconf`, which rejects
+  wg-quick-only keys like `Address`/`DNS`/`MTU`). No library change; the
+  parser lives in the binary (precedent: the `config` binary's schema).
 
 ### Fixed
 
