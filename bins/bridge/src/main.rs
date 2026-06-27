@@ -5,7 +5,7 @@
 mod commands;
 
 use clap::{Parser, Subcommand};
-use commands::{fdb::FdbCmd, link::LinkCmd, vlan::VlanCmd};
+use commands::{fdb::FdbCmd, link::LinkCmd, mdb::MdbCmd, vlan::VlanCmd};
 use nlink::{
     netlink::{Connection, Result, Route},
     output::{OutputFormat, OutputOptions},
@@ -46,6 +46,9 @@ enum Command {
 
     /// Manage bridge ports (per-port options)
     Link(LinkCmd),
+
+    /// Manage the multicast database (MDB)
+    Mdb(MdbCmd),
 }
 
 #[tokio::main]
@@ -73,5 +76,6 @@ async fn main() -> Result<()> {
         Command::Fdb(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Vlan(cmd) => cmd.run(&conn, format, &opts).await,
         Command::Link(cmd) => cmd.run(&conn, format, &opts).await,
+        Command::Mdb(cmd) => cmd.run(&conn, format, &opts).await,
     }
 }

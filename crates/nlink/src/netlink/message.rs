@@ -189,6 +189,11 @@ impl NlMsgType {
     pub const RTM_DELACTION: u16 = 49;
     pub const RTM_GETACTION: u16 = 50;
 
+    // Bridge multicast database (MDB) messages
+    pub const RTM_NEWMDB: u16 = 84;
+    pub const RTM_DELMDB: u16 = 85;
+    pub const RTM_GETMDB: u16 = 86;
+
     // Netns messages
     pub const RTM_NEWNSID: u16 = 88;
     pub const RTM_DELNSID: u16 = 89;
