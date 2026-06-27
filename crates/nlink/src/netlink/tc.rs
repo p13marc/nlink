@@ -46,7 +46,7 @@ use super::{
     tc_handle::TcHandle,
     types::tc::{
         TcMsg, TcaAttr,
-        qdisc::{TcRateSpec, codel, fq, fq_codel, htb, netem::*, prio, sfq, tbf},
+        qdisc::{TcRateSpec, codel, ets, fq, fq_codel, htb, netem::*, prio, sfq, tbf},
     },
 };
 
@@ -1219,6 +1219,246 @@ impl QdiscConfig for FqConfig {
         }
         if let Some(pacing) = self.pacing {
             builder.append_attr_u32(fq::TCA_FQ_RATE_ENABLE, u32::from(pacing));
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// MqConfig
+// ============================================================================
+
+/// Multiqueue (mq) qdisc configuration.
+///
+/// `mq` is a classful dummy scheduler the kernel attaches as the root
+/// qdisc of a multi-queue NIC: it exposes one child class per hardware
+/// TX queue so a real qdisc (fq_codel, pfifo_fast, …) can be installed
+/// per queue. The qdisc itself carries **no options** — like
+/// [`DrrConfig`], this type exists for symmetry so `mq` can be created
+/// through the same typed `add_qdisc` path as every other kind.
+///
+/// ```ignore
+/// use nlink::netlink::tc::MqConfig;
+/// use nlink::TcHandle;
+/// conn.add_qdisc("eth0", TcHandle::ROOT, MqConfig::new()).await?;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct MqConfig {}
+
+impl MqConfig {
+    /// Create a new mq configuration builder.
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    /// Terminal no-op for builder symmetry.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style mq params slice. `mq` takes no parameters; an
+    /// empty slice succeeds, anything else errors (strict contract —
+    /// per-queue tuning belongs on the child qdiscs).
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        if let Some(token) = params.first() {
+            return Err(Error::InvalidMessage(format!(
+                "mq: qdisc takes no parameters (got `{token}`); install per-queue qdiscs on the child classes"
+            )));
+        }
+        Ok(Self::new())
+    }
+}
+
+impl QdiscConfig for MqConfig {
+    fn kind(&self) -> &'static str {
+        "mq"
+    }
+
+    fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
+        // mq has no options; the kernel materializes one child class
+        // per hardware TX queue automatically.
+        Ok(())
+    }
+}
+
+// ============================================================================
+// EtsConfig
+// ============================================================================
+
+/// Enhanced Transmission Selection (ets) qdisc configuration.
+///
+/// `ets` (IEEE 802.1Qaz) combines strict-priority and weighted
+/// (deficit round-robin) bands in a single qdisc. The first `nstrict`
+/// bands are served in strict priority order; the remaining
+/// `nbands - nstrict` bands share bandwidth by their DRR `quanta`. A
+/// `priomap` maps each of the 16 skb priorities to a band.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::tc::EtsConfig;
+/// // 4 bands, 1 strict; the 3 DWRR bands get 3000/2000/1000 byte quanta.
+/// let cfg = EtsConfig::new()
+///     .bands(4)
+///     .strict(1)
+///     .quanta(vec![3000, 2000, 1000])
+///     .priomap(vec![0, 0, 0, 1, 2, 3, 3, 3])
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct EtsConfig {
+    /// Total number of bands (`nbands`, 1..=16).
+    pub bands: Option<u8>,
+    /// Number of leading strict-priority bands (`nstrict`).
+    pub strict: Option<u8>,
+    /// Per-band DRR quanta in bytes, for the non-strict bands.
+    pub quanta: Vec<u32>,
+    /// Priority → band map (one entry per skb priority, up to 16).
+    pub priomap: Vec<u8>,
+}
+
+impl EtsConfig {
+    /// Create a new ets configuration builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the total number of bands.
+    pub fn bands(mut self, nbands: u8) -> Self {
+        self.bands = Some(nbands);
+        self
+    }
+
+    /// Set the number of leading strict-priority bands.
+    pub fn strict(mut self, nstrict: u8) -> Self {
+        self.strict = Some(nstrict);
+        self
+    }
+
+    /// Set the per-band DRR quanta (bytes) for the non-strict bands.
+    pub fn quanta(mut self, quanta: Vec<u32>) -> Self {
+        self.quanta = quanta;
+        self
+    }
+
+    /// Set the priority → band map.
+    pub fn priomap(mut self, priomap: Vec<u8>) -> Self {
+        self.priomap = priomap;
+        self
+    }
+
+    /// Terminal no-op for builder symmetry.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style ets params slice.
+    ///
+    /// Recognised tokens: `bands <n>`, `strict <n>`,
+    /// `quanta <q1> <q2> …` (greedy until the next keyword),
+    /// `priomap <p0> <p1> …` (greedy until the next keyword). Strict:
+    /// unknown tokens, missing values, and unparseable values error.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        fn is_keyword(s: &str) -> bool {
+            matches!(s, "bands" | "strict" | "quanta" | "priomap")
+        }
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "bands" => {
+                    let v = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("ets: `bands` requires a value".to_string())
+                    })?;
+                    cfg.bands = Some(v.parse::<u8>().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "ets: invalid bands `{v}` (expected integer 1..=16)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "strict" => {
+                    let v = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("ets: `strict` requires a value".to_string())
+                    })?;
+                    cfg.strict = Some(v.parse::<u8>().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "ets: invalid strict `{v}` (expected integer)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "quanta" => {
+                    i += 1;
+                    let start = i;
+                    while i < params.len() && !is_keyword(params[i]) {
+                        let v = params[i];
+                        cfg.quanta.push(v.parse::<u32>().map_err(|_| {
+                            Error::InvalidMessage(format!(
+                                "ets: invalid quantum `{v}` (expected integer bytes)"
+                            ))
+                        })?);
+                        i += 1;
+                    }
+                    if i == start {
+                        return Err(Error::InvalidMessage(
+                            "ets: `quanta` requires at least one value".to_string(),
+                        ));
+                    }
+                }
+                "priomap" => {
+                    i += 1;
+                    let start = i;
+                    while i < params.len() && !is_keyword(params[i]) {
+                        let v = params[i];
+                        cfg.priomap.push(v.parse::<u8>().map_err(|_| {
+                            Error::InvalidMessage(format!(
+                                "ets: invalid priomap entry `{v}` (expected band index)"
+                            ))
+                        })?);
+                        i += 1;
+                    }
+                    if i == start {
+                        return Err(Error::InvalidMessage(
+                            "ets: `priomap` requires at least one value".to_string(),
+                        ));
+                    }
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!("ets: unknown token `{other}`")));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+impl QdiscConfig for EtsConfig {
+    fn kind(&self) -> &'static str {
+        "ets"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        if let Some(nbands) = self.bands {
+            builder.append_attr(ets::TCA_ETS_NBANDS, &[nbands]);
+        }
+        if let Some(nstrict) = self.strict {
+            builder.append_attr(ets::TCA_ETS_NSTRICT, &[nstrict]);
+        }
+        if !self.quanta.is_empty() {
+            let token = builder.nest_start(ets::TCA_ETS_QUANTA);
+            for q in &self.quanta {
+                builder.append_attr(ets::TCA_ETS_QUANTA_BAND, &q.to_ne_bytes());
+            }
+            builder.nest_end(token);
+        }
+        if !self.priomap.is_empty() {
+            let token = builder.nest_start(ets::TCA_ETS_PRIOMAP);
+            for band in &self.priomap {
+                builder.append_attr(ets::TCA_ETS_PRIOMAP_BAND, &[*band]);
+            }
+            builder.nest_end(token);
         }
         Ok(())
     }
@@ -7913,5 +8153,55 @@ mod tests {
         assert!(FqConfig::parse_params(&["maxrate"]).is_err()); // missing value
         assert!(FqConfig::parse_params(&["maxrate", "notarate"]).is_err());
         assert!(FqConfig::parse_params(&["limit", "notanumber"]).is_err());
+    }
+
+    #[test]
+    fn mq_parse_params() {
+        assert_eq!(MqConfig::parse_params(&[]).unwrap().kind(), "mq");
+        // strict: any token errors
+        assert!(MqConfig::parse_params(&["bands", "4"]).is_err());
+        assert!(MqConfig::parse_params(&["anything"]).is_err());
+    }
+
+    #[test]
+    fn ets_parse_params() {
+        let cfg = EtsConfig::parse_params(&[
+            "bands", "4", "strict", "1", "quanta", "3000", "2000", "1000", "priomap", "0", "0", "1",
+            "2", "3",
+        ])
+        .unwrap();
+        assert_eq!(cfg.bands, Some(4));
+        assert_eq!(cfg.strict, Some(1));
+        assert_eq!(cfg.quanta, vec![3000, 2000, 1000]);
+        assert_eq!(cfg.priomap, vec![0, 0, 1, 2, 3]);
+        assert_eq!(cfg.kind(), "ets");
+
+        // any-order keywords
+        let cfg = EtsConfig::parse_params(&["quanta", "1500", "bands", "2"]).unwrap();
+        assert_eq!(cfg.quanta, vec![1500]);
+        assert_eq!(cfg.bands, Some(2));
+
+        // strict
+        assert!(EtsConfig::parse_params(&["bogus"]).is_err());
+        assert!(EtsConfig::parse_params(&["bands"]).is_err()); // missing value
+        assert!(EtsConfig::parse_params(&["bands", "notanumber"]).is_err());
+        assert!(EtsConfig::parse_params(&["quanta"]).is_err()); // empty list
+        assert!(EtsConfig::parse_params(&["quanta", "notanumber"]).is_err());
+        assert!(EtsConfig::parse_params(&["priomap", "notanumber"]).is_err());
+    }
+
+    #[test]
+    fn ets_write_options_nests_quanta_and_priomap() {
+        // Smoke-test that nested encoding produces bytes without panic
+        // and includes the band-level attrs.
+        let cfg = EtsConfig::new()
+            .bands(3)
+            .strict(1)
+            .quanta(vec![2000, 1000])
+            .priomap(vec![0, 1, 2]);
+        let mut builder = MessageBuilder::new(0, 0);
+        cfg.write_options(&mut builder).unwrap();
+        // Non-empty payload — at minimum NBANDS + NSTRICT + 2 nests.
+        assert!(!builder.as_bytes().is_empty());
     }
 }

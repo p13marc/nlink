@@ -454,6 +454,7 @@ version = "0.21.0"
 dependencies = [
  "clap",
  "nlink",
+ "serde_json",
  "tokio",
  "tokio-stream",
 ]
@@ -475,6 +476,7 @@ version = "0.21.0"
 dependencies = [
  "clap",
  "nlink",
+ "serde_json",
  "tokio",
  "tokio-stream",
 ]
@@ -513,6 +515,7 @@ version = "0.21.0"
 dependencies = [
  "clap",
  "nlink",
+ "serde_json",
  "tokio",
 ]
 
