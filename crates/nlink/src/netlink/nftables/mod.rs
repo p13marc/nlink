@@ -39,6 +39,7 @@ pub mod resync;
 pub mod types;
 pub(crate) mod userdata;
 
+pub use connection::Transaction;
 pub use events::{NftablesEvent, NftablesGroup, NFNLGRP_NFTABLES};
 pub use resync::{nftables_snapshot, BorrowedResyncStream, OwnedResyncStream};
 pub use expr::*;

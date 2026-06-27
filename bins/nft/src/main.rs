@@ -9,6 +9,7 @@ use nlink::netlink::{
     Connection, Nftables, Result,
     nftables::{
         Chain, ChainType, Family, Hook, Policy, Priority, Rule, Set, SetElement, SetKeyType,
+        Transaction,
     },
 };
 
@@ -47,6 +48,26 @@ enum Command {
     Flush {
         #[command(subcommand)]
         what: FlushWhat,
+    },
+
+    /// Apply a batch of operations atomically from a file.
+    ///
+    /// The file holds one operation per line (blank lines and `#`
+    /// comments ignored), e.g.:
+    ///
+    ///   add table inet filter
+    ///   add chain inet filter input hook input priority 0 policy drop
+    ///   add rule inet filter input ct state established,related accept
+    ///   add rule inet filter input tcp dport 22 accept
+    ///
+    /// All operations commit in a single kernel transaction — either
+    /// every line applies or none do.
+    Apply {
+        /// Path to the operations file.
+        file: String,
+        /// Parse and validate only; don't commit to the kernel.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -263,6 +284,173 @@ fn parse_priority(s: &str) -> Result<Priority> {
     })
 }
 
+/// Build a typed [`Chain`] from CLI/file tokens (shared by `add chain`
+/// and the atomic `apply` path). Strict on unknown hook / priority /
+/// type / policy tokens.
+fn build_chain(
+    family: Family,
+    table: &str,
+    name: &str,
+    hook: Option<&str>,
+    priority: Option<&str>,
+    chain_type: Option<&str>,
+    policy: Option<&str>,
+) -> Result<Chain> {
+    let mut chain = Chain::new(table, name).family(family);
+    if let Some(h) = hook {
+        chain = chain.hook(parse_hook(h)?);
+    }
+    if let Some(p) = priority {
+        chain = chain.priority(parse_priority(p)?);
+    }
+    if let Some(t) = chain_type {
+        let ct = match t {
+            "filter" => ChainType::Filter,
+            "nat" => ChainType::Nat,
+            "route" => ChainType::Route,
+            other => {
+                return Err(nlink::netlink::Error::InvalidAttribute(format!(
+                    "unknown chain type `{other}` — expected one of `filter`, `nat`, `route`"
+                )));
+            }
+        };
+        chain = chain.chain_type(ct);
+    }
+    if let Some(p) = policy {
+        let pol = match p {
+            "drop" => Policy::Drop,
+            "accept" => Policy::Accept,
+            other => {
+                return Err(nlink::netlink::Error::InvalidAttribute(format!(
+                    "unknown policy `{other}` — expected `drop` or `accept`"
+                )));
+            }
+        };
+        chain = chain.policy(pol);
+    }
+    Ok(chain)
+}
+
+/// Parse a rule spec (token slice) into a typed [`Rule`] (shared by
+/// `add rule` and the atomic `apply` path). STRICT: every token is
+/// either consumed by a recognised arm or rejected — a mistyped token
+/// is never silently dropped (a firewall failing open).
+fn build_rule(family: Family, table: &str, chain: &str, tokens: &[&str]) -> Result<Rule> {
+    let mut rule = Rule::new(table, chain).family(family);
+    let mut i = 0;
+    while i < tokens.len() {
+        match tokens[i] {
+            "tcp" if tokens.get(i + 1) == Some(&"dport") => {
+                let port = parse_rule_port(tokens.get(i + 2), "tcp dport")?;
+                rule = rule.match_tcp_dport(port);
+                i += 3;
+            }
+            "udp" if tokens.get(i + 1) == Some(&"dport") => {
+                let port = parse_rule_port(tokens.get(i + 2), "udp dport")?;
+                rule = rule.match_udp_dport(port);
+                i += 3;
+            }
+            "accept" => {
+                rule = rule.accept();
+                i += 1;
+            }
+            "drop" => {
+                rule = rule.drop();
+                i += 1;
+            }
+            "counter" => {
+                rule = rule.counter();
+                i += 1;
+            }
+            "masquerade" => {
+                rule = rule.masquerade();
+                i += 1;
+            }
+            "dnat" if tokens.get(i + 1) == Some(&"to") => {
+                let (ip, port) = parse_rule_nat(tokens.get(i + 2), "dnat to")?;
+                rule = rule.dnat(ip, port);
+                i += 3;
+            }
+            "snat" if tokens.get(i + 1) == Some(&"to") => {
+                let (ip, port) = parse_rule_nat(tokens.get(i + 2), "snat to")?;
+                rule = rule.snat(ip, port);
+                i += 3;
+            }
+            "redirect" if tokens.get(i + 1) == Some(&"to") => {
+                let port = parse_rule_port(tokens.get(i + 2), "redirect to")?;
+                rule = rule.redirect(Some(port));
+                i += 3;
+            }
+            "redirect" => {
+                rule = rule.redirect(None);
+                i += 1;
+            }
+            "iif" | "iifname" => {
+                let name = tokens.get(i + 1).ok_or_else(|| {
+                    nlink::netlink::Error::InvalidAttribute(format!(
+                        "nft: `{}` requires an interface name",
+                        tokens[i]
+                    ))
+                })?;
+                rule = rule.match_iif(name);
+                i += 2;
+            }
+            "oif" | "oifname" => {
+                let name = tokens.get(i + 1).ok_or_else(|| {
+                    nlink::netlink::Error::InvalidAttribute(format!(
+                        "nft: `{}` requires an interface name",
+                        tokens[i]
+                    ))
+                })?;
+                rule = rule.match_oif(name);
+                i += 2;
+            }
+            "ct" if tokens.get(i + 1) == Some(&"state") => {
+                use nlink::netlink::nftables::CtState;
+                let state_str = tokens.get(i + 2).ok_or_else(|| {
+                    nlink::netlink::Error::InvalidAttribute(
+                        "nft: `ct state` requires a comma-separated state list".into(),
+                    )
+                })?;
+                let mut state = CtState(0);
+                for s in state_str.split(',') {
+                    match s.trim() {
+                        "established" => state |= CtState::ESTABLISHED,
+                        "related" => state |= CtState::RELATED,
+                        "new" => state |= CtState::NEW,
+                        "invalid" => state |= CtState::INVALID,
+                        other => {
+                            return Err(nlink::netlink::Error::InvalidAttribute(format!(
+                                "nft: unknown ct state `{other}` — expected \
+                                 established/related/new/invalid"
+                            )));
+                        }
+                    }
+                }
+                rule = rule.match_ct_state(state);
+                i += 3;
+            }
+            "ip" if tokens.get(i + 1) == Some(&"saddr") => {
+                let (ip, prefix) = parse_rule_cidr(tokens.get(i + 2), "ip saddr")?;
+                rule = rule.match_saddr_v4(ip, prefix);
+                i += 3;
+            }
+            "ip" if tokens.get(i + 1) == Some(&"daddr") => {
+                let (ip, prefix) = parse_rule_cidr(tokens.get(i + 2), "ip daddr")?;
+                rule = rule.match_daddr_v4(ip, prefix);
+                i += 3;
+            }
+            other => {
+                return Err(nlink::netlink::Error::InvalidAttribute(format!(
+                    "nft: unrecognized rule token `{other}` (a mistyped or unmodelled token \
+                     is rejected rather than silently dropped)"
+                )));
+            }
+        }
+    }
+    Ok(rule)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -367,50 +555,15 @@ async fn main() -> Result<()> {
                 policy,
             } => {
                 let family = parse_family(&family)?;
-                let mut chain = Chain::new(&table, &name).family(family);
-
-                if let Some(ref h) = hook {
-                    chain = chain.hook(parse_hook(h)?);
-                }
-                if let Some(ref p) = priority {
-                    chain = chain.priority(parse_priority(p)?);
-                }
-                // Plan 209 H5 — reject unknown chain_type tokens.
-                // Pre-0.19 a typo on `--type` silently fell through
-                // to `Filter`, producing a chain semantically
-                // different from what the user asked for.
-                if let Some(ref t) = chain_type {
-                    let ct = match t.as_str() {
-                        "filter" => ChainType::Filter,
-                        "nat" => ChainType::Nat,
-                        "route" => ChainType::Route,
-                        other => {
-                            return Err(nlink::netlink::Error::InvalidAttribute(format!(
-                                "unknown chain type `{other}` — expected one of \
-                                 `filter`, `nat`, `route`"
-                            )));
-                        }
-                    };
-                    chain = chain.chain_type(ct);
-                }
-                // Plan 209 H5 — security UX. Pre-0.19 a typo on
-                // `--policy` silently flipped the firewall default
-                // to ACCEPT. `--policy drpo` (typo of `drop`) →
-                // ACCEPT instead of DROP. For a firewall tool this
-                // is the textbook footgun.
-                if let Some(ref p) = policy {
-                    let pol = match p.as_str() {
-                        "drop" => Policy::Drop,
-                        "accept" => Policy::Accept,
-                        other => {
-                            return Err(nlink::netlink::Error::InvalidAttribute(format!(
-                                "unknown policy `{other}` — expected `drop` or `accept`"
-                            )));
-                        }
-                    };
-                    chain = chain.policy(pol);
-                }
-
+                let chain = build_chain(
+                    family,
+                    &table,
+                    &name,
+                    hook.as_deref(),
+                    priority.as_deref(),
+                    chain_type.as_deref(),
+                    policy.as_deref(),
+                )?;
                 conn.add_chain(chain).await?;
                 eprintln!("Chain {name} added");
             }
@@ -421,132 +574,9 @@ async fn main() -> Result<()> {
                 spec,
             } => {
                 let family = parse_family(&family)?;
-                let mut rule = Rule::new(&table, &chain).family(family);
-
-                // Rule-spec parsing. STRICT: every token is either
-                // consumed by a recognised arm or rejected with an error.
-                // Silently skipping unknown/unparseable tokens would let a
-                // mistyped rule (e.g. `tcp dpot 22 accept`) be sent to the
-                // kernel missing its intended match/verb — a firewall
-                // failing open. Mirrors the CLAUDE.md strict-parser
-                // contract and the chain_type/policy/priority hardening.
                 let spec_str = spec.join(" ");
                 let tokens: Vec<&str> = spec_str.split_whitespace().collect();
-                let mut i = 0;
-                while i < tokens.len() {
-                    match tokens[i] {
-                        "tcp" if tokens.get(i + 1) == Some(&"dport") => {
-                            let port = parse_rule_port(tokens.get(i + 2), "tcp dport")?;
-                            rule = rule.match_tcp_dport(port);
-                            i += 3;
-                        }
-                        "udp" if tokens.get(i + 1) == Some(&"dport") => {
-                            let port = parse_rule_port(tokens.get(i + 2), "udp dport")?;
-                            rule = rule.match_udp_dport(port);
-                            i += 3;
-                        }
-                        "accept" => {
-                            rule = rule.accept();
-                            i += 1;
-                        }
-                        "drop" => {
-                            rule = rule.drop();
-                            i += 1;
-                        }
-                        "counter" => {
-                            rule = rule.counter();
-                            i += 1;
-                        }
-                        "masquerade" => {
-                            rule = rule.masquerade();
-                            i += 1;
-                        }
-                        "dnat" if tokens.get(i + 1) == Some(&"to") => {
-                            let (ip, port) = parse_rule_nat(tokens.get(i + 2), "dnat to")?;
-                            rule = rule.dnat(ip, port);
-                            i += 3;
-                        }
-                        "snat" if tokens.get(i + 1) == Some(&"to") => {
-                            let (ip, port) = parse_rule_nat(tokens.get(i + 2), "snat to")?;
-                            rule = rule.snat(ip, port);
-                            i += 3;
-                        }
-                        "redirect" if tokens.get(i + 1) == Some(&"to") => {
-                            let port = parse_rule_port(tokens.get(i + 2), "redirect to")?;
-                            rule = rule.redirect(Some(port));
-                            i += 3;
-                        }
-                        "redirect" => {
-                            rule = rule.redirect(None);
-                            i += 1;
-                        }
-                        "iif" | "iifname" => {
-                            let name = tokens.get(i + 1).ok_or_else(|| {
-                                nlink::netlink::Error::InvalidAttribute(format!(
-                                    "nft: `{}` requires an interface name",
-                                    tokens[i]
-                                ))
-                            })?;
-                            rule = rule.match_iif(name);
-                            i += 2;
-                        }
-                        "oif" | "oifname" => {
-                            let name = tokens.get(i + 1).ok_or_else(|| {
-                                nlink::netlink::Error::InvalidAttribute(format!(
-                                    "nft: `{}` requires an interface name",
-                                    tokens[i]
-                                ))
-                            })?;
-                            rule = rule.match_oif(name);
-                            i += 2;
-                        }
-                        "ct" if tokens.get(i + 1) == Some(&"state") => {
-                            use nlink::netlink::nftables::CtState;
-                            let state_str = tokens.get(i + 2).ok_or_else(|| {
-                                nlink::netlink::Error::InvalidAttribute(
-                                    "nft: `ct state` requires a comma-separated state list".into(),
-                                )
-                            })?;
-                            let mut state = CtState(0);
-                            for s in state_str.split(',') {
-                                match s.trim() {
-                                    "established" => state |= CtState::ESTABLISHED,
-                                    "related" => state |= CtState::RELATED,
-                                    "new" => state |= CtState::NEW,
-                                    "invalid" => state |= CtState::INVALID,
-                                    other => {
-                                        return Err(nlink::netlink::Error::InvalidAttribute(
-                                            format!(
-                                                "nft: unknown ct state `{other}` — expected \
-                                                 established/related/new/invalid"
-                                            ),
-                                        ));
-                                    }
-                                }
-                            }
-                            rule = rule.match_ct_state(state);
-                            i += 3;
-                        }
-                        "ip" if tokens.get(i + 1) == Some(&"saddr") => {
-                            let (ip, prefix) = parse_rule_cidr(tokens.get(i + 2), "ip saddr")?;
-                            rule = rule.match_saddr_v4(ip, prefix);
-                            i += 3;
-                        }
-                        "ip" if tokens.get(i + 1) == Some(&"daddr") => {
-                            let (ip, prefix) = parse_rule_cidr(tokens.get(i + 2), "ip daddr")?;
-                            rule = rule.match_daddr_v4(ip, prefix);
-                            i += 3;
-                        }
-                        other => {
-                            return Err(nlink::netlink::Error::InvalidAttribute(format!(
-                                "nft: unrecognized rule token `{other}` in spec `{spec_str}` \
-                                 (a mistyped or unmodelled token is rejected rather than \
-                                 silently dropped — see the rule-spec grammar in `--help`)"
-                            )));
-                        }
-                    }
-                }
-
+                let rule = build_rule(family, &table, &chain, &tokens)?;
                 conn.add_rule(rule).await?;
                 eprintln!("Rule added");
             }
@@ -623,9 +653,94 @@ async fn main() -> Result<()> {
                 eprintln!("Ruleset flushed");
             }
         },
+
+        Command::Apply { file, dry_run } => {
+            apply_file(&conn, &file, dry_run).await?;
+        }
     }
 
     Ok(())
+}
+
+/// Parse an operations file into a single [`Transaction`] and commit
+/// it atomically (or, with `dry_run`, just report what would apply).
+async fn apply_file(conn: &Connection<Nftables>, path: &str, dry_run: bool) -> Result<()> {
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        nlink::netlink::Error::InvalidMessage(format!("nft apply: cannot read `{path}`: {e}"))
+    })?;
+
+    let mut txn = conn.transaction();
+    let mut count = 0usize;
+
+    for (lineno, raw) in contents.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        txn = apply_line(txn, &tokens).map_err(|e| {
+            nlink::netlink::Error::InvalidMessage(format!(
+                "nft apply: {path}:{}: {e}",
+                lineno + 1
+            ))
+        })?;
+        count += 1;
+    }
+
+    if count == 0 {
+        return Err(nlink::netlink::Error::InvalidMessage(
+            "nft apply: file contains no operations".into(),
+        ));
+    }
+
+    if dry_run {
+        eprintln!("nft apply: {count} operation(s) parsed OK (dry-run, not committed)");
+        return Ok(());
+    }
+
+    txn.commit(conn).await?;
+    eprintln!("nft apply: {count} operation(s) committed atomically");
+    Ok(())
+}
+
+/// Translate one tokenized operation line into a Transaction step.
+fn apply_line(txn: Transaction, tokens: &[&str]) -> Result<Transaction> {
+    let err = |m: String| nlink::netlink::Error::InvalidAttribute(m);
+    match tokens {
+        ["add", "table", family, name] => Ok(txn.add_table(name, parse_family(family)?)),
+        ["delete", "table", family, name] => Ok(txn.del_table(name, parse_family(family)?)),
+        ["add", "chain", family, table, name, rest @ ..] => {
+            let fam = parse_family(family)?;
+            let (mut hook, mut priority, mut ctype, mut policy) = (None, None, None, None);
+            let mut i = 0;
+            while i < rest.len() {
+                let key = rest[i];
+                let val = rest.get(i + 1).ok_or_else(|| {
+                    err(format!("chain option `{key}` requires a value"))
+                })?;
+                match key {
+                    "hook" => hook = Some(*val),
+                    "priority" => priority = Some(*val),
+                    "type" => ctype = Some(*val),
+                    "policy" => policy = Some(*val),
+                    other => return Err(err(format!("unknown chain option `{other}`"))),
+                }
+                i += 2;
+            }
+            Ok(txn.add_chain(build_chain(fam, table, name, hook, priority, ctype, policy)?))
+        }
+        ["delete", "chain", family, table, name] => {
+            Ok(txn.del_chain(table, name, parse_family(family)?))
+        }
+        ["add", "rule", family, table, chain, spec @ ..] => {
+            let fam = parse_family(family)?;
+            Ok(txn.add_rule(build_rule(fam, table, chain, spec)?))
+        }
+        _ => Err(err(format!(
+            "unrecognized operation `{}` (expected `add|delete table|chain|rule …`)",
+            tokens.join(" ")
+        ))),
+    }
 }
 
 fn parse_key_type(s: &str) -> Result<SetKeyType> {
@@ -778,5 +893,49 @@ mod tests {
         );
         assert!(parse_rule_cidr(None, "ip saddr").is_err());
         assert!(parse_rule_cidr(Some(&"garbage"), "ip saddr").is_err());
+    }
+
+    #[test]
+    fn build_chain_strict() {
+        // Valid: hook + priority + type + policy all parse.
+        assert!(
+            build_chain(
+                Family::Inet,
+                "filter",
+                "input",
+                Some("input"),
+                Some("0"),
+                Some("filter"),
+                Some("drop"),
+            )
+            .is_ok()
+        );
+        // A bare chain (no options) is fine.
+        assert!(build_chain(Family::Inet, "t", "c", None, None, None, None).is_ok());
+        // Strict: bad hook / priority / type / policy each error.
+        assert!(build_chain(Family::Inet, "t", "c", Some("nope"), None, None, None).is_err());
+        assert!(build_chain(Family::Inet, "t", "c", None, Some("filtr"), None, None).is_err());
+        assert!(build_chain(Family::Inet, "t", "c", None, None, Some("bogus"), None).is_err());
+        assert!(build_chain(Family::Inet, "t", "c", None, None, None, Some("drpo")).is_err());
+    }
+
+    #[test]
+    fn build_rule_strict() {
+        assert!(build_rule(Family::Inet, "t", "c", &["tcp", "dport", "22", "accept"]).is_ok());
+        assert!(
+            build_rule(
+                Family::Inet,
+                "t",
+                "c",
+                &["ct", "state", "established,related", "accept"]
+            )
+            .is_ok()
+        );
+        // Empty spec is a valid (empty) rule.
+        assert!(build_rule(Family::Inet, "t", "c", &[]).is_ok());
+        // Strict: a mistyped token is rejected, not dropped.
+        assert!(build_rule(Family::Inet, "t", "c", &["tcp", "dpot", "22"]).is_err());
+        assert!(build_rule(Family::Inet, "t", "c", &["bogus"]).is_err());
+        assert!(build_rule(Family::Inet, "t", "c", &["ct", "state", "frobnicate"]).is_err());
     }
 }
