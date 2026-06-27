@@ -5,11 +5,13 @@
 
 mod output;
 
+use std::net::IpAddr;
+
 use clap::Parser;
 use nlink::{
     netlink::{Connection, SockDiag},
     output::OutputFormat,
-    sockdiag::{InetFilter, Protocol, SocketFilter, TcpState, UnixFilter},
+    sockdiag::{InetFilter, Protocol, SocketFilter, SocketInfo, TcpState, UnixFilter},
 };
 
 #[derive(Parser)]
@@ -221,7 +223,12 @@ async fn main() -> anyhow::Result<()> {
             states: if cli.all || cli.listening {
                 TcpState::all_mask()
             } else {
-                1 << 1 // ESTABLISHED for UDP means bound
+                // Default `ss -u` shows both connected (ESTABLISHED)
+                // and unconnected/bound (CLOSE → "UNCONN") UDP
+                // sockets — the latter is most UDP sockets (DNS,
+                // DHCP, ...). Previously only bit 1 was set, so plain
+                // `ss -u` silently missed every UNCONN socket.
+                (1 << 1) | (1 << 7) // ESTABLISHED | CLOSE (UNCONN)
             },
             ..Default::default()
         };
@@ -319,6 +326,16 @@ async fn main() -> anyhow::Result<()> {
         all_results.extend(sockets);
     }
 
+    // Apply address/port filters client-side. The kernel-side inet
+    // filter does not emit INET_DIAG_REQ_BYTECODE yet, so --sport/
+    // --dport/--src/--dst must be enforced here on the dumped results
+    // (previously they were parsed and then silently ignored). Tracked
+    // for kernel-side bytecode in the library-gaps issue.
+    let inet_match = InetMatch::from_cli(&cli)?;
+    if inet_match.is_active() {
+        all_results.retain(|sock| inet_match.matches(sock));
+    }
+
     // Apply expression filter if provided
     if !cli.filter_expr.is_empty() {
         let expr_str = cli.filter_expr.join(" ");
@@ -408,17 +425,10 @@ fn apply_inet_filters(cli: &Cli, filter: &mut InetFilter) {
         filter.remote_port = Some(port);
     }
 
-    // Apply address filters
-    if let Some(ref addr) = cli.src
-        && let Ok(ip) = addr.parse()
-    {
-        filter.local_addr = Some(ip);
-    }
-    if let Some(ref addr) = cli.dst
-        && let Ok(ip) = addr.parse()
-    {
-        filter.remote_addr = Some(ip);
-    }
+    // Address filters (--src/--dst) are validated and enforced
+    // client-side via `InetMatch` after the dump — the kernel-side
+    // filter is a no-op without bytecode, and the previous
+    // parse-or-silently-ignore here hid typos.
 
     // Apply extension requests
     // Extension bits are 1<<(DIAG_TYPE-1) since constants are 1-based
@@ -430,5 +440,119 @@ fn apply_inet_filters(cli: &Cli, filter: &mut InetFilter) {
         filter.extensions |= 1 << 1; // INET_DIAG_INFO (2)
         filter.extensions |= 1 << 2; // INET_DIAG_VEGASINFO (3)
         filter.extensions |= 1 << 3; // INET_DIAG_CONG (4)
+    }
+}
+
+/// Client-side address/port matcher for inet sockets, built from the
+/// CLI's `--sport`/`--dport`/`--src`/`--dst`. Address parsing is strict
+/// (a malformed `--src`/`--dst` is an error, not a silent no-op).
+struct InetMatch {
+    sport: Option<u16>,
+    dport: Option<u16>,
+    src: Option<IpAddr>,
+    dst: Option<IpAddr>,
+}
+
+impl InetMatch {
+    fn from_cli(cli: &Cli) -> anyhow::Result<Self> {
+        Ok(Self {
+            sport: cli.sport,
+            dport: cli.dport,
+            src: parse_addr_opt(cli.src.as_deref(), "--src")?,
+            dst: parse_addr_opt(cli.dst.as_deref(), "--dst")?,
+        })
+    }
+
+    fn is_active(&self) -> bool {
+        self.sport.is_some() || self.dport.is_some() || self.src.is_some() || self.dst.is_some()
+    }
+
+    fn matches(&self, sock: &SocketInfo) -> bool {
+        // A port/address filter only makes sense for inet sockets;
+        // exclude non-inet sockets when such a filter is active.
+        let Some(inet) = sock.as_inet() else {
+            return false;
+        };
+        if let Some(p) = self.sport
+            && inet.local.port() != p
+        {
+            return false;
+        }
+        if let Some(p) = self.dport
+            && inet.remote.port() != p
+        {
+            return false;
+        }
+        if let Some(ip) = self.src
+            && inet.local.ip() != ip
+        {
+            return false;
+        }
+        if let Some(ip) = self.dst
+            && inet.remote.ip() != ip
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// Strictly parse an optional address string, erroring on a malformed
+/// value rather than silently dropping the filter.
+fn parse_addr_opt(s: Option<&str>, what: &str) -> anyhow::Result<Option<IpAddr>> {
+    match s {
+        None => Ok(None),
+        Some(s) => s
+            .parse::<IpAddr>()
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("invalid {what} address `{s}`")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nlink::sockdiag::{AddressFamily, InetSocket, Protocol, TcpState};
+
+    fn inet(local: &str, remote: &str) -> SocketInfo {
+        SocketInfo::Inet(Box::new(InetSocket::new(
+            AddressFamily::Inet,
+            Protocol::Tcp,
+            TcpState::Established,
+            local.parse().unwrap(),
+            remote.parse().unwrap(),
+        )))
+    }
+
+    #[test]
+    fn parse_addr_opt_strict() {
+        assert!(parse_addr_opt(None, "--src").unwrap().is_none());
+        assert!(parse_addr_opt(Some("10.0.0.1"), "--src").unwrap().is_some());
+        assert!(parse_addr_opt(Some("not-an-ip"), "--src").is_err());
+    }
+
+    #[test]
+    fn inet_match_filters() {
+        let m = InetMatch {
+            sport: Some(22),
+            dport: None,
+            src: None,
+            dst: Some("9.9.9.9".parse().unwrap()),
+        };
+        assert!(m.is_active());
+        assert!(m.matches(&inet("1.2.3.4:22", "9.9.9.9:5000")));
+        assert!(!m.matches(&inet("1.2.3.4:80", "9.9.9.9:5000"))); // wrong sport
+        assert!(!m.matches(&inet("1.2.3.4:22", "8.8.8.8:5000"))); // wrong dst
+    }
+
+    #[test]
+    fn inet_match_inactive_is_noop_builder() {
+        let m = InetMatch {
+            sport: None,
+            dport: None,
+            src: None,
+            dst: None,
+        };
+        assert!(!m.is_active());
     }
 }
