@@ -160,8 +160,8 @@ integration job that runs the root-gated kernel round-trip suite.
 
 ```bash
 cargo build --release
-cargo run --release -p ip -- link show
-cargo run --release -p tc -- qdisc show
+cargo run --release -p nlink-ip -- link show
+cargo run --release -p nlink-tc -- qdisc show
 ```
 
 ## License
