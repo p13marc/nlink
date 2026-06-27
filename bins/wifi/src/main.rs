@@ -54,8 +54,12 @@ enum Command {
     /// List physical devices and their capabilities.
     Phy,
 
-    /// Show regulatory domain.
-    Reg,
+    /// Show the regulatory domain, or set it by country code.
+    Reg {
+        /// ISO 3166-1 alpha-2 country code to set (e.g. US, DE, or 00
+        /// for the world domain). Omit to show the current domain.
+        country: Option<String>,
+    },
 
     /// Connect to a network.
     Connect {
@@ -330,18 +334,23 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Reg => {
-            let reg = conn.get_regulatory().await?;
-            println!("Country: {}", reg.country);
-            for rule in &reg.rules {
-                println!(
-                    "  {}-{} MHz: max_bw={} MHz, max_eirp={} dBm flags=0x{:x}",
-                    rule.start_freq_khz / 1000,
-                    rule.end_freq_khz / 1000,
-                    rule.max_bandwidth_khz / 1000,
-                    rule.max_eirp_mbm / 100,
-                    rule.flags,
-                );
+        Command::Reg { country } => {
+            if let Some(country) = country {
+                conn.set_regulatory(&country).await?;
+                eprintln!("Regulatory domain change requested: {country}");
+            } else {
+                let reg = conn.get_regulatory().await?;
+                println!("Country: {}", reg.country);
+                for rule in &reg.rules {
+                    println!(
+                        "  {}-{} MHz: max_bw={} MHz, max_eirp={} dBm flags=0x{:x}",
+                        rule.start_freq_khz / 1000,
+                        rule.end_freq_khz / 1000,
+                        rule.max_bandwidth_khz / 1000,
+                        rule.max_eirp_mbm / 100,
+                        rule.flags,
+                    );
+                }
             }
         }
 
