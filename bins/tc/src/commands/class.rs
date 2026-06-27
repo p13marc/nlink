@@ -248,12 +248,11 @@ impl ClassCmd {
         let ifindex =
             nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
 
-        let parent_filter = parent
-            .and_then(tc_handle::parse)
-            .map(nlink::TcHandle::from_raw);
-        let classid_filter = classid
-            .and_then(tc_handle::parse)
-            .map(nlink::TcHandle::from_raw);
+        // Strict: a present-but-unparseable handle is an error, not a
+        // silently-dropped filter (which would dump *all* classes and
+        // mislead the user). See the CLAUDE.md strict-parse contract.
+        let parent_filter = parse_handle_filter(parent, "parent")?;
+        let classid_filter = parse_handle_filter(classid, "classid")?;
 
         // Fetch all classes using typed API
         let all_classes: Vec<TcMessage> = conn.dump_typed(NlMsgType::RTM_GETTCLASS).await?;
@@ -350,5 +349,32 @@ async fn run_typed_class<C: ClassConfig>(
         ClassVerb::Add => conn.add_class(dev, parent, classid, cfg).await,
         ClassVerb::Change => conn.change_class(dev, parent, classid, cfg).await,
         ClassVerb::Replace => conn.replace_class(dev, parent, classid, cfg).await,
+    }
+}
+
+/// Strictly parse an optional tc handle used as a `show` filter.
+/// A present-but-unparseable value is an error (it must not silently
+/// degrade to "no filter", which would dump every class).
+fn parse_handle_filter(s: Option<&str>, what: &str) -> Result<Option<TcHandle>> {
+    match s {
+        None => Ok(None),
+        Some(v) => tc_handle::parse(v).map(TcHandle::from_raw).map(Some).ok_or_else(|| {
+            Error::InvalidMessage(format!(
+                "tc class show: invalid {what} `{v}` (expected a tc handle like `1:10`)"
+            ))
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handle_filter_strict() {
+        assert!(parse_handle_filter(None, "parent").unwrap().is_none());
+        assert!(parse_handle_filter(Some("1:10"), "parent").unwrap().is_some());
+        // present but garbage -> error (not a silent "no filter")
+        assert!(parse_handle_filter(Some("not-a-handle"), "classid").is_err());
     }
 }
