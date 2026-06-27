@@ -321,7 +321,17 @@ impl RuleCmd {
             "blackhole" => rule.blackhole(),
             "unreachable" => rule.unreachable(),
             "prohibit" => rule.prohibit(),
-            "nop" => rule, // nop not directly supported, use default
+            "nop" | "goto" => {
+                // The rule builder models only table lookup + blackhole /
+                // unreachable / prohibit. Accepting `nop`/`goto` and silently
+                // falling back to a table lookup would send a different rule
+                // than asked — reject instead (CLAUDE.md strict-parse contract).
+                return Err(nlink::netlink::Error::InvalidMessage(format!(
+                    "rule action `{}` is not modelled by the ip rule builder \
+                     (supported: lookup/table, blackhole, unreachable, prohibit)",
+                    action_type.to_lowercase()
+                )));
+            }
             _ => {
                 return Err(nlink::netlink::Error::InvalidMessage(format!(
                     "unknown action: {}",

@@ -12,6 +12,15 @@ All notable changes to this project will be documented in this file.
   input to a default (e.g. `mode bogus` → `balance-rr`), hiding typos.
   They now return `Error::InvalidMessage` on unrecognized input, in line
   with the CLAUDE.md strict-parse contract.
+- **`ip` bin: kill silent no-ops in `addr`/`tunnel`/`rule` (#17).**
+  `ip addr add … peer <addr>` now actually sets the peer address (it was
+  parsed and dropped); a bad peer value or family mismatch errors. `ip
+  tunnel add … tos/pmtudisc/nopmtudisc/dev` were silently ignored — they
+  are now wired to the tunnel builders (`tos`/`pmtudisc` error as "not
+  modelled" for `vti`, which lacks them; `--pmtudisc` + `--nopmtudisc`
+  together is rejected as contradictory). `ip rule … nop`/`goto`, which
+  the rule builder does not model, now error instead of silently sending
+  a plain table-lookup rule.
 
 ## [0.21.0] - 2026-06-04
 
