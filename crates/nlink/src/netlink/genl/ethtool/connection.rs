@@ -7,7 +7,7 @@ use super::{
     ETHTOOL_GENL_NAME, ETHTOOL_GENL_VERSION, ETHTOOL_MCGRP_MONITOR, EthtoolBitsetAttr,
     EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolFeaturesAttr, EthtoolHeaderAttr,
     EthtoolLinkinfoAttr, EthtoolLinkmodesAttr, EthtoolLinkstateAttr, EthtoolPauseAttr,
-    EthtoolRingsAttr, EthtoolStatsAttr, EthtoolStatsGrpAttr, bitset::EthtoolBitset, stats_group,
+    EthtoolRingsAttr, EthtoolStatsGrpAttr, bitset::EthtoolBitset, stats_group,
     types::*,
 };
 use crate::macros::{GenlFamily, __rt::resolve_genl_family_with_groups};
@@ -22,6 +22,20 @@ use crate::netlink::{
     protocol::{AsyncProtocolInit, Ethtool, Route},
     socket::NetlinkSocket,
 };
+
+/// Correct top-level `ETHTOOL_A_STATS_*` attribute ids.
+///
+/// The public [`EthtoolStatsAttr`](super::EthtoolStatsAttr) enum ships
+/// historically-wrong (off-by-one) discriminants that can't be fixed
+/// without a breaking change; STATS_GET code uses these instead.
+mod stats_attr {
+    /// `ETHTOOL_A_STATS_HEADER` (the stats message uniquely uses 2).
+    pub const HEADER: u16 = 2;
+    /// `ETHTOOL_A_STATS_GROUPS`.
+    pub const GROUPS: u16 = 3;
+    /// `ETHTOOL_A_STATS_GRP`.
+    pub const GRP: u16 = 4;
+}
 
 impl AsyncProtocolInit for Ethtool {
     async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
@@ -1174,13 +1188,13 @@ impl Connection<Ethtool> {
         builder.append(&genl_hdr);
 
         // Header nest (note: STATS header is attr id 2).
-        let header = builder.nest_start(EthtoolStatsAttr::Header as u16 | NLA_F_NESTED);
+        let header = builder.nest_start(stats_attr::HEADER | NLA_F_NESTED);
         builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
         builder.nest_end(header);
 
         // Groups bitset (compact, no-mask): select the 4 standardized
         // groups (bits 0..=3 set => 0x0F).
-        let groups = builder.nest_start(EthtoolStatsAttr::Groups as u16 | NLA_F_NESTED);
+        let groups = builder.nest_start(stats_attr::GROUPS | NLA_F_NESTED);
         builder.append_attr(EthtoolBitsetAttr::Nomask as u16, &[]);
         builder.append_attr_u32(EthtoolBitsetAttr::Size as u16, 4);
         builder.append_attr(EthtoolBitsetAttr::Value as u16, &0x0fu32.to_ne_bytes());
@@ -1230,10 +1244,10 @@ impl Connection<Ethtool> {
     fn parse_eth_stats(&self, data: &[u8], stats: &mut EthtoolStats) -> Result<()> {
         for (attr_type, payload) in AttrIter::new(data) {
             match attr_type {
-                t if t == EthtoolStatsAttr::Header as u16 => {
+                t if t == stats_attr::HEADER => {
                     self.parse_header(payload, &mut stats.ifname, &mut stats.ifindex)?;
                 }
-                t if t == EthtoolStatsAttr::Grp as u16 => {
+                t if t == stats_attr::GRP => {
                     if let Some((group_id, group)) = parse_stats_group(payload) {
                         match group_id {
                             stats_group::ETH_PHY => stats.eth_phy = Some(group),
@@ -1517,7 +1531,7 @@ mod stats_parse_tests {
     fn parse_eth_stats_routes_groups() {
         let conn_data = attrs(|b| {
             // GRP(rmon) with one stat.
-            let g = b.nest_start(EthtoolStatsAttr::Grp as u16 | NLA_F_NESTED);
+            let g = b.nest_start(stats_attr::GRP | NLA_F_NESTED);
             b.append_attr_u32(EthtoolStatsGrpAttr::Id as u16, stats_group::RMON);
             let s = b.nest_start(EthtoolStatsGrpAttr::Stat as u16 | NLA_F_NESTED);
             b.append_attr(stats_index::RMON_FRAG as u16, &7u64.to_ne_bytes());
@@ -1529,7 +1543,7 @@ mod stats_parse_tests {
         // manual dispatch mirror (parse_eth_stats needs &self).
         let mut found = None;
         for (attr_type, payload) in AttrIter::new(&conn_data) {
-            if attr_type == EthtoolStatsAttr::Grp as u16 {
+            if attr_type == stats_attr::GRP {
                 found = parse_stats_group(payload);
             }
         }

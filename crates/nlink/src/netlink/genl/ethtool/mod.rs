@@ -615,25 +615,30 @@ pub enum EthtoolPauseAttr {
 // Statistics Attributes
 // =============================================================================
 
-/// Top-level attributes for `ETHTOOL_MSG_STATS_GET` (`ETHTOOL_A_STATS_*`).
+/// Attributes for statistics.
 ///
-/// Note the header is **2**, not the usual 1 — `ETHTOOL_A_STATS_PAD`
-/// occupies index 1 in this message's attribute space.
+/// # Warning — discriminants are off by one (kept for ABI stability)
+///
+/// These values are **wrong** versus the kernel: the real
+/// `ETHTOOL_A_STATS_*` enum has `PAD` at index 1, so the header is 2,
+/// groups 3, grp 4, src 5. Correcting these discriminants on a
+/// `#[repr(u16)]` enum is a breaking change, so the fix is deferred to
+/// the next major bump. Internal STATS_GET code uses the correct
+/// private `stats_attr` constants in the ethtool connection module
+/// instead; prefer those if you build raw STATS requests yourself.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EthtoolStatsAttr {
     Unspec = 0,
-    /// Padding (index 1).
-    Pad = 1,
-    /// Request header (nested).
-    Header = 2,
-    /// Stat groups to query (bitset).
-    Groups = 3,
-    /// One stat group's data (nested).
-    Grp = 4,
-    /// Source for stats (u32).
-    Src = 5,
+    /// Request header (nested). **Wrong**: kernel value is 2.
+    Header = 1,
+    /// Stat groups to query (bitset). **Wrong**: kernel value is 3.
+    Groups = 2,
+    /// GRP nested stats. **Wrong**: kernel value is 4.
+    Grp = 3,
+    /// Source for stats (u32). **Wrong**: kernel value is 5.
+    Src = 4,
 }
 
 /// Attributes nested under `ETHTOOL_A_STATS_GRP` (`ETHTOOL_A_STATS_GRP_*`).
