@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`ethtool` bin: surface already-parsed link detail in `show` (#27).**
+  `show` now prints the data the library already decoded but the binary
+  dropped: PHY address, MDI-X status (+ configured control), Signal
+  Quality Index (`sqi`/`sqi_max`), the extended link state + substate
+  (why a link is down), and pause-frame statistics in `show pause`. All
+  appear in both the text and `--json` output, with stable string
+  mappings for the MDI-X / ext-state enums.
+
 - **`wg` bin: incremental allowed-ips + private-key unset (#23).** `wg set
   … --allowed-ips` now honors the `+` prefix to *add* ranges without
   replacing the peer's set (a plain list still replaces, matching real
