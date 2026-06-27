@@ -4,10 +4,11 @@
 //! settings using the ethtool netlink interface.
 
 use super::{
-    ETHTOOL_GENL_NAME, ETHTOOL_GENL_VERSION, ETHTOOL_MCGRP_MONITOR, EthtoolChannelsAttr,
-    EthtoolCmd, EthtoolCoalesceAttr, EthtoolFeaturesAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr,
-    EthtoolLinkmodesAttr, EthtoolLinkstateAttr, EthtoolPauseAttr, EthtoolRingsAttr,
-    bitset::EthtoolBitset, types::*,
+    ETHTOOL_GENL_NAME, ETHTOOL_GENL_VERSION, ETHTOOL_MCGRP_MONITOR, EthtoolBitsetAttr,
+    EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolFeaturesAttr, EthtoolHeaderAttr,
+    EthtoolLinkinfoAttr, EthtoolLinkmodesAttr, EthtoolLinkstateAttr, EthtoolPauseAttr,
+    EthtoolRingsAttr, EthtoolStatsAttr, EthtoolStatsGrpAttr, bitset::EthtoolBitset, stats_group,
+    types::*,
 };
 use crate::macros::{GenlFamily, __rt::resolve_genl_family_with_groups};
 use crate::netlink::{
@@ -1122,6 +1123,134 @@ impl Connection<Ethtool> {
     }
 
     // =========================================================================
+    // Standardized statistics (ethtool -S --groups)
+    // =========================================================================
+
+    /// Get standardized device statistics (the IEEE-802.3 / RMON
+    /// groups, like `ethtool -S --groups eth-mac eth-phy eth-ctrl
+    /// rmon`).
+    ///
+    /// Accepts an interface name or index via [`InterfaceRef`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Ethtool};
+    /// use nlink::netlink::genl::ethtool::stats_index;
+    ///
+    /// let conn = Connection::<Ethtool>::new_async().await?;
+    /// let stats = conn.get_eth_stats("eth0").await?;
+    /// if let Some(mac) = &stats.eth_mac {
+    ///     println!("rx-packets: {:?}", mac.get(stats_index::ETH_MAC_RX_PKT));
+    /// }
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_eth_stats"))]
+    pub async fn get_eth_stats(&self, iface: impl Into<InterfaceRef>) -> Result<EthtoolStats> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_eth_stats_by_name(&ifname).await
+    }
+
+    /// Get standardized device statistics by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_eth_stats_by_name"))]
+    pub async fn get_eth_stats_by_name(&self, ifname: &str) -> Result<EthtoolStats> {
+        let response = self.ethtool_stats_get(ifname).await?;
+        let mut stats = EthtoolStats::default();
+        if response.len() < GENL_HDRLEN {
+            return Ok(stats);
+        }
+        self.parse_eth_stats(&response[GENL_HDRLEN..], &mut stats)?;
+        Ok(stats)
+    }
+
+    /// Custom STATS_GET request — the stats message uses header attr
+    /// id 2 (not the usual 1) and needs a `Groups` bitset selecting
+    /// which standardized groups to return.
+    async fn ethtool_stats_get(&self, ifname: &str) -> Result<Vec<u8>> {
+        let _guard = self.lock_request().await;
+        let family_id = self.state().family_id;
+
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
+        let genl_hdr = GenlMsgHdr::new(EthtoolCmd::StatsGet as u8, ETHTOOL_GENL_VERSION);
+        builder.append(&genl_hdr);
+
+        // Header nest (note: STATS header is attr id 2).
+        let header = builder.nest_start(EthtoolStatsAttr::Header as u16 | NLA_F_NESTED);
+        builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
+        builder.nest_end(header);
+
+        // Groups bitset (compact, no-mask): select the 4 standardized
+        // groups (bits 0..=3 set => 0x0F).
+        let groups = builder.nest_start(EthtoolStatsAttr::Groups as u16 | NLA_F_NESTED);
+        builder.append_attr(EthtoolBitsetAttr::Nomask as u16, &[]);
+        builder.append_attr_u32(EthtoolBitsetAttr::Size as u16, 4);
+        builder.append_attr(EthtoolBitsetAttr::Value as u16, &0x0fu32.to_ne_bytes());
+        builder.nest_end(groups);
+
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        self.with_timeout(async {
+            let mut result_payload: Option<Vec<u8>> = None;
+            loop {
+                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let mut done = false;
+                for msg_result in MessageIter::new(&data) {
+                    let (header, payload) = msg_result?;
+                    if header.nlmsg_seq != seq {
+                        continue;
+                    }
+                    if header.is_error() {
+                        let err = NlMsgError::from_bytes(payload)?;
+                        if !err.is_ack() {
+                            return Err(err.into_error(payload));
+                        }
+                        continue;
+                    }
+                    if header.is_done() {
+                        done = true;
+                        break;
+                    }
+                    if result_payload.is_none() {
+                        result_payload = Some(payload.to_vec());
+                    }
+                }
+                if done {
+                    break;
+                }
+            }
+            result_payload.ok_or_else(|| Error::InvalidMessage("no stats response received".into()))
+        })
+        .await
+    }
+
+    fn parse_eth_stats(&self, data: &[u8], stats: &mut EthtoolStats) -> Result<()> {
+        for (attr_type, payload) in AttrIter::new(data) {
+            match attr_type {
+                t if t == EthtoolStatsAttr::Header as u16 => {
+                    self.parse_header(payload, &mut stats.ifname, &mut stats.ifindex)?;
+                }
+                t if t == EthtoolStatsAttr::Grp as u16 => {
+                    if let Some((group_id, group)) = parse_stats_group(payload) {
+                        match group_id {
+                            stats_group::ETH_PHY => stats.eth_phy = Some(group),
+                            stats_group::ETH_MAC => stats.eth_mac = Some(group),
+                            stats_group::ETH_CTRL => stats.eth_ctrl = Some(group),
+                            stats_group::RMON => stats.rmon = Some(group),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    // =========================================================================
     // Helper Methods
     // =========================================================================
 
@@ -1311,5 +1440,101 @@ impl Connection<Ethtool> {
     /// ```
     pub fn subscribe(&self) -> Result<()> {
         self.subscribe_group(ETHTOOL_MCGRP_MONITOR)
+    }
+}
+
+/// Parse one `ETHTOOL_A_STATS_GRP` nest into `(group_id, StatGroup)`.
+///
+/// The nest carries `GRP_ID` (which group) and zero or more `GRP_STAT`
+/// sub-nests; each `GRP_STAT` holds a single attribute whose type is
+/// the per-group stat index and whose payload is a `u64`.
+fn parse_stats_group(data: &[u8]) -> Option<(u32, StatGroup)> {
+    let mut group_id = None;
+    let mut group = StatGroup::default();
+
+    for (attr_type, payload) in AttrIter::new(data) {
+        match attr_type {
+            t if t == EthtoolStatsGrpAttr::Id as u16 && payload.len() >= 4 => {
+                group_id = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            t if t == EthtoolStatsGrpAttr::Stat as u16 => {
+                if let Some((index, value)) = parse_one_stat(payload) {
+                    group.values.insert(index, value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some((group_id?, group))
+}
+
+/// Parse a single `GRP_STAT` nest: one inner attr `index -> u64`.
+/// Reads the first 8 bytes of the value (accept-larger policy).
+fn parse_one_stat(data: &[u8]) -> Option<(u32, u64)> {
+    for (index, payload) in AttrIter::new(data) {
+        if payload.len() >= 8 {
+            let value = u64::from_ne_bytes(payload[..8].try_into().unwrap());
+            return Some((u32::from(index), value));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod stats_parse_tests {
+    use super::*;
+    use crate::netlink::builder::MessageBuilder;
+    use crate::netlink::genl::ethtool::stats_index;
+
+    fn attrs(build: impl FnOnce(&mut MessageBuilder)) -> Vec<u8> {
+        let mut b = MessageBuilder::new(0, 0);
+        build(&mut b);
+        b.as_bytes()[16..].to_vec()
+    }
+
+    #[test]
+    fn parse_stats_group_collects_indexed_u64s() {
+        let data = attrs(|b| {
+            b.append_attr_u32(EthtoolStatsGrpAttr::Id as u16, stats_group::ETH_MAC);
+            // Two stats: index 3 (rx-pkt) = 100, index 6 (tx-bytes) = 4096.
+            let s1 = b.nest_start(EthtoolStatsGrpAttr::Stat as u16 | NLA_F_NESTED);
+            b.append_attr(stats_index::ETH_MAC_RX_PKT as u16, &100u64.to_ne_bytes());
+            b.nest_end(s1);
+            let s2 = b.nest_start(EthtoolStatsGrpAttr::Stat as u16 | NLA_F_NESTED);
+            b.append_attr(stats_index::ETH_MAC_TX_BYTES as u16, &4096u64.to_ne_bytes());
+            b.nest_end(s2);
+        });
+
+        let (gid, group) = parse_stats_group(&data).expect("group");
+        assert_eq!(gid, stats_group::ETH_MAC);
+        assert_eq!(group.get(stats_index::ETH_MAC_RX_PKT), Some(100));
+        assert_eq!(group.get(stats_index::ETH_MAC_TX_BYTES), Some(4096));
+        assert_eq!(group.get(99), None);
+    }
+
+    #[test]
+    fn parse_eth_stats_routes_groups() {
+        let conn_data = attrs(|b| {
+            // GRP(rmon) with one stat.
+            let g = b.nest_start(EthtoolStatsAttr::Grp as u16 | NLA_F_NESTED);
+            b.append_attr_u32(EthtoolStatsGrpAttr::Id as u16, stats_group::RMON);
+            let s = b.nest_start(EthtoolStatsGrpAttr::Stat as u16 | NLA_F_NESTED);
+            b.append_attr(stats_index::RMON_FRAG as u16, &7u64.to_ne_bytes());
+            b.nest_end(s);
+            b.nest_end(g);
+        });
+
+        // Drive the routing logic directly via parse_stats_group +
+        // manual dispatch mirror (parse_eth_stats needs &self).
+        let mut found = None;
+        for (attr_type, payload) in AttrIter::new(&conn_data) {
+            if attr_type == EthtoolStatsAttr::Grp as u16 {
+                found = parse_stats_group(payload);
+            }
+        }
+        let (gid, group) = found.expect("group");
+        assert_eq!(gid, stats_group::RMON);
+        assert_eq!(group.get(stats_index::RMON_FRAG), Some(7));
     }
 }

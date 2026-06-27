@@ -832,3 +832,118 @@ pub enum EthtoolEvent {
         cmd: u8,
     },
 }
+
+/// One standardized statistics group's values, keyed by the kernel's
+/// per-group stat index. Use [`StatGroup::get`] with the index
+/// constants in [`super::stats_index`], or iterate `values`
+/// directly.
+#[derive(Debug, Clone, Default)]
+pub struct StatGroup {
+    /// Stat index → counter value. Indices are the kernel's
+    /// per-group `ETHTOOL_A_STATS_<GROUP>_*` enum positions.
+    pub values: std::collections::BTreeMap<u32, u64>,
+}
+
+impl StatGroup {
+    /// Look up a stat by its per-group index.
+    pub fn get(&self, index: u32) -> Option<u64> {
+        self.values.get(&index).copied()
+    }
+
+    /// `true` if the group carried no stats.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+/// Standardized device statistics (`ethtool -S --groups …`), returned
+/// by [`Connection::get_eth_stats`](crate::netlink::Connection::get_eth_stats).
+///
+/// Only the IEEE-802.3 / RMON standardized groups are exposed —
+/// these are the stable, driver-independent counters available over
+/// the ethtool netlink API. A group is `None` if the device didn't
+/// report it.
+#[derive(Debug, Clone, Default)]
+pub struct EthtoolStats {
+    /// Interface name, if echoed back in the reply header.
+    pub ifname: Option<String>,
+    /// Interface index, if echoed back in the reply header.
+    pub ifindex: Option<u32>,
+    /// IEEE 802.3 PHY stats.
+    pub eth_phy: Option<StatGroup>,
+    /// IEEE 802.3 MAC stats.
+    pub eth_mac: Option<StatGroup>,
+    /// IEEE 802.3 MAC-control stats.
+    pub eth_ctrl: Option<StatGroup>,
+    /// RMON (RFC 2819) stats.
+    pub rmon: Option<StatGroup>,
+}
+
+/// Per-group stat index constants for the well-known standardized
+/// counters (`ETHTOOL_A_STATS_<GROUP>_*` positions). Pass these to
+/// [`StatGroup::get`]. Drivers may report additional indices not
+/// named here; those are preserved in [`StatGroup::values`].
+pub mod stats_index {
+    /// eth-mac: frames transmitted OK.
+    pub const ETH_MAC_TX_PKT: u32 = 0;
+    /// eth-mac: frames received OK.
+    pub const ETH_MAC_RX_PKT: u32 = 3;
+    /// eth-mac: frame-check-sequence errors.
+    pub const ETH_MAC_FCS_ERR: u32 = 4;
+    /// eth-mac: octets transmitted OK.
+    pub const ETH_MAC_TX_BYTES: u32 = 6;
+    /// eth-mac: octets received OK.
+    pub const ETH_MAC_RX_BYTES: u32 = 12;
+    /// eth-mac: multicast frames transmitted OK.
+    pub const ETH_MAC_TX_MCAST: u32 = 14;
+    /// eth-mac: broadcast frames transmitted OK.
+    pub const ETH_MAC_TX_BCAST: u32 = 15;
+    /// eth-mac: multicast frames received OK.
+    pub const ETH_MAC_RX_MCAST: u32 = 17;
+    /// eth-mac: broadcast frames received OK.
+    pub const ETH_MAC_RX_BCAST: u32 = 18;
+
+    /// eth-ctrl: MAC-control frames transmitted.
+    pub const ETH_CTRL_TX: u32 = 0;
+    /// eth-ctrl: MAC-control frames received.
+    pub const ETH_CTRL_RX: u32 = 1;
+    /// eth-ctrl: unsupported MAC-control frames received.
+    pub const ETH_CTRL_RX_UNSUP: u32 = 2;
+
+    /// rmon: undersized packets.
+    pub const RMON_UNDERSIZE: u32 = 0;
+    /// rmon: oversized packets.
+    pub const RMON_OVERSIZE: u32 = 1;
+    /// rmon: fragments.
+    pub const RMON_FRAG: u32 = 2;
+    /// rmon: jabbers.
+    pub const RMON_JABBER: u32 = 3;
+}
+
+/// Human-readable name for a `(group_id, stat_index)` pair, for the
+/// well-known standardized counters. Returns `None` for indices not
+/// named in [`stats_index`] (callers can fall back to the numeric
+/// index).
+pub fn standard_stat_name(group_id: u32, index: u32) -> Option<&'static str> {
+    use super::stats_group::*;
+    use stats_index::*;
+    Some(match (group_id, index) {
+        (ETH_MAC, ETH_MAC_TX_PKT) => "tx-packets",
+        (ETH_MAC, ETH_MAC_RX_PKT) => "rx-packets",
+        (ETH_MAC, ETH_MAC_FCS_ERR) => "fcs-errors",
+        (ETH_MAC, ETH_MAC_TX_BYTES) => "tx-bytes",
+        (ETH_MAC, ETH_MAC_RX_BYTES) => "rx-bytes",
+        (ETH_MAC, ETH_MAC_TX_MCAST) => "tx-multicast",
+        (ETH_MAC, ETH_MAC_TX_BCAST) => "tx-broadcast",
+        (ETH_MAC, ETH_MAC_RX_MCAST) => "rx-multicast",
+        (ETH_MAC, ETH_MAC_RX_BCAST) => "rx-broadcast",
+        (ETH_CTRL, ETH_CTRL_TX) => "tx-control",
+        (ETH_CTRL, ETH_CTRL_RX) => "rx-control",
+        (ETH_CTRL, ETH_CTRL_RX_UNSUP) => "rx-control-unsupported",
+        (RMON, RMON_UNDERSIZE) => "undersize",
+        (RMON, RMON_OVERSIZE) => "oversize",
+        (RMON, RMON_FRAG) => "fragments",
+        (RMON, RMON_JABBER) => "jabbers",
+        _ => return None,
+    })
+}

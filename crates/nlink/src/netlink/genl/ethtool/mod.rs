@@ -615,18 +615,54 @@ pub enum EthtoolPauseAttr {
 // Statistics Attributes
 // =============================================================================
 
-/// Attributes for statistics.
+/// Top-level attributes for `ETHTOOL_MSG_STATS_GET` (`ETHTOOL_A_STATS_*`).
+///
+/// Note the header is **2**, not the usual 1 — `ETHTOOL_A_STATS_PAD`
+/// occupies index 1 in this message's attribute space.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EthtoolStatsAttr {
     Unspec = 0,
+    /// Padding (index 1).
+    Pad = 1,
     /// Request header (nested).
-    Header = 1,
+    Header = 2,
     /// Stat groups to query (bitset).
-    Groups = 2,
-    /// GRP nested stats.
-    Grp = 3,
+    Groups = 3,
+    /// One stat group's data (nested).
+    Grp = 4,
     /// Source for stats (u32).
-    Src = 4,
+    Src = 5,
+}
+
+/// Attributes nested under `ETHTOOL_A_STATS_GRP` (`ETHTOOL_A_STATS_GRP_*`).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EthtoolStatsGrpAttr {
+    Unspec = 0,
+    /// Padding (index 1).
+    Pad = 1,
+    /// Group id (u32) — one of [`stats_group`].
+    Id = 2,
+    /// String-set id (u32).
+    SsId = 3,
+    /// One stat: a nested attr whose type is the stat index and
+    /// whose payload is a `u64` value.
+    Stat = 4,
+}
+
+/// Standardized stat-group ids (`enum stats_group` in
+/// `ethtool_netlink.h`), used as `ETHTOOL_A_STATS_GRP_ID` values and
+/// as bit positions in the request `Groups` bitset.
+pub mod stats_group {
+    /// IEEE 802.3 PHY stats.
+    pub const ETH_PHY: u32 = 0;
+    /// IEEE 802.3 MAC stats.
+    pub const ETH_MAC: u32 = 1;
+    /// IEEE 802.3 MAC-control stats.
+    pub const ETH_CTRL: u32 = 2;
+    /// RMON (RFC 2819) stats.
+    pub const RMON: u32 = 3;
 }
