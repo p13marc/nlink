@@ -103,6 +103,13 @@ All notable changes to this project will be documented in this file.
   printed raw `{:?}` Debug for each event. It now renders a concise line
   per event (`new device …`, `new port … (eth3)`, `health event …`,
   `flash update …`), with a Debug fallback for future event variants.
+- **`ip` bin: namespace-safe `nexthop show` device names (#17).** The
+  ifindex→name resolution scanned `/sys/class/net/*/ifindex`, which reads
+  the calling process's mount namespace and prints the wrong (or no) device
+  name for a nexthop dumped from a foreign netns. It now resolves names via
+  a single `RTM_GETLINK` dump on the connection (`get_interface_names`),
+  which is always relative to the connection's netns, and reuses the map for
+  every nexthop instead of re-scanning sysfs per entry.
 
 ## [0.21.0] - 2026-06-04
 

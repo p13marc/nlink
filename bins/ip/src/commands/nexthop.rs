@@ -119,10 +119,15 @@ async fn show_nexthops(
         conn.get_nexthops().await?
     };
 
+    // Resolve ifindex -> name via netlink (RTM_GETLINK) rather than scanning
+    // /sys/class/net, which reads the calling process's mount namespace and is
+    // wrong inside a foreign netns. One dump, reused for every nexthop.
+    let names = conn.get_interface_names().await?;
+
     match format {
         OutputFormat::Json => {
             // Honor -p/--pretty instead of always pretty-printing.
-            let value = nexthops_to_json(&nexthops);
+            let value = nexthops_to_json(&nexthops, &names);
             let json = if opts.pretty {
                 serde_json::to_string_pretty(&value)
             } else {
@@ -133,7 +138,7 @@ async fn show_nexthops(
         }
         OutputFormat::Text => {
             for nh in &nexthops {
-                print_nexthop(nh);
+                print_nexthop(nh, &names);
             }
         }
     }
@@ -141,7 +146,7 @@ async fn show_nexthops(
     Ok(())
 }
 
-fn print_nexthop(nh: &Nexthop) {
+fn print_nexthop(nh: &Nexthop, names: &std::collections::HashMap<u32, String>) {
     print!("id {} ", nh.id());
 
     if let Some(group) = nh.group() {
@@ -193,7 +198,7 @@ fn print_nexthop(nh: &Nexthop) {
             }
             if let Some(ifindex) = nh.ifindex() {
                 // Try to resolve interface name
-                if let Some(name) = get_ifname(ifindex) {
+                if let Some(name) = names.get(&ifindex) {
                     print!("dev {} ", name);
                 } else {
                     print!("dev {} ", ifindex);
@@ -241,7 +246,10 @@ fn print_nexthop(nh: &Nexthop) {
     println!();
 }
 
-fn nexthops_to_json(nexthops: &[Nexthop]) -> Vec<serde_json::Value> {
+fn nexthops_to_json(
+    nexthops: &[Nexthop],
+    names: &std::collections::HashMap<u32, String>,
+) -> Vec<serde_json::Value> {
     nexthops
         .iter()
         .map(|nh| {
@@ -280,7 +288,9 @@ fn nexthops_to_json(nexthops: &[Nexthop]) -> Vec<serde_json::Value> {
                     obj["gateway"] = gw.to_string().into();
                 }
                 if let Some(ifindex) = nh.ifindex() {
-                    obj["dev"] = get_ifname(ifindex)
+                    obj["dev"] = names
+                        .get(&ifindex)
+                        .cloned()
                         .unwrap_or_else(|| ifindex.to_string())
                         .into();
                 }
@@ -429,21 +439,4 @@ async fn flush_nexthops(conn: &Connection<Route>) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Get interface name from index
-fn get_ifname(ifindex: u32) -> Option<String> {
-    let path = "/sys/class/net/";
-    let entries = std::fs::read_dir(path).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let idx_path = entry.path().join("ifindex");
-        if let Ok(content) = std::fs::read_to_string(&idx_path)
-            && let Ok(idx) = content.trim().parse::<u32>()
-            && idx == ifindex
-        {
-            return Some(name);
-        }
-    }
-    None
 }
