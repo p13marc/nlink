@@ -68,6 +68,10 @@ enum FilterAction {
         #[arg(long)]
         prio: Option<u16>,
 
+        /// Filter handle (e.g. 800::1).
+        #[arg(long)]
+        handle: Option<String>,
+
         /// Filter type (u32, flower, basic, etc.).
         #[arg(name = "TYPE")]
         kind: String,
@@ -116,6 +120,10 @@ enum FilterAction {
         #[arg(long)]
         prio: Option<u16>,
 
+        /// Filter handle (e.g. 800::1).
+        #[arg(long)]
+        handle: Option<String>,
+
         /// Filter type.
         #[arg(name = "TYPE")]
         kind: String,
@@ -141,6 +149,10 @@ enum FilterAction {
         /// Priority.
         #[arg(long)]
         prio: Option<u16>,
+
+        /// Filter handle (e.g. 800::1).
+        #[arg(long)]
+        handle: Option<String>,
 
         /// Filter type.
         #[arg(name = "TYPE")]
@@ -177,6 +189,7 @@ impl FilterCmd {
                 parent,
                 protocol,
                 prio,
+                handle,
                 kind,
                 params,
             } => {
@@ -186,6 +199,7 @@ impl FilterCmd {
                     &parent,
                     &protocol,
                     prio,
+                    handle.as_deref(),
                     &kind,
                     &params,
                     FilterVerb::Add,
@@ -225,6 +239,7 @@ impl FilterCmd {
                 parent,
                 protocol,
                 prio,
+                handle,
                 kind,
                 params,
             } => {
@@ -234,6 +249,7 @@ impl FilterCmd {
                     &parent,
                     &protocol,
                     prio,
+                    handle.as_deref(),
                     &kind,
                     &params,
                     FilterVerb::Replace,
@@ -245,6 +261,7 @@ impl FilterCmd {
                 parent,
                 protocol,
                 prio,
+                handle,
                 kind,
                 params,
             } => {
@@ -254,6 +271,7 @@ impl FilterCmd {
                     &parent,
                     &protocol,
                     prio,
+                    handle.as_deref(),
                     &kind,
                     &params,
                     FilterVerb::Change,
@@ -338,13 +356,14 @@ enum FilterVerb {
 /// Typed dispatch for every filter kind nlink models. Unknown
 /// kinds error cleanly with a recognised-kinds list; there's no
 /// silent fallback to a looser legacy parser anymore.
-#[allow(clippy::too_many_arguments)] // 7 args mirror the tc(8) CLI surface; bundling into a struct would just add ceremony
+#[allow(clippy::too_many_arguments)] // args mirror the tc(8) CLI surface; bundling into a struct would just add ceremony
 async fn dispatch_filter(
     conn: &Connection<Route>,
     dev: &str,
     parent: &str,
     protocol: &str,
     prio: Option<u16>,
+    handle: Option<&str>,
     kind: &str,
     params: &[String],
     verb: FilterVerb,
@@ -355,6 +374,15 @@ async fn dispatch_filter(
     let proto = parse_protocol_u16(protocol)?;
     let priority = prio.unwrap_or(0);
 
+    // Strict: a present-but-unparseable handle is an error, never a
+    // silently-dropped filter (see the CLAUDE.md strict-parse contract).
+    let handle = match handle {
+        None => None,
+        Some(h) => Some(h.parse::<TcHandle>().map_err(|e| {
+            Error::InvalidMessage(format!("tc filter: invalid handle `{h}`: {e}"))
+        })?),
+    };
+
     let refs: Vec<&str> = params.iter().map(String::as_str).collect();
 
     macro_rules! dispatch {
@@ -362,7 +390,7 @@ async fn dispatch_filter(
             // Bind through the ParseParams trait so the dispatcher's
             // contract is type-checked, not just convention.
             let cfg = <$Cfg as nlink::ParseParams>::parse_params(&refs)?;
-            run_typed_filter(conn, dev, parent, proto, priority, cfg, verb).await
+            run_typed_filter(conn, dev, parent, handle, proto, priority, cfg, verb).await
         }};
     }
     match kind {
@@ -381,10 +409,12 @@ async fn dispatch_filter(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // args mirror the tc(8) CLI surface
 async fn run_typed_filter<C: FilterConfig>(
     conn: &Connection<Route>,
     dev: &str,
     parent: TcHandle,
+    handle: Option<TcHandle>,
     proto: u16,
     priority: u16,
     cfg: C,
@@ -392,15 +422,15 @@ async fn run_typed_filter<C: FilterConfig>(
 ) -> Result<()> {
     match verb {
         FilterVerb::Add => {
-            conn.add_filter_full(dev, parent, None, proto, priority, cfg)
+            conn.add_filter_full(dev, parent, handle, proto, priority, cfg)
                 .await
         }
         FilterVerb::Replace => {
-            conn.replace_filter_full(dev, parent, None, proto, priority, cfg)
+            conn.replace_filter_full(dev, parent, handle, proto, priority, cfg)
                 .await
         }
         FilterVerb::Change => {
-            conn.change_filter_full(dev, parent, None, proto, priority, cfg)
+            conn.change_filter_full(dev, parent, handle, proto, priority, cfg)
                 .await
         }
     }
