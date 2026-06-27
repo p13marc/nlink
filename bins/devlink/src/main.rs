@@ -93,6 +93,23 @@ enum Command {
         #[command(subcommand)]
         action: RateAction,
     },
+
+    /// Show shared-buffer instances.
+    Sb,
+
+    /// Show packet traps.
+    Trap,
+
+    /// Show address regions.
+    Region,
+
+    /// Show hardware resources for a device.
+    Resource {
+        /// Bus name (e.g., "pci").
+        bus: String,
+        /// Device name (e.g., "0000:03:00.0").
+        device: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -601,6 +618,127 @@ async fn main() -> Result<()> {
                 eprintln!("Rate object {node} deleted");
             }
         },
+
+        Command::Sb => {
+            let buffers = conn.get_shared_buffers().await?;
+            if json {
+                let arr: Vec<_> = buffers
+                    .iter()
+                    .map(|sb| {
+                        serde_json::json!({
+                            "bus": sb.bus,
+                            "device": sb.device,
+                            "index": sb.index,
+                            "size": sb.size,
+                            "ingress_pools": sb.ingress_pools,
+                            "egress_pools": sb.egress_pools,
+                            "ingress_tcs": sb.ingress_tcs,
+                            "egress_tcs": sb.egress_tcs,
+                        })
+                    })
+                    .collect();
+                print_json(&serde_json::Value::Array(arr));
+            } else {
+                for sb in &buffers {
+                    println!(
+                        "{}/{} sb {} size {} ingress_pools {} egress_pools {}",
+                        sb.bus, sb.device, sb.index, sb.size, sb.ingress_pools, sb.egress_pools
+                    );
+                }
+            }
+        }
+
+        Command::Trap => {
+            let traps = conn.get_traps().await?;
+            if json {
+                let arr: Vec<_> = traps
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "bus": t.bus,
+                            "device": t.device,
+                            "name": t.name,
+                            "action": t.action.as_str(),
+                            "type": t.trap_type.as_str(),
+                            "generic": t.generic,
+                            "group": t.group,
+                        })
+                    })
+                    .collect();
+                print_json(&serde_json::Value::Array(arr));
+            } else {
+                for t in &traps {
+                    print!(
+                        "{}/{} trap {} type {} action {}",
+                        t.bus,
+                        t.device,
+                        t.name,
+                        t.trap_type.as_str(),
+                        t.action.as_str()
+                    );
+                    if let Some(ref g) = t.group {
+                        print!(" group {g}");
+                    }
+                    println!();
+                }
+            }
+        }
+
+        Command::Region => {
+            let regions = conn.get_regions().await?;
+            if json {
+                let arr: Vec<_> = regions
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "bus": r.bus,
+                            "device": r.device,
+                            "name": r.name,
+                            "size": r.size,
+                            "snapshots": r.snapshot_count,
+                        })
+                    })
+                    .collect();
+                print_json(&serde_json::Value::Array(arr));
+            } else {
+                for r in &regions {
+                    print!("{}/{} region {}", r.bus, r.device, r.name);
+                    if let Some(size) = r.size {
+                        print!(" size {size}");
+                    }
+                    println!(" snapshots {}", r.snapshot_count);
+                }
+            }
+        }
+
+        Command::Resource { bus, device } => {
+            let resources = conn.get_resources(&bus, &device).await?;
+            if json {
+                let arr: Vec<_> = resources
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "bus": r.bus,
+                            "device": r.device,
+                            "name": r.name,
+                            "id": r.id,
+                            "size": r.size,
+                            "occ": r.occ,
+                            "size_valid": r.size_valid,
+                        })
+                    })
+                    .collect();
+                print_json(&serde_json::Value::Array(arr));
+            } else {
+                for r in &resources {
+                    print!("{} size {}", r.name, r.size);
+                    if let Some(occ) = r.occ {
+                        print!(" occ {occ}");
+                    }
+                    println!();
+                }
+            }
+        }
     }
 
     Ok(())

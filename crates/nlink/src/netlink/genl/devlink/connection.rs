@@ -684,11 +684,275 @@ impl Connection<Devlink> {
         })
         .await
     }
+
+    // =========================================================================
+    // Shared buffers / traps / resources / regions (read-only)
+    // =========================================================================
+
+    /// List shared-buffer instances across all devlink devices.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_shared_buffers"))]
+    pub async fn get_shared_buffers(&self) -> Result<Vec<SharedBuffer>> {
+        let responses = self.devlink_dump(DEVLINK_CMD_SB_GET).await?;
+        Ok(responses
+            .iter()
+            .filter(|p| p.len() >= GENL_HDRLEN)
+            .filter_map(|p| parse_shared_buffer(&p[GENL_HDRLEN..]))
+            .collect())
+    }
+
+    /// List packet traps across all devlink devices.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_traps"))]
+    pub async fn get_traps(&self) -> Result<Vec<DevlinkTrap>> {
+        let responses = self.devlink_dump(DEVLINK_CMD_TRAP_GET).await?;
+        Ok(responses
+            .iter()
+            .filter(|p| p.len() >= GENL_HDRLEN)
+            .filter_map(|p| parse_trap(&p[GENL_HDRLEN..]))
+            .collect())
+    }
+
+    /// List address regions across all devlink devices.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_regions"))]
+    pub async fn get_regions(&self) -> Result<Vec<DevlinkRegion>> {
+        let responses = self.devlink_dump(DEVLINK_CMD_REGION_GET).await?;
+        Ok(responses
+            .iter()
+            .filter(|p| p.len() >= GENL_HDRLEN)
+            .filter_map(|p| parse_region(&p[GENL_HDRLEN..]))
+            .collect())
+    }
+
+    /// Get the hardware-resource tree for a specific device.
+    ///
+    /// Unlike sb/trap/region, `RESOURCE_DUMP` is a per-device `doit`
+    /// (not a netlink dump), so it takes `bus`/`device` and returns
+    /// the whole tree in one message, flattened here into a list with
+    /// slash-joined [`DevlinkResource::name`] paths.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_resources"))]
+    pub async fn get_resources(&self, bus: &str, device: &str) -> Result<Vec<DevlinkResource>> {
+        let response = self
+            .devlink_get(DEVLINK_CMD_RESOURCE_DUMP, bus, device)
+            .await?;
+        if response.len() < GENL_HDRLEN {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for (attr_type, payload) in AttrIter::new(&response[GENL_HDRLEN..]) {
+            if attr_type == DEVLINK_ATTR_RESOURCE_LIST {
+                parse_resource_list(bus, device, "", payload, &mut out);
+            }
+        }
+        Ok(out)
+    }
 }
 
 // =============================================================================
 // Attribute Parsing
 // =============================================================================
+
+/// Read a `u16` attribute payload (native endian), ignoring trailing
+/// bytes the kernel may have grown the attribute by.
+fn attr_u16(payload: &[u8]) -> Option<u16> {
+    payload.get(0..2).map(|b| u16::from_ne_bytes([b[0], b[1]]))
+}
+
+/// Read a `u32` attribute payload (native endian).
+fn attr_u32(payload: &[u8]) -> Option<u32> {
+    payload
+        .get(0..4)
+        .map(|b| u32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Read a `u64` attribute payload (native endian).
+fn attr_u64(payload: &[u8]) -> Option<u64> {
+    payload.get(0..8).map(|b| {
+        u64::from_ne_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+    })
+}
+
+fn parse_shared_buffer(data: &[u8]) -> Option<SharedBuffer> {
+    let mut bus = None;
+    let mut device = None;
+    let mut index = None;
+    let mut size = 0;
+    let (mut ing_pools, mut egr_pools, mut ing_tcs, mut egr_tcs) = (0, 0, 0, 0);
+
+    for (attr_type, payload) in AttrIter::new(data) {
+        match attr_type {
+            DEVLINK_ATTR_BUS_NAME => bus = attr_str(payload),
+            DEVLINK_ATTR_DEV_NAME => device = attr_str(payload),
+            DEVLINK_ATTR_SB_INDEX => index = attr_u32(payload),
+            DEVLINK_ATTR_SB_SIZE => size = attr_u32(payload).unwrap_or(0),
+            DEVLINK_ATTR_SB_INGRESS_POOL_COUNT => {
+                ing_pools = u32::from(attr_u16(payload).unwrap_or(0))
+            }
+            DEVLINK_ATTR_SB_EGRESS_POOL_COUNT => {
+                egr_pools = u32::from(attr_u16(payload).unwrap_or(0))
+            }
+            DEVLINK_ATTR_SB_INGRESS_TC_COUNT => {
+                ing_tcs = u32::from(attr_u16(payload).unwrap_or(0))
+            }
+            DEVLINK_ATTR_SB_EGRESS_TC_COUNT => {
+                egr_tcs = u32::from(attr_u16(payload).unwrap_or(0))
+            }
+            _ => {}
+        }
+    }
+
+    Some(SharedBuffer {
+        bus: bus?,
+        device: device?,
+        index: index?,
+        size,
+        ingress_pools: ing_pools,
+        egress_pools: egr_pools,
+        ingress_tcs: ing_tcs,
+        egress_tcs: egr_tcs,
+    })
+}
+
+fn parse_trap(data: &[u8]) -> Option<DevlinkTrap> {
+    let mut bus = None;
+    let mut device = None;
+    let mut name = None;
+    let mut action = TrapAction::Unknown(u8::MAX);
+    let mut trap_type = TrapType::Unknown(u8::MAX);
+    let mut generic = false;
+    let mut group = None;
+
+    for (attr_type, payload) in AttrIter::new(data) {
+        match attr_type {
+            DEVLINK_ATTR_BUS_NAME => bus = attr_str(payload),
+            DEVLINK_ATTR_DEV_NAME => device = attr_str(payload),
+            DEVLINK_ATTR_TRAP_NAME => name = attr_str(payload),
+            DEVLINK_ATTR_TRAP_ACTION => {
+                action = match payload.first().copied() {
+                    Some(DEVLINK_TRAP_ACTION_DROP) => TrapAction::Drop,
+                    Some(DEVLINK_TRAP_ACTION_TRAP) => TrapAction::Trap,
+                    Some(DEVLINK_TRAP_ACTION_MIRROR) => TrapAction::Mirror,
+                    Some(v) => TrapAction::Unknown(v),
+                    None => action,
+                };
+            }
+            DEVLINK_ATTR_TRAP_TYPE => {
+                trap_type = match payload.first().copied() {
+                    Some(DEVLINK_TRAP_TYPE_DROP) => TrapType::Drop,
+                    Some(DEVLINK_TRAP_TYPE_EXCEPTION) => TrapType::Exception,
+                    Some(DEVLINK_TRAP_TYPE_CONTROL) => TrapType::Control,
+                    Some(v) => TrapType::Unknown(v),
+                    None => trap_type,
+                };
+            }
+            DEVLINK_ATTR_TRAP_GENERIC => generic = true,
+            DEVLINK_ATTR_TRAP_GROUP_NAME => group = attr_str(payload),
+            _ => {}
+        }
+    }
+
+    Some(DevlinkTrap {
+        bus: bus?,
+        device: device?,
+        name: name?,
+        action,
+        trap_type,
+        generic,
+        group,
+    })
+}
+
+fn parse_region(data: &[u8]) -> Option<DevlinkRegion> {
+    let mut bus = None;
+    let mut device = None;
+    let mut name = None;
+    let mut size = None;
+    let mut snapshot_count = 0;
+
+    for (attr_type, payload) in AttrIter::new(data) {
+        match attr_type {
+            DEVLINK_ATTR_BUS_NAME => bus = attr_str(payload),
+            DEVLINK_ATTR_DEV_NAME => device = attr_str(payload),
+            DEVLINK_ATTR_REGION_NAME => name = attr_str(payload),
+            DEVLINK_ATTR_REGION_SIZE => size = attr_u64(payload),
+            DEVLINK_ATTR_REGION_SNAPSHOTS => {
+                snapshot_count = AttrIter::new(payload).count();
+            }
+            _ => {}
+        }
+    }
+
+    Some(DevlinkRegion {
+        bus: bus?,
+        device: device?,
+        name: name?,
+        size,
+        snapshot_count,
+    })
+}
+
+/// Recursively flatten a `DEVLINK_ATTR_RESOURCE_LIST` nest into `out`,
+/// joining nested resource names under `prefix` with `/`.
+fn parse_resource_list(
+    bus: &str,
+    device: &str,
+    prefix: &str,
+    data: &[u8],
+    out: &mut Vec<DevlinkResource>,
+) {
+    for (attr_type, payload) in AttrIter::new(data) {
+        if attr_type == DEVLINK_ATTR_RESOURCE {
+            parse_resource(bus, device, prefix, payload, out);
+        }
+    }
+}
+
+fn parse_resource(
+    bus: &str,
+    device: &str,
+    prefix: &str,
+    data: &[u8],
+    out: &mut Vec<DevlinkResource>,
+) {
+    let mut name = String::new();
+    let mut id = 0u64;
+    let mut size = 0u64;
+    let mut occ = None;
+    let mut size_valid = false;
+    let mut children: Option<&[u8]> = None;
+
+    for (attr_type, payload) in AttrIter::new(data) {
+        match attr_type {
+            DEVLINK_ATTR_RESOURCE_NAME => name = attr_str(payload).unwrap_or_default(),
+            DEVLINK_ATTR_RESOURCE_ID => id = attr_u64(payload).unwrap_or(0),
+            DEVLINK_ATTR_RESOURCE_SIZE => size = attr_u64(payload).unwrap_or(0),
+            DEVLINK_ATTR_RESOURCE_OCC => occ = attr_u64(payload),
+            DEVLINK_ATTR_RESOURCE_SIZE_VALID => {
+                size_valid = payload.first().copied().unwrap_or(0) != 0;
+            }
+            DEVLINK_ATTR_RESOURCE_LIST => children = Some(payload),
+            _ => {}
+        }
+    }
+
+    let full = if prefix.is_empty() {
+        name.clone()
+    } else {
+        format!("{prefix}/{name}")
+    };
+
+    out.push(DevlinkResource {
+        bus: bus.to_string(),
+        device: device.to_string(),
+        name: full.clone(),
+        id,
+        size,
+        occ,
+        size_valid,
+    });
+
+    if let Some(child_data) = children {
+        parse_resource_list(bus, device, &full, child_data, out);
+    }
+}
 
 fn parse_device(data: &[u8]) -> Option<DevlinkDevice> {
     let mut bus = None;
@@ -1029,3 +1293,123 @@ fn attr_str(payload: &[u8]) -> Option<String> {
     }
 }
 
+
+#[cfg(test)]
+mod read_parse_tests {
+    use super::*;
+    use crate::netlink::builder::MessageBuilder;
+
+    /// Build a bare attribute region (no headers) for feeding to the
+    /// free parse functions, which expect the post-GENL_HDRLEN slice.
+    fn attrs(build: impl FnOnce(&mut MessageBuilder)) -> Vec<u8> {
+        let mut b = MessageBuilder::new(0, 0);
+        build(&mut b);
+        // Strip the 16-byte nlmsghdr the builder prepends.
+        b.as_bytes()[16..].to_vec()
+    }
+
+    #[test]
+    fn parse_shared_buffer_basic() {
+        let data = attrs(|b| {
+            b.append_attr_str(DEVLINK_ATTR_BUS_NAME, "pci");
+            b.append_attr_str(DEVLINK_ATTR_DEV_NAME, "0000:03:00.0");
+            b.append_attr(DEVLINK_ATTR_SB_INDEX, &0u32.to_ne_bytes());
+            b.append_attr(DEVLINK_ATTR_SB_SIZE, &16_000_000u32.to_ne_bytes());
+            b.append_attr(DEVLINK_ATTR_SB_INGRESS_POOL_COUNT, &4u16.to_ne_bytes());
+            b.append_attr(DEVLINK_ATTR_SB_EGRESS_POOL_COUNT, &4u16.to_ne_bytes());
+        });
+        let sb = parse_shared_buffer(&data).expect("parse");
+        assert_eq!(sb.bus, "pci");
+        assert_eq!(sb.device, "0000:03:00.0");
+        assert_eq!(sb.index, 0);
+        assert_eq!(sb.size, 16_000_000);
+        assert_eq!(sb.ingress_pools, 4);
+        assert_eq!(sb.egress_pools, 4);
+    }
+
+    #[test]
+    fn parse_trap_basic() {
+        let data = attrs(|b| {
+            b.append_attr_str(DEVLINK_ATTR_BUS_NAME, "pci");
+            b.append_attr_str(DEVLINK_ATTR_DEV_NAME, "0000:03:00.0");
+            b.append_attr_str(DEVLINK_ATTR_TRAP_NAME, "source_mac_is_multicast");
+            b.append_attr(DEVLINK_ATTR_TRAP_ACTION, &[DEVLINK_TRAP_ACTION_DROP]);
+            b.append_attr(DEVLINK_ATTR_TRAP_TYPE, &[DEVLINK_TRAP_TYPE_DROP]);
+            b.append_attr(DEVLINK_ATTR_TRAP_GENERIC, &[]);
+            b.append_attr_str(DEVLINK_ATTR_TRAP_GROUP_NAME, "l2_drops");
+        });
+        let t = parse_trap(&data).expect("parse");
+        assert_eq!(t.name, "source_mac_is_multicast");
+        assert_eq!(t.action, TrapAction::Drop);
+        assert_eq!(t.trap_type, TrapType::Drop);
+        assert!(t.generic);
+        assert_eq!(t.group.as_deref(), Some("l2_drops"));
+    }
+
+    #[test]
+    fn parse_trap_unknown_action_is_forward_compat() {
+        let data = attrs(|b| {
+            b.append_attr_str(DEVLINK_ATTR_BUS_NAME, "pci");
+            b.append_attr_str(DEVLINK_ATTR_DEV_NAME, "d");
+            b.append_attr_str(DEVLINK_ATTR_TRAP_NAME, "future");
+            b.append_attr(DEVLINK_ATTR_TRAP_ACTION, &[99]);
+        });
+        let t = parse_trap(&data).expect("parse");
+        assert_eq!(t.action, TrapAction::Unknown(99));
+    }
+
+    #[test]
+    fn parse_region_counts_snapshots() {
+        let data = attrs(|b| {
+            b.append_attr_str(DEVLINK_ATTR_BUS_NAME, "pci");
+            b.append_attr_str(DEVLINK_ATTR_DEV_NAME, "d");
+            b.append_attr_str(DEVLINK_ATTR_REGION_NAME, "cr-space");
+            b.append_attr(DEVLINK_ATTR_REGION_SIZE, &1024u64.to_ne_bytes());
+            // Two snapshot sub-attrs nested under SNAPSHOTS.
+            let tok = b.nest_start(DEVLINK_ATTR_REGION_SNAPSHOTS);
+            b.append_attr(1, &0u32.to_ne_bytes());
+            b.append_attr(1, &1u32.to_ne_bytes());
+            b.nest_end(tok);
+        });
+        let r = parse_region(&data).expect("parse");
+        assert_eq!(r.name, "cr-space");
+        assert_eq!(r.size, Some(1024));
+        assert_eq!(r.snapshot_count, 2);
+    }
+
+    #[test]
+    fn parse_resource_tree_flattens_with_paths() {
+        // Build RESOURCE_LIST { RESOURCE(kvd) { RESOURCE_LIST {
+        //   RESOURCE(linear) } } }.
+        let data = attrs(|b| {
+            let list = b.nest_start(DEVLINK_ATTR_RESOURCE_LIST);
+            let parent = b.nest_start(DEVLINK_ATTR_RESOURCE);
+            b.append_attr_str(DEVLINK_ATTR_RESOURCE_NAME, "kvd");
+            b.append_attr(DEVLINK_ATTR_RESOURCE_ID, &1u64.to_ne_bytes());
+            b.append_attr(DEVLINK_ATTR_RESOURCE_SIZE, &1000u64.to_ne_bytes());
+            let child_list = b.nest_start(DEVLINK_ATTR_RESOURCE_LIST);
+            let child = b.nest_start(DEVLINK_ATTR_RESOURCE);
+            b.append_attr_str(DEVLINK_ATTR_RESOURCE_NAME, "linear");
+            b.append_attr(DEVLINK_ATTR_RESOURCE_ID, &2u64.to_ne_bytes());
+            b.append_attr(DEVLINK_ATTR_RESOURCE_SIZE, &500u64.to_ne_bytes());
+            b.append_attr(DEVLINK_ATTR_RESOURCE_OCC, &123u64.to_ne_bytes());
+            b.nest_end(child);
+            b.nest_end(child_list);
+            b.nest_end(parent);
+            b.nest_end(list);
+        });
+
+        let mut out = Vec::new();
+        for (attr_type, payload) in AttrIter::new(&data) {
+            if attr_type == DEVLINK_ATTR_RESOURCE_LIST {
+                parse_resource_list("pci", "d", "", payload, &mut out);
+            }
+        }
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].name, "kvd");
+        assert_eq!(out[0].size, 1000);
+        assert_eq!(out[1].name, "kvd/linear");
+        assert_eq!(out[1].size, 500);
+        assert_eq!(out[1].occ, Some(123));
+    }
+}
