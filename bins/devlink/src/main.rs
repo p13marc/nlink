@@ -9,7 +9,8 @@ use nlink::{
     netlink::{
         Connection, Devlink, Result,
         genl::devlink::{
-            ConfigMode, DevlinkRate, DevlinkRateType, FlashRequest, ParamData, ReloadAction,
+            ConfigMode, DevlinkPortFunctionState, DevlinkRate, DevlinkRateType, FlashRequest,
+            ParamData, ReloadAction,
         },
     },
 };
@@ -166,6 +167,40 @@ enum PortAction {
         #[arg(long)]
         device: Option<String>,
     },
+
+    /// Split a port into sub-ports.
+    Split {
+        /// Bus name.
+        bus: String,
+        /// Device name.
+        device: String,
+        /// Port index.
+        port: u32,
+        /// Number of sub-ports to split into.
+        count: u32,
+    },
+
+    /// Unsplit a previously split port.
+    Unsplit {
+        /// Bus name.
+        bus: String,
+        /// Device name.
+        device: String,
+        /// Port index.
+        port: u32,
+    },
+
+    /// Set a port-function state (activate/deactivate an SR-IOV VF).
+    Function {
+        /// Bus name.
+        bus: String,
+        /// Device name.
+        device: String,
+        /// Port index.
+        port: u32,
+        /// State: "active" or "inactive".
+        state: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -259,48 +294,85 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Port { action } => {
-            let ports = conn.get_ports().await?;
-            let (filter_bus, filter_dev) = match action {
-                Some(PortAction::Show { bus, device }) => (bus, device),
-                None => (None, None),
-            };
-            let filtered: Vec<_> = ports
-                .iter()
-                .filter(|port| {
-                    filter_bus.as_ref().is_none_or(|b| &port.bus == b)
-                        && filter_dev.as_ref().is_none_or(|d| &port.device == d)
-                })
-                .collect();
-            if json {
-                let arr: Vec<_> = filtered
+        Command::Port { action } => match action {
+            None | Some(PortAction::Show { .. }) => {
+                let (filter_bus, filter_dev) = match action {
+                    Some(PortAction::Show { bus, device }) => (bus, device),
+                    _ => (None, None),
+                };
+                let ports = conn.get_ports().await?;
+                let filtered: Vec<_> = ports
                     .iter()
-                    .map(|port| {
-                        serde_json::json!({
-                            "bus": port.bus,
-                            "device": port.device,
-                            "index": port.index,
-                            "path": port.path(),
-                            "type": format!("{:?}", port.port_type),
-                            "netdev": port.netdev_name,
-                            "flavour": port.flavour.map(|f| format!("{f:?}")),
-                        })
+                    .filter(|port| {
+                        filter_bus.as_ref().is_none_or(|b| &port.bus == b)
+                            && filter_dev.as_ref().is_none_or(|d| &port.device == d)
                     })
                     .collect();
-                print_json(&serde_json::Value::Array(arr));
-            } else {
-                for port in filtered {
-                    print!("{}", port.path());
-                    if let Some(ref name) = port.netdev_name {
-                        print!(" netdev {name}");
+                if json {
+                    let arr: Vec<_> = filtered
+                        .iter()
+                        .map(|port| {
+                            serde_json::json!({
+                                "bus": port.bus,
+                                "device": port.device,
+                                "index": port.index,
+                                "path": port.path(),
+                                "type": format!("{:?}", port.port_type),
+                                "netdev": port.netdev_name,
+                                "flavour": port.flavour.map(|f| format!("{f:?}")),
+                            })
+                        })
+                        .collect();
+                    print_json(&serde_json::Value::Array(arr));
+                } else {
+                    for port in filtered {
+                        print!("{}", port.path());
+                        if let Some(ref name) = port.netdev_name {
+                            print!(" netdev {name}");
+                        }
+                        if let Some(flavour) = port.flavour {
+                            print!(" flavour {flavour:?}");
+                        }
+                        println!();
                     }
-                    if let Some(flavour) = port.flavour {
-                        print!(" flavour {flavour:?}");
-                    }
-                    println!();
                 }
             }
-        }
+
+            Some(PortAction::Split {
+                bus,
+                device,
+                port,
+                count,
+            }) => {
+                conn.port_split(&bus, &device, port, count).await?;
+                eprintln!("Port {port} split into {count}");
+            }
+
+            Some(PortAction::Unsplit { bus, device, port }) => {
+                conn.port_unsplit(&bus, &device, port).await?;
+                eprintln!("Port {port} unsplit");
+            }
+
+            Some(PortAction::Function {
+                bus,
+                device,
+                port,
+                state,
+            }) => {
+                let state = match state.as_str() {
+                    "active" => DevlinkPortFunctionState::Active,
+                    "inactive" => DevlinkPortFunctionState::Inactive,
+                    other => {
+                        return Err(nlink::netlink::Error::InvalidMessage(format!(
+                            "devlink port function: invalid state `{other}` (expected active/inactive)"
+                        )));
+                    }
+                };
+                conn.set_port_function_state(&bus, &device, port, state)
+                    .await?;
+                eprintln!("Port {port} function set to {state:?}");
+            }
+        },
 
         Command::Info { bus, device } => {
             let info = conn.get_device_info(&bus, &device).await?;
