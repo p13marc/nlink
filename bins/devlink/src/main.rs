@@ -18,6 +18,10 @@ use tokio_stream::StreamExt;
 #[derive(Parser)]
 #[command(name = "devlink", version, about = "Devlink device management utility")]
 struct Cli {
+    /// Emit machine-readable JSON instead of the default text output.
+    #[arg(long, short, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -229,14 +233,29 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let json = cli.json;
     let conn = Connection::<Devlink>::new_async().await?;
 
     match cli.command {
         Command::Dev { action } => {
             let _ = action; // show is default
             let devices = conn.get_devices().await?;
-            for dev in &devices {
-                println!("{}", dev.path());
+            if json {
+                let arr: Vec<_> = devices
+                    .iter()
+                    .map(|dev| {
+                        serde_json::json!({
+                            "bus": dev.bus,
+                            "device": dev.device,
+                            "path": dev.path(),
+                        })
+                    })
+                    .collect();
+                print_json(&serde_json::Value::Array(arr));
+            } else {
+                for dev in &devices {
+                    println!("{}", dev.path());
+                }
             }
         }
 
@@ -246,71 +265,122 @@ async fn main() -> Result<()> {
                 Some(PortAction::Show { bus, device }) => (bus, device),
                 None => (None, None),
             };
-            for port in &ports {
-                if let Some(ref b) = filter_bus
-                    && &port.bus != b
-                {
-                    continue;
+            let filtered: Vec<_> = ports
+                .iter()
+                .filter(|port| {
+                    filter_bus.as_ref().is_none_or(|b| &port.bus == b)
+                        && filter_dev.as_ref().is_none_or(|d| &port.device == d)
+                })
+                .collect();
+            if json {
+                let arr: Vec<_> = filtered
+                    .iter()
+                    .map(|port| {
+                        serde_json::json!({
+                            "bus": port.bus,
+                            "device": port.device,
+                            "index": port.index,
+                            "path": port.path(),
+                            "type": format!("{:?}", port.port_type),
+                            "netdev": port.netdev_name,
+                            "flavour": port.flavour.map(|f| format!("{f:?}")),
+                        })
+                    })
+                    .collect();
+                print_json(&serde_json::Value::Array(arr));
+            } else {
+                for port in filtered {
+                    print!("{}", port.path());
+                    if let Some(ref name) = port.netdev_name {
+                        print!(" netdev {name}");
+                    }
+                    if let Some(flavour) = port.flavour {
+                        print!(" flavour {flavour:?}");
+                    }
+                    println!();
                 }
-                if let Some(ref d) = filter_dev
-                    && &port.device != d
-                {
-                    continue;
-                }
-                print!("{}", port.path());
-                if let Some(ref name) = port.netdev_name {
-                    print!(" netdev {name}");
-                }
-                if let Some(flavour) = port.flavour {
-                    print!(" flavour {flavour:?}");
-                }
-                println!();
             }
         }
 
         Command::Info { bus, device } => {
             let info = conn.get_device_info(&bus, &device).await?;
-            println!("{}/{}", info.bus, info.device);
-            println!("  driver: {}", info.driver);
-            if let Some(ref serial) = info.serial {
-                println!("  serial: {serial}");
-            }
-            if !info.versions_fixed.is_empty() {
-                println!("  versions (fixed):");
-                for v in &info.versions_fixed {
-                    println!("    {}: {}", v.name, v.value);
+            if json {
+                let versions = |vs: &[nlink::netlink::genl::devlink::VersionInfo]| {
+                    vs.iter()
+                        .map(|v| serde_json::json!({"name": v.name, "value": v.value}))
+                        .collect::<Vec<_>>()
+                };
+                print_json(&serde_json::json!({
+                    "bus": info.bus,
+                    "device": info.device,
+                    "driver": info.driver,
+                    "serial": info.serial,
+                    "board_serial": info.board_serial,
+                    "versions_fixed": versions(&info.versions_fixed),
+                    "versions_running": versions(&info.versions_running),
+                    "versions_stored": versions(&info.versions_stored),
+                    "pending_update": info.has_pending_update(),
+                }));
+            } else {
+                println!("{}/{}", info.bus, info.device);
+                println!("  driver: {}", info.driver);
+                if let Some(ref serial) = info.serial {
+                    println!("  serial: {serial}");
                 }
-            }
-            if !info.versions_running.is_empty() {
-                println!("  versions (running):");
-                for v in &info.versions_running {
-                    println!("    {}: {}", v.name, v.value);
+                if !info.versions_fixed.is_empty() {
+                    println!("  versions (fixed):");
+                    for v in &info.versions_fixed {
+                        println!("    {}: {}", v.name, v.value);
+                    }
                 }
-            }
-            if !info.versions_stored.is_empty() {
-                println!("  versions (stored):");
-                for v in &info.versions_stored {
-                    println!("    {}: {}", v.name, v.value);
+                if !info.versions_running.is_empty() {
+                    println!("  versions (running):");
+                    for v in &info.versions_running {
+                        println!("    {}: {}", v.name, v.value);
+                    }
                 }
-            }
-            if info.has_pending_update() {
-                println!("  ** pending firmware update **");
+                if !info.versions_stored.is_empty() {
+                    println!("  versions (stored):");
+                    for v in &info.versions_stored {
+                        println!("    {}: {}", v.name, v.value);
+                    }
+                }
+                if info.has_pending_update() {
+                    println!("  ** pending firmware update **");
+                }
             }
         }
 
         Command::Health { action } => match action {
             HealthAction::Show { bus, device } => {
                 let reporters = conn.get_health_reporters(&bus, &device).await?;
-                for r in &reporters {
-                    print!("{}: state={:?}", r.name, r.state);
-                    if r.error_count > 0 {
-                        print!(" errors={}", r.error_count);
+                if json {
+                    let arr: Vec<_> = reporters
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "name": r.name,
+                                "state": format!("{:?}", r.state),
+                                "error_count": r.error_count,
+                                "recover_count": r.recover_count,
+                                "auto_recover": r.auto_recover,
+                                "auto_dump": r.auto_dump,
+                            })
+                        })
+                        .collect();
+                    print_json(&serde_json::Value::Array(arr));
+                } else {
+                    for r in &reporters {
+                        print!("{}: state={:?}", r.name, r.state);
+                        if r.error_count > 0 {
+                            print!(" errors={}", r.error_count);
+                        }
+                        if r.recover_count > 0 {
+                            print!(" recoveries={}", r.recover_count);
+                        }
+                        print!(" auto_recover={} auto_dump={}", r.auto_recover, r.auto_dump);
+                        println!();
                     }
-                    if r.recover_count > 0 {
-                        print!(" recoveries={}", r.recover_count);
-                    }
-                    print!(" auto_recover={} auto_dump={}", r.auto_recover, r.auto_dump);
-                    println!();
                 }
             }
             HealthAction::Recover {
@@ -327,15 +397,39 @@ async fn main() -> Result<()> {
         Command::Param { action } => match action {
             ParamAction::Show { bus, device } => {
                 let params = conn.get_params(&bus, &device).await?;
-                for p in &params {
-                    print!("{}:", p.name);
-                    if p.generic {
-                        print!(" [generic]");
+                if json {
+                    let arr: Vec<_> = params
+                        .iter()
+                        .map(|p| {
+                            let values: Vec<_> = p
+                                .values
+                                .iter()
+                                .map(|v| {
+                                    serde_json::json!({
+                                        "cmode": format!("{:?}", v.cmode),
+                                        "value": v.data.to_string(),
+                                    })
+                                })
+                                .collect();
+                            serde_json::json!({
+                                "name": p.name,
+                                "generic": p.generic,
+                                "values": values,
+                            })
+                        })
+                        .collect();
+                    print_json(&serde_json::Value::Array(arr));
+                } else {
+                    for p in &params {
+                        print!("{}:", p.name);
+                        if p.generic {
+                            print!(" [generic]");
+                        }
+                        for v in &p.values {
+                            print!(" {:?}={}", v.cmode, v.data);
+                        }
+                        println!();
                     }
-                    for v in &p.values {
-                        print!(" {:?}={}", v.cmode, v.data);
-                    }
-                    println!();
                 }
             }
             ParamAction::Set {
@@ -383,6 +477,7 @@ async fn main() -> Result<()> {
 
         Command::Monitor => unreachable!(),
 
+        // Mutating commands report status on stderr regardless of --json.
         Command::Reload {
             bus,
             device,
@@ -472,6 +567,14 @@ fn build_rate(
         rate = rate.parent_node(p);
     }
     Ok(rate)
+}
+
+/// Print a JSON value as pretty-printed JSON on stdout.
+fn print_json(value: &serde_json::Value) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).expect("JSON serialization")
+    );
 }
 
 #[cfg(test)]
