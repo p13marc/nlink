@@ -463,7 +463,7 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             lacp_rate,
             common,
         } => {
-            let mode_val = parse_bond_mode(&mode);
+            let mode_val = parse_bond_mode(&mode)?;
             let mut link = BondLink::new(&name).mode(mode_val);
             if let Some(v) = miimon {
                 link = link.miimon(v);
@@ -478,7 +478,7 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
                 link = link.min_links(v);
             }
             if let Some(ref policy) = xmit_hash_policy {
-                let p = parse_xmit_hash_policy(policy);
+                let p = parse_xmit_hash_policy(policy)?;
                 link = link.xmit_hash_policy(p);
             }
             if let Some(v) = arp_interval {
@@ -490,7 +490,7 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
                 link = link.arp_ip_target(ip);
             }
             if let Some(ref rate) = lacp_rate {
-                link = link.lacp_rate(parse_lacp_rate(rate));
+                link = link.lacp_rate(parse_lacp_rate(rate)?);
             }
             if let Some(mtu) = common.mtu {
                 link = link.mtu(mtu);
@@ -510,8 +510,14 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             common,
         } => {
             let mut link = VlanLink::new(&name, &parent, id);
-            if protocol == "802.1ad" {
-                link = link.qinq();
+            match protocol.to_lowercase().as_str() {
+                "802.1q" => {}
+                "802.1ad" => link = link.qinq(),
+                other => {
+                    return Err(invalid(format!(
+                        "vlan: unknown protocol `{other}` (expected 802.1q or 802.1ad)"
+                    )));
+                }
             }
             if let Some(mtu) = common.mtu {
                 link = link.mtu(mtu);
@@ -573,7 +579,7 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             mode,
             common,
         } => {
-            let mode_val = parse_macvlan_mode(&mode);
+            let mode_val = parse_macvlan_mode(&mode)?;
             let mut link = MacvlanLink::new(&name, &parent).mode(mode_val);
             if let Some(mtu) = common.mtu {
                 link = link.mtu(mtu);
@@ -591,7 +597,7 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             mode,
             common,
         } => {
-            let mode_val = parse_macvlan_mode(&mode);
+            let mode_val = parse_macvlan_mode(&mode)?;
             let mut link = MacvtapLink::new(&name, &parent).mode(mode_val);
             if let Some(mtu) = common.mtu {
                 link = link.mtu(mtu);
@@ -609,7 +615,7 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             mode,
             common,
         } => {
-            let mode_val = parse_ipvlan_mode(&mode);
+            let mode_val = parse_ipvlan_mode(&mode)?;
             let mut link = IpvlanLink::new(&name, &parent).mode(mode_val);
             if let Some(mtu) = common.mtu {
                 link = link.mtu(mtu);
@@ -861,8 +867,12 @@ fn parse_mac(addr: &str) -> Result<[u8; 6]> {
         .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("invalid MAC address: {}", e)))
 }
 
-fn parse_bond_mode(mode: &str) -> BondMode {
-    match mode.to_lowercase().as_str() {
+fn invalid(msg: String) -> nlink::netlink::Error {
+    nlink::netlink::Error::InvalidMessage(msg)
+}
+
+fn parse_bond_mode(mode: &str) -> Result<BondMode> {
+    Ok(match mode.to_lowercase().as_str() {
         "balance-rr" | "0" => BondMode::BalanceRr,
         "active-backup" | "1" => BondMode::ActiveBackup,
         "balance-xor" | "2" => BondMode::BalanceXor,
@@ -870,48 +880,117 @@ fn parse_bond_mode(mode: &str) -> BondMode {
         "802.3ad" | "4" => BondMode::Lacp,
         "balance-tlb" | "5" => BondMode::BalanceTlb,
         "balance-alb" | "6" => BondMode::BalanceAlb,
-        _ => BondMode::BalanceRr,
-    }
+        other => {
+            return Err(invalid(format!(
+                "bond: unknown mode `{other}` (expected balance-rr, active-backup, \
+                 balance-xor, broadcast, 802.3ad, balance-tlb, balance-alb, or 0-6)"
+            )));
+        }
+    })
 }
 
-fn parse_xmit_hash_policy(policy: &str) -> XmitHashPolicy {
-    match policy.to_lowercase().as_str() {
+fn parse_xmit_hash_policy(policy: &str) -> Result<XmitHashPolicy> {
+    Ok(match policy.to_lowercase().as_str() {
         "layer2" | "0" => XmitHashPolicy::Layer2,
         "layer3+4" | "1" => XmitHashPolicy::Layer34,
         "layer2+3" | "2" => XmitHashPolicy::Layer23,
         "encap2+3" | "3" => XmitHashPolicy::Encap23,
         "encap3+4" | "4" => XmitHashPolicy::Encap34,
         "vlan+srcmac" | "5" => XmitHashPolicy::VlanSrcMac,
-        _ => XmitHashPolicy::Layer2,
-    }
+        other => {
+            return Err(invalid(format!(
+                "bond: unknown xmit_hash_policy `{other}` (expected layer2, layer3+4, \
+                 layer2+3, encap2+3, encap3+4, vlan+srcmac, or 0-5)"
+            )));
+        }
+    })
 }
 
-fn parse_lacp_rate(rate: &str) -> LacpRate {
-    match rate.to_lowercase().as_str() {
+fn parse_lacp_rate(rate: &str) -> Result<LacpRate> {
+    Ok(match rate.to_lowercase().as_str() {
         "fast" | "1" => LacpRate::Fast,
         "slow" | "0" => LacpRate::Slow,
-        _ => LacpRate::Slow,
-    }
+        other => {
+            return Err(invalid(format!(
+                "bond: unknown lacp_rate `{other}` (expected fast, slow, 0, or 1)"
+            )));
+        }
+    })
 }
 
-fn parse_macvlan_mode(mode: &str) -> nlink::netlink::link::MacvlanMode {
+fn parse_macvlan_mode(mode: &str) -> Result<nlink::netlink::link::MacvlanMode> {
     use nlink::netlink::link::MacvlanMode;
-    match mode.to_lowercase().as_str() {
+    Ok(match mode.to_lowercase().as_str() {
         "private" => MacvlanMode::Private,
         "vepa" => MacvlanMode::Vepa,
         "bridge" => MacvlanMode::Bridge,
         "passthru" => MacvlanMode::Passthru,
         "source" => MacvlanMode::Source,
-        _ => MacvlanMode::Bridge,
-    }
+        other => {
+            return Err(invalid(format!(
+                "macvlan: unknown mode `{other}` (expected private, vepa, bridge, \
+                 passthru, or source)"
+            )));
+        }
+    })
 }
 
-fn parse_ipvlan_mode(mode: &str) -> nlink::netlink::link::IpvlanMode {
+fn parse_ipvlan_mode(mode: &str) -> Result<nlink::netlink::link::IpvlanMode> {
     use nlink::netlink::link::IpvlanMode;
-    match mode.to_lowercase().as_str() {
+    Ok(match mode.to_lowercase().as_str() {
         "l2" => IpvlanMode::L2,
         "l3" => IpvlanMode::L3,
         "l3s" => IpvlanMode::L3S,
-        _ => IpvlanMode::L3,
+        other => {
+            return Err(invalid(format!(
+                "ipvlan: unknown mode `{other}` (expected l2, l3, or l3s)"
+            )));
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bond_mode_accepts_known() {
+        assert!(matches!(parse_bond_mode("active-backup"), Ok(BondMode::ActiveBackup)));
+        assert!(matches!(parse_bond_mode("4"), Ok(BondMode::Lacp)));
+        assert!(matches!(parse_bond_mode("802.3AD"), Ok(BondMode::Lacp)));
+    }
+
+    #[test]
+    fn bond_mode_rejects_unknown() {
+        let err = parse_bond_mode("bogus").unwrap_err().to_string();
+        assert!(err.contains("bond: unknown mode `bogus`"), "{err}");
+    }
+
+    #[test]
+    fn xmit_hash_policy_rejects_unknown() {
+        assert!(parse_xmit_hash_policy("layer2").is_ok());
+        let err = parse_xmit_hash_policy("layer9").unwrap_err().to_string();
+        assert!(err.contains("unknown xmit_hash_policy `layer9`"), "{err}");
+    }
+
+    #[test]
+    fn lacp_rate_rejects_unknown() {
+        assert!(parse_lacp_rate("fast").is_ok());
+        let err = parse_lacp_rate("turbo").unwrap_err().to_string();
+        assert!(err.contains("unknown lacp_rate `turbo`"), "{err}");
+    }
+
+    #[test]
+    fn macvlan_mode_rejects_unknown() {
+        assert!(parse_macvlan_mode("bridge").is_ok());
+        let err = parse_macvlan_mode("brigde").unwrap_err().to_string();
+        assert!(err.contains("macvlan: unknown mode `brigde`"), "{err}");
+    }
+
+    #[test]
+    fn ipvlan_mode_rejects_unknown() {
+        assert!(parse_ipvlan_mode("l3s").is_ok());
+        let err = parse_ipvlan_mode("l4").unwrap_err().to_string();
+        assert!(err.contains("ipvlan: unknown mode `l4`"), "{err}");
     }
 }
