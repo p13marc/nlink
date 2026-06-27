@@ -199,6 +199,12 @@ pub async fn run_conf(interface: &str) -> Result<()> {
     let device = conn.get_device(interface).await?;
 
     println!("[Interface]");
+    // The privileged GET_DEVICE does return the private key, and the
+    // library parses it (see WgDevice::private_key). Emit it like the
+    // real `wg showconf`, which the conf format requires to be usable.
+    if let Some(ref sk) = device.private_key {
+        println!("PrivateKey = {}", base64_encode(sk));
+    }
     if let Some(port) = device.listen_port
         && port != 0
     {
@@ -209,8 +215,6 @@ pub async fn run_conf(interface: &str) -> Result<()> {
     {
         println!("FwMark = 0x{:x}", fwmark);
     }
-    // Private key is not returned by kernel, so we can't output it
-    // In the real wg tool, it requires PrivateKey to be set
 
     for peer in &device.peers {
         println!();
