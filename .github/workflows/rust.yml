@@ -141,6 +141,19 @@ jobs:
       - name: Run scripts/audit-example-features.sh
         run: bash scripts/audit-example-features.sh
 
+  # Issue #15 — README drifts silently. The README pins a published
+  # version, an MSRV, and binary package names that are really facts
+  # owned by Cargo.toml. This gate fails the build when any of them
+  # diverges from the workspace manifest (PR #14 had to fix a stale
+  # README; this stops the next drift from landing). Pure bash; ~1s.
+  check-readme:
+    name: check README in sync with workspace manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scripts/check-readme.sh
+        run: bash scripts/check-readme.sh
+
   # Audit script: every `.rs` file under crates/nlink/examples/
   # MUST be registered as a [[example]] entry in Cargo.toml.
   # Closes the gap surfaced by Plan 160: cargo doesn't auto-
