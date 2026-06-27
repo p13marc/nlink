@@ -142,6 +142,15 @@ enum Commands {
         #[arg(long)]
         autoneg: Option<bool>,
     },
+    /// Set device features (offloads): `<feature> on|off` pairs
+    #[command(short_flag = 'K')]
+    SetFeatures {
+        /// Device name
+        device: String,
+        /// `<feature> on|off` pairs, e.g. `tx-checksumming on rx-checksumming off`
+        #[arg(trailing_var_arg = true)]
+        features: Vec<String>,
+    },
     /// Monitor ethtool events
     Monitor,
 }
@@ -165,6 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::Show { device } => show_device(&device).await?,
         Commands::Features { device } => show_features(&device).await?,
+        Commands::SetFeatures { device, features } => set_features_cmd(&device, &features).await?,
         Commands::Rings { device } => show_rings(&device).await?,
         Commands::Channels { device } => show_channels(&device).await?,
         Commands::Coalesce { device } => show_coalesce(&device).await?,
@@ -550,16 +560,17 @@ async fn set_speed(
     duplex: Option<String>,
     autoneg: Option<bool>,
 ) -> nlink::Result<()> {
+    // Validate duplex up front — previously any non-`half` value
+    // (incl. typos like `ful`) silently became Full.
+    let duplex = duplex.as_deref().map(parse_duplex).transpose()?;
+
     let conn = Connection::<Ethtool>::new_async().await?;
     conn.set_link_modes(device, |mut m| {
         if let Some(v) = speed {
             m = m.speed(v);
         }
-        if let Some(ref d) = duplex {
-            m = m.duplex(match d.as_str() {
-                "half" => Duplex::Half,
-                _ => Duplex::Full,
-            });
+        if let Some(d) = duplex {
+            m = m.duplex(d);
         }
         if let Some(v) = autoneg {
             m = m.autoneg(v);
@@ -568,6 +579,66 @@ async fn set_speed(
     })
     .await?;
     eprintln!("Link modes set for {}", device);
+    Ok(())
+}
+
+/// Parse a duplex token, rejecting anything but `full`/`half`.
+fn parse_duplex(s: &str) -> nlink::Result<Duplex> {
+    match s {
+        "full" => Ok(Duplex::Full),
+        "half" => Ok(Duplex::Half),
+        other => Err(nlink::netlink::Error::InvalidMessage(format!(
+            "ethtool: invalid duplex `{other}` (expected `full` or `half`)"
+        ))),
+    }
+}
+
+/// Parse `<feature> on|off` pairs from the trailing args of
+/// `set-features`. Strict: an odd token count or a value that isn't
+/// `on`/`off` is an error rather than a silently-dropped change.
+fn parse_feature_pairs(tokens: &[String]) -> nlink::Result<Vec<(String, bool)>> {
+    if tokens.is_empty() {
+        return Err(nlink::netlink::Error::InvalidMessage(
+            "ethtool set-features: expected at least one `<feature> on|off` pair".into(),
+        ));
+    }
+    if !tokens.len().is_multiple_of(2) {
+        return Err(nlink::netlink::Error::InvalidMessage(format!(
+            "ethtool set-features: expected `<feature> on|off` pairs, got an odd number of \
+             tokens ({})",
+            tokens.len()
+        )));
+    }
+    tokens
+        .chunks(2)
+        .map(|pair| {
+            let on = match pair[1].as_str() {
+                "on" | "true" => true,
+                "off" | "false" => false,
+                other => {
+                    return Err(nlink::netlink::Error::InvalidMessage(format!(
+                        "ethtool set-features: invalid value `{other}` for `{}` \
+                         (expected on/off)",
+                        pair[0]
+                    )));
+                }
+            };
+            Ok((pair[0].clone(), on))
+        })
+        .collect()
+}
+
+async fn set_features_cmd(device: &str, tokens: &[String]) -> nlink::Result<()> {
+    let changes = parse_feature_pairs(tokens)?;
+    let conn = Connection::<Ethtool>::new_async().await?;
+    conn.set_features(device, |mut f| {
+        for (name, on) in &changes {
+            f = if *on { f.enable(name) } else { f.disable(name) };
+        }
+        f
+    })
+    .await?;
+    eprintln!("Features set for {}", device);
     Ok(())
 }
 
@@ -644,5 +715,44 @@ fn print_event(event: &EthtoolEvent) {
             println!("[?] unknown event (cmd={})", cmd);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplex_parse_strict() {
+        assert!(matches!(parse_duplex("full"), Ok(Duplex::Full)));
+        assert!(matches!(parse_duplex("half"), Ok(Duplex::Half)));
+        // The whole point: typos must error, not default to Full.
+        assert!(parse_duplex("ful").is_err());
+        assert!(parse_duplex("").is_err());
+    }
+
+    #[test]
+    fn feature_pairs_parse() {
+        let v = parse_feature_pairs(&[
+            "tx-checksumming".into(),
+            "on".into(),
+            "rx-checksumming".into(),
+            "off".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            v,
+            vec![
+                ("tx-checksumming".to_string(), true),
+                ("rx-checksumming".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn feature_pairs_strict() {
+        assert!(parse_feature_pairs(&[]).is_err()); // nothing to do
+        assert!(parse_feature_pairs(&["tx".into()]).is_err()); // odd count
+        assert!(parse_feature_pairs(&["tx".into(), "maybe".into()]).is_err()); // bad value
     }
 }
