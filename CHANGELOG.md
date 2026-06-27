@@ -13,6 +13,10 @@ All notable changes to this project will be documented in this file.
   (why a link is down), and pause-frame statistics in `show pause`. All
   appear in both the text and `--json` output, with stable string
   mappings for the MDI-X / ext-state enums.
+- **`wifi` bin: show more station detail (#24).** `wifi station` now
+  prints the already-parsed `signal_avg_dbm`, `connected_time_secs`, and
+  `inactive_time_ms` fields (previously dropped), alongside the existing
+  signal / bitrate / byte counters.
 
 - **`wg` bin: incremental allowed-ips + private-key unset (#23).** `wg set
   … --allowed-ips` now honors the `+` prefix to *add* ranges without
