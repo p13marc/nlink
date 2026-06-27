@@ -55,10 +55,37 @@ pub struct SetArgs {
 
 /// Run the set command.
 pub async fn run(args: SetArgs) -> Result<()> {
+    let has_device_opts =
+        args.listen_port.is_some() || args.private_key.is_some() || args.fwmark.is_some();
+    let has_peer_config = args.endpoint.is_some()
+        || args.allowed_ips.is_some()
+        || args.persistent_keepalive.is_some()
+        || args.preshared_key.is_some();
+
+    // `--remove` removes the peer wholesale; combining it with
+    // per-peer config flags previously silently dropped those flags.
+    // Reject the contradiction instead.
+    if args.remove && has_peer_config {
+        return Err(Error::InvalidMessage(
+            "wg set: `--remove` cannot be combined with peer configuration flags \
+             (--endpoint/--allowed-ips/--persistent-keepalive/--preshared-key)"
+                .into(),
+        ));
+    }
+
+    // A `set` with nothing to do was previously a silent no-op exiting 0.
+    if !has_device_opts && args.peer.is_none() {
+        return Err(Error::InvalidMessage(
+            "wg set: nothing to do — specify a device option \
+             (--listen-port/--private-key/--fwmark) or `--peer <key> ...`"
+                .into(),
+        ));
+    }
+
     let conn = Connection::<Wireguard>::new_async().await?;
 
     // Set device parameters if any device-level options are specified
-    if args.listen_port.is_some() || args.private_key.is_some() || args.fwmark.is_some() {
+    if has_device_opts {
         // Plan 209 H6 — security UX. Pre-0.19 a missing private-key
         // file or a base64-decode failure silently dropped the key
         // set; `wg set wg0 --private-key /path/typo` exited 0 and
