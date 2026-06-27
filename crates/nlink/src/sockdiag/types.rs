@@ -712,6 +712,48 @@ impl Timer {
             _ => Self::Off,
         }
     }
+
+    /// Format like `ss -o`: `timer:(<name>,<expires>,<count>)`.
+    ///
+    /// Returns `None` when no timer is active ([`Timer::Off`]), so
+    /// callers can skip the field entirely. The expiry is rendered
+    /// in `ss(8)`'s `<hr>hr<min>min<sec>sec` / `<sec>.<ms>sec` style.
+    pub fn describe(&self) -> Option<String> {
+        let (name, expires_ms, count) = match self {
+            Timer::Off => return None,
+            Timer::On {
+                expires_ms,
+                retrans,
+            } => ("on", *expires_ms, *retrans),
+            Timer::Keepalive { expires_ms, probes } => ("keepalive", *expires_ms, *probes),
+            Timer::TimeWait { expires_ms } => ("timewait", *expires_ms, 0),
+            Timer::Probe {
+                expires_ms,
+                retrans,
+            } => ("persist", *expires_ms, *retrans),
+        };
+        Some(format!(
+            "timer:({name},{},{count})",
+            format_timer_expires(expires_ms)
+        ))
+    }
+}
+
+/// Render a millisecond timer expiry the way `ss(8)` does.
+fn format_timer_expires(msecs: u32) -> String {
+    let total_secs = msecs / 1000;
+    let ms = msecs % 1000;
+    let secs = total_secs % 60;
+    let total_min = total_secs / 60;
+    let minutes = total_min % 60;
+    let hrs = total_min / 60;
+    if hrs > 0 {
+        format!("{hrs}hr{minutes:02}min{secs:02}sec")
+    } else if minutes > 0 {
+        format!("{minutes}min{secs:02}sec")
+    } else {
+        format!("{secs}.{ms:03}sec")
+    }
 }
 
 /// Aggregated socket statistics across all families.
@@ -821,6 +863,46 @@ pub struct TcpSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timer_describe_matches_ss_format() {
+        assert_eq!(Timer::Off.describe(), None);
+        assert_eq!(
+            Timer::Keepalive {
+                expires_ms: 29_000,
+                probes: 0
+            }
+            .describe()
+            .as_deref(),
+            Some("timer:(keepalive,29.000sec,0)")
+        );
+        assert_eq!(
+            Timer::On {
+                expires_ms: 62_500,
+                retrans: 3
+            }
+            .describe()
+            .as_deref(),
+            Some("timer:(on,1min02sec,3)")
+        );
+        assert_eq!(
+            Timer::TimeWait {
+                expires_ms: 3_661_000
+            }
+            .describe()
+            .as_deref(),
+            Some("timer:(timewait,1hr01min01sec,0)")
+        );
+        assert_eq!(
+            Timer::Probe {
+                expires_ms: 200,
+                retrans: 1
+            }
+            .describe()
+            .as_deref(),
+            Some("timer:(persist,0.200sec,1)")
+        );
+    }
 
     #[test]
     fn default_socket_summary_is_all_zeros() {

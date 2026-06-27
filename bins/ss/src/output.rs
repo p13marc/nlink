@@ -210,8 +210,8 @@ fn print_inet_socket(
     opts: &DisplayOptions,
     procs: &crate::procmap::ProcMap,
 ) -> io::Result<()> {
-    let local = format_addr(&sock.local, opts.numeric);
-    let remote = format_addr(&sock.remote, opts.numeric);
+    let local = format_addr(&sock.local, opts.numeric, opts.resolve);
+    let remote = format_addr(&sock.remote, opts.numeric, opts.resolve);
 
     let users = if opts.processes {
         crate::procmap::format_users(procs, sock.inode)
@@ -230,6 +230,13 @@ fn print_inet_socket(
         remote,
         users
     )?;
+
+    // Timer info (-o): only printed when a timer is active.
+    if opts.options
+        && let Some(timer) = sock.timer.describe()
+    {
+        writeln!(handle, "\t {timer}")?;
+    }
 
     // Extended info
     if opts.extended {
@@ -393,9 +400,13 @@ fn print_unix_socket(
     Ok(())
 }
 
-fn format_addr(addr: &SocketAddr, numeric: bool) -> String {
+fn format_addr(addr: &SocketAddr, numeric: bool, resolve: bool) -> String {
     let ip_str = if addr.ip().is_unspecified() {
         "*".to_string()
+    } else if resolve && !numeric {
+        // -r: reverse-DNS the address, falling back to numeric when
+        // there's no PTR record.
+        crate::dns::reverse_lookup(addr.ip()).unwrap_or_else(|| addr.ip().to_string())
     } else {
         addr.ip().to_string()
     };
