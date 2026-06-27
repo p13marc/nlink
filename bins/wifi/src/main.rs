@@ -3,10 +3,12 @@
 //! Lists wireless interfaces, scan results, station info,
 //! and manages connections via Generic Netlink.
 
+use std::time::Duration;
+
 use clap::{Parser, Subcommand};
 use nlink::netlink::{
-    Connection, Nl80211, Result,
-    genl::nl80211::{ConnectRequest, ScanRequest},
+    Connection, Error, Nl80211, Result,
+    genl::nl80211::{ConnectRequest, Nl80211Event, ScanRequest},
 };
 use tokio_stream::StreamExt;
 
@@ -88,22 +90,39 @@ fn format_mac(mac: &[u8; 6]) -> String {
     )
 }
 
+/// Render a monitored nl80211 event as a readable line instead of the
+/// raw `{:?}` Debug form.
+fn format_event(event: &Nl80211Event) -> String {
+    match event {
+        Nl80211Event::ScanComplete { ifindex } => format!("scan complete (ifindex {ifindex})"),
+        Nl80211Event::ScanAborted { ifindex } => format!("scan aborted (ifindex {ifindex})"),
+        Nl80211Event::Connect {
+            ifindex,
+            bssid,
+            status_code,
+        } => format!(
+            "connect (ifindex {ifindex}, bssid {}, status {status_code})",
+            format_mac(bssid)
+        ),
+        Nl80211Event::Disconnect {
+            ifindex,
+            reason_code,
+            ..
+        } => format!("disconnect (ifindex {ifindex}, reason {reason_code})"),
+        Nl80211Event::NewInterface { ifindex, name, .. } => format!(
+            "new interface {} (ifindex {ifindex})",
+            name.as_deref().unwrap_or("?")
+        ),
+        Nl80211Event::DelInterface { ifindex, .. } => {
+            format!("del interface (ifindex {ifindex})")
+        }
+        other => format!("{other:?}"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    if matches!(cli.command, Command::Monitor) {
-        let conn = Connection::<Nl80211>::new_async().await?;
-        conn.subscribe()?;
-        eprintln!("Monitoring WiFi events (Ctrl+C to stop)...");
-        let mut events = conn.events().await;
-        while let Some(result) = events.next().await {
-            match result {
-                Ok(event) => println!("{event:?}"),
-                Err(e) => eprintln!("Error: {e}"),
-            }
-        }
-        return Ok(());
-    }
 
     let conn = Connection::<Nl80211>::new_async().await?;
 
@@ -149,8 +168,9 @@ async fn main() -> Result<()> {
                     }
                 }
                 None => {
-                    eprintln!("Interface {interface} not found");
-                    std::process::exit(1);
+                    return Err(Error::InvalidMessage(format!(
+                        "interface {interface} not found"
+                    )));
                 }
             }
         }
@@ -160,11 +180,42 @@ async fn main() -> Result<()> {
             if let Some(ref ssid) = ssid {
                 request = request.ssid(ssid.as_bytes().to_vec());
             }
+
+            // Resolve the target ifindex so we can match the
+            // ScanComplete event to this interface.
+            let target_ifindex = conn
+                .get_interface(&interface)
+                .await?
+                .ok_or_else(|| Error::InvalidMessage(format!("interface {interface} not found")))?
+                .ifindex;
+
+            // Subscribe on a second connection so the event stream
+            // doesn't serialize against trigger_scan/get_scan_results
+            // on the main connection.
+            let sub = Connection::<Nl80211>::new_async().await?;
+            sub.subscribe()?;
+            let mut events = sub.events().await;
+
             eprintln!("Triggering scan on {interface}...");
             conn.trigger_scan(&interface, &request).await?;
 
-            // Brief delay to allow scan to complete
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            // Wait for the kernel's scan-complete signal instead of a
+            // fixed sleep (which both missed slow scans and wasted time
+            // on fast ones). Fall back after a timeout.
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                while let Some(result) = events.next().await {
+                    if let Ok(
+                        Nl80211Event::ScanComplete { ifindex }
+                        | Nl80211Event::ScanAborted { ifindex },
+                    ) = result
+                        && ifindex == target_ifindex
+                    {
+                        break;
+                    }
+                }
+            })
+            .await;
+            drop(events);
 
             let results = conn.get_scan_results(&interface).await?;
             print_scan_results(&results);
@@ -255,7 +306,17 @@ async fn main() -> Result<()> {
             eprintln!("Disconnected from {interface}");
         }
 
-        Command::Monitor => unreachable!(),
+        Command::Monitor => {
+            conn.subscribe()?;
+            eprintln!("Monitoring WiFi events (Ctrl+C to stop)...");
+            let mut events = conn.events().await;
+            while let Some(result) = events.next().await {
+                match result {
+                    Ok(event) => println!("{}", format_event(&event)),
+                    Err(e) => eprintln!("Error: {e}"),
+                }
+            }
+        }
 
         Command::Powersave { interface, mode } => {
             if let Some(mode) = mode {
@@ -263,8 +324,9 @@ async fn main() -> Result<()> {
                     "on" | "true" | "1" => true,
                     "off" | "false" | "0" => false,
                     _ => {
-                        eprintln!("Unknown mode: {mode}. Use 'on' or 'off'.");
-                        std::process::exit(1);
+                        return Err(Error::InvalidMessage(format!(
+                            "unknown power-save mode `{mode}` (expected on/off)"
+                        )));
                     }
                 };
                 conn.set_power_save(&interface, enabled).await?;
