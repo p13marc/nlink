@@ -938,4 +938,33 @@ mod tests {
         assert!(build_rule(Family::Inet, "t", "c", &["bogus"]).is_err());
         assert!(build_rule(Family::Inet, "t", "c", &["ct", "state", "frobnicate"]).is_err());
     }
+
+    #[test]
+    fn family_known_and_aliases() {
+        assert!(matches!(parse_family("inet"), Ok(Family::Inet)));
+        assert!(matches!(parse_family("ipv4"), Ok(Family::Ip)));
+        assert!(matches!(parse_family("ip6"), Ok(Family::Ip6)));
+        assert!(matches!(parse_family("netdev"), Ok(Family::Netdev)));
+        assert!(parse_family("ipx").is_err());
+    }
+
+    #[test]
+    fn hook_known_and_ingress_variants() {
+        assert!(matches!(parse_hook("prerouting"), Ok(Hook::Prerouting)));
+        // bare `ingress` defaults to the netdev variant
+        assert!(matches!(parse_hook("ingress"), Ok(Hook::NetdevIngress)));
+        assert!(matches!(parse_hook("inet:ingress"), Ok(Hook::InetIngress)));
+        assert!(parse_hook("sideways").is_err());
+    }
+
+    #[test]
+    fn cidr_defaults_to_32() {
+        assert_eq!(parse_cidr("10.0.0.1"), Some((Ipv4Addr::new(10, 0, 0, 1), 32)));
+        assert_eq!(
+            parse_cidr("172.16.0.0/12"),
+            Some((Ipv4Addr::new(172, 16, 0, 0), 12))
+        );
+        assert_eq!(parse_cidr("not-an-ip"), None);
+        assert_eq!(parse_cidr("10.0.0.0/bad"), None);
+    }
 }

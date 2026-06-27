@@ -422,3 +422,28 @@ fn format_addr(addr: &SocketAddr, numeric: bool, resolve: bool) -> String {
 
     format!("{}:{}", ip_str, port_str)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use super::format_addr;
+
+    #[test]
+    fn unspecified_addr_renders_star() {
+        let a: SocketAddr = "0.0.0.0:22".parse().unwrap();
+        assert_eq!(format_addr(&a, true, false), "*:22");
+    }
+
+    #[test]
+    fn zero_port_renders_star() {
+        let a: SocketAddr = "10.0.0.1:0".parse().unwrap();
+        assert_eq!(format_addr(&a, true, false), "10.0.0.1:*");
+    }
+
+    #[test]
+    fn numeric_addr_and_port() {
+        let a: SocketAddr = "192.168.1.5:443".parse().unwrap();
+        assert_eq!(format_addr(&a, true, false), "192.168.1.5:443");
+    }
+}

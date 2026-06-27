@@ -14,6 +14,10 @@ All notable changes to this project will be documented in this file.
   mixing plain/`+` is rejected. `wg set … --private-key /dev/null` (or an
   empty file) now unsets the device key (all-zero key = remove) instead of
   failing the length check.
+- **`ss` / `nft` bins: extend unit coverage of the pure parsers (#20,
+  #21).** Added `nft` tests for `parse_family` (+ aliases), `parse_hook`
+  (incl. the netdev/inet `ingress` split), and `parse_cidr`; and `ss`
+  tests for `format_addr` (unspecified-address and zero-port rendering).
 - **`ip` bin: `ip link set <dev> --netns <name|pid>` (#17).** Moves a
   device into another network namespace, wiring the existing
   `set_link_netns_by_index` / `set_link_netns_pid_by_index` library APIs.
