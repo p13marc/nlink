@@ -537,14 +537,14 @@ async fn main() -> Result<()> {
                         std::process::exit(1);
                     }
                 };
-                // Try as bool, then u32, then string
-                let data = if value == "true" || value == "false" {
-                    ParamData::Bool(value == "true")
-                } else if let Ok(n) = value.parse::<u32>() {
-                    ParamData::U32(n)
-                } else {
-                    ParamData::String(value)
-                };
+                // Read the parameter's declared type first so the value is
+                // parsed into it (instead of lossily inferring bool→u32→str).
+                let existing = conn.get_param(&bus, &device, &name).await?;
+                let declared = existing
+                    .as_ref()
+                    .and_then(|p| p.values.first())
+                    .map(|v| &v.data);
+                let data = coerce_param_value(&name, value, declared)?;
                 conn.set_param(&bus, &device, &name, cmode, data).await?;
                 eprintln!("Parameter {name} set");
             }
@@ -779,6 +779,53 @@ fn build_rate(
     Ok(rate)
 }
 
+/// Coerce a CLI `param set` value string into the parameter's declared type.
+///
+/// `existing` is the parameter's current value (from `get_param`), whose
+/// `ParamData` variant tells us the real type. Parsing into that type avoids
+/// the lossy "bool → u32 → string" inference that silently mis-typed `u8`/
+/// `u16` params and all-digit string labels. When the param can't be read
+/// (`None`), fall back to best-effort inference so the command still works.
+fn coerce_param_value(name: &str, value: String, existing: Option<&ParamData>) -> Result<ParamData> {
+    let int = |bits: &str, max: u64| -> Result<u64> {
+        value.parse::<u64>().ok().filter(|n| *n <= max).ok_or_else(|| {
+            nlink::netlink::Error::InvalidMessage(format!(
+                "devlink param `{name}` expects a {bits} value, got `{value}`"
+            ))
+        })
+    };
+    let data = match existing {
+        Some(ParamData::U8(_)) => ParamData::U8(int("u8", u8::MAX as u64)? as u8),
+        Some(ParamData::U16(_)) => ParamData::U16(int("u16", u16::MAX as u64)? as u16),
+        Some(ParamData::U32(_)) => ParamData::U32(int("u32", u32::MAX as u64)? as u32),
+        Some(ParamData::Bool(_)) => ParamData::Bool(match value.as_str() {
+            "true" | "1" | "on" => true,
+            "false" | "0" | "off" => false,
+            _ => {
+                return Err(nlink::netlink::Error::InvalidMessage(format!(
+                    "devlink param `{name}` expects a boolean (true/false), got `{value}`"
+                )));
+            }
+        }),
+        Some(ParamData::String(_)) => ParamData::String(value),
+        // Param not found, or a future ParamData variant: best-effort infer.
+        _ => infer_param_value(value),
+    };
+    Ok(data)
+}
+
+/// Best-effort type inference from a value string (used only when the
+/// parameter's declared type is unavailable).
+fn infer_param_value(value: String) -> ParamData {
+    if value == "true" || value == "false" {
+        ParamData::Bool(value == "true")
+    } else if let Ok(n) = value.parse::<u32>() {
+        ParamData::U32(n)
+    } else {
+        ParamData::String(value)
+    }
+}
+
 /// Print a JSON value as pretty-printed JSON on stdout.
 fn print_json(value: &serde_json::Value) {
     println!(
@@ -796,6 +843,52 @@ mod tests {
         assert!(parse_rate("100mbit").is_ok());
         assert!(parse_rate("1gbit").is_ok());
         assert!(parse_rate("notarate").is_err());
+    }
+
+    #[test]
+    fn coerce_respects_declared_type() {
+        // A u8 param keeps its width and rejects out-of-range values.
+        let got = coerce_param_value("p", "200".into(), Some(&ParamData::U8(0))).unwrap();
+        assert!(matches!(got, ParamData::U8(200)));
+        assert!(coerce_param_value("p", "300".into(), Some(&ParamData::U8(0))).is_err());
+
+        // A u16 param doesn't collapse to u32.
+        assert!(matches!(
+            coerce_param_value("p", "5000".into(), Some(&ParamData::U16(0))).unwrap(),
+            ParamData::U16(5000)
+        ));
+
+        // A string param keeps an all-digits label as a String, not U32.
+        assert!(matches!(
+            coerce_param_value("p", "12345".into(), Some(&ParamData::String(String::new()))).unwrap(),
+            ParamData::String(s) if s == "12345"
+        ));
+    }
+
+    #[test]
+    fn coerce_bool_param_is_strict() {
+        assert!(matches!(
+            coerce_param_value("p", "on".into(), Some(&ParamData::Bool(false))).unwrap(),
+            ParamData::Bool(true)
+        ));
+        assert!(coerce_param_value("p", "maybe".into(), Some(&ParamData::Bool(false))).is_err());
+    }
+
+    #[test]
+    fn coerce_falls_back_to_inference_when_type_unknown() {
+        // No declared type (param not found): infer.
+        assert!(matches!(
+            coerce_param_value("p", "true".into(), None).unwrap(),
+            ParamData::Bool(true)
+        ));
+        assert!(matches!(
+            coerce_param_value("p", "42".into(), None).unwrap(),
+            ParamData::U32(42)
+        ));
+        assert!(matches!(
+            coerce_param_value("p", "label".into(), None).unwrap(),
+            ParamData::String(s) if s == "label"
+        ));
     }
 
     #[test]
