@@ -397,27 +397,33 @@ impl RouteCmd {
         opts: &OutputOptions,
     ) -> Result<()> {
         // Parse destination prefix
+        use std::net::IpAddr;
+
         use nlink::util::addr::parse_prefix;
 
         let (dst_addr, prefix_len) = parse_prefix(destination).map_err(|e| {
             nlink::netlink::Error::InvalidMessage(format!("invalid destination: {}", e))
         })?;
 
-        // Get all routes and filter for the matching destination
-        let routes = conn.get_routes().await?;
-        let matching: Vec<_> = routes
-            .into_iter()
-            .filter(|r| r.destination() == Some(&dst_addr) && r.dst_len() == prefix_len)
-            .collect();
+        // Ask the kernel which route it would actually use for this
+        // destination (RTM_GETROUTE, longest-prefix match) rather than
+        // dumping every route and requiring an exact prefix match — the
+        // latter returned "not found" for e.g. `ip route get 8.8.8.8`
+        // whenever only a default/covering route existed.
+        let route = match dst_addr {
+            IpAddr::V4(v4) => conn.get_route_v4(v4, prefix_len).await?,
+            IpAddr::V6(v6) => conn.get_route_v6(v6, prefix_len).await?,
+        };
 
-        if matching.is_empty() {
-            return Err(nlink::netlink::Error::InvalidMessage(format!(
-                "route to {} not found",
-                destination
-            )));
+        match route {
+            Some(r) => print_all(std::slice::from_ref(&r), format, opts)?,
+            None => {
+                return Err(nlink::netlink::Error::InvalidMessage(format!(
+                    "route to {} not found",
+                    destination
+                )));
+            }
         }
-
-        print_all(&matching, format, opts)?;
 
         Ok(())
     }
