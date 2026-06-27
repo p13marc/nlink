@@ -2153,6 +2153,147 @@ impl FqPieConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style fq_pie params slice into a typed `FqPieConfig`.
+    ///
+    /// Recognised tokens (any order):
+    ///
+    /// - `limit <packets>`, `flows <n>`, `alpha <n>`, `beta <n>`
+    /// - `target <time>`, `tupdate <time>` — tc-style times (`15ms`)
+    /// - `quantum <size>`, `memory_limit <size>` — tc-style sizes
+    /// - `ecnprob <percent>` (alias `ecn_prob`)
+    /// - bare toggles: `ecn` / `noecn`, `bytemode` / `nobytemode`,
+    ///   `dq_rate_estimator` / `no_dq_rate_estimator`
+    ///
+    /// Strict: unknown tokens, missing values, and unparseable
+    /// values all return `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("fq_pie: `{key}` requires a value"))
+                })
+            };
+            match key {
+                "limit" => {
+                    let s = need_value()?;
+                    cfg.limit = Some(crate::util::parse::get_u32(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_pie: invalid limit `{s}` (expected packet count)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "flows" => {
+                    let s = need_value()?;
+                    cfg.flows = Some(crate::util::parse::get_u32(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_pie: invalid flows `{s}` (expected unsigned integer)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "alpha" => {
+                    let s = need_value()?;
+                    cfg.alpha = Some(crate::util::parse::get_u32(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_pie: invalid alpha `{s}` (expected unsigned integer)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "beta" => {
+                    let s = need_value()?;
+                    cfg.beta = Some(crate::util::parse::get_u32(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_pie: invalid beta `{s}` (expected unsigned integer)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "target" => {
+                    let s = need_value()?;
+                    cfg.target = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_pie: invalid target `{s}` (expected tc-style time like `15ms`)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "tupdate" => {
+                    let s = need_value()?;
+                    cfg.tupdate = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_pie: invalid tupdate `{s}` (expected tc-style time like `15ms`)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "quantum" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_pie: invalid quantum `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    cfg.quantum = Some(crate::util::Bytes::new(bytes));
+                    i += 2;
+                }
+                "memory_limit" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_pie: invalid memory_limit `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    cfg.memory_limit = Some(crate::util::Bytes::new(bytes));
+                    i += 2;
+                }
+                "ecnprob" | "ecn_prob" => {
+                    let s = need_value()?;
+                    cfg.ecn_prob = Some(s.parse::<crate::util::Percent>().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "fq_pie: invalid ecnprob `{s}` (expected percent 0-100)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "ecn" => {
+                    cfg.ecn = true;
+                    i += 1;
+                }
+                "noecn" => {
+                    cfg.ecn = false;
+                    i += 1;
+                }
+                "bytemode" => {
+                    cfg.bytemode = true;
+                    i += 1;
+                }
+                "nobytemode" => {
+                    cfg.bytemode = false;
+                    i += 1;
+                }
+                "dq_rate_estimator" => {
+                    cfg.dq_rate_estimator = true;
+                    i += 1;
+                }
+                "no_dq_rate_estimator" => {
+                    cfg.dq_rate_estimator = false;
+                    i += 1;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "fq_pie: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
 }
 
 impl QdiscConfig for FqPieConfig {
@@ -2356,6 +2497,41 @@ impl PfifoConfig {
     pub fn build(self) -> Self {
         self
     }
+
+    /// Parse a tc-style pfifo params slice into a typed `PfifoConfig`.
+    ///
+    /// Recognised token:
+    ///
+    /// - `limit <packets>` — queue limit in packets.
+    ///
+    /// Strict: unknown tokens, missing values, and unparseable
+    /// numbers all return `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "limit" => {
+                    let s = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("pfifo: `limit` requires a value".into())
+                    })?;
+                    cfg.limit = crate::util::parse::get_u32(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "pfifo: invalid limit `{s}` (expected packet count)"
+                        ))
+                    })?;
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "pfifo: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
 }
 
 impl QdiscConfig for PfifoConfig {
@@ -2420,6 +2596,45 @@ impl BfifoConfig {
     /// Build the configuration.
     pub fn build(self) -> Self {
         self
+    }
+
+    /// Parse a tc-style bfifo params slice into a typed `BfifoConfig`.
+    ///
+    /// Recognised token:
+    ///
+    /// - `limit <size>` — queue limit as a tc-style size (bytes,
+    ///   accepts suffixes like `kb`/`mb`).
+    ///
+    /// Strict: unknown tokens, missing values, and unparseable
+    /// sizes all return `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "limit" => {
+                    let s = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("bfifo: `limit` requires a value".into())
+                    })?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "bfifo: invalid limit `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    cfg.limit = bytes.try_into().map_err(|_| {
+                        Error::InvalidMessage(format!("bfifo: limit `{s}` exceeds u32 (max ~4GB)"))
+                    })?;
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "bfifo: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
     }
 }
 
@@ -5815,6 +6030,73 @@ impl Connection<Route> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pfifo_parse_params() {
+        let cfg = PfifoConfig::parse_params(&[]).unwrap();
+        assert_eq!(cfg.limit, 1000); // default
+
+        let cfg = PfifoConfig::parse_params(&["limit", "500"]).unwrap();
+        assert_eq!(cfg.limit, 500);
+
+        // missing value, unparseable value, and unknown token all error
+        assert!(PfifoConfig::parse_params(&["limit"]).is_err());
+        assert!(PfifoConfig::parse_params(&["limit", "abc"]).is_err());
+        assert!(PfifoConfig::parse_params(&["bogus"]).is_err());
+    }
+
+    #[test]
+    fn test_bfifo_parse_params() {
+        let cfg = BfifoConfig::parse_params(&["limit", "100kb"]).unwrap();
+        assert_eq!(cfg.limit, 100 * 1024); // tc size suffixes are binary
+
+        let cfg = BfifoConfig::parse_params(&["limit", "4096"]).unwrap();
+        assert_eq!(cfg.limit, 4096);
+
+        assert!(BfifoConfig::parse_params(&["limit"]).is_err());
+        assert!(BfifoConfig::parse_params(&["limit", "nope"]).is_err());
+        assert!(BfifoConfig::parse_params(&["divisor", "1"]).is_err());
+    }
+
+    #[test]
+    fn test_fq_pie_parse_params() {
+        use crate::util::{Bytes, Percent};
+
+        let cfg = FqPieConfig::parse_params(&[]).unwrap();
+        assert_eq!(cfg.limit, None);
+        assert!(!cfg.ecn);
+
+        let cfg = FqPieConfig::parse_params(&[
+            "limit", "10000", "flows", "1024", "target", "15ms", "tupdate", "16ms", "alpha", "2",
+            "beta", "20", "quantum", "1514", "memory_limit", "32mb", "ecnprob", "10", "ecn",
+            "bytemode", "dq_rate_estimator",
+        ])
+        .unwrap();
+        assert_eq!(cfg.limit, Some(10000));
+        assert_eq!(cfg.flows, Some(1024));
+        assert_eq!(cfg.target, Some(Duration::from_millis(15)));
+        assert_eq!(cfg.tupdate, Some(Duration::from_millis(16)));
+        assert_eq!(cfg.alpha, Some(2));
+        assert_eq!(cfg.beta, Some(20));
+        assert_eq!(cfg.quantum, Some(Bytes::new(1514)));
+        assert_eq!(cfg.memory_limit, Some(Bytes::new(32 * 1024 * 1024)));
+        assert_eq!(cfg.ecn_prob, Some(Percent::new(10.0)));
+        assert!(cfg.ecn);
+        assert!(cfg.bytemode);
+        assert!(cfg.dq_rate_estimator);
+
+        // toggles can be cleared, alias accepted
+        let cfg =
+            FqPieConfig::parse_params(&["noecn", "nobytemode", "ecn_prob", "5"]).unwrap();
+        assert!(!cfg.ecn);
+        assert!(!cfg.bytemode);
+        assert_eq!(cfg.ecn_prob, Some(Percent::new(5.0)));
+
+        // strict: missing value, bad value, unknown token
+        assert!(FqPieConfig::parse_params(&["limit"]).is_err());
+        assert!(FqPieConfig::parse_params(&["target", "fast"]).is_err());
+        assert!(FqPieConfig::parse_params(&["unknown"]).is_err());
+    }
 
     #[test]
     fn test_netem_builder() {
