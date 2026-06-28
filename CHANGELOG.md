@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`ip` bin: `macsec add`/`set`/`del` (TX/RX SA + RX SC) (#17).** The
+  `ip macsec` object was show-only; it now mutates MACsec secure
+  associations over the existing `Connection<Macsec>` GENL API. `add tx
+  --an <0-3> --key <hex> [--key-id <hex>] [--pn N] [--active on|off]`
+  installs a TX SA; `add rx --sci <hex|dec>` creates an RX secure
+  channel, and adding `--an` targets an RX SA within it; `set`
+  updates an existing SA; `del` removes the SA/SC. The device is
+  resolved to an ifindex up front so the `*_by_index` calls are
+  namespace-safe, and `--an > 3` / odd-length hex are rejected before
+  reaching the (panicking) builder.
+
 - **`bridge` bin: `monitor` command (#25).** Streams bridge FDB changes
   in real time — `bridge monitor` subscribes to `RTNLGRP_NEIGH` and
   prints `NewFdb`/`DelFdb` events (text or `--json`, with `-t` for
