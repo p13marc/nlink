@@ -60,7 +60,7 @@ tun/tap), addresses, routes, neighbors, routing rules, nexthop objects + ECMP
 groups, MPLS, SRv6, bridge FDB + VLAN filtering, network namespaces.
 
 **Traffic control** — 35 typed qdisc kinds, typed classes (HTB, HFSC, DRR, QFQ),
-11 typed filter kinds, 16 typed action kinds, filter chains, BPF program attachment.
+11 typed filter kinds, 17 typed action kinds, filter chains, BPF program attachment.
 Every typed config has a `parse_params(&[&str])` so `tc` CLI syntax round-trips
 through the typed API. Strongly-typed units: `Rate` (bytes/sec internally,
 parses `100mbit` / `1gbit`), `Bytes`, `Percent`, `TcHandle`, `FilterPriority`.
