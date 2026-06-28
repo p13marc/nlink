@@ -33,15 +33,30 @@ pub struct DisplayOptions {
 }
 
 /// Print sockets in JSON format.
-pub fn print_json(sockets: &[SocketInfo]) -> io::Result<()> {
+///
+/// The JSON honors the same display flags as the text output: the
+/// `tcp_info` block appears only with `-i`, `mem_info` only with `-m`,
+/// the extended `interface`/`mark` fields only with `-e`, an active
+/// `timer` only with `-o`, and the `process` array only with `-p`.
+/// This keeps `-j` field-for-field consistent with the text columns
+/// rather than dumping every captured attribute unconditionally.
+pub fn print_json(sockets: &[SocketInfo], opts: &DisplayOptions) -> io::Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
+
+    // -p/--processes: build the socket-inode → process map once, the
+    // same way the text path does.
+    let procs = if opts.processes {
+        crate::procmap::build()
+    } else {
+        crate::procmap::ProcMap::new()
+    };
 
     let json_sockets: Vec<_> = sockets
         .iter()
         .map(|s| match s {
-            SocketInfo::Inet(inet) => inet_to_json(inet),
-            SocketInfo::Unix(unix) => unix_to_json(unix),
+            SocketInfo::Inet(inet) => inet_to_json(inet, opts, &procs),
+            SocketInfo::Unix(unix) => unix_to_json(unix, opts, &procs),
             SocketInfo::Netlink(nl) => serde_json::json!({
                 "netid": "nl",
                 "protocol": nl.protocol_name(),
@@ -61,7 +76,32 @@ pub fn print_json(sockets: &[SocketInfo]) -> io::Result<()> {
     Ok(())
 }
 
-fn inet_to_json(sock: &InetSocket) -> serde_json::Value {
+/// Render the processes holding a socket open as a JSON array, or
+/// `None` when none are known. Mirrors `procmap::format_users` but in
+/// structured form for `-j -p`.
+fn procs_to_json(map: &crate::procmap::ProcMap, inode: u32) -> Option<serde_json::Value> {
+    let procs = map.get(&inode)?;
+    if procs.is_empty() {
+        return None;
+    }
+    let arr: Vec<_> = procs
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "comm": p.comm,
+                "pid": p.pid,
+                "fd": p.fd,
+            })
+        })
+        .collect();
+    Some(serde_json::Value::Array(arr))
+}
+
+fn inet_to_json(
+    sock: &InetSocket,
+    opts: &DisplayOptions,
+    procs: &crate::procmap::ProcMap,
+) -> serde_json::Value {
     let mut json = serde_json::json!({
         "netid": sock.netid(),
         "state": sock.state.name(),
@@ -79,7 +119,28 @@ fn inet_to_json(sock: &InetSocket) -> serde_json::Value {
         "inode": sock.inode,
     });
 
-    if let Some(ref info) = sock.tcp_info {
+    // -o: active retransmission/keepalive timer.
+    if opts.options
+        && let Some(timer) = sock.timer.describe()
+    {
+        json["timer"] = serde_json::Value::String(timer);
+    }
+
+    // -e: extended fields (bound interface, firewall mark).
+    if opts.extended {
+        if sock.interface > 0 {
+            json["interface"] = serde_json::Value::Number(sock.interface.into());
+        }
+        if let Some(mark) = sock.mark {
+            json["mark"] = serde_json::Value::Number(mark.into());
+        }
+    }
+
+    // -i: TCP info. The congestion algorithm rides along with it,
+    // matching the text layout where `cong` prefixes the info segment.
+    if opts.info
+        && let Some(ref info) = sock.tcp_info
+    {
         json["tcp_info"] = serde_json::json!({
             "rtt": info.rtt,
             "rttvar": info.rttvar,
@@ -92,9 +153,15 @@ fn inet_to_json(sock: &InetSocket) -> serde_json::Value {
             "delivery_rate": info.delivery_rate,
             "min_rtt": info.min_rtt,
         });
+        if let Some(ref cong) = sock.congestion {
+            json["congestion"] = serde_json::Value::String(cong.clone());
+        }
     }
 
-    if let Some(ref mem) = sock.mem_info {
+    // -m: socket memory info.
+    if opts.memory
+        && let Some(ref mem) = sock.mem_info
+    {
         json["mem_info"] = serde_json::json!({
             "rmem_alloc": mem.rmem_alloc,
             "rcvbuf": mem.rcvbuf,
@@ -108,18 +175,21 @@ fn inet_to_json(sock: &InetSocket) -> serde_json::Value {
         });
     }
 
-    if let Some(ref cong) = sock.congestion {
-        json["congestion"] = serde_json::Value::String(cong.clone());
-    }
-
-    if let Some(mark) = sock.mark {
-        json["mark"] = serde_json::Value::Number(mark.into());
+    // -p: owning processes.
+    if opts.processes
+        && let Some(p) = procs_to_json(procs, sock.inode)
+    {
+        json["process"] = p;
     }
 
     json
 }
 
-fn unix_to_json(sock: &UnixSocket) -> serde_json::Value {
+fn unix_to_json(
+    sock: &UnixSocket,
+    opts: &DisplayOptions,
+    procs: &crate::procmap::ProcMap,
+) -> serde_json::Value {
     let mut json = serde_json::json!({
         "netid": sock.netid(),
         "state": sock.state.name(),
@@ -144,6 +214,13 @@ fn unix_to_json(sock: &UnixSocket) -> serde_json::Value {
 
     if let Some(uid) = sock.uid {
         json["uid"] = serde_json::Value::Number(uid.into());
+    }
+
+    // -p: owning processes.
+    if opts.processes
+        && let Some(p) = procs_to_json(procs, sock.inode)
+    {
+        json["process"] = p;
     }
 
     json
@@ -454,7 +531,10 @@ fn format_addr(addr: &SocketAddr, numeric: bool, resolve: bool) -> String {
 mod tests {
     use std::net::SocketAddr;
 
-    use super::format_addr;
+    use nlink::sockdiag::{InetSocket, TcpInfo};
+
+    use super::{DisplayOptions, format_addr, inet_to_json, procs_to_json};
+    use crate::procmap::{ProcEntry, ProcMap};
 
     #[test]
     fn unspecified_addr_renders_star() {
@@ -472,5 +552,99 @@ mod tests {
     fn numeric_addr_and_port() {
         let a: SocketAddr = "192.168.1.5:443".parse().unwrap();
         assert_eq!(format_addr(&a, true, false), "192.168.1.5:443");
+    }
+
+    /// All display flags off: JSON carries only the core fields, never
+    /// the detail blocks — even when the socket captured them.
+    fn opts_all_off() -> DisplayOptions {
+        DisplayOptions {
+            numeric: true,
+            resolve: false,
+            extended: false,
+            memory: false,
+            info: false,
+            options: false,
+            processes: false,
+            no_header: false,
+            oneline: false,
+        }
+    }
+
+    fn socket_with_details() -> InetSocket {
+        InetSocket {
+            interface: 7,
+            mark: Some(0x1234),
+            tcp_info: Some(TcpInfo::default()),
+            congestion: Some("bbr".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn json_omits_detail_blocks_without_flags() {
+        let sock = socket_with_details();
+        let json = inet_to_json(&sock, &opts_all_off(), &ProcMap::new());
+        // Detail blocks are gated off.
+        assert!(json.get("tcp_info").is_none());
+        assert!(json.get("congestion").is_none());
+        assert!(json.get("interface").is_none());
+        assert!(json.get("mark").is_none());
+        assert!(json.get("process").is_none());
+        // Core fields are always present.
+        assert!(json.get("state").is_some());
+        assert!(json.get("local").is_some());
+    }
+
+    #[test]
+    fn json_includes_blocks_when_flags_set() {
+        let sock = socket_with_details();
+        let opts = DisplayOptions {
+            extended: true,
+            info: true,
+            ..opts_all_off()
+        };
+        let json = inet_to_json(&sock, &opts, &ProcMap::new());
+        assert!(json.get("tcp_info").is_some());
+        assert_eq!(json["congestion"], "bbr");
+        assert_eq!(json["interface"], 7);
+        assert_eq!(json["mark"], 0x1234);
+    }
+
+    #[test]
+    fn json_process_block_only_with_p_flag() {
+        let mut map = ProcMap::new();
+        map.insert(
+            99,
+            vec![ProcEntry {
+                pid: 100,
+                comm: "sshd".into(),
+                fd: 3,
+            }],
+        );
+        let sock = InetSocket {
+            inode: 99,
+            ..Default::default()
+        };
+
+        // Without -p: absent even though the map has an entry.
+        let json = inet_to_json(&sock, &opts_all_off(), &map);
+        assert!(json.get("process").is_none());
+
+        // With -p: present and structured.
+        let opts = DisplayOptions {
+            processes: true,
+            ..opts_all_off()
+        };
+        let json = inet_to_json(&sock, &opts, &map);
+        let procs = json["process"].as_array().expect("process array");
+        assert_eq!(procs.len(), 1);
+        assert_eq!(procs[0]["comm"], "sshd");
+        assert_eq!(procs[0]["pid"], 100);
+        assert_eq!(procs[0]["fd"], 3);
+    }
+
+    #[test]
+    fn procs_to_json_none_when_absent() {
+        assert!(procs_to_json(&ProcMap::new(), 42).is_none());
     }
 }
