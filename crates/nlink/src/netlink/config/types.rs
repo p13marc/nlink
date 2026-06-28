@@ -2176,6 +2176,29 @@ mod serde_roundtrip_tests {
     }
 
     #[test]
+    fn documented_json_example_parses() {
+        // Pins the exact JSON shown in docs/library.md "Declarative
+        // Network Configuration" so the docs can't drift from the
+        // Deserialize impl (veth is externally-tagged, address/route
+        // are CIDR strings, the bridge is a bare-string unit variant).
+        let cfg = NetworkConfig::from_json_str(
+            r#"{
+                "links": [
+                    { "name": "br0", "link-type": "bridge", "state": "up" },
+                    { "name": "veth0", "link-type": { "veth": { "peer": "veth1" } } }
+                ],
+                "addresses": [ { "dev": "br0", "address": "10.0.0.1/24" } ],
+                "routes":    [ { "destination": "10.1.0.0/16", "gateway": "10.0.0.254", "dev": "br0" } ]
+            }"#,
+        )
+        .expect("documented JSON must parse");
+        assert_eq!(cfg.links().len(), 2);
+        assert_eq!(cfg.addresses().len(), 1);
+        assert_eq!(cfg.routes().len(), 1);
+        assert_eq!(cfg.links()[1].name(), "veth0");
+    }
+
+    #[test]
     fn unit_link_type_keeps_bare_string_shape() {
         // Plan 189 shape: a unit link-type serializes as the bare
         // string "dummy", not {"dummy": null}.

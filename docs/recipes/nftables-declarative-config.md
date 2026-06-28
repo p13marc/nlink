@@ -206,17 +206,42 @@ surface immediately without retry — the predicate is
 
 ## Loading from a config file
 
-The declarative types are pure data — derive `Serialize` /
-`Deserialize` in your downstream crate to get TOML/YAML/JSON
-support for free. nlink doesn't bundle a serde feature in 0.16
-because adding the dep to the lib crate would force every
-downstream user to compile it; doing the derives in your own
-binary keeps nlink lean.
+### From the CLI — `nft reconcile` / `nft diff`
 
-Sketch (downstream):
+The in-tree `nft` binary demonstrates the whole loop. `nft
+reconcile <file>` reads a *desired-state* ruleset (the same `add
+table` / `add chain` / `add rule` grammar as `nft apply`, but
+interpreted as "what should exist"), folds it into an
+`NftablesConfig`, diffs it against the live ruleset, and applies
+the minimal change set via `apply_reconcile`. `nft diff <file>`
+is the read-only preview.
+
+```text
+# fw.nft — desired state
+add table inet filter
+add chain inet filter input hook input priority 0 policy drop
+add rule inet filter input tcp dport 22 accept
+
+$ nft diff fw.nft        # preview
+$ nft reconcile fw.nft   # apply the minimal delta
+```
+
+Because it is desired-state, `delete` / `flush` lines are rejected —
+removal is inferred from the diff. (`nft apply` remains the
+imperative, single-transaction path.) See `bins/nft/src/main.rs`
+`parse_ruleset`.
+
+### From your own crate
+
+The nft rule body is a low-level expression VM (`Vec<Expr>` with
+raw byte payloads), so it is *not* serde-deserializable — a
+human-facing ruleset is always lowered into `Rule` through the
+builders (that's what `parse_ruleset` does). To load from
+TOML/YAML/JSON, define your own schema and map it onto the
+builder:
 
 ```rust,ignore
-// In your binary's crate, wrap the nlink type with serde derives.
+// In your crate, wrap a serde schema that lowers into NftablesConfig.
 #[derive(serde::Deserialize)]
 struct FirewallConfig {
     // ... your own schema fields ...
@@ -232,6 +257,11 @@ impl FirewallConfig {
     }
 }
 ```
+
+(The *interface*-side `NetworkConfig` is different: with the
+`serde` feature it deserializes directly — its fields are typed
+values, not an expression VM. See the
+[library guide](../library.md#declarative-network-configuration).)
 
 Pair with [`notify`](https://docs.rs/notify) for file-watch and
 the apply loop becomes:

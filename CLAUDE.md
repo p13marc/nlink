@@ -97,6 +97,7 @@ unsafe pointer casts in `types/`.
 | `namespace_watcher` | Inotify-based netns watching |
 | `lab` | `nlink::lab` namespace + integration-test harness |
 | `syscall_batch` | `recvmmsg`/`sendmmsg` batching wired into eager + streaming dump paths (0.16+; opt-in for one soak release) |
+| `serde` | `Serialize` + validating `Deserialize` on the declarative config types (`NetworkConfig` round-trips through JSON/YAML; addresses/routes as CIDR strings, MACs as `aa:bb:..`, validated via `try_from`). Also gates `ConfigDiff`/`NftablesDiff`/result-type `Serialize`. Pulls `serde_json` for the `NetworkConfig::{from_json_str,to_json_string}` helpers. |
 | `full` | All of the above |
 
 ## Type-safe units (Rate / Bytes / Percent)
@@ -564,7 +565,12 @@ recipe rather than re-synthesizing:
 - [`nftables-declarative-config`](docs/recipes/nftables-declarative-config.md) —
   declare a whole ruleset, `cfg.diff(&conn)` + `diff.apply(&conn)`
   (atomic single-batch commit) + `apply_reconcile` for concurrent
-  mutators. Mirror of `NetworkConfig` for nftables.
+  mutators. Mirror of `NetworkConfig` for nftables. The `nft` bin
+  demos it as `nft reconcile <file>` / `nft diff <file>` (desired-state
+  DSL → diff → apply; #109). For the interface-side `NetworkConfig`,
+  the `serde` feature gives a validating JSON/YAML round-trip
+  (`NetworkConfig::from_json_str`; #108) — see
+  [`docs/library.md`](docs/library.md#declarative-network-configuration).
 - [`define-your-own-genl-family`](docs/recipes/define-your-own-genl-family.md)
   — declare a complete custom GENL family in ~30 lines via
   `nlink-macros` (`#[genl_family]` + `#[derive(GenlMessage)]` +
@@ -612,15 +618,26 @@ run it locally before merging a new example.
 
 ## Active work
 
-**0.19.0 shipped 2026-05-31** (`v0.19.0` tagged; both crates on
-crates.io). Headline narrative in `CHANGELOG.md ## [0.19.0]`
-+ `docs/migration_guide/0.18.0-to-0.19.0.md`.
+**0.21.0 shipped 2026-06-04** (`v0.21.0` tagged; both crates on
+crates.io). Headline narrative in `CHANGELOG.md ## [0.21.0]`
++ `docs/migration_guide/0.20.0-to-0.21.0.md`.
 
-The **0.20 cycle is open** on the `0.20` branch (do not push to
-master). No plans written yet; seed topics queued in
-[`plans/INDEX.md ## 0.20 cycle seed`](plans/INDEX.md). New work
-lands in `CHANGELOG.md ## [Unreleased]` and is promoted to
-`## [0.20.0]` at cut time.
+The **next cycle is open on `master`** — new work lands in
+`CHANGELOG.md ## [Unreleased]` and is promoted to the next
+`## [X.Y.0]` at cut time. (CI runs on every push/PR to master, so
+the old "work on a release branch, don't push to master" note no
+longer applies.)
+
+Recently closed: the **demo-binary hardening epic (#30)** and all
+11 per-binary issues + #29 (library gaps) — see the closed issues
+and `CHANGELOG.md ## [Unreleased]`. Two follow-ups from that epic
+also landed: validating `serde::Deserialize` on `NetworkConfig`
+(#108) and declarative `nft reconcile`/`diff` (#109). Standing
+backlog (deferred with rationale in #29's close comment): tc
+`choke`/`gred`/`atm`/`pfifo_fast` qdiscs, `rsvp` filter,
+`ife`/`gate`/`ctinfo`/`xt` actions; ethtool FEC-setter/module-EEPROM/
+RSS; sockdiag `INET_DIAG_REQ_BYTECODE` (ss port/addr filters work
+today but enforce client-side).
 
 Per-release upgrade guides:
 [`docs/migration_guide/`](docs/migration_guide/README.md) — write
