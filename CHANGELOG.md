@@ -6,6 +6,23 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **library: strongly-typed, round-trippable `NetworkConfig` (#108).**
+  The declarative `NetworkConfig` tree was `Serialize`-only; it now
+  also implements a **validating** `serde::Deserialize` behind the
+  `serde` feature, so the typed config round-trips through YAML/JSON
+  directly (no stringly intermediate schema). The human-facing forms
+  are idiomatic: addresses/routes round-trip as CIDR strings (`route`
+  destinations as the `default` keyword for `0.0.0.0/0` / `::/0`),
+  MACs as `aa:bb:cc:dd:ee:ff`. Validation is preserved rather than
+  bypassed — deserialization goes through the same parse paths as the
+  builders (via serde's `try_from`/`into` conversion attributes), so
+  an out-of-range prefix, a malformed gateway, or a bad MAC is a
+  deserialize **error**, not a silently-accepted struct. New
+  high-level helpers `NetworkConfig::{from_json_str, to_json_string,
+  to_json_string_pretty}`. The `serde` feature now also pulls
+  `serde_json` for these. Additive (new trait impls + methods);
+  `cargo-semver-checks` clean.
+
 - **`ss`/library: AF_PACKET socket diagnostics (#29).** `query_packet`
   was a stub returning an empty list; it now issues a real
   `PACKET_DIAG` (`SOCK_DIAG_BY_FAMILY` with `sdiag_family = AF_PACKET`)

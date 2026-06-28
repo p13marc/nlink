@@ -12,11 +12,17 @@ pub use crate::netlink::link::{
 /// Represents the desired state of network resources. Use the builder methods
 /// to add links, addresses, routes, and qdiscs, then call [`diff()`](NetworkConfig::diff)
 /// or [`apply()`](NetworkConfig::apply) to reconcile with the current state.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", default))]
 #[derive(Debug, Clone, Default)]
 pub struct NetworkConfig {
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) links: Vec<DeclaredLink>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) addresses: Vec<DeclaredAddress>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) routes: Vec<DeclaredRoute>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) qdiscs: Vec<DeclaredQdisc>,
 }
 
@@ -24,6 +30,43 @@ impl NetworkConfig {
     /// Create an empty network configuration.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Parse a [`NetworkConfig`] from a JSON document.
+    ///
+    /// Resource fields are validated as they parse — addresses and
+    /// routes from their CIDR strings (prefix bounds checked), MACs
+    /// from `aa:bb:cc:dd:ee:ff` — so a malformed document is a parse
+    /// error rather than a silently-wrong config. Requires the
+    /// `serde` feature.
+    ///
+    /// ```ignore
+    /// let cfg = NetworkConfig::from_json_str(r#"{
+    ///     "addresses": [{ "dev": "eth0", "address": "10.0.0.1/24" }]
+    /// }"#)?;
+    /// ```
+    #[cfg(feature = "serde")]
+    pub fn from_json_str(s: &str) -> crate::netlink::Result<Self> {
+        serde_json::from_str(s)
+            .map_err(|e| crate::netlink::Error::InvalidMessage(format!("config JSON parse: {e}")))
+    }
+
+    /// Serialize this configuration to a compact JSON string.
+    /// Requires the `serde` feature.
+    #[cfg(feature = "serde")]
+    pub fn to_json_string(&self) -> crate::netlink::Result<String> {
+        serde_json::to_string(self).map_err(|e| {
+            crate::netlink::Error::InvalidMessage(format!("config JSON serialize: {e}"))
+        })
+    }
+
+    /// Serialize this configuration to a pretty-printed JSON string.
+    /// Requires the `serde` feature.
+    #[cfg(feature = "serde")]
+    pub fn to_json_string_pretty(&self) -> crate::netlink::Result<String> {
+        serde_json::to_string_pretty(self).map_err(|e| {
+            crate::netlink::Error::InvalidMessage(format!("config JSON serialize: {e}"))
+        })
     }
 
     /// Add a link (interface) configuration.
@@ -136,15 +179,24 @@ impl NetworkConfig {
 // ============================================================================
 
 /// Declared link configuration.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredLink {
     pub(crate) name: String,
     pub(crate) link_type: DeclaredLinkType,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub(crate) state: LinkState,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub(crate) mtu: Option<u32>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub(crate) master: Option<String>,
+    /// Hardware address, round-tripped as the canonical
+    /// `aa:bb:cc:dd:ee:ff` string rather than a raw byte array.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "mac_serde", skip_serializing_if = "Option::is_none")
+    )]
     pub(crate) address: Option<[u8; 6]>,
 }
 
@@ -176,7 +228,7 @@ impl DeclaredLink {
 }
 
 /// Link type for declared configuration.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -282,7 +334,7 @@ impl DeclaredLinkType {
 }
 
 /// Link state (up or down).
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -297,7 +349,7 @@ pub enum LinkState {
 }
 
 /// Macvlan mode.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -316,7 +368,7 @@ pub enum MacvlanMode {
 }
 
 /// Bond mode.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -712,13 +764,48 @@ impl LinkBuilder {
 // ============================================================================
 
 /// Declared address configuration.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+///
+/// Round-trips through serde as `{ dev, address }` where `address`
+/// is CIDR notation (`10.0.0.1/24`). Deserialization goes through
+/// [`DeclaredAddress::parse`], so prefix-length bounds are validated
+/// rather than bypassed — an out-of-range prefix is a deserialize
+/// error, not a silently-accepted struct.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(into = "AddressRepr", try_from = "AddressRepr"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredAddress {
     pub(crate) dev: String,
     pub(crate) address: IpAddr,
     pub(crate) prefix_len: u8,
+}
+
+/// Serde shadow for [`DeclaredAddress`] — the human-facing
+/// `{ dev, address: "<cidr>" }` form.
+#[cfg(feature = "serde")]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct AddressRepr {
+    dev: String,
+    address: String,
+}
+
+#[cfg(feature = "serde")]
+impl From<DeclaredAddress> for AddressRepr {
+    fn from(a: DeclaredAddress) -> Self {
+        AddressRepr {
+            dev: a.dev,
+            address: format!("{}/{}", a.address, a.prefix_len),
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<AddressRepr> for DeclaredAddress {
+    type Error = AddressParseError;
+
+    fn try_from(r: AddressRepr) -> Result<Self, Self::Error> {
+        DeclaredAddress::parse(&r.dev, &r.address)
+    }
 }
 
 impl DeclaredAddress {
@@ -801,8 +888,14 @@ pub enum AddressParseError {
 // ============================================================================
 
 /// Declared route configuration.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+///
+/// Round-trips through serde with `destination` (and `gateway`) as
+/// strings: a CIDR like `10.0.0.0/8`, or the bare keyword `default`
+/// for `0.0.0.0/0` / `::/0` (family inferred from the gateway, IPv4
+/// when there is none). Deserialization validates the prefix length
+/// and the gateway address, so malformed input is a deserialize error.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(into = "RouteRepr", try_from = "RouteRepr"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredRoute {
     pub(crate) destination: IpAddr,
@@ -812,6 +905,102 @@ pub struct DeclaredRoute {
     pub(crate) metric: Option<u32>,
     pub(crate) table: Option<u32>,
     pub(crate) route_type: DeclaredRouteType,
+}
+
+/// Serde shadow for [`DeclaredRoute`] — string `destination`/`gateway`
+/// plus the optional knobs, with `type` omitted when it is the
+/// default `unicast`.
+#[cfg(feature = "serde")]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RouteRepr {
+    destination: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gateway: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dev: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metric: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    table: Option<u32>,
+    #[serde(
+        rename = "type",
+        default,
+        skip_serializing_if = "DeclaredRouteType::is_unicast"
+    )]
+    route_type: DeclaredRouteType,
+}
+
+#[cfg(feature = "serde")]
+impl From<DeclaredRoute> for RouteRepr {
+    fn from(r: DeclaredRoute) -> Self {
+        // A `0.0.0.0/0` or `::/0` destination renders as the iproute2
+        // `default` keyword for readability.
+        let destination = if r.prefix_len == 0 && r.destination.is_unspecified() {
+            "default".to_string()
+        } else {
+            format!("{}/{}", r.destination, r.prefix_len)
+        };
+        RouteRepr {
+            destination,
+            gateway: r.gateway.map(|g| g.to_string()),
+            dev: r.dev,
+            metric: r.metric,
+            table: r.table,
+            route_type: r.route_type,
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<RouteRepr> for DeclaredRoute {
+    type Error = RouteParseError;
+
+    fn try_from(r: RouteRepr) -> Result<Self, Self::Error> {
+        // Parse the gateway first; its family disambiguates a bare
+        // `default` destination.
+        let gateway = match r.gateway.as_deref() {
+            Some(g) => Some(
+                g.parse::<IpAddr>()
+                    .map_err(|_| RouteParseError::InvalidGateway(g.to_string()))?,
+            ),
+            None => None,
+        };
+
+        let (destination, prefix_len) = if r.destination == "default" {
+            if matches!(gateway, Some(IpAddr::V6(_))) {
+                (IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0)
+            } else {
+                (IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+            }
+        } else {
+            let (ip_str, prefix_str) = r
+                .destination
+                .split_once('/')
+                .ok_or_else(|| RouteParseError::MissingPrefix(r.destination.clone()))?;
+            let dst: IpAddr = ip_str
+                .parse()
+                .map_err(|_| RouteParseError::InvalidDestination(ip_str.to_string()))?;
+            let plen: u8 = prefix_str
+                .parse()
+                .map_err(|_| RouteParseError::InvalidPrefix(prefix_str.to_string()))?;
+            let max = if dst.is_ipv4() { 32 } else { 128 };
+            if plen > max {
+                return Err(RouteParseError::PrefixTooLarge { prefix: plen, max });
+            }
+            (dst, plen)
+        };
+
+        Ok(DeclaredRoute {
+            destination,
+            prefix_len,
+            gateway,
+            dev: r.dev,
+            metric: r.metric,
+            table: r.table,
+            route_type: r.route_type,
+        })
+    }
 }
 
 impl DeclaredRoute {
@@ -862,7 +1051,7 @@ impl DeclaredRoute {
 }
 
 /// Route type for declared configuration.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -876,6 +1065,15 @@ pub enum DeclaredRouteType {
     Unreachable,
     /// Prohibit (ICMP prohibited).
     Prohibit,
+}
+
+impl DeclaredRouteType {
+    /// True for the default `unicast` type — lets serde omit the
+    /// redundant `type: unicast` field from serialized routes.
+    #[cfg(feature = "serde")]
+    fn is_unicast(&self) -> bool {
+        matches!(self, Self::Unicast)
+    }
 }
 
 /// Error parsing a route.
@@ -1031,11 +1229,12 @@ impl RouteBuilder {
 // ============================================================================
 
 /// Declared qdisc configuration.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredQdisc {
     pub(crate) dev: String,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub(crate) parent: QdiscParent,
     pub(crate) qdisc_type: DeclaredQdiscType,
 }
@@ -1058,7 +1257,7 @@ impl DeclaredQdisc {
 }
 
 /// Qdisc parent location.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -1071,7 +1270,13 @@ pub enum QdiscParent {
 }
 
 /// Qdisc type for declared configuration.
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+///
+/// Note: the percentage fields on [`DeclaredQdiscType::Netem`] are
+/// stored as raw `f64`. When built through [`QdiscBuilder`] they pass
+/// through [`crate::util::Percent`] (clamped to `0..=100`); a value
+/// deserialized directly here is range-checked by the kernel at
+/// apply time rather than on construction.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -1848,5 +2053,187 @@ mod plan_228_tests {
         });
         assert_eq!(dup, Some(100.0));
         assert_eq!(cor, Some(0.0));
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_roundtrip_tests {
+    use super::*;
+    use crate::netlink::link::VlanProtocol;
+
+    /// A config that round-trips must serialize, deserialize, and
+    /// re-serialize to a byte-identical document. (The `Declared*`
+    /// types don't all implement `PartialEq` — `DeclaredQdiscType`
+    /// carries `f64` — so re-serialization equality is the round-trip
+    /// oracle.)
+    fn assert_roundtrips(cfg: &NetworkConfig) {
+        let json = cfg.to_json_string().expect("serialize");
+        let back = NetworkConfig::from_json_str(&json).expect("deserialize");
+        let json2 = back.to_json_string().expect("re-serialize");
+        assert_eq!(json, json2, "round-trip changed the document:\n{json}\n{json2}");
+    }
+
+    #[test]
+    fn full_config_roundtrips() {
+        let cfg = NetworkConfig::new()
+            .link("br0", |l| l.bridge().up().mtu(1500))
+            .link("eth0.42", |l| {
+                l.vlan("eth0", 42).vlan_protocol(VlanProtocol::Dot1ad)
+            })
+            .link("bond0", |l| l.bond().bond_mode(BondMode::Ieee802_3ad))
+            .link("dummy0", |l| l.dummy().address([0xaa, 0xbb, 0xcc, 0x11, 0x22, 0x33]))
+            .address("br0", "10.0.0.1/24")
+            .expect("addr")
+            .address("br0", "2001:db8::1/64")
+            .expect("addr6")
+            .route("0.0.0.0/0", |r| r.via("10.0.0.254"))
+            .expect("route")
+            .route("10.10.0.0/16", |r| r.blackhole().metric(100))
+            .expect("blackhole")
+            .qdisc("eth0", |q| q.netem().delay_ms(100));
+        assert_roundtrips(&cfg);
+    }
+
+    #[test]
+    fn address_roundtrips_as_cidr_string() {
+        let cfg = NetworkConfig::new()
+            .address("eth0", "192.168.1.5/24")
+            .unwrap();
+        let json = cfg.to_json_string().unwrap();
+        assert!(json.contains(r#""address":"192.168.1.5/24""#), "{json}");
+        let back = NetworkConfig::from_json_str(&json).unwrap();
+        assert_eq!(back.addresses()[0].address().to_string(), "192.168.1.5");
+        assert_eq!(back.addresses()[0].prefix_len(), 24);
+    }
+
+    #[test]
+    fn address_rejects_out_of_range_prefix() {
+        // /99 is invalid for IPv4 — the try_from must surface it as a
+        // deserialize error rather than silently accepting it.
+        let err = NetworkConfig::from_json_str(
+            r#"{"addresses":[{"dev":"eth0","address":"10.0.0.1/99"}]}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("prefix"), "{err}");
+    }
+
+    #[test]
+    fn route_default_keyword_roundtrips() {
+        let cfg = NetworkConfig::new()
+            .route("0.0.0.0/0", |r| r.via("192.0.2.1"))
+            .unwrap();
+        let json = cfg.to_json_string().unwrap();
+        // A 0.0.0.0/0 destination renders as the `default` keyword.
+        assert!(json.contains(r#""destination":"default""#), "{json}");
+        let back = NetworkConfig::from_json_str(&json).unwrap();
+        assert!(back.routes()[0].destination().is_unspecified());
+        assert_eq!(back.routes()[0].prefix_len(), 0);
+    }
+
+    #[test]
+    fn route_default_infers_v6_from_gateway() {
+        let back = NetworkConfig::from_json_str(
+            r#"{"routes":[{"destination":"default","gateway":"2001:db8::1"}]}"#,
+        )
+        .unwrap();
+        assert!(back.routes()[0].destination().is_ipv6());
+    }
+
+    #[test]
+    fn route_rejects_bad_gateway() {
+        let err = NetworkConfig::from_json_str(
+            r#"{"routes":[{"destination":"10.0.0.0/8","gateway":"not-an-ip"}]}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("gateway"), "{err}");
+    }
+
+    #[test]
+    fn mac_roundtrips_as_colon_string() {
+        let cfg = NetworkConfig::new()
+            .link("dummy0", |l| l.dummy().address([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
+        let json = cfg.to_json_string().unwrap();
+        assert!(json.contains(r#""address":"aa:bb:cc:dd:ee:ff""#), "{json}");
+        assert_roundtrips(&cfg);
+    }
+
+    #[test]
+    fn mac_rejects_malformed_string() {
+        let err = NetworkConfig::from_json_str(
+            r#"{"links":[{"name":"d0","link-type":"dummy","address":"aa:bb:cc"}]}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("MAC"), "{err}");
+    }
+
+    #[test]
+    fn empty_config_omits_empty_sections() {
+        let json = NetworkConfig::new().to_json_string().unwrap();
+        assert_eq!(json, "{}");
+        // And an empty document deserializes back to an empty config.
+        let back = NetworkConfig::from_json_str("{}").unwrap();
+        assert!(back.links().is_empty() && back.addresses().is_empty());
+    }
+
+    #[test]
+    fn unit_link_type_keeps_bare_string_shape() {
+        // Plan 189 shape: a unit link-type serializes as the bare
+        // string "dummy", not {"dummy": null}.
+        let cfg = NetworkConfig::new().link("d0", |l| l.dummy());
+        let json = cfg.to_json_string().unwrap();
+        assert!(json.contains(r#""link-type":"dummy""#), "{json}");
+    }
+}
+
+/// Serde adapter for [`DeclaredLink::address`] — represents the
+/// `Option<[u8; 6]>` hardware address as a canonical
+/// `aa:bb:cc:dd:ee:ff` string (or absent) rather than a raw byte
+/// array, and validates the string form on the way back in.
+#[cfg(feature = "serde")]
+mod mac_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S>(mac: &Option<[u8; 6]>, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match mac {
+            Some(m) => s.serialize_some(&format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                m[0], m[1], m[2], m[3], m[4], m[5]
+            )),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D>(d: D) -> Result<Option<[u8; 6]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<String>::deserialize(d)? {
+            None => Ok(None),
+            Some(s) => parse_mac(&s).map(Some).map_err(serde::de::Error::custom),
+        }
+    }
+
+    fn parse_mac(s: &str) -> Result<[u8; 6], String> {
+        let mut out = [0u8; 6];
+        let mut n = 0;
+        for (i, part) in s.split(':').enumerate() {
+            if i >= 6 {
+                return Err(format!(
+                    "invalid MAC `{s}`: expected 6 colon-separated octets"
+                ));
+            }
+            out[i] = u8::from_str_radix(part, 16)
+                .map_err(|_| format!("invalid MAC `{s}`: octet `{part}` is not hex"))?;
+            n = i + 1;
+        }
+        if n != 6 {
+            return Err(format!(
+                "invalid MAC `{s}`: expected 6 colon-separated octets, got {n}"
+            ));
+        }
+        Ok(out)
     }
 }
