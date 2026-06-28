@@ -459,6 +459,12 @@ fn apply_inet_filters(cli: &Cli, filter: &mut InetFilter) {
         filter.extensions |= 1 << 2; // INET_DIAG_VEGASINFO (3)
         filter.extensions |= 1 << 3; // INET_DIAG_CONG (4)
     }
+
+    // `--sport`/`--dport` set local_port/remote_port above; the inet
+    // dump path lowers those into an INET_DIAG_REQ_BYTECODE kernel-side
+    // pre-filter automatically, so the kernel admits only matching
+    // sockets. Richer ss-expression predicates (ranges, addresses,
+    // state, or/not) stay client-side via the post-dump filter.
 }
 
 /// Client-side address/port matcher for inet sockets, built from the

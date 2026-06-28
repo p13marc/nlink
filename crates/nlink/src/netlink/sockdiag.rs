@@ -472,6 +472,26 @@ impl Connection<SockDiag> {
             buf.extend_from_slice(&0u32.to_ne_bytes());
             buf.extend_from_slice(&[0u8; 8]);
 
+            // Optional INET_DIAG_REQ_BYTECODE attribute — lower the
+            // filter's exact source/destination port into a kernel-side
+            // pre-filter so far fewer sockets cross into userspace. A
+            // malformed program is rejected by the kernel's bc-audit with
+            // EINVAL (loud); any client-side filtering stays as the
+            // correctness backstop.
+            if let Some(code) =
+                crate::sockdiag::bytecode::for_ports(filter.local_port, filter.remote_port)
+            {
+                let attr_len = (4 + code.len()) as u16;
+                buf.extend_from_slice(&attr_len.to_ne_bytes());
+                buf.extend_from_slice(
+                    &crate::sockdiag::bytecode::INET_DIAG_REQ_BYTECODE.to_ne_bytes(),
+                );
+                buf.extend_from_slice(&code);
+                // Pad the attribute to a 4-byte boundary.
+                let pad = (4 - (code.len() % 4)) % 4;
+                buf.extend(std::iter::repeat_n(0u8, pad));
+            }
+
             let len = buf.len() as u32;
             buf[0..4].copy_from_slice(&len.to_ne_bytes());
 

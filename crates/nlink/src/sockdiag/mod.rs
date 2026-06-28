@@ -62,6 +62,7 @@
 //!
 //! Each socket type has its own query method and response structure.
 
+pub mod bytecode;
 pub mod error;
 pub mod expr;
 pub mod filter;
