@@ -481,6 +481,41 @@ impl Connection<Nl80211> {
         self.wait_ack(seq).await
     }
 
+    /// Remove (kick) a station from an AP-mode interface by MAC.
+    ///
+    /// Sends `NL80211_CMD_DEL_STATION`, deauthenticating the client.
+    /// Useful in AP mode to disconnect a specific associated station.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_station"))]
+    pub async fn del_station(&self, iface: &str, mac: [u8; 6]) -> Result<()> {
+        let ifindex = self.resolve_ifindex(iface).await?;
+        self.del_station_by_index(ifindex, mac).await
+    }
+
+    /// Remove a station by interface index (namespace-safe).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_station_by_index"))]
+    pub async fn del_station_by_index(&self, ifindex: u32, mac: [u8; 6]) -> Result<()> {
+        // F1 fix — serialize the send + recv-loop pair so concurrent
+        // tasks on a shared `Arc<Connection>` don't race on the recv
+        // side. See connection.rs `Concurrency` docstring.
+        let _guard = self.lock_request().await;
+        let family_id = self.state().family_id;
+
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
+        let genl_hdr = GenlMsgHdr::new(NL80211_CMD_DEL_STATION, NL80211_GENL_VERSION);
+        builder.append(&genl_hdr);
+        builder.append_attr_u32(NL80211_ATTR_IFINDEX, ifindex);
+        builder.append_attr(NL80211_ATTR_MAC, &mac);
+
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        self.wait_ack(seq).await
+    }
+
     /// Set power save mode.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_power_save"))]
     pub async fn set_power_save(&self, iface: &str, enabled: bool) -> Result<()> {
