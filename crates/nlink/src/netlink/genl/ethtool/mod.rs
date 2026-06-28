@@ -691,6 +691,29 @@ pub enum EthtoolFecAttr {
     Stats = 5,
 }
 
+/// Attributes for SFP/QSFP module EEPROM reads
+/// (`ETHTOOL_MSG_MODULE_EEPROM_GET`).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EthtoolModuleEepromAttr {
+    Unspec = 0,
+    /// Request header (nested).
+    Header = 1,
+    /// Byte offset within the page (u32).
+    Offset = 2,
+    /// Number of bytes to read (u32, 1..=128).
+    Length = 3,
+    /// Page number (u8).
+    Page = 4,
+    /// Bank number (u8).
+    Bank = 5,
+    /// I2C address (u8 — 0x50 lower / 0x51 upper).
+    I2cAddress = 6,
+    /// Raw EEPROM bytes (binary).
+    Data = 7,
+}
+
 // =============================================================================
 // Statistics Attributes
 // =============================================================================

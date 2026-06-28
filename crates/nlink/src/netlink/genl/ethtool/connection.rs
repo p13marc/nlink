@@ -7,8 +7,8 @@ use super::{
     ETHTOOL_GENL_NAME, ETHTOOL_GENL_VERSION, ETHTOOL_MCGRP_MONITOR, EthtoolBitsetAttr,
     EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolEeeAttr, EthtoolFeaturesAttr,
     EthtoolFecAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr,
-    EthtoolLinkstateAttr, EthtoolPauseAttr, EthtoolRingsAttr, EthtoolStatsGrpAttr, EthtoolWolAttr,
-    WOL_MODE_NAMES, bitset::EthtoolBitset, stats_group,
+    EthtoolLinkstateAttr, EthtoolModuleEepromAttr, EthtoolPauseAttr, EthtoolRingsAttr,
+    EthtoolStatsGrpAttr, EthtoolWolAttr, WOL_MODE_NAMES, bitset::EthtoolBitset, stats_group,
     types::*,
 };
 use crate::macros::{GenlFamily, __rt::resolve_genl_family_with_groups};
@@ -1455,6 +1455,67 @@ impl Connection<Ethtool> {
     }
 
     // =========================================================================
+    // Module EEPROM (ethtool -m)
+    // =========================================================================
+
+    /// Read raw bytes from an SFP/QSFP module's EEPROM (`ethtool -m`).
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    /// A single read is bounded to one 128-byte page at one I2C address;
+    /// see [`ModuleEepromRequest`] for page/bank/address selection.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_module_eeprom"))]
+    pub async fn get_module_eeprom(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        request: ModuleEepromRequest,
+    ) -> Result<ModuleEeprom> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_module_eeprom_by_name(&ifname, request).await
+    }
+
+    /// Read module EEPROM bytes by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_module_eeprom_by_name"))]
+    pub async fn get_module_eeprom_by_name(
+        &self,
+        ifname: &str,
+        request: ModuleEepromRequest,
+    ) -> Result<ModuleEeprom> {
+        if request.length == 0 || request.length > 128 {
+            return Err(Error::InvalidMessage(format!(
+                "get_module_eeprom: length {} out of range (1..=128)",
+                request.length
+            )));
+        }
+        let response = self
+            .ethtool_get_with(EthtoolCmd::ModuleEepromGet, ifname, |builder| {
+                builder.append_attr_u32(EthtoolModuleEepromAttr::Offset as u16, request.offset);
+                builder.append_attr_u32(EthtoolModuleEepromAttr::Length as u16, request.length);
+                builder.append_attr_u8(EthtoolModuleEepromAttr::Page as u16, request.page);
+                builder.append_attr_u8(EthtoolModuleEepromAttr::Bank as u16, request.bank);
+                builder
+                    .append_attr_u8(EthtoolModuleEepromAttr::I2cAddress as u16, request.i2c_address);
+            })
+            .await?;
+
+        let mut out = ModuleEeprom::default();
+        if response.len() < GENL_HDRLEN {
+            return Ok(out);
+        }
+        for (attr_type, payload) in AttrIter::new(&response[GENL_HDRLEN..]) {
+            match attr_type {
+                t if t == EthtoolModuleEepromAttr::Header as u16 => {
+                    self.parse_header(payload, &mut out.ifname, &mut out.ifindex)?;
+                }
+                t if t == EthtoolModuleEepromAttr::Data as u16 => {
+                    out.data = payload.to_vec();
+                }
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    // =========================================================================
     // Standardized statistics (ethtool -S --groups)
     // =========================================================================
 
@@ -1685,6 +1746,62 @@ impl Connection<Ethtool> {
         .await
     }
 
+    /// Send a parameterized ethtool GET (`doit`, not a dump): the caller
+    /// appends request attributes after the device header, and the
+    /// single reply payload is returned. Used by reads that carry input
+    /// parameters (e.g. module-EEPROM offset/length/page).
+    async fn ethtool_get_with(
+        &self,
+        cmd: EthtoolCmd,
+        ifname: &str,
+        build_attrs: impl FnOnce(&mut MessageBuilder),
+    ) -> Result<Vec<u8>> {
+        let _guard = self.lock_request().await;
+        let family_id = self.state().family_id;
+
+        // NLM_F_REQUEST only (no DUMP) — this is a do-it with parameters.
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST);
+        let genl_hdr = GenlMsgHdr::new(cmd as u8, ETHTOOL_GENL_VERSION);
+        builder.append(&genl_hdr);
+
+        let header_token = builder.nest_start(1 | NLA_F_NESTED); // ETHTOOL_A_*_HEADER = 1
+        builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
+        builder.nest_end(header_token);
+
+        build_attrs(&mut builder);
+
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        self.with_timeout(async {
+            loop {
+                let data: Vec<u8> = self.socket().recv_msg().await?;
+                for msg_result in MessageIter::new(&data) {
+                    let (header, payload) = msg_result?;
+                    if header.nlmsg_seq != seq {
+                        continue;
+                    }
+                    if header.is_error() {
+                        let err = NlMsgError::from_bytes(payload)?;
+                        if err.is_ack() {
+                            continue;
+                        }
+                        return Err(err.into_error(payload));
+                    }
+                    if header.is_done() {
+                        return Err(Error::InvalidMessage("no response received".into()));
+                    }
+                    // The doit reply is a single message — return its payload.
+                    return Ok(payload.to_vec());
+                }
+            }
+        })
+        .await
+    }
+
     /// Send an ethtool SET request.
     async fn ethtool_set(
         &self,
@@ -1827,6 +1944,18 @@ mod fec_builder_tests {
             .auto(true);
         assert_eq!(f.modes, vec!["RS", "Off", "BASER", "FancyVendorName"]);
         assert_eq!(f.auto, Some(true));
+    }
+
+    #[test]
+    fn module_eeprom_request_defaults_and_setters() {
+        let r = ModuleEepromRequest::new(4, 64);
+        assert_eq!(r.offset, 4);
+        assert_eq!(r.length, 64);
+        assert_eq!(r.page, 0);
+        assert_eq!(r.i2c_address, 0x50);
+        let r2 = ModuleEepromRequest::new(0, 128).page(1).i2c_address(0x51);
+        assert_eq!(r2.page, 1);
+        assert_eq!(r2.i2c_address, 0x51);
     }
 
     #[test]

@@ -926,6 +926,73 @@ impl FecBuilder {
 }
 
 // =============================================================================
+// Module EEPROM
+// =============================================================================
+
+/// A request to read bytes from an SFP/QSFP module's EEPROM.
+///
+/// A single read is bounded to one 128-byte page at one I2C address.
+/// Use [`ModuleEepromRequest::new`] then the setters for non-default
+/// page/bank/address (e.g. page 1 at I2C `0x51` for diagnostics).
+#[derive(Debug, Clone)]
+#[must_use = "build a request then pass it to get_module_eeprom"]
+pub struct ModuleEepromRequest {
+    /// Byte offset within the page (0..=255).
+    pub offset: u32,
+    /// Number of bytes to read (1..=128).
+    pub length: u32,
+    /// Page number.
+    pub page: u8,
+    /// Bank number.
+    pub bank: u8,
+    /// I2C address (`0x50` lower / `0x51` upper).
+    pub i2c_address: u8,
+}
+
+impl ModuleEepromRequest {
+    /// A read of `length` bytes from `offset` on page 0, bank 0, at the
+    /// standard lower I2C address `0x50`.
+    pub fn new(offset: u32, length: u32) -> Self {
+        Self {
+            offset,
+            length,
+            page: 0,
+            bank: 0,
+            i2c_address: 0x50,
+        }
+    }
+
+    /// Set the page number.
+    pub fn page(mut self, page: u8) -> Self {
+        self.page = page;
+        self
+    }
+
+    /// Set the bank number.
+    pub fn bank(mut self, bank: u8) -> Self {
+        self.bank = bank;
+        self
+    }
+
+    /// Set the I2C address (`0x50` / `0x51`).
+    pub fn i2c_address(mut self, addr: u8) -> Self {
+        self.i2c_address = addr;
+        self
+    }
+}
+
+/// Raw bytes read from a module EEPROM (`ethtool -m`).
+#[derive(Debug, Clone, Default)]
+pub struct ModuleEeprom {
+    /// Interface name.
+    pub ifname: Option<String>,
+    /// Interface index.
+    pub ifindex: Option<u32>,
+    /// The EEPROM bytes returned by the device.
+    pub data: Vec<u8>,
+}
+
+// =============================================================================
 // String Sets
 // =============================================================================
 
