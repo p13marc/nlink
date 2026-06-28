@@ -8,11 +8,11 @@ use nlink::{
         messages::TcMessage,
         tc::{
             BfifoConfig, CakeConfig, CbsConfig, ChokeConfig, ClsactConfig, CodelConfig, DrrConfig,
-            DsmarkConfig, EtfConfig, EtsConfig, FqCodelConfig, FqConfig, FqPieConfig, HfscConfig,
-            HhfConfig, HtbQdiscConfig, IngressConfig, MqConfig, MqprioConfig, MultiqConfig,
-            NetemConfig, PfifoConfig, PfifoFastConfig, PieConfig, PlugConfig, PrioConfig,
-            QdiscConfig, QfqConfig, RedConfig, SfbConfig, SfqConfig, SkbprioConfig, TaprioConfig,
-            TbfConfig,
+            DsmarkConfig, EtfConfig, EtsConfig, FqCodelConfig, FqConfig, FqPieConfig, GredConfig,
+            HfscConfig, HhfConfig, HtbQdiscConfig, IngressConfig, MqConfig, MqprioConfig,
+            MultiqConfig, NetemConfig, PfifoConfig, PfifoFastConfig, PieConfig, PlugConfig,
+            PrioConfig, QdiscConfig, QfqConfig, RedConfig, SfbConfig, SfqConfig, SkbprioConfig,
+            TaprioConfig, TbfConfig,
         },
     },
     output::{OutputFormat, OutputOptions, print_all},
@@ -343,8 +343,9 @@ async fn dispatch_qdisc(
         "dsmark" => dispatch!(DsmarkConfig),
         "choke" => dispatch!(ChokeConfig),
         "pfifo_fast" => dispatch!(PfifoFastConfig),
+        "gred" => dispatch!(GredConfig),
         other => Err(Error::InvalidMessage(format!(
-            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, mq, ets, etf, taprio, cbs, skbprio, sfb, multiq, hhf, dsmark, choke, pfifo_fast)"
+            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, mq, ets, etf, taprio, cbs, skbprio, sfb, multiq, hhf, dsmark, choke, pfifo_fast, gred)"
         ))),
     }
 }

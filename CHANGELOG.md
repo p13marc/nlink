@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **TC qdisc: `gred` (Generic RED) setup-phase typed config (#116).**
+  `GredConfig` models the GRED **setup** message — virtual-queue count
+  (`DPs`, 1..=16), default VQ, GRIO flag, and global byte `limit` — sent
+  as `struct tc_gred_sopt` under `TCA_GRED_DPS` (+ `TCA_GRED_LIMIT`). This
+  is the mandatory first step that installs the virtual-queue table; a
+  setup-only GRED is a complete, valid operation. **Per-VQ RED
+  parameterization is deliberately not modelled**: it requires the
+  256-byte RED stab probability table the kernel demands under
+  `TCA_GRED_STAB` (which plain `RedConfig` also sidesteps), so
+  `parse_params` rejects per-VQ tokens (`min`/`max`/`avpkt`/`bandwidth`/
+  `DP`/`probability`/`prio`/…) with a clear not-modelled error rather than
+  emitting a message the kernel would refuse — tracked as a #115 follow-up.
+  34 qdisc parsers total. New `qdisc::gred` wire module.
+
 - **TC qdiscs: `choke` and `pfifo_fast` typed configs (#116).** Two
   more qdisc kinds reach typed-first parity (33 qdisc parsers total).
   `ChokeConfig` is a RED-family AQM that shares `struct tc_red_qopt`
