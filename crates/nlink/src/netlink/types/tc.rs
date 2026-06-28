@@ -971,6 +971,65 @@ pub mod qdisc {
         }
     }
 
+    /// CBS (Credit-Based Shaper, IEEE 802.1Qav) qdisc attributes.
+    pub mod cbs {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        pub const TCA_CBS_UNSPEC: u16 = 0;
+        pub const TCA_CBS_PARMS: u16 = 1;
+
+        /// Credit-Based Shaper parameters (struct tc_cbs_qopt).
+        ///
+        /// `idleslope`/`sendslope` are in kbit/s as the kernel/tc(8)
+        /// express them; `hicredit`/`locredit` are in bytes. `offload`
+        /// is a boolean flag (hardware offload to the NIC's Qav
+        /// shaper).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcCbsQopt {
+            pub offload: u8,
+            pub _pad: [u8; 3],
+            pub hicredit: i32,
+            pub locredit: i32,
+            pub idleslope: i32,
+            pub sendslope: i32,
+        }
+
+        impl TcCbsQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
+    /// SKB priority queue (skbprio) qdisc parameters.
+    pub mod skbprio {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        /// skbprio limit structure (struct tc_skbprio_qopt). Written
+        /// directly as the `TCA_OPTIONS` payload (no PARMS sub-attr).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcSkbprioQopt {
+            /// Queue length limit in packets.
+            pub limit: u32,
+        }
+
+        impl TcSkbprioQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn new(limit: u32) -> Self {
+                Self { limit }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
     /// DRR (Deficit Round Robin) qdisc attributes.
     pub mod drr {
         pub const TCA_DRR_UNSPEC: u16 = 0;
