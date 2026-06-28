@@ -3560,6 +3560,269 @@ impl QdiscConfig for SkbprioConfig {
 }
 
 // ============================================================================
+// SfbConfig (Stochastic Fair Blue)
+// ============================================================================
+
+/// SFB (Stochastic Fair Blue) qdisc configuration.
+///
+/// SFB is a rate-control AQM that uses Bloom-filter accounting to keep
+/// per-flow marking/dropping probabilities and rate-limit non-responsive
+/// ("inelastic") flows. All fields map directly to `struct tc_sfb_qopt`;
+/// `rehash`/`db` are durations (sent as milliseconds).
+///
+/// ```ignore
+/// use nlink::netlink::tc::SfbConfig;
+///
+/// let cfg = SfbConfig::new().limit(1000).build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct SfbConfig {
+    /// Max SFB queue length (packets).
+    pub limit: Option<u32>,
+    /// Rehash interval.
+    pub rehash: Option<Duration>,
+    /// Double-buffering warmup time (must be < rehash).
+    pub db: Option<Duration>,
+    /// Max length of qlen_min.
+    pub max: Option<u32>,
+    /// Target queue length per bin.
+    pub target: Option<u32>,
+    /// Probability increment (d1).
+    pub increment: Option<u32>,
+    /// Probability decrement (d2).
+    pub decrement: Option<u32>,
+    /// Inelastic-flow penalty rate (packets/s).
+    pub penalty_rate: Option<u32>,
+    /// Inelastic-flow penalty burst.
+    pub penalty_burst: Option<u32>,
+}
+
+impl SfbConfig {
+    /// Create a new SFB configuration builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the max SFB queue length (packets).
+    pub fn limit(mut self, packets: u32) -> Self {
+        self.limit = Some(packets);
+        self
+    }
+
+    /// Set the rehash interval.
+    pub fn rehash(mut self, interval: Duration) -> Self {
+        self.rehash = Some(interval);
+        self
+    }
+
+    /// Set the double-buffering warmup time.
+    pub fn db(mut self, warmup: Duration) -> Self {
+        self.db = Some(warmup);
+        self
+    }
+
+    /// Set the max length of qlen_min.
+    pub fn max(mut self, max: u32) -> Self {
+        self.max = Some(max);
+        self
+    }
+
+    /// Set the target queue length per bin.
+    pub fn target(mut self, target: u32) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    /// Set the probability increment (d1).
+    pub fn increment(mut self, increment: u32) -> Self {
+        self.increment = Some(increment);
+        self
+    }
+
+    /// Set the probability decrement (d2).
+    pub fn decrement(mut self, decrement: u32) -> Self {
+        self.decrement = Some(decrement);
+        self
+    }
+
+    /// Set the inelastic-flow penalty rate (packets/s).
+    pub fn penalty_rate(mut self, rate: u32) -> Self {
+        self.penalty_rate = Some(rate);
+        self
+    }
+
+    /// Set the inelastic-flow penalty burst.
+    pub fn penalty_burst(mut self, burst: u32) -> Self {
+        self.penalty_burst = Some(burst);
+        self
+    }
+
+    /// Terminal no-op for builder symmetry.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style sfb params slice into a typed `SfbConfig`.
+    ///
+    /// Recognised tokens: `limit <packets>`, `rehash <time>`,
+    /// `db <time>`, `max <packets>`, `target <packets>`,
+    /// `increment <n>`, `decrement <n>`, `penalty_rate <pps>`,
+    /// `penalty_burst <n>`. Strict: unknown tokens, missing values,
+    /// and unparseable values all error.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("sfb: `{key}` requires a value"))
+                })
+            };
+            let parse_u32 = |s: &str| -> Result<u32> {
+                s.parse::<u32>().map_err(|_| {
+                    Error::InvalidMessage(format!(
+                        "sfb: invalid {key} `{s}` (expected unsigned integer)"
+                    ))
+                })
+            };
+            let parse_time = |s: &str| -> Result<Duration> {
+                crate::util::parse::get_time(s).map_err(|_| {
+                    Error::InvalidMessage(format!(
+                        "sfb: invalid {key} `{s}` (expected tc-style time)"
+                    ))
+                })
+            };
+            match key {
+                "limit" => {
+                    cfg.limit = Some(parse_u32(need_value()?)?);
+                    i += 2;
+                }
+                "rehash" => {
+                    cfg.rehash = Some(parse_time(need_value()?)?);
+                    i += 2;
+                }
+                "db" => {
+                    cfg.db = Some(parse_time(need_value()?)?);
+                    i += 2;
+                }
+                "max" => {
+                    cfg.max = Some(parse_u32(need_value()?)?);
+                    i += 2;
+                }
+                "target" => {
+                    cfg.target = Some(parse_u32(need_value()?)?);
+                    i += 2;
+                }
+                "increment" => {
+                    cfg.increment = Some(parse_u32(need_value()?)?);
+                    i += 2;
+                }
+                "decrement" => {
+                    cfg.decrement = Some(parse_u32(need_value()?)?);
+                    i += 2;
+                }
+                "penalty_rate" => {
+                    cfg.penalty_rate = Some(parse_u32(need_value()?)?);
+                    i += 2;
+                }
+                "penalty_burst" => {
+                    cfg.penalty_burst = Some(parse_u32(need_value()?)?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!("sfb: unknown token `{other}`")));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+impl QdiscConfig for SfbConfig {
+    fn kind(&self) -> &'static str {
+        "sfb"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::sfb::{TCA_SFB_PARMS, TcSfbQopt};
+
+        let ms = |d: Duration| d.as_millis() as u32;
+        let qopt = TcSfbQopt {
+            rehash_interval: self.rehash.map(ms).unwrap_or(0),
+            warmup_time: self.db.map(ms).unwrap_or(0),
+            max: self.max.unwrap_or(0),
+            bin_size: self.target.unwrap_or(0),
+            increment: self.increment.unwrap_or(0),
+            decrement: self.decrement.unwrap_or(0),
+            limit: self.limit.unwrap_or(0),
+            penalty_rate: self.penalty_rate.unwrap_or(0),
+            penalty_burst: self.penalty_burst.unwrap_or(0),
+        };
+        builder.append_attr(TCA_SFB_PARMS, qopt.as_bytes());
+        Ok(())
+    }
+}
+
+// ============================================================================
+// MultiqConfig (band-per-tx-queue)
+// ============================================================================
+
+/// multiq qdisc configuration.
+///
+/// multiq creates one band per device tx queue, mapping `skb->priority`
+/// to a band so a multi-queue NIC can be driven directly. It is
+/// parameterless: the kernel derives the band count from the device's
+/// real tx-queue count, so the config writes a zeroed
+/// `struct tc_multiq_qopt`.
+///
+/// ```ignore
+/// use nlink::netlink::tc::MultiqConfig;
+///
+/// let cfg = MultiqConfig::new().build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct MultiqConfig;
+
+impl MultiqConfig {
+    /// Create a new multiq configuration.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Terminal no-op for builder symmetry.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style multiq params slice. multiq takes no
+    /// parameters; any token is rejected (strict-parse contract).
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        if let Some(tok) = params.first() {
+            return Err(Error::InvalidMessage(format!(
+                "multiq: unexpected token `{tok}` (multiq takes no parameters)"
+            )));
+        }
+        Ok(Self)
+    }
+}
+
+impl QdiscConfig for MultiqConfig {
+    fn kind(&self) -> &'static str {
+        "multiq"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::multiq::TcMultiqQopt;
+
+        // Zeroed — the kernel fills bands from the device tx-queue count.
+        let qopt = TcMultiqQopt::default();
+        builder.append(&qopt);
+        Ok(())
+    }
+}
+
+// ============================================================================
 // DrrConfig (Deficit Round Robin)
 // ============================================================================
 
@@ -7048,6 +7311,40 @@ mod tests {
         assert!(SkbprioConfig::parse_params(&["limit"]).is_err());
         assert!(SkbprioConfig::parse_params(&["limit", "x"]).is_err());
         assert!(SkbprioConfig::parse_params(&["unknown"]).is_err());
+    }
+
+    #[test]
+    fn test_sfb_parse_and_write() {
+        let cfg = SfbConfig::parse_params(&[
+            "limit", "1000", "rehash", "600ms", "db", "60ms", "max", "25", "target", "20",
+            "increment", "5", "decrement", "1", "penalty_rate", "10", "penalty_burst", "20",
+        ])
+        .unwrap();
+        assert_eq!(cfg.limit, Some(1000));
+        assert_eq!(cfg.rehash, Some(Duration::from_millis(600)));
+        assert_eq!(cfg.db, Some(Duration::from_millis(60)));
+        assert_eq!(cfg.max, Some(25));
+        assert_eq!(cfg.target, Some(20));
+        assert_eq!(cfg.penalty_rate, Some(10));
+
+        let mut b = MessageBuilder::new(0, 0);
+        cfg.write_options(&mut b).unwrap();
+        use crate::netlink::types::tc::qdisc::sfb::TcSfbQopt;
+        assert_eq!(TcSfbQopt::SIZE, 36);
+
+        // strict: missing value, bad time, unknown token.
+        assert!(SfbConfig::parse_params(&["limit"]).is_err());
+        assert!(SfbConfig::parse_params(&["rehash", "soon"]).is_err());
+        assert!(SfbConfig::parse_params(&["unknown"]).is_err());
+    }
+
+    #[test]
+    fn test_multiq_parse() {
+        // Parameterless: empty parses, any token errors.
+        assert!(MultiqConfig::parse_params(&[]).is_ok());
+        assert!(MultiqConfig::parse_params(&["bands", "4"]).is_err());
+        let mut b = MessageBuilder::new(0, 0);
+        MultiqConfig::new().write_options(&mut b).unwrap();
     }
 
     #[test]

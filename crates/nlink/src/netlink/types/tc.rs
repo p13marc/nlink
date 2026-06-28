@@ -1036,6 +1036,72 @@ pub mod qdisc {
         pub const TCA_DRR_QUANTUM: u16 = 1;
     }
 
+    /// SFB (Stochastic Fair Blue) qdisc attributes.
+    pub mod sfb {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        pub const TCA_SFB_UNSPEC: u16 = 0;
+        pub const TCA_SFB_PARMS: u16 = 1;
+
+        /// SFB parameters (struct tc_sfb_qopt). `rehash_interval` and
+        /// `warmup_time` are in milliseconds; `penalty_rate` is in
+        /// packets/s.
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcSfbQopt {
+            /// Delay between hash moves, in ms.
+            pub rehash_interval: u32,
+            /// Double-buffering warmup time, in ms (< rehash_interval).
+            pub warmup_time: u32,
+            /// Max length of qlen_min.
+            pub max: u32,
+            /// Maximum queue length per bin.
+            pub bin_size: u32,
+            /// Probability increment (d1 in Blue).
+            pub increment: u32,
+            /// Probability decrement (d2 in Blue).
+            pub decrement: u32,
+            /// Max SFB queue length.
+            pub limit: u32,
+            /// Inelastic-flow rate limit, in packets/s.
+            pub penalty_rate: u32,
+            /// Penalty burst.
+            pub penalty_burst: u32,
+        }
+
+        impl TcSfbQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
+    /// MULTIQ (band-per-tx-queue) qdisc parameters.
+    pub mod multiq {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        /// multiq parameters (struct tc_multiq_qopt). Written zeroed —
+        /// the kernel derives `bands` from the device's tx-queue count.
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcMultiqQopt {
+            /// Number of bands.
+            pub bands: u16,
+            /// Maximum number of queues.
+            pub max_bands: u16,
+        }
+
+        impl TcMultiqQopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
     /// QFQ (Quick Fair Queueing) qdisc attributes.
     pub mod qfq {
         pub const TCA_QFQ_UNSPEC: u16 = 0;

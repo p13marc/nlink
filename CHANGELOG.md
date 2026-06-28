@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`tc`/library: `sfb` and `multiq` qdiscs (#29).** Two more typed
+  qdisc configs in the standard `*Config` + builder + strict
+  `parse_params` shape, wired into `tc qdisc add … sfb|multiq`.
+  `SfbConfig` drives Stochastic Fair Blue (`limit`, `rehash`, `db`,
+  `max`, `target`, `increment`, `decrement`, `penalty_rate`,
+  `penalty_burst`) packed into `struct tc_sfb_qopt` under
+  `TCA_SFB_PARMS`. `MultiqConfig` drives the band-per-tx-queue qdisc —
+  parameterless (the kernel derives band count from the device's
+  tx-queue count), writing a zeroed `struct tc_multiq_qopt`. Brings the
+  typed-qdisc count to 29.
+
 - **`tc`/library: `cbs` and `skbprio` qdiscs (#29).** Two new typed
   qdisc configs with the standard `*Config` + fluent builder +
   strict `parse_params` shape, wired into `tc qdisc add … cbs|skbprio`.
