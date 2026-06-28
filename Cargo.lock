@@ -434,6 +434,7 @@ dependencies = [
  "nlink",
  "serde_json",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
