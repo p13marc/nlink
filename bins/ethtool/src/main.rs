@@ -95,6 +95,18 @@ enum Commands {
         /// Device name
         device: String,
     },
+    /// Set Forward Error Correction settings
+    SetFec {
+        /// Device name
+        device: String,
+        /// FEC encodings to enable: any of off, none, rs, baser, llrs
+        /// (space-separated; use the names `fec` reports for the device).
+        #[arg(trailing_var_arg = true)]
+        modes: Vec<String>,
+        /// Enable/disable FEC auto-negotiation (on/off)
+        #[arg(long)]
+        auto: Option<bool>,
+    },
     /// Set Energy-Efficient Ethernet settings
     SetEee {
         /// Device name
@@ -236,6 +248,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::SetWol { device, modes } => set_wol(&device, &modes).await?,
         Commands::Eee { device } => show_eee(&device, json).await?,
         Commands::Fec { device } => show_fec(&device, json).await?,
+        Commands::SetFec {
+            device,
+            modes,
+            auto,
+        } => set_fec(&device, &modes, auto).await?,
         Commands::SetEee {
             device,
             enabled,
@@ -827,6 +844,27 @@ async fn show_fec(device: &str, json: bool) -> nlink::Result<()> {
     if let Some(active) = fec.active {
         println!("\tActive FEC mode (raw bit):\t{}", active);
     }
+    Ok(())
+}
+
+async fn set_fec(device: &str, modes: &[String], auto: Option<bool>) -> nlink::Result<()> {
+    if modes.is_empty() && auto.is_none() {
+        return Err(nlink::Error::InvalidMessage(
+            "set-fec: specify at least one encoding (off/none/rs/baser/llrs) or --auto".into(),
+        ));
+    }
+    let conn = Connection::<Ethtool>::new_async().await?;
+    conn.set_fec(device, |mut f| {
+        for m in modes {
+            f = f.mode(m);
+        }
+        if let Some(a) = auto {
+            f = f.auto(a);
+        }
+        f
+    })
+    .await?;
+    eprintln!("FEC settings updated for {}", device);
     Ok(())
 }
 

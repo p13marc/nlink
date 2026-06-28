@@ -876,6 +876,55 @@ pub struct Fec {
     pub active: Option<u32>,
 }
 
+/// Builder for setting Forward Error Correction parameters
+/// (`ethtool --set-fec`).
+///
+/// FEC mode names are the kernel-labelled bitset names — the same
+/// strings [`Fec::modes`] reports for the device (e.g. `None`, `RS`,
+/// `BASER`, `LLRS`, `Off`). Passing the names `get_fec` returns is
+/// correct by construction; common lowercase spellings (`off`, `none`,
+/// `rs`, `baser`, `llrs`) are normalised to the canonical forms.
+#[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
+pub struct FecBuilder {
+    pub(crate) modes: Vec<String>,
+    pub(crate) auto: Option<bool>,
+}
+
+impl FecBuilder {
+    /// Create a new builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Request a FEC mode by name. May be called multiple times to
+    /// enable several encodings; names are normalised
+    /// (`off`→`Off`, `rs`→`RS`, `baser`→`BASER`, `llrs`→`LLRS`,
+    /// `none`→`None`) and otherwise passed through verbatim so device
+    /// reported names always work.
+    pub fn mode(mut self, name: &str) -> Self {
+        self.modes.push(Self::normalise_mode(name));
+        self
+    }
+
+    /// Enable or disable FEC auto-negotiation.
+    pub fn auto(mut self, on: bool) -> Self {
+        self.auto = Some(on);
+        self
+    }
+
+    fn normalise_mode(name: &str) -> String {
+        match name.to_ascii_lowercase().as_str() {
+            "off" => "Off".to_string(),
+            "none" => "None".to_string(),
+            "rs" => "RS".to_string(),
+            "baser" => "BASER".to_string(),
+            "llrs" => "LLRS".to_string(),
+            _ => name.to_string(),
+        }
+    }
+}
+
 // =============================================================================
 // String Sets
 // =============================================================================
