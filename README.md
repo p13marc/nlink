@@ -146,7 +146,9 @@ let report = nlink::netlink::diagnostics::Diagnostics::new(conn).scan().await?;
 - [Cookbook recipes](docs/recipes/README.md) — end-to-end walkthroughs
   (per-peer impairment, VLAN-aware bridges, bidirectional rate limiting,
   WireGuard mesh in namespaces, ENOBUFS-resync loops, define-your-own-GENL-family).
-- [CLI reference](docs/cli.md) — `ip` and `tc` command coverage.
+- [CLI reference](docs/cli.md) — command coverage for all ten demo
+  binaries (`ip`, `tc`, `ss`, `nft`, `bridge`, `wg`, `nlink-config`,
+  `devlink`, `nlink-ethtool`, `wifi`).
 - [Migration guides](docs/migration_guide/README.md) — per-release upgrade notes.
 - [Examples](crates/nlink/examples/README.md) — 40+ runnable demos.
 - [docs.rs/nlink](https://docs.rs/nlink) — full API reference.
