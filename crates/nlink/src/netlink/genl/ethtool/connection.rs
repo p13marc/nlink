@@ -5,10 +5,10 @@
 
 use super::{
     ETHTOOL_GENL_NAME, ETHTOOL_GENL_VERSION, ETHTOOL_MCGRP_MONITOR, EthtoolBitsetAttr,
-    EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolFeaturesAttr, EthtoolHeaderAttr,
-    EthtoolLinkinfoAttr, EthtoolLinkmodesAttr, EthtoolLinkstateAttr, EthtoolPauseAttr,
-    EthtoolRingsAttr, EthtoolStatsGrpAttr, EthtoolWolAttr, WOL_MODE_NAMES, bitset::EthtoolBitset,
-    stats_group,
+    EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolEeeAttr, EthtoolFeaturesAttr,
+    EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr, EthtoolLinkstateAttr,
+    EthtoolPauseAttr, EthtoolRingsAttr, EthtoolStatsGrpAttr, EthtoolWolAttr, WOL_MODE_NAMES,
+    bitset::EthtoolBitset, stats_group,
     types::*,
 };
 use crate::macros::{GenlFamily, __rt::resolve_genl_family_with_groups};
@@ -1250,6 +1250,106 @@ impl Connection<Ethtool> {
                     let mut pass = [0u8; 6];
                     pass.copy_from_slice(&payload[..6]);
                     wol.sopass = Some(pass);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    // =========================================================================
+    // Energy-Efficient Ethernet (ethtool --show-eee / --set-eee)
+    // =========================================================================
+
+    /// Get Energy-Efficient Ethernet settings.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_eee"))]
+    pub async fn get_eee(&self, iface: impl Into<InterfaceRef>) -> Result<Eee> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_eee_by_name(&ifname).await
+    }
+
+    /// Get Energy-Efficient Ethernet settings by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_eee_by_name"))]
+    pub async fn get_eee_by_name(&self, ifname: &str) -> Result<Eee> {
+        let response = self.ethtool_get(EthtoolCmd::EeeGet, ifname).await?;
+
+        let mut eee = Eee::default();
+        if response.len() < GENL_HDRLEN {
+            return Ok(eee);
+        }
+        self.parse_eee(&response[GENL_HDRLEN..], &mut eee)?;
+        Ok(eee)
+    }
+
+    /// Set Energy-Efficient Ethernet settings.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Ethtool};
+    ///
+    /// let conn = Connection::<Ethtool>::new_async().await?;
+    /// conn.set_eee("eth0", |e| e.enabled(true).tx_lpi_enabled(true)).await?;
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_eee"))]
+    pub async fn set_eee(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        configure: impl FnOnce(EeeBuilder) -> EeeBuilder,
+    ) -> Result<()> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.set_eee_by_name(&ifname, configure).await
+    }
+
+    /// Set Energy-Efficient Ethernet settings by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_eee_by_name"))]
+    pub async fn set_eee_by_name(
+        &self,
+        ifname: &str,
+        configure: impl FnOnce(EeeBuilder) -> EeeBuilder,
+    ) -> Result<()> {
+        let config = configure(EeeBuilder::new());
+        self.ethtool_set(EthtoolCmd::EeeSet, ifname, move |builder| {
+            if let Some(v) = config.enabled {
+                builder.append_attr_u8(EthtoolEeeAttr::Enabled as u16, v as u8);
+            }
+            if let Some(v) = config.tx_lpi_enabled {
+                builder.append_attr_u8(EthtoolEeeAttr::TxLpiEnabled as u16, v as u8);
+            }
+            if let Some(v) = config.tx_lpi_timer {
+                builder.append_attr_u32(EthtoolEeeAttr::TxLpiTimer as u16, v);
+            }
+        })
+        .await
+    }
+
+    fn parse_eee(&self, data: &[u8], eee: &mut Eee) -> Result<()> {
+        for (attr_type, payload) in AttrIter::new(data) {
+            match attr_type {
+                t if t == EthtoolEeeAttr::Header as u16 => {
+                    self.parse_header(payload, &mut eee.ifname, &mut eee.ifindex)?;
+                }
+                t if t == EthtoolEeeAttr::ModesOurs as u16 => {
+                    let bs = EthtoolBitset::parse(payload)?;
+                    eee.advertised = bs.active_names().into_iter().map(String::from).collect();
+                }
+                t if t == EthtoolEeeAttr::ModesPeer as u16 => {
+                    let bs = EthtoolBitset::parse(payload)?;
+                    eee.peer = bs.active_names().into_iter().map(String::from).collect();
+                }
+                t if t == EthtoolEeeAttr::Active as u16 && !payload.is_empty() => {
+                    eee.active = Some(payload[0] != 0);
+                }
+                t if t == EthtoolEeeAttr::Enabled as u16 && !payload.is_empty() => {
+                    eee.enabled = Some(payload[0] != 0);
+                }
+                t if t == EthtoolEeeAttr::TxLpiEnabled as u16 && !payload.is_empty() => {
+                    eee.tx_lpi_enabled = Some(payload[0] != 0);
+                }
+                t if t == EthtoolEeeAttr::TxLpiTimer as u16 && payload.len() >= 4 => {
+                    eee.tx_lpi_timer = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
                 _ => {}
             }

@@ -644,6 +644,32 @@ pub const WOL_MODE_NAMES: [&str; 8] = [
 ];
 
 // =============================================================================
+// Energy-Efficient Ethernet Attributes
+// =============================================================================
+
+/// Attributes for Energy-Efficient Ethernet (`ETHTOOL_MSG_EEE_{GET,SET}`).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EthtoolEeeAttr {
+    Unspec = 0,
+    /// Request header (nested).
+    Header = 1,
+    /// Modes we advertise (link-mode bitset).
+    ModesOurs = 2,
+    /// Modes the link partner advertises (link-mode bitset).
+    ModesPeer = 3,
+    /// EEE currently active (u8).
+    Active = 4,
+    /// EEE administratively enabled (u8).
+    Enabled = 5,
+    /// TX LPI enabled (u8).
+    TxLpiEnabled = 6,
+    /// TX LPI timer, microseconds (u32).
+    TxLpiTimer = 7,
+}
+
+// =============================================================================
 // Statistics Attributes
 // =============================================================================
 
