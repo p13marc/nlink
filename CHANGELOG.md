@@ -113,6 +113,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`ip` bin: namespace-safe `maddr show` interface resolution (#17).**
+  `maddr` resolved the interface name→index map by scanning
+  `/sys/class/net`, which always reads the host namespace and so showed
+  wrong indices inside a foreign netns. It now resolves the map over
+  netlink (`RTM_GETLINK`). The `/proc/net/{dev_mcast,igmp,igmp6}` reads
+  stay — they are per-netns and the kernel-blessed source for multicast
+  membership (no netlink equivalent). Documented that `maddr add/del` is
+  intentionally not offered: the kernel exposes static L2 multicast only
+  via the `SIOCADDMULTI`/`SIOCDELMULTI` ioctls, out of scope for this
+  netlink-first demo.
 - **`tc` bin: remove the dead `-b`/`--batch` flag (#19).** It was a
   global option declared "(not yet implemented)" and never read — a
   silent no-op that violated the strict-no-op contract. Dropped rather
