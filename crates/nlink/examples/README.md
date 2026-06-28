@@ -31,7 +31,8 @@ examples/
 │   ├── fdb.rs            # FDB (forwarding database) management
 │   └── vlan.rs           # VLAN filtering
 ├── config/             # Declarative configuration examples
-│   └── declarative.rs    # Define desired state, compute diff, apply
+│   ├── declarative.rs    # Define desired state, compute diff, apply
+│   └── round_trip.rs     # Validating JSON round-trip (serde feature)
 ├── diagnostics/        # Network diagnostics examples
 │   ├── bottleneck.rs     # Find network bottlenecks
 │   ├── connectivity.rs   # Check connectivity to destination
@@ -146,6 +147,7 @@ Some examples require specific features or root privileges. See the individual e
 | Example | Description | Command |
 |---------|-------------|---------|
 | `config_declarative` | Define network state, compute diff, apply changes | `cargo run -p nlink --example config_declarative` |
+| `config_round_trip` | Validating `NetworkConfig` JSON round-trip (serde) | `cargo run -p nlink --features serde --example config_round_trip` |
 
 ## Rate Limiting Examples
 
