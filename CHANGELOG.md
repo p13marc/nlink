@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`tc` bin: implement `qdisc show --invisible` (#19).** The flag was
+  parsed but ignored, so `tc qdisc show invisible` behaved identically
+  to a plain show. It now sets `TCA_DUMP_INVISIBLE` on the
+  `RTM_GETQDISC` dump (via the new `Connection::get_qdiscs_full`
+  library method), so the kernel also returns the auto-created default
+  qdiscs it normally hides.
 - **`ethtool` bin: surface already-parsed link detail in `show` (#27).**
   `show` now prints the data the library already decoded but the binary
   dropped: PHY address, MDI-X status (+ configured control), Signal
@@ -61,6 +67,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`tc` bin: remove the dead `-b`/`--batch` flag (#19).** It was a
+  global option declared "(not yet implemented)" and never read — a
+  silent no-op that violated the strict-no-op contract. Dropped rather
+  than left lying; a real batch interpreter can return as a focused
+  feature.
 - **`ip` bin: namespace-safe `neighbor show`/`flush` device filter (#17).**
   Both resolved the device via `get_neighbors_by_name`, which reads the
   name from the host `/sys` and so returns wrong results inside a foreign

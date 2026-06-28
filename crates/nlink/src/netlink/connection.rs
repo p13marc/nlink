@@ -1711,6 +1711,42 @@ impl Connection<Route> {
         self.dump_typed(NlMsgType::RTM_GETQDISC).await
     }
 
+    /// Get all qdiscs, optionally including "invisible" ones.
+    ///
+    /// The kernel hides auto-created default qdiscs (e.g. the implicit
+    /// `pfifo_fast` / `mq` on a fresh device) from `RTM_GETQDISC` dumps
+    /// unless the request carries the `TCA_DUMP_INVISIBLE` flag. Passing
+    /// `invisible = true` appends that flag, matching
+    /// `tc qdisc show invisible`. With `invisible = false` this is
+    /// identical to [`get_qdiscs`](Self::get_qdiscs).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_qdiscs_full"))]
+    pub async fn get_qdiscs_full(&self, invisible: bool) -> Result<Vec<TcMessage>> {
+        if !invisible {
+            return self.get_qdiscs().await;
+        }
+
+        // TCA_DUMP_INVISIBLE is an empty flag attribute (rtnetlink.h).
+        const TCA_DUMP_INVISIBLE: u16 = 10;
+
+        let mut builder = dump_request(NlMsgType::RTM_GETQDISC);
+        let mut header_buf = Vec::new();
+        TcMessage::write_dump_header(&mut header_buf);
+        builder.append_bytes(&header_buf);
+        builder.append_attr_empty(TCA_DUMP_INVISIBLE);
+
+        let responses = self.send_dump(builder).await?;
+        let mut parsed = Vec::with_capacity(responses.len());
+        for response in responses {
+            if response.len() < NLMSG_HDRLEN {
+                continue;
+            }
+            if let Ok(msg) = TcMessage::from_bytes(&response[NLMSG_HDRLEN..]) {
+                parsed.push(msg);
+            }
+        }
+        Ok(parsed)
+    }
+
     /// Get qdiscs for a specific interface.
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
