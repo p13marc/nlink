@@ -154,16 +154,17 @@ impl_parse_params! {
     crate::netlink::filter::RsvpFilter,
     crate::netlink::filter::TcindexFilter,
     crate::netlink::filter::U32Filter,
-    // Action configs (17) — Plan 139 PR B closed the original 14
-    // typed-first; mpls + skbmod added in the #29 epic; ctinfo added
-    // under the #115 coverage epic. PeditAction is a stub that rejects
-    // all inputs per Plan §10.
+    // Action configs (18) — Plan 139 PR B closed the original 14
+    // typed-first; mpls + skbmod added in the #29 epic; ctinfo + ife
+    // added under the #115 coverage epic. PeditAction is a stub that
+    // rejects all inputs per Plan §10.
     crate::netlink::action::BpfAction,
     crate::netlink::action::ConnmarkAction,
     crate::netlink::action::CsumAction,
     crate::netlink::action::CtAction,
     crate::netlink::action::CtinfoAction,
     crate::netlink::action::GactAction,
+    crate::netlink::action::IfeAction,
     crate::netlink::action::MirredAction,
     crate::netlink::action::MplsAction,
     crate::netlink::action::NatAction,

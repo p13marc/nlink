@@ -2949,6 +2949,70 @@ pub mod action {
         }
     }
 
+    /// IFE (Inter-FE) action attributes and structures.
+    ///
+    /// `act_ife` encodes selected skb metadata (mark / priority /
+    /// tcindex) into an Ethernet header for transport between
+    /// forwarding elements, and decodes it on the far side. The
+    /// metadata selection rides in the nested `TCA_IFE_METALST` list.
+    pub mod ife {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        pub const TCA_IFE_UNSPEC: u16 = 0;
+        pub const TCA_IFE_PARMS: u16 = 1;
+        pub const TCA_IFE_TM: u16 = 2;
+        pub const TCA_IFE_DMAC: u16 = 3;
+        pub const TCA_IFE_SMAC: u16 = 4;
+        pub const TCA_IFE_TYPE: u16 = 5;
+        pub const TCA_IFE_METALST: u16 = 6;
+        pub const TCA_IFE_PAD: u16 = 7;
+
+        // Metadata identifiers (nested under TCA_IFE_METALST).
+        pub const IFE_META_SKBMARK: u16 = 1;
+        pub const IFE_META_HASHID: u16 = 2;
+        pub const IFE_META_PRIO: u16 = 3;
+        pub const IFE_META_QMAP: u16 = 4;
+        pub const IFE_META_TCINDEX: u16 = 5;
+
+        /// Encode mode (set in `tc_ife.flags`); decode is the absence
+        /// of this bit.
+        pub const IFE_ENCODE: u16 = 1;
+
+        /// IFE action parameters (`struct tc_ife` — `tc_gen` + flags).
+        ///
+        /// The `tc_gen` prefix is 20 bytes; `flags` is a `u16` followed
+        /// by 2 bytes of explicit padding so the struct has no implicit
+        /// padding (required for zerocopy `IntoBytes`).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcIfe {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+            /// `IFE_ENCODE` for encode mode, 0 for decode.
+            pub flags: u16,
+            /// Explicit trailing padding.
+            pub _pad: u16,
+        }
+
+        impl TcIfe {
+            pub fn new(flags: u16, action: i32) -> Self {
+                Self {
+                    action,
+                    flags,
+                    ..Default::default()
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
     /// Csum (checksum) action attributes and structures.
     pub mod csum {
         use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};

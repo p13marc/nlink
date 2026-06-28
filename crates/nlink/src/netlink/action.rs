@@ -2556,6 +2556,268 @@ impl ActionConfig for CtinfoAction {
 }
 
 // ============================================================================
+// IfeAction
+// ============================================================================
+
+/// IFE metadata kind carried by an [`IfeAction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IfeMeta {
+    /// skb mark (`IFE_META_SKBMARK`, 4-byte value).
+    Mark,
+    /// skb priority (`IFE_META_PRIO`, 4-byte value).
+    Prio,
+    /// tc index (`IFE_META_TCINDEX`, 2-byte value).
+    TcIndex,
+}
+
+#[derive(Debug, Clone)]
+struct IfeMetaEntry {
+    kind: IfeMeta,
+    /// `None` = `allow` (carry whatever the skb holds); `Some` = `use`
+    /// (override with this value).
+    value: Option<u32>,
+}
+
+/// IFE (Inter-FE) action configuration.
+///
+/// `act_ife` tunnels selected skb metadata (mark / priority / tcindex)
+/// between forwarding elements: in **encode** mode it writes the
+/// selected metadata into an IFE Ethernet header (optionally overriding
+/// the destination/source MAC and ethertype); in **decode** mode it
+/// reads metadata back out of arriving IFE frames.
+///
+/// Each metadata item is either `allow`ed (carry whatever the skb
+/// currently holds) or `use`d with an explicit override value.
+///
+/// ```ignore
+/// use nlink::netlink::action::{IfeAction, IfeMeta};
+///
+/// // Encode the skb mark and a fixed priority into an IFE header.
+/// let a = IfeAction::encode()
+///     .allow(IfeMeta::Mark)
+///     .use_value(IfeMeta::Prio, 7)
+///     .dst([0x02, 0, 0, 0, 0, 1])
+///     .etype(0xed3e)
+///     .build();
+/// ```
+///
+/// # Override-value byte order
+///
+/// `use <meta> <value>` overrides are written big-endian (network order)
+/// — `u32` for `mark`/`prio`, `u16` for `tcindex`. The `allow` form
+/// carries no value and is the common case.
+#[derive(Debug, Clone)]
+pub struct IfeAction {
+    encode: bool,
+    dmac: Option<[u8; 6]>,
+    smac: Option<[u8; 6]>,
+    etype: Option<u16>,
+    metadata: Vec<IfeMetaEntry>,
+    action: i32,
+}
+
+impl IfeAction {
+    fn new(encode: bool) -> Self {
+        Self {
+            encode,
+            dmac: None,
+            smac: None,
+            etype: None,
+            metadata: Vec::new(),
+            action: action::TC_ACT_PIPE,
+        }
+    }
+
+    /// Create an IFE action in **encode** mode.
+    pub fn encode() -> Self {
+        Self::new(true)
+    }
+
+    /// Create an IFE action in **decode** mode.
+    pub fn decode() -> Self {
+        Self::new(false)
+    }
+
+    /// Carry whatever value the skb holds for `meta` (`allow`).
+    pub fn allow(mut self, meta: IfeMeta) -> Self {
+        self.metadata.push(IfeMetaEntry {
+            kind: meta,
+            value: None,
+        });
+        self
+    }
+
+    /// Override `meta` with an explicit value (`use`).
+    pub fn use_value(mut self, meta: IfeMeta, value: u32) -> Self {
+        self.metadata.push(IfeMetaEntry {
+            kind: meta,
+            value: Some(value),
+        });
+        self
+    }
+
+    /// Set the destination MAC written into the IFE header.
+    pub fn dst(mut self, mac: [u8; 6]) -> Self {
+        self.dmac = Some(mac);
+        self
+    }
+
+    /// Set the source MAC written into the IFE header.
+    pub fn src(mut self, mac: [u8; 6]) -> Self {
+        self.smac = Some(mac);
+        self
+    }
+
+    /// Set the IFE ethertype.
+    pub fn etype(mut self, etype: u16) -> Self {
+        self.etype = Some(etype);
+        self
+    }
+
+    /// Set the action verdict.
+    pub fn action(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build the action configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    fn meta_from_str(kind: &str, s: &str) -> Result<IfeMeta> {
+        match s {
+            "mark" => Ok(IfeMeta::Mark),
+            "prio" => Ok(IfeMeta::Prio),
+            "tcindex" => Ok(IfeMeta::TcIndex),
+            other => Err(Error::InvalidMessage(format!(
+                "{kind}: unknown metadata `{other}` (expected mark, prio, tcindex)"
+            ))),
+        }
+    }
+
+    /// Parse a `tc(8)`-style `ife` token slice into a typed action.
+    ///
+    /// # Recognised tokens
+    ///
+    /// - `encode` / `decode` — mode (required, must come first).
+    /// - `allow <meta>` — carry the skb's value for `mark`/`prio`/`tcindex`.
+    /// - `use <meta> <value>` — override with an explicit value.
+    /// - `dst <MAC>` / `src <MAC>` — IFE header MACs.
+    /// - `type <ethertype>` — IFE ethertype (name or `0x`-hex/decimal).
+    ///
+    /// Strict: unknown tokens, missing values, and unparseable values
+    /// all error.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut a = match params.first() {
+            Some(&"encode") => Self::encode(),
+            Some(&"decode") => Self::decode(),
+            _ => {
+                return Err(Error::InvalidMessage(
+                    "ife: first token must be `encode` or `decode`".to_string(),
+                ));
+            }
+        };
+        let mut i = 1;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "allow" => {
+                    let s = action_need_value(params, i, "ife", "allow")?;
+                    a = a.allow(Self::meta_from_str("ife", s)?);
+                    i += 2;
+                }
+                "use" => {
+                    let what = action_need_value(params, i, "ife", "use")?;
+                    let meta = Self::meta_from_str("ife", what)?;
+                    let val_s = params.get(i + 2).copied().ok_or_else(|| {
+                        Error::InvalidMessage(format!("ife: `use {what}` requires a value"))
+                    })?;
+                    let val = action_parse_u32("ife", "use value", val_s)?;
+                    a = a.use_value(meta, val);
+                    i += 3;
+                }
+                "dst" => {
+                    let s = action_need_value(params, i, "ife", "dst")?;
+                    a = a.dst(crate::util::addr::parse_mac(s).map_err(|_| {
+                        Error::InvalidMessage(format!("ife: invalid dst MAC `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "src" => {
+                    let s = action_need_value(params, i, "ife", "src")?;
+                    a = a.src(crate::util::addr::parse_mac(s).map_err(|_| {
+                        Error::InvalidMessage(format!("ife: invalid src MAC `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "type" => {
+                    let s = action_need_value(params, i, "ife", "type")?;
+                    a = a.etype(parse_ethertype("ife", s)?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "ife: unknown token `{other}` (recognised: encode|decode, allow <meta>, use <meta> <val>, dst/src <MAC>, type <ethertype>)"
+                    )));
+                }
+            }
+        }
+        Ok(a)
+    }
+}
+
+impl ActionConfig for IfeAction {
+    fn kind(&self) -> &'static str {
+        "ife"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::action::ife;
+
+        let flags = if self.encode { ife::IFE_ENCODE } else { 0 };
+        let parms = ife::TcIfe::new(flags, self.action);
+        builder.append_attr(ife::TCA_IFE_PARMS, parms.as_bytes());
+
+        if let Some(dmac) = self.dmac {
+            builder.append_attr(ife::TCA_IFE_DMAC, &dmac);
+        }
+        if let Some(smac) = self.smac {
+            builder.append_attr(ife::TCA_IFE_SMAC, &smac);
+        }
+        if let Some(etype) = self.etype {
+            builder.append_attr(ife::TCA_IFE_TYPE, &etype.to_be_bytes());
+        }
+
+        if !self.metadata.is_empty() {
+            let lst = builder.nest_start(ife::TCA_IFE_METALST);
+            for entry in &self.metadata {
+                let attr = match entry.kind {
+                    IfeMeta::Mark => ife::IFE_META_SKBMARK,
+                    IfeMeta::Prio => ife::IFE_META_PRIO,
+                    IfeMeta::TcIndex => ife::IFE_META_TCINDEX,
+                };
+                match entry.value {
+                    // `allow`: empty payload.
+                    None => builder.append_attr(attr, &[]),
+                    // `use`: explicit override value, network byte order.
+                    Some(v) => match entry.kind {
+                        IfeMeta::TcIndex => {
+                            builder.append_attr(attr, &(v as u16).to_be_bytes())
+                        }
+                        _ => builder.append_attr(attr, &v.to_be_bytes()),
+                    },
+                }
+            }
+            builder.nest_end(lst);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // CsumAction
 // ============================================================================
 
@@ -5121,6 +5383,61 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("out of range")
+        );
+    }
+
+    // ---- IfeAction ----
+
+    #[test]
+    fn ife_parse_params_encode_allow_and_use() {
+        let a = IfeAction::parse_params(&[
+            "encode", "allow", "mark", "use", "prio", "7", "dst", "02:00:00:00:00:01", "type",
+            "0xed3e",
+        ])
+        .unwrap();
+        assert_eq!(ActionConfig::kind(&a), "ife");
+        assert_eq!(a.metadata.len(), 2);
+        assert_eq!(a.metadata[0].kind, IfeMeta::Mark);
+        assert_eq!(a.metadata[0].value, None); // allow
+        assert_eq!(a.metadata[1].kind, IfeMeta::Prio);
+        assert_eq!(a.metadata[1].value, Some(7)); // use
+        assert_eq!(a.etype, Some(0xed3e));
+        assert!(a.dmac.is_some());
+        assert!(a.encode);
+    }
+
+    #[test]
+    fn ife_parse_params_decode_mode() {
+        let a = IfeAction::parse_params(&["decode", "allow", "tcindex"]).unwrap();
+        assert!(!a.encode);
+        assert_eq!(a.metadata[0].kind, IfeMeta::TcIndex);
+    }
+
+    #[test]
+    fn ife_parse_params_mode_required_first() {
+        let err = IfeAction::parse_params(&["allow", "mark"]).unwrap_err();
+        assert!(err.to_string().contains("first token must be `encode` or `decode`"));
+    }
+
+    #[test]
+    fn ife_parse_params_strict_errors() {
+        assert!(
+            IfeAction::parse_params(&["encode", "allow", "bogusmeta"])
+                .unwrap_err()
+                .to_string()
+                .contains("unknown metadata")
+        );
+        assert!(
+            IfeAction::parse_params(&["encode", "use", "mark"])
+                .unwrap_err()
+                .to_string()
+                .contains("requires a value")
+        );
+        assert!(
+            IfeAction::parse_params(&["encode", "nonsense"])
+                .unwrap_err()
+                .to_string()
+                .contains("ife: unknown token")
         );
     }
 
