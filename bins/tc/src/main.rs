@@ -36,10 +36,6 @@ struct Cli {
     #[arg(short = 'd', long, global = true)]
     details: bool,
 
-    /// Batch mode (not yet implemented)
-    #[arg(short = 'b', long, global = true)]
-    batch: Option<String>,
-
     /// Use names instead of numeric handles
     #[arg(short = 'n', long = "names", global = true)]
     use_names: bool,
