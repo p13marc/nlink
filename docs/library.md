@@ -429,45 +429,57 @@ let err = Error::validation(vec![
 
 ## Declarative Network Configuration
 
-Infrastructure-as-code approach for network state management:
+Infrastructure-as-code approach for network state management. You
+describe the *desired* state; `diff` computes the delta against the
+live kernel and `apply` reconciles it idempotently (re-applying the
+same config is a no-op).
 
 ```rust
 use nlink::netlink::{Connection, Route};
-use nlink::netlink::config::{NetworkConfig, ConfigDiff};
+use nlink::netlink::config::{NetworkConfig, ApplyOptions};
 
 let conn = Connection::<Route>::new()?;
 
-// Capture current network state
-let current = NetworkConfig::capture(&conn).await?;
+// Describe the desired state with the typed builders…
+let desired = NetworkConfig::new()
+    .link("br0", |l| l.bridge().up())
+    .link("veth0", |l| l.veth("veth1").master("br0"))
+    .address("br0", "10.0.0.1/24")?
+    .route("10.1.0.0/16", |r| r.via("10.0.0.254").dev("br0"))?;
 
-// Load desired configuration from YAML/JSON
-let desired: NetworkConfig = serde_yaml::from_str(r#"
-links:
-  - name: veth0
-    kind: veth
-    peer: veth1
-  - name: br0
-    kind: bridge
+// Diff against the live kernel state (async — reads current links,
+// addresses, routes, qdiscs and computes the minimal change set).
+let diff = desired.diff(&conn).await?;
+println!("{} change(s) pending", diff.change_count());
 
-addresses:
-  - dev: veth0
-    address: 10.0.0.1/24
+// Preview without touching the kernel, then apply for real.
+desired
+    .apply_with_options(&conn, ApplyOptions::default().with_dry_run(true))
+    .await?;
+let result = desired.apply(&conn).await?;
+println!("applied {} change(s)", result.changes_made);
+```
 
-routes:
-  - destination: 10.1.0.0/16
-    gateway: 10.0.0.254
-    dev: veth0
-"#)?;
+With the `serde` feature, the *same typed config* round-trips through
+JSON/YAML — and it validates as it parses, so a bad address, prefix,
+gateway, or MAC is a deserialize error rather than a silently-wrong
+config. Addresses and routes use CIDR strings (`default` for the
+default route); MACs use `aa:bb:cc:dd:ee:ff`:
 
-// Compare configurations
-let diff = current.diff(&desired);
-println!("Changes: {} additions, {} removals", 
-    diff.additions().len(), 
-    diff.removals().len());
+```rust
+let desired = NetworkConfig::from_json_str(r#"{
+    "links": [
+        { "name": "br0", "link-type": "bridge", "state": "up" },
+        { "name": "veth0", "link-type": { "veth": { "peer": "veth1" } } }
+    ],
+    "addresses": [ { "dev": "br0", "address": "10.0.0.1/24" } ],
+    "routes":    [ { "destination": "10.1.0.0/16", "gateway": "10.0.0.254", "dev": "br0" } ]
+}"#)?;
 
-// Apply changes (dry-run first)
-diff.apply_dry_run(&conn).await?;  // Preview only
-diff.apply(&conn).await?;           // Actually apply
+// YAML works too via serde_yaml (the Deserialize impl is format-agnostic):
+// let desired: NetworkConfig = serde_yaml::from_str(yaml)?;
+
+let json = desired.to_json_string_pretty()?;
 ```
 
 ## Rate Limiting DSL

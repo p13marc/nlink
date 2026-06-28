@@ -59,8 +59,8 @@ GRE, IPIP, SIT, VTI, Geneve, netkit, IFB, VRF, MACsec, MACVLAN, IPVLAN, GTP,
 tun/tap), addresses, routes, neighbors, routing rules, nexthop objects + ECMP
 groups, MPLS, SRv6, bridge FDB + VLAN filtering, network namespaces.
 
-**Traffic control** — 18 typed qdisc kinds, typed classes (HTB, HFSC, DRR, QFQ),
-9 typed filter kinds, 14 typed action kinds, filter chains, BPF program attachment.
+**Traffic control** — 31 typed qdisc kinds, typed classes (HTB, HFSC, DRR, QFQ),
+10 typed filter kinds, 16 typed action kinds, filter chains, BPF program attachment.
 Every typed config has a `parse_params(&[&str])` so `tc` CLI syntax round-trips
 through the typed API. Strongly-typed units: `Rate` (bytes/sec internally,
 parses `100mbit` / `1gbit`), `Bytes`, `Percent`, `TcHandle`, `FilterPriority`.
@@ -90,20 +90,25 @@ collapse common configuration patterns.
 
 ```rust
 // Declarative network state — diff against kernel, apply changes idempotently.
+// With the `serde` feature it also round-trips through JSON/YAML: the typed
+// config validates as it parses (CIDR addresses, MAC strings), so a bad value
+// is a deserialize error, not a silently-wrong config.
 use nlink::netlink::config::NetworkConfig;
 NetworkConfig::new()
     .link("br0", |l| l.bridge().up())
     .link("dummy0", |l| l.dummy().mtu(9000).up().master("br0"))
     .address("br0", "192.168.100.1/24")?
     .apply(&conn).await?;
+let cfg = NetworkConfig::from_json_str(r#"{ "links": [{ "name": "br0", "link-type": "bridge" }] }"#)?;
 
 // Declarative nftables ruleset — atomic batch commit.
 use nlink::netlink::nftables::config::NftablesConfig;
-let cfg = NftablesConfig::new()
-    .table("filter", |t| t.inet()
-        .chain("input", |c| c.hook_input().policy_drop()
-            .rule(|r| r.iif("lo").accept())
-            .rule(|r| r.ct_state_established_related().accept())));
+use nlink::netlink::nftables::types::{Family, Hook, Policy, Priority};
+let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
+    t.chain("input", |c| c.hook(Hook::Input).priority(Priority::Filter).policy(Policy::Drop))
+        .rule("input", |r| r.match_iif("lo").accept())
+        .rule("input", |r| r.match_tcp_dport(22).accept())
+});
 cfg.diff(&conn).await?.apply(&conn).await?;
 
 // Rate limiting — typed Rate, no bits-vs-bytes confusion.
@@ -151,10 +156,11 @@ let report = nlink::netlink::diagnostics::Diagnostics::new(conn).scan().await?;
 API stable and used in production. Wire format pinned by build-time
 `sizeof(struct …)` CI gates; concurrent shared-`Arc<Connection>` use is safe
 (serialized via internal mutex — use `ConnectionPool` for parallel throughput).
-14 CI gates on every push (build × 2 feature sets, tests × 2, clippy
+19 CI gates on every push (build × 2 feature sets, tests × 2, clippy
 `--deny warnings`, doc with strict intra-doc links, semver-checks, public-api
-diff, machete, msrv, plus 5 nlink-specific audit scripts) + a privileged
-integration job that runs the root-gated kernel round-trip suite.
+diff, machete, msrv, s390x big-endian cross-check, README/manifest sync, plus
+8 nlink-specific audit scripts) + a privileged integration job that runs the
+root-gated kernel round-trip suite.
 
 ## Building from source
 
