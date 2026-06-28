@@ -855,6 +855,28 @@ impl EeeBuilder {
 }
 
 // =============================================================================
+// Forward Error Correction
+// =============================================================================
+
+/// Forward Error Correction settings (`ethtool --show-fec`).
+#[derive(Debug, Clone, Default)]
+pub struct Fec {
+    /// Interface name.
+    pub ifname: Option<String>,
+    /// Interface index.
+    pub ifindex: Option<u32>,
+    /// Configured FEC modes (kernel-labelled names, e.g. `None`, `RS`,
+    /// `BASER`, `LLRS`).
+    pub modes: Vec<String>,
+    /// Whether the FEC mode is auto-negotiated.
+    pub auto: Option<bool>,
+    /// Active FEC mode as the raw `ETHTOOL_LINK_MODE_FEC_*` bit (0 if
+    /// none/unreported). Exposed raw to avoid mismodelling the kernel's
+    /// link-mode numbering.
+    pub active: Option<u32>,
+}
+
+// =============================================================================
 // String Sets
 // =============================================================================
 

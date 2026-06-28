@@ -6,9 +6,9 @@
 use super::{
     ETHTOOL_GENL_NAME, ETHTOOL_GENL_VERSION, ETHTOOL_MCGRP_MONITOR, EthtoolBitsetAttr,
     EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolEeeAttr, EthtoolFeaturesAttr,
-    EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr, EthtoolLinkstateAttr,
-    EthtoolPauseAttr, EthtoolRingsAttr, EthtoolStatsGrpAttr, EthtoolWolAttr, WOL_MODE_NAMES,
-    bitset::EthtoolBitset, stats_group,
+    EthtoolFecAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr,
+    EthtoolLinkstateAttr, EthtoolPauseAttr, EthtoolRingsAttr, EthtoolStatsGrpAttr, EthtoolWolAttr,
+    WOL_MODE_NAMES, bitset::EthtoolBitset, stats_group,
     types::*,
 };
 use crate::macros::{GenlFamily, __rt::resolve_genl_family_with_groups};
@@ -1350,6 +1350,58 @@ impl Connection<Ethtool> {
                 }
                 t if t == EthtoolEeeAttr::TxLpiTimer as u16 && payload.len() >= 4 => {
                     eee.tx_lpi_timer = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    // =========================================================================
+    // Forward Error Correction (ethtool --show-fec)
+    // =========================================================================
+
+    /// Get Forward Error Correction settings (read-only).
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    /// Setting FEC is not yet modelled — the configured-modes bitset
+    /// uses kernel-specific mode bit names that this read path simply
+    /// echoes back; a typed setter that picks the right names is left
+    /// to a follow-up.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_fec"))]
+    pub async fn get_fec(&self, iface: impl Into<InterfaceRef>) -> Result<Fec> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_fec_by_name(&ifname).await
+    }
+
+    /// Get Forward Error Correction settings by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_fec_by_name"))]
+    pub async fn get_fec_by_name(&self, ifname: &str) -> Result<Fec> {
+        let response = self.ethtool_get(EthtoolCmd::FecGet, ifname).await?;
+
+        let mut fec = Fec::default();
+        if response.len() < GENL_HDRLEN {
+            return Ok(fec);
+        }
+        self.parse_fec(&response[GENL_HDRLEN..], &mut fec)?;
+        Ok(fec)
+    }
+
+    fn parse_fec(&self, data: &[u8], fec: &mut Fec) -> Result<()> {
+        for (attr_type, payload) in AttrIter::new(data) {
+            match attr_type {
+                t if t == EthtoolFecAttr::Header as u16 => {
+                    self.parse_header(payload, &mut fec.ifname, &mut fec.ifindex)?;
+                }
+                t if t == EthtoolFecAttr::Modes as u16 => {
+                    let bs = EthtoolBitset::parse(payload)?;
+                    fec.modes = bs.active_names().into_iter().map(String::from).collect();
+                }
+                t if t == EthtoolFecAttr::Auto as u16 && !payload.is_empty() => {
+                    fec.auto = Some(payload[0] != 0);
+                }
+                t if t == EthtoolFecAttr::Active as u16 && payload.len() >= 4 => {
+                    fec.active = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
                 _ => {}
             }
