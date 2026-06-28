@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`ethtool`/library: Forward Error Correction read (#29).** New
+  `Connection<Ethtool>::get_fec`/`get_fec_by_name` over
+  `ETHTOOL_MSG_FEC_GET`: configured-modes list, auto-negotiation flag,
+  and the active FEC mode (raw `ETHTOOL_LINK_MODE_FEC_*` bit). Surfaced
+  as `ethtool fec`. Read-only for now — a typed FEC setter needs the
+  kernel-specific mode bit-names and is left to a follow-up.
+
 - **`ethtool`/library: Energy-Efficient Ethernet get/set (#29).** New
   `Connection<Ethtool>::get_eee`/`set_eee` (+ `_by_name`) over
   `ETHTOOL_MSG_EEE_{GET,SET}`: read active/enabled/TX-LPI state, the

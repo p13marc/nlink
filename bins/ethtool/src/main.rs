@@ -90,6 +90,11 @@ enum Commands {
         /// Device name
         device: String,
     },
+    /// Show Forward Error Correction settings
+    Fec {
+        /// Device name
+        device: String,
+    },
     /// Set Energy-Efficient Ethernet settings
     SetEee {
         /// Device name
@@ -230,6 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Wol { device } => show_wol(&device, json).await?,
         Commands::SetWol { device, modes } => set_wol(&device, &modes).await?,
         Commands::Eee { device } => show_eee(&device, json).await?,
+        Commands::Fec { device } => show_fec(&device, json).await?,
         Commands::SetEee {
             device,
             enabled,
@@ -794,6 +800,33 @@ async fn set_eee(
     })
     .await?;
     eprintln!("EEE settings updated for {}", device);
+    Ok(())
+}
+
+async fn show_fec(device: &str, json: bool) -> nlink::Result<()> {
+    let conn = Connection::<Ethtool>::new_async().await?;
+    let fec = conn.get_fec(device).await?;
+
+    if json {
+        print_json(&serde_json::json!({
+            "device": device,
+            "modes": fec.modes,
+            "auto": fec.auto,
+            "active": fec.active,
+        }));
+        return Ok(());
+    }
+
+    println!("FEC settings for {}:", device);
+    if !fec.modes.is_empty() {
+        println!("\tConfigured FEC encodings: {}", fec.modes.join(" "));
+    }
+    if let Some(a) = fec.auto {
+        println!("\tAuto-negotiation:\t{}", if a { "on" } else { "off" });
+    }
+    if let Some(active) = fec.active {
+        println!("\tActive FEC mode (raw bit):\t{}", active);
+    }
     Ok(())
 }
 

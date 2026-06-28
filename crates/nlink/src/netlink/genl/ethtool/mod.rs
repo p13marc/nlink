@@ -670,6 +670,28 @@ pub enum EthtoolEeeAttr {
 }
 
 // =============================================================================
+// Forward Error Correction Attributes
+// =============================================================================
+
+/// Attributes for Forward Error Correction (`ETHTOOL_MSG_FEC_{GET,SET}`).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EthtoolFecAttr {
+    Unspec = 0,
+    /// Request header (nested).
+    Header = 1,
+    /// Configured FEC modes (bitset).
+    Modes = 2,
+    /// FEC mode auto-negotiated (u8).
+    Auto = 3,
+    /// Active FEC mode (u32 — an `ETHTOOL_LINK_MODE_FEC_*` bit, or 0).
+    Active = 4,
+    /// FEC statistics (nested).
+    Stats = 5,
+}
+
+// =============================================================================
 // Statistics Attributes
 // =============================================================================
 
