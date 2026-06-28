@@ -6,6 +6,22 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **sockdiag: `INET_DIAG_REQ_BYTECODE` kernel-side filtering (#120) —
+  closes #120 and the #115 coverage epic.** The new `sockdiag::bytecode`
+  compiler lowers `sport`/`dport` comparisons (`=`/`<`/`<=`/`>`/`>=`)
+  combined with `and` into an `inet_diag_bc_op` program, attached as
+  `INET_DIAG_REQ_BYTECODE` on the inet dump so the **kernel** pre-filters
+  and far fewer sockets cross into userspace. `ss` sets it automatically
+  from its filter expression. Unsupported predicates (`!=`,
+  address/prefix, `state`, any `or`/`not`) compile to `None` and fall
+  back to the full dump; the existing client-side expression filter is
+  the correctness backstop in every case, so the pre-filter can only
+  reduce traffic, never change results. Byte-exact layout is unit-tested;
+  on-kernel semantics (the kernel `inet_diag_bc_audit` rejects a
+  malformed program with EINVAL) are validated by a `require_root!()`
+  integration test under the privileged CI (now built with
+  `lab,sockdiag`).
+
 - **ethtool: RSS read (#119) — closes #119.**
   `Connection::<Ethtool>::get_rss` reads Receive Side Scaling settings
   (`ETHTOOL_MSG_RSS_GET`) for the default or a given context: the

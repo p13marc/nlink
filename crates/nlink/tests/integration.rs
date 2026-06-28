@@ -79,6 +79,13 @@ mod namespace_spawn;
 #[path = "integration/conntrack.rs"]
 mod conntrack;
 
+// Feature-gated: only compiles when `sockdiag` is enabled. The
+// privileged integration workflow builds with `lab,sockdiag` so the
+// on-kernel bytecode validation runs there.
+#[cfg(feature = "sockdiag")]
+#[path = "integration/sockdiag_bytecode.rs"]
+mod sockdiag_bytecode;
+
 #[path = "integration/neigh.rs"]
 mod neigh;
 

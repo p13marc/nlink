@@ -110,7 +110,10 @@ jobs:
           done
 
       - name: Build with `lab` feature
-        run: cargo build -p nlink --features lab --tests
+        # `sockdiag` is included so the sockdiag bytecode integration
+        # test (on-kernel INET_DIAG_REQ_BYTECODE validation) compiles
+        # and runs here.
+        run: cargo build -p nlink --features lab,sockdiag --tests
 
       - name: Run integration tests as root
         env:
@@ -128,7 +131,7 @@ jobs:
           # prevents collisions, but parallel execution of the
           # heavier recipes (HTB trees, xfrm SAs) still races on
           # shared kernel state in some kernels.
-          cargo test -p nlink --features lab --test integration -- \
+          cargo test -p nlink --features lab,sockdiag --test integration -- \
               --test-threads=1 --nocapture
 
       - name: Run library unit tests too

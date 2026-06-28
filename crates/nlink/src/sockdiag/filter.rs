@@ -101,6 +101,12 @@ pub struct InetFilter {
     pub mark: Option<(u32, u32)>, // (value, mask)
     /// Filter by cgroup ID.
     pub cgroup_id: Option<u64>,
+    /// Kernel-side `INET_DIAG_REQ_BYTECODE` program, compiled from an
+    /// ss-style filter expression. When set, the kernel pre-filters the
+    /// dump so far fewer sockets cross into userspace. `None` = dump all
+    /// (the default); callers apply any client-side filtering on top.
+    /// See [`crate::sockdiag::bytecode`].
+    pub bytecode: Option<Vec<u8>>,
 }
 
 impl Default for InetFilter {
@@ -117,6 +123,7 @@ impl Default for InetFilter {
             interface: None,
             mark: None,
             cgroup_id: None,
+            bytecode: None,
         }
     }
 }

@@ -459,6 +459,21 @@ fn apply_inet_filters(cli: &Cli, filter: &mut InetFilter) {
         filter.extensions |= 1 << 2; // INET_DIAG_VEGASINFO (3)
         filter.extensions |= 1 << 3; // INET_DIAG_CONG (4)
     }
+
+    // Compile a kernel-side bytecode pre-filter from the ss-style filter
+    // expression when it falls in the supported subset (sport/dport
+    // comparisons combined with `and`). The kernel then admits far fewer
+    // sockets into the dump. Unsupported expressions compile to `None`
+    // and we fall back to the full dump; the client-side expression
+    // filter (applied after the query) is the correctness backstop in
+    // every case, so a bytecode pre-filter can only reduce traffic, not
+    // change results.
+    if !cli.filter_expr.is_empty() {
+        let expr_str = cli.filter_expr.join(" ");
+        if let Ok(expr) = nlink::sockdiag::FilterExpr::parse(&expr_str) {
+            filter.bytecode = nlink::sockdiag::bytecode::compile(&expr);
+        }
+    }
 }
 
 /// Client-side address/port matcher for inet sockets, built from the
