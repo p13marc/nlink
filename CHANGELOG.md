@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **TC action: `gate` (IEEE 802.1Qci PSFP) typed config (#118) — closes
+  the modelable side of #118.** `GateAction` admits packets only during
+  the open windows of a cyclic time schedule (TSN per-stream gating):
+  `priority`, `base-time`/`cycle-time`/`cycle-time-ext` (`Duration`s, ns
+  on the wire, `tc(8)` time strings accepted), `clockid`
+  (`TAI`/`REALTIME`/`MONOTONIC`/`BOOTTIME` or numeric), and a repeatable
+  `sched-entry open|close <interval> [<ipv> [<max-octets>]]` schedule.
+  The entry list is built as nested `TCA_GATE_ONE_ENTRY` items under
+  `TCA_GATE_ENTRY_LIST` (gate-open is an `NLA_FLAG`). New `action::gate`
+  wire module. 19 action parsers. **`xt`/`ipt` is intentionally not
+  modelled**: `act_ipt` requires a `TCA_IPT_TARG` `xt_entry_target` blob
+  built via libxtables, with no pure-netlink construction path — a
+  hook/index-only config would be rejected with EINVAL, so it's
+  documented as out-of-scope under #118 rather than shipped broken.
+
 - **TC action: `ife` (Inter-FE) typed config (#118).** `IfeAction`
   tunnels skb metadata (mark / priority / tcindex) between forwarding
   elements: `encode` writes selected metadata into an IFE Ethernet
