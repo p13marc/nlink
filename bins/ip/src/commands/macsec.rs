@@ -2,11 +2,13 @@
 //!
 //! This module implements MACsec device information display.
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use nlink::{
     netlink::{
-        Connection, Macsec, Result, Route,
-        genl::macsec::{MacsecCipherSuite, MacsecDevice, MacsecOffload, MacsecValidate},
+        Connection, Error, Macsec, Result, Route,
+        genl::macsec::{
+            MacsecCipherSuite, MacsecDevice, MacsecOffload, MacsecSaBuilder, MacsecValidate,
+        },
     },
     output::{OutputFormat, OutputOptions},
 };
@@ -17,6 +19,64 @@ pub struct MacsecCmd {
     action: Option<MacsecAction>,
 }
 
+/// TX vs RX secure-channel direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Direction {
+    Tx,
+    Rx,
+}
+
+/// Arguments shared by the SA/SC mutation subcommands. Which fields are
+/// required depends on the verb + direction (validated in `mutate`):
+/// `tx` operates on the device's single TX SC; `rx` needs `--sci` to pick
+/// the per-peer RX SC, and an `--an` selects an SA within it (omit `--an`
+/// on `rx` to operate on the RX SC itself).
+#[derive(Args)]
+struct MacsecSaArgs {
+    /// MACsec device name.
+    device: String,
+
+    /// Secure-channel direction.
+    direction: Direction,
+
+    /// RX secure-channel identifier (required for `rx`; hex `0x…` or decimal).
+    #[arg(long)]
+    sci: Option<String>,
+
+    /// Association Number (0-3) selecting an SA.
+    #[arg(long)]
+    an: Option<u8>,
+
+    /// SA key (hex; 16 bytes for GCM-AES-128, 32 for -256). Required on add.
+    #[arg(long)]
+    key: Option<String>,
+
+    /// 128-bit key identifier (32 hex chars).
+    #[arg(long = "key-id")]
+    key_id: Option<String>,
+
+    /// Initial/next packet number.
+    #[arg(long)]
+    pn: Option<u64>,
+
+    /// Whether the SA is active (the encoding SA for TX).
+    #[arg(long, default_value = "on")]
+    active: OnOff,
+}
+
+/// on/off toggle that maps to a bool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+}
+
+impl From<OnOff> for bool {
+    fn from(v: OnOff) -> bool {
+        matches!(v, OnOff::On)
+    }
+}
+
 #[derive(Subcommand)]
 enum MacsecAction {
     /// Show MACsec devices.
@@ -24,6 +84,23 @@ enum MacsecAction {
         /// Device name.
         device: Option<String>,
     },
+
+    /// Add a TX SA, RX secure-channel, or RX SA.
+    Add(MacsecSaArgs),
+
+    /// Update an existing TX/RX SA (packet number / active flag).
+    Set(MacsecSaArgs),
+
+    /// Delete a TX SA, RX secure-channel, or RX SA.
+    Del(MacsecSaArgs),
+}
+
+/// Verb for the shared `mutate` dispatcher.
+#[derive(Clone, Copy)]
+enum Verb {
+    Add,
+    Set,
+    Del,
 }
 
 impl MacsecCmd {
@@ -37,6 +114,9 @@ impl MacsecCmd {
             MacsecAction::Show { device } => {
                 Self::show(conn, device.as_deref(), format, opts).await
             }
+            MacsecAction::Add(args) => mutate(conn, Verb::Add, &args).await,
+            MacsecAction::Set(args) => mutate(conn, Verb::Set, &args).await,
+            MacsecAction::Del(args) => mutate(conn, Verb::Del, &args).await,
         }
     }
 
@@ -106,6 +186,143 @@ impl MacsecCmd {
 
         Ok(())
     }
+}
+
+/// Resolve the device to an ifindex (namespace-safe) and dispatch the
+/// add/set/del to the matching `Connection<Macsec>` `*_by_index` method.
+async fn mutate(conn: &Connection<Route>, verb: Verb, args: &MacsecSaArgs) -> Result<()> {
+    let ifindex = conn
+        .get_link_by_name(args.device.as_str())
+        .await?
+        .ok_or_else(|| Error::InvalidMessage(format!("device `{}` not found", args.device)))?
+        .ifindex();
+
+    let macsec = Connection::<Macsec>::new_async().await?;
+
+    // Validate the AN up front — MacsecSaBuilder::new panics on an > 3.
+    if let Some(an) = args.an
+        && an > 3
+    {
+        return Err(Error::InvalidMessage(format!(
+            "macsec: association number must be 0-3 (got {an})"
+        )));
+    }
+
+    match (verb, args.direction) {
+        // ---- TX SA ----
+        (Verb::Add, Direction::Tx) => {
+            macsec.add_tx_sa_by_index(ifindex, build_sa(args)?).await?;
+        }
+        (Verb::Set, Direction::Tx) => {
+            macsec
+                .update_tx_sa_by_index(ifindex, build_sa(args)?)
+                .await?;
+        }
+        (Verb::Del, Direction::Tx) => {
+            let an = require_an(args)?;
+            macsec.del_tx_sa_by_index(ifindex, an).await?;
+        }
+
+        // ---- RX SC / RX SA ----
+        (verb, Direction::Rx) => {
+            let sci = parse_sci(require(&args.sci, "--sci")?)?;
+            match (verb, args.an) {
+                // No AN: operate on the RX secure-channel itself.
+                (Verb::Add, None) => macsec.add_rx_sc_by_index(ifindex, sci).await?,
+                (Verb::Del, None) => macsec.del_rx_sc_by_index(ifindex, sci).await?,
+                (Verb::Set, None) => {
+                    return Err(Error::InvalidMessage(
+                        "macsec set rx requires --an (RX secure-channels have no mutable state)"
+                            .into(),
+                    ));
+                }
+                // With AN: operate on an RX SA within that SC.
+                (Verb::Add, Some(_)) => {
+                    macsec
+                        .add_rx_sa_by_index(ifindex, sci, build_sa(args)?)
+                        .await?
+                }
+                (Verb::Set, Some(_)) => {
+                    macsec
+                        .update_rx_sa_by_index(ifindex, sci, build_sa(args)?)
+                        .await?
+                }
+                (Verb::Del, Some(an)) => macsec.del_rx_sa_by_index(ifindex, sci, an).await?,
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Build a `MacsecSaBuilder` from the CLI args (for add/update). Requires
+/// `--an`; `--key` is required for `add` (the kernel needs it to create the
+/// SA) but the same builder serves `update`, where the key is re-sent.
+fn build_sa(args: &MacsecSaArgs) -> Result<MacsecSaBuilder> {
+    let an = require_an(args)?;
+    let key = parse_hex(require(&args.key, "--key")?, "--key")?;
+
+    let mut sa = MacsecSaBuilder::new(an, &key).active(args.active.into());
+    if let Some(pn) = args.pn {
+        sa = sa.packet_number(pn);
+    }
+    if let Some(ref id) = args.key_id {
+        let bytes = parse_hex(id, "--key-id")?;
+        let arr: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+            Error::InvalidMessage(format!(
+                "macsec: --key-id must be 16 bytes (32 hex chars), got {}",
+                bytes.len()
+            ))
+        })?;
+        sa = sa.key_id(arr);
+    }
+    Ok(sa)
+}
+
+fn require_an(args: &MacsecSaArgs) -> Result<u8> {
+    let an = require(&args.an, "--an")?;
+    if *an > 3 {
+        return Err(Error::InvalidMessage(format!(
+            "macsec: association number must be 0-3 (got {an})"
+        )));
+    }
+    Ok(*an)
+}
+
+/// Require an optional CLI value, erroring with the flag name if absent.
+fn require<'a, T>(opt: &'a Option<T>, what: &str) -> Result<&'a T> {
+    opt.as_ref()
+        .ok_or_else(|| Error::InvalidMessage(format!("macsec: {what} is required here")))
+}
+
+/// Parse an SCI: hex (`0x…`) or decimal `u64`.
+fn parse_sci(s: &str) -> Result<u64> {
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16)
+    } else {
+        s.parse::<u64>()
+    };
+    parsed.map_err(|_| Error::InvalidMessage(format!("macsec: invalid SCI `{s}`")))
+}
+
+/// Parse an even-length hex string into bytes.
+fn parse_hex(s: &str, what: &str) -> Result<Vec<u8>> {
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    if !s.len().is_multiple_of(2) {
+        return Err(Error::InvalidMessage(format!(
+            "macsec: {what} must have an even number of hex digits"
+        )));
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16)
+                .map_err(|_| Error::InvalidMessage(format!("macsec: invalid hex in {what}")))
+        })
+        .collect()
 }
 
 /// Print devices in JSON format.
@@ -358,5 +575,34 @@ fn offload_str(offload: MacsecOffload) -> &'static str {
         MacsecOffload::Phy => "phy",
         MacsecOffload::Mac => "mac",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_sci_hex_and_dec() {
+        assert_eq!(
+            parse_sci("0x11223344550001").unwrap(),
+            0x0011_2233_4455_0001
+        );
+        assert_eq!(parse_sci("42").unwrap(), 42);
+        assert!(parse_sci("nope").is_err());
+    }
+
+    #[test]
+    fn parse_hex_keys() {
+        assert_eq!(parse_hex("0a0b", "--key").unwrap(), vec![0x0a, 0x0b]);
+        assert_eq!(parse_hex("0x0a0b", "--key").unwrap(), vec![0x0a, 0x0b]);
+        assert!(parse_hex("abc", "--key").is_err()); // odd length
+        assert!(parse_hex("zz", "--key").is_err()); // not hex
+    }
+
+    #[test]
+    fn on_off_to_bool() {
+        assert!(bool::from(OnOff::On));
+        assert!(!bool::from(OnOff::Off));
     }
 }
