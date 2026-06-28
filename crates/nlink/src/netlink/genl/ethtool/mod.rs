@@ -612,6 +612,38 @@ pub enum EthtoolPauseAttr {
 }
 
 // =============================================================================
+// Wake-on-LAN Attributes
+// =============================================================================
+
+/// Attributes for Wake-on-LAN (`ETHTOOL_MSG_WOL_{GET,SET}`).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EthtoolWolAttr {
+    Unspec = 0,
+    /// Request header (nested).
+    Header = 1,
+    /// WoL modes (bitset — supported via mask, active via value).
+    Modes = 2,
+    /// SecureOn password (6 bytes, for `magicsecure`).
+    Sopass = 3,
+}
+
+/// Wake-on-LAN mode bit names, indexed by `ilog2(WAKE_*)`, matching
+/// the kernel's `wol_mode_names`. Used to build the outgoing modes
+/// bitset by name.
+pub const WOL_MODE_NAMES: [&str; 8] = [
+    "phy",
+    "ucast",
+    "mcast",
+    "bcast",
+    "arp",
+    "magic",
+    "magicsecure",
+    "filter",
+];
+
+// =============================================================================
 // Statistics Attributes
 // =============================================================================
 

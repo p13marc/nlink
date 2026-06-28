@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`ethtool`/library: Wake-on-LAN get/set (#29).** New
+  `Connection<Ethtool>::get_wol` / `set_wol` (plus `_by_name`)
+  over `ETHTOOL_MSG_WOL_{GET,SET}`: read supported/active modes + the
+  SecureOn password, and enable modes by name (`phy`, `ucast`, `mcast`,
+  `bcast`, `arp`, `magic`, `magicsecure`, `filter`) via a `WolBuilder`.
+  Unknown mode names are rejected before the request is sent. Surfaced
+  in the `ethtool` bin as `wol`/`-w` (show) and `set-wol`/`-W` (with a
+  `none` sentinel to disable all), printing the `p u m b a g s f`/`d`
+  flag string ethtool(8) uses.
+
 - **`tc`/library: `mpls` and `skbmod` actions (#29).** Two new typed
   TC actions in the standard `*Action` + `parse_params` shape, wired
   into `tc action add … mpls|skbmod`. `MplsAction` pushes/pops/modifies

@@ -68,6 +68,23 @@ enum Commands {
         /// Device name
         device: String,
     },
+    /// Show Wake-on-LAN settings
+    #[command(short_flag = 'w')]
+    Wol {
+        /// Device name
+        device: String,
+    },
+    /// Set Wake-on-LAN modes
+    #[command(short_flag = 'W')]
+    SetWol {
+        /// Device name
+        device: String,
+        /// WoL modes to enable: any of phy, ucast, mcast, bcast, arp,
+        /// magic, magicsecure, filter (space-separated). Pass `none`
+        /// to disable all.
+        #[arg(trailing_var_arg = true)]
+        modes: Vec<String>,
+    },
     /// Set ring buffer sizes
     #[command(short_flag = 'G')]
     SetRings {
@@ -191,6 +208,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Coalesce { device } => show_coalesce(&device, json).await?,
         Commands::Pause { device } => show_pause(&device, json).await?,
         Commands::Stats { device } => show_stats(&device, json).await?,
+        Commands::Wol { device } => show_wol(&device, json).await?,
+        Commands::SetWol { device, modes } => set_wol(&device, &modes).await?,
         Commands::SetRings { device, rx, tx } => set_rings(&device, rx, tx).await?,
         Commands::SetChannels {
             device,
@@ -623,6 +642,69 @@ async fn show_pause(device: &str, json: bool) -> nlink::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+async fn show_wol(device: &str, json: bool) -> nlink::Result<()> {
+    let conn = Connection::<Ethtool>::new_async().await?;
+    let wol = conn.get_wol(device).await?;
+
+    let sopass = wol
+        .sopass
+        .map(|p| nlink::util::addr::format_mac(&p));
+
+    if json {
+        print_json(&serde_json::json!({
+            "device": device,
+            "supported": wol.supported,
+            "active": wol.active,
+            "sopass": sopass,
+        }));
+        return Ok(());
+    }
+
+    println!("Wake-on-LAN settings for {}:", device);
+    println!("\tSupports Wake-on:\t{}", wol_flags(&wol.supported));
+    println!("\tWake-on:\t\t{}", wol_flags(&wol.active));
+    if let Some(p) = sopass {
+        println!("\tSecureOn password:\t{}", p);
+    }
+    Ok(())
+}
+
+/// Render WoL mode names as the single-letter flag string ethtool(8)
+/// uses (`p u m b a g s f`), or `d` when nothing is set.
+fn wol_flags(modes: &[String]) -> String {
+    let mut s = String::new();
+    for (name, ch) in [
+        ("phy", 'p'),
+        ("ucast", 'u'),
+        ("mcast", 'm'),
+        ("bcast", 'b'),
+        ("arp", 'a'),
+        ("magic", 'g'),
+        ("magicsecure", 's'),
+        ("filter", 'f'),
+    ] {
+        if modes.iter().any(|m| m == name) {
+            s.push(ch);
+        }
+    }
+    if s.is_empty() { "d".to_string() } else { s }
+}
+
+async fn set_wol(device: &str, modes: &[String]) -> nlink::Result<()> {
+    let conn = Connection::<Ethtool>::new_async().await?;
+
+    // `none`/`d` (ethtool's "disable" sentinels) clear all modes.
+    let enable: Vec<String> = if modes.iter().any(|m| m == "none" || m == "d") {
+        Vec::new()
+    } else {
+        modes.to_vec()
+    };
+
+    conn.set_wol(device, |w| w.modes(enable)).await?;
+    eprintln!("Wake-on-LAN modes set for {}", device);
     Ok(())
 }
 

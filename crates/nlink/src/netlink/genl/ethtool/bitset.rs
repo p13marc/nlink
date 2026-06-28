@@ -373,6 +373,44 @@ mod tests {
         assert_eq!(parsed.index("nonexistent"), None);
     }
 
+    /// The Wake-on-LAN modes bitset (the full `WOL_MODE_NAMES` space
+    /// with selected bits active) must round-trip so a `get_wol` parse
+    /// recovers `supported` (all names) and `active` (set names).
+    #[test]
+    fn wol_modes_bitset_roundtrips() {
+        use crate::netlink::builder::MessageBuilder;
+        use crate::netlink::genl::ethtool::WOL_MODE_NAMES;
+
+        let mut bs = EthtoolBitset::new();
+        for (idx, name) in WOL_MODE_NAMES.iter().enumerate() {
+            // Enable only magic + phy, like `ethtool -W eth0 wol gp`.
+            let on = *name == "magic" || *name == "phy";
+            bs.add(idx as u32, name, on);
+        }
+
+        let mut builder = MessageBuilder::new(0, 0);
+        bs.write_to(&mut builder, 2);
+        let bytes = builder.finish();
+        let (s, e) = find_attr_payload(&bytes, 2).expect("attr 2 present");
+        let parsed = EthtoolBitset::parse(&bytes[s..e]).expect("parse");
+
+        let mut supported = parsed
+            .all_names()
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        supported.sort();
+        assert_eq!(supported.len(), WOL_MODE_NAMES.len());
+
+        let mut active = parsed
+            .active_names()
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        active.sort();
+        assert_eq!(active, vec!["magic".to_string(), "phy".to_string()]);
+    }
+
     /// Helper: walk netlink message bytes, find the (start, end)
     /// payload range for a given outer attr type, ignoring the
     /// netlink message header. Used only by the roundtrip test.
