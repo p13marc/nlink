@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`bridge` bin: `monitor` command (#25).** Streams bridge FDB changes
+  in real time — `bridge monitor` subscribes to `RTNLGRP_NEIGH` and
+  prints `NewFdb`/`DelFdb` events (text or `--json`, with `-t` for
+  timestamps), mirroring `bridge monitor fdb`. (MDB-event monitoring is
+  deferred until the library models `RTM_*MDB` notifications.)
+
 - **`bridge` bin: `fdb add --extern-learn` and `fdb show --brport` (#25).**
   `fdb add … --extern-learn` marks an entry `NTF_EXT_LEARNED` (a
   user-space control plane owns it; the kernel won't age/overwrite it) —
