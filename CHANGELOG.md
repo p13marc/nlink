@@ -232,6 +232,20 @@ All notable changes to this project will be documented in this file.
   `oper_state_str`, `format_bytes`, plus the severity ordering the
   `--min-severity` filter relies on.
 
+### Added
+
+- **CLI parse-test suites for `ss`, `bridge`, and `nlink-config`
+  (#20, #25, #22).** Each bin gained a `tests/cli_parsing.rs` mirroring
+  the `ip`/`tc` pattern (`assert_cmd` + `predicates`). The suites are
+  hermetic — they exercise clap's parse phase (root + per-subcommand
+  `--help`, invalid input, arg conflicts, typed-value rejection) which
+  completes before any netlink socket opens, so they run as a non-root
+  user with no live kernel. They lock in the hardening-campaign
+  additions (`ss --packet`/`--oneline`/`--sport`, `bridge fdb add
+  --extern-learn`, `config apply --reconcile` ⊥ `--dry-run`) against
+  silent regression, and `config example` is run end-to-end (it emits
+  an embedded sample with no kernel access).
+
 ### Fixed
 
 - **`ss` bin: JSON output honors display flags + process parity (#20).**
