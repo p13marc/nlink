@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`ethtool`/library: Energy-Efficient Ethernet get/set (#29).** New
+  `Connection<Ethtool>::get_eee`/`set_eee` (+ `_by_name`) over
+  `ETHTOOL_MSG_EEE_{GET,SET}`: read active/enabled/TX-LPI state, the
+  TX-LPI timer, and the advertised/peer EEE link-mode lists; set
+  `enabled`/`tx_lpi`/`tx_lpi_timer` via an `EeeBuilder`. Surfaced in
+  the `ethtool` bin as `eee` (show) and `set-eee` (set).
+
 - **`ethtool`/library: Wake-on-LAN get/set (#29).** New
   `Connection<Ethtool>::get_wol` / `set_wol` (plus `_by_name`)
   over `ETHTOOL_MSG_WOL_{GET,SET}`: read supported/active modes + the

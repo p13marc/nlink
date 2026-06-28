@@ -85,6 +85,25 @@ enum Commands {
         #[arg(trailing_var_arg = true)]
         modes: Vec<String>,
     },
+    /// Show Energy-Efficient Ethernet settings
+    Eee {
+        /// Device name
+        device: String,
+    },
+    /// Set Energy-Efficient Ethernet settings
+    SetEee {
+        /// Device name
+        device: String,
+        /// Administratively enable/disable EEE (on/off)
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Enable/disable TX low-power idle (on/off)
+        #[arg(long)]
+        tx_lpi: Option<bool>,
+        /// TX low-power-idle timer in microseconds
+        #[arg(long)]
+        tx_lpi_timer: Option<u32>,
+    },
     /// Set ring buffer sizes
     #[command(short_flag = 'G')]
     SetRings {
@@ -210,6 +229,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Stats { device } => show_stats(&device, json).await?,
         Commands::Wol { device } => show_wol(&device, json).await?,
         Commands::SetWol { device, modes } => set_wol(&device, &modes).await?,
+        Commands::Eee { device } => show_eee(&device, json).await?,
+        Commands::SetEee {
+            device,
+            enabled,
+            tx_lpi,
+            tx_lpi_timer,
+        } => set_eee(&device, enabled, tx_lpi, tx_lpi_timer).await?,
         Commands::SetRings { device, rx, tx } => set_rings(&device, rx, tx).await?,
         Commands::SetChannels {
             device,
@@ -705,6 +731,69 @@ async fn set_wol(device: &str, modes: &[String]) -> nlink::Result<()> {
 
     conn.set_wol(device, |w| w.modes(enable)).await?;
     eprintln!("Wake-on-LAN modes set for {}", device);
+    Ok(())
+}
+
+async fn show_eee(device: &str, json: bool) -> nlink::Result<()> {
+    let conn = Connection::<Ethtool>::new_async().await?;
+    let eee = conn.get_eee(device).await?;
+
+    if json {
+        print_json(&serde_json::json!({
+            "device": device,
+            "active": eee.active,
+            "enabled": eee.enabled,
+            "tx_lpi_enabled": eee.tx_lpi_enabled,
+            "tx_lpi_timer": eee.tx_lpi_timer,
+            "advertised": eee.advertised,
+            "peer": eee.peer,
+        }));
+        return Ok(());
+    }
+
+    let on = |v: Option<bool>| match v {
+        Some(true) => "enabled",
+        Some(false) => "disabled",
+        None => "not reported",
+    };
+
+    println!("EEE settings for {}:", device);
+    println!("\tEEE active:\t\t{}", on(eee.active));
+    println!("\tEEE enabled:\t\t{}", on(eee.enabled));
+    println!("\tTX LPI enabled:\t\t{}", on(eee.tx_lpi_enabled));
+    if let Some(t) = eee.tx_lpi_timer {
+        println!("\tTX LPI timer:\t\t{} us", t);
+    }
+    if !eee.advertised.is_empty() {
+        println!("\tAdvertised EEE link modes: {}", eee.advertised.join(" "));
+    }
+    if !eee.peer.is_empty() {
+        println!("\tLink partner EEE link modes: {}", eee.peer.join(" "));
+    }
+    Ok(())
+}
+
+async fn set_eee(
+    device: &str,
+    enabled: Option<bool>,
+    tx_lpi: Option<bool>,
+    tx_lpi_timer: Option<u32>,
+) -> nlink::Result<()> {
+    let conn = Connection::<Ethtool>::new_async().await?;
+    conn.set_eee(device, |mut e| {
+        if let Some(v) = enabled {
+            e = e.enabled(v);
+        }
+        if let Some(v) = tx_lpi {
+            e = e.tx_lpi_enabled(v);
+        }
+        if let Some(v) = tx_lpi_timer {
+            e = e.tx_lpi_timer(v);
+        }
+        e
+    })
+    .await?;
+    eprintln!("EEE settings updated for {}", device);
     Ok(())
 }
 

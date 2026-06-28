@@ -796,6 +796,65 @@ impl WolBuilder {
 }
 
 // =============================================================================
+// Energy-Efficient Ethernet
+// =============================================================================
+
+/// Energy-Efficient Ethernet settings (`ethtool --show-eee`/`--set-eee`).
+#[derive(Debug, Clone, Default)]
+pub struct Eee {
+    /// Interface name.
+    pub ifname: Option<String>,
+    /// Interface index.
+    pub ifindex: Option<u32>,
+    /// Whether EEE is currently active on the link.
+    pub active: Option<bool>,
+    /// Whether EEE is administratively enabled.
+    pub enabled: Option<bool>,
+    /// Whether TX low-power idle is enabled.
+    pub tx_lpi_enabled: Option<bool>,
+    /// TX low-power-idle timer, in microseconds.
+    pub tx_lpi_timer: Option<u32>,
+    /// Link modes we advertise EEE on.
+    pub advertised: Vec<String>,
+    /// Link modes the peer advertises EEE on.
+    pub peer: Vec<String>,
+}
+
+/// Builder for setting Energy-Efficient Ethernet parameters.
+#[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
+pub struct EeeBuilder {
+    pub(crate) enabled: Option<bool>,
+    pub(crate) tx_lpi_enabled: Option<bool>,
+    pub(crate) tx_lpi_timer: Option<u32>,
+}
+
+impl EeeBuilder {
+    /// Create a new builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Administratively enable or disable EEE.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    /// Enable or disable TX low-power idle.
+    pub fn tx_lpi_enabled(mut self, enabled: bool) -> Self {
+        self.tx_lpi_enabled = Some(enabled);
+        self
+    }
+
+    /// Set the TX low-power-idle timer (microseconds).
+    pub fn tx_lpi_timer(mut self, usecs: u32) -> Self {
+        self.tx_lpi_timer = Some(usecs);
+        self
+    }
+}
+
+// =============================================================================
 // String Sets
 // =============================================================================
 
