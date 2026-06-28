@@ -31,9 +31,11 @@ enum FilterAction {
         /// Device name.
         dev: String,
 
-        /// Parent qdisc/class.
-        #[arg(long, default_value = "root")]
-        parent: String,
+        /// Parent qdisc/class. When omitted, filters are listed across
+        /// *all* parents (root, ingress, clsact, …) — real `tc filter
+        /// show dev X` behaviour. Pass `--parent root` to narrow.
+        #[arg(long)]
+        parent: Option<String>,
 
         /// Protocol (ip, ipv6, all, etc.).
         #[arg(long)]
@@ -71,6 +73,10 @@ enum FilterAction {
         /// Filter handle (e.g. 800::1).
         #[arg(long)]
         handle: Option<String>,
+
+        /// Chain index (tc(8) `chain N`).
+        #[arg(long)]
+        chain: Option<u32>,
 
         /// Filter type (u32, flower, basic, etc.).
         #[arg(name = "TYPE")]
@@ -124,6 +130,10 @@ enum FilterAction {
         #[arg(long)]
         handle: Option<String>,
 
+        /// Chain index (tc(8) `chain N`).
+        #[arg(long)]
+        chain: Option<u32>,
+
         /// Filter type.
         #[arg(name = "TYPE")]
         kind: String,
@@ -154,6 +164,10 @@ enum FilterAction {
         #[arg(long)]
         handle: Option<String>,
 
+        /// Chain index (tc(8) `chain N`).
+        #[arg(long)]
+        chain: Option<u32>,
+
         /// Filter type.
         #[arg(name = "TYPE")]
         kind: String,
@@ -180,9 +194,10 @@ impl FilterCmd {
                 parent,
                 protocol,
                 prio,
-            } => Self::show(conn, &dev, &parent, protocol.as_deref(), prio, format, opts).await,
+            } => Self::show(conn, &dev, parent.as_deref(), protocol.as_deref(), prio, format, opts)
+                .await,
             FilterAction::List { dev } => {
-                Self::show(conn, &dev, "root", None, None, format, opts).await
+                Self::show(conn, &dev, None, None, None, format, opts).await
             }
             FilterAction::Add {
                 dev,
@@ -190,6 +205,7 @@ impl FilterCmd {
                 protocol,
                 prio,
                 handle,
+                chain,
                 kind,
                 params,
             } => {
@@ -200,6 +216,7 @@ impl FilterCmd {
                     &protocol,
                     prio,
                     handle.as_deref(),
+                    chain,
                     &kind,
                     &params,
                     FilterVerb::Add,
@@ -213,26 +230,26 @@ impl FilterCmd {
                 prio,
                 kind: _,
             } => {
-                // Typed del_filter requires (parent, protocol, prio) — partial
-                // specs (e.g. delete-by-kind-only) are no longer supported by
-                // the bin; users must supply all three.
-                let proto_str = protocol.as_deref().ok_or_else(|| {
-                    Error::InvalidMessage(
-                        "tc filter del: --protocol is required (typed del needs the full lookup tuple)"
-                            .to_string(),
-                    )
-                })?;
-                let p = prio.ok_or_else(|| {
-                    Error::InvalidMessage(
-                        "tc filter del: --prio is required (typed del needs the full lookup tuple)"
-                            .to_string(),
-                    )
-                })?;
                 let parent_t = parent.parse::<TcHandle>().map_err(|e| {
                     Error::InvalidMessage(format!("tc filter del: invalid parent `{parent}`: {e}"))
                 })?;
-                let proto_u = parse_protocol_u16(proto_str)?;
-                conn.del_filter(dev.as_str(), parent_t, proto_u, p).await
+                match (protocol.as_deref(), prio) {
+                    // Full lookup tuple → delete exactly that filter.
+                    (Some(proto_str), Some(p)) => {
+                        let proto_u = parse_protocol_u16(proto_str)?;
+                        conn.del_filter(dev.as_str(), parent_t, proto_u, p).await
+                    }
+                    // Bare parent → flush every filter on that parent
+                    // (tc(8) `tc filter del dev X parent 1:`).
+                    (None, None) => conn.flush_filters(dev.as_str(), parent_t).await,
+                    // A half-specified tuple is ambiguous: which filter?
+                    // Reject rather than guess (strict-parse contract).
+                    _ => Err(Error::InvalidMessage(
+                        "tc filter del: specify both --protocol and --prio to delete one \
+                         filter, or neither to flush all filters on the parent"
+                            .to_string(),
+                    )),
+                }
             }
             FilterAction::Replace {
                 dev,
@@ -240,6 +257,7 @@ impl FilterCmd {
                 protocol,
                 prio,
                 handle,
+                chain,
                 kind,
                 params,
             } => {
@@ -250,6 +268,7 @@ impl FilterCmd {
                     &protocol,
                     prio,
                     handle.as_deref(),
+                    chain,
                     &kind,
                     &params,
                     FilterVerb::Replace,
@@ -262,6 +281,7 @@ impl FilterCmd {
                 protocol,
                 prio,
                 handle,
+                chain,
                 kind,
                 params,
             } => {
@@ -272,6 +292,7 @@ impl FilterCmd {
                     &protocol,
                     prio,
                     handle.as_deref(),
+                    chain,
                     &kind,
                     &params,
                     FilterVerb::Change,
@@ -284,7 +305,7 @@ impl FilterCmd {
     async fn show(
         conn: &Connection<Route>,
         dev: &str,
-        parent: &str,
+        parent: Option<&str>,
         protocol_filter: Option<&str>,
         prio_filter: Option<u16>,
         format: OutputFormat,
@@ -299,11 +320,18 @@ impl FilterCmd {
         let ifindex =
             nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
 
-        let parent_handle = tc_handle::parse(parent)
-            .map(nlink::TcHandle::from_raw)
-            .ok_or_else(|| {
-                nlink::netlink::Error::InvalidMessage(format!("invalid parent: {}", parent))
-            })?;
+        // When `--parent` is omitted, list filters across *all* parents
+        // (root, ingress, clsact, …) — matching `tc filter show dev X`.
+        // A `--parent <handle>` narrows the dump to that one parent.
+        let parent_handle = parent
+            .map(|p| {
+                tc_handle::parse(p)
+                    .map(nlink::TcHandle::from_raw)
+                    .ok_or_else(|| {
+                        nlink::netlink::Error::InvalidMessage(format!("invalid parent: {}", p))
+                    })
+            })
+            .transpose()?;
 
         let proto_filter = protocol_filter.map(parse_protocol_u16).transpose()?;
 
@@ -318,8 +346,10 @@ impl FilterCmd {
                 if f.ifindex() != ifindex {
                     return false;
                 }
-                // Filter by parent
-                if f.parent() != parent_handle {
+                // Filter by parent (only when one was requested)
+                if let Some(parent_handle) = parent_handle
+                    && f.parent() != parent_handle
+                {
                     return false;
                 }
                 // Filter by protocol if specified
@@ -364,6 +394,7 @@ async fn dispatch_filter(
     protocol: &str,
     prio: Option<u16>,
     handle: Option<&str>,
+    chain: Option<u32>,
     kind: &str,
     params: &[String],
     verb: FilterVerb,
@@ -389,7 +420,10 @@ async fn dispatch_filter(
         ($Cfg:ident) => {{
             // Bind through the ParseParams trait so the dispatcher's
             // contract is type-checked, not just convention.
-            let cfg = <$Cfg as nlink::ParseParams>::parse_params(&refs)?;
+            let mut cfg = <$Cfg as nlink::ParseParams>::parse_params(&refs)?;
+            if let Some(chain) = chain {
+                nlink::netlink::filter::FilterConfig::set_chain(&mut cfg, chain);
+            }
             run_typed_filter(conn, dev, parent, handle, proto, priority, cfg, verb).await
         }};
     }
