@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`wg` bin: `addconf` config-file apply (#23).** Completes the
+  `setconf`/`syncconf`/`addconf` trio over `WireguardConfig`. `addconf`
+  is the additive form — it appends the file's peers/settings without
+  removing existing peers. (Because the library's `apply` never prunes
+  unlisted peers, it currently coincides with `setconf`; the two diverge
+  once `setconf` gains real unlisted-peer pruning.)
+
 - **`ss` bin: implement `-O`/`--oneline` (#20).** The flag was parsed and
   stored but never read, so each socket's extended/memory/TCP-info/timer
   detail always wrapped onto `\t`-prefixed continuation lines. With

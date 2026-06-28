@@ -68,6 +68,24 @@ pub async fn run_syncconf(interface: &str, file: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `wg addconf <if> <file>` — append the config-file's peers/settings to
+/// the interface without removing peers that already exist in the kernel.
+///
+/// This is the additive form. Because the library's `WireguardConfig::apply`
+/// never prunes unlisted peers, `addconf` and [`run_setconf`] currently
+/// behave identically here — the distinction matters only once `setconf`
+/// gains real `wg setconf` pruning of unlisted peers (not modelled yet).
+pub async fn run_addconf(interface: &str, file: &Path) -> Result<()> {
+    let cfg = load(interface, file)?;
+    let conn = Connection::<Wireguard>::new_async().await?;
+    let result = cfg.apply(&conn).await?;
+    println!(
+        "wg: added {} change(s) to {interface}",
+        result.total_writes()
+    );
+    Ok(())
+}
+
 /// Read and parse a config file into a [`WireguardConfig`]. The parse runs
 /// before any kernel connection, so a malformed file fails fast.
 fn load(interface: &str, file: &Path) -> Result<WireguardConfig> {

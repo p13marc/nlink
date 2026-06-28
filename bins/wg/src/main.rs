@@ -62,6 +62,15 @@ enum Command {
         file: PathBuf,
     },
 
+    /// Append a configuration file's peers/settings to an interface
+    /// without removing existing peers (additive apply)
+    Addconf {
+        /// Interface name
+        interface: String,
+        /// Path to the configuration file
+        file: PathBuf,
+    },
+
     /// Generate a new private key
     Genkey,
 
@@ -98,6 +107,7 @@ async fn main() -> Result<()> {
         Some(Command::Syncconf { interface, file }) => {
             conf::run_syncconf(&interface, &file).await
         }
+        Some(Command::Addconf { interface, file }) => conf::run_addconf(&interface, &file).await,
         Some(Command::Genkey) => keys::genkey(),
         Some(Command::Pubkey) => keys::pubkey(),
         Some(Command::Genpsk) => keys::genpsk(),
