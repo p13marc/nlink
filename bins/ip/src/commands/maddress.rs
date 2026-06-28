@@ -2,6 +2,17 @@
 //!
 //! Multicast address management. Shows link-layer and IP multicast addresses
 //! that are subscribed on interfaces.
+//!
+//! Read-only by design: the kernel does not expose multicast-address
+//! membership over netlink. The L2 link-layer entries come from
+//! `/proc/net/dev_mcast` and the L3 group memberships from
+//! `/proc/net/{igmp,igmp6}` — these procfs files are per-netns, so they
+//! already reflect the connection's namespace. (iproute2's `ip maddr
+//! add/del` manipulates static L2 multicast via the `SIOCADDMULTI` /
+//! `SIOCDELMULTI` ioctls, not netlink; that is out of scope for this
+//! netlink-first demo and is intentionally not offered rather than
+//! faked.) The interface index↔name map is resolved over netlink so it
+//! is namespace-correct relative to the connection.
 
 use std::{
     collections::HashMap,
@@ -12,7 +23,7 @@ use std::{
 
 use clap::{Args, Subcommand};
 use nlink::{
-    netlink::Result,
+    netlink::{Connection, Result, Route},
     output::{OutputFormat, OutputOptions, Printable, print_all},
 };
 
@@ -97,8 +108,10 @@ impl MaddressCmd {
     ) -> Result<()> {
         let mut interfaces: HashMap<String, McastInfo> = HashMap::new();
 
-        // Get interface index mapping
-        let if_indices = get_interface_indices()?;
+        // Resolve the name→ifindex map over netlink (namespace-correct vs
+        // the previous `/sys/class/net` scan, which always read the host
+        // namespace).
+        let if_indices = get_interface_indices().await?;
 
         // Filter by device if specified
         let filter_dev = dev.map(|s| s.to_string());
@@ -227,23 +240,18 @@ impl MaddressCmd {
     }
 }
 
-/// Get interface name to index mapping.
-fn get_interface_indices() -> Result<HashMap<String, u32>> {
-    let mut indices = HashMap::new();
-
-    if let Ok(entries) = fs::read_dir("/sys/class/net") {
-        for entry in entries.flatten() {
-            let ifname = entry.file_name().to_string_lossy().to_string();
-            let index_path = entry.path().join("ifindex");
-            if let Ok(content) = fs::read_to_string(&index_path)
-                && let Ok(idx) = content.trim().parse::<u32>()
-            {
-                indices.insert(ifname, idx);
-            }
-        }
-    }
-
-    Ok(indices)
+/// Get the interface name→index mapping over netlink.
+///
+/// Resolved via `RTM_GETLINK` in the connection's namespace, so it is
+/// correct inside a foreign netns (unlike a `/sys/class/net` scan, which
+/// always reads the host namespace).
+async fn get_interface_indices() -> Result<HashMap<String, u32>> {
+    let conn = Connection::<Route>::new()?;
+    let by_index = conn.get_interface_names().await?;
+    Ok(by_index
+        .into_iter()
+        .map(|(idx, name)| (name, idx))
+        .collect())
 }
 
 /// Format a hex MAC address string (e.g., "01005e000001") to colon-separated format.
