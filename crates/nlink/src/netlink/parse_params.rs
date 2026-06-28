@@ -137,7 +137,7 @@ impl_parse_params! {
     crate::netlink::tc::HfscClassConfig,
     crate::netlink::tc::HtbClassConfig,
     crate::netlink::tc::QfqClassConfig,
-    // Filter configs (9 — full filter side typed-first as of Plan 138 + Plan 133 PR C).
+    // Filter configs (10 — full filter side typed-first as of Plan 138 + Plan 133 PR C).
     crate::netlink::filter::BasicFilter,
     crate::netlink::filter::BpfFilter,
     crate::netlink::filter::CgroupFilter,
@@ -146,6 +146,7 @@ impl_parse_params! {
     crate::netlink::filter::FwFilter,
     crate::netlink::filter::MatchallFilter,
     crate::netlink::filter::RouteFilter,
+    crate::netlink::filter::TcindexFilter,
     crate::netlink::filter::U32Filter,
     // Action configs — Plan 139 PR B closes (14 of 14 typed-first;
     // PeditAction is a stub that rejects all inputs per Plan §10).

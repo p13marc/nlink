@@ -49,7 +49,7 @@ use super::{
     tc_handle::TcHandle,
     types::tc::{
         TcMsg, TcaAttr,
-        filter::{basic, bpf, ematch, flower, fw, matchall, u32 as u32_mod},
+        filter::{basic, bpf, ematch, flower, fw, matchall, tcindex, u32 as u32_mod},
     },
 };
 
@@ -1965,6 +1965,209 @@ impl FilterConfig for FwFilter {
             builder.append_attr_u32(fw::TCA_FW_MASK, self.mask);
         }
 
+        Ok(())
+    }
+}
+
+// ============================================================================
+// TcindexFilter
+// ============================================================================
+
+/// tcindex filter configuration.
+///
+/// The tcindex classifier maps `skb->tc_index` (set upstream by dsmark
+/// or an `skbedit`/`flow` action) through a hash table to a class id.
+/// It is the canonical companion to the `dsmark` qdisc for DiffServ.
+///
+/// ```ignore
+/// use nlink::netlink::filter::TcindexFilter;
+/// use nlink::TcHandle;
+///
+/// let f = TcindexFilter::new()
+///     .mask(0xff)
+///     .shift(0)
+///     .classid(TcHandle::new(1, 0x10))
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct TcindexFilter {
+    /// Hash-table size.
+    hash: Option<u32>,
+    /// Mask applied to `tc_index`.
+    mask: Option<u16>,
+    /// Right shift applied to `tc_index`.
+    shift: Option<u32>,
+    /// `Some(true)` = fall_through, `Some(false)` = pass_on.
+    fall_through: Option<bool>,
+    /// Target class id.
+    classid: Option<u32>,
+    /// Chain index for this filter.
+    chain: Option<u32>,
+}
+
+impl TcindexFilter {
+    /// Create a new tcindex filter builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the hash-table size.
+    pub fn hash(mut self, hash: u32) -> Self {
+        self.hash = Some(hash);
+        self
+    }
+
+    /// Set the mask applied to `tc_index`.
+    pub fn mask(mut self, mask: u16) -> Self {
+        self.mask = Some(mask);
+        self
+    }
+
+    /// Set the right shift applied to `tc_index`.
+    pub fn shift(mut self, shift: u32) -> Self {
+        self.shift = Some(shift);
+        self
+    }
+
+    /// Fall through to the next filter on a miss (vs. `pass_on`).
+    pub fn fall_through(mut self, fall_through: bool) -> Self {
+        self.fall_through = Some(fall_through);
+        self
+    }
+
+    /// Set the target class id.
+    pub fn classid(mut self, classid: TcHandle) -> Self {
+        self.classid = Some(classid.as_raw());
+        self
+    }
+
+    /// Set the chain index for this filter.
+    pub fn chain(mut self, chain: u32) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
+    /// Build the filter configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style tcindex params slice into a typed
+    /// `TcindexFilter`.
+    ///
+    /// Recognised tokens: `hash <n>`, `mask <hex|dec>`, `shift <n>`,
+    /// `fall_through`, `pass_on`, `classid <handle>` (alias `flowid`),
+    /// `chain <n>`. Strict: unknown tokens, missing values, and
+    /// unparseable values all error.
+    pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
+        let mut f = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("tcindex: `{key}` requires a value"))
+                })
+            };
+            match key {
+                "hash" => {
+                    let s = need_value()?;
+                    f.hash = Some(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("tcindex: invalid hash `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "mask" => {
+                    let s = need_value()?;
+                    let m = if let Some(hex) =
+                        s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
+                    {
+                        u16::from_str_radix(hex, 16)
+                    } else {
+                        s.parse::<u16>()
+                    }
+                    .map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "tcindex: invalid mask `{s}` (expected hex `0xNN` or decimal u16)"
+                        ))
+                    })?;
+                    f.mask = Some(m);
+                    i += 2;
+                }
+                "shift" => {
+                    let s = need_value()?;
+                    f.shift = Some(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("tcindex: invalid shift `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "fall_through" => {
+                    f.fall_through = Some(true);
+                    i += 1;
+                }
+                "pass_on" => {
+                    f.fall_through = Some(false);
+                    i += 1;
+                }
+                "classid" | "flowid" => {
+                    let s = need_value()?;
+                    let h = s.parse::<TcHandle>().map_err(|e| {
+                        Error::InvalidMessage(format!("tcindex: invalid {key} `{s}`: {e}"))
+                    })?;
+                    f.classid = Some(h.as_raw());
+                    i += 2;
+                }
+                "chain" => {
+                    let s = need_value()?;
+                    f.chain = Some(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("tcindex: invalid chain `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "tcindex: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(f)
+    }
+}
+
+impl FilterConfig for TcindexFilter {
+    fn kind(&self) -> &'static str {
+        "tcindex"
+    }
+
+    fn classid(&self) -> Option<u32> {
+        self.classid
+    }
+
+    fn chain(&self) -> Option<u32> {
+        self.chain
+    }
+
+    fn set_chain(&mut self, chain: u32) {
+        self.chain = Some(chain);
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        if let Some(hash) = self.hash {
+            builder.append_attr_u32(tcindex::TCA_TCINDEX_HASH, hash);
+        }
+        if let Some(mask) = self.mask {
+            builder.append_attr_u16(tcindex::TCA_TCINDEX_MASK, mask);
+        }
+        if let Some(shift) = self.shift {
+            builder.append_attr_u32(tcindex::TCA_TCINDEX_SHIFT, shift);
+        }
+        if let Some(fall_through) = self.fall_through {
+            builder.append_attr_u32(tcindex::TCA_TCINDEX_FALL_THROUGH, u32::from(fall_through));
+        }
+        if let Some(classid) = self.classid {
+            builder.append_attr_u32(tcindex::TCA_TCINDEX_CLASSID, classid);
+        }
         Ok(())
     }
 }
@@ -4034,6 +4237,33 @@ pub enum BpfDirection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tcindex_parse_and_write() {
+        let f = TcindexFilter::parse_params(&[
+            "hash", "256", "mask", "0xff", "shift", "0", "fall_through", "classid", "1:10",
+        ])
+        .unwrap();
+        assert_eq!(f.hash, Some(256));
+        assert_eq!(f.mask, Some(0xff));
+        assert_eq!(f.shift, Some(0));
+        assert_eq!(f.fall_through, Some(true));
+        assert_eq!(f.classid, Some(TcHandle::new(1, 0x10).as_raw()));
+
+        // pass_on flips fall_through; set_chain via trait works.
+        let mut f = TcindexFilter::parse_params(&["pass_on"]).unwrap();
+        assert_eq!(f.fall_through, Some(false));
+        FilterConfig::set_chain(&mut f, 4);
+        assert_eq!(FilterConfig::chain(&f), Some(4));
+
+        let mut b = MessageBuilder::new(NlMsgType::RTM_NEWTFILTER, 0);
+        f.write_options(&mut b).unwrap();
+
+        // strict: missing value, bad mask, unknown token.
+        assert!(TcindexFilter::parse_params(&["hash"]).is_err());
+        assert!(TcindexFilter::parse_params(&["mask", "zz"]).is_err());
+        assert!(TcindexFilter::parse_params(&["unknown"]).is_err());
+    }
 
     #[test]
     fn set_chain_through_trait_object() {

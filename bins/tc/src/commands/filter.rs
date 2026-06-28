@@ -9,7 +9,7 @@ use nlink::{
         Connection, Result, Route,
         filter::{
             BasicFilter, BpfFilter, CgroupFilter, FilterConfig, FlowFilter, FlowerFilter, FwFilter,
-            MatchallFilter, RouteFilter, U32Filter,
+            MatchallFilter, RouteFilter, TcindexFilter, U32Filter,
         },
         message::NlMsgType,
         messages::TcMessage,
@@ -437,8 +437,9 @@ async fn dispatch_filter(
         "flow" => dispatch!(FlowFilter),
         "u32" => dispatch!(U32Filter),
         "basic" => dispatch!(BasicFilter),
+        "tcindex" => dispatch!(TcindexFilter),
         other => Err(Error::InvalidMessage(format!(
-            "tc filter: unknown kind `{other}` (recognised: flower, matchall, fw, route, bpf, cgroup, flow, u32, basic)"
+            "tc filter: unknown kind `{other}` (recognised: flower, matchall, fw, route, bpf, cgroup, flow, u32, basic, tcindex)"
         ))),
     }
 }
