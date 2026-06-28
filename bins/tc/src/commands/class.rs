@@ -245,8 +245,15 @@ impl ClassCmd {
             ));
         }
 
-        let ifindex =
-            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
+        // Resolve dev→ifindex over netlink, not the sysfs
+        // `/sys/class/net` read (wrong inside a foreign netns).
+        let ifindex = conn
+            .get_link_by_name(dev)
+            .await?
+            .ok_or_else(|| {
+                nlink::netlink::Error::InvalidMessage(format!("device not found: {dev}"))
+            })?
+            .ifindex();
 
         // Strict: a present-but-unparseable handle is an error, not a
         // silently-dropped filter (which would dump *all* classes and

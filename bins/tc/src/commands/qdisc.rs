@@ -179,9 +179,20 @@ impl QdiscCmd {
         format: OutputFormat,
         opts: &OutputOptions,
     ) -> Result<()> {
-        // Get interface index if filtering
-        let filter_index =
-            nlink::util::get_ifindex_opt(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
+        // Get interface index if filtering. Resolve over netlink
+        // (RTM_GETLINK in the connection's netns) rather than the sysfs
+        // `/sys/class/net` read, which is wrong inside a foreign netns.
+        let filter_index = match dev {
+            Some(d) => Some(
+                conn.get_link_by_name(d)
+                    .await?
+                    .ok_or_else(|| {
+                        nlink::netlink::Error::InvalidMessage(format!("device not found: {d}"))
+                    })?
+                    .ifindex(),
+            ),
+            None => None,
+        };
 
         // Fetch all qdiscs. `--invisible` sets TCA_DUMP_INVISIBLE so the
         // kernel also returns auto-created default qdiscs it normally hides.

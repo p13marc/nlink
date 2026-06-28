@@ -234,6 +234,15 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`tc` bin: namespace-safe `qdisc`/`class`/`filter show` (#19).** The
+  three show paths resolved the device name→ifindex via
+  `nlink::util::get_ifindex` (a `/sys/class/net` read in the *calling
+  process's* mount namespace), which returns the wrong index inside a
+  foreign netns. They now resolve over netlink via
+  `Connection::get_link_by_name` (RTM_GETLINK in the connection's
+  netns). The mutating paths were already netlink-safe via
+  `resolve_interface`.
+
 - **bin JSON robustness + deterministic `bridge vlan` output (#25, #19).**
   The `bridge` (`vlan`/`fdb`/`mdb`) and `tc` (`chain`) JSON show paths
   used `.expect("JSON serialization")`, a latent panic path; they now
