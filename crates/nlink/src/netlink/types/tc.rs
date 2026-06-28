@@ -933,7 +933,7 @@ pub mod qdisc {
     ///
     /// GRED multiplexes up to `MAX_DPS` virtual queues (drop precedences)
     /// over a single qdisc. Configuration is two-phase: the **setup**
-    /// message carries `struct tc_gred_sopt` under [`TCA_GRED_DPS`]
+    /// message carries `struct tc_gred_sopt` under `TCA_GRED_DPS`
     /// (queue count, default VQ, optional GRIO), and per-VQ RED
     /// parameters are sent separately under `TCA_GRED_PARMS`.
     pub mod gred {
