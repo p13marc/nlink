@@ -234,6 +234,17 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`ss` bin: JSON output honors display flags + process parity (#20).**
+  `ss -j` previously dumped the `tcp_info`/`mem_info`/`congestion`/
+  `mark` blocks unconditionally whenever the kernel returned them,
+  regardless of the `-i`/`-m`/`-e` flags, and never emitted the
+  owning-process data that `-p` shows in text. The JSON now mirrors
+  the text columns: `tcp_info` (+ `congestion`) only with `-i`,
+  `mem_info` only with `-m`, the extended `interface`/`mark` fields
+  only with `-e`, an active `timer` only with `-o`, and a structured
+  `process` array (`comm`/`pid`/`fd`) only with `-p`. Unit tests cover
+  the gating in both directions.
+
 - **`ip` bin: `sr tunsrc show --pretty` + POC version string (#17).**
   `sr tunsrc show -j` hand-rolled its JSON and ignored the global
   `--pretty` flag; it now builds the object via `serde_json` so

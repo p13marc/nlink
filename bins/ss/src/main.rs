@@ -365,7 +365,7 @@ async fn main() -> anyhow::Result<()> {
     // Output results
     match format {
         OutputFormat::Json => {
-            output::print_json(&all_results)?;
+            output::print_json(&all_results, &opts)?;
         }
         OutputFormat::Text => {
             output::print_text(&all_results, &opts)?;
