@@ -623,9 +623,10 @@ run it locally before merging a new example.
 
 ## Active work
 
-**0.21.0 shipped 2026-06-04** (`v0.21.0` tagged; both crates on
-crates.io). Headline narrative in `CHANGELOG.md ## [0.21.0]`
-+ `docs/migration_guide/0.20.0-to-0.21.0.md`.
+**0.22.0 shipped 2026-06-29** (`v0.22.0` tagged; both crates on
+crates.io). Headline narrative in `CHANGELOG.md ## [0.22.0]`
++ `docs/migration_guide/0.21.0-to-0.22.0.md`. Library-additive only;
+the one tooling change is the demo-binary rename to `nlink-*`.
 
 The **next cycle is open on `master`** — new work lands in
 `CHANGELOG.md ## [Unreleased]` and is promoted to the next
@@ -633,16 +634,20 @@ The **next cycle is open on `master`** — new work lands in
 the old "work on a release branch, don't push to master" note no
 longer applies.)
 
-Recently closed: the **demo-binary hardening epic (#30)** and all
-11 per-binary issues + #29 (library gaps) — see the closed issues
-and `CHANGELOG.md ## [Unreleased]`. Two follow-ups from that epic
-also landed: validating `serde::Deserialize` on `NetworkConfig`
-(#108) and declarative `nft reconcile`/`diff` (#109). Standing
-backlog (deferred with rationale in #29's close comment): tc
-`choke`/`gred`/`atm`/`pfifo_fast` qdiscs, `rsvp` filter,
-`ife`/`gate`/`ctinfo`/`xt` actions; ethtool FEC-setter/module-EEPROM/
-RSS; sockdiag `INET_DIAG_REQ_BYTECODE` (ss port/addr filters work
-today but enforce client-side).
+The 0.22.0 cycle closed the **demo-binary hardening epic (#30)** +
+all 11 per-binary issues + #29 (library gaps), the **TC/ethtool/
+sockdiag coverage epic (#115 → #116–#120)**, validating
+`serde::Deserialize` on `NetworkConfig` (#108), declarative `nft
+reconcile`/`diff` (#109), and the `nlink-*` binary rename (#133).
+The old #29 deferred backlog (tc `choke`/`gred`/`atm`/`pfifo_fast`,
+`rsvp`, `ife`/`gate`/`ctinfo`; ethtool FEC/module-EEPROM/RSS;
+sockdiag `INET_DIAG_REQ_BYTECODE`) is **all shipped**.
+
+Open follow-on work is tracked as GitHub issues, not in `plans/`:
+#134 (Plan 234 per-seq unicast dispatcher), #135 (Plan 235 GENL
+command unification), #136 (Plan 197 cross-netns `attach_socket`),
+#137 (audit/coverage backlog — nl80211 per-attribute, ethtool
+bitset, bridge VLAN/FDB wire-format, …).
 
 Per-release upgrade guides:
 [`docs/migration_guide/`](docs/migration_guide/README.md) — write
