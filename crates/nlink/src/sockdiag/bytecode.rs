@@ -73,6 +73,52 @@ fn lower_port(is_source: bool, cmp: Comparison, port: u16) -> Option<Vec<PortPri
     })
 }
 
+/// Lay out a flat primitive list into an `inet_diag_bc_op` program with
+/// the reject-on-fail / accept-on-fall-through offsets computed.
+fn emit(prims: &[PortPrimitive]) -> Vec<u8> {
+    // Each primitive is an 8-byte instruction (comparison op + data op).
+    let total = prims.len() * 8;
+    let mut bc = Vec::with_capacity(total);
+    for (i, p) in prims.iter().enumerate() {
+        let pos = i * 8;
+        // Remaining bytes from the start of this op to the end.
+        let remaining = (total - pos) as u16;
+        // Failure jump overshoots the end by 4 → length goes negative →
+        // reject. (The kernel audit permits `no == remaining + 4`.)
+        let no = remaining + 4;
+
+        // Comparison op: { code, yes = 8 (skip the data op too), no }.
+        bc.push(p.code);
+        bc.push(8);
+        bc.extend_from_slice(&no.to_ne_bytes());
+
+        // Data op: { 0, 0, no = port }. Read by the kernel as op[1].no.
+        bc.push(0);
+        bc.push(0);
+        bc.extend_from_slice(&p.port.to_ne_bytes());
+    }
+    bc
+}
+
+/// Build a bytecode program that pins an exact source and/or destination
+/// port (`sport == s AND dport == d`), or `None` if neither is given.
+///
+/// This is what the inet dump path uses to lower the filter's
+/// `local_port`/`remote_port` into a kernel-side pre-filter.
+pub fn for_ports(sport: Option<u16>, dport: Option<u16>) -> Option<Vec<u8>> {
+    let mut prims = Vec::new();
+    if let Some(s) = sport {
+        prims.extend(lower_port(true, Comparison::Eq, s)?);
+    }
+    if let Some(d) = dport {
+        prims.extend(lower_port(false, Comparison::Eq, d)?);
+    }
+    if prims.is_empty() {
+        return None;
+    }
+    Some(emit(&prims))
+}
+
 /// Flatten an `and`-tree of port comparisons into a flat primitive list.
 /// Returns `None` if any leaf is outside the supported subset.
 fn collect(expr: &FilterExpr, out: &mut Vec<PortPrimitive>) -> Option<()> {
@@ -108,31 +154,7 @@ pub fn compile(expr: &FilterExpr) -> Option<Vec<u8>> {
     if prims.is_empty() {
         return None;
     }
-
-    // Each primitive is an 8-byte instruction (comparison op + data op).
-    let total = prims.len() * 8;
-    let mut bc = Vec::with_capacity(total);
-
-    for (i, p) in prims.iter().enumerate() {
-        let pos = i * 8;
-        // Remaining bytes from the start of this op to the end.
-        let remaining = (total - pos) as u16;
-        // Failure jump overshoots the end by 4 → length goes negative →
-        // reject. (The kernel audit permits `no == remaining + 4`.)
-        let no = remaining + 4;
-
-        // Comparison op: { code, yes = 8 (skip the data op too), no }.
-        bc.push(p.code);
-        bc.push(8);
-        bc.extend_from_slice(&no.to_ne_bytes());
-
-        // Data op: { 0, 0, no = port }. Read by the kernel as op[1].no.
-        bc.push(0);
-        bc.push(0);
-        bc.extend_from_slice(&p.port.to_ne_bytes());
-    }
-
-    Some(bc)
+    Some(emit(&prims))
 }
 
 #[cfg(test)]
@@ -188,6 +210,23 @@ mod tests {
         for i in [0usize, 2, 4] {
             assert_eq!(op(&bc, i).2 % 4, 0);
         }
+    }
+
+    #[test]
+    fn for_ports_builds_exact_match_program() {
+        // sport only
+        let bc = for_ports(Some(22), None).unwrap();
+        assert_eq!(bc.len(), 16);
+        assert_eq!(op(&bc, 0), (INET_DIAG_BC_S_GE, 8, 20));
+        assert_eq!(op(&bc, 2), (INET_DIAG_BC_S_LE, 8, 12));
+        // sport AND dport → 4 primitives
+        let bc = for_ports(Some(22), Some(443)).unwrap();
+        assert_eq!(bc.len(), 32);
+        assert_eq!(op(&bc, 0).0, INET_DIAG_BC_S_GE);
+        assert_eq!(op(&bc, 4).0, INET_DIAG_BC_D_GE);
+        assert_eq!(op(&bc, 6), (INET_DIAG_BC_D_LE, 8, 12));
+        // neither → None
+        assert!(for_ports(None, None).is_none());
     }
 
     #[test]

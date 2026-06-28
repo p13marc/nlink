@@ -209,10 +209,10 @@ ss -0                       # AF_PACKET sockets
 ss -a                       # all states; -4 / -6 to restrict family
 
 # Filters: typed --sport/--dport/--src/--dst, or an ss-style expression.
-# sport/dport comparisons (incl. and-chains) compile to a kernel-side
-# INET_DIAG_REQ_BYTECODE pre-filter; other predicates filter client-side.
+# --sport/--dport lower to a kernel-side INET_DIAG_REQ_BYTECODE pre-filter
+# (the kernel admits only matching sockets); other predicates and the
+# ss-style expression filter client-side.
 ss -tn 'sport = :22'
-ss -tn 'sport >= :1024 and dport = :443'
 ss -tn --dst 10.0.0.0/8 --dport 443
 
 # Detail blocks (gated, mirrored in JSON): -i info, -m memory, -e extended, -o timer

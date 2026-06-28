@@ -460,20 +460,11 @@ fn apply_inet_filters(cli: &Cli, filter: &mut InetFilter) {
         filter.extensions |= 1 << 3; // INET_DIAG_CONG (4)
     }
 
-    // Compile a kernel-side bytecode pre-filter from the ss-style filter
-    // expression when it falls in the supported subset (sport/dport
-    // comparisons combined with `and`). The kernel then admits far fewer
-    // sockets into the dump. Unsupported expressions compile to `None`
-    // and we fall back to the full dump; the client-side expression
-    // filter (applied after the query) is the correctness backstop in
-    // every case, so a bytecode pre-filter can only reduce traffic, not
-    // change results.
-    if !cli.filter_expr.is_empty() {
-        let expr_str = cli.filter_expr.join(" ");
-        if let Ok(expr) = nlink::sockdiag::FilterExpr::parse(&expr_str) {
-            filter.bytecode = nlink::sockdiag::bytecode::compile(&expr);
-        }
-    }
+    // `--sport`/`--dport` set local_port/remote_port above; the inet
+    // dump path lowers those into an INET_DIAG_REQ_BYTECODE kernel-side
+    // pre-filter automatically, so the kernel admits only matching
+    // sockets. Richer ss-expression predicates (ranges, addresses,
+    // state, or/not) stay client-side via the post-dump filter.
 }
 
 /// Client-side address/port matcher for inet sockets, built from the
