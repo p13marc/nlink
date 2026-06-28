@@ -9,6 +9,10 @@ source doc-strings, `docs/recipes/`, and `crates/nlink/examples/`.
 `nlink` is a Rust library for Linux network configuration via
 netlink. The library is the deliverable; the `bins/{ip,tc,ss,nft,
 wifi,devlink}` binaries exist as proof-of-concept demonstrations.
+Every produced binary is `nlink-` prefixed (`nlink-ip`, `nlink-tc`,
+…) so it never shadows the real system tool — the `[[bin]] name` in
+each `bins/*/Cargo.toml` matches the package name. CLI integration
+tests reference binaries via `env!("CARGO_BIN_EXE_nlink-<tool>")`.
 
 Key design invariants:
 - **Custom netlink** — no `rtnetlink` / `netlink-packet-*`

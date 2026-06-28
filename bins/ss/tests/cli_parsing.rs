@@ -9,7 +9,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn ss_cmd() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_ss"))
+    Command::new(env!("CARGO_BIN_EXE_nlink-ss"))
 }
 
 #[test]

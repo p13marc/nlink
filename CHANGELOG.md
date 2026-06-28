@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **All demo binaries are now `nlink-` prefixed.** The eight that
+  previously built as the bare system-tool name (`ip`, `tc`, `ss`,
+  `nft`, `bridge`, `wg`, `wifi`, `devlink`) now produce `nlink-ip`,
+  `nlink-tc`, … matching `nlink-config`/`nlink-ethtool`, so a demo
+  binary never shadows the real iproute2/iw/ethtool tool on `PATH`.
+  Cargo package names were already `nlink-*`; only the `[[bin]] name`
+  changed (and the CLI tests' `CARGO_BIN_EXE_*` references). Invoke as
+  `nlink-ip link show` (or `cargo run -p nlink-ip -- link show`).
+
 ### Added
 
 - **sockdiag: `INET_DIAG_REQ_BYTECODE` kernel-side filtering (#120) —

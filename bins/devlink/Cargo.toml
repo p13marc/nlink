@@ -8,7 +8,7 @@ rust-version.workspace = true
 publish = false
 
 [[bin]]
-name = "devlink"
+name = "nlink-devlink"
 path = "src/main.rs"
 
 [dependencies]

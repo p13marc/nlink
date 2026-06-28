@@ -7,7 +7,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn ip_cmd() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_ip"))
+    Command::new(env!("CARGO_BIN_EXE_nlink-ip"))
 }
 
 mod global_flags {

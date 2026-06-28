@@ -6,8 +6,10 @@
 
 A Rust library for Linux network configuration via netlink. Async/tokio-native,
 type-safe, owns its wire format end-to-end (no `rtnetlink` / `netlink-packet-*`
-dependency). CLI binaries (`ip`, `tc`, `ss`, `nft`, `wg`, `bridge`, `devlink`,
-`ethtool`, `wifi`) ship as proof-of-concept demonstrations of the library.
+dependency). CLI binaries (`nlink-ip`, `nlink-tc`, `nlink-ss`, `nlink-nft`,
+`nlink-wg`, `nlink-bridge`, `nlink-devlink`, `nlink-ethtool`, `nlink-wifi`,
+`nlink-config`) ship as proof-of-concept demonstrations of the library —
+each `nlink-` prefixed so it never shadows the system tool it mirrors.
 
 ## Install
 
@@ -147,8 +149,9 @@ let report = nlink::netlink::diagnostics::Diagnostics::new(conn).scan().await?;
   (per-peer impairment, VLAN-aware bridges, bidirectional rate limiting,
   WireGuard mesh in namespaces, ENOBUFS-resync loops, define-your-own-GENL-family).
 - [CLI reference](docs/cli.md) — command coverage for all ten demo
-  binaries (`ip`, `tc`, `ss`, `nft`, `bridge`, `wg`, `nlink-config`,
-  `devlink`, `nlink-ethtool`, `wifi`).
+  binaries (`nlink-ip`, `nlink-tc`, `nlink-ss`, `nlink-nft`,
+  `nlink-bridge`, `nlink-wg`, `nlink-config`, `nlink-devlink`,
+  `nlink-ethtool`, `nlink-wifi`).
 - [Migration guides](docs/migration_guide/README.md) — per-release upgrade notes.
 - [Examples](crates/nlink/examples/README.md) — 40+ runnable demos.
 - [docs.rs/nlink](https://docs.rs/nlink) — full API reference.
