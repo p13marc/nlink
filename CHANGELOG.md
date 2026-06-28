@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-06-29
+
 ### Changed
 
 - **All demo binaries are now `nlink-` prefixed.** The eight that
