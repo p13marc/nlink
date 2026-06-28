@@ -2409,6 +2409,286 @@ impl QdiscConfig for RedConfig {
 }
 
 // ============================================================================
+// ChokeConfig
+// ============================================================================
+
+/// CHOKe qdisc configuration.
+///
+/// CHOKe ("CHOose and Keep for responsive flows, CHOose and Kill for
+/// unresponsive flows") is a stateless AQM in the RED family. On each
+/// enqueue it compares the arriving packet against a randomly-chosen
+/// packet already in the queue; if they belong to the same flow it
+/// drops both, penalising unresponsive (high-rate) flows without
+/// per-flow state. Parameters mirror RED (it shares
+/// `struct tc_red_qopt`).
+///
+/// ```ignore
+/// use nlink::netlink::tc::ChokeConfig;
+///
+/// let cfg = ChokeConfig::new()
+///     .limit(1_000_000)
+///     .min(50_000)
+///     .max(150_000)
+///     .ecn(true)
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct ChokeConfig {
+    /// Queue limit in bytes.
+    pub limit: u32,
+    /// Minimum threshold in bytes.
+    pub min: u32,
+    /// Maximum threshold in bytes.
+    pub max: u32,
+    /// Maximum probability (0-255, default ~2%).
+    pub max_p: u8,
+    /// Enable ECN marking instead of dropping.
+    pub ecn: bool,
+    /// Enable hard drop (drop all above max).
+    pub harddrop: bool,
+}
+
+impl Default for ChokeConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChokeConfig {
+    /// Create a new CHOKe configuration builder.
+    pub fn new() -> Self {
+        Self {
+            limit: 0,
+            min: 0,
+            max: 0,
+            max_p: 5, // ~2% probability
+            ecn: false,
+            harddrop: false,
+        }
+    }
+
+    /// Set the queue limit in bytes.
+    pub fn limit(mut self, bytes: u32) -> Self {
+        self.limit = bytes;
+        self
+    }
+
+    /// Set the minimum threshold in bytes.
+    pub fn min(mut self, bytes: u32) -> Self {
+        self.min = bytes;
+        self
+    }
+
+    /// Set the maximum threshold in bytes.
+    pub fn max(mut self, bytes: u32) -> Self {
+        self.max = bytes;
+        self
+    }
+
+    /// Set the maximum probability (0-100%).
+    pub fn max_probability(mut self, percent: f64) -> Self {
+        self.max_p = ((percent / 100.0) * 255.0).clamp(0.0, 255.0) as u8;
+        self
+    }
+
+    /// Enable or disable ECN marking.
+    pub fn ecn(mut self, enable: bool) -> Self {
+        self.ecn = enable;
+        self
+    }
+
+    /// Enable or disable hard drop.
+    pub fn harddrop(mut self, enable: bool) -> Self {
+        self.harddrop = enable;
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style choke params slice into a typed `ChokeConfig`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `limit <bytes>` — queue limit (tc-style size).
+    /// - `min <bytes>` — minimum threshold.
+    /// - `max <bytes>` — maximum threshold.
+    /// - `probability <pct>` — max probability as a percentage 0-100
+    ///   (converted internally to the kernel's 0-255 scale).
+    /// - `ecn` / `noecn` — ECN marking flag pair.
+    /// - `harddrop` / `noharddrop` — hard-drop flag pair.
+    ///
+    /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
+    /// `avpkt`, `burst`, `bandwidth` — same as [`RedConfig`]; CHOKe
+    /// uses the bare thresholds directly.
+    ///
+    /// Strict: unknown tokens, missing values, and unparseable values
+    /// return `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("choke: `{key}` requires a value"))
+                })
+            };
+            match key {
+                "limit" | "min" | "max" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "choke: invalid {key} `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    let val: u32 = bytes.try_into().map_err(|_| {
+                        Error::InvalidMessage(format!("choke: {key} `{s}` exceeds u32"))
+                    })?;
+                    match key {
+                        "limit" => cfg.limit = val,
+                        "min" => cfg.min = val,
+                        "max" => cfg.max = val,
+                        _ => unreachable!(),
+                    }
+                    i += 2;
+                }
+                "probability" => {
+                    let s = need_value()?;
+                    let pct: f64 = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "choke: invalid probability `{s}` (expected percentage 0-100)"
+                        ))
+                    })?;
+                    cfg = cfg.max_probability(pct);
+                    i += 2;
+                }
+                "ecn" => {
+                    cfg.ecn = true;
+                    i += 1;
+                }
+                "noecn" => {
+                    cfg.ecn = false;
+                    i += 1;
+                }
+                "harddrop" => {
+                    cfg.harddrop = true;
+                    i += 1;
+                }
+                "noharddrop" => {
+                    cfg.harddrop = false;
+                    i += 1;
+                }
+                "avpkt" | "burst" | "bandwidth" => {
+                    return Err(Error::InvalidMessage(format!(
+                        "choke: `{key}` is not modelled by ChokeConfig — drop to a hand-rolled MessageBuilder if needed"
+                    )));
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "choke: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+impl QdiscConfig for ChokeConfig {
+    fn kind(&self) -> &'static str {
+        "choke"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::{choke, red};
+
+        let mut flags: u8 = 0;
+        if self.ecn {
+            flags |= red::TC_RED_ECN as u8;
+        }
+        if self.harddrop {
+            flags |= red::TC_RED_HARDDROP as u8;
+        }
+
+        let qopt = choke::TcRedQopt {
+            limit: self.limit,
+            qth_min: self.min,
+            qth_max: self.max,
+            wlog: 9,      // Weight log (default)
+            plog: 13,     // Probability log (default)
+            scell_log: 0, // Cell size log
+            flags,
+        };
+
+        builder.append_attr(choke::TCA_CHOKE_PARMS, qopt.as_bytes());
+
+        let max_p = (self.max_p as u32) << 24;
+        builder.append_attr_u32(choke::TCA_CHOKE_MAX_P, max_p);
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// PfifoFastConfig
+// ============================================================================
+
+/// pfifo_fast qdisc configuration.
+///
+/// `pfifo_fast` is the classic three-band priority FIFO that the kernel
+/// installs as the default qdisc on a freshly-created device. Its
+/// band count and priomap (`prio2band`) are hardcoded kernel-side, so
+/// unlike most qdiscs it accepts **no** options — this config is a unit
+/// type. Adding it explicitly is mostly useful for restoring the
+/// default behaviour after replacing the root qdisc.
+///
+/// ```ignore
+/// use nlink::netlink::tc::PfifoFastConfig;
+///
+/// conn.add_qdisc("eth0", PfifoFastConfig::new()).await?;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct PfifoFastConfig;
+
+impl PfifoFastConfig {
+    /// Create a new pfifo_fast configuration.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Terminal no-op for builder symmetry.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style pfifo_fast params slice. pfifo_fast takes no
+    /// parameters; any token is rejected (strict-parse contract).
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        if let Some(tok) = params.first() {
+            return Err(Error::InvalidMessage(format!(
+                "pfifo_fast: unexpected token `{tok}` (pfifo_fast takes no parameters)"
+            )));
+        }
+        Ok(Self)
+    }
+}
+
+impl QdiscConfig for PfifoFastConfig {
+    fn kind(&self) -> &'static str {
+        "pfifo_fast"
+    }
+
+    fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
+        // pfifo_fast ignores TCA_OPTIONS — bands and priomap are
+        // hardcoded kernel-side. Send no options.
+        Ok(())
+    }
+}
+
+// ============================================================================
 // PieConfig
 // ============================================================================
 
@@ -8611,6 +8891,61 @@ mod tests {
     fn red_parse_params_unknown_token_errors() {
         let err = RedConfig::parse_params(&["nonsense"]).unwrap_err();
         assert!(err.to_string().contains("unknown token"));
+    }
+
+    #[test]
+    fn choke_parse_params_empty_yields_default() {
+        let cfg = ChokeConfig::parse_params(&[]).unwrap();
+        assert_eq!(cfg.limit, 0);
+        assert_eq!(cfg.min, 0);
+        assert_eq!(cfg.max, 0);
+        assert!(!cfg.ecn);
+        assert!(!cfg.harddrop);
+    }
+
+    #[test]
+    fn choke_parse_params_thresholds_and_flags() {
+        let cfg =
+            ChokeConfig::parse_params(&["limit", "100k", "min", "10k", "max", "30k", "ecn"])
+                .unwrap();
+        assert_eq!(cfg.limit, 100 * 1024);
+        assert_eq!(cfg.min, 10 * 1024);
+        assert_eq!(cfg.max, 30 * 1024);
+        assert!(cfg.ecn);
+    }
+
+    #[test]
+    fn choke_parse_params_unsupported_features_rejected() {
+        for unsup in ["avpkt", "burst", "bandwidth"] {
+            let err = ChokeConfig::parse_params(&[unsup, "1"]).unwrap_err();
+            assert!(
+                err.to_string().contains("not modelled"),
+                "expected not-modelled for `{unsup}`, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn choke_parse_params_unknown_token_errors() {
+        let err = ChokeConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+        let err = ChokeConfig::parse_params(&["limit"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"));
+    }
+
+    #[test]
+    fn pfifo_fast_parse_params_takes_no_args() {
+        assert!(PfifoFastConfig::parse_params(&[]).is_ok());
+        let err = PfifoFastConfig::parse_params(&["bands", "3"]).unwrap_err();
+        assert!(err.to_string().contains("takes no parameters"));
+    }
+
+    #[test]
+    fn pfifo_fast_writes_no_options() {
+        // pfifo_fast ignores TCA_OPTIONS; write_options must be a no-op
+        // (no panic, no bytes appended beyond the empty builder).
+        let cfg = PfifoFastConfig::new();
+        assert_eq!(cfg.kind(), "pfifo_fast");
     }
 
     #[test]

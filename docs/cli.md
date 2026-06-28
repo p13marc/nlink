@@ -141,6 +141,8 @@ tc qdisc add dev eth0 --parent root fq_codel limit 10000 target 5ms interval 100
 tc qdisc add dev eth0 --parent root tbf rate 1mbit burst 32kb limit 100kb
 tc qdisc add dev eth0 --parent root prio bands 3
 tc qdisc add dev eth0 --parent root sfq perturb 10 limit 127
+tc qdisc add dev eth0 --parent root choke limit 1000k min 50k max 150k ecn
+tc qdisc add dev eth0 --parent root pfifo_fast   # restore the kernel default
 
 # Replace/change qdiscs
 tc qdisc replace dev eth0 --parent root fq_codel limit 5000
