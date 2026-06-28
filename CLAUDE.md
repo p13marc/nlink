@@ -70,7 +70,7 @@ over assertions.
 | Binaries | `bins/{ip,tc,ss,nft,wifi,devlink}` | CLI demos consuming the library |
 | Recipes | `docs/recipes/` | End-to-end markdown walkthroughs |
 | Examples | `crates/nlink/examples/` | Runnable demos per subsystem |
-| Plans | `*.md` at repo root | In-flight plans + roadmap (`128b-roadmap-overview.md`) |
+| Plans | GitHub issues + `CHANGELOG.md ## [Unreleased]` | In-flight work + roadmap (a per-cycle `plans/` dir is recreated when a cycle opens and deleted at cut) |
 
 Inside `crates/nlink/src/`:
 - `netlink/` — the core protocol stack (always built). Submodules
@@ -395,7 +395,8 @@ pool.acquire().await?.subscribe_all()?;
 
 The full per-seq response router (NlRouter-style dispatcher)
 that would unlock interleaved events + requests on a single
-socket is queued for 0.20 — see `plans/INDEX.md` "F1 follow-on".
+socket is the Plan 234 per-seq pipelining follow-on — tracked in
+[#134](https://github.com/p13marc/nlink/issues/134).
 
 ## Errors
 
@@ -679,11 +680,13 @@ publish order is "macros first, then nlink." Skip the
 `nlink --dry-run`; rely on the macros dry-run + the real publish
 sequence. `cut-release.sh` skips it automatically with a comment.
 
-**Plan-file cleanup**: when a cycle cuts + publishes, delete the
-per-plan scaffolding under `plans/` in a follow-up commit. The
-durable narrative lives in `CHANGELOG.md ## [X.Y.Z]` +
-`docs/migration_guide/<from>-to-<to>.md`. Keep `plans/INDEX.md`
-(rewrite for the next cycle) and any plans still in flight or
-deprioritized but not abandoned. Reference: the 0.16 → 0.17
-transition deleted 23 0.16 plans + slimmed Plan 169 to just its
-open Phase 3 (`Bottleneck::score`).
+**Plan-file cleanup**: a `plans/` directory is per-cycle working
+memory. When a cycle cuts + publishes, delete the whole thing in a
+follow-up commit; the durable narrative lives in
+`CHANGELOG.md ## [X.Y.Z]` + `docs/migration_guide/<from>-to-<to>.md`,
+and any not-yet-implemented work becomes a GitHub issue before the
+files go. (The 0.20/0.21 plan cycle was cleaned up this way — its
+deferred items are tracked in #134–#137; earlier, the 0.16 → 0.17
+transition deleted 23 0.16 plans + slimmed Plan 169 to its open
+Phase 3.) When the next cycle opens, recreate `plans/` with a fresh
+`INDEX.md`.

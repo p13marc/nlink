@@ -184,8 +184,8 @@ impl Connection<Ovpn> {
     /// (or `peer-set`) for `peer_id` with the fd passed in the
     /// auxiliary data.
     ///
-    /// See `plans/197-declarative-ovpn-plan.md` §7 for the
-    /// deferral rationale.
+    /// Tracked in <https://github.com/p13marc/nlink/issues/136>
+    /// (Plan 197 cross-netns follow-on) for the deferral rationale.
     pub async fn attach_socket(
         &self,
         _ifindex: u32,
@@ -196,7 +196,7 @@ impl Connection<Ovpn> {
             "Connection::<Ovpn>::attach_socket — cross-netns fd passing via SCM_RIGHTS \
              not yet implemented. Same-netns callers should set OvpnPeer::socket = Some(fd) \
              and call peer_new() directly; the kernel resolves the fd via sockfd_lookup. \
-             See plans/197-declarative-ovpn-plan.md §7."
+             See https://github.com/p13marc/nlink/issues/136."
                 .into(),
         ))
     }
