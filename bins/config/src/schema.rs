@@ -17,11 +17,21 @@
 
 use std::{collections::BTreeMap, net::IpAddr, path::Path};
 
+use clap::ValueEnum;
 use nlink::netlink::{
     Error, Result,
     config::{BondMode, MacvlanMode, NetworkConfig, VlanProtocol},
 };
 use serde::{Deserialize, Serialize};
+
+/// Output serialization format, shared by `capture` and `example` (the
+/// two subcommands that emit the schema). One definition, so `--full` and
+/// `--format` mean the same thing everywhere.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum OutputFormat {
+    Yaml,
+    Json,
+}
 
 /// Free-form per-resource options, mirroring the kernel's
 /// open-ended attribute model. Values are kept as YAML scalars so a
@@ -247,7 +257,10 @@ impl LinkPlan {
         let mac = match &link.mac {
             None => None,
             Some(s) => Some(parse_mac(s).ok_or_else(|| {
-                err(&link.name, format!("invalid mac `{s}` (expected aa:bb:cc:dd:ee:ff)"))
+                err(
+                    &link.name,
+                    format!("invalid mac `{s}` (expected aa:bb:cc:dd:ee:ff)"),
+                )
             })?),
         };
         Ok(Self {
@@ -259,7 +272,10 @@ impl LinkPlan {
         })
     }
 
-    fn apply(self, mut b: nlink::netlink::config::LinkBuilder) -> nlink::netlink::config::LinkBuilder {
+    fn apply(
+        self,
+        mut b: nlink::netlink::config::LinkBuilder,
+    ) -> nlink::netlink::config::LinkBuilder {
         b = match self.kind {
             LinkKind::Physical => b,
             LinkKind::Dummy => b.dummy(),
@@ -538,21 +554,21 @@ fn opt_str(o: &Options, key: &str) -> Option<String> {
 fn opt_u64(link: &str, o: &Options, key: &str) -> Result<Option<u64>> {
     match o.get(key) {
         None => Ok(None),
-        Some(v) => v
-            .as_u64()
-            .map(Some)
-            .ok_or_else(|| err(link, format!("option `{key}` must be a non-negative integer"))),
+        Some(v) => v.as_u64().map(Some).ok_or_else(|| {
+            err(
+                link,
+                format!("option `{key}` must be a non-negative integer"),
+            )
+        }),
     }
 }
 
 fn opt_u32(link: &str, o: &Options, key: &str) -> Result<Option<u32>> {
-    Ok(opt_u64(link, o, key)?
-        .map(|v| u32::try_from(v).unwrap_or(u32::MAX)))
+    Ok(opt_u64(link, o, key)?.map(|v| u32::try_from(v).unwrap_or(u32::MAX)))
 }
 
 fn opt_u16(link: &str, o: &Options, key: &str) -> Result<Option<u16>> {
-    Ok(opt_u64(link, o, key)?
-        .map(|v| u16::try_from(v).unwrap_or(u16::MAX)))
+    Ok(opt_u64(link, o, key)?.map(|v| u16::try_from(v).unwrap_or(u16::MAX)))
 }
 
 fn opt_addr(link: &str, o: &Options, key: &str) -> Result<Option<IpAddr>> {
@@ -688,7 +704,10 @@ routes:
         let out = serde_yaml::to_string(&cfg).unwrap();
         let cfg2: ConfigFile = serde_yaml::from_str(&out).unwrap();
         assert_eq!(cfg2.links.len(), 2);
-        assert_eq!(cfg2.links[1].options.get("peer").unwrap().as_str(), Some("veth1"));
+        assert_eq!(
+            cfg2.links[1].options.get("peer").unwrap().as_str(),
+            Some("veth1")
+        );
     }
 
     #[test]
@@ -740,7 +759,10 @@ links:
 "#;
         let cfg: ConfigFile = serde_yaml::from_str(yaml).unwrap();
         let e = cfg.to_network_config().unwrap_err();
-        assert!(e.to_string().contains("missing required option `peer`"), "got: {e}");
+        assert!(
+            e.to_string().contains("missing required option `peer`"),
+            "got: {e}"
+        );
     }
 
     #[test]

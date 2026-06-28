@@ -2,14 +2,14 @@
 
 use std::collections::BTreeMap;
 
-use clap::{Args, ValueEnum};
+use clap::Args;
 use nlink::netlink::{
     Connection, Result, Route,
     types::{route::RouteType, rule::FibRuleAction},
 };
 
 use crate::schema::{
-    AddressConfig, ConfigFile, LinkConfig, QdiscConfig, RouteConfig, RuleConfig,
+    AddressConfig, ConfigFile, LinkConfig, OutputFormat, QdiscConfig, RouteConfig, RuleConfig,
 };
 
 #[derive(Args)]
@@ -37,12 +37,6 @@ pub struct CaptureArgs {
     /// Skip loopback interface
     #[arg(long, default_value = "true")]
     pub skip_loopback: bool,
-}
-
-#[derive(Clone, ValueEnum)]
-pub enum OutputFormat {
-    Yaml,
-    Json,
 }
 
 pub async fn run(args: CaptureArgs) -> Result<()> {
@@ -197,7 +191,14 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
             RouteType::Blackhole => Some("blackhole".to_string()),
             RouteType::Unreachable => Some("unreachable".to_string()),
             RouteType::Prohibit => Some("prohibit".to_string()),
-            _ => None,
+            other => {
+                // Don't let an unmodelled route type vanish silently from
+                // the captured config — warn and preserve its raw name.
+                eprintln!(
+                    "warning: route to {destination} has unmodelled type {other:?}; captured as-is"
+                );
+                Some(format!("{other:?}").to_lowercase())
+            }
         };
 
         route_configs.push(RouteConfig {
@@ -250,7 +251,13 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
                 FibRuleAction::Blackhole => Some("blackhole".to_string()),
                 FibRuleAction::Unreachable => Some("unreachable".to_string()),
                 FibRuleAction::Prohibit => Some("prohibit".to_string()),
-                _ => None,
+                other => {
+                    eprintln!(
+                        "warning: rule prio {} has unmodelled action {other:?}; captured as-is",
+                        rule.priority()
+                    );
+                    Some(format!("{other:?}").to_lowercase())
+                }
             };
 
             rule_configs.push(RuleConfig {
@@ -304,7 +311,7 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
                 None
             };
 
-            let options = BTreeMap::new();
+            let options = qdisc_options_map(qdisc);
 
             qdisc_configs.push(QdiscConfig {
                 dev: dev.to_string(),
@@ -350,4 +357,95 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Decode a captured qdisc's parameters into a `key -> value` map for the
+/// `QdiscConfig.options` field. Covers the common shaping/AQM kinds
+/// (htb / tbf / netem / fq_codel); other kinds capture their `kind` +
+/// `handle` but leave options empty (the library decodes their bytes only
+/// behind typed accessors, not a generic map).
+fn qdisc_options_map(
+    qdisc: &nlink::netlink::messages::TcMessage,
+) -> BTreeMap<String, serde_yaml::Value> {
+    use nlink::netlink::tc_options::QdiscOptions;
+
+    let mut map: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+    let Some(opts) = qdisc.options() else {
+        return map;
+    };
+
+    let mut put = |k: &str, v: String| {
+        map.insert(k.to_string(), serde_yaml::Value::String(v));
+    };
+
+    match opts {
+        QdiscOptions::Htb(h) => {
+            if let Some(d) = h.default_class() {
+                put("default", format!("0x{d:x}"));
+            }
+            if let Some(r) = h.rate2quantum() {
+                put("r2q", r.to_string());
+            }
+            if let Some(q) = h.direct_qlen() {
+                put("direct_qlen", q.to_string());
+            }
+        }
+        QdiscOptions::Tbf(t) => {
+            if let Some(r) = t.rate() {
+                put("rate", r.to_string());
+            }
+            if let Some(p) = t.peakrate() {
+                put("peakrate", p.to_string());
+            }
+            if let Some(b) = t.burst() {
+                put("burst", b.to_string());
+            }
+            if let Some(m) = t.mtu() {
+                put("mtu", m.to_string());
+            }
+            if let Some(l) = t.limit() {
+                put("limit", l.to_string());
+            }
+        }
+        QdiscOptions::Netem(n) => {
+            if let Some(d) = n.delay() {
+                put("delay", format!("{}us", d.as_micros()));
+            }
+            if let Some(j) = n.jitter() {
+                put("jitter", format!("{}us", j.as_micros()));
+            }
+            if let Some(l) = n.loss() {
+                put("loss", format!("{l}%"));
+            }
+            if let Some(d) = n.duplicate() {
+                put("duplicate", format!("{d}%"));
+            }
+            if let Some(r) = n.reorder() {
+                put("reorder", format!("{r}%"));
+            }
+            if let Some(l) = n.limit() {
+                put("limit", l.to_string());
+            }
+        }
+        QdiscOptions::FqCodel(f) => {
+            if let Some(l) = f.limit() {
+                put("limit", l.to_string());
+            }
+            if let Some(fl) = f.flows() {
+                put("flows", fl.to_string());
+            }
+            if let Some(t) = f.target() {
+                put("target", format!("{}us", t.as_micros()));
+            }
+            if let Some(i) = f.interval() {
+                put("interval", format!("{}us", i.as_micros()));
+            }
+            if f.ecn() {
+                put("ecn", "on".to_string());
+            }
+        }
+        _ => {}
+    }
+
+    map
 }

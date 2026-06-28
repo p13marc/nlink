@@ -3,6 +3,8 @@
 use clap::{Args, ValueEnum};
 use nlink::netlink::Result;
 
+use crate::schema::OutputFormat;
+
 #[derive(Args)]
 pub struct ExampleArgs {
     /// Show full example with all features
@@ -16,12 +18,6 @@ pub struct ExampleArgs {
     /// Example type to generate
     #[arg(short, long, value_enum, default_value = "basic")]
     pub example: ExampleType,
-}
-
-#[derive(Clone, ValueEnum)]
-pub enum OutputFormat {
-    Yaml,
-    Json,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -451,7 +447,10 @@ mod tests {
         ];
         for (name, text) in examples {
             let parsed: std::result::Result<ConfigFile, _> = serde_yaml::from_str(text);
-            assert!(parsed.is_ok(), "example `{name}` failed to parse: {parsed:?}");
+            assert!(
+                parsed.is_ok(),
+                "example `{name}` failed to parse: {parsed:?}"
+            );
         }
     }
 }
