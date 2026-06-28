@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **TC qdisc: `atm` (`sch_atm`) typed config (#116) — closes the qdisc
+  side of #116.** The ATM qdisc is classful and takes no qdisc-level
+  options, so `AtmConfig` is a unit config (`tc qdisc add … root atm`
+  instantiates the classful qdisc). VC binding lives in the **classes**
+  (`TCA_ATM_FD` + friends), which require the file descriptor of a live,
+  application-owned ATM socket — no portable/testable surface — so nlink
+  does not model an ATM class config; the rustdoc points at a hand-rolled
+  `MessageBuilder` for that case. 35 qdisc parsers total. With this,
+  `choke`/`gred`/`atm`/`pfifo_fast` from #116 are all landed.
+
 - **TC qdisc: `gred` (Generic RED) setup-phase typed config (#116).**
   `GredConfig` models the GRED **setup** message — virtual-queue count
   (`DPs`, 1..=16), default VQ, GRIO flag, and global byte `limit` — sent

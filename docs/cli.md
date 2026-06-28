@@ -144,6 +144,7 @@ tc qdisc add dev eth0 --parent root sfq perturb 10 limit 127
 tc qdisc add dev eth0 --parent root choke limit 1000k min 50k max 150k ecn
 tc qdisc add dev eth0 --parent root pfifo_fast   # restore the kernel default
 tc qdisc add dev eth0 --parent root gred setup DPs 8 default 2 grio   # GRED setup phase
+tc qdisc add dev eth0 --parent root atm   # classful ATM qdisc (VC binding is class-level, not modelled)
 
 # Replace/change qdiscs
 tc qdisc replace dev eth0 --parent root fq_codel limit 5000

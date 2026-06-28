@@ -7,8 +7,9 @@ use nlink::{
         Connection, Result, Route,
         messages::TcMessage,
         tc::{
-            BfifoConfig, CakeConfig, CbsConfig, ChokeConfig, ClsactConfig, CodelConfig, DrrConfig,
-            DsmarkConfig, EtfConfig, EtsConfig, FqCodelConfig, FqConfig, FqPieConfig, GredConfig,
+            AtmConfig, BfifoConfig, CakeConfig, CbsConfig, ChokeConfig, ClsactConfig, CodelConfig,
+            DrrConfig, DsmarkConfig, EtfConfig, EtsConfig, FqCodelConfig, FqConfig, FqPieConfig,
+            GredConfig,
             HfscConfig, HhfConfig, HtbQdiscConfig, IngressConfig, MqConfig, MqprioConfig,
             MultiqConfig, NetemConfig, PfifoConfig, PfifoFastConfig, PieConfig, PlugConfig,
             PrioConfig, QdiscConfig, QfqConfig, RedConfig, SfbConfig, SfqConfig, SkbprioConfig,
@@ -344,8 +345,9 @@ async fn dispatch_qdisc(
         "choke" => dispatch!(ChokeConfig),
         "pfifo_fast" => dispatch!(PfifoFastConfig),
         "gred" => dispatch!(GredConfig),
+        "atm" => dispatch!(AtmConfig),
         other => Err(Error::InvalidMessage(format!(
-            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, mq, ets, etf, taprio, cbs, skbprio, sfb, multiq, hhf, dsmark, choke, pfifo_fast, gred)"
+            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, mq, ets, etf, taprio, cbs, skbprio, sfb, multiq, hhf, dsmark, choke, pfifo_fast, gred, atm)"
         ))),
     }
 }
