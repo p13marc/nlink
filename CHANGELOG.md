@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`tc`/library: `mpls` and `skbmod` actions (#29).** Two new typed
+  TC actions in the standard `*Action` + `parse_params` shape, wired
+  into `tc action add … mpls|skbmod`. `MplsAction` pushes/pops/modifies
+  an MPLS shim or decrements its TTL (`label`, `tc`, `ttl`, `bos`,
+  `protocol`) via `struct tc_mpls`. `SkbmodAction` rewrites L2
+  src/dst MAC and/or ethertype, or swaps MAC (`set smac|dmac|etype`,
+  `swap mac`) via `struct tc_skbmod`. Brings the typed-action count to
+  16. (The remaining `ife`/`gate`/`ctinfo`/`xt` actions stay deferred —
+  metadata-encap / time-gated-schedule / iptables-target wrappers that
+  are complex or niche.)
+
 - **`tc`/library: `tcindex` filter (#29).** New `TcindexFilter` typed
   config (`hash`, `mask`, `shift`, `fall_through`/`pass_on`, `classid`,
   `chain`) over the `TCA_TCINDEX_*` attributes, wired into `tc filter

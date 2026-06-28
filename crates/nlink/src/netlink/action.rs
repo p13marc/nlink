@@ -41,7 +41,7 @@ use super::{
         TCA_ACT_TAB, TcMsg,
         action::{
             self, TCA_ACT_INDEX, TCA_ACT_KIND, TCA_ACT_OPTIONS, TcGen, connmark, csum, ct, gact,
-            mirred, nat, pedit, police, sample, tunnel_key, vlan,
+            mirred, mpls, nat, pedit, police, sample, skbmod, tunnel_key, vlan,
         },
     },
 };
@@ -1036,6 +1036,430 @@ impl ActionConfig for VlanAction {
             &self.vlan_proto.to_be_bytes(),
         );
 
+        Ok(())
+    }
+}
+
+// ============================================================================
+// MplsAction
+// ============================================================================
+
+/// MPLS action configuration.
+///
+/// Push, pop, or modify an MPLS shim header, or decrement its TTL.
+///
+/// ```ignore
+/// use nlink::netlink::action::MplsAction;
+///
+/// // Push label 100 with TTL 64.
+/// let a = MplsAction::push(100).ttl(64).build();
+/// // Pop, revealing an IPv4 packet.
+/// let p = MplsAction::pop(0x0800).build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct MplsAction {
+    m_action: i32,
+    label: Option<u32>,
+    tc: Option<u8>,
+    ttl: Option<u8>,
+    bos: Option<u8>,
+    proto: Option<u16>,
+    action: i32,
+}
+
+impl MplsAction {
+    fn with(m_action: i32) -> Self {
+        Self {
+            m_action,
+            label: None,
+            tc: None,
+            ttl: None,
+            bos: None,
+            proto: None,
+            action: action::TC_ACT_PIPE,
+        }
+    }
+
+    /// Pop the outer MPLS header, revealing a packet of `proto`
+    /// (ethertype, e.g. `0x0800` for IPv4).
+    pub fn pop(proto: u16) -> Self {
+        let mut a = Self::with(mpls::TCA_MPLS_ACT_POP);
+        a.proto = Some(proto);
+        a
+    }
+
+    /// Push a new MPLS header with the given label.
+    pub fn push(label: u32) -> Self {
+        let mut a = Self::with(mpls::TCA_MPLS_ACT_PUSH);
+        a.label = Some(label);
+        a
+    }
+
+    /// Modify the outer MPLS header.
+    pub fn modify() -> Self {
+        Self::with(mpls::TCA_MPLS_ACT_MODIFY)
+    }
+
+    /// Decrement the outer MPLS header's TTL.
+    pub fn dec_ttl() -> Self {
+        Self::with(mpls::TCA_MPLS_ACT_DEC_TTL)
+    }
+
+    /// Set the MPLS label (push/modify).
+    pub fn label(mut self, label: u32) -> Self {
+        self.label = Some(label);
+        self
+    }
+
+    /// Set the traffic-class bits (push/modify).
+    pub fn tc(mut self, tc: u8) -> Self {
+        self.tc = Some(tc);
+        self
+    }
+
+    /// Set the TTL (push/modify).
+    pub fn ttl(mut self, ttl: u8) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set the bottom-of-stack bit (push/modify).
+    pub fn bos(mut self, bos: u8) -> Self {
+        self.bos = Some(bos);
+        self
+    }
+
+    /// Set the new header's ethertype (push) or revealed protocol (pop).
+    pub fn protocol(mut self, proto: u16) -> Self {
+        self.proto = Some(proto);
+        self
+    }
+
+    /// Set the action result.
+    pub fn action(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build the action configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a `tc(8)`-style `mpls` token slice into a typed action.
+    ///
+    /// Operation (one required): `pop`, `push`, `modify`, `dec_ttl`.
+    /// Modifiers: `label <n>`, `tc <0-7>`, `ttl <0-255>`, `bos <0|1>`,
+    /// `protocol <ethertype>` (decimal, `0x`-hex, or one of `ipv4`,
+    /// `ipv6`, `mpls_uc`, `mpls_mc`). Strict: unknown tokens, missing
+    /// values, and unparseable values all error; `push` requires a
+    /// `label`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut op: Option<i32> = None;
+        let mut label = None;
+        let mut tc = None;
+        let mut ttl = None;
+        let mut bos = None;
+        let mut proto = None;
+
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "pop" => {
+                    op = Some(mpls::TCA_MPLS_ACT_POP);
+                    i += 1;
+                }
+                "push" => {
+                    op = Some(mpls::TCA_MPLS_ACT_PUSH);
+                    i += 1;
+                }
+                "modify" => {
+                    op = Some(mpls::TCA_MPLS_ACT_MODIFY);
+                    i += 1;
+                }
+                "dec_ttl" => {
+                    op = Some(mpls::TCA_MPLS_ACT_DEC_TTL);
+                    i += 1;
+                }
+                "label" => {
+                    let s = action_need_value(params, i, "mpls", key)?;
+                    let v = action_parse_u32("mpls", "label", s)?;
+                    if v > 0xF_FFFF {
+                        return Err(Error::InvalidMessage(format!(
+                            "mpls: label `{v}` out of range (0–1048575)"
+                        )));
+                    }
+                    label = Some(v);
+                    i += 2;
+                }
+                "tc" => {
+                    let s = action_need_value(params, i, "mpls", key)?;
+                    let v = action_parse_u32("mpls", "tc", s)?;
+                    if v > 7 {
+                        return Err(Error::InvalidMessage(format!(
+                            "mpls: tc `{v}` out of range (0–7)"
+                        )));
+                    }
+                    tc = Some(v as u8);
+                    i += 2;
+                }
+                "ttl" => {
+                    let s = action_need_value(params, i, "mpls", key)?;
+                    let v = action_parse_u32("mpls", "ttl", s)?;
+                    if v > 255 {
+                        return Err(Error::InvalidMessage(format!(
+                            "mpls: ttl `{v}` out of range (0–255)"
+                        )));
+                    }
+                    ttl = Some(v as u8);
+                    i += 2;
+                }
+                "bos" => {
+                    let s = action_need_value(params, i, "mpls", key)?;
+                    let v = action_parse_u32("mpls", "bos", s)?;
+                    if v > 1 {
+                        return Err(Error::InvalidMessage(format!(
+                            "mpls: bos `{v}` out of range (0–1)"
+                        )));
+                    }
+                    bos = Some(v as u8);
+                    i += 2;
+                }
+                "protocol" => {
+                    let s = action_need_value(params, i, "mpls", key)?;
+                    proto = Some(parse_ethertype("mpls", s)?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "mpls: unknown token `{other}` (recognised: pop, push, modify, dec_ttl, label <n>, tc <n>, ttl <n>, bos <n>, protocol <ethertype>)"
+                    )));
+                }
+            }
+        }
+
+        let m_action = op.ok_or_else(|| {
+            Error::InvalidMessage(
+                "mpls: missing operation (pop, push, modify, or dec_ttl)".to_string(),
+            )
+        })?;
+        if m_action == mpls::TCA_MPLS_ACT_PUSH && label.is_none() {
+            return Err(Error::InvalidMessage(
+                "mpls: push requires a `label`".to_string(),
+            ));
+        }
+
+        Ok(Self {
+            m_action,
+            label,
+            tc,
+            ttl,
+            bos,
+            proto,
+            action: action::TC_ACT_PIPE,
+        })
+    }
+}
+
+impl ActionConfig for MplsAction {
+    fn kind(&self) -> &'static str {
+        "mpls"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        let parms = mpls::TcMpls::new(self.m_action, self.action);
+        builder.append_attr(mpls::TCA_MPLS_PARMS, parms.as_bytes());
+
+        if let Some(proto) = self.proto {
+            builder.append_attr(mpls::TCA_MPLS_PROTO, &proto.to_be_bytes());
+        }
+        if let Some(label) = self.label {
+            builder.append_attr_u32(mpls::TCA_MPLS_LABEL, label);
+        }
+        if let Some(tc) = self.tc {
+            builder.append_attr(mpls::TCA_MPLS_TC, &[tc]);
+        }
+        if let Some(ttl) = self.ttl {
+            builder.append_attr(mpls::TCA_MPLS_TTL, &[ttl]);
+        }
+        if let Some(bos) = self.bos {
+            builder.append_attr(mpls::TCA_MPLS_BOS, &[bos]);
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// SkbmodAction
+// ============================================================================
+
+/// skbmod action configuration.
+///
+/// Rewrite a packet's L2 source/destination MAC and/or ethertype, or
+/// swap source and destination MAC.
+///
+/// ```ignore
+/// use nlink::netlink::action::SkbmodAction;
+///
+/// let a = SkbmodAction::new()
+///     .set_dmac([0x02, 0, 0, 0, 0, 1])
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct SkbmodAction {
+    dmac: Option<[u8; 6]>,
+    smac: Option<[u8; 6]>,
+    etype: Option<u16>,
+    swap_mac: bool,
+    action: i32,
+}
+
+impl SkbmodAction {
+    /// Create a new skbmod action.
+    pub fn new() -> Self {
+        Self {
+            action: action::TC_ACT_PIPE,
+            ..Default::default()
+        }
+    }
+
+    /// Set the destination MAC.
+    pub fn set_dmac(mut self, dmac: [u8; 6]) -> Self {
+        self.dmac = Some(dmac);
+        self
+    }
+
+    /// Set the source MAC.
+    pub fn set_smac(mut self, smac: [u8; 6]) -> Self {
+        self.smac = Some(smac);
+        self
+    }
+
+    /// Set the ethertype.
+    pub fn set_etype(mut self, etype: u16) -> Self {
+        self.etype = Some(etype);
+        self
+    }
+
+    /// Swap source and destination MAC.
+    pub fn swap_mac(mut self) -> Self {
+        self.swap_mac = true;
+        self
+    }
+
+    /// Set the action result.
+    pub fn action(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build the action configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a `tc(8)`-style `skbmod` token slice into a typed action.
+    ///
+    /// Recognised tokens: `set smac <MAC>`, `set dmac <MAC>`,
+    /// `set etype <ethertype>`, `swap mac`. At least one operation is
+    /// required. Strict: unknown tokens, missing values, and
+    /// unparseable values all error.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut a = Self::new();
+        let mut any = false;
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "set" => {
+                    let what = action_need_value(params, i, "skbmod", "set")?;
+                    let val = params.get(i + 2).copied().ok_or_else(|| {
+                        Error::InvalidMessage(format!("skbmod: `set {what}` requires a value"))
+                    })?;
+                    match what {
+                        "smac" => {
+                            a.smac = Some(crate::util::addr::parse_mac(val).map_err(|_| {
+                                Error::InvalidMessage(format!("skbmod: invalid smac `{val}`"))
+                            })?);
+                        }
+                        "dmac" => {
+                            a.dmac = Some(crate::util::addr::parse_mac(val).map_err(|_| {
+                                Error::InvalidMessage(format!("skbmod: invalid dmac `{val}`"))
+                            })?);
+                        }
+                        "etype" => {
+                            a.etype = Some(parse_ethertype("skbmod", val)?);
+                        }
+                        other => {
+                            return Err(Error::InvalidMessage(format!(
+                                "skbmod: unknown `set` target `{other}` (expected smac, dmac, etype)"
+                            )));
+                        }
+                    }
+                    any = true;
+                    i += 3;
+                }
+                "swap" => {
+                    let what = action_need_value(params, i, "skbmod", "swap")?;
+                    if what != "mac" {
+                        return Err(Error::InvalidMessage(format!(
+                            "skbmod: unknown `swap` target `{what}` (expected mac)"
+                        )));
+                    }
+                    a.swap_mac = true;
+                    any = true;
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "skbmod: unknown token `{other}` (recognised: set smac|dmac|etype <v>, swap mac)"
+                    )));
+                }
+            }
+        }
+        if !any {
+            return Err(Error::InvalidMessage(
+                "skbmod: at least one operation required (set smac|dmac|etype, swap mac)"
+                    .to_string(),
+            ));
+        }
+        Ok(a)
+    }
+}
+
+impl ActionConfig for SkbmodAction {
+    fn kind(&self) -> &'static str {
+        "skbmod"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        let mut flags = 0u64;
+        if self.dmac.is_some() {
+            flags |= skbmod::SKBMOD_F_DMAC;
+        }
+        if self.smac.is_some() {
+            flags |= skbmod::SKBMOD_F_SMAC;
+        }
+        if self.etype.is_some() {
+            flags |= skbmod::SKBMOD_F_ETYPE;
+        }
+        if self.swap_mac {
+            flags |= skbmod::SKBMOD_F_SWAPMAC;
+        }
+
+        let parms = skbmod::TcSkbmod::new(flags, self.action);
+        builder.append_attr(skbmod::TCA_SKBMOD_PARMS, parms.as_bytes());
+
+        if let Some(dmac) = self.dmac {
+            builder.append_attr(skbmod::TCA_SKBMOD_DMAC, &dmac);
+        }
+        if let Some(smac) = self.smac {
+            builder.append_attr(skbmod::TCA_SKBMOD_SMAC, &smac);
+        }
+        if let Some(etype) = self.etype {
+            builder.append_attr(skbmod::TCA_SKBMOD_ETYPE, &etype.to_be_bytes());
+        }
         Ok(())
     }
 }
@@ -3582,6 +4006,29 @@ fn action_parse_u32(kind: &str, key: &str, s: &str) -> Result<u32> {
     })
 }
 
+/// Parse an ethertype: a common name (`ipv4`, `ipv6`, `mpls_uc`,
+/// `mpls_mc`), a `0x`-prefixed hex value, or a decimal u16.
+fn parse_ethertype(kind: &str, s: &str) -> Result<u16> {
+    match s {
+        "ipv4" | "ip" => Ok(0x0800),
+        "ipv6" | "ip6" => Ok(0x86DD),
+        "mpls_uc" => Ok(0x8847),
+        "mpls_mc" => Ok(0x8848),
+        _ => {
+            let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u16::from_str_radix(hex, 16)
+            } else {
+                s.parse::<u16>()
+            };
+            parsed.map_err(|_| {
+                Error::InvalidMessage(format!(
+                    "{kind}: invalid protocol `{s}` (expected ipv4, ipv6, mpls_uc, mpls_mc, 0xNN, or decimal u16)"
+                ))
+            })
+        }
+    }
+}
+
 /// Parse an IPv4 address or `<min>-<max>` range. Single addresses
 /// expand to `(addr, addr)` so callers can always pass a pair to
 /// the typed builder. Used by `CtAction::parse_params`.
@@ -4301,6 +4748,61 @@ mod tests {
     fn vlan_parse_params_unknown_protocol_errors() {
         let err = VlanAction::parse_params(&["pop", "protocol", "wat"]).unwrap_err();
         assert!(err.to_string().contains("unknown protocol"));
+    }
+
+    // ---- MplsAction ----
+
+    #[test]
+    fn mpls_parse_params_push() {
+        let a =
+            MplsAction::parse_params(&["push", "label", "100", "ttl", "64", "tc", "3"]).unwrap();
+        let b = MplsAction::push(100).ttl(64).tc(3).build();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn mpls_parse_params_pop_protocol_names() {
+        let a = MplsAction::parse_params(&["pop", "protocol", "ipv4"]).unwrap();
+        assert_eq!(a.proto, Some(0x0800));
+        let b = MplsAction::parse_params(&["pop", "protocol", "0x8847"]).unwrap();
+        assert_eq!(b.proto, Some(0x8847));
+    }
+
+    #[test]
+    fn mpls_parse_params_strict() {
+        // push requires a label
+        assert!(MplsAction::parse_params(&["push"]).is_err());
+        // missing op
+        assert!(MplsAction::parse_params(&["label", "5"]).is_err());
+        // out-of-range label / tc, unknown token, bad protocol
+        assert!(MplsAction::parse_params(&["push", "label", "2000000"]).is_err());
+        assert!(MplsAction::parse_params(&["modify", "tc", "9"]).is_err());
+        assert!(MplsAction::parse_params(&["pop", "protocol", "nope"]).is_err());
+        assert!(MplsAction::parse_params(&["bogus"]).is_err());
+    }
+
+    // ---- SkbmodAction ----
+
+    #[test]
+    fn skbmod_parse_params_set_and_swap() {
+        let a = SkbmodAction::parse_params(&["set", "dmac", "02:00:00:00:00:01", "swap", "mac"])
+            .unwrap();
+        let b = SkbmodAction::new()
+            .set_dmac([0x02, 0, 0, 0, 0, 1])
+            .swap_mac()
+            .build();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    }
+
+    #[test]
+    fn skbmod_parse_params_strict() {
+        // at least one op required
+        assert!(SkbmodAction::parse_params(&[]).is_err());
+        // bad MAC, unknown set target, unknown token, swap non-mac
+        assert!(SkbmodAction::parse_params(&["set", "smac", "zz"]).is_err());
+        assert!(SkbmodAction::parse_params(&["set", "bogus", "1"]).is_err());
+        assert!(SkbmodAction::parse_params(&["swap", "ip"]).is_err());
+        assert!(SkbmodAction::parse_params(&["nope"]).is_err());
     }
 
     // ---- SkbeditAction ----

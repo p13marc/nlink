@@ -14,8 +14,8 @@ use nlink::{
         Connection, Result, Route,
         action::{
             ActionMessage, BpfAction, ConnmarkAction, CsumAction, CtAction, GactAction,
-            MirredAction, NatAction, PeditAction, PoliceAction, SampleAction, SimpleAction,
-            SkbeditAction, TunnelKeyAction, VlanAction,
+            MirredAction, MplsAction, NatAction, PeditAction, PoliceAction, SampleAction,
+            SimpleAction, SkbeditAction, SkbmodAction, TunnelKeyAction, VlanAction,
         },
         attr::AttrIter,
         types::tc::action::{
@@ -181,8 +181,10 @@ async fn add_typed_action(conn: &Connection<Route>, kind: &str, params: &[String
         "bpf" => dispatch!(BpfAction),
         "ct" => dispatch!(CtAction),
         "pedit" => dispatch!(PeditAction),
+        "mpls" => dispatch!(MplsAction),
+        "skbmod" => dispatch!(SkbmodAction),
         other => Err(Error::InvalidMessage(format!(
-            "tc action: unknown kind `{other}` (recognised: gact, mirred, police, vlan, skbedit, connmark, csum, sample, tunnel_key, nat, simple, bpf, ct, pedit)"
+            "tc action: unknown kind `{other}` (recognised: gact, mirred, police, vlan, skbedit, connmark, csum, sample, tunnel_key, nat, simple, bpf, ct, pedit, mpls, skbmod)"
         ))),
     }
 }
