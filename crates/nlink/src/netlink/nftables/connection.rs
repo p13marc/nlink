@@ -598,6 +598,20 @@ impl Connection<Nftables> {
         self.nft_request_ack(builder).await
     }
 
+    /// Delete a set, treating "not found" as success.
+    ///
+    /// Returns `Ok(true)` if the set was deleted, `Ok(false)` if it did
+    /// not exist. Mirrors [`del_table_if_exists`](Self::del_table_if_exists)
+    /// for idempotent teardown.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_set_if_exists"))]
+    pub async fn del_set_if_exists(&self, table: &str, name: &str, family: Family) -> Result<bool> {
+        match self.del_set(table, name, family).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Add elements to a set.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_set_elements"))]
     pub async fn add_set_elements(

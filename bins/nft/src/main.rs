@@ -258,6 +258,15 @@ fn policy_name(p: u32) -> &'static str {
     }
 }
 
+/// Report the outcome of an idempotent delete.
+fn report_delete(kind: &str, name: &str, existed: bool) {
+    if existed {
+        eprintln!("{kind} {name} deleted");
+    } else {
+        eprintln!("{kind} {name} did not exist (no-op)");
+    }
+}
+
 fn parse_family(s: &str) -> Result<Family> {
     match s {
         "inet" => Ok(Family::Inet),
@@ -559,13 +568,38 @@ async fn main() -> Result<()> {
                         &rules
                             .iter()
                             .filter(|r| r.chain == chain)
-                            .map(|r| serde_json::json!({"chain": r.chain, "handle": r.handle}))
+                            .map(|r| {
+                                serde_json::json!({
+                                    "chain": r.chain,
+                                    "handle": r.handle,
+                                    "position": r.position,
+                                    "comment": r.comment,
+                                    // The library keeps rule expressions as
+                                    // raw bytes (no disassembler); expose the
+                                    // payload length so callers can tell
+                                    // empty rules from non-trivial ones.
+                                    "expr_bytes": r.expression_bytes.len(),
+                                })
+                            })
                             .collect(),
                     );
                 } else {
                     for r in &rules {
                         if r.chain == chain {
-                            println!("  handle {}", r.handle);
+                            let mut line = format!("  handle {}", r.handle);
+                            if let Some(pos) = r.position {
+                                line.push_str(&format!(" position {pos}"));
+                            }
+                            if let Some(ref c) = r.comment {
+                                line.push_str(&format!(" comment \"{c}\""));
+                            }
+                            if !r.expression_bytes.is_empty() {
+                                line.push_str(&format!(
+                                    " ({} expr bytes)",
+                                    r.expression_bytes.len()
+                                ));
+                            }
+                            println!("{line}");
                         }
                     }
                 }
@@ -655,11 +689,14 @@ async fn main() -> Result<()> {
             }
         },
 
+        // Deletes are idempotent: a missing object is a clean no-op
+        // (reported as such) rather than an error, via the `*_if_exists`
+        // library variants.
         Command::Delete { what } => match what {
             DeleteWhat::Table { family, name } => {
                 let family = parse_family(&family)?;
-                conn.del_table(&name, family).await?;
-                eprintln!("Table {name} deleted");
+                let existed = conn.del_table_if_exists(&name, family).await?;
+                report_delete("Table", &name, existed);
             }
             DeleteWhat::Chain {
                 family,
@@ -667,8 +704,8 @@ async fn main() -> Result<()> {
                 name,
             } => {
                 let family = parse_family(&family)?;
-                conn.del_chain(&table, &name, family).await?;
-                eprintln!("Chain {name} deleted");
+                let existed = conn.del_chain_if_exists(&table, &name, family).await?;
+                report_delete("Chain", &name, existed);
             }
             DeleteWhat::Rule {
                 family,
@@ -677,8 +714,8 @@ async fn main() -> Result<()> {
                 handle,
             } => {
                 let family = parse_family(&family)?;
-                conn.del_rule(&table, &chain, family, handle).await?;
-                eprintln!("Rule deleted");
+                let existed = conn.del_rule_if_exists(&table, &chain, family, handle).await?;
+                report_delete("Rule", &handle.to_string(), existed);
             }
             DeleteWhat::Set {
                 family,
@@ -686,8 +723,8 @@ async fn main() -> Result<()> {
                 name,
             } => {
                 let family = parse_family(&family)?;
-                conn.del_set(&table, &name, family).await?;
-                eprintln!("Set {name} deleted");
+                let existed = conn.del_set_if_exists(&table, &name, family).await?;
+                report_delete("Set", &name, existed);
             }
         },
 

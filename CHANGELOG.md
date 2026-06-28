@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`nft` bin: idempotent deletes + richer `list rules` (#21).** `nft
+  delete table/chain/rule/set` now uses the `*_if_exists` library
+  variants, so deleting a missing object is a clean no-op ("… did not
+  exist (no-op)") instead of an error — matching declarative teardown
+  expectations. Added the missing `del_set_if_exists` library method.
+  `list rules` now also surfaces each rule's `position`, `comment`, and
+  expression-payload size (text + JSON), rather than only the handle;
+  full expression disassembly stays out of scope (the library keeps rule
+  expressions as raw bytes by design).
+
 - **`ip` bin: `macsec add`/`set`/`del` (TX/RX SA + RX SC) (#17).** The
   `ip macsec` object was show-only; it now mutates MACsec secure
   associations over the existing `Connection<Macsec>` GENL API. `add tx
