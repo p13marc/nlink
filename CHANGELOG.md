@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **ethtool: module-EEPROM read (#119).**
+  `Connection::<Ethtool>::get_module_eeprom` reads raw SFP/QSFP module
+  EEPROM bytes (`ETHTOOL_MSG_MODULE_EEPROM_GET`) via a
+  `ModuleEepromRequest` (offset/length + page/bank/I2C-address setters,
+  length bounded 1..=128). A new `ethtool_get_with` helper sends a
+  parameterized `doit` GET (request flag, no dump) and returns the
+  single reply, parsing out `ETHTOOL_A_MODULE_EEPROM_DATA`. Surfaced as
+  `nlink-ethtool -m eth0` (hex dump). Second of #119's three ethtool gaps.
+
 - **ethtool: `set_fec` FEC setter (#119).** `Connection::<Ethtool>::set_fec`
   configures Forward Error Correction via a `FecBuilder`
   (`ETHTOOL_MSG_FEC_SET`): `.mode("rs")` selects encodings (a named

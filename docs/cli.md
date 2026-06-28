@@ -322,6 +322,7 @@ nlink-ethtool eth0                     # link settings (default action)
 nlink-ethtool -k eth0                  # features / offloads
 nlink-ethtool -S eth0                  # standardized IEEE 802.3 / RMON stats
 nlink-ethtool -g eth0 / -l eth0        # ring sizes / channel counts
+nlink-ethtool -m eth0                   # SFP/QSFP module EEPROM hex dump (--page/--offset/--length)
 nlink-ethtool wol eth0                 # Wake-on-LAN settings
 nlink-ethtool set-wol eth0 magic       # enable WoL on magic packet (or `none` to disable)
 nlink-ethtool eee eth0 / fec eth0      # Energy-Efficient Ethernet / FEC

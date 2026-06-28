@@ -107,6 +107,27 @@ enum Commands {
         #[arg(long)]
         auto: Option<bool>,
     },
+    /// Dump SFP/QSFP module EEPROM bytes
+    #[command(short_flag = 'm')]
+    Module {
+        /// Device name
+        device: String,
+        /// Byte offset within the page
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+        /// Number of bytes to read (1..=128)
+        #[arg(long, default_value_t = 128)]
+        length: u32,
+        /// Page number
+        #[arg(long, default_value_t = 0)]
+        page: u8,
+        /// Bank number
+        #[arg(long, default_value_t = 0)]
+        bank: u8,
+        /// I2C address (0x50 lower / 0x51 upper)
+        #[arg(long, default_value_t = 0x50)]
+        i2c_address: u8,
+    },
     /// Set Energy-Efficient Ethernet settings
     SetEee {
         /// Device name
@@ -253,6 +274,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             modes,
             auto,
         } => set_fec(&device, &modes, auto).await?,
+        Commands::Module {
+            device,
+            offset,
+            length,
+            page,
+            bank,
+            i2c_address,
+        } => show_module_eeprom(&device, offset, length, page, bank, i2c_address, json).await?,
         Commands::SetEee {
             device,
             enabled,
@@ -865,6 +894,42 @@ async fn set_fec(device: &str, modes: &[String], auto: Option<bool>) -> nlink::R
     })
     .await?;
     eprintln!("FEC settings updated for {}", device);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn show_module_eeprom(
+    device: &str,
+    offset: u32,
+    length: u32,
+    page: u8,
+    bank: u8,
+    i2c_address: u8,
+    json: bool,
+) -> nlink::Result<()> {
+    use nlink::netlink::genl::ethtool::ModuleEepromRequest;
+    let conn = Connection::<Ethtool>::new_async().await?;
+    let req = ModuleEepromRequest::new(offset, length)
+        .page(page)
+        .bank(bank)
+        .i2c_address(i2c_address);
+    let eeprom = conn.get_module_eeprom(device, req).await?;
+
+    if json {
+        print_json(&serde_json::json!({
+            "device": device,
+            "offset": offset,
+            "length": eeprom.data.len(),
+            "data": eeprom.data,
+        }));
+        return Ok(());
+    }
+
+    println!("Module EEPROM for {} (offset {}, {} bytes):", device, offset, eeprom.data.len());
+    for (i, chunk) in eeprom.data.chunks(16).enumerate() {
+        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+        println!("\t{:#06x}: {}", offset as usize + i * 16, hex.join(" "));
+    }
     Ok(())
 }
 
