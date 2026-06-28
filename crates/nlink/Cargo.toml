@@ -162,6 +162,12 @@ path = "examples/diagnostics/health_check.rs"
 name = "config_declarative"
 path = "examples/config/declarative.rs"
 
+# NetworkConfig JSON round-trip (validating serde, #108)
+[[example]]
+name = "config_round_trip"
+path = "examples/config/round_trip.rs"
+required-features = ["serde"]
+
 # Traffic control examples
 [[example]]
 name = "route_tc_netem"
