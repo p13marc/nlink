@@ -214,7 +214,7 @@ async fn show_vlans(
     let names = conn.get_interface_names().await?;
 
     match format {
-        OutputFormat::Json => print_vlans_json(&entries, &names, opts),
+        OutputFormat::Json => print_vlans_json(&entries, &names, opts)?,
         OutputFormat::Text => print_vlans_text(&entries, &names),
     }
 
@@ -260,13 +260,16 @@ fn print_vlans_json(
     entries: &[BridgeVlanEntry],
     names: &std::collections::HashMap<u32, String>,
     opts: &OutputOptions,
-) {
-    // Group by interface
+) -> Result<()> {
+    // Group by interface, then sort by ifindex so the output is
+    // deterministic regardless of HashMap iteration order.
     let mut by_dev: std::collections::HashMap<u32, Vec<&BridgeVlanEntry>> =
         std::collections::HashMap::new();
     for entry in entries {
         by_dev.entry(entry.ifindex()).or_default().push(entry);
     }
+    let mut by_dev: Vec<(u32, Vec<&BridgeVlanEntry>)> = by_dev.into_iter().collect();
+    by_dev.sort_by_key(|(ifindex, _)| *ifindex);
 
     let json_output: Vec<serde_json::Value> = by_dev
         .into_iter()
@@ -295,12 +298,8 @@ fn print_vlans_json(
         })
         .collect();
 
-    let output = if opts.pretty {
-        serde_json::to_string_pretty(&json_output).expect("JSON serialization")
-    } else {
-        serde_json::to_string(&json_output).expect("JSON serialization")
-    };
-    println!("{}", output);
+    println!("{}", super::to_json_string(&json_output, opts.pretty)?);
+    Ok(())
 }
 
 async fn add_vlan(conn: &Connection<Route>, args: VlanAddArgs) -> Result<()> {
@@ -357,12 +356,7 @@ async fn show_tunnels(
                 })
                 .collect();
 
-            let output = if opts.pretty {
-                serde_json::to_string_pretty(&json_output).expect("JSON serialization")
-            } else {
-                serde_json::to_string(&json_output).expect("JSON serialization")
-            };
-            println!("{}", output);
+            println!("{}", super::to_json_string(&json_output, opts.pretty)?);
         }
         OutputFormat::Text => {
             let header = format!("{:<8} {:<12} {}", "port", "vlan-id", "tunnel-id");

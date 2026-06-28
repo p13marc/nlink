@@ -158,7 +158,7 @@ async fn show_fdb(
     let names = conn.get_interface_names().await?;
 
     match format {
-        OutputFormat::Json => print_fdb_json(&entries, &names, opts),
+        OutputFormat::Json => print_fdb_json(&entries, &names, opts)?,
         OutputFormat::Text => print_fdb_text(&entries, &names, opts),
     }
 
@@ -220,7 +220,7 @@ fn print_fdb_json(
     entries: &[FdbEntry],
     names: &std::collections::HashMap<u32, String>,
     opts: &OutputOptions,
-) {
+) -> Result<()> {
     let json_entries: Vec<serde_json::Value> = entries
         .iter()
         .map(|entry| {
@@ -276,12 +276,8 @@ fn print_fdb_json(
         })
         .collect();
 
-    let output = if opts.pretty {
-        serde_json::to_string_pretty(&json_entries).expect("JSON serialization")
-    } else {
-        serde_json::to_string(&json_entries).expect("JSON serialization")
-    };
-    println!("{}", output);
+    println!("{}", super::to_json_string(&json_entries, opts.pretty)?);
+    Ok(())
 }
 
 async fn add_fdb(conn: &Connection<Route>, args: FdbAddArgs, replace: bool) -> Result<()> {

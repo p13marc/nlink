@@ -234,6 +234,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **bin JSON robustness + deterministic `bridge vlan` output (#25, #19).**
+  The `bridge` (`vlan`/`fdb`/`mdb`) and `tc` (`chain`) JSON show paths
+  used `.expect("JSON serialization")`, a latent panic path; they now
+  return a proper `Error` via a shared `to_json_string` helper.
+  `bridge vlan show --json` also groups interfaces through a HashMap, so
+  its output order was nondeterministic — it now sorts by ifindex for
+  stable, diffable JSON.
+
 - **`ip` bin: namespace-safe `maddr show` interface resolution (#17).**
   `maddr` resolved the interface name→index map by scanning
   `/sys/class/net`, which always reads the host namespace and so showed

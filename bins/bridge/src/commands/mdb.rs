@@ -91,7 +91,7 @@ async fn show_mdb(
     let names = conn.get_interface_names().await?;
 
     match format {
-        OutputFormat::Json => print_mdb_json(&entries, &names, opts),
+        OutputFormat::Json => print_mdb_json(&entries, &names, opts)?,
         OutputFormat::Text => print_mdb_text(&entries, &names),
     }
 
@@ -118,7 +118,7 @@ fn print_mdb_json(
     entries: &[MdbEntry],
     names: &std::collections::HashMap<u32, String>,
     opts: &OutputOptions,
-) {
+) -> Result<()> {
     let json: Vec<serde_json::Value> = entries
         .iter()
         .map(|e| {
@@ -154,12 +154,8 @@ fn print_mdb_json(
         })
         .collect();
 
-    let out = if opts.pretty {
-        serde_json::to_string_pretty(&json).expect("JSON serialization")
-    } else {
-        serde_json::to_string(&json).expect("JSON serialization")
-    };
-    println!("{out}");
+    println!("{}", super::to_json_string(&json, opts.pretty)?);
+    Ok(())
 }
 
 async fn modify_mdb(conn: &Connection<Route>, args: MdbAddArgs, delete: bool) -> Result<()> {
