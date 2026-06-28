@@ -148,20 +148,23 @@ impl_parse_params! {
     crate::netlink::filter::RouteFilter,
     crate::netlink::filter::TcindexFilter,
     crate::netlink::filter::U32Filter,
-    // Action configs — Plan 139 PR B closes (14 of 14 typed-first;
-    // PeditAction is a stub that rejects all inputs per Plan §10).
+    // Action configs (16) — Plan 139 PR B closed the original 14
+    // typed-first; mpls + skbmod added in the #29 epic. PeditAction is
+    // a stub that rejects all inputs per Plan §10.
     crate::netlink::action::BpfAction,
     crate::netlink::action::ConnmarkAction,
     crate::netlink::action::CsumAction,
     crate::netlink::action::CtAction,
     crate::netlink::action::GactAction,
     crate::netlink::action::MirredAction,
+    crate::netlink::action::MplsAction,
     crate::netlink::action::NatAction,
     crate::netlink::action::PeditAction,
     crate::netlink::action::PoliceAction,
     crate::netlink::action::SampleAction,
     crate::netlink::action::SimpleAction,
     crate::netlink::action::SkbeditAction,
+    crate::netlink::action::SkbmodAction,
     crate::netlink::action::TunnelKeyAction,
     crate::netlink::action::VlanAction,
 }

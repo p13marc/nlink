@@ -2463,6 +2463,126 @@ pub mod action {
         }
     }
 
+    /// MPLS action attributes (push/pop/modify/dec_ttl).
+    pub mod mpls {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        pub const TCA_MPLS_UNSPEC: u16 = 0;
+        pub const TCA_MPLS_TM: u16 = 1;
+        pub const TCA_MPLS_PARMS: u16 = 2;
+        pub const TCA_MPLS_PAD: u16 = 3;
+        /// Ethertype of the new MPLS header (u16, push only).
+        pub const TCA_MPLS_PROTO: u16 = 4;
+        /// MPLS label (u32).
+        pub const TCA_MPLS_LABEL: u16 = 5;
+        /// Traffic class (u8).
+        pub const TCA_MPLS_TC: u16 = 6;
+        /// Time to live (u8).
+        pub const TCA_MPLS_TTL: u16 = 7;
+        /// Bottom of stack (u8).
+        pub const TCA_MPLS_BOS: u16 = 8;
+
+        pub const TCA_MPLS_ACT_POP: i32 = 1;
+        pub const TCA_MPLS_ACT_PUSH: i32 = 2;
+        pub const TCA_MPLS_ACT_MODIFY: i32 = 3;
+        pub const TCA_MPLS_ACT_DEC_TTL: i32 = 4;
+        pub const TCA_MPLS_ACT_MAC_PUSH: i32 = 5;
+
+        /// MPLS action parameters (struct tc_mpls).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcMpls {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+            /// MPLS action type (`TCA_MPLS_ACT_*`).
+            pub m_action: i32,
+        }
+
+        impl TcMpls {
+            pub fn new(m_action: i32, action: i32) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                    m_action,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
+    /// SKB-modify action attributes (rewrite L2 src/dst MAC + ethertype).
+    pub mod skbmod {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        pub const TCA_SKBMOD_UNSPEC: u16 = 0;
+        pub const TCA_SKBMOD_TM: u16 = 1;
+        pub const TCA_SKBMOD_PARMS: u16 = 2;
+        /// Destination MAC (6 bytes).
+        pub const TCA_SKBMOD_DMAC: u16 = 3;
+        /// Source MAC (6 bytes).
+        pub const TCA_SKBMOD_SMAC: u16 = 4;
+        /// Ethertype (u16).
+        pub const TCA_SKBMOD_ETYPE: u16 = 5;
+        pub const TCA_SKBMOD_PAD: u16 = 6;
+
+        /// Set destination MAC.
+        pub const SKBMOD_F_DMAC: u64 = 0x1;
+        /// Set source MAC.
+        pub const SKBMOD_F_SMAC: u64 = 0x2;
+        /// Set ethertype.
+        pub const SKBMOD_F_ETYPE: u64 = 0x4;
+        /// Swap source and destination MAC.
+        pub const SKBMOD_F_SWAPMAC: u64 = 0x8;
+
+        /// skbmod action parameters (struct tc_skbmod).
+        ///
+        /// The 20-byte `tc_gen` prefix leaves 4 bytes of explicit
+        /// padding before the 8-byte-aligned `flags` — matching the
+        /// kernel's natural layout and keeping the struct free of
+        /// implicit padding (required for zerocopy `IntoBytes`).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcSkbmod {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+            pub _pad: u32,
+            /// Modification flags (`SKBMOD_F_*`).
+            pub flags: u64,
+        }
+
+        impl TcSkbmod {
+            pub fn new(flags: u64, action: i32) -> Self {
+                Self {
+                    index: 0,
+                    capab: 0,
+                    action,
+                    refcnt: 0,
+                    bindcnt: 0,
+                    _pad: 0,
+                    flags,
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
     /// Skbedit action attributes.
     pub mod skbedit {
         use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
