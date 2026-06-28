@@ -3013,6 +3013,63 @@ pub mod action {
         }
     }
 
+    /// gate (IEEE 802.1Qci PSFP) action attributes and structures.
+    ///
+    /// `act_gate` opens/closes a time-gated schedule, admitting packets
+    /// only during open windows. The schedule is a list of entries
+    /// (`TCA_GATE_ENTRY_LIST`), each nested under `TCA_GATE_ONE_ENTRY`.
+    pub mod gate {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        // Top-level gate attributes.
+        pub const TCA_GATE_UNSPEC: u16 = 0;
+        pub const TCA_GATE_TM: u16 = 1;
+        pub const TCA_GATE_PARMS: u16 = 2;
+        pub const TCA_GATE_PAD: u16 = 3;
+        pub const TCA_GATE_PRIORITY: u16 = 4;
+        pub const TCA_GATE_ENTRY_LIST: u16 = 5;
+        pub const TCA_GATE_BASE_TIME: u16 = 6;
+        pub const TCA_GATE_CYCLE_TIME: u16 = 7;
+        pub const TCA_GATE_CYCLE_TIME_EXT: u16 = 8;
+        pub const TCA_GATE_FLAGS: u16 = 9;
+        pub const TCA_GATE_CLOCKID: u16 = 10;
+
+        // Entry-list wrapper.
+        pub const TCA_GATE_ONE_ENTRY: u16 = 1;
+
+        // Per-entry attributes (nested under TCA_GATE_ONE_ENTRY).
+        pub const TCA_GATE_ENTRY_INDEX: u16 = 1;
+        pub const TCA_GATE_ENTRY_GATE: u16 = 2;
+        pub const TCA_GATE_ENTRY_INTERVAL: u16 = 3;
+        pub const TCA_GATE_ENTRY_IPV: u16 = 4;
+        pub const TCA_GATE_ENTRY_MAX_OCTETS: u16 = 5;
+
+        /// gate action parameters (`struct tc_gate` — `tc_gen` only).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcGate {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+        }
+
+        impl TcGate {
+            pub fn new(action: i32) -> Self {
+                Self {
+                    action,
+                    ..Default::default()
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
     /// Csum (checksum) action attributes and structures.
     pub mod csum {
         use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};

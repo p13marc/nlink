@@ -2818,6 +2818,329 @@ impl ActionConfig for IfeAction {
 }
 
 // ============================================================================
+// GateAction
+// ============================================================================
+
+/// A single schedule entry of a [`GateAction`].
+#[derive(Debug, Clone)]
+struct GateEntry {
+    /// Gate open (admit) during this interval.
+    open: bool,
+    /// Interval length in nanoseconds.
+    interval_ns: u32,
+    /// Internal priority value (`-1` = unset).
+    ipv: Option<i32>,
+    /// Max octets admitted in this interval (`-1` = unset).
+    max_octets: Option<i32>,
+}
+
+/// gate (IEEE 802.1Qci PSFP) action configuration.
+///
+/// `act_gate` admits packets only during the open windows of a cyclic
+/// time schedule — the per-stream filtering-and-policing gate of TSN.
+/// The schedule is a list of `sched-entry` items, each opening or
+/// closing the gate for a nanosecond interval, optionally pinning an
+/// internal priority value (IPV) and a per-interval octet budget.
+///
+/// ```ignore
+/// use nlink::netlink::action::GateAction;
+/// use std::time::Duration;
+///
+/// let a = GateAction::new()
+///     .priority(0)
+///     .cycle_time(Duration::from_millis(2))
+///     .sched_entry(true, Duration::from_millis(1), None, None)   // open 1ms
+///     .sched_entry(false, Duration::from_millis(1), None, None)  // close 1ms
+///     .build();
+/// ```
+///
+/// # Time units
+///
+/// `base_time`/`cycle_time`/`cycle_time_ext` and each entry interval are
+/// `Duration`s, sent to the kernel in nanoseconds. The `parse_params`
+/// forms accept `tc(8)` time strings (`1ms`, `100us`, …).
+#[derive(Debug, Clone, Default)]
+pub struct GateAction {
+    priority: Option<i32>,
+    base_time: Option<u64>,
+    cycle_time: Option<u64>,
+    cycle_time_ext: Option<u64>,
+    clockid: Option<i32>,
+    entries: Vec<GateEntry>,
+    action: i32,
+}
+
+impl GateAction {
+    /// Create a new gate action (default verdict: pipe).
+    pub fn new() -> Self {
+        Self {
+            action: action::TC_ACT_PIPE,
+            ..Default::default()
+        }
+    }
+
+    /// Set the gate priority.
+    pub fn priority(mut self, prio: i32) -> Self {
+        self.priority = Some(prio);
+        self
+    }
+
+    /// Set the schedule base time.
+    pub fn base_time(mut self, t: std::time::Duration) -> Self {
+        self.base_time = Some(t.as_nanos() as u64);
+        self
+    }
+
+    /// Set the schedule cycle time.
+    pub fn cycle_time(mut self, t: std::time::Duration) -> Self {
+        self.cycle_time = Some(t.as_nanos() as u64);
+        self
+    }
+
+    /// Set the schedule cycle-time extension.
+    pub fn cycle_time_ext(mut self, t: std::time::Duration) -> Self {
+        self.cycle_time_ext = Some(t.as_nanos() as u64);
+        self
+    }
+
+    /// Set the POSIX clock id (e.g. `11` for `CLOCK_TAI`).
+    pub fn clockid(mut self, id: i32) -> Self {
+        self.clockid = Some(id);
+        self
+    }
+
+    /// Append a schedule entry: `open` admits packets for `interval`;
+    /// `ipv`/`max_octets` are optional per-interval overrides.
+    pub fn sched_entry(
+        mut self,
+        open: bool,
+        interval: std::time::Duration,
+        ipv: Option<i32>,
+        max_octets: Option<i32>,
+    ) -> Self {
+        self.entries.push(GateEntry {
+            open,
+            interval_ns: interval.as_nanos() as u32,
+            ipv,
+            max_octets,
+        });
+        self
+    }
+
+    /// Set the action verdict.
+    pub fn action(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build the action configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Map a `clockid` token (`TAI`, `CLOCK_REALTIME`, …) to its POSIX id.
+    fn clockid_from_str(s: &str) -> Result<i32> {
+        let bare = s.strip_prefix("CLOCK_").unwrap_or(s);
+        Ok(match bare {
+            "REALTIME" => 0,
+            "MONOTONIC" => 1,
+            "BOOTTIME" => 7,
+            "TAI" => 11,
+            other => other.parse::<i32>().map_err(|_| {
+                Error::InvalidMessage(format!(
+                    "gate: unknown clockid `{other}` (expected TAI/REALTIME/MONOTONIC/BOOTTIME or a number)"
+                ))
+            })?,
+        })
+    }
+
+    fn is_keyword(tok: &str) -> bool {
+        matches!(
+            tok,
+            "priority"
+                | "base-time"
+                | "cycle-time"
+                | "cycle-time-ext"
+                | "clockid"
+                | "sched-entry"
+                | "pass" | "ok" | "drop" | "shot" | "continue" | "pipe" | "reclassify"
+        )
+    }
+
+    /// Parse a `tc(8)`-style `gate` token slice into a typed action.
+    ///
+    /// # Recognised tokens
+    ///
+    /// - `priority <int>`
+    /// - `base-time <time>` / `cycle-time <time>` / `cycle-time-ext <time>`
+    ///   (`tc(8)` time strings, e.g. `1ms`, `200us`).
+    /// - `clockid <id>` (`TAI`/`REALTIME`/`MONOTONIC`/`BOOTTIME` or a number).
+    /// - `sched-entry open|close <interval> [<ipv> [<max-octets>]]` —
+    ///   repeatable; the optional `ipv`/`max-octets` are consumed
+    ///   greedily up to the next keyword.
+    ///
+    /// Strict: unknown tokens, missing values, and unparseable values
+    /// all error.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut a = Self::new();
+        let mut i = 0;
+
+        let parse_ns = |key: &str, s: &str| -> Result<u64> {
+            crate::util::parse::get_time(s)
+                .map(|d| d.as_nanos() as u64)
+                .map_err(|_| {
+                    Error::InvalidMessage(format!(
+                        "gate: invalid {key} `{s}` (expected a tc-style time)"
+                    ))
+                })
+        };
+
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "priority" => {
+                    let s = action_need_value(params, i, "gate", "priority")?;
+                    a.priority = Some(s.parse::<i32>().map_err(|_| {
+                        Error::InvalidMessage(format!("gate: invalid priority `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "base-time" => {
+                    let s = action_need_value(params, i, "gate", "base-time")?;
+                    a.base_time = Some(parse_ns("base-time", s)?);
+                    i += 2;
+                }
+                "cycle-time" => {
+                    let s = action_need_value(params, i, "gate", "cycle-time")?;
+                    a.cycle_time = Some(parse_ns("cycle-time", s)?);
+                    i += 2;
+                }
+                "cycle-time-ext" => {
+                    let s = action_need_value(params, i, "gate", "cycle-time-ext")?;
+                    a.cycle_time_ext = Some(parse_ns("cycle-time-ext", s)?);
+                    i += 2;
+                }
+                "clockid" => {
+                    let s = action_need_value(params, i, "gate", "clockid")?;
+                    a.clockid = Some(Self::clockid_from_str(s)?);
+                    i += 2;
+                }
+                "sched-entry" => {
+                    let state = action_need_value(params, i, "gate", "sched-entry")?;
+                    let open = match state {
+                        "open" => true,
+                        "close" => false,
+                        other => {
+                            return Err(Error::InvalidMessage(format!(
+                                "gate: sched-entry state `{other}` (expected open or close)"
+                            )));
+                        }
+                    };
+                    let interval_s = params.get(i + 2).copied().ok_or_else(|| {
+                        Error::InvalidMessage(
+                            "gate: `sched-entry` requires an interval".to_string(),
+                        )
+                    })?;
+                    let interval_ns = parse_ns("sched-entry interval", interval_s)?;
+                    let interval_ns: u32 = interval_ns.try_into().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "gate: sched-entry interval `{interval_s}` exceeds u32 nanoseconds"
+                        ))
+                    })?;
+                    i += 3;
+
+                    // Greedily consume optional ipv then max-octets.
+                    let mut ipv = None;
+                    let mut max_octets = None;
+                    if let Some(tok) = params.get(i)
+                        && !Self::is_keyword(tok)
+                    {
+                        ipv = Some(tok.parse::<i32>().map_err(|_| {
+                            Error::InvalidMessage(format!("gate: invalid sched-entry ipv `{tok}`"))
+                        })?);
+                        i += 1;
+                        if let Some(tok2) = params.get(i)
+                            && !Self::is_keyword(tok2)
+                        {
+                            max_octets = Some(tok2.parse::<i32>().map_err(|_| {
+                                Error::InvalidMessage(format!(
+                                    "gate: invalid sched-entry max-octets `{tok2}`"
+                                ))
+                            })?);
+                            i += 1;
+                        }
+                    }
+                    a.entries.push(GateEntry {
+                        open,
+                        interval_ns,
+                        ipv,
+                        max_octets,
+                    });
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "gate: unknown token `{other}` (recognised: priority, base-time, cycle-time, cycle-time-ext, clockid, sched-entry open|close <interval> [ipv [max-octets]])"
+                    )));
+                }
+            }
+        }
+        Ok(a)
+    }
+}
+
+impl ActionConfig for GateAction {
+    fn kind(&self) -> &'static str {
+        "gate"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::action::gate;
+
+        let parms = gate::TcGate::new(self.action);
+        builder.append_attr(gate::TCA_GATE_PARMS, parms.as_bytes());
+
+        if let Some(prio) = self.priority {
+            builder.append_attr_u32(gate::TCA_GATE_PRIORITY, prio as u32);
+        }
+        if let Some(t) = self.base_time {
+            builder.append_attr(gate::TCA_GATE_BASE_TIME, &t.to_ne_bytes());
+        }
+        if let Some(t) = self.cycle_time {
+            builder.append_attr(gate::TCA_GATE_CYCLE_TIME, &t.to_ne_bytes());
+        }
+        if let Some(t) = self.cycle_time_ext {
+            builder.append_attr(gate::TCA_GATE_CYCLE_TIME_EXT, &t.to_ne_bytes());
+        }
+        if let Some(id) = self.clockid {
+            builder.append_attr_u32(gate::TCA_GATE_CLOCKID, id as u32);
+        }
+
+        if !self.entries.is_empty() {
+            let list = builder.nest_start(gate::TCA_GATE_ENTRY_LIST);
+            for (idx, e) in self.entries.iter().enumerate() {
+                let one = builder.nest_start(gate::TCA_GATE_ONE_ENTRY);
+                builder.append_attr_u32(gate::TCA_GATE_ENTRY_INDEX, idx as u32);
+                if e.open {
+                    // NLA_FLAG: present = gate open, absent = closed.
+                    builder.append_attr(gate::TCA_GATE_ENTRY_GATE, &[]);
+                }
+                builder.append_attr_u32(gate::TCA_GATE_ENTRY_INTERVAL, e.interval_ns);
+                if let Some(ipv) = e.ipv {
+                    builder.append_attr_u32(gate::TCA_GATE_ENTRY_IPV, ipv as u32);
+                }
+                if let Some(mo) = e.max_octets {
+                    builder.append_attr_u32(gate::TCA_GATE_ENTRY_MAX_OCTETS, mo as u32);
+                }
+                builder.nest_end(one);
+            }
+            builder.nest_end(list);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // CsumAction
 // ============================================================================
 
@@ -5438,6 +5761,94 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("ife: unknown token")
+        );
+    }
+
+    // ---- GateAction ----
+
+    #[test]
+    fn gate_parse_params_schedule() {
+        let a = GateAction::parse_params(&[
+            "priority",
+            "0",
+            "cycle-time",
+            "2ms",
+            "clockid",
+            "TAI",
+            "sched-entry",
+            "open",
+            "1ms",
+            "sched-entry",
+            "close",
+            "1ms",
+        ])
+        .unwrap();
+        assert_eq!(ActionConfig::kind(&a), "gate");
+        assert_eq!(a.priority, Some(0));
+        assert_eq!(a.cycle_time, Some(2_000_000));
+        assert_eq!(a.clockid, Some(11)); // CLOCK_TAI
+        assert_eq!(a.entries.len(), 2);
+        assert!(a.entries[0].open);
+        assert_eq!(a.entries[0].interval_ns, 1_000_000);
+        assert!(!a.entries[1].open);
+    }
+
+    #[test]
+    fn gate_parse_params_entry_optional_ipv_max_octets() {
+        // ipv + max-octets consumed greedily, then a following keyword
+        // (sched-entry) is NOT swallowed.
+        let a = GateAction::parse_params(&[
+            "sched-entry",
+            "open",
+            "300us",
+            "2",
+            "1500",
+            "sched-entry",
+            "close",
+            "300us",
+        ])
+        .unwrap();
+        assert_eq!(a.entries.len(), 2);
+        assert_eq!(a.entries[0].ipv, Some(2));
+        assert_eq!(a.entries[0].max_octets, Some(1500));
+        assert_eq!(a.entries[1].ipv, None);
+    }
+
+    #[test]
+    fn gate_parse_params_clockid_names() {
+        assert_eq!(
+            GateAction::parse_params(&["clockid", "CLOCK_REALTIME"])
+                .unwrap()
+                .clockid,
+            Some(0)
+        );
+        assert_eq!(
+            GateAction::parse_params(&["clockid", "MONOTONIC"])
+                .unwrap()
+                .clockid,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn gate_parse_params_strict_errors() {
+        assert!(
+            GateAction::parse_params(&["nonsense"])
+                .unwrap_err()
+                .to_string()
+                .contains("gate: unknown token")
+        );
+        assert!(
+            GateAction::parse_params(&["sched-entry", "halfopen", "1ms"])
+                .unwrap_err()
+                .to_string()
+                .contains("expected open or close")
+        );
+        assert!(
+            GateAction::parse_params(&["cycle-time", "notatime"])
+                .unwrap_err()
+                .to_string()
+                .contains("invalid cycle-time")
         );
     }
 
