@@ -9,7 +9,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn bridge_cmd() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_bridge"))
+    Command::new(env!("CARGO_BIN_EXE_nlink-bridge"))
 }
 
 #[test]

@@ -5,16 +5,21 @@ The CLI binaries serve as proof-of-concept demonstrations of the
 it in use. They are **not** drop-in replacements for iproute2 /
 iw / ethtool.
 
-Most binaries are named after the system tool they mirror (`ip`,
-`tc`, `ss`, `nft`, `bridge`, `wg`, `devlink`, `wifi`); two are
-`nlink-` prefixed to avoid shadowing (`nlink-config`,
-`nlink-ethtool`). The cargo package is always `nlink-<tool>`
-(e.g. `cargo run -p nlink-ip -- link show`).
+Every binary is `nlink-` prefixed so it never shadows the real system
+tool it mirrors — `nlink-ip`, `nlink-tc`, `nlink-ss`, `nlink-nft`,
+`nlink-bridge`, `nlink-wg`, `nlink-devlink`, `nlink-wifi`,
+`nlink-config`, `nlink-ethtool`. The cargo package matches the binary
+name (`cargo run -p nlink-ip -- link show`).
 
-Coverage below: [`ip`](#ip), [`tc`](#tc), [`ss`](#ss),
-[`nft`](#nft), [`bridge`](#bridge), [`wg`](#wg),
-[`nlink-config`](#nlink-config), [`devlink`](#devlink),
-[`nlink-ethtool`](#nlink-ethtool), [`wifi`](#wifi).
+The command examples below use the bare tool name (`ip link show`,
+`tc qdisc show`, …) to mirror the iproute2/iw/ethtool surface they
+demonstrate; prepend `nlink-` to invoke the actual binary
+(`nlink-ip link show`).
+
+Coverage below: [`nlink-ip`](#ip), [`nlink-tc`](#tc), [`nlink-ss`](#ss),
+[`nlink-nft`](#nft), [`nlink-bridge`](#bridge), [`nlink-wg`](#wg),
+[`nlink-config`](#nlink-config), [`nlink-devlink`](#devlink),
+[`nlink-ethtool`](#nlink-ethtool), [`nlink-wifi`](#wifi).
 
 ## ip
 

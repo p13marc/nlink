@@ -7,7 +7,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn tc_cmd() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tc"))
+    Command::new(env!("CARGO_BIN_EXE_nlink-tc"))
 }
 
 mod global_flags {
