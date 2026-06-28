@@ -35,7 +35,7 @@
 //! conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
 //! ```
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::{
     Connection,
@@ -3261,6 +3261,277 @@ impl FilterConfig for RouteFilter {
 }
 
 // ============================================================================
+// RsvpFilter
+// ============================================================================
+
+/// RSVP classifier configuration (`rsvp` / `rsvp6`).
+///
+/// The RSVP classifier matches flows by session (destination) and sender
+/// (source) address, optionally narrowed by L4 protocol and tunnel id.
+/// The address family is inferred from the addresses you set: an IPv6
+/// session/sender selects the `rsvp6` kernel classifier, IPv4 selects
+/// `rsvp`.
+///
+/// ```ignore
+/// use nlink::netlink::filter::RsvpFilter;
+/// use nlink::TcHandle;
+///
+/// let f = RsvpFilter::new()
+///     .ipproto(6) // TCP
+///     .session("10.0.0.1".parse().unwrap())
+///     .sender("10.0.0.2".parse().unwrap())
+///     .classid(TcHandle::new(1, 0x10))
+///     .build();
+/// ```
+///
+/// # Port matching is not modelled
+///
+/// `tc`'s `session <addr>/<port>` and `sender <addr>/<port>` forms match
+/// on an L4 port via a general-port-info (GPI) key/mask/offset triple
+/// whose offset is protocol-specific. `RsvpFilter` matches at the address
+/// level only and rejects an embedded `/<port>` with a clear not-modelled
+/// error (the `tc_rsvp_pinfo` port fields are left zeroed). Use a
+/// hand-rolled `MessageBuilder` if you need port-level RSVP matching.
+#[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
+pub struct RsvpFilter {
+    classid: Option<u32>,
+    /// Session (destination) address.
+    dst: Option<IpAddr>,
+    /// Sender (source) address.
+    src: Option<IpAddr>,
+    /// L4 protocol number.
+    ipproto: Option<u8>,
+    /// Tunnel id.
+    tunnelid: Option<u8>,
+    actions: Option<super::action::ActionList>,
+    chain: Option<u32>,
+}
+
+impl RsvpFilter {
+    /// Create a new RSVP filter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the target class id.
+    pub fn classid(mut self, classid: TcHandle) -> Self {
+        self.classid = Some(classid.as_raw());
+        self
+    }
+
+    /// Match the session (destination) address.
+    pub fn session(mut self, addr: IpAddr) -> Self {
+        self.dst = Some(addr);
+        self
+    }
+
+    /// Match the sender (source) address.
+    pub fn sender(mut self, addr: IpAddr) -> Self {
+        self.src = Some(addr);
+        self
+    }
+
+    /// Match a specific L4 protocol number (e.g. 6 = TCP, 17 = UDP).
+    pub fn ipproto(mut self, proto: u8) -> Self {
+        self.ipproto = Some(proto);
+        self
+    }
+
+    /// Match a specific tunnel id.
+    pub fn tunnelid(mut self, id: u8) -> Self {
+        self.tunnelid = Some(id);
+        self
+    }
+
+    /// Add an action to the filter.
+    pub fn with_action<A: super::action::ActionConfig + Clone + std::fmt::Debug + 'static>(
+        mut self,
+        action: A,
+    ) -> Self {
+        let actions = self.actions.take().unwrap_or_default().with(action);
+        self.actions = Some(actions);
+        self
+    }
+
+    /// Set the chain index for this filter.
+    pub fn chain(mut self, chain: u32) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
+    /// Build the filter configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Whether this filter targets the IPv6 (`rsvp6`) classifier — true
+    /// if any configured address is IPv6.
+    fn is_v6(&self) -> bool {
+        matches!(self.dst, Some(IpAddr::V6(_))) || matches!(self.src, Some(IpAddr::V6(_)))
+    }
+
+    /// Parse a tc-style rsvp params slice into a typed `RsvpFilter`.
+    ///
+    /// Recognised tokens:
+    ///
+    /// - `ipproto <proto>` — `tcp`, `udp`, or a numeric protocol.
+    /// - `session <addr>` — match destination address. An embedded
+    ///   `/<port>` is rejected (port GPI matching is not modelled).
+    /// - `sender <addr>` — match source address (same port caveat).
+    /// - `classid <handle>` (alias `flowid`) — target class id.
+    /// - `tunnelid <id>` — match tunnel id.
+    /// - `chain <n>` — chain index.
+    ///
+    /// Strict: unknown tokens, missing values, unparseable values, and
+    /// not-modelled port forms all return `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
+        use crate::Error;
+        let mut f = Self::new();
+        let mut i = 0;
+
+        let parse_addr = |key: &str, s: &str| -> crate::Result<IpAddr> {
+            if s.contains('/') {
+                return Err(Error::InvalidMessage(format!(
+                    "rsvp: `{key} {s}` port matching is not modelled by RsvpFilter — \
+                     use an address without `/<port>`, or a hand-rolled MessageBuilder"
+                )));
+            }
+            s.parse::<IpAddr>().map_err(|_| {
+                Error::InvalidMessage(format!("rsvp: invalid {key} address `{s}`"))
+            })
+        };
+
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("rsvp: `{key}` requires a value"))
+                })
+            };
+            match key {
+                "ipproto" => {
+                    let s = need_value()?;
+                    let proto = match s {
+                        "tcp" => 6,
+                        "udp" => 17,
+                        other => other.parse::<u8>().map_err(|_| {
+                            Error::InvalidMessage(format!(
+                                "rsvp: invalid ipproto `{other}` (expected tcp, udp, or a number)"
+                            ))
+                        })?,
+                    };
+                    f = f.ipproto(proto);
+                    i += 2;
+                }
+                "session" => {
+                    let s = need_value()?;
+                    f = f.session(parse_addr("session", s)?);
+                    i += 2;
+                }
+                "sender" => {
+                    let s = need_value()?;
+                    f = f.sender(parse_addr("sender", s)?);
+                    i += 2;
+                }
+                "classid" | "flowid" => {
+                    let s = need_value()?;
+                    let h = s.parse::<TcHandle>().map_err(|e| {
+                        Error::InvalidMessage(format!("rsvp: invalid {key} `{s}`: {e}"))
+                    })?;
+                    f = f.classid(h);
+                    i += 2;
+                }
+                "tunnelid" => {
+                    let s = need_value()?;
+                    f = f.tunnelid(s.parse::<u8>().map_err(|_| {
+                        Error::InvalidMessage(format!("rsvp: invalid tunnelid `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "chain" => {
+                    let s = need_value()?;
+                    f = f.chain(s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("rsvp: invalid chain `{s}`"))
+                    })?);
+                    i += 2;
+                }
+                "tunnel" => {
+                    return Err(Error::InvalidMessage(
+                        "rsvp: `tunnel <id> skip <n>` tunnel-creation form is not modelled by \
+                         RsvpFilter — use a hand-rolled MessageBuilder"
+                            .to_string(),
+                    ));
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "rsvp: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(f)
+    }
+}
+
+impl FilterConfig for RsvpFilter {
+    fn kind(&self) -> &'static str {
+        if self.is_v6() { "rsvp6" } else { "rsvp" }
+    }
+
+    fn classid(&self) -> Option<u32> {
+        self.classid
+    }
+
+    fn chain(&self) -> Option<u32> {
+        self.chain
+    }
+
+    fn set_chain(&mut self, chain: u32) {
+        self.chain = Some(chain);
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::filter::rsvp;
+
+        if let Some(classid) = self.classid {
+            builder.append_attr_u32(rsvp::TCA_RSVP_CLASSID, classid);
+        }
+
+        // Address attributes carry the raw 4- or 16-byte address.
+        let mut append_addr = |attr: u16, addr: &IpAddr| match addr {
+            IpAddr::V4(v4) => builder.append_attr(attr, &v4.octets()),
+            IpAddr::V6(v6) => builder.append_attr(attr, &v6.octets()),
+        };
+        if let Some(dst) = self.dst {
+            append_addr(rsvp::TCA_RSVP_DST, &dst);
+        }
+        if let Some(src) = self.src {
+            append_addr(rsvp::TCA_RSVP_SRC, &src);
+        }
+
+        // Only emit pinfo when protocol or tunnel narrowing is requested;
+        // the port GPI fields stay zeroed (port matching not modelled).
+        if self.ipproto.is_some() || self.tunnelid.is_some() {
+            let pinfo = rsvp::TcRsvpPinfo {
+                protocol: self.ipproto.unwrap_or(0),
+                tunnelid: self.tunnelid.unwrap_or(0),
+                ..Default::default()
+            };
+            builder.append_attr(rsvp::TCA_RSVP_PINFO, pinfo.as_bytes());
+        }
+
+        if let Some(ref actions) = self.actions {
+            let act_token = builder.nest_start(rsvp::TCA_RSVP_ACT);
+            actions.write_to(builder)?;
+            builder.nest_end(act_token);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // FlowFilter
 // ============================================================================
 
@@ -4749,6 +5020,70 @@ mod tests {
     fn route_parse_params_invalid_realm_errors() {
         let err = RouteFilter::parse_params(&["to", "not-a-number"]).unwrap_err();
         assert!(err.to_string().contains("invalid to realm"));
+    }
+
+    #[test]
+    fn rsvp_parse_params_v4_session_sender_proto() {
+        let f = RsvpFilter::parse_params(&[
+            "ipproto", "tcp", "session", "10.0.0.1", "sender", "10.0.0.2", "classid", "1:10",
+        ])
+        .unwrap();
+        assert_eq!(f.kind(), "rsvp");
+        assert_eq!(f.ipproto, Some(6));
+        assert_eq!(f.dst, Some("10.0.0.1".parse().unwrap()));
+        assert_eq!(f.src, Some("10.0.0.2".parse().unwrap()));
+        assert!(f.classid.is_some());
+    }
+
+    #[test]
+    fn rsvp_parse_params_v6_selects_rsvp6_kind() {
+        let f = RsvpFilter::parse_params(&["session", "2001:db8::1"]).unwrap();
+        assert_eq!(f.kind(), "rsvp6");
+    }
+
+    #[test]
+    fn rsvp_parse_params_port_form_not_modelled() {
+        let err = RsvpFilter::parse_params(&["session", "10.0.0.1/22"]).unwrap_err();
+        assert!(
+            err.to_string().contains("not modelled"),
+            "expected not-modelled for port form, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rsvp_parse_params_ipproto_numeric_and_udp() {
+        assert_eq!(
+            RsvpFilter::parse_params(&["ipproto", "udp"]).unwrap().ipproto,
+            Some(17)
+        );
+        assert_eq!(
+            RsvpFilter::parse_params(&["ipproto", "47"]).unwrap().ipproto,
+            Some(47)
+        );
+        let err = RsvpFilter::parse_params(&["ipproto", "bogus"]).unwrap_err();
+        assert!(err.to_string().contains("invalid ipproto"));
+    }
+
+    #[test]
+    fn rsvp_parse_params_strict_errors() {
+        assert!(
+            RsvpFilter::parse_params(&["nonsense"])
+                .unwrap_err()
+                .to_string()
+                .contains("unknown token")
+        );
+        assert!(
+            RsvpFilter::parse_params(&["session"])
+                .unwrap_err()
+                .to_string()
+                .contains("requires a value")
+        );
+        assert!(
+            RsvpFilter::parse_params(&["session", "not-an-ip"])
+                .unwrap_err()
+                .to_string()
+                .contains("invalid session address")
+        );
     }
 
     #[test]

@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **TC filter: `rsvp` / `rsvp6` classifier typed config (#117).**
+  `RsvpFilter` matches flows by `session` (destination) and `sender`
+  (source) address, narrowed by `ipproto` and `tunnelid`, with
+  `classid`/`flowid` and `chain`. The address family is inferred from the
+  addresses — an IPv6 session/sender selects the `rsvp6` kernel
+  classifier, IPv4 selects `rsvp` — so a single config + both bin
+  dispatch arms cover the pair. New `filter::rsvp` wire module
+  (`tc_rsvp_pinfo`/`tc_rsvp_gpi`). **Port-level matching is not
+  modelled**: `session <addr>/<port>` uses a protocol-specific
+  general-port-info offset, so an embedded `/<port>` is rejected with a
+  clear not-modelled error rather than emitting a zeroed/incorrect GPI;
+  the `tunnel <id> skip <n>` creation form is likewise rejected. 11
+  filter parsers total.
+
 - **TC qdisc: `atm` (`sch_atm`) typed config (#116) — closes the qdisc
   side of #116.** The ATM qdisc is classful and takes no qdisc-level
   options, so `AtmConfig` is a unit config (`tc qdisc add … root atm`
