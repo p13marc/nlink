@@ -7,7 +7,8 @@ use super::{
     ETHTOOL_GENL_NAME, ETHTOOL_GENL_VERSION, ETHTOOL_MCGRP_MONITOR, EthtoolBitsetAttr,
     EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolFeaturesAttr, EthtoolHeaderAttr,
     EthtoolLinkinfoAttr, EthtoolLinkmodesAttr, EthtoolLinkstateAttr, EthtoolPauseAttr,
-    EthtoolRingsAttr, EthtoolStatsGrpAttr, bitset::EthtoolBitset, stats_group,
+    EthtoolRingsAttr, EthtoolStatsGrpAttr, EthtoolWolAttr, WOL_MODE_NAMES, bitset::EthtoolBitset,
+    stats_group,
     types::*,
 };
 use crate::macros::{GenlFamily, __rt::resolve_genl_family_with_groups};
@@ -1134,6 +1135,126 @@ impl Connection<Ethtool> {
             }
         })
         .await
+    }
+
+    // =========================================================================
+    // Wake-on-LAN (ethtool -w / -W)
+    // =========================================================================
+
+    /// Get Wake-on-LAN settings.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Ethtool};
+    ///
+    /// let conn = Connection::<Ethtool>::new_async().await?;
+    /// let wol = conn.get_wol("eth0").await?;
+    /// println!("supported: {:?}, active: {:?}", wol.supported, wol.active);
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_wol"))]
+    pub async fn get_wol(&self, iface: impl Into<InterfaceRef>) -> Result<Wol> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_wol_by_name(&ifname).await
+    }
+
+    /// Get Wake-on-LAN settings by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_wol_by_name"))]
+    pub async fn get_wol_by_name(&self, ifname: &str) -> Result<Wol> {
+        let response = self.ethtool_get(EthtoolCmd::WolGet, ifname).await?;
+
+        let mut wol = Wol::default();
+        if response.len() < GENL_HDRLEN {
+            return Ok(wol);
+        }
+        self.parse_wol(&response[GENL_HDRLEN..], &mut wol)?;
+        Ok(wol)
+    }
+
+    /// Set Wake-on-LAN settings.
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, Ethtool};
+    ///
+    /// let conn = Connection::<Ethtool>::new_async().await?;
+    /// // Enable magic-packet wake-up.
+    /// conn.set_wol("eth0", |w| w.mode("magic")).await?;
+    /// // Disable all WoL.
+    /// conn.set_wol("eth0", |w| w).await?;
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wol"))]
+    pub async fn set_wol(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        configure: impl FnOnce(WolBuilder) -> WolBuilder,
+    ) -> Result<()> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.set_wol_by_name(&ifname, configure).await
+    }
+
+    /// Set Wake-on-LAN settings by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wol_by_name"))]
+    pub async fn set_wol_by_name(
+        &self,
+        ifname: &str,
+        configure: impl FnOnce(WolBuilder) -> WolBuilder,
+    ) -> Result<()> {
+        let config = configure(WolBuilder::new());
+
+        // Validate mode names up front so a typo is a clean error
+        // instead of a silent no-op (strict-parse spirit).
+        for m in &config.modes {
+            if !WOL_MODE_NAMES.contains(&m.as_str()) {
+                return Err(Error::InvalidMessage(format!(
+                    "wol: unknown mode `{m}` (expected one of {})",
+                    WOL_MODE_NAMES.join(", ")
+                )));
+            }
+        }
+
+        // Build the modes bitset across the full name space: each known
+        // mode is present (so the kernel treats it as "being set") with
+        // its value = whether it was requested. This mirrors how the
+        // kernel expects a full WoL modes bitset.
+        let mut modes = EthtoolBitset::new();
+        for (idx, name) in WOL_MODE_NAMES.iter().enumerate() {
+            modes.add(idx as u32, name, config.modes.iter().any(|m| m == name));
+        }
+
+        let sopass = config.sopass;
+        self.ethtool_set(EthtoolCmd::WolSet, ifname, move |builder| {
+            modes.write_to(builder, EthtoolWolAttr::Modes as u16);
+            if let Some(pass) = sopass {
+                builder.append_attr(EthtoolWolAttr::Sopass as u16, &pass);
+            }
+        })
+        .await
+    }
+
+    fn parse_wol(&self, data: &[u8], wol: &mut Wol) -> Result<()> {
+        for (attr_type, payload) in AttrIter::new(data) {
+            match attr_type {
+                t if t == EthtoolWolAttr::Header as u16 => {
+                    self.parse_header(payload, &mut wol.ifname, &mut wol.ifindex)?;
+                }
+                t if t == EthtoolWolAttr::Modes as u16 => {
+                    let bitset = EthtoolBitset::parse(payload)?;
+                    // `all_names` = supported (present in the mask),
+                    // `active_names` = currently enabled (value set).
+                    wol.supported = bitset.all_names().into_iter().map(String::from).collect();
+                    wol.active = bitset.active_names().into_iter().map(String::from).collect();
+                }
+                t if t == EthtoolWolAttr::Sopass as u16 && payload.len() >= 6 => {
+                    let mut pass = [0u8; 6];
+                    pass.copy_from_slice(&payload[..6]);
+                    wol.sopass = Some(pass);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     // =========================================================================

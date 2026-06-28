@@ -736,6 +736,66 @@ impl PauseBuilder {
 }
 
 // =============================================================================
+// Wake-on-LAN
+// =============================================================================
+
+/// Wake-on-LAN settings (`ethtool -w`/`-W`).
+#[derive(Debug, Clone, Default)]
+pub struct Wol {
+    /// Interface name.
+    pub ifname: Option<String>,
+    /// Interface index.
+    pub ifindex: Option<u32>,
+    /// WoL modes the device supports (e.g. `magic`, `phy`).
+    pub supported: Vec<String>,
+    /// WoL modes currently active.
+    pub active: Vec<String>,
+    /// SecureOn password (`magicsecure`), if set.
+    pub sopass: Option<[u8; 6]>,
+}
+
+/// Builder for setting Wake-on-LAN parameters.
+#[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
+pub struct WolBuilder {
+    /// Modes to enable (kernel `wol_mode_names`, e.g. `magic`, `phy`).
+    pub(crate) modes: Vec<String>,
+    /// Optional SecureOn password (6 bytes).
+    pub(crate) sopass: Option<[u8; 6]>,
+}
+
+impl WolBuilder {
+    /// Create a new builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable a WoL mode by name (one of the kernel `wol_mode_names`:
+    /// `phy`, `ucast`, `mcast`, `bcast`, `arp`, `magic`,
+    /// `magicsecure`, `filter`).
+    pub fn mode(mut self, name: impl Into<String>) -> Self {
+        self.modes.push(name.into());
+        self
+    }
+
+    /// Set the modes from a slice, replacing any already added.
+    pub fn modes<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.modes = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set the SecureOn password (for `magicsecure`).
+    pub fn sopass(mut self, sopass: [u8; 6]) -> Self {
+        self.sopass = Some(sopass);
+        self
+    }
+}
+
+// =============================================================================
 // String Sets
 // =============================================================================
 
