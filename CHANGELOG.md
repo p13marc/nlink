@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`wifi`/library: `del_station` (kick an AP client) (#29).** New
+  `Connection<Nl80211>::del_station(iface, mac)` /
+  `del_station_by_index` send `NL80211_CMD_DEL_STATION` to
+  deauthenticate an associated station, surfaced as `nlink-wifi
+  del-station <iface> <mac>`. Complements the existing read-only
+  `station` listing for AP-mode management.
+
 - **`tc`/library: `hhf` and `dsmark` qdiscs (#29).** Two more typed
   qdisc configs wired into `tc qdisc add … hhf|dsmark`. `HhfConfig`
   drives the Heavy-Hitter Filter (`limit`, `quantum`, `hh_limit`,

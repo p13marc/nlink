@@ -51,6 +51,14 @@ enum Command {
         interface: String,
     },
 
+    /// Remove (kick) an associated station from an AP-mode interface.
+    DelStation {
+        /// Interface name.
+        interface: String,
+        /// Station MAC to remove (aa:bb:cc:dd:ee:ff).
+        mac: String,
+    },
+
     /// List physical devices and their capabilities.
     Phy,
 
@@ -324,6 +332,12 @@ async fn main() -> Result<()> {
                     println!("  TX bytes: {tx_bytes}");
                 }
             }
+        }
+
+        Command::DelStation { interface, mac } => {
+            let mac = parse_mac(&mac)?;
+            conn.del_station(&interface, mac).await?;
+            println!("Removed station {} from {interface}", format_mac(&mac));
         }
 
         Command::Phy => {
