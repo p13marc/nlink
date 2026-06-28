@@ -2360,7 +2360,7 @@ impl Connection<Route> {
 
 use super::{
     messages::NsIdMessage,
-    types::nsid::{RTM_GETNSID, RtGenMsg, netnsa},
+    types::nsid::{RTM_GETNSID, RTM_NEWNSID, RtGenMsg, netnsa},
 };
 
 impl Connection<Route> {
@@ -2450,6 +2450,32 @@ impl Connection<Route> {
         Err(Error::InvalidMessage(
             "namespace ID not found in response".into(),
         ))
+    }
+
+    /// Assign a namespace ID to the network namespace referenced by an
+    /// open file descriptor (`RTM_NEWNSID`).
+    ///
+    /// `ns_fd` is an open reference to a network namespace (e.g. from
+    /// opening `/var/run/netns/<name>`). Pass `nsid >= 0` to request a
+    /// specific id, or `-1` to let the kernel auto-allocate the next
+    /// free id (matching `ip netns set <name> auto`).
+    ///
+    /// The kernel rejects re-assigning an id to a namespace that already
+    /// has one (`EEXIST`); each namespace gets at most one id per peer
+    /// namespace.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_nsid"))]
+    pub async fn set_nsid(&self, ns_fd: RawFd, nsid: i32) -> Result<()> {
+        let mut builder = ack_request(RTM_NEWNSID);
+
+        // rtgenmsg header (1 byte + 3 padding).
+        builder.append(&RtGenMsg::new());
+        builder.append_bytes(&[0u8; 3]);
+
+        // NETNSA_NSID carries an i32; -1 means "auto-allocate".
+        builder.append_attr_u32(netnsa::NSID, nsid as u32);
+        builder.append_attr_u32(netnsa::FD, ns_fd as u32);
+
+        self.send_ack(builder).await
     }
 }
 

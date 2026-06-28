@@ -13,6 +13,14 @@ All notable changes to this project will be documented in this file.
   show <bridge> --brport <port>` lists only the entries learned on a
   given bridge port via the existing `get_fdb_for_port`, mirroring
   `bridge fdb show br <dev> brport <port>`.
+- **`ip` bin: real `netns set <name> <nsid>` and nsid display in `netns
+  list` (#17).** `netns set` was a stub that printed "Setting…" and
+  returned `Ok` without doing anything; it now sends `RTM_NEWNSID` (new
+  `Connection::set_nsid` library method) to assign the id — or
+  auto-allocate on `auto`/`-1`, reading the chosen id back. `netns list`
+  previously always showed no id because `get_namespace_id` returned
+  `None`; it now queries each namespace via the existing `get_nsid`
+  (`RTM_GETNSID`), so `(id: N)` appears for namespaces that have one.
 - **`wg` bin: `addconf` config-file apply (#23).** Completes the
   `setconf`/`syncconf`/`addconf` trio over `WireguardConfig`. `addconf`
   is the additive form — it appends the file's peers/settings without
