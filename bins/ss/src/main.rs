@@ -55,6 +55,10 @@ struct Cli {
     #[arg(long)]
     netlink: bool,
 
+    /// Display AF_PACKET sockets.
+    #[arg(short = '0', long)]
+    packet: bool,
+
     /// Display IPv4 sockets only.
     #[arg(short = '4', long)]
     ipv4: bool,
@@ -180,14 +184,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Determine which socket types to query
-    let query_tcp =
-        cli.tcp || (!cli.udp && !cli.unix && !cli.raw && !cli.sctp && !cli.mptcp && !cli.netlink);
+    let query_tcp = cli.tcp
+        || (!cli.udp
+            && !cli.unix
+            && !cli.raw
+            && !cli.sctp
+            && !cli.mptcp
+            && !cli.netlink
+            && !cli.packet);
     let query_udp = cli.udp;
     let query_unix = cli.unix;
     let query_raw = cli.raw;
     let query_sctp = cli.sctp;
     let query_mptcp = cli.mptcp;
     let query_netlink = cli.netlink;
+    let query_packet = cli.packet;
 
     // Determine state filter
     let states = if cli.all {
@@ -326,6 +337,11 @@ async fn main() -> anyhow::Result<()> {
             })
             .await?;
         all_results.extend(sockets);
+    }
+
+    if query_packet {
+        let packets = conn.query_packet_sockets().await?;
+        all_results.extend(packets.into_iter().map(SocketInfo::Packet));
     }
 
     // Apply address/port filters client-side. The kernel-side inet

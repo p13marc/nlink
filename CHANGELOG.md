@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`ss`/library: AF_PACKET socket diagnostics (#29).** `query_packet`
+  was a stub returning an empty list; it now issues a real
+  `PACKET_DIAG` (`SOCK_DIAG_BY_FAMILY` with `sdiag_family = AF_PACKET`)
+  dump and parses `packet_diag_msg` + `PACKET_DIAG_INFO`/`UID`/`FANOUT`/
+  `MEMINFO` into `PacketSocket` (bound interface, protocol, type, uid,
+  fanout, recv/send queues). New `Connection<SockDiag>::query_packet_sockets`
+  convenience method, surfaced in the `ss` bin as `-0`/`--packet`.
+
 - **`ethtool`/library: Forward Error Correction read (#29).** New
   `Connection<Ethtool>::get_fec`/`get_fec_by_name` over
   `ETHTOOL_MSG_FEC_GET`: configured-modes list, auto-negotiation flag,

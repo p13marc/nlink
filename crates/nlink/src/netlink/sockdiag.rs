@@ -147,6 +147,25 @@ impl Connection<SockDiag> {
         self.query_netlink_typed(&filter).await
     }
 
+    /// Query `AF_PACKET` sockets (the kind `ss -0`/`ss --packet`
+    /// lists) with default options (info + meminfo + fanout).
+    pub async fn query_packet_sockets(&self) -> Result<Vec<crate::sockdiag::socket::PacketSocket>> {
+        let filter = PacketFilter {
+            show_meminfo: true,
+            show_info: true,
+            show_fanout: true,
+        };
+        Ok(self
+            .query_packet(&filter)
+            .await?
+            .into_iter()
+            .filter_map(|s| match s {
+                SocketInfo::Packet(p) => Some(p),
+                _ => None,
+            })
+            .collect())
+    }
+
     /// Get aggregated socket statistics across all families.
     ///
     /// Queries TCP, UDP, raw, and Unix sockets and aggregates the counts
@@ -739,10 +758,215 @@ impl Connection<SockDiag> {
         .await
     }
 
-    async fn query_packet(&self, _filter: &PacketFilter) -> Result<Vec<SocketInfo>> {
-        // Packet socket diagnostics - simplified for now
-        Ok(Vec::new())
+    async fn query_packet(&self, filter: &PacketFilter) -> Result<Vec<SocketInfo>> {
+        // AF_PACKET socket diagnostics via PACKET_DIAG (the same
+        // SOCK_DIAG_BY_FAMILY dump the inet/unix/netlink paths use, with
+        // `sdiag_family = AF_PACKET`).
+        let _guard = self.lock_request().await;
+        self.with_timeout(async move {
+            let seq = self.socket().next_seq();
+            let pid = self.socket().pid();
+
+            // struct packet_diag_req {
+            //   __u8 sdiag_family; __u8 sdiag_protocol; __u16 pad;
+            //   __u32 pdiag_ino; __u32 pdiag_show; __u32 pdiag_cookie[2];
+            // }
+            let mut buf = Vec::with_capacity(36);
+            buf.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_len placeholder
+            buf.extend_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes());
+            buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes());
+            buf.extend_from_slice(&seq.to_ne_bytes());
+            buf.extend_from_slice(&pid.to_ne_bytes());
+
+            buf.push(libc::AF_PACKET as u8); // sdiag_family
+            buf.push(0); // sdiag_protocol (0 = all)
+            buf.extend_from_slice(&0u16.to_ne_bytes()); // pad
+            buf.extend_from_slice(&0u32.to_ne_bytes()); // pdiag_ino (0 = all)
+
+            // pdiag_show flags.
+            const PACKET_SHOW_INFO: u32 = 1;
+            const PACKET_SHOW_FANOUT: u32 = 8;
+            const PACKET_SHOW_MEMINFO: u32 = 16;
+            let mut show = 0u32;
+            if filter.show_info {
+                show |= PACKET_SHOW_INFO;
+            }
+            if filter.show_fanout {
+                show |= PACKET_SHOW_FANOUT;
+            }
+            if filter.show_meminfo {
+                show |= PACKET_SHOW_MEMINFO;
+            }
+            // Always request INFO so the interface/version fields populate.
+            show |= PACKET_SHOW_INFO;
+            buf.extend_from_slice(&show.to_ne_bytes());
+            buf.extend_from_slice(&[0u8; 8]); // pdiag_cookie
+
+            let len = buf.len() as u32;
+            buf[0..4].copy_from_slice(&len.to_ne_bytes());
+
+            self.socket().send(&buf).await?;
+
+            let mut sockets = Vec::new();
+            loop {
+                let data: Vec<u8> = self.socket().recv_msg().await?;
+
+                let mut offset = 0;
+                while offset + 16 <= data.len() {
+                    let nlmsg_len = u32::from_ne_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]) as usize;
+                    let nlmsg_type = u16::from_ne_bytes([data[offset + 4], data[offset + 5]]);
+                    let nlmsg_flags = u16::from_ne_bytes([data[offset + 6], data[offset + 7]]);
+                    let nlmsg_seq = u32::from_ne_bytes([
+                        data[offset + 8],
+                        data[offset + 9],
+                        data[offset + 10],
+                        data[offset + 11],
+                    ]);
+
+                    if nlmsg_len < 16 || offset + nlmsg_len > data.len() {
+                        break;
+                    }
+                    if nlmsg_seq != seq {
+                        offset += (nlmsg_len + 3) & !3;
+                        continue;
+                    }
+                    if nlmsg_flags & 0x10 != 0 {
+                        return Err(crate::netlink::Error::DumpInterrupted);
+                    }
+
+                    match nlmsg_type {
+                        NLMSG_DONE => return Ok(sockets),
+                        NLMSG_ERROR if nlmsg_len >= 20 => {
+                            let errno = i32::from_ne_bytes([
+                                data[offset + 16],
+                                data[offset + 17],
+                                data[offset + 18],
+                                data[offset + 19],
+                            ]);
+                            if errno != 0 {
+                                return Err(super::error::Error::from_errno_with_context(
+                                    errno,
+                                    "packet_diag",
+                                ));
+                            }
+                        }
+                        SOCK_DIAG_BY_FAMILY => {
+                            if let Some(sock) = parse_packet_msg(&data[offset..offset + nlmsg_len]) {
+                                sockets.push(SocketInfo::Packet(sock));
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    offset += (nlmsg_len + 3) & !3;
+                }
+            }
+        })
+        .await
     }
+}
+
+/// Parse a single `packet_diag_msg` (+ attributes) into a
+/// [`PacketSocket`]. Returns `None` if the buffer is too short or the
+/// family is not `AF_PACKET`.
+fn parse_packet_msg(data: &[u8]) -> Option<crate::sockdiag::socket::PacketSocket> {
+    // struct packet_diag_msg {
+    //   __u8 pdiag_family; __u8 pdiag_type; __u16 pdiag_num;
+    //   __u32 pdiag_ino; __u32 pdiag_cookie[2];
+    // } = 16 bytes, after the 16-byte nlmsghdr.
+    if data.len() < 16 + 16 {
+        return None;
+    }
+    let payload = &data[16..];
+    if payload[0] != libc::AF_PACKET as u8 {
+        return None;
+    }
+
+    let socket_type = payload[1];
+    let protocol = u16::from_ne_bytes([payload[2], payload[3]]);
+    let inode = u32::from_ne_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    let cookie = u64::from_ne_bytes([
+        payload[8],
+        payload[9],
+        payload[10],
+        payload[11],
+        payload[12],
+        payload[13],
+        payload[14],
+        payload[15],
+    ]);
+
+    let mut sock = crate::sockdiag::socket::PacketSocket {
+        socket_type,
+        protocol,
+        interface: 0,
+        inode,
+        cookie,
+        uid: 0,
+        recv_q: None,
+        send_q: None,
+        fanout: None,
+        mem_info: None,
+    };
+
+    // PACKET_DIAG_* attribute types.
+    const PACKET_DIAG_INFO: u16 = 0;
+    const PACKET_DIAG_FANOUT: u16 = 4;
+    const PACKET_DIAG_UID: u16 = 5;
+    const PACKET_DIAG_MEMINFO: u16 = 6;
+
+    let mut attr_offset = 16 + 16;
+    while attr_offset + 4 <= data.len() {
+        let attr_len = u16::from_ne_bytes([data[attr_offset], data[attr_offset + 1]]) as usize;
+        let attr_type = u16::from_ne_bytes([data[attr_offset + 2], data[attr_offset + 3]]);
+        if attr_len < 4 || attr_offset + attr_len > data.len() {
+            break;
+        }
+        let attr_data = &data[attr_offset + 4..attr_offset + attr_len];
+
+        match attr_type {
+            // struct packet_diag_info { __u32 pdi_index; ... } — the
+            // first field is the bound interface index.
+            PACKET_DIAG_INFO if attr_data.len() >= 4 => {
+                sock.interface =
+                    u32::from_ne_bytes([attr_data[0], attr_data[1], attr_data[2], attr_data[3]]);
+            }
+            PACKET_DIAG_UID if attr_data.len() >= 4 => {
+                sock.uid =
+                    u32::from_ne_bytes([attr_data[0], attr_data[1], attr_data[2], attr_data[3]]);
+            }
+            PACKET_DIAG_FANOUT if attr_data.len() >= 4 => {
+                sock.fanout = Some(u32::from_ne_bytes([
+                    attr_data[0],
+                    attr_data[1],
+                    attr_data[2],
+                    attr_data[3],
+                ]));
+            }
+            // struct sk_meminfo (>= 36 bytes); rmem_alloc / wmem_alloc
+            // map to recv_q / send_q like the other socket families.
+            PACKET_DIAG_MEMINFO if attr_data.len() >= 36 => {
+                sock.recv_q =
+                    Some(u32::from_ne_bytes([attr_data[0], attr_data[1], attr_data[2], attr_data[3]]));
+                sock.send_q = Some(u32::from_ne_bytes([
+                    attr_data[8],
+                    attr_data[9],
+                    attr_data[10],
+                    attr_data[11],
+                ]));
+            }
+            _ => {}
+        }
+
+        attr_offset += (attr_len + 3) & !3;
+    }
+
+    Some(sock)
 }
 
 // Helper functions for parsing
@@ -1428,4 +1652,66 @@ fn parse_netlink_msg(
     }
 
     Some(sock)
+}
+
+#[cfg(test)]
+mod packet_tests {
+    use super::*;
+
+    /// `parse_packet_msg` reconstructs a `PacketSocket` from a synthetic
+    /// `packet_diag_msg` + `PACKET_DIAG_INFO`/`UID`/`FANOUT` attrs.
+    #[test]
+    fn parse_packet_msg_basic() {
+        let mut msg = Vec::new();
+        // 16-byte nlmsghdr (contents irrelevant to the parser — it reads
+        // the payload starting at offset 16).
+        msg.extend_from_slice(&[0u8; 16]);
+
+        // packet_diag_msg: family, type, num(u16), ino(u32), cookie[2].
+        msg.push(libc::AF_PACKET as u8); // pdiag_family
+        msg.push(3); // pdiag_type = SOCK_RAW
+        msg.extend_from_slice(&0x0003u16.to_ne_bytes()); // pdiag_num = ETH_P_ALL
+        msg.extend_from_slice(&4242u32.to_ne_bytes()); // pdiag_ino
+        msg.extend_from_slice(&7u64.to_ne_bytes()); // pdiag_cookie[2]
+
+        // PACKET_DIAG_INFO (type 0): struct packet_diag_info, first u32 =
+        // pdi_index (bound interface). 24 bytes of payload.
+        let mut info = Vec::new();
+        info.extend_from_slice(&5u32.to_ne_bytes()); // pdi_index = 5
+        info.extend_from_slice(&[0u8; 20]); // remaining fields
+        push_attr(&mut msg, 0, &info);
+
+        // PACKET_DIAG_UID (type 5).
+        push_attr(&mut msg, 5, &1000u32.to_ne_bytes());
+        // PACKET_DIAG_FANOUT (type 4).
+        push_attr(&mut msg, 4, &0xABCDu32.to_ne_bytes());
+
+        let sock = parse_packet_msg(&msg).expect("should parse");
+        assert_eq!(sock.socket_type, 3);
+        assert_eq!(sock.protocol, 0x0003);
+        assert_eq!(sock.inode, 4242);
+        assert_eq!(sock.cookie, 7);
+        assert_eq!(sock.interface, 5);
+        assert_eq!(sock.uid, 1000);
+        assert_eq!(sock.fanout, Some(0xABCD));
+    }
+
+    #[test]
+    fn parse_packet_msg_rejects_short_and_wrong_family() {
+        assert!(parse_packet_msg(&[0u8; 20]).is_none()); // too short
+        let mut msg = vec![0u8; 16 + 16];
+        msg[16] = libc::AF_INET as u8; // wrong family
+        assert!(parse_packet_msg(&msg).is_none());
+    }
+
+    /// Append a netlink attribute (4-byte header + padded payload).
+    fn push_attr(buf: &mut Vec<u8>, attr_type: u16, payload: &[u8]) {
+        let len = (4 + payload.len()) as u16;
+        buf.extend_from_slice(&len.to_ne_bytes());
+        buf.extend_from_slice(&attr_type.to_ne_bytes());
+        buf.extend_from_slice(payload);
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+    }
 }
