@@ -182,6 +182,9 @@ tc class add dev eth0 --parent 1: --classid 1:20 htb rate 5mbit ceil 50mbit burs
 ```bash
 tc filter show
 tc filter show dev eth0
+
+# RSVP classifier (rsvp / rsvp6 — family inferred from the address)
+tc filter add dev eth0 --parent 1: rsvp ipproto tcp session 10.0.0.1 sender 10.0.0.2 classid 1:10
 ```
 
 ### Monitoring

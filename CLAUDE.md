@@ -206,7 +206,7 @@ impl FooConfig {
   **Never silently fall back.**
 - **Errors are stringly typed by design** — no typed parse-error
   variant. Format-string messages have proven readable across
-  the 65 shipped parsers (35 qdisc + 4 class + 10 filter + 16 action).
+  the 66 shipped parsers (35 qdisc + 4 class + 11 filter + 16 action).
 
 The sealed `nlink::ParseParams` trait formalizes the inherent
 method for generic dispatch (`fn run<C: ParseParams>(p: &[&str])

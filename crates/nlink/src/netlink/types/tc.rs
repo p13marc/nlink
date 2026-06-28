@@ -2096,6 +2096,56 @@ pub mod filter {
         pub const TCA_ROUTE4_ACT: u16 = 6;
     }
 
+    /// RSVP classifier attributes (shared by `rsvp` and `rsvp6`).
+    pub mod rsvp {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        pub const TCA_RSVP_UNSPEC: u16 = 0;
+        pub const TCA_RSVP_CLASSID: u16 = 1;
+        pub const TCA_RSVP_DST: u16 = 2;
+        pub const TCA_RSVP_SRC: u16 = 3;
+        pub const TCA_RSVP_PINFO: u16 = 4;
+        pub const TCA_RSVP_POLICE: u16 = 5;
+        pub const TCA_RSVP_ACT: u16 = 6;
+
+        /// General port info (`struct tc_rsvp_gpi`) — a key/mask/offset
+        /// triple used for L4 port matching. Left zeroed when only
+        /// address-level matching is requested.
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcRsvpGpi {
+            pub key: u32,
+            pub mask: u32,
+            pub offset: i32,
+        }
+
+        /// RSVP protocol info (`struct tc_rsvp_pinfo`).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcRsvpPinfo {
+            /// Destination port info.
+            pub dpi: TcRsvpGpi,
+            /// Source port info.
+            pub spi: TcRsvpGpi,
+            /// L4 protocol number.
+            pub protocol: u8,
+            /// Tunnel id.
+            pub tunnelid: u8,
+            /// Tunnel header length.
+            pub tunnelhdr: u8,
+            /// Padding.
+            pub pad: u8,
+        }
+
+        impl TcRsvpPinfo {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
     /// Flow filter attributes.
     pub mod flow {
         pub const TCA_FLOW_UNSPEC: u16 = 0;

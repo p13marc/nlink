@@ -141,7 +141,8 @@ impl_parse_params! {
     crate::netlink::tc::HfscClassConfig,
     crate::netlink::tc::HtbClassConfig,
     crate::netlink::tc::QfqClassConfig,
-    // Filter configs (10 — full filter side typed-first as of Plan 138 + Plan 133 PR C).
+    // Filter configs (11 — full filter side typed-first as of Plan 138 +
+    // Plan 133 PR C; rsvp added under the #115 coverage epic).
     crate::netlink::filter::BasicFilter,
     crate::netlink::filter::BpfFilter,
     crate::netlink::filter::CgroupFilter,
@@ -150,6 +151,7 @@ impl_parse_params! {
     crate::netlink::filter::FwFilter,
     crate::netlink::filter::MatchallFilter,
     crate::netlink::filter::RouteFilter,
+    crate::netlink::filter::RsvpFilter,
     crate::netlink::filter::TcindexFilter,
     crate::netlink::filter::U32Filter,
     // Action configs (16) — Plan 139 PR B closed the original 14
