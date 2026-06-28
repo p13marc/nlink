@@ -24,6 +24,11 @@ enum FdbCommand {
     Show {
         /// Bridge or port device
         dev: Option<String>,
+
+        /// Restrict to entries learned on this bridge port (requires a
+        /// bridge device). Mirrors `bridge fdb show br <dev> brport <port>`.
+        #[arg(long)]
+        brport: Option<String>,
     },
     /// Add FDB entry
     Add(FdbAddArgs),
@@ -75,6 +80,11 @@ struct FdbAddArgs {
     /// Self entry (entry on the device itself)
     #[arg(long, name = "self")]
     self_entry: bool,
+
+    /// Externally-learned entry (NTF_EXT_LEARNED) — managed by a
+    /// user-space control plane; the kernel won't age or overwrite it
+    #[arg(long)]
+    extern_learn: bool,
 }
 
 #[derive(Args)]
@@ -101,9 +111,11 @@ impl FdbCmd {
         match self.command {
             None => {
                 // Default to show all
-                show_fdb(conn, None, format, opts).await
+                show_fdb(conn, None, None, format, opts).await
             }
-            Some(FdbCommand::Show { dev }) => show_fdb(conn, dev, format, opts).await,
+            Some(FdbCommand::Show { dev, brport }) => {
+                show_fdb(conn, dev, brport, format, opts).await
+            }
             Some(FdbCommand::Add(args)) => add_fdb(conn, args, false).await,
             Some(FdbCommand::Replace(args)) => add_fdb(conn, args, true).await,
             Some(FdbCommand::Del(args)) => del_fdb(conn, args).await,
@@ -115,10 +127,20 @@ impl FdbCmd {
 async fn show_fdb(
     conn: &Connection<Route>,
     dev: Option<String>,
+    brport: Option<String>,
     format: OutputFormat,
     opts: &OutputOptions,
 ) -> Result<()> {
-    let entries = if let Some(ref name) = dev {
+    let entries = if let Some(ref port) = brport {
+        // `bridge fdb show br <dev> brport <port>` — entries learned on a
+        // specific port of a specific bridge. The bridge device is required.
+        let Some(ref bridge) = dev else {
+            return Err(nlink::netlink::Error::InvalidMessage(
+                "bridge fdb show --brport requires a bridge device".into(),
+            ));
+        };
+        conn.get_fdb_for_port(bridge.as_str(), port.as_str()).await?
+    } else if let Some(ref name) = dev {
         conn.get_fdb(name).await?
     } else {
         // No device: aggregate FDB entries across every bridge in the
@@ -298,6 +320,10 @@ async fn add_fdb(conn: &Connection<Route>, args: FdbAddArgs, replace: bool) -> R
 
     if args.self_entry {
         builder = builder.self_();
+    }
+
+    if args.extern_learn {
+        builder = builder.extern_learn();
     }
 
     if replace {
