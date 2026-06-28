@@ -94,7 +94,7 @@ async fn show_chains(
     let chains = conn.get_tc_chains(&args.dev, parent).await?;
 
     match format {
-        OutputFormat::Json => print_chains_json(&args.dev, &args.parent, &chains, opts),
+        OutputFormat::Json => print_chains_json(&args.dev, &args.parent, &chains, opts)?,
         OutputFormat::Text => print_chains_text(&chains),
     }
 
@@ -107,7 +107,7 @@ fn print_chains_text(chains: &[u32]) {
     }
 }
 
-fn print_chains_json(dev: &str, parent: &str, chains: &[u32], opts: &OutputOptions) {
+fn print_chains_json(dev: &str, parent: &str, chains: &[u32], opts: &OutputOptions) -> Result<()> {
     let obj = serde_json::json!({
         "dev": dev,
         "parent": parent,
@@ -115,11 +115,13 @@ fn print_chains_json(dev: &str, parent: &str, chains: &[u32], opts: &OutputOptio
     });
 
     let output = if opts.pretty {
-        serde_json::to_string_pretty(&obj).expect("JSON serialization")
+        serde_json::to_string_pretty(&obj)
     } else {
-        serde_json::to_string(&obj).expect("JSON serialization")
-    };
+        serde_json::to_string(&obj)
+    }
+    .map_err(|e| nlink::Error::InvalidMessage(format!("JSON serialization failed: {e}")))?;
     println!("{}", output);
+    Ok(())
 }
 
 async fn add_chain(conn: &Connection<Route>, args: ChainAddArgs) -> Result<()> {

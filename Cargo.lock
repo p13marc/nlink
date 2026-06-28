@@ -432,6 +432,7 @@ dependencies = [
  "atty",
  "clap",
  "nlink",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
