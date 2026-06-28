@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`ss` bin: implement `-O`/`--oneline` (#20).** The flag was parsed and
+  stored but never read, so each socket's extended/memory/TCP-info/timer
+  detail always wrapped onto `\t`-prefixed continuation lines. With
+  `--oneline` those segments are now space-joined onto the socket's row,
+  so each socket occupies exactly one line (matching real `ss -O`).
+
 - **`ethtool` bin: surface already-parsed link detail in `show` (#27).**
   `show` now prints the data the library already decoded but the binary
   dropped: PHY address, MDI-X status (+ configured control), Signal
@@ -61,6 +67,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`ss` bin: ss-expression filters no longer pass non-inet sockets
+  unconditionally (#20).** `FilterExpr::matches_socket_info` returned
+  `true` for every unix/netlink/packet socket, so `ss -x 'sport = :22'`
+  kept *all* unix sockets. Every predicate in the grammar
+  (`sport`/`dport`/`src`/`dst`/`state`) reads inet fields, so an
+  expression is inherently inet-only; a non-inet socket can't satisfy it
+  and is now excluded — matching the `InetMatch` exclusion the binary
+  already applies to `--sport`/`--dport`/`--src`/`--dst`.
 - **`ip` bin: namespace-safe `neighbor show`/`flush` device filter (#17).**
   Both resolved the device via `get_neighbors_by_name`, which reads the
   name from the host `/sys` and so returns wrong results inside a foreign
