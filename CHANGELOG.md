@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`tc`/library: `tcindex` filter (#29).** New `TcindexFilter` typed
+  config (`hash`, `mask`, `shift`, `fall_through`/`pass_on`, `classid`,
+  `chain`) over the `TCA_TCINDEX_*` attributes, wired into `tc filter
+  add … tcindex`. The canonical companion to the `dsmark` qdisc for
+  DiffServ classification. Brings the typed-filter count to 10. (`rsvp`
+  remains deferred — a session/sender classful filter that is rarely
+  used and needs the `tc_rsvp_pinfo` selector struct.)
+
 - **`wifi`/library: `del_station` (kick an AP client) (#29).** New
   `Connection<Nl80211>::del_station(iface, mac)` /
   `del_station_by_index` send `NL80211_CMD_DEL_STATION` to

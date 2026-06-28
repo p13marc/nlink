@@ -1998,6 +1998,23 @@ pub mod filter {
         pub const TCA_FW_MASK: u16 = 5;
     }
 
+    /// tcindex filter attributes.
+    pub mod tcindex {
+        pub const TCA_TCINDEX_UNSPEC: u16 = 0;
+        /// Hash-table size (u32).
+        pub const TCA_TCINDEX_HASH: u16 = 1;
+        /// Mask applied to `tc_index` (u16).
+        pub const TCA_TCINDEX_MASK: u16 = 2;
+        /// Right shift applied to `tc_index` (u32).
+        pub const TCA_TCINDEX_SHIFT: u16 = 3;
+        /// Fall-through flag (u32): 1 = fall_through, 0 = pass_on.
+        pub const TCA_TCINDEX_FALL_THROUGH: u16 = 4;
+        /// Target class id (u32).
+        pub const TCA_TCINDEX_CLASSID: u16 = 5;
+        pub const TCA_TCINDEX_POLICE: u16 = 6;
+        pub const TCA_TCINDEX_ACT: u16 = 7;
+    }
+
     /// Cgroup filter attributes.
     pub mod cgroup {
         pub const TCA_CGROUP_UNSPEC: u16 = 0;
