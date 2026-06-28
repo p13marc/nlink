@@ -234,6 +234,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`ip` bin: `sr tunsrc show --pretty` + POC version string (#17).**
+  `sr tunsrc show -j` hand-rolled its JSON and ignored the global
+  `--pretty` flag; it now builds the object via `serde_json` so
+  `--pretty` is honored and the address is correctly escaped. The
+  `ip --version`/`--help` strings now identify the binary as the
+  nlink proof-of-concept ("not iproute2") so it can't be confused
+  with a real `ip(8)`.
+
 - **`tc` bin: namespace-safe `qdisc`/`class`/`filter show` (#19).** The
   three show paths resolved the device name→ifindex via
   `nlink::util::get_ifindex` (a `/sys/class/net` read in the *calling

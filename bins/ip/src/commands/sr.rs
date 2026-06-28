@@ -41,46 +41,54 @@ impl SrCmd {
         self,
         _conn: &Connection<Route>,
         format: OutputFormat,
-        _opts: &OutputOptions,
+        opts: &OutputOptions,
     ) -> Result<()> {
         match self.action {
             SrAction::Tunsrc { command } => match command {
-                TunsrcCommand::Show => Self::tunsrc_show(format).await,
+                TunsrcCommand::Show => Self::tunsrc_show(format, opts.pretty),
                 TunsrcCommand::Set { address } => Self::tunsrc_set(address).await,
             },
         }
     }
 
-    async fn tunsrc_show(format: OutputFormat) -> Result<()> {
+    fn tunsrc_show(format: OutputFormat, pretty: bool) -> Result<()> {
         // Read /proc/sys/net/ipv6/conf/all/seg6_src
-        // This is the global SRv6 tunnel source address
+        // This is the global SRv6 tunnel source address. A read error
+        // (SRv6 unsupported) and an empty/`::` value both mean "not set".
         let path = "/proc/sys/net/ipv6/conf/all/seg6_src";
-        match std::fs::read_to_string(path) {
+        let tunsrc: Option<String> = match std::fs::read_to_string(path) {
             Ok(content) => {
                 let addr = content.trim();
                 if addr.is_empty() || addr == "::" {
-                    match format {
-                        OutputFormat::Json => println!("{{\"tunsrc\": null}}"),
-                        OutputFormat::Text => println!("tunsrc addr (not set)"),
-                    }
+                    None
                 } else {
-                    match format {
-                        OutputFormat::Json => {
-                            println!("{{\"tunsrc\": \"{}\"}}", addr);
-                        }
-                        OutputFormat::Text => {
-                            println!("tunsrc addr {}", addr);
-                        }
-                    }
+                    Some(addr.to_string())
                 }
             }
-            Err(_) => {
-                // SRv6 not supported or not available
-                match format {
-                    OutputFormat::Json => println!("{{\"tunsrc\": null}}"),
-                    OutputFormat::Text => println!("tunsrc addr (not available)"),
+            Err(_) => None,
+        };
+
+        match format {
+            OutputFormat::Json => {
+                // Build via serde_json so `--pretty` is honored and the
+                // address is correctly escaped (no hand-rolled JSON).
+                let value = serde_json::json!({ "tunsrc": tunsrc });
+                let rendered = if pretty {
+                    serde_json::to_string_pretty(&value)
+                } else {
+                    serde_json::to_string(&value)
                 }
+                .map_err(|e| {
+                    nlink::netlink::Error::InvalidMessage(format!(
+                        "JSON serialization failed: {e}"
+                    ))
+                })?;
+                println!("{rendered}");
             }
+            OutputFormat::Text => match tunsrc {
+                Some(addr) => println!("tunsrc addr {addr}"),
+                None => println!("tunsrc addr (not set)"),
+            },
         }
         Ok(())
     }

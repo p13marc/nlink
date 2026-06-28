@@ -9,7 +9,11 @@ use nlink::{
 };
 
 #[derive(Parser)]
-#[command(name = "ip", version, about = "Network configuration tool")]
+#[command(
+    name = "ip",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (nlink proof-of-concept; not iproute2)"),
+    about = "Network configuration tool — nlink proof-of-concept demo (not iproute2's ip(8))"
+)]
 struct Cli {
     /// Use IPv4 only.
     #[arg(short = '4')]
