@@ -317,8 +317,16 @@ impl FilterCmd {
             ));
         }
 
-        let ifindex =
-            nlink::util::get_ifindex(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
+        // Resolve dev→ifindex over netlink (RTM_GETLINK in the
+        // connection's netns), not the sysfs `/sys/class/net` read —
+        // the latter is wrong inside a foreign netns.
+        let ifindex = conn
+            .get_link_by_name(dev)
+            .await?
+            .ok_or_else(|| {
+                nlink::netlink::Error::InvalidMessage(format!("device not found: {dev}"))
+            })?
+            .ifindex();
 
         // When `--parent` is omitted, list filters across *all* parents
         // (root, ingress, clsact, …) — matching `tc filter show dev X`.
