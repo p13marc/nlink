@@ -222,4 +222,6 @@ match Connection::<Ovpn>::new_async().await {
 - Kernel UAPI: `Documentation/netlink/specs/ovpn.yaml`
 - Out-of-tree development: `https://github.com/OpenVPN/ovpn-net-next`
 - Example: `crates/nlink/examples/genl/ovpn.rs`
-- Plan: `plans/197-declarative-ovpn-plan.md`
+- Changelog: `CHANGELOG.md ## [0.21.0]` (Plan 197); cross-netns
+  `attach_socket` follow-on tracked in
+  [#136](https://github.com/p13marc/nlink/issues/136)
