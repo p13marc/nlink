@@ -21,6 +21,13 @@ All notable changes to this project will be documented in this file.
   previously always showed no id because `get_namespace_id` returned
   `None`; it now queries each namespace via the existing `get_nsid`
   (`RTM_GETNSID`), so `(id: N)` appears for namespaces that have one.
+- **`tc` bin: implement `qdisc show --invisible` (#19).** The flag was
+  parsed but ignored, so `tc qdisc show invisible` behaved identically
+  to a plain show. It now sets `TCA_DUMP_INVISIBLE` on the
+  `RTM_GETQDISC` dump (via the new `Connection::get_qdiscs_full`
+  library method), so the kernel also returns the auto-created default
+  qdiscs it normally hides.
+
 - **`wg` bin: `addconf` config-file apply (#23).** Completes the
   `setconf`/`syncconf`/`addconf` trio over `WireguardConfig`. `addconf`
   is the additive form — it appends the file's peers/settings without
@@ -89,6 +96,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`tc` bin: remove the dead `-b`/`--batch` flag (#19).** It was a
+  global option declared "(not yet implemented)" and never read — a
+  silent no-op that violated the strict-no-op contract. Dropped rather
+  than left lying; a real batch interpreter can return as a focused
+  feature.
 - **`bridge` bin: remove the dead `-s`/`--stats` flag (#25).** It was
   plumbed into `OutputOptions` but never read by any `fdb`/`vlan`/`mdb`
   output path — a silent no-op. The bridge entry types don't carry

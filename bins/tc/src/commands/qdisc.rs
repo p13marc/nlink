@@ -5,7 +5,6 @@ use nlink::{
     Error, TcHandle,
     netlink::{
         Connection, Result, Route,
-        message::NlMsgType,
         messages::TcMessage,
         tc::{
             BfifoConfig, CakeConfig, ClsactConfig, CodelConfig, DrrConfig, EtfConfig, EtsConfig,
@@ -175,7 +174,7 @@ impl QdiscCmd {
     async fn show(
         conn: &Connection<Route>,
         dev: Option<&str>,
-        _invisible: bool,
+        invisible: bool,
         format: OutputFormat,
         opts: &OutputOptions,
     ) -> Result<()> {
@@ -183,8 +182,9 @@ impl QdiscCmd {
         let filter_index =
             nlink::util::get_ifindex_opt(dev).map_err(nlink::netlink::Error::InvalidMessage)?;
 
-        // Fetch all qdiscs using typed API
-        let all_qdiscs: Vec<TcMessage> = conn.dump_typed(NlMsgType::RTM_GETQDISC).await?;
+        // Fetch all qdiscs. `--invisible` sets TCA_DUMP_INVISIBLE so the
+        // kernel also returns auto-created default qdiscs it normally hides.
+        let all_qdiscs: Vec<TcMessage> = conn.get_qdiscs_full(invisible).await?;
 
         // Filter by device if specified
         let qdiscs: Vec<_> = all_qdiscs
