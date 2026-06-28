@@ -67,6 +67,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`bridge` bin: remove the dead `-s`/`--stats` flag (#25).** It was
+  plumbed into `OutputOptions` but never read by any `fdb`/`vlan`/`mdb`
+  output path — a silent no-op. The bridge entry types don't carry
+  per-entry statistics (NDA_CACHEINFO ages, MDB timers, per-VLAN
+  counters) yet, so there's nothing to show; surfacing real stats needs
+  library support first. Dropped rather than left lying.
 - **`ss` bin: ss-expression filters no longer pass non-inet sockets
   unconditionally (#20).** `FilterExpr::matches_socket_info` returned
   `true` for every unix/netlink/packet socket, so `ss -x 'sport = :22'`

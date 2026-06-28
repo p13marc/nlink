@@ -24,10 +24,6 @@ struct Cli {
     #[arg(short = 'p', long, global = true)]
     pretty: bool,
 
-    /// Show statistics
-    #[arg(short = 's', long, global = true)]
-    stats: bool,
-
     /// Show details
     #[arg(short = 'd', long, global = true)]
     details: bool,
@@ -62,7 +58,12 @@ async fn main() -> Result<()> {
     };
 
     let opts = OutputOptions {
-        stats: cli.stats,
+        // The bridge FDB/VLAN/MDB entry types don't carry per-entry
+        // statistics (NDA_CACHEINFO ages, MDB timers, per-VLAN counters)
+        // yet, so there is nothing to gate on a `-s` flag — exposing one
+        // would be a silent no-op. Surfacing real stats needs library
+        // support first; tracked alongside the other bridge gaps.
+        stats: false,
         details: cli.details,
         pretty: cli.pretty,
         numeric: false,
