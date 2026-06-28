@@ -2689,6 +2689,72 @@ impl QdiscConfig for PfifoFastConfig {
 }
 
 // ============================================================================
+// AtmConfig
+// ============================================================================
+
+/// ATM (`sch_atm`) qdisc configuration.
+///
+/// The ATM qdisc is classful: it maps classified flows onto ATM virtual
+/// circuits. The **qdisc itself takes no options** — `tc qdisc add dev X
+/// root atm` simply instantiates the classful qdisc, so this is a unit
+/// config (like [`PfifoFastConfig`] / `MultiqConfig`).
+///
+/// ```ignore
+/// use nlink::netlink::tc::AtmConfig;
+///
+/// conn.add_qdisc("eth0", AtmConfig::new()).await?;
+/// ```
+///
+/// # VC binding is out of scope
+///
+/// The useful part of `sch_atm` lives in its **classes**, which bind a
+/// flow to an ATM virtual circuit via the file descriptor of an *open
+/// ATM socket* (`TCA_ATM_FD`, plus `TCA_ATM_HDR`/`TCA_ATM_EXCESS`/
+/// `TCA_ATM_ADDR`). That requires live ATM hardware and an
+/// application-owned socket fd, so nlink does not model an ATM class
+/// config — there is no portable, testable surface for it. Use a
+/// hand-rolled `MessageBuilder` with your own socket fd if you target
+/// ATM hardware.
+#[derive(Debug, Clone, Default)]
+pub struct AtmConfig;
+
+impl AtmConfig {
+    /// Create a new ATM qdisc configuration.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Terminal no-op for builder symmetry.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style atm params slice. The ATM qdisc takes no
+    /// parameters; any token is rejected (strict-parse contract).
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        if let Some(tok) = params.first() {
+            return Err(Error::InvalidMessage(format!(
+                "atm: unexpected token `{tok}` (the atm qdisc takes no parameters; \
+                 VC binding is a class-level concern not modelled by nlink)"
+            )));
+        }
+        Ok(Self)
+    }
+}
+
+impl QdiscConfig for AtmConfig {
+    fn kind(&self) -> &'static str {
+        "atm"
+    }
+
+    fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
+        // The atm qdisc accepts no TCA_OPTIONS; classes carry the VC
+        // binding. Send no options.
+        Ok(())
+    }
+}
+
+// ============================================================================
 // GredConfig
 // ============================================================================
 
@@ -9162,6 +9228,14 @@ mod tests {
         // (no panic, no bytes appended beyond the empty builder).
         let cfg = PfifoFastConfig::new();
         assert_eq!(cfg.kind(), "pfifo_fast");
+    }
+
+    #[test]
+    fn atm_parse_params_takes_no_args() {
+        assert!(AtmConfig::parse_params(&[]).is_ok());
+        assert_eq!(AtmConfig::new().kind(), "atm");
+        let err = AtmConfig::parse_params(&["vpi", "0"]).unwrap_err();
+        assert!(err.to_string().contains("takes no parameters"));
     }
 
     #[test]
