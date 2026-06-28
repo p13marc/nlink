@@ -7,11 +7,11 @@ use nlink::{
         Connection, Result, Route,
         messages::TcMessage,
         tc::{
-            BfifoConfig, CakeConfig, CbsConfig, ClsactConfig, CodelConfig, DrrConfig, EtfConfig,
-            EtsConfig, FqCodelConfig, FqConfig, FqPieConfig, HfscConfig, HtbQdiscConfig,
-            IngressConfig, MqConfig, MqprioConfig, MultiqConfig, NetemConfig, PfifoConfig,
-            PieConfig, PlugConfig, PrioConfig, QdiscConfig, QfqConfig, RedConfig, SfbConfig,
-            SfqConfig, SkbprioConfig, TaprioConfig, TbfConfig,
+            BfifoConfig, CakeConfig, CbsConfig, ClsactConfig, CodelConfig, DrrConfig, DsmarkConfig,
+            EtfConfig, EtsConfig, FqCodelConfig, FqConfig, FqPieConfig, HfscConfig, HhfConfig,
+            HtbQdiscConfig, IngressConfig, MqConfig, MqprioConfig, MultiqConfig, NetemConfig,
+            PfifoConfig, PieConfig, PlugConfig, PrioConfig, QdiscConfig, QfqConfig, RedConfig,
+            SfbConfig, SfqConfig, SkbprioConfig, TaprioConfig, TbfConfig,
         },
     },
     output::{OutputFormat, OutputOptions, print_all},
@@ -327,8 +327,10 @@ async fn dispatch_qdisc(
         "skbprio" => dispatch!(SkbprioConfig),
         "sfb" => dispatch!(SfbConfig),
         "multiq" => dispatch!(MultiqConfig),
+        "hhf" => dispatch!(HhfConfig),
+        "dsmark" => dispatch!(DsmarkConfig),
         other => Err(Error::InvalidMessage(format!(
-            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, mq, ets, etf, taprio, cbs, skbprio, sfb, multiq)"
+            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, mq, ets, etf, taprio, cbs, skbprio, sfb, multiq, hhf, dsmark)"
         ))),
     }
 }
