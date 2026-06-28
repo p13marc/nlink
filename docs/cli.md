@@ -325,6 +325,7 @@ nlink-ethtool -g eth0 / -l eth0        # ring sizes / channel counts
 nlink-ethtool wol eth0                 # Wake-on-LAN settings
 nlink-ethtool set-wol eth0 magic       # enable WoL on magic packet (or `none` to disable)
 nlink-ethtool eee eth0 / fec eth0      # Energy-Efficient Ethernet / FEC
+nlink-ethtool set-fec eth0 rs --auto off  # set FEC encoding(s) (off/none/rs/baser/llrs)
 
 # Setters
 nlink-ethtool -K eth0 tso off gro on   # toggle features

@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **ethtool: `set_fec` FEC setter (#119).** `Connection::<Ethtool>::set_fec`
+  configures Forward Error Correction via a `FecBuilder`
+  (`ETHTOOL_MSG_FEC_SET`): `.mode("rs")` selects encodings (a named
+  `ETHTOOL_A_FEC_MODES` bitset), `.auto(bool)` toggles negotiation.
+  Mode names are the kernel-labelled bitset names `get_fec` reports
+  (correct-by-construction round-trip); common spellings
+  (`off`/`none`/`rs`/`baser`/`llrs`) are normalised. Surfaced as
+  `nlink-ethtool set-fec eth0 rs --auto off`. First of #119's three
+  ethtool gaps.
+
 - **TC action: `gate` (IEEE 802.1Qci PSFP) typed config (#118) — closes
   the modelable side of #118.** `GateAction` admits packets only during
   the open windows of a cyclic time schedule (TSN per-stream gating):

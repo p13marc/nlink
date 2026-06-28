@@ -1364,10 +1364,9 @@ impl Connection<Ethtool> {
     /// Get Forward Error Correction settings (read-only).
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
-    /// Setting FEC is not yet modelled — the configured-modes bitset
-    /// uses kernel-specific mode bit names that this read path simply
-    /// echoes back; a typed setter that picks the right names is left
-    /// to a follow-up.
+    /// The configured-modes bitset uses kernel-specific mode bit names;
+    /// feed the same names back to [`Connection::set_fec`] to change the
+    /// configuration.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_fec"))]
     pub async fn get_fec(&self, iface: impl Into<InterfaceRef>) -> Result<Fec> {
         let ifname = self.resolve_interface_name(&iface.into()).await?;
@@ -1407,6 +1406,52 @@ impl Connection<Ethtool> {
             }
         }
         Ok(())
+    }
+
+    /// Set Forward Error Correction settings.
+    ///
+    /// FEC mode names are the kernel-labelled bitset names — pass the
+    /// same strings [`Fec::modes`] reports for the device. See
+    /// [`FecBuilder`] for the normalisation of common spellings.
+    ///
+    /// ```ignore
+    /// // Enable RS FEC and turn auto-negotiation off.
+    /// conn.set_fec("eth0", |f| f.mode("rs").auto(false)).await?;
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_fec"))]
+    pub async fn set_fec(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        configure: impl FnOnce(FecBuilder) -> FecBuilder,
+    ) -> Result<()> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.set_fec_by_name(&ifname, configure).await
+    }
+
+    /// Set Forward Error Correction settings by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "set_fec_by_name"))]
+    pub async fn set_fec_by_name(
+        &self,
+        ifname: &str,
+        configure: impl FnOnce(FecBuilder) -> FecBuilder,
+    ) -> Result<()> {
+        let config = configure(FecBuilder::new());
+        self.ethtool_set(EthtoolCmd::FecSet, ifname, move |builder| {
+            if !config.modes.is_empty() {
+                // The requested encodings become the active set: present +
+                // Value flag = enable; the kernel leaves unlisted bits
+                // untouched, so list only what we want enabled.
+                let mut bs = EthtoolBitset::new();
+                for (idx, name) in config.modes.iter().enumerate() {
+                    bs.add(idx as u32, name, true);
+                }
+                bs.write_to(builder, EthtoolFecAttr::Modes as u16);
+            }
+            if let Some(auto) = config.auto {
+                builder.append_attr_u8(EthtoolFecAttr::Auto as u16, auto as u8);
+            }
+        })
+        .await
     }
 
     // =========================================================================
@@ -1766,6 +1811,41 @@ fn parse_one_stat(data: &[u8]) -> Option<(u32, u64)> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod fec_builder_tests {
+    use super::*;
+
+    #[test]
+    fn fec_builder_normalises_common_spellings() {
+        let f = FecBuilder::new()
+            .mode("rs")
+            .mode("Off")
+            .mode("baser")
+            .mode("FancyVendorName")
+            .auto(true);
+        assert_eq!(f.modes, vec!["RS", "Off", "BASER", "FancyVendorName"]);
+        assert_eq!(f.auto, Some(true));
+    }
+
+    #[test]
+    fn fec_set_request_encodes_modes_bitset() {
+        // The bitset write path must round-trip the requested modes.
+        let mut bs = EthtoolBitset::new();
+        bs.add(0, "RS", true);
+        bs.add(1, "Off", false);
+        let mut b = MessageBuilder::new(0, 0);
+        bs.write_to(&mut b, EthtoolFecAttr::Modes as u16);
+        // Re-parse the nested Modes attr and confirm RS is active.
+        for (attr_type, payload) in AttrIter::new(&b.as_bytes()[16..]) {
+            if attr_type == EthtoolFecAttr::Modes as u16 {
+                let parsed = EthtoolBitset::parse(payload).expect("parse modes");
+                assert!(parsed.is_set("RS"));
+                assert!(!parsed.is_set("Off"));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
