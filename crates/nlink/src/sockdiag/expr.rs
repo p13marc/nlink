@@ -90,10 +90,19 @@ impl FilterExpr {
     }
 
     /// Evaluate this expression against a socket.
+    ///
+    /// Every predicate in the grammar (`sport`/`dport`/`src`/`dst`/
+    /// `state`) reads inet-socket fields, so a port/address/state
+    /// expression is inherently inet-only. A non-inet socket cannot
+    /// satisfy it and is therefore excluded — matching the
+    /// `InetMatch` behaviour the `ss` binary applies to
+    /// `--sport`/`--dport`/`--src`/`--dst`. (Previously non-inet
+    /// sockets passed through unconditionally, so `ss -x 'sport = :22'`
+    /// kept every unix socket — issue #20.)
     pub fn matches_socket_info(&self, socket: &SocketInfo) -> bool {
         match socket {
             SocketInfo::Inet(inet) => self.matches(inet),
-            _ => true, // Non-inet sockets pass through
+            _ => false,
         }
     }
 
@@ -544,5 +553,29 @@ mod tests {
         assert!(FilterExpr::parse("").is_err());
         assert!(FilterExpr::parse("invalid").is_err());
         assert!(FilterExpr::parse("sport = :abc").is_err());
+    }
+
+    #[test]
+    fn non_inet_excluded_by_inet_expr() {
+        use crate::sockdiag::socket::{SocketInfo, UnixSocket, UnixType};
+
+        // An inet port/addr/state expression cannot match a non-inet
+        // socket — it must be excluded, not passed through (issue #20:
+        // `ss -x 'sport = :22'` previously kept every unix socket).
+        let expr = FilterExpr::parse("sport = :22").unwrap();
+        let unix = SocketInfo::Unix(UnixSocket::new(
+            UnixType::Stream,
+            SocketState::Tcp(TcpState::Established),
+            42,
+        ));
+        assert!(!expr.matches_socket_info(&unix));
+
+        // Inet sockets still evaluate normally.
+        let inet = SocketInfo::Inet(Box::new(make_socket(
+            "0.0.0.0:22",
+            "0.0.0.0:0",
+            tcp_state(TcpState::Listen),
+        )));
+        assert!(expr.matches_socket_info(&inet));
     }
 }

@@ -11,7 +11,6 @@ use nlink::{
 };
 
 /// Display options for socket output.
-#[allow(dead_code)]
 pub struct DisplayOptions {
     /// Don't resolve service names.
     pub numeric: bool,
@@ -219,8 +218,7 @@ fn print_inet_socket(
         String::new()
     };
 
-    writeln!(
-        handle,
+    let main = format!(
         "{:<8} {:<12} {:>6} {:>6} {:>25} {:>25}{}",
         sock.netid(),
         sock.state.name(),
@@ -229,34 +227,38 @@ fn print_inet_socket(
         local,
         remote,
         users
-    )?;
+    );
+
+    // Detail segments that normally wrap onto `\t`-prefixed
+    // continuation lines. With -O/--oneline they are joined onto the
+    // socket's row instead (see `emit_row`).
+    let mut details: Vec<String> = Vec::new();
 
     // Timer info (-o): only printed when a timer is active.
     if opts.options
         && let Some(timer) = sock.timer.describe()
     {
-        writeln!(handle, "\t {timer}")?;
+        details.push(timer);
     }
 
     // Extended info
     if opts.extended {
-        write!(handle, "\t uid:{} ino:{}", sock.uid, sock.inode)?;
+        let mut s = format!("uid:{} ino:{}", sock.uid, sock.inode);
         if sock.interface > 0 {
-            write!(handle, " if:{}", sock.interface)?;
+            s.push_str(&format!(" if:{}", sock.interface));
         }
         if let Some(mark) = sock.mark {
-            write!(handle, " fwmark:0x{:x}", mark)?;
+            s.push_str(&format!(" fwmark:0x{:x}", mark));
         }
-        writeln!(handle)?;
+        details.push(s);
     }
 
     // Memory info
     if opts.memory
         && let Some(ref mem) = sock.mem_info
     {
-        writeln!(
-            handle,
-            "\t skmem:(r{},rb{},t{},tb{},f{},w{},o{},bl{},d{})",
+        details.push(format!(
+            "skmem:(r{},rb{},t{},tb{},f{},w{},o{},bl{},d{})",
             mem.rmem_alloc,
             mem.rcvbuf,
             mem.wmem_alloc,
@@ -266,7 +268,7 @@ fn print_inet_socket(
             mem.optmem,
             mem.backlog,
             mem.drops
-        )?;
+        ));
     }
 
     // TCP info
@@ -346,10 +348,35 @@ fn print_inet_socket(
             parts.push(format!("rcv_ssthresh:{}", info.rcv_ssthresh));
         }
 
-        writeln!(handle, "\t {}", parts.join(" "))?;
+        details.push(parts.join(" "));
     }
 
-    Ok(())
+    emit_row(handle, &main, &details, opts.oneline)
+}
+
+/// Emit a socket row plus its detail segments. In the default layout
+/// each detail wraps onto its own `\t`-prefixed continuation line; with
+/// -O/--oneline they are space-joined onto the row so each socket
+/// occupies exactly one line.
+fn emit_row(
+    handle: &mut impl Write,
+    main: &str,
+    details: &[String],
+    oneline: bool,
+) -> io::Result<()> {
+    if oneline {
+        if details.is_empty() {
+            writeln!(handle, "{main}")
+        } else {
+            writeln!(handle, "{main} {}", details.join(" "))
+        }
+    } else {
+        writeln!(handle, "{main}")?;
+        for d in details {
+            writeln!(handle, "\t {d}")?;
+        }
+        Ok(())
+    }
 }
 
 fn print_unix_socket(
@@ -377,8 +404,7 @@ fn print_unix_socket(
         String::new()
     };
 
-    writeln!(
-        handle,
+    let main = format!(
         "{:<8} {:<12} {:>6} {:>6} {:>25} {:>25}{}",
         sock.netid(),
         sock.state.name(),
@@ -387,17 +413,18 @@ fn print_unix_socket(
         path_display,
         peer,
         users
-    )?;
+    );
 
+    let mut details: Vec<String> = Vec::new();
     if opts.extended {
-        write!(handle, "\t ino:{}", sock.inode)?;
+        let mut s = format!("ino:{}", sock.inode);
         if let Some(uid) = sock.uid {
-            write!(handle, " uid:{}", uid)?;
+            s.push_str(&format!(" uid:{}", uid));
         }
-        writeln!(handle)?;
+        details.push(s);
     }
 
-    Ok(())
+    emit_row(handle, &main, &details, opts.oneline)
 }
 
 fn format_addr(addr: &SocketAddr, numeric: bool, resolve: bool) -> String {
