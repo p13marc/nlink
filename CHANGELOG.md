@@ -6,6 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`nft` bin: declarative `reconcile`/`diff` over the `NftablesConfig`
+  engine (#109).** New `nft reconcile <file>` reads a *desired-state*
+  ruleset (the same `add table`/`add chain`/`add rule` grammar as
+  `apply`), folds it into an `NftablesConfig`, diffs it against the
+  live ruleset, and applies the minimal change set via the library's
+  `diff`/`apply`/`apply_reconcile` engine (the same one the `config`
+  binary uses for interfaces). `nft diff <file>` is the read-only
+  preview; `--dry-run` / `--no-retry` tune `reconcile`. Because it is
+  desired-state, `delete`/`flush` lines are rejected (removal is
+  inferred from the diff) — `nft apply` remains the imperative,
+  single-transaction path. The rule-spec parser is shared with
+  `apply` (STRICT: an unrecognized token fails the whole parse, never
+  a silent drop). This is deliberately *not* a serde-`Deserialize`
+  path: nft rule bodies are low-level VM byte expressions, so the
+  human-facing format is the rule DSL lowered through the typed
+  builders. Parser unit tests cover the fold, the desired-state
+  rejections, and strict error propagation.
+
 - **library: strongly-typed, round-trippable `NetworkConfig` (#108).**
   The declarative `NetworkConfig` tree was `Serialize`-only; it now
   also implements a **validating** `serde::Deserialize` behind the
