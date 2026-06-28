@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`tc`/library: `cbs` and `skbprio` qdiscs (#29).** Two new typed
+  qdisc configs with the standard `*Config` + fluent builder +
+  strict `parse_params` shape, wired into `tc qdisc add … cbs|skbprio`.
+  `CbsConfig` drives the IEEE 802.1Qav Credit-Based Shaper (AVB/TSN):
+  `idleslope`/`sendslope` (kbit/s), `hicredit`/`locredit` (bytes), and
+  `offload` packed into `struct tc_cbs_qopt` under `TCA_CBS_PARMS`.
+  `SkbprioConfig` drives the SKB-priority queue (`limit` packets).
+  Brings the typed-qdisc count to 27.
+
 - **`tc` bin: `filter` parity — show across all parents, `--chain`,
   partial delete (#19).** `tc filter show dev X` now lists filters
   across *every* parent (root, ingress, clsact, …) instead of silently

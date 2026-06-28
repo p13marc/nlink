@@ -3306,6 +3306,260 @@ impl QdiscConfig for BfifoConfig {
 }
 
 // ============================================================================
+// CbsConfig (Credit-Based Shaper, IEEE 802.1Qav / AVB / TSN)
+// ============================================================================
+
+/// CBS (Credit-Based Shaper) qdisc configuration.
+///
+/// CBS implements the IEEE 802.1Qav forwarding-and-queuing rules used by
+/// AVB / TSN, shaping a traffic class to a reserved bandwidth. It is
+/// typically installed as a leaf under `mqprio` on a multi-queue NIC.
+///
+/// `idleslope`/`sendslope` are in kbit/s; `hicredit`/`locredit` are in
+/// bytes (matching tc(8) and the kernel's `struct tc_cbs_qopt`). Set
+/// `offload` to hand the shaping to a NIC that implements the Qav
+/// shaper in hardware.
+///
+/// ```ignore
+/// use nlink::netlink::tc::CbsConfig;
+///
+/// // Class A reservation on a 1Gbit link (tc(8) example values).
+/// let cfg = CbsConfig::new()
+///     .idleslope(98_688)
+///     .sendslope(-901_312)
+///     .hicredit(153)
+///     .locredit(-1_389)
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct CbsConfig {
+    /// Hardware offload flag.
+    pub offload: bool,
+    /// High credit, in bytes.
+    pub hicredit: i32,
+    /// Low credit, in bytes.
+    pub locredit: i32,
+    /// Idle slope, in kbit/s.
+    pub idleslope: i32,
+    /// Send slope, in kbit/s (typically negative).
+    pub sendslope: i32,
+}
+
+impl CbsConfig {
+    /// Create a new CBS configuration builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable or disable hardware offload.
+    pub fn offload(mut self, offload: bool) -> Self {
+        self.offload = offload;
+        self
+    }
+
+    /// Set the high credit (bytes).
+    pub fn hicredit(mut self, hicredit: i32) -> Self {
+        self.hicredit = hicredit;
+        self
+    }
+
+    /// Set the low credit (bytes).
+    pub fn locredit(mut self, locredit: i32) -> Self {
+        self.locredit = locredit;
+        self
+    }
+
+    /// Set the idle slope (kbit/s).
+    pub fn idleslope(mut self, idleslope: i32) -> Self {
+        self.idleslope = idleslope;
+        self
+    }
+
+    /// Set the send slope (kbit/s).
+    pub fn sendslope(mut self, sendslope: i32) -> Self {
+        self.sendslope = sendslope;
+        self
+    }
+
+    /// Terminal no-op for builder symmetry.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style cbs params slice into a typed `CbsConfig`.
+    ///
+    /// Recognised tokens: `idleslope <kbit>`, `sendslope <kbit>`,
+    /// `hicredit <bytes>`, `locredit <bytes>`, `offload <0|1>`.
+    /// Strict: unknown tokens, missing values, and unparseable values
+    /// all error.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("cbs: `{key}` requires a value"))
+                })
+            };
+            let parse_i32 = |s: &str| -> Result<i32> {
+                s.parse::<i32>().map_err(|_| {
+                    Error::InvalidMessage(format!(
+                        "cbs: invalid {key} `{s}` (expected signed integer)"
+                    ))
+                })
+            };
+            match key {
+                "idleslope" => {
+                    cfg.idleslope = parse_i32(need_value()?)?;
+                    i += 2;
+                }
+                "sendslope" => {
+                    cfg.sendslope = parse_i32(need_value()?)?;
+                    i += 2;
+                }
+                "hicredit" => {
+                    cfg.hicredit = parse_i32(need_value()?)?;
+                    i += 2;
+                }
+                "locredit" => {
+                    cfg.locredit = parse_i32(need_value()?)?;
+                    i += 2;
+                }
+                "offload" => {
+                    let s = need_value()?;
+                    cfg.offload = match s {
+                        "0" | "off" | "false" => false,
+                        "1" | "on" | "true" => true,
+                        other => {
+                            return Err(Error::InvalidMessage(format!(
+                                "cbs: invalid offload `{other}` (expected 0|1)"
+                            )));
+                        }
+                    };
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!("cbs: unknown token `{other}`")));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+impl QdiscConfig for CbsConfig {
+    fn kind(&self) -> &'static str {
+        "cbs"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::cbs::{TCA_CBS_PARMS, TcCbsQopt};
+
+        let qopt = TcCbsQopt {
+            offload: u8::from(self.offload),
+            _pad: [0; 3],
+            hicredit: self.hicredit,
+            locredit: self.locredit,
+            idleslope: self.idleslope,
+            sendslope: self.sendslope,
+        };
+        builder.append_attr(TCA_CBS_PARMS, qopt.as_bytes());
+        Ok(())
+    }
+}
+
+// ============================================================================
+// SkbprioConfig (SKB priority queue)
+// ============================================================================
+
+/// skbprio (SKB priority) qdisc configuration.
+///
+/// A priority queue that uses the packet's `skb->priority` to drop the
+/// lowest-priority packets first when the queue is full. The only knob
+/// is the queue-length `limit` (packets).
+///
+/// ```ignore
+/// use nlink::netlink::tc::SkbprioConfig;
+///
+/// let cfg = SkbprioConfig::new().limit(64).build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct SkbprioConfig {
+    /// Queue length limit in packets.
+    pub limit: u32,
+}
+
+impl Default for SkbprioConfig {
+    fn default() -> Self {
+        // Kernel default is 64 packets.
+        Self { limit: 64 }
+    }
+}
+
+impl SkbprioConfig {
+    /// Create a new skbprio configuration builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the queue length limit in packets.
+    pub fn limit(mut self, packets: u32) -> Self {
+        self.limit = packets;
+        self
+    }
+
+    /// Terminal no-op for builder symmetry.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style skbprio params slice into a typed
+    /// `SkbprioConfig`.
+    ///
+    /// Recognised tokens: `limit <packets>`. Strict: unknown tokens,
+    /// missing values, and unparseable values all error.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "limit" => {
+                    let s = params.get(i + 1).copied().ok_or_else(|| {
+                        Error::InvalidMessage("skbprio: `limit` requires a value".to_string())
+                    })?;
+                    cfg.limit = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!("skbprio: invalid limit `{s}`"))
+                    })?;
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "skbprio: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+impl QdiscConfig for SkbprioConfig {
+    fn kind(&self) -> &'static str {
+        "skbprio"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::skbprio::TcSkbprioQopt;
+
+        let qopt = TcSkbprioQopt::new(self.limit);
+        builder.append(&qopt);
+        Ok(())
+    }
+}
+
+// ============================================================================
 // DrrConfig (Deficit Round Robin)
 // ============================================================================
 
@@ -6749,6 +7003,51 @@ mod tests {
         assert!(FqPieConfig::parse_params(&["limit"]).is_err());
         assert!(FqPieConfig::parse_params(&["target", "fast"]).is_err());
         assert!(FqPieConfig::parse_params(&["unknown"]).is_err());
+    }
+
+    #[test]
+    fn test_cbs_parse_and_write() {
+        // tc(8) Class-A example values.
+        let cfg = CbsConfig::parse_params(&[
+            "idleslope", "98688", "sendslope", "-901312", "hicredit", "153", "locredit", "-1389",
+            "offload", "1",
+        ])
+        .unwrap();
+        assert_eq!(cfg.idleslope, 98688);
+        assert_eq!(cfg.sendslope, -901312);
+        assert_eq!(cfg.hicredit, 153);
+        assert_eq!(cfg.locredit, -1389);
+        assert!(cfg.offload);
+
+        // write_options emits the PARMS attribute without error; the
+        // fixed struct is 20 bytes (offload + 3 pad + 4×i32).
+        let mut b = MessageBuilder::new(0, 0);
+        cfg.write_options(&mut b).unwrap();
+        use crate::netlink::types::tc::qdisc::cbs::TcCbsQopt;
+        assert_eq!(TcCbsQopt::SIZE, 20);
+
+        // offload alias + default-zero fields.
+        let cfg = CbsConfig::parse_params(&["offload", "off"]).unwrap();
+        assert!(!cfg.offload);
+        assert_eq!(cfg.idleslope, 0);
+
+        // strict: missing value, bad value, bad offload, unknown token.
+        assert!(CbsConfig::parse_params(&["idleslope"]).is_err());
+        assert!(CbsConfig::parse_params(&["idleslope", "fast"]).is_err());
+        assert!(CbsConfig::parse_params(&["offload", "2"]).is_err());
+        assert!(CbsConfig::parse_params(&["unknown"]).is_err());
+    }
+
+    #[test]
+    fn test_skbprio_parse() {
+        let cfg = SkbprioConfig::parse_params(&["limit", "128"]).unwrap();
+        assert_eq!(cfg.limit, 128);
+        // kernel default when unspecified.
+        assert_eq!(SkbprioConfig::parse_params(&[]).unwrap().limit, 64);
+        // strict: missing value, bad value, unknown token.
+        assert!(SkbprioConfig::parse_params(&["limit"]).is_err());
+        assert!(SkbprioConfig::parse_params(&["limit", "x"]).is_err());
+        assert!(SkbprioConfig::parse_params(&["unknown"]).is_err());
     }
 
     #[test]

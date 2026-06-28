@@ -7,10 +7,11 @@ use nlink::{
         Connection, Result, Route,
         messages::TcMessage,
         tc::{
-            BfifoConfig, CakeConfig, ClsactConfig, CodelConfig, DrrConfig, EtfConfig, EtsConfig,
-            FqCodelConfig, FqConfig, FqPieConfig, HfscConfig, HtbQdiscConfig, IngressConfig,
-            MqConfig, MqprioConfig, NetemConfig, PfifoConfig, PieConfig, PlugConfig, PrioConfig,
-            QdiscConfig, QfqConfig, RedConfig, SfqConfig, TaprioConfig, TbfConfig,
+            BfifoConfig, CakeConfig, CbsConfig, ClsactConfig, CodelConfig, DrrConfig, EtfConfig,
+            EtsConfig, FqCodelConfig, FqConfig, FqPieConfig, HfscConfig, HtbQdiscConfig,
+            IngressConfig, MqConfig, MqprioConfig, NetemConfig, PfifoConfig, PieConfig, PlugConfig,
+            PrioConfig, QdiscConfig, QfqConfig, RedConfig, SfqConfig, SkbprioConfig, TaprioConfig,
+            TbfConfig,
         },
     },
     output::{OutputFormat, OutputOptions, print_all},
@@ -322,8 +323,10 @@ async fn dispatch_qdisc(
         "ets" => dispatch!(EtsConfig),
         "etf" => dispatch!(EtfConfig),
         "taprio" => dispatch!(TaprioConfig),
+        "cbs" => dispatch!(CbsConfig),
+        "skbprio" => dispatch!(SkbprioConfig),
         other => Err(Error::InvalidMessage(format!(
-            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, mq, ets, etf, taprio)"
+            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, mq, ets, etf, taprio, cbs, skbprio)"
         ))),
     }
 }
