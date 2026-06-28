@@ -240,6 +240,7 @@ pub struct FdbEntryBuilder {
     master: Option<InterfaceRef>,
     permanent: bool,
     self_flag: bool,
+    extern_learn: bool,
 }
 
 impl FdbEntryBuilder {
@@ -346,6 +347,16 @@ impl FdbEntryBuilder {
         self
     }
 
+    /// Mark the entry as externally learned (sets NTF_EXT_LEARNED).
+    ///
+    /// Externally-learned entries are managed by a user-space control
+    /// plane (e.g. an EVPN/VXLAN agent) rather than the kernel's normal
+    /// MAC learning; the kernel will not age or overwrite them.
+    pub fn extern_learn(mut self) -> Self {
+        self.extern_learn = true;
+        self
+    }
+
     /// Write the add message to the builder with resolved interface indices.
     pub(crate) fn write_add(
         &self,
@@ -362,6 +373,9 @@ impl FdbEntryBuilder {
         let mut ntf_flags: u8 = 0;
         if self.self_flag {
             ntf_flags |= ntf::SELF;
+        }
+        if self.extern_learn {
+            ntf_flags |= ntf::EXT_LEARNED;
         }
 
         let ndmsg = NdMsg::new()

@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`bridge` bin: `fdb add --extern-learn` and `fdb show --brport` (#25).**
+  `fdb add … --extern-learn` marks an entry `NTF_EXT_LEARNED` (a
+  user-space control plane owns it; the kernel won't age/overwrite it) —
+  backed by a new `FdbEntryBuilder::extern_learn()` library setter. `fdb
+  show <bridge> --brport <port>` lists only the entries learned on a
+  given bridge port via the existing `get_fdb_for_port`, mirroring
+  `bridge fdb show br <dev> brport <port>`.
 - **`wg` bin: `addconf` config-file apply (#23).** Completes the
   `setconf`/`syncconf`/`addconf` trio over `WireguardConfig`. `addconf`
   is the additive form — it appends the file's peers/settings without
