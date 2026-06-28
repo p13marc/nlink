@@ -10,6 +10,7 @@ use nlink::netlink::{
     nftables::{
         Chain, ChainType, Family, Hook, Policy, Priority, Rule, Set, SetElement, SetKeyType,
         Transaction,
+        config::{NftablesConfig, ReconcileOptions},
     },
 };
 
@@ -68,6 +69,33 @@ enum Command {
         /// Parse and validate only; don't commit to the kernel.
         #[arg(long)]
         dry_run: bool,
+    },
+
+    /// Reconcile the kernel to a declarative desired-state ruleset.
+    ///
+    /// Unlike `apply` (which replays imperative `add`/`delete` ops in
+    /// one transaction), `reconcile` reads a desired-state file —
+    /// `add table`/`add chain`/`add rule` lines describing what
+    /// *should* exist — diffs it against the live ruleset, and applies
+    /// the minimal set of changes (the same `NftablesConfig` engine the
+    /// `config` binary uses for interfaces). `delete`/`flush` lines are
+    /// rejected: removal is inferred from the diff, not spelled out.
+    Reconcile {
+        /// Path to the desired-state ruleset file.
+        file: String,
+        /// Compute and print the diff without touching the kernel.
+        #[arg(long)]
+        dry_run: bool,
+        /// Apply once without the bounded retry-on-contention loop.
+        #[arg(long)]
+        no_retry: bool,
+    },
+
+    /// Show what `reconcile` would change for a desired-state file,
+    /// without touching the kernel (alias for `reconcile --dry-run`).
+    Diff {
+        /// Path to the desired-state ruleset file.
+        file: String,
     },
 }
 
@@ -347,29 +375,10 @@ fn build_chain(
         chain = chain.priority(parse_priority(p)?);
     }
     if let Some(t) = chain_type {
-        let ct = match t {
-            "filter" => ChainType::Filter,
-            "nat" => ChainType::Nat,
-            "route" => ChainType::Route,
-            other => {
-                return Err(nlink::netlink::Error::InvalidAttribute(format!(
-                    "unknown chain type `{other}` — expected one of `filter`, `nat`, `route`"
-                )));
-            }
-        };
-        chain = chain.chain_type(ct);
+        chain = chain.chain_type(parse_chain_type(t)?);
     }
     if let Some(p) = policy {
-        let pol = match p {
-            "drop" => Policy::Drop,
-            "accept" => Policy::Accept,
-            other => {
-                return Err(nlink::netlink::Error::InvalidAttribute(format!(
-                    "unknown policy `{other}` — expected `drop` or `accept`"
-                )));
-            }
-        };
-        chain = chain.policy(pol);
+        chain = chain.policy(parse_policy(p)?);
     }
     Ok(chain)
 }
@@ -743,6 +752,18 @@ async fn main() -> Result<()> {
         Command::Apply { file, dry_run } => {
             apply_file(&conn, &file, dry_run).await?;
         }
+
+        Command::Reconcile {
+            file,
+            dry_run,
+            no_retry,
+        } => {
+            reconcile_file(&conn, &file, dry_run, no_retry).await?;
+        }
+
+        Command::Diff { file } => {
+            reconcile_file(&conn, &file, true, false).await?;
+        }
     }
 
     Ok(())
@@ -787,6 +808,247 @@ async fn apply_file(conn: &Connection<Nftables>, path: &str, dry_run: bool) -> R
     txn.commit(conn).await?;
     eprintln!("nft apply: {count} operation(s) committed atomically");
     Ok(())
+}
+
+/// Reconcile the kernel ruleset to a declarative desired-state file.
+///
+/// The file uses the same `add table`/`add chain`/`add rule` line
+/// grammar as `apply`, but is interpreted as *desired state*: the
+/// whole file is parsed into an [`NftablesConfig`], diffed against the
+/// live ruleset, and the minimal change set is applied. With
+/// `dry_run`, the diff is printed and nothing is committed.
+async fn reconcile_file(
+    conn: &Connection<Nftables>,
+    path: &str,
+    dry_run: bool,
+    no_retry: bool,
+) -> Result<()> {
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        nlink::netlink::Error::InvalidMessage(format!("nft reconcile: cannot read `{path}`: {e}"))
+    })?;
+    let cfg = parse_ruleset(&contents)
+        .map_err(|e| nlink::netlink::Error::InvalidMessage(format!("nft reconcile: {path}: {e}")))?;
+
+    let diff = cfg.diff(conn).await?;
+
+    if dry_run {
+        if diff.is_empty() {
+            println!("No changes needed; the live ruleset already matches `{path}`.");
+        } else {
+            println!("Reconcile would make {} change(s):", diff.change_count());
+            print!("{diff}");
+        }
+        return Ok(());
+    }
+
+    if diff.is_empty() {
+        eprintln!("nft reconcile: no changes needed");
+        return Ok(());
+    }
+
+    if no_retry {
+        let n = diff.apply(conn).await?;
+        eprintln!("nft reconcile: applied {n} change(s)");
+    } else {
+        let report = diff
+            .apply_reconcile(conn, ReconcileOptions::default())
+            .await?;
+        eprintln!(
+            "nft reconcile: applied {} change(s) in {} attempt(s)",
+            report.change_count, report.attempts
+        );
+    }
+    Ok(())
+}
+
+/// Parse a declarative desired-state ruleset into an [`NftablesConfig`].
+///
+/// Two passes: the first validates every line and folds the flat
+/// `add table`/`add chain`/`add rule` grammar into per-table groups
+/// (surfacing parse errors eagerly — STRICT, like the imperative
+/// parser); the second assembles the nested `NftablesConfig` via its
+/// builder closures. `delete`/`flush` lines are rejected, because
+/// removal in a desired-state model is inferred from the diff.
+fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
+    let err = |m: String| nlink::netlink::Error::InvalidAttribute(m);
+
+    /// A chain with its options pre-resolved to typed enums.
+    struct PendingChain {
+        name: String,
+        hook: Option<Hook>,
+        priority: Option<Priority>,
+        chain_type: Option<ChainType>,
+        policy: Option<Policy>,
+    }
+    /// One table and its declared chains + pre-built rules.
+    struct PendingTable {
+        name: String,
+        family: Family,
+        chains: Vec<PendingChain>,
+        rules: Vec<(String, Rule)>,
+    }
+
+    let mut tables: Vec<PendingTable> = Vec::new();
+    // Locate (or refuse to invent) the pending table for an op.
+    fn find<'a>(
+        tables: &'a mut [PendingTable],
+        family: Family,
+        name: &str,
+    ) -> Option<&'a mut PendingTable> {
+        tables
+            .iter_mut()
+            .find(|t| t.family == family && t.name == name)
+    }
+
+    for (lineno, raw) in contents.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let loc = |m: String| err(format!("line {}: {m}", lineno + 1));
+
+        match tokens.as_slice() {
+            ["add", "table", family, name] => {
+                let fam = parse_family(family)?;
+                if find(&mut tables, fam, name).is_none() {
+                    tables.push(PendingTable {
+                        name: (*name).to_string(),
+                        family: fam,
+                        chains: Vec::new(),
+                        rules: Vec::new(),
+                    });
+                }
+            }
+            ["add", "chain", family, table, name, rest @ ..] => {
+                let fam = parse_family(family)?;
+                let (mut hook, mut priority, mut chain_type, mut policy) = (None, None, None, None);
+                let mut i = 0;
+                while i < rest.len() {
+                    let key = rest[i];
+                    let val = rest
+                        .get(i + 1)
+                        .ok_or_else(|| loc(format!("chain option `{key}` requires a value")))?;
+                    match key {
+                        "hook" => hook = Some(parse_hook(val)?),
+                        "priority" => priority = Some(parse_priority(val)?),
+                        "type" => chain_type = Some(parse_chain_type(val)?),
+                        "policy" => policy = Some(parse_policy(val)?),
+                        other => return Err(loc(format!("unknown chain option `{other}`"))),
+                    }
+                    i += 2;
+                }
+                let t = find(&mut tables, fam, table).ok_or_else(|| {
+                    loc(format!(
+                        "chain `{name}` references table `{table}` (family {family}) not declared earlier in the file"
+                    ))
+                })?;
+                t.chains.push(PendingChain {
+                    name: (*name).to_string(),
+                    hook,
+                    priority,
+                    chain_type,
+                    policy,
+                });
+            }
+            ["add", "rule", family, table, chain, spec @ ..] => {
+                let fam = parse_family(family)?;
+                // Pre-build the typed rule body so parse errors surface
+                // here rather than inside the infallible builder closure.
+                let rule = build_rule(fam, table, chain, spec)?;
+                let t = find(&mut tables, fam, table).ok_or_else(|| {
+                    loc(format!(
+                        "rule references table `{table}` (family {family}) not declared earlier in the file"
+                    ))
+                })?;
+                t.rules.push(((*chain).to_string(), rule));
+            }
+            ["delete", ..] | ["flush", ..] => {
+                return Err(loc(format!(
+                    "`{}` is not allowed in a desired-state ruleset — removal is inferred from the diff. Use `nft apply <file>` for imperative ops.",
+                    tokens[0]
+                )));
+            }
+            _ => {
+                return Err(loc(format!(
+                    "unrecognized line `{}` (expected `add table|chain|rule …`)",
+                    tokens.join(" ")
+                )));
+            }
+        }
+    }
+
+    if tables.is_empty() {
+        return Err(err("file declares no tables".into()));
+    }
+
+    // Second pass: assemble the nested config via the builder closures.
+    // All fallible parsing already happened above, so these are infallible.
+    let mut cfg = NftablesConfig::new();
+    for pt in tables {
+        let PendingTable {
+            name,
+            family,
+            chains,
+            rules,
+        } = pt;
+        cfg = cfg.table(name, family, move |mut tb| {
+            for pc in chains {
+                let PendingChain {
+                    name,
+                    hook,
+                    priority,
+                    chain_type,
+                    policy,
+                } = pc;
+                tb = tb.chain(name, move |mut cb| {
+                    if let Some(h) = hook {
+                        cb = cb.hook(h);
+                    }
+                    if let Some(p) = priority {
+                        cb = cb.priority(p);
+                    }
+                    if let Some(ct) = chain_type {
+                        cb = cb.chain_type(ct);
+                    }
+                    if let Some(pol) = policy {
+                        cb = cb.policy(pol);
+                    }
+                    cb
+                });
+            }
+            for (chain, rule) in rules {
+                // The pre-built rule already carries this table/chain/
+                // family; return it in place of the fresh builder rule.
+                tb = tb.rule(chain, move |_fresh| rule);
+            }
+            tb
+        });
+    }
+    Ok(cfg)
+}
+
+/// Parse a chain `type` token (`filter`/`nat`/`route`).
+fn parse_chain_type(s: &str) -> Result<ChainType> {
+    match s {
+        "filter" => Ok(ChainType::Filter),
+        "nat" => Ok(ChainType::Nat),
+        "route" => Ok(ChainType::Route),
+        other => Err(nlink::netlink::Error::InvalidAttribute(format!(
+            "unknown chain type `{other}` — expected one of `filter`, `nat`, `route`"
+        ))),
+    }
+}
+
+/// Parse a chain `policy` token (`accept`/`drop`).
+fn parse_policy(s: &str) -> Result<Policy> {
+    match s {
+        "drop" => Ok(Policy::Drop),
+        "accept" => Ok(Policy::Accept),
+        other => Err(nlink::netlink::Error::InvalidAttribute(format!(
+            "unknown policy `{other}` — expected `drop` or `accept`"
+        ))),
+    }
 }
 
 /// Translate one tokenized operation line into a Transaction step.
@@ -1069,5 +1331,63 @@ mod tests {
         );
         assert_eq!(parse_cidr("not-an-ip"), None);
         assert_eq!(parse_cidr("10.0.0.0/bad"), None);
+    }
+
+    #[test]
+    fn parse_ruleset_folds_flat_lines_into_tables() {
+        let cfg = parse_ruleset(
+            "
+            # a desired-state ruleset
+            add table inet filter
+            add chain inet filter input hook input priority 0 policy drop
+            add rule inet filter input tcp dport 22 accept
+            add rule inet filter input tcp dport 443 accept
+            add table ip nat
+            add chain ip nat post hook postrouting priority 100 type nat
+            ",
+        )
+        .expect("valid ruleset");
+
+        assert_eq!(cfg.tables().len(), 2);
+        let filter = &cfg.tables()[0];
+        assert_eq!(filter.name(), "filter");
+        assert_eq!(filter.chains().len(), 1);
+        assert_eq!(filter.chains()[0].name(), "input");
+        assert_eq!(filter.rules().len(), 2);
+        let nat = &cfg.tables()[1];
+        assert_eq!(nat.name(), "nat");
+        assert_eq!(nat.chains().len(), 1);
+    }
+
+    #[test]
+    fn parse_ruleset_rejects_delete_and_flush() {
+        let e = parse_ruleset("add table inet filter\ndelete table inet filter\n").unwrap_err();
+        assert!(e.to_string().contains("desired-state"), "{e}");
+        let e = parse_ruleset("flush ruleset\n").unwrap_err();
+        assert!(e.to_string().contains("desired-state"), "{e}");
+    }
+
+    #[test]
+    fn parse_ruleset_rejects_chain_for_undeclared_table() {
+        let e = parse_ruleset("add chain inet filter input\n").unwrap_err();
+        assert!(e.to_string().contains("not declared"), "{e}");
+    }
+
+    #[test]
+    fn parse_ruleset_rejects_empty_and_unknown() {
+        assert!(parse_ruleset("# only comments\n").is_err());
+        let e = parse_ruleset("frobnicate the widget\n").unwrap_err();
+        assert!(e.to_string().contains("unrecognized"), "{e}");
+    }
+
+    #[test]
+    fn parse_ruleset_propagates_strict_rule_errors() {
+        // A malformed rule spec must fail the whole parse (strict),
+        // never silently drop the offending token.
+        let e = parse_ruleset(
+            "add table inet filter\nadd rule inet filter input tcp dport notaport accept\n",
+        )
+        .unwrap_err();
+        assert!(!e.to_string().is_empty());
     }
 }
