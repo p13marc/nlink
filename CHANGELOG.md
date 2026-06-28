@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **TC action: `ife` (Inter-FE) typed config (#118).** `IfeAction`
+  tunnels skb metadata (mark / priority / tcindex) between forwarding
+  elements: `encode` writes selected metadata into an IFE Ethernet
+  header (with optional `dst`/`src` MAC + `type` ethertype overrides),
+  `decode` reads it back. Each metadata item is `allow`ed (carry the
+  skb's value) or `use`d with an explicit override. New `action::ife`
+  wire module (`tc_ife` = `tc_gen` + flags; metadata rides in the nested
+  `TCA_IFE_METALST` list). 18 action parsers. Second of #118's actions.
+
 - **TC action: `ctinfo` typed config (#118).** `CtinfoAction` restores
   conntrack metadata into the packet — a DSCP value (under a state mask)
   into the IP DS field via `dscp <mask>[/<statemask>]`, and/or the
