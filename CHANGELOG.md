@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`nlink-config` bin: `apply --reconcile` + higher-fidelity capture
+  (#22).** `apply --reconcile` drives the library's `apply_reconcile`
+  (recomputes the diff each attempt, bounded retry on transient kernel
+  contention); mutually exclusive with `--dry-run`. `capture` now decodes
+  qdisc options (htb/tbf/netem/fq_codel parameters) into the
+  `options` map instead of leaving it empty, and unmodelled route/rule
+  types are warned about and preserved verbatim rather than silently
+  dropped to `None`. The duplicated `OutputFormat` enum (capture +
+  example) is unified in `schema.rs`.
+
 - **`nft` bin: idempotent deletes + richer `list rules` (#21).** `nft
   delete table/chain/rule/set` now uses the `*_if_exists` library
   variants, so deleting a missing object is a clean no-op ("… did not

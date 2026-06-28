@@ -51,6 +51,12 @@ struct ApplyArgs {
     /// Compute and print the changes without applying them
     #[arg(long)]
     dry_run: bool,
+
+    /// Reconcile with bounded retry on transient kernel contention
+    /// (recomputes the diff each attempt). Mutually exclusive with
+    /// --dry-run.
+    #[arg(long, conflicts_with = "dry_run")]
+    reconcile: bool,
 }
 
 #[tokio::main]
@@ -91,6 +97,18 @@ async fn diff_cmd(args: FileArgs) -> Result<()> {
 async fn apply_cmd(args: ApplyArgs) -> Result<()> {
     let cfg = load_config(&args.file)?;
     let conn = Connection::<Route>::new()?;
+
+    if args.reconcile {
+        use nlink::netlink::nftables::config::ReconcileOptions;
+        let report = cfg
+            .apply_reconcile(&conn, ReconcileOptions::default())
+            .await?;
+        println!(
+            "Reconciled {} change(s) in {} attempt(s).",
+            report.change_count, report.attempts
+        );
+        return Ok(());
+    }
 
     let result = cfg
         .apply_with_options(&conn, ApplyOptions::default().with_dry_run(args.dry_run))
