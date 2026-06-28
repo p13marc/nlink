@@ -75,6 +75,17 @@ pub trait FilterConfig: Send + Sync {
     fn chain(&self) -> Option<u32> {
         None
     }
+
+    /// Set the chain index (tc(8) `chain N`).
+    ///
+    /// Default no-op so external `FilterConfig` impls stay
+    /// source-compatible; every config nlink ships overrides this to
+    /// store the value, so generic callers (e.g. the `tc` binary's
+    /// `--chain` flag) can set the chain without naming the concrete
+    /// type.
+    fn set_chain(&mut self, chain: u32) {
+        let _ = chain;
+    }
 }
 
 // ============================================================================
@@ -493,6 +504,10 @@ impl FilterConfig for U32Filter {
 
     fn chain(&self) -> Option<u32> {
         self.chain
+    }
+
+    fn set_chain(&mut self, chain: u32) {
+        self.chain = Some(chain);
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -1434,6 +1449,10 @@ impl FilterConfig for FlowerFilter {
         self.chain
     }
 
+    fn set_chain(&mut self, chain: u32) {
+        self.chain = Some(chain);
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         // Add classid
         if let Some(classid) = self.classid {
@@ -1739,6 +1758,10 @@ impl FilterConfig for MatchallFilter {
         self.chain
     }
 
+    fn set_chain(&mut self, chain: u32) {
+        self.chain = Some(chain);
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         if let Some(classid) = self.classid {
             builder.append_attr_u32(matchall::TCA_MATCHALL_CLASSID, classid);
@@ -1927,6 +1950,10 @@ impl FilterConfig for FwFilter {
 
     fn chain(&self) -> Option<u32> {
         self.chain
+    }
+
+    fn set_chain(&mut self, chain: u32) {
+        self.chain = Some(chain);
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -2208,6 +2235,10 @@ impl FilterConfig for BpfFilter {
 
     fn chain(&self) -> Option<u32> {
         self.chain
+    }
+
+    fn set_chain(&mut self, chain: u32) {
+        self.chain = Some(chain);
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -2544,6 +2575,10 @@ impl FilterConfig for BasicFilter {
         self.chain
     }
 
+    fn set_chain(&mut self, chain: u32) {
+        self.chain = Some(chain);
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         if let Some(classid) = self.classid {
             builder.append_attr_u32(basic::TCA_BASIC_CLASSID, classid);
@@ -2760,6 +2795,10 @@ impl FilterConfig for CgroupFilter {
         self.chain
     }
 
+    fn set_chain(&mut self, chain: u32) {
+        self.chain = Some(chain);
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::filter::cgroup;
 
@@ -2973,6 +3012,10 @@ impl FilterConfig for RouteFilter {
 
     fn chain(&self) -> Option<u32> {
         self.chain
+    }
+
+    fn set_chain(&mut self, chain: u32) {
+        self.chain = Some(chain);
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -3402,6 +3445,10 @@ impl FilterConfig for FlowFilter {
 
     fn chain(&self) -> Option<u32> {
         self.chain
+    }
+
+    fn set_chain(&mut self, chain: u32) {
+        self.chain = Some(chain);
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -3987,6 +4034,26 @@ pub enum BpfDirection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_chain_through_trait_object() {
+        // The `tc --chain` flag drives every filter kind generically
+        // through `FilterConfig::set_chain`; verify the value lands in
+        // the concrete config's `chain()` getter for a representative
+        // sample of kinds.
+        let mut u32f = U32Filter::new().build();
+        assert_eq!(FilterConfig::chain(&u32f), None);
+        FilterConfig::set_chain(&mut u32f, 7);
+        assert_eq!(FilterConfig::chain(&u32f), Some(7));
+
+        let mut flower = FlowerFilter::new().build();
+        FilterConfig::set_chain(&mut flower, 3);
+        assert_eq!(FilterConfig::chain(&flower), Some(3));
+
+        let mut matchall = MatchallFilter::new().build();
+        FilterConfig::set_chain(&mut matchall, 0);
+        assert_eq!(FilterConfig::chain(&matchall), Some(0));
+    }
 
     #[test]
     fn test_u32_filter_builder() {

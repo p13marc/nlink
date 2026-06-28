@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`tc` bin: `filter` parity — show across all parents, `--chain`,
+  partial delete (#19).** `tc filter show dev X` now lists filters
+  across *every* parent (root, ingress, clsact, …) instead of silently
+  defaulting to `root` only — previously ingress/clsact filters
+  vanished from the listing; pass `--parent <handle>` to narrow.
+  `filter add/replace/change … --chain N` sets the filter chain index
+  (tc(8) `chain N`), threaded generically through every kind via a new
+  defaulted `FilterConfig::set_chain` trait method (additive; all nine
+  shipped configs override it). `filter del` regained partial form:
+  supplying both `--protocol` and `--prio` deletes one filter, supplying
+  neither flushes every filter on the parent (`tc filter del dev X
+  parent 1:`); a half-specified tuple is rejected rather than guessed.
+
 - **`nlink-config` bin: `apply --reconcile` + higher-fidelity capture
   (#22).** `apply --reconcile` drives the library's `apply_reconcile`
   (recomputes the diff each attempt, bounded retry on transient kernel
