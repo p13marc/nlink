@@ -993,6 +993,29 @@ pub struct ModuleEeprom {
 }
 
 // =============================================================================
+// Receive Side Scaling (RSS)
+// =============================================================================
+
+/// Receive Side Scaling configuration (`ethtool -x`).
+#[derive(Debug, Clone, Default)]
+pub struct Rss {
+    /// Interface name.
+    pub ifname: Option<String>,
+    /// Interface index.
+    pub ifindex: Option<u32>,
+    /// RSS context id (`None` for the default context).
+    pub context: Option<u32>,
+    /// Hash-function bitmask, raw (`ETHTOOL_A_RSS_HFUNC`). Exposed raw —
+    /// the bit-to-name mapping lives in the device's
+    /// `ETH_SS_RSS_HASH_FUNCS` string set.
+    pub hfunc: Option<u32>,
+    /// The RSS indirection table: each entry is a receive-queue index.
+    pub indirection_table: Vec<u32>,
+    /// The RSS hash key bytes.
+    pub hash_key: Vec<u8>,
+}
+
+// =============================================================================
 // String Sets
 // =============================================================================
 

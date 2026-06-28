@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **ethtool: RSS read (#119) — closes #119.**
+  `Connection::<Ethtool>::get_rss` reads Receive Side Scaling settings
+  (`ETHTOOL_MSG_RSS_GET`) for the default or a given context: the
+  indirection table (`ETHTOOL_A_RSS_INDIR`, an array of receive-queue
+  indices), the hash key (`ETHTOOL_A_RSS_HKEY`), and the raw hash-function
+  bitmask (`ETHTOOL_A_RSS_HFUNC`). New `EthtoolRssAttr` enum + `Rss` type.
+  Surfaced as `nlink-ethtool -x eth0`. With FEC-set + module-EEPROM, all
+  three #119 ethtool gaps are landed.
+
 - **ethtool: module-EEPROM read (#119).**
   `Connection::<Ethtool>::get_module_eeprom` reads raw SFP/QSFP module
   EEPROM bytes (`ETHTOOL_MSG_MODULE_EEPROM_GET`) via a

@@ -714,6 +714,26 @@ pub enum EthtoolModuleEepromAttr {
     Data = 7,
 }
 
+/// Attributes for Receive Side Scaling (`ETHTOOL_MSG_RSS_GET`).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EthtoolRssAttr {
+    Unspec = 0,
+    /// Request header (nested).
+    Header = 1,
+    /// RSS context id (u32).
+    Context = 2,
+    /// Hash function bitmask (u32).
+    Hfunc = 3,
+    /// Indirection table (binary — array of u32).
+    Indir = 4,
+    /// Hash key (binary).
+    Hkey = 5,
+    /// Input transform (u32).
+    InputXfrm = 6,
+}
+
 // =============================================================================
 // Statistics Attributes
 // =============================================================================

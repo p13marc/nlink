@@ -8,7 +8,8 @@ use super::{
     EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolEeeAttr, EthtoolFeaturesAttr,
     EthtoolFecAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr,
     EthtoolLinkstateAttr, EthtoolModuleEepromAttr, EthtoolPauseAttr, EthtoolRingsAttr,
-    EthtoolStatsGrpAttr, EthtoolWolAttr, WOL_MODE_NAMES, bitset::EthtoolBitset, stats_group,
+    EthtoolRssAttr, EthtoolStatsGrpAttr, EthtoolWolAttr, WOL_MODE_NAMES, bitset::EthtoolBitset,
+    stats_group,
     types::*,
 };
 use crate::macros::{GenlFamily, __rt::resolve_genl_family_with_groups};
@@ -1516,6 +1517,67 @@ impl Connection<Ethtool> {
     }
 
     // =========================================================================
+    // Receive Side Scaling (ethtool -x)
+    // =========================================================================
+
+    /// Get Receive Side Scaling settings (`ethtool -x`).
+    ///
+    /// Accepts either an interface name or index via [`InterfaceRef`].
+    /// `context` selects an RSS context (`None` = the default context).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rss"))]
+    pub async fn get_rss(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        context: Option<u32>,
+    ) -> Result<Rss> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_rss_by_name(&ifname, context).await
+    }
+
+    /// Get Receive Side Scaling settings by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rss_by_name"))]
+    pub async fn get_rss_by_name(&self, ifname: &str, context: Option<u32>) -> Result<Rss> {
+        let response = self
+            .ethtool_get_with(EthtoolCmd::RssGet, ifname, |builder| {
+                if let Some(ctx) = context {
+                    builder.append_attr_u32(EthtoolRssAttr::Context as u16, ctx);
+                }
+            })
+            .await?;
+
+        let mut rss = Rss::default();
+        if response.len() < GENL_HDRLEN {
+            return Ok(rss);
+        }
+        for (attr_type, payload) in AttrIter::new(&response[GENL_HDRLEN..]) {
+            match attr_type {
+                t if t == EthtoolRssAttr::Header as u16 => {
+                    self.parse_header(payload, &mut rss.ifname, &mut rss.ifindex)?;
+                }
+                t if t == EthtoolRssAttr::Context as u16 && payload.len() >= 4 => {
+                    rss.context = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                }
+                t if t == EthtoolRssAttr::Hfunc as u16 && payload.len() >= 4 => {
+                    rss.hfunc = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                }
+                t if t == EthtoolRssAttr::Indir as u16 => {
+                    // Binary array of u32 (native endian); accept a
+                    // trailing partial word defensively (read whole words).
+                    rss.indirection_table = payload
+                        .chunks_exact(4)
+                        .map(|c| u32::from_ne_bytes(c.try_into().unwrap()))
+                        .collect();
+                }
+                t if t == EthtoolRssAttr::Hkey as u16 => {
+                    rss.hash_key = payload.to_vec();
+                }
+                _ => {}
+            }
+        }
+        Ok(rss)
+    }
+
+    // =========================================================================
     // Standardized statistics (ethtool -S --groups)
     // =========================================================================
 
@@ -1956,6 +2018,43 @@ mod fec_builder_tests {
         let r2 = ModuleEepromRequest::new(0, 128).page(1).i2c_address(0x51);
         assert_eq!(r2.page, 1);
         assert_eq!(r2.i2c_address, 0x51);
+    }
+
+    #[test]
+    fn rss_parse_collects_indir_table_and_key() {
+        use crate::netlink::builder::MessageBuilder;
+        let mut b = MessageBuilder::new(0, 0);
+        // header skipped; emit hfunc, indir (3 u32 queues), hkey (4 bytes)
+        b.append_attr_u32(EthtoolRssAttr::Hfunc as u16, 0x1);
+        let mut indir = Vec::new();
+        for q in [0u32, 1, 2] {
+            indir.extend_from_slice(&q.to_ne_bytes());
+        }
+        b.append_attr(EthtoolRssAttr::Indir as u16, &indir);
+        b.append_attr(EthtoolRssAttr::Hkey as u16, &[0xde, 0xad, 0xbe, 0xef]);
+
+        // Parse the attribute region (skip the 16-byte nl header the
+        // builder prepends; no GENL header in this synthetic buffer).
+        let conn_attrs = &b.as_bytes()[16..];
+        let mut rss = Rss::default();
+        for (attr_type, payload) in AttrIter::new(conn_attrs) {
+            match attr_type {
+                t if t == EthtoolRssAttr::Hfunc as u16 && payload.len() >= 4 => {
+                    rss.hfunc = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                }
+                t if t == EthtoolRssAttr::Indir as u16 => {
+                    rss.indirection_table = payload
+                        .chunks_exact(4)
+                        .map(|c| u32::from_ne_bytes(c.try_into().unwrap()))
+                        .collect();
+                }
+                t if t == EthtoolRssAttr::Hkey as u16 => rss.hash_key = payload.to_vec(),
+                _ => {}
+            }
+        }
+        assert_eq!(rss.hfunc, Some(1));
+        assert_eq!(rss.indirection_table, vec![0, 1, 2]);
+        assert_eq!(rss.hash_key, vec![0xde, 0xad, 0xbe, 0xef]);
     }
 
     #[test]

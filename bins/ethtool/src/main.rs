@@ -107,6 +107,15 @@ enum Commands {
         #[arg(long)]
         auto: Option<bool>,
     },
+    /// Show Receive Side Scaling settings
+    #[command(short_flag = 'x')]
+    Rss {
+        /// Device name
+        device: String,
+        /// RSS context id (default context if omitted)
+        #[arg(long)]
+        context: Option<u32>,
+    },
     /// Dump SFP/QSFP module EEPROM bytes
     #[command(short_flag = 'm')]
     Module {
@@ -274,6 +283,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             modes,
             auto,
         } => set_fec(&device, &modes, auto).await?,
+        Commands::Rss { device, context } => show_rss(&device, context, json).await?,
         Commands::Module {
             device,
             offset,
@@ -894,6 +904,39 @@ async fn set_fec(device: &str, modes: &[String], auto: Option<bool>) -> nlink::R
     })
     .await?;
     eprintln!("FEC settings updated for {}", device);
+    Ok(())
+}
+
+async fn show_rss(device: &str, context: Option<u32>, json: bool) -> nlink::Result<()> {
+    let conn = Connection::<Ethtool>::new_async().await?;
+    let rss = conn.get_rss(device, context).await?;
+
+    if json {
+        print_json(&serde_json::json!({
+            "device": device,
+            "context": rss.context,
+            "hfunc": rss.hfunc,
+            "indirection_table": rss.indirection_table,
+            "hash_key": rss.hash_key,
+        }));
+        return Ok(());
+    }
+
+    println!("RSS settings for {}:", device);
+    if let Some(h) = rss.hfunc {
+        println!("\tRSS hash function (raw bitmask): {:#x}", h);
+    }
+    if !rss.indirection_table.is_empty() {
+        println!("\tRSS indirection table ({} entries):", rss.indirection_table.len());
+        for (i, chunk) in rss.indirection_table.chunks(8).enumerate() {
+            let cells: Vec<String> = chunk.iter().map(|q| format!("{q:5}")).collect();
+            println!("\t{:5}: {}", i * 8, cells.join(" "));
+        }
+    }
+    if !rss.hash_key.is_empty() {
+        let hex: Vec<String> = rss.hash_key.iter().map(|b| format!("{b:02x}")).collect();
+        println!("\tRSS hash key: {}", hex.join(":"));
+    }
     Ok(())
 }
 
