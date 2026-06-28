@@ -2379,6 +2379,183 @@ impl ActionConfig for ConnmarkAction {
 }
 
 // ============================================================================
+// CtinfoAction
+// ============================================================================
+
+/// ctinfo action configuration.
+///
+/// `act_ctinfo` copies metadata held in conntrack back into the packet:
+/// it can restore a **DSCP** value (under a state mask) into the IP
+/// DS field, and/or restore the connection mark (**cpmark**) into
+/// `skb->mark`. Typically paired with an earlier `ct` action that stored
+/// the values.
+///
+/// ```ignore
+/// use nlink::netlink::action::CtinfoAction;
+///
+/// // Restore DSCP (top 6 bits) when the conntrack DSCP-set state bit is on,
+/// // and restore the connection mark.
+/// let a = CtinfoAction::new()
+///     .dscp(0xfc, 0x01)
+///     .cpmark(0xffffffff)
+///     .zone(0)
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct CtinfoAction {
+    dscp_mask: Option<u32>,
+    dscp_statemask: Option<u32>,
+    cpmark_mask: Option<u32>,
+    zone: Option<u16>,
+    action: i32,
+}
+
+impl CtinfoAction {
+    /// Create a new ctinfo action (default verdict: pipe).
+    pub fn new() -> Self {
+        Self {
+            action: action::TC_ACT_PIPE,
+            ..Default::default()
+        }
+    }
+
+    /// Restore DSCP from conntrack: `mask` selects the DS-field bits and
+    /// `statemask` gates the restore on conntrack state bits.
+    pub fn dscp(mut self, mask: u32, statemask: u32) -> Self {
+        self.dscp_mask = Some(mask);
+        self.dscp_statemask = Some(statemask);
+        self
+    }
+
+    /// Restore the connection mark into `skb->mark` under `mask`.
+    pub fn cpmark(mut self, mask: u32) -> Self {
+        self.cpmark_mask = Some(mask);
+        self
+    }
+
+    /// Set the conntrack zone.
+    pub fn zone(mut self, zone: u16) -> Self {
+        self.zone = Some(zone);
+        self
+    }
+
+    /// Set the action verdict.
+    pub fn action(mut self, action: i32) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Build the action configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a `tc(8)`-style `ctinfo` token slice into a typed action.
+    ///
+    /// # Recognised tokens
+    ///
+    /// - `dscp <mask>[/<statemask>]` — restore DSCP. `mask` and
+    ///   `statemask` are hex (`0x..`) or decimal u32; `statemask`
+    ///   defaults to 0 when omitted.
+    /// - `cpmark [<mask>]` — restore the connection mark. A bare
+    ///   `cpmark` uses the full `0xffffffff` mask.
+    /// - `zone <0–65535>` — conntrack zone.
+    ///
+    /// Strict: unknown tokens, missing values, and unparseable values
+    /// all error. At least one of `dscp`/`cpmark` is required.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut a = Self::new();
+        let mut any = false;
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            match key {
+                "dscp" => {
+                    let s = action_need_value(params, i, "ctinfo", "dscp")?;
+                    let (mask_s, state_s) = match s.split_once('/') {
+                        Some((m, st)) => (m, Some(st)),
+                        None => (s, None),
+                    };
+                    let mask = ctinfo_parse_u32("dscp mask", mask_s)?;
+                    let statemask = match state_s {
+                        Some(st) => ctinfo_parse_u32("dscp statemask", st)?,
+                        None => 0,
+                    };
+                    a = a.dscp(mask, statemask);
+                    any = true;
+                    i += 2;
+                }
+                "cpmark" => {
+                    // Optional mask: consume the next token only if it
+                    // parses as a number; otherwise default to all-ones.
+                    let next_is_mask = params
+                        .get(i + 1)
+                        .is_some_and(|s| ctinfo_parse_u32("cpmark mask", s).is_ok());
+                    if next_is_mask {
+                        let mask = ctinfo_parse_u32("cpmark mask", params[i + 1])?;
+                        a = a.cpmark(mask);
+                        i += 2;
+                    } else {
+                        a = a.cpmark(0xffff_ffff);
+                        i += 1;
+                    }
+                    any = true;
+                }
+                "zone" => {
+                    let s = action_need_value(params, i, "ctinfo", "zone")?;
+                    let z = ctinfo_parse_u32("zone", s)?;
+                    if z > u16::MAX as u32 {
+                        return Err(Error::InvalidMessage(format!(
+                            "ctinfo: zone `{z}` out of range (0–65535)"
+                        )));
+                    }
+                    a = a.zone(z as u16);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "ctinfo: unknown token `{other}` (recognised: dscp <mask>[/<statemask>], cpmark [<mask>], zone <0–65535>)"
+                    )));
+                }
+            }
+        }
+        if !any {
+            return Err(Error::InvalidMessage(
+                "ctinfo: at least one of `dscp`/`cpmark` is required".to_string(),
+            ));
+        }
+        Ok(a)
+    }
+}
+
+impl ActionConfig for CtinfoAction {
+    fn kind(&self) -> &'static str {
+        "ctinfo"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::action::ctinfo;
+
+        let parms = ctinfo::TcCtinfo::new(self.action);
+        builder.append_attr(ctinfo::TCA_CTINFO_ACT, parms.as_bytes());
+
+        if let Some(zone) = self.zone {
+            builder.append_attr(ctinfo::TCA_CTINFO_ZONE, &zone.to_ne_bytes());
+        }
+        if let Some(mask) = self.dscp_mask {
+            builder.append_attr_u32(ctinfo::TCA_CTINFO_PARMS_DSCP_MASK, mask);
+        }
+        if let Some(statemask) = self.dscp_statemask {
+            builder.append_attr_u32(ctinfo::TCA_CTINFO_PARMS_DSCP_STATEMASK, statemask);
+        }
+        if let Some(mask) = self.cpmark_mask {
+            builder.append_attr_u32(ctinfo::TCA_CTINFO_PARMS_CPMARK_MASK, mask);
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
 // CsumAction
 // ============================================================================
 
@@ -4006,6 +4183,21 @@ fn action_parse_u32(kind: &str, key: &str, s: &str) -> Result<u32> {
     })
 }
 
+/// Parse a `0x`-prefixed hex or decimal u32 — used by `ctinfo` mask
+/// tokens, which `tc(8)` conventionally writes in hex (`0xfc`).
+fn ctinfo_parse_u32(what: &str, s: &str) -> Result<u32> {
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16)
+    } else {
+        s.parse::<u32>()
+    };
+    parsed.map_err(|_| {
+        Error::InvalidMessage(format!(
+            "ctinfo: invalid {what} `{s}` (expected 0x-hex or decimal u32)"
+        ))
+    })
+}
+
 /// Parse an ethertype: a common name (`ipv4`, `ipv6`, `mpls_uc`,
 /// `mpls_mc`), a `0x`-prefixed hex value, or a decimal u16.
 fn parse_ethertype(kind: &str, s: &str) -> Result<u16> {
@@ -4872,6 +5064,64 @@ mod tests {
     fn connmark_parse_params_unknown_token_errors() {
         let err = ConnmarkAction::parse_params(&["nonsense"]).unwrap_err();
         assert!(err.to_string().contains("connmark: unknown token"));
+    }
+
+    // ---- CtinfoAction ----
+
+    #[test]
+    fn ctinfo_parse_params_dscp_with_statemask() {
+        let a = CtinfoAction::parse_params(&["dscp", "0xfc/0x01", "zone", "5"]).unwrap();
+        assert_eq!(ActionConfig::kind(&a), "ctinfo");
+        assert_eq!(a.dscp_mask, Some(0xfc));
+        assert_eq!(a.dscp_statemask, Some(0x01));
+        assert_eq!(a.zone, Some(5));
+        // statemask defaults to 0 when omitted
+        let a2 = CtinfoAction::parse_params(&["dscp", "0xfc"]).unwrap();
+        assert_eq!(a2.dscp_mask, Some(0xfc));
+        assert_eq!(a2.dscp_statemask, Some(0));
+    }
+
+    #[test]
+    fn ctinfo_parse_params_cpmark_optional_mask() {
+        // bare cpmark -> default all-ones mask, and must NOT swallow the
+        // following keyword.
+        let a = CtinfoAction::parse_params(&["cpmark", "zone", "1"]).unwrap();
+        assert_eq!(a.cpmark_mask, Some(0xffff_ffff));
+        assert_eq!(a.zone, Some(1));
+        // explicit mask consumed
+        let a2 = CtinfoAction::parse_params(&["cpmark", "0x00ff"]).unwrap();
+        assert_eq!(a2.cpmark_mask, Some(0x00ff));
+    }
+
+    #[test]
+    fn ctinfo_parse_params_requires_dscp_or_cpmark() {
+        let err = CtinfoAction::parse_params(&["zone", "1"]).unwrap_err();
+        assert!(
+            err.to_string().contains("at least one of `dscp`/`cpmark`"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn ctinfo_parse_params_strict_errors() {
+        assert!(
+            CtinfoAction::parse_params(&["nonsense"])
+                .unwrap_err()
+                .to_string()
+                .contains("ctinfo: unknown token")
+        );
+        assert!(
+            CtinfoAction::parse_params(&["dscp", "nothex"])
+                .unwrap_err()
+                .to_string()
+                .contains("invalid dscp mask")
+        );
+        assert!(
+            CtinfoAction::parse_params(&["zone", "70000"])
+                .unwrap_err()
+                .to_string()
+                .contains("out of range")
+        );
     }
 
     // ==========================================================

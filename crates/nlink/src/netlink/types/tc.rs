@@ -2905,6 +2905,50 @@ pub mod action {
         }
     }
 
+    /// ctinfo action attributes and structures.
+    ///
+    /// `act_ctinfo` restores a DSCP value and/or the connection mark from
+    /// conntrack metadata into the packet. Its parameter struct is just
+    /// the `tc_gen` header; the DSCP/cpmark masks and zone ride as
+    /// separate attributes.
+    pub mod ctinfo {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        pub const TCA_CTINFO_UNSPEC: u16 = 0;
+        pub const TCA_CTINFO_PAD: u16 = 1;
+        pub const TCA_CTINFO_TM: u16 = 2;
+        pub const TCA_CTINFO_ACT: u16 = 3;
+        pub const TCA_CTINFO_ZONE: u16 = 4;
+        pub const TCA_CTINFO_PARMS_DSCP_MASK: u16 = 5;
+        pub const TCA_CTINFO_PARMS_DSCP_STATEMASK: u16 = 6;
+        pub const TCA_CTINFO_PARMS_CPMARK_MASK: u16 = 7;
+
+        /// ctinfo action parameters (`struct tc_ctinfo` — `tc_gen` only).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcCtinfo {
+            /// Common action fields (tc_gen).
+            pub index: u32,
+            pub capab: u32,
+            pub action: i32,
+            pub refcnt: i32,
+            pub bindcnt: i32,
+        }
+
+        impl TcCtinfo {
+            pub fn new(action: i32) -> Self {
+                Self {
+                    action,
+                    ..Default::default()
+                }
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
     /// Csum (checksum) action attributes and structures.
     pub mod csum {
         use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};

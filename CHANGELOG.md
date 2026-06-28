@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **TC action: `ctinfo` typed config (#118).** `CtinfoAction` restores
+  conntrack metadata into the packet — a DSCP value (under a state mask)
+  into the IP DS field via `dscp <mask>[/<statemask>]`, and/or the
+  connection mark into `skb->mark` via `cpmark [<mask>]` (bare `cpmark`
+  uses the full mask), scoped by `zone`. Masks parse as `0x`-hex or
+  decimal; at least one of `dscp`/`cpmark` is required. New
+  `action::ctinfo` wire module (`tc_ctinfo` = `tc_gen` header; params
+  ride as separate attrs). 17 action parsers. First of #118's four
+  actions.
+
 - **TC filter: `rsvp` / `rsvp6` classifier typed config (#117).**
   `RsvpFilter` matches flows by `session` (destination) and `sender`
   (source) address, narrowed by `ipproto` and `tunnelid`, with
