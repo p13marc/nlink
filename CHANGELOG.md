@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **TC qdiscs: `choke` and `pfifo_fast` typed configs (#116).** Two
+  more qdisc kinds reach typed-first parity (33 qdisc parsers total).
+  `ChokeConfig` is a RED-family AQM that shares `struct tc_red_qopt`
+  with `RedConfig` and adds CHOKe differential dropping; its
+  `parse_params` mirrors RED (`limit`/`min`/`max`/`probability`/`ecn`/
+  `harddrop`, with `avpkt`/`burst`/`bandwidth` reported as not-modelled
+  rather than silently dropped). `PfifoFastConfig` is a unit config —
+  `pfifo_fast`'s bands and priomap are hardcoded kernel-side, so it
+  accepts no options; adding it explicitly restores the kernel-default
+  qdisc after a root replacement. Both wired into the `tc` bin
+  dispatch + recognised-kinds list. First of the #115 coverage epic.
+
 - **`nft` bin: declarative `reconcile`/`diff` over the `NftablesConfig`
   engine (#109).** New `nft reconcile <file>` reads a *desired-state*
   ruleset (the same `add table`/`add chain`/`add rule` grammar as

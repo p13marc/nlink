@@ -7,11 +7,12 @@ use nlink::{
         Connection, Result, Route,
         messages::TcMessage,
         tc::{
-            BfifoConfig, CakeConfig, CbsConfig, ClsactConfig, CodelConfig, DrrConfig, DsmarkConfig,
-            EtfConfig, EtsConfig, FqCodelConfig, FqConfig, FqPieConfig, HfscConfig, HhfConfig,
-            HtbQdiscConfig, IngressConfig, MqConfig, MqprioConfig, MultiqConfig, NetemConfig,
-            PfifoConfig, PieConfig, PlugConfig, PrioConfig, QdiscConfig, QfqConfig, RedConfig,
-            SfbConfig, SfqConfig, SkbprioConfig, TaprioConfig, TbfConfig,
+            BfifoConfig, CakeConfig, CbsConfig, ChokeConfig, ClsactConfig, CodelConfig, DrrConfig,
+            DsmarkConfig, EtfConfig, EtsConfig, FqCodelConfig, FqConfig, FqPieConfig, HfscConfig,
+            HhfConfig, HtbQdiscConfig, IngressConfig, MqConfig, MqprioConfig, MultiqConfig,
+            NetemConfig, PfifoConfig, PfifoFastConfig, PieConfig, PlugConfig, PrioConfig,
+            QdiscConfig, QfqConfig, RedConfig, SfbConfig, SfqConfig, SkbprioConfig, TaprioConfig,
+            TbfConfig,
         },
     },
     output::{OutputFormat, OutputOptions, print_all},
@@ -340,8 +341,10 @@ async fn dispatch_qdisc(
         "multiq" => dispatch!(MultiqConfig),
         "hhf" => dispatch!(HhfConfig),
         "dsmark" => dispatch!(DsmarkConfig),
+        "choke" => dispatch!(ChokeConfig),
+        "pfifo_fast" => dispatch!(PfifoFastConfig),
         other => Err(Error::InvalidMessage(format!(
-            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, mq, ets, etf, taprio, cbs, skbprio, sfb, multiq, hhf, dsmark)"
+            "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, mq, ets, etf, taprio, cbs, skbprio, sfb, multiq, hhf, dsmark, choke, pfifo_fast)"
         ))),
     }
 }

@@ -913,6 +913,22 @@ pub mod qdisc {
         }
     }
 
+    /// CHOKe qdisc-specific attributes.
+    ///
+    /// CHOKe is a RED variant: it shares `struct tc_red_qopt` for its
+    /// parameters (re-exported from the [`red`] module) and adds the
+    /// CHOKe-specific differential-dropping behaviour kernel-side. The
+    /// attribute IDs differ from RED's, so they get their own module.
+    pub mod choke {
+        pub const TCA_CHOKE_UNSPEC: u16 = 0;
+        pub const TCA_CHOKE_PARMS: u16 = 1;
+        pub const TCA_CHOKE_STAB: u16 = 2;
+        pub const TCA_CHOKE_MAX_P: u16 = 3;
+
+        /// CHOKe parameters share `struct tc_red_qopt` with RED.
+        pub use super::red::TcRedQopt;
+    }
+
     /// PIE (Proportional Integral controller-Enhanced) qdisc-specific attributes.
     pub mod pie {
         pub const TCA_PIE_UNSPEC: u16 = 0;
