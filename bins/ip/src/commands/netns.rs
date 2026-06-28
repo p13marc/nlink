@@ -11,10 +11,12 @@ use std::{
     process::Command,
 };
 
+use std::os::fd::AsRawFd;
+
 use clap::{Args, Subcommand};
 use nlink::{
     netlink::{
-        Result,
+        Connection, Result, Route,
         namespace::{self, NETNS_RUN_DIR},
     },
     output::{OutputFormat, OutputOptions, Printable, print_all},
@@ -121,7 +123,7 @@ impl NetnsCmd {
     pub async fn run(&self, format: OutputFormat, opts: &OutputOptions) -> Result<()> {
         match &self.action {
             Some(NetnsAction::List) | Some(NetnsAction::Show) | None => {
-                list_namespaces(format, opts)
+                list_namespaces(format, opts).await
             }
             Some(NetnsAction::Add { name }) => add_namespace(name),
             Some(NetnsAction::Delete { name }) => delete_namespace(name),
@@ -129,36 +131,46 @@ impl NetnsCmd {
             Some(NetnsAction::Identify { pid }) => identify_namespace(pid),
             Some(NetnsAction::Pids { name }) => list_pids_in_namespace(name),
             Some(NetnsAction::Monitor) => monitor_namespaces(),
-            Some(NetnsAction::Set { name, nsid }) => set_namespace_id(name, nsid),
+            Some(NetnsAction::Set { name, nsid }) => set_namespace_id(name, nsid).await,
             Some(NetnsAction::Attach { name, pid }) => attach_namespace(name, *pid),
         }
     }
 }
 
 /// List all network namespaces.
-fn list_namespaces(format: OutputFormat, opts: &OutputOptions) -> Result<()> {
+async fn list_namespaces(format: OutputFormat, opts: &OutputOptions) -> Result<()> {
     let names = namespace::list()?;
 
-    let namespaces: Vec<NamespaceInfo> = names
-        .into_iter()
-        .map(|name| NamespaceInfo {
-            nsid: get_namespace_id(&name),
-            name,
-        })
-        .collect();
+    // One connection reused for all the per-namespace nsid queries.
+    let conn = Connection::<Route>::new().ok();
+
+    let mut namespaces = Vec::with_capacity(names.len());
+    for name in names {
+        let nsid = match &conn {
+            Some(c) => get_namespace_id(c, &name).await,
+            None => None,
+        };
+        namespaces.push(NamespaceInfo { nsid, name });
+    }
 
     print_all(&namespaces, format, opts)?;
 
     Ok(())
 }
 
-/// Get the namespace ID for a named namespace.
-fn get_namespace_id(name: &str) -> Option<i32> {
-    // This requires RTM_GETNSID netlink message
-    // For now, return None (nsid display is optional)
-    // A full implementation would open the namespace file and query via netlink
-    let _ = name;
-    None
+/// Get the namespace ID for a named namespace via `RTM_GETNSID`.
+///
+/// Opens `/var/run/netns/<name>` and queries the kernel for the id the
+/// caller's namespace has assigned to it; returns `None` if the
+/// namespace has no id (`NETNSA_NSID_NOT_ASSIGNED`) or can't be opened.
+async fn get_namespace_id(conn: &Connection<Route>, name: &str) -> Option<i32> {
+    let path = PathBuf::from(NETNS_RUN_DIR).join(name);
+    let file = fs::File::open(&path).ok()?;
+    match conn.get_nsid(file.as_raw_fd()).await {
+        // The kernel reports an unassigned id as u32::MAX (-1).
+        Ok(id) if id != u32::MAX => Some(id as i32),
+        _ => None,
+    }
 }
 
 /// Add a new network namespace.
@@ -450,8 +462,8 @@ fn monitor_namespaces() -> Result<()> {
     }
 }
 
-/// Set the namespace ID for a network namespace.
-fn set_namespace_id(name: &str, nsid: &str) -> Result<()> {
+/// Set the namespace ID for a network namespace (`RTM_NEWNSID`).
+async fn set_namespace_id(name: &str, nsid: &str) -> Result<()> {
     if !namespace::exists(name) {
         return Err(nlink::netlink::Error::NamespaceNotFound {
             name: name.to_string(),
@@ -465,16 +477,24 @@ fn set_namespace_id(name: &str, nsid: &str) -> Result<()> {
             .map_err(|_| nlink::netlink::Error::InvalidMessage(format!("invalid nsid: {}", nsid)))?
     };
 
-    // This requires RTM_NEWNSID netlink message
-    // For now, print a message about the operation
-    if id < 0 {
-        println!("Setting automatic namespace ID for '{}'", name);
-    } else {
-        println!("Setting namespace ID {} for '{}'", id, name);
-    }
+    // Open the namespace mount so the kernel can resolve it via NETNSA_FD.
+    let path = PathBuf::from(NETNS_RUN_DIR).join(name);
+    let file = fs::File::open(&path).map_err(nlink::netlink::Error::Io)?;
 
-    // TODO: Implement RTM_NEWNSID message
-    // This requires opening the namespace file and sending NETNSA_FD + NETNSA_NSID
+    let conn = Connection::<Route>::new()?;
+    conn.set_nsid(file.as_raw_fd(), id).await?;
+
+    if id < 0 {
+        // Read back the kernel-assigned id so the user sees what they got.
+        match conn.get_nsid(file.as_raw_fd()).await {
+            Ok(assigned) if assigned != u32::MAX => {
+                println!("Assigned namespace ID {assigned} to '{name}'");
+            }
+            _ => println!("Assigned an automatic namespace ID to '{name}'"),
+        }
+    } else {
+        println!("Assigned namespace ID {id} to '{name}'");
+    }
 
     Ok(())
 }
