@@ -40,7 +40,7 @@ syscall_batch = []
 # JSON field naming: kebab-case for structs (`links-to-add`),
 # snake_case for enum variants. Opt-in only — no runtime
 # cost when disabled.
-serde = ["dep:serde"]
+serde = ["dep:serde", "dep:serde_json"]
 # All features
 full = ["sockdiag", "tuntap", "tuntap-async", "output", "namespace_watcher", "lab", "syscall_batch", "serde"]
 # Enable integration tests (require root or network namespace)
