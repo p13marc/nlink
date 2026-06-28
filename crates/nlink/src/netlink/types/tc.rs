@@ -929,6 +929,52 @@ pub mod qdisc {
         pub use super::red::TcRedQopt;
     }
 
+    /// GRED (Generic RED) qdisc-specific attributes.
+    ///
+    /// GRED multiplexes up to `MAX_DPS` virtual queues (drop precedences)
+    /// over a single qdisc. Configuration is two-phase: the **setup**
+    /// message carries `struct tc_gred_sopt` under [`TCA_GRED_DPS`]
+    /// (queue count, default VQ, optional GRIO), and per-VQ RED
+    /// parameters are sent separately under `TCA_GRED_PARMS`.
+    pub mod gred {
+        use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+        pub const TCA_GRED_UNSPEC: u16 = 0;
+        pub const TCA_GRED_PARMS: u16 = 1;
+        pub const TCA_GRED_STAB: u16 = 2;
+        pub const TCA_GRED_DPS: u16 = 3;
+        pub const TCA_GRED_MAX_P: u16 = 4;
+        pub const TCA_GRED_LIMIT: u16 = 5;
+        pub const TCA_GRED_VQ_LIST: u16 = 6;
+
+        /// Maximum number of virtual queues (drop precedences).
+        pub const MAX_DPS: u32 = 16;
+
+        /// GRED setup parameters (`struct tc_gred_sopt`).
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+        pub struct TcGredSopt {
+            /// Number of virtual queues (drop precedences).
+            pub dps: u32,
+            /// Default virtual queue.
+            pub def_dp: u32,
+            /// GRIO (RIO-like priority dropping) enabled.
+            pub grio: u8,
+            /// Flags.
+            pub flags: u8,
+            /// Padding.
+            pub pad1: u16,
+        }
+
+        impl TcGredSopt {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
+
+            pub fn as_bytes(&self) -> &[u8] {
+                <Self as IntoBytes>::as_bytes(self)
+            }
+        }
+    }
+
     /// PIE (Proportional Integral controller-Enhanced) qdisc-specific attributes.
     pub mod pie {
         pub const TCA_PIE_UNSPEC: u16 = 0;

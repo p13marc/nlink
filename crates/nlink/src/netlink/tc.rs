@@ -2689,6 +2689,222 @@ impl QdiscConfig for PfifoFastConfig {
 }
 
 // ============================================================================
+// GredConfig
+// ============================================================================
+
+/// GRED (Generic RED) qdisc configuration — **setup phase**.
+///
+/// GRED multiplexes up to 16 virtual queues (drop precedences) over one
+/// qdisc, each with independent RED parameters. Configuration is
+/// two-phase in the kernel:
+///
+/// 1. **Setup** (this config) — declare the number of virtual queues
+///    (`DPs`), the default VQ, and whether GRIO (RIO-like priority
+///    dropping) is enabled. Sent as `struct tc_gred_sopt` under
+///    `TCA_GRED_DPS`, plus an optional global byte `limit`.
+/// 2. **Per-VQ RED params** — `min`/`max`/`avpkt`/`bandwidth`/`prio` for
+///    an individual VQ. This requires the kernel's 256-byte RED stab
+///    probability table (computed from avpkt + bandwidth), which
+///    `GredConfig` does **not** model — see the note below.
+///
+/// ```ignore
+/// use nlink::netlink::tc::GredConfig;
+///
+/// // 8 virtual queues, VQ 2 is the default, GRIO on.
+/// let cfg = GredConfig::new()
+///     .virtual_queues(8)
+///     .default_vq(2)
+///     .grio(true)
+///     .build();
+/// conn.add_qdisc("eth0", cfg).await?;
+/// ```
+///
+/// # Per-VQ parameterization is not modelled
+///
+/// Setting an individual VQ's RED thresholds (the
+/// `tc qdisc change … gred limit … min … max … avpkt … bandwidth … DP …`
+/// form) requires computing the RED stab table the kernel demands under
+/// `TCA_GRED_STAB`. The library does not currently model that table (the
+/// plain [`RedConfig`] sidesteps it too). `parse_params` therefore
+/// rejects per-VQ tokens with a clear not-modelled error rather than
+/// emitting a message the kernel would refuse. Tracked as a follow-up
+/// under the #115 coverage epic.
+#[derive(Debug, Clone, Default)]
+pub struct GredConfig {
+    /// Number of virtual queues / drop precedences (`DPs`, 1..=16).
+    pub virtual_queues: Option<u32>,
+    /// Default virtual queue (`def_DP`).
+    pub default_vq: Option<u32>,
+    /// Enable GRIO (RIO-like priority dropping).
+    pub grio: bool,
+    /// Global queue limit in bytes (`TCA_GRED_LIMIT`).
+    pub limit: Option<u32>,
+}
+
+impl GredConfig {
+    /// Create a new GRED setup configuration builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the number of virtual queues / drop precedences (1..=16).
+    pub fn virtual_queues(mut self, dps: u32) -> Self {
+        self.virtual_queues = Some(dps);
+        self
+    }
+
+    /// Set the default virtual queue.
+    pub fn default_vq(mut self, dp: u32) -> Self {
+        self.default_vq = Some(dp);
+        self
+    }
+
+    /// Enable or disable GRIO (RIO-like priority dropping).
+    pub fn grio(mut self, enable: bool) -> Self {
+        self.grio = enable;
+        self
+    }
+
+    /// Set the global queue limit in bytes.
+    pub fn limit(mut self, bytes: u32) -> Self {
+        self.limit = Some(bytes);
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style gred params slice into a typed `GredConfig`.
+    ///
+    /// Recognised tokens (setup phase):
+    ///
+    /// - `setup` — optional leading keyword (tc(8) accepts it; ignored).
+    /// - `DPs <n>` — number of virtual queues (1..=16).
+    /// - `default <dp>` — default virtual queue.
+    /// - `grio` / `nogrio` — GRIO flag pair.
+    /// - `limit <bytes>` — global queue limit (tc-style size).
+    ///
+    /// **Not modelled by `GredConfig`** (returns `Error::InvalidMessage`):
+    /// the per-VQ RED tokens `min`/`max`/`avpkt`/`burst`/`bandwidth`/`DP`/
+    /// `probability`/`prio`/`ecn`/`harddrop`. Per-VQ parameterization needs
+    /// the RED stab probability table the kernel requires under
+    /// `TCA_GRED_STAB`; configure VQs via a hand-rolled `MessageBuilder`
+    /// until that lands.
+    ///
+    /// Strict: unknown tokens, missing values, and unparseable values
+    /// return `Error::InvalidMessage`.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params
+                    .get(i + 1)
+                    .copied()
+                    .ok_or_else(|| Error::InvalidMessage(format!("gred: `{key}` requires a value")))
+            };
+            match key {
+                "setup" => {
+                    // tc(8) leading keyword; the setup fields follow.
+                    i += 1;
+                }
+                "DPs" | "dps" => {
+                    let s = need_value()?;
+                    let n: u32 = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "gred: invalid DPs `{s}` (expected 1..=16)"
+                        ))
+                    })?;
+                    if n == 0 || n > super::types::tc::qdisc::gred::MAX_DPS {
+                        return Err(Error::InvalidMessage(format!(
+                            "gred: DPs `{n}` out of range (1..=16)"
+                        )));
+                    }
+                    cfg.virtual_queues = Some(n);
+                    i += 2;
+                }
+                "default" => {
+                    let s = need_value()?;
+                    let dp: u32 = s.parse().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "gred: invalid default `{s}` (expected unsigned integer)"
+                        ))
+                    })?;
+                    cfg.default_vq = Some(dp);
+                    i += 2;
+                }
+                "grio" => {
+                    cfg.grio = true;
+                    i += 1;
+                }
+                "nogrio" => {
+                    cfg.grio = false;
+                    i += 1;
+                }
+                "limit" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "gred: invalid limit `{s}` (expected tc-style size)"
+                        ))
+                    })?;
+                    let val: u32 = bytes.try_into().map_err(|_| {
+                        Error::InvalidMessage(format!("gred: limit `{s}` exceeds u32"))
+                    })?;
+                    cfg.limit = Some(val);
+                    i += 2;
+                }
+                "min" | "max" | "avpkt" | "burst" | "bandwidth" | "DP" | "probability" | "prio"
+                | "ecn" | "harddrop" => {
+                    return Err(Error::InvalidMessage(format!(
+                        "gred: per-VQ token `{key}` is not modelled by GredConfig — \
+                         per-VQ RED parameterization needs the TCA_GRED_STAB table; \
+                         use setup mode (DPs/default/grio) or a hand-rolled MessageBuilder"
+                    )));
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "gred: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+impl QdiscConfig for GredConfig {
+    fn kind(&self) -> &'static str {
+        "gred"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::gred;
+
+        // Setup message: tc_gred_sopt under TCA_GRED_DPS. The kernel
+        // requires DPs to install the virtual-queue table; default to a
+        // single VQ if the caller only set a limit.
+        let sopt = gred::TcGredSopt {
+            dps: self.virtual_queues.unwrap_or(1),
+            def_dp: self.default_vq.unwrap_or(0),
+            grio: u8::from(self.grio),
+            flags: 0,
+            pad1: 0,
+        };
+        builder.append_attr(gred::TCA_GRED_DPS, sopt.as_bytes());
+
+        if let Some(limit) = self.limit {
+            builder.append_attr_u32(gred::TCA_GRED_LIMIT, limit);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // PieConfig
 // ============================================================================
 
@@ -8946,6 +9162,54 @@ mod tests {
         // (no panic, no bytes appended beyond the empty builder).
         let cfg = PfifoFastConfig::new();
         assert_eq!(cfg.kind(), "pfifo_fast");
+    }
+
+    #[test]
+    fn gred_parse_params_setup() {
+        let cfg =
+            GredConfig::parse_params(&["setup", "DPs", "8", "default", "2", "grio", "limit", "60k"])
+                .unwrap();
+        assert_eq!(cfg.virtual_queues, Some(8));
+        assert_eq!(cfg.default_vq, Some(2));
+        assert!(cfg.grio);
+        assert_eq!(cfg.limit, Some(60 * 1024));
+    }
+
+    #[test]
+    fn gred_parse_params_empty_yields_default() {
+        let cfg = GredConfig::parse_params(&[]).unwrap();
+        assert!(cfg.virtual_queues.is_none());
+        assert!(cfg.default_vq.is_none());
+        assert!(!cfg.grio);
+        assert!(cfg.limit.is_none());
+    }
+
+    #[test]
+    fn gred_parse_params_dps_range_checked() {
+        assert!(GredConfig::parse_params(&["DPs", "0"]).is_err());
+        assert!(GredConfig::parse_params(&["DPs", "17"]).is_err());
+        assert!(GredConfig::parse_params(&["DPs", "16"]).is_ok());
+        let err = GredConfig::parse_params(&["DPs", "notanum"]).unwrap_err();
+        assert!(err.to_string().contains("invalid DPs"));
+    }
+
+    #[test]
+    fn gred_parse_params_per_vq_tokens_not_modelled() {
+        for tok in ["min", "max", "avpkt", "bandwidth", "DP", "probability", "prio"] {
+            let err = GredConfig::parse_params(&[tok, "1"]).unwrap_err();
+            assert!(
+                err.to_string().contains("not modelled"),
+                "expected not-modelled for per-VQ `{tok}`, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn gred_parse_params_unknown_token_errors() {
+        let err = GredConfig::parse_params(&["nonsense"]).unwrap_err();
+        assert!(err.to_string().contains("unknown token"));
+        let err = GredConfig::parse_params(&["DPs"]).unwrap_err();
+        assert!(err.to_string().contains("requires a value"));
     }
 
     #[test]

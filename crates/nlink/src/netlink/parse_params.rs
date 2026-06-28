@@ -96,7 +96,7 @@ macro_rules! impl_parse_params {
 }
 
 impl_parse_params! {
-    // Qdisc configs (33) — see crates/nlink/src/netlink/tc.rs.
+    // Qdisc configs (34) — see crates/nlink/src/netlink/tc.rs.
     crate::netlink::tc::BfifoConfig,
     crate::netlink::tc::CakeConfig,
     crate::netlink::tc::CbsConfig,
@@ -110,6 +110,7 @@ impl_parse_params! {
     crate::netlink::tc::FqConfig,
     crate::netlink::tc::FqCodelConfig,
     crate::netlink::tc::FqPieConfig,
+    crate::netlink::tc::GredConfig,
     crate::netlink::tc::HfscConfig,
     crate::netlink::tc::HhfConfig,
     crate::netlink::tc::HtbQdiscConfig,
