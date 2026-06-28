@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`tc`/library: `hhf` and `dsmark` qdiscs (#29).** Two more typed
+  qdisc configs wired into `tc qdisc add … hhf|dsmark`. `HhfConfig`
+  drives the Heavy-Hitter Filter (`limit`, `quantum`, `hh_limit`,
+  `reset_timeout`, `admit_bytes`, `evict_timeout`, `nonhh_weight`) over
+  the individual `TCA_HHF_*` attributes (timeouts sent as microseconds,
+  matching the kernel's `usecs_to_jiffies`). `DsmarkConfig` drives the
+  DiffServ-marking qdisc's `indices`/`default_index`/`set_tc_index`
+  (per-index `mask`/`value` remain class-level). Brings the typed-qdisc
+  count to 31.
+
 - **`tc`/library: `sfb` and `multiq` qdiscs (#29).** Two more typed
   qdisc configs in the standard `*Config` + builder + strict
   `parse_params` shape, wired into `tc qdisc add … sfb|multiq`.

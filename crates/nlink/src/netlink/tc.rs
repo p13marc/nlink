@@ -3823,6 +3823,326 @@ impl QdiscConfig for MultiqConfig {
 }
 
 // ============================================================================
+// HhfConfig (Heavy-Hitter Filter)
+// ============================================================================
+
+/// HHF (Heavy-Hitter Filter) qdisc configuration.
+///
+/// HHF isolates "heavy-hitter" flows (those sending disproportionately)
+/// from the rest, scheduling the two bands with WDRR. Timeouts are
+/// durations (sent as microseconds, matching the kernel's
+/// `usecs_to_jiffies`).
+///
+/// ```ignore
+/// use nlink::netlink::tc::HhfConfig;
+///
+/// let cfg = HhfConfig::new().limit(1000).quantum(Bytes::new(1514)).build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct HhfConfig {
+    /// Backlog limit, in packets.
+    pub limit: Option<u32>,
+    /// Quantum, in bytes.
+    pub quantum: Option<crate::util::Bytes>,
+    /// Heavy-hitter flow-table size.
+    pub hh_limit: Option<u32>,
+    /// Reset timeout.
+    pub reset_timeout: Option<Duration>,
+    /// Admit bytes threshold.
+    pub admit_bytes: Option<crate::util::Bytes>,
+    /// Evict timeout.
+    pub evict_timeout: Option<Duration>,
+    /// Weight of the non-heavy-hitter band.
+    pub non_hh_weight: Option<u32>,
+}
+
+impl HhfConfig {
+    /// Create a new HHF configuration builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the backlog limit (packets).
+    pub fn limit(mut self, packets: u32) -> Self {
+        self.limit = Some(packets);
+        self
+    }
+
+    /// Set the quantum (bytes).
+    pub fn quantum(mut self, bytes: crate::util::Bytes) -> Self {
+        self.quantum = Some(bytes);
+        self
+    }
+
+    /// Set the heavy-hitter flow-table size.
+    pub fn hh_limit(mut self, limit: u32) -> Self {
+        self.hh_limit = Some(limit);
+        self
+    }
+
+    /// Set the reset timeout.
+    pub fn reset_timeout(mut self, timeout: Duration) -> Self {
+        self.reset_timeout = Some(timeout);
+        self
+    }
+
+    /// Set the admit-bytes threshold.
+    pub fn admit_bytes(mut self, bytes: crate::util::Bytes) -> Self {
+        self.admit_bytes = Some(bytes);
+        self
+    }
+
+    /// Set the evict timeout.
+    pub fn evict_timeout(mut self, timeout: Duration) -> Self {
+        self.evict_timeout = Some(timeout);
+        self
+    }
+
+    /// Set the non-heavy-hitter band weight.
+    pub fn non_hh_weight(mut self, weight: u32) -> Self {
+        self.non_hh_weight = Some(weight);
+        self
+    }
+
+    /// Terminal no-op for builder symmetry.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style hhf params slice into a typed `HhfConfig`.
+    ///
+    /// Recognised tokens: `limit <packets>`, `quantum <bytes>`,
+    /// `hh_limit <n>`, `reset_timeout <time>`, `admit_bytes <bytes>`,
+    /// `evict_timeout <time>`, `nonhh_weight <n>`. Strict: unknown
+    /// tokens, missing values, and unparseable values all error.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("hhf: `{key}` requires a value"))
+                })
+            };
+            let parse_u32 = |s: &str| -> Result<u32> {
+                s.parse::<u32>().map_err(|_| {
+                    Error::InvalidMessage(format!(
+                        "hhf: invalid {key} `{s}` (expected unsigned integer)"
+                    ))
+                })
+            };
+            let parse_bytes = |s: &str| -> Result<crate::util::Bytes> {
+                crate::util::parse::get_size(s)
+                    .map(crate::util::Bytes::new)
+                    .map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "hhf: invalid {key} `{s}` (expected tc-style size)"
+                        ))
+                    })
+            };
+            let parse_time = |s: &str| -> Result<Duration> {
+                crate::util::parse::get_time(s).map_err(|_| {
+                    Error::InvalidMessage(format!(
+                        "hhf: invalid {key} `{s}` (expected tc-style time)"
+                    ))
+                })
+            };
+            match key {
+                "limit" => {
+                    cfg.limit = Some(parse_u32(need_value()?)?);
+                    i += 2;
+                }
+                "quantum" => {
+                    cfg.quantum = Some(parse_bytes(need_value()?)?);
+                    i += 2;
+                }
+                "hh_limit" => {
+                    cfg.hh_limit = Some(parse_u32(need_value()?)?);
+                    i += 2;
+                }
+                "reset_timeout" => {
+                    cfg.reset_timeout = Some(parse_time(need_value()?)?);
+                    i += 2;
+                }
+                "admit_bytes" => {
+                    cfg.admit_bytes = Some(parse_bytes(need_value()?)?);
+                    i += 2;
+                }
+                "evict_timeout" => {
+                    cfg.evict_timeout = Some(parse_time(need_value()?)?);
+                    i += 2;
+                }
+                "nonhh_weight" => {
+                    cfg.non_hh_weight = Some(parse_u32(need_value()?)?);
+                    i += 2;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!("hhf: unknown token `{other}`")));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+impl QdiscConfig for HhfConfig {
+    fn kind(&self) -> &'static str {
+        "hhf"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::hhf::*;
+
+        if let Some(limit) = self.limit {
+            builder.append_attr_u32(TCA_HHF_BACKLOG_LIMIT, limit);
+        }
+        if let Some(q) = self.quantum {
+            builder.append_attr_u32(TCA_HHF_QUANTUM, q.as_u32_saturating());
+        }
+        if let Some(hh) = self.hh_limit {
+            builder.append_attr_u32(TCA_HHF_HH_FLOWS_LIMIT, hh);
+        }
+        if let Some(t) = self.reset_timeout {
+            builder.append_attr_u32(TCA_HHF_RESET_TIMEOUT, t.as_micros() as u32);
+        }
+        if let Some(a) = self.admit_bytes {
+            builder.append_attr_u32(TCA_HHF_ADMIT_BYTES, a.as_u32_saturating());
+        }
+        if let Some(t) = self.evict_timeout {
+            builder.append_attr_u32(TCA_HHF_EVICT_TIMEOUT, t.as_micros() as u32);
+        }
+        if let Some(w) = self.non_hh_weight {
+            builder.append_attr_u32(TCA_HHF_NON_HH_WEIGHT, w);
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// DsmarkConfig (DiffServ marking)
+// ============================================================================
+
+/// dsmark (DiffServ marking) qdisc configuration.
+///
+/// dsmark classifies packets into a table of indices, each carrying a
+/// DiffServ mask/value applied to the DS field. This config covers the
+/// qdisc-level knobs; the per-index `mask`/`value` are class-level
+/// (`TCA_DSMARK_MASK`/`VALUE`).
+///
+/// ```ignore
+/// use nlink::netlink::tc::DsmarkConfig;
+///
+/// let cfg = DsmarkConfig::new().indices(64).set_tc_index().build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct DsmarkConfig {
+    /// Number of indices (power of two).
+    pub indices: Option<u16>,
+    /// Default index for unclassified packets.
+    pub default_index: Option<u16>,
+    /// Derive the class from `skb->tc_index`.
+    pub set_tc_index: bool,
+}
+
+impl DsmarkConfig {
+    /// Create a new dsmark configuration builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the number of indices (power of two).
+    pub fn indices(mut self, indices: u16) -> Self {
+        self.indices = Some(indices);
+        self
+    }
+
+    /// Set the default index.
+    pub fn default_index(mut self, index: u16) -> Self {
+        self.default_index = Some(index);
+        self
+    }
+
+    /// Derive the class from `skb->tc_index`.
+    pub fn set_tc_index(mut self) -> Self {
+        self.set_tc_index = true;
+        self
+    }
+
+    /// Terminal no-op for builder symmetry.
+    pub fn build(self) -> Self {
+        self
+    }
+
+    /// Parse a tc-style dsmark params slice into a typed
+    /// `DsmarkConfig`.
+    ///
+    /// Recognised tokens: `indices <n>`, `default_index <n>`,
+    /// `set_tc_index`. Strict: unknown tokens, missing values, and
+    /// unparseable values all error.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut cfg = Self::new();
+        let mut i = 0;
+        while i < params.len() {
+            let key = params[i];
+            let need_value = || {
+                params.get(i + 1).copied().ok_or_else(|| {
+                    Error::InvalidMessage(format!("dsmark: `{key}` requires a value"))
+                })
+            };
+            let parse_u16 = |s: &str| -> Result<u16> {
+                s.parse::<u16>().map_err(|_| {
+                    Error::InvalidMessage(format!(
+                        "dsmark: invalid {key} `{s}` (expected unsigned integer)"
+                    ))
+                })
+            };
+            match key {
+                "indices" => {
+                    cfg.indices = Some(parse_u16(need_value()?)?);
+                    i += 2;
+                }
+                "default_index" => {
+                    cfg.default_index = Some(parse_u16(need_value()?)?);
+                    i += 2;
+                }
+                "set_tc_index" => {
+                    cfg.set_tc_index = true;
+                    i += 1;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "dsmark: unknown token `{other}`"
+                    )));
+                }
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+impl QdiscConfig for DsmarkConfig {
+    fn kind(&self) -> &'static str {
+        "dsmark"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::dsmark::*;
+
+        if let Some(indices) = self.indices {
+            builder.append_attr_u16(TCA_DSMARK_INDICES, indices);
+        }
+        if let Some(default_index) = self.default_index {
+            builder.append_attr_u16(TCA_DSMARK_DEFAULT_INDEX, default_index);
+        }
+        if self.set_tc_index {
+            builder.append_attr_empty(TCA_DSMARK_SET_TC_INDEX);
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
 // DrrConfig (Deficit Round Robin)
 // ============================================================================
 
@@ -7345,6 +7665,51 @@ mod tests {
         assert!(MultiqConfig::parse_params(&["bands", "4"]).is_err());
         let mut b = MessageBuilder::new(0, 0);
         MultiqConfig::new().write_options(&mut b).unwrap();
+    }
+
+    #[test]
+    fn test_hhf_parse_and_write() {
+        use crate::util::Bytes;
+
+        let cfg = HhfConfig::parse_params(&[
+            "limit", "1000", "quantum", "1514", "hh_limit", "2048", "reset_timeout", "40ms",
+            "admit_bytes", "131072", "evict_timeout", "1s", "nonhh_weight", "2",
+        ])
+        .unwrap();
+        assert_eq!(cfg.limit, Some(1000));
+        assert_eq!(cfg.quantum, Some(Bytes::new(1514)));
+        assert_eq!(cfg.hh_limit, Some(2048));
+        assert_eq!(cfg.reset_timeout, Some(Duration::from_millis(40)));
+        assert_eq!(cfg.admit_bytes, Some(Bytes::new(131072)));
+        assert_eq!(cfg.evict_timeout, Some(Duration::from_secs(1)));
+        assert_eq!(cfg.non_hh_weight, Some(2));
+
+        let mut b = MessageBuilder::new(0, 0);
+        cfg.write_options(&mut b).unwrap();
+
+        // strict: missing value, bad size, bad time, unknown token.
+        assert!(HhfConfig::parse_params(&["limit"]).is_err());
+        assert!(HhfConfig::parse_params(&["quantum", "big"]).is_err());
+        assert!(HhfConfig::parse_params(&["reset_timeout", "soon"]).is_err());
+        assert!(HhfConfig::parse_params(&["unknown"]).is_err());
+    }
+
+    #[test]
+    fn test_dsmark_parse() {
+        let cfg =
+            DsmarkConfig::parse_params(&["indices", "64", "default_index", "0", "set_tc_index"])
+                .unwrap();
+        assert_eq!(cfg.indices, Some(64));
+        assert_eq!(cfg.default_index, Some(0));
+        assert!(cfg.set_tc_index);
+
+        let mut b = MessageBuilder::new(0, 0);
+        cfg.write_options(&mut b).unwrap();
+
+        // strict: missing value, bad value, unknown token.
+        assert!(DsmarkConfig::parse_params(&["indices"]).is_err());
+        assert!(DsmarkConfig::parse_params(&["indices", "x"]).is_err());
+        assert!(DsmarkConfig::parse_params(&["unknown"]).is_err());
     }
 
     #[test]

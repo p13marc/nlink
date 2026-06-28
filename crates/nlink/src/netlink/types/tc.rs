@@ -1109,6 +1109,44 @@ pub mod qdisc {
         pub const TCA_QFQ_LMAX: u16 = 2;
     }
 
+    /// HHF (Heavy-Hitter Filter) qdisc attributes. All u32. Timeouts
+    /// are microseconds (kernel calls `usecs_to_jiffies`), matching the
+    /// codel time-attr convention.
+    pub mod hhf {
+        pub const TCA_HHF_UNSPEC: u16 = 0;
+        /// Backlog limit, in packets.
+        pub const TCA_HHF_BACKLOG_LIMIT: u16 = 1;
+        /// Quantum, in bytes.
+        pub const TCA_HHF_QUANTUM: u16 = 2;
+        /// Heavy-hitter flow table size.
+        pub const TCA_HHF_HH_FLOWS_LIMIT: u16 = 3;
+        /// Reset timeout, in microseconds.
+        pub const TCA_HHF_RESET_TIMEOUT: u16 = 4;
+        /// Admit bytes, in bytes.
+        pub const TCA_HHF_ADMIT_BYTES: u16 = 5;
+        /// Evict timeout, in microseconds.
+        pub const TCA_HHF_EVICT_TIMEOUT: u16 = 6;
+        /// Weight of the non-heavy-hitter band in the WDRR scheduler.
+        pub const TCA_HHF_NON_HH_WEIGHT: u16 = 7;
+    }
+
+    /// DSMARK (DiffServ marking) qdisc attributes. The qdisc carries
+    /// `indices`/`default_index`/`set_tc_index`; `mask`/`value` are
+    /// per-class.
+    pub mod dsmark {
+        pub const TCA_DSMARK_UNSPEC: u16 = 0;
+        /// Number of indices (u16, power of two).
+        pub const TCA_DSMARK_INDICES: u16 = 1;
+        /// Default index (u16).
+        pub const TCA_DSMARK_DEFAULT_INDEX: u16 = 2;
+        /// Set-tc-index flag (empty attribute).
+        pub const TCA_DSMARK_SET_TC_INDEX: u16 = 3;
+        /// Per-class mask (u8).
+        pub const TCA_DSMARK_MASK: u16 = 4;
+        /// Per-class value (u8).
+        pub const TCA_DSMARK_VALUE: u16 = 5;
+    }
+
     /// MQPRIO (Multi-Queue Priority) qdisc attributes.
     pub mod mqprio {
         use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
