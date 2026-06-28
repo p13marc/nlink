@@ -1,6 +1,20 @@
 # nlink CLI Tools
 
-The CLI binaries serve as proof-of-concept demonstrations. They are not drop-in replacements for iproute2.
+The CLI binaries serve as proof-of-concept demonstrations of the
+`nlink` library — the library is the deliverable; the binaries show
+it in use. They are **not** drop-in replacements for iproute2 /
+iw / ethtool.
+
+Most binaries are named after the system tool they mirror (`ip`,
+`tc`, `ss`, `nft`, `bridge`, `wg`, `devlink`, `wifi`); two are
+`nlink-` prefixed to avoid shadowing (`nlink-config`,
+`nlink-ethtool`). The cargo package is always `nlink-<tool>`
+(e.g. `cargo run -p nlink-ip -- link show`).
+
+Coverage below: [`ip`](#ip), [`tc`](#tc), [`ss`](#ss),
+[`nft`](#nft), [`bridge`](#bridge), [`wg`](#wg),
+[`nlink-config`](#nlink-config), [`devlink`](#devlink),
+[`nlink-ethtool`](#nlink-ethtool), [`wifi`](#wifi).
 
 ## ip
 
@@ -174,15 +188,171 @@ tc monitor qdisc class --timestamp
 tc monitor -j  # JSON output
 ```
 
+## ss
+
+Socket statistics over `NETLINK_SOCK_DIAG`. Flag-driven (no
+subcommands); a trailing ss-style filter expression is accepted.
+
+```bash
+ss -t                       # connected TCP sockets
+ss -tln                     # listening TCP, numeric (no name resolution)
+ss -tp                      # with the owning process (inode → /proc)
+ss -u / ss -x / ss -w       # UDP / Unix / raw sockets
+ss -0                       # AF_PACKET sockets
+ss -a                       # all states; -4 / -6 to restrict family
+
+# Filters: typed --sport/--dport/--src/--dst, or an ss-style expression
+ss -tn 'sport = :22'
+ss -tn --dst 10.0.0.0/8 --dport 443
+
+# Detail blocks (gated, mirrored in JSON): -i info, -m memory, -e extended, -o timer
+ss -tim
+ss -tj -i                   # JSON; honors the display flags
+ss -s                       # summary counters
+```
+
+## nft
+
+nftables over `NETLINK_NETFILTER`. Imperative ops plus a declarative
+desired-state path (see the
+[declarative-config recipe](recipes/nftables-declarative-config.md)).
+
+```bash
+nft list tables
+nft list chains
+nft list rules inet filter input      # decoded rule expressions
+nft list sets inet
+
+# Imperative mutation
+nft add table inet filter
+nft add chain inet filter input hook input priority 0 policy drop
+nft add rule inet filter input tcp dport 22 accept
+nft delete table inet filter
+nft flush ruleset
+
+# Imperative atomic batch from a file (every line commits or none do)
+nft apply ops.nft
+
+# Declarative desired-state reconcile (diff → minimal apply)
+nft diff fw.nft                       # preview only
+nft reconcile fw.nft                  # apply the minimal delta
+nft reconcile fw.nft --dry-run        # same as `diff`
+```
+
+## bridge
+
+Bridge forwarding database, VLAN filtering, ports, and multicast.
+
+```bash
+bridge fdb show
+bridge fdb show brport eth0
+bridge fdb add 00:11:22:33:44:55 dev eth0 master
+bridge fdb add 00:11:22:33:44:55 dev eth0 --extern-learn   # NTF_EXT_LEARNED
+
+bridge vlan show                      # JSON output sorts by ifindex
+bridge vlan add dev eth0 vid 100 pvid untagged
+
+bridge link set dev eth0 ...          # per-port options (learning, flood, ...)
+bridge mdb show
+bridge monitor                        # live FDB/MDB events
+```
+
+## wg
+
+WireGuard over Generic Netlink.
+
+```bash
+wg show                               # all interfaces + peers
+wg showconf wg0                       # wg-quick format (reveals private key)
+wg set wg0 --peer <pubkey> --allowed-ips 10.0.0.0/24 --endpoint host:51820
+
+# Config files (kernel-level [Interface] + [Peer] format)
+wg setconf wg0 wg0.conf                # replace
+wg addconf wg0 extra-peers.conf        # additive (keeps existing peers)
+wg syncconf wg0 wg0.conf               # reconcile with bounded retry
+
+wg genkey | wg pubkey                  # key generation
+wg genpsk
+wg watch                               # peer/handshake/endpoint changes
+```
+
+## nlink-config
+
+Declarative whole-host network state (links + addresses + routes +
+qdiscs) — the `NetworkConfig` diff/apply engine as a CLI. See the
+[library guide](library.md#declarative-network-configuration).
+
+```bash
+nlink-config example                   # emit a sample config (YAML; --format json)
+nlink-config capture > current.yaml    # snapshot live state to a file
+nlink-config diff desired.yaml         # preview the changes apply would make
+nlink-config apply desired.yaml        # reconcile the kernel to the file
+nlink-config apply desired.yaml --dry-run
+nlink-config apply desired.yaml --reconcile   # bounded retry on contention
+```
+
+## devlink
+
+Device-management over the `devlink` Generic Netlink family.
+
+```bash
+devlink dev                            # list devlink devices
+devlink port                           # ports (incl. split/unsplit, SR-IOV functions)
+devlink info                           # firmware + driver versions
+devlink param                          # device parameters (type-aware set)
+devlink rate                           # port-function / scheduler-node shaping
+devlink sb / trap / region / resource  # shared buffers, traps, regions, resources
+devlink monitor                        # live devlink events
+```
+
+## nlink-ethtool
+
+NIC settings + statistics over the `ethtool` Generic Netlink family.
+Subcommands carry the classic `ethtool` short flags as aliases.
+
+```bash
+nlink-ethtool eth0                     # link settings (default action)
+nlink-ethtool -k eth0                  # features / offloads
+nlink-ethtool -S eth0                  # standardized IEEE 802.3 / RMON stats
+nlink-ethtool -g eth0 / -l eth0        # ring sizes / channel counts
+nlink-ethtool wol eth0                 # Wake-on-LAN settings
+nlink-ethtool set-wol eth0 magic       # enable WoL on magic packet (or `none` to disable)
+nlink-ethtool eee eth0 / fec eth0      # Energy-Efficient Ethernet / FEC
+
+# Setters
+nlink-ethtool -K eth0 tso off gro on   # toggle features
+nlink-ethtool -s eth0 speed 1000 duplex full autoneg on
+nlink-ethtool monitor                  # live ethtool events
+```
+
+## wifi
+
+Wireless (nl80211) over Generic Netlink.
+
+```bash
+wifi list                              # wireless interfaces
+wifi show wlan0                        # detailed interface info
+wifi scan wlan0                        # trigger a scan + show results
+wifi results wlan0                     # cached results, no new scan
+wifi station wlan0                     # connection / signal info
+wifi del-station wlan0 <mac>           # kick a station (AP mode)
+wifi connect wlan0 <ssid> --auth sae   # --auth open|shared|sae|ft|eap; --bssid/--freq to pin
+wifi disconnect wlan0
+wifi reg / wifi reg US                 # show / set regulatory domain
+wifi powersave wlan0 [on|off]
+wifi monitor                           # scan/connect/disconnect/regulatory events
+```
+
 ## Building
 
-Requires Rust 1.85+ (edition 2024).
+Requires Rust 1.95+ (edition 2024).
 
 ```bash
 # Build all
 cargo build --release
 
-# Run commands
-cargo run --release -p ip -- link show
-cargo run --release -p tc -- qdisc show
+# Run commands — the cargo package is always `nlink-<tool>`
+cargo run --release -p nlink-ip -- link show
+cargo run --release -p nlink-tc -- qdisc show
+cargo run --release -p nlink-nft -- list tables
 ```
