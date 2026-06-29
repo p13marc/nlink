@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **MPLS / SRv6 / NextHop fixed-struct wire-format audit (#137).**
+  Audited the fixed-size kernel structs in `mpls`, `srv6`, and
+  `nexthop` (`MplsLabelEntry`, `Ipv6SrHdr`, `NhMsg`, `NexthopGrp`)
+  against parser-robustness rule 1 (accept-larger-than-expected) and
+  the chain/segment walkers against rule 2 (pathological-length).
+  Outcome: **already robust** — every `from_bytes` reads its prefix via
+  `ref_from_prefix` (ignores trailing bytes a future kernel appends),
+  and every label-stack / group / segment walker is fixed-stride with
+  explicit `<= len` bounds (not the length-field-driven loop the
+  rule-2 bug class targets). Added regression tests pinning the
+  invariant so a future edit to an exact-size (`len() == SIZE`) guard
+  fails CI rather than silently reintroducing the
+  `IFLA_INET6_CONF`-class bug. No behaviour change.
 - **Bridge-global per-VLAN options — `BRIDGE_VLANDB_GOPTS` (#137
   bridge/FDB wire-format audit).** The 0.22.0 FDB work flagged that
   bridge *global* VLAN options were unmodelled; this lands them. Adds

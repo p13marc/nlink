@@ -217,4 +217,39 @@ mod tests {
         assert_eq!(grp.resvd1, 0);
         assert_eq!(grp.resvd2, 0);
     }
+
+    // Parser-robustness rule 1 (accept-larger-than-expected on fixed
+    // structs). Pin both `from_bytes` paths to `ref_from_prefix`.
+    #[test]
+    fn nhmsg_from_bytes_accepts_trailing_bytes() {
+        let msg = NhMsg::new()
+            .with_family(libc::AF_INET as u8)
+            .with_flags(nhf::ONLINK);
+        let mut buf = msg.as_bytes().to_vec();
+        buf.extend_from_slice(&[0xFF; 16]);
+        let parsed = NhMsg::from_bytes(&buf).expect("prefix parse");
+        assert_eq!(parsed.nh_family, libc::AF_INET as u8);
+        assert_eq!(parsed.nh_flags, nhf::ONLINK);
+    }
+
+    #[test]
+    fn nhmsg_from_bytes_rejects_undersized() {
+        let msg = NhMsg::new();
+        assert!(NhMsg::from_bytes(&msg.as_bytes()[..NhMsg::SIZE - 1]).is_err());
+        for len in 0..NhMsg::SIZE {
+            let _ = NhMsg::from_bytes(&vec![0u8; len]);
+        }
+    }
+
+    #[test]
+    fn nexthop_grp_from_bytes_accepts_larger_rejects_undersized() {
+        let grp = NexthopGrp::new(42, 10);
+        let mut buf = grp.as_bytes().to_vec();
+        buf.extend_from_slice(&[0x7E; 4]);
+        let parsed = NexthopGrp::from_bytes(&buf).expect("prefix parse");
+        assert_eq!(parsed.id, 42);
+        assert_eq!(parsed.weight, 10);
+        assert!(NexthopGrp::from_bytes(&grp.as_bytes()[..NexthopGrp::SIZE - 1]).is_none());
+        assert!(NexthopGrp::from_bytes(&[]).is_none());
+    }
 }

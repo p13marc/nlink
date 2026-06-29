@@ -222,4 +222,29 @@ mod tests {
     fn test_rtvia_size() {
         assert_eq!(RtVia::HEADER_SIZE, 2);
     }
+
+    // Parser-robustness rule 1 (accept-larger-than-expected on fixed
+    // structs). These pin `from_bytes` to `ref_from_prefix`; they fail
+    // if it regresses to an exact-size (`len() == SIZE`) guard.
+    #[test]
+    fn mpls_label_entry_from_bytes_accepts_trailing_bytes() {
+        let entry = MplsLabelEntry::new(12345);
+        let mut buf = entry.as_bytes().to_vec();
+        buf.extend_from_slice(&[0xAB; 8]); // bytes a future kernel may append
+        let parsed = MplsLabelEntry::from_bytes(&buf).expect("prefix parse");
+        assert_eq!(parsed.label(), 12345);
+    }
+
+    #[test]
+    fn mpls_label_entry_from_bytes_rejects_undersized() {
+        let entry = MplsLabelEntry::new(1);
+        assert!(
+            MplsLabelEntry::from_bytes(&entry.as_bytes()[..MplsLabelEntry::SIZE - 1]).is_none()
+        );
+        assert!(MplsLabelEntry::from_bytes(&[]).is_none());
+        // Arbitrary short inputs never panic.
+        for len in 0..MplsLabelEntry::SIZE {
+            let _ = MplsLabelEntry::from_bytes(&vec![0xCD; len]);
+        }
+    }
 }
