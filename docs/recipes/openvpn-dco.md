@@ -179,6 +179,45 @@ while let Some(evt) = events.next().await {
 }
 ```
 
+## Monitoring a DCO server
+
+A server's observability has two halves: **poll** the connected peers
+and their counters, and **subscribe** to lifecycle notifications. The
+multicast stream above is the push side; `peer_dump` is the pull side.
+
+`peer_dump(ifindex)` returns every peer with its read-only counters —
+VPN-layer and transport-layer byte/packet totals — plus the current
+remote endpoint and keepalive settings:
+
+```rust
+let conn = Connection::<Ovpn>::new_async().await?;
+
+for p in conn.peer_dump(ifindex).await? {
+    println!(
+        "peer {} @ {:?}  vpn rx/tx={:?}/{:?}B  link rx/tx={:?}/{:?}B",
+        p.id.unwrap_or(0),
+        p.remote_socket(),
+        p.vpn_rx_bytes, p.vpn_tx_bytes,
+        p.link_rx_bytes, p.link_tx_bytes,
+    );
+}
+```
+
+Poll this on an interval for a traffic / rate view, and run the
+[multicast subscription](#multicast-notifications) concurrently for
+immediate `peer-del` / `key-swap` / `peer-float` signals. Together they
+are the full per-peer picture: `peer_dump` answers "who's connected and
+how much have they moved", the event stream answers "what just changed".
+
+There is no server/client *mode* — the `ovpn` family is symmetric and
+per-peer, so a server is simply a DCO interface carrying many peers,
+each enumerated by `peer_dump` and keyed by its 3-byte peer ID. (Note
+that netlink only sees DCO's *data plane*; the TLS control channel
+stays in userspace OpenVPN.)
+
+The `genl_ovpn` example bundles this as a `monitor <ifname>` mode:
+`cargo run -p nlink --example genl_ovpn -- monitor tun0`.
+
 ## Cross-namespace fd passing
 
 The kernel's per-peer socket is identified by an `OVPN_A_PEER_SOCKET`

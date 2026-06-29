@@ -25,7 +25,9 @@
 //! See `docs/recipes/openvpn-dco.md` for the canonical
 //! "production-shape OvpnConfig + rekey via key_swap" pattern.
 
-use nlink::netlink::{genl::ovpn::Ovpn, Connection};
+use nlink::netlink::genl::ovpn::{Ovpn, OvpnEvent};
+use nlink::netlink::{Connection, Route};
+use tokio_stream::StreamExt;
 #[cfg(feature = "lab")]
 use nlink::netlink::genl::ovpn::{
     OvpnCipherAlg, OvpnConfig, OvpnKeyConfig, OvpnKeySlot, OvpnKeydir,
@@ -37,6 +39,7 @@ async fn main() -> nlink::Result<()> {
     match args.get(1).map(|s| s.as_str()) {
         Some("probe") => run_probe().await,
         Some("apply") => run_apply().await,
+        Some("monitor") => run_monitor(args.get(2).map(|s| s.as_str())).await,
         _ => {
             print_overview();
             Ok(())
@@ -71,8 +74,9 @@ fn print_overview() {
              .apply(&conn).await?;\n\
          \n\
          Run modes:\n\
-           probe   probe the host's `ovpn` GENL family availability\n\
-           apply   full lab-namespace demo (root + kernel 6.16+ + `ovpn` module)\n",
+           probe          probe the host's `ovpn` GENL family availability\n\
+           monitor <if>   dump per-peer stats on <if>, then stream lifecycle events\n\
+           apply          full lab-namespace demo (root + kernel 6.16+ + `ovpn` module)\n",
     );
 }
 
@@ -95,6 +99,81 @@ async fn run_probe() -> nlink::Result<()> {
         Err(e) => {
             println!("  unexpected error: {e}");
             return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Monitor a DCO server: enumerate peers + their traffic counters
+/// (the pull side), then stream lifecycle notifications (the push
+/// side). The dump needs an existing `ovpn` interface; the event
+/// stream needs the `peers` multicast group (kernel 6.16+).
+async fn run_monitor(ifname: Option<&str>) -> nlink::Result<()> {
+    let conn = Connection::<Ovpn>::new_async().await?;
+
+    // --- Pull: enumerate connected peers + read their counters. ---
+    if let Some(ifname) = ifname {
+        let route = Connection::<Route>::new()?;
+        let Some(link) = route.get_link_by_name(ifname).await? else {
+            println!("interface {ifname} not found");
+            return Ok(());
+        };
+        let ifindex = link.ifindex();
+        match conn.peer_dump(ifindex).await {
+            Ok(peers) => {
+                println!("{} peer(s) on {ifname}:", peers.len());
+                for p in &peers {
+                    println!(
+                        "  peer {:<8} remote={:?}\n      vpn rx={:?}B/{:?}pkt tx={:?}B/{:?}pkt\n      link rx={:?}B tx={:?}B",
+                        p.id.unwrap_or(0),
+                        p.remote_socket(),
+                        p.vpn_rx_bytes,
+                        p.vpn_rx_packets,
+                        p.vpn_tx_bytes,
+                        p.vpn_tx_packets,
+                        p.link_rx_bytes,
+                        p.link_tx_bytes,
+                    );
+                }
+            }
+            Err(e) => println!("peer_dump({ifname}) failed: {e}"),
+        }
+    } else {
+        println!("(no interface given — pass `monitor <ifname>` to dump peer stats)");
+    }
+
+    // --- Push: stream peer lifecycle notifications until Ctrl-C. ---
+    conn.subscribe_peers()?;
+    println!("subscribed to ovpn `peers` group; streaming events (Ctrl-C to stop)…");
+    let mut events = conn.events().await;
+    while let Some(evt) = events.next().await {
+        match evt? {
+            OvpnEvent::PeerDeleted(reply) => {
+                let peer = reply.peer.as_ref();
+                println!(
+                    "peer {} removed: {:?}",
+                    peer.and_then(|p| p.id).unwrap_or(0),
+                    peer.and_then(|p| p.del_reason),
+                );
+            }
+            OvpnEvent::KeySwap(reply) => {
+                let kc = reply.keyconf.as_ref();
+                println!(
+                    "peer {:?} key {:?} needs rekey (IV space exhausting)",
+                    kc.and_then(|k| k.peer_id),
+                    kc.and_then(|k| k.slot),
+                );
+            }
+            OvpnEvent::PeerFloat(reply) => {
+                let peer = reply.peer.as_ref();
+                println!(
+                    "peer {} floated to {:?}",
+                    peer.and_then(|p| p.id).unwrap_or(0),
+                    peer.and_then(|p| p.remote_socket()),
+                );
+            }
+            // OvpnEvent is #[non_exhaustive]; ignore kernel additions.
+            _ => {}
         }
     }
     Ok(())
