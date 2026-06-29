@@ -1593,18 +1593,18 @@ impl Connection<Xfrm> {
         fields(method = "get_security_associations")
     )]
     pub async fn get_security_associations(&self) -> Result<Vec<SecurityAssociation>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring. Acquired
-        // BEFORE the with_timeout wrapper so the lock spans the
-        // entire timeout window.
-        let _guard = self.lock_request().await;
+        // #134 — dual-mode recv. Mutex mode: the session holds the
+        // request lock for the whole send+recv (the F1 fix). Dispatcher
+        // mode: it registers the seq (+ dump-serialization lock) so the
+        // driver routes frames here instead of the loop racing the
+        // driver's recv_msg. Built BEFORE with_timeout so it spans the
+        // timeout window.
+        let seq = self.socket().next_seq();
+        let pid = self.socket().pid();
+        let mut session = self.recv_session_dump(seq).await;
         // Plan 208 Phase 1+2 — wrap in with_timeout, add seq filter,
         // detect NLM_F_DUMP_INTR.
         self.with_timeout(async move {
-            let seq = self.socket().next_seq();
-            let pid = self.socket().pid();
-
             let mut buf = Vec::with_capacity(64);
             buf.extend_from_slice(&0u32.to_ne_bytes());
             buf.extend_from_slice(&XFRM_MSG_GETSA.to_ne_bytes());
@@ -1623,7 +1623,7 @@ impl Connection<Xfrm> {
             let mut sas = Vec::new();
 
             loop {
-                let data = self.socket().recv_msg().await?;
+                let data = session.recv(self).await?;
 
                 let mut offset = 0;
                 while offset + NLMSG_HDRLEN <= data.len() {
@@ -1666,16 +1666,12 @@ impl Connection<Xfrm> {
                                     data[offset + 19],
                                 ]);
                                 if errno != 0 {
-                                    return Err(
-                                        super::error::Error::from_errno(-errno),
-                                    );
+                                    return Err(super::error::Error::from_errno(-errno));
                                 }
                             }
                         }
                         _ => {
-                            if let Some(sa) =
-                                self.parse_sa(&data[offset..offset + nlmsg_len])
-                            {
+                            if let Some(sa) = self.parse_sa(&data[offset..offset + nlmsg_len]) {
                                 sas.push(sa);
                             }
                         }
@@ -1705,18 +1701,13 @@ impl Connection<Xfrm> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_security_policies"))]
     pub async fn get_security_policies(&self) -> Result<Vec<SecurityPolicy>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring. Acquired
-        // BEFORE the with_timeout wrapper so the lock spans the
-        // entire timeout window.
-        let _guard = self.lock_request().await;
+        // #134 — dual-mode recv (dump); see `get_security_associations`.
+        let seq = self.socket().next_seq();
+        let pid = self.socket().pid();
+        let mut session = self.recv_session_dump(seq).await;
         // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
         // NLM_F_DUMP_INTR detection.
         self.with_timeout(async move {
-            let seq = self.socket().next_seq();
-            let pid = self.socket().pid();
-
             let mut buf = Vec::with_capacity(64);
             buf.extend_from_slice(&0u32.to_ne_bytes());
             buf.extend_from_slice(&XFRM_MSG_GETPOLICY.to_ne_bytes());
@@ -1735,7 +1726,7 @@ impl Connection<Xfrm> {
             let mut policies = Vec::new();
 
             loop {
-                let data = self.socket().recv_msg().await?;
+                let data = session.recv(self).await?;
 
                 let mut offset = 0;
                 while offset + NLMSG_HDRLEN <= data.len() {
@@ -1777,15 +1768,12 @@ impl Connection<Xfrm> {
                                     data[offset + 19],
                                 ]);
                                 if errno != 0 {
-                                    return Err(
-                                        super::error::Error::from_errno(-errno),
-                                    );
+                                    return Err(super::error::Error::from_errno(-errno));
                                 }
                             }
                         }
                         _ => {
-                            if let Some(pol) =
-                                self.parse_policy(&data[offset..offset + nlmsg_len])
+                            if let Some(pol) = self.parse_policy(&data[offset..offset + nlmsg_len])
                             {
                                 policies.push(pol);
                             }
@@ -2201,8 +2189,7 @@ mod tests {
     // XfrmSaBuilder — Plan 141 PR A wire-format round-trip tests
     // ==========================================================
 
-    use super::Connection;
-    use super::Xfrm;
+    use super::{Connection, Xfrm};
 
     /// Build an `add_sa` request via XfrmSaBuilder + MessageBuilder
     /// and return the full netlink frame (header + body + attrs).
@@ -2434,7 +2421,8 @@ mod tests {
             "update_sa MUST send XFRM_MSG_UPDSA (26), not NEWSA — XFRM dispatches by type"
         );
         assert_eq!(
-            flags & NLM_F_REPLACE, 0,
+            flags & NLM_F_REPLACE,
+            0,
             "update_sa MUST NOT set NLM_F_REPLACE — XFRM ignores it; dispatch is by type"
         );
         assert_eq!(flags & NLM_F_EXCL, 0, "EXCL must NOT be set");
@@ -2703,8 +2691,10 @@ mod tests {
 // Streaming dump support — Plan 149 typed-config streams for XFRM
 // =========================================================================
 
-use super::dump_stream::DumpStream;
-use super::parse::{FromNetlink, PResult};
+use super::{
+    dump_stream::DumpStream,
+    parse::{FromNetlink, PResult},
+};
 
 impl FromNetlink for SecurityAssociation {
     /// Push a zeroed `xfrm_usersa_info` body — the kernel reads it
@@ -2721,18 +2711,15 @@ impl FromNetlink for SecurityAssociation {
     fn parse(input: &mut &[u8]) -> PResult<Self> {
         let consumed = *input;
         *input = &input[input.len()..];
-        Self::from_bytes(consumed).map_err(|_| {
-            winnow::error::ErrMode::Cut(winnow::error::ContextError::new())
-        })
+        Self::from_bytes(consumed)
+            .map_err(|_| winnow::error::ErrMode::Cut(winnow::error::ContextError::new()))
     }
 
     /// Parse from the post-nlmsghdr body (`xfrm_usersa_info` +
     /// attrs). Returns `Error::InvalidMessage` on a truncated body.
     fn from_bytes(payload: &[u8]) -> Result<Self> {
         parse_sa_payload(payload).ok_or_else(|| {
-            super::error::Error::InvalidMessage(
-                "truncated xfrm_usersa_info body".into(),
-            )
+            super::error::Error::InvalidMessage("truncated xfrm_usersa_info body".into())
         })
     }
 }
@@ -2748,16 +2735,13 @@ impl FromNetlink for SecurityPolicy {
     fn parse(input: &mut &[u8]) -> PResult<Self> {
         let consumed = *input;
         *input = &input[input.len()..];
-        Self::from_bytes(consumed).map_err(|_| {
-            winnow::error::ErrMode::Cut(winnow::error::ContextError::new())
-        })
+        Self::from_bytes(consumed)
+            .map_err(|_| winnow::error::ErrMode::Cut(winnow::error::ContextError::new()))
     }
 
     fn from_bytes(payload: &[u8]) -> Result<Self> {
         parse_sp_payload(payload).ok_or_else(|| {
-            super::error::Error::InvalidMessage(
-                "truncated xfrm_userpolicy_info body".into(),
-            )
+            super::error::Error::InvalidMessage("truncated xfrm_userpolicy_info body".into())
         })
     }
 }
@@ -2780,7 +2764,8 @@ impl Connection<Xfrm> {
     /// }
     /// ```
     pub async fn stream_sas(&self) -> Result<DumpStream<'_, Xfrm, SecurityAssociation>> {
-        self.dump_stream::<SecurityAssociation>(XFRM_MSG_GETSA).await
+        self.dump_stream::<SecurityAssociation>(XFRM_MSG_GETSA)
+            .await
     }
 
     /// Stream every IPsec Security Policy the kernel knows about.
@@ -2851,8 +2836,8 @@ mod stream_tests {
     #[test]
     fn sp_from_bytes_round_trips_zeroed_body() {
         let payload = vec![0u8; std::mem::size_of::<XfrmUserpolicyInfo>()];
-        let sp = <SecurityPolicy as FromNetlink>::from_bytes(&payload)
-            .expect("zero body should parse");
+        let sp =
+            <SecurityPolicy as FromNetlink>::from_bytes(&payload).expect("zero body should parse");
         assert_eq!(sp.priority, 0);
         assert_eq!(sp.index, 0);
     }

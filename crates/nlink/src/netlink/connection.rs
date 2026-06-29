@@ -141,6 +141,43 @@ impl<P: ProtocolState> Drop for Connection<P> {
     }
 }
 
+/// Dual-mode frame source for hand-rolled subsystem `send + recv-loop`
+/// cycles (#134). Construct via [`Connection::recv_session`].
+///
+/// `Direct` holds the request lock and reads the socket (mutex mode — the
+/// pre-#134 behavior). `Dispatched` holds a per-seq registration on the
+/// background driver and reads the channel the driver routes this seq's
+/// frames into (dispatcher mode — coexists with the driver instead of
+/// racing its `recv_msg`).
+pub(crate) enum RecvSession {
+    /// Mutex mode — guard held purely for its `Drop` (lock release).
+    Direct(#[allow(dead_code)] tokio::sync::OwnedMutexGuard<()>),
+    Dispatched {
+        guard: super::dispatcher::PendingGuard,
+        /// `Some` for dump cycles: the kernel serializes dumps per socket
+        /// (`netlink_dump_start` → `EBUSY`), so a dispatcher-mode dump
+        /// still holds the dump-serialization lock for its lifetime.
+        /// `None` for single-message cycles (those pipeline freely).
+        _dump_lock: Option<tokio::sync::OwnedMutexGuard<()>>,
+    },
+}
+
+impl RecvSession {
+    /// Receive the next datagram for this cycle, replacing
+    /// `socket().recv_msg()` in a migrated loop. Mutex mode reads the
+    /// socket directly; dispatcher mode pulls the next driver-routed
+    /// frame (or surfaces the driver's fatal error if it stopped).
+    pub(crate) async fn recv<P: ProtocolState>(&mut self, conn: &Connection<P>) -> Result<Vec<u8>> {
+        match self {
+            RecvSession::Direct(_) => conn.socket().recv_msg().await,
+            RecvSession::Dispatched { guard, .. } => match guard.rx.recv().await {
+                Some(buf) => Ok((*buf).clone()),
+                None => Err(conn.dispatcher().take_fatal_error()),
+            },
+        }
+    }
+}
+
 /// Default operation timeout for `Connection<P>` (Plan 171).
 ///
 /// 30 seconds — long enough that legitimate slow operations don't
@@ -506,6 +543,69 @@ impl<P: ProtocolState> Connection<P> {
     /// can store it in its own struct.
     pub(crate) async fn lock_request_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.request_lock.clone().lock_owned().await
+    }
+
+    /// Begin a hand-rolled `send + recv-loop` cycle (#134 dual-mode).
+    ///
+    /// Returns a [`RecvSession`] the caller drives with
+    /// [`RecvSession::recv`] in place of `socket().recv_msg()`. In mutex
+    /// mode the session holds the request lock for the loop's lifetime
+    /// (the old `lock_request` behavior); in dispatcher mode it registers
+    /// `seq` on the driver and the loop consumes the driver-routed
+    /// channel — so the bespoke loop coexists with the background driver
+    /// instead of racing its `recv_msg`.
+    ///
+    /// **Call after computing `seq` and before sending** — dispatcher mode
+    /// requires register-before-send so the driver never sees a response
+    /// for an unregistered seq.
+    pub(crate) async fn recv_session(&self, seq: u32) -> RecvSession {
+        if self.dispatcher_mode {
+            self.ensure_driver();
+            RecvSession::Dispatched {
+                guard: self.dispatcher.register(seq),
+                _dump_lock: None,
+            }
+        } else {
+            RecvSession::Direct(self.request_lock.clone().lock_owned().await)
+        }
+    }
+
+    /// Like [`recv_session`](Self::recv_session) but registers **several**
+    /// seqs onto one channel (#134 batch path). The batch sends N messages
+    /// with N distinct seqs in one `sendmsg` and collects their ACKs in a
+    /// single loop; in dispatcher mode the driver routes all of them to
+    /// the one channel. No dump-serialization lock — a batch isn't a dump,
+    /// and its distinct seqs demux cleanly, so concurrent batches pipeline.
+    pub(crate) async fn recv_session_multi(&self, seqs: &[u32]) -> RecvSession {
+        if self.dispatcher_mode {
+            self.ensure_driver();
+            RecvSession::Dispatched {
+                guard: self.dispatcher.register_many(seqs),
+                _dump_lock: None,
+            }
+        } else {
+            RecvSession::Direct(self.request_lock.clone().lock_owned().await)
+        }
+    }
+
+    /// Like [`recv_session`](Self::recv_session) but for a **dump** cycle.
+    /// In dispatcher mode it additionally holds the dump-serialization
+    /// lock for the cycle's lifetime — the kernel serializes dumps per
+    /// socket (`EBUSY` on a 2nd in-flight dump), so concurrent
+    /// dispatcher-mode dumps must still serialize even though unicast
+    /// requests pipeline. In mutex mode it's identical to `recv_session`
+    /// (the lock already serializes everything).
+    pub(crate) async fn recv_session_dump(&self, seq: u32) -> RecvSession {
+        if self.dispatcher_mode {
+            let dump_lock = self.request_lock.clone().lock_owned().await;
+            self.ensure_driver();
+            RecvSession::Dispatched {
+                guard: self.dispatcher.register(seq),
+                _dump_lock: Some(dump_lock),
+            }
+        } else {
+            RecvSession::Direct(self.request_lock.clone().lock_owned().await)
+        }
     }
 
     /// Plan 234 — access this Connection's dispatcher.
@@ -3026,27 +3126,27 @@ impl Connection<Generic> {
         builder.append(&genl_hdr);
         build_attrs(&mut builder);
 
-        // F1 fix — these public escape hatches for custom GENL
-        // commands were missed in the 0.19 lock sweep. Without this,
-        // `conn.command(...)` running concurrently with `conn.get_links()`
-        // on a shared `Arc<Connection>` races on the recv side
-        // exactly like the pre-F1 bug. Lock acquired BEFORE
-        // with_timeout so the lock spans the 30s op-timeout window.
-        let _guard = self.lock_request().await;
+        // #134 — dual-mode recv. In mutex mode the session holds the
+        // request lock for the whole send+recv (the F1 fix — these public
+        // escape hatches were missed in the 0.19 lock sweep); in
+        // dispatcher mode it registers the seq so the driver routes the
+        // response here instead of the call racing the driver's recv_msg.
+        // Built BEFORE with_timeout so the lock/registration spans the
+        // 30s op-timeout window.
+        let seq = self.socket.next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket.pid());
+        let mut session = self.recv_session(seq).await;
 
         // Plan 208 Phase 1 — wrap in with_timeout. Pre-0.19 a kernel
         // that dropped the ACK for any custom GENL command hung
         // indefinitely. `process_genl_response` already does
         // seq-filter; the timeout closes the indefinite-hang class.
         self.with_timeout(async move {
-            let seq = self.socket.next_seq();
-            builder.set_seq(seq);
-            builder.set_pid(self.socket.pid());
-
             let msg = builder.finish();
             self.socket.send(&msg).await?;
 
-            let response = self.socket.recv_msg().await?;
+            let response = session.recv(self).await?;
             self.process_genl_response(&response, seq)?;
 
             Ok(response)
@@ -3068,8 +3168,14 @@ impl Connection<Generic> {
         builder.append(&genl_hdr);
         build_attrs(&mut builder);
 
-        // F1 fix — see `command()` above.
-        let _guard = self.lock_request().await;
+        // #134 — dual-mode recv; see `command()` above. Dumps still
+        // serialize per socket in dispatcher mode (the registration
+        // doesn't change the kernel's per-fd EBUSY rule), but the loop no
+        // longer races the driver's recv_msg.
+        let seq = self.socket.next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket.pid());
+        let mut session = self.recv_session_dump(seq).await;
 
         // Plan 208 Phase 1+2 — wrap in with_timeout, add
         // NLM_F_DUMP_INTR detection. Pre-0.19 every custom GENL
@@ -3077,17 +3183,13 @@ impl Connection<Generic> {
         // silently use an inconsistent snapshot when the kernel
         // signaled mid-dump mutation.
         self.with_timeout(async move {
-            let seq = self.socket.next_seq();
-            builder.set_seq(seq);
-            builder.set_pid(self.socket.pid());
-
             let msg = builder.finish();
             self.socket.send(&msg).await?;
 
             let mut responses = Vec::new();
 
             loop {
-                let data = self.socket.recv_msg().await?;
+                let data = session.recv(self).await?;
                 let mut done = false;
 
                 for result in MessageIter::new(&data) {

@@ -17,6 +17,22 @@ All notable changes to this project will be documented in this file.
   hardened: `NetlinkSocket::next_seq()` now **skips 0** so a wrapped
   unicast seq can never be misrouted as a multicast notification. Default
   (mutex) mode is unchanged.
+- **Dispatcher mode: mixed-subsystem recv loops migrated (#134 stage 3).**
+  The subsystems that mix the driver-backed generic inners with their own
+  hand-rolled `recv_msg` loops — xfrm (SA/policy dumps), netfilter
+  (conntrack dump), ethtool (`*_GET` / stats / parameterized doit), the
+  generic `command` / `dump_command` GENL escape hatches, and the route
+  `batch` commit path — now route their loops through a new dual-mode
+  `RecvSession` primitive. In the default mutex mode it holds the request
+  lock and reads the socket exactly as before (zero behavior change); in
+  dispatcher mode it registers the seq(s) on the background driver and
+  consumes the routed channel, so the loop coexists with the driver
+  instead of racing its `recv_msg`. Dump cycles additionally hold the
+  dump-serialization lock (kernel `EBUSY`); the batch path registers all
+  its op seqs onto one channel via `register_many`. Bespoke **single-reader**
+  subsystems that never touch the driver (sockdiag, audit, connector,
+  fib_lookup, selinux, uevent, nftables, nl80211, devlink) keep the
+  request lock — it's the correct per-socket serialization there.
 - **Dispatcher mode: streaming dumps now supported (#134 streams stage 2).**
   `dump_stream` / `dump_stream_with_body` and the GENL `dump_typed_stream`
   work on a dispatcher-mode `Connection`: they register their seq before

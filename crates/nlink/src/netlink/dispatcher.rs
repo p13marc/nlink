@@ -280,7 +280,25 @@ impl Dispatcher {
             .insert(seq, tx);
         PendingGuard {
             dispatcher: self.clone(),
-            seq,
+            seqs: vec![seq],
+            rx,
+        }
+    }
+
+    /// Register interest in **several** seqs that share one response
+    /// channel. Used by the batch path: it sends N messages with N
+    /// distinct seqs in one `sendmsg` and collects their ACKs from a
+    /// single loop, so the driver routes every one of those seqs into the
+    /// same `rx`. Register-before-send, same as [`register`](Self::register).
+    pub(crate) fn register_many(&self, seqs: &[u32]) -> PendingGuard {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut pending = self.inner.pending.lock().unwrap_or_else(|p| p.into_inner());
+        for &seq in seqs {
+            pending.insert(seq, tx.clone());
+        }
+        PendingGuard {
+            dispatcher: self.clone(),
+            seqs: seqs.to_vec(),
             rx,
         }
     }
@@ -509,14 +527,18 @@ impl Dispatcher {
 /// recv side.
 pub(crate) struct PendingGuard {
     dispatcher: Dispatcher,
-    seq: u32,
+    /// The seq(s) routed to this guard's channel. Usually one; the batch
+    /// path registers several (see [`Dispatcher::register_many`]).
+    seqs: Vec<u32>,
     /// Each item is a full netlink datagram routed by the driver.
     pub rx: mpsc::UnboundedReceiver<Arc<Vec<u8>>>,
 }
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        self.dispatcher.deregister(self.seq);
+        for &seq in &self.seqs {
+            self.dispatcher.deregister(seq);
+        }
     }
 }
 
@@ -864,6 +886,23 @@ mod tests {
         d.route_buffer(synth_frame(0));
         assert!(a.rx.recv().await.is_some());
         assert!(b.rx.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn register_many_routes_all_seqs_to_one_channel() {
+        let d = Dispatcher::new();
+        let mut guard = d.register_many(&[10, 20, 30]);
+        assert_eq!(d.pending_count(), 3);
+        // Frames for any of the registered seqs land on the one channel.
+        d.route_buffer(synth_frame(20));
+        d.route_buffer(synth_frame(10));
+        d.route_buffer(synth_frame(30));
+        for _ in 0..3 {
+            assert!(guard.rx.recv().await.is_some());
+        }
+        // Dropping the guard deregisters every seq.
+        drop(guard);
+        assert_eq!(d.pending_count(), 0);
     }
 
     #[tokio::test]

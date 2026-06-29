@@ -309,12 +309,13 @@ impl<'a> Batch<'a> {
     }
 
     async fn send_chunk(&self, ops: &[BatchOp]) -> Result<Vec<std::result::Result<(), Error>>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring. Acquired
-        // BEFORE the with_timeout wrapper so the lock spans the
-        // entire timeout window.
-        let _guard = self.conn.lock_request().await;
+        // #134 — dual-mode recv. Mutex mode: hold the request lock for the
+        // whole send+recv (the F1 fix). Dispatcher mode: register all the
+        // ops' seqs onto one channel so the driver routes every ACK here
+        // instead of the loop racing its recv_msg. Built BEFORE the send
+        // (and the with_timeout wrapper) so it spans the timeout window.
+        let seqs: Vec<u32> = ops.iter().map(|o| o.seq).collect();
+        let mut session = self.conn.recv_session_multi(&seqs).await;
         // Concatenate messages into a single buffer
         let total_size: usize = ops.iter().map(|o| o.msg.len()).sum();
         let mut buf = Vec::with_capacity(total_size);
@@ -339,7 +340,7 @@ impl<'a> Batch<'a> {
                 let mut remaining = ops.len();
 
                 while remaining > 0 {
-                    let response = self.conn.socket().recv_msg().await?;
+                    let response = session.recv(self.conn).await?;
 
                     for result in MessageIter::new(&response) {
                         let (header, payload) = result?;

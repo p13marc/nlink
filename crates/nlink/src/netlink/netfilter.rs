@@ -888,21 +888,19 @@ impl Connection<Netfilter> {
 
     /// Get connection tracking entries for a specific address family.
     async fn get_conntrack_family(&self, family: u8) -> Result<Vec<ConntrackEntry>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring. Acquired
-        // BEFORE the with_timeout wrapper so the lock spans the
-        // entire timeout window.
-        let _guard = self.lock_request().await;
+        // #134 — dual-mode recv (dump). Mutex mode: hold the request lock
+        // for the whole send+recv (the F1 fix). Dispatcher mode: register
+        // the seq (+ dump-serialization lock) so the loop coexists with
+        // the driver instead of racing its recv_msg. Built BEFORE
+        // with_timeout so it spans the timeout window.
+        let seq = self.socket().next_seq();
+        let pid = self.socket().pid();
+        let mut session = self.recv_session_dump(seq).await;
         // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
         // NLM_F_DUMP_INTR detection.
         self.with_timeout(async move {
-            let seq = self.socket().next_seq();
-            let pid = self.socket().pid();
-
             let mut buf = Vec::with_capacity(64);
-            let msg_type =
-                ((NFNL_SUBSYS_CTNETLINK as u16) << 8) | (IPCTNL_MSG_CT_GET as u16);
+            let msg_type = ((NFNL_SUBSYS_CTNETLINK as u16) << 8) | (IPCTNL_MSG_CT_GET as u16);
 
             buf.extend_from_slice(&0u32.to_ne_bytes());
             buf.extend_from_slice(&msg_type.to_ne_bytes());
@@ -922,7 +920,7 @@ impl Connection<Netfilter> {
             let mut entries = Vec::new();
 
             loop {
-                let data = self.socket().recv_msg().await?;
+                let data = session.recv(self).await?;
 
                 let mut offset = 0;
                 while offset + 16 <= data.len() {
@@ -964,9 +962,7 @@ impl Connection<Netfilter> {
                                     data[offset + 19],
                                 ]);
                                 if errno != 0 {
-                                    return Err(
-                                        super::error::Error::from_errno(-errno),
-                                    );
+                                    return Err(super::error::Error::from_errno(-errno));
                                 }
                             }
                         }
@@ -1594,8 +1590,7 @@ mod tests {
 // Streaming dump support — Plan 149 closeout
 // =========================================================================
 
-use super::dump_stream::DumpStream;
-use super::parse::FromNetlink;
+use super::{dump_stream::DumpStream, parse::FromNetlink};
 
 impl FromNetlink for ConntrackEntry {
     /// Default body: AF_UNSPEC nfgenmsg ("dump everything,
@@ -1612,18 +1607,16 @@ impl FromNetlink for ConntrackEntry {
     fn parse(input: &mut &[u8]) -> PResult<Self> {
         let consumed = *input;
         *input = &input[input.len()..];
-        Self::from_bytes(consumed).map_err(|_| {
-            winnow::error::ErrMode::Cut(winnow::error::ContextError::new())
-        })
+        Self::from_bytes(consumed)
+            .map_err(|_| winnow::error::ErrMode::Cut(winnow::error::ContextError::new()))
     }
 
     /// Parse a post-nlmsghdr conntrack frame: `nfgenmsg + attrs`.
     /// Delegates to the existing `parse_conntrack_body` so the
     /// dump path and the multicast-event path share one parser.
     fn from_bytes(payload: &[u8]) -> Result<Self> {
-        parse_conntrack_body(payload).ok_or_else(|| {
-            super::error::Error::InvalidMessage("malformed conntrack entry".into())
-        })
+        parse_conntrack_body(payload)
+            .ok_or_else(|| super::error::Error::InvalidMessage("malformed conntrack entry".into()))
     }
 }
 
@@ -1660,16 +1653,12 @@ impl Connection<Netfilter> {
     }
 
     /// Convenience: `stream_conntrack(AF_INET)`.
-    pub async fn stream_conntrack_v4(
-        &self,
-    ) -> Result<DumpStream<'_, Netfilter, ConntrackEntry>> {
+    pub async fn stream_conntrack_v4(&self) -> Result<DumpStream<'_, Netfilter, ConntrackEntry>> {
         self.stream_conntrack(libc::AF_INET as u8).await
     }
 
     /// Convenience: `stream_conntrack(AF_INET6)`.
-    pub async fn stream_conntrack_v6(
-        &self,
-    ) -> Result<DumpStream<'_, Netfilter, ConntrackEntry>> {
+    pub async fn stream_conntrack_v6(&self) -> Result<DumpStream<'_, Netfilter, ConntrackEntry>> {
         self.stream_conntrack(libc::AF_INET6 as u8).await
     }
 }
