@@ -61,14 +61,23 @@ const NLM_F_REPLACE: u16 = 0x100;
 /// AF_BRIDGE constant
 const AF_BRIDGE: u8 = 7;
 
-/// Neighbor flags for FDB entries.
+/// Neighbor flags for FDB entries (`NTF_*` from `linux/neighbour.h`).
 mod ntf {
-    /// Entry for the interface itself
+    /// `NTF_SELF` — entry for the interface itself.
     pub const SELF: u8 = 0x02;
-    /// Entry for the master bridge
+    /// `NTF_MASTER` — entry for the master bridge.
     pub const MASTER: u8 = 0x04;
-    /// Externally learned entry
+    /// `NTF_PROXY` — proxy entry (the local stack answers for it).
+    pub const PROXY: u8 = 0x08;
+    /// `NTF_EXT_LEARNED` — externally learned entry.
     pub const EXT_LEARNED: u8 = 0x10;
+    /// `NTF_OFFLOADED` — entry is offloaded to hardware. Read-only,
+    /// set by the kernel; ignored on writes.
+    pub const OFFLOADED: u8 = 0x20;
+    /// `NTF_STICKY` — entry is not refreshed/replaced by MAC learning.
+    pub const STICKY: u8 = 0x40;
+    /// `NTF_ROUTER` — the destination is a router (VXLAN/EVPN).
+    pub const ROUTER: u8 = 0x80;
 }
 
 /// Neighbor states
@@ -200,6 +209,28 @@ impl FdbEntry {
         self.flags & ntf::EXT_LEARNED != 0
     }
 
+    /// Check if the entry is sticky (NTF_STICKY) — not refreshed or
+    /// replaced by MAC learning.
+    pub fn is_sticky(&self) -> bool {
+        self.flags & ntf::STICKY != 0
+    }
+
+    /// Check if the destination is flagged as a router (NTF_ROUTER).
+    pub fn is_router(&self) -> bool {
+        self.flags & ntf::ROUTER != 0
+    }
+
+    /// Check if the entry is offloaded to hardware (NTF_OFFLOADED).
+    /// This flag is set by the kernel and read-only.
+    pub fn is_offloaded(&self) -> bool {
+        self.flags & ntf::OFFLOADED != 0
+    }
+
+    /// Check if the entry is a proxy entry (NTF_PROXY).
+    pub fn is_proxy(&self) -> bool {
+        self.flags & ntf::PROXY != 0
+    }
+
     /// Format MAC address as a colon-separated hex string.
     pub fn mac_str(&self) -> String {
         format!(
@@ -241,6 +272,8 @@ pub struct FdbEntryBuilder {
     permanent: bool,
     self_flag: bool,
     extern_learn: bool,
+    sticky: bool,
+    router: bool,
 }
 
 impl FdbEntryBuilder {
@@ -357,6 +390,25 @@ impl FdbEntryBuilder {
         self
     }
 
+    /// Mark the entry as sticky (sets NTF_STICKY).
+    ///
+    /// A sticky entry is pinned to its current port: the kernel will
+    /// not move or overwrite it via MAC learning, even if the same MAC
+    /// is seen on another port.
+    pub fn sticky(mut self) -> Self {
+        self.sticky = true;
+        self
+    }
+
+    /// Mark the destination as a router (sets NTF_ROUTER).
+    ///
+    /// Used for VXLAN/EVPN remote VTEPs that are routers, so the
+    /// bridge treats the peer accordingly (e.g. for ARP/ND suppression).
+    pub fn router(mut self) -> Self {
+        self.router = true;
+        self
+    }
+
     /// Write the add message to the builder with resolved interface indices.
     pub(crate) fn write_add(
         &self,
@@ -376,6 +428,12 @@ impl FdbEntryBuilder {
         }
         if self.extern_learn {
             ntf_flags |= ntf::EXT_LEARNED;
+        }
+        if self.sticky {
+            ntf_flags |= ntf::STICKY;
+        }
+        if self.router {
+            ntf_flags |= ntf::ROUTER;
         }
 
         let ndmsg = NdMsg::new()
@@ -758,6 +816,66 @@ mod tests {
         let builder = FdbEntryBuilder::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
         assert!(builder.permanent); // default is permanent
         assert!(!builder.self_flag);
+    }
+
+    // ---- NTF flag completeness (#137 bridge/FDB audit) ----
+
+    #[test]
+    fn ntf_constants_match_kernel() {
+        // linux/neighbour.h NTF_* values.
+        assert_eq!(ntf::SELF, 0x02);
+        assert_eq!(ntf::MASTER, 0x04);
+        assert_eq!(ntf::PROXY, 0x08);
+        assert_eq!(ntf::EXT_LEARNED, 0x10);
+        assert_eq!(ntf::OFFLOADED, 0x20);
+        assert_eq!(ntf::STICKY, 0x40);
+        assert_eq!(ntf::ROUTER, 0x80);
+    }
+
+    #[test]
+    fn fdb_entry_flag_accessors() {
+        let mk = |flags: u8| FdbEntry {
+            ifindex: 1,
+            mac: [0; 6],
+            vlan: None,
+            dst: None,
+            vni: None,
+            state: NeighborState::Permanent,
+            flags,
+            master: None,
+        };
+        assert!(mk(ntf::STICKY).is_sticky());
+        assert!(mk(ntf::ROUTER).is_router());
+        assert!(mk(ntf::OFFLOADED).is_offloaded());
+        assert!(mk(ntf::PROXY).is_proxy());
+        // Mutually exclusive: a sticky-only entry isn't router/offloaded.
+        let s = mk(ntf::STICKY);
+        assert!(!s.is_router() && !s.is_offloaded() && !s.is_proxy());
+    }
+
+    /// `write_add` must lower the sticky/router builder flags into the
+    /// `ndmsg.ndm_flags` byte (offset 10 in the 12-byte ndmsg, which
+    /// follows the 16-byte nlmsghdr → message offset 26).
+    #[test]
+    fn write_add_lowers_sticky_and_router_into_ndm_flags() {
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_NEWNEIGH, 0);
+        FdbEntryBuilder::new([0xaa; 6])
+            .sticky()
+            .router()
+            .write_add(&mut builder, 5, None);
+        let bytes = builder.finish();
+        assert_eq!(bytes[16 + 10], ntf::STICKY | ntf::ROUTER);
+    }
+
+    #[test]
+    fn write_add_self_and_extern_learn_flags() {
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_NEWNEIGH, 0);
+        FdbEntryBuilder::new([0xaa; 6])
+            .self_()
+            .extern_learn()
+            .write_add(&mut builder, 5, None);
+        let bytes = builder.finish();
+        assert_eq!(bytes[16 + 10], ntf::SELF | ntf::EXT_LEARNED);
     }
 
     #[test]

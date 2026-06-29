@@ -6,20 +6,24 @@ use super::{
     MPTCP_PM_GENL_NAME, MPTCP_PM_GENL_VERSION,
     types::{MptcpEndpoint, MptcpEndpointBuilder, MptcpFlags, MptcpLimits},
 };
-use crate::netlink::{
-    attr::{AttrIter, NLA_F_NESTED, get},
-    builder::MessageBuilder,
-    connection::Connection,
-    error::{Error, Result},
-    genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr},
-    message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
-    protocol::{AsyncProtocolInit, Mptcp},
-    socket::NetlinkSocket,
+use crate::{
+    macros::__rt::resolve_genl_family,
+    netlink::{
+        attr::{AttrIter, NLA_F_NESTED},
+        builder::MessageBuilder,
+        connection::Connection,
+        error::Result,
+        genl::{GENL_HDRLEN, GenlMsgHdr},
+        message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN},
+        protocol::{AsyncProtocolInit, Mptcp},
+        socket::NetlinkSocket,
+    },
 };
 
 impl AsyncProtocolInit for Mptcp {
     async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
-        let family_id = resolve_mptcp_family(socket).await?;
+        // #135 — shared canonical resolver (was a per-family copy).
+        let family_id = resolve_genl_family(socket, MPTCP_PM_GENL_NAME).await?;
         Ok(Self { family_id })
     }
 }
@@ -372,233 +376,55 @@ impl Connection<Mptcp> {
         Ok(())
     }
 
-    /// Send an MPTCP PM GENL command and wait for ACK.
+    /// Send an MPTCP PM GENL `SET`-style command and wait for the ACK.
+    ///
+    /// #135 — routes through the canonical [`Connection::send_ack`]
+    /// (looped recv + seq filter + 30s timeout), closing the H9
+    /// stale-frame bug class.
     async fn mptcp_command(
         &self,
         cmd: u8,
         build_attrs: impl FnOnce(&mut MessageBuilder),
-    ) -> Result<Vec<u8>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
-        let family_id = self.state().family_id;
-
-        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
-
-        let genl_hdr = GenlMsgHdr::new(cmd, MPTCP_PM_GENL_VERSION);
-        builder.append(&genl_hdr);
-
+    ) -> Result<()> {
+        let mut builder = MessageBuilder::new(self.state().family_id, NLM_F_REQUEST | NLM_F_ACK);
+        builder.append(&GenlMsgHdr::new(cmd, MPTCP_PM_GENL_VERSION));
         build_attrs(&mut builder);
-
-        let seq = self.socket().next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket().pid());
-
-        let msg = builder.finish();
-        self.socket().send(&msg).await?;
-
-        let response: Vec<u8> = self.socket().recv_msg().await?;
-        self.process_genl_response(&response, seq)?;
-
-        Ok(response)
+        self.send_ack(builder).await
     }
 
-    /// Send an MPTCP PM GENL query command (no ACK requested).
+    /// Send an MPTCP PM GENL query command (no ACK requested, single
+    /// data reply).
+    ///
+    /// #135 — routes through the canonical [`Connection::send_request`]
+    /// (looped recv + seq filter + 30s timeout). Returns the full
+    /// netlink response buffer; callers parse past
+    /// `NLMSG_HDRLEN + GENL_HDRLEN`.
     async fn mptcp_query(
         &self,
         cmd: u8,
         build_attrs: impl FnOnce(&mut MessageBuilder),
     ) -> Result<Vec<u8>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
-        let family_id = self.state().family_id;
-
-        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST);
-
-        let genl_hdr = GenlMsgHdr::new(cmd, MPTCP_PM_GENL_VERSION);
-        builder.append(&genl_hdr);
-
+        let mut builder = MessageBuilder::new(self.state().family_id, NLM_F_REQUEST);
+        builder.append(&GenlMsgHdr::new(cmd, MPTCP_PM_GENL_VERSION));
         build_attrs(&mut builder);
-
-        let seq = self.socket().next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket().pid());
-
-        let msg = builder.finish();
-        self.socket().send(&msg).await?;
-
-        let response: Vec<u8> = self.socket().recv_msg().await?;
-
-        // Extract the payload from the first valid message
-        for result in MessageIter::new(&response) {
-            let (header, payload) = result?;
-            if header.nlmsg_seq != seq {
-                continue;
-            }
-            if header.is_error() {
-                let err = NlMsgError::from_bytes(payload)?;
-                if !err.is_ack() {
-                    return Err(err.into_error(payload));
-                }
-                continue;
-            }
-            if !header.is_done() {
-                return Ok(payload.to_vec());
-            }
-        }
-
-        Ok(Vec::new())
+        self.send_request(builder).await
     }
 
     /// Send an MPTCP PM GENL dump command and collect all responses.
+    ///
+    /// #135 — routes through [`Connection::send_dump`]; each element is
+    /// a full netlink message, so callers skip
+    /// `NLMSG_HDRLEN + GENL_HDRLEN` to reach the attributes.
     async fn dump_mptcp_command(
         &self,
         cmd: u8,
         build_attrs: impl FnOnce(&mut MessageBuilder),
     ) -> Result<Vec<Vec<u8>>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
-        let family_id = self.state().family_id;
-
-        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
-
-        let genl_hdr = GenlMsgHdr::new(cmd, MPTCP_PM_GENL_VERSION);
-        builder.append(&genl_hdr);
-
+        let mut builder = MessageBuilder::new(self.state().family_id, NLM_F_REQUEST | NLM_F_DUMP);
+        builder.append(&GenlMsgHdr::new(cmd, MPTCP_PM_GENL_VERSION));
         build_attrs(&mut builder);
-
-        let seq = self.socket().next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket().pid());
-
-        let msg = builder.finish();
-        self.socket().send(&msg).await?;
-
-        // Plan 172 — wrap the recv loop in the Connection-level
-        // operation timeout (Plan 171 default: 30s).
-        self.with_timeout(async {
-            let mut responses = Vec::new();
-
-            loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
-                let mut done = false;
-
-                for result in MessageIter::new(&data) {
-                    let (header, payload) = result?;
-
-                    if header.nlmsg_seq != seq {
-                        continue;
-                    }
-
-                    if header.is_error() {
-                        let err = NlMsgError::from_bytes(payload)?;
-                        if !err.is_ack() {
-                            return Err(err.into_error(payload));
-                        }
-                        continue;
-                    }
-
-                    if header.is_done() {
-                        done = true;
-                        break;
-                    }
-
-                    responses.push(payload.to_vec());
-                }
-
-                if done {
-                    break;
-                }
-            }
-
-            Ok(responses)
-        })
-        .await
+        self.send_dump(builder).await
     }
-
-    /// Process a GENL response, checking for errors.
-    fn process_genl_response(&self, data: &[u8], seq: u32) -> Result<()> {
-        for result in MessageIter::new(data) {
-            let (header, payload) = result?;
-
-            if header.nlmsg_seq != seq {
-                continue;
-            }
-
-            if header.is_error() {
-                let err = NlMsgError::from_bytes(payload)?;
-                if !err.is_ack() {
-                    return Err(err.into_error(payload));
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Resolve the MPTCP PM GENL family ID.
-async fn resolve_mptcp_family(socket: &NetlinkSocket) -> Result<u16> {
-    let mut builder = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST);
-
-    let genl_hdr = GenlMsgHdr::new(CtrlCmd::GetFamily as u8, 1);
-    builder.append(&genl_hdr);
-
-    builder.append_attr_str(CtrlAttr::FamilyName as u16, MPTCP_PM_GENL_NAME);
-
-    let seq = socket.next_seq();
-    builder.set_seq(seq);
-    builder.set_pid(socket.pid());
-
-    let msg = builder.finish();
-    socket.send(&msg).await?;
-
-    let response: Vec<u8> = socket.recv_msg().await?;
-
-    for result in MessageIter::new(&response) {
-        let (header, payload) = result?;
-
-        if header.nlmsg_seq != seq {
-            continue;
-        }
-
-        if header.is_error() {
-            let err = NlMsgError::from_bytes(payload)?;
-            if !err.is_ack() {
-                if err.error == -libc::ENOENT {
-                    return Err(Error::FamilyNotFound {
-                        name: MPTCP_PM_GENL_NAME.to_string(),
-                    });
-                }
-                return Err(err.into_error(payload));
-            }
-            continue;
-        }
-
-        if header.is_done() {
-            continue;
-        }
-
-        if payload.len() < GENL_HDRLEN {
-            return Err(Error::InvalidMessage("GENL header too short".into()));
-        }
-
-        let attrs_data = &payload[GENL_HDRLEN..];
-        for (attr_type, attr_payload) in AttrIter::new(attrs_data) {
-            if attr_type == CtrlAttr::FamilyId as u16 {
-                return get::u16_ne(attr_payload);
-            }
-        }
-    }
-
-    Err(Error::FamilyNotFound {
-        name: MPTCP_PM_GENL_NAME.to_string(),
-    })
 }
 
 /// Append endpoint attributes to a message builder.
@@ -642,13 +468,15 @@ fn append_endpoint_attrs(builder: &mut MessageBuilder, endpoint: &MptcpEndpointB
     }
 }
 
-/// Parse an endpoint from a GENL response.
-fn parse_endpoint_response(payload: &[u8]) -> Result<Option<MptcpEndpoint>> {
-    // Skip GENL header
-    if payload.len() < GENL_HDRLEN {
+/// Parse an endpoint from a full netlink response message.
+///
+/// The frame comes from `send_dump`, so it begins with the 16-byte
+/// `nlmsghdr`; skip that plus the GENL header to reach the attributes.
+fn parse_endpoint_response(frame: &[u8]) -> Result<Option<MptcpEndpoint>> {
+    if frame.len() < NLMSG_HDRLEN + GENL_HDRLEN {
         return Ok(None);
     }
-    let data = &payload[GENL_HDRLEN..];
+    let data = &frame[NLMSG_HDRLEN + GENL_HDRLEN..];
 
     // Look for MPTCP_PM_ATTR_ADDR
     for (attr_type, attr_payload) in AttrIter::new(data) {
@@ -700,13 +528,15 @@ fn parse_endpoint_attrs(data: &[u8]) -> Result<MptcpEndpoint> {
     Ok(endpoint)
 }
 
-/// Parse limits from a GENL response.
-fn parse_limits_response(payload: &[u8]) -> Result<Option<MptcpLimits>> {
-    // Skip GENL header
-    if payload.len() < GENL_HDRLEN {
+/// Parse limits from a full netlink response message.
+///
+/// The frame comes from `send_request`, so it begins with the 16-byte
+/// `nlmsghdr`; skip that plus the GENL header to reach the attributes.
+fn parse_limits_response(frame: &[u8]) -> Result<Option<MptcpLimits>> {
+    if frame.len() < NLMSG_HDRLEN + GENL_HDRLEN {
         return Ok(None);
     }
-    let data = &payload[GENL_HDRLEN..];
+    let data = &frame[NLMSG_HDRLEN + GENL_HDRLEN..];
 
     let mut limits = MptcpLimits::default();
     let mut found = false;
@@ -779,6 +609,7 @@ fn append_dest_addr(builder: &mut MessageBuilder, addr: &super::types::MptcpAddr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::netlink::genl::GENL_ID_CTRL;
 
     #[test]
     fn test_parse_empty_payload() {
@@ -790,5 +621,59 @@ mod tests {
     fn test_parse_limits_empty() {
         let result = parse_limits_response(&[]).unwrap();
         assert!(result.is_none());
+    }
+
+    /// Build a full netlink frame (16-byte nlmsghdr + GENL header +
+    /// attrs), exactly what `send_dump`/`send_request` hand back after
+    /// the #135 unification. The parse helpers must skip
+    /// `NLMSG_HDRLEN + GENL_HDRLEN` to reach the attributes — this test
+    /// pins that offset so a regression to the old GENL-only offset is
+    /// caught.
+    fn frame_with_attrs(build: impl FnOnce(&mut MessageBuilder)) -> Vec<u8> {
+        let mut b = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST);
+        b.append(&GenlMsgHdr::new(
+            mptcp_pm_cmd::GET_LIMITS,
+            MPTCP_PM_GENL_VERSION,
+        ));
+        build(&mut b);
+        b.set_seq(7);
+        b.finish()
+    }
+
+    #[test]
+    fn parse_limits_reads_full_frame_at_correct_offset() {
+        let frame = frame_with_attrs(|b| {
+            b.append_attr_u32(mptcp_pm_attr::SUBFLOWS, 4);
+            b.append_attr_u32(mptcp_pm_attr::RCV_ADD_ADDRS, 8);
+        });
+        let limits = parse_limits_response(&frame)
+            .unwrap()
+            .expect("limits parsed");
+        assert_eq!(limits.subflows, Some(4));
+        assert_eq!(limits.add_addr_accepted, Some(8));
+    }
+
+    #[test]
+    fn parse_endpoint_reads_full_frame_at_correct_offset() {
+        let frame = frame_with_attrs(|b| {
+            let addr_token = b.nest_start(mptcp_pm_attr::ADDR | NLA_F_NESTED);
+            b.append_attr_u8(mptcp_pm_addr_attr::ID, 3);
+            b.append_attr(mptcp_pm_addr_attr::ADDR4, &[10, 0, 0, 1]);
+            b.nest_end(addr_token);
+        });
+        let ep = parse_endpoint_response(&frame)
+            .unwrap()
+            .expect("endpoint parsed");
+        assert_eq!(ep.id, 3);
+        assert_eq!(ep.address, IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)));
+    }
+
+    /// A frame shorter than `nlmsghdr + GENL header` must not panic —
+    /// it returns `None` (the length guard).
+    #[test]
+    fn parse_helpers_reject_short_frame() {
+        let too_short = vec![0u8; NLMSG_HDRLEN + GENL_HDRLEN - 1];
+        assert!(parse_limits_response(&too_short).unwrap().is_none());
+        assert!(parse_endpoint_response(&too_short).unwrap().is_none());
     }
 }

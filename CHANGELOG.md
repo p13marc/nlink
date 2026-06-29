@@ -4,6 +4,118 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in dispatcher mode — per-`nlmsg_seq` unicast demux foundation
+  (#134, Plan 234 follow-on).** `Connection::with_dispatcher()` opts a
+  connection into a new request path: a single background recv-driver
+  task owns the socket's read side and demultiplexes each datagram to a
+  per-`nlmsg_seq` registry, so single-message unicast requests on a
+  shared `Arc<Connection>` **pipeline** instead of serializing through
+  the F1 `request_lock`, and a long-lived `recv` no longer blocks
+  unrelated requests. The driver is spawned lazily on first use and torn
+  down on `Connection::drop`; per-seq registration is RAII
+  (`PendingGuard`) so a cancelled/timed-out request is cancellation-safe
+  (a late frame for a dropped seq is discarded). **Default is off** —
+  the existing `request_lock` path is byte-for-byte unchanged, so this
+  is a zero-regression addition. Two deliberate constraints in this
+  foundation release: (1) **dumps still serialize** even in dispatcher
+  mode, because the kernel serializes dumps per socket
+  (`netlink_dump_start` returns `EBUSY` on a second concurrent dump);
+  use `ConnectionPool<P>` for genuinely parallel dumps. (2) The
+  **streaming APIs** (`events`/`into_events`/`dump_stream`/`*_with_resync`)
+  return a clear `Error::NotSupported` on a dispatcher-mode connection —
+  the driver owns recv, so a second reader would race it; use a
+  default-mode `Connection` for events. The full cutover (retiring the
+  mutex outright + migrating the streams onto the dispatcher) remains
+  the tracked #134 follow-up; this lands the validated demux core behind
+  the flag. Also: `Error::is_not_supported()` now also matches the
+  library-level `Error::NotSupported` variant (previously errno-only).
+- **FDB `NTF_*` flag completeness (#137 bridge/FDB wire-format audit).**
+  The FDB builder/reader modelled only `NTF_SELF`/`NTF_MASTER`/
+  `NTF_EXT_LEARNED`. Added the remaining `linux/neighbour.h` flags:
+  `FdbEntryBuilder::sticky()` (`NTF_STICKY` — pin the entry against MAC
+  learning) and `router()` (`NTF_ROUTER` — VXLAN/EVPN router peer) on the
+  write side, plus `FdbEntry::is_sticky()`/`is_router()`/`is_offloaded()`
+  (`NTF_OFFLOADED`, kernel-set/read-only)/`is_proxy()` accessors on the
+  read side. Wire-format tests pin the flag values against the kernel
+  UAPI and assert `write_add` lowers them into the `ndmsg.ndm_flags`
+  byte. (Bridge global VLAN options — `BRIDGE_VLANDB_GOPTS` — remain
+  unmodelled; tracked under #137.)
+- **`WireguardConfig::from_wg_quick` + `WireguardConfig::client` (#137).**
+  `from_wg_quick(ifname, contents)` parses a `wg-quick` / `wg setconf`
+  style `[Interface]` + `[Peer]` config into a declarative
+  `WireguardConfig` (then `.diff()` / `.apply()` as usual). It handles
+  `PrivateKey`/`ListenPort`/`FwMark` and per-peer `PublicKey`/
+  `PresharedKey`/`Endpoint`/`AllowedIPs`/`PersistentKeepalive`, accepts
+  comma-separated allowed-IP CIDRs and `0x`-hex fwmarks, matches keys
+  case-insensitively, and accepts-and-ignores the `wg-quick`-only
+  userspace keys (`Address`, `DNS`, `MTU`, `Table`, `PreUp`/`PostUp`/…).
+  Unknown keys, hostname endpoints (no DNS resolution), and peers
+  missing a `PublicKey` are hard errors. `client(ifname, priv, server_pub,
+  endpoint, allowed_ips, keepalive)` is a convenience constructor for the
+  common single-peer client profile. (Plan 196 ergonomic follow-ups.)
+- **TC `pedit` action `munge` DSL parser (#137).** `PeditAction::parse_params`
+  was a stub that rejected all input; it now parses the `tc(8)` pedit
+  syntax — `[ex] munge <spec> [munge ...] [<control>]` — covering the
+  layered forms (`ip src|dst|ttl|tos`, `tcp|udp sport|dport`,
+  `eth src|dst`), the raw form
+  (`offset <off> [u8|u16|u32] set|add <val> [retain <mask>]`), and a
+  trailing control verdict (`pipe`/`drop`/…). Values accept decimal or
+  `0x`-hex. Per the strict parse_params contract, unmodelled forms
+  (`ip6`, the `clear`/`or`/`and`/… ops) return a clear "not modelled"
+  error pointing at `PeditAction::set_raw`/`add_raw` rather than being
+  silently skipped. `nlink-tc action add pedit munge ...` now works
+  (previously errored). The serialization, builder, and the
+  `ParseParams` trait wiring were already in place.
+
+- **`Connection::<Ovpn>::attach_socket` / `attach_socket_in_netns` —
+  cross-netns transport-socket attach (#136).** The previously-stubbed
+  `attach_socket(ifindex, peer_id, fd)` now issues a `peer-set` carrying
+  `OVPN_A_PEER_SOCKET = fd`; the kernel resolves the fd via
+  `sockfd_lookup` in the **calling process** (fds are process-global,
+  not netns-scoped), so a controller that holds the fd can attach a
+  socket created in another network namespace. `attach_socket_in_netns`
+  additionally sets `OVPN_A_PEER_SOCKET_NETNSID` for the case where the
+  kernel must be told the socket's namespace explicitly. **Redesign
+  note:** #136 specified an `SCM_RIGHTS` sendmsg path; that premise was
+  wrong — netlink generic-command handlers never receive `SCM_RIGHTS`
+  file descriptors, and the upstream ovpn netlink spec passes the socket
+  as a plain `u32` attribute. Verified against the kernel `ovpn.yaml`
+  spec.
+- **`NetlinkSocket::send_with_fds(msg, &[fd])` — generic `SCM_RIGHTS`
+  `sendmsg(2)` primitive (#136).** A general control-message send path
+  (the first `sendmsg`-with-`msg_control` in the crate; all other sends
+  use plain `send(2)`). Provided for protocols/out-of-tree kernels that
+  genuinely consume passed fds and for fd-relay scenarios; it is **not**
+  used by ovpn (see above). cmsg buffer layout (`CMSG_SPACE`/`CMSG_LEN`,
+  8-byte alignment) is unit-tested, and a compile-time assertion pins
+  that the returned future stays `Send` (the `msghdr`/`iovec` raw
+  pointers are built inside the synchronous `try_io` closure, never held
+  across the await).
+
+### Changed
+
+- **GENL command unification — closes the H9 stale-frame bug class
+  (#135).** The hand-rolled per-family GENL command/dump paths for
+  WireGuard, MACsec, MPTCP and ethtool now route through the audited
+  canonical `Connection::{send_ack,send_request,send_dump}` helpers
+  instead of bespoke single-`recv_msg` blocks. Five `SET`/query helpers
+  (`wg_command`, `macsec_command`, `mptcp_command`, `mptcp_query`,
+  `ethtool_set`) previously read exactly one datagram and `continue`d
+  past any non-matching `nlmsg_seq`, so a stale or interleaved frame
+  could make them return `Ok` **without consuming their own ACK** —
+  desynchronizing the fd for the next request (the "H9" class). Routing
+  through the shared helpers inherits the looped seq-filter + correct
+  end-marker + 30 s operation timeout, closing it. In the same pass the
+  four byte-identical `process_genl_response`/`process_ethtool_ack`
+  copies and the three duplicated per-family `resolve_*_family`
+  functions were deleted (the families now share
+  `resolve_genl_family`), netting ~430 fewer lines. Library-internal
+  only — no public type or method signature changed. (nl80211/devlink
+  already used the shared resolver and conformant looped recv paths;
+  their dump-path dedup rides along with the #134 dispatcher migration.)
+
 ## [0.22.0] - 2026-06-29
 
 ### Changed

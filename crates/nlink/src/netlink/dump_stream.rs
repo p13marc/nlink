@@ -88,10 +88,7 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
     /// Send the dump request and construct a stream ready to yield
     /// frames. Called by `Connection::dump_stream`; not part of the
     /// public API directly.
-    pub(crate) async fn send(
-        conn: &'a Connection<P>,
-        msg_type: u16,
-    ) -> Result<Self> {
+    pub(crate) async fn send(conn: &'a Connection<P>, msg_type: u16) -> Result<Self> {
         let mut header_buf = Vec::new();
         T::write_dump_header(&mut header_buf);
         Self::send_with_body_bytes(conn, msg_type, &header_buf).await
@@ -397,6 +394,9 @@ impl<P: ProtocolState> Connection<P> {
     where
         T: FromNetlink + Unpin,
     {
+        if self.is_dispatcher_mode() {
+            return Err(crate::netlink::stream::dispatcher_mode_stream_error());
+        }
         DumpStream::send(self, msg_type).await
     }
 
@@ -418,6 +418,9 @@ impl<P: ProtocolState> Connection<P> {
     where
         T: FromNetlink + Unpin,
     {
+        if self.is_dispatcher_mode() {
+            return Err(crate::netlink::stream::dispatcher_mode_stream_error());
+        }
         DumpStream::send_with_body(self, msg_type, body).await
     }
 }
@@ -440,7 +443,9 @@ mod tests {
         }
     }
 
-    async fn make_stream<'a>(conn: &'a Connection<crate::netlink::Route>) -> DumpStream<'a, crate::netlink::Route, Dummy> {
+    async fn make_stream<'a>(
+        conn: &'a Connection<crate::netlink::Route>,
+    ) -> DumpStream<'a, crate::netlink::Route, Dummy> {
         let guard = conn.lock_request_owned().await;
         DumpStream {
             conn,
@@ -592,7 +597,10 @@ mod tests {
         let done = synth_done_frame(1);
         stream.drain_into_pending(&done);
 
-        assert!(stream.done, "NLMSG_DONE must terminate even with skip_malformed");
+        assert!(
+            stream.done,
+            "NLMSG_DONE must terminate even with skip_malformed"
+        );
         assert!(stream.pending.is_empty());
     }
 

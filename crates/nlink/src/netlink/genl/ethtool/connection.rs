@@ -9,20 +9,21 @@ use super::{
     EthtoolFecAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr,
     EthtoolLinkstateAttr, EthtoolModuleEepromAttr, EthtoolPauseAttr, EthtoolRingsAttr,
     EthtoolRssAttr, EthtoolStatsGrpAttr, EthtoolWolAttr, WOL_MODE_NAMES, bitset::EthtoolBitset,
-    stats_group,
-    types::*,
+    stats_group, types::*,
 };
-use crate::macros::{GenlFamily, __rt::resolve_genl_family_with_groups};
-use crate::netlink::{
-    attr::{AttrIter, NLA_F_NESTED},
-    builder::MessageBuilder,
-    connection::Connection,
-    error::{Error, Result},
-    genl::{GENL_HDRLEN, GenlMsgHdr},
-    interface_ref::InterfaceRef,
-    message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
-    protocol::{AsyncProtocolInit, Ethtool, Route},
-    socket::NetlinkSocket,
+use crate::{
+    macros::{__rt::resolve_genl_family_with_groups, GenlFamily},
+    netlink::{
+        attr::{AttrIter, NLA_F_NESTED},
+        builder::MessageBuilder,
+        connection::Connection,
+        error::{Error, Result},
+        genl::{GENL_HDRLEN, GenlMsgHdr},
+        interface_ref::InterfaceRef,
+        message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
+        protocol::{AsyncProtocolInit, Ethtool, Route},
+        socket::NetlinkSocket,
+    },
 };
 
 /// Correct top-level `ETHTOOL_A_STATS_*` attribute ids.
@@ -71,7 +72,10 @@ impl Connection<Ethtool> {
 
     /// Get the monitor multicast group ID (if available).
     pub fn monitor_group_id(&self) -> Option<u32> {
-        self.state().mcast_groups.get(ETHTOOL_MCGRP_MONITOR).copied()
+        self.state()
+            .mcast_groups
+            .get(ETHTOOL_MCGRP_MONITOR)
+            .copied()
     }
 
     /// Resolve an interface reference to a name.
@@ -1245,7 +1249,11 @@ impl Connection<Ethtool> {
                     // `all_names` = supported (present in the mask),
                     // `active_names` = currently enabled (value set).
                     wol.supported = bitset.all_names().into_iter().map(String::from).collect();
-                    wol.active = bitset.active_names().into_iter().map(String::from).collect();
+                    wol.active = bitset
+                        .active_names()
+                        .into_iter()
+                        .map(String::from)
+                        .collect();
                 }
                 t if t == EthtoolWolAttr::Sopass as u16 && payload.len() >= 6 => {
                     let mut pass = [0u8; 6];
@@ -1475,7 +1483,11 @@ impl Connection<Ethtool> {
     }
 
     /// Read module EEPROM bytes by interface name.
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_module_eeprom_by_name"))]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "get_module_eeprom_by_name")
+    )]
     pub async fn get_module_eeprom_by_name(
         &self,
         ifname: &str,
@@ -1493,8 +1505,10 @@ impl Connection<Ethtool> {
                 builder.append_attr_u32(EthtoolModuleEepromAttr::Length as u16, request.length);
                 builder.append_attr_u8(EthtoolModuleEepromAttr::Page as u16, request.page);
                 builder.append_attr_u8(EthtoolModuleEepromAttr::Bank as u16, request.bank);
-                builder
-                    .append_attr_u8(EthtoolModuleEepromAttr::I2cAddress as u16, request.i2c_address);
+                builder.append_attr_u8(
+                    EthtoolModuleEepromAttr::I2cAddress as u16,
+                    request.i2c_address,
+                );
             })
             .await?;
 
@@ -1865,23 +1879,21 @@ impl Connection<Ethtool> {
     }
 
     /// Send an ethtool SET request.
+    ///
+    /// #135 — routes through the canonical [`Connection::send_ack`]
+    /// (looped recv + seq filter + 30s timeout), closing the H9
+    /// stale-frame bug class (the old single-`recv_msg` could return
+    /// `Ok` without consuming its own ACK, desyncing the fd).
     async fn ethtool_set(
         &self,
         cmd: EthtoolCmd,
         ifname: &str,
         build_attrs: impl FnOnce(&mut MessageBuilder),
     ) -> Result<()> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
-        let family_id = self.state().family_id;
-
-        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
+        let mut builder = MessageBuilder::new(self.state().family_id, NLM_F_REQUEST | NLM_F_ACK);
 
         // Append GENL header
-        let genl_hdr = GenlMsgHdr::new(cmd as u8, ETHTOOL_GENL_VERSION);
-        builder.append(&genl_hdr);
+        builder.append(&GenlMsgHdr::new(cmd as u8, ETHTOOL_GENL_VERSION));
 
         // Append request header with device name
         let header_token = builder.nest_start(1 | NLA_F_NESTED); // ETHTOOL_A_*_HEADER = 1
@@ -1891,39 +1903,7 @@ impl Connection<Ethtool> {
         // Let caller append additional attributes
         build_attrs(&mut builder);
 
-        // Send request
-        let seq = self.socket().next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket().pid());
-
-        let msg = builder.finish();
-        self.socket().send(&msg).await?;
-
-        // Receive ACK
-        let response: Vec<u8> = self.socket().recv_msg().await?;
-        self.process_ethtool_ack(&response, seq)?;
-
-        Ok(())
-    }
-
-    /// Process an ethtool ACK response.
-    fn process_ethtool_ack(&self, data: &[u8], seq: u32) -> Result<()> {
-        for result in MessageIter::new(data) {
-            let (header, payload) = result?;
-
-            if header.nlmsg_seq != seq {
-                continue;
-            }
-
-            if header.is_error() {
-                let err = NlMsgError::from_bytes(payload)?;
-                if !err.is_ack() {
-                    return Err(err.into_error(payload));
-                }
-            }
-        }
-
-        Ok(())
+        self.send_ack(builder).await
     }
 
     // =========================================================================
@@ -2079,8 +2059,7 @@ mod fec_builder_tests {
 #[cfg(test)]
 mod stats_parse_tests {
     use super::*;
-    use crate::netlink::builder::MessageBuilder;
-    use crate::netlink::genl::ethtool::stats_index;
+    use crate::netlink::{builder::MessageBuilder, genl::ethtool::stats_index};
 
     fn attrs(build: impl FnOnce(&mut MessageBuilder)) -> Vec<u8> {
         let mut b = MessageBuilder::new(0, 0);
