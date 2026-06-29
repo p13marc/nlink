@@ -333,7 +333,7 @@ the underlying sockopt:
   `"attribute IFLA_MTU rejected: value 0 out of range (at request
   offset 24)"`. See `Error::Kernel::ext_ack`.
 
-### Concurrency (0.19 F1 fix + 0.21 dispatcher foundation)
+### Concurrency (0.19 F1 fix + opt-in dispatcher mode, #134)
 
 `Connection<P>` is `Send + Sync` and safe to share across tokio
 tasks via `Arc<Connection<P>>`. Every request/response method
@@ -345,58 +345,69 @@ in parallel. For true parallel throughput use
 its own kernel-side socket queue, which the kernel processes
 in parallel).
 
-**Stream-shape APIs hold the lock for their lifetime.**
-`conn.events().await`, `conn.into_events().await`,
-`conn.dump_stream::<T>(...).await?` and the
-`*_with_resync` constructors are now **async** (0.19 Finding B).
-A long-lived events subscriber blocks concurrent requests on
-the same Connection until dropped. Use a second Connection
-or `ConnectionPool` for query-in-parallel patterns.
+**Stream-shape APIs hold the lock for their lifetime — in the
+default mutex mode.** `conn.events().await`,
+`conn.into_events().await`, `conn.dump_stream::<T>(...).await?`
+and the `*_with_resync` constructors are **async** (0.19 Finding
+B). On a plain connection a long-lived events subscriber blocks
+concurrent requests until dropped — use a second Connection,
+`ConnectionPool`, or **`with_dispatcher()`** (below), which lifts
+this restriction entirely.
 
-**0.21 Plan 234 — Dispatcher foundation lands.** The
-per-Connection `Dispatcher` (accessible via `conn.dispatcher()`)
-ships the broadcast-channel infrastructure for multicast
-subscribers and the canonical `ENOBUFS → ResyncMarker::ResyncStart`
-routing. Slow multicast subscribers that overflow the kernel's
-multicast queue see the marker on a per-group broadcast channel
-even though the original `recv_msg` call also surfaces the error
-— Plan 151's `*_with_resync` wrappers consume the marker and
-re-issue the appropriate dump. This deliberately diverges from
-neli's behaviour (silent drop) and from the bare `netlink-sys`
-crate (caller handles the error).
+**Opt-in dispatcher mode (`with_dispatcher()`) — #134.** The
+per-Connection `Dispatcher` ships a per-`nlmsg_seq` background
+recv-driver. Opt a connection in with
+`Connection::<P>::new()?.with_dispatcher()` and a single driver
+task owns recv and demultiplexes every frame: unicast responses
+to per-seq channels, multicast (`seq == 0`) frames to event
+subscribers. The payoff — **events and requests on the same
+connection no longer serialize**, the exact F1 regression #134
+was filed for. `events()`/`into_events()`, `dump_stream`, the
+GENL `dump_typed_stream`, and the mixed subsystems
+(xfrm/netfilter/ethtool/`command`/`batch`) all work in this mode;
+single-message unicast requests **pipeline** instead of waiting on
+the mutex.
 
-The full `NlRouter`-style per-seq unicast dispatcher that
-retires the F1 mutex is the architectural follow-up to Plan
-234 — the broadcast-channel and ENOBUFS-routing infrastructure
-that lands now is the foundation it plugs into. Until then,
-shared-`Arc<Connection>` requests still serialize through the
-F1 mutex; use `ConnectionPool<P>` for true many-fd parallelism.
+Two constraints survive because the kernel imposes them, not the
+library: **dumps still serialize** per socket (`netlink_dump_start`
+→ `EBUSY` on a 2nd in-flight dump — the dump-serialization lock is
+held for a dump's lifetime even in dispatcher mode), and for
+genuinely parallel dumps you still want `ConnectionPool<P>` (one fd
+per task, kernel-parallel).
+
+**The default stays the mutex — deliberately.** A plain
+`Connection<P>` serializes request/response through an internal
+`tokio::sync::Mutex` (the 0.19 F1 fix). This keeps the simple
+one-shot path lean (no background task, no runtime-context
+requirement). `with_dispatcher()` is the **concurrency opt-in**;
+reach for it when one connection must serve a long-lived event
+stream *and* concurrent requests. The mutex also remains the
+correct per-socket serialization for the single-reader subsystems
+(sockdiag/audit/nftables/nl80211/devlink/…), whose only operations
+are dumps that must serialize anyway.
 
 ```rust
-// Sharing a Connection across tasks — serialized but correct.
+// Default: shared Connection across tasks — serialized but correct,
+// and lean (no background driver).
 let conn = Arc::new(Connection::<Route>::new()?);
 for _ in 0..16 {
     let c = conn.clone();
     tokio::spawn(async move { c.get_links().await });
 }
 
-// Parallel fanout via the pool — each task gets its own socket.
+// Opt-in dispatcher: events + requests on ONE connection coexist.
+let conn = Arc::new(Connection::<Route>::new()?.with_dispatcher());
+conn.subscribe_all()?;
+let mut events = conn.events().await;          // long-lived subscriber…
+let links = conn.get_links().await?;           // …doesn't block this request
+
+// Parallel dump fanout: still the pool — each task gets its own fd.
 let pool = Arc::new(ConnectionPool::<Route>::new(8)?);
 for _ in 0..16 {
     let p = pool.clone();
     tokio::spawn(async move { p.acquire().await?.get_links().await });
 }
-
-// subscribe() is now `&self` (0.19 Finding A) — works through
-// the pool, and concurrent subscribe from multiple tasks
-// sharing an Arc<Connection> is a legitimate pattern.
-pool.acquire().await?.subscribe_all()?;
 ```
-
-The full per-seq response router (NlRouter-style dispatcher)
-that would unlock interleaved events + requests on a single
-socket is the Plan 234 per-seq pipelining follow-on — tracked in
-[#134](https://github.com/p13marc/nlink/issues/134).
 
 ## Errors
 

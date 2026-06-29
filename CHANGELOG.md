@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Opt-in dispatcher mode is now feature-complete (#134).**
+  `Connection::with_dispatcher()` opts a connection into a per-`nlmsg_seq`
+  background recv-driver that demultiplexes all frames off one socket, so
+  **events, streaming dumps, and requests on the same connection no longer
+  serialize** — the F1 regression #134 was filed for. Everything works in
+  this mode: unicast requests (pipelined), `events()`/`into_events()`,
+  `dump_stream`/`dump_typed_stream`, and the mixed subsystems
+  (xfrm/netfilter/ethtool/`command`/`batch`). By design the **default
+  stays the lean mutex path** (no background task, no runtime-context
+  requirement for one-shot callers); `with_dispatcher()` is the
+  concurrency opt-in, and `ConnectionPool<P>` remains the route to
+  kernel-parallel dumps (the kernel serializes dumps per socket). See the
+  per-stage entries below and CLAUDE.md §Concurrency.
 - **Dispatcher mode: event streams now coexist with requests (#134
   streams stage — the headline fix).** `events()` / `into_events()` work
   on a dispatcher-mode `Connection`: instead of holding the request lock
