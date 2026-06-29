@@ -65,8 +65,9 @@ use super::{
     message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgType},
     protocol::Route,
     types::link::{
-        BridgeVlanInfo, BrVlanMsg, IfInfoMsg, IflaAttr, bridge_af, bridge_vlan_flags,
-        bridge_vlan_tunnel, bridge_vlandb, bridge_vlandb_dump, bridge_vlandb_gopts, rtext_filter,
+        BridgeVlanInfo, BrVlanMsg, IfInfoMsg, IflaAttr, br_state, bridge_af, bridge_vlan_flags,
+        bridge_vlan_tunnel, bridge_vlandb, bridge_vlandb_dump, bridge_vlandb_entry,
+        bridge_vlandb_gopts, rtext_filter,
     },
 };
 
@@ -813,6 +814,238 @@ impl BridgeVlanGlobalOptions {
 }
 
 // ============================================================================
+// Per-VLAN entry options (BRIDGE_VLANDB_ENTRY / per-(port, VLAN))
+// ============================================================================
+
+/// Spanning-tree state for a per-VLAN entry (`BR_STATE_*`), used for
+/// MSTP — per-VLAN STP state on a bridge port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BridgeVlanState {
+    /// Port disabled for this VLAN.
+    Disabled,
+    /// Listening (STP).
+    Listening,
+    /// Learning (STP).
+    Learning,
+    /// Forwarding.
+    Forwarding,
+    /// Blocking (STP).
+    Blocking,
+}
+
+impl BridgeVlanState {
+    /// Raw `BR_STATE_*` value.
+    pub fn to_raw(self) -> u8 {
+        match self {
+            Self::Disabled => br_state::DISABLED,
+            Self::Listening => br_state::LISTENING,
+            Self::Learning => br_state::LEARNING,
+            Self::Forwarding => br_state::FORWARDING,
+            Self::Blocking => br_state::BLOCKING,
+        }
+    }
+
+    /// Parse a raw `BR_STATE_*` value, `None` if unrecognised.
+    pub fn from_raw(v: u8) -> Option<Self> {
+        match v {
+            br_state::DISABLED => Some(Self::Disabled),
+            br_state::LISTENING => Some(Self::Listening),
+            br_state::LEARNING => Some(Self::Learning),
+            br_state::FORWARDING => Some(Self::Forwarding),
+            br_state::BLOCKING => Some(Self::Blocking),
+            _ => None,
+        }
+    }
+}
+
+/// Builder for per-VLAN entry options on a bridge port.
+///
+/// These are per-(port, VLAN) settings carried by the VLAN-DB API
+/// (`RTM_NEWVLAN` → `BRIDGE_VLANDB_ENTRY`): the per-VLAN STP state
+/// (MSTP), multicast router mode, multicast group limit, and
+/// neighbour suppression. This complements (does not replace) the
+/// legacy [`BridgeVlanBuilder`] membership path — set a VLAN's
+/// membership with `add_bridge_vlan`, then tune its per-VLAN options
+/// here.
+///
+/// Only options that are explicitly set are emitted.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::bridge_vlan::{BridgeVlanEntryOptionsBuilder, BridgeVlanState};
+///
+/// // Put VLAN 100 into forwarding state on port eth0.
+/// conn.set_bridge_vlan_entry_options(
+///     BridgeVlanEntryOptionsBuilder::new(100)
+///         .dev("eth0")
+///         .state(BridgeVlanState::Forwarding)
+/// ).await?;
+/// ```
+#[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
+pub struct BridgeVlanEntryOptionsBuilder {
+    dev: Option<InterfaceRef>,
+    vid: u16,
+    vid_end: Option<u16>,
+    state: Option<BridgeVlanState>,
+    mcast_router: Option<u8>,
+    mcast_max_groups: Option<u32>,
+    neigh_suppress: Option<bool>,
+}
+
+impl BridgeVlanEntryOptionsBuilder {
+    /// Create a builder for a single VLAN on a port.
+    pub fn new(vid: u16) -> Self {
+        Self {
+            vid,
+            ..Default::default()
+        }
+    }
+
+    /// Set the bridge port by name.
+    pub fn dev(mut self, dev: impl Into<String>) -> Self {
+        self.dev = Some(InterfaceRef::Name(dev.into()));
+        self
+    }
+
+    /// Set the bridge port interface index directly.
+    ///
+    /// Prefer this over [`dev`](Self::dev) in a network namespace.
+    pub fn ifindex(mut self, ifindex: u32) -> Self {
+        self.dev = Some(InterfaceRef::Index(ifindex));
+        self
+    }
+
+    /// Get the device reference.
+    pub fn device_ref(&self) -> Option<&InterfaceRef> {
+        self.dev.as_ref()
+    }
+
+    /// Apply to a VLAN range `vid..=vid_end`.
+    pub fn range(mut self, vid_end: u16) -> Self {
+        self.vid_end = Some(vid_end);
+        self
+    }
+
+    /// Set the per-VLAN STP state (MSTP).
+    pub fn state(mut self, state: BridgeVlanState) -> Self {
+        self.state = Some(state);
+        self
+    }
+
+    /// Set the per-VLAN multicast router mode (0 disabled, 1 temp, 2 perm).
+    pub fn mcast_router(mut self, mode: u8) -> Self {
+        self.mcast_router = Some(mode);
+        self
+    }
+
+    /// Set the per-VLAN multicast group limit.
+    pub fn mcast_max_groups(mut self, max: u32) -> Self {
+        self.mcast_max_groups = Some(max);
+        self
+    }
+
+    /// Enable or disable neighbour suppression for this VLAN.
+    pub fn neigh_suppress(mut self, on: bool) -> Self {
+        self.neigh_suppress = Some(on);
+        self
+    }
+
+    /// Write the `RTM_NEWVLAN` payload setting these entry options.
+    pub(crate) fn write_set(&self, builder: &mut MessageBuilder, ifindex: u32) {
+        let msg = BrVlanMsg::new()
+            .with_family(libc::AF_BRIDGE as u8)
+            .with_index(ifindex);
+        builder.append(&msg);
+
+        let entry = builder.nest_start(bridge_vlandb::ENTRY);
+
+        // ENTRY_INFO is the struct bridge_vlan_info (flags + vid).
+        let info = BridgeVlanInfo::new(self.vid);
+        builder.append_attr(bridge_vlandb_entry::INFO, info.as_bytes());
+        if let Some(vid_end) = self.vid_end {
+            builder.append_attr_u16(bridge_vlandb_entry::RANGE, vid_end);
+        }
+        if let Some(state) = self.state {
+            builder.append_attr_u8(bridge_vlandb_entry::STATE, state.to_raw());
+        }
+        if let Some(mode) = self.mcast_router {
+            builder.append_attr_u8(bridge_vlandb_entry::MCAST_ROUTER, mode);
+        }
+        if let Some(max) = self.mcast_max_groups {
+            builder.append_attr_u32(bridge_vlandb_entry::MCAST_MAX_GROUPS, max);
+        }
+        if let Some(on) = self.neigh_suppress {
+            builder.append_attr_u8(bridge_vlandb_entry::NEIGH_SUPPRESS, on as u8);
+        }
+
+        builder.nest_end(entry);
+    }
+}
+
+/// Per-VLAN entry options, as read back from the kernel.
+///
+/// Returned by [`Connection::get_bridge_vlan_entry_options`]. Fields
+/// are `Option` because the kernel only reports options relevant to
+/// the running configuration. `#[non_exhaustive]` for forward-compat.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BridgeVlanEntryOptions {
+    pub(crate) ifindex: u32,
+    pub(crate) vid: u16,
+    pub(crate) vid_end: Option<u16>,
+    pub(crate) state: Option<BridgeVlanState>,
+    pub(crate) mcast_router: Option<u8>,
+    pub(crate) mcast_n_groups: Option<u32>,
+    pub(crate) mcast_max_groups: Option<u32>,
+    pub(crate) neigh_suppress: Option<bool>,
+}
+
+impl BridgeVlanEntryOptions {
+    /// Bridge port interface index these options belong to.
+    pub fn ifindex(&self) -> u32 {
+        self.ifindex
+    }
+
+    /// VLAN ID (lower bound of the range, if a range).
+    pub fn vid(&self) -> u16 {
+        self.vid
+    }
+
+    /// Upper VLAN ID of the range, if this block covers a range.
+    pub fn vid_end(&self) -> Option<u16> {
+        self.vid_end
+    }
+
+    /// Per-VLAN STP state.
+    pub fn state(&self) -> Option<BridgeVlanState> {
+        self.state
+    }
+
+    /// Per-VLAN multicast router mode.
+    pub fn mcast_router(&self) -> Option<u8> {
+        self.mcast_router
+    }
+
+    /// Current multicast group count (read-only).
+    pub fn mcast_n_groups(&self) -> Option<u32> {
+        self.mcast_n_groups
+    }
+
+    /// Multicast group limit.
+    pub fn mcast_max_groups(&self) -> Option<u32> {
+        self.mcast_max_groups
+    }
+
+    /// Whether neighbour suppression is enabled for this VLAN.
+    pub fn neigh_suppress(&self) -> Option<bool> {
+        self.neigh_suppress
+    }
+}
+
+// ============================================================================
 // Connection Methods
 // ============================================================================
 
@@ -1348,6 +1581,98 @@ impl Connection<Route> {
         }
         Ok(entries)
     }
+
+    // ========================================================================
+    // Per-VLAN entry options (BRIDGE_VLANDB_ENTRY)
+    // ========================================================================
+
+    /// Set per-VLAN entry options on a bridge port (STP state, mcast
+    /// router, neighbour suppression). Uses the VLAN-DB API
+    /// (`RTM_NEWVLAN`).
+    ///
+    /// The VLAN must already be a member of the port (e.g. via
+    /// [`add_bridge_vlan`](Self::add_bridge_vlan)).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::bridge_vlan::{BridgeVlanEntryOptionsBuilder, BridgeVlanState};
+    ///
+    /// conn.set_bridge_vlan_entry_options(
+    ///     BridgeVlanEntryOptionsBuilder::new(100)
+    ///         .dev("eth0")
+    ///         .state(BridgeVlanState::Forwarding)
+    /// ).await?;
+    /// ```
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "set_bridge_vlan_entry_options")
+    )]
+    pub async fn set_bridge_vlan_entry_options(
+        &self,
+        config: BridgeVlanEntryOptionsBuilder,
+    ) -> Result<()> {
+        let ifindex = match config.device_ref() {
+            Some(iface) => self.resolve_interface(iface).await?,
+            None => {
+                return Err(Error::InvalidMessage(
+                    "device name or ifindex required".into(),
+                ));
+            }
+        };
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_NEWVLAN, NLM_F_REQUEST | NLM_F_ACK);
+        config.write_set(&mut builder, ifindex);
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_bridge_vlan_entry_options"))
+    }
+
+    /// Get per-VLAN entry options for a bridge port.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "get_bridge_vlan_entry_options")
+    )]
+    pub async fn get_bridge_vlan_entry_options(
+        &self,
+        dev: impl Into<InterfaceRef>,
+    ) -> Result<Vec<BridgeVlanEntryOptions>> {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
+        self.get_bridge_vlan_entry_options_by_index(ifindex).await
+    }
+
+    /// Get per-VLAN entry options for a bridge port by interface index.
+    ///
+    /// Use this method when operating in a network namespace.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "get_bridge_vlan_entry_options_by_index")
+    )]
+    pub async fn get_bridge_vlan_entry_options_by_index(
+        &self,
+        ifindex: u32,
+    ) -> Result<Vec<BridgeVlanEntryOptions>> {
+        // RTM_GETVLAN dump (no DUMPF_GLOBAL → per-VLAN ENTRY blocks),
+        // filtered to this port.
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETVLAN, NLM_F_REQUEST | NLM_F_DUMP);
+        let msg = BrVlanMsg::new()
+            .with_family(libc::AF_BRIDGE as u8)
+            .with_index(ifindex);
+        builder.append(&msg);
+
+        let responses = self
+            .send_dump(builder)
+            .await
+            .map_err(|e| e.with_context("get_bridge_vlan_entry_options"))?;
+
+        let mut entries = Vec::new();
+        for response in responses {
+            parse_entry_options_from_dump(&response, ifindex, &mut entries);
+        }
+        Ok(entries)
+    }
 }
 
 // ============================================================================
@@ -1696,6 +2021,80 @@ fn parse_one_gopts(payload: &[u8], ifindex: u32) -> Option<BridgeVlanGlobalOptio
     have_id.then_some(opts)
 }
 
+/// Parse `BRIDGE_VLANDB_ENTRY` blocks out of an `RTM_GETVLAN` dump
+/// chunk. Same robustness rules as the gopts walker.
+fn parse_entry_options_from_dump(
+    data: &[u8],
+    fallback_ifindex: u32,
+    entries: &mut Vec<BridgeVlanEntryOptions>,
+) {
+    for msg_result in MessageIter::new(data) {
+        let Ok((_header, payload)) = msg_result else {
+            continue;
+        };
+
+        let ifindex = BrVlanMsg::from_bytes(payload)
+            .map(|m| m.ifindex)
+            .unwrap_or(fallback_ifindex);
+        if payload.len() < BrVlanMsg::SIZE {
+            continue;
+        }
+        let attrs = &payload[BrVlanMsg::SIZE..];
+
+        for (attr_type, attr_payload) in AttrIter::new(attrs) {
+            if attr_type == bridge_vlandb::ENTRY
+                && let Some(opts) = parse_one_entry(attr_payload, ifindex)
+            {
+                entries.push(opts);
+            }
+        }
+    }
+}
+
+/// Parse a single `BRIDGE_VLANDB_ENTRY` nest. Returns `None` if the
+/// mandatory `ENTRY_INFO` (carrying the VID) is missing or malformed.
+fn parse_one_entry(payload: &[u8], ifindex: u32) -> Option<BridgeVlanEntryOptions> {
+    let mut opts = BridgeVlanEntryOptions {
+        ifindex,
+        ..Default::default()
+    };
+    let mut have_vid = false;
+
+    for (attr, data) in AttrIter::new(payload) {
+        match attr {
+            t if t == bridge_vlandb_entry::INFO => {
+                // struct bridge_vlan_info { flags: u16, vid: u16 }
+                if let Some(info) = BridgeVlanInfo::from_bytes(data) {
+                    opts.vid = info.vid;
+                    have_vid = true;
+                }
+            }
+            t if t == bridge_vlandb_entry::RANGE && data.len() >= 2 => {
+                opts.vid_end = Some(u16::from_ne_bytes(data[..2].try_into().unwrap()));
+            }
+            t if t == bridge_vlandb_entry::STATE && !data.is_empty() => {
+                opts.state = BridgeVlanState::from_raw(data[0]);
+            }
+            t if t == bridge_vlandb_entry::MCAST_ROUTER && !data.is_empty() => {
+                opts.mcast_router = Some(data[0]);
+            }
+            t if t == bridge_vlandb_entry::MCAST_N_GROUPS && data.len() >= 4 => {
+                opts.mcast_n_groups = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+            }
+            t if t == bridge_vlandb_entry::MCAST_MAX_GROUPS && data.len() >= 4 => {
+                opts.mcast_max_groups = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+            }
+            t if t == bridge_vlandb_entry::NEIGH_SUPPRESS && !data.is_empty() => {
+                opts.neigh_suppress = Some(data[0] != 0);
+            }
+            // ENTRY_TUNNEL_INFO / ENTRY_STATS (nested) and future attrs.
+            _ => {}
+        }
+    }
+
+    have_vid.then_some(opts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2008,5 +2407,104 @@ mod tests {
         push_attr(&mut nest, bridge_vlandb_gopts::ID, &[0x01]); // 1 byte, needs 2
         push_attr(&mut nest, bridge_vlandb_gopts::MCAST_QUERIER_INTVL, &[0, 0, 0]); // needs 8
         assert!(parse_one_gopts(&nest, 1).is_none()); // ID too short → no id
+    }
+
+    // ========================================================================
+    // Per-VLAN entry options (ENTRY) tests
+    // ========================================================================
+
+    #[test]
+    fn entry_attr_and_state_constants_match_kernel_uapi() {
+        assert_eq!(bridge_vlandb_entry::INFO, 1);
+        assert_eq!(bridge_vlandb_entry::RANGE, 2);
+        assert_eq!(bridge_vlandb_entry::STATE, 3);
+        assert_eq!(bridge_vlandb_entry::TUNNEL_INFO, 4);
+        assert_eq!(bridge_vlandb_entry::STATS, 5);
+        assert_eq!(bridge_vlandb_entry::MCAST_ROUTER, 6);
+        assert_eq!(bridge_vlandb_entry::MCAST_N_GROUPS, 7);
+        assert_eq!(bridge_vlandb_entry::MCAST_MAX_GROUPS, 8);
+        assert_eq!(bridge_vlandb_entry::NEIGH_SUPPRESS, 9);
+        assert_eq!(br_state::DISABLED, 0);
+        assert_eq!(br_state::FORWARDING, 3);
+        assert_eq!(br_state::BLOCKING, 4);
+    }
+
+    #[test]
+    fn bridge_vlan_state_round_trips_all_variants() {
+        for s in [
+            BridgeVlanState::Disabled,
+            BridgeVlanState::Listening,
+            BridgeVlanState::Learning,
+            BridgeVlanState::Forwarding,
+            BridgeVlanState::Blocking,
+        ] {
+            assert_eq!(BridgeVlanState::from_raw(s.to_raw()), Some(s));
+        }
+        assert_eq!(BridgeVlanState::from_raw(99), None);
+    }
+
+    #[test]
+    fn entry_builder_wire_roundtrips() {
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_NEWVLAN, 0);
+        BridgeVlanEntryOptionsBuilder::new(100)
+            .ifindex(7)
+            .state(BridgeVlanState::Forwarding)
+            .mcast_router(2)
+            .mcast_max_groups(64)
+            .neigh_suppress(true)
+            .write_set(&mut builder, 7);
+        let bytes = builder.finish();
+
+        let mut entries = Vec::new();
+        parse_entry_options_from_dump(&bytes, 0, &mut entries);
+        assert_eq!(entries.len(), 1);
+        let o = &entries[0];
+        assert_eq!(o.ifindex(), 7);
+        assert_eq!(o.vid(), 100);
+        assert_eq!(o.vid_end(), None);
+        assert_eq!(o.state(), Some(BridgeVlanState::Forwarding));
+        assert_eq!(o.mcast_router(), Some(2));
+        assert_eq!(o.mcast_max_groups(), Some(64));
+        assert_eq!(o.neigh_suppress(), Some(true));
+        // Unset / read-only attrs absent.
+        assert_eq!(o.mcast_n_groups(), None);
+    }
+
+    #[test]
+    fn entry_builder_emits_range_and_only_set_attrs() {
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_NEWVLAN, 0);
+        BridgeVlanEntryOptionsBuilder::new(10)
+            .ifindex(7)
+            .range(20)
+            .state(BridgeVlanState::Blocking)
+            .write_set(&mut builder, 7);
+        let bytes = builder.finish();
+
+        let mut entries = Vec::new();
+        parse_entry_options_from_dump(&bytes, 0, &mut entries);
+        assert_eq!(entries.len(), 1);
+        let o = &entries[0];
+        assert_eq!(o.vid(), 10);
+        assert_eq!(o.vid_end(), Some(20));
+        assert_eq!(o.state(), Some(BridgeVlanState::Blocking));
+        assert_eq!(o.mcast_router(), None);
+        assert_eq!(o.neigh_suppress(), None);
+    }
+
+    #[test]
+    fn entry_parse_without_info_is_none() {
+        let mut nest = Vec::new();
+        push_attr(&mut nest, bridge_vlandb_entry::STATE, &[br_state::FORWARDING]);
+        assert!(parse_one_entry(&nest, 3).is_none());
+    }
+
+    #[test]
+    fn entry_parse_arbitrary_bytes_never_panics() {
+        for len in 0..40usize {
+            let data: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(53)).collect();
+            let mut entries = Vec::new();
+            parse_entry_options_from_dump(&data, 9, &mut entries);
+            let _ = parse_one_entry(&data, 9);
+        }
     }
 }

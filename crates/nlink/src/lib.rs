@@ -191,8 +191,8 @@ pub mod lab;
 // Route protocol multicast groups
 // Bridge VLAN types
 pub use netlink::bridge_vlan::{
-    BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanFlags, BridgeVlanGlobalOptions,
-    BridgeVlanGlobalOptionsBuilder,
+    BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanEntryOptions, BridgeVlanEntryOptionsBuilder,
+    BridgeVlanFlags, BridgeVlanGlobalOptions, BridgeVlanGlobalOptionsBuilder, BridgeVlanState,
 };
 // Diagnostics types
 pub use netlink::diagnostics::{

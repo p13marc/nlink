@@ -573,6 +573,47 @@ pub mod bridge_vlandb {
     pub const GLOBAL_OPTIONS: u16 = 2;
 }
 
+/// Per-VLAN entry attributes (`BRIDGE_VLANDB_ENTRY` → `BRIDGE_VLANDB_ENTRY_*`).
+///
+/// These are per-(port, VLAN) settings — STP state, multicast router,
+/// neighbour suppression — distinct from the bridge-global
+/// [`bridge_vlandb_gopts`] options.
+pub mod bridge_vlandb_entry {
+    /// `struct bridge_vlan_info` (flags + vid).
+    pub const INFO: u16 = 1;
+    /// Upper VLAN ID of a range (u16); present with [`INFO`] for ranges.
+    pub const RANGE: u16 = 2;
+    /// Per-VLAN STP state (u8, `BR_STATE_*` — see [`br_state`]).
+    pub const STATE: u16 = 3;
+    /// VLAN tunnel info (nested).
+    pub const TUNNEL_INFO: u16 = 4;
+    /// Per-VLAN stats (nested, read-only).
+    pub const STATS: u16 = 5;
+    /// Per-VLAN multicast router mode (u8).
+    pub const MCAST_ROUTER: u16 = 6;
+    /// Current number of multicast groups (u32, read-only).
+    pub const MCAST_N_GROUPS: u16 = 7;
+    /// Multicast group limit (u32).
+    pub const MCAST_MAX_GROUPS: u16 = 8;
+    /// Neighbour suppression enabled (u8 bool).
+    pub const NEIGH_SUPPRESS: u16 = 9;
+}
+
+/// Spanning-tree port states (`BR_STATE_*`), used by the per-VLAN
+/// [`bridge_vlandb_entry::STATE`] attribute (MSTP per-VLAN state).
+pub mod br_state {
+    /// Port disabled.
+    pub const DISABLED: u8 = 0;
+    /// Listening (STP).
+    pub const LISTENING: u8 = 1;
+    /// Learning (STP).
+    pub const LEARNING: u8 = 2;
+    /// Forwarding.
+    pub const FORWARDING: u8 = 3;
+    /// Blocking (STP).
+    pub const BLOCKING: u8 = 4;
+}
+
 /// Attributes carried in an `RTM_GETVLAN` dump *request* to filter the
 /// dump (`BRIDGE_VLANDB_DUMP_*`).
 pub mod bridge_vlandb_dump {
