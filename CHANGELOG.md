@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`WireguardConfig::from_wg_quick` + `WireguardConfig::client` (#137).**
+  `from_wg_quick(ifname, contents)` parses a `wg-quick` / `wg setconf`
+  style `[Interface]` + `[Peer]` config into a declarative
+  `WireguardConfig` (then `.diff()` / `.apply()` as usual). It handles
+  `PrivateKey`/`ListenPort`/`FwMark` and per-peer `PublicKey`/
+  `PresharedKey`/`Endpoint`/`AllowedIPs`/`PersistentKeepalive`, accepts
+  comma-separated allowed-IP CIDRs and `0x`-hex fwmarks, matches keys
+  case-insensitively, and accepts-and-ignores the `wg-quick`-only
+  userspace keys (`Address`, `DNS`, `MTU`, `Table`, `PreUp`/`PostUp`/…).
+  Unknown keys, hostname endpoints (no DNS resolution), and peers
+  missing a `PublicKey` are hard errors. `client(ifname, priv, server_pub,
+  endpoint, allowed_ips, keepalive)` is a convenience constructor for the
+  common single-peer client profile. (Plan 196 ergonomic follow-ups.)
 - **TC `pedit` action `munge` DSL parser (#137).** `PeditAction::parse_params`
   was a stub that rejected all input; it now parses the `tc(8)` pedit
   syntax — `[ex] munge <spec> [munge ...] [<control>]` — covering the

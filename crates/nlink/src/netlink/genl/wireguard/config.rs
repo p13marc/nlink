@@ -43,14 +43,15 @@
 //!
 //! [`WgDevice::private_key`]: super::types::WgDevice::private_key
 
-use std::fmt;
-use std::net::SocketAddr;
-use std::str::FromStr;
-use std::time::Duration;
+use std::{
+    fmt,
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
+    time::Duration,
+};
 
 use super::types::{AllowedIp, WG_KEY_LEN, WgDevice, WgPeer, WgPeerBuilder};
-use crate::netlink::protocol::Wireguard;
-use crate::{Connection, Error, Result};
+use crate::{Connection, Error, Result, netlink::protocol::Wireguard};
 
 // =============================================================================
 // PublicKey newtype (Plan 196 §2.3b)
@@ -362,6 +363,300 @@ impl WireguardConfig {
 
         Ok(result)
     }
+
+    /// Build a typical single-peer **client** configuration: one
+    /// interface with a private key, and one peer (the server) with an
+    /// endpoint, allowed-IPs, and an optional persistent-keepalive.
+    ///
+    /// This is the common "import a server-provided profile" shape. For
+    /// anything richer (multiple peers, fwmark, listen-port) use the
+    /// [`device`](Self::device) builder or [`from_wg_quick`](Self::from_wg_quick).
+    ///
+    /// ```ignore
+    /// let cfg = WireguardConfig::client(
+    ///     "wg0",
+    ///     my_private_key,                       // [u8; 32]
+    ///     server_public_key,                    // [u8; 32]
+    ///     "203.0.113.1:51820".parse().unwrap(), // SocketAddr
+    ///     vec![AllowedIp::v4(Ipv4Addr::UNSPECIFIED, 0)],
+    ///     Some(Duration::from_secs(25)),
+    /// );
+    /// ```
+    pub fn client(
+        ifname: impl Into<String>,
+        private_key: [u8; WG_KEY_LEN],
+        server_public_key: [u8; WG_KEY_LEN],
+        endpoint: SocketAddr,
+        allowed_ips: Vec<AllowedIp>,
+        persistent_keepalive: Option<Duration>,
+    ) -> Self {
+        let peer = DeclaredWgPeer {
+            public_key: server_public_key,
+            preshared_key: None,
+            endpoint: Some(endpoint),
+            persistent_keepalive,
+            allowed_ips,
+        };
+        let device = DeclaredWgDevice {
+            ifname: ifname.into(),
+            private_key: Some(private_key),
+            listen_port: None,
+            fwmark: None,
+            peers: vec![peer],
+        };
+        let mut cfg = WireguardConfig::new();
+        cfg.push_device(device);
+        cfg
+    }
+
+    /// Parse a `wg-quick` / `wg setconf` style `[Interface]` + `[Peer]`
+    /// configuration into a single-device `WireguardConfig`.
+    ///
+    /// The interface name is supplied separately (`wg-quick` derives it
+    /// from the file name, which isn't part of the file body).
+    ///
+    /// Recognised keys:
+    /// - `[Interface]`: `PrivateKey`, `ListenPort`, `FwMark` (the
+    ///   kernel-level device attributes). The `wg-quick`-only keys
+    ///   (`Address`, `DNS`, `MTU`, `Table`, `PreUp`/`PostUp`/`PreDown`/
+    ///   `PostDown`, `SaveConfig`) are accepted and ignored — they're
+    ///   handled by `wg-quick`'s userspace wrapper, not the kernel
+    ///   device.
+    /// - `[Peer]`: `PublicKey`, `PresharedKey`, `Endpoint` (must be
+    ///   `IP:port` — hostnames are rejected, no DNS resolution),
+    ///   `AllowedIPs` (comma-separated CIDRs), `PersistentKeepalive`
+    ///   (seconds, or `off`).
+    ///
+    /// Keys are matched case-insensitively. Genuinely unknown keys are
+    /// an error (not silently dropped).
+    pub fn from_wg_quick(ifname: impl Into<String>, contents: &str) -> Result<Self> {
+        parse_wg_quick(ifname.into(), contents)
+    }
+
+    /// View the declared devices, mutable — used by the wg-quick parser
+    /// helper. (internal)
+    fn push_device(&mut self, device: DeclaredWgDevice) {
+        self.devices.push(device);
+    }
+}
+
+/// Parse a CIDR string (`10.0.0.0/24`, `0.0.0.0/0`, `::/0`, or a bare
+/// address) into an [`AllowedIp`]. A bare address defaults to /32 (v4)
+/// or /128 (v6).
+fn parse_cidr(s: &str) -> Result<AllowedIp> {
+    let s = s.trim();
+    let (addr_str, cidr_str) = match s.split_once('/') {
+        Some((a, c)) => (a, Some(c)),
+        None => (s, None),
+    };
+    let addr: IpAddr = addr_str
+        .parse()
+        .map_err(|_| Error::InvalidMessage(format!("wireguard config: invalid IP `{addr_str}`")))?;
+    let max = if addr.is_ipv4() { 32 } else { 128 };
+    let cidr = match cidr_str {
+        Some(c) => c.parse::<u8>().map_err(|_| {
+            Error::InvalidMessage(format!("wireguard config: invalid prefix `{c}`"))
+        })?,
+        None => max,
+    };
+    if cidr > max {
+        return Err(Error::InvalidMessage(format!(
+            "wireguard config: prefix /{cidr} out of range for {} (max /{max})",
+            if addr.is_ipv4() { "IPv4" } else { "IPv6" }
+        )));
+    }
+    Ok(match addr {
+        IpAddr::V4(a) => AllowedIp::v4(a, cidr),
+        IpAddr::V6(a) => AllowedIp::v6(a, cidr),
+    })
+}
+
+/// Decode a base64 WireGuard key, mapping failure to a clear error.
+fn parse_key(field: &str, value: &str) -> Result<[u8; WG_KEY_LEN]> {
+    b64_decode_32(value)
+        .ok_or_else(|| Error::InvalidMessage(format!("wireguard config: invalid {field} key")))
+}
+
+/// `wg-quick`/`wg setconf` INI parser. Builds a single device named
+/// `ifname` plus its peers.
+fn parse_wg_quick(ifname: String, contents: &str) -> Result<WireguardConfig> {
+    /// Which section the cursor is in.
+    enum Section {
+        None,
+        Interface,
+        Peer,
+    }
+
+    let mut section = Section::None;
+    let mut device = DeclaredWgDevice {
+        ifname,
+        private_key: None,
+        listen_port: None,
+        fwmark: None,
+        peers: Vec::new(),
+    };
+    let mut current_peer: Option<DeclaredWgPeer> = None;
+
+    // `[Interface]` keys that wg-quick consumes in userspace and the
+    // kernel device doesn't model — accept and ignore.
+    const IGNORED_INTERFACE_KEYS: &[&str] = &[
+        "address",
+        "dns",
+        "mtu",
+        "table",
+        "preup",
+        "postup",
+        "predown",
+        "postdown",
+        "saveconfig",
+    ];
+
+    for (lineno, raw) in contents.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Section header.
+        if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "interface" => section = Section::Interface,
+                "peer" => {
+                    if let Some(p) = current_peer.take() {
+                        device.peers.push(p);
+                    }
+                    section = Section::Peer;
+                    current_peer = Some(DeclaredWgPeer {
+                        public_key: [0u8; WG_KEY_LEN],
+                        preshared_key: None,
+                        endpoint: None,
+                        persistent_keepalive: None,
+                        allowed_ips: Vec::new(),
+                    });
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "wireguard config: unknown section `[{other}]` at line {}",
+                        lineno + 1
+                    )));
+                }
+            }
+            continue;
+        }
+
+        let (key, value) = line.split_once('=').ok_or_else(|| {
+            Error::InvalidMessage(format!(
+                "wireguard config: expected `key = value` at line {}: `{line}`",
+                lineno + 1
+            ))
+        })?;
+        let key_lc = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+
+        match section {
+            Section::None => {
+                return Err(Error::InvalidMessage(format!(
+                    "wireguard config: key `{}` before any [Interface]/[Peer] section (line {})",
+                    key.trim(),
+                    lineno + 1
+                )));
+            }
+            Section::Interface => match key_lc.as_str() {
+                "privatekey" => device.private_key = Some(parse_key("PrivateKey", value)?),
+                "listenport" => {
+                    device.listen_port = Some(value.parse::<u16>().map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "wireguard config: invalid ListenPort `{value}`"
+                        ))
+                    })?);
+                }
+                "fwmark" => device.fwmark = Some(parse_fwmark(value)?),
+                k if IGNORED_INTERFACE_KEYS.contains(&k) => { /* wg-quick userspace key */ }
+                _ => {
+                    return Err(Error::InvalidMessage(format!(
+                        "wireguard config: unknown [Interface] key `{}` (line {})",
+                        key.trim(),
+                        lineno + 1
+                    )));
+                }
+            },
+            Section::Peer => {
+                let peer = current_peer
+                    .as_mut()
+                    .expect("peer section sets current_peer");
+                match key_lc.as_str() {
+                    "publickey" => peer.public_key = parse_key("PublicKey", value)?,
+                    "presharedkey" => peer.preshared_key = Some(parse_key("PresharedKey", value)?),
+                    "endpoint" => {
+                        peer.endpoint = Some(value.parse::<SocketAddr>().map_err(|_| {
+                            Error::InvalidMessage(format!(
+                                "wireguard config: Endpoint `{value}` must be IP:port \
+                                 (hostnames are not resolved)"
+                            ))
+                        })?);
+                    }
+                    "allowedips" => {
+                        for part in value.split(',') {
+                            let part = part.trim();
+                            if part.is_empty() {
+                                continue;
+                            }
+                            peer.allowed_ips.push(parse_cidr(part)?);
+                        }
+                    }
+                    "persistentkeepalive" => {
+                        if !value.eq_ignore_ascii_case("off") {
+                            let secs = value.parse::<u16>().map_err(|_| {
+                                Error::InvalidMessage(format!(
+                                    "wireguard config: invalid PersistentKeepalive `{value}`"
+                                ))
+                            })?;
+                            if secs != 0 {
+                                peer.persistent_keepalive = Some(Duration::from_secs(secs as u64));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(Error::InvalidMessage(format!(
+                            "wireguard config: unknown [Peer] key `{}` (line {})",
+                            key.trim(),
+                            lineno + 1
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(p) = current_peer.take() {
+        device.peers.push(p);
+    }
+
+    // A peer with no PublicKey set is malformed.
+    for (i, p) in device.peers.iter().enumerate() {
+        if p.public_key == [0u8; WG_KEY_LEN] {
+            return Err(Error::InvalidMessage(format!(
+                "wireguard config: [Peer] #{} is missing PublicKey",
+                i + 1
+            )));
+        }
+    }
+
+    let mut cfg = WireguardConfig::new();
+    cfg.push_device(device);
+    Ok(cfg)
+}
+
+/// Parse an `FwMark` value: decimal, `0x`-hex, or `off` (= 0).
+fn parse_fwmark(s: &str) -> Result<u32> {
+    if s.eq_ignore_ascii_case("off") {
+        return Ok(0);
+    }
+    let parsed = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => s.parse::<u32>(),
+    };
+    parsed.map_err(|_| Error::InvalidMessage(format!("wireguard config: invalid FwMark `{s}`")))
 }
 
 // =============================================================================
@@ -748,7 +1043,10 @@ impl DeviceChanges {
 
     pub fn change_count(&self) -> usize {
         let device_level = self.has_device_level_change() as usize;
-        device_level + self.peers_to_add.len() + self.peers_to_modify.len() + self.peers_to_remove.len()
+        device_level
+            + self.peers_to_add.len()
+            + self.peers_to_modify.len()
+            + self.peers_to_remove.len()
     }
 }
 
@@ -809,8 +1107,10 @@ const _PLAN_196_MARKER: Option<Error> = None;
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::time::Duration;
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
 
     use super::*;
     use crate::netlink::genl::wireguard::types::WgPeer;
@@ -848,9 +1148,12 @@ mod tests {
     fn peer_builder_records_fields() {
         let cfg = WireguardConfig::new().device("wg0", |d| {
             d.peer(key(0xbb), |p| {
-                p.endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 51820))
-                    .persistent_keepalive(Duration::from_secs(25))
-                    .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
+                p.endpoint(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+                    51820,
+                ))
+                .persistent_keepalive(Duration::from_secs(25))
+                .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
             })
         });
         let peer = &cfg.devices()[0].peers[0];
@@ -879,7 +1182,10 @@ mod tests {
         let mut curr = empty_device("wg0");
         curr.listen_port = Some(51820);
         let changes = declared.diff_against(&curr);
-        assert!(changes.is_empty(), "matching listen_port shouldn't be dirty");
+        assert!(
+            changes.is_empty(),
+            "matching listen_port shouldn't be dirty"
+        );
     }
 
     #[test]
@@ -896,7 +1202,9 @@ mod tests {
     #[test]
     fn diff_peers_to_add() {
         let declared = DeclaredWgDeviceBuilder::new("wg0".into())
-            .peer(key(0xbb), |p| p.persistent_keepalive(Duration::from_secs(25)))
+            .peer(key(0xbb), |p| {
+                p.persistent_keepalive(Duration::from_secs(25))
+            })
             .build();
         let curr = empty_device("wg0");
         let changes = declared.diff_against(&curr);
@@ -909,7 +1217,10 @@ mod tests {
         let declared = DeclaredWgDeviceBuilder::new("wg0".into()).build();
         let mut curr = empty_device("wg0");
         let mut p = WgPeer::new(key(0xcc));
-        p.endpoint = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 51820));
+        p.endpoint = Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            51820,
+        ));
         curr.peers.push(p);
         let changes = declared.diff_against(&curr);
         assert_eq!(changes.peers_to_remove, vec![key(0xcc)]);
@@ -919,17 +1230,26 @@ mod tests {
     fn diff_peer_endpoint_change() {
         let declared = DeclaredWgDeviceBuilder::new("wg0".into())
             .peer(key(0xbb), |p| {
-                p.endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2)), 51820))
+                p.endpoint(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2)),
+                    51820,
+                ))
             })
             .build();
         let mut curr = empty_device("wg0");
         let mut peer = WgPeer::new(key(0xbb));
-        peer.endpoint = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 51820));
+        peer.endpoint = Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            51820,
+        ));
         curr.peers.push(peer);
         let changes = declared.diff_against(&curr);
-        assert!(changes.peers_to_modify.iter().any(|(pk, pc)| {
-            *pk == key(0xbb) && pc.endpoint_set
-        }));
+        assert!(
+            changes
+                .peers_to_modify
+                .iter()
+                .any(|(pk, pc)| { *pk == key(0xbb) && pc.endpoint_set })
+        );
     }
 
     #[test]
@@ -945,7 +1265,12 @@ mod tests {
         peer.allowed_ips = vec![AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24)];
         curr.peers.push(peer);
         let changes = declared.diff_against(&curr);
-        assert!(changes.peers_to_modify.iter().any(|(_, pc)| pc.allowed_ips_set));
+        assert!(
+            changes
+                .peers_to_modify
+                .iter()
+                .any(|(_, pc)| pc.allowed_ips_set)
+        );
     }
 
     #[test]
@@ -1043,7 +1368,9 @@ mod tests {
     #[test]
     fn diff_display_renders_peer_add_remove() {
         let declared = DeclaredWgDeviceBuilder::new("wg0".into())
-            .peer(key(0xbb), |p| p.persistent_keepalive(Duration::from_secs(25)))
+            .peer(key(0xbb), |p| {
+                p.persistent_keepalive(Duration::from_secs(25))
+            })
             .build();
         let mut curr = empty_device("wg0");
         curr.peers.push(WgPeer::new(key(0xcc)));
@@ -1071,7 +1398,9 @@ mod tests {
         let declared = DeclaredWgDeviceBuilder::new("wg0".into())
             .private_key(key(1))
             .listen_port(51820)
-            .peer(key(0xaa), |p| p.persistent_keepalive(Duration::from_secs(25)))
+            .peer(key(0xaa), |p| {
+                p.persistent_keepalive(Duration::from_secs(25))
+            })
             .build();
         let curr = empty_device("wg0");
         let changes = declared.diff_against(&curr);
@@ -1081,5 +1410,148 @@ mod tests {
         // add). change_count counts kernel calls, not
         // dirty fields.
         assert_eq!(changes.change_count(), 2);
+    }
+
+    // ---- client() + wg-quick INI parser (#137) ----
+
+    fn b64(byte: u8) -> String {
+        b64_encode_32(&key(byte))
+    }
+
+    #[test]
+    fn client_builds_single_device_single_peer() {
+        let cfg = WireguardConfig::client(
+            "wg0",
+            key(0x11),
+            key(0x22),
+            "203.0.113.1:51820".parse().unwrap(),
+            vec![AllowedIp::v4(Ipv4Addr::UNSPECIFIED, 0)],
+            Some(Duration::from_secs(25)),
+        );
+        let dev = &cfg.devices()[0];
+        assert_eq!(dev.ifname, "wg0");
+        assert_eq!(dev.private_key, Some(key(0x11)));
+        assert_eq!(dev.peers.len(), 1);
+        let p = &dev.peers[0];
+        assert_eq!(p.public_key, key(0x22));
+        assert_eq!(p.endpoint, Some("203.0.113.1:51820".parse().unwrap()));
+        assert_eq!(p.persistent_keepalive, Some(Duration::from_secs(25)));
+        assert_eq!(p.allowed_ips, vec![AllowedIp::v4(Ipv4Addr::UNSPECIFIED, 0)]);
+    }
+
+    #[test]
+    fn wg_quick_parses_full_profile() {
+        let conf = format!(
+            "# a client profile\n\
+             [Interface]\n\
+             PrivateKey = {}\n\
+             ListenPort = 51820\n\
+             FwMark = 0x1234\n\
+             Address = 10.0.0.2/24   # wg-quick only, ignored\n\
+             DNS = 1.1.1.1\n\
+             \n\
+             [Peer]\n\
+             PublicKey = {}\n\
+             PresharedKey = {}\n\
+             Endpoint = 203.0.113.1:51820\n\
+             AllowedIPs = 10.0.0.0/24, 192.168.1.5, ::/0\n\
+             PersistentKeepalive = 25\n",
+            b64(0x11),
+            b64(0x22),
+            b64(0x33),
+        );
+        let cfg = WireguardConfig::from_wg_quick("wg0", &conf).expect("parse");
+        let dev = &cfg.devices()[0];
+        assert_eq!(dev.ifname, "wg0");
+        assert_eq!(dev.private_key, Some(key(0x11)));
+        assert_eq!(dev.listen_port, Some(51820));
+        assert_eq!(dev.fwmark, Some(0x1234));
+        assert_eq!(dev.peers.len(), 1);
+        let p = &dev.peers[0];
+        assert_eq!(p.public_key, key(0x22));
+        assert_eq!(p.preshared_key, Some(key(0x33)));
+        assert_eq!(p.endpoint, Some("203.0.113.1:51820".parse().unwrap()));
+        assert_eq!(p.persistent_keepalive, Some(Duration::from_secs(25)));
+        assert_eq!(
+            p.allowed_ips,
+            vec![
+                AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24),
+                AllowedIp::v4(Ipv4Addr::new(192, 168, 1, 5), 32),
+                AllowedIp::v6(std::net::Ipv6Addr::UNSPECIFIED, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn wg_quick_parses_multiple_peers() {
+        let conf = format!(
+            "[Interface]\nPrivateKey = {}\n\
+             [Peer]\nPublicKey = {}\nAllowedIPs = 10.0.0.1/32\n\
+             [Peer]\nPublicKey = {}\nAllowedIPs = 10.0.0.2/32\n",
+            b64(0x11),
+            b64(0x22),
+            b64(0x44),
+        );
+        let cfg = WireguardConfig::from_wg_quick("wg0", &conf).expect("parse");
+        let dev = &cfg.devices()[0];
+        assert_eq!(dev.peers.len(), 2);
+        assert_eq!(dev.peers[0].public_key, key(0x22));
+        assert_eq!(dev.peers[1].public_key, key(0x44));
+    }
+
+    #[test]
+    fn wg_quick_rejects_unknown_key() {
+        let conf = format!("[Interface]\nPrivateKey = {}\nBogus = 1\n", b64(0x11));
+        let err = WireguardConfig::from_wg_quick("wg0", &conf).unwrap_err();
+        assert!(err.to_string().contains("unknown [Interface] key"), "{err}");
+    }
+
+    #[test]
+    fn wg_quick_rejects_hostname_endpoint() {
+        let conf = format!(
+            "[Interface]\nPrivateKey = {}\n[Peer]\nPublicKey = {}\nEndpoint = vpn.example.com:51820\n",
+            b64(0x11),
+            b64(0x22),
+        );
+        let err = WireguardConfig::from_wg_quick("wg0", &conf).unwrap_err();
+        assert!(err.to_string().contains("IP:port"), "{err}");
+    }
+
+    #[test]
+    fn wg_quick_rejects_peer_without_public_key() {
+        let conf = format!(
+            "[Interface]\nPrivateKey = {}\n[Peer]\nAllowedIPs = 10.0.0.1/32\n",
+            b64(0x11),
+        );
+        let err = WireguardConfig::from_wg_quick("wg0", &conf).unwrap_err();
+        assert!(err.to_string().contains("missing PublicKey"), "{err}");
+    }
+
+    #[test]
+    fn wg_quick_keepalive_off_is_none() {
+        let conf = format!(
+            "[Interface]\nPrivateKey = {}\n[Peer]\nPublicKey = {}\nPersistentKeepalive = off\n",
+            b64(0x11),
+            b64(0x22),
+        );
+        let cfg = WireguardConfig::from_wg_quick("wg0", &conf).expect("parse");
+        assert_eq!(cfg.devices()[0].peers[0].persistent_keepalive, None);
+    }
+
+    #[test]
+    fn parse_cidr_defaults_and_bounds() {
+        assert_eq!(
+            parse_cidr("10.0.0.1").unwrap(),
+            AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 1), 32)
+        );
+        assert_eq!(
+            parse_cidr("::1").unwrap(),
+            AllowedIp::v6("::1".parse().unwrap(), 128)
+        );
+        assert!(
+            parse_cidr("10.0.0.0/33").is_err(),
+            "v4 prefix > 32 must fail"
+        );
+        let _ = IpAddr::V4(Ipv4Addr::UNSPECIFIED); // keep IpAddr import used
     }
 }
