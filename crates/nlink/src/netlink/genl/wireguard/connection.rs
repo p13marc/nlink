@@ -9,21 +9,27 @@ use super::{
     WG_GENL_NAME, WG_GENL_VERSION, WgAllowedIpAttr, WgCmd, WgDeviceAttr, WgDeviceFlag, WgPeerAttr,
     types::{AllowedIp, WG_KEY_LEN, WgDevice, WgDeviceBuilder, WgPeer, parse_timespec},
 };
-use crate::netlink::{
-    attr::{AttrIter, NLA_F_NESTED, get},
-    builder::MessageBuilder,
-    connection::Connection,
-    error::{Error, Result},
-    genl::{CtrlAttr, CtrlCmd, GENL_HDRLEN, GENL_ID_CTRL, GenlMsgHdr},
-    interface_ref::InterfaceRef,
-    message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
-    protocol::{AsyncProtocolInit, Route, Wireguard},
-    socket::NetlinkSocket,
+use crate::{
+    macros::__rt::resolve_genl_family,
+    netlink::{
+        attr::{AttrIter, NLA_F_NESTED, get},
+        builder::MessageBuilder,
+        connection::Connection,
+        error::{Error, Result},
+        genl::{GENL_HDRLEN, GenlMsgHdr},
+        interface_ref::InterfaceRef,
+        message::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN},
+        protocol::{AsyncProtocolInit, Route, Wireguard},
+        socket::NetlinkSocket,
+    },
 };
 
 impl AsyncProtocolInit for Wireguard {
     async fn resolve_async(socket: &NetlinkSocket) -> Result<Self> {
-        let family_id = resolve_wireguard_family(socket).await?;
+        // #135 — resolve via the shared canonical resolver instead of
+        // a per-family copy (the old `resolve_wireguard_family` was a
+        // byte-for-byte duplicate of `resolve_genl_family`).
+        let family_id = resolve_genl_family(socket, WG_GENL_NAME).await?;
         Ok(Self { family_id })
     }
 }
@@ -155,11 +161,13 @@ impl Connection<Wireguard> {
         let mut device = WgDevice::new();
 
         for response in &responses {
-            if response.len() < GENL_HDRLEN {
+            // `send_dump` returns full netlink messages — skip the
+            // 16-byte nlmsghdr and the GENL header to reach the attrs.
+            if response.len() < NLMSG_HDRLEN + GENL_HDRLEN {
                 continue;
             }
 
-            let attrs_data = &response[GENL_HDRLEN..];
+            let attrs_data = &response[NLMSG_HDRLEN + GENL_HDRLEN..];
             self.parse_device_attrs(attrs_data, &mut device)?;
         }
 
@@ -241,132 +249,39 @@ impl Connection<Wireguard> {
         Ok(())
     }
 
-    /// Send a WireGuard GENL command and wait for ACK.
+    /// Send a WireGuard GENL `SET`-style command and wait for the ACK.
+    ///
+    /// #135 — routes through the canonical [`Connection::send_ack`]
+    /// helper instead of a hand-rolled single-`recv_msg`. That helper
+    /// loops with the seq filter + 30s timeout, closing the H9
+    /// stale-frame bug class (the old single-recv could return `Ok`
+    /// without consuming its own ACK, desyncing the fd).
     async fn wg_command(
         &self,
         cmd: u8,
         build_attrs: impl FnOnce(&mut MessageBuilder),
-    ) -> Result<Vec<u8>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
-        let family_id = self.state().family_id;
-
-        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
-
-        // Append GENL header
-        let genl_hdr = GenlMsgHdr::new(cmd, WG_GENL_VERSION);
-        builder.append(&genl_hdr);
-
-        // Let caller append attributes
+    ) -> Result<()> {
+        let mut builder = MessageBuilder::new(self.state().family_id, NLM_F_REQUEST | NLM_F_ACK);
+        builder.append(&GenlMsgHdr::new(cmd, WG_GENL_VERSION));
         build_attrs(&mut builder);
-
-        // Send request
-        let seq = self.socket().next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket().pid());
-
-        let msg = builder.finish();
-        self.socket().send(&msg).await?;
-
-        // Receive response
-        let response: Vec<u8> = self.socket().recv_msg().await?;
-        self.process_genl_response(&response, seq)?;
-
-        Ok(response)
+        self.send_ack(builder).await
     }
 
     /// Send a WireGuard GENL dump command and collect all responses.
+    ///
+    /// #135 — routes through the canonical [`Connection::send_dump`]
+    /// helper. Each returned element is a full netlink message
+    /// (16-byte `nlmsghdr` + GENL header + attrs); callers skip
+    /// `NLMSG_HDRLEN + GENL_HDRLEN` to reach the attribute bytes.
     async fn dump_wg_command(
         &self,
         cmd: u8,
         build_attrs: impl FnOnce(&mut MessageBuilder),
     ) -> Result<Vec<Vec<u8>>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
-        let family_id = self.state().family_id;
-
-        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
-
-        // Append GENL header
-        let genl_hdr = GenlMsgHdr::new(cmd, WG_GENL_VERSION);
-        builder.append(&genl_hdr);
-
-        // Let caller append attributes
+        let mut builder = MessageBuilder::new(self.state().family_id, NLM_F_REQUEST | NLM_F_DUMP);
+        builder.append(&GenlMsgHdr::new(cmd, WG_GENL_VERSION));
         build_attrs(&mut builder);
-
-        // Send request
-        let seq = self.socket().next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket().pid());
-
-        let msg = builder.finish();
-        self.socket().send(&msg).await?;
-
-        // Plan 172 — wrap the recv loop in the Connection-level
-        // operation timeout (Plan 171 default: 30s).
-        self.with_timeout(async {
-            let mut responses = Vec::new();
-
-            loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
-                let mut done = false;
-
-                for result in MessageIter::new(&data) {
-                    let (header, payload) = result?;
-
-                    if header.nlmsg_seq != seq {
-                        continue;
-                    }
-
-                    if header.is_error() {
-                        let err = NlMsgError::from_bytes(payload)?;
-                        if !err.is_ack() {
-                            return Err(err.into_error(payload));
-                        }
-                        continue;
-                    }
-
-                    if header.is_done() {
-                        done = true;
-                        break;
-                    }
-
-                    // Include the payload (with GENL header)
-                    responses.push(payload.to_vec());
-                }
-
-                if done {
-                    break;
-                }
-            }
-
-            Ok(responses)
-        })
-        .await
-    }
-
-    /// Process a GENL response, checking for errors.
-    fn process_genl_response(&self, data: &[u8], seq: u32) -> Result<()> {
-        for result in MessageIter::new(data) {
-            let (header, payload) = result?;
-
-            if header.nlmsg_seq != seq {
-                continue;
-            }
-
-            if header.is_error() {
-                let err = NlMsgError::from_bytes(payload)?;
-                if !err.is_ack() {
-                    return Err(err.into_error(payload));
-                }
-            }
-        }
-
-        Ok(())
+        self.send_dump(builder).await
     }
 
     /// Parse device attributes from a GENL response.
@@ -464,11 +379,7 @@ fn parse_key(payload: &[u8]) -> Option<[u8; WG_KEY_LEN]> {
 ///
 /// Split out from `Connection::parse_device_attrs` so the scalar parsing path
 /// is testable without a live socket.
-fn parse_device_attr_scalar(
-    attr_type: u16,
-    payload: &[u8],
-    device: &mut WgDevice,
-) -> Result<()> {
+fn parse_device_attr_scalar(attr_type: u16, payload: &[u8], device: &mut WgDevice) -> Result<()> {
     match attr_type {
         t if t == WgDeviceAttr::Ifindex as u16 => {
             device.ifindex = Some(get::u32_ne(payload)?);
@@ -491,73 +402,6 @@ fn parse_device_attr_scalar(
         _ => {}
     }
     Ok(())
-}
-
-/// Resolve the WireGuard GENL family ID.
-async fn resolve_wireguard_family(socket: &NetlinkSocket) -> Result<u16> {
-    // Build CTRL_CMD_GETFAMILY request
-    let mut builder = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK);
-
-    // Append GENL header
-    let genl_hdr = GenlMsgHdr::new(CtrlCmd::GetFamily as u8, 1);
-    builder.append(&genl_hdr);
-
-    // Append family name attribute
-    builder.append_attr_str(CtrlAttr::FamilyName as u16, WG_GENL_NAME);
-
-    // Send request
-    let seq = socket.next_seq();
-    builder.set_seq(seq);
-    builder.set_pid(socket.pid());
-
-    let msg = builder.finish();
-    socket.send(&msg).await?;
-
-    // Receive response
-    let response: Vec<u8> = socket.recv_msg().await?;
-
-    // Parse response
-    for result in MessageIter::new(&response) {
-        let (header, payload) = result?;
-
-        if header.nlmsg_seq != seq {
-            continue;
-        }
-
-        if header.is_error() {
-            let err = NlMsgError::from_bytes(payload)?;
-            if !err.is_ack() {
-                if err.error == -libc::ENOENT {
-                    return Err(Error::FamilyNotFound {
-                        name: WG_GENL_NAME.to_string(),
-                    });
-                }
-                return Err(err.into_error(payload));
-            }
-            continue;
-        }
-
-        if header.is_done() {
-            continue;
-        }
-
-        // Parse GENL header
-        if payload.len() < GENL_HDRLEN {
-            return Err(Error::InvalidMessage("GENL header too short".into()));
-        }
-
-        // Parse attributes after GENL header
-        let attrs_data = &payload[GENL_HDRLEN..];
-        for (attr_type, attr_payload) in AttrIter::new(attrs_data) {
-            if attr_type == CtrlAttr::FamilyId as u16 {
-                return get::u16_ne(attr_payload);
-            }
-        }
-    }
-
-    Err(Error::FamilyNotFound {
-        name: WG_GENL_NAME.to_string(),
-    })
 }
 
 /// Append peer attributes to a message builder.

@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **GENL command unification — closes the H9 stale-frame bug class
+  (#135).** The hand-rolled per-family GENL command/dump paths for
+  WireGuard, MACsec, MPTCP and ethtool now route through the audited
+  canonical `Connection::{send_ack,send_request,send_dump}` helpers
+  instead of bespoke single-`recv_msg` blocks. Five `SET`/query helpers
+  (`wg_command`, `macsec_command`, `mptcp_command`, `mptcp_query`,
+  `ethtool_set`) previously read exactly one datagram and `continue`d
+  past any non-matching `nlmsg_seq`, so a stale or interleaved frame
+  could make them return `Ok` **without consuming their own ACK** —
+  desynchronizing the fd for the next request (the "H9" class). Routing
+  through the shared helpers inherits the looped seq-filter + correct
+  end-marker + 30 s operation timeout, closing it. In the same pass the
+  four byte-identical `process_genl_response`/`process_ethtool_ack`
+  copies and the three duplicated per-family `resolve_*_family`
+  functions were deleted (the families now share
+  `resolve_genl_family`), netting ~430 fewer lines. Library-internal
+  only — no public type or method signature changed. (nl80211/devlink
+  already used the shared resolver and conformant looped recv paths;
+  their dump-path dedup rides along with the #134 dispatcher migration.)
+
 ## [0.22.0] - 2026-06-29
 
 ### Changed
