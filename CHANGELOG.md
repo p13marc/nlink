@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Property-based parser-robustness harnesses (#137, Plan 193 phase
+  2-3).** Added a `proptest` **dev-dependency** and a `parser_proptest`
+  test module that feeds arbitrary bytes to the protocol-stack parsers
+  and proves the CLAUDE.md `## Parser robustness` invariants hold across
+  the input space the audit scripts can't enumerate: `MessageIter` /
+  `AttrIter` never panic and always terminate (the infinite-loop bug
+  class — netlink-packet-route #152), `MessageIter` stays exhausted after
+  yielding an error (Plan 193 rule 2), the fixed-size struct parsers and
+  `get::*` extractors never panic on arbitrary bytes, `NlMsgHdr` accepts
+  oversized input (rule 1), and the typed RTNetlink parsers
+  (`LinkMessage`/`RouteMessage`/`AddressMessage`/`NeighborMessage`/
+  `RuleMessage`/`TcMessage` `::from_bytes`) — the real kernel-response
+  attack surface — return `Result` rather than panicking. Runs under
+  `cargo test -p nlink --lib` (no root, no `cargo-fuzz` toolchain).
+
 - **Opt-in dispatcher mode is now feature-complete (#134).**
   `Connection::with_dispatcher()` opts a connection into a per-`nlmsg_seq`
   background recv-driver that demultiplexes all frames off one socket, so

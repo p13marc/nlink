@@ -69,6 +69,11 @@ tokio-stream = "0.1"
 # bring their own dep).
 bitflags = "2"
 
+# Property-based testing (dev-only). Plan 193 phase 2-3 — adversarial
+# byte inputs proving the parser-robustness invariants (MessageIter /
+# AttrIter termination + no-panic on arbitrary bytes).
+proptest = "1"
+
 # Proc macros
 proc-macro2 = "1"
 quote = "1"

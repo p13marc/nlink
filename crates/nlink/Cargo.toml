@@ -80,6 +80,8 @@ tracing-subscriber = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # Plan 189: JSON-shape stability tests for the `serde` feature.
 serde_json = { workspace = true }
+# Plan 193 phase 2-3: property-based parser-robustness harnesses.
+proptest = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true
