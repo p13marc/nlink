@@ -358,16 +358,25 @@ impl<P: ProtocolState> Connection<P> {
     /// parallel dumps, use [`ConnectionPool<P>`](crate::netlink::pool::ConnectionPool)
     /// — one socket per task.
     ///
-    /// # Limitations (this is the opt-in foundation)
+    /// # Event streams coexist with requests (the headline fix)
     ///
-    /// The streaming APIs ([`events`](Self::events),
-    /// [`into_events`](Self::into_events),
-    /// [`dump_stream`](Self::dump_stream) and the `*_with_resync`
-    /// wrappers) are **not yet supported** on a dispatcher-mode
-    /// connection — the driver owns the recv side, so a second reader
-    /// would race it. They return a clear error here. Use a separate
-    /// default-mode `Connection` (or the not-yet-shipped streaming
-    /// migration) for events while this connection serves requests.
+    /// [`events`](Self::events) / [`into_events`](Self::into_events) work
+    /// in dispatcher mode: they register a listener on the driver and
+    /// consume driver-routed multicast frames instead of holding a lock.
+    /// So a long-lived event subscriber and concurrent requests on the
+    /// **same** connection both make progress — the exact regression #134
+    /// was filed for. (Multicast membership is still added the usual way
+    /// via [`subscribe`](Self::subscribe) / `subscribe_all`.)
+    ///
+    /// # Remaining limitation
+    ///
+    /// [`dump_stream`](Self::dump_stream) (and the `*_with_resync`
+    /// wrappers built on the streaming path) are **not yet supported** on
+    /// a dispatcher-mode connection — per-seq dump *streaming* through the
+    /// driver is the tracked #134 follow-on. They return a clear
+    /// `Error::NotSupported`. Use the eager `get_*` dumps (which route
+    /// through the driver) or a default-mode `Connection` for streaming
+    /// dumps.
     #[must_use]
     pub fn with_dispatcher(mut self) -> Self {
         self.dispatcher_mode = true;
@@ -380,8 +389,9 @@ impl<P: ProtocolState> Connection<P> {
     }
 
     /// Ensure the background recv-driver is running. Idempotent; only
-    /// meaningful in dispatcher mode. Called by the request inners.
-    fn ensure_driver(&self) {
+    /// meaningful in dispatcher mode. Called by the request inners and
+    /// by the event-stream constructors (#134 streams).
+    pub(crate) fn ensure_driver(&self) {
         self.dispatcher.ensure_driver(self.socket.clone());
     }
 
@@ -3264,18 +3274,34 @@ mod send_sync_tests {
         }
     }
 
-    /// `events()` in dispatcher mode yields exactly one error then ends
-    /// (the subscription can't poll recv under the driver).
+    /// The #134 headline fix: in dispatcher mode an `events()` stream and
+    /// concurrent requests on the **same** connection both make progress
+    /// (the events stream no longer holds a lock that blocks requests).
+    /// Creating the stream registers an event listener + starts the
+    /// driver; `get_links()` then completes while the stream is live.
     #[tokio::test]
-    async fn dispatcher_mode_events_yield_one_error_then_end() {
-        use tokio_stream::StreamExt;
-        let conn = Connection::<Route>::new()
-            .expect("socket open")
-            .with_dispatcher();
-        let mut events = conn.events().await;
-        let first = events.next().await.expect("one item");
-        assert!(first.is_err(), "first item must be the unsupported error");
-        assert!(first.unwrap_err().is_not_supported());
-        assert!(events.next().await.is_none(), "stream ends after the error");
+    async fn dispatcher_mode_events_coexist_with_requests() {
+        let conn = std::sync::Arc::new(
+            Connection::<Route>::new()
+                .expect("socket open")
+                .with_dispatcher(),
+        );
+        // Hold a live events stream for the duration.
+        let events = conn.events().await;
+        assert!(conn.dispatcher().driver_started());
+        assert_eq!(
+            conn.dispatcher().event_listener_count(),
+            1,
+            "events() must register a driver event listener in dispatcher mode"
+        );
+        // Requests still complete while the stream is held — the headline
+        // fix (pre-#134 the events lock would block this forever).
+        for _ in 0..4 {
+            let links = conn.get_links().await.expect("get_links while events live");
+            assert!(!links.is_empty());
+        }
+        // Dropping the stream deregisters the listener.
+        drop(events);
+        assert_eq!(conn.dispatcher().event_listener_count(), 0);
     }
 }

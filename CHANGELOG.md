@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Dispatcher mode: event streams now coexist with requests (#134
+  streams stage — the headline fix).** `events()` / `into_events()` work
+  on a dispatcher-mode `Connection`: instead of holding the request lock
+  for the stream's lifetime (which blocked all concurrent requests — the
+  exact regression #134 was filed for), they register a raw-frame
+  listener on the background driver and consume driver-routed multicast
+  (`seq == 0`) frames. A long-lived event subscriber and concurrent
+  requests on the **same** connection now both make progress. The
+  `dump_stream` / `*_with_resync` streaming path remains unsupported in
+  dispatcher mode for now (per-seq dump *streaming* through the driver is
+  the tracked #134 follow-on) and returns `Error::NotSupported`. Also
+  hardened: `NetlinkSocket::next_seq()` now **skips 0** so a wrapped
+  unicast seq can never be misrouted as a multicast notification. Default
+  (mutex) mode is unchanged.
 - **Opt-in dispatcher mode — per-`nlmsg_seq` unicast demux foundation
   (#134, Plan 234 follow-on).** `Connection::with_dispatcher()` opts a
   connection into a new request path: a single background recv-driver

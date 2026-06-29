@@ -66,17 +66,33 @@ use super::{
     protocol::ProtocolState,
 };
 
-/// Error surfaced when an event stream is created on a dispatcher-mode
-/// connection. The background driver task owns `recv` on the socket, so a
-/// `poll_recv`-based stream would be a two-reader race. Multicast subscribers
-/// must use a default-mode `Connection` (or a separate connection from a
-/// `ConnectionPool`). See #134.
+/// Error surfaced when a `dump_stream` is created on a dispatcher-mode
+/// connection. Per-seq dump streaming through the driver is the tracked
+/// #134 follow-on; until then, `dump_stream` callers on a dispatcher-mode
+/// connection must use the eager `get_*` dumps (which route through the
+/// driver) or a default-mode `Connection`.
 pub(crate) fn dispatcher_mode_stream_error() -> Error {
     Error::not_supported(
-        "event/dump streams are not supported on a dispatcher-mode connection; \
-         use a default-mode Connection (or a separate ConnectionPool connection) \
-         for long-lived subscriptions",
+        "dump_stream is not yet supported on a dispatcher-mode connection; \
+         use the eager get_* dumps, or a default-mode Connection for streaming \
+         dumps",
     )
+}
+
+/// How an event stream sources its frames (#134).
+///
+/// In the default (mutex) mode the stream holds the Connection's request
+/// lock and polls the socket directly. In dispatcher mode the background
+/// driver owns recv, so the stream instead consumes the per-subscriber
+/// channel the driver fans multicast (`seq == 0`) frames into.
+pub(crate) enum EventBackend {
+    /// Mutex mode — hold the request lock for the stream's lifetime and
+    /// poll the socket. (0.19 Finding B: the lock keeps concurrent dumps
+    /// / streams on a shared `Arc<Connection>` from racing on `poll_recv`.)
+    /// The guard is held purely for its `Drop` (lock release), never read.
+    Direct(#[allow(dead_code)] tokio::sync::OwnedMutexGuard<()>),
+    /// Dispatcher mode — consume driver-routed multicast frames.
+    Dispatched(super::dispatcher::EventGuard),
 }
 
 /// Sealed trait module to prevent external implementations.
@@ -133,29 +149,74 @@ pub struct EventSubscription<'a, P: EventSource> {
     conn: &'a Connection<P>,
     buffer: Vec<u8>,
     pending: Vec<P::Event>,
-    /// 0.19 Finding B — hold the Connection's request lock for the
-    /// subscription's lifetime so concurrent dumps / other streams
-    /// on a shared `Arc<Connection>` don't race on `poll_recv`. The
-    /// lock is acquired in [`Connection::events`] (now async) and
-    /// released when the stream is dropped.
-    _guard: tokio::sync::OwnedMutexGuard<()>,
-    /// #134 — set when the connection is in dispatcher mode, where the
-    /// driver owns recv and a second reader (this stream) would race
-    /// it. The stream yields one error then ends.
-    unsupported: bool,
+    /// #134 — frame source: the request lock + socket (mutex mode) or a
+    /// driver-routed channel (dispatcher mode). Both keep concurrent
+    /// streams/dumps on a shared `Arc<Connection>` from racing recv.
+    backend: EventBackend,
     terminated: bool,
 }
 
 impl<'a, P: EventSource> EventSubscription<'a, P> {
-    pub(crate) fn new(conn: &'a Connection<P>, guard: tokio::sync::OwnedMutexGuard<()>) -> Self {
+    pub(crate) fn new(conn: &'a Connection<P>, backend: EventBackend) -> Self {
         Self {
-            unsupported: conn.is_dispatcher_mode(),
             conn,
             buffer: Vec::new(),
             pending: Vec::new(),
-            _guard: guard,
+            backend,
             terminated: false,
         }
+    }
+}
+
+/// Shared poll body for both event streams (#134). Drains `pending`
+/// first, then sources the next multicast batch from the backend:
+/// `Direct` polls the socket (mutex mode); `Dispatched` polls the
+/// driver-routed channel (dispatcher mode). Returns the head event of
+/// each freshly parsed batch.
+fn poll_event_backend<P: EventSource>(
+    backend: &mut EventBackend,
+    conn: &Connection<P>,
+    buffer: &mut Vec<u8>,
+    pending: &mut Vec<P::Event>,
+    terminated: &mut bool,
+    cx: &mut Context<'_>,
+) -> Poll<Option<Result<P::Event>>> {
+    if let Some(event) = pending.pop() {
+        return Poll::Ready(Some(Ok(event)));
+    }
+    if *terminated {
+        return Poll::Ready(None);
+    }
+    loop {
+        let data: Vec<u8> = match backend {
+            EventBackend::Direct(_) => match conn.socket().poll_recv(cx) {
+                Poll::Ready(Ok(data)) => data,
+                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+                Poll::Pending => return Poll::Pending,
+            },
+            EventBackend::Dispatched(guard) => match guard.rx.poll_recv(cx) {
+                Poll::Ready(Some(frame)) => (*frame).clone(),
+                Poll::Ready(None) => {
+                    // Driver stopped — surface the fatal error once, end after.
+                    *terminated = true;
+                    return Poll::Ready(Some(Err(conn.dispatcher().take_fatal_error())));
+                }
+                Poll::Pending => return Poll::Pending,
+            },
+        };
+
+        *buffer = data;
+        *pending = P::parse_events(buffer);
+        tracing::trace!(
+            protocol = std::any::type_name::<P>(),
+            events = pending.len(),
+            "delivered multicast batch"
+        );
+        pending.reverse();
+        if let Some(event) = pending.pop() {
+            return Poll::Ready(Some(Ok(event)));
+        }
+        // Empty batch (no parseable events) — keep polling.
     }
 }
 
@@ -164,50 +225,14 @@ impl<P: EventSource> Stream for EventSubscription<'_, P> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-
-        // #134 — dispatcher mode: surface the limitation once, then end.
-        if this.unsupported {
-            if this.terminated {
-                return Poll::Ready(None);
-            }
-            this.terminated = true;
-            return Poll::Ready(Some(Err(dispatcher_mode_stream_error())));
-        }
-
-        // Return pending events first
-        if let Some(event) = this.pending.pop() {
-            return Poll::Ready(Some(Ok(event)));
-        }
-
-        // Poll for new data
-        loop {
-            match this.conn.socket().poll_recv(cx) {
-                Poll::Ready(Ok(data)) => {
-                    this.buffer = data;
-
-                    // Parse all events from the buffer
-                    this.pending = P::parse_events(&this.buffer);
-                    tracing::trace!(
-                        protocol = std::any::type_name::<P>(),
-                        events = this.pending.len(),
-                        "delivered multicast batch"
-                    );
-
-                    // Reverse so we pop in the correct order
-                    this.pending.reverse();
-
-                    // Return first event if available
-                    if let Some(event) = this.pending.pop() {
-                        return Poll::Ready(Some(Ok(event)));
-                    }
-
-                    // No events in this batch, continue polling
-                    continue;
-                }
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
-                Poll::Pending => return Poll::Pending,
-            }
-        }
+        poll_event_backend(
+            &mut this.backend,
+            this.conn,
+            &mut this.buffer,
+            &mut this.pending,
+            &mut this.terminated,
+            cx,
+        )
     }
 }
 
@@ -242,26 +267,20 @@ pub struct OwnedEventStream<P: EventSource> {
     conn: Connection<P>,
     buffer: Vec<u8>,
     pending: Vec<P::Event>,
-    /// 0.19 Finding B — same role as `EventSubscription::_guard`.
-    /// Because the lock is held by the OwnedMutexGuard wrapping
-    /// the Connection's own request_lock Arc, and the Connection
-    /// is owned by this struct, dropping the stream releases the
-    /// guard which drops the Arc reference (alongside the
-    /// Connection itself).
-    _guard: tokio::sync::OwnedMutexGuard<()>,
-    /// #134 — see [`EventSubscription::unsupported`].
-    unsupported: bool,
+    /// #134 — frame source; see [`EventSubscription::backend`]. In mutex
+    /// mode this is the owned request-lock guard (0.19 Finding B); in
+    /// dispatcher mode it's the driver-routed event channel.
+    backend: EventBackend,
     terminated: bool,
 }
 
 impl<P: EventSource> OwnedEventStream<P> {
-    pub(crate) fn new(conn: Connection<P>, guard: tokio::sync::OwnedMutexGuard<()>) -> Self {
+    pub(crate) fn new(conn: Connection<P>, backend: EventBackend) -> Self {
         Self {
-            unsupported: conn.is_dispatcher_mode(),
             conn,
             buffer: Vec::new(),
             pending: Vec::new(),
-            _guard: guard,
+            backend,
             terminated: false,
         }
     }
@@ -287,50 +306,14 @@ impl<P: EventSource> Stream for OwnedEventStream<P> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-
-        // #134 — dispatcher mode: surface the limitation once, then end.
-        if this.unsupported {
-            if this.terminated {
-                return Poll::Ready(None);
-            }
-            this.terminated = true;
-            return Poll::Ready(Some(Err(dispatcher_mode_stream_error())));
-        }
-
-        // Return pending events first
-        if let Some(event) = this.pending.pop() {
-            return Poll::Ready(Some(Ok(event)));
-        }
-
-        // Poll for new data
-        loop {
-            match this.conn.socket().poll_recv(cx) {
-                Poll::Ready(Ok(data)) => {
-                    this.buffer = data;
-
-                    // Parse all events from the buffer
-                    this.pending = P::parse_events(&this.buffer);
-                    tracing::trace!(
-                        protocol = std::any::type_name::<P>(),
-                        events = this.pending.len(),
-                        "delivered multicast batch (owned stream)"
-                    );
-
-                    // Reverse so we pop in the correct order
-                    this.pending.reverse();
-
-                    // Return first event if available
-                    if let Some(event) = this.pending.pop() {
-                        return Poll::Ready(Some(Ok(event)));
-                    }
-
-                    // No events in this batch, continue polling
-                    continue;
-                }
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
-                Poll::Pending => return Poll::Pending,
-            }
-        }
+        poll_event_backend(
+            &mut this.backend,
+            &this.conn,
+            &mut this.buffer,
+            &mut this.pending,
+            &mut this.terminated,
+            cx,
+        )
     }
 }
 
@@ -376,8 +359,7 @@ impl<P: EventSource> Connection<P> {
     /// drop(events);
     /// ```
     pub async fn events(&self) -> EventSubscription<'_, P> {
-        let guard = self.lock_request_owned().await;
-        EventSubscription::new(self, guard)
+        EventSubscription::new(self, self.event_backend().await)
     }
 
     /// Convert this connection into an owned event stream.
@@ -405,8 +387,20 @@ impl<P: EventSource> Connection<P> {
     /// **0.19 Finding B — now `async`.** Same locking semantics as
     /// [`Self::events`]; see that method's docstring for the trade-off.
     pub async fn into_events(self) -> OwnedEventStream<P> {
-        let guard = self.lock_request_owned().await;
-        OwnedEventStream::new(self, guard)
+        let backend = self.event_backend().await;
+        OwnedEventStream::new(self, backend)
+    }
+
+    /// Build the right [`EventBackend`] for this connection's mode (#134).
+    /// Dispatcher mode ensures the driver is running and registers a
+    /// raw-frame event listener; mutex mode takes the owned request lock.
+    async fn event_backend(&self) -> EventBackend {
+        if self.is_dispatcher_mode() {
+            self.ensure_driver();
+            EventBackend::Dispatched(self.dispatcher().subscribe_events())
+        } else {
+            EventBackend::Direct(self.lock_request_owned().await)
+        }
     }
 }
 
