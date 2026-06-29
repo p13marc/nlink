@@ -69,7 +69,7 @@ pub mod types;
 
 pub use messages::{
     NetShaperCapsGetRequest, NetShaperCapsReply, NetShaperDeleteRequest, NetShaperGetRequest,
-    NetShaperHandle, NetShaperReply, NetShaperSetRequest,
+    NetShaperGroupRequest, NetShaperHandle, NetShaperLeaf, NetShaperReply, NetShaperSetRequest,
 };
 pub use types::{
     NetShaperAttr, NetShaperCapsAttr, NetShaperCmd, NetShaperHandleAttr, NetShaperMetric,

@@ -182,15 +182,44 @@ into the obvious `bool`.
 
 ## Hierarchical shaping (advanced)
 
-The `NET_SHAPER_CMD_GROUP` operation atomically creates a parent
-shaper at `Node` scope and reparents the listed leaf shapers
-underneath it — useful for "rate-limit this set of queues
-collectively to N Gbit/s." **Not exposed via the typed
-Connection API in 0.16**: the macro stack doesn't yet handle
-`Vec<NetlinkAttrs>` (the multi-valued nested leaf-info array),
-so the operation is deferred. Hand-rolled via the lower-level
-`Connection::send` is possible but ugly; wait for the macro
-extension or drop down to `tc` for now.
+The `NET_SHAPER_CMD_GROUP` operation atomically creates (or updates)
+a `Node`-scope shaper and attaches the listed `Queue`-scope leaf
+shapers underneath it — "rate-limit this set of queues collectively
+to N Gbit/s." Use [`group_shapers`][grp] with a
+[`NetShaperGroupRequest`][greq] + one [`NetShaperLeaf`][leaf] per queue:
+
+[grp]: https://docs.rs/nlink/latest/nlink/netlink/struct.Connection.html#method.group_shapers
+[greq]: https://docs.rs/nlink/latest/nlink/netlink/genl/net_shaper/struct.NetShaperGroupRequest.html
+[leaf]: https://docs.rs/nlink/latest/nlink/netlink/genl/net_shaper/struct.NetShaperLeaf.html
+
+```rust,no_run
+# use nlink::netlink::{genl::net_shaper::{NetShaper, NetShaperGroupRequest, NetShaperLeaf}, Connection};
+# async fn run(ifindex: u32) -> nlink::Result<()> {
+let conn = Connection::<NetShaper>::new_async().await?;
+
+// Group TX queues 0..=2 under a new node, collectively capped at 1 Gbps.
+// Omitting the node handle asks the kernel to allocate one and return it.
+let node = conn.group_shapers(
+    NetShaperGroupRequest::new(ifindex)
+        .bw_max(1_000_000_000)
+        .leaf(NetShaperLeaf::queue(0))
+        .leaf(NetShaperLeaf::queue(1))
+        .leaf(NetShaperLeaf::queue(2)),
+).await?;
+
+// `node` is the kernel-assigned Node handle — pass it to a later
+// group() call (`.node(node)`) to add more leaves, or to set_shaper
+// to retune the aggregate cap.
+println!("created scheduler node {node:?}");
+# Ok(())
+# }
+```
+
+Per-leaf `priority` / `weight` ride along
+(`NetShaperLeaf::queue(0).priority(1).weight(4)`). The node shaper
+must be `Node` or `Netdev` scope and the driver must report
+`support_nesting` at that scope (check [`get_caps`](#code--driver-capability-discovery)
+first). The operation is atomic: on failure nothing is applied.
 
 ## Error handling
 

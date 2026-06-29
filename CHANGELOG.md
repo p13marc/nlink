@@ -6,6 +6,22 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **net_shaper `NET_SHAPER_CMD_GROUP` — hierarchical TX shaping (#137).**
+  The net_shaper re-audit against the kernel 6.13 `net_shaper.yaml`
+  found the family otherwise matched the UAPI (discriminants already
+  pinned), but the `group` operation was defined-but-unwired — the one
+  real gap. `Connection::group_shapers(NetShaperGroupRequest)` now
+  atomically creates/updates a `Node`-scope shaper and attaches
+  `Queue`-scope leaves under it (the "rate-limit this set of queues
+  collectively" primitive), returning the node's handle. Leaves carry
+  optional per-leaf `priority`/`weight` via `NetShaperLeaf`; the node
+  carries the usual `metric`/`bw_*`/`burst`/`priority`/`weight`. The
+  request encoding is hand-written (the derive doesn't model the
+  repeated nested `leaves` attribute, whose `leaf-info` is
+  `subset-of: net-shaper` and so reuses the net-shaper attribute IDs);
+  request-shape tests pin the wire layout. `docs/recipes/tx-hw-shaping.md`
+  §"Hierarchical shaping" now shows the real API (previously documented
+  as deferred). Read paths unchanged.
 - **MPLS / SRv6 / NextHop fixed-struct wire-format audit (#137).**
   Audited the fixed-size kernel structs in `mpls`, `srv6`, and
   `nexthop` (`MplsLabelEntry`, `Ipv6SrHdr`, `NhMsg`, `NexthopGrp`)

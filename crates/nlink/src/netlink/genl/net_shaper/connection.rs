@@ -9,9 +9,11 @@
 use crate::macros::GenlTypedDumpStream;
 use crate::netlink::{connection::Connection, error::Result};
 
+use crate::Error;
+
 use super::messages::{
     NetShaperCapsGetRequest, NetShaperCapsReply, NetShaperDeleteRequest, NetShaperGetRequest,
-    NetShaperHandle, NetShaperReply, NetShaperSetRequest,
+    NetShaperGroupRequest, NetShaperHandle, NetShaperReply, NetShaperSetRequest,
 };
 use super::types::NetShaperScope;
 use super::NetShaper;
@@ -75,6 +77,35 @@ impl Connection<NetShaper> {
             .send_typed(NetShaperDeleteRequest::new(ifindex, handle))
             .await?;
         Ok(())
+    }
+
+    /// Create or update a scheduling group: attach queue-scope
+    /// `leaves` under a node shaper, building a hierarchy.
+    ///
+    /// Returns the node shaper's handle — freshly allocated when the
+    /// request omits the node `id`, or the existing node's handle when
+    /// adding leaves to one. The operation is atomic. Requires
+    /// `CAP_NET_ADMIN` and a driver whose caps report
+    /// `support_nesting` at the node scope (check
+    /// [`get_caps`](Self::get_caps) first).
+    ///
+    /// ```ignore
+    /// use nlink::netlink::genl::net_shaper::{NetShaperGroupRequest, NetShaperLeaf};
+    ///
+    /// // Group TX queues 0..3 under a new node, capped at 1 Gbps.
+    /// let node = conn.group_shapers(
+    ///     NetShaperGroupRequest::new(eth0)
+    ///         .bw_max(1_000_000_000)
+    ///         .leaf(NetShaperLeaf::queue(0))
+    ///         .leaf(NetShaperLeaf::queue(1))
+    ///         .leaf(NetShaperLeaf::queue(2)),
+    /// ).await?;
+    /// ```
+    pub async fn group_shapers(&self, req: NetShaperGroupRequest) -> Result<NetShaperHandle> {
+        let reply: NetShaperReply = self.send_typed(req).await?;
+        reply.handle.ok_or_else(|| {
+            Error::InvalidMessage("net_shaper group reply missing node handle".into())
+        })
     }
 
     /// Query driver-supported shaper features for one specific
