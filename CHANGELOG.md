@@ -17,6 +17,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **nl80211 scan/BSS coverage (#137).** Following the station-info audit,
+  audited the `NL80211_BSS_*` attribute ids against `enum nl80211_bss`
+  (all correct — the RX_BITRATE-class drift was isolated to STA_INFO) and
+  pinned them with a regression test. `ScanResult` now also reports
+  `signal_unspec` (0–100 quality from drivers without an mBm value),
+  `beacon_ies` (beacon IEs distinct from the probe-response set, with
+  SSID fallback when no probe response was seen), `last_seen_boottime_ns`,
+  and `frequency_offset_khz`. `ScanResult` is now `#[non_exhaustive]` +
+  `Default`; a parse test covers the new attributes and confirms
+  probe-response IEs win over beacon IEs for the SSID.
 - **nl80211 station-info coverage (#137).** Following the RX_BITRATE
   fix above, `StationInfo` now also reports the standard `iw station
   dump` counters: `rx_packets` / `tx_packets` / `tx_retries` /
