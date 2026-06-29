@@ -76,11 +76,20 @@ pub struct DumpStream<'a, P: ProtocolState, T: FromNetlink + Unpin> {
     /// that dump APIs imply. See
     /// [`Self::with_skip_malformed`].
     skip_malformed: bool,
-    /// 0.19 Finding B — hold the Connection's request lock for the
-    /// stream's lifetime so concurrent dumps / events on a shared
-    /// `Arc<Connection>` don't race on `poll_recv` and steal each
-    /// other's frames. Released when the stream is dropped.
+    /// Held for the stream's lifetime. In **mutex mode** (0.19 Finding B)
+    /// it's the request lock, keeping concurrent dumps / events on a
+    /// shared `Arc<Connection>` from racing on `poll_recv`. In
+    /// **dispatcher mode** it's the dump-serialization lock — the kernel
+    /// serializes dumps per socket (`netlink_dump_start` returns `EBUSY`
+    /// on a 2nd in-flight dump), so a streaming dump holds it for its
+    /// lifetime just like the eager `send_dump` path. Released on drop.
     _guard: tokio::sync::OwnedMutexGuard<()>,
+    /// #134 — dispatcher mode: per-seq channel the background driver
+    /// routes this dump's frames into. `None` in mutex mode (frames come
+    /// from `socket().poll_recv`). When `Some`, `poll_next` consumes this
+    /// channel instead of touching the socket directly (the driver owns
+    /// recv).
+    dispatched: Option<super::dispatcher::PendingGuard>,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -112,12 +121,10 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
         msg_type: u16,
         body: &[u8],
     ) -> Result<Self> {
-        // 0.19 Finding B — acquire the request lock BEFORE the send
-        // and hold it for the stream's lifetime. Without this, two
-        // concurrent DumpStreams on a shared `Arc<Connection>` would
-        // both `poll_recv` and steal each other's frames; the
-        // seq-filter would silently drop the foreign frames but
-        // they'd never reach the right stream's pending queue.
+        // Acquire the lock BEFORE the send and hold it for the stream's
+        // lifetime. In mutex mode (0.19 Finding B) it stops two concurrent
+        // DumpStreams from racing `poll_recv`; in dispatcher mode it
+        // serializes dumps (kernel `EBUSY`). Same lock, both roles.
         let guard = conn.lock_request_owned().await;
 
         let mut builder = MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_DUMP);
@@ -130,6 +137,17 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
         builder.set_seq(seq);
         builder.set_pid(socket.pid());
 
+        // #134 — in dispatcher mode the driver owns recv, so register the
+        // seq BEFORE sending and consume the driver-routed channel. The
+        // register-before-send order means the driver never sees a frame
+        // for an unregistered seq.
+        let dispatched = if conn.is_dispatcher_mode() {
+            conn.ensure_driver();
+            Some(conn.dispatcher().register(seq))
+        } else {
+            None
+        };
+
         let msg = builder.finish();
         socket.send(&msg).await?;
 
@@ -141,6 +159,7 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
             errored: false,
             skip_malformed: false,
             _guard: guard,
+            dispatched,
             _marker: PhantomData,
         })
     }
@@ -282,6 +301,34 @@ impl<P: ProtocolState, T: FromNetlink + Unpin> Stream for DumpStream<'_, P, T> {
             return Poll::Ready(None);
         }
 
+        // #134 — dispatcher mode: the background driver owns recv, so
+        // consume the per-seq channel it routes this dump's frames into
+        // instead of polling the socket. (The `syscall_batch` fast path
+        // doesn't apply — the driver does one `recv_msg` per frame.)
+        if this.dispatched.is_some() {
+            loop {
+                let polled = this.dispatched.as_mut().unwrap().rx.poll_recv(cx);
+                match polled {
+                    Poll::Ready(Some(frame)) => {
+                        this.drain_into_pending(&frame);
+                        if let Some(item) = this.pending.pop_front() {
+                            return Poll::Ready(Some(item));
+                        }
+                        if this.done || this.errored {
+                            return Poll::Ready(None);
+                        }
+                        // Empty/seq-filtered batch — keep draining.
+                    }
+                    Poll::Ready(None) => {
+                        // Driver stopped (fatal recv error / shutdown).
+                        this.errored = true;
+                        return Poll::Ready(Some(Err(this.conn.dispatcher().take_fatal_error())));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        }
+
         // Drain socket batches until we have a parsed message to
         // yield, or until the socket goes pending.
         //
@@ -394,9 +441,6 @@ impl<P: ProtocolState> Connection<P> {
     where
         T: FromNetlink + Unpin,
     {
-        if self.is_dispatcher_mode() {
-            return Err(crate::netlink::stream::dispatcher_mode_stream_error());
-        }
         DumpStream::send(self, msg_type).await
     }
 
@@ -418,9 +462,6 @@ impl<P: ProtocolState> Connection<P> {
     where
         T: FromNetlink + Unpin,
     {
-        if self.is_dispatcher_mode() {
-            return Err(crate::netlink::stream::dispatcher_mode_stream_error());
-        }
         DumpStream::send_with_body(self, msg_type, body).await
     }
 }
@@ -455,6 +496,7 @@ mod tests {
             errored: false,
             skip_malformed: false,
             _guard: guard,
+            dispatched: None,
             _marker: PhantomData,
         }
     }
@@ -539,6 +581,7 @@ mod tests {
             errored: false,
             skip_malformed: false,
             _guard: guard,
+            dispatched: None,
             _marker: PhantomData,
         }
     }

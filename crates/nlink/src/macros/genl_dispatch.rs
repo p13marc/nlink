@@ -31,14 +31,16 @@ use std::{
 
 use tokio_stream::Stream;
 
-use crate::macros::{GenlFamily, GenlMessage};
-use crate::netlink::{
-    connection::Connection,
-    genl::{GENL_HDRLEN, GenlMsgHdr},
-    message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
-    MessageBuilder, ProtocolState,
+use crate::{
+    Error, Result,
+    macros::{GenlFamily, GenlMessage},
+    netlink::{
+        MessageBuilder, ProtocolState,
+        connection::Connection,
+        genl::{GENL_HDRLEN, GenlMsgHdr},
+        message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
+    },
 };
-use crate::{Error, Result};
 
 impl<F> Connection<F>
 where
@@ -124,11 +126,12 @@ where
     /// }
     /// ```
     pub fn subscribe_group(&self, name: &str) -> Result<()> {
-        let id = self.state().mcast_group(name).ok_or_else(|| {
-            crate::Error::FamilyNotFound {
+        let id = self
+            .state()
+            .mcast_group(name)
+            .ok_or_else(|| crate::Error::FamilyNotFound {
                 name: ::std::format!("{}::{}", F::NAME, name),
-            }
-        })?;
+            })?;
         self.socket().add_membership(id)?;
         Ok(())
     }
@@ -138,8 +141,7 @@ where
         M: GenlMessage,
         R: GenlMessage + Default,
     {
-        let builder =
-            build_genl_request::<F, M>(self, &request, NLM_F_REQUEST | NLM_F_ACK)?;
+        let builder = build_genl_request::<F, M>(self, &request, NLM_F_REQUEST | NLM_F_ACK)?;
         let response = self.send_request(builder).await?;
         parse_first_genl_reply::<R>(&response)
     }
@@ -154,37 +156,38 @@ where
     /// response). For the canonical kernel dump shape (`*_CMD_GET`
     /// with `NLM_F_DUMP` returning many frames) this is the right
     /// helper.
-    pub async fn dump_typed_stream<M, R>(
-        &self,
-        request: M,
-    ) -> Result<GenlTypedDumpStream<'_, F, R>>
+    pub async fn dump_typed_stream<M, R>(&self, request: M) -> Result<GenlTypedDumpStream<'_, F, R>>
     where
         M: GenlMessage,
         R: GenlMessage + Default + Unpin,
     {
-        let mut builder =
-            build_genl_request::<F, M>(self, &request, NLM_F_REQUEST | NLM_F_DUMP)?;
+        let mut builder = build_genl_request::<F, M>(self, &request, NLM_F_REQUEST | NLM_F_DUMP)?;
 
         let socket = self.socket();
         let seq = socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(socket.pid());
 
+        // #134 — dispatcher mode: register the seq before sending so the
+        // driver routes this dump's frames to our channel.
+        let dispatched = if self.is_dispatcher_mode() {
+            self.ensure_driver();
+            Some(self.dispatcher().register(seq))
+        } else {
+            None
+        };
+
         let msg = builder.finish();
         socket.send(&msg).await?;
 
-        Ok(GenlTypedDumpStream::new(self, seq))
+        Ok(GenlTypedDumpStream::new(self, seq, dispatched))
     }
 }
 
 /// Build a netlink message for a GENL request: family-id'd
 /// header + GENL header (`cmd = M::CMD`, `version = F::VERSION`)
 /// + the message's typed attributes.
-fn build_genl_request<F, M>(
-    conn: &Connection<F>,
-    request: &M,
-    flags: u16,
-) -> Result<MessageBuilder>
+fn build_genl_request<F, M>(conn: &Connection<F>, request: &M, flags: u16) -> Result<MessageBuilder>
 where
     F: ProtocolState + GenlFamily,
     M: GenlMessage,
@@ -250,6 +253,10 @@ where
     pending: VecDeque<Result<R>>,
     done: bool,
     errored: bool,
+    /// #134 — dispatcher mode: per-seq channel the background driver
+    /// routes this dump's frames into. `None` in mutex mode (frames come
+    /// from `socket().poll_recv`).
+    dispatched: Option<crate::netlink::dispatcher::PendingGuard>,
     _marker: PhantomData<fn() -> R>,
 }
 
@@ -258,13 +265,18 @@ where
     F: ProtocolState + GenlFamily,
     R: GenlMessage + Default + Unpin,
 {
-    fn new(conn: &'a Connection<F>, seq: u32) -> Self {
+    fn new(
+        conn: &'a Connection<F>,
+        seq: u32,
+        dispatched: Option<crate::netlink::dispatcher::PendingGuard>,
+    ) -> Self {
         Self {
             conn,
             expected_seq: seq,
             pending: VecDeque::new(),
             done: false,
             errored: false,
+            dispatched,
             _marker: PhantomData,
         }
     }
@@ -336,6 +348,30 @@ where
             return Poll::Ready(None);
         }
 
+        // #134 — dispatcher mode: consume the driver-routed per-seq
+        // channel instead of polling the socket.
+        if this.dispatched.is_some() {
+            loop {
+                let polled = this.dispatched.as_mut().unwrap().rx.poll_recv(cx);
+                match polled {
+                    Poll::Ready(Some(frame)) => {
+                        this.drain_into_pending(&frame);
+                        if let Some(item) = this.pending.pop_front() {
+                            return Poll::Ready(Some(item));
+                        }
+                        if this.done || this.errored {
+                            return Poll::Ready(None);
+                        }
+                    }
+                    Poll::Ready(None) => {
+                        this.errored = true;
+                        return Poll::Ready(Some(Err(this.conn.dispatcher().take_fatal_error())));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        }
+
         loop {
             #[cfg(feature = "syscall_batch")]
             {
@@ -397,8 +433,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::macros::__rt;
-    use crate::netlink::message::{NlMsgType, NLMSG_HDRLEN};
+    use crate::{
+        macros::__rt,
+        netlink::message::{NLMSG_HDRLEN, NlMsgType},
+    };
 
     /// Hand-rolled reply type — proves the dispatch helpers are
     /// generic over `R: GenlMessage + Default`, no derive needed.
@@ -541,16 +579,16 @@ mod tests {
 
         let mut b = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
         b.append(&GenlMsgHdr::new(cmd, version));
-        Reply { id: 9, label: "x".into() }
-            .to_bytes(&mut b)
-            .expect("emit");
+        Reply {
+            id: 9,
+            label: "x".into(),
+        }
+        .to_bytes(&mut b)
+        .expect("emit");
         let bytes = b.finish();
 
         // nlmsg_type at offset 4..6 should be family_id.
-        assert_eq!(
-            u16::from_ne_bytes([bytes[4], bytes[5]]),
-            family_id
-        );
+        assert_eq!(u16::from_ne_bytes([bytes[4], bytes[5]]), family_id);
         // nlmsg_flags at offset 6..8.
         assert_eq!(
             u16::from_ne_bytes([bytes[6], bytes[7]]),

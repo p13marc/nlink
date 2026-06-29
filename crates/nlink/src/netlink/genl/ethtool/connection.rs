@@ -1635,7 +1635,6 @@ impl Connection<Ethtool> {
     /// id 2 (not the usual 1) and needs a `Groups` bitset selecting
     /// which standardized groups to return.
     async fn ethtool_stats_get(&self, ifname: &str) -> Result<Vec<u8>> {
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -1659,13 +1658,15 @@ impl Connection<Ethtool> {
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
+        // #134 — dual-mode recv (dump). Register/lock before send.
+        let mut session = self.recv_session_dump(seq).await;
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
         self.with_timeout(async {
             let mut result_payload: Option<Vec<u8>> = None;
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = session.recv(self).await?;
                 let mut done = false;
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
@@ -1751,10 +1752,6 @@ impl Connection<Ethtool> {
 
     /// Send an ethtool GET request (dump style).
     async fn ethtool_get(&self, cmd: EthtoolCmd, ifname: &str) -> Result<Vec<u8>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -1773,6 +1770,8 @@ impl Connection<Ethtool> {
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
+        // #134 — dual-mode recv (dump). Register/lock before send.
+        let mut session = self.recv_session_dump(seq).await;
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
@@ -1783,7 +1782,7 @@ impl Connection<Ethtool> {
             let mut result_payload: Option<Vec<u8>> = None;
 
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = session.recv(self).await?;
                 let mut done = false;
 
                 for msg_result in MessageIter::new(&data) {
@@ -1832,7 +1831,6 @@ impl Connection<Ethtool> {
         ifname: &str,
         build_attrs: impl FnOnce(&mut MessageBuilder),
     ) -> Result<Vec<u8>> {
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         // NLM_F_REQUEST only (no DUMP) — this is a do-it with parameters.
@@ -1849,12 +1847,15 @@ impl Connection<Ethtool> {
         let seq = self.socket().next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
+
+        // #134 — dual-mode recv (single doit). Register/lock before send.
+        let mut session = self.recv_session(seq).await;
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
         self.with_timeout(async {
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = session.recv(self).await?;
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
                     if header.nlmsg_seq != seq {

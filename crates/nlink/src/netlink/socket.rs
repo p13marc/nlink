@@ -263,8 +263,14 @@ impl NetlinkSocket {
     }
 
     /// Get the next sequence number.
+    ///
+    /// **Skips 0** (#134): the dispatcher treats `nlmsg_seq == 0` as the
+    /// multicast-notification marker and fans those frames out to event
+    /// subscribers. A unicast request that wrapped to seq 0 would be
+    /// misrouted, so the counter never hands out 0 (after `u32::MAX` it
+    /// resumes at 1).
     pub fn next_seq(&self) -> u32 {
-        self.seq.fetch_add(1, Ordering::Relaxed)
+        next_nonzero_seq(&self.seq)
     }
 
     /// Get the local port ID.
@@ -974,6 +980,41 @@ fn build_scm_rights_control(fds: &[RawFd]) -> (Vec<u64>, usize) {
     }
 
     (buf, space)
+}
+
+/// Fetch-and-increment a sequence counter, skipping 0 (#134). Pulled out
+/// of [`NetlinkSocket::next_seq`] so the wrap behavior is unit-testable
+/// without opening a socket fd.
+fn next_nonzero_seq(counter: &AtomicU32) -> u32 {
+    loop {
+        let s = counter.fetch_add(1, Ordering::Relaxed);
+        if s != 0 {
+            return s;
+        }
+    }
+}
+
+#[cfg(test)]
+mod seq_tests {
+    use super::*;
+
+    #[test]
+    fn next_seq_skips_zero_on_wrap() {
+        // Seed just below wrap: u32::MAX is handed out, then the counter
+        // is at 0 and must be skipped, yielding 1.
+        let counter = AtomicU32::new(u32::MAX);
+        assert_eq!(next_nonzero_seq(&counter), u32::MAX);
+        assert_eq!(next_nonzero_seq(&counter), 1, "0 must be skipped");
+        assert_eq!(next_nonzero_seq(&counter), 2);
+    }
+
+    #[test]
+    fn next_seq_is_monotonic_from_one() {
+        let counter = AtomicU32::new(1);
+        assert_eq!(next_nonzero_seq(&counter), 1);
+        assert_eq!(next_nonzero_seq(&counter), 2);
+        assert_eq!(next_nonzero_seq(&counter), 3);
+    }
 }
 
 #[cfg(test)]

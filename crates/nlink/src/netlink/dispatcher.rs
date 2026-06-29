@@ -114,6 +114,20 @@ struct DispatcherInner {
     /// driver dies so awaiting requests (whose channels then close)
     /// can surface a meaningful error instead of a bare "closed".
     fatal: Mutex<Option<String>>,
+
+    /// #134 (stage: streams) — raw-frame fan-out for `events()` /
+    /// `into_events()` streams running in dispatcher mode. Each event
+    /// stream registers an unbounded sender here; the driver forwards
+    /// every `seq == 0` (multicast) datagram to all of them. Separate
+    /// from `subscribers` (the typed `DispatcherEvent` broadcast surface
+    /// used by `*_with_resync`) because the hand-rolled event `Stream`
+    /// impls poll an `mpsc::UnboundedReceiver` directly — `broadcast`
+    /// has no public poll method. Keyed by a monotonic id so a dropped
+    /// stream deregisters precisely.
+    event_listeners: Mutex<HashMap<u64, mpsc::UnboundedSender<Arc<Vec<u8>>>>>,
+
+    /// Monotonic id source for `event_listeners` registrations.
+    next_listener_id: std::sync::atomic::AtomicU64,
 }
 
 /// Item delivered to multicast subscribers by the dispatcher.
@@ -148,6 +162,8 @@ impl Dispatcher {
                 driver: OnceLock::new(),
                 shutdown: Notify::new(),
                 fatal: Mutex::new(None),
+                event_listeners: Mutex::new(HashMap::new()),
+                next_listener_id: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -264,7 +280,25 @@ impl Dispatcher {
             .insert(seq, tx);
         PendingGuard {
             dispatcher: self.clone(),
-            seq,
+            seqs: vec![seq],
+            rx,
+        }
+    }
+
+    /// Register interest in **several** seqs that share one response
+    /// channel. Used by the batch path: it sends N messages with N
+    /// distinct seqs in one `sendmsg` and collects their ACKs from a
+    /// single loop, so the driver routes every one of those seqs into the
+    /// same `rx`. Register-before-send, same as [`register`](Self::register).
+    pub(crate) fn register_many(&self, seqs: &[u32]) -> PendingGuard {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut pending = self.inner.pending.lock().unwrap_or_else(|p| p.into_inner());
+        for &seq in seqs {
+            pending.insert(seq, tx.clone());
+        }
+        PendingGuard {
+            dispatcher: self.clone(),
+            seqs: seqs.to_vec(),
             rx,
         }
     }
@@ -296,7 +330,11 @@ impl Dispatcher {
         };
         let seq = header.nlmsg_seq;
         if seq == 0 {
-            self.fan_out_all(buf);
+            // Multicast notification. Feed both surfaces: the typed
+            // `DispatcherEvent` broadcast (resync/ENOBUFS consumers) and
+            // the raw-frame `event_listeners` (the `events()` streams).
+            self.fan_out_all(buf.clone());
+            self.fan_out_events(buf);
             return;
         }
         let pending = self.inner.pending.lock().unwrap_or_else(|p| p.into_inner());
@@ -329,6 +367,58 @@ impl Dispatcher {
             }
         }
         delivered
+    }
+
+    /// Register a raw-frame event listener (#134 streams). Returns an
+    /// RAII [`EventGuard`] whose `rx` yields every multicast (`seq == 0`)
+    /// datagram the driver receives; dropping it deregisters the
+    /// listener. Used by `events()` / `into_events()` in dispatcher mode.
+    pub(crate) fn subscribe_events(&self) -> EventGuard {
+        let id = self
+            .inner
+            .next_listener_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.inner
+            .event_listeners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id, tx);
+        EventGuard {
+            dispatcher: self.clone(),
+            id,
+            rx,
+        }
+    }
+
+    /// Remove an event listener (called from [`EventGuard`]'s `Drop`).
+    pub(crate) fn deregister_event_listener(&self, id: u64) {
+        self.inner
+            .event_listeners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
+    }
+
+    /// Forward a multicast frame to every registered event listener.
+    /// Senders whose receiver was dropped are pruned opportunistically.
+    fn fan_out_events(&self, frame: Arc<Vec<u8>>) {
+        let mut listeners = self
+            .inner
+            .event_listeners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        listeners.retain(|_, tx| tx.send(frame.clone()).is_ok());
+    }
+
+    /// Test/lab accessor: number of registered event listeners.
+    #[cfg(any(test, feature = "lab"))]
+    pub fn event_listener_count(&self) -> usize {
+        self.inner
+            .event_listeners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
     }
 
     /// Record a fatal recv error and tear down every pending request:
@@ -437,14 +527,37 @@ impl Dispatcher {
 /// recv side.
 pub(crate) struct PendingGuard {
     dispatcher: Dispatcher,
-    seq: u32,
+    /// The seq(s) routed to this guard's channel. Usually one; the batch
+    /// path registers several (see [`Dispatcher::register_many`]).
+    seqs: Vec<u32>,
     /// Each item is a full netlink datagram routed by the driver.
     pub rx: mpsc::UnboundedReceiver<Arc<Vec<u8>>>,
 }
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        self.dispatcher.deregister(self.seq);
+        for &seq in &self.seqs {
+            self.dispatcher.deregister(seq);
+        }
+    }
+}
+
+/// RAII registration handle for a raw-frame event listener (#134 streams).
+///
+/// Held by an `events()` / `into_events()` stream running in dispatcher
+/// mode. The `rx` yields every multicast (`seq == 0`) datagram the driver
+/// receives; dropping the guard deregisters the listener so the driver
+/// stops forwarding to a dead stream.
+pub(crate) struct EventGuard {
+    dispatcher: Dispatcher,
+    id: u64,
+    /// Each item is a full multicast netlink datagram.
+    pub rx: mpsc::UnboundedReceiver<Arc<Vec<u8>>>,
+}
+
+impl Drop for EventGuard {
+    fn drop(&mut self) {
+        self.dispatcher.deregister_event_listener(self.id);
     }
 }
 
@@ -725,6 +838,71 @@ mod tests {
         let d = Dispatcher::new();
         let err = d.take_fatal_error();
         assert!(err.to_string().contains("driver stopped"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn event_listener_receives_seq_zero_frames() {
+        let d = Dispatcher::new();
+        let mut guard = d.subscribe_events();
+        assert_eq!(d.event_listener_count(), 1);
+        // Multicast frame (seq == 0) is fanned to event listeners.
+        d.route_buffer(synth_frame(0));
+        let buf = guard.rx.recv().await.expect("event listener got the frame");
+        assert!(!buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn event_listener_ignores_unicast_frames() {
+        let d = Dispatcher::new();
+        let mut ev = d.subscribe_events();
+        let mut req = d.register(5);
+        // A unicast (seq != 0) frame goes to the per-seq channel, not the
+        // event listener.
+        d.route_buffer(synth_frame(5));
+        assert!(req.rx.recv().await.is_some(), "unicast routed to seq 5");
+        assert!(matches!(
+            ev.rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropping_event_guard_deregisters() {
+        let d = Dispatcher::new();
+        let g = d.subscribe_events();
+        assert_eq!(d.event_listener_count(), 1);
+        drop(g);
+        assert_eq!(d.event_listener_count(), 0);
+        // A later multicast frame is simply dropped (no panic).
+        d.route_buffer(synth_frame(0));
+    }
+
+    #[tokio::test]
+    async fn multiple_event_listeners_all_receive() {
+        let d = Dispatcher::new();
+        let mut a = d.subscribe_events();
+        let mut b = d.subscribe_events();
+        assert_eq!(d.event_listener_count(), 2);
+        d.route_buffer(synth_frame(0));
+        assert!(a.rx.recv().await.is_some());
+        assert!(b.rx.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn register_many_routes_all_seqs_to_one_channel() {
+        let d = Dispatcher::new();
+        let mut guard = d.register_many(&[10, 20, 30]);
+        assert_eq!(d.pending_count(), 3);
+        // Frames for any of the registered seqs land on the one channel.
+        d.route_buffer(synth_frame(20));
+        d.route_buffer(synth_frame(10));
+        d.route_buffer(synth_frame(30));
+        for _ in 0..3 {
+            assert!(guard.rx.recv().await.is_some());
+        }
+        // Dropping the guard deregisters every seq.
+        drop(guard);
+        assert_eq!(d.pending_count(), 0);
     }
 
     #[tokio::test]

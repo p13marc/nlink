@@ -6,6 +6,57 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Opt-in dispatcher mode is now feature-complete (#134).**
+  `Connection::with_dispatcher()` opts a connection into a per-`nlmsg_seq`
+  background recv-driver that demultiplexes all frames off one socket, so
+  **events, streaming dumps, and requests on the same connection no longer
+  serialize** — the F1 regression #134 was filed for. Everything works in
+  this mode: unicast requests (pipelined), `events()`/`into_events()`,
+  `dump_stream`/`dump_typed_stream`, and the mixed subsystems
+  (xfrm/netfilter/ethtool/`command`/`batch`). By design the **default
+  stays the lean mutex path** (no background task, no runtime-context
+  requirement for one-shot callers); `with_dispatcher()` is the
+  concurrency opt-in, and `ConnectionPool<P>` remains the route to
+  kernel-parallel dumps (the kernel serializes dumps per socket). See the
+  per-stage entries below and CLAUDE.md §Concurrency.
+- **Dispatcher mode: event streams now coexist with requests (#134
+  streams stage — the headline fix).** `events()` / `into_events()` work
+  on a dispatcher-mode `Connection`: instead of holding the request lock
+  for the stream's lifetime (which blocked all concurrent requests — the
+  exact regression #134 was filed for), they register a raw-frame
+  listener on the background driver and consume driver-routed multicast
+  (`seq == 0`) frames. A long-lived event subscriber and concurrent
+  requests on the **same** connection now both make progress. Also
+  hardened: `NetlinkSocket::next_seq()` now **skips 0** so a wrapped
+  unicast seq can never be misrouted as a multicast notification. Default
+  (mutex) mode is unchanged.
+- **Dispatcher mode: mixed-subsystem recv loops migrated (#134 stage 3).**
+  The subsystems that mix the driver-backed generic inners with their own
+  hand-rolled `recv_msg` loops — xfrm (SA/policy dumps), netfilter
+  (conntrack dump), ethtool (`*_GET` / stats / parameterized doit), the
+  generic `command` / `dump_command` GENL escape hatches, and the route
+  `batch` commit path — now route their loops through a new dual-mode
+  `RecvSession` primitive. In the default mutex mode it holds the request
+  lock and reads the socket exactly as before (zero behavior change); in
+  dispatcher mode it registers the seq(s) on the background driver and
+  consumes the routed channel, so the loop coexists with the driver
+  instead of racing its `recv_msg`. Dump cycles additionally hold the
+  dump-serialization lock (kernel `EBUSY`); the batch path registers all
+  its op seqs onto one channel via `register_many`. Bespoke **single-reader**
+  subsystems that never touch the driver (sockdiag, audit, connector,
+  fib_lookup, selinux, uevent, nftables, nl80211, devlink) keep the
+  request lock — it's the correct per-socket serialization there.
+- **Dispatcher mode: streaming dumps now supported (#134 streams stage 2).**
+  `dump_stream` / `dump_stream_with_body` and the GENL `dump_typed_stream`
+  work on a dispatcher-mode `Connection`: they register their seq before
+  sending and consume the driver-routed per-seq channel instead of
+  polling the socket, so a streaming dump coexists with concurrent
+  unicast requests and event subscribers on the same connection. Dumps
+  still serialize against each other (the dump-serialization lock is held
+  for the stream's lifetime — the kernel returns `EBUSY` on a 2nd
+  in-flight dump per socket); use `ConnectionPool` for parallel dumps.
+  This also closes the pre-existing no-lock latent race in
+  `dump_typed_stream`.
 - **Opt-in dispatcher mode — per-`nlmsg_seq` unicast demux foundation
   (#134, Plan 234 follow-on).** `Connection::with_dispatcher()` opts a
   connection into a new request path: a single background recv-driver
