@@ -134,16 +134,31 @@ pub const NL80211_BSS_SEEN_MS_AGO: u16 = 10;
 // Station Info Nested Attributes
 // =============================================================================
 
+// Values are the positions in `enum nl80211_sta_info`
+// (linux/nl80211.h); pinned by a test in connection.rs.
 pub const NL80211_STA_INFO_INACTIVE_TIME: u16 = 1;
 pub const NL80211_STA_INFO_RX_BYTES: u16 = 2;
 pub const NL80211_STA_INFO_TX_BYTES: u16 = 3;
 pub const NL80211_STA_INFO_SIGNAL: u16 = 7;
 pub const NL80211_STA_INFO_TX_BITRATE: u16 = 8;
-pub const NL80211_STA_INFO_RX_BITRATE: u16 = 12;
+pub const NL80211_STA_INFO_RX_PACKETS: u16 = 9;
+pub const NL80211_STA_INFO_TX_PACKETS: u16 = 10;
+pub const NL80211_STA_INFO_TX_RETRIES: u16 = 11;
+pub const NL80211_STA_INFO_TX_FAILED: u16 = 12;
 pub const NL80211_STA_INFO_SIGNAL_AVG: u16 = 13;
+// NB: RX_BITRATE is 14, not 12 — 12 is TX_FAILED. Pre-0.23 nlink had
+// this as 12, so rx_bitrate was parsed off the wrong attribute.
+pub const NL80211_STA_INFO_RX_BITRATE: u16 = 14;
 pub const NL80211_STA_INFO_CONNECTED_TIME: u16 = 16;
+pub const NL80211_STA_INFO_STA_FLAGS: u16 = 17;
+pub const NL80211_STA_INFO_BEACON_LOSS: u16 = 18;
 pub const NL80211_STA_INFO_RX_BYTES64: u16 = 23;
 pub const NL80211_STA_INFO_TX_BYTES64: u16 = 24;
+pub const NL80211_STA_INFO_EXPECTED_THROUGHPUT: u16 = 27;
+pub const NL80211_STA_INFO_RX_DROP_MISC: u16 = 28;
+pub const NL80211_STA_INFO_BEACON_RX: u16 = 29;
+pub const NL80211_STA_INFO_BEACON_SIGNAL_AVG: u16 = 30;
+pub const NL80211_STA_INFO_ACK_SIGNAL: u16 = 34;
 
 // =============================================================================
 // Bitrate Info Nested Attributes

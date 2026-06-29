@@ -4,8 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **nl80211 `STA_INFO_RX_BITRATE` was the wrong attribute id (#137).**
+  The station-info audit found `NL80211_STA_INFO_RX_BITRATE` defined as
+  `12`, but `12` is `TX_FAILED` — `RX_BITRATE` is `14`. So a station's
+  RX bitrate was parsed off the wrong attribute (and a present
+  `TX_FAILED` would have been misread as a bitrate nest). Corrected to
+  `14`, and a new test pins every modelled `NL80211_STA_INFO_*` constant
+  against its position in `enum nl80211_sta_info` so the class can't
+  recur.
+
 ### Added
 
+- **nl80211 station-info coverage (#137).** Following the RX_BITRATE
+  fix above, `StationInfo` now also reports the standard `iw station
+  dump` counters: `rx_packets` / `tx_packets` / `tx_retries` /
+  `tx_failed`, `beacon_loss`, `rx_drop_misc`, `expected_throughput_kbps`,
+  `beacon_signal_avg_dbm`, and `ack_signal_dbm`. The struct is now
+  `#[non_exhaustive]` + `Default` so future kernel attributes are
+  additive. Surfaced in the `nlink-wifi` station display; a parse test
+  proves TX_FAILED (12) and RX_BITRATE (14) land in distinct fields.
 - **Bridge per-VLAN entry options — `BRIDGE_VLANDB_ENTRY` (#137).**
   Builds on the VLAN-DB foundation from the gopts work to expose the
   per-(port, VLAN) options the legacy `BridgeVlanBuilder` membership

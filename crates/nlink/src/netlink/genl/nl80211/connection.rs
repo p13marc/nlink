@@ -926,14 +926,7 @@ fn parse_station(data: &[u8]) -> StationInfo {
     let mut station = StationInfo {
         mac: [0; 6],
         ifindex: 0,
-        inactive_time_ms: None,
-        rx_bytes: None,
-        tx_bytes: None,
-        signal_dbm: None,
-        signal_avg_dbm: None,
-        tx_bitrate: None,
-        rx_bitrate: None,
-        connected_time_secs: None,
+        ..Default::default()
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
@@ -986,6 +979,34 @@ fn parse_station_info_nested(data: &[u8], station: &mut StationInfo) {
             }
             NL80211_STA_INFO_RX_BITRATE => {
                 station.rx_bitrate = Some(parse_bitrate_info(payload));
+            }
+            NL80211_STA_INFO_RX_PACKETS if payload.len() >= 4 => {
+                station.rx_packets = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            NL80211_STA_INFO_TX_PACKETS if payload.len() >= 4 => {
+                station.tx_packets = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            NL80211_STA_INFO_TX_RETRIES if payload.len() >= 4 => {
+                station.tx_retries = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            NL80211_STA_INFO_TX_FAILED if payload.len() >= 4 => {
+                station.tx_failed = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            NL80211_STA_INFO_BEACON_LOSS if payload.len() >= 4 => {
+                station.beacon_loss = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            NL80211_STA_INFO_RX_DROP_MISC if payload.len() >= 8 => {
+                station.rx_drop_misc = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
+            }
+            NL80211_STA_INFO_EXPECTED_THROUGHPUT if payload.len() >= 4 => {
+                station.expected_throughput_kbps =
+                    Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            NL80211_STA_INFO_BEACON_SIGNAL_AVG if !payload.is_empty() => {
+                station.beacon_signal_avg_dbm = Some(payload[0] as i8);
+            }
+            NL80211_STA_INFO_ACK_SIGNAL if !payload.is_empty() => {
+                station.ack_signal_dbm = Some(payload[0] as i8);
             }
             NL80211_STA_INFO_CONNECTED_TIME if payload.len() >= 4 => {
                 station.connected_time_secs =
@@ -1291,6 +1312,93 @@ mod ssid_walker_tests {
     #[test]
     fn empty_ies_returns_none() {
         assert_eq!(parse_ssid_from_ies(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod station_info_tests {
+    use super::*;
+
+    /// Emit a netlink attribute (TLV, 4-byte aligned) into `buf`.
+    fn push_attr(buf: &mut Vec<u8>, atype: u16, payload: &[u8]) {
+        let len = 4 + payload.len();
+        buf.extend_from_slice(&(len as u16).to_ne_bytes());
+        buf.extend_from_slice(&atype.to_ne_bytes());
+        buf.extend_from_slice(payload);
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+    }
+
+    /// Pin every modelled `NL80211_STA_INFO_*` constant against its
+    /// position in `enum nl80211_sta_info` (linux/nl80211.h). This is
+    /// the regression guard for the pre-0.23 bug where RX_BITRATE was
+    /// 12 (actually TX_FAILED) instead of 14.
+    #[test]
+    fn sta_info_constants_match_kernel_enum() {
+        assert_eq!(NL80211_STA_INFO_INACTIVE_TIME, 1);
+        assert_eq!(NL80211_STA_INFO_RX_BYTES, 2);
+        assert_eq!(NL80211_STA_INFO_TX_BYTES, 3);
+        assert_eq!(NL80211_STA_INFO_SIGNAL, 7);
+        assert_eq!(NL80211_STA_INFO_TX_BITRATE, 8);
+        assert_eq!(NL80211_STA_INFO_RX_PACKETS, 9);
+        assert_eq!(NL80211_STA_INFO_TX_PACKETS, 10);
+        assert_eq!(NL80211_STA_INFO_TX_RETRIES, 11);
+        assert_eq!(NL80211_STA_INFO_TX_FAILED, 12);
+        assert_eq!(NL80211_STA_INFO_SIGNAL_AVG, 13);
+        assert_eq!(NL80211_STA_INFO_RX_BITRATE, 14); // NOT 12
+        assert_eq!(NL80211_STA_INFO_CONNECTED_TIME, 16);
+        assert_eq!(NL80211_STA_INFO_STA_FLAGS, 17);
+        assert_eq!(NL80211_STA_INFO_BEACON_LOSS, 18);
+        assert_eq!(NL80211_STA_INFO_RX_BYTES64, 23);
+        assert_eq!(NL80211_STA_INFO_TX_BYTES64, 24);
+        assert_eq!(NL80211_STA_INFO_EXPECTED_THROUGHPUT, 27);
+        assert_eq!(NL80211_STA_INFO_RX_DROP_MISC, 28);
+        assert_eq!(NL80211_STA_INFO_BEACON_RX, 29);
+        assert_eq!(NL80211_STA_INFO_BEACON_SIGNAL_AVG, 30);
+        assert_eq!(NL80211_STA_INFO_ACK_SIGNAL, 34);
+    }
+
+    /// TX_FAILED (12) and RX_BITRATE (14) are distinct attributes;
+    /// before the fix, attr 12 was misparsed as rx_bitrate. Build a
+    /// station nest carrying both + the new counters and confirm each
+    /// lands in the right field.
+    #[test]
+    fn parse_station_distinguishes_tx_failed_from_rx_bitrate() {
+        // Inner STA_INFO nest.
+        let mut sta = Vec::new();
+        push_attr(&mut sta, NL80211_STA_INFO_TX_FAILED, &7u32.to_ne_bytes());
+        push_attr(&mut sta, NL80211_STA_INFO_RX_PACKETS, &100u32.to_ne_bytes());
+        push_attr(&mut sta, NL80211_STA_INFO_TX_PACKETS, &200u32.to_ne_bytes());
+        push_attr(&mut sta, NL80211_STA_INFO_TX_RETRIES, &3u32.to_ne_bytes());
+        push_attr(&mut sta, NL80211_STA_INFO_BEACON_LOSS, &1u32.to_ne_bytes());
+        push_attr(&mut sta, NL80211_STA_INFO_RX_DROP_MISC, &9u64.to_ne_bytes());
+        push_attr(
+            &mut sta,
+            NL80211_STA_INFO_EXPECTED_THROUGHPUT,
+            &54000u32.to_ne_bytes(),
+        );
+        push_attr(&mut sta, NL80211_STA_INFO_ACK_SIGNAL, &[0xCE]); // -50 dBm
+        // RX_BITRATE is a nest; an empty one parses to a default
+        // BitrateInfo, which is enough to prove attr 14 → rx_bitrate.
+        push_attr(&mut sta, NL80211_STA_INFO_RX_BITRATE, &[]);
+
+        // Outer station attrs: MAC + STA_INFO.
+        let mut outer = Vec::new();
+        push_attr(&mut outer, NL80211_ATTR_MAC, &[1, 2, 3, 4, 5, 6]);
+        push_attr(&mut outer, NL80211_ATTR_STA_INFO, &sta);
+
+        let s = parse_station(&outer);
+        assert_eq!(s.mac, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(s.tx_failed, Some(7)); // attr 12 → tx_failed (not rx_bitrate)
+        assert!(s.rx_bitrate.is_some()); // attr 14 → rx_bitrate
+        assert_eq!(s.rx_packets, Some(100));
+        assert_eq!(s.tx_packets, Some(200));
+        assert_eq!(s.tx_retries, Some(3));
+        assert_eq!(s.beacon_loss, Some(1));
+        assert_eq!(s.rx_drop_misc, Some(9));
+        assert_eq!(s.expected_throughput_kbps, Some(54000));
+        assert_eq!(s.ack_signal_dbm, Some(-50));
     }
 }
 
