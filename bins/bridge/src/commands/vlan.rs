@@ -4,7 +4,10 @@ use clap::{Args, Subcommand};
 use nlink::{
     netlink::{
         Connection, Error, Result, Route,
-        bridge_vlan::{BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanTunnelBuilder},
+        bridge_vlan::{
+            BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanGlobalOptionsBuilder,
+            BridgeVlanTunnelBuilder,
+        },
     },
     output::{OutputFormat, OutputOptions},
 };
@@ -35,6 +38,12 @@ enum VlanCommand {
     Tunnel {
         #[command(subcommand)]
         command: TunnelCommand,
+    },
+    /// Manage bridge-global per-VLAN options (multicast snooping)
+    #[command(visible_alias = "gopts")]
+    Global {
+        #[command(subcommand)]
+        command: GlobalCommand,
     },
 }
 
@@ -129,6 +138,50 @@ struct TunnelDelArgs {
     range: Option<u16>,
 }
 
+#[derive(Subcommand)]
+enum GlobalCommand {
+    /// Show bridge-global per-VLAN options
+    #[command(visible_alias = "list", visible_alias = "ls")]
+    Show {
+        /// Bridge device
+        #[arg(long)]
+        dev: String,
+    },
+    /// Set bridge-global per-VLAN options
+    Set(GlobalSetArgs),
+}
+
+#[derive(Args)]
+struct GlobalSetArgs {
+    /// VLAN ID or range (e.g., 100 or 100-110)
+    #[arg(long)]
+    vid: String,
+
+    /// Bridge device
+    #[arg(long)]
+    dev: String,
+
+    /// Per-VLAN multicast snooping (on/off)
+    #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
+    mcast_snooping: Option<bool>,
+
+    /// Per-VLAN multicast querier (on/off)
+    #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
+    mcast_querier: Option<bool>,
+
+    /// IGMP query version (2 or 3)
+    #[arg(long)]
+    mcast_igmp_version: Option<u8>,
+
+    /// MLD query version (1 or 2)
+    #[arg(long)]
+    mcast_mld_version: Option<u8>,
+
+    /// MST instance id this VLAN maps to
+    #[arg(long)]
+    msti: Option<u16>,
+}
+
 impl VlanCmd {
     pub async fn run(
         self,
@@ -149,6 +202,10 @@ impl VlanCmd {
                 TunnelCommand::Show { dev } => show_tunnels(conn, &dev, format, opts).await,
                 TunnelCommand::Add(args) => add_tunnel(conn, args).await,
                 TunnelCommand::Del(args) => del_tunnel(conn, args).await,
+            },
+            Some(VlanCommand::Global { command }) => match command {
+                GlobalCommand::Show { dev } => show_global(conn, &dev, format, opts).await,
+                GlobalCommand::Set(args) => set_global(conn, args).await,
             },
         }
     }
@@ -387,6 +444,95 @@ async fn del_tunnel(conn: &Connection<Route>, args: TunnelDelArgs) -> Result<()>
     } else {
         conn.del_vlan_tunnel(&args.dev, args.vid).await
     }
+}
+
+async fn show_global(
+    conn: &Connection<Route>,
+    dev: &str,
+    format: OutputFormat,
+    opts: &OutputOptions,
+) -> Result<()> {
+    let mut opts_list = conn.get_bridge_vlan_global_options(dev).await?;
+    opts_list.sort_by_key(|o| o.vid());
+
+    match format {
+        OutputFormat::Json => {
+            let json_output: Vec<serde_json::Value> = opts_list
+                .iter()
+                .map(|o| {
+                    serde_json::json!({
+                        "vid": o.vid(),
+                        "vid_end": o.vid_end(),
+                        "mcast_snooping": o.mcast_snooping(),
+                        "mcast_querier": o.mcast_querier(),
+                        "mcast_igmp_version": o.mcast_igmp_version(),
+                        "mcast_mld_version": o.mcast_mld_version(),
+                        "msti": o.msti(),
+                    })
+                })
+                .collect();
+            println!("{}", super::to_json_string(&json_output, opts.pretty)?);
+        }
+        OutputFormat::Text => {
+            println!("{:<8} {:<12} options", "bridge", "vlan-id");
+            for (i, o) in opts_list.iter().enumerate() {
+                let vid = match o.vid_end() {
+                    Some(end) => format!("{}-{}", o.vid(), end),
+                    None => o.vid().to_string(),
+                };
+                let mut flags = Vec::new();
+                if let Some(v) = o.mcast_snooping() {
+                    flags.push(format!("mcast_snooping {}", on_off(v)));
+                }
+                if let Some(v) = o.mcast_querier() {
+                    flags.push(format!("mcast_querier {}", on_off(v)));
+                }
+                if let Some(v) = o.mcast_igmp_version() {
+                    flags.push(format!("mcast_igmp_version {v}"));
+                }
+                if let Some(v) = o.mcast_mld_version() {
+                    flags.push(format!("mcast_mld_version {v}"));
+                }
+                if let Some(v) = o.msti() {
+                    flags.push(format!("msti {v}"));
+                }
+                let bridge_col = if i == 0 { dev } else { "" };
+                println!("{:<8} {:<12} {}", bridge_col, vid, flags.join(" "));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn on_off(v: bool) -> &'static str {
+    if v { "on" } else { "off" }
+}
+
+async fn set_global(conn: &Connection<Route>, args: GlobalSetArgs) -> Result<()> {
+    let (vid_start, vid_end) = parse_vid_range(&args.vid)?;
+
+    let mut builder = BridgeVlanGlobalOptionsBuilder::new(vid_start).dev(&args.dev);
+    if let Some(end) = vid_end {
+        builder = builder.range(end);
+    }
+    if let Some(v) = args.mcast_snooping {
+        builder = builder.mcast_snooping(v);
+    }
+    if let Some(v) = args.mcast_querier {
+        builder = builder.mcast_querier(v);
+    }
+    if let Some(v) = args.mcast_igmp_version {
+        builder = builder.mcast_igmp_version(v);
+    }
+    if let Some(v) = args.mcast_mld_version {
+        builder = builder.mcast_mld_version(v);
+    }
+    if let Some(v) = args.msti {
+        builder = builder.msti(v);
+    }
+
+    conn.set_bridge_vlan_global_options(builder).await
 }
 
 #[cfg(test)]

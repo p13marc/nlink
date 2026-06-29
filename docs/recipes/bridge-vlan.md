@@ -141,6 +141,46 @@ conn.add_vlan_tunnel(BridgeVlanTunnelBuilder::new(10, 10000).dev("vxlan0")).awai
 conn.add_vlan_tunnel(BridgeVlanTunnelBuilder::new(100, 20000).dev("vxlan0").range(109)).await?;
 ```
 
+## Per-VLAN global options (multicast snooping)
+
+The per-port VLANs above (`BridgeVlanBuilder`) control which VLANs a
+*port* accepts. A separate set of **bridge-global** options control
+per-VLAN behaviour on the **bridge device itself** — chiefly per-VLAN
+multicast snooping (IGMP/MLD querier, versions, query intervals) and
+the MST instance mapping. These ride the newer VLAN-DB netlink API
+(`RTM_NEWVLAN` over `struct br_vlan_msg`), wrapped by
+[`BridgeVlanGlobalOptionsBuilder`][gopts].
+
+[gopts]: https://docs.rs/nlink/latest/nlink/netlink/bridge_vlan/struct.BridgeVlanGlobalOptionsBuilder.html
+
+```rust,ignore
+use nlink::netlink::bridge_vlan::BridgeVlanGlobalOptionsBuilder;
+
+// Enable per-VLAN multicast snooping on VLAN 10 of br0, IGMPv3.
+conn.set_bridge_vlan_global_options(
+    BridgeVlanGlobalOptionsBuilder::new(10)
+        .dev("br0")
+        .mcast_snooping(true)
+        .mcast_igmp_version(3),
+).await?;
+
+// Apply across a range, then read the options back.
+conn.set_bridge_vlan_global_options(
+    BridgeVlanGlobalOptionsBuilder::new(100).dev("br0").range(199).mcast_snooping(false),
+).await?;
+
+for o in conn.get_bridge_vlan_global_options("br0").await? {
+    println!("VLAN {}: snooping={:?}", o.vid(), o.mcast_snooping());
+}
+```
+
+Only options you set are sent, so a single call can flip one knob
+without disturbing the rest. The read-only/nested attributes
+(`MCAST_ROUTER_PORTS`, `MCAST_QUERIER_STATE`) are recognized on the
+wire but not modelled. The shell equivalent is
+`bridge vlan global set dev br0 vid 10 mcast_snooping 1` /
+`bridge vlan global show dev br0`.
+
 ## Caveats
 
 - `vlan_filtering` is a bridge-level toggle, not a port-level toggle.

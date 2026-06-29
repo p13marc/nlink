@@ -6,6 +6,30 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Bridge-global per-VLAN options — `BRIDGE_VLANDB_GOPTS` (#137
+  bridge/FDB wire-format audit).** The 0.22.0 FDB work flagged that
+  bridge *global* VLAN options were unmodelled; this lands them. Adds
+  the newer **VLAN-DB netlink message family** (`RTM_NEWVLAN` /
+  `RTM_DELVLAN` / `RTM_GETVLAN` over `struct br_vlan_msg`) — none of
+  which nlink modelled before; the existing `BridgeVlanBuilder` only
+  speaks the legacy `IFLA_AF_SPEC` + `RTM_SETLINK` per-port path.
+  `BridgeVlanGlobalOptionsBuilder` + `Connection::
+  {set,get}_bridge_vlan_global_options[_by_index]` configure and read
+  the per-VLAN options that live on the **bridge device itself** —
+  multicast snooping, IGMP/MLD querier + versions, the query
+  counts/intervals, and the MST instance mapping — for a single VID or
+  a VID range. Only options explicitly set are emitted (single-knob
+  changes don't disturb the rest). The reader (`BridgeVlanGlobalOptions`)
+  is `#[non_exhaustive]` with `Option` fields and follows the
+  parser-robustness policy (length-guarded reads, accept-larger-than-
+  expected `br_vlan_msg`, malformed dump messages skipped). Wire-format
+  tests pin every attribute code against the kernel UAPI. The two
+  nested/read-only attributes (`MCAST_ROUTER_PORTS`,
+  `MCAST_QUERIER_STATE`) are recognized but deliberately not modelled.
+  Demoed by `nlink-bridge vlan global show|set` and the `bridge_vlan`
+  example; recipe section in `docs/recipes/bridge-vlan.md`. (Per-VLAN
+  `BRIDGE_VLANDB_ENTRY` migration onto the VLAN-DB API remains tracked
+  under #137.)
 - **Property-based parser-robustness harnesses (#137, Plan 193 phase
   2-3).** Added a `proptest` **dev-dependency** and a `parser_proptest`
   test module that feeds arbitrary bytes to the protocol-stack parsers

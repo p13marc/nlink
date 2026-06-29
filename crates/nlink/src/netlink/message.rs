@@ -208,6 +208,12 @@ impl NlMsgType {
     pub const RTM_NEWNEXTHOP: u16 = 104;
     pub const RTM_DELNEXTHOP: u16 = 105;
     pub const RTM_GETNEXTHOP: u16 = 106;
+
+    // Bridge VLAN-DB messages (Linux 5.10+) — per-VLAN entries and
+    // bridge-global VLAN options over `struct br_vlan_msg`.
+    pub const RTM_NEWVLAN: u16 = 112;
+    pub const RTM_DELVLAN: u16 = 113;
+    pub const RTM_GETVLAN: u16 = 114;
 }
 
 /// Netlink message flags.
