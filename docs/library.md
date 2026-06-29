@@ -57,6 +57,18 @@ let wg: Connection<Wireguard> = namespace::connection_for_async("myns").await?;
 for ns in namespace::list()? {
     println!("Namespace: {}", ns);
 }
+
+// Create/delete a persistent netns at the `ip netns` convention path
+// (/var/run/netns/<name>):
+namespace::create("myns")?;
+namespace::delete("myns")?;
+
+// Or persist it at an application-owned path — clearer ownership, no
+// collisions with operator `ip netns add`. create_path materializes the
+// parent directory (rolled back on failure); delete_path removes only the
+// marker file, leaving the directory tree for the caller to own.
+namespace::create_path("/run/myapp/netns/tenant-a")?;
+namespace::delete_path("/run/myapp/netns/tenant-a")?;
 ```
 
 ## Event Monitoring

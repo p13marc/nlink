@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Path-based netns create/delete: `namespace::create_path` /
+  `namespace::delete_path`.** Persist a network namespace at an arbitrary
+  bind-mount path instead of the `ip netns` convention `/var/run/netns/<name>`,
+  so applications can own their netns directory (clearer ownership, no
+  collisions with operator `ip netns add`). `create`/`delete` now delegate to
+  the path-based core; behavior for the name-based API is unchanged. On a
+  failed `create_path` any parent directory it had to create is rolled back, and
+  a live bind mount is torn down before rollback, so a transient unshare/mount/
+  restore failure can't leak a half-created tree or a pinned mount. Paths are
+  passed to the kernel byte-exact (non-UTF-8 paths are honored, not mangled).
+- **Live-netns predicate: `namespace::is_namespace_path` /
+  `namespace::is_namespace`.** Infallible `bool` (mirrors `exists`)
+  distinguishing a *live* netns bind-mount from a *stale* marker file left by
+  an unclean shutdown, via a `statfs(2)` `nsfs`-magic check (`/proc/mounts` is
+  unreliable under mount-namespace propagation). Lets a path-based caller
+  detect-and-clear a stale marker before `create_path`, which refuses an
+  existing path. `is_namespace` is the named wrapper resolving against
+  `/var/run/netns/<name>`.
+
 ## [0.24.0] - 2026-07-03
 
 > Upgrading? See
