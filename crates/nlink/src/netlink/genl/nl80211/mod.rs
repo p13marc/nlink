@@ -61,6 +61,7 @@ pub const NL80211_CMD_GET_SCAN: u8 = 32;
 pub const NL80211_CMD_TRIGGER_SCAN: u8 = 33;
 pub const NL80211_CMD_NEW_SCAN_RESULTS: u8 = 34;
 pub const NL80211_CMD_SCAN_ABORTED: u8 = 35;
+pub const NL80211_CMD_GET_SURVEY: u8 = 50;
 pub const NL80211_CMD_CONNECT: u8 = 46;
 pub const NL80211_CMD_DISCONNECT: u8 = 48;
 pub const NL80211_CMD_SET_POWER_SAVE: u8 = 61;
@@ -102,6 +103,7 @@ pub const NL80211_ATTR_SCAN_FREQUENCIES: u16 = 18;
 pub const NL80211_ATTR_SCAN_SSIDS: u16 = 19;
 pub const NL80211_ATTR_STA_INFO: u16 = 21;
 pub const NL80211_ATTR_WIPHY_BANDS: u16 = 22;
+pub const NL80211_ATTR_SURVEY_INFO: u16 = 83;
 pub const NL80211_ATTR_SUPPORTED_IFTYPES: u16 = 32;
 pub const NL80211_ATTR_WIPHY_FREQ: u16 = 38;
 pub const NL80211_ATTR_WIPHY_CHANNEL_TYPE: u16 = 39;
@@ -114,6 +116,22 @@ pub const NL80211_ATTR_NETNS_FD: u16 = 69;
 pub const NL80211_ATTR_STATUS_CODE: u16 = 72;
 pub const NL80211_ATTR_PID: u16 = 82;
 pub const NL80211_ATTR_PS_STATE: u16 = 91;
+
+// =============================================================================
+// Survey Info Nested Attributes (NL80211_SURVEY_INFO_*)
+// =============================================================================
+// Values are positions in `enum nl80211_survey_info`; pinned by a test.
+pub const NL80211_SURVEY_INFO_FREQUENCY: u16 = 1;
+pub const NL80211_SURVEY_INFO_NOISE: u16 = 2;
+pub const NL80211_SURVEY_INFO_IN_USE: u16 = 3;
+pub const NL80211_SURVEY_INFO_TIME: u16 = 4;
+pub const NL80211_SURVEY_INFO_TIME_BUSY: u16 = 5;
+pub const NL80211_SURVEY_INFO_TIME_EXT_BUSY: u16 = 6;
+pub const NL80211_SURVEY_INFO_TIME_RX: u16 = 7;
+pub const NL80211_SURVEY_INFO_TIME_TX: u16 = 8;
+pub const NL80211_SURVEY_INFO_TIME_SCAN: u16 = 9;
+pub const NL80211_SURVEY_INFO_TIME_BSS_RX: u16 = 11;
+pub const NL80211_SURVEY_INFO_FREQUENCY_OFFSET: u16 = 12;
 
 // =============================================================================
 // BSS Nested Attributes

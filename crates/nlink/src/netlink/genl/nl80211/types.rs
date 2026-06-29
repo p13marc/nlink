@@ -209,6 +209,39 @@ impl WirelessInterface {
     }
 }
 
+/// Per-channel survey information (`NL80211_CMD_GET_SURVEY`).
+///
+/// One entry per surveyed frequency. The `time_*_ms` counters are
+/// monotonic channel-occupation times the kernel reports; subtract two
+/// samples to derive utilisation. `#[non_exhaustive]` — the kernel
+/// grows `NL80211_SURVEY_INFO_*` attributes over time.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct SurveyInfo {
+    /// Channel frequency in MHz.
+    pub frequency_mhz: u32,
+    /// Frequency offset in kHz (S1G / fine-grained channels).
+    pub frequency_offset_khz: Option<u32>,
+    /// Channel noise floor in dBm.
+    pub noise_dbm: Option<i8>,
+    /// Whether this is the channel the interface is currently on.
+    pub in_use: bool,
+    /// Total channel active time (ms).
+    pub time_ms: Option<u64>,
+    /// Time the channel was busy (ms).
+    pub time_busy_ms: Option<u64>,
+    /// Time the channel was busy due to extension-channel CCA (ms).
+    pub time_ext_busy_ms: Option<u64>,
+    /// Time spent receiving (ms).
+    pub time_rx_ms: Option<u64>,
+    /// Time spent transmitting (ms).
+    pub time_tx_ms: Option<u64>,
+    /// Time spent scanning (ms).
+    pub time_scan_ms: Option<u64>,
+    /// Time spent receiving from the associated BSS only (ms).
+    pub time_bss_rx_ms: Option<u64>,
+}
+
 /// BSS (Basic Service Set) from scan results.
 ///
 /// `#[non_exhaustive]` — the kernel grows `NL80211_BSS_*` attributes

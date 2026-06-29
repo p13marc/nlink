@@ -51,6 +51,12 @@ enum Command {
         interface: String,
     },
 
+    /// Show channel survey (per-frequency occupation / noise).
+    Survey {
+        /// Interface name.
+        interface: String,
+    },
+
     /// Remove (kick) an associated station from an AP-mode interface.
     DelStation {
         /// Interface name.
@@ -342,6 +348,45 @@ async fn main() -> Result<()> {
                 }
                 if let Some(ack) = sta.ack_signal_dbm {
                     println!("  ACK signal: {ack} dBm");
+                }
+            }
+        }
+
+        Command::Survey { interface } => {
+            let surveys = conn.get_survey(&interface).await?;
+            if surveys.is_empty() {
+                println!("No survey data");
+            }
+            for s in &surveys {
+                print!("Frequency: {} MHz", s.frequency_mhz);
+                if s.in_use {
+                    print!(" [in use]");
+                }
+                println!();
+                if let Some(noise) = s.noise_dbm {
+                    println!("  Noise: {noise} dBm");
+                }
+                if let Some(active) = s.time_ms {
+                    print!("  Channel active time: {active} ms");
+                    if let Some(busy) = s.time_busy_ms {
+                        // Utilisation is the headline number for channel selection.
+                        if active > 0 {
+                            let pct = (busy as f64 / active as f64) * 100.0;
+                            print!(" (busy {busy} ms, {pct:.1}% utilisation)");
+                        } else {
+                            print!(" (busy {busy} ms)");
+                        }
+                    }
+                    println!();
+                }
+                if let Some(rx) = s.time_rx_ms {
+                    println!("  RX time: {rx} ms");
+                }
+                if let Some(tx) = s.time_tx_ms {
+                    println!("  TX time: {tx} ms");
+                }
+                if let Some(scan) = s.time_scan_ms {
+                    println!("  Scan time: {scan} ms");
                 }
             }
         }

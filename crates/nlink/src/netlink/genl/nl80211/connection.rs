@@ -38,7 +38,6 @@ impl GenlFamily for Nl80211 {
 }
 
 impl Connection<Nl80211> {
-
     /// Get the nl80211 family ID.
     pub fn family_id(&self) -> u16 {
         self.state().family_id
@@ -301,6 +300,46 @@ impl Connection<Nl80211> {
         }
 
         Ok(stations)
+    }
+
+    /// Channel survey results — per-frequency occupation/noise stats
+    /// (`NL80211_CMD_GET_SURVEY`). Useful for channel selection: derive
+    /// utilisation from `time_busy_ms / time_ms`.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_survey"))]
+    pub async fn get_survey(&self, iface: &str) -> Result<Vec<SurveyInfo>> {
+        let ifindex = self.resolve_ifindex(iface).await?;
+        self.get_survey_by_index(ifindex).await
+    }
+
+    /// Channel survey results by interface index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_survey_by_index"))]
+    pub async fn get_survey_by_index(&self, ifindex: u32) -> Result<Vec<SurveyInfo>> {
+        let _guard = self.lock_request().await;
+        let family_id = self.state().family_id;
+
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
+        let genl_hdr = GenlMsgHdr::new(NL80211_CMD_GET_SURVEY, NL80211_GENL_VERSION);
+        builder.append(&genl_hdr);
+        builder.append_attr_u32(NL80211_ATTR_IFINDEX, ifindex);
+
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        let responses = self.collect_dump_responses(seq).await?;
+        let mut surveys = Vec::new();
+        for payload in &responses {
+            if payload.len() < GENL_HDRLEN {
+                continue;
+            }
+            if let Some(s) = parse_survey(&payload[GENL_HDRLEN..]) {
+                surveys.push(s);
+            }
+        }
+        Ok(surveys)
     }
 
     // =========================================================================
@@ -1029,6 +1068,61 @@ fn parse_station_info_nested(data: &[u8], station: &mut StationInfo) {
     }
 }
 
+/// Parse a single `NL80211_CMD_GET_SURVEY` dump message into a
+/// [`SurveyInfo`]. Returns `None` if the message carries no
+/// `NL80211_ATTR_SURVEY_INFO` nest (e.g. a header-only frame).
+fn parse_survey(data: &[u8]) -> Option<SurveyInfo> {
+    for (attr_type, payload) in AttrIter::new(data) {
+        if attr_type == NL80211_ATTR_SURVEY_INFO {
+            return Some(parse_survey_info_nested(payload));
+        }
+    }
+    None
+}
+
+fn parse_survey_info_nested(data: &[u8]) -> SurveyInfo {
+    let mut s = SurveyInfo::default();
+    for (attr_type, payload) in AttrIter::new(data) {
+        match attr_type {
+            NL80211_SURVEY_INFO_FREQUENCY if payload.len() >= 4 => {
+                s.frequency_mhz = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+            }
+            NL80211_SURVEY_INFO_FREQUENCY_OFFSET if payload.len() >= 4 => {
+                s.frequency_offset_khz = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            NL80211_SURVEY_INFO_NOISE if !payload.is_empty() => {
+                s.noise_dbm = Some(payload[0] as i8);
+            }
+            NL80211_SURVEY_INFO_IN_USE => {
+                s.in_use = true;
+            }
+            NL80211_SURVEY_INFO_TIME if payload.len() >= 8 => {
+                s.time_ms = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
+            }
+            NL80211_SURVEY_INFO_TIME_BUSY if payload.len() >= 8 => {
+                s.time_busy_ms = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
+            }
+            NL80211_SURVEY_INFO_TIME_EXT_BUSY if payload.len() >= 8 => {
+                s.time_ext_busy_ms = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
+            }
+            NL80211_SURVEY_INFO_TIME_RX if payload.len() >= 8 => {
+                s.time_rx_ms = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
+            }
+            NL80211_SURVEY_INFO_TIME_TX if payload.len() >= 8 => {
+                s.time_tx_ms = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
+            }
+            NL80211_SURVEY_INFO_TIME_SCAN if payload.len() >= 8 => {
+                s.time_scan_ms = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
+            }
+            NL80211_SURVEY_INFO_TIME_BSS_RX if payload.len() >= 8 => {
+                s.time_bss_rx_ms = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
+            }
+            _ => {}
+        }
+    }
+    s
+}
+
 fn parse_bitrate_info(data: &[u8]) -> BitrateInfo {
     let mut info = BitrateInfo {
         bitrate_100kbps: None,
@@ -1499,3 +1593,101 @@ mod bss_tests {
     }
 }
 
+#[cfg(test)]
+mod survey_tests {
+    use super::*;
+
+    fn push_attr(buf: &mut Vec<u8>, atype: u16, payload: &[u8]) {
+        let len = 4 + payload.len();
+        buf.extend_from_slice(&(len as u16).to_ne_bytes());
+        buf.extend_from_slice(&atype.to_ne_bytes());
+        buf.extend_from_slice(payload);
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+    }
+
+    /// Pin every modelled `NL80211_SURVEY_INFO_*` constant against its
+    /// position in `enum nl80211_survey_info` (linux/nl80211.h) — the
+    /// same id-drift guard added for STA_INFO and BSS.
+    #[test]
+    fn survey_info_constants_match_kernel_enum() {
+        assert_eq!(NL80211_SURVEY_INFO_FREQUENCY, 1);
+        assert_eq!(NL80211_SURVEY_INFO_NOISE, 2);
+        assert_eq!(NL80211_SURVEY_INFO_IN_USE, 3);
+        assert_eq!(NL80211_SURVEY_INFO_TIME, 4);
+        assert_eq!(NL80211_SURVEY_INFO_TIME_BUSY, 5);
+        assert_eq!(NL80211_SURVEY_INFO_TIME_EXT_BUSY, 6);
+        assert_eq!(NL80211_SURVEY_INFO_TIME_RX, 7);
+        assert_eq!(NL80211_SURVEY_INFO_TIME_TX, 8);
+        assert_eq!(NL80211_SURVEY_INFO_TIME_SCAN, 9);
+        assert_eq!(NL80211_SURVEY_INFO_TIME_BSS_RX, 11);
+        assert_eq!(NL80211_SURVEY_INFO_FREQUENCY_OFFSET, 12);
+    }
+
+    /// A full survey nest round-trips each attribute into the right
+    /// `SurveyInfo` field, including the `IN_USE` flag (zero-length).
+    #[test]
+    fn parse_survey_round_trips_nest() {
+        let mut nest = Vec::new();
+        push_attr(
+            &mut nest,
+            NL80211_SURVEY_INFO_FREQUENCY,
+            &5180u32.to_ne_bytes(),
+        );
+        push_attr(
+            &mut nest,
+            NL80211_SURVEY_INFO_FREQUENCY_OFFSET,
+            &200u32.to_ne_bytes(),
+        );
+        push_attr(&mut nest, NL80211_SURVEY_INFO_NOISE, &[0xBD]); // -67 dBm
+        push_attr(&mut nest, NL80211_SURVEY_INFO_IN_USE, &[]); // flag
+        push_attr(&mut nest, NL80211_SURVEY_INFO_TIME, &1000u64.to_ne_bytes());
+        push_attr(
+            &mut nest,
+            NL80211_SURVEY_INFO_TIME_BUSY,
+            &250u64.to_ne_bytes(),
+        );
+        push_attr(
+            &mut nest,
+            NL80211_SURVEY_INFO_TIME_RX,
+            &120u64.to_ne_bytes(),
+        );
+        push_attr(&mut nest, NL80211_SURVEY_INFO_TIME_TX, &80u64.to_ne_bytes());
+
+        let mut outer = Vec::new();
+        push_attr(&mut outer, NL80211_ATTR_SURVEY_INFO, &nest);
+
+        let s = parse_survey(&outer).expect("survey nest present");
+        assert_eq!(s.frequency_mhz, 5180);
+        assert_eq!(s.frequency_offset_khz, Some(200));
+        assert_eq!(s.noise_dbm, Some(-67));
+        assert!(s.in_use);
+        assert_eq!(s.time_ms, Some(1000));
+        assert_eq!(s.time_busy_ms, Some(250));
+        assert_eq!(s.time_rx_ms, Some(120));
+        assert_eq!(s.time_tx_ms, Some(80));
+        assert_eq!(s.time_ext_busy_ms, None);
+        assert_eq!(s.time_scan_ms, None);
+    }
+
+    /// A frame with no `SURVEY_INFO` nest (header-only) yields `None`,
+    /// and truncated attrs are skipped without panicking
+    /// (Parser-robustness rule 2).
+    #[test]
+    fn parse_survey_handles_missing_and_truncated() {
+        assert!(parse_survey(&[]).is_none());
+
+        // Outer attr present but inner FREQUENCY truncated to 2 bytes:
+        // the guard skips it and frequency stays 0 (default).
+        let mut nest = Vec::new();
+        push_attr(&mut nest, NL80211_SURVEY_INFO_FREQUENCY, &[1, 2]);
+        push_attr(&mut nest, NL80211_SURVEY_INFO_IN_USE, &[]);
+        let mut outer = Vec::new();
+        push_attr(&mut outer, NL80211_ATTR_SURVEY_INFO, &nest);
+
+        let s = parse_survey(&outer).expect("nest present");
+        assert_eq!(s.frequency_mhz, 0);
+        assert!(s.in_use);
+    }
+}
