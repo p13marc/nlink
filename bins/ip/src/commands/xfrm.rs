@@ -222,9 +222,72 @@ impl XfrmCmd {
     }
 
     async fn monitor() -> Result<()> {
-        // XFRM multicast event subscription isn't exposed by the
-        // library yet (no subscribe/events on Connection<Xfrm>).
-        eprintln!("ip xfrm monitor is not yet implemented (no XFRM event API)");
+        use nlink::netlink::xfrm::XfrmEvent;
+        use tokio_stream::StreamExt;
+
+        let conn = Connection::<Xfrm>::new()?;
+        conn.subscribe_all()?;
+
+        eprintln!("Monitoring XFRM events (Ctrl+C to stop)...");
+        let mut events = conn.events().await;
+        let mut stdout = std::io::stdout().lock();
+
+        while let Some(result) = events.next().await {
+            let line = match result? {
+                XfrmEvent::NewSa(sa) => format!(
+                    "added SA {} -> {} spi 0x{:x} proto {:?} mode {:?}",
+                    fmt_opt_ip(sa.src_addr),
+                    fmt_opt_ip(sa.dst_addr),
+                    sa.spi,
+                    sa.protocol,
+                    sa.mode,
+                ),
+                XfrmEvent::DelSa(id) => format!(
+                    "deleted SA dst {} spi 0x{:x} proto {:?}",
+                    fmt_opt_ip(id.dst_addr),
+                    id.spi,
+                    id.protocol,
+                ),
+                XfrmEvent::ExpireSa { sa, hard } => format!(
+                    "expired SA dst {} spi 0x{:x} ({} limit)",
+                    fmt_opt_ip(sa.dst_addr),
+                    sa.spi,
+                    if hard { "hard" } else { "soft" },
+                ),
+                XfrmEvent::NewPolicy(sp) => format!(
+                    "added policy dir {:?} index {} action {:?}",
+                    sp.direction, sp.index, sp.action,
+                ),
+                XfrmEvent::DelPolicy(id) => {
+                    format!("deleted policy dir {:?} index {}", id.direction, id.index,)
+                }
+                XfrmEvent::ExpirePolicy { policy, hard } => format!(
+                    "expired policy index {} ({} limit)",
+                    policy.index,
+                    if hard { "hard" } else { "soft" },
+                ),
+                XfrmEvent::Acquire { policy, .. } => {
+                    format!(
+                        "acquire (policy dir {:?} index {})",
+                        policy.direction, policy.index
+                    )
+                }
+                XfrmEvent::Report { protocol, .. } => format!("report proto {protocol:?}"),
+                XfrmEvent::FlushSa => "flushed all SAs".to_string(),
+                XfrmEvent::FlushPolicy => "flushed all policies".to_string(),
+                XfrmEvent::Other { msg_type } => format!("event (msg type {msg_type})"),
+                _ => "event (unrecognized)".to_string(),
+            };
+            writeln!(stdout, "{line}")?;
+        }
+
         Ok(())
     }
+}
+
+/// Render an optional IP address, falling back to `-` (the kernel may
+/// not set a family on every notification).
+fn fmt_opt_ip(addr: Option<IpAddr>) -> String {
+    addr.map(|a| a.to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
