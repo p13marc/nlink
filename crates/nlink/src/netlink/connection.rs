@@ -3257,21 +3257,32 @@ mod send_sync_tests {
         );
     }
 
-    /// Dispatcher mode rejects long-lived stream APIs with a clear
-    /// error (the background driver owns recv, so a second reader would
-    /// race). `dump_stream` returns the error eagerly.
+    /// `dump_stream` works in dispatcher mode (#134 Stage 2): it
+    /// registers its seq, the driver routes frames to its channel, and it
+    /// streams `lo` and friends to completion (`NLMSG_DONE`). Runs as a
+    /// regular user (reads only).
     #[tokio::test]
-    async fn dispatcher_mode_dump_stream_is_rejected() {
+    async fn dispatcher_mode_dump_stream_streams_links() {
+        use tokio_stream::StreamExt;
         let conn = Connection::<Route>::new()
             .expect("socket open")
             .with_dispatcher();
-        let res = conn
+        let mut stream = conn
             .dump_stream::<LinkMessage>(super::super::message::NlMsgType::RTM_GETLINK)
-            .await;
-        match res {
-            Err(e) => assert!(e.is_not_supported(), "got {e}"),
-            Ok(_) => panic!("dump_stream must be rejected in dispatcher mode"),
+            .await
+            .expect("dump_stream starts in dispatcher mode");
+        let mut count = 0usize;
+        while let Some(item) = stream.next().await {
+            item.expect("each frame parses");
+            count += 1;
         }
+        assert!(count >= 1, "host always has at least `lo`");
+        drop(stream);
+        assert_eq!(
+            conn.dispatcher().pending_count(),
+            0,
+            "completed dump_stream must deregister its seq"
+        );
     }
 
     /// The #134 headline fix: in dispatcher mode an `events()` stream and

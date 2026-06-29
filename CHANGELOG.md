@@ -13,13 +13,21 @@ All notable changes to this project will be documented in this file.
   exact regression #134 was filed for), they register a raw-frame
   listener on the background driver and consume driver-routed multicast
   (`seq == 0`) frames. A long-lived event subscriber and concurrent
-  requests on the **same** connection now both make progress. The
-  `dump_stream` / `*_with_resync` streaming path remains unsupported in
-  dispatcher mode for now (per-seq dump *streaming* through the driver is
-  the tracked #134 follow-on) and returns `Error::NotSupported`. Also
+  requests on the **same** connection now both make progress. Also
   hardened: `NetlinkSocket::next_seq()` now **skips 0** so a wrapped
   unicast seq can never be misrouted as a multicast notification. Default
   (mutex) mode is unchanged.
+- **Dispatcher mode: streaming dumps now supported (#134 streams stage 2).**
+  `dump_stream` / `dump_stream_with_body` and the GENL `dump_typed_stream`
+  work on a dispatcher-mode `Connection`: they register their seq before
+  sending and consume the driver-routed per-seq channel instead of
+  polling the socket, so a streaming dump coexists with concurrent
+  unicast requests and event subscribers on the same connection. Dumps
+  still serialize against each other (the dump-serialization lock is held
+  for the stream's lifetime — the kernel returns `EBUSY` on a 2nd
+  in-flight dump per socket); use `ConnectionPool` for parallel dumps.
+  This also closes the pre-existing no-lock latent race in
+  `dump_typed_stream`.
 - **Opt-in dispatcher mode — per-`nlmsg_seq` unicast demux foundation
   (#134, Plan 234 follow-on).** `Connection::with_dispatcher()` opts a
   connection into a new request path: a single background recv-driver

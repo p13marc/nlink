@@ -59,25 +59,7 @@ use std::{
 
 use tokio_stream::Stream;
 
-use super::{
-    connection::Connection,
-    error::{Error, Result},
-    message::MessageIter,
-    protocol::ProtocolState,
-};
-
-/// Error surfaced when a `dump_stream` is created on a dispatcher-mode
-/// connection. Per-seq dump streaming through the driver is the tracked
-/// #134 follow-on; until then, `dump_stream` callers on a dispatcher-mode
-/// connection must use the eager `get_*` dumps (which route through the
-/// driver) or a default-mode `Connection`.
-pub(crate) fn dispatcher_mode_stream_error() -> Error {
-    Error::not_supported(
-        "dump_stream is not yet supported on a dispatcher-mode connection; \
-         use the eager get_* dumps, or a default-mode Connection for streaming \
-         dumps",
-    )
-}
+use super::{connection::Connection, error::Result, message::MessageIter, protocol::ProtocolState};
 
 /// How an event stream sources its frames (#134).
 ///
