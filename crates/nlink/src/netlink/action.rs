@@ -2803,9 +2803,7 @@ impl ActionConfig for IfeAction {
                     None => builder.append_attr(attr, &[]),
                     // `use`: explicit override value, network byte order.
                     Some(v) => match entry.kind {
-                        IfeMeta::TcIndex => {
-                            builder.append_attr(attr, &(v as u16).to_be_bytes())
-                        }
+                        IfeMeta::TcIndex => builder.append_attr(attr, &(v as u16).to_be_bytes()),
                         _ => builder.append_attr(attr, &v.to_be_bytes()),
                     },
                 }
@@ -2963,7 +2961,13 @@ impl GateAction {
                 | "cycle-time-ext"
                 | "clockid"
                 | "sched-entry"
-                | "pass" | "ok" | "drop" | "shot" | "continue" | "pipe" | "reclassify"
+                | "pass"
+                | "ok"
+                | "drop"
+                | "shot"
+                | "continue"
+                | "pipe"
+                | "reclassify"
         )
     }
 
@@ -4059,25 +4063,165 @@ impl PeditAction {
         self
     }
 
-    /// Reject all `pedit` token slices — the `tc(8)` pedit DSL
-    /// (`munge ip src set 1.2.3.4`, etc.) is genuinely complex
-    /// and per Plan 139 §10 is "punt-eligible until a downstream
-    /// user asks". Use the typed builder
-    /// ([`PeditAction::set_ipv4_src`], etc.) directly for now.
+    /// Parse the `tc(8)` pedit `munge` DSL.
     ///
-    /// This stub keeps `PeditAction` discoverable in the
-    /// `ParseParams` trait impl list while making the
-    /// not-yet-typed-modelled status explicit. The `bins/tc`
-    /// dispatch will surface this error to users who run
-    /// `tc action add pedit ...`; they fall back to the typed
-    /// builder via library code.
-    pub fn parse_params(_params: &[&str]) -> Result<Self> {
-        Err(Error::InvalidMessage(
-            "pedit: not yet typed-modelled — use the typed builder \
-             (PeditAction::set_ipv4_src / set_tcp_dport / etc.) \
-             instead of the tc(8) DSL. Future work per Plan 139 §10."
-                .to_string(),
-        ))
+    /// Grammar (strict; any unknown token or unmodelled op is an
+    /// error, never a silent skip — see `CLAUDE.md ## parse_params
+    /// contract`):
+    ///
+    /// ```text
+    /// [ex] munge <LAYERED|RAW> [munge ...] [<CONTROL>]
+    ///   LAYERED := (ip (src|dst) set <ipv4>)
+    ///            | (ip (ttl|tos|dsfield) set <u8>)
+    ///            | ((tcp|udp) (sport|dport) set <u16>)
+    ///            | (eth (src|dst) set <mac>)
+    ///   RAW     := offset <off> [u8|u16|u32] (set|add) <u32> [retain <mask>]
+    ///   CONTROL := pass|ok|drop|shot|pipe|reclassify|stolen|continue
+    /// ```
+    ///
+    /// Values accept decimal or `0x`-prefixed hex. Forms the typed
+    /// builder doesn't model (e.g. `ip6`, the `clear`/`invert`/`or`/
+    /// `and`/`xor` ops) return a "not modelled" error pointing at
+    /// [`PeditAction::set_raw`] / [`add_raw`](PeditAction::add_raw)
+    /// rather than being skipped.
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let mut a = Self::new();
+        let mut any = false;
+        let mut i = 0;
+        while i < params.len() {
+            match params[i] {
+                // Extended-mode flag — nlink always emits KEYS_EX, so
+                // accept and ignore it.
+                "ex" => {
+                    i += 1;
+                }
+                "munge" => {
+                    let (next, consumed) = a.parse_one_munge(&params[i + 1..])?;
+                    a = next;
+                    i += 1 + consumed;
+                    any = true;
+                }
+                // A bare verdict keyword terminates the spec as the
+                // control action.
+                "pass" | "ok" | "drop" | "shot" | "pipe" | "reclassify" | "stolen" | "continue" => {
+                    a.action = parse_gact_verdict(params[i])?;
+                    i += 1;
+                }
+                other => {
+                    return Err(Error::InvalidMessage(format!(
+                        "pedit: unexpected token `{other}` (expected `munge` or a control \
+                         verdict like pipe/pass/drop)"
+                    )));
+                }
+            }
+        }
+        if !any {
+            return Err(Error::InvalidMessage(
+                "pedit: requires at least one `munge <field> set <value>` spec".to_string(),
+            ));
+        }
+        Ok(a)
+    }
+
+    /// Parse a single `munge` spec from the front of `rest` (the
+    /// tokens *after* the `munge` keyword). Returns the updated action
+    /// and the number of tokens consumed.
+    fn parse_one_munge(self, rest: &[&str]) -> Result<(Self, usize)> {
+        let layer = rest.first().copied().ok_or_else(|| {
+            Error::InvalidMessage("pedit: `munge` requires a field spec".to_string())
+        })?;
+
+        // Raw form: `offset <off> [u8|u16|u32] (set|add) <u32> [retain <mask>]`
+        if layer == "offset" {
+            return self.parse_raw_munge(rest);
+        }
+
+        // Layered form: `<layer> <field> set <value>` — 4 tokens.
+        let field = rest.get(1).copied().ok_or_else(|| {
+            Error::InvalidMessage(format!("pedit: `munge {layer}` requires a field name"))
+        })?;
+        let op = rest.get(2).copied().ok_or_else(|| {
+            Error::InvalidMessage(format!("pedit: `munge {layer} {field}` requires an op"))
+        })?;
+        let value = rest.get(3).copied().ok_or_else(|| {
+            Error::InvalidMessage(format!(
+                "pedit: `munge {layer} {field} {op}` requires a value"
+            ))
+        })?;
+        if op != "set" {
+            return Err(Error::InvalidMessage(format!(
+                "pedit: op `{op}` on `{layer} {field}` is not modelled by the typed builder — \
+                 use `munge offset <off> {op} <val>` or PeditAction::set_raw / add_raw"
+            )));
+        }
+
+        let a = match (layer, field) {
+            ("ip", "src") => self.set_ipv4_src(pedit_ipv4(layer, field, value)?),
+            ("ip", "dst") => self.set_ipv4_dst(pedit_ipv4(layer, field, value)?),
+            ("ip", "ttl") => self.set_ipv4_ttl(pedit_u8(layer, field, value)?),
+            ("ip", "tos" | "dsfield") => self.set_ipv4_tos(pedit_u8(layer, field, value)?),
+            ("tcp", "sport") => self.set_tcp_sport(pedit_u16(layer, field, value)?),
+            ("tcp", "dport") => self.set_tcp_dport(pedit_u16(layer, field, value)?),
+            ("udp", "sport") => self.set_udp_sport(pedit_u16(layer, field, value)?),
+            ("udp", "dport") => self.set_udp_dport(pedit_u16(layer, field, value)?),
+            ("eth", "src") => self.set_eth_src(pedit_mac(layer, field, value)?),
+            ("eth", "dst") => self.set_eth_dst(pedit_mac(layer, field, value)?),
+            _ => {
+                return Err(Error::InvalidMessage(format!(
+                    "pedit: `{layer} {field}` is not modelled by the typed builder \
+                     (modelled: ip src|dst|ttl|tos, tcp/udp sport|dport, eth src|dst) — \
+                     use `munge offset <off> set <val> [retain <mask>]` for raw edits"
+                )));
+            }
+        };
+        Ok((a, 4))
+    }
+
+    /// Parse `offset <off> [u8|u16|u32] (set|add) <u32> [retain <mask>]`.
+    fn parse_raw_munge(self, rest: &[&str]) -> Result<(Self, usize)> {
+        // rest[0] == "offset"
+        let off = rest.get(1).copied().ok_or_else(|| {
+            Error::InvalidMessage("pedit: `munge offset` requires an offset".to_string())
+        })?;
+        let off = pedit_u32("offset", "offset", off)?;
+
+        let mut idx = 2;
+        // Optional size keyword.
+        if matches!(rest.get(idx).copied(), Some("u8" | "u16" | "u32")) {
+            idx += 1;
+        }
+
+        let op = rest.get(idx).copied().ok_or_else(|| {
+            Error::InvalidMessage("pedit: `munge offset` requires `set` or `add`".to_string())
+        })?;
+        let value = rest.get(idx + 1).copied().ok_or_else(|| {
+            Error::InvalidMessage(format!("pedit: `munge offset {off} {op}` requires a value"))
+        })?;
+        let val = pedit_u32("offset", "value", value)?;
+        idx += 2;
+
+        // Optional `retain <mask>` — defaults to 0 (write the whole word).
+        let mask = if matches!(rest.get(idx).copied(), Some("retain")) {
+            let m = rest.get(idx + 1).copied().ok_or_else(|| {
+                Error::InvalidMessage("pedit: `retain` requires a mask value".to_string())
+            })?;
+            idx += 2;
+            pedit_u32("offset", "retain", m)?
+        } else {
+            0
+        };
+
+        let htype = pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_NETWORK;
+        let a = match op {
+            "set" => self.set_raw(htype, off, val, mask),
+            "add" => self.add_raw(htype, off, val, mask),
+            other => {
+                return Err(Error::InvalidMessage(format!(
+                    "pedit: op `{other}` on `offset` is not modelled (expected set or add)"
+                )));
+            }
+        };
+        Ok((a, idx))
     }
 
     /// Build the action configuration.
@@ -4824,6 +4968,53 @@ fn parse_ipv4_range_or_single(s: &str) -> Result<(Ipv4Addr, Ipv4Addr)> {
             .map_err(|_| Error::InvalidMessage(format!("ct: invalid address `{s}`")))?;
         Ok((addr, addr))
     }
+}
+
+/// Parse a pedit integer value — decimal or `0x`-prefixed hex.
+fn pedit_u32(layer: &str, field: &str, s: &str) -> Result<u32> {
+    let parsed = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => s.parse::<u32>(),
+    };
+    parsed.map_err(|_| {
+        Error::InvalidMessage(format!(
+            "pedit: invalid {layer} {field} value `{s}` (expected integer or 0x-hex)"
+        ))
+    })
+}
+
+/// Parse a pedit value that must fit in a `u8`.
+fn pedit_u8(layer: &str, field: &str, s: &str) -> Result<u8> {
+    let v = pedit_u32(layer, field, s)?;
+    u8::try_from(v).map_err(|_| {
+        Error::InvalidMessage(format!(
+            "pedit: {layer} {field} value `{s}` out of range for u8 (0..=255)"
+        ))
+    })
+}
+
+/// Parse a pedit value that must fit in a `u16`.
+fn pedit_u16(layer: &str, field: &str, s: &str) -> Result<u16> {
+    let v = pedit_u32(layer, field, s)?;
+    u16::try_from(v).map_err(|_| {
+        Error::InvalidMessage(format!(
+            "pedit: {layer} {field} value `{s}` out of range for u16 (0..=65535)"
+        ))
+    })
+}
+
+/// Parse a pedit IPv4 address value.
+fn pedit_ipv4(layer: &str, field: &str, s: &str) -> Result<Ipv4Addr> {
+    s.parse::<Ipv4Addr>().map_err(|_| {
+        Error::InvalidMessage(format!("pedit: invalid {layer} {field} IPv4 address `{s}`"))
+    })
+}
+
+/// Parse a pedit MAC address value (`aa:bb:cc:dd:ee:ff`).
+fn pedit_mac(layer: &str, field: &str, s: &str) -> Result<[u8; 6]> {
+    crate::util::addr::parse_mac(s).map_err(|_| {
+        Error::InvalidMessage(format!("pedit: invalid {layer} {field} MAC address `{s}`"))
+    })
 }
 
 /// Resolve a `gact` verdict keyword (`pass`/`drop`/etc.) to its
@@ -5714,7 +5905,15 @@ mod tests {
     #[test]
     fn ife_parse_params_encode_allow_and_use() {
         let a = IfeAction::parse_params(&[
-            "encode", "allow", "mark", "use", "prio", "7", "dst", "02:00:00:00:00:01", "type",
+            "encode",
+            "allow",
+            "mark",
+            "use",
+            "prio",
+            "7",
+            "dst",
+            "02:00:00:00:00:01",
+            "type",
             "0xed3e",
         ])
         .unwrap();
@@ -5739,7 +5938,10 @@ mod tests {
     #[test]
     fn ife_parse_params_mode_required_first() {
         let err = IfeAction::parse_params(&["allow", "mark"]).unwrap_err();
-        assert!(err.to_string().contains("first token must be `encode` or `decode`"));
+        assert!(
+            err.to_string()
+                .contains("first token must be `encode` or `decode`")
+        );
     }
 
     #[test]
@@ -6225,26 +6427,129 @@ mod tests {
         assert!(err.to_string().contains("must be `src` or `dst`"));
     }
 
-    // ---- PeditAction (stub) ----
+    // ---- PeditAction (munge DSL parser) ----
 
     #[test]
-    fn pedit_parse_params_always_rejects_with_clear_message() {
-        let err = PeditAction::parse_params(&["munge", "ip", "src", "set", "1.2.3.4"]).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("pedit:"), "kind-prefixed: {msg}");
-        assert!(
-            msg.contains("not yet typed-modelled"),
-            "stub message: {msg}"
-        );
-        assert!(msg.contains("Plan 139"), "points at the plan: {msg}");
+    fn pedit_parse_ip_src_matches_builder() {
+        let parsed = PeditAction::parse_params(&["munge", "ip", "src", "set", "10.0.0.1"]).unwrap();
+        let built = PeditAction::new().set_ipv4_src("10.0.0.1".parse().unwrap());
+        assert_eq!(write_options_bytes(&parsed), write_options_bytes(&built));
     }
 
     #[test]
-    fn pedit_parse_params_empty_input_also_rejects() {
-        // The stub doesn't pretend to support a no-op parse — even
-        // empty input is rejected so users get the consistent
-        // "use the typed builder" message.
+    fn pedit_parse_multi_munge_and_control_action() {
+        // ip dst + tcp dport + trailing `pipe` control verdict.
+        let parsed = PeditAction::parse_params(&[
+            "munge",
+            "ip",
+            "dst",
+            "set",
+            "192.168.1.2",
+            "munge",
+            "tcp",
+            "dport",
+            "set",
+            "8080",
+            "pipe",
+        ])
+        .unwrap();
+        let built = PeditAction::new()
+            .set_ipv4_dst("192.168.1.2".parse().unwrap())
+            .set_tcp_dport(8080)
+            .action(action::TC_ACT_PIPE);
+        assert_eq!(write_options_bytes(&parsed), write_options_bytes(&built));
+    }
+
+    #[test]
+    fn pedit_parse_eth_and_ttl_and_drop() {
+        let parsed = PeditAction::parse_params(&[
+            "munge",
+            "eth",
+            "dst",
+            "set",
+            "aa:bb:cc:dd:ee:ff",
+            "munge",
+            "ip",
+            "ttl",
+            "set",
+            "64",
+            "drop",
+        ])
+        .unwrap();
+        let built = PeditAction::new()
+            .set_eth_dst([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+            .set_ipv4_ttl(64)
+            .action(action::TC_ACT_SHOT);
+        assert_eq!(write_options_bytes(&parsed), write_options_bytes(&built));
+    }
+
+    #[test]
+    fn pedit_parse_raw_offset_with_size_and_retain() {
+        // `munge offset 12 u32 set 0x0a000001 retain 0xffffffff`
+        let parsed = PeditAction::parse_params(&[
+            "munge",
+            "offset",
+            "12",
+            "u32",
+            "set",
+            "0x0a000001",
+            "retain",
+            "0xffffffff",
+        ])
+        .unwrap();
+        let built = PeditAction::new().set_raw(
+            pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_NETWORK,
+            12,
+            0x0a00_0001,
+            0xffff_ffff,
+        );
+        assert_eq!(write_options_bytes(&parsed), write_options_bytes(&built));
+    }
+
+    #[test]
+    fn pedit_parse_raw_offset_add_defaults_mask_zero() {
+        let parsed = PeditAction::parse_params(&["munge", "offset", "8", "add", "1"]).unwrap();
+        let built = PeditAction::new().add_raw(pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_NETWORK, 8, 1, 0);
+        assert_eq!(write_options_bytes(&parsed), write_options_bytes(&built));
+    }
+
+    #[test]
+    fn pedit_parse_rejects_empty() {
         let err = PeditAction::parse_params(&[]).unwrap_err();
-        assert!(err.to_string().contains("not yet typed-modelled"));
+        assert!(err.to_string().contains("pedit:"), "{err}");
+        assert!(err.to_string().contains("at least one"), "{err}");
+    }
+
+    #[test]
+    fn pedit_parse_rejects_unmodelled_layer_field() {
+        // ip6 has no typed builder — must error, not silently skip.
+        let err = PeditAction::parse_params(&["munge", "ip6", "src", "set", "::1"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not modelled"), "{msg}");
+        assert!(
+            msg.contains("offset"),
+            "points at the raw escape hatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn pedit_parse_rejects_unmodelled_layered_op() {
+        let err = PeditAction::parse_params(&["munge", "ip", "ttl", "add", "1"]).unwrap_err();
+        assert!(err.to_string().contains("not modelled"), "{err}");
+    }
+
+    #[test]
+    fn pedit_parse_rejects_garbage_value() {
+        let err =
+            PeditAction::parse_params(&["munge", "tcp", "dport", "set", "notaport"]).unwrap_err();
+        assert!(err.to_string().contains("pedit:"), "{err}");
+        let err2 = PeditAction::parse_params(&["munge", "ip", "ttl", "set", "999"]).unwrap_err();
+        assert!(err2.to_string().contains("out of range"), "{err2}");
+    }
+
+    #[test]
+    fn pedit_parse_rejects_unknown_leading_token() {
+        let err = PeditAction::parse_params(&["frobnicate"]).unwrap_err();
+        assert!(err.to_string().contains("unexpected token"), "{err}");
     }
 }

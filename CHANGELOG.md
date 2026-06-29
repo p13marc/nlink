@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **TC `pedit` action `munge` DSL parser (#137).** `PeditAction::parse_params`
+  was a stub that rejected all input; it now parses the `tc(8)` pedit
+  syntax — `[ex] munge <spec> [munge ...] [<control>]` — covering the
+  layered forms (`ip src|dst|ttl|tos`, `tcp|udp sport|dport`,
+  `eth src|dst`), the raw form
+  (`offset <off> [u8|u16|u32] set|add <val> [retain <mask>]`), and a
+  trailing control verdict (`pipe`/`drop`/…). Values accept decimal or
+  `0x`-hex. Per the strict parse_params contract, unmodelled forms
+  (`ip6`, the `clear`/`or`/`and`/… ops) return a clear "not modelled"
+  error pointing at `PeditAction::set_raw`/`add_raw` rather than being
+  silently skipped. `nlink-tc action add pedit munge ...` now works
+  (previously errored). The serialization, builder, and the
+  `ParseParams` trait wiring were already in place.
+
 - **`Connection::<Ovpn>::attach_socket` / `attach_socket_in_netns` —
   cross-netns transport-socket attach (#136).** The previously-stubbed
   `attach_socket(ifindex, peer_id, fd)` now issues a `peer-set` carrying
