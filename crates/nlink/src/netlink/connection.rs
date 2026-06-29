@@ -86,9 +86,20 @@ use crate::util::AddressFamily;
 /// request lock). The proper fix is a per-seq response router
 /// (NlRouter-style dispatch task) — queued for 0.20.
 pub struct Connection<P: ProtocolState> {
-    socket: NetlinkSocket,
+    /// `Arc` so the #134 dispatcher driver task can hold the recv side
+    /// while `Connection` methods keep using the send side. The
+    /// `socket()` accessor still returns `&NetlinkSocket` via deref.
+    socket: std::sync::Arc<NetlinkSocket>,
     state: P,
     timeout: Option<Duration>,
+    /// #134 — when `true`, request inners route through the per-seq
+    /// dispatcher registry + a background recv-driver task instead of
+    /// the F1 `request_lock`, so concurrent requests on a shared
+    /// `Arc<Connection>` pipeline instead of serializing. Opt-in via
+    /// [`Connection::with_dispatcher`]; default `false` (unchanged
+    /// mutex path). The streaming APIs are not yet supported in this
+    /// mode (the driver owns recv) — they return a clear error.
+    dispatcher_mode: bool,
     /// Serialize concurrent request/response cycles on a shared
     /// `Arc<Connection<P>>`. Held by every higher-level method
     /// that does `socket.send(...) + recv-loop-until-DONE`.
@@ -115,6 +126,19 @@ pub struct Connection<P: ProtocolState> {
     /// consults the connection's dispatcher when it sees ENOBUFS
     /// so the marker reaches the right place (Plan 234 §4).
     dispatcher: Dispatcher,
+}
+
+impl<P: ProtocolState> Drop for Connection<P> {
+    fn drop(&mut self) {
+        // #134 — if a dispatcher driver task was spawned, signal it to
+        // exit so it stops polling recv and drops its
+        // `Arc<NetlinkSocket>` (the last Arc then closes the fd). A
+        // no-op for default-mode connections (no driver) and for
+        // dispatcher-mode connections that never issued a request.
+        if self.dispatcher.driver_started() {
+            self.dispatcher.shutdown();
+        }
+    }
 }
 
 /// Default operation timeout for `Connection<P>` (Plan 171).
@@ -171,8 +195,10 @@ where
         // ENOBUFS path fans out ResyncMarker::ResyncStart to active
         // multicast subscribers.
         socket.install_dispatcher(dispatcher.clone());
+        let socket = std::sync::Arc::new(socket);
         Ok(Self {
             socket,
+            dispatcher_mode: false,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -203,8 +229,10 @@ where
         let socket = NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?;
         let dispatcher = Dispatcher::new();
         socket.install_dispatcher(dispatcher.clone());
+        let socket = std::sync::Arc::new(socket);
         Ok(Self {
             socket,
+            dispatcher_mode: false,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -233,8 +261,10 @@ where
         let socket = NetlinkSocket::new_in_namespace_path(P::PROTOCOL, ns_path)?;
         let dispatcher = Dispatcher::new();
         socket.install_dispatcher(dispatcher.clone());
+        let socket = std::sync::Arc::new(socket);
         Ok(Self {
             socket,
+            dispatcher_mode: false,
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -258,8 +288,7 @@ where
 
 impl<P> Connection<P>
 where
-    P: super::protocol::AsyncProtocolInit
-        + super::protocol::construction::AsyncConstructible,
+    P: super::protocol::AsyncProtocolInit + super::protocol::construction::AsyncConstructible,
 {
     /// Create a connection for a GENL family whose ID must be
     /// resolved at construction time.
@@ -298,6 +327,62 @@ impl<P: ProtocolState> Connection<P> {
     /// Get the underlying socket.
     pub fn socket(&self) -> &NetlinkSocket {
         &self.socket
+    }
+
+    /// Opt this connection into **dispatcher mode** (#134).
+    ///
+    /// In dispatcher mode, request/ack/dump operations route through a
+    /// per-`nlmsg_seq` registry served by a single background
+    /// recv-driver task instead of the F1 `request_lock`. Single-message
+    /// unicast requests on a shared `Arc<Connection>` then **pipeline**
+    /// (each awaits its own response channel) rather than serializing
+    /// through the mutex, and a long-lived `recv` no longer blocks
+    /// unrelated requests.
+    ///
+    /// ```ignore
+    /// let conn = std::sync::Arc::new(Connection::<Route>::new()?.with_dispatcher());
+    /// // Single-message lookups pipeline (not serialized):
+    /// let (a, b) = tokio::join!(
+    ///     conn.get_link_by_index(1),
+    ///     conn.get_link_by_index(2),
+    /// );
+    /// ```
+    ///
+    /// # Dumps still serialize (kernel constraint)
+    ///
+    /// The kernel serializes **dumps** per socket — `netlink_dump_start`
+    /// returns `EBUSY` if a dump is already in flight on the same fd. So
+    /// the eager `get_*`-style dumps (which use `send_dump`, e.g.
+    /// `get_links`/`get_routes`) still complete in sequence in dispatcher
+    /// mode; the dispatcher can't change a kernel rule. For genuinely
+    /// parallel dumps, use [`ConnectionPool<P>`](crate::netlink::pool::ConnectionPool)
+    /// — one socket per task.
+    ///
+    /// # Limitations (this is the opt-in foundation)
+    ///
+    /// The streaming APIs ([`events`](Self::events),
+    /// [`into_events`](Self::into_events),
+    /// [`dump_stream`](Self::dump_stream) and the `*_with_resync`
+    /// wrappers) are **not yet supported** on a dispatcher-mode
+    /// connection — the driver owns the recv side, so a second reader
+    /// would race it. They return a clear error here. Use a separate
+    /// default-mode `Connection` (or the not-yet-shipped streaming
+    /// migration) for events while this connection serves requests.
+    #[must_use]
+    pub fn with_dispatcher(mut self) -> Self {
+        self.dispatcher_mode = true;
+        self
+    }
+
+    /// Whether this connection is in dispatcher mode (#134).
+    pub fn is_dispatcher_mode(&self) -> bool {
+        self.dispatcher_mode
+    }
+
+    /// Ensure the background recv-driver is running. Idempotent; only
+    /// meaningful in dispatcher mode. Called by the request inners.
+    fn ensure_driver(&self) {
+        self.dispatcher.ensure_driver(self.socket.clone());
     }
 
     /// Get the protocol state.
@@ -453,12 +538,14 @@ impl<P: ProtocolState> Connection<P> {
     pub(crate) fn from_parts(socket: NetlinkSocket, state: P) -> Self {
         let dispatcher = Dispatcher::new();
         socket.install_dispatcher(dispatcher.clone());
+        let socket = std::sync::Arc::new(socket);
         Self {
             socket,
             state,
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             dispatcher,
+            dispatcher_mode: false,
         }
     }
 
@@ -491,7 +578,16 @@ impl<P: ProtocolState> Connection<P> {
     }
 
     #[instrument(level = "trace", skip_all, fields(seq))]
-    async fn send_request_inner(&self, mut builder: MessageBuilder) -> Result<Vec<u8>> {
+    async fn send_request_inner(&self, builder: MessageBuilder) -> Result<Vec<u8>> {
+        // #134 — dispatcher mode pipelines through the per-seq registry
+        // instead of the F1 mutex.
+        if self.dispatcher_mode {
+            return self.send_request_dispatch(builder).await;
+        }
+        self.send_request_mutex(builder).await
+    }
+
+    async fn send_request_mutex(&self, mut builder: MessageBuilder) -> Result<Vec<u8>> {
         // F1 fix — serialize the send + recv-loop pair so concurrent
         // tasks on a shared `Arc<Connection>` don't race on the recv
         // side. See struct-level "Concurrency" docstring.
@@ -527,9 +623,7 @@ impl<P: ProtocolState> Connection<P> {
                 // long-lived subscribers + requests on the same
                 // socket survive a single malformed frame.
                 let Ok((header, payload)) = result else {
-                    tracing::trace!(
-                        "send_request: skipping malformed frame in shared recv loop"
-                    );
+                    tracing::trace!("send_request: skipping malformed frame in shared recv loop");
                     continue;
                 };
                 if header.nlmsg_seq != seq {
@@ -553,7 +647,14 @@ impl<P: ProtocolState> Connection<P> {
     }
 
     #[instrument(level = "trace", skip_all, fields(seq))]
-    async fn send_ack_inner(&self, mut builder: MessageBuilder) -> Result<()> {
+    async fn send_ack_inner(&self, builder: MessageBuilder) -> Result<()> {
+        if self.dispatcher_mode {
+            return self.send_ack_dispatch(builder).await;
+        }
+        self.send_ack_mutex(builder).await
+    }
+
+    async fn send_ack_mutex(&self, mut builder: MessageBuilder) -> Result<()> {
         // F1 fix — see send_request_inner.
         let _guard = self.request_lock.lock().await;
 
@@ -573,9 +674,7 @@ impl<P: ProtocolState> Connection<P> {
             for result in MessageIter::new(&response) {
                 // 0.19 N2 — see send_request_inner.
                 let Ok((header, payload)) = result else {
-                    tracing::trace!(
-                        "send_ack: skipping malformed frame in shared recv loop"
-                    );
+                    tracing::trace!("send_ack: skipping malformed frame in shared recv loop");
                     continue;
                 };
                 if header.nlmsg_seq != seq {
@@ -606,7 +705,14 @@ impl<P: ProtocolState> Connection<P> {
     }
 
     #[instrument(level = "trace", skip_all, fields(seq, responses))]
-    async fn send_dump_inner(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
+    async fn send_dump_inner(&self, builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
+        if self.dispatcher_mode {
+            return self.send_dump_dispatch(builder).await;
+        }
+        self.send_dump_mutex(builder).await
+    }
+
+    async fn send_dump_mutex(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
         // F1 fix — see send_request_inner.
         let _guard = self.request_lock.lock().await;
 
@@ -654,9 +760,7 @@ impl<P: ProtocolState> Connection<P> {
                 for result in MessageIter::new(data) {
                     // 0.19 N2 — see send_request_inner.
                     let Ok((header, payload)) = result else {
-                        tracing::trace!(
-                            "send_dump: skipping malformed frame in shared recv loop"
-                        );
+                        tracing::trace!("send_dump: skipping malformed frame in shared recv loop");
                         break;
                     };
 
@@ -705,6 +809,156 @@ impl<P: ProtocolState> Connection<P> {
         Ok(responses)
     }
 
+    // ========================================================================
+    // #134 — dispatcher-mode request paths (per-seq registry + driver)
+    // ========================================================================
+
+    /// Register a pending seq, send, then consume the driver-routed
+    /// datagrams until the response with the matching seq arrives. No
+    /// `request_lock` — concurrent calls pipeline.
+    #[instrument(level = "trace", skip_all, fields(seq))]
+    async fn send_request_dispatch(&self, mut builder: MessageBuilder) -> Result<Vec<u8>> {
+        self.ensure_driver();
+        let seq = self.socket.next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket.pid());
+        tracing::Span::current().record("seq", seq);
+
+        // Register BEFORE send so the driver never sees a response for
+        // an unregistered seq.
+        let mut guard = self.dispatcher.register(seq);
+        let msg = builder.finish();
+        self.socket.send(&msg).await?;
+
+        loop {
+            let Some(buf) = guard.rx.recv().await else {
+                return Err(self.dispatcher.take_fatal_error());
+            };
+            let mut found_seq = false;
+            for result in MessageIter::new(&buf) {
+                let Ok((header, payload)) = result else {
+                    continue;
+                };
+                if header.nlmsg_seq != seq {
+                    continue;
+                }
+                found_seq = true;
+                if header.is_error() {
+                    let err = NlMsgError::from_bytes(payload)?;
+                    if !err.is_ack() {
+                        warn!(errno = err.error, "kernel returned error for request");
+                        return Err(err.into_error(payload));
+                    }
+                }
+            }
+            if found_seq {
+                return Ok((*buf).clone());
+            }
+        }
+    }
+
+    #[instrument(level = "trace", skip_all, fields(seq))]
+    async fn send_ack_dispatch(&self, mut builder: MessageBuilder) -> Result<()> {
+        self.ensure_driver();
+        let seq = self.socket.next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket.pid());
+        tracing::Span::current().record("seq", seq);
+
+        let mut guard = self.dispatcher.register(seq);
+        let msg = builder.finish();
+        self.socket.send(&msg).await?;
+
+        loop {
+            let Some(buf) = guard.rx.recv().await else {
+                return Err(self.dispatcher.take_fatal_error());
+            };
+            for result in MessageIter::new(&buf) {
+                let Ok((header, payload)) = result else {
+                    continue;
+                };
+                if header.nlmsg_seq != seq {
+                    continue;
+                }
+                if header.is_error() {
+                    let err = NlMsgError::from_bytes(payload)?;
+                    if !err.is_ack() {
+                        warn!(errno = err.error, "kernel returned error for ack");
+                        return Err(err.into_error(payload));
+                    }
+                    return Ok(());
+                }
+                return Err(Error::InvalidMessage(format!(
+                    "send_ack: expected ACK or error for seq {}, got nlmsg_type {} \
+                     (kernel returned data on an ack-only request)",
+                    seq, header.nlmsg_type
+                )));
+            }
+        }
+    }
+
+    #[instrument(level = "trace", skip_all, fields(seq, responses))]
+    async fn send_dump_dispatch(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
+        self.ensure_driver();
+
+        // The kernel serializes dumps **per socket**: `netlink_dump_start`
+        // returns `EBUSY` if a dump is already in flight on this fd. The
+        // per-seq driver demuxes responses but can't change that kernel
+        // constraint, so dumps in dispatcher mode still serialize through
+        // `request_lock` (held only for this dump's send→DONE lifetime).
+        // Unicast `send_request`/`send_ack` don't take it — they pipeline
+        // freely, which is the headline #134 win. For genuinely parallel
+        // dumps, use `ConnectionPool<P>` (one socket per task).
+        let _dump_guard = self.request_lock.lock().await;
+
+        let seq = self.socket.next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket.pid());
+        tracing::Span::current().record("seq", seq);
+
+        let mut guard = self.dispatcher.register(seq);
+        let msg = builder.finish();
+        self.socket.send(&msg).await?;
+
+        let mut responses = Vec::new();
+        'outer: loop {
+            let Some(buf) = guard.rx.recv().await else {
+                return Err(self.dispatcher.take_fatal_error());
+            };
+            let data: &[u8] = &buf;
+            let mut msg_start: usize = 0;
+            for result in MessageIter::new(data) {
+                let Ok((header, payload)) = result else {
+                    break;
+                };
+                let msg_len = header.nlmsg_len as usize;
+                let aligned = nlmsg_align(msg_len);
+                if header.nlmsg_seq != seq {
+                    msg_start = msg_start.saturating_add(aligned);
+                    continue;
+                }
+                if header.is_dump_interrupted() {
+                    return Err(Error::DumpInterrupted);
+                }
+                if header.is_error() {
+                    let err = NlMsgError::from_bytes(payload)?;
+                    if !err.is_ack() {
+                        return Err(err.into_error(payload));
+                    }
+                }
+                if header.is_done() {
+                    break 'outer;
+                }
+                if msg_start + msg_len <= data.len() {
+                    responses.push(data[msg_start..msg_start + msg_len].to_vec());
+                }
+                msg_start = msg_start.saturating_add(aligned);
+            }
+        }
+
+        tracing::Span::current().record("responses", responses.len());
+        Ok(responses)
+    }
 }
 
 // ============================================================================
@@ -1000,7 +1254,8 @@ impl Connection<Route> {
     pub async fn stream_links(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, LinkMessage>> {
-        self.dump_stream::<LinkMessage>(NlMsgType::RTM_GETLINK).await
+        self.dump_stream::<LinkMessage>(NlMsgType::RTM_GETLINK)
+            .await
     }
 
     /// Stream a route dump frame-by-frame. See [`Self::stream_links`].
@@ -1115,12 +1370,12 @@ impl Connection<Route> {
         let ifindex = self.resolve_interface(&iface).await?;
 
         loop {
-            let link = self
-                .get_link_by_index(ifindex)
-                .await?
-                .ok_or_else(|| Error::InterfaceNotFound {
-                    name: label.clone(),
-                })?;
+            let link =
+                self.get_link_by_index(ifindex)
+                    .await?
+                    .ok_or_else(|| Error::InterfaceNotFound {
+                        name: label.clone(),
+                    })?;
             if link.is_up() {
                 return Ok(());
             }
@@ -1169,7 +1424,9 @@ impl Connection<Route> {
         let link = self
             .get_link_by_name(iface)
             .await?
-            .ok_or_else(|| Error::InterfaceNotFound { name: label.clone() })?;
+            .ok_or_else(|| Error::InterfaceNotFound {
+                name: label.clone(),
+            })?;
         link.stats().copied().ok_or_else(|| {
             Error::InvalidMessage(format!(
                 "interface {label} response did not include link-stats attribute"
@@ -1589,10 +1846,7 @@ impl Connection<Route> {
     /// (Renamed from `get_rules_for_family_typed` in 0.21 — the raw-`u8`
     /// sibling was removed in the same release.)
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules_for_family"))]
-    pub async fn get_rules_for_family(
-        &self,
-        family: AddressFamily,
-    ) -> Result<Vec<RuleMessage>> {
+    pub async fn get_rules_for_family(&self, family: AddressFamily) -> Result<Vec<RuleMessage>> {
         let raw = family.as_u8();
         let rules = self.get_rules().await?;
         // AF_UNSPEC (0) is the "no filter" form: return everything.
@@ -1664,11 +1918,7 @@ impl Connection<Route> {
     /// (Renamed from `del_rule_by_priority_typed` in 0.21 — the raw-`u8`
     /// sibling was removed in the same release.)
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rule_by_priority"))]
-    pub async fn del_rule_by_priority(
-        &self,
-        family: AddressFamily,
-        priority: u32,
-    ) -> Result<()> {
+    pub async fn del_rule_by_priority(&self, family: AddressFamily, priority: u32) -> Result<()> {
         let rule = super::rule::RuleBuilder::new(family.as_u8()).priority(priority);
         self.del_rule(rule).await
     }
@@ -1688,9 +1938,7 @@ impl Connection<Route> {
             if rule.is_default() {
                 continue;
             }
-            let _ = self
-                .del_rule_by_priority(family, rule.priority())
-                .await;
+            let _ = self.del_rule_by_priority(family, rule.priority()).await;
         }
 
         Ok(())
@@ -2550,11 +2798,7 @@ impl Connection<Generic> {
         // unreachable; the `unwrap_or_else(into_inner)` recovers if
         // a future panic surfaces (hardening rather than fix).
         {
-            let cache = self
-                .state
-                .cache
-                .read()
-                .unwrap_or_else(|p| p.into_inner());
+            let cache = self.state.cache.read().unwrap_or_else(|p| p.into_inner());
             if let Some(info) = cache.get(name) {
                 let span = tracing::Span::current();
                 span.record("id", info.id);
@@ -2571,11 +2815,7 @@ impl Connection<Generic> {
 
         // Cache the result
         {
-            let mut cache = self
-                .state
-                .cache
-                .write()
-                .unwrap_or_else(|p| p.into_inner());
+            let mut cache = self.state.cache.write().unwrap_or_else(|p| p.into_inner());
             cache.insert(name.to_string(), info.clone());
         }
 
@@ -2595,11 +2835,7 @@ impl Connection<Generic> {
     /// This is rarely needed, but may be useful if families are
     /// dynamically loaded/unloaded.
     pub fn clear_cache(&self) {
-        let mut cache = self
-            .state
-            .cache
-            .write()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut cache = self.state.cache.write().unwrap_or_else(|p| p.into_inner());
         cache.clear();
     }
 
@@ -2950,5 +3186,96 @@ mod send_sync_tests {
             .expect("socket open")
             .timeout(Duration::from_secs(5));
         assert_eq!(conn.get_timeout(), Some(Duration::from_secs(5)));
+    }
+
+    // -- #134 — dispatcher-mode end-to-end (non-root; reads only) ----
+
+    #[tokio::test]
+    async fn dispatcher_mode_flag_defaults_off() {
+        let conn = Connection::<Route>::new().expect("socket open");
+        assert!(!conn.is_dispatcher_mode());
+        let conn = conn.with_dispatcher();
+        assert!(conn.is_dispatcher_mode());
+    }
+
+    /// The headline #134 validation: a request issued in dispatcher
+    /// mode goes register → send → driver-demux → response, with no
+    /// `request_lock`. `get_links()` is a read, so this runs as a
+    /// regular user in CI.
+    #[tokio::test]
+    async fn dispatcher_mode_single_request_round_trips() {
+        let conn = Connection::<Route>::new()
+            .expect("socket open")
+            .with_dispatcher();
+        let links = conn
+            .get_links()
+            .await
+            .expect("get_links in dispatcher mode");
+        assert!(!links.is_empty(), "host always has at least `lo`");
+        // The driver was spawned, and the request deregistered its seq.
+        assert!(conn.dispatcher().driver_started());
+        assert_eq!(
+            conn.dispatcher().pending_count(),
+            0,
+            "completed request must leave no pending seq"
+        );
+    }
+
+    /// Concurrent requests on a shared `Arc<Connection>` in dispatcher
+    /// mode demux independently — the whole point of retiring the F1
+    /// mutex. Each task gets its own correct result.
+    #[tokio::test]
+    async fn dispatcher_mode_concurrent_requests_demux() {
+        let conn = std::sync::Arc::new(
+            Connection::<Route>::new()
+                .expect("socket open")
+                .with_dispatcher(),
+        );
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let c = conn.clone();
+            handles.push(tokio::spawn(async move { c.get_links().await }));
+        }
+        for h in handles {
+            let links = h.await.expect("task join").expect("get_links");
+            assert!(!links.is_empty());
+        }
+        assert_eq!(
+            conn.dispatcher().pending_count(),
+            0,
+            "all concurrent requests must drain their pending seqs"
+        );
+    }
+
+    /// Dispatcher mode rejects long-lived stream APIs with a clear
+    /// error (the background driver owns recv, so a second reader would
+    /// race). `dump_stream` returns the error eagerly.
+    #[tokio::test]
+    async fn dispatcher_mode_dump_stream_is_rejected() {
+        let conn = Connection::<Route>::new()
+            .expect("socket open")
+            .with_dispatcher();
+        let res = conn
+            .dump_stream::<LinkMessage>(super::super::message::NlMsgType::RTM_GETLINK)
+            .await;
+        match res {
+            Err(e) => assert!(e.is_not_supported(), "got {e}"),
+            Ok(_) => panic!("dump_stream must be rejected in dispatcher mode"),
+        }
+    }
+
+    /// `events()` in dispatcher mode yields exactly one error then ends
+    /// (the subscription can't poll recv under the driver).
+    #[tokio::test]
+    async fn dispatcher_mode_events_yield_one_error_then_end() {
+        use tokio_stream::StreamExt;
+        let conn = Connection::<Route>::new()
+            .expect("socket open")
+            .with_dispatcher();
+        let mut events = conn.events().await;
+        let first = events.next().await.expect("one item");
+        assert!(first.is_err(), "first item must be the unsupported error");
+        assert!(first.unwrap_err().is_not_supported());
+        assert!(events.next().await.is_none(), "stream ends after the error");
     }
 }

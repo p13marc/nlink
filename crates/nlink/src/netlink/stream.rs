@@ -59,7 +59,25 @@ use std::{
 
 use tokio_stream::Stream;
 
-use super::{connection::Connection, error::Result, message::MessageIter, protocol::ProtocolState};
+use super::{
+    connection::Connection,
+    error::{Error, Result},
+    message::MessageIter,
+    protocol::ProtocolState,
+};
+
+/// Error surfaced when an event stream is created on a dispatcher-mode
+/// connection. The background driver task owns `recv` on the socket, so a
+/// `poll_recv`-based stream would be a two-reader race. Multicast subscribers
+/// must use a default-mode `Connection` (or a separate connection from a
+/// `ConnectionPool`). See #134.
+pub(crate) fn dispatcher_mode_stream_error() -> Error {
+    Error::not_supported(
+        "event/dump streams are not supported on a dispatcher-mode connection; \
+         use a default-mode Connection (or a separate ConnectionPool connection) \
+         for long-lived subscriptions",
+    )
+}
 
 /// Sealed trait module to prevent external implementations.
 mod private {
@@ -121,15 +139,22 @@ pub struct EventSubscription<'a, P: EventSource> {
     /// lock is acquired in [`Connection::events`] (now async) and
     /// released when the stream is dropped.
     _guard: tokio::sync::OwnedMutexGuard<()>,
+    /// #134 — set when the connection is in dispatcher mode, where the
+    /// driver owns recv and a second reader (this stream) would race
+    /// it. The stream yields one error then ends.
+    unsupported: bool,
+    terminated: bool,
 }
 
 impl<'a, P: EventSource> EventSubscription<'a, P> {
     pub(crate) fn new(conn: &'a Connection<P>, guard: tokio::sync::OwnedMutexGuard<()>) -> Self {
         Self {
+            unsupported: conn.is_dispatcher_mode(),
             conn,
             buffer: Vec::new(),
             pending: Vec::new(),
             _guard: guard,
+            terminated: false,
         }
     }
 }
@@ -139,6 +164,15 @@ impl<P: EventSource> Stream for EventSubscription<'_, P> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+
+        // #134 — dispatcher mode: surface the limitation once, then end.
+        if this.unsupported {
+            if this.terminated {
+                return Poll::Ready(None);
+            }
+            this.terminated = true;
+            return Poll::Ready(Some(Err(dispatcher_mode_stream_error())));
+        }
 
         // Return pending events first
         if let Some(event) = this.pending.pop() {
@@ -215,15 +249,20 @@ pub struct OwnedEventStream<P: EventSource> {
     /// guard which drops the Arc reference (alongside the
     /// Connection itself).
     _guard: tokio::sync::OwnedMutexGuard<()>,
+    /// #134 — see [`EventSubscription::unsupported`].
+    unsupported: bool,
+    terminated: bool,
 }
 
 impl<P: EventSource> OwnedEventStream<P> {
     pub(crate) fn new(conn: Connection<P>, guard: tokio::sync::OwnedMutexGuard<()>) -> Self {
         Self {
+            unsupported: conn.is_dispatcher_mode(),
             conn,
             buffer: Vec::new(),
             pending: Vec::new(),
             _guard: guard,
+            terminated: false,
         }
     }
 
@@ -248,6 +287,15 @@ impl<P: EventSource> Stream for OwnedEventStream<P> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+
+        // #134 — dispatcher mode: surface the limitation once, then end.
+        if this.unsupported {
+            if this.terminated {
+                return Poll::Ready(None);
+            }
+            this.terminated = true;
+            return Poll::Ready(Some(Err(dispatcher_mode_stream_error())));
+        }
 
         // Return pending events first
         if let Some(event) = this.pending.pop() {
@@ -545,10 +593,9 @@ impl EventSource for super::protocol::Nftables {
     fn parse_events(data: &[u8]) -> Vec<super::nftables::NftablesEvent> {
         let mut events = Vec::new();
         for (header, payload) in MessageIter::new(data).flatten() {
-            if let Some(evt) = super::nftables::events::parse_nftables_event(
-                header.nlmsg_type,
-                payload,
-            ) {
+            if let Some(evt) =
+                super::nftables::events::parse_nftables_event(header.nlmsg_type, payload)
+            {
                 events.push(evt);
             }
         }

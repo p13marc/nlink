@@ -306,8 +306,10 @@ pub enum Error {
     ///
     /// Recover via [`Error::is_namespace_restore_failed`] for the
     /// predicate form.
-    #[error("netns restore failed after socket creation; thread \
-             stuck in target netns: {source}")]
+    #[error(
+        "netns restore failed after socket creation; thread \
+             stuck in target netns: {source}"
+    )]
     NamespaceRestoreFailed {
         /// The underlying `setns()` failure.
         #[source]
@@ -668,12 +670,15 @@ impl Error {
         self.errno() == Some(libc::ENODEV)
     }
 
-    /// Check if this is a "not supported" error (EOPNOTSUPP).
+    /// Check if this is a "not supported" error (EOPNOTSUPP, or the
+    /// library-level [`Error::NotSupported`] variant).
     ///
     /// This indicates the requested operation is not supported by the kernel
-    /// or the specific device/driver.
+    /// or the specific device/driver, or that nlink itself does not support
+    /// the operation in the current mode (e.g. an event stream on a
+    /// dispatcher-mode connection).
     pub fn is_not_supported(&self) -> bool {
-        self.errno() == Some(libc::EOPNOTSUPP)
+        matches!(self, Self::NotSupported(_)) || self.errno() == Some(libc::EOPNOTSUPP)
     }
 
     /// Check if this is a "network unreachable" error (ENETUNREACH).
@@ -1115,10 +1120,7 @@ mod tests {
     fn ext_ack_returns_none_for_non_kernel_errors() {
         assert_eq!(Error::Timeout.ext_ack(), None);
         assert_eq!(Error::Timeout.ext_ack_offset(), None);
-        assert_eq!(
-            Error::InvalidMessage("bad".into()).ext_ack(),
-            None
-        );
+        assert_eq!(Error::InvalidMessage("bad".into()).ext_ack(), None);
     }
 
     // Plan 185 fix — `is_no_buffer_space` must catch the OS-shape
@@ -1173,18 +1175,8 @@ mod tests {
 
     #[test]
     fn from_errno_with_context_ext_ack_normalizes_both_signs() {
-        let neg = Error::from_errno_with_context_ext_ack(
-            -libc::EBUSY,
-            "add_link",
-            None,
-            None,
-        );
-        let pos = Error::from_errno_with_context_ext_ack(
-            libc::EBUSY,
-            "add_link",
-            None,
-            None,
-        );
+        let neg = Error::from_errno_with_context_ext_ack(-libc::EBUSY, "add_link", None, None);
+        let pos = Error::from_errno_with_context_ext_ack(libc::EBUSY, "add_link", None, None);
         assert_eq!(neg.errno(), pos.errno());
         assert_eq!(neg.errno(), Some(libc::EBUSY));
     }
@@ -1207,24 +1199,15 @@ mod tests {
     // `raw_os_error()`) makes this work uniformly; this sweep
     // pins the contract so future predicates inherit it.
 
-    fn assert_predicate_matches_both_shapes(
-        pred: fn(&Error) -> bool,
-        errno: i32,
-        name: &str,
-    ) {
+    fn assert_predicate_matches_both_shapes(pred: fn(&Error) -> bool, errno: i32, name: &str) {
         let kernel = Error::from_errno_ext_ack(errno, None, None);
         assert!(
             pred(&kernel),
             "{name}: Kernel({errno}) must match the predicate"
         );
         let io = Error::Io(std::io::Error::from_raw_os_error(errno));
-        assert!(
-            pred(&io),
-            "{name}: Io({errno}) must match the predicate"
-        );
-        let kctx = Error::from_errno_with_context_ext_ack(
-            errno, "ctx", None, None,
-        );
+        assert!(pred(&io), "{name}: Io({errno}) must match the predicate");
+        let kctx = Error::from_errno_with_context_ext_ack(errno, "ctx", None, None);
         assert!(
             pred(&kctx),
             "{name}: KernelWithContext({errno}) must match the predicate"
@@ -1237,34 +1220,46 @@ mod tests {
         // shared helper. Adding a new `is_*` predicate later
         // appends one line here.
         assert_predicate_matches_both_shapes(
-            Error::is_no_buffer_space, libc::ENOBUFS, "is_no_buffer_space",
+            Error::is_no_buffer_space,
+            libc::ENOBUFS,
+            "is_no_buffer_space",
+        );
+        assert_predicate_matches_both_shapes(Error::is_busy, libc::EBUSY, "is_busy");
+        assert_predicate_matches_both_shapes(Error::is_try_again, libc::EAGAIN, "is_try_again");
+        assert_predicate_matches_both_shapes(
+            Error::is_already_exists,
+            libc::EEXIST,
+            "is_already_exists",
         );
         assert_predicate_matches_both_shapes(
-            Error::is_busy, libc::EBUSY, "is_busy",
+            Error::is_permission_denied,
+            libc::EACCES,
+            "is_permission_denied",
         );
         assert_predicate_matches_both_shapes(
-            Error::is_try_again, libc::EAGAIN, "is_try_again",
+            Error::is_invalid_argument,
+            libc::EINVAL,
+            "is_invalid_argument",
         );
         assert_predicate_matches_both_shapes(
-            Error::is_already_exists, libc::EEXIST, "is_already_exists",
+            Error::is_not_supported,
+            libc::EOPNOTSUPP,
+            "is_not_supported",
         );
         assert_predicate_matches_both_shapes(
-            Error::is_permission_denied, libc::EACCES, "is_permission_denied",
+            Error::is_network_unreachable,
+            libc::ENETUNREACH,
+            "is_network_unreachable",
         );
         assert_predicate_matches_both_shapes(
-            Error::is_invalid_argument, libc::EINVAL, "is_invalid_argument",
+            Error::is_host_unreachable,
+            libc::EHOSTUNREACH,
+            "is_host_unreachable",
         );
         assert_predicate_matches_both_shapes(
-            Error::is_not_supported, libc::EOPNOTSUPP, "is_not_supported",
-        );
-        assert_predicate_matches_both_shapes(
-            Error::is_network_unreachable, libc::ENETUNREACH, "is_network_unreachable",
-        );
-        assert_predicate_matches_both_shapes(
-            Error::is_host_unreachable, libc::EHOSTUNREACH, "is_host_unreachable",
-        );
-        assert_predicate_matches_both_shapes(
-            Error::is_connection_refused, libc::ECONNREFUSED, "is_connection_refused",
+            Error::is_connection_refused,
+            libc::ECONNREFUSED,
+            "is_connection_refused",
         );
     }
 

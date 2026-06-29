@@ -6,6 +6,31 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Opt-in dispatcher mode — per-`nlmsg_seq` unicast demux foundation
+  (#134, Plan 234 follow-on).** `Connection::with_dispatcher()` opts a
+  connection into a new request path: a single background recv-driver
+  task owns the socket's read side and demultiplexes each datagram to a
+  per-`nlmsg_seq` registry, so single-message unicast requests on a
+  shared `Arc<Connection>` **pipeline** instead of serializing through
+  the F1 `request_lock`, and a long-lived `recv` no longer blocks
+  unrelated requests. The driver is spawned lazily on first use and torn
+  down on `Connection::drop`; per-seq registration is RAII
+  (`PendingGuard`) so a cancelled/timed-out request is cancellation-safe
+  (a late frame for a dropped seq is discarded). **Default is off** —
+  the existing `request_lock` path is byte-for-byte unchanged, so this
+  is a zero-regression addition. Two deliberate constraints in this
+  foundation release: (1) **dumps still serialize** even in dispatcher
+  mode, because the kernel serializes dumps per socket
+  (`netlink_dump_start` returns `EBUSY` on a second concurrent dump);
+  use `ConnectionPool<P>` for genuinely parallel dumps. (2) The
+  **streaming APIs** (`events`/`into_events`/`dump_stream`/`*_with_resync`)
+  return a clear `Error::NotSupported` on a dispatcher-mode connection —
+  the driver owns recv, so a second reader would race it; use a
+  default-mode `Connection` for events. The full cutover (retiring the
+  mutex outright + migrating the streams onto the dispatcher) remains
+  the tracked #134 follow-up; this lands the validated demux core behind
+  the flag. Also: `Error::is_not_supported()` now also matches the
+  library-level `Error::NotSupported` variant (previously errno-only).
 - **FDB `NTF_*` flag completeness (#137 bridge/FDB wire-format audit).**
   The FDB builder/reader modelled only `NTF_SELF`/`NTF_MASTER`/
   `NTF_EXT_LEARNED`. Added the remaining `linux/neighbour.h` flags:
