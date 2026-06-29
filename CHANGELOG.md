@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`Connection::<Ovpn>::attach_socket` / `attach_socket_in_netns` —
+  cross-netns transport-socket attach (#136).** The previously-stubbed
+  `attach_socket(ifindex, peer_id, fd)` now issues a `peer-set` carrying
+  `OVPN_A_PEER_SOCKET = fd`; the kernel resolves the fd via
+  `sockfd_lookup` in the **calling process** (fds are process-global,
+  not netns-scoped), so a controller that holds the fd can attach a
+  socket created in another network namespace. `attach_socket_in_netns`
+  additionally sets `OVPN_A_PEER_SOCKET_NETNSID` for the case where the
+  kernel must be told the socket's namespace explicitly. **Redesign
+  note:** #136 specified an `SCM_RIGHTS` sendmsg path; that premise was
+  wrong — netlink generic-command handlers never receive `SCM_RIGHTS`
+  file descriptors, and the upstream ovpn netlink spec passes the socket
+  as a plain `u32` attribute. Verified against the kernel `ovpn.yaml`
+  spec.
+- **`NetlinkSocket::send_with_fds(msg, &[fd])` — generic `SCM_RIGHTS`
+  `sendmsg(2)` primitive (#136).** A general control-message send path
+  (the first `sendmsg`-with-`msg_control` in the crate; all other sends
+  use plain `send(2)`). Provided for protocols/out-of-tree kernels that
+  genuinely consume passed fds and for fd-relay scenarios; it is **not**
+  used by ovpn (see above). cmsg buffer layout (`CMSG_SPACE`/`CMSG_LEN`,
+  8-byte alignment) is unit-tested, and a compile-time assertion pins
+  that the returned future stays `Send` (the `msghdr`/`iovec` raw
+  pointers are built inside the synchronous `try_io` closure, never held
+  across the await).
+
 ### Changed
 
 - **GENL command unification — closes the H9 stale-frame bug class

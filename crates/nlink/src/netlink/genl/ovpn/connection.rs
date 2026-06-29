@@ -6,33 +6,42 @@
 //! dispatch the `#[derive(GenlMessage)]` + `#[genl_family]` machinery
 //! provides.
 //!
-//! # SCM_RIGHTS fd passing
+//! # Socket attachment
 //!
-//! The kernel's `peer-new` GENL command takes an
-//! `OVPN_A_PEER_SOCKET` u32 attribute that's a kernel-side
-//! reference to a UDP/TCP socket. When the caller owns the socket
-//! in the same process + netns, passing the bare fd value works
-//! (the kernel resolves it via `sockfd_lookup`). Cross-namespace
-//! fd passing requires SCM_RIGHTS in the sendmsg auxiliary control
-//! message; that path is deferred to a follow-up — see
-//! `Connection::<Ovpn>::attach_socket` for the call shape so
-//! consumers can plan ahead.
+//! The kernel's `peer-new`/`peer-set` GENL commands take an
+//! `OVPN_A_PEER_SOCKET` u32 attribute — the fd of a UDP/TCP socket,
+//! resolved by the kernel via `sockfd_lookup` in the **calling
+//! process**. Since fds are process-global (not netns-scoped), a
+//! controller process that holds the fd can attach it regardless of
+//! which netns the socket was created in; for the kernel to interpret
+//! the socket's namespace it also accepts `OVPN_A_PEER_SOCKET_NETNSID`.
+//! See [`Connection::<Ovpn>::attach_socket`] /
+//! [`attach_socket_in_netns`](Connection::<Ovpn>::attach_socket_in_netns).
+//!
+//! (#136 originally specified an `SCM_RIGHTS` sendmsg path here; that
+//! was a misreading of the protocol — netlink genl handlers never
+//! consume `SCM_RIGHTS` fds. The general
+//! [`NetlinkSocket::send_with_fds`](crate::netlink::NetlinkSocket::send_with_fds)
+//! primitive still ships for protocols that do.)
 
 use std::os::fd::RawFd;
 
-use crate::macros::GenlTypedDumpStream;
-use crate::netlink::{
-    Connection,
-    error::{Error, Result},
-    genl::ovpn::messages::{
-        OvpnKeyDelRequest, OvpnKeyGetRequest, OvpnKeyNewRequest, OvpnKeyReply,
-        OvpnKeySwapRequest, OvpnKeyconf, OvpnPeer, OvpnPeerDelRequest, OvpnPeerGetRequest,
-        OvpnPeerNewRequest, OvpnPeerReply, OvpnPeerSetRequest,
-    },
-    genl::ovpn::types::OvpnKeySlot,
-};
-
 use super::Ovpn;
+use crate::{
+    macros::GenlTypedDumpStream,
+    netlink::{
+        Connection,
+        error::{Error, Result},
+        genl::ovpn::{
+            messages::{
+                OvpnKeyDelRequest, OvpnKeyGetRequest, OvpnKeyNewRequest, OvpnKeyReply,
+                OvpnKeySwapRequest, OvpnKeyconf, OvpnPeer, OvpnPeerDelRequest, OvpnPeerGetRequest,
+                OvpnPeerNewRequest, OvpnPeerReply, OvpnPeerSetRequest,
+            },
+            types::OvpnKeySlot,
+        },
+    },
+};
 
 impl Connection<Ovpn> {
     // ============================================================
@@ -43,9 +52,9 @@ impl Connection<Ovpn> {
     ///
     /// `peer.id` must be set and unique among the interface's
     /// peers. The peer's UDP/TCP socket can be specified via
-    /// `peer.socket` (a fd value in the caller's process — same
-    /// netns). Cross-netns fd passing isn't yet supported; the
-    /// `attach_socket` method will land in a follow-up release.
+    /// `peer.socket` (a fd in the caller's process) and, for a socket
+    /// in another network namespace, `peer.socket_netnsid`. To attach a
+    /// socket to a peer after creation, see [`Self::attach_socket`].
     pub async fn peer_new(&self, ifindex: u32, peer: OvpnPeer) -> Result<()> {
         let _: OvpnPeerReply = self
             .send_typed(OvpnPeerNewRequest::new(ifindex, peer))
@@ -152,12 +161,7 @@ impl Connection<Ovpn> {
 
     /// Delete the cipher key at `(peer_id, slot)`. Returns
     /// `Error::is_not_found()` if no key is installed there.
-    pub async fn key_del(
-        &self,
-        ifindex: u32,
-        peer_id: u32,
-        slot: OvpnKeySlot,
-    ) -> Result<()> {
+    pub async fn key_del(&self, ifindex: u32, peer_id: u32, slot: OvpnKeySlot) -> Result<()> {
         let _: OvpnKeyReply = self
             .send_typed(OvpnKeyDelRequest::new(ifindex, peer_id, slot))
             .await?;
@@ -168,36 +172,64 @@ impl Connection<Ovpn> {
     // Socket attachment
     // ============================================================
 
-    /// Cross-namespace socket attachment via SCM_RIGHTS auxiliary
-    /// control message.
+    /// Attach a transport socket to the peer identified by `peer_id`.
     ///
-    /// **Currently returns `Error::is_not_supported()`.** Same-netns
-    /// callers should pass the socket fd via `OvpnPeer::socket`
-    /// on `peer_new` — the kernel resolves it via `sockfd_lookup`
-    /// without needing SCM_RIGHTS.
+    /// Issues a `peer-set` carrying `OVPN_A_PEER_SOCKET = fd`. The
+    /// kernel resolves the fd via `sockfd_lookup` in the **calling
+    /// process** (file descriptors are process-global, not netns-scoped),
+    /// so this works whenever the current process holds the fd —
+    /// including a controller process that created the socket in a
+    /// different network namespace than the ovpn interface lives in.
     ///
-    /// Cross-netns fd passing requires extending the `NetlinkSocket`
-    /// sendmsg path with a `cmsghdr` carrying `SCM_RIGHTS` + the fd
-    /// number. That refactor is queued for a follow-up release; the
-    /// method signature is shipped now so consumers can plan
-    /// against it. When implemented, this will issue a `peer-new`
-    /// (or `peer-set`) for `peer_id` with the fd passed in the
-    /// auxiliary data.
+    /// For a socket whose namespace the kernel must be told about
+    /// explicitly, use [`Self::attach_socket_in_netns`].
     ///
-    /// Tracked in <https://github.com/p13marc/nlink/issues/136>
-    /// (Plan 197 cross-netns follow-on) for the deferral rationale.
-    pub async fn attach_socket(
+    /// # Note — SCM_RIGHTS is *not* the mechanism here
+    ///
+    /// #136 originally framed this as an `SCM_RIGHTS` sendmsg control
+    /// message. That premise was wrong: netlink generic-command handlers
+    /// never receive `SCM_RIGHTS` file descriptors, and the upstream
+    /// ovpn netlink spec passes the socket as the plain `OVPN_A_PEER_SOCKET`
+    /// u32 attribute (+ `OVPN_A_PEER_SOCKET_NETNSID` for cross-netns).
+    /// A general [`NetlinkSocket::send_with_fds`](crate::netlink::NetlinkSocket::send_with_fds)
+    /// SCM_RIGHTS primitive still ships for protocols that genuinely
+    /// consume passed fds.
+    pub async fn attach_socket(&self, ifindex: u32, peer_id: u32, fd: RawFd) -> Result<()> {
+        self.attach_socket_inner(ifindex, peer_id, fd, None).await
+    }
+
+    /// Attach a transport socket that lives in the network namespace
+    /// identified by `netnsid`.
+    ///
+    /// Issues a `peer-set` carrying `OVPN_A_PEER_SOCKET = fd` plus
+    /// `OVPN_A_PEER_SOCKET_NETNSID = netnsid`. `netnsid` is a namespace
+    /// id as assigned by `RTM_NEWNSID` / `ip netns set` and is resolved
+    /// by the kernel relative to the caller's netns. This is the
+    /// kernel-blessed cross-namespace socket-attach path.
+    pub async fn attach_socket_in_netns(
         &self,
-        _ifindex: u32,
-        _peer_id: u32,
-        _fd: RawFd,
+        ifindex: u32,
+        peer_id: u32,
+        fd: RawFd,
+        netnsid: i32,
     ) -> Result<()> {
-        Err(Error::NotSupported(
-            "Connection::<Ovpn>::attach_socket — cross-netns fd passing via SCM_RIGHTS \
-             not yet implemented. Same-netns callers should set OvpnPeer::socket = Some(fd) \
-             and call peer_new() directly; the kernel resolves the fd via sockfd_lookup. \
-             See https://github.com/p13marc/nlink/issues/136."
-                .into(),
-        ))
+        self.attach_socket_inner(ifindex, peer_id, fd, Some(netnsid))
+            .await
+    }
+
+    async fn attach_socket_inner(
+        &self,
+        ifindex: u32,
+        peer_id: u32,
+        fd: RawFd,
+        netnsid: Option<i32>,
+    ) -> Result<()> {
+        let mut peer = OvpnPeer::identity(peer_id);
+        peer.socket = Some(fd as u32);
+        peer.socket_netnsid = netnsid;
+        let _: OvpnPeerReply = self
+            .send_typed(OvpnPeerSetRequest::new(ifindex, peer))
+            .await?;
+        Ok(())
     }
 }

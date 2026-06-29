@@ -19,12 +19,11 @@
 //!   trailing bytes (per CLAUDE.md `## Parser robustness` rule 1),
 //!   so future kernel widening stays compatible.
 
-use crate::macros::{GenlMessage, NetlinkAttrs};
-
 use super::types::{
-    OvpnAttr, OvpnCipherAlg, OvpnCmd, OvpnDelPeerReason, OvpnKeyconfAttr, OvpnKeydirAttr,
-    OvpnKeySlot, OvpnPeerAttr,
+    OvpnAttr, OvpnCipherAlg, OvpnCmd, OvpnDelPeerReason, OvpnKeySlot, OvpnKeyconfAttr,
+    OvpnKeydirAttr, OvpnPeerAttr,
 };
+use crate::macros::{GenlMessage, NetlinkAttrs};
 
 // ============================================================
 // Nested: OvpnKeydir
@@ -165,8 +164,10 @@ pub struct OvpnPeer {
     /// Remote UDP/TCP port — 2 bytes, big-endian.
     #[genl_attr(OvpnPeerAttr::RemotePort)]
     pub remote_port: Option<Vec<u8>>,
-    /// Per-peer socket fd. Carried in-band via SCM_RIGHTS on
-    /// peer-new; the value here is the kernel's reference index.
+    /// Per-peer transport socket fd (`OVPN_A_PEER_SOCKET`). On
+    /// `peer-new`/`peer-set` this is a file descriptor in the calling
+    /// process, resolved by the kernel via `sockfd_lookup`; on a
+    /// `peer-get` reply the kernel echoes back its own reference index.
     #[genl_attr(OvpnPeerAttr::Socket)]
     pub socket: Option<u32>,
     /// The netnsid of the socket's netns. `-1` (`!0u32`) means
@@ -486,7 +487,9 @@ impl OvpnPeer {
         if bytes.len() != 4 {
             return None;
         }
-        Some(std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]))
+        Some(std::net::Ipv4Addr::new(
+            bytes[0], bytes[1], bytes[2], bytes[3],
+        ))
     }
 
     /// Encode an `Ipv6Addr` as its 16-byte big-endian octets.
@@ -542,7 +545,9 @@ impl OvpnPeer {
     pub fn remote_socket(&self) -> Option<std::net::SocketAddr> {
         let port = self.remote_port.as_deref().and_then(Self::decode_port)?;
         if let Some(v4) = self.remote_ipv4.as_deref().and_then(Self::decode_ipv4) {
-            return Some(std::net::SocketAddr::V4(std::net::SocketAddrV4::new(v4, port)));
+            return Some(std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+                v4, port,
+            )));
         }
         if let Some(v6) = self.remote_ipv6.as_deref().and_then(Self::decode_ipv6) {
             let scope = self.remote_ipv6_scope_id.unwrap_or(0);
@@ -557,9 +562,10 @@ impl OvpnPeer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::macros::__rt;
-    use crate::macros::NetlinkAttrs;
-    use crate::netlink::MessageBuilder;
+    use crate::{
+        macros::{__rt, NetlinkAttrs},
+        netlink::MessageBuilder,
+    };
 
     fn body(write: impl FnOnce(&mut MessageBuilder)) -> Vec<u8> {
         let mut b = MessageBuilder::new(0, 0);
@@ -603,10 +609,7 @@ mod tests {
         let attrs: Vec<u16> = __rt::attr_iter(&body).map(|(t, _)| t).collect();
         assert_eq!(
             attrs,
-            vec![
-                OvpnKeyconfAttr::PeerId as u16,
-                OvpnKeyconfAttr::Slot as u16,
-            ]
+            vec![OvpnKeyconfAttr::PeerId as u16, OvpnKeyconfAttr::Slot as u16,]
         );
     }
 
@@ -686,6 +689,27 @@ mod tests {
     }
 
     #[test]
+    fn peer_socket_and_netnsid_round_trip() {
+        // `Connection::<Ovpn>::attach_socket` / `attach_socket_in_netns`
+        // set exactly these two fields on an identity peer and send a
+        // `peer-set`. Verify they survive the wire round-trip so the
+        // kernel actually receives `OVPN_A_PEER_SOCKET` (+ `_NETNSID`).
+        let mut peer = OvpnPeer::identity(21);
+        peer.socket = Some(42);
+        peer.socket_netnsid = Some(3);
+        let original = OvpnPeerReply {
+            ifindex: 9,
+            peer: Some(peer),
+        };
+        let body = body(|b| original.to_bytes(b).unwrap());
+        let parsed = OvpnPeerReply::from_bytes(&body).expect("parse");
+        let p = parsed.peer.expect("peer present");
+        assert_eq!(p.id, Some(21));
+        assert_eq!(p.socket, Some(42));
+        assert_eq!(p.socket_netnsid, Some(3));
+    }
+
+    #[test]
     fn peer_reply_round_trips_counters() {
         let mut peer = OvpnPeer::identity(5);
         peer.vpn_rx_bytes = Some(1_000_000);
@@ -714,7 +738,10 @@ mod tests {
         let outer_body = body(|b| req.to_bytes(b).unwrap());
         // Outer: ifindex + keyconf
         let outer: Vec<u16> = __rt::attr_iter(&outer_body).map(|(t, _)| t).collect();
-        assert_eq!(outer, vec![OvpnAttr::Ifindex as u16, OvpnAttr::Keyconf as u16]);
+        assert_eq!(
+            outer,
+            vec![OvpnAttr::Ifindex as u16, OvpnAttr::Keyconf as u16]
+        );
         // Pull the nested keyconf bytes and check the inner attrs.
         for (ty, payload) in __rt::attr_iter(&outer_body) {
             if ty == OvpnAttr::Keyconf as u16 {
@@ -733,10 +760,7 @@ mod tests {
                 let inner: Vec<u16> = __rt::attr_iter(payload).map(|(t, _)| t).collect();
                 assert_eq!(
                     inner,
-                    vec![
-                        OvpnKeyconfAttr::PeerId as u16,
-                        OvpnKeyconfAttr::Slot as u16
-                    ]
+                    vec![OvpnKeyconfAttr::PeerId as u16, OvpnKeyconfAttr::Slot as u16]
                 );
             }
         }

@@ -434,6 +434,77 @@ impl NetlinkSocket {
         }
     }
 
+    /// Send a netlink message with file descriptors attached as an
+    /// `SCM_RIGHTS` ancillary control message via `sendmsg(2)`.
+    ///
+    /// With an empty `fds` slice this is exactly [`Self::send`].
+    ///
+    /// # Netlink semantics — read before reaching for this
+    ///
+    /// Unlike `AF_UNIX` sockets, the kernel's netlink layer does **not**
+    /// hand `SCM_RIGHTS` file descriptors to generic-netlink command
+    /// handlers: a genl `doit`/`dumpit` callback has no access to the
+    /// received `scm_fp_list`. So for most in-tree families (including
+    /// OpenVPN DCO) this primitive does not attach the fd to anything —
+    /// it is provided as a general building block for protocols (or
+    /// out-of-tree kernels) that genuinely consume passed fds, and for
+    /// fd-relay scenarios (handing the message+fd to a broker over a
+    /// Unix socket). For the OpenVPN DCO family, cross-netns socket
+    /// attach is done via the `OVPN_A_PEER_SOCKET` +
+    /// `OVPN_A_PEER_SOCKET_NETNSID` attributes instead — see
+    /// [`Connection::<Ovpn>::attach_socket`](crate::netlink::Connection).
+    pub async fn send_with_fds(&self, msg: &[u8], fds: &[RawFd]) -> Result<()> {
+        if fds.is_empty() {
+            return self.send(msg).await;
+        }
+
+        let (mut cmsg_buf, cmsg_space) = build_scm_rights_control(fds);
+
+        let mut would_block_count: u32 = 0;
+        loop {
+            let mut guard = self.fd.ready(Interest::WRITABLE).await?;
+
+            // Build the `msghdr` inside the synchronous closure so the
+            // raw pointers it holds never cross the `.await` above —
+            // keeping the returned future `Send` (only the `Vec<u64>`
+            // control buffer, which is `Send`, is held across the await).
+            let res = guard.try_io(|inner| {
+                let mut iov = libc::iovec {
+                    iov_base: msg.as_ptr() as *mut libc::c_void,
+                    iov_len: msg.len(),
+                };
+                let mut mhdr: libc::msghdr = unsafe { std::mem::zeroed() };
+                mhdr.msg_iov = &mut iov;
+                mhdr.msg_iovlen = 1;
+                mhdr.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+                mhdr.msg_controllen = cmsg_space as _;
+
+                let n = unsafe { libc::sendmsg(inner.get_ref().as_raw_fd(), &mhdr, 0) };
+                if n < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(n as usize)
+                }
+            });
+
+            match res {
+                Ok(result) => {
+                    result?;
+                    return Ok(());
+                }
+                Err(_would_block) => {
+                    would_block_count += 1;
+                    if would_block_count >= SEND_WOULDBLOCK_LIMIT {
+                        return Err(Error::Backpressure {
+                            send_buffer_full: true,
+                        });
+                    }
+                    continue;
+                }
+            }
+        }
+    }
+
     /// Receive a message, allocating a buffer.
     ///
     /// Plan 224 — passes `MSG_TRUNC` to recv so the kernel reports
@@ -448,9 +519,7 @@ impl NetlinkSocket {
             let mut buf = BytesMut::with_capacity(capacity);
             let received = loop {
                 let mut guard = self.fd.ready(Interest::READABLE).await?;
-                match guard.try_io(|inner| {
-                    inner.get_ref().recv(&mut buf, libc::MSG_TRUNC)
-                }) {
+                match guard.try_io(|inner| inner.get_ref().recv(&mut buf, libc::MSG_TRUNC)) {
                     Ok(Ok(n)) => break n,
                     Ok(Err(e)) => {
                         // Plan 234 §4 — route ENOBUFS to multicast
@@ -514,9 +583,7 @@ impl NetlinkSocket {
                 Poll::Pending => return Poll::Pending,
             };
 
-            match guard.try_io(|inner| {
-                inner.get_ref().recv(&mut buf, libc::MSG_TRUNC)
-            }) {
+            match guard.try_io(|inner| inner.get_ref().recv(&mut buf, libc::MSG_TRUNC)) {
                 Ok(result) => match result {
                     Ok(received) => {
                         if received > capacity {
@@ -620,9 +687,8 @@ struct BatchBufs {
 #[cfg(feature = "syscall_batch")]
 impl BatchBufs {
     fn new() -> Self {
-        let mut storage: Vec<Vec<u8>> = (0..NL_BATCH_SIZE)
-            .map(|_| vec![0u8; NL_BUF_SIZE])
-            .collect();
+        let mut storage: Vec<Vec<u8>> =
+            (0..NL_BATCH_SIZE).map(|_| vec![0u8; NL_BUF_SIZE]).collect();
         let mut iovecs: Vec<libc::iovec> = storage
             .iter_mut()
             .map(|buf| libc::iovec {
@@ -666,11 +732,7 @@ impl NetlinkSocket {
     /// (`DumpStream`, multicast event streams). Same semantics as
     /// [`Self::recv_batch`] but exposes the batch via the
     /// `Poll<Result<Vec<Vec<u8>>>>` shape.
-    pub fn poll_recv_batch(
-        &self,
-        cx: &mut Context<'_>,
-        max: usize,
-    ) -> Poll<Result<Vec<Vec<u8>>>> {
+    pub fn poll_recv_batch(&self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Vec<Vec<u8>>>> {
         let max = max.clamp(1, NL_BATCH_SIZE);
         loop {
             let mut guard = match self.fd.poll_read_ready(cx) {
@@ -818,9 +880,8 @@ impl NetlinkSocket {
 
         loop {
             let mut guard = self.fd.ready(Interest::WRITABLE).await?;
-            let result: std::result::Result<std::io::Result<usize>, _> = guard.try_io(|inner| {
-                Self::send_batch_inner(inner.get_ref().as_raw_fd(), &msgs[..n])
-            });
+            let result: std::result::Result<std::io::Result<usize>, _> = guard
+                .try_io(|inner| Self::send_batch_inner(inner.get_ref().as_raw_fd(), &msgs[..n]));
             match result {
                 Ok(Ok(sent)) => return Ok(sent),
                 Ok(Err(e)) => return Err(Error::Io(e)),
@@ -880,6 +941,99 @@ impl NetlinkSocket {
     }
 }
 
+/// Build an `SCM_RIGHTS` control buffer carrying `fds`.
+///
+/// Returned as a `Vec<u64>` so the backing storage is 8-byte aligned
+/// (the alignment `cmsghdr` requires); the `usize` is the valid
+/// `msg_controllen` (`CMSG_SPACE`). Split out from
+/// [`NetlinkSocket::send_with_fds`] so the on-wire control-message
+/// layout is unit-testable without a live socket.
+fn build_scm_rights_control(fds: &[RawFd]) -> (Vec<u64>, usize) {
+    let fd_bytes = std::mem::size_of_val(fds);
+    // SAFETY: CMSG_SPACE is a pure size computation.
+    let space = unsafe { libc::CMSG_SPACE(fd_bytes as u32) } as usize;
+    let mut buf = vec![0u64; space.div_ceil(std::mem::size_of::<u64>())];
+
+    // A throwaway msghdr drives CMSG_FIRSTHDR / CMSG_DATA; it is never
+    // sent — only used to compute the cmsg/data offsets into `buf`.
+    let mut mhdr: libc::msghdr = unsafe { std::mem::zeroed() };
+    mhdr.msg_control = buf.as_mut_ptr() as *mut libc::c_void;
+    mhdr.msg_controllen = space as _;
+
+    // SAFETY: `buf` is `space` bytes (rounded up to u64) and 8-byte
+    // aligned; CMSG_FIRSTHDR returns a pointer within it, and we copy
+    // exactly `fd_bytes` into the CMSG_DATA region which `CMSG_SPACE`
+    // accounts for.
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&mhdr);
+        debug_assert!(!cmsg.is_null());
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(fd_bytes as u32) as _;
+        std::ptr::copy_nonoverlapping(fds.as_ptr() as *const u8, libc::CMSG_DATA(cmsg), fd_bytes);
+    }
+
+    (buf, space)
+}
+
+#[cfg(test)]
+mod scm_rights_tests {
+    use super::*;
+
+    /// The control buffer must round-trip through `CMSG_FIRSTHDR` /
+    /// `CMSG_DATA` with the SCM_RIGHTS level/type and the exact fd
+    /// payload — this pins the on-wire cmsg layout.
+    #[test]
+    fn scm_rights_control_roundtrips_fds() {
+        let fds = [7i32, 9, 11];
+        let (mut buf, space) = build_scm_rights_control(&fds);
+
+        let mut mhdr: libc::msghdr = unsafe { std::mem::zeroed() };
+        mhdr.msg_control = buf.as_mut_ptr() as *mut libc::c_void;
+        mhdr.msg_controllen = space as _;
+
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&mhdr);
+            assert!(!cmsg.is_null());
+            assert_eq!((*cmsg).cmsg_level, libc::SOL_SOCKET);
+            assert_eq!((*cmsg).cmsg_type, libc::SCM_RIGHTS);
+            assert_eq!(
+                (*cmsg).cmsg_len as usize,
+                libc::CMSG_LEN((std::mem::size_of::<RawFd>() * fds.len()) as u32) as usize
+            );
+            let data = libc::CMSG_DATA(cmsg) as *const RawFd;
+            for (i, &want) in fds.iter().enumerate() {
+                assert_eq!(*data.add(i), want, "fd {i} mismatch");
+            }
+        }
+    }
+
+    /// Compile-time guard: the `send_with_fds` future must stay `Send`.
+    /// The `msghdr`/`iovec` raw pointers are built inside the sync
+    /// `try_io` closure precisely so they never cross the `.await`; if a
+    /// refactor leaked one into the await-held state, this stops
+    /// compiling. Never executed.
+    #[allow(dead_code)]
+    fn assert_send_with_fds_future_is_send(s: &NetlinkSocket) {
+        fn assert_send<T: Send>(_: &T) {}
+        let fut = s.send_with_fds(&[], &[]);
+        assert_send(&fut);
+    }
+
+    #[test]
+    fn scm_rights_control_single_fd() {
+        let (mut buf, space) = build_scm_rights_control(&[42]);
+        let mut mhdr: libc::msghdr = unsafe { std::mem::zeroed() };
+        mhdr.msg_control = buf.as_mut_ptr() as *mut libc::c_void;
+        mhdr.msg_controllen = space as _;
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&mhdr);
+            assert!(!cmsg.is_null());
+            assert_eq!(*(libc::CMSG_DATA(cmsg) as *const RawFd), 42);
+        }
+    }
+}
+
 #[cfg(all(test, feature = "syscall_batch"))]
 mod batch_tests {
     use super::*;
@@ -893,7 +1047,10 @@ mod batch_tests {
         for i in 0..NL_BATCH_SIZE {
             assert_eq!(bufs.storage[i].len(), NL_BUF_SIZE);
             assert_eq!(bufs.iovecs[i].iov_len, NL_BUF_SIZE);
-            assert_eq!(bufs.iovecs[i].iov_base as *const u8, bufs.storage[i].as_ptr());
+            assert_eq!(
+                bufs.iovecs[i].iov_base as *const u8,
+                bufs.storage[i].as_ptr()
+            );
             // msg_iov should point at the i-th iovec.
             assert_eq!(
                 bufs.msgs[i].msg_hdr.msg_iov as *const libc::iovec,
