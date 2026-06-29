@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Bridge per-VLAN entry options — `BRIDGE_VLANDB_ENTRY` (#137).**
+  Builds on the VLAN-DB foundation from the gopts work to expose the
+  per-(port, VLAN) options the legacy `BridgeVlanBuilder` membership
+  path can't: per-VLAN STP state (MSTP), multicast router mode,
+  multicast group limit, and neighbour suppression.
+  `BridgeVlanEntryOptionsBuilder` + `Connection::
+  {set,get}_bridge_vlan_entry_options[_by_index]` (`RTM_NEWVLAN` set /
+  `RTM_GETVLAN` dump), with a typed `BridgeVlanState` enum
+  (`BR_STATE_*`). Additive — the legacy add/del/PVID path is untouched.
+  Wire-format + robustness tests pin the attribute codes against the
+  kernel UAPI; read-only `MCAST_N_GROUPS` / per-VLAN `STATS` are not
+  settable. Demoed by `nlink-bridge vlan options show|set`; recipe
+  section in `docs/recipes/bridge-vlan.md`.
 - **net_shaper `NET_SHAPER_CMD_GROUP` — hierarchical TX shaping (#137).**
   The net_shaper re-audit against the kernel 6.13 `net_shaper.yaml`
   found the family otherwise matched the UAPI (discriminants already

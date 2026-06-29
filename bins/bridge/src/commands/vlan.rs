@@ -5,8 +5,8 @@ use nlink::{
     netlink::{
         Connection, Error, Result, Route,
         bridge_vlan::{
-            BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanGlobalOptionsBuilder,
-            BridgeVlanTunnelBuilder,
+            BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanEntryOptionsBuilder,
+            BridgeVlanGlobalOptionsBuilder, BridgeVlanState, BridgeVlanTunnelBuilder,
         },
     },
     output::{OutputFormat, OutputOptions},
@@ -44,6 +44,12 @@ enum VlanCommand {
     Global {
         #[command(subcommand)]
         command: GlobalCommand,
+    },
+    /// Manage per-VLAN entry options on a port (STP state, mcast router)
+    #[command(visible_alias = "opts")]
+    Options {
+        #[command(subcommand)]
+        command: OptionsCommand,
     },
 }
 
@@ -151,6 +157,67 @@ enum GlobalCommand {
     Set(GlobalSetArgs),
 }
 
+#[derive(Subcommand)]
+enum OptionsCommand {
+    /// Show per-VLAN entry options on a port
+    #[command(visible_alias = "list", visible_alias = "ls")]
+    Show {
+        /// Bridge port device
+        #[arg(long)]
+        dev: String,
+    },
+    /// Set per-VLAN entry options on a port
+    Set(OptionsSetArgs),
+}
+
+#[derive(Args)]
+struct OptionsSetArgs {
+    /// VLAN ID or range (e.g., 100 or 100-110)
+    #[arg(long)]
+    vid: String,
+
+    /// Bridge port device
+    #[arg(long)]
+    dev: String,
+
+    /// Per-VLAN STP state (disabled|listening|learning|forwarding|blocking)
+    #[arg(long)]
+    state: Option<BridgeVlanStateArg>,
+
+    /// Per-VLAN multicast router mode (0 disabled, 1 temp, 2 perm)
+    #[arg(long)]
+    mcast_router: Option<u8>,
+
+    /// Per-VLAN multicast group limit
+    #[arg(long)]
+    mcast_max_groups: Option<u32>,
+
+    /// Neighbour suppression (on/off)
+    #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
+    neigh_suppress: Option<bool>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum BridgeVlanStateArg {
+    Disabled,
+    Listening,
+    Learning,
+    Forwarding,
+    Blocking,
+}
+
+impl From<BridgeVlanStateArg> for BridgeVlanState {
+    fn from(v: BridgeVlanStateArg) -> Self {
+        match v {
+            BridgeVlanStateArg::Disabled => BridgeVlanState::Disabled,
+            BridgeVlanStateArg::Listening => BridgeVlanState::Listening,
+            BridgeVlanStateArg::Learning => BridgeVlanState::Learning,
+            BridgeVlanStateArg::Forwarding => BridgeVlanState::Forwarding,
+            BridgeVlanStateArg::Blocking => BridgeVlanState::Blocking,
+        }
+    }
+}
+
 #[derive(Args)]
 struct GlobalSetArgs {
     /// VLAN ID or range (e.g., 100 or 100-110)
@@ -206,6 +273,10 @@ impl VlanCmd {
             Some(VlanCommand::Global { command }) => match command {
                 GlobalCommand::Show { dev } => show_global(conn, &dev, format, opts).await,
                 GlobalCommand::Set(args) => set_global(conn, args).await,
+            },
+            Some(VlanCommand::Options { command }) => match command {
+                OptionsCommand::Show { dev } => show_options(conn, &dev, format, opts).await,
+                OptionsCommand::Set(args) => set_options(conn, args).await,
             },
         }
     }
@@ -507,6 +578,81 @@ async fn show_global(
 
 fn on_off(v: bool) -> &'static str {
     if v { "on" } else { "off" }
+}
+
+async fn show_options(
+    conn: &Connection<Route>,
+    dev: &str,
+    format: OutputFormat,
+    opts: &OutputOptions,
+) -> Result<()> {
+    let mut list = conn.get_bridge_vlan_entry_options(dev).await?;
+    list.sort_by_key(|o| o.vid());
+
+    match format {
+        OutputFormat::Json => {
+            let json_output: Vec<serde_json::Value> = list
+                .iter()
+                .map(|o| {
+                    serde_json::json!({
+                        "vid": o.vid(),
+                        "vid_end": o.vid_end(),
+                        "state": o.state().map(|s| format!("{s:?}")),
+                        "mcast_router": o.mcast_router(),
+                        "mcast_max_groups": o.mcast_max_groups(),
+                        "neigh_suppress": o.neigh_suppress(),
+                    })
+                })
+                .collect();
+            println!("{}", super::to_json_string(&json_output, opts.pretty)?);
+        }
+        OutputFormat::Text => {
+            println!("{:<8} {:<12} options", "port", "vlan-id");
+            for (i, o) in list.iter().enumerate() {
+                let vid = match o.vid_end() {
+                    Some(end) => format!("{}-{}", o.vid(), end),
+                    None => o.vid().to_string(),
+                };
+                let mut flags = Vec::new();
+                if let Some(s) = o.state() {
+                    flags.push(format!("state {s:?}"));
+                }
+                if let Some(v) = o.mcast_router() {
+                    flags.push(format!("mcast_router {v}"));
+                }
+                if let Some(v) = o.neigh_suppress() {
+                    flags.push(format!("neigh_suppress {}", on_off(v)));
+                }
+                let port_col = if i == 0 { dev } else { "" };
+                println!("{:<8} {:<12} {}", port_col, vid, flags.join(" "));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn set_options(conn: &Connection<Route>, args: OptionsSetArgs) -> Result<()> {
+    let (vid_start, vid_end) = parse_vid_range(&args.vid)?;
+
+    let mut builder = BridgeVlanEntryOptionsBuilder::new(vid_start).dev(&args.dev);
+    if let Some(end) = vid_end {
+        builder = builder.range(end);
+    }
+    if let Some(state) = args.state {
+        builder = builder.state(state.into());
+    }
+    if let Some(v) = args.mcast_router {
+        builder = builder.mcast_router(v);
+    }
+    if let Some(v) = args.mcast_max_groups {
+        builder = builder.mcast_max_groups(v);
+    }
+    if let Some(v) = args.neigh_suppress {
+        builder = builder.neigh_suppress(v);
+    }
+
+    conn.set_bridge_vlan_entry_options(builder).await
 }
 
 async fn set_global(conn: &Connection<Route>, args: GlobalSetArgs) -> Result<()> {

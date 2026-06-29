@@ -181,6 +181,40 @@ wire but not modelled. The shell equivalent is
 `bridge vlan global set dev br0 vid 10 mcast_snooping 1` /
 `bridge vlan global show dev br0`.
 
+## Per-VLAN entry options (per-port STP state / MSTP)
+
+The options above are bridge-*global*. A separate, per-(port, VLAN)
+set of options lives under `BRIDGE_VLANDB_ENTRY` — the per-VLAN STP
+state (MSTP), multicast router mode, multicast group limit, and
+neighbour suppression. Set them with
+[`BridgeVlanEntryOptionsBuilder`][entryopts] *after* the VLAN is a
+member of the port.
+
+[entryopts]: https://docs.rs/nlink/latest/nlink/netlink/bridge_vlan/struct.BridgeVlanEntryOptionsBuilder.html
+
+```rust,ignore
+use nlink::netlink::bridge_vlan::{BridgeVlanEntryOptionsBuilder, BridgeVlanState};
+
+// Put VLAN 100 into forwarding state on eth0, with neigh-suppress on.
+conn.set_bridge_vlan_entry_options(
+    BridgeVlanEntryOptionsBuilder::new(100)
+        .dev("eth0")
+        .state(BridgeVlanState::Forwarding)
+        .neigh_suppress(true),
+).await?;
+
+for o in conn.get_bridge_vlan_entry_options("eth0").await? {
+    println!("VLAN {}: state={:?}", o.vid(), o.state());
+}
+```
+
+This complements (does not replace) the `BridgeVlanBuilder`
+membership path — `add_bridge_vlan` makes the VLAN a member of the
+port; these options tune its behaviour. The `MCAST_N_GROUPS` and
+per-VLAN `STATS` attributes are read-only and not settable. Shell
+equivalent: `bridge vlan set dev eth0 vid 100 state 3`. The `nlink-bridge`
+demo: `nlink-bridge vlan options set --dev eth0 --vid 100 --state forwarding`.
+
 ## Caveats
 
 - `vlan_filtering` is a bridge-level toggle, not a port-level toggle.
