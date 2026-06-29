@@ -135,6 +135,19 @@ impl EthtoolBitset {
     }
 
     /// Parse compact bitmap format.
+    ///
+    /// **Name limitation:** the compact format carries no per-bit
+    /// names — only value/mask bitmaps indexed by position. So after
+    /// parsing a compact bitset, [`is_set_by_index`](Self::is_set_by_index)
+    /// works but the name-based accessors ([`is_set`](Self::is_set),
+    /// [`active_names`](Self::active_names)) return nothing, because the
+    /// kernel→string mapping (`link_mode_names[]` in
+    /// `net/ethtool/common.c`) is not on the wire. nlink's ethtool GETs
+    /// never request `ETHTOOL_FLAG_COMPACT_BITSET`, so the kernel
+    /// answers with the verbose (named) format and link-mode names are
+    /// populated; this path only triggers if a peer/kernel sends compact
+    /// anyway. The fix (a static index→name table) is deliberately not
+    /// done here — see #137.
     fn parse_compact(&mut self, value: &[u8], mask: Option<&[u8]>, is_nomask: bool) -> Result<()> {
         let bits_count = self.size.min((value.len() * 8) as u32);
 
@@ -409,6 +422,94 @@ mod tests {
             .collect::<Vec<_>>();
         active.sort();
         assert_eq!(active, vec!["magic".to_string(), "phy".to_string()]);
+    }
+
+    /// Emit a netlink attribute (TLV, 4-byte aligned) into `buf`.
+    fn push_attr(buf: &mut Vec<u8>, atype: u16, payload: &[u8]) {
+        let len = 4 + payload.len();
+        buf.extend_from_slice(&(len as u16).to_ne_bytes());
+        buf.extend_from_slice(&atype.to_ne_bytes());
+        buf.extend_from_slice(payload);
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+    }
+
+    /// Link-mode bitsets in the **verbose** (kernel-default) format
+    /// carry names, so the name-based `LinkModes` accessors work. Pin
+    /// that the linkmodes-shaped names round-trip through write/parse.
+    #[test]
+    fn link_mode_named_bitset_roundtrips() {
+        use crate::netlink::builder::MessageBuilder;
+        use crate::netlink::genl::ethtool::EthtoolLinkmodesAttr;
+        let mut bs = EthtoolBitset::new();
+        bs.add(1, "10baseT/Full", false);
+        bs.add(5, "1000baseT/Full", true);
+        bs.add(6, "Autoneg", true);
+        bs.add(7, "TP", false);
+
+        let mut builder = MessageBuilder::new(0, 0);
+        bs.write_to(&mut builder, EthtoolLinkmodesAttr::Supported as u16);
+        let bytes = builder.finish();
+        let (s, e) =
+            find_attr_payload(&bytes, EthtoolLinkmodesAttr::Supported as u16).expect("attr present");
+        let parsed = EthtoolBitset::parse(&bytes[s..e]).expect("parse");
+
+        assert!(parsed.is_set("1000baseT/Full"));
+        assert!(parsed.is_set("Autoneg"));
+        assert!(!parsed.is_set("10baseT/Full"));
+        assert!(!parsed.is_set("TP"));
+        let mut active = parsed.active_names();
+        active.sort_unstable();
+        assert_eq!(active, vec!["1000baseT/Full", "Autoneg"]);
+    }
+
+    /// The **compact** format (value + mask bitmaps, no names) had no
+    /// test coverage. Pin the value&mask decode by index, the
+    /// out-of-mask exclusion, and the documented name limitation
+    /// (`active_names()` empty because compact carries no names).
+    #[test]
+    fn compact_bitset_decodes_by_index_with_mask() {
+        let mut payload = Vec::new();
+        push_attr(&mut payload, EthtoolBitsetAttr::Size as u16, &8u32.to_ne_bytes());
+        // bits 1 and 3 set in value
+        push_attr(&mut payload, EthtoolBitsetAttr::Value as u16, &[0b0000_1010]);
+        // bits 1,2,3 relevant in mask (bit 0 not relevant)
+        push_attr(&mut payload, EthtoolBitsetAttr::Mask as u16, &[0b0000_1110]);
+
+        let bs = EthtoolBitset::parse(&payload).expect("parse compact");
+        assert!(bs.is_set_by_index(1), "bit 1 set + in mask");
+        assert!(!bs.is_set_by_index(2), "bit 2 clear + in mask");
+        assert!(bs.is_set_by_index(3), "bit 3 set + in mask");
+        // bit 0 is set in value's complement but not in mask → not recorded.
+        assert!(!bs.is_set_by_index(0));
+        // Compact carries no names: name-based views are empty.
+        assert!(bs.active_names().is_empty());
+        assert!(bs.all_names().is_empty());
+    }
+
+    /// Compact `nomask` form (every bit relevant) decodes all bits up to
+    /// `size` without a mask attribute.
+    #[test]
+    fn compact_bitset_nomask_decodes_all_bits() {
+        let mut payload = Vec::new();
+        push_attr(&mut payload, EthtoolBitsetAttr::Nomask as u16, &[]);
+        push_attr(&mut payload, EthtoolBitsetAttr::Size as u16, &4u32.to_ne_bytes());
+        push_attr(&mut payload, EthtoolBitsetAttr::Value as u16, &[0b0000_0101]);
+
+        let bs = EthtoolBitset::parse(&payload).expect("parse nomask compact");
+        assert!(bs.is_set_by_index(0));
+        assert!(!bs.is_set_by_index(1));
+        assert!(bs.is_set_by_index(2));
+        assert!(!bs.is_set_by_index(3));
+    }
+
+    #[test]
+    fn bitset_parse_arbitrary_bytes_never_panics() {
+        for len in 0..48usize {
+            let data: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(31)).collect();
+            let _ = EthtoolBitset::parse(&data);
+        }
     }
 
     /// Helper: walk netlink message bytes, find the (start, end)
