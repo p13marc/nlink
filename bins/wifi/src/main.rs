@@ -331,6 +331,18 @@ async fn main() -> Result<()> {
                 if let Some(tx_bytes) = sta.tx_bytes {
                     println!("  TX bytes: {tx_bytes}");
                 }
+                if let Some(rx) = sta.rx_packets {
+                    println!("  RX packets: {rx}");
+                }
+                if let Some(tx) = sta.tx_packets {
+                    println!("  TX packets: {tx}");
+                }
+                if let (Some(retries), Some(failed)) = (sta.tx_retries, sta.tx_failed) {
+                    println!("  TX retries: {retries}, failed: {failed}");
+                }
+                if let Some(ack) = sta.ack_signal_dbm {
+                    println!("  ACK signal: {ack} dBm");
+                }
             }
         }
 

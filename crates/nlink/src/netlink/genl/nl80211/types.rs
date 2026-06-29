@@ -266,7 +266,12 @@ impl ScanResult {
 }
 
 /// Station (connected peer) information.
-#[derive(Debug, Clone)]
+///
+/// `#[non_exhaustive]` — the kernel grows `NL80211_STA_INFO_*`
+/// attributes over time; new fields are added without breaking
+/// downstream readers.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct StationInfo {
     /// Station MAC address.
     pub mac: [u8; 6],
@@ -278,14 +283,32 @@ pub struct StationInfo {
     pub rx_bytes: Option<u64>,
     /// Total bytes transmitted to this station.
     pub tx_bytes: Option<u64>,
+    /// Total packets received from this station.
+    pub rx_packets: Option<u32>,
+    /// Total packets transmitted to this station.
+    pub tx_packets: Option<u32>,
+    /// Total TX retries to this station.
+    pub tx_retries: Option<u32>,
+    /// Total failed TX packets to this station.
+    pub tx_failed: Option<u32>,
     /// Signal strength in dBm.
     pub signal_dbm: Option<i8>,
     /// Average signal strength in dBm.
     pub signal_avg_dbm: Option<i8>,
+    /// Average beacon signal strength in dBm.
+    pub beacon_signal_avg_dbm: Option<i8>,
+    /// Signal strength of the last ACK frame, in dBm.
+    pub ack_signal_dbm: Option<i8>,
     /// TX bitrate info.
     pub tx_bitrate: Option<BitrateInfo>,
     /// RX bitrate info.
     pub rx_bitrate: Option<BitrateInfo>,
+    /// Count of times beacon loss was detected.
+    pub beacon_loss: Option<u32>,
+    /// RX packets dropped for unspecified reasons.
+    pub rx_drop_misc: Option<u64>,
+    /// Expected throughput in kbit/s (considers rate + probabilities).
+    pub expected_throughput_kbps: Option<u32>,
     /// Time connected in seconds.
     pub connected_time_secs: Option<u32>,
 }
