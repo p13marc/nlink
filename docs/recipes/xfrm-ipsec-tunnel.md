@@ -233,7 +233,50 @@ The runner installs SAs and SPs, dumps them back to verify they
 landed, exercises `update_sa` for in-place key rotation, then
 tears down via `del_sa` / `flush_sp`. Output shows each step's
 SA / SP visibility — useful as a smoke test after kernel
-upgrades or when bringing up a new lab box.
+upgrades or when bringing up a new lab box. It also subscribes a
+second connection to the XFRM multicast groups and prints the
+`XfrmEvent`s the mutations emit (see below).
+
+## Monitoring events
+
+`Connection<Xfrm>` implements `EventSource`, so the same socket
+abstraction that dumps tables can stream live notifications —
+the programmatic equivalent of `ip xfrm monitor`:
+
+```rust
+use nlink::netlink::{Connection, Xfrm};
+use nlink::netlink::xfrm::{XfrmEvent, XfrmGroup};
+use tokio_stream::StreamExt;
+
+let conn = Connection::<Xfrm>::new()?;
+conn.subscribe_all()?;                 // or subscribe(&[XfrmGroup::Sa, ...])
+let mut events = conn.events().await;
+while let Some(evt) = events.next().await {
+    match evt? {
+        XfrmEvent::Acquire { selector, .. } => {
+            // kernel wants an SA negotiated for `selector` —
+            // the trigger an IKE daemon acts on.
+        }
+        XfrmEvent::ExpireSa { sa, hard } if hard => {
+            // SA hit its hard limit and is now dead → rekey.
+        }
+        other => println!("{other:?}"),
+    }
+}
+```
+
+`subscribe_all()` joins every `XFRMNLGRP_*` group (SA, policy,
+expire, acquire, report, migrate, mapping). `XfrmEvent` is
+`#[non_exhaustive]`; notification types nlink doesn't model in
+detail surface as `XfrmEvent::Other { msg_type }` rather than
+being dropped. The `watch` mode of the example streams these
+forever:
+
+```bash
+sudo cargo run -p nlink --example xfrm_ipsec_monitor -- watch
+# or, via the demo binary:
+sudo nlink-ip xfrm monitor
+```
 
 ## See also
 

@@ -17,6 +17,26 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **XFRM (IPsec) monitor event API (#137).** `Connection<Xfrm>` now
+  implements `EventSource`: `subscribe(&[XfrmGroup])` /
+  `subscribe_all()` join the kernel's `XFRMNLGRP_*` multicast groups,
+  and `events()` / `into_events()` stream typed `XfrmEvent`s —
+  `NewSa` / `DelSa` / `ExpireSa { hard }` / `NewPolicy` / `DelPolicy` /
+  `ExpirePolicy { hard }` / `Acquire` (the SA-negotiation trigger IKE
+  daemons watch) / `Report` / `FlushSa` / `FlushPolicy`. The enum is
+  `#[non_exhaustive]` and unmodelled notification types (MIGRATE,
+  MAPPING, …) surface as `XfrmEvent::Other { msg_type }` rather than
+  being dropped. This closes the long-standing `ip xfrm monitor` stub
+  (previously `"not yet implemented (no XFRM event API)"`) — the
+  `nlink-ip xfrm monitor` subcommand now streams events. Event bodies
+  are parsed from the authoritative `linux/xfrm.h` layouts: `DELSA` /
+  `DELPOLICY` carry the compact `xfrm_usersa_id` / `xfrm_userpolicy_id`
+  (surfaced as `XfrmSaId` / `XfrmPolicyId`), `EXPIRE` / `POLEXPIRE` wrap
+  the state struct with a trailing `hard` byte, and `ACQUIRE` is pinned
+  by a 280-byte `sizeof` regression test. The walker skips malformed
+  frames (Parser-robustness rule 3) so one bad frame can't kill a
+  long-lived subscriber. Demoed by `examples/xfrm/ipsec_monitor.rs`
+  (`watch` mode + event collection during the `--apply` lifecycle).
 - **nl80211 scan/BSS coverage (#137).** Following the station-info audit,
   audited the `NL80211_BSS_*` attribute ids against `enum nl80211_bss`
   (all correct — the RX_BITRATE-class drift was isolated to STA_INFO) and

@@ -63,6 +63,12 @@ const XFRM_MSG_FLUSHSA: u16 = 28;
 // Plan 221: FLUSHPOLICY was hardcoded to 28 (which is FLUSHSA); flush_policy() was
 // SILENTLY FLUSHING ALL SAs instead of all SPs. Corrected to the kernel UAPI value 29.
 const XFRM_MSG_FLUSHPOLICY: u16 = 29;
+// Notification-only message types (delivered on the XFRM multicast groups,
+// never sent by nlink). Values from the same linux/xfrm.h enum.
+const XFRM_MSG_ACQUIRE: u16 = 23;
+const XFRM_MSG_EXPIRE: u16 = 24;
+const XFRM_MSG_POLEXPIRE: u16 = 27;
+const XFRM_MSG_REPORT: u16 = 32;
 
 // XFRM attribute types (from linux/xfrm.h enum xfrm_attr_type_t)
 const XFRMA_ALG_AUTH: u16 = 1;
@@ -1360,6 +1366,53 @@ impl XfrmSpBuilder {
 }
 
 impl Connection<Xfrm> {
+    /// Subscribe to XFRM multicast notification groups.
+    ///
+    /// After subscribing, drive the stream with
+    /// [`Connection::events`](super::Connection::events) /
+    /// [`into_events`](super::Connection::into_events); each frame
+    /// parses to an [`XfrmEvent`]. Like every multicast subscription
+    /// this is namespace-local to the connection's netns.
+    ///
+    /// ```no_run
+    /// # async fn example() -> nlink::Result<()> {
+    /// use nlink::netlink::{Connection, Xfrm};
+    /// use nlink::netlink::xfrm::XfrmGroup;
+    /// use tokio_stream::StreamExt;
+    ///
+    /// let conn = Connection::<Xfrm>::new()?;
+    /// conn.subscribe(&[XfrmGroup::Sa, XfrmGroup::Expire])?;
+    /// let mut events = conn.events().await;
+    /// while let Some(evt) = events.next().await {
+    ///     println!("{:?}", evt?);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(level = "info", skip(self), fields(groups = ?groups))]
+    pub fn subscribe(&self, groups: &[XfrmGroup]) -> Result<()> {
+        for group in groups {
+            self.socket().add_membership(group.to_group())?;
+        }
+        Ok(())
+    }
+
+    /// Subscribe to every XFRM notification group (SA, policy, expire,
+    /// acquire, report, migrate, mapping) — the equivalent of
+    /// `ip xfrm monitor` with no type filter.
+    #[tracing::instrument(level = "info", skip_all)]
+    pub fn subscribe_all(&self) -> Result<()> {
+        self.subscribe(&[
+            XfrmGroup::Acquire,
+            XfrmGroup::Expire,
+            XfrmGroup::Sa,
+            XfrmGroup::Policy,
+            XfrmGroup::Report,
+            XfrmGroup::Migrate,
+            XfrmGroup::Mapping,
+        ])
+    }
+
     /// Create a Security Association.
     ///
     /// Sends `XFRM_MSG_NEWSA` with `NLM_F_CREATE | NLM_F_EXCL`.
@@ -1989,6 +2042,248 @@ fn parse_nla<'a>(input: &mut &'a [u8]) -> Option<(u16, &'a [u8])> {
     }
 
     Some((attr_type, payload))
+}
+
+// ============================================================================
+// Monitor / event stream (XFRM multicast notifications) — #137
+// ============================================================================
+
+/// An XFRM multicast notification group (`XFRMNLGRP_*` in
+/// `linux/xfrm.h`). Pass to [`Connection::subscribe`] to receive the
+/// matching [`XfrmEvent`]s on the connection's event stream.
+///
+/// The kernel multicast-group *number* (what `NETLINK_ADD_MEMBERSHIP`
+/// takes) equals the `XFRMNLGRP_*` enum value directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum XfrmGroup {
+    /// SA-negotiation requests (`XFRM_MSG_ACQUIRE`) — the trigger an
+    /// IKE daemon watches.
+    Acquire,
+    /// SA / policy lifetime expiry (`XFRM_MSG_EXPIRE`, `_POLEXPIRE`).
+    Expire,
+    /// SA add / delete / update (`XFRM_MSG_NEWSA`/`DELSA`/`UPDSA`,
+    /// plus `FLUSHSA`).
+    Sa,
+    /// Policy add / delete / update (`XFRM_MSG_NEWPOLICY`/`DELPOLICY`/
+    /// `UPDPOLICY`, plus `FLUSHPOLICY`).
+    Policy,
+    /// Async-event reports (`XFRM_MSG_REPORT`).
+    Report,
+    /// Policy migration (`XFRM_MSG_MIGRATE`).
+    Migrate,
+    /// NAT mapping changes (`XFRM_MSG_MAPPING`).
+    Mapping,
+}
+
+impl XfrmGroup {
+    /// Raw `XFRMNLGRP_*` multicast group number.
+    fn to_group(self) -> u32 {
+        match self {
+            Self::Acquire => 1, // XFRMNLGRP_ACQUIRE
+            Self::Expire => 2,  // XFRMNLGRP_EXPIRE
+            Self::Sa => 3,      // XFRMNLGRP_SA
+            Self::Policy => 4,  // XFRMNLGRP_POLICY
+            Self::Report => 6,  // XFRMNLGRP_REPORT
+            Self::Migrate => 7, // XFRMNLGRP_MIGRATE
+            Self::Mapping => 8, // XFRMNLGRP_MAPPING
+        }
+    }
+}
+
+/// Compact identifier for a deleted SA (`XFRM_MSG_DELSA` carries
+/// `xfrm_usersa_id`, not the full SA state).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct XfrmSaId {
+    /// Destination address.
+    pub dst_addr: Option<IpAddr>,
+    /// Security Parameter Index.
+    pub spi: u32,
+    /// IPsec protocol.
+    pub protocol: IpsecProtocol,
+}
+
+/// Compact identifier for a deleted policy (`XFRM_MSG_DELPOLICY`
+/// carries `xfrm_userpolicy_id`).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct XfrmPolicyId {
+    /// Traffic selector the policy matched.
+    pub selector: TrafficSelector,
+    /// Policy index.
+    pub index: u32,
+    /// Policy direction.
+    pub direction: PolicyDirection,
+}
+
+/// `xfrm_user_acquire` — body of an `XFRM_MSG_ACQUIRE` notification.
+/// Fixed-layout prefix (no trailing attrs are parsed here). Wire size
+/// 280 bytes: `xfrm_id`(24) + `xfrm_address_t`(16) +
+/// `xfrm_selector`(56) + `xfrm_userpolicy_info`(168) + 4×u32(16).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
+struct XfrmUserAcquire {
+    id: XfrmId,
+    saddr: XfrmAddress,
+    sel: XfrmSelector,
+    policy: XfrmUserpolicyInfo,
+    aalgos: u32,
+    ealgos: u32,
+    calgos: u32,
+    seq: u32,
+}
+
+/// An XFRM notification delivered on a subscribed multicast group.
+///
+/// Obtain a stream with [`Connection::subscribe`] (or
+/// [`Connection::subscribe_all`]) followed by
+/// [`Connection::events`](super::Connection::events). The enum is
+/// `#[non_exhaustive]`: the kernel's `XFRM_MSG_*` notification set
+/// grows, and unmodelled types surface as [`XfrmEvent::Other`] rather
+/// than being silently dropped.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum XfrmEvent {
+    /// SA added or updated (`XFRM_MSG_NEWSA` / `UPDSA`).
+    NewSa(SecurityAssociation),
+    /// SA deleted (`XFRM_MSG_DELSA`) — compact id only.
+    DelSa(XfrmSaId),
+    /// SA lifetime threshold crossed (`XFRM_MSG_EXPIRE`). `hard`
+    /// distinguishes the soft (rekey-soon) from the hard (SA dead)
+    /// limit.
+    ExpireSa {
+        /// The expiring SA (identity + counters; algorithms omitted).
+        sa: SecurityAssociation,
+        /// `true` for the hard limit, `false` for the soft limit.
+        hard: bool,
+    },
+    /// Policy added or updated (`XFRM_MSG_NEWPOLICY` / `UPDPOLICY`).
+    NewPolicy(SecurityPolicy),
+    /// Policy deleted (`XFRM_MSG_DELPOLICY`) — compact id only.
+    DelPolicy(XfrmPolicyId),
+    /// Policy lifetime threshold crossed (`XFRM_MSG_POLEXPIRE`).
+    ExpirePolicy {
+        /// The expiring policy.
+        policy: SecurityPolicy,
+        /// `true` for the hard limit, `false` for the soft limit.
+        hard: bool,
+    },
+    /// Kernel requests SA negotiation for matching traffic
+    /// (`XFRM_MSG_ACQUIRE`).
+    Acquire {
+        /// Traffic selector that triggered the acquire.
+        selector: TrafficSelector,
+        /// Policy demanding the SA.
+        policy: SecurityPolicy,
+    },
+    /// Async-event report (`XFRM_MSG_REPORT`).
+    Report {
+        /// IPsec protocol the report concerns.
+        protocol: IpsecProtocol,
+        /// Affected traffic selector.
+        selector: TrafficSelector,
+    },
+    /// All SAs flushed (`XFRM_MSG_FLUSHSA`).
+    FlushSa,
+    /// All policies flushed (`XFRM_MSG_FLUSHPOLICY`).
+    FlushPolicy,
+    /// A notification nlink does not model in detail (e.g.
+    /// `XFRM_MSG_MIGRATE`, `XFRM_MSG_MAPPING`). Surfaced by message
+    /// type so monitors can still report it.
+    Other {
+        /// The raw `XFRM_MSG_*` message type.
+        msg_type: u16,
+    },
+}
+
+/// Parse one XFRM notification message body (everything after the
+/// `nlmsghdr`) into an [`XfrmEvent`]. Returns `None` for messages that
+/// carry no actionable notification (e.g. an `NLMSG_DONE` / error
+/// frame whose type we ignore) or that are too short to parse.
+fn parse_xfrm_event(msg_type: u16, body: &[u8]) -> Option<XfrmEvent> {
+    match msg_type {
+        XFRM_MSG_NEWSA | XFRM_MSG_UPDSA => parse_sa_payload(body).map(XfrmEvent::NewSa),
+        XFRM_MSG_DELSA => {
+            let (id, _) = XfrmUsersaId::ref_from_prefix(body).ok()?;
+            Some(XfrmEvent::DelSa(XfrmSaId {
+                dst_addr: id.daddr.to_ip(id.family),
+                spi: u32::from_be(id.spi),
+                protocol: IpsecProtocol::from_u8(id.proto),
+            }))
+        }
+        XFRM_MSG_EXPIRE => {
+            // xfrm_user_expire = xfrm_usersa_info + u8 hard. Parse the
+            // SA from just the fixed prefix (so the attr-walk sees no
+            // input), then read the trailing `hard` byte.
+            let info_size = std::mem::size_of::<XfrmUsersaInfo>();
+            let sa = parse_sa_payload(body.get(..info_size)?)?;
+            let hard = body.get(info_size).copied().unwrap_or(0) != 0;
+            Some(XfrmEvent::ExpireSa { sa, hard })
+        }
+        XFRM_MSG_NEWPOLICY | XFRM_MSG_UPDPOLICY => parse_sp_payload(body).map(XfrmEvent::NewPolicy),
+        XFRM_MSG_DELPOLICY => {
+            let (id, _) = XfrmUserpolicyId::ref_from_prefix(body).ok()?;
+            Some(XfrmEvent::DelPolicy(XfrmPolicyId {
+                selector: TrafficSelector::from_selector(id.sel),
+                index: id.index,
+                direction: PolicyDirection::from_u8(id.dir),
+            }))
+        }
+        XFRM_MSG_POLEXPIRE => {
+            // xfrm_user_polexpire = xfrm_userpolicy_info + u8 hard.
+            let info_size = std::mem::size_of::<XfrmUserpolicyInfo>();
+            let policy = parse_sp_payload(body.get(..info_size)?)?;
+            let hard = body.get(info_size).copied().unwrap_or(0) != 0;
+            Some(XfrmEvent::ExpirePolicy { policy, hard })
+        }
+        XFRM_MSG_ACQUIRE => {
+            let (acq, _) = XfrmUserAcquire::ref_from_prefix(body).ok()?;
+            let selector = TrafficSelector::from_selector(acq.sel);
+            // The embedded policy is followed by the algorithm bitmasks,
+            // not attrs — slice to exactly the policy struct so
+            // parse_sp_payload's attr-walk sees nothing.
+            let pol_off = std::mem::size_of::<XfrmId>()
+                + std::mem::size_of::<XfrmAddress>()
+                + std::mem::size_of::<XfrmSelector>();
+            let pol_end = pol_off + std::mem::size_of::<XfrmUserpolicyInfo>();
+            let policy = parse_sp_payload(body.get(pol_off..pol_end)?)?;
+            Some(XfrmEvent::Acquire { selector, policy })
+        }
+        XFRM_MSG_REPORT => {
+            // xfrm_user_report = u8 proto + xfrm_selector. The selector
+            // is u32-aligned, so it begins at offset 4 (3 pad bytes).
+            let proto = *body.first()?;
+            let (sel, _) = XfrmSelector::ref_from_prefix(body.get(4..)?).ok()?;
+            Some(XfrmEvent::Report {
+                protocol: IpsecProtocol::from_u8(proto),
+                selector: TrafficSelector::from_selector(*sel),
+            })
+        }
+        XFRM_MSG_FLUSHSA => Some(XfrmEvent::FlushSa),
+        XFRM_MSG_FLUSHPOLICY => Some(XfrmEvent::FlushPolicy),
+        // GETSA/GETPOLICY/ALLOCSPI etc. are request types, never
+        // multicast notifications; ignore. Everything else we don't
+        // model (MIGRATE, MAPPING, *AE, *INFO) surfaces by type.
+        XFRM_MSG_GETSA | XFRM_MSG_GETPOLICY => None,
+        t if (XFRM_MSG_NEWSA..=XFRM_MSG_REPORT + 6).contains(&t) => {
+            Some(XfrmEvent::Other { msg_type: t })
+        }
+        _ => None,
+    }
+}
+
+/// Parse all XFRM notifications from a received buffer. Walks
+/// [`MessageIter`], skipping malformed frames (Parser-robustness
+/// rule 3 — one bad frame must not kill a long-lived subscriber).
+pub(crate) fn parse_xfrm_events(data: &[u8]) -> Vec<XfrmEvent> {
+    let mut events = Vec::new();
+    for (header, payload) in super::message::MessageIter::new(data).flatten() {
+        if let Some(event) = parse_xfrm_event(header.nlmsg_type, payload) {
+            events.push(event);
+        }
+    }
+    events
 }
 
 /// Parse an XFRM algorithm.
@@ -2840,5 +3135,155 @@ mod stream_tests {
             <SecurityPolicy as FromNetlink>::from_bytes(&payload).expect("zero body should parse");
         assert_eq!(sp.priority, 0);
         assert_eq!(sp.index, 0);
+    }
+}
+
+#[cfg(test)]
+mod xfrm_event_tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+    use zerocopy::IntoBytes;
+
+    /// `XfrmGroup` maps to the kernel `XFRMNLGRP_*` group numbers.
+    #[test]
+    fn group_numbers_match_kernel() {
+        assert_eq!(XfrmGroup::Acquire.to_group(), 1);
+        assert_eq!(XfrmGroup::Expire.to_group(), 2);
+        assert_eq!(XfrmGroup::Sa.to_group(), 3);
+        assert_eq!(XfrmGroup::Policy.to_group(), 4);
+        assert_eq!(XfrmGroup::Report.to_group(), 6);
+        assert_eq!(XfrmGroup::Migrate.to_group(), 7);
+        assert_eq!(XfrmGroup::Mapping.to_group(), 8);
+    }
+
+    /// `xfrm_user_acquire` wire size is 280 bytes (pins the embedded
+    /// struct offsets used by the ACQUIRE parser).
+    #[test]
+    fn acquire_struct_size() {
+        assert_eq!(std::mem::size_of::<XfrmUserAcquire>(), 280);
+    }
+
+    fn sa_info(spi: u32) -> XfrmUsersaInfo {
+        let mut info = XfrmUsersaInfo {
+            family: 2, // AF_INET
+            mode: 1,   // tunnel
+            reqid: 42,
+            ..Default::default()
+        };
+        info.id.daddr = XfrmAddress::from_v4(Ipv4Addr::new(10, 0, 0, 1));
+        info.id.spi = spi.to_be();
+        info.id.proto = IPPROTO_ESP;
+        info.saddr = XfrmAddress::from_v4(Ipv4Addr::new(10, 0, 0, 2));
+        info.sel.family = 2;
+        info
+    }
+
+    /// NEWSA / UPDSA bodies parse into a full SA.
+    #[test]
+    fn parse_newsa() {
+        let body = sa_info(0x1000).as_bytes().to_vec();
+        for ty in [XFRM_MSG_NEWSA, XFRM_MSG_UPDSA] {
+            match parse_xfrm_event(ty, &body) {
+                Some(XfrmEvent::NewSa(sa)) => {
+                    assert_eq!(sa.spi, 0x1000);
+                    assert_eq!(sa.protocol, IpsecProtocol::Esp);
+                    assert_eq!(sa.dst_addr, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+                }
+                other => panic!("expected NewSa, got {other:?}"),
+            }
+        }
+    }
+
+    /// DELSA carries the compact `xfrm_usersa_id`, not the full state.
+    #[test]
+    fn parse_delsa() {
+        let id = XfrmUsersaId {
+            daddr: XfrmAddress::from_v4(Ipv4Addr::new(192, 168, 1, 1)),
+            spi: 0xABCDu32.to_be(),
+            family: 2,
+            proto: IPPROTO_ESP,
+            _pad: 0,
+        };
+        match parse_xfrm_event(XFRM_MSG_DELSA, id.as_bytes()) {
+            Some(XfrmEvent::DelSa(sa_id)) => {
+                assert_eq!(sa_id.spi, 0xABCD);
+                assert_eq!(sa_id.protocol, IpsecProtocol::Esp);
+                assert_eq!(
+                    sa_id.dst_addr,
+                    Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))
+                );
+            }
+            other => panic!("expected DelSa, got {other:?}"),
+        }
+    }
+
+    /// EXPIRE is `xfrm_usersa_info` + a trailing `hard` byte.
+    #[test]
+    fn parse_expire_reads_hard_flag() {
+        let mut body = sa_info(0x2000).as_bytes().to_vec();
+        body.push(1); // hard = true
+        match parse_xfrm_event(XFRM_MSG_EXPIRE, &body) {
+            Some(XfrmEvent::ExpireSa { sa, hard }) => {
+                assert_eq!(sa.spi, 0x2000);
+                assert!(hard);
+            }
+            other => panic!("expected ExpireSa, got {other:?}"),
+        }
+
+        // Soft limit: hard byte = 0.
+        let mut soft = sa_info(0x2001).as_bytes().to_vec();
+        soft.push(0);
+        match parse_xfrm_event(XFRM_MSG_EXPIRE, &soft) {
+            Some(XfrmEvent::ExpireSa { hard, .. }) => assert!(!hard),
+            other => panic!("expected ExpireSa, got {other:?}"),
+        }
+    }
+
+    /// FLUSH notifications carry no body.
+    #[test]
+    fn parse_flush() {
+        assert!(matches!(
+            parse_xfrm_event(XFRM_MSG_FLUSHSA, &[]),
+            Some(XfrmEvent::FlushSa)
+        ));
+        assert!(matches!(
+            parse_xfrm_event(XFRM_MSG_FLUSHPOLICY, &[]),
+            Some(XfrmEvent::FlushPolicy)
+        ));
+    }
+
+    /// Unmodelled notification types surface as `Other`, not dropped.
+    #[test]
+    fn unmodelled_types_surface_as_other() {
+        // 33 = XFRM_MSG_MIGRATE, 38 = XFRM_MSG_MAPPING.
+        for ty in [33u16, 38u16] {
+            assert!(matches!(
+                parse_xfrm_event(ty, &[]),
+                Some(XfrmEvent::Other { msg_type }) if msg_type == ty
+            ));
+        }
+        // A request-only type and an out-of-range type are ignored.
+        assert!(parse_xfrm_event(XFRM_MSG_GETSA, &[]).is_none());
+        assert!(parse_xfrm_event(999, &[]).is_none());
+    }
+
+    /// Truncated bodies return `None` rather than panicking
+    /// (Parser-robustness).
+    #[test]
+    fn truncated_bodies_dont_panic() {
+        assert!(parse_xfrm_event(XFRM_MSG_NEWSA, &[1, 2, 3]).is_none());
+        assert!(parse_xfrm_event(XFRM_MSG_DELSA, &[1, 2]).is_none());
+        assert!(parse_xfrm_event(XFRM_MSG_EXPIRE, &[0u8; 4]).is_none());
+        assert!(parse_xfrm_event(XFRM_MSG_ACQUIRE, &[0u8; 10]).is_none());
+        assert!(parse_xfrm_event(XFRM_MSG_REPORT, &[]).is_none());
+    }
+
+    /// The buffer-level walker skips malformed frames (rule 3) — a
+    /// truncated frame must not abort the stream.
+    #[test]
+    fn parse_events_skips_garbage() {
+        // Not a valid netlink message; MessageIter yields nothing.
+        let events = parse_xfrm_events(&[0xFF, 0x00, 0x01]);
+        assert!(events.is_empty());
     }
 }

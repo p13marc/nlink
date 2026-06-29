@@ -397,7 +397,9 @@ use super::{
     messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage},
     netfilter::{ConntrackEvent, parse_conntrack_event},
     parse::FromNetlink,
-    protocol::{Connector, Devlink, Ethtool, KobjectUevent, Netfilter, Nl80211, Route, SELinux},
+    protocol::{
+        Connector, Devlink, Ethtool, KobjectUevent, Netfilter, Nl80211, Route, SELinux, Xfrm,
+    },
     selinux::SELinuxEvent,
     uevent::Uevent,
 };
@@ -502,6 +504,17 @@ fn parse_route_event(msg_type: u16, payload: &[u8]) -> Option<NetworkEvent> {
             .map(NetworkEvent::DelAction),
 
         _ => None,
+    }
+}
+
+// XFRM (IPsec) protocol events
+impl private::Sealed for Xfrm {}
+
+impl EventSource for Xfrm {
+    type Event = super::xfrm::XfrmEvent;
+
+    fn parse_events(data: &[u8]) -> Vec<super::xfrm::XfrmEvent> {
+        super::xfrm::parse_xfrm_events(data)
     }
 }
 
