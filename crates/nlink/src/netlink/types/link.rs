@@ -583,7 +583,7 @@ pub mod bridge_vlandb_entry {
     pub const INFO: u16 = 1;
     /// Upper VLAN ID of a range (u16); present with [`INFO`] for ranges.
     pub const RANGE: u16 = 2;
-    /// Per-VLAN STP state (u8, `BR_STATE_*` — see [`br_state`]).
+    /// Per-VLAN STP state (u8, `BR_STATE_*` — see [`super::br_state`]).
     pub const STATE: u16 = 3;
     /// VLAN tunnel info (nested).
     pub const TUNNEL_INFO: u16 = 4;

@@ -35,6 +35,17 @@ All notable changes to this project will be documented in this file.
   `#[non_exhaustive]` + `Default` so future kernel attributes are
   additive. Surfaced in the `nlink-wifi` station display; a parse test
   proves TX_FAILED (12) and RX_BITRATE (14) land in distinct fields.
+- **nl80211 channel survey — `NL80211_CMD_GET_SURVEY` (#137).** Completes
+  the wireless read trio (scan + station + survey). `Connection::
+  get_survey[_by_index]` dumps per-frequency `SurveyInfo`: noise floor,
+  the `in_use` flag, and the channel-time counters (`time`, `time_busy`,
+  `time_ext_busy`, `time_rx`, `time_tx`, `time_scan`, `time_bss_rx`) plus
+  `frequency_offset_khz`. Channel utilisation — the headline number for
+  channel selection — is `time_busy / time`; the `nlink-wifi survey`
+  subcommand prints it. `SurveyInfo` is `#[non_exhaustive]` + `Default`.
+  A test pins every modelled `NL80211_SURVEY_INFO_*` constant against
+  `enum nl80211_survey_info`, and parse tests cover the full nest, the
+  zero-length `IN_USE` flag, and truncated/missing input.
 - **Bridge per-VLAN entry options — `BRIDGE_VLANDB_ENTRY` (#137).**
   Builds on the VLAN-DB foundation from the gopts work to expose the
   per-(port, VLAN) options the legacy `BridgeVlanBuilder` membership
