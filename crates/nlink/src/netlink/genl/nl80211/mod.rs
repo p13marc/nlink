@@ -119,6 +119,8 @@ pub const NL80211_ATTR_PS_STATE: u16 = 91;
 // BSS Nested Attributes
 // =============================================================================
 
+// Values are the positions in `enum nl80211_bss` (linux/nl80211.h);
+// pinned by a test in connection.rs.
 pub const NL80211_BSS_BSSID: u16 = 1;
 pub const NL80211_BSS_FREQUENCY: u16 = 2;
 pub const NL80211_BSS_TSF: u16 = 3;
@@ -129,6 +131,9 @@ pub const NL80211_BSS_SIGNAL_MBM: u16 = 7;
 pub const NL80211_BSS_SIGNAL_UNSPEC: u16 = 8;
 pub const NL80211_BSS_STATUS: u16 = 9;
 pub const NL80211_BSS_SEEN_MS_AGO: u16 = 10;
+pub const NL80211_BSS_BEACON_IES: u16 = 11;
+pub const NL80211_BSS_LAST_SEEN_BOOTTIME: u16 = 15;
+pub const NL80211_BSS_FREQUENCY_OFFSET: u16 = 21;
 
 // =============================================================================
 // Station Info Nested Attributes

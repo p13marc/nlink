@@ -210,7 +210,11 @@ impl WirelessInterface {
 }
 
 /// BSS (Basic Service Set) from scan results.
-#[derive(Debug, Clone)]
+///
+/// `#[non_exhaustive]` — the kernel grows `NL80211_BSS_*` attributes
+/// over time; new fields are added without breaking downstream readers.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ScanResult {
     /// BSSID (AP MAC address).
     pub bssid: [u8; 6],
@@ -231,8 +235,21 @@ pub struct ScanResult {
     pub tsf: Option<u64>,
     /// Connection status (if this is the associated BSS).
     pub status: Option<BssStatus>,
-    /// Raw information elements (vendor-specific, WPA, RSN, etc.).
+    /// Raw information elements (vendor-specific, WPA, RSN, etc.) from
+    /// the probe response (or beacon if no probe response was seen).
     pub information_elements: Vec<u8>,
+    /// Information elements from the beacon, when they differ from
+    /// [`information_elements`](Self::information_elements) (probe
+    /// response). Empty if the kernel didn't report a separate set.
+    pub beacon_ies: Vec<u8>,
+    /// Unspecified-units signal quality (0–100), reported by drivers
+    /// that don't provide an absolute mBm value.
+    pub signal_unspec: Option<u8>,
+    /// `CLOCK_BOOTTIME` (nanoseconds) when this BSS was last seen.
+    pub last_seen_boottime_ns: Option<u64>,
+    /// Frequency offset from [`frequency`](Self::frequency), in kHz
+    /// (S1G / fine-grained channels).
+    pub frequency_offset_khz: Option<u32>,
 }
 
 impl ScanResult {

@@ -845,14 +845,7 @@ fn parse_bss(data: &[u8]) -> ScanResult {
     let mut result = ScanResult {
         bssid: [0; 6],
         frequency: 0,
-        ssid: None,
-        signal_mbm: 0,
-        capability: 0,
-        beacon_interval: 0,
-        seen_ms_ago: 0,
-        tsf: None,
-        status: None,
-        information_elements: Vec::new(),
+        ..Default::default()
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
@@ -890,6 +883,25 @@ fn parse_bss(data: &[u8]) -> ScanResult {
             }
             NL80211_BSS_SEEN_MS_AGO if payload.len() >= 4 => {
                 result.seen_ms_ago = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+            }
+            NL80211_BSS_SIGNAL_UNSPEC if !payload.is_empty() => {
+                result.signal_unspec = Some(payload[0]);
+            }
+            NL80211_BSS_BEACON_IES => {
+                result.beacon_ies = payload.to_vec();
+                // Prefer the SSID from the (probe-response) IEs; fall
+                // back to the beacon IEs only if we haven't found one.
+                if result.ssid.is_none() {
+                    result.ssid = parse_ssid_from_ies(payload);
+                }
+            }
+            NL80211_BSS_LAST_SEEN_BOOTTIME if payload.len() >= 8 => {
+                result.last_seen_boottime_ns =
+                    Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
+            }
+            NL80211_BSS_FREQUENCY_OFFSET if payload.len() >= 4 => {
+                result.frequency_offset_khz =
+                    Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
             }
             _ => {}
         }
@@ -1399,6 +1411,91 @@ mod station_info_tests {
         assert_eq!(s.rx_drop_misc, Some(9));
         assert_eq!(s.expected_throughput_kbps, Some(54000));
         assert_eq!(s.ack_signal_dbm, Some(-50));
+    }
+}
+
+#[cfg(test)]
+mod bss_tests {
+    use super::*;
+
+    fn push_attr(buf: &mut Vec<u8>, atype: u16, payload: &[u8]) {
+        let len = 4 + payload.len();
+        buf.extend_from_slice(&(len as u16).to_ne_bytes());
+        buf.extend_from_slice(&atype.to_ne_bytes());
+        buf.extend_from_slice(payload);
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+    }
+
+    /// Pin every modelled `NL80211_BSS_*` constant against its position
+    /// in `enum nl80211_bss` (linux/nl80211.h) — the same id-drift guard
+    /// added for STA_INFO. (BSS constants were already correct; this
+    /// locks them.)
+    #[test]
+    fn bss_constants_match_kernel_enum() {
+        assert_eq!(NL80211_BSS_BSSID, 1);
+        assert_eq!(NL80211_BSS_FREQUENCY, 2);
+        assert_eq!(NL80211_BSS_TSF, 3);
+        assert_eq!(NL80211_BSS_BEACON_INTERVAL, 4);
+        assert_eq!(NL80211_BSS_CAPABILITY, 5);
+        assert_eq!(NL80211_BSS_INFORMATION_ELEMENTS, 6);
+        assert_eq!(NL80211_BSS_SIGNAL_MBM, 7);
+        assert_eq!(NL80211_BSS_SIGNAL_UNSPEC, 8);
+        assert_eq!(NL80211_BSS_STATUS, 9);
+        assert_eq!(NL80211_BSS_SEEN_MS_AGO, 10);
+        assert_eq!(NL80211_BSS_BEACON_IES, 11);
+        assert_eq!(NL80211_BSS_LAST_SEEN_BOOTTIME, 15);
+        assert_eq!(NL80211_BSS_FREQUENCY_OFFSET, 21);
+    }
+
+    #[test]
+    fn parse_bss_reads_new_attributes() {
+        let mut bss = Vec::new();
+        push_attr(&mut bss, NL80211_BSS_BSSID, &[0xAA; 6]);
+        push_attr(&mut bss, NL80211_BSS_FREQUENCY, &5180u32.to_ne_bytes());
+        push_attr(&mut bss, NL80211_BSS_SIGNAL_UNSPEC, &[70]);
+        push_attr(
+            &mut bss,
+            NL80211_BSS_LAST_SEEN_BOOTTIME,
+            &123_456_789u64.to_ne_bytes(),
+        );
+        push_attr(
+            &mut bss,
+            NL80211_BSS_FREQUENCY_OFFSET,
+            &500u32.to_ne_bytes(),
+        );
+        // Beacon IEs carrying an SSID — picked up when probe-resp IEs
+        // are absent.
+        let ssid_ie = [0u8, 4, b'h', b'o', b'm', b'e'];
+        push_attr(&mut bss, NL80211_BSS_BEACON_IES, &ssid_ie);
+
+        let r = parse_bss(&bss);
+        assert_eq!(r.bssid, [0xAA; 6]);
+        assert_eq!(r.frequency, 5180);
+        assert_eq!(r.signal_unspec, Some(70));
+        assert_eq!(r.last_seen_boottime_ns, Some(123_456_789));
+        assert_eq!(r.frequency_offset_khz, Some(500));
+        assert_eq!(r.beacon_ies, ssid_ie);
+        assert_eq!(r.ssid.as_deref(), Some("home"));
+    }
+
+    /// Probe-response IEs take precedence over beacon IEs for the SSID.
+    #[test]
+    fn probe_response_ies_win_over_beacon_for_ssid() {
+        let mut bss = Vec::new();
+        push_attr(
+            &mut bss,
+            NL80211_BSS_INFORMATION_ELEMENTS,
+            &[0u8, 5, b'r', b'e', b'a', b'l', b'!'],
+        );
+        push_attr(
+            &mut bss,
+            NL80211_BSS_BEACON_IES,
+            &[0u8, 6, b'h', b'i', b'd', b'd', b'e', b'n'],
+        );
+        let r = parse_bss(&bss);
+        assert_eq!(r.ssid.as_deref(), Some("real!"));
     }
 }
 
