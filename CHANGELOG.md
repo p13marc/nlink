@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **FDB `NTF_*` flag completeness (#137 bridge/FDB wire-format audit).**
+  The FDB builder/reader modelled only `NTF_SELF`/`NTF_MASTER`/
+  `NTF_EXT_LEARNED`. Added the remaining `linux/neighbour.h` flags:
+  `FdbEntryBuilder::sticky()` (`NTF_STICKY` — pin the entry against MAC
+  learning) and `router()` (`NTF_ROUTER` — VXLAN/EVPN router peer) on the
+  write side, plus `FdbEntry::is_sticky()`/`is_router()`/`is_offloaded()`
+  (`NTF_OFFLOADED`, kernel-set/read-only)/`is_proxy()` accessors on the
+  read side. Wire-format tests pin the flag values against the kernel
+  UAPI and assert `write_add` lowers them into the `ndmsg.ndm_flags`
+  byte. (Bridge global VLAN options — `BRIDGE_VLANDB_GOPTS` — remain
+  unmodelled; tracked under #137.)
 - **`WireguardConfig::from_wg_quick` + `WireguardConfig::client` (#137).**
   `from_wg_quick(ifname, contents)` parses a `wg-quick` / `wg setconf`
   style `[Interface]` + `[Peer]` config into a declarative
