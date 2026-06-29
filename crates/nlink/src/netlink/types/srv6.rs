@@ -202,4 +202,27 @@ mod tests {
         assert_eq!(hdr.segments_left, 0);
         assert_eq!(hdr.first_segment, 0);
     }
+
+    // Parser-robustness rule 1 (accept-larger-than-expected on fixed
+    // structs). The 8-byte SRH is always followed by the segment list
+    // in real packets, so accept-larger is the load-bearing behaviour.
+    #[test]
+    fn ipv6_sr_hdr_from_bytes_accepts_trailing_segments() {
+        let hdr = Ipv6SrHdr::new(3);
+        let mut buf = hdr.as_bytes().to_vec();
+        buf.extend_from_slice(&[0x11; 48]); // 3 x 16-byte segments follow
+        let parsed = Ipv6SrHdr::from_bytes(&buf).expect("prefix parse");
+        assert_eq!(parsed.first_segment, hdr.first_segment);
+        assert_eq!(parsed.sr_type, hdr.sr_type);
+    }
+
+    #[test]
+    fn ipv6_sr_hdr_from_bytes_rejects_undersized() {
+        let hdr = Ipv6SrHdr::new(1);
+        assert!(Ipv6SrHdr::from_bytes(&hdr.as_bytes()[..Ipv6SrHdr::SIZE - 1]).is_none());
+        assert!(Ipv6SrHdr::from_bytes(&[]).is_none());
+        for len in 0..Ipv6SrHdr::SIZE {
+            let _ = Ipv6SrHdr::from_bytes(&vec![0u8; len]);
+        }
+    }
 }

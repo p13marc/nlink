@@ -65,8 +65,8 @@ use super::{
     message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgType},
     protocol::Route,
     types::link::{
-        BridgeVlanInfo, IfInfoMsg, IflaAttr, bridge_af, bridge_vlan_flags, bridge_vlan_tunnel,
-        rtext_filter,
+        BridgeVlanInfo, BrVlanMsg, IfInfoMsg, IflaAttr, bridge_af, bridge_vlan_flags,
+        bridge_vlan_tunnel, bridge_vlandb, bridge_vlandb_dump, bridge_vlandb_gopts, rtext_filter,
     },
 };
 
@@ -462,6 +462,353 @@ impl BridgeVlanBuilder {
         }
 
         builder.nest_end(af_spec);
+    }
+}
+
+// ============================================================================
+// Bridge-global VLAN options (BRIDGE_VLANDB_GLOBAL_OPTIONS / GOPTS)
+// ============================================================================
+
+/// Builder for bridge-global per-VLAN options.
+///
+/// Global VLAN options are per-VLAN settings stored on the **bridge
+/// device itself** (not on a port) — chiefly per-VLAN multicast
+/// snooping (IGMP/MLD querier, versions, counts, and intervals) and
+/// the MST instance mapping. They are carried by the newer VLAN-DB
+/// netlink API (`RTM_NEWVLAN` over a `struct br_vlan_msg`), distinct
+/// from the legacy per-port [`BridgeVlanBuilder`] path.
+///
+/// Only fields that are explicitly set are emitted, so a builder can
+/// change a single option without disturbing the others.
+///
+/// # Example
+///
+/// ```ignore
+/// use nlink::netlink::bridge_vlan::BridgeVlanGlobalOptionsBuilder;
+///
+/// // Enable multicast snooping on VLAN 100 of bridge br0.
+/// conn.set_bridge_vlan_global_options(
+///     BridgeVlanGlobalOptionsBuilder::new(100)
+///         .dev("br0")
+///         .mcast_snooping(true)
+/// ).await?;
+///
+/// // Apply to a VLAN range 200-210.
+/// conn.set_bridge_vlan_global_options(
+///     BridgeVlanGlobalOptionsBuilder::new(200)
+///         .dev("br0")
+///         .range(210)
+///         .mcast_snooping(false)
+/// ).await?;
+/// ```
+///
+/// # Not modelled
+///
+/// `BRIDGE_VLANDB_GOPTS_MCAST_ROUTER_PORTS` (nested router-ports list)
+/// and `BRIDGE_VLANDB_GOPTS_MCAST_QUERIER_STATE` (read-only querier
+/// state) are recognized on the wire but not exposed as setters or
+/// reader fields — they are nested/read-only attributes whose
+/// semantics differ across kernel versions.
+#[derive(Debug, Clone, Default)]
+#[must_use = "builders do nothing unless used"]
+pub struct BridgeVlanGlobalOptionsBuilder {
+    dev: Option<InterfaceRef>,
+    vid: u16,
+    vid_end: Option<u16>,
+    mcast_snooping: Option<bool>,
+    mcast_querier: Option<bool>,
+    mcast_igmp_version: Option<u8>,
+    mcast_mld_version: Option<u8>,
+    mcast_last_member_count: Option<u32>,
+    mcast_startup_query_count: Option<u32>,
+    mcast_last_member_interval: Option<u64>,
+    mcast_membership_interval: Option<u64>,
+    mcast_querier_interval: Option<u64>,
+    mcast_query_interval: Option<u64>,
+    mcast_query_response_interval: Option<u64>,
+    mcast_startup_query_interval: Option<u64>,
+    msti: Option<u16>,
+}
+
+impl BridgeVlanGlobalOptionsBuilder {
+    /// Create a builder for a single VLAN.
+    pub fn new(vid: u16) -> Self {
+        Self {
+            vid,
+            ..Default::default()
+        }
+    }
+
+    /// Set the bridge device by name.
+    pub fn dev(mut self, dev: impl Into<String>) -> Self {
+        self.dev = Some(InterfaceRef::Name(dev.into()));
+        self
+    }
+
+    /// Set the bridge interface index directly.
+    ///
+    /// Prefer this over [`dev`](Self::dev) in a network namespace.
+    pub fn ifindex(mut self, ifindex: u32) -> Self {
+        self.dev = Some(InterfaceRef::Index(ifindex));
+        self
+    }
+
+    /// Get the device reference.
+    pub fn device_ref(&self) -> Option<&InterfaceRef> {
+        self.dev.as_ref()
+    }
+
+    /// Apply the options to a VLAN range `vid..=vid_end`.
+    pub fn range(mut self, vid_end: u16) -> Self {
+        self.vid_end = Some(vid_end);
+        self
+    }
+
+    /// Enable or disable per-VLAN multicast snooping.
+    pub fn mcast_snooping(mut self, on: bool) -> Self {
+        self.mcast_snooping = Some(on);
+        self
+    }
+
+    /// Enable or disable the per-VLAN multicast querier.
+    pub fn mcast_querier(mut self, on: bool) -> Self {
+        self.mcast_querier = Some(on);
+        self
+    }
+
+    /// Set the IGMP query version (2 or 3).
+    pub fn mcast_igmp_version(mut self, version: u8) -> Self {
+        self.mcast_igmp_version = Some(version);
+        self
+    }
+
+    /// Set the MLD query version (1 or 2).
+    pub fn mcast_mld_version(mut self, version: u8) -> Self {
+        self.mcast_mld_version = Some(version);
+        self
+    }
+
+    /// Set the last-member query count.
+    pub fn mcast_last_member_count(mut self, count: u32) -> Self {
+        self.mcast_last_member_count = Some(count);
+        self
+    }
+
+    /// Set the startup query count.
+    pub fn mcast_startup_query_count(mut self, count: u32) -> Self {
+        self.mcast_startup_query_count = Some(count);
+        self
+    }
+
+    /// Set the last-member query interval (centiseconds).
+    pub fn mcast_last_member_interval(mut self, centisecs: u64) -> Self {
+        self.mcast_last_member_interval = Some(centisecs);
+        self
+    }
+
+    /// Set the membership interval (centiseconds).
+    pub fn mcast_membership_interval(mut self, centisecs: u64) -> Self {
+        self.mcast_membership_interval = Some(centisecs);
+        self
+    }
+
+    /// Set the querier interval (centiseconds).
+    pub fn mcast_querier_interval(mut self, centisecs: u64) -> Self {
+        self.mcast_querier_interval = Some(centisecs);
+        self
+    }
+
+    /// Set the query interval (centiseconds).
+    pub fn mcast_query_interval(mut self, centisecs: u64) -> Self {
+        self.mcast_query_interval = Some(centisecs);
+        self
+    }
+
+    /// Set the query response interval (centiseconds).
+    pub fn mcast_query_response_interval(mut self, centisecs: u64) -> Self {
+        self.mcast_query_response_interval = Some(centisecs);
+        self
+    }
+
+    /// Set the startup query interval (centiseconds).
+    pub fn mcast_startup_query_interval(mut self, centisecs: u64) -> Self {
+        self.mcast_startup_query_interval = Some(centisecs);
+        self
+    }
+
+    /// Map this VLAN to an MST instance.
+    pub fn msti(mut self, msti: u16) -> Self {
+        self.msti = Some(msti);
+        self
+    }
+
+    /// Write the `RTM_NEWVLAN` payload setting these global options.
+    pub(crate) fn write_set(&self, builder: &mut MessageBuilder, ifindex: u32) {
+        let msg = BrVlanMsg::new()
+            .with_family(libc::AF_BRIDGE as u8)
+            .with_index(ifindex);
+        builder.append(&msg);
+
+        let gopts = builder.nest_start(bridge_vlandb::GLOBAL_OPTIONS);
+
+        builder.append_attr_u16(bridge_vlandb_gopts::ID, self.vid);
+        if let Some(vid_end) = self.vid_end {
+            builder.append_attr_u16(bridge_vlandb_gopts::RANGE, vid_end);
+        }
+
+        if let Some(v) = self.mcast_snooping {
+            builder.append_attr_u8(bridge_vlandb_gopts::MCAST_SNOOPING, v as u8);
+        }
+        if let Some(v) = self.mcast_querier {
+            builder.append_attr_u8(bridge_vlandb_gopts::MCAST_QUERIER, v as u8);
+        }
+        if let Some(v) = self.mcast_igmp_version {
+            builder.append_attr_u8(bridge_vlandb_gopts::MCAST_IGMP_VERSION, v);
+        }
+        if let Some(v) = self.mcast_mld_version {
+            builder.append_attr_u8(bridge_vlandb_gopts::MCAST_MLD_VERSION, v);
+        }
+        if let Some(v) = self.mcast_last_member_count {
+            builder.append_attr_u32(bridge_vlandb_gopts::MCAST_LAST_MEMBER_CNT, v);
+        }
+        if let Some(v) = self.mcast_startup_query_count {
+            builder.append_attr_u32(bridge_vlandb_gopts::MCAST_STARTUP_QUERY_CNT, v);
+        }
+        if let Some(v) = self.mcast_last_member_interval {
+            builder.append_attr_u64(bridge_vlandb_gopts::MCAST_LAST_MEMBER_INTVL, v);
+        }
+        if let Some(v) = self.mcast_membership_interval {
+            builder.append_attr_u64(bridge_vlandb_gopts::MCAST_MEMBERSHIP_INTVL, v);
+        }
+        if let Some(v) = self.mcast_querier_interval {
+            builder.append_attr_u64(bridge_vlandb_gopts::MCAST_QUERIER_INTVL, v);
+        }
+        if let Some(v) = self.mcast_query_interval {
+            builder.append_attr_u64(bridge_vlandb_gopts::MCAST_QUERY_INTVL, v);
+        }
+        if let Some(v) = self.mcast_query_response_interval {
+            builder.append_attr_u64(bridge_vlandb_gopts::MCAST_QUERY_RESPONSE_INTVL, v);
+        }
+        if let Some(v) = self.mcast_startup_query_interval {
+            builder.append_attr_u64(bridge_vlandb_gopts::MCAST_STARTUP_QUERY_INTVL, v);
+        }
+        if let Some(v) = self.msti {
+            builder.append_attr_u16(bridge_vlandb_gopts::MSTI, v);
+        }
+
+        builder.nest_end(gopts);
+    }
+}
+
+/// Bridge-global per-VLAN options, as read back from the kernel.
+///
+/// Returned by [`Connection::get_bridge_vlan_global_options`]. Fields
+/// are `Option` because the kernel only reports options relevant to
+/// the running configuration. The struct is `#[non_exhaustive]` so new
+/// kernel options can be added without a breaking change.
+///
+/// See [`BridgeVlanGlobalOptionsBuilder`] for the *not modelled*
+/// attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BridgeVlanGlobalOptions {
+    pub(crate) ifindex: u32,
+    pub(crate) vid: u16,
+    pub(crate) vid_end: Option<u16>,
+    pub(crate) mcast_snooping: Option<bool>,
+    pub(crate) mcast_querier: Option<bool>,
+    pub(crate) mcast_igmp_version: Option<u8>,
+    pub(crate) mcast_mld_version: Option<u8>,
+    pub(crate) mcast_last_member_count: Option<u32>,
+    pub(crate) mcast_startup_query_count: Option<u32>,
+    pub(crate) mcast_last_member_interval: Option<u64>,
+    pub(crate) mcast_membership_interval: Option<u64>,
+    pub(crate) mcast_querier_interval: Option<u64>,
+    pub(crate) mcast_query_interval: Option<u64>,
+    pub(crate) mcast_query_response_interval: Option<u64>,
+    pub(crate) mcast_startup_query_interval: Option<u64>,
+    pub(crate) msti: Option<u16>,
+}
+
+impl BridgeVlanGlobalOptions {
+    /// Bridge interface index these options belong to.
+    pub fn ifindex(&self) -> u32 {
+        self.ifindex
+    }
+
+    /// VLAN ID (lower bound of the range, if a range).
+    pub fn vid(&self) -> u16 {
+        self.vid
+    }
+
+    /// Upper VLAN ID of the range, if this block covers a range.
+    pub fn vid_end(&self) -> Option<u16> {
+        self.vid_end
+    }
+
+    /// Whether per-VLAN multicast snooping is enabled.
+    pub fn mcast_snooping(&self) -> Option<bool> {
+        self.mcast_snooping
+    }
+
+    /// Whether the per-VLAN multicast querier is enabled.
+    pub fn mcast_querier(&self) -> Option<bool> {
+        self.mcast_querier
+    }
+
+    /// IGMP query version.
+    pub fn mcast_igmp_version(&self) -> Option<u8> {
+        self.mcast_igmp_version
+    }
+
+    /// MLD query version.
+    pub fn mcast_mld_version(&self) -> Option<u8> {
+        self.mcast_mld_version
+    }
+
+    /// Last-member query count.
+    pub fn mcast_last_member_count(&self) -> Option<u32> {
+        self.mcast_last_member_count
+    }
+
+    /// Startup query count.
+    pub fn mcast_startup_query_count(&self) -> Option<u32> {
+        self.mcast_startup_query_count
+    }
+
+    /// Last-member query interval (centiseconds).
+    pub fn mcast_last_member_interval(&self) -> Option<u64> {
+        self.mcast_last_member_interval
+    }
+
+    /// Membership interval (centiseconds).
+    pub fn mcast_membership_interval(&self) -> Option<u64> {
+        self.mcast_membership_interval
+    }
+
+    /// Querier interval (centiseconds).
+    pub fn mcast_querier_interval(&self) -> Option<u64> {
+        self.mcast_querier_interval
+    }
+
+    /// Query interval (centiseconds).
+    pub fn mcast_query_interval(&self) -> Option<u64> {
+        self.mcast_query_interval
+    }
+
+    /// Query response interval (centiseconds).
+    pub fn mcast_query_response_interval(&self) -> Option<u64> {
+        self.mcast_query_response_interval
+    }
+
+    /// Startup query interval (centiseconds).
+    pub fn mcast_startup_query_interval(&self) -> Option<u64> {
+        self.mcast_startup_query_interval
+    }
+
+    /// MST instance this VLAN maps to.
+    pub fn msti(&self) -> Option<u16> {
+        self.msti
     }
 }
 
@@ -902,6 +1249,105 @@ impl Connection<Route> {
             .await
             .map_err(|e| e.with_context("del_vlan_tunnel_range"))
     }
+
+    // ========================================================================
+    // Bridge-global VLAN options (BRIDGE_VLANDB_GLOBAL_OPTIONS / GOPTS)
+    // ========================================================================
+
+    /// Set bridge-global per-VLAN options (multicast snooping, etc.).
+    ///
+    /// These options live on the bridge device itself, not on a port.
+    /// Uses the VLAN-DB API (`RTM_NEWVLAN`).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::bridge_vlan::BridgeVlanGlobalOptionsBuilder;
+    ///
+    /// conn.set_bridge_vlan_global_options(
+    ///     BridgeVlanGlobalOptionsBuilder::new(100)
+    ///         .dev("br0")
+    ///         .mcast_snooping(true)
+    /// ).await?;
+    /// ```
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "set_bridge_vlan_global_options")
+    )]
+    pub async fn set_bridge_vlan_global_options(
+        &self,
+        config: BridgeVlanGlobalOptionsBuilder,
+    ) -> Result<()> {
+        let ifindex = match config.device_ref() {
+            Some(iface) => self.resolve_interface(iface).await?,
+            None => {
+                return Err(Error::InvalidMessage(
+                    "device name or ifindex required".into(),
+                ));
+            }
+        };
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_NEWVLAN, NLM_F_REQUEST | NLM_F_ACK);
+        config.write_set(&mut builder, ifindex);
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("set_bridge_vlan_global_options"))
+    }
+
+    /// Get bridge-global per-VLAN options for a bridge.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let opts = conn.get_bridge_vlan_global_options("br0").await?;
+    /// for o in &opts {
+    ///     println!("VLAN {}: snooping={:?}", o.vid(), o.mcast_snooping());
+    /// }
+    /// ```
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "get_bridge_vlan_global_options")
+    )]
+    pub async fn get_bridge_vlan_global_options(
+        &self,
+        bridge: impl Into<InterfaceRef>,
+    ) -> Result<Vec<BridgeVlanGlobalOptions>> {
+        let ifindex = self.resolve_interface(&bridge.into()).await?;
+        self.get_bridge_vlan_global_options_by_index(ifindex).await
+    }
+
+    /// Get bridge-global per-VLAN options by bridge interface index.
+    ///
+    /// Use this method when operating in a network namespace.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(method = "get_bridge_vlan_global_options_by_index")
+    )]
+    pub async fn get_bridge_vlan_global_options_by_index(
+        &self,
+        ifindex: u32,
+    ) -> Result<Vec<BridgeVlanGlobalOptions>> {
+        // RTM_GETVLAN dump filtered to global options on this bridge.
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETVLAN, NLM_F_REQUEST | NLM_F_DUMP);
+        let msg = BrVlanMsg::new()
+            .with_family(libc::AF_BRIDGE as u8)
+            .with_index(ifindex);
+        builder.append(&msg);
+        builder.append_attr_u32(bridge_vlandb_dump::FLAGS, bridge_vlandb_dump::DUMPF_GLOBAL);
+
+        let responses = self
+            .send_dump(builder)
+            .await
+            .map_err(|e| e.with_context("get_bridge_vlan_global_options"))?;
+
+        let mut entries = Vec::new();
+        for response in responses {
+            parse_global_options_from_dump(&response, ifindex, &mut entries);
+        }
+        Ok(entries)
+    }
 }
 
 // ============================================================================
@@ -1135,6 +1581,121 @@ fn parse_af_spec_tunnels(data: &[u8], ifindex: u32, entries: &mut Vec<BridgeVlan
     }
 }
 
+// ============================================================================
+// Global-options parsing helpers
+// ============================================================================
+
+/// Parse `BRIDGE_VLANDB_GLOBAL_OPTIONS` blocks out of an `RTM_GETVLAN`
+/// dump chunk (which may carry several netlink messages).
+///
+/// Per the parser-robustness policy: malformed messages are skipped
+/// (no `?` propagation), the `br_vlan_msg` header is accepted
+/// larger-than-expected, and every attribute read is length-guarded.
+fn parse_global_options_from_dump(
+    data: &[u8],
+    fallback_ifindex: u32,
+    entries: &mut Vec<BridgeVlanGlobalOptions>,
+) {
+    for msg_result in MessageIter::new(data) {
+        let Ok((_header, payload)) = msg_result else {
+            continue;
+        };
+
+        // br_vlan_msg header gives the bridge ifindex.
+        let ifindex = BrVlanMsg::from_bytes(payload)
+            .map(|m| m.ifindex)
+            .unwrap_or(fallback_ifindex);
+        if payload.len() < BrVlanMsg::SIZE {
+            continue;
+        }
+        let attrs = &payload[BrVlanMsg::SIZE..];
+
+        for (attr_type, attr_payload) in AttrIter::new(attrs) {
+            if attr_type == bridge_vlandb::GLOBAL_OPTIONS
+                && let Some(opts) = parse_one_gopts(attr_payload, ifindex)
+            {
+                entries.push(opts);
+            }
+        }
+    }
+}
+
+/// Parse a single `BRIDGE_VLANDB_GLOBAL_OPTIONS` nest into a typed
+/// [`BridgeVlanGlobalOptions`]. Returns `None` if the mandatory
+/// `GOPTS_ID` is missing. Unknown / not-modelled attributes (router
+/// ports, querier state, future additions) are skipped.
+fn parse_one_gopts(payload: &[u8], ifindex: u32) -> Option<BridgeVlanGlobalOptions> {
+    let mut opts = BridgeVlanGlobalOptions {
+        ifindex,
+        ..Default::default()
+    };
+    let mut have_id = false;
+
+    for (attr, data) in AttrIter::new(payload) {
+        match attr {
+            t if t == bridge_vlandb_gopts::ID && data.len() >= 2 => {
+                opts.vid = u16::from_ne_bytes(data[..2].try_into().unwrap());
+                have_id = true;
+            }
+            t if t == bridge_vlandb_gopts::RANGE && data.len() >= 2 => {
+                opts.vid_end = Some(u16::from_ne_bytes(data[..2].try_into().unwrap()));
+            }
+            t if t == bridge_vlandb_gopts::MCAST_SNOOPING && !data.is_empty() => {
+                opts.mcast_snooping = Some(data[0] != 0);
+            }
+            t if t == bridge_vlandb_gopts::MCAST_QUERIER && !data.is_empty() => {
+                opts.mcast_querier = Some(data[0] != 0);
+            }
+            t if t == bridge_vlandb_gopts::MCAST_IGMP_VERSION && !data.is_empty() => {
+                opts.mcast_igmp_version = Some(data[0]);
+            }
+            t if t == bridge_vlandb_gopts::MCAST_MLD_VERSION && !data.is_empty() => {
+                opts.mcast_mld_version = Some(data[0]);
+            }
+            t if t == bridge_vlandb_gopts::MCAST_LAST_MEMBER_CNT && data.len() >= 4 => {
+                opts.mcast_last_member_count =
+                    Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+            }
+            t if t == bridge_vlandb_gopts::MCAST_STARTUP_QUERY_CNT && data.len() >= 4 => {
+                opts.mcast_startup_query_count =
+                    Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+            }
+            t if t == bridge_vlandb_gopts::MCAST_LAST_MEMBER_INTVL && data.len() >= 8 => {
+                opts.mcast_last_member_interval =
+                    Some(u64::from_ne_bytes(data[..8].try_into().unwrap()));
+            }
+            t if t == bridge_vlandb_gopts::MCAST_MEMBERSHIP_INTVL && data.len() >= 8 => {
+                opts.mcast_membership_interval =
+                    Some(u64::from_ne_bytes(data[..8].try_into().unwrap()));
+            }
+            t if t == bridge_vlandb_gopts::MCAST_QUERIER_INTVL && data.len() >= 8 => {
+                opts.mcast_querier_interval =
+                    Some(u64::from_ne_bytes(data[..8].try_into().unwrap()));
+            }
+            t if t == bridge_vlandb_gopts::MCAST_QUERY_INTVL && data.len() >= 8 => {
+                opts.mcast_query_interval =
+                    Some(u64::from_ne_bytes(data[..8].try_into().unwrap()));
+            }
+            t if t == bridge_vlandb_gopts::MCAST_QUERY_RESPONSE_INTVL && data.len() >= 8 => {
+                opts.mcast_query_response_interval =
+                    Some(u64::from_ne_bytes(data[..8].try_into().unwrap()));
+            }
+            t if t == bridge_vlandb_gopts::MCAST_STARTUP_QUERY_INTVL && data.len() >= 8 => {
+                opts.mcast_startup_query_interval =
+                    Some(u64::from_ne_bytes(data[..8].try_into().unwrap()));
+            }
+            t if t == bridge_vlandb_gopts::MSTI && data.len() >= 2 => {
+                opts.msti = Some(u16::from_ne_bytes(data[..2].try_into().unwrap()));
+            }
+            // GOPTS_ID present but too short, or not-modelled attrs
+            // (MCAST_ROUTER_PORTS, MCAST_QUERIER_STATE, PAD, future).
+            _ => {}
+        }
+    }
+
+    have_id.then_some(opts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1283,5 +1844,169 @@ mod tests {
     fn test_tunnel_max_id() {
         // Maximum valid tunnel ID
         assert_eq!(BridgeVlanTunnelBuilder::MAX_TUNNEL_ID, 0xFFFFFF);
+    }
+
+    // ========================================================================
+    // Bridge-global VLAN options (GOPTS) tests
+    // ========================================================================
+
+    /// Emit a netlink attribute (TLV, 4-byte aligned) into `buf`.
+    fn push_attr(buf: &mut Vec<u8>, atype: u16, payload: &[u8]) {
+        let len = 4 + payload.len();
+        buf.extend_from_slice(&(len as u16).to_ne_bytes());
+        buf.extend_from_slice(&atype.to_ne_bytes());
+        buf.extend_from_slice(payload);
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+    }
+
+    #[test]
+    fn br_vlan_msg_layout_is_8_bytes() {
+        assert_eq!(BrVlanMsg::SIZE, 8);
+        let msg = BrVlanMsg::new()
+            .with_family(libc::AF_BRIDGE as u8)
+            .with_index(0x0102_0304);
+        let bytes = msg.as_bytes();
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(bytes[0], libc::AF_BRIDGE as u8); // family @ 0
+        assert_eq!(&bytes[4..8], &0x0102_0304u32.to_ne_bytes()); // ifindex @ 4
+        // Round-trips, and accepts trailing bytes a future kernel adds.
+        let mut oversized = bytes.to_vec();
+        oversized.extend_from_slice(&[0xff; 4]);
+        let parsed = BrVlanMsg::from_bytes(&oversized).unwrap();
+        assert_eq!(parsed.ifindex, 0x0102_0304);
+    }
+
+    #[test]
+    fn gopts_attr_constants_match_kernel_uapi() {
+        // Pinned against linux/if_bridge.h so writer+reader can't drift
+        // from the kernel onto a self-consistent-but-wrong code.
+        assert_eq!(bridge_vlandb::ENTRY, 1);
+        assert_eq!(bridge_vlandb::GLOBAL_OPTIONS, 2);
+        assert_eq!(bridge_vlandb_dump::FLAGS, 1);
+        assert_eq!(bridge_vlandb_dump::DUMPF_GLOBAL, 1 << 1);
+        assert_eq!(bridge_vlandb_gopts::ID, 1);
+        assert_eq!(bridge_vlandb_gopts::RANGE, 2);
+        assert_eq!(bridge_vlandb_gopts::MCAST_SNOOPING, 3);
+        assert_eq!(bridge_vlandb_gopts::MCAST_IGMP_VERSION, 4);
+        assert_eq!(bridge_vlandb_gopts::MCAST_MLD_VERSION, 5);
+        assert_eq!(bridge_vlandb_gopts::MCAST_LAST_MEMBER_CNT, 6);
+        assert_eq!(bridge_vlandb_gopts::MCAST_STARTUP_QUERY_CNT, 7);
+        assert_eq!(bridge_vlandb_gopts::MCAST_LAST_MEMBER_INTVL, 8);
+        assert_eq!(bridge_vlandb_gopts::PAD, 9);
+        assert_eq!(bridge_vlandb_gopts::MCAST_MEMBERSHIP_INTVL, 10);
+        assert_eq!(bridge_vlandb_gopts::MCAST_QUERIER_INTVL, 11);
+        assert_eq!(bridge_vlandb_gopts::MCAST_QUERY_INTVL, 12);
+        assert_eq!(bridge_vlandb_gopts::MCAST_QUERY_RESPONSE_INTVL, 13);
+        assert_eq!(bridge_vlandb_gopts::MCAST_STARTUP_QUERY_INTVL, 14);
+        assert_eq!(bridge_vlandb_gopts::MCAST_QUERIER, 15);
+        assert_eq!(bridge_vlandb_gopts::MCAST_ROUTER_PORTS, 16);
+        assert_eq!(bridge_vlandb_gopts::MCAST_QUERIER_STATE, 17);
+        assert_eq!(bridge_vlandb_gopts::MSTI, 18);
+    }
+
+    #[test]
+    fn gopts_builder_wire_roundtrips() {
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_NEWVLAN, 0);
+        BridgeVlanGlobalOptionsBuilder::new(100)
+            .ifindex(7)
+            .mcast_snooping(true)
+            .mcast_querier(false)
+            .mcast_igmp_version(3)
+            .mcast_mld_version(2)
+            .mcast_last_member_count(2)
+            .mcast_startup_query_count(2)
+            .mcast_last_member_interval(100)
+            .mcast_membership_interval(26000)
+            .mcast_querier_interval(25500)
+            .mcast_query_interval(12500)
+            .mcast_query_response_interval(1000)
+            .mcast_startup_query_interval(3125)
+            .msti(5)
+            .write_set(&mut builder, 7);
+        let bytes = builder.finish();
+
+        let mut entries = Vec::new();
+        // fallback ifindex unused — the br_vlan_msg header carries 7.
+        parse_global_options_from_dump(&bytes, 0, &mut entries);
+        assert_eq!(entries.len(), 1);
+        let o = &entries[0];
+        assert_eq!(o.ifindex(), 7);
+        assert_eq!(o.vid(), 100);
+        assert_eq!(o.vid_end(), None);
+        assert_eq!(o.mcast_snooping(), Some(true));
+        assert_eq!(o.mcast_querier(), Some(false));
+        assert_eq!(o.mcast_igmp_version(), Some(3));
+        assert_eq!(o.mcast_mld_version(), Some(2));
+        assert_eq!(o.mcast_last_member_count(), Some(2));
+        assert_eq!(o.mcast_startup_query_count(), Some(2));
+        assert_eq!(o.mcast_last_member_interval(), Some(100));
+        assert_eq!(o.mcast_membership_interval(), Some(26000));
+        assert_eq!(o.mcast_querier_interval(), Some(25500));
+        assert_eq!(o.mcast_query_interval(), Some(12500));
+        assert_eq!(o.mcast_query_response_interval(), Some(1000));
+        assert_eq!(o.mcast_startup_query_interval(), Some(3125));
+        assert_eq!(o.msti(), Some(5));
+    }
+
+    #[test]
+    fn gopts_builder_emits_range_and_only_set_attrs() {
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_NEWVLAN, 0);
+        BridgeVlanGlobalOptionsBuilder::new(200)
+            .ifindex(7)
+            .range(210)
+            .mcast_snooping(false)
+            .write_set(&mut builder, 7);
+        let bytes = builder.finish();
+
+        let mut entries = Vec::new();
+        parse_global_options_from_dump(&bytes, 0, &mut entries);
+        assert_eq!(entries.len(), 1);
+        let o = &entries[0];
+        assert_eq!(o.vid(), 200);
+        assert_eq!(o.vid_end(), Some(210));
+        assert_eq!(o.mcast_snooping(), Some(false));
+        // Unset options stay absent rather than defaulting.
+        assert_eq!(o.mcast_querier(), None);
+        assert_eq!(o.msti(), None);
+    }
+
+    #[test]
+    fn gopts_parse_skips_unknown_attrs() {
+        let mut nest = Vec::new();
+        push_attr(&mut nest, bridge_vlandb_gopts::ID, &100u16.to_ne_bytes());
+        // Not-modelled / future attr — must be ignored, not fatal.
+        push_attr(&mut nest, 0xFFFE, &[1, 2, 3, 4]);
+        push_attr(&mut nest, bridge_vlandb_gopts::MCAST_SNOOPING, &[1]);
+        let o = parse_one_gopts(&nest, 3).expect("ID present → Some");
+        assert_eq!(o.ifindex(), 3);
+        assert_eq!(o.vid(), 100);
+        assert_eq!(o.mcast_snooping(), Some(true));
+    }
+
+    #[test]
+    fn gopts_parse_without_id_is_none() {
+        let mut nest = Vec::new();
+        push_attr(&mut nest, bridge_vlandb_gopts::MCAST_SNOOPING, &[1]);
+        assert!(parse_one_gopts(&nest, 3).is_none());
+    }
+
+    #[test]
+    fn gopts_parse_arbitrary_bytes_never_panics() {
+        // Parser-robustness: truncated headers, short attr payloads, and
+        // arbitrary noise must not panic the dump walker or nest parser.
+        for len in 0..40usize {
+            let data: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(37)).collect();
+            let mut entries = Vec::new();
+            parse_global_options_from_dump(&data, 9, &mut entries);
+            let _ = parse_one_gopts(&data, 9);
+        }
+        // Truncated multi-byte attr values (short ID / interval) skipped,
+        // not indexed out of bounds.
+        let mut nest = Vec::new();
+        push_attr(&mut nest, bridge_vlandb_gopts::ID, &[0x01]); // 1 byte, needs 2
+        push_attr(&mut nest, bridge_vlandb_gopts::MCAST_QUERIER_INTVL, &[0, 0, 0]); // needs 8
+        assert!(parse_one_gopts(&nest, 1).is_none()); // ID too short → no id
     }
 }

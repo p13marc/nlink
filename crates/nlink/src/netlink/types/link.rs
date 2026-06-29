@@ -508,6 +508,130 @@ impl BridgeVlanInfo {
     }
 }
 
+// ============================================================================
+// Bridge VLAN-DB API (RTM_{NEW,DEL,GET}VLAN)
+// ============================================================================
+
+/// Bridge VLAN-DB message header (`struct br_vlan_msg`).
+///
+/// Family header for the `RTM_{NEW,DEL,GET}VLAN` messages that carry
+/// per-VLAN entries (`BRIDGE_VLANDB_ENTRY`) and bridge-global VLAN
+/// options (`BRIDGE_VLANDB_GLOBAL_OPTIONS`). `family` is `AF_BRIDGE`
+/// and `ifindex` is the bridge device.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct BrVlanMsg {
+    /// Address family (`AF_BRIDGE`).
+    pub family: u8,
+    /// Reserved, must be zero.
+    pub reserved1: u8,
+    /// Reserved, must be zero.
+    pub reserved2: u16,
+    /// Bridge interface index.
+    pub ifindex: u32,
+}
+
+impl BrVlanMsg {
+    /// Size of this structure (8 bytes).
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+
+    /// Create a new message header.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the address family.
+    pub fn with_family(mut self, family: u8) -> Self {
+        self.family = family;
+        self
+    }
+
+    /// Set the bridge interface index.
+    pub fn with_index(mut self, ifindex: u32) -> Self {
+        self.ifindex = ifindex;
+        self
+    }
+
+    /// Convert to bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        <Self as IntoBytes>::as_bytes(self)
+    }
+
+    /// Parse from bytes (accept-larger-than-expected: reads the prefix,
+    /// ignores trailing bytes a future kernel may append).
+    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
+        Self::ref_from_prefix(data).map(|(r, _)| r).ok()
+    }
+}
+
+/// Top-level attributes carried in an `RTM_{NEW,GET}VLAN` message
+/// (`BRIDGE_VLANDB_*`).
+pub mod bridge_vlandb {
+    /// Per-VLAN entry nest (`BRIDGE_VLANDB_ENTRY`).
+    pub const ENTRY: u16 = 1;
+    /// Bridge-global VLAN options nest (`BRIDGE_VLANDB_GLOBAL_OPTIONS`).
+    pub const GLOBAL_OPTIONS: u16 = 2;
+}
+
+/// Attributes carried in an `RTM_GETVLAN` dump *request* to filter the
+/// dump (`BRIDGE_VLANDB_DUMP_*`).
+pub mod bridge_vlandb_dump {
+    /// Dump-filter flags attribute (`BRIDGE_VLANDB_DUMP_FLAGS`, u32).
+    pub const FLAGS: u16 = 1;
+
+    /// Include per-VLAN stats in the dump (`BRIDGE_VLANDB_DUMPF_STATS`).
+    pub const DUMPF_STATS: u32 = 1 << 0;
+    /// Dump bridge-global VLAN options only (`BRIDGE_VLANDB_DUMPF_GLOBAL`).
+    pub const DUMPF_GLOBAL: u32 = 1 << 1;
+}
+
+/// Bridge-global per-VLAN option attributes
+/// (`BRIDGE_VLANDB_GLOBAL_OPTIONS` → `BRIDGE_VLANDB_GOPTS_*`).
+///
+/// These are the per-VLAN settings that live on the bridge device
+/// itself, chiefly per-VLAN multicast snooping.
+pub mod bridge_vlandb_gopts {
+    /// VLAN ID this option block applies to (u16).
+    pub const ID: u16 = 1;
+    /// Upper VLAN ID of a range (u16); present with [`ID`] for ranges.
+    pub const RANGE: u16 = 2;
+    /// Per-VLAN multicast snooping enabled (u8 bool).
+    pub const MCAST_SNOOPING: u16 = 3;
+    /// IGMP query version (u8).
+    pub const MCAST_IGMP_VERSION: u16 = 4;
+    /// MLD query version (u8).
+    pub const MCAST_MLD_VERSION: u16 = 5;
+    /// Last-member query count (u32).
+    pub const MCAST_LAST_MEMBER_CNT: u16 = 6;
+    /// Startup query count (u32).
+    pub const MCAST_STARTUP_QUERY_CNT: u16 = 7;
+    /// Last-member query interval, centiseconds (u64).
+    pub const MCAST_LAST_MEMBER_INTVL: u16 = 8;
+    /// Padding attribute for 64-bit alignment (`BRIDGE_VLANDB_GOPTS_PAD`).
+    pub const PAD: u16 = 9;
+    /// Membership interval, centiseconds (u64).
+    pub const MCAST_MEMBERSHIP_INTVL: u16 = 10;
+    /// Querier interval, centiseconds (u64).
+    pub const MCAST_QUERIER_INTVL: u16 = 11;
+    /// Query interval, centiseconds (u64).
+    pub const MCAST_QUERY_INTVL: u16 = 12;
+    /// Query response interval, centiseconds (u64).
+    pub const MCAST_QUERY_RESPONSE_INTVL: u16 = 13;
+    /// Startup query interval, centiseconds (u64).
+    pub const MCAST_STARTUP_QUERY_INTVL: u16 = 14;
+    /// Per-VLAN multicast querier enabled (u8 bool).
+    pub const MCAST_QUERIER: u16 = 15;
+    /// Multicast router ports list (nested, dump-only). Older mainline
+    /// headers name this attribute `BRIDGE_VLANDB_GOPTS_MCAST_ROUTER`;
+    /// the index is stable. Recognized but not modelled by
+    /// `BridgeVlanGlobalOptions` (see module docs).
+    pub const MCAST_ROUTER_PORTS: u16 = 16;
+    /// Multicast querier state (nested, read-only). Not modelled.
+    pub const MCAST_QUERIER_STATE: u16 = 17;
+    /// MST instance id this VLAN maps to (u16).
+    pub const MSTI: u16 = 18;
+}
+
 /// Extended filter mask for requesting additional link info.
 pub mod rtext_filter {
     /// Request VLAN info

@@ -190,7 +190,10 @@ pub mod lab;
 // Event types
 // Route protocol multicast groups
 // Bridge VLAN types
-pub use netlink::bridge_vlan::{BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanFlags};
+pub use netlink::bridge_vlan::{
+    BridgeVlanBuilder, BridgeVlanEntry, BridgeVlanFlags, BridgeVlanGlobalOptions,
+    BridgeVlanGlobalOptionsBuilder,
+};
 // Diagnostics types
 pub use netlink::diagnostics::{
     Bottleneck, BottleneckType, ConnectivityReport, DiagnosticReport, Diagnostics,

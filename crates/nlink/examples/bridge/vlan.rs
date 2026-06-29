@@ -63,6 +63,29 @@ async fn main() -> nlink::Result<()> {
                 }
                 Err(e) => println!("  Error: {}\n", e),
             }
+
+            // Bridge-global per-VLAN options (multicast snooping, etc.)
+            match conn.get_bridge_vlan_global_options(name).await {
+                Ok(opts) if !opts.is_empty() => {
+                    println!("  Global VLAN options:");
+                    for o in &opts {
+                        let vid = match o.vid_end() {
+                            Some(end) => format!("{}-{}", o.vid(), end),
+                            None => o.vid().to_string(),
+                        };
+                        println!(
+                            "    VLAN {}: mcast_snooping={:?} mcast_querier={:?} msti={:?}",
+                            vid,
+                            o.mcast_snooping(),
+                            o.mcast_querier(),
+                            o.msti(),
+                        );
+                    }
+                    println!();
+                }
+                Ok(_) => {}
+                Err(e) => println!("  Global options error: {}\n", e),
+            }
         }
     }
 
@@ -136,6 +159,34 @@ async fn main() -> nlink::Result<()> {
 
     // Delete a VLAN range
     conn.del_bridge_vlan_range("eth0", 300, 310).await?;
+"#
+    );
+
+    println!("--- Bridge-global per-VLAN options (multicast snooping) ---");
+    println!(
+        r#"
+    use nlink::netlink::bridge_vlan::BridgeVlanGlobalOptionsBuilder;
+
+    // Enable per-VLAN multicast snooping on VLAN 100 of bridge br0.
+    // These options live on the bridge device itself (VLAN-DB API).
+    conn.set_bridge_vlan_global_options(
+        BridgeVlanGlobalOptionsBuilder::new(100)
+            .dev("br0")
+            .mcast_snooping(true)
+            .mcast_igmp_version(3)
+    ).await?;
+
+    // Apply to a VLAN range, then read the options back.
+    conn.set_bridge_vlan_global_options(
+        BridgeVlanGlobalOptionsBuilder::new(200)
+            .dev("br0")
+            .range(210)
+            .mcast_snooping(false)
+    ).await?;
+
+    for o in conn.get_bridge_vlan_global_options("br0").await? {{
+        println!("VLAN {{}}: snooping={{:?}}", o.vid(), o.mcast_snooping());
+    }}
 "#
     );
 
