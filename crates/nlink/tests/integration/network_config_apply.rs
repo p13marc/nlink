@@ -27,7 +27,7 @@ use std::time::Duration;
 use nlink::Result;
 use nlink::netlink::{
     Connection, Route,
-    config::NetworkConfig,
+    config::{DiffOptions, NetworkConfig},
     namespace,
 };
 
@@ -281,6 +281,216 @@ async fn vlan_parent_already_exists_in_kernel() -> Result<()> {
             .link("eth0.42", |b| b.vlan("eth0", 42));
         let result = cfg.apply(&conn).await?;
         assert_eq!(result.changes_made, 1, "only the VLAN should be new");
+
+        Ok(())
+    })
+    .await
+}
+
+// -------------------------------------------------------------
+// Plan 205 (re-wired) — declarative purge: remove undeclared
+// kernel resources, conservatively scoped. Validates the
+// exclusion fences (global-scope only, managed devices only,
+// static/boot main-table routes only) against a live kernel.
+// Locally: run as root-in-netns via `unshare -rn`.
+// -------------------------------------------------------------
+
+/// Purge removes an undeclared **global** address while keeping
+/// the declared one — and never touches the kernel-managed
+/// IPv6 link-local (scope link) the kernel auto-adds when the
+/// dummy comes up.
+#[tokio::test]
+async fn purge_removes_undeclared_global_address_keeps_declared() -> Result<()> {
+    nlink::require_root!();
+
+    with_timeout(async {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        use nlink::netlink::addr::Ipv4Address;
+        use nlink::netlink::link::DummyLink;
+
+        let ns = TestNamespace::new("purge-addr")?;
+        let conn = conn_in_ns(&ns)?;
+
+        conn.add_link(DummyLink::new("eth0")).await?;
+        conn.set_link_up("eth0").await?;
+        // Two global addresses on the managed interface; the
+        // config will declare only the first.
+        conn.add_address(Ipv4Address::new("eth0", Ipv4Addr::new(10, 0, 0, 1), 24))
+            .await?;
+        conn.add_address(Ipv4Address::new("eth0", Ipv4Addr::new(10, 0, 0, 2), 24))
+            .await?;
+
+        let cfg = NetworkConfig::new()
+            .link("eth0", |b| b.dummy())
+            .address("eth0", "10.0.0.1/24")
+            .expect("valid CIDR");
+
+        // Purge diff: exactly one address slated for removal.
+        let diff = cfg
+            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .await?;
+        let removed: Vec<(IpAddr, u8)> = diff
+            .addresses_to_remove
+            .iter()
+            .map(|a| (a.address(), a.prefix_len()))
+            .collect();
+        assert_eq!(
+            removed,
+            vec![(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 24)],
+            "only the undeclared global address should be slated for removal \
+             (link-local / declared address excluded); got {removed:?}"
+        );
+
+        // Apply the purge, then confirm kernel state.
+        let result = diff.apply(&conn, Default::default()).await?;
+        assert_eq!(result.changes_made, 1, "one address removed");
+
+        let addrs = conn.get_addresses().await?;
+        let v4: Vec<IpAddr> = addrs
+            .iter()
+            .filter(|a| a.is_ipv4())
+            .filter_map(|a| a.address().copied())
+            .collect();
+        assert!(
+            v4.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            "declared address must survive purge; have {v4:?}"
+        );
+        assert!(
+            !v4.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            "undeclared address must be gone; have {v4:?}"
+        );
+        // Link-local must still be present (proves scope fence).
+        assert!(
+            addrs.iter().any(|a| !a.is_ipv4()),
+            "IPv6 link-local must survive purge (scope-link exclusion)"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+/// Default (non-purge) diff never removes anything, even when
+/// the kernel has undeclared addresses — the safety invariant.
+#[tokio::test]
+async fn default_diff_never_removes_addresses() -> Result<()> {
+    nlink::require_root!();
+
+    with_timeout(async {
+        use std::net::Ipv4Addr;
+
+        use nlink::netlink::addr::Ipv4Address;
+        use nlink::netlink::link::DummyLink;
+
+        let ns = TestNamespace::new("no-purge-addr")?;
+        let conn = conn_in_ns(&ns)?;
+
+        conn.add_link(DummyLink::new("eth0")).await?;
+        conn.set_link_up("eth0").await?;
+        conn.add_address(Ipv4Address::new("eth0", Ipv4Addr::new(10, 0, 0, 9), 24))
+            .await?;
+
+        // Config declares the interface but NO addresses.
+        let cfg = NetworkConfig::new().link("eth0", |b| b.dummy());
+
+        let diff = cfg.diff(&conn).await?;
+        assert!(
+            diff.addresses_to_remove.is_empty(),
+            "default diff must never populate removals"
+        );
+        // …and the purge diff WOULD remove it (proves the gate
+        // is the flag, not a missing-data accident).
+        let purge = cfg
+            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .await?;
+        assert_eq!(
+            purge.addresses_to_remove.len(),
+            1,
+            "purge diff sees the undeclared address"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+/// Purge removes an undeclared `boot`-protocol main-table route
+/// but leaves the kernel-managed connected route (proto kernel)
+/// the address install created. Re-diffing after apply yields an
+/// empty purge set (idempotent).
+#[tokio::test]
+async fn purge_removes_static_route_keeps_connected_route() -> Result<()> {
+    nlink::require_root!();
+
+    with_timeout(async {
+        use std::net::Ipv4Addr;
+
+        use nlink::netlink::addr::Ipv4Address;
+        use nlink::netlink::link::DummyLink;
+        use nlink::netlink::route::Ipv4Route;
+
+        let ns = TestNamespace::new("purge-route")?;
+        let conn = conn_in_ns(&ns)?;
+
+        conn.add_link(DummyLink::new("eth0")).await?;
+        conn.set_link_up("eth0").await?;
+        conn.add_address(Ipv4Address::new("eth0", Ipv4Addr::new(10, 0, 0, 1), 24))
+            .await?;
+        // Undeclared admin route (proto boot, table main).
+        conn.add_route(Ipv4Route::from_addr(Ipv4Addr::new(10, 9, 0, 0), 24).dev("eth0"))
+            .await?;
+
+        // Config declares the address (so the connected route
+        // stays "desired" via the kernel) but no explicit routes.
+        let cfg = NetworkConfig::new()
+            .link("eth0", |b| b.dummy())
+            .address("eth0", "10.0.0.1/24")
+            .expect("valid CIDR");
+
+        let diff = cfg
+            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .await?;
+        let removed: Vec<(std::net::IpAddr, u8)> = diff
+            .routes_to_remove
+            .iter()
+            .map(|r| (r.destination(), r.prefix_len()))
+            .collect();
+        assert!(
+            removed.contains(&(std::net::IpAddr::V4(Ipv4Addr::new(10, 9, 0, 0)), 24)),
+            "undeclared static route must be slated for removal; got {removed:?}"
+        );
+        assert!(
+            !removed
+                .iter()
+                .any(|(d, _)| *d == std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0))),
+            "kernel connected route (proto kernel) must NOT be purged; got {removed:?}"
+        );
+
+        let _ = diff.apply(&conn, Default::default()).await?;
+
+        // The static route is gone; the connected route remains.
+        let routes = conn.get_routes().await?;
+        let dst_is = |r: &nlink::RouteMessage, a: Ipv4Addr| {
+            r.destination() == Some(&std::net::IpAddr::V4(a))
+        };
+        assert!(
+            !routes.iter().any(|r| dst_is(r, Ipv4Addr::new(10, 9, 0, 0))),
+            "static route must be removed after purge apply"
+        );
+        assert!(
+            routes.iter().any(|r| dst_is(r, Ipv4Addr::new(10, 0, 0, 0))),
+            "connected route must survive purge apply"
+        );
+
+        // Idempotent: re-diff now sees nothing to remove.
+        let again = cfg
+            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .await?;
+        assert!(
+            again.routes_to_remove.is_empty(),
+            "purge must be idempotent — second diff has no route removals"
+        );
 
         Ok(())
     })
