@@ -388,19 +388,25 @@ async fn default_diff_never_removes_addresses() -> Result<()> {
 
         conn.add_link(DummyLink::new("eth0")).await?;
         conn.set_link_up("eth0").await?;
+        // Two global addresses; the config declares only .1, so eth0
+        // is an address-managed interface and .9 is undeclared.
+        conn.add_address(Ipv4Address::new("eth0", Ipv4Addr::new(10, 0, 0, 1), 24))
+            .await?;
         conn.add_address(Ipv4Address::new("eth0", Ipv4Addr::new(10, 0, 0, 9), 24))
             .await?;
 
-        // Config declares the interface but NO addresses.
-        let cfg = NetworkConfig::new().link("eth0", |b| b.dummy());
+        let cfg = NetworkConfig::new()
+            .link("eth0", |b| b.dummy())
+            .address("eth0", "10.0.0.1/24")
+            .expect("valid CIDR");
 
         let diff = cfg.diff(&conn).await?;
         assert!(
             diff.addresses_to_remove.is_empty(),
             "default diff must never populate removals"
         );
-        // …and the purge diff WOULD remove it (proves the gate
-        // is the flag, not a missing-data accident).
+        // …and the purge diff WOULD remove the undeclared .9 (proves
+        // the gate is the flag, not a missing-data accident).
         let purge = cfg
             .diff_with_options(&conn, DiffOptions::default().purge(true))
             .await?;
