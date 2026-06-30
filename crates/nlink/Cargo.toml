@@ -414,3 +414,8 @@ path = "examples/ratelimit/simple.rs"
 name = "lab_three_namespace"
 path = "examples/lab/three_namespace.rs"
 required-features = ["lab"]
+
+# Reflector / watch-cache (Store + ReflectExt)
+[[example]]
+name = "reflector_watch_cache"
+path = "examples/reflector/watch_cache.rs"

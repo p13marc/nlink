@@ -83,7 +83,10 @@ Inside `crates/nlink/src/`:
 - `netlink/genl/{wireguard,macsec,mptcp,ethtool,nl80211,devlink}/`
   — Generic Netlink families.
 - `netlink/config/` — declarative `NetworkConfig` (diff + apply +
-  reconcile).
+  reconcile + opt-in purge).
+- `netlink/{resync,resync_ext,reflector}.rs` — ENOBUFS-resync event
+  streams, the `ResyncStreamExt` combinators, and the kube-rs-style
+  `Store<K,V>` watch-cache (`ReflectExt::reflect`).
 - `netlink/{ratelimit,impair,diagnostics}.rs` — high-level helpers.
 - `lab/` — namespace + integration-test harness (feature `lab`).
 
@@ -102,6 +105,7 @@ unsafe pointer casts in `types/`.
 | `lab` | `nlink::lab` namespace + integration-test harness |
 | `syscall_batch` | `recvmmsg`/`sendmmsg` batching wired into eager + streaming dump paths (0.16+; opt-in for one soak release) |
 | `serde` | `Serialize` + validating `Deserialize` on the declarative config types (`NetworkConfig` round-trips through JSON/YAML; addresses/routes as CIDR strings, MACs as `aa:bb:..`, validated via `try_from`). Also gates `ConfigDiff`/`NftablesDiff`/result-type `Serialize`. Pulls `serde_json` for the `NetworkConfig::{from_json_str,to_json_string}` helpers. |
+| `schemars` | JSON Schema (draft 7) for `NetworkConfig` via `json_schema()` / `json_schema_value()` — wire into editor `json.schemas`/`yaml.schemas` or CI validation. Opt-in; implies `serde`; faithful to the human-facing JSON shape (CIDR strings, not parsed structs). 0.23+. |
 | `full` | All of the above |
 
 ## Type-safe units (Rate / Bytes / Percent)
@@ -610,14 +614,29 @@ recipe rather than re-synthesizing:
   installed in-kernel; atomic `key_swap` rekey cutover;
   multicast `peer-del-ntf` / `key-swap-ntf` / `peer-float-ntf`.
   Kernel 6.16+ (0.21+, Plan 197).
+- [`events-with-resync`](docs/recipes/events-with-resync.md) —
+  ENOBUFS-resilient event loop (`ResyncedEvent`, resync markers,
+  `into_events_with_resync`) + the `ResyncStreamExt`/`ReflectExt`
+  combinators and the `Store` watch-cache.
+- [`nftables-watch-with-resync`](docs/recipes/nftables-watch-with-resync.md)
+  — subscribe to nftables multicast events and recover from ENOBUFS
+  via resync redump.
+- [`xfrm-ipsec-tunnel`](docs/recipes/xfrm-ipsec-tunnel.md) — IPsec SA/SP
+  setup + the `Connection<Xfrm>: EventSource` monitor stream.
+- [`connection-pool`](docs/recipes/connection-pool.md) — `ConnectionPool<P>`
+  for kernel-parallel dump fan-out (one fd per task).
+- [`cgroup-classification`](docs/recipes/cgroup-classification.md) —
+  cgroup-based TC classification.
+- [`error-handling-patterns`](docs/recipes/error-handling-patterns.md) —
+  `is_X()` recovery predicates + typed not-found variants.
 
 Per-subsystem runnable examples live under
 `crates/nlink/examples/`: `genl/{wireguard,macsec,mptcp,ethtool_*,
-nl80211,devlink,dpll,net_shaper}.rs`, `macros/define_taskstats.rs`,
-`netfilter/{conntrack,conntrack_events}.rs`,
+nl80211,devlink,dpll,net_shaper,ovpn}.rs`, `macros/define_taskstats.rs`,
+`netfilter/{conntrack,conntrack_events}.rs`, `pool/parallel_dump.rs`,
 `{audit,bridge,config,connector,diagnostics,events,fib_lookup,
-impair,lab,namespace,nftables,ratelimit,route,selinux,sockdiag,
-uevent,xfrm}/`. Read these directly when learning a subsystem;
+impair,lab,namespace,nftables,ratelimit,reflector,route,selinux,
+sockdiag,uevent,xfrm}/`. Read these directly when learning a subsystem;
 every shipped example is registered + builds clean under
 `cargo build --workspace --all-targets` (the
 `audit-example-registration` CI gate enforces zero orphans).
@@ -634,10 +653,10 @@ run it locally before merging a new example.
 
 ## Active work
 
-**0.22.0 shipped 2026-06-29** (`v0.22.0` tagged; both crates on
-crates.io). Headline narrative in `CHANGELOG.md ## [0.22.0]`
-+ `docs/migration_guide/0.21.0-to-0.22.0.md`. Library-additive only;
-the one tooling change is the demo-binary rename to `nlink-*`.
+**0.23.0 shipped 2026-06-30** (`v0.23.0` tagged; both crates on
+crates.io). Headline narrative in `CHANGELOG.md ## [0.23.0]`
++ `docs/migration_guide/0.22.0-to-0.23.0.md`. A large, mostly
+library-additive release.
 
 The **next cycle is open on `master`** — new work lands in
 `CHANGELOG.md ## [Unreleased]` and is promoted to the next
@@ -645,20 +664,26 @@ The **next cycle is open on `master`** — new work lands in
 the old "work on a release branch, don't push to master" note no
 longer applies.)
 
-The 0.22.0 cycle closed the **demo-binary hardening epic (#30)** +
-all 11 per-binary issues + #29 (library gaps), the **TC/ethtool/
-sockdiag coverage epic (#115 → #116–#120)**, validating
-`serde::Deserialize` on `NetworkConfig` (#108), declarative `nft
-reconcile`/`diff` (#109), and the `nlink-*` binary rename (#133).
-The old #29 deferred backlog (tc `choke`/`gred`/`atm`/`pfifo_fast`,
-`rsvp`, `ife`/`gate`/`ctinfo`; ethtool FEC/module-EEPROM/RSS;
-sockdiag `INET_DIAG_REQ_BYTECODE`) is **all shipped**.
+The 0.23.0 cycle resolved the **#134–#137 follow-on epic**: the
+opt-in dispatcher mode is feature-complete (#134 —
+`Connection::with_dispatcher`, events + streams + mixed subsystems
+coexist on one connection), GENL command unification (#135),
+`Connection::<Ovpn>::attach_socket` + `NetlinkSocket::send_with_fds`
+(#136), and the entire **#137 audit/coverage backlog**: full nl80211
+read audit (PHY/wiphy, scan/BSS, station-info, channel survey) with
+two id-drift wire-bug fixes, XFRM monitor `EventSource`, bridge
+`BRIDGE_VLANDB_ENTRY`/`GOPTS`, net_shaper group shaping, MPLS/SRv6/
+NextHop struct audit, declarative nftables sets (`DeclaredSet`),
+`schemars` JSON Schema, `NetworkConfig` declarative purge (Plan 205),
+the `Store` reflector watch-cache (Plan 195), the newtype `From`/`Into`
+sweep (Plan 201), `TableName` newtype, `LinkStats` accessor convention,
+pedit `munge` DSL, `WireguardConfig::{from_wg_quick,client}`, and
+property-based parser-robustness harnesses. **Only intentionally
+deferred:** `backon`-based `StreamBackoff` (Plan 195 — reconnect
+backoff composes at the spawn-loop level) and `ip vrf exec` (needs
+cgroup2 + eBPF `sock_bind`, untestable under the non-root CI gate).
 
-Open follow-on work is tracked as GitHub issues, not in `plans/`:
-#134 (Plan 234 per-seq unicast dispatcher), #135 (Plan 235 GENL
-command unification), #136 (Plan 197 cross-netns `attach_socket`),
-#137 (audit/coverage backlog — nl80211 per-attribute, ethtool
-bitset, bridge VLAN/FDB wire-format, …).
+Open follow-on work is tracked as GitHub issues, not in `plans/`.
 
 Per-release upgrade guides:
 [`docs/migration_guide/`](docs/migration_guide/README.md) — write

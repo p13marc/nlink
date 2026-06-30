@@ -63,6 +63,9 @@ to the hand-rolled netlink primitives if you want to go deeper.
   test pre-seeding, NAT control planes, and lab eviction. Covers
   symmetric (auto-mirrored) and asymmetric (explicit reply / NAT)
   flow shapes.
+- [**Watch nftables with resync**](nftables-watch-with-resync.md) —
+  subscribe to nftables multicast events and recover from ENOBUFS
+  via a resync redump (`into_events_with_resync`).
 
 ### Observability & orchestration
 
