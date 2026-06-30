@@ -1684,6 +1684,8 @@ pub struct RuleInfo {
 /// Plan 198 §2.1 added `InetProto` (single u8 protocol — e.g.
 /// `tcp`, `udp`, `icmp`) and `Concat(Vec<_>)` (composite key
 /// used in rules like `ip saddr . tcp dport`).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SetKeyType {
@@ -1809,10 +1811,20 @@ impl Set {
         self.flags |= super::NFT_SET_CONSTANT;
         self
     }
+
+    /// Set the flags bitmask directly (`NFT_SET_*` constants).
+    /// Overwrites any previously set flags (including
+    /// [`Self::constant`]); combine bits yourself if you need
+    /// several.
+    pub fn flags(mut self, flags: u32) -> Self {
+        self.flags = flags;
+        self
+    }
 }
 
 /// A set element (key + optional data).
-#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetElement {
     /// Element key data.
     pub key: Vec<u8>,

@@ -3,9 +3,9 @@
 use std::collections::HashSet;
 
 use super::types::{
-    DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredTable, NftablesConfig,
+    DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredSet, DeclaredTable, NftablesConfig,
 };
-use super::super::types::Family;
+use super::super::types::{Family, SetElement};
 use crate::netlink::{
     builder::MessageBuilder, connection::Connection, error::Result, protocol::Nftables,
 };
@@ -201,6 +201,16 @@ pub struct NftablesDiff {
     pub flowtables_to_add: Vec<DeclaredFlowtable>,
     /// Flowtables to delete — (family, table, name).
     pub flowtables_to_delete: Vec<(Family, String, String)>,
+    /// Sets to create — (owning table, owning family, set).
+    pub sets_to_add: Vec<(String, Family, DeclaredSet)>,
+    /// Sets to delete — (table, family, name).
+    pub sets_to_delete: Vec<(String, Family, String)>,
+    /// Set elements to add — (table, family, set, elements). The
+    /// declared keys not yet present in the kernel set.
+    pub set_elements_to_add: Vec<(String, Family, String, Vec<SetElement>)>,
+    /// Set elements to remove — (table, family, set, elements). The
+    /// kernel keys not declared (full element reconcile).
+    pub set_elements_to_remove: Vec<(String, Family, String, Vec<SetElement>)>,
 }
 
 impl NftablesDiff {
@@ -215,6 +225,10 @@ impl NftablesDiff {
             && self.rules_to_replace.is_empty()
             && self.flowtables_to_add.is_empty()
             && self.flowtables_to_delete.is_empty()
+            && self.sets_to_add.is_empty()
+            && self.sets_to_delete.is_empty()
+            && self.set_elements_to_add.is_empty()
+            && self.set_elements_to_remove.is_empty()
     }
 
     /// Total number of changes (sum of all add/delete counts).
@@ -228,6 +242,10 @@ impl NftablesDiff {
             + self.rules_to_replace.len()
             + self.flowtables_to_add.len()
             + self.flowtables_to_delete.len()
+            + self.sets_to_add.len()
+            + self.sets_to_delete.len()
+            + self.set_elements_to_add.len()
+            + self.set_elements_to_remove.len()
     }
 
     /// Render a one-line-per-change human summary. Useful for
@@ -285,6 +303,31 @@ impl NftablesDiff {
         }
         for (fam, tbl, name) in &self.flowtables_to_delete {
             lines.push(format!("- flowtable {fam:?} {tbl}/{name}"));
+        }
+        for (tbl, fam, s) in &self.sets_to_add {
+            lines.push(format!(
+                "+ set {fam:?} {tbl}/{} ({} element{})",
+                s.name(),
+                s.elements().len(),
+                if s.elements().len() == 1 { "" } else { "s" },
+            ));
+        }
+        for (tbl, fam, name) in &self.sets_to_delete {
+            lines.push(format!("- set {fam:?} {tbl}/{name}"));
+        }
+        for (tbl, fam, set, elems) in &self.set_elements_to_add {
+            lines.push(format!(
+                "+ {} element{} {fam:?} {tbl}/{set}",
+                elems.len(),
+                if elems.len() == 1 { "" } else { "s" },
+            ));
+        }
+        for (tbl, fam, set, elems) in &self.set_elements_to_remove {
+            lines.push(format!(
+                "- {} element{} {fam:?} {tbl}/{set}",
+                elems.len(),
+                if elems.len() == 1 { "" } else { "s" },
+            ));
         }
         if lines.is_empty() {
             "NftablesDiff: no changes".to_string()
@@ -416,6 +459,21 @@ impl NftablesConfig {
                 }
                 for f in declared.flowtables() {
                     diff.flowtables_to_add.push(f.clone());
+                }
+                for s in declared.sets() {
+                    diff.sets_to_add.push((
+                        declared.name().to_string(),
+                        declared.family(),
+                        s.clone(),
+                    ));
+                    if !s.elements().is_empty() {
+                        diff.set_elements_to_add.push((
+                            declared.name().to_string(),
+                            declared.family(),
+                            s.name().to_string(),
+                            s.elements().to_vec(),
+                        ));
+                    }
                 }
                 continue;
             }
@@ -637,6 +695,91 @@ impl NftablesConfig {
                     ));
                 }
             }
+
+            // Sets: name-based identity, like chains/flowtables.
+            // Server-side table-scoped (Plan 181), so this is one
+            // round-trip per declared table — cheaper than a
+            // kernel-wide GETSET dump indexed in the loop.
+            let current_sets = conn
+                .list_sets_in(declared.name(), declared.family())
+                .await?;
+            let declared_set_names: HashSet<&str> =
+                declared.sets().iter().map(|s| s.name()).collect();
+            let current_set_names: HashSet<&str> =
+                current_sets.iter().map(|s| s.name.as_str()).collect();
+
+            for s in declared.sets() {
+                if current_set_names.contains(s.name()) {
+                    // Set exists on both sides → element-level diff.
+                    // Read the kernel's current elements and compute
+                    // the symmetric difference on raw key bytes.
+                    let current_elems = conn
+                        .list_set_elements(declared.name(), s.name(), declared.family())
+                        .await?;
+                    let declared_keys: HashSet<&[u8]> =
+                        s.elements().iter().map(|e| e.key.as_slice()).collect();
+                    let current_keys: HashSet<&[u8]> =
+                        current_elems.iter().map(|e| e.key.as_slice()).collect();
+
+                    let to_add: Vec<SetElement> = s
+                        .elements()
+                        .iter()
+                        .filter(|e| !current_keys.contains(e.key.as_slice()))
+                        .cloned()
+                        .collect();
+                    if !to_add.is_empty() {
+                        diff.set_elements_to_add.push((
+                            declared.name().to_string(),
+                            declared.family(),
+                            s.name().to_string(),
+                            to_add,
+                        ));
+                    }
+
+                    let to_remove: Vec<SetElement> = current_elems
+                        .iter()
+                        .filter(|e| !declared_keys.contains(e.key.as_slice()))
+                        .cloned()
+                        .collect();
+                    if !to_remove.is_empty() {
+                        diff.set_elements_to_remove.push((
+                            declared.name().to_string(),
+                            declared.family(),
+                            s.name().to_string(),
+                            to_remove,
+                        ));
+                    }
+                } else {
+                    // Set is new in an existing table → create it +
+                    // install all declared elements.
+                    diff.sets_to_add.push((
+                        declared.name().to_string(),
+                        declared.family(),
+                        s.clone(),
+                    ));
+                    if !s.elements().is_empty() {
+                        diff.set_elements_to_add.push((
+                            declared.name().to_string(),
+                            declared.family(),
+                            s.name().to_string(),
+                            s.elements().to_vec(),
+                        ));
+                    }
+                }
+            }
+
+            // Kernel sets we no longer declare → delete (full
+            // reconcile, same as chains/flowtables). Sets in tables
+            // we don't manage never reach here.
+            for s in &current_sets {
+                if !declared_set_names.contains(s.name.as_str()) {
+                    diff.sets_to_delete.push((
+                        declared.name().to_string(),
+                        declared.family(),
+                        s.name.clone(),
+                    ));
+                }
+            }
         }
 
         Ok(diff)
@@ -695,6 +838,61 @@ mod tests {
         d.tables_to_delete
             .push((super::super::super::types::Family::Inet, "y".to_string()));
         assert_eq!(d.change_count(), 2);
+    }
+
+    // ---- Plan 198 — declarative sets + element diff ----
+
+    #[test]
+    fn declared_set_builder_collects_key_type_flags_and_elements() {
+        use super::super::super::types::SetKeyType;
+        let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
+            t.set("allowed_v4", |s| {
+                s.key_type(SetKeyType::Ipv4Addr)
+                    .constant()
+                    .ipv4(std::net::Ipv4Addr::new(10, 0, 0, 1))
+                    .port(80) // (mixed key not realistic, just exercises the builder)
+            })
+        });
+        let set = &cfg.tables()[0].sets()[0];
+        assert_eq!(set.name(), "allowed_v4");
+        assert_eq!(*set.key_type(), SetKeyType::Ipv4Addr);
+        assert_ne!(set.flags(), 0, "constant() must set a flag bit");
+        assert_eq!(set.elements().len(), 2);
+    }
+
+    #[test]
+    fn set_and_element_collections_count_and_render() {
+        use super::super::super::types::{SetElement, SetKeyType};
+        let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
+            t.set("s", |s| s.key_type(SetKeyType::InetService))
+        });
+        let declared = cfg.tables()[0].sets()[0].clone();
+
+        let mut d = NftablesDiff::default();
+        d.sets_to_add
+            .push(("filter".to_string(), Family::Inet, declared));
+        d.sets_to_delete
+            .push(("filter".to_string(), Family::Inet, "stale".to_string()));
+        d.set_elements_to_add.push((
+            "filter".to_string(),
+            Family::Inet,
+            "s".to_string(),
+            vec![SetElement::port(80)],
+        ));
+        d.set_elements_to_remove.push((
+            "filter".to_string(),
+            Family::Inet,
+            "s".to_string(),
+            vec![SetElement::port(81), SetElement::port(82)],
+        ));
+
+        assert!(!d.is_empty());
+        assert_eq!(d.change_count(), 4);
+        let s = d.summary();
+        assert!(s.contains("+ set"), "summary: {s}");
+        assert!(s.contains("- set"), "summary: {s}");
+        assert!(s.contains("+ 1 element"), "summary: {s}");
+        assert!(s.contains("- 2 elements"), "summary: {s}");
     }
 
     // ---- Plan 157b v2 — per-rule USERDATA-keyed identity ----

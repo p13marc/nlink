@@ -25,8 +25,9 @@ Don't use it when:
   [`Connection::<Nftables>::{add_table, add_chain, add_rule}`](../../crates/nlink/src/netlink/nftables/connection.rs)
   methods are simpler.
 - You need full nftables expressiveness with maps, named counters,
-  or quota objects — 0.16 covers tables, chains, rules, and
-  flowtables; sets/maps land in a follow-up.
+  or quota objects — the declarative layer covers tables, chains,
+  rules, flowtables, and named **sets** (with element-level diff,
+  see below); maps/counters/quotas remain imperative-only.
 
 ## Permissions
 
@@ -170,6 +171,62 @@ on their comment, or no comment at all) are left alone by the
 diff. The library only deletes what it owns. If you want a clean
 chain (drop everything not declared), use the imperative
 `conn.del_chain(...)` first.
+
+## Named sets + element-level diff
+
+Declare a named set inside its table with `.set(name, |s| …)`;
+the closure takes a `DeclaredSetBuilder` (key type, flags,
+elements). Sets reconcile by **name** (created if absent, deleted
+if removed from the config), and a set present on both sides gets
+a real **element-level diff** — only the missing keys are added
+and the undeclared ones removed:
+
+```rust
+# use nlink::{Connection, Nftables};
+# use nlink::netlink::nftables::config::NftablesConfig;
+# use nlink::netlink::nftables::types::{Family, SetKeyType};
+# use std::net::Ipv4Addr;
+# async fn run(conn: &Connection<Nftables>) -> nlink::Result<()> {
+let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
+    t.set("allowed_v4", |s| {
+        s.key_type(SetKeyType::Ipv4Addr)
+            .ipv4(Ipv4Addr::new(10, 0, 0, 1))
+            .ipv4(Ipv4Addr::new(10, 0, 0, 2))
+    })
+});
+
+let diff = cfg.diff(conn).await?;
+// diff.sets_to_add / sets_to_delete — set create/delete by name.
+// diff.set_elements_to_add / set_elements_to_remove — per-key diff.
+diff.apply(conn).await?;
+# Ok(())
+# }
+```
+
+The whole thing commits inside the same atomic batch as
+tables/chains/rules, ordered so a rule referencing the set by
+`@allowed_v4` is released before the set is deleted and the set
+exists before the rules that match on it. To read a set's current
+contents directly, use
+[`Connection::<Nftables>::list_set_elements`](../../crates/nlink/src/netlink/nftables/connection.rs).
+
+**Two limitations** (both documented on `DeclaredSet`): only a
+set's *elements* are reconciled in place — its `key_type`/`flags`
+are not (same as a chain's hook/policy; change those by deleting
+and re-declaring). And dynamic/`timeout` sets that the kernel
+populates at runtime should be declared with **no** elements,
+otherwise every apply churns them.
+
+The `nlink-nft` demo speaks the matching reconcile DSL:
+
+```text
+add table inet filter
+add set inet filter allowed_v4 type ipv4_addr
+add element inet filter allowed_v4 10.0.0.1 10.0.0.2
+```
+
+`nlink-nft diff <file>` previews the change; `nlink-nft reconcile
+<file>` applies it.
 
 ## `apply_reconcile` — retry on conflict
 

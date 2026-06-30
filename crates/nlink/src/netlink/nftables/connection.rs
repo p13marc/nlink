@@ -659,21 +659,7 @@ impl Connection<Nftables> {
             nft_msg_type(NFT_MSG_NEWSETELEM),
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         );
-        let nfgenmsg = NfGenMsg::new(family);
-        builder.append(&nfgenmsg);
-        builder.append_attr_str(NFTA_SET_ELEM_LIST_TABLE, table);
-        builder.append_attr_str(NFTA_SET_ELEM_LIST_SET, set);
-
-        let elems_nest = builder.nest_start(NFTA_SET_ELEM_LIST_ELEMENTS | 0x8000);
-        for elem in elements {
-            let elem_nest = builder.nest_start(NFTA_LIST_ELEM | 0x8000);
-            let key_nest = builder.nest_start(NFTA_SET_ELEM_KEY | 0x8000);
-            builder.append_attr(NFTA_DATA_VALUE, &elem.key);
-            builder.nest_end(key_nest);
-            builder.nest_end(elem_nest);
-        }
-        builder.nest_end(elems_nest);
-
+        append_set_elements(&mut builder, table, set, family, elements);
         self.nft_request_ack(builder).await
     }
 
@@ -688,22 +674,36 @@ impl Connection<Nftables> {
     ) -> Result<()> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_DELSETELEM), NLM_F_REQUEST | NLM_F_ACK);
-        let nfgenmsg = NfGenMsg::new(family);
-        builder.append(&nfgenmsg);
-        builder.append_attr_str(NFTA_SET_ELEM_LIST_TABLE, table);
-        builder.append_attr_str(NFTA_SET_ELEM_LIST_SET, set);
-
-        let elems_nest = builder.nest_start(NFTA_SET_ELEM_LIST_ELEMENTS | 0x8000);
-        for elem in elements {
-            let elem_nest = builder.nest_start(NFTA_LIST_ELEM | 0x8000);
-            let key_nest = builder.nest_start(NFTA_SET_ELEM_KEY | 0x8000);
-            builder.append_attr(NFTA_DATA_VALUE, &elem.key);
-            builder.nest_end(key_nest);
-            builder.nest_end(elem_nest);
-        }
-        builder.nest_end(elems_nest);
-
+        append_set_elements(&mut builder, table, set, family, elements);
         self.nft_request_ack(builder).await
+    }
+
+    /// List the current elements of a named set.
+    ///
+    /// Dumps `NFT_MSG_GETSETELEM` for `(table, set, family)` and
+    /// returns each element's key bytes as a [`SetElement`]. Used by
+    /// the declarative [`NftablesConfig::diff`](super::config::NftablesConfig::diff)
+    /// to compute an element-level diff (add missing keys, remove
+    /// undeclared ones); also useful standalone to read a set's
+    /// contents.
+    ///
+    /// Only the element **key** is parsed — map/`element : value`
+    /// data (`NFTA_SET_ELEM_DATA`) is ignored, matching
+    /// [`SetElement`]'s key-only shape.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_set_elements"))]
+    pub async fn list_set_elements(
+        &self,
+        table: &str,
+        set: &str,
+        family: Family,
+    ) -> Result<Vec<SetElement>> {
+        let builder = build_list_set_elements_request(family as u8, table, set);
+        let responses = self.nft_dump(builder).await?;
+        let mut elements = Vec::new();
+        for (_family_byte, payload) in &responses {
+            parse_set_elements(payload, &mut elements);
+        }
+        Ok(elements)
     }
 
     // =========================================================================
@@ -1088,6 +1088,26 @@ pub(crate) fn build_list_sets_request(
     builder
 }
 
+pub(crate) fn build_list_set_elements_request(
+    family_byte: u8,
+    table: &str,
+    set: &str,
+) -> MessageBuilder {
+    let mut builder = MessageBuilder::new(
+        nft_msg_type(NFT_MSG_GETSETELEM),
+        NLM_F_REQUEST | NLM_F_DUMP,
+    );
+    let nfgenmsg = NfGenMsg {
+        nfgen_family: family_byte,
+        version: 0,
+        res_id: 0,
+    };
+    builder.append(&nfgenmsg);
+    builder.append_attr_str(NFTA_SET_ELEM_LIST_TABLE, table);
+    builder.append_attr_str(NFTA_SET_ELEM_LIST_SET, set);
+    builder
+}
+
 // =============================================================================
 // Attribute Parsing
 // =============================================================================
@@ -1267,6 +1287,48 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
     }
 
     if set.name.is_empty() { None } else { Some(set) }
+}
+
+/// Parse the element keys out of one `NFT_MSG_GETSETELEM` dump
+/// message, appending each as a [`SetElement`] to `out`.
+///
+/// Walks `NFTA_SET_ELEM_LIST_ELEMENTS` → per-element `NFTA_LIST_ELEM`
+/// → `NFTA_SET_ELEM_KEY` → `NFTA_DATA_VALUE` (the raw key bytes).
+/// Map data (`NFTA_SET_ELEM_DATA`) is ignored — [`SetElement`] is
+/// key-only. Per parser-robustness rule 3, malformed nests are
+/// silently skipped (no element pushed) rather than aborting the
+/// whole dump.
+pub(crate) fn parse_set_elements(data: &[u8], out: &mut Vec<SetElement>) {
+    for (attr_type, payload) in AttrIter::new(data) {
+        if attr_type & 0x7FFF != NFTA_SET_ELEM_LIST_ELEMENTS {
+            continue;
+        }
+        // Each child is an NFTA_LIST_ELEM wrapping one element.
+        for (elem_type, elem_payload) in AttrIter::new(payload) {
+            if elem_type & 0x7FFF != NFTA_LIST_ELEM {
+                continue;
+            }
+            if let Some(key) = parse_set_elem_key(elem_payload) {
+                out.push(SetElement::new(key));
+            }
+        }
+    }
+}
+
+/// Extract the `NFTA_SET_ELEM_KEY` → `NFTA_DATA_VALUE` key bytes
+/// from a single element nest. Returns `None` if the key attribute
+/// is absent (e.g. an interval end-marker we don't model).
+fn parse_set_elem_key(elem: &[u8]) -> Option<Vec<u8>> {
+    for (attr_type, payload) in AttrIter::new(elem) {
+        if attr_type & 0x7FFF == NFTA_SET_ELEM_KEY {
+            for (data_type, data_payload) in AttrIter::new(payload) {
+                if data_type & 0x7FFF == NFTA_DATA_VALUE {
+                    return Some(data_payload.to_vec());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Extract a null-terminated string from attribute payload.
@@ -1535,11 +1597,111 @@ impl Transaction {
         self
     }
 
+    /// Add a set creation to the batch. Mirrors the imperative
+    /// [`Connection::<Nftables>::add_set`](Connection).
+    ///
+    /// The per-transaction `NFTA_SET_ID` is set to the message's
+    /// sequence number so it's unique within the batch (the kernel
+    /// uses it to disambiguate sets created in the same
+    /// transaction; element adds reference the set by name, so they
+    /// don't need it).
+    pub fn add_set(mut self, set: Set) -> Self {
+        let seq = self.next_seq();
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWSET),
+            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        let nfgenmsg = NfGenMsg::new(set.family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_SET_TABLE, &set.table);
+        builder.append_attr_str(NFTA_SET_NAME, &set.name);
+        builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
+        builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
+        builder.append_attr_u32_be(NFTA_SET_FLAGS, set.flags);
+        builder.append_attr_u32_be(NFTA_SET_ID, seq);
+        builder.set_seq(seq);
+        self.messages.push(builder.finish());
+        self
+    }
+
+    /// Add a set deletion to the batch. Mirrors the imperative
+    /// [`Connection::<Nftables>::del_set`](Connection).
+    pub fn del_set(mut self, table: &str, name: &str, family: Family) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELSET), NLM_F_REQUEST);
+        let nfgenmsg = NfGenMsg::new(family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_SET_TABLE, table);
+        builder.append_attr_str(NFTA_SET_NAME, name);
+        builder.set_seq(self.next_seq());
+        self.messages.push(builder.finish());
+        self
+    }
+
+    /// Add set-element insertions to the batch. Mirrors the
+    /// imperative [`Connection::<Nftables>::add_set_elements`](Connection).
+    pub fn add_set_elements(
+        mut self,
+        table: &str,
+        set: &str,
+        family: Family,
+        elements: &[SetElement],
+    ) -> Self {
+        let mut builder =
+            MessageBuilder::new(nft_msg_type(NFT_MSG_NEWSETELEM), NLM_F_REQUEST | NLM_F_CREATE);
+        append_set_elements(&mut builder, table, set, family, elements);
+        builder.set_seq(self.next_seq());
+        self.messages.push(builder.finish());
+        self
+    }
+
+    /// Add set-element removals to the batch. Mirrors the
+    /// imperative [`Connection::<Nftables>::del_set_elements`](Connection).
+    pub fn del_set_elements(
+        mut self,
+        table: &str,
+        set: &str,
+        family: Family,
+        elements: &[SetElement],
+    ) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELSETELEM), NLM_F_REQUEST);
+        append_set_elements(&mut builder, table, set, family, elements);
+        builder.set_seq(self.next_seq());
+        self.messages.push(builder.finish());
+        self
+    }
+
     /// Commit the transaction atomically.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "commit"))]
     pub async fn commit(self, conn: &Connection<Nftables>) -> Result<()> {
         conn.send_batch(self.messages).await
     }
+}
+
+/// Append the `NFTA_SET_ELEM_LIST_*` header + per-element nest used
+/// by both `NEWSETELEM` and `DELSETELEM` messages. Shared by the
+/// imperative `Connection` methods and the `Transaction` builders so
+/// the wire shape stays identical.
+fn append_set_elements(
+    builder: &mut MessageBuilder,
+    table: &str,
+    set: &str,
+    family: Family,
+    elements: &[SetElement],
+) {
+    let nfgenmsg = NfGenMsg::new(family);
+    builder.append(&nfgenmsg);
+    builder.append_attr_str(NFTA_SET_ELEM_LIST_TABLE, table);
+    builder.append_attr_str(NFTA_SET_ELEM_LIST_SET, set);
+
+    let elems_nest = builder.nest_start(NFTA_SET_ELEM_LIST_ELEMENTS | 0x8000);
+    for elem in elements {
+        let elem_nest = builder.nest_start(NFTA_LIST_ELEM | 0x8000);
+        let key_nest = builder.nest_start(NFTA_SET_ELEM_KEY | 0x8000);
+        builder.append_attr(NFTA_DATA_VALUE, &elem.key);
+        builder.nest_end(key_nest);
+        builder.nest_end(elem_nest);
+    }
+    builder.nest_end(elems_nest);
 }
 
 /// Parse a flowtable from `NFT_MSG_GETFLOWTABLE` response payload.
@@ -1806,6 +1968,135 @@ mod transaction_tests {
         let table = find_attr(post_nfgen, NFTA_SET_TABLE)
             .expect("NFTA_SET_TABLE must be present");
         assert_eq!(&table[..table.len().saturating_sub(1)], b"filter");
+    }
+
+    #[test]
+    fn build_list_set_elements_request_carries_table_and_set() {
+        let bytes = super::build_list_set_elements_request(
+            super::super::types::Family::Inet as u8,
+            "filter",
+            "allowed_v4",
+        )
+        .finish();
+        assert_header(
+            &bytes,
+            super::nft_msg_type(super::super::NFT_MSG_GETSETELEM),
+            NLM_F_REQUEST | NLM_F_DUMP,
+        );
+        let body = body_after_nlmsghdr(&bytes);
+        assert_eq!(body[0], super::super::types::Family::Inet as u8);
+        let post_nfgen = &body[NFGENMSG_HDRLEN..];
+        let table = find_attr(post_nfgen, NFTA_SET_ELEM_LIST_TABLE)
+            .expect("NFTA_SET_ELEM_LIST_TABLE must be present");
+        let set = find_attr(post_nfgen, NFTA_SET_ELEM_LIST_SET)
+            .expect("NFTA_SET_ELEM_LIST_SET must be present");
+        assert_eq!(&table[..table.len().saturating_sub(1)], b"filter");
+        assert_eq!(&set[..set.len().saturating_sub(1)], b"allowed_v4");
+    }
+
+    #[test]
+    fn nfta_set_attr_ids_match_kernel_enum() {
+        // Regression for the ERANGE-on-NEWSET bug: `NFTA_SET_ID` was
+        // 16 and `NFTA_SET_HANDLE` 17, but the kernel
+        // `enum nft_set_attributes` puts ID at 10 and HANDLE at 16.
+        // Sending the set id under attribute 16 made the kernel read
+        // it as a (bogus) handle and reject every set create. Pin the
+        // whole tail of the enum so the class can't recur.
+        use super::super::*;
+        assert_eq!(NFTA_SET_TABLE, 1);
+        assert_eq!(NFTA_SET_NAME, 2);
+        assert_eq!(NFTA_SET_FLAGS, 3);
+        assert_eq!(NFTA_SET_KEY_TYPE, 4);
+        assert_eq!(NFTA_SET_KEY_LEN, 5);
+        assert_eq!(NFTA_SET_DATA_TYPE, 6);
+        assert_eq!(NFTA_SET_DATA_LEN, 7);
+        assert_eq!(NFTA_SET_POLICY, 8);
+        assert_eq!(NFTA_SET_DESC, 9);
+        assert_eq!(NFTA_SET_ID, 10);
+        assert_eq!(NFTA_SET_HANDLE, 16);
+    }
+
+    #[test]
+    fn tx_add_set_emits_key_type_len_flags_and_id() {
+        let set = Set::new("filter", "allowed_v4")
+            .family(Family::Inet)
+            .key_type(SetKeyType::Ipv4Addr);
+        let tx = new_tx().add_set(set);
+        assert_eq!(tx.messages.len(), 1);
+        let msg = &tx.messages[0];
+        assert_header(
+            msg,
+            nft_msg_type(NFT_MSG_NEWSET),
+            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        let body = body_after_nfgenmsg(msg);
+        let name = find_attr(body, NFTA_SET_NAME).expect("NFTA_SET_NAME missing");
+        assert_eq!(&name[..name.len().saturating_sub(1)], b"allowed_v4");
+        let kt = find_attr(body, NFTA_SET_KEY_TYPE).expect("NFTA_SET_KEY_TYPE missing");
+        assert_eq!(u32::from_be_bytes(kt.try_into().unwrap()), 7); // ipv4_addr
+        let kl = find_attr(body, NFTA_SET_KEY_LEN).expect("NFTA_SET_KEY_LEN missing");
+        assert_eq!(u32::from_be_bytes(kl.try_into().unwrap()), 4);
+        assert!(find_attr(body, NFTA_SET_ID).is_some(), "NFTA_SET_ID missing");
+    }
+
+    #[test]
+    fn tx_del_set_emits_table_and_name() {
+        let tx = new_tx().del_set("filter", "allowed_v4", Family::Inet);
+        let msg = &tx.messages[0];
+        assert_header(msg, nft_msg_type(NFT_MSG_DELSET), NLM_F_REQUEST);
+        let body = body_after_nfgenmsg(msg);
+        let table = find_attr(body, NFTA_SET_TABLE).expect("NFTA_SET_TABLE missing");
+        let name = find_attr(body, NFTA_SET_NAME).expect("NFTA_SET_NAME missing");
+        assert_eq!(&table[..table.len().saturating_sub(1)], b"filter");
+        assert_eq!(&name[..name.len().saturating_sub(1)], b"allowed_v4");
+    }
+
+    #[test]
+    fn tx_add_set_elements_nests_key_value() {
+        let elems = vec![
+            SetElement::ipv4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            SetElement::ipv4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+        ];
+        let tx = new_tx().add_set_elements("filter", "allowed_v4", Family::Inet, &elems);
+        let msg = &tx.messages[0];
+        assert_header(
+            msg,
+            nft_msg_type(NFT_MSG_NEWSETELEM),
+            NLM_F_REQUEST | NLM_F_CREATE,
+        );
+        let body = body_after_nfgenmsg(msg);
+        let set = find_attr(body, NFTA_SET_ELEM_LIST_SET).expect("NFTA_SET_ELEM_LIST_SET missing");
+        assert_eq!(&set[..set.len().saturating_sub(1)], b"allowed_v4");
+        // The whole ELEMENTS nest round-trips back through the parser.
+        let mut parsed = Vec::new();
+        super::parse_set_elements(body, &mut parsed);
+        assert_eq!(parsed, elems, "tx-written elements must parse back identically");
+    }
+
+    #[test]
+    fn parse_set_elements_skips_malformed_and_extracts_keys() {
+        // Build a minimal ELEMENTS nest by hand via the shared writer,
+        // then confirm the parser pulls exactly the key bytes.
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWSETELEM), NLM_F_REQUEST);
+        super::append_set_elements(
+            &mut builder,
+            "t",
+            "s",
+            Family::Inet,
+            &[SetElement::port(80), SetElement::port(443)],
+        );
+        let msg = builder.finish();
+        let body = body_after_nfgenmsg(&msg);
+        let mut out = Vec::new();
+        super::parse_set_elements(body, &mut out);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].key, 80u16.to_be_bytes());
+        assert_eq!(out[1].key, 443u16.to_be_bytes());
+
+        // Truncated / garbage payload must not panic and yields nothing.
+        let mut none = Vec::new();
+        super::parse_set_elements(&[0x01, 0x00, 0xff], &mut none);
+        assert!(none.is_empty());
     }
 
     #[test]

@@ -7,22 +7,26 @@
 //!   `cargo build --example nftables_declarative`
 //!
 //! Demonstrates:
-//!   1. Build an `NftablesConfig` with two `rule_keyed` rules.
+//!   1. Build an `NftablesConfig` with two `rule_keyed` rules and a
+//!      declared `allowed_v4` set with two IPv4 elements.
 //!   2. Compute the diff against the kernel (empty starting state
 //!      → all-adds).
 //!   3. Apply atomically (single NFNL_MSG_BATCH_BEGIN…END commit).
 //!   4. Re-compute the diff (now empty — idempotent reapply).
-//!   5. Mutate one rule's body, keep its handle_key; the diff is
-//!      a single `rules_to_replace` op (in-place
-//!      NFT_MSG_NEWRULE+NLM_F_REPLACE at the kernel handle).
+//!   5. Mutate one rule's body (keep its handle_key) AND add a third
+//!      IP to the set; the diff is a single `rules_to_replace` op
+//!      plus a single `set_elements_to_add` op (element-level diff —
+//!      only the new key is added, not the whole set).
 //!   6. Tear down with `del_table`.
 //!
 //! Each keyed rule round-trips its key through `NFTA_RULE_USERDATA`
 //! as `"nlink:<key>"` so `nft list ruleset` shows
 //! `comment "nlink:ssh-allow"`.
 
+use std::net::Ipv4Addr;
+
 use nlink::netlink::nftables::config::NftablesConfig;
-use nlink::netlink::nftables::types::{Family, Hook, Policy, Priority};
+use nlink::netlink::nftables::types::{Family, Hook, Policy, Priority, SetKeyType};
 use nlink::netlink::{Connection, Nftables};
 
 #[tokio::main]
@@ -39,6 +43,11 @@ async fn main() -> nlink::Result<()> {
         .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(22).accept())
         .rule_keyed("input", "icmp-allow", |r| {
             r.match_l4proto(1 /* IPPROTO_ICMP */).accept()
+        })
+        .set("allowed_v4", |s| {
+            s.key_type(SetKeyType::Ipv4Addr)
+                .ipv4(Ipv4Addr::new(10, 0, 0, 1))
+                .ipv4(Ipv4Addr::new(10, 0, 0, 2))
         })
     });
 
@@ -78,17 +87,33 @@ async fn main() -> nlink::Result<()> {
         })
         .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(2222).accept()) // new port
         .rule_keyed("input", "icmp-allow", |r| r.match_l4proto(1).accept())
+        .set("allowed_v4", |s| {
+            s.key_type(SetKeyType::Ipv4Addr)
+                .ipv4(Ipv4Addr::new(10, 0, 0, 1))
+                .ipv4(Ipv4Addr::new(10, 0, 0, 2))
+                .ipv4(Ipv4Addr::new(10, 0, 0, 3)) // new element
+        })
     });
     let mut_diff = updated.diff(&conn).await?;
-    println!("after port change:\n{}", mut_diff);
+    println!("after port change + new set element:\n{}", mut_diff);
     assert_eq!(
         mut_diff.rules_to_replace.len(),
         1,
         "expected exactly one in-place replace for the changed rule",
     );
+    assert_eq!(
+        mut_diff.set_elements_to_add.len(),
+        1,
+        "expected exactly one set_elements_to_add op (only the new key)",
+    );
+    assert_eq!(
+        mut_diff.set_elements_to_add[0].3.len(),
+        1,
+        "element diff should add just the single new key, not the whole set",
+    );
 
     let applied = mut_diff.apply(&conn).await?;
-    println!("\napplied {applied} op (1 = single replace_rule via NLM_F_REPLACE)\n");
+    println!("\napplied {applied} ops (1 replace_rule via NLM_F_REPLACE + 1 set-element add)\n");
 
     // -- Step 6: cleanup ---------------------------------------
     let teardown = NftablesConfig::new(); // empty → delete everything we own

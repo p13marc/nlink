@@ -3,7 +3,7 @@
 
 use super::super::{
     expr::Expr,
-    types::{ChainType, Family, Hook, Policy, Priority, Rule},
+    types::{ChainType, Family, Hook, Policy, Priority, Rule, SetElement, SetKeyType},
 };
 
 /// A complete declarative nftables ruleset. Construct via
@@ -63,6 +63,7 @@ pub struct DeclaredTable {
     pub(crate) chains: Vec<DeclaredChain>,
     pub(crate) rules: Vec<DeclaredRule>,
     pub(crate) flowtables: Vec<DeclaredFlowtable>,
+    pub(crate) sets: Vec<DeclaredSet>,
 }
 
 impl DeclaredTable {
@@ -88,6 +89,10 @@ impl DeclaredTable {
     pub fn flowtables(&self) -> &[DeclaredFlowtable] {
         &self.flowtables
     }
+    /// Named sets declared in this table.
+    pub fn sets(&self) -> &[DeclaredSet] {
+        &self.sets
+    }
 }
 
 /// Closure-style builder for [`DeclaredTable`]. Returned by the
@@ -99,6 +104,7 @@ pub struct DeclaredTableBuilder {
     chains: Vec<DeclaredChain>,
     rules: Vec<DeclaredRule>,
     flowtables: Vec<DeclaredFlowtable>,
+    sets: Vec<DeclaredSet>,
 }
 
 impl DeclaredTableBuilder {
@@ -110,6 +116,7 @@ impl DeclaredTableBuilder {
             chains: Vec::new(),
             rules: Vec::new(),
             flowtables: Vec::new(),
+            sets: Vec::new(),
         }
     }
 
@@ -196,6 +203,21 @@ impl DeclaredTableBuilder {
         self
     }
 
+    /// Declare a named set. The closure receives a
+    /// [`DeclaredSetBuilder`] for the key type, flags, and initial
+    /// elements. The set is reconciled by name (created if absent,
+    /// deleted if removed from the config); its declared elements
+    /// are reconciled element-by-element against the kernel on
+    /// [`apply`](super::NftablesDiff::apply).
+    pub fn set<F>(mut self, name: impl Into<String>, f: F) -> Self
+    where
+        F: FnOnce(DeclaredSetBuilder) -> DeclaredSetBuilder,
+    {
+        let builder = DeclaredSetBuilder::new(name.into());
+        self.sets.push(f(builder).into_set());
+        self
+    }
+
     fn into_table(self) -> DeclaredTable {
         DeclaredTable {
             name: self.name,
@@ -204,6 +226,7 @@ impl DeclaredTableBuilder {
             chains: self.chains,
             rules: self.rules,
             flowtables: self.flowtables,
+            sets: self.sets,
         }
     }
 }
@@ -324,6 +347,132 @@ impl DeclaredChainBuilder {
             policy: self.policy,
             chain_type: self.chain_type,
             device: self.device,
+        }
+    }
+}
+
+// =============================================================================
+// DeclaredSet
+// =============================================================================
+
+/// A declared named set — name, key type, flags, and its declared
+/// elements.
+///
+/// Reconciled by **name** (created if absent in the kernel, deleted
+/// if removed from the config) — its `key_type`/`flags` are not
+/// reconciled in place (same as a chain's hook/policy); changing a
+/// set's type means deleting and re-declaring it. The declared
+/// `elements` are reconciled **element-by-element** against the
+/// kernel: missing keys are added, undeclared keys are removed.
+///
+/// Note for dynamic/timeout sets (`NFT_SET_TIMEOUT` etc.): the
+/// kernel adds elements at runtime, so declaring `elements` on such
+/// a set will churn on every apply. Declare such sets with no
+/// elements (let rules populate them) or mark them constant.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone)]
+pub struct DeclaredSet {
+    pub(crate) name: String,
+    pub(crate) key_type: SetKeyType,
+    pub(crate) flags: u32,
+    pub(crate) elements: Vec<SetElement>,
+}
+
+impl DeclaredSet {
+    /// Set name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Key type.
+    pub fn key_type(&self) -> &SetKeyType {
+        &self.key_type
+    }
+    /// Flags bitmask (`NFT_SET_*` constants).
+    pub fn flags(&self) -> u32 {
+        self.flags
+    }
+    /// Declared elements.
+    pub fn elements(&self) -> &[SetElement] {
+        &self.elements
+    }
+}
+
+/// Closure-style builder for [`DeclaredSet`]. Returned by the
+/// closure passed to [`DeclaredTableBuilder::set`].
+pub struct DeclaredSetBuilder {
+    name: String,
+    key_type: SetKeyType,
+    flags: u32,
+    elements: Vec<SetElement>,
+}
+
+impl DeclaredSetBuilder {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            // Match `Set::new`'s default so an unconfigured set is
+            // still well-formed.
+            key_type: SetKeyType::Ipv4Addr,
+            flags: 0,
+            elements: Vec::new(),
+        }
+    }
+
+    /// Set the key type (`SetKeyType::Ipv4Addr`, `InetService`, …).
+    pub fn key_type(mut self, key_type: SetKeyType) -> Self {
+        self.key_type = key_type;
+        self
+    }
+
+    /// Set the flags bitmask directly (`NFT_SET_*` constants).
+    pub fn flags(mut self, flags: u32) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    /// Convenience: mark the set constant (`NFT_SET_CONSTANT`).
+    pub fn constant(mut self) -> Self {
+        self.flags |= super::super::NFT_SET_CONSTANT;
+        self
+    }
+
+    /// Add a raw element.
+    pub fn element(mut self, elem: SetElement) -> Self {
+        self.elements.push(elem);
+        self
+    }
+
+    /// Add many elements from an iterator.
+    pub fn elements<I>(mut self, elems: I) -> Self
+    where
+        I: IntoIterator<Item = SetElement>,
+    {
+        self.elements.extend(elems);
+        self
+    }
+
+    /// Convenience: add an IPv4-address element.
+    pub fn ipv4(self, addr: std::net::Ipv4Addr) -> Self {
+        self.element(SetElement::ipv4(addr))
+    }
+
+    /// Convenience: add an IPv6-address element.
+    pub fn ipv6(self, addr: std::net::Ipv6Addr) -> Self {
+        self.element(SetElement::ipv6(addr))
+    }
+
+    /// Convenience: add a port-number element (`inet_service`).
+    pub fn port(self, port: u16) -> Self {
+        self.element(SetElement::port(port))
+    }
+
+    fn into_set(self) -> DeclaredSet {
+        DeclaredSet {
+            name: self.name,
+            key_type: self.key_type,
+            flags: self.flags,
+            elements: self.elements,
         }
     }
 }
