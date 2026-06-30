@@ -112,6 +112,7 @@ mod parser_proptest;
 pub mod pool;
 mod protocol;
 pub mod ratelimit;
+pub mod reflector;
 pub mod resync;
 pub mod resync_ext;
 pub mod route;

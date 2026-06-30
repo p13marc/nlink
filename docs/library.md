@@ -140,6 +140,48 @@ while let Some(event) = sub.recv().await? {
 }
 ```
 
+## Reflector / Watch-Cache
+
+Keep an in-memory cache continuously up to date from an event stream —
+the `kube-rs` reflector pattern, built on the resync types (no extra
+dependency). `Store<K, V>` is a cheap-to-clone, read-only handle over a
+shared map; `stream.reflect(store, classify)` is a pass-through adapter
+that updates the store from every item it forwards.
+
+```rust
+use nlink::{Store, StoreOp};
+use nlink::netlink::reflector::ReflectExt;     // the stream combinator
+use nlink::netlink::events::NetworkEvent;
+use tokio_stream::StreamExt;
+
+let store: Store<u32, NetworkEvent> = Store::new();
+let reader = store.clone();                     // clones share the map
+
+// Drive the reflector in the background; classify each event into a
+// StoreOp. The typed event enum already encodes add-vs-delete.
+let watch = conn.into_events_with_resync(factory)?.reflect(store, |ev| {
+    match ev {
+        NetworkEvent::NewLink(l) => StoreOp::Upsert(l.ifindex()),
+        NetworkEvent::DelLink(l) => StoreOp::Remove(l.ifindex()),
+        _ => StoreOp::Ignore,
+    }
+});
+tokio::spawn(async move {
+    let mut watch = watch;
+    while watch.next().await.is_some() {}       // pass-through; just drain
+});
+
+// Read the cache from anywhere.
+println!("{} links tracked", reader.len());
+let link = reader.get(&ifindex);
+```
+
+After an `ENOBUFS` overflow the resync window replays the full state;
+the reflector stages that snapshot and swaps it in atomically at
+`ResyncEnd`, so the cache *replaces* stale state rather than merging
+into it. (The `backon`-based reconnect backoff is intentionally left to
+the caller's spawn loop — see `netlink::resync_ext`.)
+
 ## Traffic Control (TC)
 
 ### Adding Qdiscs

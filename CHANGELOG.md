@@ -49,6 +49,29 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Reflector / watch-cache — `Store<K, V>` + `ReflectExt::reflect`
+  (#137, Plan 195).** A `kube-rs`-style reflector that keeps an
+  in-memory cache continuously up to date from a resync-aware event
+  stream, with no new dependency. `Store<K, V>` is a cheap-to-clone,
+  read-only handle over a shared `HashMap` (clone it for any number of
+  readers; all observe the same map; accessors are `get` / `keys` /
+  `values` / `snapshot` / `contains_key` / `len` / `with_read`).
+  `stream.reflect(store, |ev| …)` wraps any
+  `Stream<Item = Result<ResyncedEvent<V>>>` (e.g.
+  `into_events_with_resync`) into a **pass-through** stream that applies
+  each item to the store before re-yielding it — drive it in a task,
+  read the store from anywhere. A caller-supplied closure maps each
+  event to a `StoreOp` (`Upsert` / `Remove` / `Ignore`), so the
+  reflector stays protocol-generic (for `NetworkEvent`, that closure is
+  a `match` on `NewLink => Upsert`, `DelLink => Remove`, …). During a
+  resync window (`Marker(ResyncStart)` … `Marker(ResyncEnd)`) the
+  reflector stages a fresh snapshot from the `Resynced(V)` replay and
+  swaps it in atomically at `ResyncEnd`, so a post-`ENOBUFS` redump
+  *replaces* stale state rather than merging into it. Completes Plan
+  195 alongside the already-shipped `ResyncStreamExt` combinators; the
+  `backon`-based `StreamBackoff` remains intentionally deferred (the
+  resync wrapper already handles `ENOBUFS` internally, and consumers
+  that want reconnect backoff compose it at the spawn-loop level).
 - **`NetworkConfig` declarative purge — re-wired with safety fences
   (#137, Plan 205).** The interface-side declarative config can once
   again *remove* undeclared kernel state, not just add it. Opt in per
