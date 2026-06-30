@@ -320,6 +320,25 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Typed `TableName` for the nftables API (#137).** nftables table
+  names are now the validated `TableName` newtype (mirroring the
+  existing `ChainName`): empty / overlong / interior-NUL names are
+  rejected at the boundary, and — the real win — `Chain::new(table,
+  name)` no longer takes two interchangeable `&str`s, so swapping the
+  table and chain arguments is a compile error. The name-taking methods
+  (`Connection::{add_table, add_table_with_flags, del_table,
+  del_table_if_exists, flush_table, list_chains_in, del_chain,
+  del_chain_if_exists}` and `Chain::new`) accept `impl TryInto<TableName
+  / ChainName>`, so plain `&str` / `String` call sites are **unchanged**
+  (`conn.add_table("filter", Family::Inet)` still compiles, now with
+  validation) while already-typed values pass through infallibly. Both
+  newtypes gain `FromStr` (`"filter".parse()?`). **Breaking:**
+  `Chain::new` now returns `Result` (a malformed name is a local `Err`
+  instead of a kernel `EINVAL` later) — add `?` to its call sites. A
+  new `From<Infallible> for Error` bridges the typed path's
+  conversion. The transaction/batch builder name args remain `&str` for
+  now (they return `Self`, so can't surface a validation error
+  mid-chain) — a follow-up.
 - **`LinkStats` follows the message-accessor convention (#137, Plan
   231 §6).** The parsed `LinkStats` (wrapping `rtnl_link_stats64`,
   reachable via `LinkMessage`) had bare `pub` fields, so it leaked the

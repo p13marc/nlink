@@ -98,7 +98,7 @@ impl NftablesDiff {
         //    `DeclaredChain` since the latter is a value type and
         //    the former is the transaction-input type.
         for (table_name, family, declared) in &self.chains_to_add {
-            let mut chain = Chain::new(table_name, declared.name()).family(*family);
+            let mut chain = Chain::new(table_name.as_str(), declared.name())?.family(*family);
             if let Some(h) = declared.hook() {
                 chain = chain.hook(h);
             }

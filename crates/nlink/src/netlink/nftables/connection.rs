@@ -26,7 +26,11 @@ impl Connection<Nftables> {
     /// conn.add_table("filter", Family::Inet).await?;
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_table"))]
-    pub async fn add_table(&self, name: &str, family: Family) -> Result<()> {
+    pub async fn add_table<N>(&self, name: N, family: Family) -> Result<()>
+    where
+        N: TryInto<TableName>,
+        N::Error: Into<Error>,
+    {
         self.add_table_with_flags(name, family, 0).await
     }
 
@@ -53,17 +57,17 @@ impl Connection<Nftables> {
         skip_all,
         fields(method = "add_table_with_flags", flags)
     )]
-    pub async fn add_table_with_flags(
+    pub async fn add_table_with_flags<N>(
         &self,
-        name: &str,
+        name: N,
         family: Family,
         flags: u32,
-    ) -> Result<()> {
-        if name.is_empty() || name.len() > 256 {
-            return Err(Error::InvalidMessage(
-                "table name must be 1-256 characters".into(),
-            ));
-        }
+    ) -> Result<()>
+    where
+        N: TryInto<TableName>,
+        N::Error: Into<Error>,
+    {
+        let name: TableName = name.try_into().map_err(Into::into)?;
 
         let mut builder = MessageBuilder::new(
             nft_msg_type(NFT_MSG_NEWTABLE),
@@ -71,7 +75,7 @@ impl Connection<Nftables> {
         );
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
-        builder.append_attr_str(NFTA_TABLE_NAME, name);
+        builder.append_attr_str(NFTA_TABLE_NAME, name.as_str());
         if flags != 0 {
             // NFTA_TABLE_FLAGS is big-endian per kernel convention
             // (matches the existing list_tables parser at
@@ -236,12 +240,17 @@ impl Connection<Nftables> {
 
     /// Delete an nftables table.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_table"))]
-    pub async fn del_table(&self, name: &str, family: Family) -> Result<()> {
+    pub async fn del_table<N>(&self, name: N, family: Family) -> Result<()>
+    where
+        N: TryInto<TableName>,
+        N::Error: Into<Error>,
+    {
+        let name: TableName = name.try_into().map_err(Into::into)?;
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_DELTABLE), NLM_F_REQUEST | NLM_F_ACK);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
-        builder.append_attr_str(NFTA_TABLE_NAME, name);
+        builder.append_attr_str(NFTA_TABLE_NAME, name.as_str());
 
         self.nft_request_ack(builder).await
     }
@@ -253,7 +262,11 @@ impl Connection<Nftables> {
     /// Saves the `let _ = conn.del_table(...).await;` ignore
     /// pattern that nearly all callers reach for. Plan 188 §2.7 / feedback W8.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_table_if_exists"))]
-    pub async fn del_table_if_exists(&self, name: &str, family: Family) -> Result<bool> {
+    pub async fn del_table_if_exists<N>(&self, name: N, family: Family) -> Result<bool>
+    where
+        N: TryInto<TableName>,
+        N::Error: Into<Error>,
+    {
         match self.del_table(name, family).await {
             Ok(()) => Ok(true),
             Err(e) if e.is_not_found() => Ok(false),
@@ -263,13 +276,18 @@ impl Connection<Nftables> {
 
     /// Flush all rules from a table (keeps chains).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_table"))]
-    pub async fn flush_table(&self, name: &str, family: Family) -> Result<()> {
+    pub async fn flush_table<N>(&self, name: N, family: Family) -> Result<()>
+    where
+        N: TryInto<TableName>,
+        N::Error: Into<Error>,
+    {
+        let name: TableName = name.try_into().map_err(Into::into)?;
         // Flush is done by deleting all rules in the table
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_DELRULE), NLM_F_REQUEST | NLM_F_ACK);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
-        builder.append_attr_str(NFTA_RULE_TABLE, name);
+        builder.append_attr_str(NFTA_RULE_TABLE, name.as_str());
 
         self.nft_request_ack(builder).await
     }
@@ -307,8 +325,8 @@ impl Connection<Nftables> {
         );
         let nfgenmsg = NfGenMsg::new(chain.family);
         builder.append(&nfgenmsg);
-        builder.append_attr_str(NFTA_CHAIN_TABLE, &chain.table);
-        builder.append_attr_str(NFTA_CHAIN_NAME, &chain.name);
+        builder.append_attr_str(NFTA_CHAIN_TABLE, chain.table.as_str());
+        builder.append_attr_str(NFTA_CHAIN_NAME, chain.name.as_str());
 
         if let Some(chain_type) = chain.chain_type {
             builder.append_attr_str(NFTA_CHAIN_TYPE, chain_type.as_str());
@@ -344,12 +362,14 @@ impl Connection<Nftables> {
     /// more efficient than `list_chains().filter(|c|
     /// c.table == "…")` on hosts with many tables. Plan 181.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_chains_in"))]
-    pub async fn list_chains_in(
-        &self,
-        table: &str,
-        family: Family,
-    ) -> Result<Vec<ChainInfo>> {
-        self.list_chains_filtered(family as u8, Some(table)).await
+    pub async fn list_chains_in<T>(&self, table: T, family: Family) -> Result<Vec<ChainInfo>>
+    where
+        T: TryInto<TableName>,
+        T::Error: Into<Error>,
+    {
+        let table: TableName = table.try_into().map_err(Into::into)?;
+        self.list_chains_filtered(family as u8, Some(table.as_str()))
+            .await
     }
 
     async fn list_chains_filtered(
@@ -378,13 +398,21 @@ impl Connection<Nftables> {
 
     /// Delete a chain.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_chain"))]
-    pub async fn del_chain(&self, table: &str, name: &str, family: Family) -> Result<()> {
+    pub async fn del_chain<T, N>(&self, table: T, name: N, family: Family) -> Result<()>
+    where
+        T: TryInto<TableName>,
+        T::Error: Into<Error>,
+        N: TryInto<ChainName>,
+        N::Error: Into<Error>,
+    {
+        let table: TableName = table.try_into().map_err(Into::into)?;
+        let name: ChainName = name.try_into().map_err(Into::into)?;
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_DELCHAIN), NLM_F_REQUEST | NLM_F_ACK);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
-        builder.append_attr_str(NFTA_CHAIN_TABLE, table);
-        builder.append_attr_str(NFTA_CHAIN_NAME, name);
+        builder.append_attr_str(NFTA_CHAIN_TABLE, table.as_str());
+        builder.append_attr_str(NFTA_CHAIN_NAME, name.as_str());
 
         self.nft_request_ack(builder).await
     }
@@ -393,12 +421,18 @@ impl Connection<Nftables> {
     /// chain was deleted, `Ok(false)` if it didn't exist.
     /// Plan 188 §2.7 / feedback W8.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_chain_if_exists"))]
-    pub async fn del_chain_if_exists(
+    pub async fn del_chain_if_exists<T, N>(
         &self,
-        table: &str,
-        name: &str,
+        table: T,
+        name: N,
         family: Family,
-    ) -> Result<bool> {
+    ) -> Result<bool>
+    where
+        T: TryInto<TableName>,
+        T::Error: Into<Error>,
+        N: TryInto<ChainName>,
+        N::Error: Into<Error>,
+    {
         match self.del_chain(table, name, family).await {
             Ok(()) => Ok(true),
             Err(e) if e.is_not_found() => Ok(false),
@@ -700,7 +734,7 @@ impl Connection<Nftables> {
         // Delete all tables across all families
         let tables = self.list_tables().await?;
         for table in tables {
-            self.del_table(&table.name, table.family).await?;
+            self.del_table(table.name.as_str(), table.family).await?;
         }
         Ok(())
     }
@@ -1300,8 +1334,8 @@ impl Transaction {
         );
         let nfgenmsg = NfGenMsg::new(chain.family);
         builder.append(&nfgenmsg);
-        builder.append_attr_str(NFTA_CHAIN_TABLE, &chain.table);
-        builder.append_attr_str(NFTA_CHAIN_NAME, &chain.name);
+        builder.append_attr_str(NFTA_CHAIN_TABLE, chain.table.as_str());
+        builder.append_attr_str(NFTA_CHAIN_NAME, chain.name.as_str());
 
         if let Some(chain_type) = chain.chain_type {
             builder.append_attr_str(NFTA_CHAIN_TYPE, chain_type.as_str());
@@ -1648,6 +1682,7 @@ mod transaction_tests {
         // Plan 180 — netdev base chain must carry
         // NFTA_HOOK_DEV inside the NFTA_CHAIN_HOOK nest.
         let chain = Chain::new("ft", "ingress")
+            .unwrap()
             .family(Family::Netdev)
             .hook(Hook::NetdevIngress)
             .priority(Priority::Filter)
@@ -1669,6 +1704,7 @@ mod transaction_tests {
         // Plan 180 — NAT chain must carry NFTA_CHAIN_TYPE="nat"
         // so the kernel accepts masquerade/snat/dnat verdicts.
         let chain = Chain::new("nat", "postrouting")
+            .unwrap()
             .family(Family::Inet)
             .hook(Hook::Postrouting)
             .priority(Priority::SrcNat)

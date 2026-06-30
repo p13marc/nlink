@@ -669,11 +669,11 @@ async fn plan_204_c1_verdict_jump_round_trips_through_kernel() -> Result<()> {
         // Stand up a table with a parent chain (hooks input,
         // base chain) and a child chain (regular, no hook —
         // jump target).
-        let parent = Chain::new("t", "parent")
+        let parent = Chain::new("t", "parent")?
             .family(Family::Inet)
             .hook(Hook::Input)
             .priority(nlink::netlink::nftables::Priority::Custom(0));
-        let child = Chain::new("t", "child").family(Family::Inet);
+        let child = Chain::new("t", "child")?.family(Family::Inet);
 
         conn.transaction()
             .add_table("t", Family::Inet)
@@ -777,7 +777,7 @@ async fn plan_211_m1_inet_ingress_chain_installs_on_correct_hook() -> Result<()>
         let conn = namespace::connection_for::<Nftables>(ns.name())?;
 
         // Install the Prerouting chain first — always supported.
-        let prerouting = Chain::new("t", "pre")
+        let prerouting = Chain::new("t", "pre")?
             .family(Family::Inet)
             .hook(Hook::Prerouting)
             .priority(nlink::netlink::nftables::Priority::Custom(0));
@@ -795,7 +795,7 @@ async fn plan_211_m1_inet_ingress_chain_installs_on_correct_hook() -> Result<()>
         // NetdevIngress chains require a `device` attribute;
         // InetIngress on the Inet family doesn't (it's process-
         // global ingress, no per-iface bind).
-        let inet_ingress = Chain::new("t", "ingress")
+        let inet_ingress = Chain::new("t", "ingress")?
             .family(Family::Inet)
             .hook(Hook::InetIngress)
             .priority(nlink::netlink::nftables::Priority::Custom(0));
@@ -945,11 +945,11 @@ async fn plan_204_c1_verdict_goto_round_trips_through_kernel() -> Result<()> {
         let ns = TestNamespace::new("p204-c1-goto")?;
         let conn = namespace::connection_for::<Nftables>(ns.name())?;
 
-        let parent = Chain::new("t", "parent")
+        let parent = Chain::new("t", "parent")?
             .family(Family::Inet)
             .hook(Hook::Input)
             .priority(nlink::netlink::nftables::Priority::Custom(0));
-        let child = Chain::new("t", "child").family(Family::Inet);
+        let child = Chain::new("t", "child")?.family(Family::Inet);
 
         conn.transaction()
             .add_table("t", Family::Inet)

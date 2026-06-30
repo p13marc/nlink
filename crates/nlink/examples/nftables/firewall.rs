@@ -65,7 +65,7 @@ async fn run_demo(conn: &Connection<Nftables>) -> nlink::netlink::Result<()> {
     println!("Created table: example");
 
     conn.add_chain(
-        Chain::new("example", "input")
+        Chain::new("example", "input")?
             .family(Family::Inet)
             .hook(Hook::Input)
             .chain_type(ChainType::Filter)

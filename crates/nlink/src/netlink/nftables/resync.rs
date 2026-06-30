@@ -91,7 +91,7 @@ pub async fn nftables_snapshot(conn: &Connection<Nftables>) -> Result<Vec<Nftabl
     // finding), so we walk per-table by-name with client-side
     // matching via list_*_in.
     for t in &tables {
-        for c in conn.list_chains_in(&t.name, t.family).await? {
+        for c in conn.list_chains_in(t.name.as_str(), t.family).await? {
             out.push(NftablesEvent::NewChain(c));
         }
         for f in conn.list_flowtables_in(&t.name, t.family).await? {

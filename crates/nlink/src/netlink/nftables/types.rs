@@ -287,6 +287,95 @@ impl TryFrom<String> for ChainName {
     }
 }
 
+impl std::str::FromStr for ChainName {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self> {
+        Self::new(s)
+    }
+}
+
+/// A validated nftables table name.
+///
+/// Mirrors [`ChainName`]: the kernel rejects empty / overlong /
+/// interior-NUL names, so this newtype enforces the same contract at
+/// the API boundary and — crucially — makes the
+/// `Chain::new(table, name)` argument order a compile-time concern
+/// rather than two interchangeable `&str`s. Construct via
+/// [`TableName::new`], `"filter".parse()`, or `TryFrom`; it is
+/// `Display` + `AsRef<str>` for natural use in messages and
+/// `&str`-shaped APIs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TableName(String);
+
+impl TableName {
+    /// Maximum table-name length on the wire, in bytes
+    /// (kernel `NFT_NAME_MAXLEN - 1`).
+    pub const MAX_LEN: usize = 255;
+
+    /// Construct a table name, validating against the kernel contract.
+    pub fn new(s: impl Into<String>) -> Result<Self> {
+        let s = s.into();
+        if s.is_empty() {
+            return Err(Error::InvalidMessage(
+                "TableName: empty table names are rejected by nftables".into(),
+            ));
+        }
+        if s.len() > Self::MAX_LEN {
+            return Err(Error::InvalidMessage(format!(
+                "TableName: {} bytes exceeds NFT_NAME_MAXLEN-1 ({} bytes)",
+                s.len(),
+                Self::MAX_LEN,
+            )));
+        }
+        if s.contains('\0') {
+            return Err(Error::InvalidMessage(
+                "TableName: interior NUL bytes are rejected — nftables wire format is a \
+                 NUL-terminated C string"
+                    .into(),
+            ));
+        }
+        Ok(Self(s))
+    }
+
+    /// View as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for TableName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TableName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<&str> for TableName {
+    type Error = Error;
+    fn try_from(s: &str) -> Result<Self> {
+        Self::new(s)
+    }
+}
+
+impl TryFrom<String> for TableName {
+    type Error = Error;
+    fn try_from(s: String) -> Result<Self> {
+        Self::new(s)
+    }
+}
+
+impl std::str::FromStr for TableName {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self> {
+        Self::new(s)
+    }
+}
+
 /// Rule verdict.
 ///
 /// `#[non_exhaustive]` so new variants can be added additively.
@@ -761,8 +850,8 @@ pub struct Table {
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
 pub struct Chain {
-    pub(crate) table: String,
-    pub(crate) name: String,
+    pub(crate) table: TableName,
+    pub(crate) name: ChainName,
     pub(crate) family: Family,
     pub(crate) hook: Option<Hook>,
     pub(crate) priority: Option<Priority>,
@@ -773,17 +862,30 @@ pub struct Chain {
 
 impl Chain {
     /// Create a new chain builder.
-    pub fn new(table: &str, name: &str) -> Self {
-        Self {
-            table: table.to_string(),
-            name: name.to_string(),
+    ///
+    /// `table` / `name` accept anything convertible to a validated
+    /// [`TableName`] / [`ChainName`] — a `&str` or `String` (validated
+    /// here, so an empty / overlong / NUL-bearing name is an early
+    /// `Err`) or an already-typed value (infallible). The distinct
+    /// types make the `(table, name)` argument order a compile-time
+    /// concern rather than two interchangeable strings.
+    pub fn new<T, N>(table: T, name: N) -> Result<Self>
+    where
+        T: TryInto<TableName>,
+        T::Error: Into<Error>,
+        N: TryInto<ChainName>,
+        N::Error: Into<Error>,
+    {
+        Ok(Self {
+            table: table.try_into().map_err(Into::into)?,
+            name: name.try_into().map_err(Into::into)?,
             family: Family::Inet,
             hook: None,
             priority: None,
             chain_type: None,
             policy: None,
             device: None,
-        }
+        })
     }
 
     /// Set the address family.
@@ -1782,6 +1884,39 @@ fn prefix_to_mask(width: usize, prefix: u8) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------- TableName newtype --------
+
+    #[test]
+    fn table_name_validates_like_kernel() {
+        assert!(TableName::new("filter").is_ok());
+        assert!("filter".parse::<TableName>().is_ok());
+        // Empty / interior-NUL / overlong are rejected.
+        assert!(TableName::new("").is_err());
+        assert!(TableName::new("a\0b").is_err());
+        assert!(TableName::new("x".repeat(TableName::MAX_LEN + 1)).is_err());
+        // Round-trips through Display / as_str.
+        let t = TableName::new("inet-fw").unwrap();
+        assert_eq!(t.as_str(), "inet-fw");
+        assert_eq!(t.to_string(), "inet-fw");
+    }
+
+    #[test]
+    fn chain_new_accepts_str_and_typed_and_validates() {
+        // &str path (validated, fallible).
+        let c = Chain::new("filter", "input").unwrap();
+        assert_eq!(c.table.as_str(), "filter");
+        assert_eq!(c.name.as_str(), "input");
+        // Already-typed path (infallible conversion via the
+        // Infallible→Error bridge).
+        let table = TableName::new("nat").unwrap();
+        let name = ChainName::new("postrouting").unwrap();
+        let c = Chain::new(table, name).unwrap();
+        assert_eq!(c.table.as_str(), "nat");
+        // Invalid name surfaces as Err rather than a bad wire frame.
+        assert!(Chain::new("", "input").is_err());
+        assert!(Chain::new("filter", "a\0b").is_err());
+    }
 
     // -------- Plan 198 §2.1 — SetKeyType extensions --------
 
