@@ -1995,6 +1995,28 @@ mod transaction_tests {
     }
 
     #[test]
+    fn nfta_set_attr_ids_match_kernel_enum() {
+        // Regression for the ERANGE-on-NEWSET bug: `NFTA_SET_ID` was
+        // 16 and `NFTA_SET_HANDLE` 17, but the kernel
+        // `enum nft_set_attributes` puts ID at 10 and HANDLE at 16.
+        // Sending the set id under attribute 16 made the kernel read
+        // it as a (bogus) handle and reject every set create. Pin the
+        // whole tail of the enum so the class can't recur.
+        use super::super::*;
+        assert_eq!(NFTA_SET_TABLE, 1);
+        assert_eq!(NFTA_SET_NAME, 2);
+        assert_eq!(NFTA_SET_FLAGS, 3);
+        assert_eq!(NFTA_SET_KEY_TYPE, 4);
+        assert_eq!(NFTA_SET_KEY_LEN, 5);
+        assert_eq!(NFTA_SET_DATA_TYPE, 6);
+        assert_eq!(NFTA_SET_DATA_LEN, 7);
+        assert_eq!(NFTA_SET_POLICY, 8);
+        assert_eq!(NFTA_SET_DESC, 9);
+        assert_eq!(NFTA_SET_ID, 10);
+        assert_eq!(NFTA_SET_HANDLE, 16);
+    }
+
+    #[test]
     fn tx_add_set_emits_key_type_len_flags_and_id() {
         let set = Set::new("filter", "allowed_v4")
             .family(Family::Inet)

@@ -267,8 +267,17 @@ pub const NFTA_SET_KEY_TYPE: u16 = 4;
 pub const NFTA_SET_KEY_LEN: u16 = 5;
 pub const NFTA_SET_DATA_TYPE: u16 = 6;
 pub const NFTA_SET_DATA_LEN: u16 = 7;
-pub const NFTA_SET_ID: u16 = 16;
-pub const NFTA_SET_HANDLE: u16 = 17;
+// Values below are the kernel `enum nft_set_attributes` positions.
+// `NFTA_SET_ID` was previously (wrongly) 16 and `NFTA_SET_HANDLE` 17,
+// which collided: a `NEWSET` carried its set id under attribute 16
+// (the *real* `NFTA_SET_HANDLE`), so the kernel saw a bogus handle on
+// a create and rejected it with ERANGE. No integration test exercised
+// sets against a live kernel until the declarative-set work, so the
+// drift went unnoticed.
+pub const NFTA_SET_POLICY: u16 = 8;
+pub const NFTA_SET_DESC: u16 = 9;
+pub const NFTA_SET_ID: u16 = 10;
+pub const NFTA_SET_HANDLE: u16 = 16;
 
 // Set element attributes
 pub const NFTA_SET_ELEM_LIST_TABLE: u16 = 1;

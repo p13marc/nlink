@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **nftables set creation always failed with ERANGE (#137).** The
+  `NFTA_SET_ID` attribute constant was `16` and `NFTA_SET_HANDLE`
+  was `17`, but the kernel `enum nft_set_attributes` places
+  `NFTA_SET_ID` at `10` and `NFTA_SET_HANDLE` at `16`. So every
+  `NFT_MSG_NEWSET` carried its set id under attribute `16` — the
+  *real* `NFTA_SET_HANDLE` — and the kernel rejected the create as a
+  bogus handle (`errno 34`, ERANGE). The imperative
+  `Connection::<Nftables>::add_set` was affected too; the drift went
+  unnoticed because no integration test exercised sets against a live
+  kernel until the declarative-set work above. Corrected both
+  constants (same id-drift class as the `STA_INFO_RX_BITRATE` /
+  `BAND_ATTR_VHT_CAPA` fixes), added `NFTA_SET_POLICY` / `NFTA_SET_DESC`,
+  and pinned the whole `NFTA_SET_*` tail against its kernel-enum
+  position with a regression test. As a bonus `SetInfo::handle` now
+  parses (it was read off the wrong attribute and was always 0).
 - **nl80211 `BAND_ATTR_VHT_CAPA` was the wrong attribute id (#137).**
   The PHY/wiphy audit found `NL80211_BAND_ATTR_VHT_CAPA` defined as
   `9`, but `9` is `IFTYPE_DATA` — `VHT_CAPA` is `8`. So a band's VHT
