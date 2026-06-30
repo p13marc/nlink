@@ -144,19 +144,27 @@ impl LinkInfo {
     }
 }
 
-/// Link statistics.
+/// Link statistics (parsed `rtnl_link_stats64`).
+///
+/// `#[non_exhaustive]` with `pub(crate)` fields + public accessors —
+/// the message-accessor convention (Plan 231): the struct mirrors a
+/// kernel layout that grows over time (`rtnl_link_stats64` has more
+/// counters than the subset modelled here), so the fields stay hidden
+/// behind accessors and new ones can be added without breaking
+/// downstream readers. Read via `rx_packets()` / `tx_bytes()` / … .
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct LinkStats {
-    pub rx_packets: u64,
-    pub tx_packets: u64,
-    pub rx_bytes: u64,
-    pub tx_bytes: u64,
-    pub rx_errors: u64,
-    pub tx_errors: u64,
-    pub rx_dropped: u64,
-    pub tx_dropped: u64,
-    pub multicast: u64,
-    pub collisions: u64,
+    pub(crate) rx_packets: u64,
+    pub(crate) tx_packets: u64,
+    pub(crate) rx_bytes: u64,
+    pub(crate) tx_bytes: u64,
+    pub(crate) rx_errors: u64,
+    pub(crate) tx_errors: u64,
+    pub(crate) rx_dropped: u64,
+    pub(crate) tx_dropped: u64,
+    pub(crate) multicast: u64,
+    pub(crate) collisions: u64,
 }
 
 impl LinkStats {

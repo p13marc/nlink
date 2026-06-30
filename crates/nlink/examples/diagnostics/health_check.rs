@@ -89,8 +89,8 @@ fn print_report(r: &DiagnosticReport) {
                 .mtu
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| "-".into()),
-            iface.stats.rx_packets,
-            iface.stats.tx_packets,
+            iface.stats.rx_packets(),
+            iface.stats.tx_packets(),
             iface.issues.len(),
         );
         if let Some(tc) = &iface.tc {

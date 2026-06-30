@@ -320,6 +320,19 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **`LinkStats` follows the message-accessor convention (#137, Plan
+  231 §6).** The parsed `LinkStats` (wrapping `rtnl_link_stats64`,
+  reachable via `LinkMessage`) had bare `pub` fields, so it leaked the
+  parser's layout and would break downstream the moment a counter was
+  added — yet it escaped the `audit-message-accessor-convention.sh`
+  gate because its name ends in `Stats`, not `Message`. Its fields are
+  now `pub(crate)` behind the existing `rx_packets()` / `tx_bytes()` /
+  … accessors and the struct is `#[non_exhaustive]`, and the audit gate
+  now covers it. **Breaking:** read the counters via the accessors
+  (`stats.rx_bytes()`) instead of field access (`stats.rx_bytes`). The
+  separate user-facing `stats::LinkStats` aggregate (with `name` +
+  `total_*` / rate helpers) is unchanged — it is a convenience DTO, not
+  a parsed wrapper.
 - **GENL command unification — closes the H9 stale-frame bug class
   (#135).** The hand-rolled per-family GENL command/dump paths for
   WireGuard, MACsec, MPTCP and ethtool now route through the audited
