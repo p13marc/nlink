@@ -116,6 +116,14 @@ pub const NL80211_ATTR_NETNS_FD: u16 = 69;
 pub const NL80211_ATTR_STATUS_CODE: u16 = 72;
 pub const NL80211_ATTR_PID: u16 = 82;
 pub const NL80211_ATTR_PS_STATE: u16 = 91;
+/// Supported cipher suites — a flat array of `u32` suite selectors.
+pub const NL80211_ATTR_CIPHER_SUITES: u16 = 57;
+/// Flag attribute requesting a split `GET_WIPHY` dump: the kernel
+/// emits a wiphy's attributes across multiple messages (sharing the
+/// same `NL80211_ATTR_WIPHY` index) rather than truncating them to a
+/// single skb. `iw` always sets it; without it, rich PHYs lose
+/// bands/channels/HE caps. Reassembled by wiphy index in `get_phys`.
+pub const NL80211_ATTR_SPLIT_WIPHY_DUMP: u16 = 174;
 
 // =============================================================================
 // Survey Info Nested Attributes (NL80211_SURVEY_INFO_*)
@@ -202,20 +210,51 @@ pub const NL80211_RATE_INFO_160_MHZ_WIDTH: u16 = 10;
 // Band Nested Attributes
 // =============================================================================
 
+// Values are positions in `enum nl80211_band_attr` (linux/nl80211.h);
+// pinned by a test in connection.rs.
 pub const NL80211_BAND_ATTR_FREQS: u16 = 1;
 pub const NL80211_BAND_ATTR_RATES: u16 = 2;
+pub const NL80211_BAND_ATTR_HT_MCS_SET: u16 = 3;
 pub const NL80211_BAND_ATTR_HT_CAPA: u16 = 4;
-pub const NL80211_BAND_ATTR_VHT_CAPA: u16 = 9;
+pub const NL80211_BAND_ATTR_VHT_MCS_SET: u16 = 7;
+// NB: VHT_CAPA is 8, not 9 — 9 is IFTYPE_DATA. Pre-0.23 nlink had
+// this as 9, so vht_capa was parsed off the wrong attribute (the
+// per-iftype HE/EHT nest).
+pub const NL80211_BAND_ATTR_VHT_CAPA: u16 = 8;
+pub const NL80211_BAND_ATTR_IFTYPE_DATA: u16 = 9;
+
+// =============================================================================
+// Band Iftype-Data Nested Attributes (NL80211_BAND_IFTYPE_ATTR_*)
+// =============================================================================
+// HE (802.11ax) / EHT (802.11be) per-interface-type capabilities,
+// nested under each NL80211_BAND_ATTR_IFTYPE_DATA element.
+
+pub const NL80211_BAND_IFTYPE_ATTR_IFTYPES: u16 = 1;
+pub const NL80211_BAND_IFTYPE_ATTR_HE_CAP_MAC: u16 = 2;
+pub const NL80211_BAND_IFTYPE_ATTR_HE_CAP_PHY: u16 = 3;
+pub const NL80211_BAND_IFTYPE_ATTR_HE_CAP_MCS_SET: u16 = 4;
+pub const NL80211_BAND_IFTYPE_ATTR_HE_6GHZ_CAPA: u16 = 6;
+pub const NL80211_BAND_IFTYPE_ATTR_EHT_CAP_MAC: u16 = 8;
+pub const NL80211_BAND_IFTYPE_ATTR_EHT_CAP_PHY: u16 = 9;
+pub const NL80211_BAND_IFTYPE_ATTR_EHT_CAP_MCS_SET: u16 = 10;
 
 // =============================================================================
 // Frequency Nested Attributes
 // =============================================================================
 
+// Values are positions in `enum nl80211_frequency_attr`
+// (linux/nl80211.h); pinned by a test in connection.rs.
 pub const NL80211_FREQUENCY_ATTR_FREQ: u16 = 1;
 pub const NL80211_FREQUENCY_ATTR_DISABLED: u16 = 2;
 pub const NL80211_FREQUENCY_ATTR_NO_IR: u16 = 3;
 pub const NL80211_FREQUENCY_ATTR_RADAR: u16 = 5;
 pub const NL80211_FREQUENCY_ATTR_MAX_TX_POWER: u16 = 6;
+pub const NL80211_FREQUENCY_ATTR_DFS_STATE: u16 = 7;
+pub const NL80211_FREQUENCY_ATTR_NO_HT40_MINUS: u16 = 9;
+pub const NL80211_FREQUENCY_ATTR_NO_HT40_PLUS: u16 = 10;
+pub const NL80211_FREQUENCY_ATTR_NO_80MHZ: u16 = 11;
+pub const NL80211_FREQUENCY_ATTR_NO_160MHZ: u16 = 12;
+pub const NL80211_FREQUENCY_ATTR_OFFSET: u16 = 20;
 
 // =============================================================================
 // Bitrate Nested Attributes (within Band)
