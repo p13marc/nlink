@@ -6,6 +6,23 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **nl80211 `BAND_ATTR_VHT_CAPA` was the wrong attribute id (#137).**
+  The PHY/wiphy audit found `NL80211_BAND_ATTR_VHT_CAPA` defined as
+  `9`, but `9` is `IFTYPE_DATA` — `VHT_CAPA` is `8`. So a band's VHT
+  capability field was parsed off the per-iftype HE/EHT nest instead.
+  Corrected to `8` (the same id-drift class as the `STA_INFO_RX_BITRATE`
+  fix below), and a new test pins every modelled `NL80211_BAND_ATTR_*`,
+  `NL80211_FREQUENCY_ATTR_*`, and `NL80211_BAND_IFTYPE_ATTR_*` constant
+  against its kernel-enum position so the class can't recur.
+- **nl80211 `get_phys` truncated rich PHYs (#137).** The `GET_WIPHY`
+  dump didn't set `NL80211_ATTR_SPLIT_WIPHY_DUMP`, so the kernel capped
+  each wiphy's reply to a single message and silently dropped the
+  bands/channels/HE caps that didn't fit — and each message was parsed
+  as a *separate* `PhyInfo`. `get_phys` now requests the split dump and
+  **reassembles** the multi-message-per-wiphy response by
+  `NL80211_ATTR_WIPHY` index, merging bands by band index (a band whose
+  frequency list spans messages is merged, not duplicated). A
+  reassembly test pins the behaviour.
 - **nl80211 `STA_INFO_RX_BITRATE` was the wrong attribute id (#137).**
   The station-info audit found `NL80211_STA_INFO_RX_BITRATE` defined as
   `12`, but `12` is `TX_FAILED` — `RX_BITRATE` is `14`. So a station's
@@ -17,6 +34,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **nl80211 PHY/wiphy band-capability coverage (#137).** Completes the
+  nl80211 read audit (scan + station + survey + now PHY). `get_phys`
+  reports the full `iw phy` surface: `Band` gains HE (802.11ax) / EHT
+  (802.11be) per-interface-type capabilities (`BandIftypeCapa` via
+  `NL80211_BAND_ATTR_IFTYPE_DATA`, with `Band::he_supported()` /
+  `eht_supported()` helpers) plus the HT/VHT MCS sets; `Frequency`
+  gains the DFS state (`DfsState`), the bandwidth-restriction flags
+  (`no_ht40_{minus,plus}` / `no_80mhz` / `no_160mhz`), and the kHz
+  frequency offset; `PhyInfo` gains `cipher_suites`. `PhyInfo` / `Band`
+  / `Frequency` are now `#[non_exhaustive]` + `Default` so future
+  kernel attributes stay additive. The `nlink-wifi phy` command now
+  prints per-band capabilities, the channel/frequency list with flags,
+  bitrates, and cipher suites. (See also the split-dump and `VHT_CAPA`
+  fixes above, without which this coverage would be silently truncated
+  or mis-parsed.)
 - **XFRM (IPsec) monitor event API (#137).** `Connection<Xfrm>` now
   implements `EventSource`: `subscribe(&[XfrmGroup])` /
   `subscribe_all()` join the kernel's `XFRMNLGRP_*` multicast groups,

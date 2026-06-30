@@ -403,13 +403,78 @@ async fn main() -> Result<()> {
                 println!("phy#{}: {}", phy.index, phy.name);
                 for (i, band) in phy.bands.iter().enumerate() {
                     println!("  Band {i}:");
-                    let freq_count = band.frequencies.len();
-                    if freq_count > 0 {
-                        println!("    Frequencies: {freq_count}");
+
+                    // Capabilities line: HT/VHT/HE/EHT presence.
+                    let mut caps = Vec::new();
+                    if band.ht_capa.is_some() {
+                        caps.push("HT".to_string());
+                    }
+                    if band.vht_capa.is_some() {
+                        caps.push("VHT".to_string());
+                    }
+                    if band.he_supported() {
+                        caps.push("HE".to_string());
+                    }
+                    if band.eht_supported() {
+                        caps.push("EHT".to_string());
+                    }
+                    if !caps.is_empty() {
+                        println!("    Capabilities: {}", caps.join(" "));
+                    }
+
+                    if !band.rates.is_empty() {
+                        let rates: Vec<String> = band
+                            .rates
+                            .iter()
+                            .map(|r| format!("{:.1}", *r as f64 / 10.0))
+                            .collect();
+                        println!("    Bitrates (Mbps): {}", rates.join(" "));
+                    }
+
+                    for f in &band.frequencies {
+                        let mut flags = Vec::new();
+                        if f.disabled {
+                            flags.push("disabled".to_string());
+                        }
+                        if f.no_ir {
+                            flags.push("no-IR".to_string());
+                        }
+                        if f.radar {
+                            match f.dfs_state {
+                                Some(s) => flags.push(format!("radar/DFS({s:?})")),
+                                None => flags.push("radar/DFS".to_string()),
+                            }
+                        }
+                        if f.no_80mhz {
+                            flags.push("no-80MHz".to_string());
+                        }
+                        if f.no_160mhz {
+                            flags.push("no-160MHz".to_string());
+                        }
+                        let flag_str = if flags.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [{}]", flags.join(", "))
+                        };
+                        println!(
+                            "    * {} MHz (ch {}, {:.1} dBm){}",
+                            f.freq,
+                            f.channel(),
+                            f.max_power_dbm(),
+                            flag_str,
+                        );
                     }
                 }
                 if !phy.supported_iftypes.is_empty() {
                     println!("  Supported types: {:?}", phy.supported_iftypes);
+                }
+                if !phy.cipher_suites.is_empty() {
+                    let ciphers: Vec<String> = phy
+                        .cipher_suites
+                        .iter()
+                        .map(|c| format!("0x{c:08x}"))
+                        .collect();
+                    println!("  Cipher suites: {}", ciphers.join(" "));
                 }
             }
         }

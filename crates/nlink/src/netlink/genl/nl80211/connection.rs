@@ -1,5 +1,7 @@
 //! nl80211 connection implementation for `Connection<Nl80211>`.
 
+use std::collections::BTreeMap;
+
 use super::{types::*, *};
 use crate::macros::{GenlFamily, __rt::resolve_genl_family_with_groups};
 use crate::netlink::{
@@ -346,20 +348,34 @@ impl Connection<Nl80211> {
     // Physical Device
     // =========================================================================
 
-    /// List all physical wireless devices.
+    /// List all physical wireless devices (what `iw phy` shows: bands,
+    /// channels, bitrates, HT/VHT/HE/EHT capabilities, supported
+    /// interface types, and cipher suites).
+    ///
+    /// The dump requests `NL80211_ATTR_SPLIT_WIPHY_DUMP`, so the kernel
+    /// emits each wiphy's attributes across multiple messages (sharing
+    /// the same `NL80211_ATTR_WIPHY` index) instead of truncating a
+    /// rich PHY to a single message. The messages are reassembled by
+    /// wiphy index here, merging bands by band index.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_phys"))]
     pub async fn get_phys(&self) -> Result<Vec<PhyInfo>> {
-        let responses = self.nl80211_dump(NL80211_CMD_GET_WIPHY).await?;
-        let mut phys = Vec::new();
+        let responses = self.dump_wiphy_split().await?;
+        let mut accs: BTreeMap<u32, PhyAcc> = BTreeMap::new();
 
         for payload in &responses {
             if payload.len() < GENL_HDRLEN {
                 continue;
             }
-            phys.push(parse_phy(&payload[GENL_HDRLEN..]));
+            let attrs = &payload[GENL_HDRLEN..];
+            // Split-dump frames always carry the wiphy index; without
+            // it we can't attribute the frame to a device, so skip.
+            let Some(idx) = wiphy_index_of(attrs) else {
+                continue;
+            };
+            accs.entry(idx).or_default().merge_message(attrs);
         }
 
-        Ok(phys)
+        Ok(accs.into_values().map(PhyAcc::finalize).collect())
     }
 
     /// Get capabilities of a specific physical device.
@@ -728,6 +744,33 @@ impl Connection<Nl80211> {
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
         let genl_hdr = GenlMsgHdr::new(cmd, NL80211_GENL_VERSION);
         builder.append(&genl_hdr);
+
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        self.collect_dump_responses(seq).await
+    }
+
+    /// Send a `GET_WIPHY` dump with `NL80211_ATTR_SPLIT_WIPHY_DUMP`.
+    ///
+    /// Without the flag the kernel caps each wiphy's reply to a single
+    /// message, silently dropping bands/channels/HE caps that don't
+    /// fit. With it, a wiphy's attributes span multiple messages (same
+    /// `NL80211_ATTR_WIPHY` index) which `get_phys` reassembles.
+    async fn dump_wiphy_split(&self) -> Result<Vec<Vec<u8>>> {
+        // F1 fix — serialize the send + recv-loop pair (see the
+        // `nl80211_dump` / `Concurrency` docstring).
+        let _guard = self.lock_request().await;
+        let family_id = self.state().family_id;
+
+        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
+        let genl_hdr = GenlMsgHdr::new(NL80211_CMD_GET_WIPHY, NL80211_GENL_VERSION);
+        builder.append(&genl_hdr);
+        builder.append_attr_empty(NL80211_ATTR_SPLIT_WIPHY_DUMP);
 
         let seq = self.socket().next_seq();
         builder.set_seq(seq);
@@ -1165,53 +1208,109 @@ fn parse_bitrate_info(data: &[u8]) -> BitrateInfo {
     info
 }
 
-fn parse_phy(data: &[u8]) -> PhyInfo {
-    let mut phy = PhyInfo {
-        index: 0,
-        name: String::new(),
-        bands: Vec::new(),
-        supported_iftypes: Vec::new(),
-        max_scan_ssids: None,
-    };
-
+/// Find the `NL80211_ATTR_WIPHY` index in a `GET_WIPHY` message's
+/// attributes, so split-dump frames can be grouped by device.
+fn wiphy_index_of(data: &[u8]) -> Option<u32> {
     for (attr_type, payload) in AttrIter::new(data) {
-        match attr_type {
-            NL80211_ATTR_WIPHY if payload.len() >= 4 => {
-                phy.index = u32::from_ne_bytes(payload[..4].try_into().unwrap());
-            }
-            NL80211_ATTR_WIPHY_NAME => {
-                phy.name = attr_str(payload).unwrap_or_default();
-            }
-            NL80211_ATTR_WIPHY_BANDS => {
-                for (_idx, band_data) in AttrIter::new(payload) {
-                    phy.bands.push(parse_band(band_data));
+        if attr_type == NL80211_ATTR_WIPHY && payload.len() >= 4 {
+            return Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+        }
+    }
+    None
+}
+
+/// Accumulates a single wiphy's attributes across the multiple
+/// messages of a split `GET_WIPHY` dump. Bands are keyed by band
+/// index so a band whose frequency list spans messages is merged
+/// rather than duplicated.
+#[derive(Default)]
+struct PhyAcc {
+    index: u32,
+    name: String,
+    supported_iftypes: Vec<InterfaceType>,
+    max_scan_ssids: Option<u8>,
+    cipher_suites: Vec<u32>,
+    bands: BTreeMap<u16, Band>,
+}
+
+impl PhyAcc {
+    /// Fold one split-dump message's attributes into the accumulator.
+    fn merge_message(&mut self, data: &[u8]) {
+        for (attr_type, payload) in AttrIter::new(data) {
+            match attr_type {
+                NL80211_ATTR_WIPHY if payload.len() >= 4 => {
+                    self.index = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                 }
-            }
-            NL80211_ATTR_SUPPORTED_IFTYPES => {
-                for (_idx, _iftype_data) in AttrIter::new(payload) {
-                    // The attr index itself is the iftype value
-                    if let Ok(iftype) = InterfaceType::try_from(_idx as u32) {
-                        phy.supported_iftypes.push(iftype);
+                NL80211_ATTR_WIPHY_NAME if self.name.is_empty() => {
+                    self.name = attr_str(payload).unwrap_or_default();
+                }
+                NL80211_ATTR_MAX_SCAN_SSIDS if !payload.is_empty() => {
+                    self.max_scan_ssids.get_or_insert(payload[0]);
+                }
+                NL80211_ATTR_SUPPORTED_IFTYPES => {
+                    for (idx, _v) in AttrIter::new(payload) {
+                        // The attr index itself is the iftype value.
+                        if let Ok(iftype) = InterfaceType::try_from(idx as u32)
+                            && !self.supported_iftypes.contains(&iftype)
+                        {
+                            self.supported_iftypes.push(iftype);
+                        }
                     }
                 }
+                NL80211_ATTR_CIPHER_SUITES => {
+                    // Flat array of u32 suite selectors.
+                    for chunk in payload.chunks_exact(4) {
+                        self.cipher_suites
+                            .push(u32::from_ne_bytes(chunk.try_into().unwrap()));
+                    }
+                }
+                NL80211_ATTR_WIPHY_BANDS => {
+                    for (band_idx, band_data) in AttrIter::new(payload) {
+                        let partial = parse_band(band_data);
+                        merge_band(self.bands.entry(band_idx).or_default(), partial);
+                    }
+                }
+                _ => {}
             }
-            NL80211_ATTR_MAX_SCAN_SSIDS if !payload.is_empty() => {
-                phy.max_scan_ssids = Some(payload[0]);
-            }
-            _ => {}
         }
     }
 
-    phy
+    fn finalize(self) -> PhyInfo {
+        PhyInfo {
+            index: self.index,
+            name: self.name,
+            bands: self.bands.into_values().collect(),
+            supported_iftypes: self.supported_iftypes,
+            max_scan_ssids: self.max_scan_ssids,
+            cipher_suites: self.cipher_suites,
+        }
+    }
+}
+
+/// Merge one message's slice of a band into the accumulated band.
+/// Lists (freqs/rates/iftype caps) concatenate — the kernel splits
+/// arrays at element boundaries without repeating — while scalar
+/// capabilities are filled when present.
+fn merge_band(dst: &mut Band, src: Band) {
+    dst.frequencies.extend(src.frequencies);
+    dst.rates.extend(src.rates);
+    if src.ht_capa.is_some() {
+        dst.ht_capa = src.ht_capa;
+    }
+    if src.vht_capa.is_some() {
+        dst.vht_capa = src.vht_capa;
+    }
+    if src.ht_mcs_set.is_some() {
+        dst.ht_mcs_set = src.ht_mcs_set;
+    }
+    if src.vht_mcs_set.is_some() {
+        dst.vht_mcs_set = src.vht_mcs_set;
+    }
+    dst.iftype_capa.extend(src.iftype_capa);
 }
 
 fn parse_band(data: &[u8]) -> Band {
-    let mut band = Band {
-        frequencies: Vec::new(),
-        rates: Vec::new(),
-        ht_capa: None,
-        vht_capa: None,
-    };
+    let mut band = Band::default();
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
@@ -1236,6 +1335,17 @@ fn parse_band(data: &[u8]) -> Band {
             NL80211_BAND_ATTR_VHT_CAPA if payload.len() >= 4 => {
                 band.vht_capa = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
             }
+            NL80211_BAND_ATTR_HT_MCS_SET if !payload.is_empty() => {
+                band.ht_mcs_set = Some(payload.to_vec());
+            }
+            NL80211_BAND_ATTR_VHT_MCS_SET if !payload.is_empty() => {
+                band.vht_mcs_set = Some(payload.to_vec());
+            }
+            NL80211_BAND_ATTR_IFTYPE_DATA => {
+                for (_idx, iftype_data) in AttrIter::new(payload) {
+                    band.iftype_capa.push(parse_band_iftype_data(iftype_data));
+                }
+            }
             _ => {}
         }
     }
@@ -1243,14 +1353,42 @@ fn parse_band(data: &[u8]) -> Band {
     band
 }
 
+fn parse_band_iftype_data(data: &[u8]) -> BandIftypeCapa {
+    let mut capa = BandIftypeCapa::default();
+
+    for (attr_type, payload) in AttrIter::new(data) {
+        match attr_type {
+            NL80211_BAND_IFTYPE_ATTR_IFTYPES => {
+                for (idx, _v) in AttrIter::new(payload) {
+                    if let Ok(iftype) = InterfaceType::try_from(idx as u32) {
+                        capa.iftypes.push(iftype);
+                    }
+                }
+            }
+            NL80211_BAND_IFTYPE_ATTR_HE_CAP_MAC if !payload.is_empty() => {
+                capa.he_cap_mac = Some(payload.to_vec());
+            }
+            NL80211_BAND_IFTYPE_ATTR_HE_CAP_PHY if !payload.is_empty() => {
+                capa.he_cap_phy = Some(payload.to_vec());
+            }
+            NL80211_BAND_IFTYPE_ATTR_HE_CAP_MCS_SET if !payload.is_empty() => {
+                capa.he_cap_mcs_set = Some(payload.to_vec());
+            }
+            NL80211_BAND_IFTYPE_ATTR_EHT_CAP_MAC if !payload.is_empty() => {
+                capa.eht_cap_mac = Some(payload.to_vec());
+            }
+            NL80211_BAND_IFTYPE_ATTR_EHT_CAP_PHY if !payload.is_empty() => {
+                capa.eht_cap_phy = Some(payload.to_vec());
+            }
+            _ => {}
+        }
+    }
+
+    capa
+}
+
 fn parse_frequency(data: &[u8]) -> Frequency {
-    let mut freq = Frequency {
-        freq: 0,
-        max_power_mbm: 0,
-        disabled: false,
-        radar: false,
-        no_ir: false,
-    };
+    let mut freq = Frequency::default();
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type {
@@ -1268,6 +1406,25 @@ fn parse_frequency(data: &[u8]) -> Frequency {
             }
             NL80211_FREQUENCY_ATTR_MAX_TX_POWER if payload.len() >= 4 => {
                 freq.max_power_mbm = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+            }
+            NL80211_FREQUENCY_ATTR_DFS_STATE if payload.len() >= 4 => {
+                let v = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+                freq.dfs_state = DfsState::try_from(v).ok();
+            }
+            NL80211_FREQUENCY_ATTR_NO_HT40_MINUS => {
+                freq.no_ht40_minus = true;
+            }
+            NL80211_FREQUENCY_ATTR_NO_HT40_PLUS => {
+                freq.no_ht40_plus = true;
+            }
+            NL80211_FREQUENCY_ATTR_NO_80MHZ => {
+                freq.no_80mhz = true;
+            }
+            NL80211_FREQUENCY_ATTR_NO_160MHZ => {
+                freq.no_160mhz = true;
+            }
+            NL80211_FREQUENCY_ATTR_OFFSET if payload.len() >= 4 => {
+                freq.offset_khz = u32::from_ne_bytes(payload[..4].try_into().unwrap());
             }
             _ => {}
         }
@@ -1689,5 +1846,152 @@ mod survey_tests {
         let s = parse_survey(&outer).expect("nest present");
         assert_eq!(s.frequency_mhz, 0);
         assert!(s.in_use);
+    }
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+
+    /// Emit a netlink attribute (TLV, 4-byte aligned) into `buf`. For
+    /// nested arrays, pass the array element's index as `atype`.
+    fn push_attr(buf: &mut Vec<u8>, atype: u16, payload: &[u8]) {
+        let len = 4 + payload.len();
+        buf.extend_from_slice(&(len as u16).to_ne_bytes());
+        buf.extend_from_slice(&atype.to_ne_bytes());
+        buf.extend_from_slice(payload);
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+    }
+
+    /// Build a band nest carrying a single frequency entry at `freq`.
+    fn band_with_freq(band_idx: u16, freq: u32) -> Vec<u8> {
+        let mut freq_entry = Vec::new();
+        push_attr(&mut freq_entry, NL80211_FREQUENCY_ATTR_FREQ, &freq.to_ne_bytes());
+        let mut freqs = Vec::new();
+        push_attr(&mut freqs, 0, &freq_entry); // freq array index 0
+        let mut band = Vec::new();
+        push_attr(&mut band, NL80211_BAND_ATTR_FREQS, &freqs);
+        let mut bands = Vec::new();
+        push_attr(&mut bands, band_idx, &band);
+        let mut msg = Vec::new();
+        push_attr(&mut msg, NL80211_ATTR_WIPHY_BANDS, &bands);
+        msg
+    }
+
+    /// Pin every modelled `NL80211_BAND_ATTR_*` / `*_FREQUENCY_ATTR_*` /
+    /// `*_BAND_IFTYPE_ATTR_*` constant against its position in the
+    /// kernel enums (linux/nl80211.h). Regression guard for the
+    /// pre-0.23 bug where VHT_CAPA was 9 (actually IFTYPE_DATA) so
+    /// `vht_capa` was parsed off the wrong attribute.
+    #[test]
+    fn band_attr_constants_match_kernel_enum() {
+        assert_eq!(NL80211_BAND_ATTR_FREQS, 1);
+        assert_eq!(NL80211_BAND_ATTR_RATES, 2);
+        assert_eq!(NL80211_BAND_ATTR_HT_MCS_SET, 3);
+        assert_eq!(NL80211_BAND_ATTR_HT_CAPA, 4);
+        assert_eq!(NL80211_BAND_ATTR_VHT_MCS_SET, 7);
+        assert_eq!(NL80211_BAND_ATTR_VHT_CAPA, 8); // NOT 9
+        assert_eq!(NL80211_BAND_ATTR_IFTYPE_DATA, 9);
+
+        assert_eq!(NL80211_FREQUENCY_ATTR_FREQ, 1);
+        assert_eq!(NL80211_FREQUENCY_ATTR_DISABLED, 2);
+        assert_eq!(NL80211_FREQUENCY_ATTR_NO_IR, 3);
+        assert_eq!(NL80211_FREQUENCY_ATTR_RADAR, 5);
+        assert_eq!(NL80211_FREQUENCY_ATTR_MAX_TX_POWER, 6);
+        assert_eq!(NL80211_FREQUENCY_ATTR_DFS_STATE, 7);
+        assert_eq!(NL80211_FREQUENCY_ATTR_NO_HT40_MINUS, 9);
+        assert_eq!(NL80211_FREQUENCY_ATTR_NO_HT40_PLUS, 10);
+        assert_eq!(NL80211_FREQUENCY_ATTR_NO_80MHZ, 11);
+        assert_eq!(NL80211_FREQUENCY_ATTR_NO_160MHZ, 12);
+        assert_eq!(NL80211_FREQUENCY_ATTR_OFFSET, 20);
+
+        assert_eq!(NL80211_BAND_IFTYPE_ATTR_IFTYPES, 1);
+        assert_eq!(NL80211_BAND_IFTYPE_ATTR_HE_CAP_MAC, 2);
+        assert_eq!(NL80211_BAND_IFTYPE_ATTR_HE_CAP_PHY, 3);
+        assert_eq!(NL80211_BAND_IFTYPE_ATTR_HE_CAP_MCS_SET, 4);
+        assert_eq!(NL80211_BAND_IFTYPE_ATTR_EHT_CAP_MAC, 8);
+        assert_eq!(NL80211_BAND_IFTYPE_ATTR_EHT_CAP_PHY, 9);
+        assert_eq!(NL80211_BAND_IFTYPE_ATTR_EHT_CAP_MCS_SET, 10);
+
+        assert_eq!(NL80211_ATTR_CIPHER_SUITES, 57);
+        assert_eq!(NL80211_ATTR_SPLIT_WIPHY_DUMP, 174);
+    }
+
+    /// VHT_CAPA (attr 8) lands in `vht_capa`, and the adjacent
+    /// IFTYPE_DATA (attr 9) is parsed as HE/EHT caps — not confused
+    /// with VHT as the pre-0.23 mis-numbering did.
+    #[test]
+    fn vht_capa_uses_attr_8_and_iftype_data_is_he() {
+        // IFTYPE_DATA element advertising HE PHY caps for Station.
+        let mut iftypes = Vec::new();
+        push_attr(&mut iftypes, InterfaceType::Station as u16, &[]);
+        let mut ifd_entry = Vec::new();
+        push_attr(&mut ifd_entry, NL80211_BAND_IFTYPE_ATTR_IFTYPES, &iftypes);
+        push_attr(&mut ifd_entry, NL80211_BAND_IFTYPE_ATTR_HE_CAP_PHY, &[0xAA; 11]);
+        let mut ifd = Vec::new();
+        push_attr(&mut ifd, 0, &ifd_entry); // iftype-data array index 0
+
+        let mut band = Vec::new();
+        push_attr(&mut band, NL80211_BAND_ATTR_VHT_CAPA, &0xDEAD_BEEFu32.to_ne_bytes());
+        push_attr(&mut band, NL80211_BAND_ATTR_IFTYPE_DATA, &ifd);
+
+        let b = parse_band(&band);
+        assert_eq!(b.vht_capa, Some(0xDEAD_BEEF));
+        assert_eq!(b.iftype_capa.len(), 1);
+        assert!(b.he_supported());
+        assert!(!b.eht_supported());
+        assert_eq!(b.iftype_capa[0].iftypes, vec![InterfaceType::Station]);
+        assert_eq!(b.iftype_capa[0].he_cap_phy.as_deref(), Some(&[0xAA; 11][..]));
+    }
+
+    /// A split dump delivers one wiphy's band across two messages
+    /// (same WIPHY index, same band index, different frequency slice).
+    /// Reassembly merges them into one band with both frequencies —
+    /// the headline correctness fix.
+    #[test]
+    fn split_dump_reassembles_band_by_index() {
+        let mut msg1 = Vec::new();
+        push_attr(&mut msg1, NL80211_ATTR_WIPHY, &0u32.to_ne_bytes());
+        push_attr(&mut msg1, NL80211_ATTR_WIPHY_NAME, b"phy0\0");
+        msg1.extend_from_slice(&band_with_freq(0, 2412));
+
+        let mut msg2 = Vec::new();
+        push_attr(&mut msg2, NL80211_ATTR_WIPHY, &0u32.to_ne_bytes());
+        msg2.extend_from_slice(&band_with_freq(0, 2417));
+
+        assert_eq!(wiphy_index_of(&msg1), Some(0));
+
+        let mut acc = PhyAcc::default();
+        acc.merge_message(&msg1);
+        acc.merge_message(&msg2);
+        let phy = acc.finalize();
+
+        assert_eq!(phy.index, 0);
+        assert_eq!(phy.name, "phy0");
+        assert_eq!(phy.bands.len(), 1, "same band index must merge, not duplicate");
+        let freqs: Vec<u32> = phy.bands[0].frequencies.iter().map(|f| f.freq).collect();
+        assert_eq!(freqs, vec![2412, 2417]);
+    }
+
+    /// DFS state, bandwidth-restriction flags, and the freq offset
+    /// parse into their fields.
+    #[test]
+    fn parse_frequency_reads_dfs_and_bw_flags() {
+        let mut f = Vec::new();
+        push_attr(&mut f, NL80211_FREQUENCY_ATTR_FREQ, &5260u32.to_ne_bytes());
+        push_attr(&mut f, NL80211_FREQUENCY_ATTR_RADAR, &[]);
+        push_attr(&mut f, NL80211_FREQUENCY_ATTR_DFS_STATE, &2u32.to_ne_bytes());
+        push_attr(&mut f, NL80211_FREQUENCY_ATTR_NO_80MHZ, &[]);
+        push_attr(&mut f, NL80211_FREQUENCY_ATTR_OFFSET, &500u32.to_ne_bytes());
+
+        let freq = parse_frequency(&f);
+        assert_eq!(freq.freq, 5260);
+        assert!(freq.radar);
+        assert_eq!(freq.dfs_state, Some(DfsState::Available));
+        assert!(freq.no_80mhz);
+        assert!(!freq.no_160mhz);
+        assert_eq!(freq.offset_khz, 500);
     }
 }

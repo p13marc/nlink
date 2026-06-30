@@ -384,7 +384,12 @@ impl BitrateInfo {
 }
 
 /// Physical wireless device capabilities.
-#[derive(Debug, Clone)]
+///
+/// `#[non_exhaustive]` — the kernel grows `NL80211_ATTR_*` wiphy
+/// attributes over time; new fields are added without breaking
+/// downstream readers.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct PhyInfo {
     /// Physical device index.
     pub index: u32,
@@ -396,10 +401,17 @@ pub struct PhyInfo {
     pub supported_iftypes: Vec<InterfaceType>,
     /// Maximum number of SSIDs in a scan request.
     pub max_scan_ssids: Option<u8>,
+    /// Supported cipher suites (`NL80211_ATTR_CIPHER_SUITES`), each a
+    /// 32-bit suite selector (`OUI << 8 | type`).
+    pub cipher_suites: Vec<u32>,
 }
 
 /// Frequency band (2.4 GHz, 5 GHz, 6 GHz).
-#[derive(Debug, Clone)]
+///
+/// `#[non_exhaustive]` — the kernel grows `NL80211_BAND_ATTR_*`
+/// attributes over time (S1G, EDMG, …); new fields are additive.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Band {
     /// Available frequencies.
     pub frequencies: Vec<Frequency>,
@@ -409,10 +421,79 @@ pub struct Band {
     pub ht_capa: Option<u16>,
     /// VHT (802.11ac) capabilities.
     pub vht_capa: Option<u32>,
+    /// HT MCS set (16 bytes) from `NL80211_BAND_ATTR_HT_MCS_SET`.
+    pub ht_mcs_set: Option<Vec<u8>>,
+    /// VHT MCS set (8 bytes) from `NL80211_BAND_ATTR_VHT_MCS_SET`.
+    pub vht_mcs_set: Option<Vec<u8>>,
+    /// Per-interface-type HE (802.11ax) / EHT (802.11be) capabilities
+    /// (`NL80211_BAND_ATTR_IFTYPE_DATA`). Empty on pre-HE hardware.
+    pub iftype_capa: Vec<BandIftypeCapa>,
+}
+
+impl Band {
+    /// Whether any interface type on this band advertises HE (802.11ax).
+    pub fn he_supported(&self) -> bool {
+        self.iftype_capa.iter().any(|c| c.he_cap_phy.is_some())
+    }
+
+    /// Whether any interface type on this band advertises EHT (802.11be).
+    pub fn eht_supported(&self) -> bool {
+        self.iftype_capa.iter().any(|c| c.eht_cap_phy.is_some())
+    }
+}
+
+/// HE/EHT capabilities for a set of interface types on a band
+/// (`NL80211_BAND_ATTR_IFTYPE_DATA` element). Capability fields hold
+/// the raw kernel bytes (their bit layouts are defined by 802.11ax/be).
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct BandIftypeCapa {
+    /// Interface types these capabilities apply to.
+    pub iftypes: Vec<InterfaceType>,
+    /// HE MAC capability info (`HE_CAP_MAC`).
+    pub he_cap_mac: Option<Vec<u8>>,
+    /// HE PHY capability info (`HE_CAP_PHY`).
+    pub he_cap_phy: Option<Vec<u8>>,
+    /// HE supported MCS/NSS set (`HE_CAP_MCS_SET`).
+    pub he_cap_mcs_set: Option<Vec<u8>>,
+    /// EHT MAC capability info (`EHT_CAP_MAC`).
+    pub eht_cap_mac: Option<Vec<u8>>,
+    /// EHT PHY capability info (`EHT_CAP_PHY`).
+    pub eht_cap_phy: Option<Vec<u8>>,
+}
+
+/// DFS (radar) state of a channel, from `NL80211_FREQUENCY_ATTR_DFS_STATE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DfsState {
+    /// Channel is usable but a CAC (channel availability check) must
+    /// run before use.
+    Usable,
+    /// A radar pattern was detected; the channel is unavailable.
+    Unavailable,
+    /// CAC completed; the channel is available for use.
+    Available,
+}
+
+impl TryFrom<u32> for DfsState {
+    type Error = ();
+
+    fn try_from(v: u32) -> core::result::Result<Self, ()> {
+        match v {
+            0 => Ok(DfsState::Usable),
+            1 => Ok(DfsState::Unavailable),
+            2 => Ok(DfsState::Available),
+            _ => Err(()),
+        }
+    }
 }
 
 /// Individual frequency/channel info.
-#[derive(Debug, Clone)]
+///
+/// `#[non_exhaustive]` — the kernel grows `NL80211_FREQUENCY_ATTR_*`
+/// attributes over time; new fields are additive.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Frequency {
     /// Frequency in MHz.
     pub freq: u32,
@@ -424,6 +505,18 @@ pub struct Frequency {
     pub radar: bool,
     /// Whether initiating radiation is not allowed (NO-IR).
     pub no_ir: bool,
+    /// DFS state, when this is a radar/DFS channel.
+    pub dfs_state: Option<DfsState>,
+    /// HT40- is not allowed on this channel.
+    pub no_ht40_minus: bool,
+    /// HT40+ is not allowed on this channel.
+    pub no_ht40_plus: bool,
+    /// 80 MHz operation is not allowed on this channel.
+    pub no_80mhz: bool,
+    /// 160 MHz operation is not allowed on this channel.
+    pub no_160mhz: bool,
+    /// Frequency offset from `freq`, in kHz (S1G / fine-grained).
+    pub offset_khz: u32,
 }
 
 impl Frequency {
