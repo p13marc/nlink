@@ -41,8 +41,13 @@ syscall_batch = []
 # snake_case for enum variants. Opt-in only — no runtime
 # cost when disabled.
 serde = ["dep:serde", "dep:serde_json"]
+# JSON Schema generation for the declarative `NetworkConfig` input
+# format (Plan 189 §8). Implies `serde` so the generated schema
+# matches the validated serde JSON shape. Opt-in only — no runtime
+# cost when disabled. Use `NetworkConfig::json_schema()`.
+schemars = ["dep:schemars", "serde"]
 # All features
-full = ["sockdiag", "tuntap", "tuntap-async", "output", "namespace_watcher", "lab", "syscall_batch", "serde"]
+full = ["sockdiag", "tuntap", "tuntap-async", "output", "namespace_watcher", "lab", "syscall_batch", "serde", "schemars"]
 # Enable integration tests (require root or network namespace)
 integration = []
 
@@ -69,6 +74,10 @@ nlink-macros = { workspace = true }
 
 # Optional dependencies
 serde = { workspace = true, optional = true }
+# JSON Schema generation for `NetworkConfig` (gated by `schemars`
+# feature, which implies `serde` so the schema matches the serde
+# JSON shape). Plan 189 §8.
+schemars = { workspace = true, optional = true }
 inotify = { version = "0.11", default-features = false, features = ["stream"], optional = true }
 # Pulled in by the `lab` feature so `nlink::lab::init_test_tracing()`
 # (auto-invoked by `nlink::require_root!()`) can wire a libtest-

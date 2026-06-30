@@ -522,6 +522,25 @@ Inspect the diff first (`addresses_to_remove` / `routes_to_remove`, or
 the `Display` output) — purge is reachable only through the explicit
 `*_with_*` entry points, never the plain `diff`/`apply`.
 
+### JSON Schema (feature `schemars`)
+
+Generate a JSON Schema (draft 7) for the config format so editors and
+CI can validate config files. The schema follows the human-facing JSON
+shape — CIDR strings for addresses/routes, `aa:bb:..` for MACs — not
+the in-memory types:
+
+```rust
+// Write the schema next to your config so VS Code's `json.schemas` /
+// `yaml.schemas` (or a CI validator) picks it up.
+std::fs::write(
+    "network-config.schema.json",
+    nlink::netlink::config::NetworkConfig::json_schema(),
+)?;
+```
+
+`json_schema_value()` returns the `schemars::schema::RootSchema` if you
+want to inspect or merge it rather than emit text.
+
 ## Rate Limiting DSL
 
 High-level rate limiting with minimal configuration:

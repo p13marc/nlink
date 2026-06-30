@@ -71,6 +71,27 @@ All notable changes to this project will be documented in this file.
   change. Validated against a live kernel (global address removed while
   the declared address and link-local survive; an admin route removed
   while the connected route stays; idempotent on re-diff).
+- **JSON Schema for `NetworkConfig` via the new `schemars` feature
+  (#137, Plan 189 §8).** Completes the config-tooling arc started by
+  the validating `Deserialize` (#108): `NetworkConfig::json_schema()`
+  returns a [JSON Schema](https://json-schema.org) (draft 7, pretty
+  string) describing exactly the JSON that `from_json_str` accepts, and
+  `json_schema_value()` returns the `schemars::schema::RootSchema` for
+  callers that want to inspect or merge it. Wire it into editor tooling
+  (`json.schemas` / `yaml.schemas`) for autocomplete + inline
+  validation of network-config files, or check it into a repo for CI
+  validation. The schema is faithful to the **human-facing** JSON
+  shape, not the in-memory types: addresses/routes are CIDR strings
+  (the schema delegates through the `AddressRepr`/`RouteRepr` serde
+  shadows rather than exposing the parsed `address`/`prefix_len`
+  fields), MACs are `aa:bb:..` strings, and the `default` route keyword
+  is a string — verified by a test that asserts those fields are
+  `"string"`-typed in the generated schema (a schema that didn't match
+  the real JSON would be worse than none). Gated behind the new
+  `schemars` cargo feature (implies `serde`; opt-in, no default-build
+  cost), mirroring the `serde` feature. Scoped to the round-trippable
+  `NetworkConfig` input format; the Serialize-only nftables declarative
+  types are unaffected.
 - **Declarative nftables sets — `DeclaredSet` + element-level diff
   (#137, Plan 198).** The declarative `NftablesConfig` now models named
   sets alongside tables/chains/rules/flowtables, closing the last gap

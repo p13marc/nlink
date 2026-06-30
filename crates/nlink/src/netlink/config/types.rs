@@ -13,6 +13,7 @@ pub use crate::netlink::link::{
 /// to add links, addresses, routes, and qdiscs, then call [`diff()`](NetworkConfig::diff)
 /// or [`apply()`](NetworkConfig::apply) to reconcile with the current state.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", default))]
 #[derive(Debug, Clone, Default)]
 pub struct NetworkConfig {
@@ -67,6 +68,38 @@ impl NetworkConfig {
         serde_json::to_string_pretty(self).map_err(|e| {
             crate::netlink::Error::InvalidMessage(format!("config JSON serialize: {e}"))
         })
+    }
+
+    /// Generate a [JSON Schema](https://json-schema.org) (draft 7)
+    /// describing the JSON accepted by [`from_json_str`](Self::from_json_str),
+    /// as a pretty-printed string. Requires the `schemars` feature.
+    ///
+    /// Wire this into editor tooling (VS Code's `json.schemas`,
+    /// `yaml.schemas`) for autocomplete + inline validation of
+    /// `NetworkConfig` files, or check it into a repo for CI
+    /// validation. The schema reflects the human-facing JSON shape —
+    /// addresses/routes as CIDR strings, MACs as `aa:bb:..` strings,
+    /// the `default` route keyword — not the in-memory representation.
+    ///
+    /// ```ignore
+    /// std::fs::write("network-config.schema.json",
+    ///     nlink::netlink::config::NetworkConfig::json_schema())?;
+    /// ```
+    #[cfg(feature = "schemars")]
+    pub fn json_schema() -> String {
+        let schema = schemars::schema_for!(NetworkConfig);
+        // `RootSchema` always serializes (no user data, no custom
+        // serializers that can fail), so the unwrap is infallible.
+        serde_json::to_string_pretty(&schema)
+            .expect("RootSchema serialization is infallible")
+    }
+
+    /// The JSON Schema as a [`schemars::schema::RootSchema`], for
+    /// callers that want to inspect or merge it rather than emit
+    /// text. Requires the `schemars` feature.
+    #[cfg(feature = "schemars")]
+    pub fn json_schema_value() -> schemars::schema::RootSchema {
+        schemars::schema_for!(NetworkConfig)
     }
 
     /// Add a link (interface) configuration.
@@ -180,6 +213,7 @@ impl NetworkConfig {
 
 /// Declared link configuration.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredLink {
@@ -197,6 +231,9 @@ pub struct DeclaredLink {
         feature = "serde",
         serde(default, with = "mac_serde", skip_serializing_if = "Option::is_none")
     )]
+    // `mac_serde` renders this as the `aa:bb:..` string, so the
+    // schema must say "optional string", not "array of 6 integers".
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
     pub(crate) address: Option<[u8; 6]>,
 }
 
@@ -229,6 +266,7 @@ impl DeclaredLink {
 
 /// Link type for declared configuration.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -335,6 +373,7 @@ impl DeclaredLinkType {
 
 /// Link state (up or down).
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -350,6 +389,7 @@ pub enum LinkState {
 
 /// Macvlan mode.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -369,6 +409,7 @@ pub enum MacvlanMode {
 
 /// Bond mode.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -772,6 +813,12 @@ impl LinkBuilder {
 /// error, not a silently-accepted struct.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(into = "AddressRepr", try_from = "AddressRepr"))]
+// JsonSchema is NOT derived here. The JSON shape goes through
+// `AddressRepr` (a CIDR string), so a *derived* schema would wrongly
+// expose the parsed `address`/`prefix_len` fields. schemars 0.8's
+// `with` is field-level only, so the container override is a no-op —
+// the manual impl below delegates to `AddressRepr` instead, keeping
+// the schema faithful to the wire.
 #[derive(Debug, Clone)]
 pub struct DeclaredAddress {
     pub(crate) dev: String,
@@ -780,13 +827,35 @@ pub struct DeclaredAddress {
 }
 
 /// Serde shadow for [`DeclaredAddress`] — the human-facing
-/// `{ dev, address: "<cidr>" }` form.
+/// `{ dev, address: "<cidr>" }` form. Also the schema source for
+/// [`DeclaredAddress`] (see its manual `JsonSchema` impl).
 #[cfg(feature = "serde")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct AddressRepr {
+    /// `dev` the address is attached to.
     dev: String,
+    /// CIDR-notation address, e.g. `"10.0.0.1/24"` or `"fd00::1/64"`.
     address: String,
+}
+
+// Delegate `DeclaredAddress`'s schema to `AddressRepr` so it
+// describes the actual `{ dev, address: "<cidr>" }` JSON.
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for DeclaredAddress {
+    fn schema_name() -> String {
+        AddressRepr::schema_name()
+    }
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        AddressRepr::schema_id()
+    }
+    fn json_schema(g: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        AddressRepr::json_schema(g)
+    }
+    fn is_referenceable() -> bool {
+        AddressRepr::is_referenceable()
+    }
 }
 
 #[cfg(feature = "serde")]
@@ -896,6 +965,8 @@ pub enum AddressParseError {
 /// and the gateway address, so malformed input is a deserialize error.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(into = "RouteRepr", try_from = "RouteRepr"))]
+// JsonSchema delegated to `RouteRepr` via the manual impl below (the
+// JSON shape is string destination/gateway, not the parsed fields).
 #[derive(Debug, Clone)]
 pub struct DeclaredRoute {
     pub(crate) destination: IpAddr,
@@ -911,9 +982,11 @@ pub struct DeclaredRoute {
 /// plus the optional knobs, with `type` omitted when it is the
 /// default `unicast`.
 #[cfg(feature = "serde")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct RouteRepr {
+    /// CIDR-notation destination, or the bare keyword `"default"`.
     destination: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gateway: Option<String>,
@@ -929,6 +1002,24 @@ struct RouteRepr {
         skip_serializing_if = "DeclaredRouteType::is_unicast"
     )]
     route_type: DeclaredRouteType,
+}
+
+// Delegate `DeclaredRoute`'s schema to `RouteRepr` so it describes
+// the actual string-destination/gateway JSON, not the parsed fields.
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for DeclaredRoute {
+    fn schema_name() -> String {
+        RouteRepr::schema_name()
+    }
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        RouteRepr::schema_id()
+    }
+    fn json_schema(g: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        RouteRepr::json_schema(g)
+    }
+    fn is_referenceable() -> bool {
+        RouteRepr::is_referenceable()
+    }
 }
 
 #[cfg(feature = "serde")]
@@ -1052,6 +1143,7 @@ impl DeclaredRoute {
 
 /// Route type for declared configuration.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -1230,6 +1322,7 @@ impl RouteBuilder {
 
 /// Declared qdisc configuration.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 pub struct DeclaredQdisc {
@@ -1258,6 +1351,7 @@ impl DeclaredQdisc {
 
 /// Qdisc parent location.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -1277,6 +1371,7 @@ pub enum QdiscParent {
 /// deserialized directly here is range-checked by the kernel at
 /// apply time rather than on construction.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -2258,5 +2353,95 @@ mod mac_serde {
             ));
         }
         Ok(out)
+    }
+}
+
+#[cfg(all(test, feature = "schemars"))]
+mod schemars_tests {
+    use super::*;
+
+    fn schema_value() -> serde_json::Value {
+        serde_json::from_str(&NetworkConfig::json_schema()).expect("schema is valid JSON")
+    }
+
+    /// schemars 0.8 emits draft-07 with a `definitions` map; tolerate
+    /// `$defs` in case the default changes.
+    fn defs(schema: &serde_json::Value) -> &serde_json::Map<String, serde_json::Value> {
+        schema
+            .get("definitions")
+            .or_else(|| schema.get("$defs"))
+            .and_then(|d| d.as_object())
+            .expect("schema exposes a definitions/$defs map")
+    }
+
+    #[test]
+    fn schema_generates_and_titles_the_config_root() {
+        let s = schema_value();
+        assert_eq!(
+            s.get("title").and_then(|t| t.as_str()),
+            Some("NetworkConfig"),
+            "root schema title should be the type name"
+        );
+        let d = defs(&s);
+        for t in ["DeclaredLink", "DeclaredLinkType", "DeclaredQdiscType"] {
+            assert!(
+                d.contains_key(t),
+                "schema missing definition for {t}; has {:?}",
+                d.keys().collect::<Vec<_>>()
+            );
+        }
+        // The Repr shadow types must appear — proof the manual
+        // `JsonSchema` delegation to `*Repr` took effect (addresses /
+        // routes describe the string wire shape, not parsed fields).
+        assert!(d.contains_key("AddressRepr"), "schema must route addresses through AddressRepr");
+        assert!(d.contains_key("RouteRepr"), "schema must route routes through RouteRepr");
+        // And the parsed structs must NOT leak into the schema.
+        assert!(!d.contains_key("DeclaredAddress"), "DeclaredAddress parsed fields must not appear");
+        assert!(!d.contains_key("DeclaredRoute"), "DeclaredRoute parsed fields must not appear");
+    }
+
+    #[test]
+    fn address_and_route_describe_cidr_strings_not_parsed_fields() {
+        // The correctness guard: DeclaredAddress / DeclaredRoute
+        // serialize THROUGH their `*Repr` (a CIDR string), so the
+        // schema must say "string", not expose the in-memory
+        // `{ address: <ip>, prefix_len: <u8> }` fields. A schema that
+        // didn't match the real JSON would be worse than none.
+        let s = schema_value();
+        let d = defs(&s);
+        assert_eq!(
+            d["AddressRepr"].pointer("/properties/address/type").and_then(|v| v.as_str()),
+            Some("string"),
+            "AddressRepr.address must be a (CIDR) string"
+        );
+        assert_eq!(
+            d["RouteRepr"].pointer("/properties/destination/type").and_then(|v| v.as_str()),
+            Some("string"),
+            "RouteRepr.destination must be a (CIDR/default) string"
+        );
+    }
+
+    #[test]
+    fn mac_field_is_a_string_not_a_byte_array() {
+        // DeclaredLink.address is Option<[u8; 6]> but `mac_serde`
+        // renders it as the `aa:bb:..` string. The schema must agree.
+        let s = schema_value();
+        let d = defs(&s);
+        let mac = d["DeclaredLink"]
+            .pointer("/properties/address")
+            .expect("DeclaredLink.address present in schema");
+        let rendered = serde_json::to_string(mac).unwrap();
+        assert!(rendered.contains("string"), "MAC must be string-typed: {rendered}");
+        assert!(
+            !rendered.contains("integer") && !rendered.contains("\"array\""),
+            "MAC must NOT be modelled as a byte array: {rendered}"
+        );
+    }
+
+    #[test]
+    fn schema_value_helper_matches_string_helper() {
+        let from_value = serde_json::to_value(NetworkConfig::json_schema_value()).unwrap();
+        let from_string = schema_value();
+        assert_eq!(from_value, from_string, "the two json_schema accessors must agree");
     }
 }
