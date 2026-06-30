@@ -24,7 +24,7 @@
 
 use nlink::netlink::{
     Connection, Route,
-    config::{ApplyOptions, NetworkConfig},
+    config::NetworkConfig,
 };
 
 #[tokio::main]
@@ -104,31 +104,30 @@ async fn main() -> nlink::Result<()> {
     let report = updated.apply(&conn).await?;
     println!("applied {} change(s)", report.changes_made);
 
-    // -- Step 6: teardown via empty config + purge ----------------
+    // -- Step 6: teardown ----------------------------------------
     //
-    // `purge: true` is explicit opt-in — empty `NetworkConfig`
-    // without purge is a no-op (the diff has nothing to add and
-    // nlink never removes resources implicitly). With purge, the
-    // diff includes "remove everything we own that isn't declared".
-    let teardown = NetworkConfig::new();
-    let report = teardown
-        .apply_with_options(
-            &conn,
-            // Plan 188 §2.2 — `#[non_exhaustive]` now;
-            // construct via the `with_*` builder methods.
-            //
-            // Plan 205 (0.19) — `with_purge(true)` was removed
-            // because the feature was non-functional (silent
-            // no-op). For teardown, this example just applies
-            // the empty config; undeclared resources are NOT
-            // removed automatically. To remove them, use the
-            // imperative API (`conn.del_link(...)` etc.).
-            ApplyOptions::default(),
-        )
-        .await?;
-    println!(
-        "\nteardown applied {} change(s) — demo complete",
-        report.changes_made,
-    );
+    // A declarative reconcile only *adds* by default; an empty
+    // `NetworkConfig::new().apply(...)` is a no-op. Plan 205 (0.23)
+    // re-wired an opt-in purge — `ApplyOptions::default().with_purge(true)`
+    // (or `DiffOptions::purge(true)` on a diff) — but it is
+    // deliberately scoped to **global-scope addresses on managed
+    // interfaces** and **`static`/`boot` main-table routes**, and it
+    // **never removes links or qdiscs**. So purge can't tear down the
+    // dummy links this demo created, and running it here (host netns,
+    // empty config) would also strip undeclared host routes — exactly
+    // why purge is opt-in and fenced. See `docs/library.md` §"Purge —
+    // full reconcile" for the safe pattern.
+    //
+    // For this demo we tear down the interfaces we created via the
+    // imperative API (deleting a link also drops its addresses and
+    // connected routes), which is the right tool for link teardown.
+    for name in ["declarative_dummy0", "declarative_dummy1"] {
+        match conn.del_link(name).await {
+            Ok(()) => println!("removed {name}"),
+            Err(e) if e.is_not_found() => {}
+            Err(e) => return Err(e),
+        }
+    }
+    println!("\nteardown complete — demo complete");
     Ok(())
 }

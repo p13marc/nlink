@@ -18,8 +18,9 @@ nlink = "0.23"
 ```
 
 Feature flags: `sockdiag`, `tuntap`, `tuntap-async`, `output`, `namespace_watcher`,
-`syscall_batch` (recvmmsg/sendmmsg batching), `serde`, `lab` (test harness),
-`full`. Full list in the [docs.rs feature table](https://docs.rs/crate/nlink/latest/features).
+`syscall_batch` (recvmmsg/sendmmsg batching), `serde`, `schemars` (JSON Schema for
+`NetworkConfig`), `lab` (test harness), `full`. Full list in the
+[docs.rs feature table](https://docs.rs/crate/nlink/latest/features).
 
 MSRV: Rust 1.95, edition 2024.
 
@@ -67,13 +68,15 @@ Every typed config has a `parse_params(&[&str])` so `tc` CLI syntax round-trips
 through the typed API. Strongly-typed units: `Rate` (bytes/sec internally,
 parses `100mbit` / `1gbit`), `Bytes`, `Percent`, `TcHandle`, `FilterPriority`.
 
-**Generic Netlink families** — WireGuard, MACsec, MPTCP, ethtool, nl80211 (WiFi),
-devlink, DPLL (clock synchronization — SyncE/PTP/GNSS, kernel 6.7+),
-net_shaper (TX hardware shaping, kernel 6.13+).
+**Generic Netlink families** — WireGuard, MACsec, MPTCP, ethtool, nl80211 (WiFi:
+PHY/wiphy band capabilities, scan/BSS, station-info, channel survey), devlink,
+DPLL (clock synchronization — SyncE/PTP/GNSS, kernel 6.7+), net_shaper (TX
+hardware shaping incl. hierarchical groups, kernel 6.13+), OpenVPN DCO.
 
-**Firewall** — nftables tables/chains/rules/sets/NAT/match expressions,
-flowtables (`Expr::FlowOffload`), multicast event subscription, atomic
-single-batch commits via `Transaction`.
+**Firewall** — nftables tables/chains/rules/NAT/match expressions, named sets
+(imperative + declarative `DeclaredSet` with element-level diff), flowtables
+(`Expr::FlowOffload`), multicast event subscription, atomic single-batch commits
+via `Transaction`, declarative `NftablesConfig` reconcile.
 
 **Diagnostics & observability** — socket diagnostics (`SockDiag`),
 connection tracking (`Netfilter`/ctnetlink), Linux audit, SELinux events,
@@ -81,9 +84,13 @@ FIB lookups, ethtool statistics + monitor, kobject uevent (device hotplug),
 process connector lifecycle events.
 
 **Cross-cutting** — XFRM IPsec SA/SP management + hardware offload
-(`XFRMA_OFFLOAD_DEV`), 30-second default per-Connection timeout (override or
-opt out), `NETLINK_EXT_ACK` TLV parsing (kernel error messages with offset +
-attribute name), `NETLINK_GET_STRICT_CHK` opt-in.
+(`XFRMA_OFFLOAD_DEV`) + monitor event stream (`Connection<Xfrm>: EventSource`),
+ENOBUFS-resync event streams with a kube-rs-style `Store` watch-cache
+(`ReflectExt::reflect`), opt-in per-`nlmsg_seq` dispatcher mode
+(`Connection::with_dispatcher`) so events and requests coexist on one
+connection, 30-second default per-Connection timeout (override or opt out),
+`NETLINK_EXT_ACK` TLV parsing (kernel error messages with offset + attribute
+name), `NETLINK_GET_STRICT_CHK` opt-in.
 
 ## High-level APIs
 
@@ -126,6 +133,21 @@ PerPeerImpairer::new("vethA-br")
 
 // Network diagnostics — find issues, score bottlenecks.
 let report = nlink::netlink::diagnostics::Diagnostics::new(conn).scan().await?;
+
+// Reflector / watch-cache — keep an in-memory Store up to date from a
+// resync-aware event stream (kube-rs style), then read it from anywhere.
+use nlink::{Store, StoreOp};
+use nlink::netlink::reflector::ReflectExt;
+let store: Store<u32, NetworkEvent> = Store::new();
+let watch = conn.into_events_with_resync(factory)?.reflect(store.clone(), |ev| match ev {
+    NetworkEvent::NewLink(l) => StoreOp::Upsert(l.ifindex()),
+    NetworkEvent::DelLink(l) => StoreOp::Remove(l.ifindex()),
+    _ => StoreOp::Ignore,
+});
+// drive `watch` in a task; `store.len()` / `store.get(&idx)` read the cache.
+
+// JSON Schema for config files (feature `schemars`) — editor/CI validation.
+let schema = NetworkConfig::json_schema();
 ```
 
 ## Building blocks for downstream code

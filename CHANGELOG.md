@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-06-30
+
+> Upgrading? See
+> [`docs/migration_guide/0.22.0-to-0.23.0.md`](docs/migration_guide/0.22.0-to-0.23.0.md)
+> — large but mostly additive; the only breaking changes are
+> `Chain::new` returning `Result`, `LinkStats` accessors, and a few
+> newly-`#[non_exhaustive]` nl80211 structs.
+
 ### Fixed
 
 - **nftables set creation always failed with ERANGE (#137).** The

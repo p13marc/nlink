@@ -182,6 +182,27 @@ the reflector stages that snapshot and swaps it in atomically at
 into it. (The `backon`-based reconnect backoff is intentionally left to
 the caller's spawn loop — see `netlink::resync_ext`.)
 
+### Dispatcher mode — events + requests on one connection
+
+A plain `Connection<P>` serializes request/response through an internal
+mutex, so a long-lived event subscriber blocks concurrent requests
+until it's dropped. Opt into **dispatcher mode** when one connection
+must serve a long-lived stream *and* concurrent requests:
+
+```rust
+let conn = std::sync::Arc::new(Connection::<Route>::new()?.with_dispatcher());
+conn.subscribe_all()?;
+let mut events = conn.events().await;     // long-lived subscriber…
+let links = conn.get_links().await?;      // …no longer blocks this request
+```
+
+A single background driver owns `recv` and demultiplexes frames by
+`nlmsg_seq`, so events, streaming dumps, and unicast requests coexist.
+The default stays the lean mutex (no background task); reach for
+`with_dispatcher()` only when you need the concurrency. For genuinely
+parallel *dumps*, use `ConnectionPool<P>` (one socket per task — the
+kernel serializes dumps per socket). See CLAUDE.md §Concurrency.
+
 ## Traffic Control (TC)
 
 ### Adding Qdiscs
@@ -1077,7 +1098,8 @@ conn.set_limits(
 | Module | Description |
 |--------|-------------|
 | `nlink::netlink` | Core netlink: Connection, EventStream, namespace, TC |
-| `nlink::netlink::config` | Declarative network configuration |
+| `nlink::netlink::config` | Declarative network configuration (diff/apply/reconcile + opt-in purge) |
+| `nlink::netlink::reflector` | `Store<K,V>` watch-cache + `ReflectExt::reflect` over resync event streams |
 | `nlink::netlink::ratelimit` | Rate limiting DSL |
 | `nlink::netlink::diagnostics` | Network diagnostics (scanner, connectivity, bottleneck) |
 | `nlink::netlink::tc` | TC builders (netem, htb, fq_codel, etc.) |
@@ -1088,8 +1110,9 @@ conn.set_limits(
 | `nlink::netlink::nexthop` | Nexthop objects and ECMP groups |
 | `nlink::netlink::mpls` | MPLS routes and encapsulation |
 | `nlink::netlink::srv6` | SRv6 segment routing |
-| `nlink::netlink::nftables` | nftables firewall (tables, chains, rules, sets, NAT) |
-| `nlink::netlink::genl` | Generic Netlink (WireGuard, MACsec, MPTCP, Ethtool, nl80211, Devlink) |
+| `nlink::netlink::nftables` | nftables firewall (tables, chains, rules, named sets incl. declarative `DeclaredSet`, NAT) |
+| `nlink::netlink::genl` | Generic Netlink (WireGuard, MACsec, MPTCP, Ethtool, nl80211 PHY/scan/station/survey, Devlink, DPLL, net_shaper, OpenVPN DCO) |
+| `nlink::netlink::xfrm` | XFRM IPsec SA/SP CRUD + monitor (`Connection<Xfrm>: EventSource`) |
 | `nlink::util` | Parsing utilities, address helpers, name resolution |
 | `nlink::sockdiag` | Socket diagnostics (feature: `sockdiag`) |
 | `nlink::tuntap` | TUN/TAP devices (feature: `tuntap`) |
