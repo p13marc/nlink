@@ -5,7 +5,7 @@
 use std::{net::IpAddr, time::Duration};
 
 use super::{
-    diff::{ConfigDiff, LinkChanges, compute_diff},
+    diff::{ConfigDiff, DiffOptions, LinkChanges, compute_diff_with_options},
     types::{
         BondMode, DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc,
         DeclaredQdiscType, DeclaredRoute, DeclaredRouteType, MacvlanMode, NetworkConfig,
@@ -75,6 +75,13 @@ pub struct ApplyOptions {
     pub dry_run: bool,
     /// Continue applying changes even if some operations fail.
     pub continue_on_error: bool,
+    /// Remove kernel resources not declared in the config (full
+    /// reconcile). Scoped conservatively — see [`DiffOptions::purge`].
+    /// Only global-scope addresses on managed interfaces and
+    /// `static`/`boot` main-table routes are eligible; kernel-managed
+    /// resources (link-local, loopback, RA/DHCP routes, links, qdiscs)
+    /// are never touched. Off by default.
+    pub purge: bool,
 }
 
 impl ApplyOptions {
@@ -93,6 +100,16 @@ impl ApplyOptions {
     /// where partial progress is preferable to no progress.
     pub fn with_continue_on_error(mut self, on: bool) -> Self {
         self.continue_on_error = on;
+        self
+    }
+
+    /// Toggle purge (full-reconcile removals). With purge on, `apply`
+    /// computes the diff with [`DiffOptions::purge`] so undeclared
+    /// global addresses and `static`/`boot` main-table routes are
+    /// removed in addition to the additive changes. See
+    /// [`DiffOptions::purge`] for the exact safety scope.
+    pub fn with_purge(mut self, on: bool) -> Self {
+        self.purge = on;
         self
     }
 }
@@ -163,7 +180,8 @@ pub async fn apply_config(
     conn: &Connection<Route>,
     options: ApplyOptions,
 ) -> Result<ApplyResult> {
-    let diff = compute_diff(config, conn).await?;
+    let diff_opts = DiffOptions::default().purge(options.purge);
+    let diff = compute_diff_with_options(config, conn, &diff_opts).await?;
     apply_diff(&diff, conn, options).await
 }
 
@@ -363,18 +381,73 @@ pub async fn apply_diff(
         }
     }
 
-    // Plan 205 (0.19) — `purge` was removed because the
-    // `*_to_remove` collections were never populated by the diff
-    // phase, so the apply-side branch was dead code that lied
-    // about what it did. Pre-0.19 `ApplyOptions::with_purge(true)`
-    // silently no-op'd; users believed kernel state was being
-    // reconciled when it wasn't. For the "remove undeclared
-    // resources" use case, the imperative API
-    // (`Connection::del_link` / `del_address` / `del_route` /
-    // `del_qdisc`) is the canonical 0.19 channel. A fully wired
-    // purge with a kernel-managed-resource exclusion list
-    // (IPv6 link-local, multicast, `lo`, link-local prefix
-    // routes) is queued for 0.20.
+    // 6. Purge removals (only populated when the diff was computed
+    //    with `DiffOptions::purge` — see `compute_diff_with_options`).
+    //    Order: routes before addresses, since a route can depend on
+    //    the address's prefix being present (removing the address
+    //    first would let the kernel auto-flush the connected route and
+    //    race our explicit del). Links and qdiscs are never purged.
+
+    // 6a. Remove undeclared routes.
+    for route in &diff.routes_to_remove {
+        let op = format!("remove route {}/{}", route.destination, route.prefix_len);
+        if options.dry_run {
+            result.summary.push(format!("Would {}", op));
+            result.changes_made += 1;
+        } else {
+            match del_route(conn, route).await {
+                Ok(()) => {
+                    result.summary.push(format!(
+                        "Removed route {}/{}",
+                        route.destination, route.prefix_len
+                    ));
+                    result.changes_made += 1;
+                }
+                Err(e) => {
+                    if options.continue_on_error {
+                        result.errors.push(ApplyError {
+                            operation: op,
+                            error: e,
+                        });
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+
+    // 6b. Remove undeclared addresses.
+    for addr in &diff.addresses_to_remove {
+        let op = format!(
+            "remove address {}/{} on {}",
+            addr.address, addr.prefix_len, addr.dev
+        );
+        if options.dry_run {
+            result.summary.push(format!("Would {}", op));
+            result.changes_made += 1;
+        } else {
+            match del_address(conn, addr).await {
+                Ok(()) => {
+                    result.summary.push(format!(
+                        "Removed address {}/{} on {}",
+                        addr.address, addr.prefix_len, addr.dev
+                    ));
+                    result.changes_made += 1;
+                }
+                Err(e) => {
+                    if options.continue_on_error {
+                        result.errors.push(ApplyError {
+                            operation: op,
+                            error: e,
+                        });
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
 
     Ok(result)
 }
@@ -694,6 +767,52 @@ async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
             // the pre-0.19 diff didn't notice the gateway change
             // at all). New routes are also accepted by replace.
             conn.replace_route(config).await
+        }
+    }
+}
+
+async fn del_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result<()> {
+    conn.del_address(addr.dev.as_str(), addr.address, addr.prefix_len)
+        .await
+}
+
+async fn del_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()> {
+    // The kernel matches a route delete on its key (dst, prefix,
+    // table) plus any specified attributes. We replay the same
+    // gateway/dev/metric/table the diff recorded so the delete is
+    // unambiguous when multiple routes share a (dst, prefix, table).
+    match route.destination {
+        IpAddr::V4(dst) => {
+            let mut config = Ipv4Route::from_addr(dst, route.prefix_len);
+            if let Some(IpAddr::V4(gw)) = route.gateway {
+                config = config.gateway(gw);
+            }
+            if let Some(dev) = &route.dev {
+                config = config.dev(dev);
+            }
+            if let Some(metric) = route.metric {
+                config = config.metric(metric);
+            }
+            if let Some(table) = route.table {
+                config = config.table(table);
+            }
+            conn.del_route(config).await
+        }
+        IpAddr::V6(dst) => {
+            let mut config = Ipv6Route::from_addr(dst, route.prefix_len);
+            if let Some(IpAddr::V6(gw)) = route.gateway {
+                config = config.gateway(gw);
+            }
+            if let Some(dev) = &route.dev {
+                config = config.dev(dev);
+            }
+            if let Some(metric) = route.metric {
+                config = config.metric(metric);
+            }
+            if let Some(table) = route.table {
+                config = config.table(table);
+            }
+            conn.del_route(config).await
         }
     }
 }

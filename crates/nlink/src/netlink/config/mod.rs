@@ -48,7 +48,7 @@ mod diff;
 mod types;
 
 pub use apply::{ApplyOptions, ApplyResult};
-pub use diff::ConfigDiff;
+pub use diff::{ConfigDiff, DiffOptions};
 pub use types::*;
 
 use super::{connection::Connection, error::Result, protocol::Route};
@@ -69,6 +69,31 @@ impl NetworkConfig {
     /// ```
     pub async fn diff(&self, conn: &Connection<Route>) -> Result<ConfigDiff> {
         diff::compute_diff(self, conn).await
+    }
+
+    /// Compute the diff with explicit [`DiffOptions`].
+    ///
+    /// The only option today is [`DiffOptions::purge`]: with it on,
+    /// the returned diff additionally carries
+    /// [`ConfigDiff::addresses_to_remove`] /
+    /// [`ConfigDiff::routes_to_remove`] for undeclared kernel
+    /// resources (conservatively scoped — see [`DiffOptions::purge`]).
+    /// The default ([`Self::diff`]) never populates the removal
+    /// collections, so it can only ever *add* state.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let diff = config.diff_with_options(&conn, DiffOptions::default().purge(true)).await?;
+    /// // `diff.summary()` now shows `-` lines for resources that
+    /// // would be removed; inspect before calling `diff.apply(&conn)`.
+    /// ```
+    pub async fn diff_with_options(
+        &self,
+        conn: &Connection<Route>,
+        options: DiffOptions,
+    ) -> Result<ConfigDiff> {
+        diff::compute_diff_with_options(self, conn, &options).await
     }
 
     /// Apply the configuration to achieve the desired state.

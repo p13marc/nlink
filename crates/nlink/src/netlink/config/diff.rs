@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use super::types::{
     DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredQdiscType,
-    DeclaredRoute, LinkState, NetworkConfig, QdiscParent,
+    DeclaredRoute, DeclaredRouteType, LinkState, NetworkConfig, QdiscParent,
 };
 use crate::netlink::{
     builder::MessageBuilder,
@@ -23,8 +23,49 @@ use crate::netlink::{
         ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, NetemConfig, PrioConfig,
         QdiscConfig, SfqConfig, TbfConfig,
     },
-    types::route::RouteType,
+    types::{addr::Scope, route::RouteProtocol, route::RouteType},
 };
+
+/// Options controlling [`NetworkConfig::diff_with_options`](crate::netlink::config::NetworkConfig::diff_with_options).
+///
+/// `#[non_exhaustive]` (Plan 188 convention) — construct via
+/// [`Default::default`] + the builder setters.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct DiffOptions {
+    /// Compute removals for resources present in the kernel but not
+    /// declared in the config ("full reconcile"). Default `false`.
+    ///
+    /// **Purge is destructive** — it populates
+    /// [`ConfigDiff::addresses_to_remove`] /
+    /// [`ConfigDiff::routes_to_remove`], which [`ConfigDiff::apply`]
+    /// then deletes. It is deliberately reachable *only* through the
+    /// explicit `diff_with_options` → inspect → `apply` flow (the
+    /// one-shot [`NetworkConfig::apply`](crate::netlink::config::NetworkConfig::apply)
+    /// never purges), so you always see the `-` lines in the diff
+    /// before anything is deleted.
+    ///
+    /// Scope + safety rails:
+    /// - **Addresses**: only `global`-scope addresses on interfaces
+    ///   the config declares addresses on. IPv6 link-local,
+    ///   loopback, and any non-global scope are excluded.
+    /// - **Routes**: only `static`/`boot` protocol routes in the
+    ///   main table. Kernel, RA, DHCP and redirect routes are
+    ///   excluded.
+    /// - **Links and qdiscs are never purged** — deleting
+    ///   interfaces is too destructive to infer; use the imperative
+    ///   `Connection::del_link` / `del_qdisc` for those.
+    pub purge: bool,
+}
+
+impl DiffOptions {
+    /// Enable/disable purge (full-reconcile removals). See
+    /// [`Self::purge`] for the safety scope.
+    pub fn purge(mut self, on: bool) -> Self {
+        self.purge = on;
+        self
+    }
+}
 
 /// Difference between desired and current network state.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -47,20 +88,24 @@ pub struct ConfigDiff {
     pub qdiscs_to_add: Vec<DeclaredQdisc>,
     /// Qdiscs to replace (same position, different config).
     pub qdiscs_to_replace: Vec<DeclaredQdisc>,
-    // Plan 205 (0.19) — removed `links_to_remove`,
-    // `addresses_to_remove`, `routes_to_remove`, `qdiscs_to_remove`.
-    // They were never populated by the diff phase (the
-    // `diff_addresses`/`diff_routes` etc. functions had explicit
-    // "We don't auto-remove" comments and silenced the
-    // `desired` HashSet to no-op). The apply path's
-    // `if options.purge { ... }` branches read from these
-    // collections and so silently did nothing — `with_purge(true)`
-    // was a silent lie. For the "remove undeclared resources"
-    // use case, use the imperative API:
-    // `Connection::del_link`/`del_address`/`del_route`/`del_qdisc`.
-    // A correctly-wired purge with a kernel-managed-resource
-    // exclusion list (IPv6 link-local, multicast, `lo`,
-    // link-local prefix routes) is queued for 0.20.
+
+    /// Addresses to remove (purge mode only — see
+    /// [`DiffOptions::purge`]). Populated **only** when the diff is
+    /// computed via
+    /// [`NetworkConfig::diff_with_options`](crate::netlink::config::NetworkConfig::diff_with_options)
+    /// with `purge` on; the default
+    /// [`diff`](crate::netlink::config::NetworkConfig::diff) never
+    /// removes anything. Kernel-managed addresses (IPv6 link-local,
+    /// loopback, any non-`global` scope) are excluded, and only
+    /// interfaces the config declares addresses on are touched.
+    pub addresses_to_remove: Vec<DeclaredAddress>,
+
+    /// Routes to remove (purge mode only). Populated only under
+    /// [`DiffOptions::purge`]. Restricted to the main table and to
+    /// admin/user-managed protocols (`static` / `boot`); kernel,
+    /// RA, DHCP and redirect routes are excluded so dynamic and
+    /// auto-configured routing is never clobbered.
+    pub routes_to_remove: Vec<DeclaredRoute>,
 }
 
 impl ConfigDiff {
@@ -97,6 +142,8 @@ impl ConfigDiff {
             && self.routes_to_add.is_empty()
             && self.qdiscs_to_add.is_empty()
             && self.qdiscs_to_replace.is_empty()
+            && self.addresses_to_remove.is_empty()
+            && self.routes_to_remove.is_empty()
     }
 
     /// Get the total number of changes.
@@ -107,6 +154,8 @@ impl ConfigDiff {
             + self.routes_to_add.len()
             + self.qdiscs_to_add.len()
             + self.qdiscs_to_replace.len()
+            + self.addresses_to_remove.len()
+            + self.routes_to_remove.len()
     }
 
     /// Get a human-readable summary of the changes.
@@ -172,6 +221,29 @@ impl ConfigDiff {
                 qdisc.qdisc_type.kind(),
                 qdisc.dev,
                 qdisc.parent
+            ));
+        }
+
+        // Purge removals (only present under `DiffOptions::purge`).
+        for addr in &self.addresses_to_remove {
+            lines.push(format!(
+                "- address {}/{} on {}",
+                addr.address, addr.prefix_len, addr.dev
+            ));
+        }
+        for route in &self.routes_to_remove {
+            let via = route
+                .gateway
+                .map(|g| format!(" via {}", g))
+                .unwrap_or_default();
+            let dev = route
+                .dev
+                .as_ref()
+                .map(|d| format!(" dev {}", d))
+                .unwrap_or_default();
+            lines.push(format!(
+                "- route {}/{}{}{}",
+                route.destination, route.prefix_len, via, dev
             ));
         }
 
@@ -260,6 +332,16 @@ impl std::fmt::Display for LinkChanges {
 
 /// Compute the difference between desired and current state.
 pub async fn compute_diff(config: &NetworkConfig, conn: &Connection<Route>) -> Result<ConfigDiff> {
+    compute_diff_with_options(config, conn, &DiffOptions::default()).await
+}
+
+/// Like [`compute_diff`] but honours [`DiffOptions`] (currently the
+/// `purge` flag — see [`DiffOptions::purge`]).
+pub async fn compute_diff_with_options(
+    config: &NetworkConfig,
+    conn: &Connection<Route>,
+    opts: &DiffOptions,
+) -> Result<ConfigDiff> {
     let mut diff = ConfigDiff::default();
 
     // Fetch current state
@@ -295,10 +377,10 @@ pub async fn compute_diff(config: &NetworkConfig, conn: &Connection<Route>) -> R
     topo_sort_links_to_add(&mut diff.links_to_add);
 
     // Diff addresses
-    diff_addresses(config, &current_addresses, &ifindex_to_name, &mut diff);
+    diff_addresses(config, &current_addresses, &ifindex_to_name, opts.purge, &mut diff);
 
     // Diff routes
-    diff_routes(config, &current_routes, &ifindex_to_name, &mut diff);
+    diff_routes(config, &current_routes, &ifindex_to_name, opts.purge, &mut diff);
 
     // Diff qdiscs
     diff_qdiscs(config, &current_qdiscs, &ifindex_to_name, &mut diff);
@@ -493,6 +575,7 @@ fn diff_addresses(
     config: &NetworkConfig,
     current: &[AddressMessage],
     ifindex_to_name: &HashMap<u32, &str>,
+    purge: bool,
     diff: &mut ConfigDiff,
 ) {
     // Build set of desired addresses: (dev, address, prefix_len)
@@ -520,15 +603,49 @@ fn diff_addresses(
         }
     }
 
-    // Note: We don't auto-remove addresses not in config
-    // That requires explicit purge mode
-    let _ = desired; // Silence unused warning
+    if !purge {
+        let _ = desired; // Silence unused warning in the non-purge path.
+        return;
+    }
+
+    // Purge: remove global-scope addresses that the kernel has but
+    // the config doesn't declare — but only on interfaces the config
+    // declares *some* address on (we don't touch interfaces we're
+    // not managing addresses for), and never kernel-managed
+    // addresses (link-local / loopback / any non-global scope).
+    let managed_devs: HashSet<&str> = config.addresses.iter().map(|a| a.dev.as_str()).collect();
+    for a in current {
+        // Only `global` (universe) scope — excludes IPv6 link-local
+        // (fe80::, scope link), loopback (::1 / 127.0.0.1, scope
+        // host), and other kernel-managed scopes.
+        if a.scope() != Scope::Universe {
+            continue;
+        }
+        let Some(name) = ifindex_to_name.get(&a.ifindex()) else {
+            continue;
+        };
+        if !managed_devs.contains(name) {
+            continue;
+        }
+        let Some(addr) = a.address else {
+            continue;
+        };
+        let key = (*name, addr, a.prefix_len());
+        if !desired.contains(&key) {
+            diff.addresses_to_remove.push(DeclaredAddress {
+                dev: name.to_string(),
+                address: addr,
+                prefix_len: a.prefix_len(),
+            });
+        }
+    }
 }
 
 fn diff_routes(
     config: &NetworkConfig,
     current: &[RouteMessage],
     ifindex_to_name: &HashMap<u32, &str>,
+    purge: bool,
     diff: &mut ConfigDiff,
 ) {
     // Plan 207d H3 — compare the FULL route identity (dst, prefix,
@@ -618,8 +735,67 @@ fn diff_routes(
         }
     }
 
-    // Note: We don't auto-remove routes not in config
-    // That requires explicit purge mode (Plan 205 will wire it).
+    if !purge {
+        return;
+    }
+
+    // Purge: remove admin/user routes the kernel has but the config
+    // doesn't declare. Heavily fenced for safety:
+    //   - main table only (254) — leaves local/default/policy tables,
+    //   - `static`/`boot` protocol only — never kernel-derived,
+    //     RA, DHCP or redirect routes (those are dynamic / auto),
+    //   - same route-type filter as the add path (unicast +
+    //     blackhole/unreachable/prohibit).
+    // Identity for "is it declared" is `(dst, prefix, table)`, the
+    // same key the add path uses, so a route being replaced is never
+    // also queued for removal.
+    let desired_keys: HashSet<(IpAddr, u8, u32)> = config
+        .routes
+        .iter()
+        .map(|r| (r.destination, r.prefix_len, r.table.unwrap_or(254)))
+        .collect();
+
+    for r in current {
+        if r.table_id() != 254 {
+            continue;
+        }
+        if !matches!(r.protocol(), RouteProtocol::Static | RouteProtocol::Boot) {
+            continue;
+        }
+        let route_type = match r.route_type() {
+            RouteType::Unicast => DeclaredRouteType::Unicast,
+            RouteType::Blackhole => DeclaredRouteType::Blackhole,
+            RouteType::Unreachable => DeclaredRouteType::Unreachable,
+            RouteType::Prohibit => DeclaredRouteType::Prohibit,
+            // Local/broadcast/multicast/anycast/… are kernel-managed
+            // — never purge them.
+            _ => continue,
+        };
+        let dst = r.destination.unwrap_or_else(|| {
+            if r.is_ipv4() {
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+            } else {
+                IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+            }
+        });
+        let key = (dst, r.dst_len(), r.table_id());
+        if desired_keys.contains(&key) {
+            continue;
+        }
+        let dev = r
+            .oif()
+            .and_then(|idx| ifindex_to_name.get(&idx))
+            .map(|n| n.to_string());
+        diff.routes_to_remove.push(DeclaredRoute {
+            destination: dst,
+            prefix_len: r.dst_len(),
+            gateway: r.gateway().copied(),
+            dev,
+            metric: r.priority(),
+            table: Some(r.table_id()),
+            route_type,
+        });
+    }
 }
 
 fn diff_qdiscs(
@@ -1157,5 +1333,67 @@ mod tests {
                 .push(("eth0".to_string(), LinkChanges::default()));
             assert_eq!(format!("{d}"), d.summary());
         }
+    }
+
+    // ---- Plan 205 (re-wired) — purge diff accounting + options ----
+
+    fn declared_addr(dev: &str, addr: &str, plen: u8) -> DeclaredAddress {
+        DeclaredAddress {
+            dev: dev.to_string(),
+            address: addr.parse().unwrap(),
+            prefix_len: plen,
+        }
+    }
+
+    fn declared_route(dst: &str, plen: u8) -> DeclaredRoute {
+        DeclaredRoute {
+            destination: dst.parse().unwrap(),
+            prefix_len: plen,
+            gateway: None,
+            dev: None,
+            metric: None,
+            table: Some(254),
+            route_type: DeclaredRouteType::Unicast,
+        }
+    }
+
+    #[test]
+    fn diff_options_purge_builder_toggles_flag() {
+        assert!(!DiffOptions::default().purge);
+        assert!(DiffOptions::default().purge(true).purge);
+        assert!(!DiffOptions::default().purge(true).purge(false).purge);
+    }
+
+    #[test]
+    fn removal_collections_count_toward_is_empty_and_change_count() {
+        let mut d = ConfigDiff::default();
+        assert!(d.is_empty());
+        assert_eq!(d.change_count(), 0);
+
+        d.addresses_to_remove
+            .push(declared_addr("eth0", "10.0.0.5", 24));
+        assert!(!d.is_empty());
+        assert_eq!(d.change_count(), 1);
+
+        d.routes_to_remove.push(declared_route("10.1.0.0", 24));
+        assert!(!d.is_empty());
+        assert_eq!(d.change_count(), 2);
+    }
+
+    #[test]
+    fn display_renders_removal_lines() {
+        let mut d = ConfigDiff::default();
+        d.addresses_to_remove
+            .push(declared_addr("eth0", "10.0.0.5", 24));
+        d.routes_to_remove.push(declared_route("10.1.0.0", 24));
+        let rendered = format!("{d}");
+        assert!(
+            rendered.contains("- address 10.0.0.5/24 on eth0"),
+            "address removal line missing: {rendered}"
+        );
+        assert!(
+            rendered.contains("- route 10.1.0.0/24"),
+            "route removal line missing: {rendered}"
+        );
     }
 }
