@@ -63,7 +63,7 @@ async fn get_link_stats_returns_zero_on_unused_dummy() -> nlink::Result<()> {
     conn.add_link(DummyLink::new("d0")).await?;
 
     let stats = conn.get_link_stats("d0").await?;
-    assert_eq!(stats.tx_packets, 0, "fresh dummy has no tx traffic");
-    assert_eq!(stats.rx_packets, 0, "fresh dummy has no rx traffic");
+    assert_eq!(stats.tx_packets(), 0, "fresh dummy has no tx traffic");
+    assert_eq!(stats.rx_packets(), 0, "fresh dummy has no rx traffic");
     Ok(())
 }

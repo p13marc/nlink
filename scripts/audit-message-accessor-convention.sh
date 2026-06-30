@@ -114,12 +114,16 @@ SIBLING_AUDIT_FILES=(
     "crates/nlink/src/netlink/fdb.rs"
     "crates/nlink/src/netlink/mpls.rs"
     "crates/nlink/src/netlink/nexthop.rs"
+    "crates/nlink/src/netlink/messages/link.rs"
 )
 SIBLING_TARGETS=(
     "BridgeVlanEntry"
     "FdbEntry"
     "MplsRoute"
     "Nexthop"
+    # LinkStats wraps parsed rtnl_link_stats64 but its name doesn't
+    # end in `Message`, so the main scan misses it (Plan 231 §6).
+    "LinkStats"
 )
 
 for idx in "${!SIBLING_AUDIT_FILES[@]}"; do
