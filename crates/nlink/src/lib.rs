@@ -272,6 +272,11 @@ pub use netlink::resync::{
     ConnectionFactory, ConnectionFuture, ResyncMarker, ResyncStream, ResyncedEvent,
     events_with_resync,
 };
+// Reflector / watch-cache (Plan 195) — keep an in-memory `Store`
+// up to date from a resync-aware event stream (`kube-rs`-style).
+// `ReflectExt` (the stream combinator) lives at
+// `netlink::reflector::ReflectExt`, mirroring `ResyncStreamExt`.
+pub use netlink::reflector::{Store, StoreOp};
 
 // Streaming dump API (Plan 149) — yield typed netlink dump
 // messages one at a time.
