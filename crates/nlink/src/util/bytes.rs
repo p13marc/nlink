@@ -177,6 +177,25 @@ impl FromStr for Bytes {
     }
 }
 
+/// A bare `u64` is interpreted as a byte count (the storage unit),
+/// mirroring [`Bytes::new`]. Lossless and unambiguous — unlike
+/// [`Rate`](crate::Rate), where bytes-vs-bits ambiguity is the whole
+/// reason no bare-integer `From` is offered.
+impl From<u64> for Bytes {
+    #[inline]
+    fn from(n: u64) -> Self {
+        Bytes::new(n)
+    }
+}
+
+/// Extract the byte count. Lossless inverse of [`From<u64>`].
+impl From<Bytes> for u64 {
+    #[inline]
+    fn from(b: Bytes) -> Self {
+        b.as_u64()
+    }
+}
+
 impl fmt::Display for Bytes {
     /// Format as the largest binary unit that represents the count
     /// without loss, otherwise as bare bytes.
@@ -212,6 +231,14 @@ mod tests {
     use core::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn bytes_u64_from_round_trips() {
+        let b: Bytes = 4096u64.into();
+        assert_eq!(b, Bytes::new(4096));
+        let n: u64 = b.into();
+        assert_eq!(n, 4096);
+    }
 
     #[test]
     fn bytes_construction() {

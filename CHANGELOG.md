@@ -49,6 +49,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Ergonomic newtype conversions — symmetric, lossless `From` impls
+  (#137, Plan 201).** The type-safe newtypes gain the obvious
+  inner-value conversions so `.into()` works at API boundaries:
+  `Bytes` ⇄ `u64` (byte count), `TcHandle` ⇄ `u32` (packed handle),
+  `FilterPriority` → `u16` (the inbound `From<u16>` already existed),
+  `Percent` → `f64`, and `TableName` / `ChainName` → `String`. Every
+  added impl is **lossless and unambiguous**, mirroring an existing
+  named constructor/accessor (`Bytes::new`/`as_u64`,
+  `TcHandle::from_raw`/`as_raw`, …). Deliberately **not** added:
+  `From<f64> for Percent` (the inbound direction clamps — keep
+  `Percent::new` explicit), the validating `String → TableName/
+  ChainName` direction (stays `TryFrom`/`new`), and **anything on
+  [`Rate`]** — a bare-integer `From` would reintroduce exactly the
+  bytes-vs-bits unit ambiguity the type exists to prevent.
 - **Reflector / watch-cache — `Store<K, V>` + `ReflectExt::reflect`
   (#137, Plan 195).** A `kube-rs`-style reflector that keeps an
   in-memory cache continuously up to date from a resync-aware event
