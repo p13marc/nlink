@@ -482,6 +482,46 @@ let desired = NetworkConfig::from_json_str(r#"{
 let json = desired.to_json_string_pretty()?;
 ```
 
+### Purge — full reconcile (opt-in)
+
+By default `diff`/`apply` only ever *add* state: a kernel resource you
+stop declaring is left in place. Opt into a full reconcile — removing
+undeclared resources — with `DiffOptions::purge` (or
+`ApplyOptions::with_purge`):
+
+```rust
+use nlink::netlink::config::DiffOptions;
+
+// See exactly what would be removed before applying.
+let diff = desired
+    .diff_with_options(&conn, DiffOptions::default().purge(true))
+    .await?;
+println!("{diff}");   // `-` lines list addresses/routes to be removed
+
+// Apply the additions AND the removals.
+desired
+    .apply_with_options(&conn, ApplyOptions::default().with_purge(true))
+    .await?;
+```
+
+Purge is conservatively fenced so a reconcile can't strip
+kernel-managed state:
+
+- **Addresses:** only **global-scope** addresses on interfaces the
+  config already manages are eligible. IPv6 link-local, loopback, and
+  any non-universe scope are never removed.
+- **Routes:** only **`static`/`boot`-protocol routes in the main
+  table** (unicast/blackhole/unreachable/prohibit). Kernel-derived, RA,
+  DHCP, and redirect routes, the auto-added connected route, and every
+  non-main table are left untouched.
+- **Links and qdiscs are never purged** — deleting an interface is too
+  blunt for a declarative reconcile; use the imperative `del_link` /
+  `del_qdisc` when you mean it.
+
+Inspect the diff first (`addresses_to_remove` / `routes_to_remove`, or
+the `Display` output) — purge is reachable only through the explicit
+`*_with_*` entry points, never the plain `diff`/`apply`.
+
 ## Rate Limiting DSL
 
 High-level rate limiting with minimal configuration:

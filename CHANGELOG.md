@@ -49,6 +49,28 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`NetworkConfig` declarative purge — re-wired with safety fences
+  (#137, Plan 205).** The interface-side declarative config can once
+  again *remove* undeclared kernel state, not just add it. Opt in per
+  call: `cfg.diff_with_options(&conn, DiffOptions::default().purge(true))`
+  populates the new `ConfigDiff::addresses_to_remove` /
+  `ConfigDiff::routes_to_remove` collections (visible as `-` lines in
+  the diff `Display`), and `cfg.apply_with_options(&conn,
+  ApplyOptions::default().with_purge(true))` applies them. The previous
+  purge knob was removed in 0.19 because it silently no-op'd (the diff
+  phase never populated the removal collections); this is the fully
+  wired replacement. **It is heavily fenced so a reconcile can't strip
+  kernel-managed state**: only **global-scope** addresses on interfaces
+  the config already manages are eligible (IPv6 link-local, loopback,
+  and any non-universe scope are excluded), and only **`static`/`boot`
+  main-table** routes of unicast/blackhole/unreachable/prohibit type
+  (kernel/RA/DHCP/redirect routes, the auto-added connected route, and
+  every non-main table are left untouched). **Links and qdiscs are
+  never purged.** The default `diff`/`apply` path is unchanged — it can
+  still only ever add state — so existing callers see no behaviour
+  change. Validated against a live kernel (global address removed while
+  the declared address and link-local survive; an admin route removed
+  while the connected route stays; idempotent on re-diff).
 - **Declarative nftables sets — `DeclaredSet` + element-level diff
   (#137, Plan 198).** The declarative `NftablesConfig` now models named
   sets alongside tables/chains/rules/flowtables, closing the last gap
