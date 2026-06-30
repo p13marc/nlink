@@ -27,7 +27,7 @@
 use std::time::Duration;
 
 use nlink::netlink::nftables::config::{NftablesConfig, ReconcileOptions};
-use nlink::netlink::nftables::types::{ChainType, Family, Hook, Policy, Priority};
+use nlink::netlink::nftables::types::{ChainType, Family, Hook, Policy, Priority, SetKeyType};
 use nlink::netlink::{Connection, Nftables, namespace};
 
 use crate::common::TestNamespace;
@@ -917,6 +917,191 @@ async fn inet_snat_with_prefix_source_round_trips() -> nlink::Result<()> {
              requires all three fixes (nfproto guard + bitwise OP + \
              NAT MAX/FLAGS); re-diff was non-empty: {again}"
         );
+        Ok(())
+    })
+    .await
+}
+
+// =============================================================================
+// Plan 198 — declarative sets + element-level diff
+// =============================================================================
+
+/// A `filter_set` table holding an `allowed_v4` IPv4 set with the
+/// given element octets (each `(a,b,c,d)`).
+fn cfg_with_set(elems: &[(u8, u8, u8, u8)]) -> NftablesConfig {
+    let elems: Vec<std::net::Ipv4Addr> = elems
+        .iter()
+        .map(|(a, b, c, d)| std::net::Ipv4Addr::new(*a, *b, *c, *d))
+        .collect();
+    NftablesConfig::new().table("filter_set", Family::Inet, move |t| {
+        t.set("allowed_v4", move |mut s| {
+            s = s.key_type(SetKeyType::Ipv4Addr);
+            for ip in &elems {
+                s = s.ipv4(*ip);
+            }
+            s
+        })
+    })
+}
+
+#[tokio::test]
+async fn reconcile_empty_to_set_with_elements_applies() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("rec-set-create")?;
+        let nft = nft_in_ns(&ns)?;
+
+        let cfg = cfg_with_set(&[(10, 0, 0, 1), (10, 0, 0, 2)]);
+        let diff = cfg.diff(&nft).await?;
+        assert_eq!(diff.tables_to_add.len(), 1, "one new table");
+        assert_eq!(diff.sets_to_add.len(), 1, "one new set");
+        // Elements of a brand-new set are installed wholesale.
+        assert_eq!(diff.set_elements_to_add.len(), 1, "one element batch");
+        assert_eq!(diff.set_elements_to_add[0].3.len(), 2, "two elements");
+
+        diff.apply(&nft).await?;
+
+        // Kernel now reports both elements.
+        let kernel = nft
+            .list_set_elements("filter_set", "allowed_v4", Family::Inet)
+            .await?;
+        assert_eq!(kernel.len(), 2, "kernel set must hold both elements");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn reconcile_set_idempotent_reapply_is_empty() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("rec-set-idem")?;
+        let nft = nft_in_ns(&ns)?;
+
+        let cfg = cfg_with_set(&[(10, 0, 0, 1), (10, 0, 0, 2)]);
+        cfg.diff(&nft).await?.apply(&nft).await?;
+
+        let again = cfg.diff(&nft).await?;
+        assert!(
+            again.is_empty(),
+            "set + elements must round-trip to an empty diff; got {again}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn reconcile_add_one_set_element() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("rec-set-add-elem")?;
+        let nft = nft_in_ns(&ns)?;
+
+        cfg_with_set(&[(10, 0, 0, 1)])
+            .diff(&nft)
+            .await?
+            .apply(&nft)
+            .await?;
+
+        // Declare the same set with one extra element.
+        let bigger = cfg_with_set(&[(10, 0, 0, 1), (10, 0, 0, 2)]);
+        let diff = bigger.diff(&nft).await?;
+        assert!(diff.sets_to_add.is_empty(), "set already exists");
+        assert_eq!(
+            diff.set_elements_to_add.len(),
+            1,
+            "exactly one element-add batch"
+        );
+        assert_eq!(
+            diff.set_elements_to_add[0].3.len(),
+            1,
+            "only the single new element is added (element-level diff)"
+        );
+        assert!(
+            diff.set_elements_to_remove.is_empty(),
+            "nothing to remove"
+        );
+        diff.apply(&nft).await?;
+
+        let kernel = nft
+            .list_set_elements("filter_set", "allowed_v4", Family::Inet)
+            .await?;
+        assert_eq!(kernel.len(), 2);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn reconcile_remove_one_set_element() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("rec-set-del-elem")?;
+        let nft = nft_in_ns(&ns)?;
+
+        cfg_with_set(&[(10, 0, 0, 1), (10, 0, 0, 2)])
+            .diff(&nft)
+            .await?
+            .apply(&nft)
+            .await?;
+
+        // Declare the same set with one element dropped.
+        let smaller = cfg_with_set(&[(10, 0, 0, 1)]);
+        let diff = smaller.diff(&nft).await?;
+        assert!(diff.set_elements_to_add.is_empty(), "nothing to add");
+        assert_eq!(
+            diff.set_elements_to_remove.len(),
+            1,
+            "exactly one element-remove batch"
+        );
+        assert_eq!(
+            diff.set_elements_to_remove[0].3.len(),
+            1,
+            "only the undeclared element is removed"
+        );
+        diff.apply(&nft).await?;
+
+        let kernel = nft
+            .list_set_elements("filter_set", "allowed_v4", Family::Inet)
+            .await?;
+        assert_eq!(kernel.len(), 1, "kernel set must hold just the kept element");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn reconcile_delete_set_when_removed_from_config() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("rec-set-delete")?;
+        let nft = nft_in_ns(&ns)?;
+
+        cfg_with_set(&[(10, 0, 0, 1)])
+            .diff(&nft)
+            .await?
+            .apply(&nft)
+            .await?;
+
+        // Same table, but the set is gone from the declaration.
+        let no_set = NftablesConfig::new().table("filter_set", Family::Inet, |t| t);
+        let diff = no_set.diff(&nft).await?;
+        assert_eq!(diff.sets_to_delete.len(), 1, "the dropped set is deleted");
+        diff.apply(&nft).await?;
+
+        let sets = nft.list_sets_in("filter_set", Family::Inet).await?;
+        assert!(sets.is_empty(), "set must be gone after reconcile");
         Ok(())
     })
     .await

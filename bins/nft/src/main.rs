@@ -2,7 +2,7 @@
 //!
 //! Manages nftables tables, chains, rules, and sets via NETLINK_NETFILTER.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use clap::{Parser, Subcommand};
 use nlink::netlink::{
@@ -880,12 +880,20 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
         chain_type: Option<ChainType>,
         policy: Option<Policy>,
     }
-    /// One table and its declared chains + pre-built rules.
+    /// A set with its key type, flags, and accumulated elements.
+    struct PendingSet {
+        name: String,
+        key_type: SetKeyType,
+        flags: u32,
+        elements: Vec<SetElement>,
+    }
+    /// One table and its declared chains + pre-built rules + sets.
     struct PendingTable {
         name: String,
         family: Family,
         chains: Vec<PendingChain>,
         rules: Vec<(String, Rule)>,
+        sets: Vec<PendingSet>,
     }
 
     let mut tables: Vec<PendingTable> = Vec::new();
@@ -917,6 +925,7 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
                         family: fam,
                         chains: Vec::new(),
                         rules: Vec::new(),
+                        sets: Vec::new(),
                     });
                 }
             }
@@ -963,6 +972,78 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
                 })?;
                 t.rules.push(((*chain).to_string(), rule));
             }
+            ["add", "set", family, table, name, rest @ ..] => {
+                let fam = parse_family(family)?;
+                // `type <keytype>` is required; `flags const` optional.
+                let (mut key_type, mut flags) = (None, 0u32);
+                let mut i = 0;
+                while i < rest.len() {
+                    match rest[i] {
+                        "type" => {
+                            let val = rest.get(i + 1).ok_or_else(|| {
+                                loc("set option `type` requires a value".to_string())
+                            })?;
+                            key_type = Some(parse_key_type(val)?);
+                            i += 2;
+                        }
+                        "flags" => {
+                            let val = rest.get(i + 1).ok_or_else(|| {
+                                loc("set option `flags` requires a value".to_string())
+                            })?;
+                            match *val {
+                                "const" | "constant" => {
+                                    flags |= nlink::netlink::nftables::NFT_SET_CONSTANT
+                                }
+                                other => {
+                                    return Err(loc(format!(
+                                        "unknown set flag `{other}` (only `const` is modelled)"
+                                    )));
+                                }
+                            }
+                            i += 2;
+                        }
+                        other => {
+                            return Err(loc(format!("unknown set option `{other}`")));
+                        }
+                    }
+                }
+                let key_type = key_type.ok_or_else(|| {
+                    loc(format!("set `{name}` requires a `type <keytype>`"))
+                })?;
+                let t = find(&mut tables, fam, table).ok_or_else(|| {
+                    loc(format!(
+                        "set `{name}` references table `{table}` (family {family}) not declared earlier in the file"
+                    ))
+                })?;
+                t.sets.push(PendingSet {
+                    name: (*name).to_string(),
+                    key_type,
+                    flags,
+                    elements: Vec::new(),
+                });
+            }
+            ["add", "element", family, table, set, elems @ ..] => {
+                let fam = parse_family(family)?;
+                if elems.is_empty() {
+                    return Err(loc("`add element` requires at least one element".to_string()));
+                }
+                let t = find(&mut tables, fam, table).ok_or_else(|| {
+                    loc(format!(
+                        "element references table `{table}` (family {family}) not declared earlier in the file"
+                    ))
+                })?;
+                let ps = t.sets.iter_mut().find(|s| s.name == *set).ok_or_else(|| {
+                    loc(format!(
+                        "element references set `{set}` not declared (with `add set`) earlier in the file"
+                    ))
+                })?;
+                for e in elems {
+                    // Allow a trailing comma-separated form too.
+                    for tok in e.split(',').filter(|s| !s.is_empty()) {
+                        ps.elements.push(parse_set_element(tok, &ps.key_type)?);
+                    }
+                }
+            }
             ["delete", ..] | ["flush", ..] => {
                 return Err(loc(format!(
                     "`{}` is not allowed in a desired-state ruleset — removal is inferred from the diff. Use `nft apply <file>` for imperative ops.",
@@ -971,7 +1052,7 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
             }
             _ => {
                 return Err(loc(format!(
-                    "unrecognized line `{}` (expected `add table|chain|rule …`)",
+                    "unrecognized line `{}` (expected `add table|chain|rule|set|element …`)",
                     tokens.join(" ")
                 )));
             }
@@ -991,6 +1072,7 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
             family,
             chains,
             rules,
+            sets,
         } = pt;
         cfg = cfg.table(name, family, move |mut tb| {
             for pc in chains {
@@ -1021,6 +1103,17 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
                 // The pre-built rule already carries this table/chain/
                 // family; return it in place of the fresh builder rule.
                 tb = tb.rule(chain, move |_fresh| rule);
+            }
+            for ps in sets {
+                let PendingSet {
+                    name,
+                    key_type,
+                    flags,
+                    elements,
+                } = ps;
+                tb = tb.set(name, move |sb| {
+                    sb.key_type(key_type).flags(flags).elements(elements)
+                });
             }
             tb
         });
@@ -1084,8 +1177,38 @@ fn apply_line(txn: Transaction, tokens: &[&str]) -> Result<Transaction> {
             let fam = parse_family(family)?;
             Ok(txn.add_rule(build_rule(fam, table, chain, spec)?))
         }
+        ["add", "set", family, table, name, "type", kt, rest @ ..] => {
+            let fam = parse_family(family)?;
+            let mut set = Set::new(table, name).family(fam).key_type(parse_key_type(kt)?);
+            match rest {
+                [] => {}
+                ["flags", "const"] | ["flags", "constant"] => set = set.constant(),
+                other => {
+                    return Err(err(format!(
+                        "unexpected set tokens `{}` (only `flags const` is modelled)",
+                        other.join(" ")
+                    )));
+                }
+            }
+            Ok(txn.add_set(set))
+        }
+        ["delete", "set", family, table, name] => {
+            Ok(txn.del_set(table, name, parse_family(family)?))
+        }
+        // Element lines carry an inline `type <kt>` because each line
+        // is parsed independently (no cross-line set-type lookup).
+        ["add", "element", family, table, set, "type", kt, elems @ ..] => {
+            let fam = parse_family(family)?;
+            let parsed = build_elements(kt, elems)?;
+            Ok(txn.add_set_elements(table, set, fam, &parsed))
+        }
+        ["delete", "element", family, table, set, "type", kt, elems @ ..] => {
+            let fam = parse_family(family)?;
+            let parsed = build_elements(kt, elems)?;
+            Ok(txn.del_set_elements(table, set, fam, &parsed))
+        }
         _ => Err(err(format!(
-            "unrecognized operation `{}` (expected `add|delete table|chain|rule …`)",
+            "unrecognized operation `{}` (expected `add|delete table|chain|rule|set|element …`)",
             tokens.join(" ")
         ))),
     }
@@ -1131,6 +1254,91 @@ fn parse_elements(s: &str, key_type: &str) -> Result<Vec<SetElement>> {
             }
         })
         .collect()
+}
+
+/// Parse one element token into a [`SetElement`] using the set's
+/// declared [`SetKeyType`]. Used by the reconcile DSL (`add element`)
+/// where the key type is known from the preceding `add set` line.
+///
+/// Supports the common scalar key types. Composite (`Concat`) and
+/// any not-yet-modelled type are rejected with a clear error rather
+/// than guessed — matching the strict-parser ethos (no silent
+/// fallback).
+fn parse_set_element(text: &str, kt: &SetKeyType) -> Result<SetElement> {
+    let bad = |m: String| nlink::netlink::Error::InvalidAttribute(m);
+    match kt {
+        SetKeyType::Ipv4Addr => {
+            let ip: Ipv4Addr = text
+                .parse()
+                .map_err(|_| bad(format!("invalid ipv4 element `{text}`")))?;
+            Ok(SetElement::ipv4(ip))
+        }
+        SetKeyType::Ipv6Addr => {
+            let ip: Ipv6Addr = text
+                .parse()
+                .map_err(|_| bad(format!("invalid ipv6 element `{text}`")))?;
+            Ok(SetElement::ipv6(ip))
+        }
+        SetKeyType::InetService => {
+            let port: u16 = text
+                .parse()
+                .map_err(|_| bad(format!("invalid port element `{text}`")))?;
+            Ok(SetElement::port(port))
+        }
+        SetKeyType::EtherAddr => {
+            let octets = parse_mac(text)
+                .ok_or_else(|| bad(format!("invalid MAC element `{text}`")))?;
+            Ok(SetElement::new(octets.to_vec()))
+        }
+        SetKeyType::InetProto => {
+            let proto = match text {
+                "tcp" => 6u8,
+                "udp" => 17,
+                "icmp" => 1,
+                "icmpv6" => 58,
+                n => n
+                    .parse::<u8>()
+                    .map_err(|_| bad(format!("invalid inet_proto element `{text}`")))?,
+            };
+            Ok(SetElement::new(vec![proto]))
+        }
+        other => Err(bad(format!(
+            "element type {other:?} is not modelled in the reconcile DSL — \
+             use the imperative `nft add element` command for it"
+        ))),
+    }
+}
+
+/// Parse a list of element tokens (each possibly comma-separated)
+/// against a key-type string. Used by the imperative `apply_line`
+/// set/element ops.
+fn build_elements(key_type: &str, tokens: &[&str]) -> Result<Vec<SetElement>> {
+    let kt = parse_key_type(key_type)?;
+    if tokens.is_empty() {
+        return Err(nlink::netlink::Error::InvalidAttribute(
+            "element op requires at least one element".to_string(),
+        ));
+    }
+    let mut out = Vec::new();
+    for t in tokens {
+        for tok in t.split(',').filter(|s| !s.is_empty()) {
+            out.push(parse_set_element(tok, &kt)?);
+        }
+    }
+    Ok(out)
+}
+
+/// Parse `aa:bb:cc:dd:ee:ff` into 6 octets.
+fn parse_mac(s: &str) -> Option<[u8; 6]> {
+    let mut out = [0u8; 6];
+    let mut parts = s.split(':');
+    for slot in out.iter_mut() {
+        *slot = u8::from_str_radix(parts.next()?, 16).ok()?;
+    }
+    if parts.next().is_some() {
+        return None; // too many octets
+    }
+    Some(out)
 }
 
 fn parse_nat_target(s: &str) -> (Option<Ipv4Addr>, Option<u16>) {
@@ -1389,5 +1597,44 @@ mod tests {
         )
         .unwrap_err();
         assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn parse_ruleset_collects_sets_and_elements() {
+        let cfg = parse_ruleset(
+            "add table inet filter\n\
+             add set inet filter allowed type ipv4_addr flags const\n\
+             add element inet filter allowed 10.0.0.1 10.0.0.2\n\
+             add element inet filter allowed 10.0.0.3,10.0.0.4\n",
+        )
+        .unwrap();
+        let set = &cfg.tables()[0].sets()[0];
+        assert_eq!(set.name(), "allowed");
+        assert_eq!(*set.key_type(), SetKeyType::Ipv4Addr);
+        assert_ne!(set.flags(), 0, "`flags const` must set a flag bit");
+        assert_eq!(set.elements().len(), 4, "all 4 IPs collected");
+    }
+
+    #[test]
+    fn parse_ruleset_set_requires_type() {
+        let e = parse_ruleset("add table inet f\nadd set inet f s\n").unwrap_err();
+        assert!(e.to_string().contains("type"), "{e}");
+    }
+
+    #[test]
+    fn parse_ruleset_element_before_set_is_error() {
+        let e = parse_ruleset("add table inet f\nadd element inet f s 1.2.3.4\n").unwrap_err();
+        assert!(e.to_string().contains("not declared"), "{e}");
+    }
+
+    #[test]
+    fn parse_ruleset_bad_element_value_is_strict() {
+        // A token that doesn't parse for the set's key type must
+        // fail the whole parse (no silent skip).
+        let e = parse_ruleset(
+            "add table inet f\nadd set inet f s type inet_service\nadd element inet f s notaport\n",
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("invalid port"), "{e}");
     }
 }

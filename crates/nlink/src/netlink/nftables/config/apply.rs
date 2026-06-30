@@ -10,14 +10,18 @@
 //!
 //! Operations are enqueued in dependency-correct order so the
 //! kernel's intra-batch validation accepts them:
-//! 1. Rule deletes (release dependencies on chains/tables)
-//! 2. Chain deletes
-//! 3. Flowtable deletes
-//! 4. Table deletes (cascades any leftover children)
-//! 5. Table adds (creates the namespace for children)
-//! 6. Chain adds
-//! 7. Rule adds
-//! 8. Flowtable adds
+//! 1. Rule deletes (release dependencies on chains/sets/tables)
+//! 2. Set-element removes (for sets that persist)
+//! 3. Set deletes (after the rules that referenced them)
+//! 4. Chain deletes
+//! 5. Flowtable deletes
+//! 6. Table deletes (cascades any leftover children)
+//! 7. Table adds (creates the namespace for children)
+//! 8. Set adds (before the rules that reference them by `@name`)
+//! 9. Set-element adds
+//! 10. Chain adds
+//! 11. Rule adds
+//! 12. Flowtable adds
 //!
 //! Tables with flags (`NFT_TABLE_F_DORMANT` / `_OWNER` /
 //! `_PERSIST`) route through `Transaction::add_table_with_flags`
@@ -32,7 +36,7 @@ use std::time::Duration;
 
 use super::diff::NftablesDiff;
 use super::super::connection::Transaction;
-use super::super::types::Chain;
+use super::super::types::{Chain, Set};
 use crate::netlink::{connection::Connection, error::Result, protocol::Nftables};
 
 impl NftablesDiff {
@@ -67,6 +71,20 @@ impl NftablesDiff {
             tx = tx.del_rule(table, chain, *family, handle.0);
         }
 
+        // 2. Set-element removes — must precede set/table deletes
+        //    and follow rule deletes (a rule referencing the set by
+        //    `@name` is released above). Only for sets that persist;
+        //    whole-set deletes (step 3) drop their elements.
+        for (table, family, set, elems) in &self.set_elements_to_remove {
+            tx = tx.del_set_elements(table, set, *family, elems);
+        }
+
+        // 3. Set deletes — after the rules that reference them are
+        //    gone, before the owning table is deleted.
+        for (table, family, name) in &self.sets_to_delete {
+            tx = tx.del_set(table, name, *family);
+        }
+
         // 2. Chain deletes.
         for (table, family, name) in &self.chains_to_delete {
             tx = tx.del_chain(table, name, *family);
@@ -92,6 +110,23 @@ impl NftablesDiff {
             } else {
                 tx = tx.add_table(table.name(), table.family());
             }
+        }
+
+        // 8. Set adds — after the owning table exists, before the
+        //    rules (step 11) that reference them by `@name`. Re-build
+        //    a runtime `Set` from `DeclaredSet`.
+        for (table_name, family, declared) in &self.sets_to_add {
+            let set = Set::new(table_name.as_str(), declared.name())
+                .family(*family)
+                .key_type(declared.key_type().clone())
+                .flags(declared.flags());
+            tx = tx.add_set(set);
+        }
+
+        // 9. Set-element adds — after their set is created (step 8 or
+        //    a prior apply), before the rules that match on them.
+        for (table, family, set, elems) in &self.set_elements_to_add {
+            tx = tx.add_set_elements(table, set, *family, elems);
         }
 
         // 6. Chain adds. Re-build a runtime `Chain` from

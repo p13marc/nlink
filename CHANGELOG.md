@@ -34,6 +34,34 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Declarative nftables sets — `DeclaredSet` + element-level diff
+  (#137, Plan 198).** The declarative `NftablesConfig` now models named
+  sets alongside tables/chains/rules/flowtables, closing the last gap
+  versus `nft list ruleset`. Declare a set inside a table —
+  `t.set("allowed_v4", |s| s.key_type(SetKeyType::Ipv4Addr).ipv4(addr))`
+  — and `diff`/`apply` reconcile it: a declared set absent from the
+  kernel is created, a managed set removed from the config is deleted,
+  and a set present on both sides gets a real **element-level diff** —
+  only the missing keys are added and the undeclared keys removed
+  (`set_elements_to_add` / `set_elements_to_remove`), never a wholesale
+  re-add. All of it commits inside the existing single
+  `NFNL_MSG_BATCH_BEGIN…END` transaction, ordered so rules that
+  reference a set by `@name` are released before the set is deleted and
+  the set exists before the rules that match on it. New supporting API:
+  the imperative `Connection::<Nftables>::list_set_elements` (dumps a
+  set's current elements via the previously-unused `NFT_MSG_GETSETELEM`)
+  and `Transaction::{add_set,del_set,add_set_elements,del_set_elements}`
+  for batch composition. `SetKeyType` / `SetElement` now derive
+  `Serialize` (under `serde`), and `Set` gained a `flags()` setter.
+  The `nlink-nft` demo learns the matching reconcile DSL — `add set
+  <family> <table> <name> type <kt> [flags const]` and `add element
+  <family> <table> <set> <elems…>` in `nft diff`/`nft reconcile` files
+  (and the imperative `nft apply` path) — with strict element parsing
+  per key type (no silent fallback). Limitation: only a set's elements
+  are reconciled in place, not its `key_type`/`flags` (same as a chain's
+  hook/policy); dynamic/timeout sets that the kernel populates at
+  runtime should be declared without elements to avoid churn. Demoed by
+  the extended `examples/nftables/declarative.rs`.
 - **nl80211 PHY/wiphy band-capability coverage (#137).** Completes the
   nl80211 read audit (scan + station + survey + now PHY). `get_phys`
   reports the full `iw phy` surface: `Band` gains HE (802.11ax) / EHT
