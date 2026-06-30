@@ -883,6 +883,17 @@ impl Error {
     }
 }
 
+/// Lets validated newtypes (e.g. [`nftables`](crate::netlink::nftables)
+/// `TableName` / `ChainName`) flow through `impl TryInto<…>` method
+/// arguments alongside `&str`: the already-typed path's `TryInto`
+/// error is `Infallible`, which this bridges into [`Error`] so a
+/// single `T::Error: Into<Error>` bound accepts both.
+impl From<std::convert::Infallible> for Error {
+    fn from(never: std::convert::Infallible) -> Self {
+        match never {}
+    }
+}
+
 /// Named iterator returned by [`Error::chain_walk`]. Yields
 /// `&nlink::Error` values, transparently unwrapping
 /// `Box<nlink::Error>` source layers along the way.

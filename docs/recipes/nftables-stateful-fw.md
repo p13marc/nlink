@@ -83,19 +83,19 @@ conn.transaction()
     .add_table("filter", Family::Inet)
 
     // 2. Three base chains hooked into netfilter.
-    .add_chain(Chain::new("filter", "input")
+    .add_chain(Chain::new("filter", "input")?
         .family(Family::Inet)
         .hook(Hook::Input)
         .chain_type(ChainType::Filter)
         .priority(Priority::Filter)
         .policy(Policy::Drop))
-    .add_chain(Chain::new("filter", "forward")
+    .add_chain(Chain::new("filter", "forward")?
         .family(Family::Inet)
         .hook(Hook::Forward)
         .chain_type(ChainType::Filter)
         .priority(Priority::Filter)
         .policy(Policy::Drop))
-    .add_chain(Chain::new("filter", "output")
+    .add_chain(Chain::new("filter", "output")?
         .family(Family::Inet)
         .hook(Hook::Output)
         .chain_type(ChainType::Filter)
@@ -257,11 +257,11 @@ nlink::netlink::namespace::set_sysctl("fw-router", "net.ipv4.ip_forward", "1")?;
 let nft: Connection<Nftables> = router.connection_for()?;
 nft.transaction()
     .add_table("filter", Family::Inet)
-    .add_chain(Chain::new("filter", "input")
+    .add_chain(Chain::new("filter", "input")?
         .family(Family::Inet)
         .hook(Hook::Input).chain_type(ChainType::Filter)
         .priority(Priority::Filter).policy(Policy::Drop))
-    .add_chain(Chain::new("filter", "forward")
+    .add_chain(Chain::new("filter", "forward")?
         .family(Family::Inet)
         .hook(Hook::Forward).chain_type(ChainType::Filter)
         .priority(Priority::Filter).policy(Policy::Drop))

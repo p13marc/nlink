@@ -367,7 +367,7 @@ fn build_chain(
     chain_type: Option<&str>,
     policy: Option<&str>,
 ) -> Result<Chain> {
-    let mut chain = Chain::new(table, name).family(family);
+    let mut chain = Chain::new(table, name)?.family(family);
     if let Some(h) = hook {
         chain = chain.hook(parse_hook(h)?);
     }
@@ -634,7 +634,7 @@ async fn main() -> Result<()> {
         Command::Add { what } => match what {
             AddWhat::Table { family, name } => {
                 let family = parse_family(&family)?;
-                conn.add_table(&name, family).await?;
+                conn.add_table(name.as_str(), family).await?;
                 eprintln!("Table {name} added");
             }
             AddWhat::Chain {
@@ -704,7 +704,7 @@ async fn main() -> Result<()> {
         Command::Delete { what } => match what {
             DeleteWhat::Table { family, name } => {
                 let family = parse_family(&family)?;
-                let existed = conn.del_table_if_exists(&name, family).await?;
+                let existed = conn.del_table_if_exists(name.as_str(), family).await?;
                 report_delete("Table", &name, existed);
             }
             DeleteWhat::Chain {
@@ -713,7 +713,7 @@ async fn main() -> Result<()> {
                 name,
             } => {
                 let family = parse_family(&family)?;
-                let existed = conn.del_chain_if_exists(&table, &name, family).await?;
+                let existed = conn.del_chain_if_exists(table.as_str(), name.as_str(), family).await?;
                 report_delete("Chain", &name, existed);
             }
             DeleteWhat::Rule {
@@ -740,7 +740,7 @@ async fn main() -> Result<()> {
         Command::Flush { what } => match what {
             FlushWhat::Table { family, name } => {
                 let family = parse_family(&family)?;
-                conn.flush_table(&name, family).await?;
+                conn.flush_table(name.as_str(), family).await?;
                 eprintln!("Table {name} flushed");
             }
             FlushWhat::Ruleset => {
