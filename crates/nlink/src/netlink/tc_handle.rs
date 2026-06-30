@@ -134,6 +134,23 @@ impl FromStr for TcHandle {
     }
 }
 
+/// A raw `u32` is the packed `major:minor` handle, mirroring
+/// [`TcHandle::from_raw`]. Lossless and unambiguous.
+impl From<u32> for TcHandle {
+    #[inline]
+    fn from(raw: u32) -> Self {
+        TcHandle::from_raw(raw)
+    }
+}
+
+/// Unpack to the raw `u32` handle. Lossless inverse of [`From<u32>`].
+impl From<TcHandle> for u32 {
+    #[inline]
+    fn from(h: TcHandle) -> Self {
+        h.as_raw()
+    }
+}
+
 /// Error type for [`TcHandle::from_str`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -244,6 +261,15 @@ impl From<u16> for FilterPriority {
     }
 }
 
+/// Extract the raw priority value. Lossless inverse of
+/// [`From<u16>`](FilterPriority).
+impl From<FilterPriority> for u16 {
+    #[inline]
+    fn from(p: FilterPriority) -> Self {
+        p.as_u16()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +284,21 @@ mod tests {
         assert_eq!(h.as_raw(), 0x0001_000A);
         assert_eq!(h.major(), 1);
         assert_eq!(h.minor(), 10);
+    }
+
+    #[test]
+    fn tc_handle_u32_from_round_trips() {
+        let h: TcHandle = 0x0001_000Au32.into();
+        assert_eq!(h, TcHandle::new(1, 10));
+        let raw: u32 = h.into();
+        assert_eq!(raw, 0x0001_000A);
+    }
+
+    #[test]
+    fn filter_priority_u16_round_trips() {
+        let p: FilterPriority = 120u16.into();
+        let v: u16 = p.into();
+        assert_eq!(v, 120);
     }
 
     #[test]

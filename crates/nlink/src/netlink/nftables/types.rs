@@ -273,6 +273,15 @@ impl fmt::Display for ChainName {
     }
 }
 
+/// Unwrap to the owned name. Lossless; the inbound direction stays
+/// validating ([`TryFrom<&str>`]/[`ChainName::new`]).
+impl From<ChainName> for String {
+    #[inline]
+    fn from(name: ChainName) -> Self {
+        name.0
+    }
+}
+
 impl TryFrom<&str> for ChainName {
     type Error = Error;
     fn try_from(s: &str) -> Result<Self> {
@@ -352,6 +361,15 @@ impl AsRef<str> for TableName {
 impl fmt::Display for TableName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// Unwrap to the owned name. Lossless; the inbound direction stays
+/// validating ([`TryFrom<&str>`]/[`TableName::new`]).
+impl From<TableName> for String {
+    #[inline]
+    fn from(name: TableName) -> Self {
+        name.0
     }
 }
 
@@ -1911,6 +1929,16 @@ mod tests {
         let t = TableName::new("inet-fw").unwrap();
         assert_eq!(t.as_str(), "inet-fw");
         assert_eq!(t.to_string(), "inet-fw");
+    }
+
+    #[test]
+    fn table_and_chain_name_into_string() {
+        let t = TableName::new("filter").unwrap();
+        let s: String = t.into();
+        assert_eq!(s, "filter");
+        let c = ChainName::new("input").unwrap();
+        let s: String = c.into();
+        assert_eq!(s, "input");
     }
 
     #[test]

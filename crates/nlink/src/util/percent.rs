@@ -80,6 +80,19 @@ impl fmt::Display for Percent {
     }
 }
 
+/// Extract the percentage as an `f64` in `0.0..=100.0`. Lossless.
+///
+/// There is deliberately **no** `From<f64> for Percent`: the inbound
+/// direction clamps to `0..=100`, which a `From` impl shouldn't do
+/// silently. Use [`Percent::new`] (clamps) or
+/// [`Percent::from_fraction`] explicitly.
+impl From<Percent> for f64 {
+    #[inline]
+    fn from(p: Percent) -> Self {
+        p.as_percent()
+    }
+}
+
 impl FromStr for Percent {
     type Err = PercentParseError;
 
@@ -113,6 +126,12 @@ mod tests {
         assert_eq!(Percent::new(50.0).as_percent(), 50.0);
         assert_eq!(Percent::new(150.0).as_percent(), 100.0);
         assert_eq!(Percent::new(-1.0).as_percent(), 0.0);
+    }
+
+    #[test]
+    fn percent_into_f64_extracts_value() {
+        let f: f64 = Percent::new(12.5).into();
+        assert_eq!(f, 12.5);
     }
 
     #[test]
