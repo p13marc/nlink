@@ -503,6 +503,38 @@ fn parse_route_event(msg_type: u16, payload: &[u8]) -> Option<NetworkEvent> {
             .ok()
             .map(NetworkEvent::DelAction),
 
+        // Policy-routing rule events
+        t if t == NlMsgType::RTM_NEWRULE => super::messages::RuleMessage::from_bytes(payload)
+            .ok()
+            .map(NetworkEvent::NewRule),
+        t if t == NlMsgType::RTM_DELRULE => super::messages::RuleMessage::from_bytes(payload)
+            .ok()
+            .map(NetworkEvent::DelRule),
+
+        // Nexthop-object events
+        t if t == NlMsgType::RTM_NEWNEXTHOP => super::nexthop::Nexthop::parse(payload)
+            .ok()
+            .map(NetworkEvent::NewNexthop),
+        t if t == NlMsgType::RTM_DELNEXTHOP => super::nexthop::Nexthop::parse(payload)
+            .ok()
+            .map(NetworkEvent::DelNexthop),
+
+        // Network-namespace ID events
+        t if t == NlMsgType::RTM_NEWNSID => {
+            super::messages::NsIdMessage::parse(payload).map(NetworkEvent::NewNsId)
+        }
+        t if t == NlMsgType::RTM_DELNSID => {
+            super::messages::NsIdMessage::parse(payload).map(NetworkEvent::DelNsId)
+        }
+
+        // Bridge multicast-database events
+        t if t == NlMsgType::RTM_NEWMDB => {
+            super::mdb::parse_mdb_event_payload(payload).map(NetworkEvent::NewMdb)
+        }
+        t if t == NlMsgType::RTM_DELMDB => {
+            super::mdb::parse_mdb_event_payload(payload).map(NetworkEvent::DelMdb)
+        }
+
         _ => None,
     }
 }
@@ -1344,6 +1376,98 @@ mod tests {
         // Empty data — must terminate immediately, not spin.
         let events = Route::parse_events(&[]);
         assert!(events.is_empty());
+    }
+
+    // -------------------------------------------------------------
+    // #165 — dispatch coverage for the rule / nexthop / nsid / mdb
+    // event variants added in 0.24. Canned minimal frames per type;
+    // the MDB payload builder is exercised in mdb.rs (nest fixture
+    // already lives there).
+    // -------------------------------------------------------------
+
+    #[test]
+    fn route_parse_events_dispatches_rule_events() {
+        // Minimal fib_rule_hdr (12 bytes): family=AF_INET, table=254,
+        // no attributes.
+        let mut payload = vec![0u8; 12];
+        payload[0] = 2; // family
+        payload[4] = 254; // table
+
+        let frame = build_nl_frame(NlMsgType::RTM_NEWRULE, &payload);
+        let events = Route::parse_events(&frame);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            NetworkEvent::NewRule(rule) => {
+                assert!(rule.is_ipv4());
+                assert_eq!(rule.table_id(), 254);
+                assert!(events[0].is_new());
+                assert_eq!(events[0].ifindex(), None);
+            }
+            other => panic!("expected NewRule, got {other:?}"),
+        }
+
+        let frame = build_nl_frame(NlMsgType::RTM_DELRULE, &payload);
+        let events = Route::parse_events(&frame);
+        assert!(matches!(&events[0], NetworkEvent::DelRule(_)));
+        assert!(events[0].is_del());
+        assert!(events[0].as_rule().is_some());
+    }
+
+    #[test]
+    fn route_parse_events_dispatches_nexthop_events() {
+        use crate::netlink::types::nexthop::nha;
+        // nhmsg (8 bytes) + NHA_ID + NHA_OIF attributes.
+        let mut payload = vec![0u8; 8];
+        payload[0] = 2; // family
+        for (attr_type, value) in [(nha::ID, 42u32), (nha::OIF, 7u32)] {
+            payload.extend_from_slice(&8u16.to_ne_bytes()); // nla_len
+            payload.extend_from_slice(&attr_type.to_ne_bytes());
+            payload.extend_from_slice(&value.to_ne_bytes());
+        }
+
+        let frame = build_nl_frame(NlMsgType::RTM_NEWNEXTHOP, &payload);
+        let events = Route::parse_events(&frame);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            NetworkEvent::NewNexthop(nh) => {
+                assert_eq!(nh.id(), 42);
+                assert!(events[0].is_new());
+                assert_eq!(events[0].ifindex(), Some(7));
+            }
+            other => panic!("expected NewNexthop, got {other:?}"),
+        }
+
+        let frame = build_nl_frame(NlMsgType::RTM_DELNEXTHOP, &payload);
+        let events = Route::parse_events(&frame);
+        assert!(matches!(&events[0], NetworkEvent::DelNexthop(_)));
+        assert!(events[0].as_nexthop().is_some());
+    }
+
+    #[test]
+    fn route_parse_events_dispatches_nsid_events() {
+        use crate::netlink::types::nsid::netnsa;
+        // rtgenmsg (4 bytes) + NETNSA_NSID attribute.
+        let mut payload = vec![0u8; 4];
+        payload.extend_from_slice(&8u16.to_ne_bytes());
+        payload.extend_from_slice(&netnsa::NSID.to_ne_bytes());
+        payload.extend_from_slice(&9u32.to_ne_bytes());
+
+        let frame = build_nl_frame(NlMsgType::RTM_NEWNSID, &payload);
+        let events = Route::parse_events(&frame);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            NetworkEvent::NewNsId(msg) => {
+                assert_eq!(msg.nsid(), Some(9));
+                assert!(events[0].is_new());
+                assert_eq!(events[0].ifindex(), None);
+            }
+            other => panic!("expected NewNsId, got {other:?}"),
+        }
+
+        let frame = build_nl_frame(NlMsgType::RTM_DELNSID, &payload);
+        let events = Route::parse_events(&frame);
+        assert!(matches!(&events[0], NetworkEvent::DelNsId(_)));
+        assert!(events[0].as_nsid().is_some());
     }
 
     #[test]

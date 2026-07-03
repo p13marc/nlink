@@ -28,7 +28,12 @@
 
 use super::{
     fdb::FdbEntry,
-    messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage},
+    mdb::MdbEntry,
+    messages::{
+        AddressMessage, LinkMessage, NeighborMessage, NsIdMessage, RouteMessage, RuleMessage,
+        TcMessage,
+    },
+    nexthop::Nexthop,
 };
 
 /// Network events that can be received from the kernel.
@@ -87,6 +92,34 @@ pub enum NetworkEvent {
     NewAction(TcMessage),
     /// An action was deleted.
     DelAction(TcMessage),
+
+    // Policy-routing rule events (RTM_NEWRULE / RTM_DELRULE).
+    // Subscribe via `RtnetlinkGroup::{Ipv4Rule, Ipv6Rule}`.
+    /// A new policy-routing rule was added.
+    NewRule(RuleMessage),
+    /// A policy-routing rule was removed.
+    DelRule(RuleMessage),
+
+    // Nexthop-object events (RTM_NEWNEXTHOP / RTM_DELNEXTHOP).
+    // Subscribe via `RtnetlinkGroup::Nexthop`.
+    /// A new nexthop object was added or changed.
+    NewNexthop(Nexthop),
+    /// A nexthop object was removed.
+    DelNexthop(Nexthop),
+
+    // Network-namespace ID events (RTM_NEWNSID / RTM_DELNSID).
+    // Subscribe via `RtnetlinkGroup::NsId`.
+    /// A network-namespace ID was assigned.
+    NewNsId(NsIdMessage),
+    /// A network-namespace ID was released.
+    DelNsId(NsIdMessage),
+
+    // Bridge multicast-database events (RTM_NEWMDB / RTM_DELMDB).
+    // Subscribe via `RtnetlinkGroup::Mdb`.
+    /// A bridge MDB entry was added or learned.
+    NewMdb(MdbEntry),
+    /// A bridge MDB entry was removed.
+    DelMdb(MdbEntry),
 }
 
 impl NetworkEvent {
@@ -103,6 +136,10 @@ impl NetworkEvent {
                 | NetworkEvent::NewClass(_)
                 | NetworkEvent::NewFilter(_)
                 | NetworkEvent::NewAction(_)
+                | NetworkEvent::NewRule(_)
+                | NetworkEvent::NewNexthop(_)
+                | NetworkEvent::NewNsId(_)
+                | NetworkEvent::NewMdb(_)
         )
     }
 
@@ -126,7 +163,14 @@ impl NetworkEvent {
             | NetworkEvent::DelFilter(m)
             | NetworkEvent::NewAction(m)
             | NetworkEvent::DelAction(m) => Some(m.ifindex()),
-            NetworkEvent::NewRoute(_) | NetworkEvent::DelRoute(_) => None,
+            NetworkEvent::NewNexthop(m) | NetworkEvent::DelNexthop(m) => m.ifindex(),
+            NetworkEvent::NewMdb(m) | NetworkEvent::DelMdb(m) => Some(m.port_ifindex),
+            NetworkEvent::NewRoute(_)
+            | NetworkEvent::DelRoute(_)
+            | NetworkEvent::NewRule(_)
+            | NetworkEvent::DelRule(_)
+            | NetworkEvent::NewNsId(_)
+            | NetworkEvent::DelNsId(_) => None,
         }
     }
 
@@ -243,6 +287,70 @@ impl NetworkEvent {
             | NetworkEvent::DelFilter(m)
             | NetworkEvent::NewAction(m)
             | NetworkEvent::DelAction(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner RuleMessage if this is a policy-routing rule event.
+    pub fn as_rule(&self) -> Option<&RuleMessage> {
+        match self {
+            NetworkEvent::NewRule(m) | NetworkEvent::DelRule(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Consumes self and returns the inner RuleMessage if this is a rule event.
+    pub fn into_rule(self) -> Option<RuleMessage> {
+        match self {
+            NetworkEvent::NewRule(m) | NetworkEvent::DelRule(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner Nexthop if this is a nexthop-object event.
+    pub fn as_nexthop(&self) -> Option<&Nexthop> {
+        match self {
+            NetworkEvent::NewNexthop(m) | NetworkEvent::DelNexthop(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Consumes self and returns the inner Nexthop if this is a nexthop event.
+    pub fn into_nexthop(self) -> Option<Nexthop> {
+        match self {
+            NetworkEvent::NewNexthop(m) | NetworkEvent::DelNexthop(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner NsIdMessage if this is a namespace-ID event.
+    pub fn as_nsid(&self) -> Option<&NsIdMessage> {
+        match self {
+            NetworkEvent::NewNsId(m) | NetworkEvent::DelNsId(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Consumes self and returns the inner NsIdMessage if this is a namespace-ID event.
+    pub fn into_nsid(self) -> Option<NsIdMessage> {
+        match self {
+            NetworkEvent::NewNsId(m) | NetworkEvent::DelNsId(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner MdbEntry if this is a bridge MDB event.
+    pub fn as_mdb(&self) -> Option<&MdbEntry> {
+        match self {
+            NetworkEvent::NewMdb(m) | NetworkEvent::DelMdb(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Consumes self and returns the inner MdbEntry if this is a bridge MDB event.
+    pub fn into_mdb(self) -> Option<MdbEntry> {
+        match self {
+            NetworkEvent::NewMdb(m) | NetworkEvent::DelMdb(m) => Some(m),
             _ => None,
         }
     }

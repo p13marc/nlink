@@ -68,9 +68,15 @@ impl DiffOptions {
 }
 
 /// Difference between desired and current network state.
+///
+/// `#[non_exhaustive]` since 0.24 (#165): new `*_to_add` /
+/// `*_to_remove` categories can appear without a major bump.
+/// Construct via [`NetworkConfig::diff`](super::NetworkConfig::diff),
+/// not literally.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Default)]
+#[non_exhaustive]
 #[must_use = "Diffs do nothing unless passed to `.apply()` or stringified via `Display`"]
 pub struct ConfigDiff {
     /// Links to create.

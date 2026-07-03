@@ -939,7 +939,12 @@ impl DeclaredWgPeerBuilder {
 
 /// Plan 196 — diff between a [`WireguardConfig`] and the
 /// current kernel state.
+///
+/// `#[non_exhaustive]` since 0.24 (#165): new change categories
+/// (e.g. device bootstrap, #169) can appear without a major bump.
+/// Construct via [`WireguardConfig::diff`], not literally.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 #[must_use = "Diffs do nothing unless passed to `.apply()` or inspected"]
 pub struct WireguardConfigDiff {
     /// Devices that need at least one mutation: device-

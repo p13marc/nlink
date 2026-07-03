@@ -1111,6 +1111,10 @@ pub enum RtnetlinkGroup {
     Ipv4Rule,
     /// IPv6 routing rule changes (RTM_NEWRULE, RTM_DELRULE).
     Ipv6Rule,
+    /// Nexthop-object changes (RTM_NEWNEXTHOP, RTM_DELNEXTHOP).
+    Nexthop,
+    /// Bridge multicast-database changes (RTM_NEWMDB, RTM_DELMDB).
+    Mdb,
 }
 
 impl RtnetlinkGroup {
@@ -1128,6 +1132,8 @@ impl RtnetlinkGroup {
             Self::NsId => RTNLGRP_NSID,
             Self::Ipv4Rule => RTNLGRP_IPV4_RULE,
             Self::Ipv6Rule => RTNLGRP_IPV6_RULE,
+            Self::Nexthop => RTNLGRP_NEXTHOP,
+            Self::Mdb => RTNLGRP_MDB,
         }
     }
 }
@@ -1180,9 +1186,17 @@ impl Connection<Route> {
         Ok(())
     }
 
-    /// Subscribe to all commonly-used event groups.
+    /// Subscribe to all event groups with a typed [`NetworkEvent`]
+    /// representation.
     ///
-    /// Subscribes to: Link, Ipv4Addr, Ipv6Addr, Ipv4Route, Ipv6Route, Neigh, Tc.
+    /// Subscribes to: Link, Ipv4Addr, Ipv6Addr, Ipv4Route, Ipv6Route,
+    /// Neigh, Tc, NsId, Ipv4Rule, Ipv6Rule, Nexthop, Mdb.
+    ///
+    /// Before 0.24 this omitted NsId/Ipv4Rule/Ipv6Rule (and the
+    /// Nexthop/Mdb groups didn't exist) — rule, nexthop, namespace-ID
+    /// and bridge-MDB changes were silent under `subscribe_all()`.
+    ///
+    /// [`NetworkEvent`]: super::events::NetworkEvent
     ///
     /// # Example
     ///
@@ -1203,6 +1217,11 @@ impl Connection<Route> {
             RtnetlinkGroup::Ipv6Route,
             RtnetlinkGroup::Neigh,
             RtnetlinkGroup::Tc,
+            RtnetlinkGroup::NsId,
+            RtnetlinkGroup::Ipv4Rule,
+            RtnetlinkGroup::Ipv6Rule,
+            RtnetlinkGroup::Nexthop,
+            RtnetlinkGroup::Mdb,
         ])
     }
 

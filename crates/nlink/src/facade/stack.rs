@@ -179,7 +179,11 @@ impl StackApplyReport {
 }
 
 /// Aggregated drift covering every layer.
+///
+/// `#[non_exhaustive]` since 0.24 (#165): new layers can appear
+/// without a major bump. Construct via [`Stack::diff`], not literally.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 #[must_use = "Diffs do nothing unless inspected or passed to apply()"]
 pub struct StackDiff {
     pub network: Option<ConfigDiff>,
