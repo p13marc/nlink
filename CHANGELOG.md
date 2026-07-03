@@ -66,6 +66,29 @@ All notable changes to this project will be documented in this file.
   - `StackDiff::change_count()` / `StackApplyReport::change_count()`;
     `NETNS_RUN_DIR` re-exported at the crate root. (`LinkChanges`
     already implemented `Display`.)
+- **Per-socket TCP byte-rate tracking (#171).**
+  `SocketRateTracker::ingest(snapshot, at)` turns consecutive TCP
+  dumps into per-socket goodput deltas keyed by the kernel socket
+  cookie (never the inode — inodes get reused across poll intervals):
+  `SocketRate { cookie, tx_goodput_bps, rx_goodput_bps,
+  retrans_ratio }`. Bounded (cookies absent for N ingests evict),
+  robust to counter regressions and same-instant double ingests. The
+  architectural constraints are now documented on the sockdiag
+  module: TCP-only (UDP diag has NO cumulative byte counters —
+  rqueue/wqueue are queue depths, never diff them), goodput ≠ wire
+  throughput, short flows invisible to polling (BPF socket iterators
+  are the successor).
+
+### Fixed (sockdiag)
+
+- **`TcpInfo` tail fields were never populated (#171).**
+  `parse_tcp_info` stopped at byte 168, so `bytes_sent`,
+  `bytes_retrans`, `busy_time`, `rwnd_limited`, `sndbuf_limited`,
+  `delivered`, `delivered_ce`, `dsack_dups`, `reord_seen`,
+  `rcv_ooopack` and `snd_wnd` — all declared on `TcpInfo` — silently
+  read 0 on every kernel. The parser now decodes through byte 232
+  (offsets pinned to uapi `linux/tcp.h`), with rule-1 guards so both
+  older (shorter) and newer (longer) kernel structs parse cleanly.
 
 ### Changed (breaking)
 

@@ -1317,6 +1317,40 @@ fn parse_tcp_info(data: &[u8]) -> TcpInfo {
         ]);
     }
 
+    // Kernel 4.10+ block (busy_time .. sndbuf_limited) and 4.19+
+    // block (delivered .. rcv_ooopack) — offsets verified against
+    // uapi linux/tcp.h via offsetof (#171: bytes_sent/bytes_retrans
+    // were declared on TcpInfo but never populated, so the byte-rate
+    // tracker's retransmission ratio always read 0). Per parser
+    // rule 1, each block is guarded with `>=` so both older kernels
+    // (shorter struct) and newer ones (longer) parse cleanly.
+    if data.len() >= 192 {
+        info.busy_time = u64::from_ne_bytes([
+            data[168], data[169], data[170], data[171], data[172], data[173], data[174], data[175],
+        ]);
+        info.rwnd_limited = u64::from_ne_bytes([
+            data[176], data[177], data[178], data[179], data[180], data[181], data[182], data[183],
+        ]);
+        info.sndbuf_limited = u64::from_ne_bytes([
+            data[184], data[185], data[186], data[187], data[188], data[189], data[190], data[191],
+        ]);
+    }
+
+    if data.len() >= 232 {
+        info.delivered = u32::from_ne_bytes([data[192], data[193], data[194], data[195]]);
+        info.delivered_ce = u32::from_ne_bytes([data[196], data[197], data[198], data[199]]);
+        info.bytes_sent = u64::from_ne_bytes([
+            data[200], data[201], data[202], data[203], data[204], data[205], data[206], data[207],
+        ]);
+        info.bytes_retrans = u64::from_ne_bytes([
+            data[208], data[209], data[210], data[211], data[212], data[213], data[214], data[215],
+        ]);
+        info.dsack_dups = u32::from_ne_bytes([data[216], data[217], data[218], data[219]]);
+        info.reord_seen = u32::from_ne_bytes([data[220], data[221], data[222], data[223]]);
+        info.rcv_ooopack = u32::from_ne_bytes([data[224], data[225], data[226], data[227]]);
+        info.snd_wnd = u32::from_ne_bytes([data[228], data[229], data[230], data[231]]);
+    }
+
     info
 }
 
@@ -1733,5 +1767,81 @@ mod packet_tests {
         while !buf.len().is_multiple_of(4) {
             buf.push(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tcp_info_tests {
+    use super::*;
+
+    /// Write `v` (LE/native) at `off` into the buffer.
+    fn put_u32(buf: &mut [u8], off: usize, v: u32) {
+        buf[off..off + 4].copy_from_slice(&v.to_ne_bytes());
+    }
+    fn put_u64(buf: &mut [u8], off: usize, v: u64) {
+        buf[off..off + 8].copy_from_slice(&v.to_ne_bytes());
+    }
+
+    /// #171 — a full-size (232+ byte) kernel `tcp_info` populates the
+    /// 4.10+/4.19+ tail fields, offsets pinned to uapi linux/tcp.h
+    /// (verified via offsetof).
+    #[test]
+    fn parse_tcp_info_reads_post_168_fields() {
+        let mut buf = vec![0u8; 232];
+        put_u32(&mut buf, 68, 15_000); // rtt
+        put_u64(&mut buf, 120, 1_000); // bytes_acked
+        put_u64(&mut buf, 128, 2_000); // bytes_received
+        put_u64(&mut buf, 160, 12_500_000); // delivery_rate
+        put_u64(&mut buf, 168, 777); // busy_time
+        put_u64(&mut buf, 176, 11); // rwnd_limited
+        put_u64(&mut buf, 184, 22); // sndbuf_limited
+        put_u32(&mut buf, 192, 33); // delivered
+        put_u32(&mut buf, 196, 44); // delivered_ce
+        put_u64(&mut buf, 200, 3_000); // bytes_sent
+        put_u64(&mut buf, 208, 55); // bytes_retrans
+        put_u32(&mut buf, 216, 66); // dsack_dups
+        put_u32(&mut buf, 220, 77); // reord_seen
+        put_u32(&mut buf, 224, 88); // rcv_ooopack
+        put_u32(&mut buf, 228, 99); // snd_wnd
+
+        let info = parse_tcp_info(&buf);
+        assert_eq!(info.rtt, 15_000);
+        assert_eq!(info.bytes_acked, 1_000);
+        assert_eq!(info.bytes_received, 2_000);
+        assert_eq!(info.delivery_rate, 12_500_000);
+        assert_eq!(info.busy_time, 777);
+        assert_eq!(info.rwnd_limited, 11);
+        assert_eq!(info.sndbuf_limited, 22);
+        assert_eq!(info.delivered, 33);
+        assert_eq!(info.delivered_ce, 44);
+        assert_eq!(info.bytes_sent, 3_000);
+        assert_eq!(info.bytes_retrans, 55);
+        assert_eq!(info.dsack_dups, 66);
+        assert_eq!(info.reord_seen, 77);
+        assert_eq!(info.rcv_ooopack, 88);
+        assert_eq!(info.snd_wnd, 99);
+    }
+
+    /// Rule 1 (accept-larger + graceful-shorter): older-kernel sizes
+    /// leave the newer fields zeroed; oversized buffers parse the
+    /// known prefix and ignore the tail.
+    #[test]
+    fn parse_tcp_info_handles_all_kernel_sizes() {
+        for len in [104usize, 160, 168, 192, 232, 280, 512] {
+            let buf = vec![0u8; len];
+            let info = parse_tcp_info(&buf);
+            assert_eq!(info.bytes_sent, 0);
+            assert_eq!(info.snd_wnd, 0);
+        }
+        // Sub-minimum returns default without panicking.
+        let info = parse_tcp_info(&[0u8; 40]);
+        assert_eq!(info.rtt, 0);
+
+        // A 231-byte buffer (one short of the 4.19 block) must not
+        // read the partial block.
+        let mut buf = vec![0u8; 231];
+        buf[200..208].copy_from_slice(&12345u64.to_ne_bytes());
+        let info = parse_tcp_info(&buf);
+        assert_eq!(info.bytes_sent, 0, "partial 4.19 block must be ignored");
     }
 }
