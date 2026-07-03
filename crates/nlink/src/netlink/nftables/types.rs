@@ -560,6 +560,23 @@ pub enum Register {
     R3 = 4,
 }
 
+impl Register {
+    /// Reverse mapping for the expression decoder (#164). `None` for
+    /// values outside the 16-byte register set (the kernel also has
+    /// 4-byte `NFT_REG32_*` numbers 8..=20, which the write path never
+    /// emits — decodes of such rules demote to `RuleExpr::Unknown`).
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Verdict),
+            1 => Some(Self::R0),
+            2 => Some(Self::R1),
+            3 => Some(Self::R2),
+            4 => Some(Self::R3),
+            _ => None,
+        }
+    }
+}
+
 /// `meta nfproto` L3-protocol values, used as the guard prepended to
 /// the address matchers (see [`Rule::match_saddr_v4`] / `_v6`).
 pub(crate) const NFPROTO_IPV4: u8 = 2;
@@ -584,6 +601,21 @@ pub enum CmpOp {
     Gte = 5,
 }
 
+impl CmpOp {
+    /// Reverse mapping for the expression decoder (#164).
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Eq),
+            1 => Some(Self::Neq),
+            2 => Some(Self::Lt),
+            3 => Some(Self::Lte),
+            4 => Some(Self::Gt),
+            5 => Some(Self::Gte),
+            _ => None,
+        }
+    }
+}
+
 /// Payload base header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -591,6 +623,18 @@ pub enum PayloadBase {
     LinkLayer = 0,
     Network = 1,
     Transport = 2,
+}
+
+impl PayloadBase {
+    /// Reverse mapping for the expression decoder (#164).
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::LinkLayer),
+            1 => Some(Self::Network),
+            2 => Some(Self::Transport),
+            _ => None,
+        }
+    }
 }
 
 /// Meta key for loading metadata.
@@ -609,6 +653,29 @@ pub enum MetaKey {
     NfProto = 15,
     L4Proto = 16,
     CGroup = 23,
+}
+
+impl MetaKey {
+    /// Reverse mapping for the expression decoder (#164). `None` for
+    /// kernel meta keys the typed enum doesn't model yet — such
+    /// expressions decode as `RuleExpr::Unknown`.
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Len),
+            1 => Some(Self::Protocol),
+            3 => Some(Self::Mark),
+            4 => Some(Self::Iif),
+            5 => Some(Self::Oif),
+            6 => Some(Self::IifName),
+            7 => Some(Self::OifName),
+            10 => Some(Self::SkUid),
+            11 => Some(Self::SkGid),
+            15 => Some(Self::NfProto),
+            16 => Some(Self::L4Proto),
+            23 => Some(Self::CGroup),
+            _ => None,
+        }
+    }
 }
 
 /// Conntrack key.

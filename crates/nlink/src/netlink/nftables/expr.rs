@@ -282,6 +282,296 @@ fn write_verdict_expr(builder: &mut MessageBuilder, verdict: &Verdict) {
     builder.nest_end(expr_data);
 }
 
+// =========================================================================
+// Expression decoding (#164) — read-side complement of `Expr`
+// =========================================================================
+
+use crate::netlink::attr::{AttrIter, get};
+
+/// A rule expression decoded from a kernel dump.
+///
+/// The read-side complement of the write-side [`Expr`]: dumps carry
+/// values the validated-input builder types can't represent (live
+/// counter state, meta keys or registers outside the typed enums,
+/// expression kinds nlink doesn't model). Every decoded element is
+/// either a fully-typed variant or [`RuleExpr::Unknown`] with the raw
+/// `NFTA_EXPR_DATA` payload preserved verbatim — nothing is dropped,
+/// and partial decodes never guess.
+///
+/// Obtain via [`RuleInfo::expressions`]; the common per-rule counter
+/// case has the [`RuleInfo::counter`] shortcut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RuleExpr {
+    /// `counter` — cumulative packet/byte counts as maintained by the
+    /// kernel (live values in dumps, zeros right after rule creation).
+    Counter {
+        /// Packets matched.
+        packets: u64,
+        /// Bytes matched.
+        bytes: u64,
+    },
+    /// `immediate` into the verdict register — the rule's verdict
+    /// (accept / drop / continue / return / jump / goto).
+    Verdict(Verdict),
+    /// `meta` load into a data register.
+    Meta {
+        /// Destination register.
+        dreg: Register,
+        /// Metadata key being loaded.
+        key: MetaKey,
+    },
+    /// `cmp` of a register against a value.
+    Cmp {
+        /// Source register.
+        sreg: Register,
+        /// Comparison operator.
+        op: CmpOp,
+        /// Comparison operand (network byte order, as on the wire).
+        data: Vec<u8>,
+    },
+    /// `immediate` value load into a data register.
+    Immediate {
+        /// Destination register.
+        dreg: Register,
+        /// Loaded value (as on the wire).
+        data: Vec<u8>,
+    },
+    /// `payload` load into a data register.
+    Payload {
+        /// Destination register.
+        dreg: Register,
+        /// Which packet header the offset is relative to.
+        base: PayloadBase,
+        /// Byte offset within the base header.
+        offset: u32,
+        /// Number of bytes loaded.
+        len: u32,
+    },
+    /// Expression not (or not fully) decodable: kind name plus the raw
+    /// `NFTA_EXPR_DATA` payload, preserved verbatim (empty for
+    /// data-less expressions like `masq`).
+    Unknown {
+        /// `NFTA_EXPR_NAME` (e.g. `"quota"`, `"limit"`, `"nat"`).
+        name: String,
+        /// Raw `NFTA_EXPR_DATA` payload.
+        data: Vec<u8>,
+    },
+}
+
+/// Decode the inner payload of `NFTA_RULE_EXPRESSIONS` (a list of
+/// `NFTA_LIST_ELEM`) into typed expressions.
+///
+/// Infallible by design: elements whose kind or contents exceed the
+/// typed variants come back as [`RuleExpr::Unknown`]; structurally
+/// malformed elements (no `NFTA_EXPR_NAME`) are skipped. One odd
+/// expression from a future kernel must not fail a rule dump.
+pub fn parse_expressions(bytes: &[u8]) -> Vec<RuleExpr> {
+    let mut exprs = Vec::new();
+    for (kind, elem) in AttrIter::new(bytes) {
+        if kind != NFTA_LIST_ELEM {
+            continue;
+        }
+        let mut name: Option<&str> = None;
+        let mut data: &[u8] = &[];
+        for (attr, payload) in AttrIter::new(elem) {
+            match attr {
+                NFTA_EXPR_NAME => name = get::string(payload).ok(),
+                NFTA_EXPR_DATA => data = payload,
+                _ => {}
+            }
+        }
+        // The kernel never emits a nameless expression; skip defensively.
+        let Some(name) = name else { continue };
+        exprs.push(parse_expr(name, data));
+    }
+    exprs
+}
+
+/// Decode one expression; anything undecodable demotes to `Unknown`.
+fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
+    let decoded = match name {
+        "counter" => parse_counter(data),
+        "immediate" => parse_immediate(data),
+        "meta" => parse_meta(data),
+        "cmp" => parse_cmp(data),
+        "payload" => parse_payload(data),
+        _ => None,
+    };
+    decoded.unwrap_or_else(|| RuleExpr::Unknown {
+        name: name.to_string(),
+        data: data.to_vec(),
+    })
+}
+
+fn parse_counter(data: &[u8]) -> Option<RuleExpr> {
+    let mut packets = None;
+    let mut bytes = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_COUNTER_PACKETS => packets = Some(get::u64_be(payload).ok()?),
+            NFTA_COUNTER_BYTES => bytes = Some(get::u64_be(payload).ok()?),
+            _ => {}
+        }
+    }
+    // The kernel always emits both; default missing ones to 0 rather
+    // than rejecting (accept-larger/lenient read policy).
+    if packets.is_none() && bytes.is_none() {
+        return None;
+    }
+    Some(RuleExpr::Counter {
+        packets: packets.unwrap_or(0),
+        bytes: bytes.unwrap_or(0),
+    })
+}
+
+fn parse_immediate(data: &[u8]) -> Option<RuleExpr> {
+    let mut dreg = None;
+    let mut imm_nest: &[u8] = &[];
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_IMMEDIATE_DREG => dreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_IMMEDIATE_DATA => imm_nest = payload,
+            _ => {}
+        }
+    }
+    let dreg = dreg?;
+    for (attr, payload) in AttrIter::new(imm_nest) {
+        match attr {
+            NFTA_DATA_VALUE if dreg != Register::Verdict => {
+                return Some(RuleExpr::Immediate {
+                    dreg,
+                    data: payload.to_vec(),
+                });
+            }
+            NFTA_DATA_VERDICT if dreg == Register::Verdict => {
+                return parse_verdict(payload).map(RuleExpr::Verdict);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Decode an `NFTA_DATA_VERDICT` nest. `None` for codes outside the
+/// typed [`Verdict`] (`NFT_BREAK`, queue verdicts) or a jump/goto
+/// whose chain name fails validation.
+fn parse_verdict(nest: &[u8]) -> Option<Verdict> {
+    let mut code = None;
+    let mut chain = None;
+    for (attr, payload) in AttrIter::new(nest) {
+        match attr {
+            NFTA_VERDICT_CODE => code = Some(get::u32_be(payload).ok()? as i32),
+            NFTA_VERDICT_CHAIN => chain = get::string(payload).ok().map(str::to_string),
+            _ => {}
+        }
+    }
+    match code? {
+        NF_ACCEPT => Some(Verdict::Accept),
+        NF_DROP => Some(Verdict::Drop),
+        NFT_CONTINUE => Some(Verdict::Continue),
+        NFT_RETURN => Some(Verdict::Return),
+        NFT_JUMP => Some(Verdict::JumpTo(ChainName::new(chain?).ok()?)),
+        NFT_GOTO => Some(Verdict::GotoTo(ChainName::new(chain?).ok()?)),
+        _ => None,
+    }
+}
+
+fn parse_meta(data: &[u8]) -> Option<RuleExpr> {
+    let mut dreg = None;
+    let mut key = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_META_DREG => dreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_META_KEY => key = MetaKey::from_u32(get::u32_be(payload).ok()?),
+            _ => {}
+        }
+    }
+    // SREG-form meta (meta-set, e.g. `meta mark set ...`) has no DREG
+    // and decodes as Unknown.
+    Some(RuleExpr::Meta {
+        dreg: dreg?,
+        key: key?,
+    })
+}
+
+fn parse_cmp(data: &[u8]) -> Option<RuleExpr> {
+    let mut sreg = None;
+    let mut op = None;
+    let mut value = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_CMP_SREG => sreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_CMP_OP => op = CmpOp::from_u32(get::u32_be(payload).ok()?),
+            NFTA_CMP_DATA => {
+                for (inner, inner_payload) in AttrIter::new(payload) {
+                    if inner == NFTA_DATA_VALUE {
+                        value = Some(inner_payload.to_vec());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(RuleExpr::Cmp {
+        sreg: sreg?,
+        op: op?,
+        data: value?,
+    })
+}
+
+fn parse_payload(data: &[u8]) -> Option<RuleExpr> {
+    let mut dreg = None;
+    let mut base = None;
+    let mut offset = None;
+    let mut len = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_PAYLOAD_DREG => dreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_PAYLOAD_BASE => base = PayloadBase::from_u32(get::u32_be(payload).ok()?),
+            NFTA_PAYLOAD_OFFSET => offset = Some(get::u32_be(payload).ok()?),
+            NFTA_PAYLOAD_LEN => len = Some(get::u32_be(payload).ok()?),
+            _ => {}
+        }
+    }
+    // SREG-form payload (payload-set / checksum rewrite) has no DREG
+    // and decodes as Unknown.
+    Some(RuleExpr::Payload {
+        dreg: dreg?,
+        base: base?,
+        offset: offset?,
+        len: len?,
+    })
+}
+
+impl super::types::RuleInfo {
+    /// Decode this rule's [`expression_bytes`](Self::expression_bytes)
+    /// into typed expressions.
+    ///
+    /// Infallible: undecodable elements come back as
+    /// [`RuleExpr::Unknown`] with their raw payload preserved. The raw
+    /// `expression_bytes` field stays untouched as the round-trip
+    /// source of truth (the declarative diff compares bodies
+    /// byte-wise, not through this decoder).
+    pub fn expressions(&self) -> Vec<RuleExpr> {
+        parse_expressions(&self.expression_bytes)
+    }
+
+    /// Cumulative `(packets, bytes)` from the first `counter`
+    /// expression in this rule, if any.
+    ///
+    /// The common "per-rule hit counters" shortcut: dump rules, join
+    /// on [`comment`](Self::comment)/handle, read `counter()`. Rules
+    /// can legally carry several counter expressions; this returns the
+    /// first (position order = evaluation order).
+    pub fn counter(&self) -> Option<(u64, u64)> {
+        self.expressions().into_iter().find_map(|e| match e {
+            RuleExpr::Counter { packets, bytes } => Some((packets, bytes)),
+            _ => None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod verdict_tests {
     //! Verdict wire-format coverage. The 0.20.1 deprecated
@@ -318,5 +608,308 @@ mod verdict_tests {
         let a = Verdict::JumpTo(ChainName::new("a").unwrap());
         let b = Verdict::JumpTo(ChainName::new("b").unwrap());
         assert_ne!(encode_verdict(&a), encode_verdict(&b));
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    //! #164 — expression-decoder coverage. Fixtures come from the
+    //! write path (`write_expressions`) so encode/decode stay in
+    //! lockstep, plus hand-built elements for read-only shapes the
+    //! writer can't produce (live counter values, unknown kinds,
+    //! pathological lengths).
+
+    use super::*;
+
+    /// Encode `exprs` and return exactly what `parse_rule` stores in
+    /// `expression_bytes`: the inner payload of the outer
+    /// `NFTA_RULE_EXPRESSIONS` attribute (16-byte nlmsghdr + 4-byte
+    /// attr header peeled — same trick as
+    /// `config::diff::lower_to_expression_bytes`).
+    fn encode(exprs: &[Expr]) -> Vec<u8> {
+        let mut b = MessageBuilder::new(0, 0);
+        write_expressions(&mut b, exprs);
+        b.as_bytes()[20..].to_vec()
+    }
+
+    /// Hand-build one `NFTA_LIST_ELEM` with the given name and
+    /// pre-encoded `NFTA_EXPR_DATA` payload.
+    fn build_elem(name: &str, data_payload: &[u8]) -> Vec<u8> {
+        let mut b = MessageBuilder::new(0, 0);
+        let elem = b.nest_start(NFTA_LIST_ELEM | 0x8000);
+        b.append_attr_str(NFTA_EXPR_NAME, name);
+        if !data_payload.is_empty() {
+            b.append_attr(NFTA_EXPR_DATA | 0x8000, data_payload);
+        }
+        b.nest_end(elem);
+        b.as_bytes()[16..].to_vec()
+    }
+
+    /// Encode a bare attribute stream (no nlmsghdr), for building
+    /// inner NFTA_EXPR_DATA payloads by hand.
+    fn build_attrs(f: impl FnOnce(&mut MessageBuilder)) -> Vec<u8> {
+        let mut b = MessageBuilder::new(0, 0);
+        f(&mut b);
+        b.as_bytes()[16..].to_vec()
+    }
+
+    #[test]
+    fn roundtrip_meta_payload_cmp_immediate() {
+        let bytes = encode(&[
+            Expr::Meta {
+                dreg: Register::R0,
+                key: MetaKey::L4Proto,
+            },
+            Expr::Payload {
+                dreg: Register::R1,
+                base: PayloadBase::Transport,
+                offset: 2,
+                len: 2,
+            },
+            Expr::Cmp {
+                sreg: Register::R1,
+                op: CmpOp::Eq,
+                data: 443u16.to_be_bytes().to_vec(),
+            },
+            Expr::Immediate {
+                dreg: Register::R2,
+                data: vec![1, 2, 3, 4],
+            },
+        ]);
+        let decoded = parse_expressions(&bytes);
+        assert_eq!(
+            decoded,
+            vec![
+                RuleExpr::Meta {
+                    dreg: Register::R0,
+                    key: MetaKey::L4Proto,
+                },
+                RuleExpr::Payload {
+                    dreg: Register::R1,
+                    base: PayloadBase::Transport,
+                    offset: 2,
+                    len: 2,
+                },
+                RuleExpr::Cmp {
+                    sreg: Register::R1,
+                    op: CmpOp::Eq,
+                    data: 443u16.to_be_bytes().to_vec(),
+                },
+                RuleExpr::Immediate {
+                    dreg: Register::R2,
+                    data: vec![1, 2, 3, 4],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn roundtrip_verdict_all_variants() {
+        let verdicts = [
+            Verdict::Accept,
+            Verdict::Drop,
+            Verdict::Continue,
+            Verdict::Return,
+            Verdict::JumpTo(ChainName::new("subchain").unwrap()),
+            Verdict::GotoTo(ChainName::new("tailchain").unwrap()),
+        ];
+        for v in verdicts {
+            let bytes = encode(&[Expr::Verdict(v.clone())]);
+            let decoded = parse_expressions(&bytes);
+            assert_eq!(decoded, vec![RuleExpr::Verdict(v)], "verdict round-trip");
+        }
+    }
+
+    #[test]
+    fn roundtrip_counter_write_side_zeroes() {
+        let bytes = encode(&[Expr::Counter]);
+        assert_eq!(
+            parse_expressions(&bytes),
+            vec![RuleExpr::Counter {
+                packets: 0,
+                bytes: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn counter_with_live_values_decodes_in_any_attr_order() {
+        for swapped in [false, true] {
+            let data = build_attrs(|b| {
+                if swapped {
+                    b.append_attr_u64_be(NFTA_COUNTER_PACKETS, 7);
+                    b.append_attr_u64_be(NFTA_COUNTER_BYTES, 4242);
+                } else {
+                    b.append_attr_u64_be(NFTA_COUNTER_BYTES, 4242);
+                    b.append_attr_u64_be(NFTA_COUNTER_PACKETS, 7);
+                }
+            });
+            let elem = build_elem("counter", &data);
+            assert_eq!(
+                parse_expressions(&elem),
+                vec![RuleExpr::Counter {
+                    packets: 7,
+                    bytes: 4242,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn counter_short_payload_falls_back_to_unknown() {
+        // 4-byte NFTA_COUNTER_PACKETS — not a valid u64.
+        let data = build_attrs(|b| b.append_attr(NFTA_COUNTER_PACKETS, &[0, 0, 0, 7]));
+        let elem = build_elem("counter", &data);
+        match &parse_expressions(&elem)[..] {
+            [RuleExpr::Unknown { name, data: raw }] => {
+                assert_eq!(name, "counter");
+                assert!(!raw.is_empty(), "raw payload preserved");
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_expr_name_preserves_payload() {
+        let data = build_attrs(|b| b.append_attr(1, &[9, 9, 9, 9]));
+        let elem = build_elem("quota", &data);
+        assert_eq!(
+            parse_expressions(&elem),
+            vec![RuleExpr::Unknown {
+                name: "quota".to_string(),
+                data: data.clone(),
+            }]
+        );
+    }
+
+    #[test]
+    fn dataless_expr_yields_unknown_with_empty_data() {
+        // `masq` writes no NFTA_EXPR_DATA at all.
+        let bytes = encode(&[Expr::Masquerade]);
+        assert_eq!(
+            parse_expressions(&bytes),
+            vec![RuleExpr::Unknown {
+                name: "masq".to_string(),
+                data: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn verdict_break_code_falls_back_to_unknown() {
+        // NFT_BREAK (-2) is not representable in the typed Verdict.
+        let verdict_nest = build_attrs(|b| {
+            b.append_attr_u32_be(NFTA_VERDICT_CODE, NFT_BREAK as u32);
+        });
+        let imm_nest = build_attrs(|b| b.append_attr(NFTA_DATA_VERDICT | 0x8000, &verdict_nest));
+        let data = build_attrs(|b| {
+            b.append_attr_u32_be(NFTA_IMMEDIATE_DREG, Register::Verdict as u32);
+            b.append_attr(NFTA_IMMEDIATE_DATA | 0x8000, &imm_nest);
+        });
+        let elem = build_elem("immediate", &data);
+        assert!(matches!(
+            &parse_expressions(&elem)[..],
+            [RuleExpr::Unknown { name, .. }] if name == "immediate"
+        ));
+    }
+
+    #[test]
+    fn meta_without_dreg_falls_back_to_unknown() {
+        // SREG-form meta (meta-set) carries no NFTA_META_DREG.
+        let data = build_attrs(|b| b.append_attr_u32_be(NFTA_META_KEY, MetaKey::Mark as u32));
+        let elem = build_elem("meta", &data);
+        assert!(matches!(
+            &parse_expressions(&elem)[..],
+            [RuleExpr::Unknown { name, .. }] if name == "meta"
+        ));
+    }
+
+    #[test]
+    fn meta_unmodelled_key_falls_back_to_unknown() {
+        let data = build_attrs(|b| {
+            b.append_attr_u32_be(NFTA_META_DREG, Register::R0 as u32);
+            b.append_attr_u32_be(NFTA_META_KEY, 9999);
+        });
+        let elem = build_elem("meta", &data);
+        assert!(matches!(
+            &parse_expressions(&elem)[..],
+            [RuleExpr::Unknown { name, .. }] if name == "meta"
+        ));
+    }
+
+    #[test]
+    fn nameless_elem_is_skipped_and_empty_input_is_empty() {
+        assert!(parse_expressions(&[]).is_empty());
+
+        // Element with data but no NFTA_EXPR_NAME.
+        let data = build_attrs(|b| b.append_attr(NFTA_COUNTER_BYTES, &42u64.to_be_bytes()));
+        let elem = {
+            let mut b = MessageBuilder::new(0, 0);
+            let e = b.nest_start(NFTA_LIST_ELEM | 0x8000);
+            b.append_attr(NFTA_EXPR_DATA | 0x8000, &data);
+            b.nest_end(e);
+            b.as_bytes()[16..].to_vec()
+        };
+        assert!(parse_expressions(&elem).is_empty());
+    }
+
+    #[test]
+    fn pathological_lengths_terminate_without_panic() {
+        // Truncated mid-attribute: claim 64 bytes, provide 8.
+        let mut truncated = Vec::new();
+        truncated.extend_from_slice(&64u16.to_ne_bytes());
+        truncated.extend_from_slice(&(NFTA_LIST_ELEM | 0x8000).to_ne_bytes());
+        truncated.extend_from_slice(&[0u8; 4]);
+        assert!(parse_expressions(&truncated).is_empty());
+
+        // Zero-length attribute header: must terminate, not spin.
+        let zero_len = [0u8, 0, 1, 0, 0, 0, 0, 0];
+        assert!(parse_expressions(&zero_len).is_empty());
+
+        // nla_len below the 4-byte header minimum.
+        let mut short = Vec::new();
+        short.extend_from_slice(&2u16.to_ne_bytes());
+        short.extend_from_slice(&NFTA_LIST_ELEM.to_ne_bytes());
+        assert!(parse_expressions(&short).is_empty());
+    }
+
+    #[test]
+    fn ruleinfo_expressions_and_counter_shortcut() {
+        let live_counter = {
+            let data = build_attrs(|b| {
+                b.append_attr_u64_be(NFTA_COUNTER_BYTES, 1_000_000);
+                b.append_attr_u64_be(NFTA_COUNTER_PACKETS, 1_000);
+            });
+            build_elem("counter", &data)
+        };
+        let mut expression_bytes = encode(&[
+            Expr::Meta {
+                dreg: Register::R0,
+                key: MetaKey::NfProto,
+            },
+            Expr::Verdict(Verdict::Accept),
+        ]);
+        // Splice the live counter between the encoded exprs.
+        expression_bytes.extend_from_slice(&live_counter);
+
+        let rule = RuleInfo {
+            table: "t".into(),
+            chain: "c".into(),
+            family: Family::Inet,
+            handle: 1,
+            position: None,
+            comment: None,
+            userdata_raw: None,
+            expression_bytes,
+        };
+        let exprs = rule.expressions();
+        assert_eq!(exprs.len(), 3);
+        assert_eq!(rule.counter(), Some((1_000, 1_000_000)));
+
+        let no_counter = RuleInfo {
+            expression_bytes: encode(&[Expr::Verdict(Verdict::Drop)]),
+            ..rule
+        };
+        assert_eq!(no_counter.counter(), None);
     }
 }

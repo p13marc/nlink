@@ -30,6 +30,16 @@ All notable changes to this project will be documented in this file.
   successor, this is the unprivileged baseline. `nlink-ss -p` now
   consumes the library version; new example
   `sockdiag_socket_owners`.
+- **Typed nftables rule-expression decoding (#164).** `RuleInfo`
+  previously exposed only raw `expression_bytes`; consumers wanting
+  per-rule counters hand-parsed NFTA TLVs. New read-side `RuleExpr`
+  enum (`Counter { packets, bytes }` with live kernel values,
+  `Verdict`, `Meta`, `Cmp`, `Immediate`, `Payload`, and a lossless
+  `Unknown { name, data }` fallback) plus `RuleInfo::expressions()`
+  and the `RuleInfo::counter() -> Option<(packets, bytes)>` shortcut.
+  Decoding is lazy and infallible — anything undecodable demotes to
+  `Unknown` verbatim; `expression_bytes` and the diff's byte-wise
+  body comparison are unchanged.
 
 ### Changed (breaking)
 
