@@ -1524,6 +1524,30 @@ impl Connection<Route> {
         self.del_route(route).await
     }
 
+    /// Delete an IPv4 route if it exists. Returns `Ok(true)` if the
+    /// route was deleted, `Ok(false)` if it didn't exist. Unlike
+    /// [`Self::del_route_v4`], does NOT error on `ESRCH`/`ENOENT`
+    /// (#169; mirrors the nftables `del_*_if_exists` family).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_route_v4_if_exists"))]
+    pub async fn del_route_v4_if_exists(&self, destination: &str, prefix_len: u8) -> Result<bool> {
+        match self.del_route_v4(destination, prefix_len).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() || e.errno() == Some(libc::ESRCH) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Delete an IPv6 route if it exists. See
+    /// [`Self::del_route_v4_if_exists`].
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_route_v6_if_exists"))]
+    pub async fn del_route_v6_if_exists(&self, destination: &str, prefix_len: u8) -> Result<bool> {
+        match self.del_route_v6(destination, prefix_len).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() || e.errno() == Some(libc::ESRCH) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Replace a route (add or update).
     ///
     /// If the route exists, it will be updated. Otherwise, it will be created.

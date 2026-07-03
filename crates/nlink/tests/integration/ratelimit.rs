@@ -121,6 +121,58 @@ async fn test_egress_rate_limiting() -> nlink::Result<()> {
     Ok(())
 }
 
+/// #169 — RateLimiter::reconcile converges from scratch, is
+/// idempotent (second run = zero changes), and picks up a
+/// rate drift in place.
+#[tokio::test]
+async fn test_rate_limiter_reconcile_idempotent() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_htb", "ifb");
+
+    let ns = TestNamespace::new("rl_reconcile")?;
+    let conn = ns.connection()?;
+
+    conn.add_link(nlink::netlink::link::DummyLink::new("test0"))
+        .await?;
+    conn.set_link_up("test0").await?;
+
+    let limiter = RateLimiter::new("test0")
+        .egress(Rate::bytes_per_sec(1_000_000))
+        .ingress(Rate::bytes_per_sec(2_000_000))
+        .latency(Duration::from_millis(20));
+
+    // From scratch: converges (several changes).
+    let first = limiter.reconcile(&conn).await?;
+    assert!(first.changes_made > 0, "first reconcile must build the tree");
+
+    // Idempotence: nothing to do.
+    let second = limiter.reconcile(&conn).await?;
+    assert_eq!(
+        second.changes_made, 0,
+        "second reconcile must be a no-op, got {second:?}"
+    );
+
+    // Dry-run reports drift without mutating.
+    let drifted = RateLimiter::new("test0")
+        .egress(Rate::bytes_per_sec(5_000_000))
+        .ingress(Rate::bytes_per_sec(2_000_000))
+        .latency(Duration::from_millis(20));
+    let plan = drifted.reconcile_dry_run(&conn).await?;
+    assert!(plan.changes_made > 0, "dry run must report the rate drift");
+    let after_dry = limiter.reconcile(&conn).await?;
+    assert_eq!(
+        after_dry.changes_made, 0,
+        "dry run must not have mutated anything"
+    );
+
+    // Real drift fix converges and is idempotent again.
+    let fixed = drifted.reconcile(&conn).await?;
+    assert!(fixed.changes_made > 0);
+    assert_eq!(drifted.reconcile(&conn).await?.changes_made, 0);
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_ingress_rate_limiting() -> nlink::Result<()> {
     require_root!();

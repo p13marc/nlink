@@ -696,6 +696,27 @@ impl Connection<Route> {
             .await
     }
 
+    /// Delete an IP address if present. Returns `Ok(true)` if the
+    /// address was deleted, `Ok(false)` if it (or the interface)
+    /// wasn't there. Unlike [`Self::del_address`], does NOT error
+    /// on `EADDRNOTAVAIL`/`ENOENT`/`ENODEV` (#169; mirrors the
+    /// nftables `del_*_if_exists` family).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_address_if_exists"))]
+    pub async fn del_address_if_exists(
+        &self,
+        ifname: impl Into<InterfaceRef>,
+        address: IpAddr,
+        prefix_len: u8,
+    ) -> Result<bool> {
+        match self.del_address(ifname, address, prefix_len).await {
+            Ok(()) => Ok(true),
+            // RTM_DELADDR answers "address not present" with
+            // EADDRNOTAVAIL.
+            Err(e) if e.is_not_found() || e.errno() == Some(libc::EADDRNOTAVAIL) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Delete an IP address from an interface by index.
     ///
     /// This is namespace-safe as it doesn't require interface name resolution.

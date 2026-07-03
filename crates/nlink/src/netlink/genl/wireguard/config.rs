@@ -236,16 +236,29 @@ impl WireguardConfig {
 
     /// Compute the diff between desired (this config) and
     /// current kernel state. Plan 196.
+    ///
+    /// A declared device that doesn't exist in the kernel (or isn't
+    /// a WireGuard link) is reported in
+    /// [`WireguardConfigDiff::devices_to_add`] rather than failing
+    /// the whole diff (#169). Create the missing links with
+    /// [`ensure_devices`](Self::ensure_devices) (or declare them in
+    /// a `NetworkConfig` / [`Stack`](crate::facade::Stack)), then
+    /// diff again — the fresh device's configuration lands in
+    /// `devices_to_modify`.
     pub async fn diff(&self, conn: &Connection<Wireguard>) -> Result<WireguardConfigDiff> {
         let mut diff = WireguardConfigDiff::default();
 
         for declared in &self.devices {
-            // Fetch current device state. If the interface
-            // doesn't exist or isn't a WG link, propagate
-            // the kernel error — the caller is expected to
-            // ensure the link exists (typically via
-            // NetworkConfig with a `wg`-kind link).
-            let current = conn.get_device_by_name(&declared.ifname).await?;
+            let current = match conn.get_device_by_name(&declared.ifname).await {
+                Ok(current) => current,
+                // Absent link (or not a WG link → GENL says no such
+                // device). Bootstrap path: report, don't fail.
+                Err(e) if e.is_not_found() || e.is_no_device() => {
+                    diff.devices_to_add.push(declared.ifname.clone());
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
             let device_changes = declared.diff_against(&current);
             if !device_changes.is_empty() {
@@ -255,6 +268,32 @@ impl WireguardConfig {
         }
 
         Ok(diff)
+    }
+
+    /// Create any declared WireGuard links that don't exist yet
+    /// (bootstrap for [`diff`](Self::diff)'s `devices_to_add`).
+    ///
+    /// Link creation is an rtnetlink operation, so this takes a
+    /// `Connection<Route>` — pass one bound to the **same network
+    /// namespace** as the WireGuard connection you'll `apply` with.
+    /// Returns the names of the links it created. Idempotent:
+    /// already-existing links are skipped.
+    pub async fn ensure_devices(
+        &self,
+        route: &Connection<crate::netlink::Route>,
+    ) -> Result<Vec<String>> {
+        let mut created = Vec::new();
+        for declared in &self.devices {
+            match route
+                .add_link(crate::netlink::link::WireguardLink::new(&declared.ifname))
+                .await
+            {
+                Ok(()) => created.push(declared.ifname.clone()),
+                Err(e) if e.is_already_exists() => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(created)
     }
 
     /// Apply with bounded retry on transient kernel errors
@@ -290,8 +329,22 @@ impl WireguardConfig {
 
     /// Apply this configuration: compute the diff, then
     /// dispatch the kernel mutations. Plan 196.
+    ///
+    /// Fails with a descriptive error if a declared device doesn't
+    /// exist — WG_CMD_SET_DEVICE can't create links. Create missing
+    /// links first via [`ensure_devices`](Self::ensure_devices) (or
+    /// declare them in a `NetworkConfig` /
+    /// [`Stack`](crate::facade::Stack), which orders the layers).
     pub async fn apply(&self, conn: &Connection<Wireguard>) -> Result<WireguardApplyResult> {
         let diff = self.diff(conn).await?;
+        if !diff.devices_to_add.is_empty() {
+            return Err(crate::netlink::Error::InvalidMessage(format!(
+                "wireguard apply: declared device(s) {} do not exist; create them first \
+                 (WireguardConfig::ensure_devices with a same-namespace Connection<Route>, \
+                 or declare the links in a NetworkConfig/Stack)",
+                diff.devices_to_add.join(", ")
+            )));
+        }
         let mut result = WireguardApplyResult::default();
 
         for (ifname, changes) in &diff.devices_to_modify {
@@ -783,12 +836,32 @@ impl DeclaredWgDeviceBuilder {
 }
 
 /// A declared WireGuard peer. Plan 196.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct DeclaredWgPeer {
+    #[cfg_attr(feature = "serde", serde(serialize_with = "diff_serde::pubkey"))]
     pub public_key: [u8; WG_KEY_LEN],
+    /// Serialized as a presence boolean (`preshared-key-set`) —
+    /// secret material never leaves the process via serde.
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            rename = "preshared-key-set",
+            serialize_with = "diff_serde::secret_presence"
+        )
+    )]
     pub preshared_key: Option<[u8; WG_KEY_LEN]>,
     pub endpoint: Option<SocketAddr>,
+    /// Serialized as whole seconds (`persistent-keepalive-secs`).
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            rename = "persistent-keepalive-secs",
+            serialize_with = "diff_serde::keepalive_secs"
+        )
+    )]
     pub persistent_keepalive: Option<Duration>,
     pub allowed_ips: Vec<AllowedIp>,
 }
@@ -943,6 +1016,13 @@ impl DeclaredWgPeerBuilder {
 /// `#[non_exhaustive]` since 0.24 (#165): new change categories
 /// (e.g. device bootstrap, #169) can appear without a major bump.
 /// Construct via [`WireguardConfig::diff`], not literally.
+///
+/// With the `serde` feature the diff serializes to JSON for typed
+/// drift reporting. **No key material is ever serialized**: public
+/// keys render as base64, preshared/private keys as presence
+/// booleans.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 #[must_use = "Diffs do nothing unless passed to `.apply()` or inspected"]
@@ -950,19 +1030,26 @@ pub struct WireguardConfigDiff {
     /// Devices that need at least one mutation: device-
     /// level field change OR a peer add/modify/remove.
     pub devices_to_modify: Vec<(String, DeviceChanges)>,
+    /// Declared devices that don't exist in the kernel (#169).
+    /// Create them via [`WireguardConfig::ensure_devices`] (or a
+    /// `NetworkConfig`/`Stack` declaring the links), then diff again.
+    pub devices_to_add: Vec<String>,
 }
 
 impl WireguardConfigDiff {
     pub fn is_empty(&self) -> bool {
-        self.devices_to_modify.is_empty()
+        self.devices_to_modify.is_empty() && self.devices_to_add.is_empty()
     }
 
-    /// Total number of kernel mutations this diff implies.
+    /// Total number of kernel mutations this diff implies
+    /// (missing devices count as one link creation each).
     pub fn change_count(&self) -> usize {
-        self.devices_to_modify
-            .iter()
-            .map(|(_, c)| c.change_count())
-            .sum()
+        self.devices_to_add.len()
+            + self
+                .devices_to_modify
+                .iter()
+                .map(|(_, c)| c.change_count())
+                .sum::<usize>()
     }
 }
 
@@ -976,6 +1063,9 @@ impl fmt::Display for WireguardConfigDiff {
             "WireguardConfigDiff: {} kernel call(s)",
             self.change_count()
         )?;
+        for ifname in &self.devices_to_add {
+            writeln!(f, "  + device {ifname} (link missing — needs creation)")?;
+        }
         for (ifname, changes) in &self.devices_to_modify {
             writeln!(f, "  {ifname}:")?;
             if changes.private_key_set {
@@ -1012,6 +1102,8 @@ impl fmt::Display for WireguardConfigDiff {
 }
 
 /// What changed on a single device. Plan 196.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct DeviceChanges {
@@ -1029,9 +1121,78 @@ pub struct DeviceChanges {
     /// Peers in the config but not in the kernel.
     pub peers_to_add: Vec<DeclaredWgPeer>,
     /// Per-peer mutations.
+    #[cfg_attr(feature = "serde", serde(serialize_with = "diff_serde::keyed_changes"))]
     pub peers_to_modify: Vec<([u8; WG_KEY_LEN], PeerChanges)>,
     /// Peers in the kernel but not in the config.
+    #[cfg_attr(feature = "serde", serde(serialize_with = "diff_serde::pubkey_vec"))]
     pub peers_to_remove: Vec<[u8; WG_KEY_LEN]>,
+}
+
+/// Serialization helpers for the diff types (`serde` feature).
+///
+/// Policy: public keys render as base64 (the WireGuard-native
+/// display form); secret material (preshared/private keys) is NEVER
+/// serialized — only its presence, as a boolean.
+#[cfg(feature = "serde")]
+mod diff_serde {
+    use serde::{Serializer, ser::SerializeSeq};
+
+    use super::{PeerChanges, WG_KEY_LEN, b64_encode_32};
+
+    pub(super) fn pubkey<S: Serializer>(
+        key: &[u8; WG_KEY_LEN],
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&b64_encode_32(key))
+    }
+
+    pub(super) fn pubkey_vec<S: Serializer>(
+        keys: &[[u8; WG_KEY_LEN]],
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(keys.len()))?;
+        for k in keys {
+            seq.serialize_element(&b64_encode_32(k))?;
+        }
+        seq.end()
+    }
+
+    pub(super) fn keyed_changes<S: Serializer>(
+        entries: &[([u8; WG_KEY_LEN], PeerChanges)],
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "kebab-case")]
+        struct Entry<'a> {
+            public_key: String,
+            changes: &'a PeerChanges,
+        }
+        let mut seq = s.serialize_seq(Some(entries.len()))?;
+        for (pk, changes) in entries {
+            seq.serialize_element(&Entry {
+                public_key: b64_encode_32(pk),
+                changes,
+            })?;
+        }
+        seq.end()
+    }
+
+    pub(super) fn secret_presence<S: Serializer>(
+        key: &Option<[u8; WG_KEY_LEN]>,
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_bool(key.is_some())
+    }
+
+    pub(super) fn keepalive_secs<S: Serializer>(
+        d: &Option<std::time::Duration>,
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match d {
+            Some(d) => s.serialize_some(&d.as_secs()),
+            None => s.serialize_none(),
+        }
+    }
 }
 
 impl DeviceChanges {
@@ -1056,6 +1217,8 @@ impl DeviceChanges {
 }
 
 /// What changed on a single peer. Plan 196.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct PeerChanges {
@@ -1558,5 +1721,74 @@ mod tests {
             "v4 prefix > 32 must fail"
         );
         let _ = IpAddr::V4(Ipv4Addr::UNSPECIFIED); // keep IpAddr import used
+    }
+
+    /// #169 — diff bootstrap accounting: devices_to_add participates
+    /// in is_empty/change_count/Display.
+    #[test]
+    fn diff_devices_to_add_accounting() {
+        let mut diff = WireguardConfigDiff::default();
+        assert!(diff.is_empty());
+        diff.devices_to_add.push("wg0".to_string());
+        assert!(!diff.is_empty());
+        assert_eq!(diff.change_count(), 1);
+        let rendered = diff.to_string();
+        assert!(rendered.contains("wg0"), "Display names the device: {rendered}");
+        assert!(rendered.contains("link missing"));
+    }
+
+    /// #169 — serde shape: public keys as base64, secrets redacted to
+    /// presence booleans, keepalive in whole seconds. Pins the JSON
+    /// ABI for typed drift reporting.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn diff_serde_shape_redacts_secrets() {
+        let peer = DeclaredWgPeer {
+            public_key: key(0xAA),
+            preshared_key: Some(key(0xBB)),
+            endpoint: Some(SocketAddr::from(([203, 0, 113, 1], 51820))),
+            persistent_keepalive: Some(Duration::from_secs(25)),
+            allowed_ips: vec![AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24)],
+        };
+        let changes = DeviceChanges {
+            private_key_set: true,
+            listen_port_set: false,
+            fwmark_set: false,
+            peers_to_add: vec![peer],
+            peers_to_modify: vec![(
+                key(0xCC),
+                PeerChanges {
+                    endpoint_set: true,
+                    ..PeerChanges::default()
+                },
+            )],
+            peers_to_remove: vec![key(0xDD)],
+        };
+        let mut diff = WireguardConfigDiff::default();
+        diff.devices_to_modify.push(("wg0".to_string(), changes));
+        diff.devices_to_add.push("wg1".to_string());
+
+        let json = serde_json::to_value(&diff).expect("serialize");
+        let rendered = json.to_string();
+
+        // No raw or base64 secret material anywhere in the output.
+        assert!(
+            !rendered.contains(&b64_encode_32(&key(0xBB))),
+            "preshared key must not serialize"
+        );
+        let dev = &json["devices-to-modify"][0];
+        assert_eq!(dev[0], "wg0");
+        let peer_json = &dev[1]["peers-to-add"][0];
+        assert_eq!(peer_json["public-key"], b64_encode_32(&key(0xAA)));
+        assert_eq!(peer_json["preshared-key-set"], true);
+        assert_eq!(peer_json["persistent-keepalive-secs"], 25);
+        assert_eq!(peer_json["allowed-ips"][0]["cidr"], 24);
+        assert_eq!(
+            dev[1]["peers-to-modify"][0]["public-key"],
+            b64_encode_32(&key(0xCC))
+        );
+        assert_eq!(dev[1]["peers-to-modify"][0]["changes"]["endpoint-set"], true);
+        assert_eq!(dev[1]["peers-to-remove"][0], b64_encode_32(&key(0xDD)));
+        assert_eq!(json["devices-to-add"][0], "wg1");
     }
 }

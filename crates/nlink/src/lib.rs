@@ -228,6 +228,10 @@ pub use netlink::tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, Unm
 pub use netlink::{
     Connection, Error, NamespaceSpec, NetworkEvent, Protocol, Result, RtnetlinkGroup,
 };
+// Default named-netns directory (`/var/run/netns`) — where
+// `NamespaceSpec::Named` / `namespace::connection_for` resolve names
+// (#169).
+pub use netlink::namespace::NETNS_RUN_DIR;
 // Plan 187 §2.2 — chain-walk iterator + convenience over the
 // `&dyn Error` source chain that handles `Box<nlink::Error>`
 // transparently.

@@ -40,6 +40,32 @@ All notable changes to this project will be documented in this file.
   Decoding is lazy and infallible — anything undecodable demotes to
   `Unknown` verbatim; `expression_bytes` and the diff's byte-wise
   body comparison are unchanged.
+- **Ergonomics batch (#169).**
+  - `del_link_if_exists` / `del_route_v4_if_exists` / `_v6` /
+    `del_address_if_exists` / `del_qdisc_if_exists` /
+    `del_filter_if_exists` on `Connection<Route>` — `Ok(bool)`
+    instead of an error when there's nothing to delete, mirroring
+    the nftables `del_*_if_exists` family.
+  - **WireGuard device bootstrap**: `WireguardConfig::diff` reports
+    absent declared devices in the new
+    `WireguardConfigDiff::devices_to_add` instead of hard-failing;
+    `WireguardConfig::ensure_devices(&Connection<Route>)` creates the
+    missing links idempotently; `facade::apply::wireguard*` wires the
+    two together so a bare `WireguardConfig` applies end-to-end.
+  - **`WireguardConfigDiff` serializes** (feature `serde`) for typed
+    drift reporting — public keys as base64, secret material redacted
+    to presence booleans, keepalive as whole seconds.
+  - **Namespace-spec facade variants**: `Stack::{apply,diff}_in`,
+    `facade::{apply,diff}::{network,nftables,wireguard}_in` take a
+    `NamespaceSpec` (named / path / PID — container support); new
+    `NamespaceSpec::connection_async` for GENL families.
+  - `RateLimiter::reconcile{,_dry_run,_with_options}` — idempotent
+    convergence mirroring `PerHostLimiter::reconcile` (zero kernel
+    calls when nothing drifted; covers the egress HTB shape, the IFB
+    device, the ingress hook + redirect, and the IFB-side HTB shape).
+  - `StackDiff::change_count()` / `StackApplyReport::change_count()`;
+    `NETNS_RUN_DIR` re-exported at the crate root. (`LinkChanges`
+    already implemented `Display`.)
 
 ### Changed (breaking)
 

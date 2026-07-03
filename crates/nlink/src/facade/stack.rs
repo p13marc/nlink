@@ -24,12 +24,13 @@
 //! (deferred to a future cycle for kernel-ABI stability —
 //! the ovpn UAPI is still maturing).
 
+use crate::Result;
 use crate::netlink::config::{ApplyResult as NetworkApplyResult, ConfigDiff, NetworkConfig};
 use crate::netlink::genl::wireguard::{
     WireguardApplyResult, WireguardConfig, WireguardConfigDiff,
 };
+use crate::netlink::namespace::NamespaceSpec;
 use crate::netlink::nftables::config::{NftablesConfig, NftablesDiff};
-use crate::Result;
 
 use super::{apply, diff};
 
@@ -90,40 +91,34 @@ impl Stack {
     /// commit. True rollback would require a Reverse-Diff
     /// abstraction across all layers — out of scope.
     pub async fn apply(&self) -> Result<StackApplyReport> {
-        // Pre-flight: validate every layer's diff succeeds
-        // before any kernel mutation.
-        let _validation = self.diff().await?;
-
-        let mut report = StackApplyReport::default();
-        if let Some(cfg) = &self.network {
-            report.network = Some(apply::network(cfg).await?);
-        }
-        if let Some(cfg) = &self.nftables {
-            report.nftables_change_count = Some(apply::nftables(cfg).await?);
-        }
-        if let Some(cfg) = &self.wireguard {
-            report.wireguard = Some(apply::wireguard(cfg).await?);
-        }
-        Ok(report)
+        self.apply_in(NamespaceSpec::Default).await
     }
 
     /// Apply every set layer in dependency order to a named
     /// namespace. See [`Self::apply`] for the pre-flight
     /// validation semantics.
     pub async fn apply_in_namespace(&self, ns: &str) -> Result<StackApplyReport> {
-        // Pre-flight: same as `apply()`. Validate against the
-        // target namespace before any mutation.
-        let _validation = self.diff_in_namespace(ns).await?;
+        self.apply_in(NamespaceSpec::Named(ns)).await
+    }
+
+    /// Apply every set layer in dependency order inside any
+    /// namespace specification — named, path-referenced, or a
+    /// process's namespace by PID (container support, #169). See
+    /// [`Self::apply`] for the pre-flight validation semantics.
+    pub async fn apply_in(&self, ns: NamespaceSpec<'_>) -> Result<StackApplyReport> {
+        // Pre-flight: validate every layer's diff succeeds
+        // before any kernel mutation.
+        let _validation = self.diff_in(ns.clone()).await?;
 
         let mut report = StackApplyReport::default();
         if let Some(cfg) = &self.network {
-            report.network = Some(apply::network_in_namespace(ns, cfg).await?);
+            report.network = Some(apply::network_in(ns.clone(), cfg).await?);
         }
         if let Some(cfg) = &self.nftables {
-            report.nftables_change_count = Some(apply::nftables_in_namespace(ns, cfg).await?);
+            report.nftables_change_count = Some(apply::nftables_in(ns.clone(), cfg).await?);
         }
         if let Some(cfg) = &self.wireguard {
-            report.wireguard = Some(apply::wireguard_in_namespace(ns, cfg).await?);
+            report.wireguard = Some(apply::wireguard_in(ns, cfg).await?);
         }
         Ok(report)
     }
@@ -131,30 +126,27 @@ impl Stack {
     /// Diff every set layer against the host's default
     /// namespace.
     pub async fn diff(&self) -> Result<StackDiff> {
-        let mut out = StackDiff::default();
-        if let Some(cfg) = &self.network {
-            out.network = Some(diff::network(cfg).await?);
-        }
-        if let Some(cfg) = &self.nftables {
-            out.nftables = Some(diff::nftables(cfg).await?);
-        }
-        if let Some(cfg) = &self.wireguard {
-            out.wireguard = Some(diff::wireguard(cfg).await?);
-        }
-        Ok(out)
+        self.diff_in(NamespaceSpec::Default).await
     }
 
     /// Diff every set layer against a named namespace.
     pub async fn diff_in_namespace(&self, ns: &str) -> Result<StackDiff> {
+        self.diff_in(NamespaceSpec::Named(ns)).await
+    }
+
+    /// Diff every set layer against any namespace specification —
+    /// named, path-referenced, or a process's namespace by PID
+    /// (container support, #169).
+    pub async fn diff_in(&self, ns: NamespaceSpec<'_>) -> Result<StackDiff> {
         let mut out = StackDiff::default();
         if let Some(cfg) = &self.network {
-            out.network = Some(diff::network_in_namespace(ns, cfg).await?);
+            out.network = Some(diff::network_in(ns.clone(), cfg).await?);
         }
         if let Some(cfg) = &self.nftables {
-            out.nftables = Some(diff::nftables_in_namespace(ns, cfg).await?);
+            out.nftables = Some(diff::nftables_in(ns.clone(), cfg).await?);
         }
         if let Some(cfg) = &self.wireguard {
-            out.wireguard = Some(diff::wireguard_in_namespace(ns, cfg).await?);
+            out.wireguard = Some(diff::wireguard_in(ns, cfg).await?);
         }
         Ok(out)
     }
@@ -175,6 +167,13 @@ impl StackApplyReport {
         self.network.as_ref().is_none_or(|r| r.changes_made == 0)
             && self.nftables_change_count.is_none_or(|c| c == 0)
             && self.wireguard.as_ref().is_none_or(|r| r.total_writes() == 0)
+    }
+
+    /// Total number of kernel mutations across every layer (#169).
+    pub fn change_count(&self) -> usize {
+        self.network.as_ref().map_or(0, |r| r.changes_made)
+            + self.nftables_change_count.unwrap_or(0)
+            + self.wireguard.as_ref().map_or(0, |r| r.total_writes())
     }
 }
 
@@ -198,6 +197,14 @@ impl StackDiff {
             && self.nftables.as_ref().is_none_or(|d| d.is_empty())
             && self.wireguard.as_ref().is_none_or(|d| d.is_empty())
     }
+
+    /// Total number of pending kernel mutations across every layer
+    /// (#169) — sums the per-layer `change_count()`s.
+    pub fn change_count(&self) -> usize {
+        self.network.as_ref().map_or(0, |d| d.change_count())
+            + self.nftables.as_ref().map_or(0, |d| d.change_count())
+            + self.wireguard.as_ref().map_or(0, |d| d.change_count())
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +221,24 @@ mod tests {
     fn empty_stack_apply_is_noop() {
         let r = StackApplyReport::default();
         assert!(r.is_noop());
+    }
+
+    /// #169 — change_count sums the set layers.
+    #[test]
+    fn stack_change_counts_sum_layers() {
+        let mut diff = StackDiff::default();
+        assert_eq!(diff.change_count(), 0);
+        let mut wg = WireguardConfigDiff::default();
+        wg.devices_to_add.push("wg0".to_string());
+        diff.wireguard = Some(wg);
+        assert_eq!(diff.change_count(), 1);
+        assert!(!diff.is_empty());
+
+        let mut report = StackApplyReport::default();
+        assert_eq!(report.change_count(), 0);
+        report.nftables_change_count = Some(3);
+        assert_eq!(report.change_count(), 3);
+        assert!(!report.is_noop());
     }
 
     #[test]
