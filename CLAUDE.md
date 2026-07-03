@@ -672,36 +672,33 @@ run it locally before merging a new example.
 
 ## Active work
 
-**0.23.0 shipped 2026-06-30** (`v0.23.0` tagged; both crates on
-crates.io). Headline narrative in `CHANGELOG.md ## [0.23.0]`
-+ `docs/migration_guide/0.22.0-to-0.23.0.md`. A large, mostly
-library-additive release.
-
-The **0.24.0 cycle is in flight on `master`** (workspace version
-already bumped — the convention is that the cycle's first breaking
-PR bumps it so cargo-semver-checks passes; see commit 041a289 for
-the precedent). Landed 2026-07 from the 2026 roadmap pass (#170):
-the #160 XFRM dump-body fix; #165 Rule/Nexthop/NsId/Mdb
-`NetworkEvent` variants + `#[non_exhaustive]` on
+**0.24.0 shipped 2026-07-03** (`v0.24.0` tagged; both crates on
+crates.io). Headline narrative in `CHANGELOG.md ## [0.24.0]` +
+`docs/migration_guide/0.23.0-to-0.24.0.md`. A sockdiag/events/
+nftables depth release from the 2026 roadmap pass (#170): the #160
+XFRM dump-body fix; #165 Rule/Nexthop/NsId/Mdb `NetworkEvent`
+variants + `#[non_exhaustive]` on
 `ConfigDiff`/`StackDiff`/`WireguardConfigDiff` + `subscribe_all()`
-joining every typed-event group (breaking); #162 socket→process/
-cgroup attribution; #164 typed nftables rule-expression decoding
+joining every typed-event group; #162 socket→process/cgroup
+attribution; #164 typed nftables rule-expression decoding
 (`RuleExpr`); #169 ergonomics batch (`del_*_if_exists`, WG device
 bootstrap `ensure_devices`, `NamespaceSpec` facade `_in` variants,
 `RateLimiter::reconcile`); #171 `SocketRateTracker` + the
 `parse_tcp_info` tail-field fix; #163 full INET_DIAG_BC bytecode
 compiler + `CcInfo` structs + the `InetExtension::mask()` off-by-one
-fix. Still open from that roadmap: #166 (modern-kernel telemetry
-families), #167 (spec-first netlink), #168 (record/replay mock
-transport) — each cycle-sized.
+fix.
 
-New work lands in `CHANGELOG.md ## [Unreleased]` and is promoted to
-`## [0.24.0]` at cut time. (CI runs on every push/PR to master, so
+The **next cycle is open on `master`** — new work lands in
+`CHANGELOG.md ## [Unreleased]` and is promoted to the next
+`## [X.Y.0]` at cut time. (CI runs on every push/PR to master, so
 the old "work on a release branch, don't push to master" note no
-longer applies.) **Remember at cut**: 0.24.0 needs a
-`docs/migration_guide/0.23.0-to-0.24.0.md` covering the #165
-breaking batch (non_exhaustive diffs, subscribe_all breadth) and the
-`InetExtension::mask()` behaviour change.
+longer applies.) The workspace version stays at the released 0.24.0
+until the cycle's first breaking PR bumps it to 0.25.0 (the
+cargo-semver-checks convention; precedent 041a289).
+
+Cycle-sized roadmap items still open from #170: #166 (modern-kernel
+telemetry families), #167 (spec-first netlink codegen), #168
+(record/replay mock transport).
 
 The 0.23.0 cycle resolved the **#134–#137 follow-on epic**: the
 opt-in dispatcher mode is feature-complete (#134 —

@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-07-03
+
+> Upgrading? See
+> [`docs/migration_guide/0.23.0-to-0.24.0.md`](docs/migration_guide/0.23.0-to-0.24.0.md)
+> — a sockdiag/events/nftables depth release; the breaking surface is
+> mechanical (`#[non_exhaustive]` on the three diff types, two new
+> sockdiag struct fields) plus behaviour-visible bug fixes
+> (`InetExtension::mask()` off-by-one, `TcpInfo` tail fields,
+> `subscribe_all()` breadth).
+
 ### Added
 
 - **Rule / Nexthop / NsId / MDB events (#165).** `NetworkEvent` gained
