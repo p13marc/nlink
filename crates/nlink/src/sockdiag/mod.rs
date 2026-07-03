@@ -89,6 +89,7 @@ pub mod rate;
 pub mod socket;
 pub mod types;
 
+pub use bytecode::{CompiledFilter, compile_filter};
 pub use error::{Error, Result};
 pub use expr::{Comparison, FilterExpr};
 pub use filter::{InetFilter, SocketFilter, UnixFilter};
@@ -96,6 +97,6 @@ pub use procmap::{CgroupPathMap, ProcessRef, SocketOwnerMap};
 pub use rate::{SocketRate, SocketRateTracker};
 pub use socket::{InetSocket, NetlinkSocket, PacketSocket, SocketInfo, UnixSocket};
 pub use types::{
-    AddressFamily, DestroyError, DestroyResult, InetExtension, Protocol, SocketState,
-    SocketSummary, TcpInfo, TcpState, TcpSummary, UnixShow,
+    AddressFamily, BbrInfo, CcInfo, DctcpInfo, DestroyError, DestroyResult, InetExtension,
+    Protocol, SocketState, SocketSummary, TcpInfo, TcpState, TcpSummary, UnixShow, VegasInfo,
 };

@@ -5,6 +5,7 @@
 
 use std::net::IpAddr;
 
+use super::expr::FilterExpr;
 use super::types::{AddressFamily, InetExtension, Protocol, TcpState, UnixShow};
 
 /// Socket filter builder.
@@ -101,6 +102,12 @@ pub struct InetFilter {
     pub mark: Option<(u32, u32)>, // (value, mask)
     /// Filter by cgroup ID.
     pub cgroup_id: Option<u64>,
+    /// Full filter expression (#163). The dump path compiles as much
+    /// of it as possible kernel-side (`INET_DIAG_REQ_BYTECODE` +
+    /// `idiag_states` hoisting) and always applies
+    /// [`FilterExpr::matches`] client-side as the correctness
+    /// backstop unless the compilation was exact.
+    pub expr: Option<FilterExpr>,
 }
 
 impl Default for InetFilter {
@@ -117,6 +124,7 @@ impl Default for InetFilter {
             interface: None,
             mark: None,
             cgroup_id: None,
+            expr: None,
         }
     }
 }
@@ -205,6 +213,25 @@ impl InetFilterBuilder {
     /// Request all extensions.
     pub fn with_all_extensions(mut self) -> Self {
         self.filter.extensions = 0xFF;
+        self
+    }
+
+    /// Request congestion-control info structs (BBR / DCTCP / vegas —
+    /// one kernel extension bit gates all three; the response
+    /// attribute depends on the socket's CC algorithm). Populates
+    /// [`InetSocket::cc_info`](super::InetSocket) (#163).
+    pub fn with_cc_info(mut self) -> Self {
+        self.filter.extensions |= InetExtension::VegasInfo.mask();
+        self
+    }
+
+    /// Attach a full filter expression (#163). As much as possible
+    /// runs kernel-side (compiled `INET_DIAG_REQ_BYTECODE` + state
+    /// hoisting into `idiag_states`); the rest — and anything the
+    /// kernel over-approximates — is applied client-side via
+    /// [`FilterExpr::matches`] before sockets are returned.
+    pub fn filter_expr(mut self, expr: FilterExpr) -> Self {
+        self.filter.expr = Some(expr);
         self
     }
 

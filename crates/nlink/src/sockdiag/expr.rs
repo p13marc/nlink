@@ -389,6 +389,7 @@ mod tests {
             tcp_info: None,
             mem_info: None,
             congestion: None,
+            cc_info: None,
             tos: None,
             tclass: None,
             shutdown: None,

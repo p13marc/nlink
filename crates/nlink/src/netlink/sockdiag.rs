@@ -32,8 +32,8 @@ pub use crate::sockdiag::filter::{
 pub use crate::sockdiag::{
     socket::{InetSocket, SocketInfo, UnixSocket, UnixType},
     types::{
-        AddressFamily, MemInfo, Protocol as InetProtocol, SocketState, SocketSummary, TcpInfo,
-        TcpState, Timer,
+        AddressFamily, BbrInfo, CcInfo, DctcpInfo, MemInfo, Protocol as InetProtocol, SocketState,
+        SocketSummary, TcpInfo, TcpState, Timer, VegasInfo,
     },
 };
 
@@ -54,11 +54,18 @@ const NLM_F_ACK: u16 = 0x04;
 // Inet diag extensions
 const INET_DIAG_MEMINFO: u16 = 1;
 const INET_DIAG_INFO: u16 = 2;
+const INET_DIAG_VEGASINFO: u16 = 3;
 const INET_DIAG_CONG: u16 = 4;
 const INET_DIAG_TOS: u16 = 5;
 const INET_DIAG_TCLASS: u16 = 6;
 const INET_DIAG_SKMEMINFO: u16 = 7;
 const INET_DIAG_SHUTDOWN: u16 = 8;
+// DCTCPINFO/BBRINFO are response-only attribute IDs above the 8-bit
+// idiag_ext field; all CC-info structs are requested via the
+// VEGASINFO extension bit (the kernel then calls the CC module's
+// get_info, which picks its own response attr).
+const INET_DIAG_DCTCPINFO: u16 = 9;
+const INET_DIAG_BBRINFO: u16 = 16;
 const INET_DIAG_MARK: u16 = 15;
 const INET_DIAG_CGROUP_ID: u16 = 21;
 const INET_DIAG_SKV6ONLY: u16 = 11;
@@ -438,6 +445,42 @@ impl Connection<SockDiag> {
         filter: &InetFilter,
         family: AddressFamily,
     ) -> Result<Vec<InetSocket>> {
+        // Kernel-side lowering (#163): build ONE effective expression
+        // from the filter's exact ports plus the optional full
+        // FilterExpr, and compile it once. Composition MUST happen at
+        // the expression level — concatenating two independently
+        // compiled programs is invalid (the first one's reject
+        // overshoot would land mid-instruction in the second).
+        let effective_expr = {
+            use crate::sockdiag::expr::{Comparison, FilterExpr};
+            let mut expr: Option<FilterExpr> = filter.expr.clone();
+            if let Some(p) = filter.local_port {
+                let port = FilterExpr::Sport(Comparison::Eq, p);
+                expr = Some(match expr {
+                    Some(e) => FilterExpr::And(Box::new(e), Box::new(port)),
+                    None => port,
+                });
+            }
+            if let Some(p) = filter.remote_port {
+                let port = FilterExpr::Dport(Comparison::Eq, p);
+                expr = Some(match expr {
+                    Some(e) => FilterExpr::And(Box::new(e), Box::new(port)),
+                    None => port,
+                });
+            }
+            expr
+        };
+        let compiled = effective_expr
+            .as_ref()
+            .map(crate::sockdiag::bytecode::compile_filter)
+            .unwrap_or_default();
+        // Client-side backstop: needed whenever a full expression was
+        // given and the kernel-side lowering over-approximates.
+        let backstop = match (&filter.expr, compiled.exact) {
+            (Some(expr), false) => Some(expr.clone()),
+            _ => None,
+        };
+
         // F1 fix — serialize the send + recv-loop pair so concurrent
         // tasks on a shared `Arc<Connection>` don't race on the recv
         // side. See connection.rs `Concurrency` docstring. Acquired
@@ -463,7 +506,10 @@ impl Connection<SockDiag> {
             buf.push(filter.protocol.number());
             buf.push(filter.extensions);
             buf.push(0);
-            buf.extend_from_slice(&filter.states.to_ne_bytes());
+            // Pure-state conjuncts of the expression hoist into the
+            // header's states bitmask (there is no state opcode).
+            let states = filter.states & compiled.states.unwrap_or(u32::MAX);
+            buf.extend_from_slice(&states.to_ne_bytes());
 
             buf.extend_from_slice(&0u16.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes());
@@ -472,21 +518,19 @@ impl Connection<SockDiag> {
             buf.extend_from_slice(&0u32.to_ne_bytes());
             buf.extend_from_slice(&[0u8; 8]);
 
-            // Optional INET_DIAG_REQ_BYTECODE attribute — lower the
-            // filter's exact source/destination port into a kernel-side
-            // pre-filter so far fewer sockets cross into userspace. A
-            // malformed program is rejected by the kernel's bc-audit with
-            // EINVAL (loud); any client-side filtering stays as the
-            // correctness backstop.
-            if let Some(code) =
-                crate::sockdiag::bytecode::for_ports(filter.local_port, filter.remote_port)
-            {
+            // Optional INET_DIAG_REQ_BYTECODE attribute — run the
+            // compiled program as a kernel-side pre-filter so far
+            // fewer sockets cross into userspace. A malformed program
+            // is rejected by the kernel's bc-audit with EINVAL (loud);
+            // the client-side backstop keeps correctness whenever the
+            // lowering was inexact.
+            if let Some(code) = &compiled.bytecode {
                 let attr_len = (4 + code.len()) as u16;
                 buf.extend_from_slice(&attr_len.to_ne_bytes());
                 buf.extend_from_slice(
                     &crate::sockdiag::bytecode::INET_DIAG_REQ_BYTECODE.to_ne_bytes(),
                 );
-                buf.extend_from_slice(&code);
+                buf.extend_from_slice(code);
                 // Pad the attribute to a 4-byte boundary.
                 let pad = (4 - (code.len() % 4)) % 4;
                 buf.extend(std::iter::repeat_n(0u8, pad));
@@ -550,7 +594,11 @@ impl Connection<SockDiag> {
                                 &data[offset..offset + nlmsg_len],
                                 filter.protocol,
                             ) {
-                                sockets.push(sock);
+                                // Backstop for inexact kernel-side
+                                // lowering (#163).
+                                if backstop.as_ref().is_none_or(|e| e.matches(&sock)) {
+                                    sockets.push(sock);
+                                }
                             }
                         }
                         _ => {}
@@ -1087,6 +1135,7 @@ fn parse_inet_msg(data: &[u8], protocol: InetProtocol) -> Option<InetSocket> {
         tcp_info: None,
         mem_info: None,
         congestion: None,
+        cc_info: None,
         tos: None,
         tclass: None,
         shutdown: None,
@@ -1232,6 +1281,59 @@ fn parse_inet_msg(data: &[u8], protocol: InetProtocol) -> Option<InetSocket> {
             }
             INET_DIAG_SKV6ONLY if !attr_data.is_empty() => {
                 sock.v6only = Some(attr_data[0] != 0);
+            }
+            // CC-specific info structs (#163) — which one the kernel
+            // emits depends on the socket's CC algorithm; all three
+            // are gated by the VEGASINFO request bit. Rule-1
+            // accept-larger: read the known prefix.
+            INET_DIAG_VEGASINFO if attr_data.len() >= 16 => {
+                let u = |o: usize| {
+                    u32::from_ne_bytes([
+                        attr_data[o],
+                        attr_data[o + 1],
+                        attr_data[o + 2],
+                        attr_data[o + 3],
+                    ])
+                };
+                sock.cc_info = Some(CcInfo::Vegas(VegasInfo {
+                    enabled: u(0) != 0,
+                    rttcnt: u(4),
+                    rtt: u(8),
+                    minrtt: u(12),
+                }));
+            }
+            INET_DIAG_DCTCPINFO if attr_data.len() >= 16 => {
+                let u = |o: usize| {
+                    u32::from_ne_bytes([
+                        attr_data[o],
+                        attr_data[o + 1],
+                        attr_data[o + 2],
+                        attr_data[o + 3],
+                    ])
+                };
+                sock.cc_info = Some(CcInfo::Dctcp(DctcpInfo {
+                    enabled: u16::from_ne_bytes([attr_data[0], attr_data[1]]) != 0,
+                    ce_state: u16::from_ne_bytes([attr_data[2], attr_data[3]]),
+                    alpha: u(4),
+                    ab_ecn: u(8),
+                    ab_tot: u(12),
+                }));
+            }
+            INET_DIAG_BBRINFO if attr_data.len() >= 20 => {
+                let u = |o: usize| {
+                    u32::from_ne_bytes([
+                        attr_data[o],
+                        attr_data[o + 1],
+                        attr_data[o + 2],
+                        attr_data[o + 3],
+                    ])
+                };
+                sock.cc_info = Some(CcInfo::Bbr(BbrInfo {
+                    bw: (u(0) as u64) | ((u(4) as u64) << 32),
+                    min_rtt_us: u(8),
+                    pacing_gain: u(12),
+                    cwnd_gain: u(16),
+                }));
             }
             _ => {}
         }
@@ -1843,5 +1945,106 @@ mod tcp_info_tests {
         buf[200..208].copy_from_slice(&12345u64.to_ne_bytes());
         let info = parse_tcp_info(&buf);
         assert_eq!(info.bytes_sent, 0, "partial 4.19 block must be ignored");
+    }
+}
+
+#[cfg(test)]
+mod cc_info_tests {
+    use super::*;
+
+    /// Build a minimal inet_diag response frame: 16-byte nlmsghdr +
+    /// 72-byte inet_diag_msg (AF_INET, ESTABLISHED) + the given attrs.
+    fn inet_frame(attrs: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let mut msg = vec![0u8; 16 + 72];
+        msg[16] = 2; // AF_INET
+        msg[17] = 1; // TCP_ESTABLISHED
+        for (attr_type, payload) in attrs {
+            let attr_len = (4 + payload.len()) as u16;
+            msg.extend_from_slice(&attr_len.to_ne_bytes());
+            msg.extend_from_slice(&attr_type.to_ne_bytes());
+            msg.extend_from_slice(payload);
+            while !msg.len().is_multiple_of(4) {
+                msg.push(0);
+            }
+        }
+        let total = msg.len() as u32;
+        msg[0..4].copy_from_slice(&total.to_ne_bytes());
+        msg
+    }
+
+    fn u32s(vals: &[u32]) -> Vec<u8> {
+        vals.iter().flat_map(|v| v.to_ne_bytes()).collect()
+    }
+
+    #[test]
+    fn bbr_info_parses_with_bw_assembly() {
+        // bw_lo, bw_hi, min_rtt, pacing_gain, cwnd_gain
+        let frame = inet_frame(&[(INET_DIAG_BBRINFO, u32s(&[0x1000_0000, 0x2, 500, 320, 512]))]);
+        let sock = parse_inet_msg(&frame, InetProtocol::Tcp).expect("parses");
+        match sock.cc_info {
+            Some(CcInfo::Bbr(bbr)) => {
+                assert_eq!(bbr.bw, 0x1000_0000u64 | (0x2u64 << 32));
+                assert_eq!(bbr.min_rtt_us, 500);
+                assert_eq!(bbr.pacing_gain, 320);
+                assert_eq!(bbr.cwnd_gain, 512);
+            }
+            other => panic!("expected Bbr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dctcp_info_parses_u16_head() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u16.to_ne_bytes()); // enabled
+        payload.extend_from_slice(&2u16.to_ne_bytes()); // ce_state
+        payload.extend_from_slice(&u32s(&[300, 400, 500])); // alpha, ab_ecn, ab_tot
+        let frame = inet_frame(&[(INET_DIAG_DCTCPINFO, payload)]);
+        let sock = parse_inet_msg(&frame, InetProtocol::Tcp).expect("parses");
+        match sock.cc_info {
+            Some(CcInfo::Dctcp(d)) => {
+                assert!(d.enabled);
+                assert_eq!(d.ce_state, 2);
+                assert_eq!(d.alpha, 300);
+                assert_eq!(d.ab_ecn, 400);
+                assert_eq!(d.ab_tot, 500);
+            }
+            other => panic!("expected Dctcp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vegas_info_parses_and_short_attr_is_skipped() {
+        let frame = inet_frame(&[(INET_DIAG_VEGASINFO, u32s(&[1, 7, 1500, 900]))]);
+        let sock = parse_inet_msg(&frame, InetProtocol::Tcp).expect("parses");
+        match sock.cc_info {
+            Some(CcInfo::Vegas(v)) => {
+                assert!(v.enabled);
+                assert_eq!(v.rttcnt, 7);
+                assert_eq!(v.rtt, 1500);
+                assert_eq!(v.minrtt, 900);
+            }
+            other => panic!("expected Vegas, got {other:?}"),
+        }
+
+        // Truncated struct → attribute skipped, socket still parses.
+        let frame = inet_frame(&[(INET_DIAG_BBRINFO, u32s(&[1, 2, 3]))]);
+        let sock = parse_inet_msg(&frame, InetProtocol::Tcp).expect("parses");
+        assert!(sock.cc_info.is_none());
+    }
+
+    /// #163 — pin the request-bit mapping. The kernel checks
+    /// `ext & (1 << (attr - 1))`; before 0.24 `mask()` returned
+    /// `1 << attr` (off by one, so with_mem_info() requested INFO).
+    #[test]
+    fn inet_extension_masks_match_kernel_bits() {
+        use crate::sockdiag::InetExtension;
+        assert_eq!(InetExtension::MemInfo.mask(), 1 << 0);
+        assert_eq!(InetExtension::Info.mask(), 1 << 1);
+        assert_eq!(InetExtension::VegasInfo.mask(), 1 << 2);
+        assert_eq!(InetExtension::Cong.mask(), 1 << 3);
+        assert_eq!(InetExtension::Tos.mask(), 1 << 4);
+        assert_eq!(InetExtension::TClass.mask(), 1 << 5);
+        assert_eq!(InetExtension::SkMemInfo.mask(), 1 << 6);
+        assert_eq!(InetExtension::Shutdown.mask(), 1 << 7);
     }
 }
