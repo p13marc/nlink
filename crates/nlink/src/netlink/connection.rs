@@ -2715,6 +2715,20 @@ impl Connection<Route> {
         self.del_link_by_index(ifindex).await
     }
 
+    /// Delete a network interface if it exists. Returns `Ok(true)`
+    /// if the link was deleted, `Ok(false)` if it didn't exist.
+    /// Unlike [`Self::del_link`], does NOT error on `ENOENT`/
+    /// `ENODEV` — the cleanup shape nearly all callers want (#169;
+    /// mirrors the nftables `del_*_if_exists` family).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_link_if_exists"))]
+    pub async fn del_link_if_exists(&self, iface: impl Into<InterfaceRef>) -> Result<bool> {
+        match self.del_link(iface).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Delete a network interface by index.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_link_by_index"))]
     pub async fn del_link_by_index(&self, ifindex: u32) -> Result<()> {

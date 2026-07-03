@@ -99,6 +99,21 @@ impl<'a> NamespaceSpec<'a> {
         }
     }
 
+    /// Create an async-initialized connection (GENL families that
+    /// need family-ID resolution — WireGuard, MACsec, …) for this
+    /// namespace specification. Async counterpart of
+    /// [`connection`](Self::connection) (#169).
+    pub async fn connection_async<P: AsyncProtocolInit + AsyncConstructible>(
+        &self,
+    ) -> Result<Connection<P>> {
+        match self {
+            NamespaceSpec::Default => Connection::<P>::new_async().await,
+            NamespaceSpec::Named(name) => connection_for_async(name).await,
+            NamespaceSpec::Path(path) => connection_for_path_async(path).await,
+            NamespaceSpec::Pid(pid) => connection_for_pid_async(*pid).await,
+        }
+    }
+
     /// Check if this refers to the default namespace.
     #[inline]
     pub fn is_default(&self) -> bool {

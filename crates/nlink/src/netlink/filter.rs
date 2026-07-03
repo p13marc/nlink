@@ -4295,6 +4295,25 @@ impl Connection<Route> {
             .await
     }
 
+    /// Delete a filter if it exists. Returns `Ok(true)` if the
+    /// filter was deleted, `Ok(false)` if there was none. Unlike
+    /// [`Self::del_filter`], does NOT error on `ENOENT` (#169;
+    /// mirrors the nftables `del_*_if_exists` family).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_filter_if_exists"))]
+    pub async fn del_filter_if_exists(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        parent: TcHandle,
+        protocol: u16,
+        priority: u16,
+    ) -> Result<bool> {
+        match self.del_filter(dev, parent, protocol, priority).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Delete a filter by interface index.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_filter_by_index"))]
     pub async fn del_filter_by_index(

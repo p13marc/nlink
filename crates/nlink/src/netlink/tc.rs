@@ -7552,6 +7552,27 @@ impl Connection<Route> {
         self.del_qdisc_full(dev, parent, None).await
     }
 
+    /// Delete a qdisc if it exists. Returns `Ok(true)` if the qdisc
+    /// was deleted, `Ok(false)` if there was none (also covers a
+    /// missing interface). Unlike [`Self::del_qdisc`], does NOT
+    /// error when there's nothing to delete (#169; mirrors the
+    /// nftables `del_*_if_exists` family).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_qdisc_if_exists"))]
+    pub async fn del_qdisc_if_exists(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        parent: TcHandle,
+    ) -> Result<bool> {
+        match self.del_qdisc(dev, parent).await {
+            Ok(()) => Ok(true),
+            // The kernel answers "no qdisc there" with ENOENT (or
+            // the typed QdiscNotFound), but EINVAL when only the
+            // never-deletable default qdisc sits at that position.
+            Err(e) if e.is_not_found() || e.is_invalid_argument() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Delete a qdisc with explicit handle.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_qdisc_full"))]
     pub async fn del_qdisc_full(

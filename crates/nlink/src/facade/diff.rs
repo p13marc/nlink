@@ -2,10 +2,15 @@
 //!
 //! Pair with [`super::apply`] — render the diff, decide
 //! whether to apply, then commit.
+//!
+//! Each config type has three shapes (#169): plain (default
+//! namespace), `_in_namespace(&str)` (named netns), and the
+//! general `_in(NamespaceSpec)` which also covers path- and
+//! PID-referenced namespaces (containers).
 
 use crate::netlink::config::{ConfigDiff, NetworkConfig};
 use crate::netlink::genl::wireguard::{WireguardConfig, WireguardConfigDiff};
-use crate::netlink::namespace;
+use crate::netlink::namespace::NamespaceSpec;
 use crate::netlink::nftables::config::{NftablesConfig, NftablesDiff};
 use crate::netlink::{Nftables, Route, Wireguard};
 use crate::{Connection, Result};
@@ -17,13 +22,18 @@ use crate::{Connection, Result};
 /// Diff a network config against the host's default
 /// namespace.
 pub async fn network(cfg: &NetworkConfig) -> Result<ConfigDiff> {
-    let conn = Connection::<Route>::new()?;
-    cfg.diff(&conn).await
+    network_in(NamespaceSpec::Default, cfg).await
 }
 
 /// Diff a network config against a named namespace.
 pub async fn network_in_namespace(ns: &str, cfg: &NetworkConfig) -> Result<ConfigDiff> {
-    let conn = namespace::connection_for::<Route>(ns)?;
+    network_in(NamespaceSpec::Named(ns), cfg).await
+}
+
+/// Diff a network config against any namespace specification
+/// (named, path, or PID — container support, #169).
+pub async fn network_in(ns: NamespaceSpec<'_>, cfg: &NetworkConfig) -> Result<ConfigDiff> {
+    let conn: Connection<Route> = ns.connection()?;
     cfg.diff(&conn).await
 }
 
@@ -34,13 +44,18 @@ pub async fn network_in_namespace(ns: &str, cfg: &NetworkConfig) -> Result<Confi
 /// Diff an nftables config against the host's default
 /// namespace.
 pub async fn nftables(cfg: &NftablesConfig) -> Result<NftablesDiff> {
-    let conn = Connection::<Nftables>::new()?;
-    cfg.diff(&conn).await
+    nftables_in(NamespaceSpec::Default, cfg).await
 }
 
 /// Diff an nftables config against a named namespace.
 pub async fn nftables_in_namespace(ns: &str, cfg: &NftablesConfig) -> Result<NftablesDiff> {
-    let conn = namespace::connection_for::<Nftables>(ns)?;
+    nftables_in(NamespaceSpec::Named(ns), cfg).await
+}
+
+/// Diff an nftables config against any namespace specification
+/// (named, path, or PID — container support, #169).
+pub async fn nftables_in(ns: NamespaceSpec<'_>, cfg: &NftablesConfig) -> Result<NftablesDiff> {
+    let conn: Connection<Nftables> = ns.connection()?;
     cfg.diff(&conn).await
 }
 
@@ -51,8 +66,7 @@ pub async fn nftables_in_namespace(ns: &str, cfg: &NftablesConfig) -> Result<Nft
 /// Diff a WireGuard config against the host's default
 /// namespace.
 pub async fn wireguard(cfg: &WireguardConfig) -> Result<WireguardConfigDiff> {
-    let conn = Connection::<Wireguard>::new_async().await?;
-    cfg.diff(&conn).await
+    wireguard_in(NamespaceSpec::Default, cfg).await
 }
 
 /// Diff a WireGuard config against a named namespace.
@@ -60,6 +74,15 @@ pub async fn wireguard_in_namespace(
     ns: &str,
     cfg: &WireguardConfig,
 ) -> Result<WireguardConfigDiff> {
-    let conn = namespace::connection_for_async::<Wireguard>(ns).await?;
+    wireguard_in(NamespaceSpec::Named(ns), cfg).await
+}
+
+/// Diff a WireGuard config against any namespace specification
+/// (named, path, or PID — container support, #169).
+pub async fn wireguard_in(
+    ns: NamespaceSpec<'_>,
+    cfg: &WireguardConfig,
+) -> Result<WireguardConfigDiff> {
+    let conn: Connection<Wireguard> = ns.connection_async().await?;
     cfg.diff(&conn).await
 }

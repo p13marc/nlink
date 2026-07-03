@@ -272,6 +272,7 @@ impl WgPeerBuilder {
 }
 
 /// An allowed IP range for a WireGuard peer.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AllowedIp {
     /// IP address (network portion).

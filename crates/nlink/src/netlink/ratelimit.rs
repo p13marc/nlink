@@ -219,6 +219,293 @@ impl RateLimiter {
         Ok(())
     }
 
+    /// Idempotently converge the interface to this limiter's desired
+    /// state, mutating only what drifted (#169 — mirrors
+    /// [`PerHostLimiter::reconcile`]).
+    ///
+    /// Unlike [`apply()`](Self::apply), which tears down the root
+    /// qdisc and rebuilds (dropping in-flight queue state), reconcile
+    /// dumps the live TC tree and issues only the kernel calls needed
+    /// to close the gap. Calling `reconcile()` twice in a row with no
+    /// other changes makes **zero** kernel calls on the second
+    /// invocation.
+    ///
+    /// If a live root qdisc is the wrong kind (not the HTB shape this
+    /// helper installs), reconcile errors by default; pass
+    /// [`ReconcileOptions::with_fallback_to_apply`]`(true)` to trigger
+    /// a destructive rebuild via [`apply()`](Self::apply) instead.
+    ///
+    /// Known approximation: the ingress redirect filter is checked
+    /// for **presence** at the ingress hook, not for its mirred
+    /// target — re-pointing a hand-modified redirect requires a
+    /// `remove()` + `reconcile()`.
+    #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev))]
+    pub async fn reconcile(&self, conn: &Connection<Route>) -> Result<ReconcileReport> {
+        self.reconcile_with_options(conn, ReconcileOptions::new())
+            .await
+    }
+
+    /// Compute what [`reconcile()`](Self::reconcile) would do without
+    /// making kernel calls.
+    #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev))]
+    pub async fn reconcile_dry_run(&self, conn: &Connection<Route>) -> Result<ReconcileReport> {
+        self.reconcile_with_options(conn, ReconcileOptions::new().with_dry_run(true))
+            .await
+    }
+
+    /// [`reconcile()`](Self::reconcile) with explicit
+    /// [`ReconcileOptions`].
+    #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev, dry_run = opts.dry_run, fallback = opts.fallback_to_apply))]
+    pub async fn reconcile_with_options(
+        &self,
+        conn: &Connection<Route>,
+        opts: ReconcileOptions,
+    ) -> Result<ReconcileReport> {
+        let link = conn
+            .get_link_by_name(&self.dev)
+            .await?
+            .ok_or_else(|| Error::InvalidMessage(format!("interface not found: {}", self.dev)))?;
+        let ifindex = link.ifindex();
+
+        let mut report = ReconcileReport {
+            dry_run: opts.dry_run,
+            ..ReconcileReport::default()
+        };
+
+        // Egress half: HTB shape directly on the interface.
+        if let Some(egress) = &self.egress {
+            let rebuilt = self
+                .reconcile_htb_shape(conn, ifindex, egress, &opts, &mut report, "egress")
+                .await?;
+            if rebuilt {
+                return Ok(report);
+            }
+        }
+
+        // Ingress half: IFB device + ingress hook + redirect + HTB
+        // shape on the IFB.
+        if let Some(ingress) = &self.ingress {
+            let ifb_name = self.ifb_name();
+            let ifb_ifindex = match conn.get_link_by_name(&ifb_name).await? {
+                Some(l) => {
+                    if !l.is_up() {
+                        if !opts.dry_run {
+                            conn.set_link_up_by_index(l.ifindex()).await?;
+                        }
+                        report.changes_made += 1;
+                    }
+                    Some(l.ifindex())
+                }
+                None => {
+                    if opts.dry_run {
+                        // Whole ingress branch pending: link + up +
+                        // shape (root, 1:1, 1:10, leaf). The hook +
+                        // filter are counted below.
+                        report.changes_made += 6;
+                        report.root_modified = true;
+                        None
+                    } else {
+                        conn.add_link(IfbLink::new(&ifb_name)).await?;
+                        conn.set_link_up(&ifb_name).await?;
+                        report.changes_made += 2;
+                        Some(
+                            conn.get_link_by_name(&ifb_name)
+                                .await?
+                                .ok_or_else(|| {
+                                    Error::InvalidMessage(format!(
+                                        "IFB device vanished after creation: {ifb_name}"
+                                    ))
+                                })?
+                                .ifindex(),
+                        )
+                    }
+                }
+            };
+
+            // Ingress hook qdisc on the main interface.
+            let has_ingress_hook = conn
+                .get_qdiscs_by_index(ifindex)
+                .await?
+                .iter()
+                .any(|q| q.kind() == Some("ingress"));
+            if !has_ingress_hook {
+                if !opts.dry_run {
+                    conn.add_qdisc_full(&self.dev, TcHandle::INGRESS, None, IngressConfig::new())
+                        .await?;
+                }
+                report.changes_made += 1;
+            }
+
+            // Redirect filter at the ingress hook (presence check).
+            let has_redirect = has_ingress_hook
+                && !conn
+                    .get_filters_by_parent_index(ifindex, TcHandle::INGRESS)
+                    .await?
+                    .is_empty();
+            if !has_redirect {
+                if !opts.dry_run {
+                    self.add_ingress_redirect(conn, &ifb_name).await?;
+                }
+                report.changes_made += 1;
+            }
+
+            // HTB shape on the IFB side (skipped in dry-run when the
+            // IFB doesn't exist yet — already counted above).
+            if let Some(ifb_ifindex) = ifb_ifindex {
+                let rebuilt = self
+                    .reconcile_htb_shape(conn, ifb_ifindex, ingress, &opts, &mut report, "ingress")
+                    .await?;
+                if rebuilt {
+                    return Ok(report);
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Converge one device's egress tree to the helper's canonical
+    /// shape: HTB root `1:` (default `0x10`) → class `1:1` → class
+    /// `1:10` → fq_codel leaf `10:`. Returns `true` when a wrong-kind
+    /// root triggered the destructive `fallback_to_apply` rebuild (the
+    /// caller must stop reconciling — the rebuild already converged
+    /// everything).
+    async fn reconcile_htb_shape(
+        &self,
+        conn: &Connection<Route>,
+        ifindex: u32,
+        limit: &RateLimit,
+        opts: &ReconcileOptions,
+        report: &mut ReconcileReport,
+        ctx: &str,
+    ) -> Result<bool> {
+        let tree = dump_live_tree(conn, ifindex).await?;
+        let root_handle = TcHandle::major_only(1);
+        let class_1_1 = TcHandle::new(1, 1);
+        let class_1_10 = TcHandle::new(1, 10);
+        let leaf_handle = TcHandle::major_only(10);
+        let rate = limit.rate;
+        let ceil = limit.ceil.unwrap_or(limit.rate);
+        let rate_bps = rate.as_bytes_per_sec();
+        let ceil_bps = ceil.as_bytes_per_sec();
+        let target_us = limit.latency.map(|d| d.as_micros() as u32);
+
+        let class_cfg = || {
+            let mut cfg = HtbClassConfig::new(rate).ceil(ceil);
+            if let Some(burst) = limit.burst {
+                cfg = cfg.burst(burst);
+            }
+            cfg.build()
+        };
+        let leaf_cfg = || {
+            let mut cfg = FqCodelConfig::new();
+            if let Some(latency) = limit.latency {
+                cfg = cfg.target(latency);
+            }
+            cfg.build()
+        };
+
+        // Root HTB.
+        match tree.root_qdisc.as_ref() {
+            None => {
+                if !opts.dry_run {
+                    let cfg = HtbQdiscConfig::new().default_class(0x10).build();
+                    conn.add_qdisc_by_index_full(ifindex, TcHandle::ROOT, Some(root_handle), cfg)
+                        .await
+                        .map_err(|e| {
+                            e.with_context(format!("RateLimiter::reconcile({ctx}): add HTB root"))
+                        })?;
+                }
+                report.changes_made += 1;
+                report.root_modified = true;
+            }
+            Some(q) if q.kind() != Some("htb") || q.handle() != root_handle => {
+                if opts.fallback_to_apply {
+                    report.changes_made += 1;
+                    report.root_modified = true;
+                    if !opts.dry_run {
+                        self.apply(conn).await?;
+                    }
+                    return Ok(true);
+                }
+                return Err(Error::InvalidMessage(format!(
+                    "RateLimiter::reconcile({ctx}): root qdisc is {:?} (handle {}), not HTB \
+                     at 1:; pass ReconcileOptions::with_fallback_to_apply(true) to rebuild",
+                    q.kind(),
+                    q.handle()
+                )));
+            }
+            Some(_) => {}
+        }
+
+        // Classes 1:1 and 1:10.
+        for (classid, parent) in [(class_1_1, root_handle), (class_1_10, class_1_1)] {
+            match tree.class(classid) {
+                None => {
+                    if !opts.dry_run {
+                        conn.add_class_by_index(ifindex, parent, classid, class_cfg())
+                            .await
+                            .map_err(|e| {
+                                e.with_context(format!(
+                                    "RateLimiter::reconcile({ctx}): add class {classid}"
+                                ))
+                            })?;
+                    }
+                    report.changes_made += 1;
+                }
+                Some(c) if !htb_class_rates_match(c, rate_bps, ceil_bps) => {
+                    if !opts.dry_run {
+                        conn.change_class_by_index(ifindex, parent, classid, class_cfg())
+                            .await
+                            .map_err(|e| {
+                                e.with_context(format!(
+                                    "RateLimiter::reconcile({ctx}): update class {classid}"
+                                ))
+                            })?;
+                    }
+                    report.changes_made += 1;
+                }
+                Some(_) => {}
+            }
+        }
+
+        // fq_codel leaf under 1:10.
+        match tree.leaf_for(class_1_10) {
+            None => {
+                if !opts.dry_run {
+                    conn.add_qdisc_by_index_full(ifindex, class_1_10, Some(leaf_handle), leaf_cfg())
+                        .await
+                        .map_err(|e| {
+                            e.with_context(format!(
+                                "RateLimiter::reconcile({ctx}): add fq_codel leaf"
+                            ))
+                        })?;
+                }
+                report.changes_made += 1;
+            }
+            Some(q) if !fq_codel_target_matches(target_us, q) => {
+                if !opts.dry_run {
+                    conn.replace_qdisc_by_index_full(
+                        ifindex,
+                        class_1_10,
+                        Some(leaf_handle),
+                        leaf_cfg(),
+                    )
+                    .await
+                    .map_err(|e| {
+                        e.with_context(format!(
+                            "RateLimiter::reconcile({ctx}): update fq_codel leaf"
+                        ))
+                    })?;
+                }
+                report.changes_made += 1;
+            }
+            Some(_) => {}
+        }
+
+        Ok(false)
+    }
+
     /// Remove all rate limits from the interface.
     #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev))]
     pub async fn remove(&self, conn: &Connection<Route>) -> Result<()> {
