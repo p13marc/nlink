@@ -179,6 +179,11 @@ name = "config_round_trip"
 path = "examples/config/round_trip.rs"
 required-features = ["serde"]
 
+# Stack facade (network + nftables + WireGuard bundle)
+[[example]]
+name = "config_stack"
+path = "examples/config/stack.rs"
+
 # Traffic control examples
 [[example]]
 name = "route_tc_netem"

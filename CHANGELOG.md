@@ -106,8 +106,9 @@ All notable changes to this project will be documented in this file.
   [`per-process-bandwidth`](docs/recipes/per-process-bandwidth.md)
   (attribution + rate tracking + kernel-side filtering end-to-end);
   new runnable examples `sockdiag_rate_top` (per-process bandwidth
-  top) and `sockdiag_filter_expr` (`compile_filter` introspection +
-  `CcInfo` display); `events_monitor` now uses `subscribe_all()` and
+  top), `sockdiag_filter_expr` (`compile_filter` introspection +
+  `CcInfo` display) and `config_stack` (the `Stack` facade end-to-end
+  incl. `change_count()` and the `--apply` runner pattern); `events_monitor` now uses `subscribe_all()` and
   prints the rule/nexthop/nsid/MDB families; `nftables_firewall`
   decodes dumped rule expressions and per-rule counters;
   `ratelimit_simple` demonstrates `RateLimiter::reconcile`

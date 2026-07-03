@@ -630,6 +630,36 @@ std::fs::write(
 `json_schema_value()` returns the `schemars::schema::RootSchema` if you
 want to inspect or merge it rather than emit text.
 
+### The Stack facade — all three layers in one bundle
+
+`nlink::facade::Stack` bundles `NetworkConfig` + `NftablesConfig` +
+`WireguardConfig` and applies them in dependency order (links →
+firewall → VPN), with a pre-flight `diff()` across every set layer
+before the first mutation. Since 0.24 (#169): `apply_in` / `diff_in`
+take a `NamespaceSpec` (named / path / PID — container support),
+`StackDiff::change_count()` / `StackApplyReport::change_count()`
+aggregate the per-layer counts, and a declared-but-absent WireGuard
+device is created automatically.
+
+```rust
+use nlink::facade::Stack;
+use nlink::netlink::NamespaceSpec;
+
+let stack = Stack::new()
+    .network(net_cfg)
+    .nftables(fw_cfg)
+    .wireguard(wg_cfg);
+
+let diff = stack.diff().await?;                    // pre-flight, read-only
+println!("{} pending change(s)", diff.change_count());
+let report = stack.apply().await?;                 // host netns
+let report = stack.apply_in(NamespaceSpec::Pid(container_pid)).await?;
+assert!(stack.apply().await?.is_noop());           // converged
+```
+
+Runnable demo: `cargo run -p nlink --example config_stack`
+(diff-only unprivileged; `--apply` under root).
+
 ## Rate Limiting DSL
 
 High-level rate limiting with minimal configuration:
