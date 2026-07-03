@@ -345,6 +345,18 @@ fn parse_mdb_attrs(bridge_ifindex: u32, attrs: &[u8], out: &mut Vec<MdbEntry>) {
     }
 }
 
+/// Parse the post-`nlmsghdr` payload of an `RTM_NEWMDB` / `RTM_DELMDB`
+/// notification (`struct br_port_msg` + attributes) into the first
+/// contained [`MdbEntry`]. Notifications carry exactly one entry
+/// (`br_mdb_notify`); a malformed or empty payload yields `None`.
+pub(crate) fn parse_mdb_event_payload(payload: &[u8]) -> Option<MdbEntry> {
+    let (bpm, _) = BrPortMsg::read_from_prefix(payload).ok()?;
+    let attrs = payload.get(BrPortMsg::SIZE..)?;
+    let mut entries = Vec::with_capacity(1);
+    parse_mdb_attrs(bpm.ifindex, attrs, &mut entries);
+    entries.into_iter().next()
+}
+
 /// Decode a single `br_mdb_entry` payload into an [`MdbEntry`].
 fn parse_mdb_entry_info(bridge_ifindex: u32, info: &[u8]) -> Option<MdbEntry> {
     // Accept-larger-than-expected: the kernel may grow br_mdb_entry.
@@ -467,5 +479,38 @@ mod tests {
         assert_eq!(e.vid, 42);
         assert!(e.permanent);
         assert_eq!(e.group, MdbGroup::Ip(IpAddr::V4(Ipv4Addr::new(239, 9, 9, 9))));
+    }
+
+    /// #165 — an RTM_NEWMDB/DELMDB notification payload
+    /// (br_port_msg + MDBA nest) decodes into its single entry.
+    #[test]
+    fn parse_event_payload_recovers_entry() {
+        let built = MdbEntryBuilder::new(
+            InterfaceRef::Index(3),
+            InterfaceRef::Index(9),
+            Ipv4Addr::new(239, 1, 2, 3),
+        )
+        .vid(10)
+        .to_entry(9);
+
+        let mut b = MessageBuilder::new(0, 0);
+        let bpm = BrPortMsg::new().with_family(AF_BRIDGE).with_ifindex(3);
+        b.append(&bpm);
+        let mdb = b.nest_start(mdba::MDBA_MDB);
+        let grp = b.nest_start(mdba_mdb::MDBA_MDB_ENTRY);
+        b.append_attr(mdba_mdb_entry::MDBA_MDB_ENTRY_INFO, built.as_bytes());
+        b.nest_end(grp);
+        b.nest_end(mdb);
+
+        let payload = &b.as_bytes()[16..];
+        let e = parse_mdb_event_payload(payload).expect("event payload should parse");
+        assert_eq!(e.bridge_ifindex, 3);
+        assert_eq!(e.port_ifindex, 9);
+        assert_eq!(e.vid, 10);
+        assert_eq!(e.group, MdbGroup::Ip(IpAddr::V4(Ipv4Addr::new(239, 1, 2, 3))));
+
+        // Malformed / truncated payloads yield None, never panic.
+        assert!(parse_mdb_event_payload(&[]).is_none());
+        assert!(parse_mdb_event_payload(&payload[..4]).is_none());
     }
 }

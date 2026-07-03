@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Rule / Nexthop / NsId / MDB events (#165).** `NetworkEvent` gained
+  `NewRule`/`DelRule` (`RuleMessage`), `NewNexthop`/`DelNexthop`
+  (`Nexthop`), `NewNsId`/`DelNsId` (`NsIdMessage`) and `NewMdb`/`DelMdb`
+  (`MdbEntry`) variants with matching `as_*`/`into_*` accessors —
+  policy-routing, nexthop-object, namespace-ID and bridge-multicast-DB
+  changes now surface as typed events. New `RtnetlinkGroup::{Nexthop,
+  Mdb}` subscription variants plus `RTNLGRP_IPV4_NETCONF` /
+  `RTNLGRP_IPV6_NETCONF` / `RTNLGRP_MDB` / `RTNLGRP_NEXTHOP` /
+  `RTNLGRP_BRVLAN` group constants.
+
+### Changed (breaking)
+
+- **`subscribe_all()` now joins every typed-event group (#165)** —
+  previously it omitted `NsId`, `Ipv4Rule` and `Ipv6Rule` (and the new
+  `Nexthop`/`Mdb` groups didn't exist), so those changes were silent
+  under the "all" subscription. Consumers matching exhaustively on
+  `NetworkEvent` were already forced to handle unknown variants
+  (`#[non_exhaustive]`); the new variants simply start arriving.
+- **`ConfigDiff`, `StackDiff` and `WireguardConfigDiff` are now
+  `#[non_exhaustive]` (#165)** — literal construction and functional-
+  update syntax outside nlink no longer compile. Construct them via
+  `NetworkConfig::diff` / `Stack::diff` / `WireguardConfig::diff`
+  (the only ways that ever made sense); this lets future diff
+  categories (e.g. #169's WireGuard device bootstrap) land without a
+  major bump.
+
 ### Fixed
 
 - **XFRM dumps no longer spam the kernel log (#160).**

@@ -1220,5 +1220,10 @@ pub mod rtnetlink_groups {
     pub const RTNLGRP_IPV6_IFINFO: u32 = 12;
     pub const RTNLGRP_IPV6_PREFIX: u32 = 18;
     pub const RTNLGRP_IPV6_RULE: u32 = 19;
+    pub const RTNLGRP_IPV4_NETCONF: u32 = 24;
+    pub const RTNLGRP_IPV6_NETCONF: u32 = 25;
+    pub const RTNLGRP_MDB: u32 = 26;
     pub const RTNLGRP_NSID: u32 = 28;
+    pub const RTNLGRP_NEXTHOP: u32 = 32;
+    pub const RTNLGRP_BRVLAN: u32 = 33;
 }
