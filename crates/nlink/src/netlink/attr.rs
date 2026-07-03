@@ -191,6 +191,16 @@ pub mod get {
         Ok(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
     }
 
+    /// Extract a u64 value (big endian / network order).
+    pub fn u64_be(data: &[u8]) -> Result<u64> {
+        if data.len() < 8 {
+            return Err(Error::InvalidAttribute("truncated u64 attribute".into()));
+        }
+        Ok(u64::from_be_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]))
+    }
+
     /// Extract a null-terminated string.
     pub fn string(data: &[u8]) -> Result<&str> {
         // Find null terminator or use whole buffer
