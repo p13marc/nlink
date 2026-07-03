@@ -76,12 +76,18 @@ hardware shaping incl. hierarchical groups, kernel 6.13+), OpenVPN DCO.
 **Firewall** — nftables tables/chains/rules/NAT/match expressions, named sets
 (imperative + declarative `DeclaredSet` with element-level diff), flowtables
 (`Expr::FlowOffload`), multicast event subscription, atomic single-batch commits
-via `Transaction`, declarative `NftablesConfig` reconcile.
+via `Transaction`, declarative `NftablesConfig` reconcile, typed decoding of
+dumped rule expressions (`RuleInfo::expressions()` / per-rule hit counters
+via `RuleInfo::counter()`).
 
-**Diagnostics & observability** — socket diagnostics (`SockDiag`),
-connection tracking (`Netfilter`/ctnetlink), Linux audit, SELinux events,
-FIB lookups, ethtool statistics + monitor, kobject uevent (device hotplug),
-process connector lifecycle events.
+**Diagnostics & observability** — socket diagnostics (`SockDiag`) with
+kernel-side `ss`-expression filtering (compiled `INET_DIAG_REQ_BYTECODE`
+programs: ports, addresses, or/not, state hoisting), socket→process/cgroup
+attribution (`SocketOwnerMap`/`CgroupPathMap`), per-socket TCP goodput
+tracking (`SocketRateTracker`), typed congestion-control internals
+(BBR/DCTCP/vegas `CcInfo`); connection tracking (`Netfilter`/ctnetlink),
+Linux audit, SELinux events, FIB lookups, ethtool statistics + monitor,
+kobject uevent (device hotplug), process connector lifecycle events.
 
 **Cross-cutting** — XFRM IPsec SA/SP management + hardware offload
 (`XFRMA_OFFLOAD_DEV`) + monitor event stream (`Connection<Xfrm>: EventSource`),

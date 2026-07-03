@@ -88,6 +88,20 @@ Inside `crates/nlink/src/`:
   streams, the `ResyncStreamExt` combinators, and the kube-rs-style
   `Store<K,V>` watch-cache (`ReflectExt::reflect`).
 - `netlink/{ratelimit,impair,diagnostics}.rs` — high-level helpers.
+  Both `RateLimiter` and `PerHostLimiter` expose the idempotent
+  `reconcile{,_dry_run,_with_options}` trio alongside the
+  destructive `apply` (0.24, #169).
+- `sockdiag/` — high-level socket-diagnostics API (feature
+  `sockdiag`; the wire layer is `netlink/sockdiag.rs`): typed
+  queries + `FilterExpr` (ss grammar) with a full
+  `INET_DIAG_REQ_BYTECODE` compiler (`bytecode.rs` —
+  `compile_filter` lowers ports/addresses/or/not kernel-side and
+  hoists `state` into `idiag_states`; client-side backstop applies
+  automatically when inexact), socket→process/cgroup attribution
+  (`procmap.rs` — `/proc` reads are fine here, the sysfs audit gate
+  only covers `netlink/`), cookie-keyed TCP goodput deltas
+  (`rate.rs` — TCP-only; UDP diag has no byte counters), and typed
+  CC internals (`CcInfo`: BBR/DCTCP/vegas). All 0.24, #162/#163/#171.
 - `lab/` — namespace + integration-test harness (feature `lab`).
 
 Types are zero-copy via the `zerocopy` crate (`#[repr(C)]` +
@@ -578,6 +592,11 @@ recipe rather than re-synthesizing:
   in `nlink::lab` namespaces.
 - [`multi-namespace-events`](docs/recipes/multi-namespace-events.md)
   — `StreamMap` fan-in across N namespaces.
+- [`per-process-bandwidth`](docs/recipes/per-process-bandwidth.md) —
+  unprivileged per-socket/process/cgroup TCP goodput from sock_diag
+  polling: kernel-side `FilterExpr` pre-filtering +
+  `SocketRateTracker` + `SocketOwnerMap`/`CgroupPathMap` (0.24+;
+  TCP-only — UDP diag has no byte counters).
 - [`conntrack-programmatic`](docs/recipes/conntrack-programmatic.md)
   — ctnetlink mutation + multicast NEW/DESTROY events.
 - [`nftables-stateful-fw`](docs/recipes/nftables-stateful-fw.md) —
@@ -658,11 +677,31 @@ crates.io). Headline narrative in `CHANGELOG.md ## [0.23.0]`
 + `docs/migration_guide/0.22.0-to-0.23.0.md`. A large, mostly
 library-additive release.
 
-The **next cycle is open on `master`** — new work lands in
-`CHANGELOG.md ## [Unreleased]` and is promoted to the next
-`## [X.Y.0]` at cut time. (CI runs on every push/PR to master, so
+The **0.24.0 cycle is in flight on `master`** (workspace version
+already bumped — the convention is that the cycle's first breaking
+PR bumps it so cargo-semver-checks passes; see commit 041a289 for
+the precedent). Landed 2026-07 from the 2026 roadmap pass (#170):
+the #160 XFRM dump-body fix; #165 Rule/Nexthop/NsId/Mdb
+`NetworkEvent` variants + `#[non_exhaustive]` on
+`ConfigDiff`/`StackDiff`/`WireguardConfigDiff` + `subscribe_all()`
+joining every typed-event group (breaking); #162 socket→process/
+cgroup attribution; #164 typed nftables rule-expression decoding
+(`RuleExpr`); #169 ergonomics batch (`del_*_if_exists`, WG device
+bootstrap `ensure_devices`, `NamespaceSpec` facade `_in` variants,
+`RateLimiter::reconcile`); #171 `SocketRateTracker` + the
+`parse_tcp_info` tail-field fix; #163 full INET_DIAG_BC bytecode
+compiler + `CcInfo` structs + the `InetExtension::mask()` off-by-one
+fix. Still open from that roadmap: #166 (modern-kernel telemetry
+families), #167 (spec-first netlink), #168 (record/replay mock
+transport) — each cycle-sized.
+
+New work lands in `CHANGELOG.md ## [Unreleased]` and is promoted to
+`## [0.24.0]` at cut time. (CI runs on every push/PR to master, so
 the old "work on a release branch, don't push to master" note no
-longer applies.)
+longer applies.) **Remember at cut**: 0.24.0 needs a
+`docs/migration_guide/0.23.0-to-0.24.0.md` covering the #165
+breaking batch (non_exhaustive diffs, subscribe_all breadth) and the
+`InetExtension::mask()` behaviour change.
 
 The 0.23.0 cycle resolved the **#134–#137 follow-on epic**: the
 opt-in dispatcher mode is feature-complete (#134 —

@@ -98,6 +98,25 @@ async fn demo_rate_limiter(conn: &Connection<Route>) -> nlink::Result<()> {
 
     dump_qdiscs(conn, "dummy0", "after RateLimiter::apply").await?;
 
+    // reconcile() (0.24, #169) mirrors PerHostLimiter: idempotent
+    // convergence that only mutates drift. Right after apply() it
+    // must be a no-op; a changed rate converges in place instead of
+    // tearing the tree down.
+    let report = limiter.reconcile(conn).await?;
+    println!(
+        "  reconcile() right after apply(): {} change(s) (expect 0)",
+        report.changes_made
+    );
+    let drifted = RateLimiter::new("dummy0")
+        .egress(nlink::Rate::mbit(200))
+        .burst_to(nlink::Rate::mbit(250))
+        .latency(Duration::from_millis(20));
+    let plan = drifted.reconcile_dry_run(conn).await?;
+    println!(
+        "  reconcile_dry_run() for a 200 Mbps target: {} pending change(s)",
+        plan.changes_made
+    );
+
     println!();
     println!("  Removing...");
     limiter.remove(conn).await?;

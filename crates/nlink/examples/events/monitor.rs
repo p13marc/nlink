@@ -10,8 +10,10 @@
 //!   ip addr add 10.0.0.1/24 dev test0
 //!   ip link set test0 up
 //!   ip link del test0
+//!   ip rule add from 10.9.9.9 lookup 100     # policy-rule event (0.24)
+//!   ip nexthop add id 7 dev test0            # nexthop event (0.24)
 
-use nlink::netlink::{Connection, NetworkEvent, Route, RtnetlinkGroup};
+use nlink::netlink::{Connection, NetworkEvent, Route};
 use tokio_stream::StreamExt;
 
 #[tokio::main]
@@ -19,14 +21,10 @@ async fn main() -> nlink::netlink::Result<()> {
     println!("Monitoring network events (Ctrl+C to stop)...\n");
 
     let conn = Connection::<Route>::new()?;
-    conn.subscribe(&[
-        RtnetlinkGroup::Link,
-        RtnetlinkGroup::Ipv4Addr,
-        RtnetlinkGroup::Ipv6Addr,
-        RtnetlinkGroup::Ipv4Route,
-        RtnetlinkGroup::Ipv6Route,
-        RtnetlinkGroup::Neigh,
-    ])?;
+    // subscribe_all() joins every typed-event group — since 0.24 that
+    // includes policy rules, nexthop objects, namespace IDs and the
+    // bridge multicast DB (#165). Use subscribe(&[...]) to narrow.
+    conn.subscribe_all()?;
 
     let mut events = conn.events().await;
 
@@ -197,6 +195,55 @@ async fn main() -> nlink::netlink::Result<()> {
                     fdb.vlan()
                 );
             }
+
+            // Policy-routing rule events (0.24, #165)
+            NetworkEvent::NewRule(rule) => {
+                println!(
+                    "[RULE+] prio={} table={} src={:?}",
+                    rule.priority(),
+                    rule.table_id(),
+                    rule.source()
+                );
+            }
+            NetworkEvent::DelRule(rule) => {
+                println!("[RULE-] prio={} table={}", rule.priority(), rule.table_id());
+            }
+
+            // Nexthop-object events (0.24, #165)
+            NetworkEvent::NewNexthop(nh) => {
+                println!(
+                    "[NEXTHOP+] id={} gateway={:?} oif={:?}",
+                    nh.id(),
+                    nh.gateway(),
+                    nh.ifindex()
+                );
+            }
+            NetworkEvent::DelNexthop(nh) => {
+                println!("[NEXTHOP-] id={}", nh.id());
+            }
+
+            // Network-namespace ID events (0.24, #165)
+            NetworkEvent::NewNsId(ns) => {
+                println!("[NSID+] nsid={:?} pid={:?}", ns.nsid(), ns.pid());
+            }
+            NetworkEvent::DelNsId(ns) => {
+                println!("[NSID-] nsid={:?}", ns.nsid());
+            }
+
+            // Bridge multicast-database events (0.24, #165)
+            NetworkEvent::NewMdb(mdb) => {
+                println!(
+                    "[MDB+] group={} port_ifindex={} vid={}",
+                    mdb.group, mdb.port_ifindex, mdb.vid
+                );
+            }
+            NetworkEvent::DelMdb(mdb) => {
+                println!(
+                    "[MDB-] group={} port_ifindex={} vid={}",
+                    mdb.group, mdb.port_ifindex, mdb.vid
+                );
+            }
+
             _ => {}
         }
     }

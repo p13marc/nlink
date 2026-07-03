@@ -80,6 +80,15 @@ while let Some(result) = events.next().await {
 }
 ```
 
+`NetworkEvent` covers links, addresses, routes, neighbors, FDB, TC
+(qdisc/class/filter/action) and — since 0.24 (#165) — policy-routing
+rules (`NewRule`/`DelRule`), nexthop objects
+(`NewNexthop`/`DelNexthop`), namespace IDs (`NewNsId`/`DelNsId`) and
+the bridge multicast DB (`NewMdb`/`DelMdb`), with matching
+`RtnetlinkGroup::{Nexthop, Mdb}` subscriptions. `subscribe_all()`
+joins every typed-event group. The enum is `#[non_exhaustive]` —
+always keep a `_ => {}` arm.
+
 ### Namespace-aware Monitoring
 
 ```rust
@@ -443,6 +452,23 @@ wg.set_peer("wg0", peer_pubkey, |peer| {
 wg.del_peer("wg0", peer_pubkey).await?;
 ```
 
+Declarative counterpart: `WireguardConfig` (diff/apply, `wg-quick`
+import via `from_wg_quick`). Since 0.24 (#169) a declared-but-absent
+device no longer fails the diff — it lands in
+`WireguardConfigDiff::devices_to_add`, and
+`WireguardConfig::ensure_devices(&route_conn)` creates the missing
+links idempotently (link creation is an rtnetlink operation, so it
+takes a same-namespace `Connection<Route>`). The
+`facade::apply::wireguard*` helpers wire both together, so a bare
+`WireguardConfig` applies end-to-end:
+
+```rust
+use nlink::netlink::genl::wireguard::WireguardConfig;
+
+let cfg = WireguardConfig::new().device("wg0", |d| d.listen_port(51820));
+nlink::facade::apply::wireguard(&cfg).await?;   // creates wg0 if absent
+```
+
 ## Error Handling
 
 ```rust
@@ -604,6 +630,36 @@ std::fs::write(
 `json_schema_value()` returns the `schemars::schema::RootSchema` if you
 want to inspect or merge it rather than emit text.
 
+### The Stack facade — all three layers in one bundle
+
+`nlink::facade::Stack` bundles `NetworkConfig` + `NftablesConfig` +
+`WireguardConfig` and applies them in dependency order (links →
+firewall → VPN), with a pre-flight `diff()` across every set layer
+before the first mutation. Since 0.24 (#169): `apply_in` / `diff_in`
+take a `NamespaceSpec` (named / path / PID — container support),
+`StackDiff::change_count()` / `StackApplyReport::change_count()`
+aggregate the per-layer counts, and a declared-but-absent WireGuard
+device is created automatically.
+
+```rust
+use nlink::facade::Stack;
+use nlink::netlink::NamespaceSpec;
+
+let stack = Stack::new()
+    .network(net_cfg)
+    .nftables(fw_cfg)
+    .wireguard(wg_cfg);
+
+let diff = stack.diff().await?;                    // pre-flight, read-only
+println!("{} pending change(s)", diff.change_count());
+let report = stack.apply().await?;                 // host netns
+let report = stack.apply_in(NamespaceSpec::Pid(container_pid)).await?;
+assert!(stack.apply().await?.is_noop());           // converged
+```
+
+Runnable demo: `cargo run -p nlink --example config_stack`
+(diff-only unprivileged; `--apply` under root).
+
 ## Rate Limiting DSL
 
 High-level rate limiting with minimal configuration:
@@ -628,6 +684,12 @@ PerHostLimiter::new("eth0", Rate::mbit(10))      // default for unmatched
     .limit_subnet("10.0.0.0/8", Rate::mbit(50))?
     .apply(&conn).await?;
 ```
+
+Both limiters also expose `reconcile()` / `reconcile_dry_run()` /
+`reconcile_with_options()` (`RateLimiter` since 0.24, #169):
+idempotent convergence that dumps the live TC tree and mutates only
+drift — a second call with no changes makes **zero** kernel calls,
+unlike `apply()`, which destructively rebuilds the tree.
 
 ## Network Diagnostics
 
@@ -676,6 +738,88 @@ for issue in &report.issues {
     }
 }
 ```
+
+## Socket Diagnostics (feature `sockdiag`)
+
+Query kernel socket state via `NETLINK_SOCK_DIAG` — the foundation
+for `ss`-style tooling and unprivileged bandwidth observability.
+
+```rust
+use nlink::netlink::{Connection, SockDiag};
+use nlink::sockdiag::{FilterExpr, SocketFilter};
+
+let conn = Connection::<SockDiag>::new()?;
+
+// Simple typed filters
+let listeners = conn
+    .query(&SocketFilter::tcp().listening().build())
+    .await?;
+
+// ss-style expressions run KERNEL-SIDE (0.24, #163): ports and
+// addresses compile to an INET_DIAG_REQ_BYTECODE program, `state`
+// predicates hoist into the request header, and a client-side
+// backstop applies automatically when the lowering is inexact.
+let expr = FilterExpr::parse("( sport = :80 or sport = :443 ) and state established")
+    .map_err(nlink::Error::InvalidMessage)?;
+let busy = conn
+    .query(&SocketFilter::tcp().with_tcp_info().filter_expr(expr).build())
+    .await?;
+
+// Congestion-control internals (0.24, #163): with_cc_info() yields
+// typed BBR/DCTCP/vegas structs on `InetSocket::cc_info`.
+let with_cc = conn
+    .query(&SocketFilter::tcp().with_congestion().with_cc_info().build())
+    .await?;
+```
+
+### Socket → process / cgroup attribution (0.24, #162)
+
+sock_diag deliberately reports no PID. `SocketOwnerMap` is the
+amortized `/proc/<pid>/fd` → `socket:[inode]` scan (with a
+PID-reuse-safe `(pid, start_time)` identity); `CgroupPathMap`
+inverts the kernel's cgroup-v2 ID to its cgroupfs path:
+
+```rust
+use nlink::sockdiag::{CgroupPathMap, SocketOwnerMap};
+
+let owners = SocketOwnerMap::scan();   // one /proc walk per poll cycle
+let cgroups = CgroupPathMap::scan();   // usually once at startup
+for s in listeners.iter().filter_map(|s| s.as_inet()) {
+    for p in owners.resolve(s.inode) {
+        println!("{}:{} → {} (pid {})", s.local.ip(), s.local.port(), p.comm, p.pid);
+    }
+    if let Some(path) = s.cgroup_id.and_then(|id| cgroups.resolve_relative(id)) {
+        println!("  unit: {}", path.display());
+    }
+}
+```
+
+### Per-socket TCP byte rates (0.24, #171)
+
+`SocketRateTracker` turns consecutive dumps into cookie-keyed
+goodput deltas. TCP only — UDP diag has no cumulative byte counters
+(architectural; see the `nlink::sockdiag` module docs for the full
+constraint list):
+
+```rust
+use std::time::Instant;
+use nlink::sockdiag::SocketRateTracker;
+
+let mut tracker = SocketRateTracker::new();
+// each poll tick:
+let snapshot = conn.query(&SocketFilter::tcp().with_tcp_info().build()).await?;
+let inet: Vec<_> = snapshot.iter().filter_map(|s| s.as_inet()).collect();
+for rate in tracker.ingest(inet.iter().copied(), Instant::now()) {
+    println!("cookie {:#x}: tx {} B/s rx {} B/s retrans {:.2}%",
+        rate.cookie, rate.tx_goodput_bps, rate.rx_goodput_bps,
+        rate.retrans_ratio * 100.0);
+}
+```
+
+End-to-end walkthrough:
+[`docs/recipes/per-process-bandwidth.md`](recipes/per-process-bandwidth.md);
+runnable examples under `crates/nlink/examples/sockdiag/`
+(`rate_top`, `filter_expr`, `socket_owners`, …).
 
 ## TC Classes and Filters
 
@@ -1114,7 +1258,7 @@ conn.set_limits(
 | `nlink::netlink::genl` | Generic Netlink (WireGuard, MACsec, MPTCP, Ethtool, nl80211 PHY/scan/station/survey, Devlink, DPLL, net_shaper, OpenVPN DCO) |
 | `nlink::netlink::xfrm` | XFRM IPsec SA/SP CRUD + monitor (`Connection<Xfrm>: EventSource`) |
 | `nlink::util` | Parsing utilities, address helpers, name resolution |
-| `nlink::sockdiag` | Socket diagnostics (feature: `sockdiag`) |
+| `nlink::sockdiag` | Socket diagnostics (feature: `sockdiag`): typed queries, kernel-side `FilterExpr` bytecode filtering, `SocketOwnerMap`/`CgroupPathMap` attribution, `SocketRateTracker` TCP goodput, `CcInfo` (BBR/DCTCP/vegas) |
 | `nlink::tuntap` | TUN/TAP devices (feature: `tuntap`) |
 | `nlink::tc` | TC utilities (feature: `tc`) |
 | `nlink::output` | Output formatting (feature: `output`) |

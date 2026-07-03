@@ -179,6 +179,11 @@ name = "config_round_trip"
 path = "examples/config/round_trip.rs"
 required-features = ["serde"]
 
+# Stack facade (network + nftables + WireGuard bundle)
+[[example]]
+name = "config_stack"
+path = "examples/config/stack.rs"
+
 # Traffic control examples
 [[example]]
 name = "route_tc_netem"
@@ -238,6 +243,16 @@ required-features = ["sockdiag"]
 [[example]]
 name = "sockdiag_socket_owners"
 path = "examples/sockdiag/socket_owners.rs"
+required-features = ["sockdiag"]
+
+[[example]]
+name = "sockdiag_rate_top"
+path = "examples/sockdiag/rate_top.rs"
+required-features = ["sockdiag"]
+
+[[example]]
+name = "sockdiag_filter_expr"
+path = "examples/sockdiag/filter_expr.rs"
 required-features = ["sockdiag"]
 
 # Generic Netlink examples

@@ -102,6 +102,19 @@ All notable changes to this project will be documented in this file.
   (BBR bandwidth assembled from the wire's lo/hi split, bytes/sec).
   Request with `with_cc_info()` — one kernel extension bit gates all
   three; which arrives depends on the socket's CC algorithm.
+- **Documentation & examples for the 0.24 surface.** New recipe
+  [`per-process-bandwidth`](docs/recipes/per-process-bandwidth.md)
+  (attribution + rate tracking + kernel-side filtering end-to-end);
+  new runnable examples `sockdiag_rate_top` (per-process bandwidth
+  top), `sockdiag_filter_expr` (`compile_filter` introspection +
+  `CcInfo` display) and `config_stack` (the `Stack` facade end-to-end
+  incl. `change_count()` and the `--apply` runner pattern); `events_monitor` now uses `subscribe_all()` and
+  prints the rule/nexthop/nsid/MDB families; `nftables_firewall`
+  decodes dumped rule expressions and per-rule counters;
+  `ratelimit_simple` demonstrates `RateLimiter::reconcile`
+  idempotence. `docs/library.md` gained a Socket Diagnostics chapter
+  and WireGuard-bootstrap / reconcile / event-coverage notes; README
+  and CLAUDE.md refreshed to match.
 
 ### Fixed (sockdiag)
 

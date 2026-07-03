@@ -72,6 +72,12 @@ to the hand-rolled netlink primitives if you want to go deeper.
 - [**Multi-namespace event monitoring**](multi-namespace-events.md) —
   watch link/addr/route/TC events across N namespaces concurrently
   with `tokio_stream::StreamMap`.
+- [**Per-process TCP bandwidth (unprivileged)**](per-process-bandwidth.md) —
+  bmon/nethogs-style per-socket / per-process / per-cgroup goodput
+  from sock_diag polling: kernel-side `FilterExpr` pre-filtering,
+  cookie-keyed `SocketRateTracker` deltas, `SocketOwnerMap` +
+  `CgroupPathMap` attribution. Documents the TCP-only /
+  goodput-not-wire / short-flow constraints (0.24+, #162/#163/#171).
 
 ### Cross-cutting
 

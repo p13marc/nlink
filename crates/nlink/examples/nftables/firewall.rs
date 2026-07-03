@@ -169,11 +169,38 @@ async fn run_demo(conn: &Connection<Nftables>) -> nlink::netlink::Result<()> {
     .await?;
     println!("Created set: allowed_ips with 2 entries");
 
-    // List rules
-    println!("\n=== Rules ===");
+    // List rules with decoded expressions (#164). Dumped rules carry
+    // their expressions as raw bytes; `RuleInfo::expressions()`
+    // decodes them into typed `RuleExpr`s — most usefully the live
+    // counter values — and `RuleInfo::counter()` is the shortcut for
+    // per-rule hit/byte counters.
+    println!("\n=== Rules (decoded) ===");
     let rules = conn.list_rules("example", Family::Inet).await?;
     for rule in &rules {
-        println!("  chain={} handle={}", rule.chain, rule.handle);
+        let counter = rule
+            .counter()
+            .map(|(packets, bytes)| format!("{packets} pkts / {bytes} bytes"))
+            .unwrap_or_else(|| "no counter".into());
+        let kinds: Vec<&str> = rule
+            .expressions()
+            .iter()
+            .map(|e| match e {
+                nlink::netlink::nftables::RuleExpr::Counter { .. } => "counter",
+                nlink::netlink::nftables::RuleExpr::Verdict(_) => "verdict",
+                nlink::netlink::nftables::RuleExpr::Meta { .. } => "meta",
+                nlink::netlink::nftables::RuleExpr::Cmp { .. } => "cmp",
+                nlink::netlink::nftables::RuleExpr::Immediate { .. } => "immediate",
+                nlink::netlink::nftables::RuleExpr::Payload { .. } => "payload",
+                _ => "other",
+            })
+            .collect();
+        println!(
+            "  chain={} handle={} [{}] — {}",
+            rule.chain,
+            rule.handle,
+            kinds.join(" "),
+            counter
+        );
     }
 
     Ok(())
