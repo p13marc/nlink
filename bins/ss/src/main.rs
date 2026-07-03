@@ -209,6 +209,18 @@ async fn main() -> anyhow::Result<()> {
         TcpState::connected_mask()
     };
 
+    // Parse the ss filter expression once (if given). It rides on
+    // every inet query so the library compiles as much as possible
+    // into a kernel-side INET_DIAG_REQ_BYTECODE pre-filter (#163);
+    // the post-dump retain below stays as the cross-family filter
+    // (non-inet exclusion, issue #20) and correctness backstop.
+    let filter_expr = if cli.filter_expr.is_empty() {
+        None
+    } else {
+        let expr_str = cli.filter_expr.join(" ");
+        Some(nlink::sockdiag::FilterExpr::parse(&expr_str).map_err(|e| anyhow::anyhow!("{e}"))?)
+    };
+
     // Collect all results
     let mut all_results = Vec::new();
 
@@ -220,6 +232,7 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         };
         apply_inet_filters(&cli, &mut filter);
+        filter.expr = filter_expr.clone();
 
         let sockets = conn
             .query(&SocketFilter {
@@ -246,6 +259,7 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         };
         apply_inet_filters(&cli, &mut filter);
+        filter.expr = filter_expr.clone();
 
         let sockets = conn
             .query(&SocketFilter {
@@ -263,6 +277,7 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         };
         apply_inet_filters(&cli, &mut filter);
+        filter.expr = filter_expr.clone();
 
         let sockets = conn
             .query(&SocketFilter {
@@ -280,6 +295,7 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         };
         apply_inet_filters(&cli, &mut filter);
+        filter.expr = filter_expr.clone();
 
         let sockets = conn
             .query(&SocketFilter {
@@ -297,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         };
         apply_inet_filters(&cli, &mut filter);
+        filter.expr = filter_expr.clone();
 
         let sockets = conn
             .query(&SocketFilter {
@@ -344,21 +361,21 @@ async fn main() -> anyhow::Result<()> {
         all_results.extend(packets.into_iter().map(SocketInfo::Packet));
     }
 
-    // Apply address/port filters client-side. The kernel-side inet
-    // filter does not emit INET_DIAG_REQ_BYTECODE yet, so --sport/
-    // --dport/--src/--dst must be enforced here on the dumped results
-    // (previously they were parsed and then silently ignored). Tracked
-    // for kernel-side bytecode in the library-gaps issue.
+    // Apply address/port filters client-side. --sport/--dport
+    // additionally compile to a kernel-side bytecode pre-filter in
+    // the dump path; --src/--dst stay client-side here (#163 note:
+    // the expression form `src <addr>` DOES compile kernel-side).
     let inet_match = InetMatch::from_cli(&cli)?;
     if inet_match.is_active() {
         all_results.retain(|sock| inet_match.matches(sock));
     }
 
-    // Apply expression filter if provided
-    if !cli.filter_expr.is_empty() {
-        let expr_str = cli.filter_expr.join(" ");
-        let expr =
-            nlink::sockdiag::FilterExpr::parse(&expr_str).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Post-dump expression filter. The inet queries already ran as
+    // much of it as possible kernel-side (bytecode + state hoisting,
+    // #163); this retain is still required to exclude non-inet
+    // sockets (issue #20 semantics) and is the correctness backstop
+    // for anything the kernel over-approximates.
+    if let Some(expr) = &filter_expr {
         all_results.retain(|sock| expr.matches_socket_info(sock));
     }
 

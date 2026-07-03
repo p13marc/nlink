@@ -258,9 +258,15 @@ pub enum InetExtension {
 }
 
 impl InetExtension {
-    /// Get the bitmask for this extension.
+    /// Get the request bitmask for this extension.
+    ///
+    /// The kernel checks `ext & (1 << (attr - 1))`
+    /// (`inet_diag_msg_attrs_fill` / `inet_sk_diag_fill`), so the bit
+    /// for extension N is `1 << (N - 1)`. Before 0.24 this returned
+    /// `1 << N` — off by one, so e.g. `with_mem_info()` actually
+    /// requested `INET_DIAG_INFO` (#163).
     pub fn mask(&self) -> u8 {
-        1 << (*self as u8)
+        1 << (*self as u8 - 1)
     }
 }
 
@@ -294,6 +300,69 @@ impl UnixShow {
     pub fn combine(options: &[UnixShow]) -> u32 {
         options.iter().fold(0, |acc, opt| acc | opt.mask())
     }
+}
+
+/// Vegas congestion-control state (`struct tcpvegas_info`,
+/// `INET_DIAG_VEGASINFO`). Times in microseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VegasInfo {
+    /// Whether Vegas is active on this socket.
+    pub enabled: bool,
+    /// Number of RTT samples in the current interval.
+    pub rttcnt: u32,
+    /// Most recent RTT (µs).
+    pub rtt: u32,
+    /// Minimum RTT observed (µs).
+    pub minrtt: u32,
+}
+
+/// DCTCP congestion-control state (`struct tcp_dctcp_info`,
+/// `INET_DIAG_DCTCPINFO`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DctcpInfo {
+    /// Whether DCTCP is active on this socket.
+    pub enabled: bool,
+    /// Current CE state.
+    pub ce_state: u16,
+    /// ECN-fraction EWMA (alpha), scaled by 1024.
+    pub alpha: u32,
+    /// Bytes acked with ECN marks in the last window.
+    pub ab_ecn: u32,
+    /// Total bytes acked in the last window.
+    pub ab_tot: u32,
+}
+
+/// BBR congestion-control state (`struct tcp_bbr_info`,
+/// `INET_DIAG_BBRINFO`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BbrInfo {
+    /// Max-filtered bottleneck bandwidth estimate, bytes/sec
+    /// (assembled from the wire's `bbr_bw_lo | bbr_bw_hi << 32`).
+    pub bw: u64,
+    /// Min-filtered RTT (µs).
+    pub min_rtt_us: u32,
+    /// Pacing gain, fixed-point shifted left 8 bits (256 = 1.0).
+    pub pacing_gain: u32,
+    /// Cwnd gain, fixed-point shifted left 8 bits (256 = 1.0).
+    pub cwnd_gain: u32,
+}
+
+/// Congestion-control–specific state (#163). Which variant a socket
+/// reports depends on its CC algorithm (join against
+/// [`InetSocket::congestion`](super::InetSocket)); algorithms without
+/// a diag `get_info` hook (cubic, reno) report nothing. Request via
+/// [`InetFilterBuilder::with_cc_info`](super::filter::InetFilterBuilder::with_cc_info)
+/// — one kernel extension bit gates all three variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CcInfo {
+    /// Vegas (`INET_DIAG_VEGASINFO`).
+    Vegas(VegasInfo),
+    /// DCTCP (`INET_DIAG_DCTCPINFO`).
+    Dctcp(DctcpInfo),
+    /// BBR (`INET_DIAG_BBRINFO`).
+    Bbr(BbrInfo),
 }
 
 /// TCP information structure (from tcp_info).

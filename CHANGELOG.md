@@ -78,8 +78,38 @@ All notable changes to this project will be documented in this file.
   rqueue/wqueue are queue depths, never diff them), goodput ≠ wire
   throughput, short flows invisible to polling (BPF socket iterators
   are the successor).
+- **Full INET_DIAG_BC bytecode compiler + kernel-side expression
+  filtering (#163).** The sockdiag bytecode compiler now lowers the
+  complete `FilterExpr` grammar — `src`/`dst` host conditions
+  (`inet_diag_hostcond`, v4/v6/prefix), `or`/`not` (De Morgan
+  push-down + jump structure; the kernel has no NOT opcode), `!=`,
+  and `state` (hoisted into the request header's `idiag_states` —
+  there is no state opcode) — via the new
+  `compile_filter(&FilterExpr) -> CompiledFilter { states, bytecode,
+  exact }`. New `InetFilter::expr` + builder `filter_expr()`: the
+  dump path compiles the expression once, runs it kernel-side, and
+  applies the client-side `matches()` backstop whenever the lowering
+  over-approximates (never under-approximates). `nlink-ss`
+  expressions now pre-filter kernel-side. Emission discipline makes
+  the kernel's `inet_diag_bc_audit` pass structural (every `yes` =
+  own size); a faithful audit-oracle reimplementation runs over every
+  compiled program in the unit tests, and the full matrix (or / not /
+  hostconds v4+v6 / prefix / state hoist / nesting) was verified
+  against a live kernel.
+- **Congestion-control info structs (#163).** `INET_DIAG_VEGASINFO` /
+  `DCTCPINFO` / `BBRINFO` now parse into typed
+  `CcInfo::{Vegas,Dctcp,Bbr}` on the new `InetSocket.cc_info`
+  (BBR bandwidth assembled from the wire's lo/hi split, bytes/sec).
+  Request with `with_cc_info()` — one kernel extension bit gates all
+  three; which arrives depends on the socket's CC algorithm.
 
 ### Fixed (sockdiag)
+
+- **`InetExtension::mask()` was off by one (#163).** The kernel
+  checks `ext & (1 << (attr - 1))`, but `mask()` returned `1 << attr`
+  — so `with_mem_info()` actually requested `INET_DIAG_INFO`,
+  `with_tcp_info()` requested VEGASINFO, and so on, one extension
+  over. Every variant's bit is now pinned by a unit test.
 
 - **`TcpInfo` tail fields were never populated (#171).**
   `parse_tcp_info` stopped at byte 168, so `bytes_sent`,

@@ -7,7 +7,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
 
-use super::types::{AddressFamily, MemInfo, Protocol, SocketState, TcpInfo, TcpState, Timer};
+use super::types::{
+    AddressFamily, CcInfo, MemInfo, Protocol, SocketState, TcpInfo, TcpState, Timer,
+};
 
 /// Common socket information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +103,10 @@ pub struct InetSocket {
     pub mem_info: Option<MemInfo>,
     /// Congestion control algorithm.
     pub congestion: Option<String>,
+    /// Congestion-control–specific state (BBR / DCTCP / vegas),
+    /// when requested via `with_cc_info()` and the socket's CC
+    /// algorithm exposes one (#163).
+    pub cc_info: Option<CcInfo>,
     /// Type of service.
     pub tos: Option<u8>,
     /// Traffic class (IPv6).
@@ -139,6 +145,7 @@ impl InetSocket {
             tcp_info: None,
             mem_info: None,
             congestion: None,
+            cc_info: None,
             tos: None,
             tclass: None,
             shutdown: None,
