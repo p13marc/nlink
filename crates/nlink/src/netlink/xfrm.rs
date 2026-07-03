@@ -1665,8 +1665,12 @@ impl Connection<Xfrm> {
             buf.extend_from_slice(&seq.to_ne_bytes());
             buf.extend_from_slice(&pid.to_ne_bytes());
 
-            let sa_info = XfrmUsersaInfo::default();
-            buf.extend_from_slice(sa_info.as_bytes());
+            // Header-only body (#160): the XFRM dump callbacks parse the
+            // entire body as netlink attributes (hdrlen = 0), so a raw
+            // xfrm_usersa_info struct here is unparsed trailing data and
+            // triggers the kernel's ratelimited "N bytes leftover after
+            // parsing attributes" warning. Filters, if ever wanted, must
+            // be expressed as attributes (XFRMA_ADDRESS_FILTER, ...).
 
             let len = buf.len() as u32;
             buf[0..4].copy_from_slice(&len.to_ne_bytes());
@@ -1768,8 +1772,7 @@ impl Connection<Xfrm> {
             buf.extend_from_slice(&seq.to_ne_bytes());
             buf.extend_from_slice(&pid.to_ne_bytes());
 
-            let pol_info = XfrmUserpolicyInfo::default();
-            buf.extend_from_slice(pol_info.as_bytes());
+            // Header-only body (#160) — see get_security_associations.
 
             let len = buf.len() as u32;
             buf[0..4].copy_from_slice(&len.to_ne_bytes());
@@ -2992,12 +2995,11 @@ use super::{
 };
 
 impl FromNetlink for SecurityAssociation {
-    /// Push a zeroed `xfrm_usersa_info` body — the kernel reads it
-    /// as a "match all" filter for the dump request.
-    fn write_dump_header(buf: &mut Vec<u8>) {
-        let sa_info = XfrmUsersaInfo::default();
-        buf.extend_from_slice(sa_info.as_bytes());
-    }
+    /// Header-only dump request (#160). The XFRM dump callbacks parse
+    /// the whole body as netlink attributes (hdrlen = 0); a raw
+    /// `xfrm_usersa_info` struct is reported as unparsed trailing data
+    /// via a ratelimited kernel warning. No body means "dump all".
+    fn write_dump_header(_buf: &mut Vec<u8>) {}
 
     /// `parse` isn't used by the dump-stream path (it overrides
     /// `from_bytes` instead), but the trait requires it. Consume
@@ -3020,12 +3022,9 @@ impl FromNetlink for SecurityAssociation {
 }
 
 impl FromNetlink for SecurityPolicy {
-    /// Push a zeroed `xfrm_userpolicy_info` body — "match all"
-    /// filter for the dump request.
-    fn write_dump_header(buf: &mut Vec<u8>) {
-        let sp_info = XfrmUserpolicyInfo::default();
-        buf.extend_from_slice(sp_info.as_bytes());
-    }
+    /// Header-only dump request (#160) — see the
+    /// [`SecurityAssociation`] impl for the rationale.
+    fn write_dump_header(_buf: &mut Vec<u8>) {}
 
     fn parse(input: &mut &[u8]) -> PResult<Self> {
         let consumed = *input;
@@ -3081,24 +3080,30 @@ mod stream_tests {
 
     use super::*;
 
-    /// `write_dump_header` writes a fixed-size zero body matching
-    /// the kernel's `xfrm_usersa_info` / `xfrm_userpolicy_info`
-    /// struct size. The kernel parses this as "no filter — dump
-    /// everything."
+    /// `write_dump_header` must write NOTHING (#160): the XFRM dump
+    /// callbacks parse the whole body as netlink attributes, so any
+    /// fixed-struct body is unparsed trailing data and triggers the
+    /// kernel's "N bytes leftover after parsing attributes" warning.
     #[test]
-    fn sa_write_dump_header_pushes_zeroed_usersa_info() {
+    fn sa_write_dump_header_is_empty() {
         let mut buf = Vec::new();
         <SecurityAssociation as FromNetlink>::write_dump_header(&mut buf);
-        assert_eq!(buf.len(), std::mem::size_of::<XfrmUsersaInfo>());
-        assert!(buf.iter().all(|&b| b == 0));
+        assert!(
+            buf.is_empty(),
+            "SA dump body must be header-only (#160), got {} bytes",
+            buf.len()
+        );
     }
 
     #[test]
-    fn sp_write_dump_header_pushes_zeroed_userpolicy_info() {
+    fn sp_write_dump_header_is_empty() {
         let mut buf = Vec::new();
         <SecurityPolicy as FromNetlink>::write_dump_header(&mut buf);
-        assert_eq!(buf.len(), std::mem::size_of::<XfrmUserpolicyInfo>());
-        assert!(buf.iter().all(|&b| b == 0));
+        assert!(
+            buf.is_empty(),
+            "SP dump body must be header-only (#160), got {} bytes",
+            buf.len()
+        );
     }
 
     #[test]

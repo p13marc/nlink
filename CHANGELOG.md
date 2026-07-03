@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **XFRM dumps no longer spam the kernel log (#160).**
+  `Connection::<Xfrm>::get_security_associations()` /
+  `get_security_policies()` (and the `stream_sas()` / `stream_sps()`
+  streaming variants) appended a zeroed `xfrm_usersa_info` /
+  `xfrm_userpolicy_info` struct as the dump body. The XFRM dump
+  callbacks parse the whole body as netlink attributes (`hdrlen = 0`),
+  so the kernel logged a ratelimited `netlink: 224 bytes leftover
+  after parsing attributes` warning (168 for policies) on every poll.
+  Dump requests are now header-only, matching `ip xfrm state/policy`.
+  Results were and remain correct — this kills the log noise.
+
 ## [0.23.0] - 2026-06-30
 
 > Upgrading? See
