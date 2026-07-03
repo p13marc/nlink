@@ -240,6 +240,16 @@ name = "sockdiag_socket_owners"
 path = "examples/sockdiag/socket_owners.rs"
 required-features = ["sockdiag"]
 
+[[example]]
+name = "sockdiag_rate_top"
+path = "examples/sockdiag/rate_top.rs"
+required-features = ["sockdiag"]
+
+[[example]]
+name = "sockdiag_filter_expr"
+path = "examples/sockdiag/filter_expr.rs"
+required-features = ["sockdiag"]
+
 # Generic Netlink examples
 [[example]]
 name = "genl_wireguard"

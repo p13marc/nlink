@@ -90,6 +90,9 @@ for (ns, addr) in [(&wga, "10.0.0.1/24"), (&wgb, "10.0.0.2/24"), (&wgc, "10.0.0.
 }
 
 // 5. Create a WireGuard interface in each peer namespace.
+//    (When driving the declarative `WireguardConfig` instead, 0.24's
+//    `cfg.ensure_devices(&route)` creates any declared-but-absent
+//    links idempotently — #169 — so this manual step disappears.)
 for peer in [&wga, &wgb, &wgc] {
     let route: Connection<Route> = peer.connection()?;
     route.add_link(WireguardLink::new("wg0")).await?;
