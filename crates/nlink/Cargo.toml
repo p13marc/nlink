@@ -235,6 +235,11 @@ name = "sockdiag_unix_sockets"
 path = "examples/sockdiag/unix_sockets.rs"
 required-features = ["sockdiag"]
 
+[[example]]
+name = "sockdiag_socket_owners"
+path = "examples/sockdiag/socket_owners.rs"
+required-features = ["sockdiag"]
+
 # Generic Netlink examples
 [[example]]
 name = "genl_wireguard"

@@ -80,7 +80,7 @@ pub fn print_json(sockets: &[SocketInfo], opts: &DisplayOptions) -> io::Result<(
 /// `None` when none are known. Mirrors `procmap::format_users` but in
 /// structured form for `-j -p`.
 fn procs_to_json(map: &crate::procmap::ProcMap, inode: u32) -> Option<serde_json::Value> {
-    let procs = map.get(&inode)?;
+    let procs = map.resolve(inode);
     if procs.is_empty() {
         return None;
     }
@@ -533,8 +533,10 @@ mod tests {
 
     use nlink::sockdiag::{InetSocket, TcpInfo};
 
+    use nlink::sockdiag::ProcessRef;
+
     use super::{DisplayOptions, format_addr, inet_to_json, procs_to_json};
-    use crate::procmap::{ProcEntry, ProcMap};
+    use crate::procmap::ProcMap;
 
     #[test]
     fn unspecified_addr_renders_star() {
@@ -615,11 +617,12 @@ mod tests {
         let mut map = ProcMap::new();
         map.insert(
             99,
-            vec![ProcEntry {
+            ProcessRef {
                 pid: 100,
+                start_time: 1,
                 comm: "sshd".into(),
                 fd: 3,
-            }],
+            },
         );
         let sock = InetSocket {
             inode: 99,

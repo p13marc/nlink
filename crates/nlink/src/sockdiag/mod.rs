@@ -66,12 +66,14 @@ pub mod bytecode;
 pub mod error;
 pub mod expr;
 pub mod filter;
+pub mod procmap;
 pub mod socket;
 pub mod types;
 
 pub use error::{Error, Result};
 pub use expr::{Comparison, FilterExpr};
 pub use filter::{InetFilter, SocketFilter, UnixFilter};
+pub use procmap::{CgroupPathMap, ProcessRef, SocketOwnerMap};
 pub use socket::{InetSocket, NetlinkSocket, PacketSocket, SocketInfo, UnixSocket};
 pub use types::{
     AddressFamily, DestroyError, DestroyResult, InetExtension, Protocol, SocketState,

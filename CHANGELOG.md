@@ -15,6 +15,21 @@ All notable changes to this project will be documented in this file.
   Mdb}` subscription variants plus `RTNLGRP_IPV4_NETCONF` /
   `RTNLGRP_IPV6_NETCONF` / `RTNLGRP_MDB` / `RTNLGRP_NEXTHOP` /
   `RTNLGRP_BRVLAN` group constants.
+- **Socket → process attribution (#162).** sock_diag deliberately
+  reports no PID, so every `ss -p`-style consumer re-implemented the
+  `/proc/<pid>/fd` → `socket:[inode]` scan. It now lives in the library
+  (feature `sockdiag`): `SocketOwnerMap::scan()` is one amortized
+  `/proc` walk, `resolve(inode)` yields `ProcessRef { pid, start_time,
+  comm, fd }` — `start_time` (stat field 22) makes `(pid, start_time)`
+  a PID-reuse-safe identity. `CgroupPathMap::scan()` is the companion
+  join for the already-exposed `InetSocket.cgroup_id`: cgroup-v2 ID →
+  cgroupfs path (`resolve_relative` yields `system.slice/foo.service`
+  shapes for unit/container joins). Both are best-effort snapshots —
+  short-lived sockets and unreadable (other users') processes resolve
+  to nothing; kernel 6.5+ BPF socket iterators are the race-free
+  successor, this is the unprivileged baseline. `nlink-ss -p` now
+  consumes the library version; new example
+  `sockdiag_socket_owners`.
 
 ### Changed (breaking)
 
