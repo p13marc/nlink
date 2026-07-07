@@ -27,6 +27,20 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`NamespaceWatcher::recv()` now actually waits for events (#183).** The
+  inotify fd is always nonblocking (the `inotify` crate initializes it with
+  `IN_NONBLOCK`), so the previous direct `read_events` call surfaced
+  `WouldBlock` as an immediate `Error::Io(EAGAIN)` whenever no event was
+  already queued — the watcher could never perform its documented
+  "wait until an event is available" contract, and the module's own doc
+  example errored on its first iteration. `recv()` is now built on the
+  crate's tokio-native `EventStream` (whose `stream` feature was already
+  enabled but unused), parking the task on the fd until an event arrives.
+  Watch-transition logic (parent-dir ↔ netns-dir) is unchanged. Events
+  whose namespace name is not UTF-8 are now skipped with a
+  `tracing::warn!` instead of silently dropped. Regression-tested
+  unprivileged (recv must park, not error) and under the privileged CI
+  gate (create → `Created`, delete → `Deleted` round-trip).
 - **`namespace::create_path` hardening** (follow-up to #181, same cycle so
   no released behavior changes):
   - The failure rollback removes only directories that are still empty
