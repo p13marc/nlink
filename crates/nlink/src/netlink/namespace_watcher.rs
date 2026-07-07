@@ -21,7 +21,8 @@
 
 use std::path::Path;
 
-use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
+use inotify::{EventMask, EventStream, Inotify, WatchDescriptor, WatchMask};
+use tokio_stream::StreamExt;
 
 use super::error::{Error, Result};
 
@@ -68,10 +69,15 @@ impl Default for NamespaceWatcherConfig {
 /// If the directory doesn't exist and `watch_parent` is enabled,
 /// watches `/var/run/` for its creation.
 ///
-/// This watcher is fully async and integrates natively with tokio.
+/// This watcher is fully async and integrates natively with tokio:
+/// [`recv`](Self::recv) parks the task on the inotify fd via the
+/// `inotify` crate's tokio [`EventStream`] until an event arrives.
 pub struct NamespaceWatcher {
-    inotify: Inotify,
-    buffer: Vec<u8>,
+    /// Tokio-native event stream over the inotify fd. The raw
+    /// `Inotify::read_events` API must NOT be used here: the fd is
+    /// always `IN_NONBLOCK`, so a direct read returns `WouldBlock`
+    /// when the queue is empty instead of waiting (#183).
+    stream: EventStream<Vec<u8>>,
     config: NamespaceWatcherConfig,
     netns_wd: Option<WatchDescriptor>,
     parent_wd: Option<WatchDescriptor>,
@@ -113,9 +119,12 @@ impl NamespaceWatcher {
             parent_wd = Some(wd);
         }
 
+        let stream = inotify
+            .into_event_stream(vec![0u8; 4096])
+            .map_err(Error::Io)?;
+
         Ok(Self {
-            inotify,
-            buffer: vec![0u8; 4096],
+            stream,
             config,
             netns_wd,
             parent_wd,
@@ -157,23 +166,34 @@ impl NamespaceWatcher {
         }
 
         loop {
-            let events = self
-                .inotify
-                .read_events(&mut self.buffer)
-                .map_err(Error::Io)?;
+            // Awaiting the EventStream parks the task until the inotify fd
+            // is readable — the fd is nonblocking, so this is the only
+            // correct way to wait (#183).
+            let Some(event) = self.stream.next().await else {
+                // End-of-stream: the inotify fd was closed.
+                return Ok(None);
+            };
+            let event = event.map_err(Error::Io)?;
 
-            // Collect event data we need before processing
-            // (to avoid borrow checker issues with self.buffer)
-            let mut pending_events: Vec<(WatchDescriptor, EventMask, Option<String>)> = Vec::new();
-            for event in events {
-                let name = event.name.and_then(|n| n.to_str()).map(String::from);
-                pending_events.push((event.wd.clone(), event.mask, name));
-            }
+            let name = match event.name {
+                Some(name) => match name.into_string() {
+                    Ok(name) => Some(name),
+                    Err(raw) => {
+                        // A namespace with a non-UTF-8 name can't be carried
+                        // by the String-shaped NamespaceEvent; skip it loudly
+                        // rather than misreporting it as a directory event.
+                        tracing::warn!(
+                            name = ?raw,
+                            "skipping inotify event with non-UTF-8 name"
+                        );
+                        continue;
+                    }
+                },
+                None => None,
+            };
 
-            for (wd, mask, name) in pending_events {
-                if let Some(ns_event) = self.process_event(wd, mask, name)? {
-                    return Ok(Some(ns_event));
-                }
+            if let Some(ns_event) = self.process_event(event.wd, event.mask, name)? {
+                return Ok(Some(ns_event));
             }
         }
     }
@@ -195,7 +215,7 @@ impl NamespaceWatcher {
                 // Start watching parent if configured
                 if self.config.watch_parent
                     && let Ok(new_wd) = self
-                        .inotify
+                        .stream
                         .watches()
                         .add(PARENT_DIR, WatchMask::CREATE | WatchMask::MOVED_TO)
                 {
@@ -221,13 +241,13 @@ impl NamespaceWatcher {
             if is_netns && (mask.contains(EventMask::CREATE) || mask.contains(EventMask::MOVED_TO))
             {
                 // netns directory appeared - switch to watching it
-                if let Ok(new_wd) = self.inotify.watches().add(
+                if let Ok(new_wd) = self.stream.watches().add(
                     NETNS_DIR,
                     WatchMask::CREATE | WatchMask::DELETE | WatchMask::DELETE_SELF,
                 ) {
                     // Remove parent watch
                     if let Some(parent_wd) = self.parent_wd.take() {
-                        let _ = self.inotify.watches().remove(parent_wd);
+                        let _ = self.stream.watches().remove(parent_wd);
                     }
                     self.netns_wd = Some(new_wd);
 
@@ -312,6 +332,29 @@ mod tests {
         if let Ok((namespaces, watcher)) = NamespaceWatcher::list_and_watch().await {
             println!("Current namespaces: {:?}", namespaces);
             println!("Watching netns: {}", watcher.is_watching_netns());
+        }
+    }
+
+    /// Regression test for #183: with no events queued, `recv()` must park
+    /// the task, not surface the nonblocking fd's `WouldBlock` as an error.
+    /// Runs unprivileged — creating the watcher needs no root.
+    #[tokio::test]
+    async fn recv_waits_instead_of_erroring() {
+        let mut watcher = NamespaceWatcher::new()
+            .await
+            .expect("watcher creation should not require root");
+
+        // Unrelated processes may legitimately create/delete namespaces
+        // while this runs; drain any real events and only fail on Err.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            match tokio::time::timeout_at(deadline, watcher.recv()).await {
+                // Timed out while pending — the correct behavior.
+                Err(_elapsed) => break,
+                Ok(Ok(Some(_unrelated_event))) => continue,
+                Ok(Ok(None)) => panic!("watcher closed unexpectedly"),
+                Ok(Err(e)) => panic!("recv() must wait for events, got error: {e}"),
+            }
         }
     }
 

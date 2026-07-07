@@ -79,6 +79,13 @@ mod namespace_spawn;
 #[path = "integration/namespace_path.rs"]
 mod namespace_path;
 
+// Feature-gated: the privileged integration workflow builds with
+// `lab,sockdiag,namespace_watcher` so the inotify round-trip (#183)
+// runs there.
+#[cfg(feature = "namespace_watcher")]
+#[path = "integration/namespace_watcher.rs"]
+mod namespace_watcher;
+
 #[path = "integration/conntrack.rs"]
 mod conntrack;
 
