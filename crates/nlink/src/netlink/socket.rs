@@ -188,13 +188,10 @@ impl NetlinkSocket {
     /// )?;
     /// ```
     pub fn new_in_namespace_path<P: AsRef<Path>>(protocol: Protocol, ns_path: P) -> Result<Self> {
-        let ns_file = File::open(ns_path.as_ref()).map_err(|e| {
-            Error::InvalidMessage(format!(
-                "cannot open namespace '{}': {}",
-                ns_path.as_ref().display(),
-                e
-            ))
-        })?;
+        // #184: ENOENT → typed NamespaceNotFound (is_not_found()), other
+        // errors keep their errno — never a stringly InvalidMessage.
+        let ns_file = File::open(ns_path.as_ref())
+            .map_err(|e| super::namespace::namespace_open_error(ns_path.as_ref(), e))?;
         Self::new_in_namespace(protocol, ns_file.as_raw_fd())
     }
 
