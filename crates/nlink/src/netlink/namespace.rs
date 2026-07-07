@@ -410,6 +410,14 @@ impl AsRawFd for NamespaceFd {
 /// [`connection_for`] or [`Connection::new_in_namespace_path`] instead,
 /// which create a socket in the namespace without affecting the thread.
 ///
+/// If the guard's restore fails (`setns` back errors), the calling thread
+/// stays in the target namespace — on a tokio worker that silently poisons
+/// every task later scheduled there. The guard is `!Send`, so it cannot
+/// leave the entering thread, but the restore-failure hazard is inherent
+/// to switching a shared thread; APIs that need a namespace only briefly
+/// should follow the dedicated-worker-thread pattern instead (see
+/// [`get_sysctl`] and `NetlinkSocket::new_in_namespace`, #185).
+///
 /// # Example
 ///
 /// ```ignore
@@ -448,28 +456,58 @@ pub fn enter_path<P: AsRef<Path>>(path: P) -> Result<NamespaceGuard> {
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
 
-    Ok(NamespaceGuard { original })
+    Ok(NamespaceGuard {
+        original: Some(original),
+        _thread_pinned: std::marker::PhantomData,
+    })
 }
 
 /// A guard that restores the original namespace when dropped.
+///
+/// The guard is `!Send` (#185): namespace membership is **per-thread**, so a
+/// guard dropped on a different thread than the one that called [`enter`]
+/// would `setns` the wrong thread — switching that thread's namespace while
+/// leaving the entering thread stuck in the target. Moving the guard across
+/// threads (including holding it across an `.await` in a multi-threaded
+/// runtime, which requires the future — and thus the guard — to be `Send`)
+/// is therefore a compile error:
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>(_: T) {}
+/// let guard = nlink::netlink::namespace::enter("myns").unwrap();
+/// assert_send(guard); // NamespaceGuard is deliberately !Send
+/// ```
 #[derive(Debug)]
 pub struct NamespaceGuard {
-    original: File,
+    /// `Some` while the guard is armed; [`Self::restore`] takes it out so
+    /// `Drop` doesn't run a second, redundant restore after an explicit one.
+    original: Option<File>,
+    /// `*mut ()` is `!Send + !Sync`, pinning the guard to the entering thread.
+    _thread_pinned: std::marker::PhantomData<*mut ()>,
 }
 
 impl NamespaceGuard {
     /// Restore the original namespace explicitly.
     ///
     /// This is called automatically on drop, but calling it explicitly
-    /// allows you to handle errors.
-    pub fn restore(self) -> Result<()> {
-        self.do_restore()
+    /// allows you to handle errors. After this call the guard is disarmed:
+    /// `Drop` will not attempt a second restore.
+    pub fn restore(mut self) -> Result<()> {
+        let result = self.do_restore();
+        // Disarm: Drop must not re-run the restore the explicit call just
+        // performed (pre-#185 it did, harmlessly but redundantly — and a
+        // failed explicit restore also fired a second attempt + error log).
+        self.original = None;
+        result
     }
 
     fn do_restore(&self) -> Result<()> {
+        let Some(original) = &self.original else {
+            return Ok(());
+        };
         // SAFETY: libc::setns restores the original namespace. The fd is valid
         // (opened from /proc/thread-self/ns/net when the guard was created).
-        let ret = unsafe { libc::setns(self.original.as_raw_fd(), libc::CLONE_NEWNET) };
+        let ret = unsafe { libc::setns(original.as_raw_fd(), libc::CLONE_NEWNET) };
         if ret < 0 {
             return Err(Error::Io(std::io::Error::last_os_error()));
         }
@@ -479,6 +517,9 @@ impl NamespaceGuard {
 
 impl Drop for NamespaceGuard {
     fn drop(&mut self) {
+        if self.original.is_none() {
+            return; // explicitly restored already
+        }
         if let Err(e) = self.do_restore() {
             // We cannot return an error from Drop. Emit a structured
             // tracing event so observers see the failure (replaces the
@@ -920,6 +961,12 @@ pub fn delete_path<P: AsRef<Path>>(path: P) -> Result<()> {
 /// [`connection_for`] which creates a socket in the namespace without
 /// affecting the thread state.
 ///
+/// The closure runs on the **calling** thread; if the restore afterwards
+/// fails, that thread stays in the target namespace (see [`enter`]'s
+/// warning). When the closure is `Send + 'static`, prefer spawning a
+/// scoped thread that enters the namespace and exits without restoring —
+/// the pattern the [`get_sysctl`]-family helpers use internally (#185).
+///
 /// # Example
 ///
 /// ```ignore
@@ -996,10 +1043,44 @@ pub fn list() -> Result<Vec<String>> {
 // Sysctl operations (namespace-aware)
 // ─────────────────────────────────────────────────
 
+/// Run `f` on a dedicated worker thread that has entered the namespace at
+/// `path`, joining before return.
+///
+/// The worker exits **without restoring** — a thread's netns membership dies
+/// with it — so there is no restore step that can fail and leave a shared
+/// (e.g. tokio worker) thread stuck in the target namespace (#185). This is
+/// the same thread discipline as [`create_path`] and
+/// `NetlinkSocket::new_in_namespace`. Contrast with [`execute_in`], which
+/// runs `f` on the *calling* thread and carries that hazard.
+fn run_in_namespace_thread<T, F>(path: PathBuf, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let thread_result = std::thread::spawn(move || -> Result<T> {
+        let target = File::open(&path).map_err(|e| namespace_open_error(&path, e))?;
+        // SAFETY: setns switches only this freshly-spawned worker thread,
+        // which exits right after `f` returns.
+        let ret = unsafe { libc::setns(target.as_raw_fd(), libc::CLONE_NEWNET) };
+        if ret < 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        f()
+    })
+    .join();
+
+    match thread_result {
+        Ok(result) => result,
+        Err(_panic) => Err(Error::InvalidMessage(
+            "namespace worker thread panicked".to_string(),
+        )),
+    }
+}
+
 /// Read a sysctl value inside a named namespace.
 ///
-/// Temporarily enters the namespace, reads the value from `/proc/sys/`,
-/// and restores the original namespace.
+/// Reads the value from `/proc/sys/` on a dedicated worker thread entered
+/// into the namespace; the calling thread's namespace is untouched (#185).
 ///
 /// # Example
 ///
@@ -1010,13 +1091,14 @@ pub fn list() -> Result<Vec<String>> {
 /// assert!(val == "0" || val == "1");
 /// ```
 pub fn get_sysctl(ns_name: &str, key: &str) -> Result<String> {
-    execute_in(ns_name, || super::sysctl::get(key))?
+    get_sysctl_path(PathBuf::from(NETNS_RUN_DIR).join(ns_name), key)
 }
 
 /// Set a sysctl value inside a named namespace.
 ///
-/// Temporarily enters the namespace, writes the value to `/proc/sys/`,
-/// and restores the original namespace. Requires root or `CAP_SYS_ADMIN`.
+/// Writes the value to `/proc/sys/` on a dedicated worker thread entered
+/// into the namespace; the calling thread's namespace is untouched (#185).
+/// Requires root or `CAP_SYS_ADMIN`.
 ///
 /// # Example
 ///
@@ -1026,13 +1108,14 @@ pub fn get_sysctl(ns_name: &str, key: &str) -> Result<String> {
 /// namespace::set_sysctl("myns", "net.ipv4.ip_forward", "1")?;
 /// ```
 pub fn set_sysctl(ns_name: &str, key: &str, value: &str) -> Result<()> {
-    execute_in(ns_name, || super::sysctl::set(key, value))?
+    set_sysctl_path(PathBuf::from(NETNS_RUN_DIR).join(ns_name), key, value)
 }
 
 /// Set multiple sysctl values inside a named namespace.
 ///
-/// Enters the namespace once and applies all entries. If any entry fails,
-/// returns the error immediately without applying remaining entries.
+/// Enters the namespace once (on a dedicated worker thread) and applies all
+/// entries. If any entry fails, returns the error immediately without
+/// applying remaining entries.
 ///
 /// # Example
 ///
@@ -1045,28 +1128,44 @@ pub fn set_sysctl(ns_name: &str, key: &str, value: &str) -> Result<()> {
 /// ])?;
 /// ```
 pub fn set_sysctls(ns_name: &str, entries: &[(&str, &str)]) -> Result<()> {
-    execute_in(ns_name, || super::sysctl::set_many(entries))?
+    set_sysctls_path(PathBuf::from(NETNS_RUN_DIR).join(ns_name), entries)
 }
 
 /// Read a sysctl value inside a namespace specified by path.
 ///
 /// See [`get_sysctl`] for details.
 pub fn get_sysctl_path<P: AsRef<Path>>(path: P, key: &str) -> Result<String> {
-    execute_in_path(path, || super::sysctl::get(key))?
+    let key = key.to_owned();
+    run_in_namespace_thread(path.as_ref().to_path_buf(), move || {
+        super::sysctl::get(&key)
+    })
 }
 
 /// Set a sysctl value inside a namespace specified by path.
 ///
 /// See [`set_sysctl`] for details.
 pub fn set_sysctl_path<P: AsRef<Path>>(path: P, key: &str, value: &str) -> Result<()> {
-    execute_in_path(path, || super::sysctl::set(key, value))?
+    let (key, value) = (key.to_owned(), value.to_owned());
+    run_in_namespace_thread(path.as_ref().to_path_buf(), move || {
+        super::sysctl::set(&key, &value)
+    })
 }
 
 /// Set multiple sysctl values inside a namespace specified by path.
 ///
 /// See [`set_sysctls`] for details.
 pub fn set_sysctls_path<P: AsRef<Path>>(path: P, entries: &[(&str, &str)]) -> Result<()> {
-    execute_in_path(path, || super::sysctl::set_many(entries))?
+    let entries: Vec<(String, String)> = entries
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    run_in_namespace_thread(path.as_ref().to_path_buf(), move || {
+        let borrowed: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        super::sysctl::set_many(&borrowed)
+    })
 }
 
 // ─────────────────────────────────────────────────

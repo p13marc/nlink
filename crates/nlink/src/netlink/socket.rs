@@ -107,17 +107,24 @@ impl NetlinkSocket {
     /// The namespace is specified by an open file descriptor to a namespace file
     /// (e.g., `/proc/<pid>/ns/net` or `/var/run/netns/<name>`).
     ///
-    /// This function temporarily switches to the target namespace, creates the socket,
-    /// then restores the original namespace. The socket will operate in the target
-    /// namespace for all subsequent operations.
+    /// The socket is created inside the target namespace and operates there for
+    /// all subsequent operations; the calling thread's namespace is untouched.
     ///
-    /// # Safety
+    /// # Thread discipline (#185)
     ///
-    /// This function uses `setns()` which affects the calling thread. It saves and
-    /// restores the original namespace. If restoration fails, the function
-    /// returns [`Error::NamespaceRestoreFailed`] — the socket may have been
-    /// created successfully but the calling thread is now stuck in the target
-    /// namespace. See the variant's documentation for recovery options.
+    /// The netns-sensitive part — `setns()` + `socket(2)` — runs on a dedicated
+    /// worker thread that **exits instead of restoring**: a thread's namespace
+    /// membership dies with it, so there is no restore step that can fail and
+    /// no window in which the calling thread (possibly a tokio worker shared
+    /// with unrelated tasks) observes the target namespace. A panic during
+    /// socket creation kills the worker, not the caller's netns state. The
+    /// pre-#185 implementation `setns`'d the calling thread and could return
+    /// [`Error::NamespaceRestoreFailed`]; that variant is retained for
+    /// compatibility but is no longer produced here.
+    ///
+    /// The tokio reactor registration (`AsyncFd`) happens afterwards on the
+    /// calling thread — epoll registration is not namespace-sensitive, and the
+    /// caller is where a runtime context is guaranteed.
     ///
     /// # Example
     ///
@@ -129,40 +136,27 @@ impl NetlinkSocket {
     /// let socket = NetlinkSocket::new_in_namespace(Protocol::Route, ns_file.as_raw_fd())?;
     /// ```
     pub fn new_in_namespace(protocol: Protocol, ns_fd: RawFd) -> Result<Self> {
-        // Save the current namespace so we can restore it
-        let current_ns = File::open("/proc/thread-self/ns/net")
-            .map_err(|e| Error::InvalidMessage(format!("cannot open current namespace: {}", e)))?;
-        let current_ns_fd = current_ns.as_raw_fd();
+        // `ns_fd` stays valid for the worker's lifetime: fds are process-wide
+        // and the caller's handle outlives the synchronous join() below.
+        let thread_result = std::thread::spawn(move || -> Result<(Socket, u32)> {
+            // SAFETY: libc::setns switches this worker thread to the namespace
+            // specified by ns_fd, a valid namespace-file descriptor. Only this
+            // freshly-spawned thread is affected, and it exits right after.
+            let ret = unsafe { libc::setns(ns_fd, libc::CLONE_NEWNET) };
+            if ret < 0 {
+                return Err(Error::Io(std::io::Error::last_os_error()));
+            }
+            Self::create_raw_socket(protocol)
+        })
+        .join();
 
-        // Switch to the target namespace
-        // SAFETY: libc::setns switches to the namespace specified by ns_fd.
-        // ns_fd is a valid file descriptor to a namespace file.
-        let ret = unsafe { libc::setns(ns_fd, libc::CLONE_NEWNET) };
-        if ret < 0 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
+        match thread_result {
+            Ok(Ok((socket, pid))) => Self::from_raw_socket(socket, pid, protocol),
+            Ok(Err(e)) => Err(e),
+            Err(_panic) => Err(Error::InvalidMessage(
+                "namespace socket worker thread panicked".to_string(),
+            )),
         }
-
-        // Create the socket in the target namespace
-        let result = Self::create_socket(protocol);
-
-        // Restore the original namespace. If this fails, the calling thread
-        // is stuck in the target ns — surface as an error so callers can
-        // decide whether to abort or pin work to a different thread.
-        // SAFETY: libc::setns restores the original namespace. current_ns_fd
-        // is valid (opened from /proc/thread-self/ns/net above).
-        let restore_ret = unsafe { libc::setns(current_ns_fd, libc::CLONE_NEWNET) };
-        if restore_ret < 0 {
-            let source = std::io::Error::last_os_error();
-            tracing::error!(
-                error = %source,
-                "netns restore failed after socket creation; thread stuck in target netns"
-            );
-            // Drop the (possibly successful) socket — the caller can't rely
-            // on thread-context to use it safely.
-            return Err(Error::NamespaceRestoreFailed { source });
-        }
-
-        result
     }
 
     /// Create a netlink socket that operates in a network namespace specified by path.
@@ -197,6 +191,15 @@ impl NetlinkSocket {
 
     /// Internal helper to create the socket.
     fn create_socket(protocol: Protocol) -> Result<Self> {
+        let (socket, pid) = Self::create_raw_socket(protocol)?;
+        Self::from_raw_socket(socket, pid, protocol)
+    }
+
+    /// Create and bind the raw netlink socket. This is the namespace-sensitive
+    /// half of construction — `socket(2)` binds the socket to the calling
+    /// thread's netns at creation time — and is runtime-independent, so
+    /// `new_in_namespace` can run it on a dedicated worker thread (#185).
+    fn create_raw_socket(protocol: Protocol) -> Result<(Socket, u32)> {
         let mut socket = Socket::new(protocol.as_isize())?;
         socket.set_non_blocking(true)?;
 
@@ -209,6 +212,14 @@ impl NetlinkSocket {
         // Enable extended ACK for better error messages
         socket.set_ext_ack(true).ok(); // Ignore if not supported
 
+        Ok((socket, pid))
+    }
+
+    /// Wrap a raw bound socket into the async `NetlinkSocket`. Must run on a
+    /// thread with a tokio runtime context (`AsyncFd::new` registers with the
+    /// reactor); the socket's netns membership is already fixed, so this half
+    /// is namespace-insensitive.
+    fn from_raw_socket(socket: Socket, pid: u32, protocol: Protocol) -> Result<Self> {
         let fd = AsyncFd::new(socket)?;
 
         Ok(Self {

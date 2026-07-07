@@ -27,6 +27,27 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **setns thread discipline (#185).** Four related hardenings on the
+  per-thread `setns` state management:
+  - `NetlinkSocket::new_in_namespace` (and everything above it:
+    `Connection::new_in_namespace*`, `namespace::connection_for*`) now runs
+    the namespace-sensitive half — `setns` + `socket(2)` — on a dedicated
+    worker thread that **exits instead of restoring**, the same discipline
+    `namespace::create` has used since 0.19. The calling thread's namespace
+    is never touched, so the restore-failed/poisoned-tokio-worker class is
+    structurally gone, and a panic during socket creation can no longer
+    strand the caller in the target netns. `Error::NamespaceRestoreFailed`
+    is retained for compatibility but no longer produced.
+  - The `namespace::{get,set}_sysctl*` helpers likewise run on a dedicated
+    entered worker thread instead of `setns`-ing the calling thread.
+  - *Breaking:* `NamespaceGuard` is now `!Send` — namespace membership is
+    per-thread, so a guard dropped on a different thread than the one that
+    `enter`ed would restore the wrong thread. Moving it across threads
+    (including holding it across an `.await` on a multi-threaded runtime)
+    is now a compile error; any code that did so was already incorrect at
+    runtime.
+  - `NamespaceGuard::restore()` no longer performs a second, redundant
+    restore in `Drop` after the explicit call.
 - **Missing-namespace errors are now classifiable via `is_not_found()`
   (#184).** `namespace::open{,_path,_pid}`, `namespace::enter{,_path}`
   (and thus `execute_in` + the `{get,set}_sysctl*` helpers), and
