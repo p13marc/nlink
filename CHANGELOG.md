@@ -25,6 +25,25 @@ All notable changes to this project will be documented in this file.
   existing path. `is_namespace` is the named wrapper resolving against
   `/var/run/netns/<name>`.
 
+### Fixed
+
+- **`namespace::create_path` hardening** (follow-up to #181, same cycle so
+  no released behavior changes):
+  - The failure rollback removes only directories that are still empty
+    (`remove_dir` walking upward instead of `remove_dir_all`), so a failing
+    create can no longer delete a marker a concurrent `create_path`
+    installed under a shared ancestor.
+  - The marker file is created with `create_new` — a lost race against a
+    concurrent create (or an operator `ip netns add`) now fails with EEXIST
+    instead of truncating the winner's marker.
+  - The already-exists rejection is `ErrorKind::AlreadyExists`-shaped and
+    `Error::is_already_exists()` matches it (previously a stringly
+    `InvalidMessage` that no predicate classified), completing the
+    detect-stale-and-retry loop `is_namespace_path` enables.
+  - `is_namespace_path` documents that `NSFS_MAGIC` identifies nsfs, not
+    the namespace *type* — a bind-mount of a PID/mount/UTS namespace also
+    reports `true`.
+
 ## [0.24.0] - 2026-07-03
 
 > Upgrading? See
