@@ -4,6 +4,11 @@
 //! including executing operations in specific namespaces and managing namespace
 //! file descriptors.
 //!
+//! [`create`]/[`delete`] persist a netns at the `ip netns` convention
+//! `/var/run/netns/<name>`. [`create_path`]/[`delete_path`] persist it at any
+//! caller-chosen path, so an application can own its netns directory (clearer
+//! ownership, no collisions with operator `ip netns add`).
+//!
 //! # Example
 //!
 //! ```ignore
@@ -29,7 +34,7 @@
 
 use std::{
     fs::File,
-    os::unix::io::{AsRawFd, RawFd},
+    os::unix::{ffi::OsStrExt, io::{AsRawFd, RawFd}},
     path::{Path, PathBuf},
 };
 
@@ -488,6 +493,58 @@ pub fn exists(name: &str) -> bool {
     path.exists()
 }
 
+/// Convert a filesystem path to a `CString`, preserving its exact bytes.
+/// Linux paths aren't necessarily UTF-8, so this goes through `OsStr` bytes
+/// rather than `to_string_lossy` (which would mangle non-UTF-8 paths into a
+/// different path than the one on disk). Errors only on an interior NUL.
+fn path_to_cstring(path: &Path) -> Result<std::ffi::CString> {
+    std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| Error::InvalidMessage(format!("invalid namespace path '{}'", path.display())))
+}
+
+/// `nsfs` superblock magic (`NSFS_MAGIC` from `<linux/magic.h>` — ASCII
+/// "nsfs"). Backs `/proc/<pid>/ns/*` and bind-mounts of them. Not exported by
+/// the `libc` crate, so defined here. Compared as `u64`: `statfs.f_type`
+/// varies in type across libc/arch (`__fsword_t` on glibc x86_64, `c_ulong`
+/// on musl, `c_uint` on s390x), so we widen at the comparison rather than pin
+/// a type the field doesn't always have.
+const NSFS_MAGIC: u64 = 0x6e_73_66_73;
+
+/// Return `true` if `path` is a *live* network-namespace bind-mount.
+///
+/// A persistent netns (see [`create_path`]) is a bind-mount of an `nsfs` inode
+/// onto a marker file. After an unclean shutdown the marker can linger as an
+/// ordinary file with the bind-mount gone — present on disk but no longer a
+/// namespace. This distinguishes the two via `statfs(2)`: a live netns
+/// bind-mount sits on the `nsfs` pseudo-filesystem; a stale marker sits on
+/// whatever backs its parent directory (typically `tmpfs`).
+///
+/// Returns `false` (never errors) when the path is absent, unreadable, or
+/// backed by any non-`nsfs` filesystem, mirroring [`exists`].
+///
+/// `/proc/mounts` is deliberately **not** consulted: mount-namespace
+/// propagation can hide a working bind-mount from it. `statfs` reflects the
+/// actual backing filesystem regardless of propagation.
+pub fn is_namespace_path<P: AsRef<Path>>(path: P) -> bool {
+    let Ok(c_path) = path_to_cstring(path.as_ref()) else {
+        return false; // interior NUL — cannot be a real path
+    };
+    // SAFETY: `c_path` outlives the call, so the path pointer stays valid;
+    // `f_type` is read only when `rc == 0`.
+    let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statfs(c_path.as_ptr(), &mut buf) };
+    rc == 0 && buf.f_type as u64 == NSFS_MAGIC
+}
+
+/// Named-namespace counterpart to [`is_namespace_path`], resolving against the
+/// `ip netns` convention `/var/run/netns/<name>`.
+///
+/// Pairs with [`exists`]: `exists` only checks the marker is present; this
+/// checks it is a live netns.
+pub fn is_namespace(name: &str) -> bool {
+    is_namespace_path(PathBuf::from(NETNS_RUN_DIR).join(name))
+}
+
 /// Create a named network namespace.
 ///
 /// This is equivalent to `ip netns add <name>`. It creates the namespace
@@ -510,27 +567,80 @@ pub fn exists(name: &str) -> bool {
 /// // Now "myns" exists and can be used
 /// let conn = namespace::connection_for("myns")?;
 /// ```
+///
+/// See also [`create_path`] to persist a netns at an arbitrary path.
 pub fn create(name: &str) -> Result<()> {
-    let ns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
+    create_path(PathBuf::from(NETNS_RUN_DIR).join(name))
+}
+
+/// Highest ancestor of `dir` that does not yet exist — the directory that
+/// `create_dir_all(dir)` will materialize first. Removing it on rollback
+/// undoes exactly what we created and nothing pre-existing.
+fn topmost_missing_ancestor(dir: &Path) -> PathBuf {
+    let mut topmost = dir.to_path_buf();
+    let mut cursor = dir;
+    while let Some(parent) = cursor.parent() {
+        if parent.exists() {
+            break;
+        }
+        topmost = parent.to_path_buf();
+        cursor = parent;
+    }
+    topmost
+}
+
+/// Create a persistent network namespace bind-mounted at an arbitrary `path`.
+///
+/// Like [`create`], but the namespace lives at the caller's path instead of
+/// the `ip netns` convention `/var/run/netns/<name>`. The parent directory is
+/// created if needed.
+///
+/// `path` should be absolute. A relative path resolves against the current
+/// working directory, which a multi-threaded program can change mid-call —
+/// surprising for both the bind mount and the parent-rollback target.
+///
+/// # Errors
+///
+/// Returns an error if the path already exists, the parent cannot be created,
+/// or the unshare/mount sequence fails (requires root or CAP_SYS_ADMIN).
+pub fn create_path<P: AsRef<Path>>(path: P) -> Result<()> {
+    let ns_path = path.as_ref().to_path_buf();
 
     // Check if namespace already exists
     if ns_path.exists() {
         return Err(Error::InvalidMessage(format!(
             "namespace '{}' already exists",
-            name
+            ns_path.display()
         )));
     }
 
-    // Create the netns directory if it doesn't exist
-    if !Path::new(NETNS_RUN_DIR).exists() {
-        std::fs::create_dir_all(NETNS_RUN_DIR).map_err(|e| {
-            Error::InvalidMessage(format!("cannot create {}: {}", NETNS_RUN_DIR, e))
-        })?;
-    }
+    // Remember the topmost created ancestor so a later failure can roll
+    // back the directory tree instead of leaking it.
+    let created_dir = match ns_path.parent() {
+        Some(parent) if !parent.exists() => {
+            let topmost = topmost_missing_ancestor(parent);
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Error::InvalidMessage(format!("cannot create {}: {}", parent.display(), e))
+            })?;
+            Some(topmost)
+        }
+        _ => None,
+    };
+
+    let rollback_dir = |dir: &Option<PathBuf>| {
+        if let Some(dir) = dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    };
 
     // Create an empty file for the bind mount
     File::create(&ns_path).map_err(|e| {
-        Error::InvalidMessage(format!("cannot create namespace file '{}': {}", name, e))
+        rollback_dir(&created_dir);
+        Error::InvalidMessage(format!(
+            "cannot create namespace file '{}': {}",
+            ns_path.display(),
+            e
+        ))
     })?;
 
     // 0.19 N1 fix — isolate the unshare+mount+setns sequence on
@@ -555,19 +665,19 @@ pub fn create(name: &str) -> Result<()> {
     // of the transient netns membership; we wait for setns to
     // complete before returning.
     let ns_path_owned = ns_path.clone();
-    let name_owned = name.to_string();
+    let label = ns_path.display().to_string();
     let thread_result = std::thread::spawn(move || -> Result<()> {
-        create_namespace_in_current_thread(&name_owned, &ns_path_owned)
+        create_namespace_in_current_thread(&label, &ns_path_owned)
     })
     .join();
 
     match thread_result {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => {
-            // The worker thread cleaned up its file already, but
-            // belt-and-braces: try once more from this thread in
-            // case it raced.
+            // Worker already tore down its marker (and any live mount) on every
+            // error path; retry here in case it raced, then roll back parent dirs.
             let _ = std::fs::remove_file(&ns_path);
+            rollback_dir(&created_dir);
             Err(e)
         }
         Err(_panic) => {
@@ -575,9 +685,10 @@ pub fn create(name: &str) -> Result<()> {
             // undefined state. Remove the file so we don't leak
             // an empty netns marker.
             let _ = std::fs::remove_file(&ns_path);
+            rollback_dir(&created_dir);
             Err(Error::InvalidMessage(format!(
                 "namespace '{}' worker thread panicked during create",
-                name
+                ns_path.display()
             )))
         }
     }
@@ -607,11 +718,9 @@ fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> 
     }
 
     // Bind mount the namespace to the file
-    let ns_path_cstr = std::ffi::CString::new(ns_path.to_string_lossy().as_bytes())
-        .map_err(|_| {
-            let _ = std::fs::remove_file(ns_path);
-            Error::InvalidMessage("invalid namespace path".to_string())
-        })?;
+    let ns_path_cstr = path_to_cstring(ns_path).inspect_err(|_| {
+        let _ = std::fs::remove_file(ns_path);
+    })?;
 
     let self_ns = std::ffi::CString::new("/proc/thread-self/ns/net").unwrap();
 
@@ -640,14 +749,17 @@ fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> 
     // to the namespace we opened before unshare().
     let ret = unsafe { libc::setns(original_ns.as_raw_fd(), libc::CLONE_NEWNET) };
     if ret < 0 {
-        // The namespace was created and persisted via bind mount, but we
-        // failed to restore. The dedicated thread will exit shortly so
-        // the bleed is bounded, but surface the error so the caller knows
-        // the create succeeded with a degraded cleanup.
+        let restore_err = std::io::Error::last_os_error();
+        // Bind mount is live but we couldn't restore the caller's netns, so the
+        // create has failed as a whole. Tear down the mount + marker here so the
+        // caller's rollback isn't racing a pinned mount.
+        if let Ok(c) = path_to_cstring(ns_path) {
+            unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+        }
+        let _ = std::fs::remove_file(ns_path);
         return Err(Error::InvalidMessage(format!(
-            "namespace '{}' created but failed to restore original namespace: {}",
-            name,
-            std::io::Error::last_os_error()
+            "namespace '{}' failed to restore original namespace: {}",
+            name, restore_err
         )));
     }
 
@@ -673,17 +785,41 @@ fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> 
 ///
 /// namespace::delete("myns")?;
 /// ```
+///
+/// See also [`delete_path`] to delete a netns at an arbitrary path.
 pub fn delete(name: &str) -> Result<()> {
-    let ns_path = PathBuf::from(NETNS_RUN_DIR).join(name);
+    delete_path(PathBuf::from(NETNS_RUN_DIR).join(name))
+}
+
+/// Delete a persistent network namespace at an arbitrary `path`.
+///
+/// The path-based counterpart to [`delete`], for namespaces created via
+/// [`create_path`]. Lazily unmounts the bind mount (`MNT_DETACH`) and removes
+/// the marker file.
+///
+/// Removes only the marker file and bind mount; parent directories that
+/// [`create_path`] created are left in place — delete cannot know which
+/// ancestors were pre-existing. The caller owns teardown of its directory
+/// tree.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The path doesn't exist — `Error::NamespaceNotFound`, whose `name` field
+///   carries the path string for path-based deletes.
+/// - The unmount fails with anything other than `EINVAL` (which covers the
+///   "not a mount point" case — a stale marker with no live bind mount).
+/// - The marker file cannot be removed.
+pub fn delete_path<P: AsRef<Path>>(path: P) -> Result<()> {
+    let ns_path = path.as_ref();
 
     if !ns_path.exists() {
         return Err(Error::NamespaceNotFound {
-            name: name.to_string(),
+            name: ns_path.display().to_string(),
         });
     }
 
-    let ns_path_cstr = std::ffi::CString::new(ns_path.to_string_lossy().as_bytes())
-        .map_err(|_| Error::InvalidMessage("invalid namespace path".to_string()))?;
+    let ns_path_cstr = path_to_cstring(ns_path)?;
 
     // Unmount the namespace
     // SAFETY: umount2 is a standard Linux syscall. MNT_DETACH allows lazy
@@ -698,7 +834,7 @@ pub fn delete(name: &str) -> Result<()> {
     }
 
     // Remove the file
-    std::fs::remove_file(&ns_path)
+    std::fs::remove_file(ns_path)
         .map_err(|e| Error::InvalidMessage(format!("cannot remove namespace file: {}", e)))?;
 
     Ok(())
@@ -1185,5 +1321,67 @@ mod tests {
     #[test]
     fn test_exists_nonexistent() {
         assert!(!exists("definitely_does_not_exist_12345"));
+    }
+
+    #[test]
+    fn test_topmost_missing_ancestor() {
+        let base = std::env::temp_dir().join(format!("nlink-tma-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // base does not exist; the topmost missing ancestor of base/a/b is base.
+        assert_eq!(topmost_missing_ancestor(&base.join("a/b")), base);
+
+        std::fs::create_dir_all(&base).unwrap();
+        // base exists now; the topmost missing ancestor of base/a/b is base/a.
+        assert_eq!(topmost_missing_ancestor(&base.join("a/b")), base.join("a"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_create_path_rejects_existing_marker() {
+        // The already-exists check runs before any privileged syscall, so this
+        // exercises the error path without root.
+        let path = std::env::temp_dir().join(format!("nlink-exists-{}", std::process::id()));
+        std::fs::File::create(&path).unwrap();
+        let err = create_path(&path).expect_err("existing path must be rejected");
+        assert!(err.to_string().contains("already exists"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_delete_path_missing_is_not_found() {
+        let path =
+            std::env::temp_dir().join(format!("nlink-missing-del-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let err = delete_path(&path).expect_err("missing path must be rejected");
+        assert!(err.is_not_found());
+    }
+
+    #[test]
+    fn is_namespace_path_false_for_missing() {
+        let path =
+            std::env::temp_dir().join(format!("nlink-isns-missing-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert!(!is_namespace_path(&path));
+    }
+
+    #[test]
+    fn is_namespace_path_false_for_plain_file() {
+        // A regular file (the shape of a *stale* marker) is not a live netns.
+        let path = std::env::temp_dir().join(format!("nlink-isns-plain-{}", std::process::id()));
+        std::fs::File::create(&path).unwrap();
+        assert!(!is_namespace_path(&path));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn is_namespace_false_for_nonexistent_name() {
+        assert!(!is_namespace("definitely_does_not_exist_12345"));
+    }
+
+    #[test]
+    fn is_namespace_path_true_for_own_net_ns() {
+        // /proc/self/ns/net is a live nsfs inode in any process, so this pins
+        // NSFS_MAGIC against the kernel's real value without needing root.
+        assert!(is_namespace_path("/proc/self/ns/net"));
     }
 }
