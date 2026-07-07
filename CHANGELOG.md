@@ -27,6 +27,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Missing-namespace errors are now classifiable via `is_not_found()`
+  (#184).** `namespace::open{,_path,_pid}`, `namespace::enter{,_path}`
+  (and thus `execute_in` + the `{get,set}_sysctl*` helpers), and
+  `NetlinkSocket::new_in_namespace_path` (and thus
+  `Connection::new_in_namespace_path`, `namespace::connection_for*`, and
+  `NamespaceSpec::connection*`) previously wrapped **all** open failures —
+  including ENOENT — in stringly `Error::InvalidMessage`, so
+  `connection_for("gone")` on a deleted namespace couldn't be handled with
+  the documented recovery predicates. ENOENT now maps to the typed
+  `Error::NamespaceNotFound` (carrying the path, the same shape
+  `delete_path` uses), and every other open failure passes through as
+  `Error::Io` with its errno intact, so `is_permission_denied()` & co.
+  classify correctly too.
 - **`NamespaceWatcher::recv()` now actually waits for events (#183).** The
   inotify fd is always nonblocking (the `inotify` crate initializes it with
   `IN_NONBLOCK`), so the previous direct `read_events` call surfaced

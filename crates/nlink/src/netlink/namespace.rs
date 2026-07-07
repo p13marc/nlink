@@ -341,15 +341,33 @@ pub fn open(name: &str) -> Result<NamespaceFd> {
     open_path(&path)
 }
 
+/// Map a failed open of a namespace path to a classifiable error (#184):
+/// ENOENT becomes `Error::NamespaceNotFound` — matching `is_not_found()`
+/// and carrying the path in `name`, the same shape [`delete_path`] uses —
+/// and everything else passes through as `Error::Io`, preserving the raw
+/// errno so `is_permission_denied()` & co. keep working. Never wrap these
+/// opens in stringly `InvalidMessage`: it defeats every recovery predicate.
+pub(crate) fn namespace_open_error(path: &Path, e: std::io::Error) -> Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        Error::NamespaceNotFound {
+            name: path.display().to_string(),
+        }
+    } else {
+        Error::Io(e)
+    }
+}
+
 /// Open a namespace file by path and return its file descriptor.
+///
+/// # Errors
+///
+/// Returns [`Error::NamespaceNotFound`] if the path doesn't exist
+/// (matchable via [`Error::is_not_found`]); other open failures surface
+/// as [`Error::Io`] with their errno intact (e.g. for
+/// [`Error::is_permission_denied`]).
 pub fn open_path<P: AsRef<Path>>(path: P) -> Result<NamespaceFd> {
-    let file = File::open(path.as_ref()).map_err(|e| {
-        Error::InvalidMessage(format!(
-            "cannot open namespace '{}': {}",
-            path.as_ref().display(),
-            e
-        ))
-    })?;
+    let file =
+        File::open(path.as_ref()).map_err(|e| namespace_open_error(path.as_ref(), e))?;
     Ok(NamespaceFd { file })
 }
 
@@ -408,19 +426,19 @@ pub fn enter(name: &str) -> Result<NamespaceGuard> {
 }
 
 /// Enter a network namespace by path.
+///
+/// # Errors
+///
+/// Returns [`Error::NamespaceNotFound`] if the path doesn't exist; other
+/// failures (open or `setns`) surface as [`Error::Io`] with errno intact.
 pub fn enter_path<P: AsRef<Path>>(path: P) -> Result<NamespaceGuard> {
     // Save the current namespace
     let original = File::open("/proc/thread-self/ns/net")
         .map_err(|e| Error::InvalidMessage(format!("cannot open current namespace: {}", e)))?;
 
     // Open and enter the target namespace
-    let target = File::open(path.as_ref()).map_err(|e| {
-        Error::InvalidMessage(format!(
-            "cannot open namespace '{}': {}",
-            path.as_ref().display(),
-            e
-        ))
-    })?;
+    let target =
+        File::open(path.as_ref()).map_err(|e| namespace_open_error(path.as_ref(), e))?;
 
     // SAFETY: libc::setns is a standard Linux syscall for switching namespaces.
     // target.as_raw_fd() is a valid fd to a namespace file, CLONE_NEWNET
@@ -1459,6 +1477,34 @@ mod tests {
     #[test]
     fn is_namespace_false_for_nonexistent_name() {
         assert!(!is_namespace("definitely_does_not_exist_12345"));
+    }
+
+    // #184 — missing-namespace opens must classify via is_not_found(),
+    // across every entry point that funnels through namespace_open_error.
+    #[test]
+    fn open_path_missing_is_not_found() {
+        let path =
+            std::env::temp_dir().join(format!("nlink-open-missing-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let err = open_path(&path).expect_err("missing path must fail");
+        assert!(err.is_not_found(), "got unclassifiable error: {err}");
+    }
+
+    #[test]
+    fn enter_path_missing_is_not_found() {
+        let path =
+            std::env::temp_dir().join(format!("nlink-enter-missing-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let err = enter_path(&path).expect_err("missing path must fail");
+        assert!(err.is_not_found(), "got unclassifiable error: {err}");
+    }
+
+    #[test]
+    fn connection_for_missing_name_is_not_found() {
+        let Err(err) = connection_for::<crate::Route>("definitely_does_not_exist_12345") else {
+            panic!("missing namespace must fail");
+        };
+        assert!(err.is_not_found(), "got unclassifiable error: {err}");
     }
 
     #[test]
