@@ -41,6 +41,11 @@ All notable changes to this project will be documented in this file.
   `tracing::warn!` instead of silently dropped. Regression-tested
   unprivileged (recv must park, not error) and under the privileged CI
   gate (create → `Created`, delete → `Deleted` round-trip).
+  *Breaking (semver-only): `NamespaceWatcher`/`NamespaceEventStream` no
+  longer implement `UnwindSafe`/`RefUnwindSafe` — the tokio `AsyncFd`
+  inside `EventStream` isn't unwind-safe, unlike the old raw fd + buffer.
+  This is the 0.25.0 version-bump trigger for the cycle; no functional
+  API changed.*
 - **`namespace::create_path` hardening** (follow-up to #181, same cycle so
   no released behavior changes):
   - The failure rollback removes only directories that are still empty
