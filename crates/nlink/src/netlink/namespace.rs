@@ -525,6 +525,12 @@ const NSFS_MAGIC: u64 = 0x6e_73_66_73;
 /// `/proc/mounts` is deliberately **not** consulted: mount-namespace
 /// propagation can hide a working bind-mount from it. `statfs` reflects the
 /// actual backing filesystem regardless of propagation.
+///
+/// **Caveat**: `NSFS_MAGIC` identifies the nsfs filesystem, not the
+/// namespace *type* — a bind-mount of any namespace (PID, mount, UTS, …)
+/// also returns `true` (as does e.g. `/proc/self/ns/pid`). Distinguishing
+/// types would need `ioctl(NS_GET_NSTYPE)`; for the stale-marker workflow
+/// this predicate exists for, the distinction doesn't arise.
 pub fn is_namespace_path<P: AsRef<Path>>(path: P) -> bool {
     let Ok(c_path) = path_to_cstring(path.as_ref()) else {
         return false; // interior NUL — cannot be a real path
@@ -573,6 +579,18 @@ pub fn create(name: &str) -> Result<()> {
     create_path(PathBuf::from(NETNS_RUN_DIR).join(name))
 }
 
+/// The EEXIST-shaped error [`create_path`] returns for an already-present
+/// path. Built as `ErrorKind::AlreadyExists` (rather than a stringly
+/// `InvalidMessage`) so callers can classify it with
+/// [`Error::is_already_exists`] — the detect-stale-and-retry loop around
+/// [`is_namespace_path`] depends on that.
+fn already_exists_error(path: &Path) -> Error {
+    Error::Io(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("namespace '{}' already exists", path.display()),
+    ))
+}
+
 /// Highest ancestor of `dir` that does not yet exist — the directory that
 /// `create_dir_all(dir)` will materialize first. Removing it on rollback
 /// undoes exactly what we created and nothing pre-existing.
@@ -589,6 +607,30 @@ fn topmost_missing_ancestor(dir: &Path) -> PathBuf {
     topmost
 }
 
+/// Rollback counterpart to the `create_dir_all` in [`create_path`]: remove
+/// the directories it materialized, walking upward from `parent` to
+/// `topmost` (inclusive) with `remove_dir`, which only deletes *empty*
+/// directories. `remove_dir_all` would be wrong here: a concurrent
+/// `create_path` under a shared ancestor may have installed its own marker
+/// since we created the tree — `remove_dir` stops at the first non-empty
+/// (or already-removed) directory instead of deleting a sibling's namespace
+/// out from under it.
+fn remove_empty_dirs_upward(parent: &Path, topmost: &Path) {
+    let mut cursor = parent;
+    loop {
+        if std::fs::remove_dir(cursor).is_err() {
+            // Non-empty (a sibling moved in) or already gone (a racing
+            // rollback) — every ancestor is non-empty too, so stop.
+            return;
+        }
+        if cursor == topmost {
+            return;
+        }
+        let Some(next) = cursor.parent() else { return };
+        cursor = next;
+    }
+}
+
 /// Create a persistent network namespace bind-mounted at an arbitrary `path`.
 ///
 /// Like [`create`], but the namespace lives at the caller's path instead of
@@ -601,47 +643,56 @@ fn topmost_missing_ancestor(dir: &Path) -> PathBuf {
 ///
 /// # Errors
 ///
-/// Returns an error if the path already exists, the parent cannot be created,
-/// or the unshare/mount sequence fails (requires root or CAP_SYS_ADMIN).
+/// Returns an error if the path already exists (EEXIST-shaped — matchable
+/// via [`Error::is_already_exists`]), the parent cannot be created, or the
+/// unshare/mount sequence fails (requires root or CAP_SYS_ADMIN).
 pub fn create_path<P: AsRef<Path>>(path: P) -> Result<()> {
     let ns_path = path.as_ref().to_path_buf();
 
     // Check if namespace already exists
     if ns_path.exists() {
-        return Err(Error::InvalidMessage(format!(
-            "namespace '{}' already exists",
-            ns_path.display()
-        )));
+        return Err(already_exists_error(&ns_path));
     }
 
-    // Remember the topmost created ancestor so a later failure can roll
-    // back the directory tree instead of leaking it.
-    let created_dir = match ns_path.parent() {
+    // Remember the created directory span (deepest, topmost) so a later
+    // failure can roll back the tree instead of leaking it.
+    let created_dirs = match ns_path.parent() {
         Some(parent) if !parent.exists() => {
             let topmost = topmost_missing_ancestor(parent);
             std::fs::create_dir_all(parent).map_err(|e| {
                 Error::InvalidMessage(format!("cannot create {}: {}", parent.display(), e))
             })?;
-            Some(topmost)
+            Some((parent.to_path_buf(), topmost))
         }
         _ => None,
     };
 
-    let rollback_dir = |dir: &Option<PathBuf>| {
-        if let Some(dir) = dir {
-            let _ = std::fs::remove_dir_all(dir);
+    let rollback_dirs = |created: &Option<(PathBuf, PathBuf)>| {
+        if let Some((parent, topmost)) = created {
+            remove_empty_dirs_upward(parent, topmost);
         }
     };
 
-    // Create an empty file for the bind mount
-    File::create(&ns_path).map_err(|e| {
-        rollback_dir(&created_dir);
-        Error::InvalidMessage(format!(
-            "cannot create namespace file '{}': {}",
-            ns_path.display(),
-            e
-        ))
-    })?;
+    // Create an empty file for the bind mount. `create_new` closes the
+    // TOCTOU on the exists() check above: if a concurrent create_path (or an
+    // operator `ip netns add`) won the race since, this fails with EEXIST
+    // instead of truncating the winner's marker.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&ns_path)
+        .map_err(|e| {
+            rollback_dirs(&created_dirs);
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                already_exists_error(&ns_path)
+            } else {
+                Error::InvalidMessage(format!(
+                    "cannot create namespace file '{}': {}",
+                    ns_path.display(),
+                    e
+                ))
+            }
+        })?;
 
     // 0.19 N1 fix — isolate the unshare+mount+setns sequence on
     // a dedicated OS thread.
@@ -677,7 +728,7 @@ pub fn create_path<P: AsRef<Path>>(path: P) -> Result<()> {
             // Worker already tore down its marker (and any live mount) on every
             // error path; retry here in case it raced, then roll back parent dirs.
             let _ = std::fs::remove_file(&ns_path);
-            rollback_dir(&created_dir);
+            rollback_dirs(&created_dirs);
             Err(e)
         }
         Err(_panic) => {
@@ -685,7 +736,7 @@ pub fn create_path<P: AsRef<Path>>(path: P) -> Result<()> {
             // undefined state. Remove the file so we don't leak
             // an empty netns marker.
             let _ = std::fs::remove_file(&ns_path);
-            rollback_dir(&created_dir);
+            rollback_dirs(&created_dirs);
             Err(Error::InvalidMessage(format!(
                 "namespace '{}' worker thread panicked during create",
                 ns_path.display()
@@ -1344,7 +1395,39 @@ mod tests {
         std::fs::File::create(&path).unwrap();
         let err = create_path(&path).expect_err("existing path must be rejected");
         assert!(err.to_string().contains("already exists"));
+        assert!(
+            err.is_already_exists(),
+            "rejection must be classifiable via is_already_exists()"
+        );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_remove_empty_dirs_upward_full_chain() {
+        let base = std::env::temp_dir().join(format!("nlink-rb-full-{}", std::process::id()));
+        let parent = base.join("a/b");
+        std::fs::create_dir_all(&parent).unwrap();
+        remove_empty_dirs_upward(&parent, &base);
+        assert!(!base.exists(), "empty chain should be removed up to topmost");
+    }
+
+    #[test]
+    fn test_remove_empty_dirs_upward_stops_at_nonempty() {
+        // Simulates a concurrent create_path having installed its own marker
+        // under a shared ancestor: rollback must stop at the non-empty
+        // directory instead of deleting the sibling.
+        let base = std::env::temp_dir().join(format!("nlink-rb-stop-{}", std::process::id()));
+        let parent = base.join("a/b");
+        std::fs::create_dir_all(&parent).unwrap();
+        let sibling = base.join("a/sibling-marker");
+        std::fs::File::create(&sibling).unwrap();
+
+        remove_empty_dirs_upward(&parent, &base);
+
+        assert!(!parent.exists(), "empty leaf dir should be removed");
+        assert!(sibling.exists(), "sibling marker must survive rollback");
+        assert!(base.join("a").exists(), "non-empty ancestor must survive");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

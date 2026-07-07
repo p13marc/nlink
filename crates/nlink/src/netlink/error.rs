@@ -583,9 +583,16 @@ impl Error {
     /// Check if this is a "already exists" error (EEXIST).
     ///
     /// Plan 187 §2.5: matches both `Error::Kernel*` and
-    /// `Error::Io(EEXIST)` shapes.
+    /// `Error::Io(EEXIST)` shapes. Also matches `Error::Io`
+    /// carrying `ErrorKind::AlreadyExists` without a raw errno —
+    /// the shape `namespace::create_path` builds for its
+    /// already-exists rejection (same predicate-widening move as
+    /// Plan 212's `is_not_found`).
     pub fn is_already_exists(&self) -> bool {
-        self.errno() == Some(libc::EEXIST)
+        if self.errno() == Some(libc::EEXIST) {
+            return true;
+        }
+        matches!(self, Self::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists)
     }
 
     /// Check if this is a "device busy" error (EBUSY).
@@ -987,6 +994,18 @@ mod tests {
     fn test_is_busy() {
         assert!(Error::from_errno(-16).is_busy()); // EBUSY
         assert!(!Error::from_errno(-1).is_busy()); // EPERM is not busy
+    }
+
+    // is_already_exists must match both the raw-errno shape and an
+    // `ErrorKind::AlreadyExists` io::Error built without one (the
+    // namespace::create_path rejection) — same widening as Plan 212's
+    // is_not_found.
+    #[test]
+    fn is_already_exists_catches_kind_without_errno() {
+        let err = Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, "x exists"));
+        assert!(err.is_already_exists());
+        assert!(Error::from_errno(-libc::EEXIST).is_already_exists());
+        assert!(!Error::Io(io::Error::new(io::ErrorKind::NotFound, "gone")).is_already_exists());
     }
 
     // Plan 212 M9 — is_not_found must match Error::Io(ENOENT/ENODEV)
