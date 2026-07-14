@@ -86,7 +86,50 @@ pub trait FilterConfig: Send + Sync {
     fn set_chain(&mut self, chain: u32) {
         let _ = chain;
     }
+
+    /// The ethertype this filter matches (tc(8) `protocol ip|ipv6|all|…`).
+    ///
+    /// `None` means "unset" and `add_filter` falls back to
+    /// [`DEFAULT_FILTER_PROTOCOL`].
+    ///
+    /// Every filter config nlink ships has a public `.protocol()` **setter**,
+    /// and until 0.25 nothing ever read the value back: `add_filter`
+    /// hardcoded `ETH_P_IP`. On a clsact/ingress hook that meant IPv6, ARP
+    /// and VLAN traffic never reached the filter at all, with no error (#201).
+    /// This accessor is what closes that gap.
+    ///
+    /// Defaulted so external impls stay source-compatible, same as
+    /// [`set_chain`](Self::set_chain).
+    fn protocol(&self) -> Option<u16> {
+        None
+    }
+
+    /// The filter priority, a.k.a. `pref` (tc(8) `prio N`).
+    ///
+    /// `None` means "unset", and the kernel auto-assigns. As with
+    /// [`protocol`](Self::protocol), every shipped config had a setter whose
+    /// value `add_filter` silently discarded — so explicit priority ordering
+    /// was ignored and filters landed in an unintended evaluation order
+    /// relative to operator-installed rules (#201).
+    fn priority(&self) -> Option<u16> {
+        None
+    }
 }
+
+/// The ethertype `add_filter` falls back to when a [`FilterConfig`] leaves
+/// [`protocol`](FilterConfig::protocol) unset.
+///
+/// `ETH_P_IP` (0x0800), which is what `add_filter` used to hardcode
+/// unconditionally. Every filter config nlink ships overrides `protocol()`
+/// with its own field, so in practice this only applies to external impls
+/// written against the pre-0.25 trait.
+///
+/// **The observable change in 0.25** is not this constant — it is that the
+/// shipped configs' own defaults now reach the wire. `MatchallFilter` and
+/// `FlowerFilter` default to `ETH_P_ALL` (0x0003), so a filter that used to
+/// be silently installed as IPv4-only now matches all traffic, as its builder
+/// always claimed.
+pub const DEFAULT_FILTER_PROTOCOL: u16 = 0x0800;
 
 // ============================================================================
 // U32Filter
@@ -508,6 +551,14 @@ impl FilterConfig for U32Filter {
 
     fn set_chain(&mut self, chain: u32) {
         self.chain = Some(chain);
+    }
+
+    fn protocol(&self) -> Option<u16> {
+        Some(self.protocol)
+    }
+
+    fn priority(&self) -> Option<u16> {
+        Some(self.priority)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -1453,6 +1504,14 @@ impl FilterConfig for FlowerFilter {
         self.chain = Some(chain);
     }
 
+    fn protocol(&self) -> Option<u16> {
+        Some(self.protocol)
+    }
+
+    fn priority(&self) -> Option<u16> {
+        Some(self.priority)
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         // Add classid
         if let Some(classid) = self.classid {
@@ -1760,6 +1819,14 @@ impl FilterConfig for MatchallFilter {
 
     fn set_chain(&mut self, chain: u32) {
         self.chain = Some(chain);
+    }
+
+    fn protocol(&self) -> Option<u16> {
+        Some(self.protocol)
+    }
+
+    fn priority(&self) -> Option<u16> {
+        Some(self.priority)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -2444,6 +2511,14 @@ impl FilterConfig for BpfFilter {
         self.chain = Some(chain);
     }
 
+    fn protocol(&self) -> Option<u16> {
+        Some(self.protocol)
+    }
+
+    fn priority(&self) -> Option<u16> {
+        Some(self.priority)
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         // Add file descriptor
         builder.append_attr_u32(bpf::TCA_BPF_FD, self.fd as u32);
@@ -2780,6 +2855,14 @@ impl FilterConfig for BasicFilter {
 
     fn set_chain(&mut self, chain: u32) {
         self.chain = Some(chain);
+    }
+
+    fn protocol(&self) -> Option<u16> {
+        Some(self.protocol)
+    }
+
+    fn priority(&self) -> Option<u16> {
+        Some(self.priority)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -3925,6 +4008,14 @@ impl FilterConfig for FlowFilter {
         self.chain = Some(chain);
     }
 
+    fn protocol(&self) -> Option<u16> {
+        Some(self.protocol)
+    }
+
+    fn priority(&self) -> Option<u16> {
+        Some(self.priority)
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::filter::flow;
 
@@ -3976,6 +4067,18 @@ impl FilterConfig for FlowFilter {
 // Connection extension methods for filters
 // ============================================================================
 
+/// The `(protocol, priority)` pair to stamp into `tcm_info` for a config.
+///
+/// `priority == 0` tells the kernel to auto-assign, which is what the
+/// convenience `add_filter` / `replace_filter` entry points used to do
+/// unconditionally — along with hardcoding `ETH_P_IP` (#201).
+fn filter_info(config: &impl FilterConfig) -> (u16, u16) {
+    (
+        config.protocol().unwrap_or(DEFAULT_FILTER_PROTOCOL),
+        config.priority().unwrap_or(0),
+    )
+}
+
 impl Connection<Route> {
     /// Add a filter to an interface.
     ///
@@ -3992,6 +4095,10 @@ impl Connection<Route> {
     ///
     /// conn.add_filter("eth0", "1:", filter).await?;
     /// ```
+    ///
+    /// The config's own `protocol` and `priority` are honored. Until 0.25
+    /// they were silently discarded and every filter went on as
+    /// `protocol ip, prio auto` (#201).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_filter"))]
     pub async fn add_filter(
         &self,
@@ -3999,7 +4106,8 @@ impl Connection<Route> {
         parent: TcHandle,
         config: impl FilterConfig,
     ) -> Result<()> {
-        self.add_filter_full(dev, parent, None, 0x0800, 0, config)
+        let (protocol, priority) = filter_info(&config);
+        self.add_filter_full(dev, parent, None, protocol, priority, config)
             .await
     }
 
@@ -4028,6 +4136,8 @@ impl Connection<Route> {
     }
 
     /// Add a filter by interface index.
+    ///
+    /// The config's own `protocol` and `priority` are honored (#201).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_filter_by_index"))]
     pub async fn add_filter_by_index(
         &self,
@@ -4035,7 +4145,8 @@ impl Connection<Route> {
         parent: TcHandle,
         config: impl FilterConfig,
     ) -> Result<()> {
-        self.add_filter_by_index_full(ifindex, parent, None, 0x0800, 0, config)
+        let (protocol, priority) = filter_info(&config);
+        self.add_filter_by_index_full(ifindex, parent, None, protocol, priority, config)
             .await
     }
 
@@ -4100,7 +4211,8 @@ impl Connection<Route> {
         config: impl FilterConfig,
     ) -> Result<()> {
         let ifindex = self.resolve_interface(&dev.into()).await?;
-        self.replace_filter_by_index_full(ifindex, parent, None, 0x0800, 0, config)
+        let (protocol, priority) = filter_info(&config);
+        self.replace_filter_by_index_full(ifindex, parent, None, protocol, priority, config)
             .await
     }
 
@@ -4128,7 +4240,8 @@ impl Connection<Route> {
         parent: TcHandle,
         config: impl FilterConfig,
     ) -> Result<()> {
-        self.replace_filter_by_index_full(ifindex, parent, None, 0x0800, 0, config)
+        let (protocol, priority) = filter_info(&config);
+        self.replace_filter_by_index_full(ifindex, parent, None, protocol, priority, config)
             .await
     }
 
@@ -4522,6 +4635,55 @@ pub enum BpfDirection {
     Ingress,
     /// Egress (clsact egress hook).
     Egress,
+}
+
+/// `add_filter` must honor the config's protocol and priority (#201).
+///
+/// Every shipped filter has public `.protocol()` / `.priority()` setters whose
+/// values `add_filter` used to throw away, hardcoding `ETH_P_IP` and
+/// auto-priority. The fields *were* assigned, so the compiler could not warn.
+/// These pin the accessor path that `add_filter`/`replace_filter` now read.
+#[cfg(test)]
+mod filter_info_tests {
+    use super::*;
+
+    /// The headline failure: a matchall on clsact asking for ETH_P_ALL was
+    /// installed as `protocol ip`, so IPv6, ARP and VLAN traffic never hit the
+    /// filter at all — with no error returned.
+    #[test]
+    fn explicit_protocol_and_priority_reach_the_wire() {
+        const ETH_P_ALL: u16 = 0x0003;
+
+        let f = MatchallFilter::new().protocol(ETH_P_ALL).priority(1);
+        assert_eq!(filter_info(&f), (ETH_P_ALL, 1));
+
+        let f = FlowerFilter::new().protocol(0x86DD).priority(7); // ETH_P_IPV6
+        assert_eq!(filter_info(&f), (0x86DD, 7));
+    }
+
+    /// Matchall and flower default to ETH_P_ALL. That default is the whole
+    /// point of them, and it used to be overridden with ETH_P_IP on the way
+    /// out.
+    #[test]
+    fn shipped_defaults_reach_the_wire() {
+        assert_eq!(filter_info(&MatchallFilter::new()).0, 0x0003);
+        assert_eq!(filter_info(&FlowerFilter::new()).0, 0x0003);
+        // u32 is genuinely an IPv4 classifier by default.
+        assert_eq!(filter_info(&U32Filter::new()).0, 0x0800);
+    }
+
+    /// A config that carries no ethertype of its own (fw, cgroup, tcindex,
+    /// route, rsvp) leaves the trait default, and `add_filter` falls back.
+    /// Priority 0 means "kernel, you pick".
+    #[test]
+    fn configs_without_their_own_ethertype_fall_back() {
+        assert_eq!(FwFilter::new().protocol(), None);
+        assert_eq!(FwFilter::new().priority(), None);
+        assert_eq!(
+            filter_info(&FwFilter::new()),
+            (DEFAULT_FILTER_PROTOCOL, 0),
+        );
+    }
 }
 
 #[cfg(test)]
