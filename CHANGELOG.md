@@ -313,6 +313,32 @@ All notable changes to this project will be documented in this file.
   crate parses them native-endian. Same value on x86_64, silently wrong on a
   big-endian target. Both sides are `to_ne_bytes` now.
 
+- **dispatcher: an `events()` stream hung forever after a fatal recv error
+  (#202).** `fail_all` cleared the `pending` map but never `event_listeners`, so
+  in-flight *requests* saw the error while every event stream kept its sender
+  alive. An `mpsc::Receiver` yields `None` only once every `Sender` is gone, so
+  the `Poll::Ready(None) => take_fatal_error()` arm was unreachable and the
+  stream parked on `Poll::Pending` **forever** — no error, no termination, no
+  resync. From the consumer's side it was indistinguishable from an idle network,
+  which means any reconnect logic hanging off the error branch never ran.
+
+- **dispatcher: `shutdown()` could be lost, leaking the driver task and its fd
+  (#219).** It signalled with `Notify::notify_waiters()`, which stores no permit
+  and wakes only tasks *already registered* as waiters. The driver re-creates its
+  `notified()` future each `select!` iteration, so it is unregistered for the
+  whole of `route_buffer` and between iterations — and a `Connection::drop`
+  landing in that window had its signal silently discarded. The driver then
+  looped forever on a socket nobody could reach: the task never exited and the fd
+  never closed, leaking one of each per connection under churn. `notify_one()`
+  stores the permit.
+
+- **socket: `recv_batch` never fanned out ENOBUFS (#220).** `recv_msg` and
+  `poll_recv` both tell the resync subscribers the kernel dropped multicast
+  frames; the `syscall_batch` siblings (`recv_batch` / `poll_recv_batch`) did
+  not, so under that feature a resync stream never learned it had missed anything
+  and never re-dumped. Narrow in practice (the batch paths are reachable only
+  from dumps), fixed for consistency.
+
 - **ethtool: link speed was always `None` and duplex was garbage (#196).** The
   kernel has a single `ETHTOOL_A_LINKMODES_OURS = 3`; nlink invented two
   variants there (`Supported` + `Advertised`), which shifted **every** later

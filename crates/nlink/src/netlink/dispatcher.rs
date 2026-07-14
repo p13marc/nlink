@@ -432,6 +432,21 @@ impl Dispatcher {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+        // Event subscribers too (#202). Clearing `pending` alone dropped the
+        // per-seq senders, so in-flight *requests* saw the error — but the
+        // event-stream senders live in `event_listeners`, which the
+        // `DispatcherInner` Arc keeps alive. An `mpsc::Receiver` yields `None`
+        // only once every `Sender` is gone, so leaving these in place meant the
+        // `Poll::Ready(None) => take_fatal_error()` arm in `stream.rs` was
+        // literally unreachable: after a fatal recv error, an `events()` stream
+        // parked on `Poll::Pending` **forever**. No error, no termination, no
+        // resync — indistinguishable, from the consumer's side, from an idle
+        // network.
+        self.inner
+            .event_listeners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
     }
 
     /// Take the stored fatal error (if any) as an [`Error`], or a
@@ -469,7 +484,18 @@ impl Dispatcher {
     /// `Drop`. The driver `select!`s on this and drops its
     /// `Arc<NetlinkSocket>` on wake; the last `Arc` closes the fd.
     pub(crate) fn shutdown(&self) {
-        self.inner.shutdown.notify_waiters();
+        // notify_one, NOT notify_waiters (#219). `notify_waiters` wakes only the
+        // tasks *already registered* as waiters and stores no permit; the driver
+        // re-creates its `notified()` future on every `select!` iteration, so
+        // there is a window — mid-`route_buffer`, or between iterations — with
+        // no registered waiter, in which the signal is simply dropped. A
+        // `Connection::drop` landing in that window left the driver looping
+        // forever on a socket nobody could reach: the task never exits and the
+        // fd never closes, leaking one of each per connection under churn.
+        //
+        // `notify_one` stores a permit, so a shutdown signalled mid-iteration is
+        // still observed at the next `notified().await`.
+        self.inner.shutdown.notify_one();
     }
 
     /// `true` once the background driver has been spawned.
@@ -830,6 +856,76 @@ mod tests {
         assert!(
             err.to_string().contains("synthetic recv failure"),
             "got {err}"
+        );
+    }
+
+    /// **#202.** A fatal recv error must terminate the event streams too.
+    ///
+    /// `fail_all` used to clear only `pending`, so in-flight *requests* saw the
+    /// error while every `events()` stream kept its sender alive inside
+    /// `event_listeners` — and an `mpsc::Receiver` yields `None` only when every
+    /// `Sender` is gone. The `Poll::Ready(None) => take_fatal_error()` arm in
+    /// `stream.rs` was therefore unreachable, and the stream parked on
+    /// `Poll::Pending` **forever**: no error, no termination, no resync, and
+    /// from the consumer's side indistinguishable from an idle network.
+    ///
+    /// The stream layer keys off `recv() == None`, so that is what this asserts.
+    #[tokio::test]
+    async fn fail_all_also_terminates_event_streams() {
+        let d = Dispatcher::new();
+        let mut events = d.subscribe_events();
+        let mut request = d.register(7);
+
+        d.fail_all("synthetic recv failure".to_string());
+
+        assert!(
+            request.rx.recv().await.is_none(),
+            "an in-flight request must see the driver die"
+        );
+        assert!(
+            events.rx.recv().await.is_none(),
+            "the event stream hung: fail_all left its sender alive, so the \
+             stream would park on Pending forever instead of yielding Err (#202)"
+        );
+        assert!(
+            d.take_fatal_error()
+                .to_string()
+                .contains("synthetic recv failure")
+        );
+    }
+
+    /// **#219.** A shutdown signalled while the driver is *not* parked in
+    /// `notified()` must still be observed.
+    ///
+    /// This is the entire difference between the two `Notify` methods, and it
+    /// is why the bug existed. `notify_waiters()` wakes only tasks **already
+    /// registered** as waiters and stores nothing; `notify_one()` stores a
+    /// permit that the next `notified().await` consumes immediately.
+    ///
+    /// The driver re-creates its `notified()` future on every `select!`
+    /// iteration, so it is unregistered for the whole of `route_buffer` and
+    /// between iterations. A `Connection::drop` landing in that window used to
+    /// have its signal silently discarded, and the driver looped forever holding
+    /// its socket — leaking a task and an fd per connection under churn.
+    ///
+    /// Signalling before anyone waits is the same window, made deterministic:
+    /// under `notify_waiters` this test times out.
+    #[tokio::test]
+    async fn shutdown_signalled_with_no_waiter_is_not_lost() {
+        let d = Dispatcher::new();
+
+        // Nobody is awaiting `notified()` yet — exactly the driver's state
+        // while it is busy routing a buffer.
+        d.shutdown();
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            d.inner.shutdown.notified(),
+        )
+        .await
+        .expect(
+            "the shutdown signal was dropped: a driver that was mid-iteration \
+             when the connection dropped would loop forever holding its fd (#219)",
         );
     }
 
