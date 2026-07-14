@@ -198,6 +198,27 @@ jobs:
       - name: Run scripts/audit-sysfs-in-lib.sh
         run: bash scripts/audit-sysfs-in-lib.sh
 
+  # #232 (0.25) — UAPI constant conformance. nlink owns its wire format end to
+  # end, so every attribute id and enum value in the crate was hand-transcribed
+  # from a kernel header. Transcription drifts, and it drifts silently: the
+  # kernel accepts a well-formed message that names the wrong attribute. The
+  # 0.25.0 cycle found eight such drifts, one of which (#196) meant link speed
+  # read as None forever, with no error anywhere.
+  #
+  # Every #[repr(uN)] enum must be either mapped to a kernel prefix in
+  # scripts/audit-uapi-constants.map or declared nlink-only in the sibling
+  # .allowlist — an unclassified enum is an unchecked enum, so the job fails on
+  # one. ubuntu-latest ships linux-libc-dev, so /usr/include/linux is present.
+  audit-uapi-constants:
+    name: audit UAPI constants against the kernel headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scripts/audit-uapi-constants.sh
+        run: bash scripts/audit-uapi-constants.sh
+      - name: Self-test the audit (it must catch the drifts it exists to catch)
+        run: bash scripts/test-audit-uapi-constants.sh
+
   # Plan 231 (0.21) — message-accessor convention. Every *Message
   # struct in crates/nlink/src/netlink/messages/ must have
   # #[non_exhaustive] + pub(crate) fields + accessor methods.

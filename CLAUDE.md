@@ -561,6 +561,33 @@ greps for `?` operator inside `MessageIter` walking loops in
 event-parser contexts and fails on hits. New parsers
 inherit the policy.
 
+## UAPI constants
+
+Because nlink owns its wire format end to end, every attribute id,
+message type and enum value in the crate was hand-transcribed from
+a kernel header. That is a transcription task, and transcription
+drifts — silently, because the kernel accepts a well-formed
+message that names the wrong attribute. The 0.25.0 cycle found
+**eight** such drifts; the worst (#196) meant `ethtool` link speed
+read as `None` on every interface, forever, with no error anywhere.
+
+`scripts/audit-uapi-constants.sh` (CI gate, #232) diffs every
+`#[repr(uN)]` enum in `crates/nlink/src/` against
+`/usr/include/linux` on every push — 644 discriminants across 62
+enums today. **Every such enum must be classified:**
+
+- mapped to its kernel prefix in `scripts/audit-uapi-constants.map`
+  (with `Variant -> KERNEL_SUFFIX` overrides where the names don't
+  line up, or `Variant -> !skip` for an nlink sentinel), or
+- declared nlink-only in `scripts/audit-uapi-constants.allowlist`,
+  **with a reason**.
+
+An unclassified enum fails the build: an unclassified enum is an
+unchecked one. Be suspicious of allowlist entries — "there's no
+header constant for it" is exactly what a drifted enum would say.
+`scripts/test-audit-uapi-constants.sh` is the self-test companion;
+it reconstructs the real drifts and asserts the gate catches them.
+
 ## Observability
 
 Every Connection method, every netlink request/ack/dump cycle
