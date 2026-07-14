@@ -43,6 +43,7 @@ use super::{
     interface_ref::InterfaceRef,
     message::NlMsgType,
     protocol::Route,
+    psched,
     tc_handle::TcHandle,
     types::tc::{
         TcMsg, TcaAttr,
@@ -1671,18 +1672,43 @@ impl QdiscConfig for TbfConfig {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         let rate_bps = self.rate.as_bytes_per_sec();
         let peakrate_bps = self.peakrate.map(|p| p.as_bytes_per_sec());
-        // Build TcTbfQopt
+        let burst = self.burst.as_u32_saturating();
+
+        // `tc_tbf_qopt.buffer` and `.mtu` are psched TICKS, not bytes —
+        // tbf_change() runs both through PSCHED_TICKS2NS(). Writing the raw
+        // byte count made the bucket drain ~125x too fast at 1 mbit, so
+        // tbf_enqueue() dropped every packet over ~262 bytes (#192).
+        let mut rate = TcRateSpec {
+            rate: rate_bps.min(u32::MAX as u64) as u32,
+            ..Default::default()
+        };
+        let rtab = psched::tc_calc_rtable(&mut rate, rate_bps, self.mtu, psched::LinkLayer::default());
+
+        let mut peakrate = TcRateSpec::default();
+        let ptab = peakrate_bps.map(|pr| {
+            peakrate.rate = pr.min(u32::MAX as u64) as u32;
+            psched::tc_calc_rtable(&mut peakrate, pr, self.mtu, psched::LinkLayer::default())
+        });
+
         let qopt = tbf::TcTbfQopt {
-            rate: TcRateSpec::new(rate_bps.min(u32::MAX as u64) as u32),
-            peakrate: peakrate_bps
-                .map(|pr| TcRateSpec::new(pr.min(u32::MAX as u64) as u32))
-                .unwrap_or_default(),
+            rate,
+            peakrate,
             limit: self.limit.as_u32_saturating(),
-            buffer: self.burst.as_u32_saturating(),
-            mtu: self.mtu,
+            buffer: psched::tc_calc_xmittime(rate_bps, burst),
+            // The peak-rate bucket is sized in ticks against the peak rate;
+            // with no peakrate configured the kernel ignores the field.
+            mtu: psched::tc_calc_xmittime(peakrate_bps.unwrap_or(rate_bps), self.mtu),
         };
 
         builder.append_attr(tbf::TCA_TBF_PARMS, qopt.as_bytes());
+
+        // The rate tables are mandatory: qdisc_get_rtab() rejects the qdisc
+        // outright without them (and silently discards a table whose spec
+        // carries cell_log == 0, which is why tc_calc_rtable stamps it).
+        builder.append_attr(tbf::TCA_TBF_RTAB, &rtab);
+        if let Some(ptab) = &ptab {
+            builder.append_attr(tbf::TCA_TBF_PTAB, ptab);
+        }
 
         // Add 64-bit rate if needed
         if rate_bps > u32::MAX as u64 {
@@ -1692,6 +1718,14 @@ impl QdiscConfig for TbfConfig {
             && pr > u32::MAX as u64
         {
             builder.append_attr(tbf::TCA_TBF_PRATE64, &pr.to_ne_bytes());
+        }
+
+        // The byte-valued escape hatches. Modern kernels prefer these over the
+        // tick-valued qopt fields and recompute the bucket from them, so they
+        // sidestep the tick quantization entirely. iproute2 emits both.
+        builder.append_attr_u32(tbf::TCA_TBF_BURST, burst);
+        if peakrate_bps.is_some() {
+            builder.append_attr_u32(tbf::TCA_TBF_PBURST, self.mtu);
         }
 
         Ok(())
@@ -6881,55 +6915,47 @@ impl ClassConfig for HtbClassConfig {
         let rate = cfg.rate.as_bytes_per_sec();
         let ceil = cfg.ceil.unwrap_or(cfg.rate).as_bytes_per_sec();
 
-        // Get HZ for time calculations (typically 1000 on Linux)
-        let hz: u64 = 1000;
+        // iproute2's get_hz() reads /proc/net/psched and returns 1e9 on any
+        // modern kernel — so q_htb.c's `buffer = rate64 / get_hz() + mtu`
+        // reduces to `mtu` for every rate below 8 Gbit/s. The old hardcoded
+        // hz = 1000 inflated the default burst by rate/1000 bytes (12,500
+        // extra at 100 mbit). Keep the formula, source hz correctly (#193).
+        let hz = psched::hz();
 
-        // Calculate burst from rate if not specified
         let burst = cfg
             .burst
             .map(|b| b.as_u32_saturating())
-            .unwrap_or_else(|| (rate / hz + cfg.mtu as u64) as u32);
+            .unwrap_or_else(|| (rate / hz) as u32 + cfg.mtu);
         let cburst = cfg
             .cburst
             .map(|b| b.as_u32_saturating())
-            .unwrap_or_else(|| (ceil / hz + cfg.mtu as u64) as u32);
+            .unwrap_or_else(|| (ceil / hz) as u32 + cfg.mtu);
 
-        // Calculate buffer time (in ticks). Falls back to the raw burst
-        // size when the rate would cause a divide-by-zero.
-        let buffer = (burst as u64 * 1_000_000)
-            .checked_div(rate)
-            .map(|v| v as u32)
-            .unwrap_or(burst);
+        // sch_htb.c: `cl->buffer = PSCHED_TICKS2NS(hopt->buffer)`. The old
+        // code computed microseconds (burst * 1e6 / rate) and labelled them
+        // ticks, losing the 15.625 factor — the token bucket landed below one
+        // MTU, so no class could ever burst a full-size packet (#193).
+        let mut rate_spec = TcRateSpec {
+            rate: rate.min(u32::MAX as u64) as u32,
+            mpu: cfg.mpu,
+            overhead: cfg.overhead,
+            ..Default::default()
+        };
+        let mut ceil_spec = TcRateSpec {
+            rate: ceil.min(u32::MAX as u64) as u32,
+            mpu: cfg.mpu,
+            overhead: cfg.overhead,
+            ..Default::default()
+        };
+        let linklayer = psched::LinkLayer::default();
+        let rtab = psched::tc_calc_rtable(&mut rate_spec, rate, cfg.mtu, linklayer);
+        let ctab = psched::tc_calc_rtable(&mut ceil_spec, ceil, cfg.mtu, linklayer);
 
-        let cbuffer = (cburst as u64 * 1_000_000)
-            .checked_div(ceil)
-            .map(|v| v as u32)
-            .unwrap_or(cburst);
-
-        // Build the tc_htb_opt structure
         let opt = htb::TcHtbOpt {
-            rate: TcRateSpec {
-                rate: if rate >= (1u64 << 32) {
-                    u32::MAX
-                } else {
-                    rate as u32
-                },
-                mpu: cfg.mpu,
-                overhead: cfg.overhead,
-                ..Default::default()
-            },
-            ceil: TcRateSpec {
-                rate: if ceil >= (1u64 << 32) {
-                    u32::MAX
-                } else {
-                    ceil as u32
-                },
-                mpu: cfg.mpu,
-                overhead: cfg.overhead,
-                ..Default::default()
-            },
-            buffer,
-            cbuffer,
+            rate: rate_spec,
+            ceil: ceil_spec,
+            buffer: psched::tc_calc_xmittime(rate, burst),
+            cbuffer: psched::tc_calc_xmittime(ceil, cburst),
             quantum: cfg.quantum.unwrap_or(0),
             prio: cfg.prio.unwrap_or(0),
             ..Default::default()
@@ -6946,10 +6972,6 @@ impl ClassConfig for HtbClassConfig {
 
         // Add the main parameters structure
         builder.append_attr(htb::TCA_HTB_PARMS, opt.as_bytes());
-
-        // Add rate tables
-        let rtab = compute_htb_rate_table(rate, cfg.mtu);
-        let ctab = compute_htb_rate_table(ceil, cfg.mtu);
 
         builder.append_attr(htb::TCA_HTB_RTAB, &rtab);
         builder.append_attr(htb::TCA_HTB_CTAB, &ctab);
@@ -7411,35 +7433,6 @@ impl ClassConfig for QfqClassConfig {
     }
 }
 
-// ============================================================================
-// HTB class rate-table helper (used by `impl ClassConfig for HtbClassConfig`)
-// ============================================================================
-
-/// Compute a rate table for HTB class.
-fn compute_htb_rate_table(rate: u64, mtu: u32) -> [u8; 1024] {
-    let mut table = [0u8; 1024];
-
-    if rate == 0 {
-        return table;
-    }
-
-    let cell_log: u32 = 3;
-    let cell_size = 1u32 << cell_log;
-    let time_units_per_sec: u64 = 1_000_000;
-
-    for i in 0..256 {
-        let size = ((i + 1) as u32) * cell_size;
-        let size = size.min(mtu);
-
-        let time = (size as u64 * time_units_per_sec) / rate;
-        let time = time.min(u32::MAX as u64) as u32;
-
-        let offset = i * 4;
-        table[offset..offset + 4].copy_from_slice(&time.to_ne_bytes());
-    }
-
-    table
-}
 
 // ============================================================================
 // Connection extension methods
@@ -8097,6 +8090,166 @@ impl Connection<Route> {
         self.send_ack(builder)
             .await
             .map_err(|e| e.with_context("replace_class"))
+    }
+}
+
+/// Wire-byte assertions for the psched-tick encoders (#191-#194, #218).
+///
+/// These deliberately do **not** round-trip through nlink's own decoder: a
+/// writer and reader that are wrong in the same direction agree with each
+/// other, which is exactly how the tick bugs survived for so long. Every
+/// expected value here is computed by hand from iproute2's algorithm and
+/// shown in the comment above it.
+#[cfg(test)]
+mod psched_wire_tests {
+    use super::*;
+    use crate::netlink::{
+        psched::Psched,
+        test_support::{class_attrs, qdisc_attrs, u32_at},
+    };
+    use crate::util::{Bytes, Rate};
+
+    /// The psched clock every modern kernel reports. The library reads the
+    /// real `/proc/net/psched`, which on any supported kernel yields exactly
+    /// this — asserting it here means the expected values below are stable.
+    #[test]
+    fn the_host_clock_is_the_modern_clock() {
+        assert_eq!(crate::netlink::psched::psched(), Psched::MODERN);
+        assert_eq!(crate::netlink::psched::tick_in_usec(), 15.625);
+    }
+
+    /// TBF at 1 mbit with a 32 KiB burst (#192).
+    ///
+    ///   rate  = 1 mbit           = 125_000 bytes/sec
+    ///   burst = 32 KiB           = 32_768 bytes
+    ///   xmit  = 32768 / 125000   = 0.262144 s = 262_144 us
+    ///   ticks = 262_144 * 15.625 = 4_096_000
+    ///
+    /// The old encoder put the raw 32_768 here. The kernel read that as
+    /// ticks (~2.1 ms), computed max_size = 125_000 * 2.1ms ~= 262 bytes, and
+    /// tbf_enqueue() then dropped every packet larger than that.
+    #[test]
+    fn tbf_buffer_is_psched_ticks_not_bytes() {
+        let cfg = TbfConfig::new()
+            .rate(Rate::mbit(1))
+            .burst(Bytes::kib(32))
+            .limit(Bytes::kib(64));
+        let attrs = qdisc_attrs(&cfg);
+
+        let parms = &attrs[&tbf::TCA_TBF_PARMS];
+        assert_eq!(parms.len(), 36, "sizeof(tc_tbf_qopt)");
+
+        assert_eq!(u32_at(&attrs, tbf::TCA_TBF_PARMS, 8), 125_000, "rate.rate");
+        assert_eq!(
+            u32_at(&attrs, tbf::TCA_TBF_PARMS, 28),
+            4_096_000,
+            "tc_tbf_qopt.buffer must be psched ticks",
+        );
+        assert_ne!(
+            u32_at(&attrs, tbf::TCA_TBF_PARMS, 28),
+            32_768,
+            "regression: buffer is the raw byte count again",
+        );
+    }
+
+    /// A rate table whose spec carries cell_log == 0 is silently discarded by
+    /// the kernel's qdisc_get_rtab(). The table and the cell_log must be
+    /// produced together or the qdisc is rejected (TBF) / the linklayer
+    /// handling never works (HTB).
+    #[test]
+    fn tbf_emits_a_rate_table_with_a_matching_cell_log() {
+        let cfg = TbfConfig::new()
+            .rate(Rate::mbit(1))
+            .burst(Bytes::kib(32))
+            .limit(Bytes::kib(64));
+        let attrs = qdisc_attrs(&cfg);
+
+        let rtab = &attrs[&tbf::TCA_TBF_RTAB];
+        assert_eq!(rtab.len(), 1024, "TC_RTAB_SIZE");
+
+        let parms = &attrs[&tbf::TCA_TBF_PARMS];
+        // Default mtu 1514: 1514 >> 3 == 189 fits 256 entries, 1514 >> 2 does not.
+        assert_eq!(parms[0], 3, "rate.cell_log");
+        assert_ne!(parms[0], 0, "cell_log == 0 makes the kernel drop the rtab");
+        assert_eq!(parms[1], 1, "rate.linklayer = TC_LINKLAYER_ETHERNET");
+        assert_eq!(&parms[4..6], (-1i16).to_ne_bytes(), "rate.cell_align");
+
+        // Entry 0 covers one 8-byte cell: 8/125000 s = 64 us -> 1000 ticks.
+        assert_eq!(u32::from_ne_bytes(rtab[0..4].try_into().unwrap()), 1_000);
+    }
+
+    /// iproute2 sends the byte-valued burst alongside the tick-valued one;
+    /// modern kernels prefer it and recompute the bucket from it exactly.
+    #[test]
+    fn tbf_emits_the_byte_valued_burst_escape_hatch() {
+        let cfg = TbfConfig::new().rate(Rate::mbit(1)).burst(Bytes::kib(32));
+        let attrs = qdisc_attrs(&cfg);
+
+        assert_eq!(u32_at(&attrs, tbf::TCA_TBF_BURST, 0), 32_768);
+        // No peakrate configured -> no peak-side attributes.
+        assert!(!attrs.contains_key(&tbf::TCA_TBF_PTAB));
+        assert!(!attrs.contains_key(&tbf::TCA_TBF_PBURST));
+    }
+
+    #[test]
+    fn tbf_peakrate_emits_the_peak_table_and_burst() {
+        let cfg = TbfConfig::new()
+            .rate(Rate::mbit(1))
+            .peakrate(Rate::mbit(2))
+            .burst(Bytes::kib(32));
+        let attrs = qdisc_attrs(&cfg);
+
+        assert_eq!(attrs[&tbf::TCA_TBF_PTAB].len(), 1024);
+        assert!(attrs.contains_key(&tbf::TCA_TBF_PBURST));
+        // peakrate.rate lives at offset 20 of tc_tbf_qopt.
+        assert_eq!(u32_at(&attrs, tbf::TCA_TBF_PARMS, 20), 250_000);
+    }
+
+    /// HTB class at 100 mbit with an explicit 15 KiB burst (#193).
+    ///
+    ///   rate  = 100 mbit        = 12_500_000 bytes/sec
+    ///   burst = 15 KiB          = 15_360 bytes
+    ///   xmit  = 15360/12500000  = 1228.8 us
+    ///   ticks = 1228.8 * 15.625 = 19_200
+    ///
+    /// The old encoder wrote the microsecond value (1228), which the kernel
+    /// read as ticks = 78 us — a token bucket of ~980 bytes, below one MTU,
+    /// so the class could never burst a full-size packet.
+    #[test]
+    fn htb_class_buffer_is_psched_ticks_not_microseconds() {
+        let cfg = HtbClassConfig::new(Rate::mbit(100)).burst(Bytes::kib(15));
+        let attrs = class_attrs(&cfg);
+
+        // tc_htb_opt: rate(12) ceil(12) buffer@24 cbuffer@28 quantum@32 ...
+        assert_eq!(
+            u32_at(&attrs, htb::TCA_HTB_PARMS, 24),
+            19_200,
+            "tc_htb_opt.buffer must be psched ticks",
+        );
+        assert_ne!(
+            u32_at(&attrs, htb::TCA_HTB_PARMS, 24),
+            1_228,
+            "regression: buffer is back in microseconds",
+        );
+
+        let parms = &attrs[&htb::TCA_HTB_PARMS];
+        assert_eq!(parms[0], 3, "rate.cell_log");
+        assert_eq!(parms[12], 3, "ceil.cell_log");
+        assert_eq!(attrs[&htb::TCA_HTB_RTAB].len(), 1024);
+        assert_eq!(attrs[&htb::TCA_HTB_CTAB].len(), 1024);
+    }
+
+    /// iproute2's get_hz() is 1e9 on modern kernels, so q_htb.c's
+    /// `buffer = rate64 / get_hz() + mtu` is just `mtu` below 8 Gbit/s.
+    /// The old hardcoded hz = 1000 added rate/1000 bytes on top — 12_500
+    /// extra at 100 mbit, a >8x too-large default burst.
+    #[test]
+    fn htb_class_default_burst_is_one_mtu() {
+        let cfg = HtbClassConfig::new(Rate::mbit(100)); // no explicit burst
+        let attrs = class_attrs(&cfg);
+
+        // Default mtu is 1600 bytes: 1600/12_500_000 s = 128 us -> 2000 ticks.
+        assert_eq!(u32_at(&attrs, htb::TCA_HTB_PARMS, 24), 2_000);
     }
 }
 

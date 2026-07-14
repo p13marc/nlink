@@ -26,7 +26,7 @@
 //! }
 //! ```
 
-use super::messages::TcMessage;
+use super::{messages::TcMessage, psched};
 
 /// Parsed qdisc options, strongly typed by qdisc kind.
 #[derive(Debug, Clone)]
@@ -905,6 +905,8 @@ pub fn parse_htb_class_options(data: &[u8]) -> Option<HtbClassOptions> {
     let mut opts = HtbClassOptions::default();
     let mut rate64: Option<u64> = None;
     let mut ceil64: Option<u64> = None;
+    let mut buffer_ticks: u32 = 0;
+    let mut cbuffer_ticks: u32 = 0;
     let mut input = data;
 
     while input.len() >= 4 {
@@ -927,8 +929,11 @@ pub fn parse_htb_class_options(data: &[u8]) -> Option<HtbClassOptions> {
                 opts.ceil = ceil as u64;
 
                 if payload.len() >= 44 {
-                    opts.burst = u32::from_ne_bytes(payload[24..28].try_into().ok()?);
-                    opts.cburst = u32::from_ne_bytes(payload[28..32].try_into().ok()?);
+                    // tc_htb_opt.buffer/.cbuffer are psched TICKS. Convert to
+                    // bytes below, once the 64-bit rates (which may override
+                    // the 32-bit ones) are known (#218).
+                    buffer_ticks = u32::from_ne_bytes(payload[24..28].try_into().ok()?);
+                    cbuffer_ticks = u32::from_ne_bytes(payload[28..32].try_into().ok()?);
                     opts.quantum = u32::from_ne_bytes(payload[32..36].try_into().ok()?);
                     opts.level = u32::from_ne_bytes(payload[36..40].try_into().ok()?);
                     opts.priority = u32::from_ne_bytes(payload[40..44].try_into().ok()?);
@@ -957,6 +962,14 @@ pub fn parse_htb_class_options(data: &[u8]) -> Option<HtbClassOptions> {
     if let Some(c) = ceil64 {
         opts.ceil = c;
     }
+
+    // The kernel reports the token bucket in psched ticks; `burst`/`cburst`
+    // are byte counts. iproute2 converts back with tc_calc_xmitsize() before
+    // printing, and so must we — without this, reading back a class created by
+    // real `tc` yielded a burst off by 15.625/rate, and `reconcile` considered
+    // a wildly wrong burst to be in sync (#218).
+    opts.burst = psched::tc_calc_xmitsize(opts.rate, buffer_ticks);
+    opts.cburst = psched::tc_calc_xmitsize(opts.ceil, cbuffer_ticks);
 
     Some(opts)
 }
@@ -1105,6 +1118,10 @@ fn parse_tbf_options(data: &[u8]) -> TbfOptions {
     let mut opts = TbfOptions::default();
     let mut rate64: Option<u64> = None;
     let mut prate64: Option<u64> = None;
+    let mut buffer_ticks: u32 = 0;
+    let mut mtu_ticks: u32 = 0;
+    let mut burst_bytes: Option<u32> = None;
+    let mut pburst_bytes: Option<u32> = None;
     let mut input = data;
 
     while input.len() >= 4 {
@@ -1141,10 +1158,11 @@ fn parse_tbf_options(data: &[u8]) -> TbfOptions {
                     opts.peakrate = u32::from_ne_bytes(payload[20..24].try_into().unwrap()) as u64;
                     // limit at offset 24
                     opts.limit = u32::from_ne_bytes(payload[24..28].try_into().unwrap());
-                    // buffer at offset 28
-                    opts.burst = u32::from_ne_bytes(payload[28..32].try_into().unwrap());
-                    // mtu at offset 32
-                    opts.mtu = u32::from_ne_bytes(payload[32..36].try_into().unwrap());
+                    // buffer at offset 28 and mtu at offset 32 are psched
+                    // TICKS, not bytes — converted below once the rates are
+                    // final (#218).
+                    buffer_ticks = u32::from_ne_bytes(payload[28..32].try_into().unwrap());
+                    mtu_ticks = u32::from_ne_bytes(payload[32..36].try_into().unwrap());
                 }
             TCA_TBF_RATE64
                 if payload.len() >= 8 => {
@@ -1154,9 +1172,17 @@ fn parse_tbf_options(data: &[u8]) -> TbfOptions {
                 if payload.len() >= 8 => {
                     prate64 = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
                 }
+            // BURST/PBURST carry the true byte counts. When the kernel sends
+            // them they are authoritative and sidestep the tick quantization
+            // entirely, so they win over the converted PARMS values —
+            // regardless of the order the attributes arrive in.
             TCA_TBF_BURST
                 if payload.len() >= 4 => {
-                    opts.burst = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+                    burst_bytes = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                }
+            TCA_TBF_PBURST
+                if payload.len() >= 4 => {
+                    pburst_bytes = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
                 }
             _ => {}
         }
@@ -1175,6 +1201,19 @@ fn parse_tbf_options(data: &[u8]) -> TbfOptions {
     if let Some(r) = prate64 {
         opts.peakrate = r;
     }
+
+    // Byte counts, from the authoritative attribute if the kernel sent one,
+    // else converted back from the tick-valued qopt fields.
+    opts.burst =
+        burst_bytes.unwrap_or_else(|| psched::tc_calc_xmitsize(opts.rate, buffer_ticks));
+    // The peak bucket is sized against the peak rate; with no peakrate the
+    // kernel sizes it against the main rate.
+    let peak = if opts.peakrate > 0 {
+        opts.peakrate
+    } else {
+        opts.rate
+    };
+    opts.mtu = pburst_bytes.unwrap_or_else(|| psched::tc_calc_xmitsize(peak, mtu_ticks));
 
     opts
 }

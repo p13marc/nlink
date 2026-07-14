@@ -149,6 +149,13 @@ mod xfrm_hotfix;
 #[path = "integration/ovpn.rs"]
 mod ovpn;
 
+// #191-#194, #218 — psched tick conversion. The unit tests pin the
+// bytes nlink emits; these pin that the *kernel* accepts them and
+// reads back what we wrote. Needed because the pre-fix writer and
+// reader were wrong in the same direction and agreed with each other.
+#[path = "integration/psched_ticks.rs"]
+mod psched_ticks;
+
 // Plan 234 (0.21) — Dispatcher foundation: ENOBUFS routing to
 // ResyncMarker::ResyncStart, per-family wiring smoke checks,
 // concurrent-request coexistence with dispatcher subscribers.
