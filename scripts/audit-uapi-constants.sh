@@ -29,8 +29,9 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 0
 fi
 
-if [[ ! -d /usr/include/linux ]]; then
-    echo "SKIP: /usr/include/linux not present — install the kernel headers"
+HEADERS="${NLINK_UAPI_HEADER_DIR:-/usr/include/linux}"
+if [[ ! -d "$HEADERS" ]]; then
+    echo "SKIP: $HEADERS not present — install the kernel headers"
     echo "      (Fedora: kernel-headers; Debian/Ubuntu: linux-libc-dev)"
     exit 0
 fi

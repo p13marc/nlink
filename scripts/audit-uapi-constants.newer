@@ -1,0 +1,38 @@
+# Kernel constants nlink knows about that a build host's headers may predate.
+#
+# nlink deliberately supports kernels newer than whatever machine happens to
+# compile it, so "this header set has never heard of that constant" is a
+# legitimate answer, not a bug. But it is also *exactly* what an invented
+# variant looks like — #227 shipped two string sets that were never kernel string
+# sets at all — so the audit will not simply wave a missing constant through.
+# Naming it here is the vouching step.
+#
+# This is NOT a hole in the gate:
+#
+#   - A constant listed here is still fully value-checked on any host whose
+#     headers DO know it. The maintainer's Fedora box knows all of these; the
+#     ubuntu-latest CI runner (older linux-libc-dev) does not. So they are
+#     checked on one and skipped on the other, and a drift in their VALUES is
+#     still caught.
+#   - Only *absence* is excused, never a mismatch. If the constant exists in the
+#     headers and disagrees with nlink, that is a hard failure regardless of what
+#     this file says.
+#
+# Add an entry only after checking the constant really does exist in a newer
+# kernel — cite the version. If you cannot name the version, you are probably
+# looking at a transcription error, which is the thing this gate exists to find.
+#
+# Format: one kernel constant name per line.
+
+# --- ethtool -------------------------------------------------------------
+# Module firmware flashing, and the PHY_GET command it displaced. Linux 6.9.
+ETHTOOL_MSG_MODULE_FW_FLASH_ACT
+ETHTOOL_MSG_PHY_GET
+
+# Per-PHY addressing in the ethtool request header. Linux 6.11.
+ETHTOOL_A_HEADER_PHY_INDEX
+
+# PHY(dev) statistics, and the hardware-timestamping flags string set.
+# Linux 6.11 / 6.13.
+ETH_SS_STATS_PHY
+ETH_SS_TS_FLAGS

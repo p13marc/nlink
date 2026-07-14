@@ -13,6 +13,8 @@
 #   4. #231   BssStatus starts at 1  -> caught
 #   5. new enum, unclassified        -> caught (nobody is checking it)
 #   6. invented variant in a UAPI enum -> caught (no such kernel constant)
+#   7. older build host, vouched-for  -> skipped, not failed
+#   8. older build host, UNvouched    -> still caught (the hole stays closed)
 
 set -euo pipefail
 
@@ -150,6 +152,45 @@ s = s.replace("pub enum EthtoolWolAttr {\n    Unspec = 0,",
 open(p, "w").write(s)
 PY
 expect_fail "an invented variant is caught" "no kernel constant named ETHTOOL_A_WOL_IMAGINARY"
+restore
+
+# 7. An OLDER build host. nlink deliberately supports kernels newer than the
+#    machine compiling it, so a constant the headers have never heard of is a
+#    legitimate answer — but only for one vouched for by name in the .newer file.
+#    This is the exact failure that took the first CI run down: ubuntu-latest
+#    ships an older linux-libc-dev than the maintainer's box.
+OLD_HEADERS="$WORK_DIR/old-headers"
+cp -r /usr/include/linux "$OLD_HEADERS"
+# Strip the constants nlink knows but an older header set would not.
+sed -i '/ETHTOOL_MSG_MODULE_FW_FLASH_ACT/d; /ETHTOOL_MSG_PHY_GET,/d; /ETHTOOL_A_HEADER_PHY_INDEX/d' \
+    "$OLD_HEADERS/ethtool_netlink_generated.h"
+sed -i '/ETH_SS_STATS_PHY/d; /ETH_SS_TS_FLAGS/d' "$OLD_HEADERS/ethtool.h"
+
+if NLINK_UAPI_HEADER_DIR="$OLD_HEADERS" run_audit >/dev/null 2>&1; then
+    echo "  ok   older headers: vouched-for constants are skipped, not failed"
+else
+    echo "  FAIL older headers: the audit rejected a tree whose only sin is being"
+    echo "       newer than the build host's headers"
+    NLINK_UAPI_HEADER_DIR="$OLD_HEADERS" run_audit | sed 's/^/       /'
+    FAILURES=$((FAILURES + 1))
+fi
+
+# 8. ...but the vouching is what makes it safe. Un-vouch one and it must fail
+#    again, exactly as an invented variant would.
+grep -v ETHTOOL_A_HEADER_PHY_INDEX "$WORK_DIR/scripts/audit-uapi-constants.newer" \
+    > "$WORK_DIR/scripts/.newer.tmp"
+mv "$WORK_DIR/scripts/.newer.tmp" "$WORK_DIR/scripts/audit-uapi-constants.newer"
+
+if output="$(NLINK_UAPI_HEADER_DIR="$OLD_HEADERS" run_audit)"; then
+    echo "  FAIL older headers: an UNVOUCHED-FOR missing constant was waved through"
+    echo "       — that is the hole an invented variant would hide in"
+    FAILURES=$((FAILURES + 1))
+elif grep -qF "ETHTOOL_A_HEADER_PHY_INDEX" <<<"$output"; then
+    echo "  ok   older headers: an unvouched-for missing constant still fails"
+else
+    echo "  FAIL older headers: failed, but not about the constant we un-vouched"
+    FAILURES=$((FAILURES + 1))
+fi
 restore
 
 echo

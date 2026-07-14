@@ -31,10 +31,16 @@ import re
 import sys
 from pathlib import Path
 
+import os
+
 REPO = Path(__file__).resolve().parent.parent
-HEADER_DIR = Path("/usr/include/linux")
+# Overridable so the self-test can point at a trimmed header tree and reproduce
+# an older build host — the case that decides whether a missing constant is
+# "nlink is newer than you" or "nlink made this up".
+HEADER_DIR = Path(os.environ.get("NLINK_UAPI_HEADER_DIR", "/usr/include/linux"))
 MAP_FILE = REPO / "scripts" / "audit-uapi-constants.map"
 ALLOWLIST_FILE = REPO / "scripts" / "audit-uapi-constants.allowlist"
+NEWER_FILE = REPO / "scripts" / "audit-uapi-constants.newer"
 SRC_DIRS = [REPO / "crates" / "nlink" / "src"]
 
 
@@ -225,8 +231,17 @@ def main() -> int:
         if line.split("#", 1)[0].strip()
     }
 
+    # Constants nlink knows about that a given build host's headers may predate.
+    # See the file's own header for why this exists and why it is not a hole.
+    newer_than_headers = {
+        line.split("#", 1)[0].strip()
+        for line in NEWER_FILE.read_text().splitlines()
+        if line.split("#", 1)[0].strip()
+    }
+
     failures: list[str] = []
     unclassified: list[str] = []
+    ahead_of_headers: list[str] = []
     checked_enums = 0
     checked_variants = 0
 
@@ -247,11 +262,23 @@ def main() -> int:
             kernel_name = f"{prefix}_{suffix}" if suffix else prefix
 
             if kernel_name not in kernel:
+                # nlink deliberately supports kernels newer than its build host,
+                # so "this header set has never heard of it" is a legitimate
+                # answer — but only for a constant someone has vouched for by
+                # name. An unvouched-for missing constant is exactly what an
+                # invented variant looks like (#227 shipped two), so it fails.
+                if kernel_name in newer_than_headers:
+                    ahead_of_headers.append(f"{name}::{variant} ({kernel_name})")
+                    continue
                 failures.append(
                     f"{path.relative_to(REPO)}: {name}::{variant} = {value}\n"
                     f"    no kernel constant named {kernel_name}\n"
-                    f"    (if this variant is nlink-only, map it to `!skip`; if the\n"
-                    f"     name just differs, add a `{variant} -> SUFFIX` override)"
+                    f"    Either:\n"
+                    f"      - the variant is nlink-only    -> map it to `!skip`\n"
+                    f"      - the name just differs        -> add `{variant} -> SUFFIX`\n"
+                    f"      - it is newer than these headers -> add {kernel_name}\n"
+                    f"        to scripts/audit-uapi-constants.newer, with the kernel\n"
+                    f"        version that introduced it"
                 )
                 continue
 
@@ -280,6 +307,18 @@ def main() -> int:
         print("These are silent-wrong-value bugs: the kernel accepts the message and")
         print("acts on a different attribute than the one you named.")
         return 1
+
+    if ahead_of_headers:
+        print(
+            f"note: {len(ahead_of_headers)} constant(s) are newer than this host's "
+            f"headers and were not checked here:"
+        )
+        for entry in ahead_of_headers:
+            print(f"  {entry}")
+        print(
+            "      (their values ARE checked on any host whose headers know them — "
+            "see scripts/audit-uapi-constants.newer)\n"
+        )
 
     print(
         f"OK: {checked_variants} discriminants across {checked_enums} enums match "
