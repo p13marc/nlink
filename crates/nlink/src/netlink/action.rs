@@ -768,16 +768,35 @@ impl ActionConfig for PoliceAction {
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
-        use super::types::tc::qdisc::TcRateSpec;
+        use super::{psched, types::tc::qdisc::TcRateSpec};
 
-        let peakrate = match self.peakrate {
-            Some(pr) => TcRateSpec::new(pr.min(u32::MAX as u64) as u32),
-            None => TcRateSpec::default(),
+        // Two defects lived on this message (#194).
+        //
+        // 1. `tc_police.burst` is psched TICKS — tcf_police_init() does
+        //    `police->tcfp_burst = PSCHED_TICKS2NS(parm->burst)`. The raw
+        //    byte count made the burst ~15x too small.
+        // 2. TCA_POLICE_RATE (the 256-entry rate table) was never emitted at
+        //    all. tcf_police_init() calls qdisc_get_rtab() for any non-zero
+        //    rate and fails the action when it returns NULL — which it does
+        //    both when the attribute is absent *and* when the ratespec's
+        //    cell_log is 0. tc_calc_rtable() fixes both by construction.
+        let linklayer = psched::LinkLayer::default();
+
+        let mut rate = TcRateSpec {
+            rate: self.rate.min(u32::MAX as u64) as u32,
+            ..Default::default()
         };
+        let rtab = psched::tc_calc_rtable(&mut rate, self.rate, self.mtu, linklayer);
+
+        let mut peakrate = TcRateSpec::default();
+        let ptab = self.peakrate.map(|pr| {
+            peakrate.rate = pr.min(u32::MAX as u64) as u32;
+            psched::tc_calc_rtable(&mut peakrate, pr, self.mtu, linklayer)
+        });
 
         let parms = police::TcPolice {
-            rate: TcRateSpec::new(self.rate.min(u32::MAX as u64) as u32),
-            burst: self.burst,
+            rate,
+            burst: psched::tc_calc_xmittime(self.rate, self.burst),
             mtu: self.mtu,
             action: self.exceed_action,
             peakrate,
@@ -785,6 +804,14 @@ impl ActionConfig for PoliceAction {
         };
 
         builder.append_attr(police::TCA_POLICE_TBF, parms.as_bytes());
+
+        // Mandatory whenever a rate is set — see (2) above.
+        if self.rate > 0 {
+            builder.append_attr(police::TCA_POLICE_RATE, &rtab);
+        }
+        if let Some(ptab) = &ptab {
+            builder.append_attr(police::TCA_POLICE_PEAKRATE, ptab);
+        }
 
         // Add 64-bit rate if needed
         if self.rate > u32::MAX as u64 {
@@ -5109,6 +5136,74 @@ fn parse_one_action(slot: &[u8]) -> Option<ActionMessage> {
         index,
         options_raw,
     })
+}
+
+/// Wire-byte assertions for the police encoder (#194).
+///
+/// Hand-computed against iproute2's algorithm, never round-tripped through
+/// nlink's own decoder.
+#[cfg(test)]
+mod psched_wire_tests {
+    use super::*;
+    use crate::netlink::test_support::{action_attrs, u32_at};
+
+    /// police at 10 mbit with a 100 KiB burst.
+    ///
+    ///   rate  = 10 mbit           = 1_250_000 bytes/sec
+    ///   burst = 100 KiB           = 102_400 bytes
+    ///   xmit  = 102400/1250000    = 81_920 us
+    ///   ticks = 81_920 * 15.625   = 1_280_000
+    ///
+    /// tcf_police_init(): `police->tcfp_burst = PSCHED_TICKS2NS(parm->burst)`.
+    /// The old encoder wrote the raw byte count.
+    #[test]
+    fn police_burst_is_psched_ticks_not_bytes() {
+        let cfg = PoliceAction::new().rate(1_250_000).burst(102_400);
+        let attrs = action_attrs(&cfg);
+
+        // struct tc_police: index@0 action@4 limit@8 burst@12 mtu@16 rate@20..
+        assert_eq!(
+            u32_at(&attrs, police::TCA_POLICE_TBF, 12),
+            1_280_000,
+            "tc_police.burst must be psched ticks",
+        );
+        assert_ne!(
+            u32_at(&attrs, police::TCA_POLICE_TBF, 12),
+            102_400,
+            "regression: burst is the raw byte count again",
+        );
+    }
+
+    /// tcf_police_init() calls qdisc_get_rtab() for any non-zero rate and
+    /// fails the action when it returns NULL — which it does both when
+    /// TCA_POLICE_RATE is absent *and* when the ratespec's cell_log is 0.
+    /// nlink emitted neither, so a policer with a rate could never install.
+    #[test]
+    fn police_emits_the_mandatory_rate_table() {
+        let cfg = PoliceAction::new().rate(1_250_000).burst(102_400);
+        let attrs = action_attrs(&cfg);
+
+        let rtab = attrs
+            .get(&police::TCA_POLICE_RATE)
+            .expect("TCA_POLICE_RATE is mandatory whenever a rate is set");
+        assert_eq!(rtab.len(), 1024, "TC_RTAB_SIZE");
+
+        let parms = &attrs[&police::TCA_POLICE_TBF];
+        assert_ne!(
+            parms[20], 0,
+            "rate.cell_log == 0 makes qdisc_get_rtab() return NULL",
+        );
+    }
+
+    /// A policer with no rate (pure packet-rate / avrate policing) must not
+    /// emit a rate table — qdisc_get_rtab() is only consulted for a non-zero
+    /// rate.
+    #[test]
+    fn police_without_a_rate_emits_no_rate_table() {
+        let cfg = PoliceAction::new().burst(102_400);
+        let attrs = action_attrs(&cfg);
+        assert!(!attrs.contains_key(&police::TCA_POLICE_RATE));
+    }
 }
 
 #[cfg(test)]

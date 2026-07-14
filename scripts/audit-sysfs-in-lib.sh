@@ -21,13 +21,25 @@ set -euo pipefail
 ALLOWED=(
     # /proc/sys IS the namespace-correct path for sysctls.
     "crates/nlink/src/netlink/sysctl.rs"
+    # /proc/net/psched carries the packet-scheduler clock constants
+    # (PSCHED_SHIFT, HZ). They are compile-time kernel globals, identical
+    # in every netns, so reading them through the caller's mount namespace
+    # is not a namespace-correctness hazard — unlike per-netns device state
+    # or sysctls. Read once per process, with the same constants as the
+    # fallback. See the module header for the full rationale.
+    "crates/nlink/src/netlink/psched.rs"
 )
 
-# Search the lib for /sys/class/net/ and /proc/sys/ literal
-# reads. Surface anything outside ALLOWED.
+# Search the lib for literal sysfs/procfs reads. Surface anything
+# outside ALLOWED.
+#
+# /proc/net/ (not the broader /proc/) is deliberate: the many
+# /proc/<pid>/ns/net and /proc/thread-self/ns/net opens in namespace.rs
+# are namespace-correct by construction and must not be swept in.
 PATTERNS=(
     "/sys/class/net/"
     "/proc/sys/"
+    "/proc/net/"
 )
 
 violations=0

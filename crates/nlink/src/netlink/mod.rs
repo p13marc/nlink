@@ -111,6 +111,7 @@ pub mod parse_params;
 mod parser_proptest;
 pub mod pool;
 mod protocol;
+pub mod psched;
 pub mod ratelimit;
 pub mod reflector;
 pub mod resync;
@@ -132,6 +133,10 @@ pub mod tc_handle;
 pub mod tc_options;
 pub mod tc_recipe;
 pub(crate) mod tc_recipe_internals;
+/// Byte-level assertions on encoder output, shared by the `tc` and
+/// `action` test modules.
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod types;
 pub mod uevent;
 pub mod xfrm;
