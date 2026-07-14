@@ -29,6 +29,7 @@
 //! the kernel.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use nlink::Result;
 use nlink::netlink::{
@@ -277,4 +278,70 @@ async fn concurrent_requests_coexist_with_dispatcher_subscriber() -> Result<()> 
         other => panic!("expected ResyncStart, got {other:?}"),
     }
     Ok(())
+}
+
+// ============================================================================
+// #219 — shutdown must actually reach the driver.
+// ============================================================================
+
+/// Dropping a dispatcher-mode `Connection` closes its fd.
+///
+/// This is the end-to-end check that shutdown reaches the driver at all, over a
+/// churn loop that would accumulate fds if it didn't.
+///
+/// **It does not, on its own, pin #219.** That bug is a lost-wakeup race:
+/// `shutdown()` signalled with `Notify::notify_waiters()`, which stores no
+/// permit and wakes only tasks *already registered* as waiters, and the driver
+/// is unregistered for the whole of `route_buffer` and between `select!`
+/// iterations. In the steady state this loop exercises, the driver is parked in
+/// `notified()` when the drop lands — which is precisely the case
+/// `notify_waiters` handles — so this test passes either way. Verified by
+/// reintroducing the bug.
+///
+/// The race itself is pinned deterministically by
+/// `dispatcher::tests::shutdown_signalled_with_no_waiter_is_not_lost`, which
+/// signals with no waiter registered and fails under `notify_waiters`.
+///
+/// Unprivileged: opening an `NETLINK_ROUTE` socket needs no capability.
+#[tokio::test]
+async fn dropping_a_dispatcher_connection_closes_its_fd() -> Result<()> {
+    fn open_fds() -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .expect("/proc/self/fd")
+            .count()
+    }
+
+    // Warm up: the first connection may allocate thread-local and runtime fds
+    // that are not returned, which would read as a leak.
+    {
+        let conn = Connection::<Route>::new()?.with_dispatcher();
+        let _ = conn.get_links().await?;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let baseline = open_fds();
+
+    for _ in 0..20 {
+        let conn = Connection::<Route>::new()?.with_dispatcher();
+        // Drive a request so the driver task is actually spawned (it starts
+        // lazily) and is mid-loop when the connection drops.
+        let _ = conn.get_links().await?;
+        drop(conn);
+    }
+
+    // The driver exits asynchronously, so give the runtime a moment to reap the
+    // tasks before counting. Poll rather than sleep-and-hope.
+    for _ in 0..40 {
+        if open_fds() <= baseline {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!(
+        "fd leak: {} open fds after 20 create/drop cycles, was {baseline} before — \
+         the shutdown signal is not reaching the driver, so it loops forever \
+         holding its socket",
+        open_fds(),
+    );
 }
