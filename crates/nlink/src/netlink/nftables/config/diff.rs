@@ -354,9 +354,57 @@ impl std::fmt::Display for NftablesDiff {
     }
 }
 
+/// Options controlling [`NftablesConfig::diff_with_options`].
+///
+/// Mirrors [`DiffOptions`](crate::netlink::config::DiffOptions) on the
+/// `NetworkConfig` side.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct NftDiffOptions {
+    /// Delete tables that exist in the kernel but are not declared in this
+    /// config ("full reconcile"). Default `false`.
+    ///
+    /// # This is extremely destructive — read before enabling
+    ///
+    /// `list_tables()` is unscoped: it returns **every table in every
+    /// family**, with no ownership marker. `NFT_MSG_DELTABLE` cascades — all
+    /// chains, rules, sets and flowtables in the table go with it.
+    ///
+    /// So on any host that also runs Docker, firewalld, libvirt or kube-proxy,
+    /// a purging apply of a config that declares only your own table will
+    /// atomically destroy `ip nat` (Docker), `inet firewalld`, `ip6 filter`,
+    /// and everything else on the box — the host loses its firewall and NAT
+    /// rules in a single commit.
+    ///
+    /// **Until 0.25 this was the unconditional default** (#190): `diff()`
+    /// scheduled every foreign table for deletion and `apply()` committed it.
+    /// It is now opt-in, and reachable only through the explicit
+    /// `diff_with_options` → inspect the diff → `apply` flow, so you always
+    /// see the `-` lines before anything is deleted.
+    ///
+    /// If you enable this, scope your config to a netns (`nlink::lab` does),
+    /// or be certain you own every table on the host.
+    pub purge_tables: bool,
+}
+
+impl NftDiffOptions {
+    /// Enable/disable purging of undeclared tables. See [`Self::purge_tables`]
+    /// — it is destructive and unscoped.
+    pub fn purge_tables(mut self, on: bool) -> Self {
+        self.purge_tables = on;
+        self
+    }
+}
+
 impl NftablesConfig {
     /// Compute the diff between this declared config and the
     /// kernel's current state.
+    ///
+    /// **Never deletes tables.** Tables present in the kernel but absent from
+    /// this config are left alone. To remove them, opt in explicitly with
+    /// [`diff_with_options`](Self::diff_with_options) +
+    /// [`NftDiffOptions::purge_tables`] — and read that method's warning first
+    /// (#190).
     ///
     /// # Rule-identity caveat (0.16)
     ///
@@ -369,6 +417,20 @@ impl NftablesConfig {
     /// declarative apply now with explicit churn-vs-correctness
     /// trade-off.
     pub async fn diff(&self, conn: &Connection<Nftables>) -> Result<NftablesDiff> {
+        self.diff_with_options(conn, &NftDiffOptions::default())
+            .await
+    }
+
+    /// [`diff`](Self::diff), with table purging optionally enabled.
+    ///
+    /// See [`NftDiffOptions::purge_tables`] — it deletes every kernel table
+    /// this config does not declare, across every family, cascading to their
+    /// chains, rules and sets.
+    pub async fn diff_with_options(
+        &self,
+        conn: &Connection<Nftables>,
+        options: &NftDiffOptions,
+    ) -> Result<NftablesDiff> {
         let mut diff = NftablesDiff::default();
 
         // Index declared by (family, name) for fast lookup.
@@ -393,10 +455,18 @@ impl NftablesConfig {
         }
 
         // Pass 2: tables to delete (current but not declared).
-        for current in &current_tables {
-            if !declared_tables.contains(&(current.family, current.name.as_str())) {
-                diff.tables_to_delete
-                    .push((current.family, current.name.clone()));
+        //
+        // Opt-in only. `current_tables` is EVERY table in EVERY family with no
+        // ownership marker, and DELTABLE cascades — so doing this by default
+        // meant a config declaring one table atomically wiped Docker's `ip
+        // nat`, firewalld's `inet firewalld`, and every other table on the box
+        // (#190).
+        if options.purge_tables {
+            for current in &current_tables {
+                if !declared_tables.contains(&(current.family, current.name.as_str())) {
+                    diff.tables_to_delete
+                        .push((current.family, current.name.clone()));
+                }
             }
         }
 

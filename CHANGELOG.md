@@ -27,6 +27,63 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **nftables: `NftablesConfig::apply` destroyed every table it did not declare
+  (#190).** `diff()` scheduled **every table in the kernel** that was not in
+  the declared config for deletion, and `apply()` committed those deletes in
+  the atomic batch. `NFT_MSG_DELTABLE` cascades — all chains, rules, sets and
+  flowtables in the table go with it — and `list_tables()` is unscoped, with no
+  ownership marker consulted.
+
+  So on any host also running Docker, firewalld, libvirt or kube-proxy,
+  following the declarative-config recipe with a config declaring one table
+  atomically destroyed `ip nat` (Docker), `inet firewalld`, `ip6 filter`, and
+  everything else on the box. The host lost its firewall and NAT rules in a
+  single commit, with no warning and no dry-run prompt. `nlink::lab` was
+  shielded only because it applies inside a fresh netns.
+
+  `diff()` now **never** emits table deletions. Purge is opt-in via
+  `diff_with_options(&conn, &NftDiffOptions::default().purge_tables(true))`,
+  mirroring `DiffOptions::purge` on the `NetworkConfig` side, and is reachable
+  only through the explicit diff → inspect → apply flow. The
+  [recipe](docs/recipes/nftables-declarative-config.md) sentence "the library
+  only deletes what it owns" was true of *rules* and not of tables; it now says
+  so, and is now true of tables too.
+
+- **nftables: rules installed in reverse declaration order (#195).**
+  `NLM_F_APPEND` was never set on `NFT_MSG_NEWRULE` — the constant was defined
+  at `message.rs:237` and used nowhere in the crate. `nf_tables_newrule()`
+  appends to the chain tail only when it is set; otherwise it **prepends**.
+  nftables is first-match-wins, so this inverted policy: a declared
+  `[accept tcp/22, drop]` installed as `[drop, accept]` and **SSH was blocked**.
+  No test pinned rule order, which is why it survived; one does now.
+
+- **nftables: `send_batch` discarded mid-batch kernel errors (#199, #209).**
+  `Transaction` numbered its inner messages from its own counter starting at 1,
+  unrelated to the socket's — so the recv loop's stated invariant ("inner seqs
+  are strictly below `begin_seq`") was false, and its one-sided
+  `if seq > end_seq { continue }` filter **threw away the `NLMSGERR` for a
+  rejected op**. The kernel aborted the batch, its `BATCH_END` ACK never came,
+  and the caller got an opaque 30-second `Error::Timeout` naming nothing. (This
+  is the hang the `nftables_reconcile` integration tests were wrapped in a
+  30s timeout to survive.) Conversely, an inner seq that happened to *equal*
+  `end_seq` had its per-op ACK mistaken for the BATCH_END ACK, returning
+  `Ok(())` for a batch that never committed.
+
+  `send_batch` now allocates every inner seq from the socket counter at send
+  time, so the batch occupies one contiguous `[begin_seq..=end_seq]` window and
+  every response matches exactly — the CLAUDE.md recv-loop rule 1. The socket
+  is now the *only* seq authority; `Transaction`'s counter is reduced to what it
+  always really was, an allocator for the batch-local `NFTA_SET_ID`. Transaction
+  messages also now carry a pid, which they never did. Separately (#209), a
+  stray `NLMSG_DONE` no longer reports success: nfnetlink never terminates a
+  batch with DONE, so the arm could only fire on a stale frame left by a
+  cancelled dump (dumps and batches share the fd) — reporting an uncommitted
+  batch as committed.
+
+- **nftables: `DeclaredSet` / `DeclaredSetBuilder` are exported (#210).** They
+  are the type of the **public** field `NftablesDiff::sets_to_add`, so leaving
+  them unexported made that field unnameable from outside the crate.
+
 - **TC config fields that never reached the wire (#201, #213, #214, #215).**
   Four cases of a value being accepted, stored, and then silently dropped —
   the compiler could not warn about any of them, because the field *was*
