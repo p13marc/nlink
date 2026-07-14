@@ -161,10 +161,23 @@ restore
 #    ships an older linux-libc-dev than the maintainer's box.
 OLD_HEADERS="$WORK_DIR/old-headers"
 cp -r /usr/include/linux "$OLD_HEADERS"
-# Strip the constants nlink knows but an older header set would not.
-sed -i '/ETHTOOL_MSG_MODULE_FW_FLASH_ACT/d; /ETHTOOL_MSG_PHY_GET,/d; /ETHTOOL_A_HEADER_PHY_INDEX/d' \
-    "$OLD_HEADERS/ethtool_netlink_generated.h"
-sed -i '/ETH_SS_STATS_PHY/d; /ETH_SS_TS_FLAGS/d' "$OLD_HEADERS/ethtool.h"
+
+# Age the copy: delete the enumerators an older header set would not have.
+#
+# Which file each lives in varies by kernel version (ethtool's netlink enums
+# moved into ethtool_netlink_generated.h only recently), and on a genuinely old
+# host — the ubuntu-latest runner, say — several are absent to begin with. So
+# grep for each constant rather than naming files, and treat "already missing"
+# as success: that IS the state being simulated.
+#
+# The trailing comma in each pattern is load-bearing: it keeps
+# `ETHTOOL_MSG_PHY_GET,` from also matching `ETHTOOL_MSG_PHY_GET_REPLY,`.
+for const in 'ETHTOOL_MSG_MODULE_FW_FLASH_ACT,' 'ETHTOOL_MSG_PHY_GET,' \
+             'ETHTOOL_A_HEADER_PHY_INDEX,' 'ETH_SS_STATS_PHY,' 'ETH_SS_TS_FLAGS,'; do
+    while IFS= read -r f; do
+        sed -i "/${const}/d" "$f"
+    done < <(grep -rlF "$const" "$OLD_HEADERS" 2>/dev/null || true)
+done
 
 if NLINK_UAPI_HEADER_DIR="$OLD_HEADERS" run_audit >/dev/null 2>&1; then
     echo "  ok   older headers: vouched-for constants are skipped, not failed"
