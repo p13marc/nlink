@@ -615,7 +615,11 @@ impl ConntrackBuilder {
             b.append_attr_u32_be(CTA_STATUS, s.bits());
         }
         if let Some(t) = self.timeout {
-            b.append_attr_u32_be(CTA_TIMEOUT, t.as_secs() as u32);
+            // CTA_TIMEOUT is a u32 of seconds. `as u32` on the u64 from
+            // as_secs() *wraps*, so a Duration beyond ~136 years silently
+            // became a tiny timeout rather than a large one. Saturate (#211).
+            let secs = t.as_secs().min(u32::MAX as u64) as u32;
+            b.append_attr_u32_be(CTA_TIMEOUT, secs);
         }
         if let Some(m) = self.mark {
             b.append_attr_u32_be(CTA_MARK, m);

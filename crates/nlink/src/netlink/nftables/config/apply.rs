@@ -35,9 +35,36 @@
 use std::time::Duration;
 
 use super::diff::NftablesDiff;
+use super::types::DeclaredChain;
 use super::super::connection::Transaction;
-use super::super::types::{Chain, Set};
+use super::super::types::{Chain, Family, Set};
 use crate::netlink::{connection::Connection, error::Result, protocol::Nftables};
+
+/// Re-build a runtime `Chain` from a `DeclaredChain`.
+///
+/// `DeclaredChain` is a value type; `Chain` is the transaction-input type.
+/// Shared by the chain-add and chain-modify passes, which emit the same
+/// `NFT_MSG_NEWCHAIN` message — the kernel treats it as an update when the
+/// chain already exists.
+fn build_chain(table: &str, family: Family, declared: &DeclaredChain) -> Result<Chain> {
+    let mut chain = Chain::new(table, declared.name())?.family(family);
+    if let Some(h) = declared.hook() {
+        chain = chain.hook(h);
+    }
+    if let Some(p) = declared.priority() {
+        chain = chain.priority(p);
+    }
+    if let Some(pol) = declared.policy() {
+        chain = chain.policy(pol);
+    }
+    if let Some(ct) = declared.chain_type() {
+        chain = chain.chain_type(ct);
+    }
+    if let Some(dev) = declared.device() {
+        chain = chain.device(dev);
+    }
+    Ok(chain)
+}
 
 impl NftablesDiff {
     /// Apply the diff to the kernel atomically.
@@ -112,6 +139,13 @@ impl NftablesDiff {
             }
         }
 
+        // 5b. Table flag updates. NFT_MSG_NEWTABLE updates an existing table,
+        //     so a flag change converges without a delete+recreate — which
+        //     would cascade away every chain and rule inside it (#208).
+        for (family, name, flags) in &self.tables_to_modify {
+            tx = tx.add_table_with_flags(name, *family, *flags);
+        }
+
         // 8. Set adds — after the owning table exists, before the
         //    rules (step 11) that reference them by `@name`. Re-build
         //    a runtime `Set` from `DeclaredSet`.
@@ -129,27 +163,15 @@ impl NftablesDiff {
             tx = tx.add_set_elements(table, set, *family, elems);
         }
 
-        // 6. Chain adds. Re-build a runtime `Chain` from
-        //    `DeclaredChain` since the latter is a value type and
-        //    the former is the transaction-input type.
-        for (table_name, family, declared) in &self.chains_to_add {
-            let mut chain = Chain::new(table_name.as_str(), declared.name())?.family(*family);
-            if let Some(h) = declared.hook() {
-                chain = chain.hook(h);
-            }
-            if let Some(p) = declared.priority() {
-                chain = chain.priority(p);
-            }
-            if let Some(pol) = declared.policy() {
-                chain = chain.policy(pol);
-            }
-            if let Some(ct) = declared.chain_type() {
-                chain = chain.chain_type(ct);
-            }
-            if let Some(dev) = declared.device() {
-                chain = chain.device(dev);
-            }
-            tx = tx.add_chain(chain);
+        // 6. Chain adds, then chain property updates. Both emit
+        //    `NFT_MSG_NEWCHAIN`, which the kernel treats as an
+        //    update when the chain already exists — so a drifted
+        //    policy/hook/priority converges without a delete+recreate
+        //    (which would drop the chain's rules). #200.
+        for (table_name, family, declared) in
+            self.chains_to_add.iter().chain(self.chains_to_modify.iter())
+        {
+            tx = tx.add_chain(build_chain(table_name, *family, declared)?);
         }
 
         // 7. Rule adds. Wire `handle_key` → `body.comment` so the

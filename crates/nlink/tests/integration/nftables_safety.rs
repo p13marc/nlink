@@ -180,7 +180,7 @@ async fn rules_install_in_declaration_order() -> nlink::Result<()> {
         let order: Vec<_> = rules.iter().map(|r| r.comment.as_deref()).collect();
         assert_eq!(
             order,
-            vec![Some("1-accept-ssh"), Some("2-drop-all")],
+            vec![Some("nlink:1-accept-ssh"), Some("nlink:2-drop-all")],
             "the kernel is holding the rules in REVERSE declaration order, so \
              the bare drop matches first and SSH is blocked (#195)",
         );

@@ -1716,9 +1716,39 @@ impl Rule {
         self
     }
 
-    /// Reject the packet (send ICMP unreachable / TCP RST).
-    pub fn reject(mut self) -> Self {
-        self.exprs.push(super::expr::Expr::Verdict(Verdict::Drop));
+    /// Reject the packet: send an ICMP port-unreachable, then drop.
+    ///
+    /// The client fails fast with "connection refused" instead of hanging to
+    /// its TCP timeout. For a black hole (no ICMP, no RST), use
+    /// [`drop`](Self::drop) instead.
+    ///
+    /// Uses `ICMPX` (family-independent) so the same rule is valid in an
+    /// `inet` or `bridge` chain, where the family is not known at rule-load
+    /// time. For a TCP RST, or a specific ICMP code, use
+    /// [`reject_with`](Self::reject_with).
+    ///
+    /// Until 0.25 this pushed a bare `NF_DROP` verdict — the doc promised
+    /// reject semantics and the code delivered a silent drop, so clients hung
+    /// until timeout (#205).
+    pub fn reject(self) -> Self {
+        // NFT_REJECT_ICMPX_PORT_UNREACH = 1.
+        self.reject_with(super::NFT_REJECT_ICMPX_UNREACH, 1)
+    }
+
+    /// Reject the packet with an explicit reject type and ICMP code.
+    ///
+    /// `reject_type` is one of [`NFT_REJECT_ICMP_UNREACH`],
+    /// [`NFT_REJECT_TCP_RST`] or [`NFT_REJECT_ICMPX_UNREACH`]. `icmp_code` is
+    /// ignored for a TCP reset.
+    ///
+    /// [`NFT_REJECT_ICMP_UNREACH`]: super::NFT_REJECT_ICMP_UNREACH
+    /// [`NFT_REJECT_TCP_RST`]: super::NFT_REJECT_TCP_RST
+    /// [`NFT_REJECT_ICMPX_UNREACH`]: super::NFT_REJECT_ICMPX_UNREACH
+    pub fn reject_with(mut self, reject_type: u32, icmp_code: u8) -> Self {
+        self.exprs.push(super::expr::Expr::Reject {
+            reject_type,
+            icmp_code,
+        });
         self
     }
 
@@ -1800,57 +1830,69 @@ pub enum SetKeyType {
 }
 
 impl SetKeyType {
-    /// Kernel type ID (from nf_tables.h NFT_DATA_*).
+    /// Number of bits each component occupies in a `Concat` type word.
+    /// nft's `TYPE_BITS`.
+    const CONCAT_TYPE_BITS: u32 = 6;
+
+    /// The **nftables userspace datatype id** carried in `NFTA_SET_KEY_TYPE`
+    /// (nft's `enum datatypes`, `include/datatype.h`).
     ///
-    /// `Concat` builds a per-component type list packed as
-    /// `u32`s into a single u64 wire value: shift each
-    /// component's `type_id()` by `i * 6` bits and OR. This
-    /// matches the kernel's `nft_set_ext_concat` layout
-    /// (each type packed into 6-bit slots).
+    /// The kernel only checks `NFT_DATA_RESERVED_MASK` and stores this value
+    /// opaquely, so a wrong id still *creates* the set — it is `nft list
+    /// ruleset` that then renders the wrong type, and nft cannot parse or
+    /// round-trip the set. Three of these were wrong until 0.25 (#207):
+    /// `InetProto` was 14 (which is `icmp_type`), `Mark` was 12 (which is
+    /// `inet_protocol`), and `IfIndex` was 15 (which is `tcp_flag`).
     pub fn type_id(&self) -> u32 {
         match self {
-            Self::Ipv4Addr => 7,     // ipv4_addr
-            Self::Ipv6Addr => 8,     // ipv6_addr
-            Self::EtherAddr => 9,    // ether_addr
-            Self::InetService => 13, // inet_service
-            Self::IfIndex => 15,     // ifindex (meta)
-            Self::Mark => 12,        // mark
-            Self::InetProto => 14,   // inet_proto
+            Self::Ipv4Addr => 7,      // TYPE_IPADDR
+            Self::Ipv6Addr => 8,      // TYPE_IP6ADDR
+            Self::EtherAddr => 9,     // TYPE_ETHERADDR
+            Self::InetProto => 12,    // TYPE_INET_PROTOCOL
+            Self::InetService => 13,  // TYPE_INET_SERVICE
+            Self::Mark => 19,         // TYPE_MARK
+            Self::IfIndex => 20,      // TYPE_IFINDEX
             Self::Concat(parts) => {
-                // Pack each component's 6-bit type-id into
-                // sequential slots. Per nf_tables.h
-                // CONCAT_TYPE_BITS = 6. Truncates beyond u32
-                // (>5 components in the list packs partially
-                // — the kernel UAPI documents up to 16
-                // components; nlink reports the lower-32-bit
-                // window which covers single-stack
-                // 4-component concats).
-                parts
-                    .iter()
-                    .enumerate()
-                    .fold(0u32, |acc, (i, t)| acc | ((t.type_id() & 0x3F) << (i * 6)))
+                // nft's `concat_subtype_add(type, sub) = type << TYPE_BITS | sub`,
+                // applied left-to-right across the component list. That puts
+                // component 0 in the **high** bits.
+                //
+                // nlink used to fold the other way (`acc | (id << (i * 6))`),
+                // putting component 0 in the *low* bits — the reverse of what
+                // nft builds and parses (#207).
+                //
+                // 6 bits per component in a u32 means at most 5 components fit;
+                // beyond that the earliest components shift out the top. The
+                // builder caps the list, so this cannot silently truncate.
+                parts.iter().fold(0u32, |acc, t| {
+                    (acc << Self::CONCAT_TYPE_BITS) | (t.type_id() & 0x3F)
+                })
             }
         }
     }
 
-    /// Key length in bytes (always non-zero for all variants).
-    /// For `Concat`, the sum of each component's length
-    /// padded to 4-byte alignment.
+    /// Key length in bytes, for `NFTA_SET_KEY_LEN`.
+    ///
+    /// For `Concat`, the sum of each component's length padded to 4-byte
+    /// alignment (the kernel's `nft_set_ext_concat` layout).
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> u32 {
         match self {
             Self::Ipv4Addr => 4,
             Self::Ipv6Addr => 16,
-            Self::EtherAddr => 8, // padded to 8
+            // A MAC address is 6 bytes and nft sends klen = 6. It used to say
+            // 8 ("padded to 8"), but that padding belongs to the *concat*
+            // layout, not to a standalone key — and a klen of 8 makes a 6-byte
+            // `sreg` load fail `nft_lookup_init` validation with EINVAL (#207).
+            Self::EtherAddr => 6,
             Self::InetService => 2,
             Self::IfIndex => 4,
             Self::Mark => 4,
             Self::InetProto => 1,
             Self::Concat(parts) => {
-                // Each component is padded to 4-byte
-                // alignment before the next starts (per kernel
-                // `nft_set_ext_concat` layout).
-                parts.iter().map(|t| (t.len() + 3) & !3).sum()
+                // Each component is padded to 4-byte alignment before the next
+                // starts. This is where EtherAddr's 6 bytes become 8.
+                parts.iter().map(|t| t.len().next_multiple_of(4)).sum()
             }
         }
     }
@@ -2025,43 +2067,65 @@ mod tests {
         assert!(Chain::new("filter", "a\0b").is_err());
     }
 
-    // -------- Plan 198 §2.1 — SetKeyType extensions --------
+    // -------- SetKeyType wire contract (#207) --------
 
+    /// The scalar datatype ids, against nft's `enum datatypes`
+    /// (include/datatype.h). Three of these were wrong, and this test used to
+    /// pin one of the wrong ones (`InetProto == 14`, which is actually
+    /// `icmp_type`).
     #[test]
-    fn set_key_type_inet_proto_wire_constants() {
-        // NFT_DATA_INET_PROTO = 14, 1 byte. Plan 198 §2.1.
-        assert_eq!(SetKeyType::InetProto.type_id(), 14);
+    fn set_key_type_scalar_datatype_ids() {
+        assert_eq!(SetKeyType::Ipv4Addr.type_id(), 7); // TYPE_IPADDR
+        assert_eq!(SetKeyType::Ipv6Addr.type_id(), 8); // TYPE_IP6ADDR
+        assert_eq!(SetKeyType::EtherAddr.type_id(), 9); // TYPE_ETHERADDR
+        assert_eq!(SetKeyType::InetProto.type_id(), 12); // TYPE_INET_PROTOCOL
+        assert_eq!(SetKeyType::InetService.type_id(), 13); // TYPE_INET_SERVICE
+        assert_eq!(SetKeyType::Mark.type_id(), 19); // TYPE_MARK
+        assert_eq!(SetKeyType::IfIndex.type_id(), 20); // TYPE_IFINDEX
+
+        // The three that were wrong pointed at real-but-different types:
+        // 14 = icmp_type, 12 = inet_protocol, 15 = tcp_flag.
+        assert_ne!(SetKeyType::InetProto.type_id(), 14);
+        assert_ne!(SetKeyType::Mark.type_id(), 12);
+        assert_ne!(SetKeyType::IfIndex.type_id(), 15);
+    }
+
+    /// A MAC key is 6 bytes on the wire. It used to claim 8 — and a klen of 8
+    /// makes a 6-byte `sreg` load fail `nft_lookup_init` with EINVAL. The
+    /// padding to 8 belongs to the concat layout, not to a standalone key.
+    #[test]
+    fn set_key_type_ether_addr_klen_is_six() {
+        assert_eq!(SetKeyType::EtherAddr.len(), 6);
         assert_eq!(SetKeyType::InetProto.len(), 1);
+        assert_eq!(SetKeyType::InetService.len(), 2);
     }
 
     #[test]
     fn set_key_type_concat_len_pads_each_component() {
         // ip saddr (4B) . tcp dport (2B → 4B after pad) = 8B.
-        let k = SetKeyType::Concat(vec![
-            SetKeyType::Ipv4Addr,
-            SetKeyType::InetService,
-        ]);
+        let k = SetKeyType::Concat(vec![SetKeyType::Ipv4Addr, SetKeyType::InetService]);
         assert_eq!(k.len(), 8);
     }
 
+    /// nft builds a concat type with
+    /// `concat_subtype_add(t, n) = (t << TYPE_BITS) | n`, applied left-to-right
+    /// — so component 0 lands in the **high** bits.
+    ///
+    /// nlink folded the other way, putting component 0 in the *low* bits: the
+    /// exact reverse of what nft builds and parses. This test used to pin the
+    /// reversed order (#207).
     #[test]
-    fn set_key_type_concat_packs_six_bit_type_ids() {
-        // Plan 198 §2.1 pack contract:
-        //   slot 0 = component[0].type_id() & 0x3F
-        //   slot 1 = component[1].type_id() << 6
-        // Ipv4Addr(7) + InetService(13) → 7 | (13 << 6) = 7 | 832 = 839.
-        let k = SetKeyType::Concat(vec![
-            SetKeyType::Ipv4Addr,
-            SetKeyType::InetService,
-        ]);
-        assert_eq!(k.type_id(), 7 | (13 << 6));
+    fn set_key_type_concat_packs_component_zero_in_the_high_bits() {
+        // ipv4_addr(7) . inet_service(13)  ->  7 << 6 | 13
+        let k = SetKeyType::Concat(vec![SetKeyType::Ipv4Addr, SetKeyType::InetService]);
+        assert_eq!(k.type_id(), (7 << 6) | 13);
+        assert_ne!(k.type_id(), 7 | (13 << 6), "regression: packing is reversed");
     }
 
     #[test]
     fn set_key_type_concat_single_component_degenerate() {
-        // One-component concat reports the wrapped type's
-        // own type_id (no second slot). Kernel treats this as
-        // a normal key.
+        // One-component concat reports the wrapped type's own type_id (no
+        // shift). The kernel treats this as a normal key.
         let k = SetKeyType::Concat(vec![SetKeyType::Ipv4Addr]);
         assert_eq!(k.type_id(), 7);
         assert_eq!(k.len(), 4);
@@ -2069,18 +2133,18 @@ mod tests {
 
     #[test]
     fn set_key_type_concat_three_components_padding_round_trip() {
-        // ether_addr (8B padded) . ip saddr (4B) . inet_service (4B padded) = 16B.
+        // ether_addr (6B → 8B after pad) . ip saddr (4B) . inet_service (2B → 4B) = 16B.
         let k = SetKeyType::Concat(vec![
             SetKeyType::EtherAddr,
             SetKeyType::Ipv4Addr,
             SetKeyType::InetService,
         ]);
         assert_eq!(k.len(), 16);
-        // type_id slot composition: EtherAddr(9), Ipv4Addr(7), InetService(13).
-        assert_eq!(k.type_id(), 9 | (7 << 6) | (13 << 12));
+        // ether_addr(9) . ipv4_addr(7) . inet_service(13), component 0 highest.
+        assert_eq!(k.type_id(), (9 << 12) | (7 << 6) | 13);
     }
 
-    // -------- end Plan 198 §2.1 --------
+    // -------- end SetKeyType wire contract --------
 
     fn find_nat_expr(rule: &Rule) -> Option<&NatExpr> {
         rule.exprs.iter().find_map(|e| match e {

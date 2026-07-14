@@ -559,10 +559,14 @@ impl Connection<Nftables> {
     /// Create an nftables set.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_set"))]
     pub async fn add_set(&self, set: Set) -> Result<()> {
-        if set.name.is_empty() || set.name.len() > 256 {
-            return Err(Error::InvalidMessage(
-                "set name must be 1-256 characters".into(),
-            ));
+        // NFT_NAME_MAXLEN - 1 = 255, the same bound TableName and ChainName
+        // enforce. The old `> 256` accepted a 256-byte name that the kernel
+        // then rejected at apply time rather than at the API boundary (#211).
+        if set.name.is_empty() || set.name.len() > 255 {
+            return Err(Error::InvalidMessage(format!(
+                "set name must be 1-255 bytes, got {}",
+                set.name.len(),
+            )));
         }
 
         let mut builder = MessageBuilder::new(
