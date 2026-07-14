@@ -275,6 +275,54 @@ All notable changes to this project will be documented in this file.
     the namespace *type* — a bind-mount of a PID/mount/UTS namespace also
     reports `true`.
 
+- **nftables: a chain, table or flowtable whose *attributes* drifted produced
+  an empty diff (#200, #208).** `diff()` matched declared objects against the
+  kernel **by name only**. Flipping a chain from `policy(Accept)` to
+  `policy(Drop)` — or changing its hook, priority, type or device — was
+  therefore a no-op: the chain existed, so nothing was scheduled, `apply()`
+  committed an empty batch, and the operator was told the reconcile succeeded
+  while the box stayed default-allow. Same shape for `DeclaredTable::flags`
+  and for a flowtable's devices/priority/flags. `NftablesDiff` gains
+  `chains_to_modify` and `tables_to_modify`; all five chain attributes, table
+  flags and the flowtable triple are now compared and re-emitted.
+
+- **nftables: `Rule::reject()` was a plain drop (#205).** It pushed a bare
+  `NF_DROP` verdict — no `reject` expression exists in the encoder at all — so
+  a rule the caller declared as *reject* silently blackholed the packet and
+  the client hung to its TCP timeout instead of failing fast. New
+  `Expr::Reject { reject_type, icmp_code }` emits a real `reject` expression.
+
+- **nftables: `Expr::Redirect` never redirected (#206).** The encoder wrote
+  `NFTA_NAT_REG_PROTO_MIN` — an attribute from the **nat** namespace — into a
+  `redir` expression nest. `redir` has its own namespace (`NFTA_REDIR_*`),
+  where that id means something else entirely, so the kernel ignored the port
+  and the redirect landed nowhere. The `NFTA_REDIR_*` constants are now
+  defined and the encoder uses them.
+
+- **nftables: three `SetKeyType` datatype ids were wrong (#207).** `InetProto`,
+  `Mark` and `IfIndex` carried ids that did not match nft's `enum datatypes`,
+  so a set declared with those key types was created with the wrong type and
+  the kernel rejected (or silently mis-keyed) every element. `EtherAddr`'s key
+  length was 8 where a MAC is 6. Concatenated key types packed their
+  components in the wrong order — nft's `concat_subtype_add(t, n)` shifts the
+  *accumulator* left, so component 0 ends up in the **high** bits, not the low
+  ones. Verified against `nft --debug=netlink`.
+
+- **nftables: `emit_tlv` wrote little-endian attribute headers (#212).** The
+  writer used `to_le_bytes` for `nla_len`/`nla_type` while every reader in the
+  crate parses them native-endian. Same value on x86_64, silently wrong on a
+  big-endian target. Both sides are `to_ne_bytes` now.
+
+- **`DeclaredSet` / `DeclaredSetBuilder` were unnameable (#210).** They are the
+  element type of the **public** `NftablesDiff::sets_to_add` field, but were
+  never re-exported — so a downstream user could read the field and could not
+  write down the type of what they read. Both are exported now.
+
+- **`CTA_TIMEOUT` wrapped instead of saturating (#211).** A conntrack timeout
+  above `u32::MAX` seconds truncated modulo 2^32 — a very long timeout could
+  wrap to a very short one. It now saturates. The nftables set-name bound is
+  255, not 256 (`NFT_NAME_MAXLEN` counts the NUL).
+
 ## [0.24.0] - 2026-07-03
 
 > Upgrading? See

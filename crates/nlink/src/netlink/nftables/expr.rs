@@ -40,6 +40,23 @@ pub enum Expr {
     Nat(NatExpr),
     /// Redirect (redirect to local machine, dnat to localhost).
     Redirect { port: Option<u16> },
+    /// Reject the packet — send an ICMP unreachable or a TCP RST, then drop.
+    ///
+    /// Distinct from [`Verdict::Drop`], which black-holes the packet silently
+    /// and leaves the client hanging until its TCP timeout.
+    ///
+    /// Prefer building this through [`Rule::reject`] /
+    /// [`Rule::reject_with`](super::types::Rule::reject_with), which pick a
+    /// default appropriate for the chain's family.
+    ///
+    /// [`Rule::reject`]: super::types::Rule::reject
+    Reject {
+        /// `NFT_REJECT_ICMP_UNREACH` / `NFT_REJECT_TCP_RST` /
+        /// `NFT_REJECT_ICMPX_UNREACH`.
+        reject_type: u32,
+        /// ICMP code to send. Ignored for `NFT_REJECT_TCP_RST`.
+        icmp_code: u8,
+    },
     /// Log packet.
     Log {
         prefix: Option<String>,
@@ -185,10 +202,39 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
         Expr::Redirect { port } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "redir");
             if port.is_some() {
+                // The port value itself is loaded into R0 by an Immediate that
+                // `Rule::redirect` pushes ahead of this expression — same shape
+                // as the Nat arm above. All we do here is point at that
+                // register.
+                //
+                // This used to emit NFTA_NAT_REG_PROTO_MIN (= 5), an attribute
+                // from the *nat* namespace. `redir` has its own
+                // (NFTA_REDIR_REG_PROTO_MIN = 1), and the kernel parses the
+                // nest with maxtype = NFTA_REDIR_MAX, so 5 was above the bound
+                // and silently skipped. The rule installed with no error and no
+                // port rewrite: traffic was redirected to the local machine on
+                // the *original* port, breaking the transparent-proxy use case
+                // with no diagnostic (#206).
                 let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-                builder.append_attr_u32_be(NFTA_NAT_REG_PROTO_MIN, Register::R0 as u32);
+                builder.append_attr_u32_be(NFTA_REDIR_REG_PROTO_MIN, Register::R0 as u32);
+                // MIN == MAX for a single port. The kernel echoes both on dump,
+                // so omitting MAX would produce a phantom diff.
+                builder.append_attr_u32_be(NFTA_REDIR_REG_PROTO_MAX, Register::R0 as u32);
+                builder.append_attr_u32_be(NFTA_REDIR_FLAGS, NF_NAT_RANGE_PROTO_SPECIFIED);
                 builder.nest_end(data);
             }
+        }
+        Expr::Reject {
+            reject_type,
+            icmp_code,
+        } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "reject");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_REJECT_TYPE, *reject_type);
+            // NFTA_REJECT_ICMP_CODE is a u8 on the wire, and the kernel wants
+            // it present even for TCP_RST (nft always sends it).
+            builder.append_attr(NFTA_REJECT_ICMP_CODE, &[*icmp_code]);
+            builder.nest_end(data);
         }
         Expr::Log { prefix, group } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "log");
@@ -651,6 +697,125 @@ mod decode_tests {
         let mut b = MessageBuilder::new(0, 0);
         f(&mut b);
         b.as_bytes()[16..].to_vec()
+    }
+
+    /// Split a bare attribute stream into `type -> payload`, with the
+    /// nested/byteorder flag bits masked off. Lets a test pin exactly which
+    /// attribute *numbers* an expression emits — which is the whole bug in
+    /// #206 (an attribute from the wrong namespace, silently skipped by the
+    /// kernel because it was above the nest's maxtype).
+    fn attrs_of(mut input: &[u8]) -> std::collections::BTreeMap<u16, Vec<u8>> {
+        let mut out = std::collections::BTreeMap::new();
+        while input.len() >= 4 {
+            let len = u16::from_ne_bytes(input[0..2].try_into().unwrap()) as usize;
+            let ty = u16::from_ne_bytes(input[2..4].try_into().unwrap()) & 0x3FFF;
+            assert!((4..=input.len()).contains(&len), "bogus nla_len {len}");
+            out.insert(ty, input[4..len].to_vec());
+            input = &input[len.next_multiple_of(4).min(input.len())..];
+        }
+        out
+    }
+
+    /// The `NFTA_EXPR_DATA` payload of the expression named `name`.
+    fn expr_data(exprs: &[Expr], name: &str) -> Vec<u8> {
+        for e in parse_expressions(&encode(exprs)) {
+            if let RuleExpr::Unknown { name: n, data } = e
+                && n == name
+            {
+                return data;
+            }
+        }
+        panic!("no `{name}` expression emitted");
+    }
+
+    /// `redir` has its own attribute namespace (`NFTA_REDIR_*`). nlink emitted
+    /// `NFTA_NAT_REG_PROTO_MIN` (= 5) into it, which is above the nest's
+    /// `NFTA_REDIR_MAX`, so the kernel **silently skipped** it: the rule
+    /// installed with no error and no port rewrite, and traffic was redirected
+    /// to the local machine on the *original* port. Transparent proxying broke
+    /// with no diagnostic (#206).
+    #[test]
+    fn redirect_uses_the_redir_attribute_namespace() {
+        let exprs = vec![
+            // Rule::redirect pushes this Immediate ahead of the Redirect.
+            Expr::Immediate {
+                dreg: Register::R0,
+                data: 3128u16.to_be_bytes().to_vec(),
+            },
+            Expr::Redirect { port: Some(3128) },
+        ];
+
+        let attrs = attrs_of(&expr_data(&exprs, "redir"));
+
+        assert_eq!(
+            attrs.get(&NFTA_REDIR_REG_PROTO_MIN).map(|v| v.as_slice()),
+            Some((Register::R0 as u32).to_be_bytes().as_slice()),
+            "the port register must be referenced through NFTA_REDIR_REG_PROTO_MIN (1)",
+        );
+        assert!(
+            attrs.contains_key(&NFTA_REDIR_REG_PROTO_MAX),
+            "MAX must equal MIN for a single port, or the kernel's dump won't round-trip",
+        );
+        assert_eq!(
+            attrs.get(&NFTA_REDIR_FLAGS).map(|v| v.as_slice()),
+            Some(NF_NAT_RANGE_PROTO_SPECIFIED.to_be_bytes().as_slice()),
+        );
+        assert!(
+            !attrs.contains_key(&NFTA_NAT_REG_PROTO_MIN) || NFTA_NAT_REG_PROTO_MIN == NFTA_REDIR_REG_PROTO_MIN,
+            "regression: emitting a nat-namespace attribute (5) inside a redir nest — \
+             the kernel skips it silently",
+        );
+    }
+
+    /// A redirect with no port rewrites nothing and needs no data nest.
+    #[test]
+    fn redirect_without_a_port_emits_no_data() {
+        let data = expr_data(&[Expr::Redirect { port: None }], "redir");
+        assert!(data.is_empty());
+    }
+
+    /// `Rule::reject()` used to push a bare NF_DROP verdict, so the packet was
+    /// black-holed with no ICMP and no RST and the client hung until its TCP
+    /// timeout — the opposite of the fast "connection refused" the doc-comment
+    /// promised (#205).
+    #[test]
+    fn reject_emits_a_real_reject_expression() {
+        let exprs = vec![Expr::Reject {
+            reject_type: NFT_REJECT_ICMPX_UNREACH,
+            icmp_code: 1,
+        }];
+
+        let attrs = attrs_of(&expr_data(&exprs, "reject"));
+
+        assert_eq!(
+            attrs.get(&NFTA_REJECT_TYPE).map(|v| v.as_slice()),
+            Some(NFT_REJECT_ICMPX_UNREACH.to_be_bytes().as_slice()),
+        );
+        assert_eq!(
+            attrs.get(&NFTA_REJECT_ICMP_CODE).map(|v| v.as_slice()),
+            Some([1u8].as_slice()),
+            "NFTA_REJECT_ICMP_CODE is a single byte",
+        );
+    }
+
+    /// The builder must reach the reject expression, not a drop verdict.
+    #[test]
+    fn rule_reject_is_not_a_drop() {
+        use super::super::types::Rule;
+
+        let rule = Rule::new("t", "c").reject();
+        assert!(
+            matches!(rule.exprs.as_slice(), [Expr::Reject { .. }]),
+            "Rule::reject() pushed {:?}, not a Reject expression",
+            rule.exprs,
+        );
+
+        // And drop() still black-holes, which is a legitimate thing to want.
+        let rule = Rule::new("t", "c").drop();
+        assert!(matches!(
+            rule.exprs.as_slice(),
+            [Expr::Verdict(Verdict::Drop)]
+        ));
     }
 
     #[test]

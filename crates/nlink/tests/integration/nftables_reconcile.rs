@@ -17,16 +17,19 @@
 //! (Duration); default is none"), so a missing DONE marker or
 //! seq mismatch under the GHA container's kernel hangs forever.
 //!
-//! Until the root cause is fixed (Plan 167 Phase 3 — deep
-//! debug), every test in this file is wrapped in
-//! `tokio::time::timeout(30s, ...)` so CI fails fast with
-//! a clear `Error::Timeout` instead of hanging. The 30s
-//! budget is ~30x the typical successful test (≤1s under root
-//! in a freshly-spawned namespace).
+//! **That root cause was #199, fixed in 0.25.0**: `Transaction`
+//! numbered its inner messages from its own counter starting at
+//! 1, unrelated to the socket's, so `send_batch`'s seq filter
+//! discarded the kernel's mid-batch NLMSGERR and then waited
+//! forever for a BATCH_END ACK the aborted batch never sent.
+//! The 30-second wrapper stays as a belt-and-braces guard so a
+//! future regression of the same shape fails fast instead of
+//! burning a CI job. The budget is ~30x the typical successful
+//! test (≤1s under root in a freshly-spawned namespace).
 
 use std::time::Duration;
 
-use nlink::netlink::nftables::config::{NftablesConfig, ReconcileOptions};
+use nlink::netlink::nftables::config::{NftDiffOptions, NftablesConfig, ReconcileOptions};
 use nlink::netlink::nftables::types::{ChainType, Family, Hook, Policy, Priority, SetKeyType};
 use nlink::netlink::{Connection, Nftables, namespace};
 
@@ -192,6 +195,11 @@ async fn reconcile_delete_one_rule_emits_delete_op() -> nlink::Result<()> {
     .await
 }
 
+/// Teardown-by-empty-config, which since #190 requires opting into purge.
+///
+/// `diff()` no longer proposes any table deletion — it could not tell our
+/// table from Docker's, and deleting a table cascades to everything inside it.
+/// `diff_with_options(.., purge_tables(true))` is the explicit opt-in.
 #[tokio::test]
 async fn reconcile_cascade_delete_table_via_empty_config() -> nlink::Result<()> {
     require_root!();
@@ -203,13 +211,21 @@ async fn reconcile_cascade_delete_table_via_empty_config() -> nlink::Result<()> 
 
         cfg_with_n_rules(2).diff(&nft).await?.apply(&nft).await?;
 
-        // Empty config → diff must propose deleting the table we own.
+        // Without the opt-in, an empty config is a no-op on tables.
         let teardown = NftablesConfig::new();
-        let diff = teardown.diff(&nft).await?;
+        assert!(
+            teardown.diff(&nft).await?.tables_to_delete.is_empty(),
+            "plain diff() must never propose a table deletion (#190)"
+        );
+
+        // With it, the table we own is dropped.
+        let diff = teardown
+            .diff_with_options(&nft, &NftDiffOptions::default().purge_tables(true))
+            .await?;
         assert_eq!(
             diff.tables_to_delete.len(),
             1,
-            "empty config must propose dropping our own table"
+            "purge_tables(true) must propose dropping the table"
         );
         diff.apply(&nft).await?;
         Ok(())

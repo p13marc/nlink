@@ -1572,7 +1572,7 @@ impl PerHostLimiter {
 
         // Stale classes in major 1:.
         let mut stale_classes: Vec<TcHandle> = Vec::new();
-        for (handle, _class) in tree.classes.iter() {
+        for handle in tree.classes.keys() {
             if handle.major() != 1 {
                 continue;
             }

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use super::types::{
     DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredSet, DeclaredTable, NftablesConfig,
 };
-use super::super::types::{Family, SetElement};
+use super::super::types::{ChainInfo, Family, Hook, Policy, Priority, SetElement};
 use crate::netlink::{
     builder::MessageBuilder, connection::Connection, error::Result, protocol::Nftables,
 };
@@ -122,8 +122,14 @@ fn try_walk_tlvs(bytes: &[u8]) -> Option<Vec<(u16, Vec<u8>)>> {
 
 fn emit_tlv(out: &mut Vec<u8>, ty: u16, payload: &[u8]) {
     let len = (payload.len() + 4) as u16;
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(&ty.to_le_bytes());
+    // Native-endian, matching `try_walk_tlvs`'s reader above and the Plan 223
+    // policy it documents. These were `to_le_bytes`, re-introducing on the
+    // writer side the exact BE bug class Plan 223 closed on the reader side:
+    // on a big-endian host `normalize_tlv(normalize_tlv(x)) != normalize_tlv(x)`,
+    // because the second pass fails `try_walk_tlvs` and passes the LE bytes
+    // through verbatim — so the idempotence test only passed by accident (#212).
+    out.extend_from_slice(&len.to_ne_bytes());
+    out.extend_from_slice(&ty.to_ne_bytes());
     out.extend_from_slice(payload);
     while !out.len().is_multiple_of(4) {
         out.push(0);
@@ -172,10 +178,33 @@ pub struct RuleHandle(pub u64);
 pub struct NftablesDiff {
     /// Tables to create.
     pub tables_to_add: Vec<DeclaredTable>,
+    /// Tables whose flags drifted — `(family, name, declared_flags)`. Applied
+    /// as `NFT_MSG_NEWTABLE`, which the kernel treats as an update.
+    ///
+    /// Separate from [`Self::tables_to_add`] because every table in *that*
+    /// collection has its whole contents (chains, rules, sets, flowtables)
+    /// installed wholesale — routing an existing table through it would re-add
+    /// everything it already has.
+    ///
+    /// `DeclaredTable::flags` (`.persist(true)`, `NFT_TABLE_F_DORMANT`) used to
+    /// be applied only on create, so toggling a flag on an existing table
+    /// produced an empty diff and a no-op apply (#208).
+    pub tables_to_modify: Vec<(Family, String, u32)>,
     /// Tables to delete (family, name).
     pub tables_to_delete: Vec<(Family, String)>,
     /// Chains to create — (owning table, owning family, chain).
     pub chains_to_add: Vec<(String, Family, DeclaredChain)>,
+    /// Chains whose *properties* drifted — (owning table, owning family,
+    /// chain). Applied as `NFT_MSG_NEWCHAIN`, which the kernel treats as an
+    /// update for an existing chain.
+    ///
+    /// Until 0.25 a chain's diff identity was its **name alone**: none of
+    /// `hook` / `priority` / `policy` / `chain_type` / `device` were compared,
+    /// even though `DeclaredChain` carries all five and `ChainInfo` parses all
+    /// five back. So flipping a declared firewall from `policy(Accept)` to
+    /// `policy(Drop)` produced an empty diff and a no-op apply — the operator
+    /// believed the box was default-deny while it stayed default-allow (#200).
+    pub chains_to_modify: Vec<(String, Family, DeclaredChain)>,
     /// Chains to delete — (table, family, name).
     pub chains_to_delete: Vec<(String, Family, String)>,
     /// Rules to add — paired with owning table/chain/family.
@@ -217,8 +246,10 @@ impl NftablesDiff {
     /// `true` if declared state already matches kernel state.
     pub fn is_empty(&self) -> bool {
         self.tables_to_add.is_empty()
+            && self.tables_to_modify.is_empty()
             && self.tables_to_delete.is_empty()
             && self.chains_to_add.is_empty()
+            && self.chains_to_modify.is_empty()
             && self.chains_to_delete.is_empty()
             && self.rules_to_add.is_empty()
             && self.rules_to_delete.is_empty()
@@ -234,8 +265,10 @@ impl NftablesDiff {
     /// Total number of changes (sum of all add/delete counts).
     pub fn change_count(&self) -> usize {
         self.tables_to_add.len()
+            + self.tables_to_modify.len()
             + self.tables_to_delete.len()
             + self.chains_to_add.len()
+            + self.chains_to_modify.len()
             + self.chains_to_delete.len()
             + self.rules_to_add.len()
             + self.rules_to_delete.len()
@@ -264,11 +297,23 @@ impl NftablesDiff {
         for t in &self.tables_to_add {
             lines.push(format!("+ table {:?} {}", t.family(), t.name()));
         }
+        for (fam, name, flags) in &self.tables_to_modify {
+            lines.push(format!("~ table {fam:?} {name} (flags={flags:#x})"));
+        }
         for (fam, name) in &self.tables_to_delete {
             lines.push(format!("- table {fam:?} {name}"));
         }
         for (tbl, fam, c) in &self.chains_to_add {
             lines.push(format!("+ chain {fam:?} {tbl}/{}", c.name()));
+        }
+        for (tbl, fam, c) in &self.chains_to_modify {
+            lines.push(format!(
+                "~ chain {fam:?} {tbl}/{} (policy={:?} hook={:?} priority={:?})",
+                c.name(),
+                c.policy(),
+                c.hook(),
+                c.priority(),
+            ));
         }
         for (tbl, fam, name) in &self.chains_to_delete {
             lines.push(format!("- chain {fam:?} {tbl}/{name}"));
@@ -352,6 +397,25 @@ impl std::fmt::Display for NftablesDiff {
         #[allow(deprecated)]
         f.write_str(&self.summary())
     }
+}
+
+/// Has a declared chain's shape drifted from what the kernel holds?
+///
+/// Compares all five properties `DeclaredChain` carries and `ChainInfo` parses
+/// back. A declared `None` means "not specified" and is not treated as drift —
+/// the config is only asserting the properties it names, so a config that
+/// doesn't mention a policy won't fight a policy set out-of-band.
+fn chain_has_drifted(declared: &DeclaredChain, current: &ChainInfo) -> bool {
+    fn drifted<T: PartialEq>(declared: Option<T>, current: Option<T>) -> bool {
+        // Only a declared value can drift; an unspecified one is not a claim.
+        declared.is_some_and(|d| current != Some(d))
+    }
+
+    drifted(declared.hook().map(Hook::to_u32), current.hook)
+        || drifted(declared.priority().map(Priority::to_i32), current.priority)
+        || drifted(declared.policy().map(Policy::to_u32), current.policy)
+        || drifted(declared.chain_type(), current.chain_type)
+        || drifted(declared.device(), current.device.as_deref())
 }
 
 /// Options controlling [`NftablesConfig::diff_with_options`].
@@ -442,15 +506,35 @@ impl NftablesConfig {
 
         // Current kernel state.
         let current_tables = conn.list_tables().await?;
-        let current_table_names: HashSet<(Family, String)> = current_tables
-            .iter()
-            .map(|t| (t.family, t.name.clone()))
-            .collect();
 
-        // Pass 1: tables to add (declared but not current).
+        // Pass 1: tables to add (declared but not current), and tables whose
+        // flags drifted.
+        //
+        // Table identity used to be (family, name) alone: `DeclaredTable::flags`
+        // — set via `.persist(true)` / `NFT_TABLE_F_DORMANT` — was applied only
+        // on create, even though `Table::flags` is parsed back from the dump.
+        // So toggling `.persist(true)` -> `.persist(false)`, or setting DORMANT
+        // to disable a table's chains without deleting it, produced an empty
+        // diff and a no-op apply; the flag never changed (#208).
+        //
+        // NFT_MSG_NEWTABLE updates an existing table, so a flag change reuses
+        // the add path rather than needing a delete+recreate (which would
+        // cascade away every chain and rule inside).
+        // Flag drift gets its own collection, deliberately NOT `tables_to_add`:
+        // every table in `tables_to_add` has its whole contents promoted and
+        // installed wholesale below, so routing an *existing* table through it
+        // would re-add every chain and rule it already has.
         for declared in &self.tables {
-            if !current_table_names.contains(&(declared.family(), declared.name().to_string())) {
-                diff.tables_to_add.push(declared.clone());
+            match current_tables
+                .iter()
+                .find(|t| t.family == declared.family() && t.name == declared.name())
+            {
+                None => diff.tables_to_add.push(declared.clone()),
+                Some(current) if current.flags != declared.flags() => {
+                    diff.tables_to_modify
+                        .push((declared.family(), declared.name().to_string(), declared.flags()));
+                }
+                Some(_) => {}
             }
         }
 
@@ -558,16 +642,31 @@ impl NftablesConfig {
                 .unwrap_or(&[]);
             let declared_chain_names: HashSet<&str> =
                 declared.chains().iter().map(|c| c.name()).collect();
-            let current_chain_names: HashSet<&str> =
-                chains_in_table.iter().map(|c| c.name.as_str()).collect();
 
             for c in declared.chains() {
-                if !current_chain_names.contains(c.name()) {
-                    diff.chains_to_add.push((
-                        declared.name().to_string(),
-                        declared.family(),
-                        c.clone(),
-                    ));
+                match chains_in_table.iter().find(|k| k.name == c.name()) {
+                    None => {
+                        diff.chains_to_add.push((
+                            declared.name().to_string(),
+                            declared.family(),
+                            c.clone(),
+                        ));
+                    }
+                    // The chain exists. Its *properties* may still have
+                    // drifted — and until 0.25 nothing compared them, so a
+                    // chain's identity was its name alone. Flipping a declared
+                    // firewall from policy(Accept) to policy(Drop) produced an
+                    // empty diff and a no-op apply: the operator believed the
+                    // box was default-deny while it stayed default-allow
+                    // (#200). Same silence for a changed hook or priority.
+                    Some(current) if chain_has_drifted(c, current) => {
+                        diff.chains_to_modify.push((
+                            declared.name().to_string(),
+                            declared.family(),
+                            c.clone(),
+                        ));
+                    }
+                    Some(_) => {}
                 }
             }
             for c in chains_in_table {
@@ -749,11 +848,25 @@ impl NftablesConfig {
                 .unwrap_or(&[]);
             let declared_ft_names: HashSet<&str> =
                 declared.flowtables().iter().map(|f| f.name()).collect();
-            let current_ft_names: HashSet<&str> =
-                fts_in_table.iter().map(|f| f.name.as_str()).collect();
             for f in declared.flowtables() {
-                if !current_ft_names.contains(f.name()) {
-                    diff.flowtables_to_add.push(f.clone());
+                match fts_in_table.iter().find(|k| k.name == f.name()) {
+                    None => diff.flowtables_to_add.push(f.clone()),
+                    // Same name-only-identity gap as chains: `Flowtable` from
+                    // the dump carries devs/priority/flags and
+                    // `DeclaredFlowtable` declares all three, but nothing
+                    // compared them. Adding a device to a declared flowtable,
+                    // or toggling hw_offload, produced an empty diff (#208).
+                    //
+                    // NFT_MSG_NEWFLOWTABLE updates an existing flowtable, so
+                    // this reuses the add path.
+                    Some(current)
+                        if f.devs() != current.devs.as_slice()
+                            || f.priority() != current.priority
+                            || f.flags() != current.flags =>
+                    {
+                        diff.flowtables_to_add.push(f.clone());
+                    }
+                    Some(_) => {}
                 }
             }
             for f in fts_in_table {
