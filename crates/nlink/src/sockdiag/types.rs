@@ -679,10 +679,10 @@ fn format_rate_bps(bps: u64) -> String {
 /// Two different kernel attributes fill this struct, and they carry different
 /// fields (#197):
 ///
-/// - `INET_DIAG_MEMINFO` (requested by [`InetFilter::with_mem_info`]) is
+/// - `INET_DIAG_MEMINFO` (requested by [`InetFilterBuilder::with_mem_info`]) is
 ///   `struct inet_diag_meminfo` — **four** counters, the four `u32` fields
 ///   below.
-/// - `INET_DIAG_SKMEMINFO` (requested by [`InetFilter::with_sk_mem_info`]) is
+/// - `INET_DIAG_SKMEMINFO` (requested by [`InetFilterBuilder::with_sk_mem_info`]) is
 ///   `enum sk_meminfo_stats` — a superset that also carries the buffer sizes,
 ///   option memory, backlog and drops.
 ///
@@ -695,8 +695,8 @@ fn format_rate_bps(bps: u64) -> String {
 /// Requesting both extensions is fine — the two arms **merge** into one
 /// `MemInfo` rather than the later one clobbering the earlier.
 ///
-/// [`InetFilter::with_mem_info`]: crate::sockdiag::filter::InetFilter::with_mem_info
-/// [`InetFilter::with_sk_mem_info`]: crate::sockdiag::filter::InetFilter::with_sk_mem_info
+/// [`InetFilterBuilder::with_mem_info`]: crate::sockdiag::filter::InetFilterBuilder::with_mem_info
+/// [`InetFilterBuilder::with_sk_mem_info`]: crate::sockdiag::filter::InetFilterBuilder::with_sk_mem_info
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemInfo {
     /// Receive memory allocated (`sk_rmem_alloc`). Both extensions.
