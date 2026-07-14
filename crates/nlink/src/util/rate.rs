@@ -517,7 +517,20 @@ mod tests {
         assert_eq!(Rate::parse("100mbit").unwrap(), Rate::mbit(100));
         assert_eq!(Rate::parse("1gbit").unwrap(), Rate::gbit(1));
         assert_eq!(Rate::parse("500kbit").unwrap(), Rate::kbit(500));
-        assert_eq!(Rate::parse("100mbps").unwrap(), Rate::mbit(100));
+    }
+
+    /// tc(8) matches suffixes case-insensitively, so `mbps` hits the `MBps`
+    /// entry — mega**bytes** per second. This assertion used to read
+    /// `== Rate::mbit(100)`, pinning the 8x bug instead of catching it (#203).
+    #[test]
+    fn rate_parse_bps_family_is_bytes() {
+        assert_eq!(Rate::parse("100mbps").unwrap(), Rate::mbit(800));
+        assert_eq!(
+            Rate::parse("100mbps").unwrap().as_bytes_per_sec(),
+            100_000_000,
+            "100mbps is 100 megabytes/sec",
+        );
+        assert_eq!(Rate::parse("1kbps").unwrap(), Rate::kbit(8));
     }
 
     #[test]

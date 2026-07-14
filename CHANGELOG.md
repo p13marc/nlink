@@ -27,6 +27,37 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **tc-string grammar now matches `tc(8)` (#203, #216, #217, #221).** Three
+  silent misreadings of values users already pass. See
+  [`docs/migration_guide/0.24.0-to-0.25.0.md`](docs/migration_guide/0.24.0-to-0.25.0.md)
+  — these change behaviour with no compiler error.
+  - **`mbps`/`kbps`/`gbps` are BYTES per second, not bits (#203).** iproute2
+    matches its suffix table with `strcasecmp`, so lowercase `mbps` hits the
+    `MBps = 8_000_000` entry. nlink mapped the whole family to bits, so every
+    such string was **8x too small** — the exact bits-vs-bytes confusion the
+    `Rate` newtype was introduced to kill. Suffix matching is now
+    case-insensitive too. The unit test at `util/rate.rs:520` was *pinning*
+    the bug (`100mbps == mbit(100)`); it now asserts `== mbit(800)`.
+  - **A bare number in a time slot is MICROseconds (#216).** `tc(8)`'s internal
+    unit is 1e6; nlink read a suffix-less number as **seconds**. So
+    `netem delay 100` meant 100 *seconds* — a 1,000,000x error that
+    effectively stopped the interface passing traffic. `m`/`min`/`h` are no
+    longer accepted (`tc(8)` has no minute suffix, and it made a mistyped `ms`
+    silently 60,000x too long).
+  - **Negative rates and sizes error instead of becoming 0 (#217).**
+    `f64 as u64` saturates, so `get_rate("-5mbit")` returned `Ok(0)` and the
+    kernel then rejected it with a bare `EINVAL` rather than nlink's
+    contract-mandated `"htb: invalid rate ..."`. A negative *duration* was
+    worse — `Duration::from_secs_f64(-1.0)` **panics**, reachable straight
+    from `NetemConfig::parse_params`.
+  - **`Percent::from_str` doc (#221).** It claimed `"0.5"` was "treated as a
+    fraction"; the code reads it as 0.5 **percent**, which is the
+    `tc(8)`-correct behaviour. The doc was wrong, not the code — but anyone
+    who believed it had a 100x error in their loss rate. Points at
+    `Percent::from_fraction` now.
+  - `get_size` also accepts the binary `kib`/`mib`/`gib`/`tib` spellings its
+    own rustdoc had always advertised and which it used to reject.
+
 - **psched tick conversion — TBF, HTB and police were all mis-programmed
   (#191, #192, #193, #194, #218).** Several TC wire fields that read like
   byte counts or microsecond durations are actually **psched ticks** (1 tick

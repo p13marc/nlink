@@ -96,7 +96,18 @@ impl From<Percent> for f64 {
 impl FromStr for Percent {
     type Err = PercentParseError;
 
-    /// Parse `"50"`, `"50%"`, `"1.5%"`, or `"0.5"` (treated as a fraction).
+    /// Parse a **percentage**: `"50"`, `"50%"`, `"1.5%"`, `"0.5"`.
+    ///
+    /// The number is always read as a percent, never as a fraction — a bare
+    /// number in `tc(8)` is a percentage, and this follows it. So `"0.5"` is
+    /// **half of one percent**, not 50%.
+    ///
+    /// For a 0.0..=1.0 fraction, use [`Percent::from_fraction`]:
+    /// `Percent::from_fraction(0.5) == Percent::new(50.0)`.
+    ///
+    /// (This doc-string used to claim `"0.5"` was "treated as a fraction",
+    /// which the code never did — a 100x trap for anyone who believed it.
+    /// The code was right and the doc was wrong; #221.)
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
         let s = s.strip_suffix('%').unwrap_or(s);
