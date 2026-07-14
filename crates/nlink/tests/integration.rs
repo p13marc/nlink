@@ -149,6 +149,13 @@ mod xfrm_hotfix;
 #[path = "integration/ovpn.rs"]
 mod ovpn;
 
+// #190, #195, #199 — nftables safety. A foreign table must survive an
+// apply that doesn't declare it; rules must install in declaration
+// order; a mid-batch kernel rejection must surface as that error
+// rather than an opaque 30s timeout.
+#[path = "integration/nftables_safety.rs"]
+mod nftables_safety;
+
 // #191-#194, #218 — psched tick conversion. The unit tests pin the
 // bytes nlink emits; these pin that the *kernel* accepts them and
 // reads back what we wrote. Needed because the pre-fix writer and

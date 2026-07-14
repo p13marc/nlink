@@ -168,9 +168,43 @@ keys from their config schema:
 
 Rules in your chains created by other tools (no `nlink:` prefix
 on their comment, or no comment at all) are left alone by the
-diff. The library only deletes what it owns. If you want a clean
+diff. The library only deletes rules it owns. If you want a clean
 chain (drop everything not declared), use the imperative
 `conn.del_chain(...)` first.
+
+### Foreign tables are preserved
+
+`diff()` **never deletes a table**, even one your config does not
+declare. Tables belonging to Docker (`ip nat`), firewalld
+(`inet firewalld`), libvirt or kube-proxy survive an apply
+untouched.
+
+Until 0.25 this was not true, and it was the single most dangerous
+thing in the library: `diff()` scheduled *every* undeclared table
+for deletion and `apply()` committed it atomically, so following
+this recipe on a real host destroyed the box's firewall and NAT
+rules in one commit.
+
+If you genuinely want full-reconcile semantics — every table not
+in the config removed — opt in explicitly, and look at the diff
+before you apply it:
+
+```rust
+use nlink::netlink::nftables::config::NftDiffOptions;
+
+let diff = cfg
+    .diff_with_options(&conn, &NftDiffOptions::default().purge_tables(true))
+    .await?;
+
+println!("{diff}");   // the `-` lines are tables about to be destroyed
+diff.apply(&conn).await?;
+```
+
+`list_tables()` is unscoped and there is no ownership marker, so
+purge cannot tell your tables from anyone else's. Only enable it
+when you own every table in the namespace — which is exactly the
+case inside a fresh `nlink::lab` netns, and exactly not the case
+on a developer laptop.
 
 ## Named sets + element-level diff
 
