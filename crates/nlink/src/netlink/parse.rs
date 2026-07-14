@@ -54,6 +54,19 @@ pub trait FromNetlink: Sized {
     /// This is appended to the netlink message after the nlmsghdr.
     /// Default implementation writes nothing (for messages that don't need a header).
     fn write_dump_header(_buf: &mut Vec<u8>) {}
+
+    /// Record the `nlmsg_type` this message arrived with.
+    ///
+    /// [`parse`](Self::parse) only sees the payload, but a few message types
+    /// cannot classify themselves without the header — `tcmsg` is the same
+    /// struct for qdiscs, classes and filters, and its `tcm_info` field means
+    /// something different for each (for a qdisc it is the *refcount*, which
+    /// is why guessing from it never worked; see #214). The dump and event
+    /// paths call this after parsing, since they have the header in hand.
+    ///
+    /// Default no-op: only [`TcMessage`](crate::netlink::messages::TcMessage)
+    /// needs it today.
+    fn set_msg_type(&mut self, _msg_type: u16) {}
 }
 
 /// Trait for types that can be serialized to netlink wire format.

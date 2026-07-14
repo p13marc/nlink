@@ -269,9 +269,14 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
             // on typed-parse errors specifically) iteration
             // continues. With `skip_malformed`, the bad frame logs
             // at WARN and is dropped silently.
-            let _ = header; // header is used above for seq/error/done checks
             match T::from_bytes(payload) {
-                Ok(item) => self.pending.push_back(Ok(item)),
+                Ok(mut item) => {
+                    // Some payloads (tcmsg) are byte-identical across message
+                    // kinds and can only classify themselves from the header
+                    // we already parsed above (#214).
+                    item.set_msg_type(header.nlmsg_type);
+                    self.pending.push_back(Ok(item))
+                }
                 Err(e) => {
                     if self.skip_malformed {
                         tracing::warn!(

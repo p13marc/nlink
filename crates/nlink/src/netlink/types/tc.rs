@@ -363,6 +363,19 @@ pub mod qdisc {
                 self
             }
 
+            /// Set `rate2quantum` (tc(8) `r2q`).
+            ///
+            /// HTB derives each class's quantum as `rate / r2q`. Until 0.25
+            /// this was hardcoded to 10 with no way to override it, so
+            /// `HtbQdiscConfig::new().r2q(100)` — and the `r2q` token that
+            /// `parse_params` dutifully accepted — were both silently
+            /// dropped on the floor, leaving class quanta wrong for
+            /// high-rate hierarchies (#213).
+            pub fn with_r2q(mut self, r2q: u32) -> Self {
+                self.rate2quantum = r2q;
+                self
+            }
+
             pub fn as_bytes(&self) -> &[u8] {
                 <Self as IntoBytes>::as_bytes(self)
             }

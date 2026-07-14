@@ -1892,7 +1892,9 @@ impl QdiscConfig for HtbQdiscConfig {
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
-        let glob = htb::TcHtbGlob::new().with_default(self.default_class);
+        let glob = htb::TcHtbGlob::new()
+            .with_default(self.default_class)
+            .with_r2q(self.r2q);
         builder.append_attr(htb::TCA_HTB_INIT, glob.as_bytes());
 
         if let Some(qlen) = self.direct_qlen {
@@ -8250,6 +8252,28 @@ mod psched_wire_tests {
 
         // Default mtu is 1600 bytes: 1600/12_500_000 s = 128 us -> 2000 ticks.
         assert_eq!(u32_at(&attrs, htb::TCA_HTB_PARMS, 24), 2_000);
+    }
+
+    /// `HtbQdiscConfig` had an `r2q` field, a public `.r2q()` setter, and a
+    /// `parse_params` token for it — and `write_options` read none of them,
+    /// because `TcHtbGlob::new()` hardcoded `rate2quantum: 10` with no way to
+    /// override it. This is CLAUDE.md's "silent skipping is a bug" contract
+    /// violated one layer *below* the parser: the parser dutifully accepted
+    /// the token and the encoder threw it away (#213).
+    #[test]
+    fn htb_qdisc_r2q_reaches_the_wire() {
+        // struct tc_htb_glob: version@0 rate2quantum@4 defcls@8 debug@12 ...
+        let attrs = qdisc_attrs(&HtbQdiscConfig::new().r2q(100).default_class(0x30));
+        assert_eq!(u32_at(&attrs, htb::TCA_HTB_INIT, 4), 100, "rate2quantum");
+        assert_eq!(u32_at(&attrs, htb::TCA_HTB_INIT, 8), 0x30, "defcls");
+
+        // The tc(8) token must land in the same place.
+        let cfg = HtbQdiscConfig::parse_params(&["r2q", "100"]).unwrap();
+        assert_eq!(u32_at(&qdisc_attrs(&cfg), htb::TCA_HTB_INIT, 4), 100);
+
+        // And the default is still 10.
+        let attrs = qdisc_attrs(&HtbQdiscConfig::new());
+        assert_eq!(u32_at(&attrs, htb::TCA_HTB_INIT, 4), 10);
     }
 }
 

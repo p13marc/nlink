@@ -27,6 +27,48 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **TC config fields that never reached the wire (#201, #213, #214, #215).**
+  Four cases of a value being accepted, stored, and then silently dropped —
+  the compiler could not warn about any of them, because the field *was*
+  assigned; it just was never read again.
+  - **Filter `protocol` and `priority` were discarded (#201).** Every filter
+    config (`U32Filter`, `FlowerFilter`, `MatchallFilter`, …) has public
+    `.protocol()` / `.priority()` setters, and `add_filter` / `replace_filter`
+    hardcoded `ETH_P_IP` and auto-priority instead of reading them. On a
+    clsact/ingress hook that meant **IPv6, ARP and VLAN traffic never hit the
+    filter at all**, and explicit priority ordering was ignored, so filters
+    landed in an unintended evaluation order relative to operator-installed
+    rules — with no error either way. `FilterConfig` gains defaulted
+    `protocol()` / `priority()` accessors (defaults `None`, so external impls
+    stay source-compatible, matching how `set_chain` was added); the shipped
+    configs override them. Note `MatchallFilter` and `FlowerFilter` default to
+    `ETH_P_ALL`, so filters that were silently IPv4-only now match everything,
+    as their builders always claimed.
+  - **`HtbQdiscConfig::r2q` never reached the wire (#213).** The field, its
+    `.r2q()` setter and the `r2q` token in `parse_params` were all live, but
+    `TcHtbGlob::new()` hardcoded `rate2quantum: 10` with no override. This is
+    the "silent skipping is a bug" contract violated one layer *below* the
+    parser: the parser dutifully accepted the token and the encoder threw it
+    away, leaving class quanta wrong for high-rate hierarchies. Adds
+    `TcHtbGlob::with_r2q`.
+  - **`TcMessage::is_filter()` returned true for every qdisc (#214).** It
+    tested `tcm_info != 0`, but `tc_fill_qdisc()` sets `tcm_info` to the qdisc
+    **refcount** — always ≥ 1. So every qdisc claimed to be a filter, and
+    `filter_protocol()` handed back refcount bits reinterpreted as an
+    ethertype. `struct tcmsg` is byte-identical for qdiscs, classes and
+    filters; the only reliable discriminator is the `nlmsg_type`, which lives
+    in the netlink header. `TcMessage` now carries it (via a defaulted
+    `FromNetlink::set_msg_type` hook the dump and event paths call), and
+    `is_qdisc()` / `is_class()` / `is_filter()` classify on it. They return
+    `false` rather than guessing when the type is unknown. `is_qdisc()` is new.
+  - **`TCA_STATS_BASIC_HW` clobbered `TCA_STATS_BASIC` (#215).** The software
+    total (id 1) and the hardware-offloaded *subset* of it (id 7) shared a
+    match arm, so the HW value — arriving last, since 7 > 1 — overwrote the
+    total. On a NIC with tc offload, `bytes()` / `packets()` therefore reported
+    only the offloaded portion, **often 0** when nothing had been offloaded
+    yet. Split into `stats_basic` / `stats_basic_hw`; `bytes()` and `packets()`
+    keep returning the software total.
+
 - **tc-string grammar now matches `tc(8)` (#203, #216, #217, #221).** Three
   silent misreadings of values users already pass. See
   [`docs/migration_guide/0.24.0-to-0.25.0.md`](docs/migration_guide/0.24.0-to-0.25.0.md)
