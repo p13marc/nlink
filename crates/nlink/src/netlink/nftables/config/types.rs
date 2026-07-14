@@ -323,7 +323,7 @@ impl DeclaredChainBuilder {
     /// **required** for `prerouting`/`postrouting` NAT chains —
     /// without it `masquerade`/`snat`/`dnat` verdicts refuse to
     /// load with `EOPNOTSUPP` and the apply rolls back.
-    /// Mirrors the imperative [`Chain::chain_type`] setter.
+    /// Mirrors the imperative [`Chain::chain_type`](crate::netlink::nftables::types::Chain::chain_type) setter.
     pub fn chain_type(mut self, ct: ChainType) -> Self {
         self.chain_type = Some(ct);
         self
@@ -332,7 +332,7 @@ impl DeclaredChainBuilder {
     /// Bind a [`Family::Netdev`] base chain to a specific
     /// interface (`type filter hook ingress device eth0 priority -150`).
     /// **Required** for netdev hooks; ignored on other
-    /// families. Mirrors the imperative [`Chain::device`]
+    /// families. Mirrors the imperative [`Chain::device`](crate::netlink::nftables::types::Chain::device)
     /// setter.
     pub fn device(mut self, dev: impl Into<String>) -> Self {
         self.device = Some(dev.into());
