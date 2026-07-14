@@ -1,0 +1,26 @@
+# `#[repr(uN)]` enums that are NOT mirrors of a kernel UAPI constant, and so
+# have nothing to be checked against. Each needs a reason.
+#
+# Keep this list short and suspicious of itself: "there's no header constant for
+# it" is the same thing a drifted enum would say. Before adding an entry, check
+# that the values really are nlink's own and not a UAPI enum you failed to find.
+
+# Address families are glibc's (AF_INET, AF_INET6, AF_PACKET, ...), declared in
+# <sys/socket.h>, not under /usr/include/linux. nlink takes them from libc::AF_*
+# at the call sites; this enum is the typed mirror.
+AddressFamily
+
+# The bonding driver's sub-option values (ad_select, arp_validate, fail_over_mac,
+# primary_reselect, lacp_rate) live in drivers/net/bonding/, not in any UAPI
+# header. if_bonding.h exports BOND_MODE_* and BOND_XMIT_POLICY_* — which ARE
+# checked, see the .map — and nothing else. These five are ABI by convention:
+# the netlink attribute carries a bare u8 whose meaning is fixed by the driver.
+AdSelect
+ArpValidate
+FailOverMac
+PrimaryReselect
+LacpRate
+
+# devlink_health_reporter_state is not exported in devlink.h (it is kernel-side
+# only); the values ride an ordinary u8 attribute.
+HealthState

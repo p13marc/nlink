@@ -173,8 +173,14 @@ pub enum EthtoolCmd {
     MmGet = 42,
     /// Set MAC Merge layer configuration.
     MmSet = 43,
+    /// Activate a flashed module firmware image.
+    ///
+    /// The kernel inserted this at 44, which pushed `PHY_GET` to 45. nlink
+    /// still had `PhyGet = 44` — so wiring up a PHY query would have sent the
+    /// NIC a **module firmware-flash activate** (#229).
+    ModuleFwFlashAct = 44,
     /// Get PHY information.
-    PhyGet = 44,
+    PhyGet = 45,
 }
 
 // =============================================================================
@@ -290,7 +296,13 @@ pub enum EthtoolStringAttr {
     Value = 2,
 }
 
-/// String set IDs.
+/// String set IDs — `enum ethtool_stringset`.
+///
+/// nlink used to omit `ETH_SS_FEATURES` (kernel id **4**), so every id from 4
+/// up was one too low and a query for one string set returned a different one:
+/// asking for `LinkModes` (nlink 8) actually requested `PHY_TUNABLES` (kernel
+/// 8). It also invented `RssContexts` and `StatsEth`, which are not kernel
+/// string sets at all (#227).
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -303,40 +315,44 @@ pub enum EthtoolStringSet {
     PrivFlags = 2,
     /// N-tuple filter strings.
     NtupleFltrs = 3,
+    /// Device feature names.
+    Features = 4,
     /// RSS hash function names.
-    RssHashFuncs = 4,
+    RssHashFuncs = 5,
     /// Tunables.
-    Tunables = 5,
+    Tunables = 6,
     /// PHY statistics.
-    PhyStats = 6,
+    PhyStats = 7,
     /// PHY tunables.
-    PhyTunables = 7,
+    PhyTunables = 8,
     /// Link modes (speeds).
-    LinkModes = 8,
+    LinkModes = 9,
     /// Message levels.
-    MsgClasses = 9,
+    MsgClasses = 10,
     /// WoL modes.
-    WolModes = 10,
+    WolModes = 11,
     /// SOF timestamping.
-    SofTimestamping = 11,
+    SofTimestamping = 12,
     /// TX timestamping types.
-    TsTypes = 12,
+    TsTxTypes = 13,
     /// RX filters.
-    RxFilters = 13,
-    /// RSS contexts.
-    RssContexts = 14,
-    /// Stats standard groups.
-    StatsStd = 15,
-    /// Stats ethernet.
-    StatsEth = 16,
-    /// Stats ethernet PHY.
+    TsRxFilters = 14,
+    /// UDP tunnel types.
+    UdpTunnelTypes = 15,
+    /// Standardized stats.
+    StatsStd = 16,
+    /// IEEE 802.3 PHY statistics.
     StatsEthPhy = 17,
-    /// Stats ethernet MAC.
+    /// IEEE 802.3 MAC statistics.
     StatsEthMac = 18,
-    /// Stats ethernet control.
+    /// IEEE 802.3 MAC Control statistics.
     StatsEthCtrl = 19,
-    /// Stats RMON.
+    /// RMON statistics.
     StatsRmon = 20,
+    /// PHY(dev) statistics.
+    StatsPhy = 21,
+    /// Hardware timestamping flags.
+    TsFlags = 22,
 }
 
 // =============================================================================
@@ -353,12 +369,12 @@ pub enum EthtoolLinkinfoAttr {
     Header = 1,
     /// Physical port type (u8).
     Port = 2,
-    /// Physical medium type (u8).
+    /// PHY address (u8).
     Phyaddr = 3,
-    /// Transceiver type (u8).
-    TpMdiCtrl = 4,
-    /// Link TP MDI status (u8).
-    TpMdix = 5,
+    /// MDI-X status (u8).
+    TpMdix = 4,
+    /// MDI-X control setting (u8).
+    TpMdiCtrl = 5,
     /// Transceiver type (u8).
     Transceiver = 6,
 }
@@ -377,24 +393,32 @@ pub enum EthtoolLinkmodesAttr {
     Header = 1,
     /// Autonegotiation enabled (u8).
     Autoneg = 2,
-    /// Supported link modes (bitset).
-    Supported = 3,
-    /// Advertised link modes (bitset).
-    Advertised = 4,
+    /// **Our** link modes (bitset) — the supported/advertised modes of this
+    /// end, in one attribute.
+    ///
+    /// nlink used to split this into `Supported = 3` + `Advertised = 4`. The
+    /// kernel has a single `ETHTOOL_A_LINKMODES_OURS = 3`, so the invented
+    /// second variant shifted **every** later id up by one and silently
+    /// corrupted the whole struct: `Speed` read `DUPLEX` (a 1-byte attribute,
+    /// so the `len >= 4` guard never matched and **speed was always `None`**),
+    /// `Duplex` read `MASTER_SLAVE_CFG`, `Peer` read `SPEED`. On the write path
+    /// a speed `u32` landed in the id the kernel's policy declares `NLA_U8`, so
+    /// setting speed/duplex could only ever `EINVAL` (#196).
+    Ours = 3,
     /// Peer advertised link modes (bitset).
-    Peer = 5,
+    Peer = 4,
     /// Current speed in Mb/s (u32).
-    Speed = 6,
+    Speed = 5,
     /// Current duplex (u8).
-    Duplex = 7,
-    /// Wake-on-LAN modes (u32).
-    MasterSlaveCfg = 8,
+    Duplex = 6,
+    /// Master/slave configuration (u8).
+    MasterSlaveCfg = 7,
     /// Master/slave state (u8).
-    MasterSlaveState = 9,
+    MasterSlaveState = 8,
     /// Number of lanes (u32).
-    Lanes = 10,
+    Lanes = 9,
     /// Rate matching (u8).
-    RateMatching = 11,
+    RateMatching = 10,
 }
 
 // =============================================================================
@@ -575,10 +599,14 @@ pub enum EthtoolCoalesceAttr {
     TxMaxFramesHigh = 22,
     /// Sample interval (u32).
     RateSampleInterval = 23,
-    /// Use CQE mode RX (u8).
-    UseCqeRx = 24,
     /// Use CQE mode TX (u8).
-    UseCqeTx = 25,
+    ///
+    /// The kernel lists **TX before RX** here, unlike every other RX/TX pair in
+    /// this enum. nlink had them the natural way round and therefore backwards
+    /// — found by `scripts/audit-uapi-constants.sh` on its first run.
+    UseCqeTx = 24,
+    /// Use CQE mode RX (u8).
+    UseCqeRx = 25,
     /// TX aggregate max bytes (u32).
     TxAggrMaxBytes = 26,
     /// TX aggregate max frames (u32).
@@ -754,14 +782,22 @@ pub enum EthtoolRssAttr {
 #[non_exhaustive]
 pub enum EthtoolStatsAttr {
     Unspec = 0,
-    /// Request header (nested). **Wrong**: kernel value is 2.
-    Header = 1,
-    /// Stat groups to query (bitset). **Wrong**: kernel value is 3.
-    Groups = 2,
-    /// GRP nested stats. **Wrong**: kernel value is 4.
-    Grp = 3,
-    /// Source for stats (u32). **Wrong**: kernel value is 5.
-    Src = 4,
+    /// Padding (`ETHTOOL_A_STATS_PAD`).
+    ///
+    /// The kernel has a `PAD` at index 1, which nlink's enum omitted — so every
+    /// id was one too low. The values used to ship with doc-comments saying so
+    /// (`**Wrong**: kernel value is 2`) and the connection module carried
+    /// private shadow constants to work around its own public enum. A public
+    /// enum with knowingly-wrong values is a bug, not documentation (#230).
+    Pad = 1,
+    /// Request header (nested).
+    Header = 2,
+    /// Stat groups to query (bitset).
+    Groups = 3,
+    /// GRP nested stats.
+    Grp = 4,
+    /// Source for stats (u32).
+    Src = 5,
 }
 
 /// Attributes nested under `ETHTOOL_A_STATS_GRP` (`ETHTOOL_A_STATS_GRP_*`).
@@ -793,4 +829,89 @@ pub mod stats_group {
     pub const ETH_CTRL: u32 = 2;
     /// RMON (RFC 2819) stats.
     pub const RMON: u32 = 3;
+}
+
+#[cfg(test)]
+mod uapi_conformance_tests {
+    //! The values here are transcribed from the kernel headers, and there was
+    //! **no test in this module at all** — which is how six of the eight
+    //! constant drifts the 0.25.0 cycle fixed managed to ship.
+    //!
+    //! `scripts/audit-uapi-constants.sh` is the real gate (it diffs every
+    //! `#[repr(uN)]` enum in the crate against `/usr/include/linux` on every
+    //! push, so it catches drift in enums nobody thought to test). These pin the
+    //! specific values that were wrong, so the regression is named in the test
+    //! output and not just in a script's diff.
+
+    use super::*;
+
+    /// #196 — the kernel has ONE `ETHTOOL_A_LINKMODES_OURS = 3`.
+    ///
+    /// nlink split it into `Supported = 3` + `Advertised = 4`, which shifted
+    /// every later id up by one. `Speed` then read `DUPLEX` — a 1-byte
+    /// attribute, so the `len >= 4` guard never matched and **speed was always
+    /// `None`** — while `Duplex` read `MASTER_SLAVE_CFG`.
+    #[test]
+    fn linkmodes_attrs_match_the_kernel() {
+        assert_eq!(EthtoolLinkmodesAttr::Header as u16, 1);
+        assert_eq!(EthtoolLinkmodesAttr::Autoneg as u16, 2);
+        assert_eq!(EthtoolLinkmodesAttr::Ours as u16, 3);
+        assert_eq!(EthtoolLinkmodesAttr::Peer as u16, 4);
+        assert_eq!(EthtoolLinkmodesAttr::Speed as u16, 5);
+        assert_eq!(EthtoolLinkmodesAttr::Duplex as u16, 6);
+        assert_eq!(EthtoolLinkmodesAttr::MasterSlaveCfg as u16, 7);
+        assert_eq!(EthtoolLinkmodesAttr::MasterSlaveState as u16, 8);
+        assert_eq!(EthtoolLinkmodesAttr::Lanes as u16, 9);
+        assert_eq!(EthtoolLinkmodesAttr::RateMatching as u16, 10);
+    }
+
+    /// #228 — TP_MDIX is 4 and TP_MDIX_CTRL is 5; nlink had them transposed, so
+    /// the reported MDI-X status and its control setting were swapped.
+    #[test]
+    fn linkinfo_mdix_attrs_are_not_transposed() {
+        assert_eq!(EthtoolLinkinfoAttr::TpMdix as u16, 4);
+        assert_eq!(EthtoolLinkinfoAttr::TpMdiCtrl as u16, 5);
+    }
+
+    /// #227 — `ETH_SS_FEATURES` is 4. Omitting it made every set id from 4 up
+    /// one too low, so a query for one string set returned a different one.
+    #[test]
+    fn string_set_ids_match_the_kernel() {
+        assert_eq!(EthtoolStringSet::NtupleFltrs as u32, 3);
+        assert_eq!(EthtoolStringSet::Features as u32, 4);
+        assert_eq!(EthtoolStringSet::RssHashFuncs as u32, 5);
+        assert_eq!(EthtoolStringSet::LinkModes as u32, 9);
+        assert_eq!(EthtoolStringSet::StatsStd as u32, 16);
+    }
+
+    /// #229 — the kernel inserted `MODULE_FW_FLASH_ACT` at 44, pushing `PHY_GET`
+    /// to 45. A PHY query wired to 44 would send the NIC a **firmware-flash
+    /// activate**.
+    #[test]
+    fn phy_get_is_not_the_firmware_flash_command() {
+        assert_eq!(EthtoolCmd::MmSet as u8, 43);
+        assert_eq!(EthtoolCmd::ModuleFwFlashAct as u8, 44);
+        assert_eq!(EthtoolCmd::PhyGet as u8, 45);
+    }
+
+    /// #230 — the kernel's STATS enum has a `PAD` at index 1. nlink's public
+    /// enum omitted it and shipped values its own doc-comments called wrong,
+    /// while the connection module quietly used private shadow constants.
+    #[test]
+    fn stats_attrs_account_for_the_pad() {
+        assert_eq!(EthtoolStatsAttr::Pad as u16, 1);
+        assert_eq!(EthtoolStatsAttr::Header as u16, 2);
+        assert_eq!(EthtoolStatsAttr::Groups as u16, 3);
+        assert_eq!(EthtoolStatsAttr::Grp as u16, 4);
+        assert_eq!(EthtoolStatsAttr::Src as u16, 5);
+    }
+
+    /// Found by the audit script on its first run: the kernel lists **TX before
+    /// RX** for the CQE-mode pair, unlike every other RX/TX pair in the enum.
+    /// nlink had them the natural way round, and therefore backwards.
+    #[test]
+    fn coalesce_cqe_mode_puts_tx_before_rx() {
+        assert_eq!(EthtoolCoalesceAttr::UseCqeTx as u16, 24);
+        assert_eq!(EthtoolCoalesceAttr::UseCqeRx as u16, 25);
+    }
 }
