@@ -334,18 +334,7 @@ fn print_inet_socket(
     if opts.memory
         && let Some(ref mem) = sock.mem_info
     {
-        details.push(format!(
-            "skmem:(r{},rb{},t{},tb{},f{},w{},o{},bl{},d{})",
-            mem.rmem_alloc,
-            mem.rcvbuf,
-            mem.wmem_alloc,
-            mem.sndbuf,
-            mem.fwd_alloc,
-            mem.wmem_queued,
-            mem.optmem,
-            mem.backlog,
-            mem.drops
-        ));
+        details.push(mem.format_skmem());
     }
 
     // TCP info

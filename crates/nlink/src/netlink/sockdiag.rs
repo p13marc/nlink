@@ -52,6 +52,12 @@ const TCPDIAG_GETSOCK: u16 = 18;
 const NLM_F_ACK: u16 = 0x04;
 
 // Inet diag extensions
+/// `INET_DIAG_REQ_PROTOCOL` — a **request**-side attribute (a separate
+/// namespace from the response attributes below, which is why the id collides
+/// with `INET_DIAG_VEGASINFO`). Carries the protocol as a `u32` and overrides
+/// `inet_diag_req_v2.sdiag_protocol`, which is only a `u8` (#225).
+const INET_DIAG_REQ_PROTOCOL: u16 = 3;
+
 const INET_DIAG_MEMINFO: u16 = 1;
 const INET_DIAG_INFO: u16 = 2;
 const INET_DIAG_VEGASINFO: u16 = 3;
@@ -451,22 +457,32 @@ impl Connection<SockDiag> {
         // the expression level — concatenating two independently
         // compiled programs is invalid (the first one's reject
         // overshoot would land mid-instruction in the second).
+        //
+        // `local_addr` / `remote_addr` join the expression here too (#223):
+        // they used to be read by nothing at all, so
+        // `SocketFilter::tcp().local_addr(..)` returned every TCP socket on
+        // the box. As `Src`/`Dst` conjuncts they lower to the same
+        // `S_COND`/`D_COND` the expression grammar already uses.
         let effective_expr = {
             use crate::sockdiag::expr::{Comparison, FilterExpr};
             let mut expr: Option<FilterExpr> = filter.expr.clone();
-            if let Some(p) = filter.local_port {
-                let port = FilterExpr::Sport(Comparison::Eq, p);
-                expr = Some(match expr {
-                    Some(e) => FilterExpr::And(Box::new(e), Box::new(port)),
-                    None => port,
+            let and = |leaf: FilterExpr, expr: &mut Option<FilterExpr>| {
+                *expr = Some(match expr.take() {
+                    Some(e) => FilterExpr::And(Box::new(e), Box::new(leaf)),
+                    None => leaf,
                 });
+            };
+            if let Some(p) = filter.local_port {
+                and(FilterExpr::Sport(Comparison::Eq, p), &mut expr);
             }
             if let Some(p) = filter.remote_port {
-                let port = FilterExpr::Dport(Comparison::Eq, p);
-                expr = Some(match expr {
-                    Some(e) => FilterExpr::And(Box::new(e), Box::new(port)),
-                    None => port,
-                });
+                and(FilterExpr::Dport(Comparison::Eq, p), &mut expr);
+            }
+            if let Some(a) = filter.local_addr {
+                and(FilterExpr::Src(a, full_prefix(&a)), &mut expr);
+            }
+            if let Some(a) = filter.remote_addr {
+                and(FilterExpr::Dst(a, full_prefix(&a)), &mut expr);
             }
             expr
         };
@@ -474,11 +490,18 @@ impl Connection<SockDiag> {
             .as_ref()
             .map(crate::sockdiag::bytecode::compile_filter)
             .unwrap_or_default();
-        // Client-side backstop: needed whenever a full expression was
-        // given and the kernel-side lowering over-approximates.
-        let backstop = match (&filter.expr, compiled.exact) {
-            (Some(expr), false) => Some(expr.clone()),
-            _ => None,
+        // Client-side backstop: needed whenever the kernel-side lowering
+        // over-approximates.
+        //
+        // It is built from the **effective** expression, not from
+        // `filter.expr`: `exact` describes what was pushed down, which now
+        // includes the port and address conjuncts, so backstopping only
+        // `filter.expr` would leave those unenforced whenever the lowering was
+        // inexact for some other reason (#223).
+        let backstop = if compiled.exact {
+            None
+        } else {
+            effective_expr.clone()
         };
 
         // F1 fix — serialize the send + recv-loop pair so concurrent
@@ -517,6 +540,17 @@ impl Connection<SockDiag> {
             buf.extend_from_slice(&[0u8; 16]);
             buf.extend_from_slice(&0u32.to_ne_bytes());
             buf.extend_from_slice(&[0u8; 8]);
+
+            // INET_DIAG_REQ_PROTOCOL (#225) — `sdiag_protocol` above is a u8,
+            // and IPPROTO_MPTCP is 262. Without this attribute the kernel
+            // dispatches on the truncated byte (262 & 0xff == 6 == TCP) and
+            // `SocketFilter::mptcp()` silently becomes a TCP dump whose every
+            // result is stamped `Protocol::Mptcp`.
+            if !filter.protocol.fits_in_u8() {
+                buf.extend_from_slice(&8u16.to_ne_bytes()); // nla_len
+                buf.extend_from_slice(&INET_DIAG_REQ_PROTOCOL.to_ne_bytes());
+                buf.extend_from_slice(&filter.protocol.number_u32().to_ne_bytes());
+            }
 
             // Optional INET_DIAG_REQ_BYTECODE attribute — run the
             // compiled program as a kernel-side pre-filter so far
@@ -585,8 +619,10 @@ impl Connection<SockDiag> {
                                 data[offset + 19],
                             ]);
                             if errno != 0 {
-                                // Plan 232 B6 — operation tag matches Plan 212 hygiene.
-                                return Err(super::error::Error::from_errno_with_context(errno, "sock_destroy"));
+                                return Err(super::error::Error::from_errno_with_context(
+                                    errno,
+                                    "sock_diag_dump(inet)",
+                                ));
                             }
                         }
                         SOCK_DIAG_BY_FAMILY | TCPDIAG_GETSOCK => {
@@ -595,8 +631,11 @@ impl Connection<SockDiag> {
                                 filter.protocol,
                             ) {
                                 // Backstop for inexact kernel-side
-                                // lowering (#163).
-                                if backstop.as_ref().is_none_or(|e| e.matches(&sock)) {
+                                // lowering (#163), then the scalar filters
+                                // that have no bytecode form (#223).
+                                if backstop.as_ref().is_none_or(|e| e.matches(&sock))
+                                    && matches_scalar_filters(&sock, filter)
+                                {
                                     sockets.push(sock);
                                 }
                             }
@@ -693,14 +732,23 @@ impl Connection<SockDiag> {
                                 data[offset + 19],
                             ]);
                             if errno != 0 {
-                                // Plan 232 B6 — operation tag matches Plan 212 hygiene.
-                                return Err(super::error::Error::from_errno_with_context(errno, "sock_destroy"));
+                                return Err(super::error::Error::from_errno_with_context(
+                                    errno,
+                                    "sock_diag_dump(unix)",
+                                ));
                             }
                         }
                         SOCK_DIAG_BY_FAMILY => {
                             if let Some(sock) = parse_unix_msg(&data[offset..offset + nlmsg_len])
                             {
-                                sockets.push(sock);
+                                // socket_types / path_pattern were read by
+                                // nothing at all, so `.unix().stream().path(..)`
+                                // returned every unix socket of every type
+                                // (#223). The unix diag request carries no
+                                // filter for either, so both are client-side.
+                                if matches_unix_filter(&sock, filter) {
+                                    sockets.push(sock);
+                                }
                             }
                         }
                         _ => {}
@@ -805,8 +853,10 @@ impl Connection<SockDiag> {
                                 data[offset + 19],
                             ]);
                             if errno != 0 {
-                                // Plan 232 B6 — operation tag matches Plan 212 hygiene.
-                                return Err(super::error::Error::from_errno_with_context(errno, "sock_destroy"));
+                                return Err(super::error::Error::from_errno_with_context(
+                                    errno,
+                                    "sock_diag_dump(netlink)",
+                                ));
                             }
                         }
                         SOCK_DIAG_BY_FAMILY => {
@@ -1065,6 +1115,102 @@ fn parse_port(data: &[u8]) -> u16 {
     }
 }
 
+/// Read a native-endian `u32` at `off`. Callers guard the length.
+fn u32_at(buf: &[u8], off: usize) -> u32 {
+    u32::from_ne_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+}
+
+/// Decode the `enum sk_meminfo_stats` array — a `u32[9]`.
+///
+/// The same array is carried by `INET_DIAG_SKMEMINFO`, `UNIX_DIAG_MEMINFO` and
+/// `NETLINK_DIAG_MEMINFO`, so all three decode through here. Callers guard
+/// `len >= 36`.
+fn parse_sk_meminfo(buf: &[u8]) -> MemInfo {
+    MemInfo {
+        rmem_alloc: u32_at(buf, 0),
+        rcvbuf: Some(u32_at(buf, 4)),
+        wmem_alloc: u32_at(buf, 8),
+        sndbuf: Some(u32_at(buf, 12)),
+        fwd_alloc: u32_at(buf, 16),
+        wmem_queued: u32_at(buf, 20),
+        optmem: Some(u32_at(buf, 24)),
+        backlog: Some(u32_at(buf, 28)),
+        drops: Some(u32_at(buf, 32)),
+    }
+}
+
+/// The all-ones prefix for an address family — the prefix length that turns a
+/// bare address into an exact match.
+fn full_prefix(addr: &std::net::IpAddr) -> u8 {
+    match addr {
+        std::net::IpAddr::V4(_) => 32,
+        std::net::IpAddr::V6(_) => 128,
+    }
+}
+
+/// The [`UnixFilter`] fields the unix diag request cannot carry, applied
+/// client-side (#223).
+///
+/// `unix_diag_req` has a `udiag_states` mask and an `udiag_ino`, and that is
+/// all — there is no type mask and no path filter on the wire. Both builders
+/// were therefore silently doing nothing: `.unix().stream().path("/run/foo")`
+/// returned every unix socket of every type.
+///
+/// `path_pattern` is a substring match, matched against the filesystem path or,
+/// for an abstract socket, its `@name`.
+fn matches_unix_filter(sock: &UnixSocket, filter: &UnixFilter) -> bool {
+    if filter.socket_types & (1 << (sock.socket_type as u32)) == 0 {
+        return false;
+    }
+    if let Some(pattern) = &filter.path_pattern {
+        let hit = sock
+            .path
+            .as_deref()
+            .or(sock.abstract_name.as_deref())
+            .is_some_and(|p| p.contains(pattern.as_str()));
+        if !hit {
+            return false;
+        }
+    }
+    true
+}
+
+/// The [`InetFilter`] fields that have no expression form and are applied
+/// client-side (#223): interface, mark, cgroup id.
+///
+/// These three could in principle lower to `DEV_COND` / `MARK_COND` /
+/// `CGROUP_COND`, but this module deliberately emits no opcode newer than
+/// `D_COND`: a kernel that does not know an opcode fails `inet_diag_bc_audit`
+/// with `EINVAL`, which kills the **whole dump** rather than degrading to a
+/// superset. `MARK_COND` additionally requires `CAP_NET_ADMIN` for the *audit*
+/// to pass, so an unprivileged caller would lose the dump entirely.
+///
+/// Filtering client-side costs a wider kernel-side result set and nothing else.
+///
+/// One caveat, inherited from the kernel: `INET_DIAG_MARK` is only emitted to a
+/// dumper with `CAP_NET_ADMIN`. Unprivileged, `sock.mark` is `None`, so a mark
+/// filter matches nothing — which is the honest answer (the information was
+/// withheld), not a silent pass.
+fn matches_scalar_filters(sock: &InetSocket, filter: &InetFilter) -> bool {
+    if let Some(ifindex) = filter.interface
+        && sock.interface != ifindex
+    {
+        return false;
+    }
+    if let Some((value, mask)) = filter.mark {
+        match sock.mark {
+            Some(m) if m & mask == value & mask => {}
+            _ => return false,
+        }
+    }
+    if let Some(id) = filter.cgroup_id
+        && sock.cgroup_id != Some(id)
+    {
+        return false;
+    }
+    true
+}
+
 fn parse_inet_msg(data: &[u8], protocol: InetProtocol) -> Option<InetSocket> {
     // Skip netlink header (16 bytes)
     if data.len() < 16 + 72 {
@@ -1155,36 +1301,35 @@ fn parse_inet_msg(data: &[u8], protocol: InetProtocol) -> Option<InetSocket> {
         let attr_data = &data[attr_offset + 4..attr_offset + attr_len];
 
         match attr_type {
+            // `struct inet_diag_meminfo` — four counters:
+            //
+            //   .idiag_rmem = sk_rmem_alloc_get(sk),        /* offset  0 */
+            //   .idiag_wmem = sk->sk_wmem_queued,           /* offset  4 */
+            //   .idiag_fmem = sk_forward_alloc_get(sk),     /* offset  8 */
+            //   .idiag_tmem = sk_wmem_alloc_get(sk),        /* offset 12 */
+            //
+            // Note idiag_*w*mem at offset 4 is wmem_QUEUED and idiag_*t*mem at
+            // offset 12 is wmem_ALLOC — nlink had those two backwards, so
+            // ss-style `skmem:` printed `t` and `w` transposed (#222).
+            //
+            // Merge rather than assign: with_all_extensions() requests both
+            // MEMINFO and SKMEMINFO, and whichever arm ran last used to
+            // clobber the other's fields (#197).
             INET_DIAG_MEMINFO if attr_data.len() >= 16 => {
-                sock.mem_info = Some(MemInfo {
-                    rmem_alloc: u32::from_ne_bytes([
-                        attr_data[0],
-                        attr_data[1],
-                        attr_data[2],
-                        attr_data[3],
-                    ]),
-                    wmem_alloc: u32::from_ne_bytes([
-                        attr_data[4],
-                        attr_data[5],
-                        attr_data[6],
-                        attr_data[7],
-                    ]),
-                    fwd_alloc: u32::from_ne_bytes([
-                        attr_data[8],
-                        attr_data[9],
-                        attr_data[10],
-                        attr_data[11],
-                    ]),
-                    wmem_queued: u32::from_ne_bytes([
-                        attr_data[12],
-                        attr_data[13],
-                        attr_data[14],
-                        attr_data[15],
-                    ]),
-                    ..Default::default()
-                });
+                let m = sock.mem_info.get_or_insert_with(MemInfo::default);
+                m.rmem_alloc = u32_at(attr_data, 0);
+                m.wmem_queued = u32_at(attr_data, 4);
+                m.fwd_alloc = u32_at(attr_data, 8);
+                m.wmem_alloc = u32_at(attr_data, 12);
             }
-            INET_DIAG_INFO => {
+            // INET_DIAG_INFO's payload is protocol-dependent: `struct tcp_info`
+            // for TCP, `struct sctp_info` for SCTP, `struct mptcp_info` for
+            // MPTCP. All three clear the length guards inside parse_tcp_info,
+            // so decoding unconditionally produced plausible-looking garbage
+            // RTT / cwnd / bytes_acked from an SCTP socket (#225). Decode only
+            // what we can name; the others are left as None rather than
+            // reinterpreted.
+            INET_DIAG_INFO if matches!(protocol, InetProtocol::Tcp) => {
                 sock.tcp_info = Some(parse_tcp_info(attr_data));
             }
             INET_DIAG_CONG => {
@@ -1198,63 +1343,12 @@ fn parse_inet_msg(data: &[u8], protocol: InetProtocol) -> Option<InetSocket> {
             INET_DIAG_TCLASS if !attr_data.is_empty() => {
                 sock.tclass = Some(attr_data[0]);
             }
+            // `enum sk_meminfo_stats` — a superset of inet_diag_meminfo that
+            // also carries the buffer sizes. This is the only attribute that
+            // can fill rcvbuf/sndbuf/optmem/backlog/drops, and before #197
+            // there was no builder that requested it.
             INET_DIAG_SKMEMINFO if attr_data.len() >= 36 => {
-                sock.mem_info = Some(MemInfo {
-                    rmem_alloc: u32::from_ne_bytes([
-                        attr_data[0],
-                        attr_data[1],
-                        attr_data[2],
-                        attr_data[3],
-                    ]),
-                    rcvbuf: u32::from_ne_bytes([
-                        attr_data[4],
-                        attr_data[5],
-                        attr_data[6],
-                        attr_data[7],
-                    ]),
-                    wmem_alloc: u32::from_ne_bytes([
-                        attr_data[8],
-                        attr_data[9],
-                        attr_data[10],
-                        attr_data[11],
-                    ]),
-                    sndbuf: u32::from_ne_bytes([
-                        attr_data[12],
-                        attr_data[13],
-                        attr_data[14],
-                        attr_data[15],
-                    ]),
-                    fwd_alloc: u32::from_ne_bytes([
-                        attr_data[16],
-                        attr_data[17],
-                        attr_data[18],
-                        attr_data[19],
-                    ]),
-                    wmem_queued: u32::from_ne_bytes([
-                        attr_data[20],
-                        attr_data[21],
-                        attr_data[22],
-                        attr_data[23],
-                    ]),
-                    optmem: u32::from_ne_bytes([
-                        attr_data[24],
-                        attr_data[25],
-                        attr_data[26],
-                        attr_data[27],
-                    ]),
-                    backlog: u32::from_ne_bytes([
-                        attr_data[28],
-                        attr_data[29],
-                        attr_data[30],
-                        attr_data[31],
-                    ]),
-                    drops: u32::from_ne_bytes([
-                        attr_data[32],
-                        attr_data[33],
-                        attr_data[34],
-                        attr_data[35],
-                    ]),
-                });
+                sock.mem_info = Some(parse_sk_meminfo(attr_data));
             }
             INET_DIAG_SHUTDOWN if !attr_data.is_empty() => {
                 sock.shutdown = Some(attr_data[0]);
@@ -1586,62 +1680,7 @@ fn parse_unix_msg(data: &[u8]) -> Option<UnixSocket> {
                 ]));
             }
             UNIX_DIAG_MEMINFO if attr_data.len() >= 36 => {
-                sock.mem_info = Some(MemInfo {
-                    rmem_alloc: u32::from_ne_bytes([
-                        attr_data[0],
-                        attr_data[1],
-                        attr_data[2],
-                        attr_data[3],
-                    ]),
-                    rcvbuf: u32::from_ne_bytes([
-                        attr_data[4],
-                        attr_data[5],
-                        attr_data[6],
-                        attr_data[7],
-                    ]),
-                    wmem_alloc: u32::from_ne_bytes([
-                        attr_data[8],
-                        attr_data[9],
-                        attr_data[10],
-                        attr_data[11],
-                    ]),
-                    sndbuf: u32::from_ne_bytes([
-                        attr_data[12],
-                        attr_data[13],
-                        attr_data[14],
-                        attr_data[15],
-                    ]),
-                    fwd_alloc: u32::from_ne_bytes([
-                        attr_data[16],
-                        attr_data[17],
-                        attr_data[18],
-                        attr_data[19],
-                    ]),
-                    wmem_queued: u32::from_ne_bytes([
-                        attr_data[20],
-                        attr_data[21],
-                        attr_data[22],
-                        attr_data[23],
-                    ]),
-                    optmem: u32::from_ne_bytes([
-                        attr_data[24],
-                        attr_data[25],
-                        attr_data[26],
-                        attr_data[27],
-                    ]),
-                    backlog: u32::from_ne_bytes([
-                        attr_data[28],
-                        attr_data[29],
-                        attr_data[30],
-                        attr_data[31],
-                    ]),
-                    drops: u32::from_ne_bytes([
-                        attr_data[32],
-                        attr_data[33],
-                        attr_data[34],
-                        attr_data[35],
-                    ]),
-                });
+                sock.mem_info = Some(parse_sk_meminfo(attr_data));
             }
             UNIX_DIAG_SHUTDOWN if !attr_data.is_empty() => {
                 sock.shutdown = Some(attr_data[0]);
@@ -1734,62 +1773,7 @@ fn parse_netlink_msg(
         match attr_type {
             NETLINK_DIAG_MEMINFO
                 if attr_data.len() >= 36 => {
-                    sock.mem_info = Some(MemInfo {
-                        rmem_alloc: u32::from_ne_bytes([
-                            attr_data[0],
-                            attr_data[1],
-                            attr_data[2],
-                            attr_data[3],
-                        ]),
-                        rcvbuf: u32::from_ne_bytes([
-                            attr_data[4],
-                            attr_data[5],
-                            attr_data[6],
-                            attr_data[7],
-                        ]),
-                        wmem_alloc: u32::from_ne_bytes([
-                            attr_data[8],
-                            attr_data[9],
-                            attr_data[10],
-                            attr_data[11],
-                        ]),
-                        sndbuf: u32::from_ne_bytes([
-                            attr_data[12],
-                            attr_data[13],
-                            attr_data[14],
-                            attr_data[15],
-                        ]),
-                        fwd_alloc: u32::from_ne_bytes([
-                            attr_data[16],
-                            attr_data[17],
-                            attr_data[18],
-                            attr_data[19],
-                        ]),
-                        wmem_queued: u32::from_ne_bytes([
-                            attr_data[20],
-                            attr_data[21],
-                            attr_data[22],
-                            attr_data[23],
-                        ]),
-                        optmem: u32::from_ne_bytes([
-                            attr_data[24],
-                            attr_data[25],
-                            attr_data[26],
-                            attr_data[27],
-                        ]),
-                        backlog: u32::from_ne_bytes([
-                            attr_data[28],
-                            attr_data[29],
-                            attr_data[30],
-                            attr_data[31],
-                        ]),
-                        drops: u32::from_ne_bytes([
-                            attr_data[32],
-                            attr_data[33],
-                            attr_data[34],
-                            attr_data[35],
-                        ]),
-                    });
+                    sock.mem_info = Some(parse_sk_meminfo(attr_data));
                 }
             NETLINK_DIAG_GROUPS
                 // Groups bitmask - first 4 bytes give us the basic groups u32
@@ -2046,5 +2030,148 @@ mod cc_info_tests {
         assert_eq!(InetExtension::TClass.mask(), 1 << 5);
         assert_eq!(InetExtension::SkMemInfo.mask(), 1 << 6);
         assert_eq!(InetExtension::Shutdown.mask(), 1 << 7);
+    }
+
+    // ================================================================
+    // MEMINFO / SKMEMINFO decode (#222, #197)
+    // ================================================================
+
+    /// **#222.** `struct inet_diag_meminfo` is
+    /// `{ idiag_rmem, idiag_wmem, idiag_fmem, idiag_tmem }`, and the kernel
+    /// fills it as:
+    ///
+    /// ```c
+    /// .idiag_rmem = sk_rmem_alloc_get(sk),      /* offset  0 */
+    /// .idiag_wmem = sk->sk_wmem_queued,         /* offset  4 */
+    /// .idiag_fmem = sk_forward_alloc_get(sk),   /* offset  8 */
+    /// .idiag_tmem = sk_wmem_alloc_get(sk),      /* offset 12 */
+    /// ```
+    ///
+    /// So offset 4 is wmem_**queued** and offset 12 is wmem_**alloc** — the
+    /// two nlink had backwards, which transposed `t` and `w` in ss-style
+    /// `skmem:` output and made `total_mem()` sum the wrong pair.
+    #[test]
+    fn meminfo_offset_4_is_wmem_queued_and_offset_12_is_wmem_alloc() {
+        let frame = inet_frame(&[(
+            INET_DIAG_MEMINFO,
+            u32s(&[11, 22, 33, 44]), // rmem, wmem_queued, fwd, wmem_alloc
+        )]);
+        let sock = parse_inet_msg(&frame, InetProtocol::Tcp).unwrap();
+        let mem = sock.mem_info.unwrap();
+
+        assert_eq!(mem.rmem_alloc, 11);
+        assert_eq!(mem.wmem_queued, 22, "offset 4 is idiag_wmem = wmem_QUEUED");
+        assert_eq!(mem.fwd_alloc, 33);
+        assert_eq!(mem.wmem_alloc, 44, "offset 12 is idiag_tmem = wmem_ALLOC");
+
+        // The four-field attribute cannot carry buffer sizes.
+        assert_eq!(mem.rcvbuf, None);
+        assert_eq!(mem.sndbuf, None);
+        assert_eq!(mem.total_mem(), 11 + 44);
+    }
+
+    /// **#197.** `SKMEMINFO` is the only attribute that carries the buffer
+    /// sizes, and no builder used to request it — so `rcvbuf`/`sndbuf` were
+    /// structurally unfillable and read as a flat zero forever.
+    #[test]
+    fn skmeminfo_fills_the_buffer_sizes() {
+        // enum sk_meminfo_stats: rmem_alloc, rcvbuf, wmem_alloc, sndbuf,
+        //                        fwd_alloc, wmem_queued, optmem, backlog, drops
+        let frame = inet_frame(&[(
+            INET_DIAG_SKMEMINFO,
+            u32s(&[1, 131_072, 3, 16_384, 5, 6, 7, 8, 9]),
+        )]);
+        let mem = parse_inet_msg(&frame, InetProtocol::Tcp)
+            .unwrap()
+            .mem_info
+            .unwrap();
+
+        assert_eq!(mem.rmem_alloc, 1);
+        assert_eq!(mem.rcvbuf, Some(131_072));
+        assert_eq!(mem.wmem_alloc, 3);
+        assert_eq!(mem.sndbuf, Some(16_384));
+        assert_eq!(mem.fwd_alloc, 5);
+        assert_eq!(mem.wmem_queued, 6);
+        assert_eq!(mem.optmem, Some(7));
+        assert_eq!(mem.backlog, Some(8));
+        assert_eq!(mem.drops, Some(9));
+    }
+
+    /// **#197.** Requesting both extensions must merge, not clobber.
+    ///
+    /// Both arms used to assign `sock.mem_info` outright, so with
+    /// `with_all_extensions()` — which requests both — whichever attribute the
+    /// kernel happened to emit last won, and the other's fields were lost.
+    #[test]
+    fn meminfo_and_skmeminfo_merge_in_either_order() {
+        let meminfo = (INET_DIAG_MEMINFO, u32s(&[11, 22, 33, 44]));
+        let skmeminfo = (
+            INET_DIAG_SKMEMINFO,
+            u32s(&[11, 131_072, 44, 16_384, 33, 22, 7, 8, 9]),
+        );
+
+        for attrs in [
+            vec![meminfo.clone(), skmeminfo.clone()],
+            vec![skmeminfo, meminfo],
+        ] {
+            let mem = parse_inet_msg(&inet_frame(&attrs), InetProtocol::Tcp)
+                .unwrap()
+                .mem_info
+                .unwrap();
+            assert_eq!(mem.wmem_alloc, 44);
+            assert_eq!(mem.wmem_queued, 22);
+            assert_eq!(
+                mem.rcvbuf,
+                Some(131_072),
+                "the MEMINFO arm clobbered SKMEMINFO's buffer sizes"
+            );
+            assert_eq!(mem.sndbuf, Some(16_384));
+        }
+    }
+
+    /// **#225.** `INET_DIAG_INFO` is `struct tcp_info` only for TCP.
+    ///
+    /// For SCTP it is `struct sctp_info` and for MPTCP `struct mptcp_info` —
+    /// both long enough to clear parse_tcp_info's length guards, so decoding
+    /// unconditionally produced plausible-looking garbage RTT and cwnd from a
+    /// completely different struct.
+    #[test]
+    fn inet_diag_info_is_only_decoded_as_tcp_info_for_tcp() {
+        let frame = inet_frame(&[(INET_DIAG_INFO, vec![0xAB; 232])]);
+
+        assert!(
+            parse_inet_msg(&frame, InetProtocol::Tcp)
+                .unwrap()
+                .tcp_info
+                .is_some(),
+            "TCP must still decode tcp_info"
+        );
+        assert!(
+            parse_inet_msg(&frame, InetProtocol::Sctp)
+                .unwrap()
+                .tcp_info
+                .is_none(),
+            "an sctp_info payload was reinterpreted as tcp_info (#225)"
+        );
+    }
+
+    /// **#225.** IPPROTO_MPTCP is 262 and does not fit `sdiag_protocol`.
+    #[test]
+    fn mptcp_does_not_fit_the_protocol_byte() {
+        use crate::sockdiag::types::Protocol;
+
+        assert_eq!(Protocol::Mptcp.number_u32(), 262);
+        assert!(
+            !Protocol::Mptcp.fits_in_u8(),
+            "MPTCP must be flagged as needing INET_DIAG_REQ_PROTOCOL — \
+             without it the kernel sees the truncated byte 6 (plain TCP) \
+             and returns every TCP socket, each stamped Mptcp"
+        );
+        assert_eq!(Protocol::Mptcp.number(), 6, "262 & 0xff");
+
+        for p in [Protocol::Tcp, Protocol::Udp, Protocol::Sctp, Protocol::Dccp] {
+            assert!(p.fits_in_u8());
+            assert_eq!(p.number() as u32, p.number_u32());
+        }
     }
 }

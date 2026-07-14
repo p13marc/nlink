@@ -84,9 +84,25 @@ impl FilterExpr {
     /// - `expr or expr` — logical OR
     /// - `not expr` — logical NOT
     /// - `( expr )` — grouping
+    ///
+    /// The **whole** input must be consumed. A trailing token the grammar does
+    /// not recognize is an error, not a stopping point: before #224 the parser
+    /// returned `Ok` with the remainder unread, so `sport = :22 && dport = :80`
+    /// silently parsed as just `sport = :22` — a *superset* of the sockets
+    /// asked for, and one marked exact, so not even the client-side backstop
+    /// would narrow it back down. (`&&` / `||` are not in the ss grammar; the
+    /// spellings are `and` / `or`.)
     pub fn parse(input: &str) -> Result<Self, String> {
-        let mut input = input.trim();
-        parse_or_expr(&mut input).map_err(|e| format!("filter parse error: {e}"))
+        let mut rest = input.trim();
+        let expr = parse_or_expr(&mut rest).map_err(|e| format!("filter parse error: {e}"))?;
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            return Err(format!(
+                "filter parse error: unexpected trailing input `{rest}` \
+                 (operators are `and` / `or` / `not`)"
+            ));
+        }
+        Ok(expr)
     }
 
     /// Evaluate this expression against a socket.
@@ -121,23 +137,36 @@ impl FilterExpr {
     }
 }
 
+/// Does `socket_ip` fall inside `filter_ip/prefix_len`?
+///
+/// `prefix_len == 0` is the "any address" prefix and must match everything —
+/// note the mask is built by an explicit zero-case, not by shifting. Shifting
+/// a `u32` by 32 is not "shift everything out": Rust panics in debug and masks
+/// the shift count in release (`32 & 31 == 0`), which would have turned `/0`
+/// into an *exact* address match — the reverse of what it means (#204).
 fn ip_matches(socket_ip: &IpAddr, filter_ip: &IpAddr, prefix_len: u8) -> bool {
     match (socket_ip, filter_ip) {
         (IpAddr::V4(sock), IpAddr::V4(filter)) => {
             if prefix_len >= 32 {
                 return sock == filter;
             }
-            let mask = u32::MAX << (32 - prefix_len);
+            let mask = if prefix_len == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix_len)
+            };
             (u32::from(*sock) & mask) == (u32::from(*filter) & mask)
         }
         (IpAddr::V6(sock), IpAddr::V6(filter)) => {
             if prefix_len >= 128 {
                 return sock == filter;
             }
-            let sock_bits = u128::from(*sock);
-            let filter_bits = u128::from(*filter);
-            let mask = u128::MAX << (128 - prefix_len);
-            (sock_bits & mask) == (filter_bits & mask)
+            let mask = if prefix_len == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix_len)
+            };
+            (u128::from(*sock) & mask) == (u128::from(*filter) & mask)
         }
         _ => false,
     }
@@ -151,9 +180,14 @@ fn parse_or_expr(input: &mut &str) -> PResult<FilterExpr> {
     let mut left = parse_and_expr(input)?;
     loop {
         let _ = multispace0.parse_next(input)?;
-        if input.starts_with("or ") || input.starts_with("or\t") {
+        // `or(` is accepted alongside `or ` — a parenthesized right operand
+        // needs no separating space.
+        if input.starts_with("or ") || input.starts_with("or\t") || input.starts_with("or(") {
             let _ = "or".parse_next(input)?;
-            let _ = multispace1.parse_next(input)?;
+            // multispace0, not multispace1: the `or(` form has no space. The
+            // starts_with guard above already established the delimiter, so
+            // this cannot swallow an identifier like `orange`.
+            let _ = multispace0.parse_next(input)?;
             let right = parse_and_expr(input)?;
             left = FilterExpr::Or(Box::new(left), Box::new(right));
         } else {
@@ -167,9 +201,9 @@ fn parse_and_expr(input: &mut &str) -> PResult<FilterExpr> {
     let mut left = parse_unary_expr(input)?;
     loop {
         let _ = multispace0.parse_next(input)?;
-        if input.starts_with("and ") || input.starts_with("and\t") {
+        if input.starts_with("and ") || input.starts_with("and\t") || input.starts_with("and(") {
             let _ = "and".parse_next(input)?;
-            let _ = multispace1.parse_next(input)?;
+            let _ = multispace0.parse_next(input)?;
             let right = parse_unary_expr(input)?;
             left = FilterExpr::And(Box::new(left), Box::new(right));
         } else {
@@ -578,5 +612,104 @@ mod tests {
             tcp_state(TcpState::Listen),
         )));
         assert!(expr.matches_socket_info(&inet));
+    }
+
+    // ----------------------------------------------------------------
+    // #204 — /0 is the "any address" prefix, not a shift overflow.
+    // ----------------------------------------------------------------
+
+    /// `src 0.0.0.0/0` matches every v4 socket.
+    ///
+    /// The old mask was `u32::MAX << (32 - 0)`, i.e. a shift by the full
+    /// width: a **panic** in debug, and in release a shift count masked to 0
+    /// — leaving `mask = u32::MAX`, which turned "any address" into an exact
+    /// match on `0.0.0.0` and returned nothing. This test runs in debug in
+    /// CI, so it pins both halves.
+    #[test]
+    fn a_zero_length_v4_prefix_matches_everything() {
+        let expr = FilterExpr::parse("src 0.0.0.0/0").unwrap();
+        for ip in ["10.1.2.3:22", "192.168.0.1:443", "0.0.0.0:0"] {
+            let sock = make_socket(ip, "0.0.0.0:0", tcp_state(TcpState::Listen));
+            assert!(expr.matches(&sock), "src 0.0.0.0/0 must match {ip}");
+        }
+    }
+
+    #[test]
+    fn a_zero_length_v6_prefix_matches_everything() {
+        let expr = FilterExpr::parse("src ::/0").unwrap();
+        for ip in ["[2001:db8::1]:22", "[::1]:443", "[::]:0"] {
+            let sock = make_socket(ip, "[::]:0", tcp_state(TcpState::Listen));
+            assert!(expr.matches(&sock), "src ::/0 must match {ip}");
+        }
+    }
+
+    /// The other boundary: a full-width prefix is an exact match.
+    #[test]
+    fn a_full_length_prefix_is_an_exact_match() {
+        let expr = FilterExpr::parse("src 10.1.2.3/32").unwrap();
+        assert!(expr.matches(&make_socket(
+            "10.1.2.3:22",
+            "0.0.0.0:0",
+            tcp_state(TcpState::Listen)
+        )));
+        assert!(!expr.matches(&make_socket(
+            "10.1.2.4:22",
+            "0.0.0.0:0",
+            tcp_state(TcpState::Listen)
+        )));
+
+        let expr = FilterExpr::parse("src ::1/128").unwrap();
+        assert!(expr.matches(&make_socket(
+            "[::1]:22",
+            "[::]:0",
+            tcp_state(TcpState::Listen)
+        )));
+        assert!(!expr.matches(&make_socket(
+            "[::2]:22",
+            "[::]:0",
+            tcp_state(TcpState::Listen)
+        )));
+    }
+
+    // ----------------------------------------------------------------
+    // #224 — the whole input must be consumed.
+    // ----------------------------------------------------------------
+
+    /// Trailing input is an error, not a stopping point.
+    ///
+    /// Each of these used to parse as its *first* conjunct alone and return
+    /// `Ok` — a strictly larger set of sockets than was asked for, and marked
+    /// exact, so the client-side backstop would not narrow it either.
+    #[test]
+    fn trailing_input_is_rejected() {
+        for bad in [
+            "sport = :22 && dport = :80",
+            "dport = :443 garbage",
+            "sport = :22 ) extra",
+            "src 10.0.0.0/8 || dst 10.0.0.1",
+        ] {
+            let err = FilterExpr::parse(bad)
+                .expect_err("`{bad}` must not parse to a weaker filter than written");
+            assert!(
+                err.contains("trailing input"),
+                "expected a trailing-input error for `{bad}`, got: {err}"
+            );
+        }
+    }
+
+    /// `or(` / `and(` — a parenthesized operand needs no separating space.
+    #[test]
+    fn operators_accept_a_parenthesized_operand_without_a_space() {
+        // FilterExpr has no PartialEq; the Debug shape is the AST.
+        for (compact, spaced) in [
+            ("sport = :22 or(dport = :80)", "sport = :22 or dport = :80"),
+            ("sport = :22 and(dport = :80)", "sport = :22 and dport = :80"),
+        ] {
+            assert_eq!(
+                format!("{:?}", FilterExpr::parse(compact).unwrap()),
+                format!("{:?}", FilterExpr::parse(spaced).unwrap()),
+                "`{compact}` must parse the same as `{spaced}`"
+            );
+        }
     }
 }

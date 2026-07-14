@@ -102,7 +102,13 @@ async fn main() -> nlink::netlink::Result<()> {
         {
             println!(
                 "{:<10} {:<10} {:<10} {:<10}",
-                unix.inode, mem.rmem_alloc, mem.wmem_alloc, mem.sndbuf
+                unix.inode,
+                mem.rmem_alloc,
+                mem.wmem_alloc,
+                // SKMEMINFO-only, so it is an Option now (#197): `-` means the
+                // kernel was never asked, which is not the same as zero.
+                mem.sndbuf
+                    .map_or_else(|| "-".to_string(), |v| v.to_string())
             );
             shown += 1;
             if shown >= 10 {
