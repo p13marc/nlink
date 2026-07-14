@@ -139,9 +139,6 @@ enum Nnf {
     And(Vec<Nnf>),
     Or(Vec<Nnf>),
     Leaf(Prim),
-    /// An inverted host condition (the kernel has no NOT op; codegen
-    /// lowers this to a skip/jump pair).
-    NotHost(Prim),
 }
 
 fn flip(cmp: Comparison) -> Comparison {
@@ -206,11 +203,26 @@ fn lower_host(is_source: bool, addr: &IpAddr, prefix_len: u8) -> Prim {
     }
 }
 
-/// NNF push-down: negation is pushed to the leaves via De Morgan;
-/// port leaves absorb it by comparison flip, host leaves become
-/// [`Nnf::NotHost`]. Returns `None` if the expression contains a
-/// `State` leaf (must be hoisted by [`compile_filter`] — it has no
-/// bytecode form) or an inexpressible bound.
+/// NNF push-down: negation is pushed to the leaves via De Morgan, where a
+/// port leaf absorbs it by flipping its comparison.
+///
+/// `None` means "not expressible kernel-side" — the caller drops the conjunct
+/// and falls back to the client-side backstop. Three things produce it:
+///
+/// - a `State` leaf ([`compile_filter`] hoists those into `idiag_states`;
+///   there is no state opcode),
+/// - a bound the wire format cannot represent,
+/// - **a negated host condition** (#198).
+///
+/// That last one is the subtle one, and it is why there is no `NotHost` node.
+/// The kernel's hostcond is a strict *superset* of nlink's client-side
+/// `ip_matches`: `inet_diag_bc_run` deliberately matches an AF_INET cond
+/// against an AF_INET6 entry whose address is v4-mapped, which `ip_matches`
+/// reports as a cross-family non-match. Complementing a superset yields a
+/// **subset**, so a kernel-side `not src 10.0.0.0/8` *rejects* the dual-stack
+/// listener's `::ffff:10.1.2.3` socket that the expression should keep — and
+/// once the kernel has dropped it, no client-side pass can bring it back.
+/// Only *positive* host conds are safe to lower.
 fn lower(expr: &FilterExpr, negated: bool) -> Option<Nnf> {
     match expr {
         FilterExpr::And(a, b) => {
@@ -238,22 +250,10 @@ fn lower(expr: &FilterExpr, negated: bool) -> Option<Nnf> {
             let cmp = if negated { flip(*cmp) } else { *cmp };
             lower_port_cmp(false, cmp, *port)
         }
-        FilterExpr::Src(addr, plen) => {
-            let prim = lower_host(true, addr, *plen);
-            Some(if negated {
-                Nnf::NotHost(prim)
-            } else {
-                Nnf::Leaf(prim)
-            })
-        }
-        FilterExpr::Dst(addr, plen) => {
-            let prim = lower_host(false, addr, *plen);
-            Some(if negated {
-                Nnf::NotHost(prim)
-            } else {
-                Nnf::Leaf(prim)
-            })
-        }
+        // A negated host cond is never lowered — see the note above.
+        FilterExpr::Src(_, _) | FilterExpr::Dst(_, _) if negated => None,
+        FilterExpr::Src(addr, plen) => Some(Nnf::Leaf(lower_host(true, addr, *plen))),
+        FilterExpr::Dst(addr, plen) => Some(Nnf::Leaf(lower_host(false, addr, *plen))),
         // No state opcode exists; `compile_filter` hoists top-level
         // pure-state conjuncts into idiag_states instead.
         FilterExpr::State(_) => None,
@@ -325,15 +325,6 @@ impl Program {
                 self.bind(done);
             }
             Nnf::Leaf(p) => self.instrs.push((*p, fail)),
-            Nnf::NotHost(p) => {
-                // Invert: prim MATCH must fail, prim no-match must
-                // continue. The prim's `no` skips the jump; the jump
-                // carries the failure.
-                let cont = self.new_label();
-                self.instrs.push((*p, Target::Label(cont)));
-                self.instrs.push((Prim::Jmp, fail));
-                self.bind(cont);
-            }
         }
     }
 
@@ -428,7 +419,10 @@ fn nnf_is_exact(nnf: &Nnf) -> bool {
     match nnf {
         Nnf::And(parts) | Nnf::Or(parts) => parts.iter().all(nnf_is_exact),
         Nnf::Leaf(Prim::Port { .. }) => true,
-        Nnf::Leaf(_) | Nnf::NotHost(_) => false,
+        // A positive host cond is a kernel-side *superset* of `ip_matches`
+        // (v4-mapped v6), so it over-approximates: safe, but the client-side
+        // backstop must still run.
+        Nnf::Leaf(_) => false,
     }
 }
 
@@ -511,36 +505,35 @@ pub fn compile_filter(expr: &FilterExpr) -> CompiledFilter {
         }
     }
 
-    let bytecode = if bc_parts.is_empty() {
+    // Lower each top-level conjunct independently. A conjunct that will not
+    // lower is *dropped*, not fatal: the parts are ANDed, so a missing one can
+    // only widen the kernel-side result set, and `exact = false` puts the
+    // client-side backstop back in charge of narrowing it. (Dropping a piece
+    // of an `Or` would instead *narrow* it — which is why `lower` itself is
+    // all-or-nothing within a conjunct and returns `None` for the whole thing.)
+    let mut lowered: Vec<Nnf> = Vec::with_capacity(bc_parts.len());
+    for c in &bc_parts {
+        match lower(c, false) {
+            Some(nnf) => lowered.push(nnf),
+            None => exact = false,
+        }
+    }
+
+    let bytecode = if lowered.is_empty() {
         None
     } else {
-        let nnf = bc_parts
-            .iter()
-            .map(|c| lower(c, false))
-            .collect::<Option<Vec<_>>>()
-            .map(Nnf::And);
-        match nnf {
-            Some(nnf) => {
-                if !nnf_is_exact(&nnf) {
-                    exact = false;
-                }
-                let mut prog = Program::new();
-                prog.emit_nnf(&nnf, Target::Reject);
-                let bytes = prog.resolve();
-                if bytes.is_none() {
-                    // Overflow → nothing kernel-side for these parts.
-                    exact = false;
-                }
-                bytes
-            }
-            None => {
-                // Inexpressible bound somewhere → drop bytecode
-                // entirely (dropping only a sub-part of an Or would
-                // under-approximate).
-                exact = false;
-                None
-            }
+        let nnf = Nnf::And(lowered);
+        if !nnf_is_exact(&nnf) {
+            exact = false;
         }
+        let mut prog = Program::new();
+        prog.emit_nnf(&nnf, Target::Reject);
+        let bytes = prog.resolve();
+        if bytes.is_none() {
+            // Overflow → nothing kernel-side for these parts.
+            exact = false;
+        }
+        bytes
     };
 
     CompiledFilter {
@@ -844,28 +837,60 @@ mod tests {
         assert_eq!(op_at(&bc, 4).2, 65534);
     }
 
+    /// **#198.** A negated host cond must never reach the kernel.
+    ///
+    /// The kernel's hostcond matches an AF_INET cond against a v4-mapped
+    /// AF_INET6 entry; `ip_matches` calls that a cross-family non-match. The
+    /// kernel cond is therefore a *superset*, and complementing a superset
+    /// gives a subset — a kernel-side `not dst 10/8` would reject the
+    /// dual-stack socket at `::ffff:10.1.2.3` that the filter must keep, with
+    /// no way for the client-side pass to get it back.
     #[test]
-    fn not_host_inverts_via_skip_jump() {
-        // HOST(no=own+4 → skip jmp) JMP(reject)
-        let bc = assert_audited("not dst 10.0.0.0/8");
-        assert_eq!(bc.len(), 20);
-        // Host cond: match → falls through to JMP (reject); no-match →
-        // no=20 lands past the JMP at end (accept).
-        assert_eq!(op_at(&bc, 0), (INET_DIAG_BC_D_COND, 16, 20));
-        // JMP → reject (overshoot end by 4): at byte 16, no = 4+4 = 8.
-        assert_eq!(op_at(&bc, 16), (INET_DIAG_BC_JMP, 4, 8));
+    fn a_negated_host_cond_is_never_lowered_kernel_side() {
+        let c = compile_filter(&FilterExpr::parse("not dst 10.0.0.0/8").unwrap());
+        assert!(
+            c.bytecode.is_none(),
+            "a negated host cond was compiled kernel-side; it under-approximates (#198)"
+        );
+        assert!(
+            !c.exact,
+            "dropping the conjunct must mark the filter inexact so the \
+             client-side backstop still runs"
+        );
     }
 
+    /// The negated host conjunct is dropped; the *rest* still compiles.
+    ///
+    /// Dropping one conjunct of an AND only widens the kernel-side result set,
+    /// and the backstop narrows it again — so the port conjunct is still worth
+    /// pushing down.
+    #[test]
+    fn a_negated_host_does_not_take_the_whole_program_with_it() {
+        let c = compile_filter(&FilterExpr::parse("sport = :22 and not dst 10.0.0.0/8").unwrap());
+        let bc = c
+            .bytecode
+            .expect("the sport conjunct must still be lowered kernel-side");
+        audit(&bc).unwrap();
+        assert_eq!(bc.len(), 16, "expected exactly the two sport primitives");
+        assert!(!c.exact);
+    }
+
+    /// De Morgan still pushes `not` through `and` for the port leaves it can
+    /// absorb — but a host leaf underneath sinks the whole conjunct, because
+    /// dropping one arm of the resulting `Or` would *narrow* the set.
     #[test]
     fn de_morgan_pushes_not_through_and() {
-        // not (sport = :22 and dst 10.0.0.0/8)
-        //   == sport != :22 or not dst 10.0.0.0/8
-        let a = compile(&FilterExpr::parse("not ( sport = :22 and dst 10.0.0.0/8 )").unwrap())
+        let a = compile(&FilterExpr::parse("not ( sport = :22 and dport = :80 )").unwrap())
             .unwrap();
-        let b =
-            compile(&FilterExpr::parse("sport != :22 or not dst 10.0.0.0/8").unwrap()).unwrap();
+        let b = compile(&FilterExpr::parse("sport != :22 or dport != :80").unwrap()).unwrap();
         assert_eq!(a, b);
         audit(&a).unwrap();
+
+        // With a host leaf under the negation, there is no sound lowering.
+        assert!(
+            compile(&FilterExpr::parse("not ( sport = :22 and dst 10.0.0.0/8 )").unwrap())
+                .is_none()
+        );
     }
 
     #[test]

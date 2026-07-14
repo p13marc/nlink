@@ -313,6 +313,77 @@ All notable changes to this project will be documented in this file.
   crate parses them native-endian. Same value on x86_64, silently wrong on a
   big-endian target. Both sides are `to_ne_bytes` now.
 
+- **sockdiag: a `/0` prefix panicked the dump path (#204).** `ip_matches` built
+  its mask with `u32::MAX << (32 - prefix_len)`, which for `prefix_len == 0` is
+  a shift by the full width: a **panic** in debug builds, and in release a shift
+  count masked back to zero — leaving `mask = u32::MAX`, so "any address"
+  became an exact match on `0.0.0.0` and matched nothing. `src 0.0.0.0/0` is a
+  legitimate ss filter and reaches this straight from user input, on the path
+  every dump takes.
+
+- **sockdiag: `not src <v4>` silently dropped v4-mapped IPv6 sockets (#198).**
+  The bytecode compiler lowered a *negated* host condition kernel-side. But the
+  kernel's hostcond deliberately matches an AF_INET cond against a v4-mapped
+  AF_INET6 entry, where nlink's client-side `ip_matches` calls that a
+  cross-family non-match — so the kernel cond is a strict **superset**, and
+  complementing a superset yields a **subset**. `not src 10.0.0.0/8` therefore
+  *rejected* the dual-stack listener's `::ffff:10.1.2.3` socket that the filter
+  should have kept, and because the kernel had already dropped it, the
+  client-side backstop could not bring it back. This broke the module's own
+  stated invariant ("the compiler never emits a program that could
+  under-approximate"). Negated host conds are no longer lowered at all; the
+  conjunct is dropped, `exact` goes false, and the backstop decides. The
+  `Nnf::NotHost` node is gone, so it cannot come back.
+
+- **sockdiag: five documented `InetFilter` builders did nothing (#223).**
+  `local_addr`, `remote_addr`, `interface`, `mark` and `cgroup_id` were assigned
+  by their builders and read by **no code anywhere** — so
+  `SocketFilter::tcp().local_addr("10.0.0.1")` returned *every TCP socket on the
+  box*, with no error and no warning. Same for `UnixFilter::socket_types` and
+  `path_pattern`: `.unix().stream().path("/run/foo")` returned every unix socket
+  of every type. The addresses now lower kernel-side as `S_COND`/`D_COND`; the
+  rest are applied client-side.
+
+- **sockdiag: `FilterExpr::parse` accepted trailing garbage (#224).** The parser
+  stopped at the first token it did not recognize and returned `Ok`, leaving the
+  remainder unread. `"sport = :22 && dport = :80"` parsed as just
+  `sport = :22` — a *superset* of the sockets asked for, and marked `exact`, so
+  even the client-side backstop would not narrow it. Full input consumption is
+  now required. (`or(`/`and(` without a separating space are accepted.)
+
+- **sockdiag: `MemInfo.wmem_alloc` and `wmem_queued` were swapped (#222).** In
+  `struct inet_diag_meminfo`, offset 4 is `idiag_wmem` = `sk_wmem_queued` and
+  offset 12 is `idiag_tmem` = `sk_wmem_alloc` — nlink read them the other way
+  round, so ss-style `skmem:` output had `t` and `w` transposed and
+  `total_mem()` summed the wrong pair.
+
+- **sockdiag: `MemInfo.rcvbuf`/`sndbuf` could never be populated (#197).** They
+  live only in `INET_DIAG_SKMEMINFO`, and **no builder requested it** — so they
+  read as a flat `0` forever and downstream dashboards graphed a clean,
+  believable, permanently-zero line. Adds `InetFilterBuilder::with_sk_mem_info()`,
+  and the `MEMINFO` and `SKMEMINFO` arms now **merge** instead of the later one
+  clobbering the earlier (with `with_all_extensions()`, whichever the kernel
+  emitted last used to win). The five SKMEMINFO-only fields are now
+  `Option<u32>`: `None` means *you did not request it*, which is a different
+  statement from `Some(0)` — the conflation is what kept this invisible.
+
+- **sockdiag: `SocketFilter::mptcp()` was a mislabelled TCP dump (#225).**
+  `IPPROTO_MPTCP` is **262** and does not fit `inet_diag_req_v2.sdiag_protocol`
+  (a `__u8`); nlink sent the truncated byte (262 & 0xff == 6 == plain TCP) and
+  never emitted the `INET_DIAG_REQ_PROTOCOL` attribute the kernel added for
+  exactly this case. The result was **every TCP socket on the box, each stamped
+  `Protocol::Mptcp`**. Relatedly, `INET_DIAG_INFO` was always decoded as
+  `struct tcp_info` regardless of protocol — for SCTP it carries `struct
+  sctp_info`, which is long enough to clear every length guard, so the decode
+  produced plausible-looking garbage RTT and cwnd. The decode is now gated on
+  the protocol.
+
+- **sockdiag: every dump error claimed to come from `sock_destroy` (#226).** The
+  inet, unix and netlink dump paths all tagged kernel errors with the one
+  operation that had not run — so an `EINVAL` on a malformed bytecode program
+  was reported as a `sock_destroy` failure, which is precisely the wrong place
+  to look.
+
 - **`DeclaredSet` / `DeclaredSetBuilder` were unnameable (#210).** They are the
   element type of the **public** `NftablesDiff::sets_to_add` field, but were
   never re-exported — so a downstream user could read the field and could not

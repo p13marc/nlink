@@ -186,9 +186,31 @@ impl InetFilterBuilder {
         self
     }
 
-    /// Request memory info extension.
+    /// Request the `INET_DIAG_MEMINFO` extension — `struct
+    /// inet_diag_meminfo`'s four counters.
+    ///
+    /// This attribute does **not** carry the buffer sizes. If you want
+    /// [`MemInfo::rcvbuf`] / [`MemInfo::sndbuf`], you want
+    /// [`Self::with_sk_mem_info`]; requesting both is fine, they merge.
+    ///
+    /// [`MemInfo::rcvbuf`]: crate::sockdiag::types::MemInfo::rcvbuf
+    /// [`MemInfo::sndbuf`]: crate::sockdiag::types::MemInfo::sndbuf
     pub fn with_mem_info(mut self) -> Self {
         self.filter.extensions |= InetExtension::MemInfo.mask();
+        self
+    }
+
+    /// Request the `INET_DIAG_SKMEMINFO` extension — `enum sk_meminfo_stats`.
+    ///
+    /// A superset of [`Self::with_mem_info`]: the same four counters **plus**
+    /// the send/receive buffer sizes, option memory, backlog and drops. It is
+    /// the only attribute that can fill [`MemInfo`]'s `Option<u32>` fields,
+    /// and until #197 no builder requested it — so `rcvbuf`/`sndbuf` were
+    /// structurally unfillable and read as a flat zero.
+    ///
+    /// [`MemInfo`]: crate::sockdiag::types::MemInfo
+    pub fn with_sk_mem_info(mut self) -> Self {
+        self.filter.extensions |= InetExtension::SkMemInfo.mask();
         self
     }
 
