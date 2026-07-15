@@ -10,8 +10,8 @@ use super::{
     error::{Error, Result},
     interface_ref::InterfaceRef,
     message::{
-        MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgError, NlMsgType,
-        nlmsg_align,
+        MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgError, NlMsgHdr,
+        NlMsgType, nlmsg_align,
     },
     parse::FromNetlink,
     protocol::{ProtocolState, Route},
@@ -1263,7 +1263,13 @@ impl Connection<Route> {
                 continue;
             }
             let payload = &response[NLMSG_HDRLEN..];
-            if let Ok(msg) = T::from_bytes(payload) {
+            if let Ok(mut msg) = T::from_bytes(payload) {
+                // Hand the message its nlmsg_type: some payloads (tcmsg) are
+                // byte-identical across message kinds and cannot classify
+                // themselves without it (#214).
+                if let Ok(header) = NlMsgHdr::from_bytes(&response[..NLMSG_HDRLEN]) {
+                    msg.set_msg_type(header.nlmsg_type);
+                }
                 parsed.push(msg);
             }
         }
@@ -1280,7 +1286,11 @@ impl Connection<Route> {
             });
         }
         let payload = &response[NLMSG_HDRLEN..];
-        T::from_bytes(payload)
+        let mut msg = T::from_bytes(payload)?;
+        if let Ok(header) = NlMsgHdr::from_bytes(&response[..NLMSG_HDRLEN]) {
+            msg.set_msg_type(header.nlmsg_type);
+        }
+        Ok(msg)
     }
 }
 

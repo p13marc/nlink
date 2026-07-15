@@ -3,6 +3,7 @@
 use winnow::{prelude::*, token::take};
 
 use crate::netlink::{
+    message::NlMsgType,
     parse::{FromNetlink, PResult, parse_string_from_bytes},
     types::tc::TcMsg,
 };
@@ -52,8 +53,12 @@ pub struct TcMessage {
     pub(crate) ingress_block: Option<u32>,
     /// Egress block index.
     pub(crate) egress_block: Option<u32>,
-    /// Basic statistics.
+    /// Basic statistics — the **software** total (`TCA_STATS_BASIC`).
     pub(crate) stats_basic: Option<TcStatsBasic>,
+    /// The hardware-offloaded **subset** of [`Self::stats_basic`]
+    /// (`TCA_STATS_BASIC_HW`), dumped alongside it for offloaded
+    /// qdiscs/filters. `None` on a device with no tc offload.
+    pub(crate) stats_basic_hw: Option<TcStatsBasic>,
     /// Queue statistics.
     pub(crate) stats_queue: Option<TcStatsQueue>,
     /// Rate estimator.
@@ -66,6 +71,15 @@ pub struct TcMessage {
     /// contain interface indices. Use [`TcMessage::with_name`] or
     /// [`TcMessage::resolve_name`] to populate it.
     pub(crate) name: Option<String>,
+    /// The `nlmsg_type` this message arrived with (`RTM_NEWQDISC`,
+    /// `RTM_NEWTCLASS`, `RTM_NEWTFILTER`, …).
+    ///
+    /// The `tcmsg` payload is byte-identical for qdiscs, classes and filters —
+    /// only the message type distinguishes them, and it lives in the netlink
+    /// header rather than the payload. Populated by the dump and event paths
+    /// via `FromNetlink::set_msg_type`; `None` for a message parsed straight
+    /// from a payload with no header in hand (#214).
+    pub(crate) msg_type: Option<u16>,
 }
 
 /// Basic traffic control statistics (from TCA_STATS2/TCA_STATS_BASIC).
@@ -248,9 +262,24 @@ impl TcMessage {
         self.egress_block
     }
 
-    /// Get the basic statistics.
+    /// Get the basic statistics — the **software** total.
     pub fn stats_basic(&self) -> Option<&TcStatsBasic> {
         self.stats_basic.as_ref()
+    }
+
+    /// Get the hardware-offloaded **subset** of the basic statistics
+    /// (`TCA_STATS_BASIC_HW`).
+    ///
+    /// This is not a separate counter to add to [`stats_basic`](Self::stats_basic)
+    /// — it is the portion of that same total which the NIC counted in
+    /// hardware. `None` on a device without tc offload.
+    ///
+    /// Until 0.25 the HW value silently overwrote the software one (they shared
+    /// a match arm, and 7 > 1 so it arrived last), which made
+    /// [`bytes`](Self::bytes) and [`packets`](Self::packets) report only the
+    /// offloaded portion on an offloading NIC — often zero (#215).
+    pub fn stats_basic_hw(&self) -> Option<&TcStatsBasic> {
+        self.stats_basic_hw.as_ref()
     }
 
     /// Get the queue statistics.
@@ -434,36 +463,75 @@ impl TcMessage {
             || self.kind() == Some("clsact")
     }
 
-    /// Check if this is a TC class (has a parent that is not root/ingress/clsact).
+    /// The `nlmsg_type` this message arrived with, if known.
     ///
-    /// Classes are child elements of classful qdiscs like HTB, CBQ, or HFSC.
-    /// They have a non-root parent and typically have a minor number in their handle.
+    /// `None` when the message was parsed from a bare payload with no netlink
+    /// header available. See [`is_qdisc`](Self::is_qdisc) for why this matters.
+    #[inline]
+    pub fn msg_type(&self) -> Option<u16> {
+        self.msg_type
+    }
+
+    /// Check if this is a qdisc.
+    ///
+    /// # Why this reads the message type and not the header
+    ///
+    /// `struct tcmsg` is byte-identical for qdiscs, classes and filters. The
+    /// only reliable discriminator is the `nlmsg_type`
+    /// (`RTM_NEWQDISC` / `RTM_NEWTCLASS` / `RTM_NEWTFILTER`), which lives in
+    /// the netlink header.
+    ///
+    /// Until 0.25 these predicates guessed from header fields, and got it
+    /// wrong (#214): `is_filter()` tested `tcm_info != 0`, but `tc_fill_qdisc()`
+    /// sets `tcm_info` to the qdisc **refcount** — always ≥ 1 — so **every
+    /// qdisc reported `is_filter() == true`**, and `filter_protocol()` handed
+    /// back refcount bits reinterpreted as an ethertype.
+    ///
+    /// Returns `false` (not `true`) when the message type is unknown, so a
+    /// caller can never be told something is a qdisc on a guess.
+    #[inline]
+    pub fn is_qdisc(&self) -> bool {
+        self.is_msg_type(&[
+            NlMsgType::RTM_NEWQDISC,
+            NlMsgType::RTM_DELQDISC,
+            NlMsgType::RTM_GETQDISC,
+        ])
+    }
+
+    /// Check if this is a TC class.
+    ///
+    /// Classified on the `nlmsg_type` — see [`is_qdisc`](Self::is_qdisc).
     #[inline]
     pub fn is_class(&self) -> bool {
-        use crate::netlink::types::tc::tc_handle;
-        let parent = self.header.tcm_parent;
-        // A class has a parent that is not root, ingress, or clsact
-        parent != tc_handle::ROOT
-            && parent != tc_handle::INGRESS
-            && parent != tc_handle::CLSACT
-            && parent != tc_handle::UNSPEC
-            // And its handle has a non-zero minor number (classes have major:minor format)
-            && tc_handle::minor(self.header.tcm_handle) != 0
+        self.is_msg_type(&[
+            NlMsgType::RTM_NEWTCLASS,
+            NlMsgType::RTM_DELTCLASS,
+            NlMsgType::RTM_GETTCLASS,
+        ])
     }
 
     /// Check if this is a TC filter.
     ///
-    /// Filters are identified by having a protocol and priority set.
-    /// They attach to qdiscs or classes to classify packets.
+    /// Classified on the `nlmsg_type` — see [`is_qdisc`](Self::is_qdisc).
     #[inline]
     pub fn is_filter(&self) -> bool {
-        // Filters have a non-zero info field that encodes protocol and priority
-        // The info field is (priority << 16) | protocol
-        self.header.tcm_info != 0
+        self.is_msg_type(&[
+            NlMsgType::RTM_NEWTFILTER,
+            NlMsgType::RTM_DELTFILTER,
+            NlMsgType::RTM_GETTFILTER,
+        ])
+    }
+
+    #[inline]
+    fn is_msg_type(&self, types: &[u16]) -> bool {
+        self.msg_type.is_some_and(|t| types.contains(&t))
     }
 
     /// Get the filter protocol (`ETH_P_*` value), in host byte order, if this
     /// is a filter. `Option` wrapper over [`protocol`](Self::protocol).
+    ///
+    /// Returns `None` for a qdisc or class, whose `tcm_info` carries something
+    /// else entirely (the refcount, for a qdisc).
     #[inline]
     pub fn filter_protocol(&self) -> Option<u16> {
         self.is_filter().then(|| self.protocol())
@@ -618,6 +686,13 @@ impl FromNetlink for TcMessage {
         buf.extend_from_slice(header.as_bytes());
     }
 
+    /// `tcmsg` is byte-identical for qdiscs, classes and filters — only the
+    /// message type tells them apart, and it lives in the header rather than
+    /// the payload `parse()` sees. See [`TcMessage::is_qdisc`] (#214).
+    fn set_msg_type(&mut self, msg_type: u16) {
+        self.msg_type = Some(msg_type);
+    }
+
     fn parse(input: &mut &[u8]) -> PResult<Self> {
         // Parse fixed header (20 bytes)
         if input.len() < TcMsg::SIZE {
@@ -715,12 +790,27 @@ fn parse_stats2(msg: &mut TcMessage, data: &[u8]) {
         let payload = &input[4..len];
 
         match attr_type & 0x3FFF {
-            stats2_ids::TCA_STATS_BASIC | stats2_ids::TCA_STATS_BASIC_HW
+            // TCA_STATS_BASIC (1) is the software total. TCA_STATS_BASIC_HW (7)
+            // is the *hardware-offloaded subset* of it, and an offloaded
+            // qdisc/filter dumps BOTH. They used to share this arm, so the HW
+            // value — arriving later, since 7 > 1 — clobbered the total, and
+            // bytes()/packets() reported only the offloaded portion (often 0,
+            // when nothing had been offloaded yet). Keep them apart (#215).
+            stats2_ids::TCA_STATS_BASIC
                 // struct gnet_stats_basic: u64 bytes, u32 packets (+ padding)
                 if payload.len() >= 12 => {
                     let bytes = u64::from_ne_bytes(payload[..8].try_into().unwrap());
                     let packets = u32::from_ne_bytes(payload[8..12].try_into().unwrap());
                     msg.stats_basic = Some(TcStatsBasic {
+                        bytes,
+                        packets: packets as u64,
+                    });
+                }
+            stats2_ids::TCA_STATS_BASIC_HW
+                if payload.len() >= 12 => {
+                    let bytes = u64::from_ne_bytes(payload[..8].try_into().unwrap());
+                    let packets = u32::from_ne_bytes(payload[8..12].try_into().unwrap());
+                    msg.stats_basic_hw = Some(TcStatsBasic {
                         bytes,
                         packets: packets as u64,
                     });
@@ -829,6 +919,134 @@ pub type ClassMessage = TcMessage;
 /// when working specifically with filter operations (u32, flower, etc.).
 pub type FilterMessage = TcMessage;
 
+/// Message classification and the software/hardware stats split
+/// (#214, #215).
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    fn msg(msg_type: u16, tcm_info: u32) -> TcMessage {
+        let mut m = TcMessage::new();
+        m.header.tcm_info = tcm_info;
+        m.set_msg_type(msg_type);
+        m
+    }
+
+    /// The bug: `is_filter()` tested `tcm_info != 0`, but `tc_fill_qdisc()`
+    /// sets `tcm_info` to the qdisc **refcount** — always >= 1. So every qdisc
+    /// reported `is_filter() == true`, and `filter_protocol()` handed back
+    /// refcount bits reinterpreted as an ethertype.
+    #[test]
+    fn a_qdisc_with_a_refcount_is_not_a_filter() {
+        // A perfectly ordinary qdisc: refcount 1 in tcm_info.
+        let q = msg(NlMsgType::RTM_NEWQDISC, 1);
+
+        assert!(q.is_qdisc());
+        assert!(!q.is_filter(), "tcm_info is the refcount, not filter info");
+        assert!(!q.is_class());
+
+        // And so the filter accessors must not hand back refcount bits.
+        assert_eq!(q.filter_protocol(), None);
+        assert_eq!(q.filter_priority(), None);
+    }
+
+    #[test]
+    fn a_filter_is_a_filter() {
+        // tcm_info for a filter is (priority << 16) | protocol.
+        let f = msg(NlMsgType::RTM_NEWTFILTER, (1u32 << 16) | 0x0008);
+
+        assert!(f.is_filter());
+        assert!(!f.is_qdisc());
+        assert!(!f.is_class());
+        assert_eq!(f.filter_priority(), Some(1));
+    }
+
+    /// A filter attached to a root qdisc has tcm_parent = 1:0 and a handle
+    /// with a non-zero minor (800::800), which satisfied every clause of the
+    /// old is_class() heuristic.
+    #[test]
+    fn a_filter_is_not_a_class() {
+        let mut f = msg(NlMsgType::RTM_NEWTFILTER, 1);
+        f.header.tcm_parent = 0x0001_0000; // 1:0
+        f.header.tcm_handle = 0x0800_0800; // 800::800
+
+        assert!(!f.is_class(), "the old heuristic said class here");
+        assert!(f.is_filter());
+    }
+
+    #[test]
+    fn a_class_is_a_class() {
+        let c = msg(NlMsgType::RTM_NEWTCLASS, 0);
+        assert!(c.is_class());
+        assert!(!c.is_qdisc());
+        assert!(!c.is_filter());
+    }
+
+    /// With no header in hand nothing can be classified — and the predicates
+    /// must say "no" rather than guess.
+    #[test]
+    fn an_unknown_message_type_classifies_as_nothing() {
+        let mut m = TcMessage::new();
+        m.header.tcm_info = 1;
+
+        assert_eq!(m.msg_type(), None);
+        assert!(!m.is_qdisc());
+        assert!(!m.is_class());
+        assert!(!m.is_filter());
+    }
+
+    /// TCA_STATS_BASIC (1) is the software total; TCA_STATS_BASIC_HW (7) is
+    /// the offloaded subset of it. They shared a match arm, so the HW value —
+    /// arriving last, since 7 > 1 — clobbered the total. On an offloading NIC
+    /// `bytes()` then reported only the offloaded portion, often 0 (#215).
+    #[test]
+    fn hardware_stats_do_not_clobber_the_software_total() {
+        fn stats_attr(ty: u16, bytes: u64, packets: u32) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(&16u16.to_ne_bytes()); // nla_len: 4 + 12
+            v.extend_from_slice(&ty.to_ne_bytes());
+            v.extend_from_slice(&bytes.to_ne_bytes());
+            v.extend_from_slice(&packets.to_ne_bytes());
+            v
+        }
+
+        // What an offloaded qdisc dumps: the full total, then the hw subset.
+        let mut data = stats_attr(stats2_ids::TCA_STATS_BASIC, 10_000, 100);
+        data.extend(stats_attr(stats2_ids::TCA_STATS_BASIC_HW, 400, 4));
+
+        let mut msg = TcMessage::new();
+        parse_stats2(&mut msg, &data);
+
+        assert_eq!(msg.bytes(), 10_000, "bytes() must be the software total");
+        assert_eq!(msg.packets(), 100);
+        assert_eq!(msg.stats_basic_hw().unwrap().bytes, 400);
+        assert_eq!(msg.stats_basic_hw().unwrap().packets, 4);
+    }
+
+    /// The nastiest shape: nothing has been offloaded yet, so the hw counter
+    /// is zero. It used to zero out the real total.
+    #[test]
+    fn an_empty_hardware_counter_does_not_zero_the_total() {
+        fn stats_attr(ty: u16, bytes: u64, packets: u32) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(&16u16.to_ne_bytes());
+            v.extend_from_slice(&ty.to_ne_bytes());
+            v.extend_from_slice(&bytes.to_ne_bytes());
+            v.extend_from_slice(&packets.to_ne_bytes());
+            v
+        }
+
+        let mut data = stats_attr(stats2_ids::TCA_STATS_BASIC, 10_000, 100);
+        data.extend(stats_attr(stats2_ids::TCA_STATS_BASIC_HW, 0, 0));
+
+        let mut msg = TcMessage::new();
+        parse_stats2(&mut msg, &data);
+
+        assert_eq!(msg.bytes(), 10_000, "regression: hw zero clobbered the total");
+        assert_eq!(msg.stats_basic_hw().unwrap().bytes, 0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,6 +1067,10 @@ mod tests {
         // then confirm the getters unpack it back to host-order values.
         let mut msg = TcMessage::new();
         msg.header = TcMsg::new().with_filter_info(0x0800, 100);
+        // filter_protocol()/filter_priority() are gated on this actually being
+        // a filter, which only the message type can say (#214) — tcm_info
+        // means something different for a qdisc (the refcount).
+        msg.set_msg_type(NlMsgType::RTM_NEWTFILTER);
 
         assert_eq!(msg.protocol(), 0x0800, "ETH_P_IP, host byte order");
         assert_eq!(msg.priority(), 100);
