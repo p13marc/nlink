@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-07-15
+
 ### Added
 
 - **Path-based netns create/delete: `namespace::create_path` /
