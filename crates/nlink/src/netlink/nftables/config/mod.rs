@@ -56,7 +56,17 @@ mod diff;
 mod types;
 
 pub use apply::{ReconcileOptions, ReconcileReport};
-pub use diff::{NftablesDiff, RuleHandle};
+pub use diff::{NftDiffOptions, NftablesDiff, RuleHandle};
+// DeclaredSet/DeclaredSetBuilder are the type of the *public* field
+// `NftablesDiff::sets_to_add`, so leaving them unexported made that field
+// unnameable — a caller could not destructure or construct it (#210).
+// The *Builder types are the same story from the other direction: the
+// declarative DSL hands one to every closure the caller writes
+// (`cfg.table("t", Inet, |t| t.chain("c", |c| ...))`), so they are already
+// de-facto public API — a caller just could not name them, which meant no
+// helper function could take one as a parameter.
 pub use types::{
-    DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredTable, NftablesConfig,
+    DeclaredChain, DeclaredChainBuilder, DeclaredFlowtable, DeclaredFlowtableBuilder,
+    DeclaredRule, DeclaredSet, DeclaredSetBuilder, DeclaredTable,
+    DeclaredTableBuilder, NftablesConfig,
 };

@@ -7,8 +7,8 @@ use crate::netlink::{
     connection::Connection,
     error::{Error, Result},
     message::{
-        MessageIter, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REPLACE, NLM_F_REQUEST,
-        NlMsgError,
+        MessageIter, NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REPLACE,
+        NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgError,
     },
     protocol::Nftables,
 };
@@ -458,9 +458,14 @@ impl Connection<Nftables> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_rule"))]
     pub async fn add_rule(&self, rule: Rule) -> Result<()> {
+        // NLM_F_APPEND is not optional. nf_tables_newrule() appends to the
+        // chain tail only when it is set; without it the kernel *prepends*, so
+        // rules land in reverse declaration order. nftables is first-match-wins,
+        // so that inverts policy — a declared [accept ssh, drop] installs as
+        // [drop, accept] and SSH is blocked (#195).
         let mut builder = MessageBuilder::new(
             nft_msg_type(NFT_MSG_NEWRULE),
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND,
         );
         let nfgenmsg = NfGenMsg::new(rule.family);
         builder.append(&nfgenmsg);
@@ -764,7 +769,7 @@ impl Connection<Nftables> {
     ///    skips the end-seq ACK (unexpected on Linux ≥ 4.6 per
     ///    `net/netfilter/nfnetlink.c`) the call fails fast with
     ///    `Error::Timeout` instead of hanging.
-    async fn send_batch(&self, messages: Vec<Vec<u8>>) -> Result<()> {
+    async fn send_batch(&self, mut messages: Vec<Vec<u8>>) -> Result<()> {
         if messages.is_empty() {
             return Ok(());
         }
@@ -788,13 +793,28 @@ impl Connection<Nftables> {
         begin.set_pid(self.socket().pid());
         batch.extend_from_slice(&begin.finish());
 
-        // Inner messages — already have their seqs set by the
-        // caller (see e.g. `nft_request_ack` or Transaction's
-        // `add_*` builders). Their seqs lie below begin_seq
-        // because they were assigned earlier; treat the response
-        // window as the full range from the lowest inner seq up
-        // to end_seq.
-        for msg_data in &messages {
+        // Inner messages — renumbered here, from the socket's counter.
+        //
+        // Whatever seq they arrived with is discarded. `Transaction` numbers
+        // its messages from its own counter starting at 1, unrelated to the
+        // socket's, so the old code's stated invariant ("inner seqs are
+        // strictly below begin_seq") was simply false — and the recv loop's
+        // `seq > end_seq { continue }` filter then *discarded mid-batch kernel
+        // errors*. The kernel aborted the batch, its BATCH_END ACK never came,
+        // and the caller got an opaque 30s Error::Timeout with no clue what
+        // failed. Worse, an inner seq that happened to equal end_seq had its
+        // per-op ACK mistaken for the BATCH_END ACK, returning Ok(()) for a
+        // batch that never committed (#199).
+        //
+        // Allocating here makes the batch occupy one contiguous
+        // [begin_seq ..= end_seq] window, so every response can be matched
+        // exactly. It also makes the socket the single source of seqs, so a
+        // future caller cannot reintroduce a second counter.
+        //
+        let pid = self.socket().pid();
+        for msg_data in &mut messages {
+            let seq = self.socket().next_seq();
+            stamp_seq_pid(msg_data, seq, pid)?;
             batch.extend_from_slice(msg_data);
         }
 
@@ -817,13 +837,9 @@ impl Connection<Nftables> {
 
         self.socket().send(&batch).await?;
 
-        // The kernel's responses cover the seq range from the
-        // smallest assigned (the first inner-message seq, which
-        // is < begin_seq since callers issue inner seqs before
-        // calling us) through end_seq. We don't track the
-        // smallest one explicitly — the seq filter accepts
-        // anything ≤ end_seq from this socket's lifetime; the
-        // end_seq termination check handles the upper bound.
+        // Every seq the kernel can legitimately answer with now lies in one
+        // contiguous window: BATCH_BEGIN, the inner ops, BATCH_END.
+        let window = begin_seq..=end_seq;
 
         // (4) Wrap in the Connection-level operation timeout
         // (Plan 171 default: 30s). Surfaces a missing end-seq
@@ -835,42 +851,43 @@ impl Connection<Nftables> {
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
 
-                    // (1) Seq filter — accept only responses to
-                    //     ops in this batch. begin_seq and end_seq
-                    //     bound the new ones; inner-message seqs
-                    //     are strictly less than begin_seq.
-                    if header.nlmsg_seq > end_seq {
-                        // Stale traffic from a later op (shouldn't
-                        // happen on a serially-used socket, but
-                        // defensive).
+                    // (1) Seq filter — an exact window, per CLAUDE.md's
+                    //     recv-loop rule 1. The old one-sided `> end_seq`
+                    //     bound silently swallowed mid-batch kernel errors
+                    //     (#199).
+                    if !window.contains(&header.nlmsg_seq) {
                         continue;
                     }
 
                     if header.is_error() {
                         let err = NlMsgError::from_bytes(payload)?;
                         if err.is_ack() {
-                            // (2) Only the end_seq ACK terminates
-                            //     the loop with success. Per-op
-                            //     ACKs are silently collected.
+                            // (2) Only the BATCH_END ACK means the batch
+                            //     committed. Per-op ACKs can fire mid-batch
+                            //     and must not be mistaken for it.
                             if header.nlmsg_seq == end_seq {
                                 return Ok(());
                             }
-                            // Per-op ACK — continue waiting for
-                            // either another per-op response or
-                            // the BATCH_END's ACK.
                             continue;
                         }
-                        // (3) Non-ack error — kernel rejected an
-                        //     op; the batch will not commit.
-                        //     Surface immediately.
+                        // (3) Non-ack error — the kernel rejected an op and
+                        //     the batch will not commit. Surface immediately,
+                        //     with the op's seq for context.
                         return Err(err.into_error(payload));
                     }
 
+                    // NLMSG_DONE is a *dump* terminator; nfnetlink never emits
+                    // one for a batch. Treating it as success meant a stale
+                    // DONE — left in the socket buffer by a cancelled dump,
+                    // since dumps and batches share the fd — could report an
+                    // uncommitted batch as committed (#209). The only success
+                    // signal is the BATCH_END ACK above.
                     if header.is_done() {
-                        // Some kernels send NLMSG_DONE at the end
-                        // of a batch response sequence; treat as
-                        // success.
-                        return Ok(());
+                        return Err(Error::InvalidMessage(format!(
+                            "nftables batch: unexpected NLMSG_DONE at seq {} \
+                             (nfnetlink does not terminate batches with DONE)",
+                            header.nlmsg_seq,
+                        )));
                     }
                 }
             }
@@ -1005,6 +1022,34 @@ impl Connection<Nftables> {
         })
         .await
     }
+}
+
+/// Overwrite an already-`finish()`ed message's `nlmsg_seq` and `nlmsg_pid` in
+/// place.
+///
+/// `send_batch` calls this on every inner message so the whole batch occupies
+/// one contiguous seq window allocated from the socket's counter — see #199.
+/// A free function (not a method) so the unit tests can exercise it without an
+/// open socket, matching the Plan 181 convention below.
+///
+/// `struct nlmsghdr` is `len@0 type@4 flags@6 seq@8 pid@12`.
+pub(crate) fn stamp_seq_pid(msg: &mut [u8], seq: u32, pid: u32) -> Result<()> {
+    const SEQ_OFFSET: usize = 8;
+    const PID_OFFSET: usize = 12;
+
+    if msg.len() < NLMSG_HDRLEN {
+        return Err(Error::InvalidMessage(format!(
+            "nftables batch: inner message is {} bytes, shorter than a \
+             {NLMSG_HDRLEN}-byte netlink header",
+            msg.len(),
+        )));
+    }
+
+    msg[SEQ_OFFSET..SEQ_OFFSET + 4].copy_from_slice(&seq.to_ne_bytes());
+    // Transaction's builders never set a pid, unlike every other request path
+    // in the crate. Stamp it here so they match.
+    msg[PID_OFFSET..PID_OFFSET + 4].copy_from_slice(&pid.to_ne_bytes());
+    Ok(())
 }
 
 // =============================================================================
@@ -1357,21 +1402,30 @@ fn attr_str(payload: &[u8]) -> Option<String> {
 #[must_use = "builders do nothing unless used"]
 pub struct Transaction {
     messages: Vec<Vec<u8>>,
-    seq_counter: u32,
+    /// Allocator for `NFTA_SET_ID` — a **batch-local** identifier that lets a
+    /// set-element add reference a set created in the same batch.
+    ///
+    /// This is not a netlink sequence number. It used to double as one, which
+    /// is what broke `send_batch`'s response matching (#199): the counter is
+    /// unrelated to the socket's, so the batch's seqs were not a contiguous
+    /// window and mid-batch kernel errors were silently discarded.
+    /// `send_batch` now assigns every `nlmsg_seq` itself.
+    set_id_counter: u32,
 }
 
 impl Transaction {
     fn new() -> Self {
         Self {
             messages: Vec::new(),
-            seq_counter: 1,
+            set_id_counter: 1,
         }
     }
 
-    fn next_seq(&mut self) -> u32 {
-        let seq = self.seq_counter;
-        self.seq_counter += 1;
-        seq
+    /// Allocate a batch-local `NFTA_SET_ID`. See [`Self::set_id_counter`].
+    fn next_set_id(&mut self) -> u32 {
+        let id = self.set_id_counter;
+        self.set_id_counter += 1;
+        id
     }
 
     /// Add a table creation to the batch.
@@ -1383,7 +1437,6 @@ impl Transaction {
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_TABLE_NAME, name);
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
@@ -1418,15 +1471,19 @@ impl Transaction {
             builder.append_attr_u32_be(NFTA_CHAIN_POLICY, policy.to_u32());
         }
 
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
 
     /// Add a rule to the batch.
+    ///
+    /// Rules are appended in the order they are added — see the
+    /// `NLM_F_APPEND` note on [`Connection::add_rule`] (#195).
     pub fn add_rule(mut self, rule: Rule) -> Self {
-        let mut builder =
-            MessageBuilder::new(nft_msg_type(NFT_MSG_NEWRULE), NLM_F_REQUEST | NLM_F_CREATE);
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWRULE),
+            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_APPEND,
+        );
         let nfgenmsg = NfGenMsg::new(rule.family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_RULE_TABLE, &rule.table);
@@ -1447,7 +1504,6 @@ impl Transaction {
             builder.append_attr(NFTA_RULE_USERDATA, &udata);
         }
 
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
@@ -1481,7 +1537,6 @@ impl Transaction {
             builder.append_attr(NFTA_RULE_USERDATA, &udata);
         }
 
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
@@ -1492,7 +1547,6 @@ impl Transaction {
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_TABLE_NAME, name);
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
@@ -1516,7 +1570,6 @@ impl Transaction {
             // `parse_table` which reads it as `from_be_bytes`).
             builder.append_attr_u32_be(NFTA_TABLE_FLAGS, flags);
         }
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
@@ -1529,7 +1582,6 @@ impl Transaction {
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_CHAIN_TABLE, table);
         builder.append_attr_str(NFTA_CHAIN_NAME, name);
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
@@ -1544,7 +1596,6 @@ impl Transaction {
         builder.append_attr_str(NFTA_RULE_TABLE, table);
         builder.append_attr_str(NFTA_RULE_CHAIN, chain);
         builder.append_attr_u64_be(NFTA_RULE_HANDLE, handle);
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
@@ -1579,7 +1630,6 @@ impl Transaction {
             builder.append_attr_u32_be(NFTA_FLOWTABLE_FLAGS, ft.flags);
         }
 
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
@@ -1592,7 +1642,6 @@ impl Transaction {
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_FLOWTABLE_TABLE, table);
         builder.append_attr_str(NFTA_FLOWTABLE_NAME, name);
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
@@ -1606,7 +1655,7 @@ impl Transaction {
     /// transaction; element adds reference the set by name, so they
     /// don't need it).
     pub fn add_set(mut self, set: Set) -> Self {
-        let seq = self.next_seq();
+        let set_id = self.next_set_id();
         let mut builder = MessageBuilder::new(
             nft_msg_type(NFT_MSG_NEWSET),
             NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL,
@@ -1618,8 +1667,7 @@ impl Transaction {
         builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
         builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
         builder.append_attr_u32_be(NFTA_SET_FLAGS, set.flags);
-        builder.append_attr_u32_be(NFTA_SET_ID, seq);
-        builder.set_seq(seq);
+        builder.append_attr_u32_be(NFTA_SET_ID, set_id);
         self.messages.push(builder.finish());
         self
     }
@@ -1632,7 +1680,6 @@ impl Transaction {
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_SET_TABLE, table);
         builder.append_attr_str(NFTA_SET_NAME, name);
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
@@ -1649,7 +1696,6 @@ impl Transaction {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_NEWSETELEM), NLM_F_REQUEST | NLM_F_CREATE);
         append_set_elements(&mut builder, table, set, family, elements);
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
@@ -1665,7 +1711,6 @@ impl Transaction {
     ) -> Self {
         let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELSETELEM), NLM_F_REQUEST);
         append_set_elements(&mut builder, table, set, family, elements);
-        builder.set_seq(self.next_seq());
         self.messages.push(builder.finish());
         self
     }
@@ -2213,14 +2258,17 @@ mod transaction_tests {
             .del_table("filter", Family::Inet);
         assert_eq!(tx.messages.len(), 3);
 
-        // Sequence numbers are at offset 8..12 of each message.
+        // Transaction no longer assigns sequence numbers at all — send_batch
+        // stamps them from the socket's counter, so the batch occupies one
+        // contiguous window and every response can be matched exactly (#199).
+        // This used to assert vec![1, 2, 3], numbers from a counter unrelated
+        // to the socket's, which is precisely what broke response matching.
         let seqs: Vec<u32> = tx
             .messages
             .iter()
             .map(|m| u32::from_ne_bytes([m[8], m[9], m[10], m[11]]))
             .collect();
-        // Per Transaction::next_seq the first message gets seq=1, next 2, next 3.
-        assert_eq!(seqs, vec![1, 2, 3]);
+        assert_eq!(seqs, vec![0, 0, 0], "send_batch is the only seq authority");
 
         // Order is preserved: DELRULE, DELCHAIN, DELTABLE.
         let types: Vec<u16> = tx
@@ -2235,6 +2283,88 @@ mod transaction_tests {
                 nft_msg_type(NFT_MSG_DELCHAIN),
                 nft_msg_type(NFT_MSG_DELTABLE),
             ]
+        );
+    }
+
+    /// `send_batch` renumbers every inner message from the socket counter, so
+    /// the batch is a contiguous `[begin_seq ..= end_seq]` window (#199).
+    ///
+    /// This mirrors what `send_batch` does, without needing an open socket.
+    #[test]
+    fn batch_renumbering_yields_a_contiguous_window() {
+        let mut tx = Transaction::new();
+        tx = tx
+            .del_rule("filter", "input", Family::Inet, 1)
+            .del_chain("filter", "input", Family::Inet)
+            .del_table("filter", Family::Inet);
+        let mut messages = tx.messages;
+
+        // A socket that has already served a few requests — the situation in
+        // which the old code broke, since NftablesConfig::diff burns ~5-6 seqs
+        // on its dumps before the batch even starts.
+        let mut next = 6u32;
+        let mut alloc = || {
+            let s = next;
+            next += 1;
+            s
+        };
+
+        let begin_seq = alloc();
+        let mut inner_seqs = Vec::new();
+        for m in &mut messages {
+            let seq = alloc();
+            stamp_seq_pid(m, seq, 4242).unwrap();
+            inner_seqs.push(seq);
+        }
+        let end_seq = alloc();
+
+        // The whole batch is one contiguous run.
+        assert_eq!(begin_seq, 6);
+        assert_eq!(inner_seqs, vec![7, 8, 9]);
+        assert_eq!(end_seq, 10);
+
+        let window = begin_seq..=end_seq;
+        for seq in &inner_seqs {
+            assert!(
+                window.contains(seq),
+                "inner seq {seq} must fall inside the batch window — the old \
+                 Transaction counter put them at 1,2,3, BELOW begin_seq, so \
+                 the recv loop discarded their errors",
+            );
+        }
+
+        // And the seq/pid really landed in the header.
+        assert_eq!(u32::from_ne_bytes(messages[0][8..12].try_into().unwrap()), 7);
+        assert_eq!(
+            u32::from_ne_bytes(messages[0][12..16].try_into().unwrap()),
+            4242,
+            "pid must be stamped too; Transaction's builders never set one",
+        );
+    }
+
+    #[test]
+    fn stamp_seq_pid_rejects_a_runt_message() {
+        let mut runt = vec![0u8; 8];
+        assert!(stamp_seq_pid(&mut runt, 1, 1).is_err());
+    }
+
+    /// Without NLM_F_APPEND the kernel PREPENDS, so rules install in reverse
+    /// declaration order. nftables is first-match-wins, so a declared
+    /// [accept ssh, drop] becomes [drop, accept] and SSH is blocked (#195).
+    #[test]
+    fn newrule_sets_nlm_f_append() {
+        let tx = Transaction::new().add_rule(
+            Rule::new("filter", "input")
+                .family(Family::Inet)
+                .match_tcp_dport(22)
+                .accept(),
+        );
+
+        // nlmsg_flags is at offset 6..8.
+        let flags = u16::from_ne_bytes(tx.messages[0][6..8].try_into().unwrap());
+        assert!(
+            flags & NLM_F_APPEND != 0,
+            "NFT_MSG_NEWRULE without NLM_F_APPEND installs rules in reverse order",
         );
     }
 }
