@@ -64,24 +64,30 @@ impl TryFrom<u32> for InterfaceType {
 #[repr(u32)]
 #[non_exhaustive]
 pub enum BssStatus {
-    /// Not authenticated.
-    NotAuthenticated = 0,
-    /// Authenticated but not associated.
-    Authenticated = 1,
+    /// Authenticated with this BSS.
+    Authenticated = 0,
     /// Associated to this BSS.
-    Associated = 2,
+    Associated = 1,
     /// Joined IBSS (ad-hoc).
-    IbssJoined = 3,
+    IbssJoined = 2,
 }
 
 impl TryFrom<u32> for BssStatus {
     type Error = Error;
+
+    /// `enum nl80211_bss_status` starts at **0**.
+    ///
+    /// nlink used to prepend an invented `NotAuthenticated = 0`, shifting every
+    /// real status up by one — so an *associated* BSS decoded as `IbssJoined`
+    /// and an authenticated one as `Associated` (#231). There is no
+    /// "not authenticated" status on the wire: the kernel simply omits
+    /// `NL80211_BSS_STATUS` for a BSS the station has no relationship with,
+    /// which the parser already models as `status: None`.
     fn try_from(value: u32) -> Result<Self> {
         match value {
-            0 => Ok(Self::NotAuthenticated),
-            1 => Ok(Self::Authenticated),
-            2 => Ok(Self::Associated),
-            3 => Ok(Self::IbssJoined),
+            0 => Ok(Self::Authenticated),
+            1 => Ok(Self::Associated),
+            2 => Ok(Self::IbssJoined),
             _ => Err(Error::InvalidAttribute(format!(
                 "unknown BSS status: {value}"
             ))),
@@ -126,7 +132,14 @@ pub enum AuthType {
     FilsPk = 7,
 }
 
-/// Channel width.
+/// Channel width — `enum nl80211_chan_width`.
+///
+/// nlink used to stop at `Width320 = 8`. The kernel had since inserted the five
+/// S1G narrow widths (1/2/4/8/16 MHz) at 8..=12, which pushed 320 MHz out to
+/// **13** — so a Wi-Fi 7 320 MHz channel decoded as "unknown channel width" and
+/// an S1G 1 MHz channel decoded as **320 MHz**, the widest possible answer to
+/// the narrowest possible channel. Found by
+/// `scripts/audit-uapi-constants.sh` (#232).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 #[non_exhaustive]
@@ -139,7 +152,18 @@ pub enum ChannelWidth {
     Width160 = 5,
     Width5 = 6,
     Width10 = 7,
-    Width320 = 8,
+    /// 1 MHz (802.11ah S1G).
+    Width1 = 8,
+    /// 2 MHz (802.11ah S1G).
+    Width2 = 9,
+    /// 4 MHz (802.11ah S1G).
+    Width4 = 10,
+    /// 8 MHz (802.11ah S1G).
+    Width8 = 11,
+    /// 16 MHz (802.11ah S1G).
+    Width16 = 12,
+    /// 320 MHz (802.11be / Wi-Fi 7).
+    Width320 = 13,
 }
 
 impl TryFrom<u32> for ChannelWidth {
@@ -154,7 +178,12 @@ impl TryFrom<u32> for ChannelWidth {
             5 => Ok(Self::Width160),
             6 => Ok(Self::Width5),
             7 => Ok(Self::Width10),
-            8 => Ok(Self::Width320),
+            8 => Ok(Self::Width1),
+            9 => Ok(Self::Width2),
+            10 => Ok(Self::Width4),
+            11 => Ok(Self::Width8),
+            12 => Ok(Self::Width16),
+            13 => Ok(Self::Width320),
             _ => Err(Error::InvalidAttribute(format!(
                 "unknown channel width: {value}"
             ))),

@@ -220,6 +220,23 @@ impl EthtoolBitset {
         self.names.values().map(|s| s.as_str()).collect()
     }
 
+    /// A copy of this bitset with every **present** bit set to `true`.
+    ///
+    /// A mask-carrying bitset says two things at once: which bits are *in the
+    /// set at all* (the mask), and which of those are *on* (the value). The
+    /// kernel leans on this for `ETHTOOL_A_LINKMODES_OURS`, where it packs the
+    /// supported modes into the mask and the advertised ones into the value —
+    /// one attribute, two answers. This turns the mask half back into a bitset
+    /// of its own, so "supported" reads like any other set.
+    pub fn all_bits_set(&self) -> Self {
+        Self {
+            size: self.size,
+            values: self.values.keys().map(|&idx| (idx, true)).collect(),
+            names: self.names.clone(),
+            name_to_index: self.name_to_index.clone(),
+        }
+    }
+
     /// Iterate over all bits with their values.
     pub fn iter(&self) -> impl Iterator<Item = (&str, bool)> {
         self.names.iter().map(|(idx, name)| {
@@ -449,10 +466,10 @@ mod tests {
         bs.add(7, "TP", false);
 
         let mut builder = MessageBuilder::new(0, 0);
-        bs.write_to(&mut builder, EthtoolLinkmodesAttr::Supported as u16);
+        bs.write_to(&mut builder, EthtoolLinkmodesAttr::Ours as u16);
         let bytes = builder.finish();
         let (s, e) =
-            find_attr_payload(&bytes, EthtoolLinkmodesAttr::Supported as u16).expect("attr present");
+            find_attr_payload(&bytes, EthtoolLinkmodesAttr::Ours as u16).expect("attr present");
         let parsed = EthtoolBitset::parse(&bytes[s..e]).expect("parse");
 
         assert!(parsed.is_set("1000baseT/Full"));

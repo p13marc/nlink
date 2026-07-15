@@ -313,6 +313,53 @@ All notable changes to this project will be documented in this file.
   crate parses them native-endian. Same value on x86_64, silently wrong on a
   big-endian target. Both sides are `to_ne_bytes` now.
 
+- **ethtool: link speed was always `None` and duplex was garbage (#196).** The
+  kernel has a single `ETHTOOL_A_LINKMODES_OURS = 3`; nlink invented two
+  variants there (`Supported` + `Advertised`), which shifted **every** later
+  attribute id up by one. `Speed` then read `DUPLEX` — a 1-byte attribute, so
+  the `len >= 4` guard never matched and speed silently read as `None` **on
+  every interface, forever** — while `Duplex` read `MASTER_SLAVE_CFG` and
+  reported garbage. On the write path a speed `u32` landed in an id the kernel's
+  policy declares `NLA_U8`, so `set_link_modes` with a speed could only ever
+  `EINVAL`. Both the request path and the multicast event decoder were affected.
+  `OURS` carries both answers at once — supported modes in the bitset's mask,
+  advertised modes in its value — so `LinkModes::supported` and `::advertised`
+  are both populated from it.
+
+- **UAPI constant drift, and the gate that ends the class (#227–#232).** Five
+  more hand-transcribed enums had drifted from the kernel:
+  - `EthtoolStringSet` omitted `ETH_SS_FEATURES` (4), so every set id from 4 up
+    was one too low — asking for `LinkModes` actually requested `PHY_TUNABLES`
+    (#227). It also invented two string sets that do not exist.
+  - `EthtoolLinkinfoAttr` transposed `TP_MDIX` and `TP_MDIX_CTRL`, so the
+    reported MDI-X status and its control setting were swapped (#228).
+  - `EthtoolCmd::PhyGet` was 44, but the kernel inserted `MODULE_FW_FLASH_ACT`
+    there and moved `PHY_GET` to 45 — so a PHY query would have sent the NIC a
+    **module firmware-flash activate** (#229). Unused so far; fixed while free.
+  - `EthtoolStatsAttr` omitted the kernel's `PAD` at index 1 and shipped values
+    its own doc-comments described as wrong, while the connection module carried
+    private shadow constants to work around its own public enum (#230).
+  - nl80211 `BssStatus` started at 1 where the kernel starts at 0, so an
+    *associated* BSS decoded as `IbssJoined`; devlink `PortFlavour` omitted
+    `UNUSED`, so an unused port decoded as a PCI subfunction (#231).
+
+  **`scripts/audit-uapi-constants.sh` (#232) now diffs every `#[repr(uN)]` enum
+  in the crate against `/usr/include/linux` on every push** — 644 discriminants
+  across 62 enums. Every enum must be classified: mapped to a kernel prefix, or
+  declared nlink-only in the allowlist. An unclassified enum fails the build,
+  because an unclassified enum is an unchecked one.
+
+  It found **two more drifts on its first run**, neither of which anyone had
+  reported:
+  - `EthtoolCoalesceAttr`'s CQE-mode pair. The kernel lists **TX before RX**
+    here, unlike every other RX/TX pair in the enum; nlink had them the natural
+    way round, and therefore backwards.
+  - nl80211 `ChannelWidth` stopped at `Width320 = 8`, but the kernel had since
+    inserted the five S1G narrow widths (1/2/4/8/16 MHz) at 8..=12 and pushed
+    320 MHz out to **13**. A Wi-Fi 7 320 MHz channel decoded as "unknown channel
+    width", and an S1G 1 MHz channel decoded as **320 MHz** — the widest possible
+    answer to the narrowest possible channel.
+
 - **sockdiag: a `/0` prefix panicked the dump path (#204).** `ip_matches` built
   its mask with `u32::MAX << (32 - prefix_len)`, which for `prefix_len == 0` is
   a shift by the full width: a **panic** in debug builds, and in release a shift

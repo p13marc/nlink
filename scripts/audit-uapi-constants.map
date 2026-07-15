@@ -1,0 +1,160 @@
+# Rust enum -> kernel constant prefix.
+#
+# One stanza per enum. An indented `Variant -> SUFFIX` line handles the cases
+# where the Rust name and the kernel name don't line up under the default
+# CamelCase -> UPPER_SNAKE rule; `Variant -> !skip` marks a variant that has no
+# kernel counterpart at all (an nlink sentinel).
+#
+# Anything not listed here must be in audit-uapi-constants.allowlist. See
+# scripts/audit_uapi_constants.py.
+
+# ---------------------------------------------------------------- rtnetlink
+IflaAttr = IFLA
+    TxqLen -> TXQLEN
+IflaInfo = IFLA_INFO
+IfaAttr = IFA
+RtaAttr = RTA
+RouteScope = RT_SCOPE
+Scope = RT_SCOPE
+RouteProtocol = RTPROT
+RouteType = RTN
+    ExternalResolver -> XRESOLVE
+FraAttr = FRA
+    L3Mdev -> L3MDEV
+    Sport -> SPORT_RANGE
+    Dport -> DPORT_RANGE
+FibRuleAction = FR_ACT
+NdaAttr = NDA
+    Flags -> FLAGS_EXT
+NeighborState = NUD
+OperState = IF_OPER
+    NotPresent -> NOTPRESENT
+    LowerLayerDown -> LOWERLAYERDOWN
+
+# ---------------------------------------------------------------------- tc
+TcaAttr = TCA
+TcaStats = TCA_STATS
+LinkLayer = TC_LINKLAYER
+
+# ------------------------------------------------------------------ bonding
+BondMode = BOND_MODE
+    BalanceRr -> ROUNDROBIN
+    ActiveBackup -> ACTIVEBACKUP
+    BalanceXor -> XOR
+    Lacp -> 8023AD
+    BalanceTlb -> TLB
+    BalanceAlb -> ALB
+XmitHashPolicy = BOND_XMIT_POLICY
+    VlanSrcMac -> VLAN_SRCMAC
+
+# ---------------------------------------------------------------- generic nl
+CtrlCmd = CTRL_CMD
+    NewFamily -> NEWFAMILY
+    DelFamily -> DELFAMILY
+    GetFamily -> GETFAMILY
+    NewOps -> NEWOPS
+    DelOps -> DELOPS
+    GetOps -> GETOPS
+    NewMcastGrp -> NEWMCAST_GRP
+    DelMcastGrp -> DELMCAST_GRP
+    GetMcastGrp -> GETMCAST_GRP
+    GetPolicy -> GETPOLICY
+CtrlAttr = CTRL_ATTR
+    HdrSize -> HDRSIZE
+    MaxAttr -> MAXATTR
+CtrlAttrMcastGrp = CTRL_ATTR_MCAST_GRP
+
+# ------------------------------------------------------------------- sockdiag
+InetExtension = INET_DIAG
+    MemInfo -> MEMINFO
+    VegasInfo -> VEGASINFO
+    TClass -> TCLASS
+    SkMemInfo -> SKMEMINFO
+# The UAPI mirror of the kernel's internal tcp_states.h — BPF_TCP_* in bpf.h is
+# the only place the values are exported to userspace.
+TcpState = BPF_TCP
+    Unknown -> !skip
+UnixShow = UDIAG_SHOW
+    RqLen -> RQLEN
+    MemInfo -> MEMINFO
+
+# ------------------------------------------------------------------- nftables
+Family = NFPROTO
+    Ip -> IPV4
+    Ip6 -> IPV6
+# nlink names the four data registers R0..R3; the kernel numbers them 1..4
+# (NFT_REG_VERDICT takes 0).
+Register = NFT_REG
+    R0 -> 1
+    R1 -> 2
+    R2 -> 3
+    R3 -> 4
+
+# -------------------------------------------------------------------- ethtool
+EthtoolCmd = ETHTOOL_MSG
+EthtoolHeaderAttr = ETHTOOL_A_HEADER
+EthtoolBitsetAttr = ETHTOOL_A_BITSET
+EthtoolBitsetBitAttr = ETHTOOL_A_BITSET_BIT
+EthtoolStringAttr = ETHTOOL_A_STRING
+EthtoolStringsetAttr = ETHTOOL_A_STRINGSET
+EthtoolStrsetAttr = ETHTOOL_A_STRSET
+EthtoolStringSet = ETH_SS
+    NtupleFltrs -> NTUPLE_FILTERS
+EthtoolLinkinfoAttr = ETHTOOL_A_LINKINFO
+    TpMdiCtrl -> TP_MDIX_CTRL
+EthtoolLinkmodesAttr = ETHTOOL_A_LINKMODES
+EthtoolLinkstateAttr = ETHTOOL_A_LINKSTATE
+EthtoolChannelsAttr = ETHTOOL_A_CHANNELS
+EthtoolCoalesceAttr = ETHTOOL_A_COALESCE
+    UseCqeRx -> USE_CQE_MODE_RX
+    UseCqeTx -> USE_CQE_MODE_TX
+EthtoolEeeAttr = ETHTOOL_A_EEE
+EthtoolFeaturesAttr = ETHTOOL_A_FEATURES
+    NoChange -> NOCHANGE
+EthtoolFecAttr = ETHTOOL_A_FEC
+EthtoolModuleEepromAttr = ETHTOOL_A_MODULE_EEPROM
+EthtoolPauseAttr = ETHTOOL_A_PAUSE
+    StatsRxSrc -> STATS_SRC
+EthtoolRingsAttr = ETHTOOL_A_RINGS
+EthtoolRssAttr = ETHTOOL_A_RSS
+EthtoolStatsAttr = ETHTOOL_A_STATS
+EthtoolStatsGrpAttr = ETHTOOL_A_STATS_GRP
+EthtoolWolAttr = ETHTOOL_A_WOL
+
+# ------------------------------------------------------------------- wireguard
+WgCmd = WG_CMD
+WgDeviceAttr = WGDEVICE_A
+WgPeerAttr = WGPEER_A
+    PersistentKeepalive -> PERSISTENT_KEEPALIVE_INTERVAL
+    LastHandshake -> LAST_HANDSHAKE_TIME
+    AllowedIps -> ALLOWEDIPS
+WgAllowedIpAttr = WGALLOWEDIP_A
+    IpAddr -> IPADDR
+
+# --------------------------------------------------------------------- nl80211
+AuthType = NL80211_AUTHTYPE
+BssStatus = NL80211_BSS_STATUS
+ChannelWidth = NL80211_CHAN_WIDTH
+    Width20NoHt -> 20_NOHT
+    Width20 -> 20
+    Width40 -> 40
+    Width80 -> 80
+    Width80P80 -> 80P80
+    Width160 -> 160
+    Width5 -> 5
+    Width10 -> 10
+    Width1 -> 1
+    Width2 -> 2
+    Width4 -> 4
+    Width8 -> 8
+    Width16 -> 16
+    Width320 -> 320
+InterfaceType = NL80211_IFTYPE
+PowerSaveState = NL80211_PS
+
+# --------------------------------------------------------------------- devlink
+ConfigMode = DEVLINK_PARAM_CMODE
+PortFlavour = DEVLINK_PORT_FLAVOUR
+PortType = DEVLINK_PORT_TYPE
+    NotSet -> NOTSET
+ReloadAction = DEVLINK_RELOAD_ACTION

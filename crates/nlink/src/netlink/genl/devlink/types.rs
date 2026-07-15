@@ -39,7 +39,13 @@ pub enum PortFlavour {
     PciPf = 3,
     PciVf = 4,
     Virtual = 5,
-    PciSf = 6,
+    /// A port that exists in the switch but is not used.
+    ///
+    /// nlink omitted this, so `PciSf` claimed 6 — the kernel's `UNUSED` — and
+    /// an unused port decoded as a PCI subfunction (#231).
+    Unused = 6,
+    /// PCI subfunction.
+    PciSf = 7,
 }
 
 impl TryFrom<u16> for PortFlavour {
@@ -52,7 +58,8 @@ impl TryFrom<u16> for PortFlavour {
             3 => Ok(Self::PciPf),
             4 => Ok(Self::PciVf),
             5 => Ok(Self::Virtual),
-            6 => Ok(Self::PciSf),
+            6 => Ok(Self::Unused),
+            7 => Ok(Self::PciSf),
             _ => Err(Error::InvalidAttribute(format!(
                 "unknown devlink port flavour: {value}"
             ))),
