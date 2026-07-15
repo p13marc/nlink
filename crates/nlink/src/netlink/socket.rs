@@ -758,7 +758,17 @@ impl NetlinkSocket {
                 guard.try_io(|inner| Self::recv_batch_inner(inner.get_ref().as_raw_fd(), max));
             match result {
                 Ok(Ok(frames)) => return Poll::Ready(Ok(frames)),
-                Ok(Err(e)) => return Poll::Ready(Err(Error::Io(e))),
+                Ok(Err(e)) => {
+                    // Mirror recv_msg/poll_recv: tell the resync subscribers the
+                    // kernel dropped multicast frames *before* handing the error
+                    // to whoever happened to be reading (#220). Without this, a
+                    // `syscall_batch` build's resync streams never learn they
+                    // missed anything and never re-dump.
+                    if e.raw_os_error() == Some(libc::ENOBUFS) {
+                        self.fan_out_enobufs();
+                    }
+                    return Poll::Ready(Err(Error::Io(e)));
+                }
                 Err(_would_block) => continue,
             }
         }
@@ -806,7 +816,13 @@ impl NetlinkSocket {
                     out.extend(frames);
                     return Ok(n);
                 }
-                Ok(Err(e)) => return Err(Error::Io(e)),
+                Ok(Err(e)) => {
+                    // Same as recv_msg (#220) — see poll_recv_batch.
+                    if e.raw_os_error() == Some(libc::ENOBUFS) {
+                        self.fan_out_enobufs();
+                    }
+                    return Err(Error::Io(e));
+                }
                 Err(_would_block) => continue,
             }
         }
