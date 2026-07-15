@@ -27,6 +27,54 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **psched tick conversion — TBF, HTB and police were all mis-programmed
+  (#191, #192, #193, #194, #218).** Several TC wire fields that read like
+  byte counts or microsecond durations are actually **psched ticks** (1 tick
+  = 64 ns, so 15.625 ticks per µs). nlink never converted, and never read
+  `/proc/net/psched` — `grep -ri psched` returned zero hits. The kernel runs
+  `tc_tbf_qopt.buffer`, `tc_htb_opt.buffer` and `tc_police.burst` through
+  `PSCHED_TICKS2NS()`, so every one of them was wrong:
+  - **TBF** (#192) wrote the burst as raw bytes. At `rate 1mbit` with the
+    default 32 KiB burst the kernel read 32 768 *ticks* (~2.1 ms), computed
+    `max_size ~= 262` bytes, and `tbf_enqueue()` then **dropped every packet
+    larger than 262 bytes** — a total blackhole for normal traffic. The
+    correct value is 4 096 000 ticks, 125x larger.
+  - **HTB** (#193) computed the buffer in microseconds and labelled it ticks,
+    losing the 15.625 factor. A 100 mbit class landed with a token bucket of
+    ~900 bytes — **below one MTU**, so it could never burst a full-size
+    packet. Every `RateLimiter`, `PerHostLimiter` and `PerPeerImpairer` shape
+    goes through this path. The hardcoded `hz = 1000` is also gone: iproute2's
+    `get_hz()` returns 1e9 on modern kernels, which makes the default burst
+    exactly one MTU rather than `rate/1000` bytes larger.
+  - **police** (#194) wrote the burst as bytes *and* never emitted
+    `TCA_POLICE_RATE` at all. `tcf_police_init()` calls `qdisc_get_rtab()` for
+    any non-zero rate and fails the action when it returns NULL — which it
+    does both when the attribute is absent and when the ratespec's `cell_log`
+    is 0. Both held, so **a policer with a rate could not install**.
+  - The **HTB rate table** was built with `cell_log = 3` while the
+    accompanying `TcRateSpec` left `cell_log = 0`, so `qdisc_get_rtab()`
+    discarded `TCA_HTB_RTAB`/`CTAB` outright — 1024 wasted bytes per class
+    add, and ATM/ADSL `linklayer` handling could never work.
+  - The **decode** side (#218) took the kernel's tick-valued buffer straight
+    into a field named and typed as bytes, so reading back a qdisc created by
+    real `tc` yielded a burst off by `15.625 / rate`, and `reconcile`
+    considered a wildly wrong burst to be in sync.
+
+  New public `nlink::netlink::psched` module: `Psched` (the cached
+  `/proc/net/psched` clock, with the modern constants as an infallible
+  fallback), plus `tc_calc_xmittime` / `tc_calc_xmitsize` / `tc_calc_rtable`
+  — ports of iproute2's `tc_core.c`. `tc_calc_rtable` takes `&mut TcRateSpec`
+  and stamps `cell_log`/`linklayer`/`cell_align` itself, so a table can no
+  longer disagree with its own spec. TBF now also emits the byte-valued
+  `TCA_TBF_BURST`/`TCA_TBF_PBURST` escape hatches iproute2 sends.
+
+  These bugs survived because there was **no test anywhere in the crate that
+  asserted a single byte** of a TC payload — the existing `write_options`
+  tests built a message and threw it away. A writer and reader wrong in the
+  same direction agree with each other. There is now a byte-level harness and
+  a set of assertions pinned to values computed by hand from iproute2's
+  algorithm, plus root-gated lab tests that round-trip through the kernel.
+
 - **setns thread discipline (#185).** Four related hardenings on the
   per-thread `setns` state management:
   - `NetlinkSocket::new_in_namespace` (and everything above it:
