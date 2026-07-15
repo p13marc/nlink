@@ -78,16 +78,42 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    /// Get the protocol number.
-    pub fn number(&self) -> u8 {
+    /// The real IP protocol number.
+    ///
+    /// `IPPROTO_MPTCP` is **262**, which is why this is a `u32` and why
+    /// [`Self::number`] is not enough on its own: `inet_diag_req_v2`'s
+    /// `sdiag_protocol` is a `__u8`, so MPTCP does not fit in it. The kernel's
+    /// answer is the `INET_DIAG_REQ_PROTOCOL` request attribute, which carries
+    /// the protocol as a `u32` and overrides the header field — nlink now
+    /// emits it whenever [`Self::fits_in_u8`] is false (#225).
+    pub fn number_u32(&self) -> u32 {
         match self {
-            Self::Tcp => libc::IPPROTO_TCP as u8,
-            Self::Udp => libc::IPPROTO_UDP as u8,
+            Self::Tcp => libc::IPPROTO_TCP as u32,
+            Self::Udp => libc::IPPROTO_UDP as u32,
             Self::Sctp => 132,
             Self::Dccp => 33,
-            Self::Mptcp => 6, // Uses TCP protocol number in inet_diag
-            Self::Raw => libc::IPPROTO_RAW as u8,
+            Self::Mptcp => 262, // IPPROTO_MPTCP — does not fit sdiag_protocol
+            Self::Raw => libc::IPPROTO_RAW as u32,
         }
+    }
+
+    /// Does the protocol number fit `inet_diag_req_v2.sdiag_protocol` (a `u8`)?
+    ///
+    /// False only for MPTCP today. When false the caller **must** also emit
+    /// `INET_DIAG_REQ_PROTOCOL`, or the kernel dispatches on the truncated
+    /// header byte — 262 truncates to 6, i.e. plain TCP, which is how
+    /// `SocketFilter::mptcp()` used to return every TCP socket on the box,
+    /// each one stamped `Protocol::Mptcp`.
+    pub fn fits_in_u8(&self) -> bool {
+        self.number_u32() <= u8::MAX as u32
+    }
+
+    /// The protocol number truncated to the `sdiag_protocol` header field.
+    ///
+    /// For MPTCP this is 6 (262 & 0xff) — meaningful only alongside an
+    /// `INET_DIAG_REQ_PROTOCOL` attribute. See [`Self::fits_in_u8`].
+    pub fn number(&self) -> u8 {
+        self.number_u32() as u8
     }
 
     /// Parse from a raw u8 value.
@@ -649,26 +675,48 @@ fn format_rate_bps(bps: u64) -> String {
 }
 
 /// Socket memory information.
+///
+/// Two different kernel attributes fill this struct, and they carry different
+/// fields (#197):
+///
+/// - `INET_DIAG_MEMINFO` (requested by [`InetFilterBuilder::with_mem_info`]) is
+///   `struct inet_diag_meminfo` — **four** counters, the four `u32` fields
+///   below.
+/// - `INET_DIAG_SKMEMINFO` (requested by [`InetFilterBuilder::with_sk_mem_info`]) is
+///   `enum sk_meminfo_stats` — a superset that also carries the buffer sizes,
+///   option memory, backlog and drops.
+///
+/// The five SKMEMINFO-only fields are therefore `Option<u32>`: `None` means
+/// *you did not request `SKMEMINFO`*, which is a different statement from
+/// `Some(0)`. They used to be a plain `u32` with no builder able to fill them,
+/// so they read as a flat `0` forever and downstream dashboards graphed a
+/// clean, believable, permanently-zero line.
+///
+/// Requesting both extensions is fine — the two arms **merge** into one
+/// `MemInfo` rather than the later one clobbering the earlier.
+///
+/// [`InetFilterBuilder::with_mem_info`]: crate::sockdiag::filter::InetFilterBuilder::with_mem_info
+/// [`InetFilterBuilder::with_sk_mem_info`]: crate::sockdiag::filter::InetFilterBuilder::with_sk_mem_info
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemInfo {
-    /// Receive memory allocated.
+    /// Receive memory allocated (`sk_rmem_alloc`). Both extensions.
     pub rmem_alloc: u32,
-    /// Receive buffer size.
-    pub rcvbuf: u32,
-    /// Write memory allocated.
+    /// Write memory allocated (`sk_wmem_alloc`). Both extensions.
     pub wmem_alloc: u32,
-    /// Send buffer size.
-    pub sndbuf: u32,
-    /// Forward alloc.
+    /// Forward allocation. Both extensions.
     pub fwd_alloc: u32,
-    /// Write memory queued.
+    /// Write memory queued (`sk_wmem_queued`). Both extensions.
     pub wmem_queued: u32,
-    /// Option memory.
-    pub optmem: u32,
-    /// Backlog.
-    pub backlog: u32,
-    /// Drops.
-    pub drops: u32,
+    /// Receive buffer size (`sk_rcvbuf`). `SKMEMINFO` only.
+    pub rcvbuf: Option<u32>,
+    /// Send buffer size (`sk_sndbuf`). `SKMEMINFO` only.
+    pub sndbuf: Option<u32>,
+    /// Option memory. `SKMEMINFO` only.
+    pub optmem: Option<u32>,
+    /// Backlog. `SKMEMINFO` only.
+    pub backlog: Option<u32>,
+    /// Drops. `SKMEMINFO` only.
+    pub drops: Option<u32>,
 }
 
 impl MemInfo {
@@ -678,52 +726,45 @@ impl MemInfo {
     /// ```text
     /// skmem:(r0,rb131072,t0,tb16384,f0,w0,o0,bl0,d0)
     /// ```
+    ///
+    /// A field the kernel was never asked for prints as `-`; ss always
+    /// requests `SKMEMINFO`, so its own output never has one.
     pub fn format_skmem(&self) -> String {
+        fn f(v: Option<u32>) -> String {
+            v.map_or_else(|| "-".to_string(), |v| v.to_string())
+        }
         format!(
             "skmem:(r{},rb{},t{},tb{},f{},w{},o{},bl{},d{})",
             self.rmem_alloc,
-            self.rcvbuf,
+            f(self.rcvbuf),
             self.wmem_alloc,
-            self.sndbuf,
+            f(self.sndbuf),
             self.fwd_alloc,
             self.wmem_queued,
-            self.optmem,
-            self.backlog,
-            self.drops
+            f(self.optmem),
+            f(self.backlog),
+            f(self.drops)
         )
     }
 
-    /// Format as compact skmem string (only non-zero values).
+    /// Format as compact skmem string (only non-zero, present values).
     pub fn format_skmem_compact(&self) -> String {
         let mut parts = Vec::new();
 
-        if self.rmem_alloc > 0 {
-            parts.push(format!("r{}", self.rmem_alloc));
-        }
-        if self.rcvbuf > 0 {
-            parts.push(format!("rb{}", self.rcvbuf));
-        }
-        if self.wmem_alloc > 0 {
-            parts.push(format!("t{}", self.wmem_alloc));
-        }
-        if self.sndbuf > 0 {
-            parts.push(format!("tb{}", self.sndbuf));
-        }
-        if self.fwd_alloc > 0 {
-            parts.push(format!("f{}", self.fwd_alloc));
-        }
-        if self.wmem_queued > 0 {
-            parts.push(format!("w{}", self.wmem_queued));
-        }
-        if self.optmem > 0 {
-            parts.push(format!("o{}", self.optmem));
-        }
-        if self.backlog > 0 {
-            parts.push(format!("bl{}", self.backlog));
-        }
-        if self.drops > 0 {
-            parts.push(format!("d{}", self.drops));
-        }
+        let mut push = |tag: &str, v: u32| {
+            if v > 0 {
+                parts.push(format!("{tag}{v}"));
+            }
+        };
+        push("r", self.rmem_alloc);
+        push("rb", self.rcvbuf.unwrap_or(0));
+        push("t", self.wmem_alloc);
+        push("tb", self.sndbuf.unwrap_or(0));
+        push("f", self.fwd_alloc);
+        push("w", self.wmem_queued);
+        push("o", self.optmem.unwrap_or(0));
+        push("bl", self.backlog.unwrap_or(0));
+        push("d", self.drops.unwrap_or(0));
 
         if parts.is_empty() {
             "skmem:()".to_string()
@@ -732,9 +773,9 @@ impl MemInfo {
         }
     }
 
-    /// Check if there are any drops.
+    /// Are there any drops? `false` if `SKMEMINFO` was not requested.
     pub fn has_drops(&self) -> bool {
-        self.drops > 0
+        self.drops.is_some_and(|d| d > 0)
     }
 
     /// Total memory in use (rmem + wmem).

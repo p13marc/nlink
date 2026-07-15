@@ -96,6 +96,12 @@ mod conntrack;
 #[path = "integration/sockdiag_bytecode.rs"]
 mod sockdiag_bytecode;
 
+// Unprivileged by design — sock_diag dumps your own sockets without any
+// capability, so these run for the non-root maintainer too.
+#[cfg(feature = "sockdiag")]
+#[path = "integration/sockdiag_correctness.rs"]
+mod sockdiag_correctness;
+
 #[path = "integration/neigh.rs"]
 mod neigh;
 
