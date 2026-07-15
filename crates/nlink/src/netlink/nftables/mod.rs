@@ -252,6 +252,35 @@ pub const NF_NAT_RANGE_MAP_IPS: u32 = 1;
 /// `NF_NAT_RANGE_PROTO_SPECIFIED` — `NFTA_NAT_FLAGS` bit: NAT rewrites the port.
 pub const NF_NAT_RANGE_PROTO_SPECIFIED: u32 = 2;
 
+// Redir — `enum nft_redir_attributes`.
+//
+// The `redir` expression has its OWN attribute namespace, distinct from
+// `nft_nat_attributes` above. nlink used to emit `NFTA_NAT_REG_PROTO_MIN` (= 5)
+// inside a `redir` nest; the kernel parses that nest with
+// `nla_parse_nested_deprecated(tb, NFTA_REDIR_MAX, ...)`, and 5 is above
+// `maxtype`, so the attribute was **silently skipped** (#206).
+pub const NFTA_REDIR_REG_PROTO_MIN: u16 = 1;
+pub const NFTA_REDIR_REG_PROTO_MAX: u16 = 2;
+pub const NFTA_REDIR_FLAGS: u16 = 3;
+
+// Reject — `enum nft_reject_attributes`.
+//
+// `reject` is a real expression that emits an ICMP unreachable or a TCP RST
+// and then drops. `Rule::reject()` used to push a bare `NF_DROP` verdict, so
+// the packet was black-holed with no ICMP and no RST and clients hung until
+// TCP timeout instead of failing fast (#205).
+pub const NFTA_REJECT_TYPE: u16 = 1;
+pub const NFTA_REJECT_ICMP_CODE: u16 = 2;
+
+/// `NFT_REJECT_ICMP_UNREACH` — send an ICMP unreachable of the family the rule
+/// is in.
+pub const NFT_REJECT_ICMP_UNREACH: u32 = 0;
+/// `NFT_REJECT_TCP_RST` — send a TCP reset. Only valid for TCP traffic.
+pub const NFT_REJECT_TCP_RST: u32 = 1;
+/// `NFT_REJECT_ICMPX_UNREACH` — family-independent ICMP unreachable, usable in
+/// an `inet` / `bridge` chain where the family isn't known at rule-load time.
+pub const NFT_REJECT_ICMPX_UNREACH: u32 = 2;
+
 // Log
 pub const NFTA_LOG_PREFIX: u16 = 1;
 pub const NFTA_LOG_GROUP: u16 = 2;
