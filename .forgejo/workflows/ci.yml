@@ -1,0 +1,127 @@
+name: CI
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: https://github.com/Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+
+  test-all-features:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: all-features
+      - run: cargo build --workspace --all-targets --all-features
+      - run: cargo test --workspace --all-features
+
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --workspace --all-targets --all-features
+
+  docs:
+    runs-on: ubuntu-24.04
+    env:
+      RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D rustdoc::redundant_explicit_links
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
+      - run: cargo doc -p nlink --no-deps --all-features
+
+  # The 9 repo-convention audit scripts: cheap greps, one job.
+  audits:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - run: bash scripts/audit-example-features.sh
+      - run: bash scripts/check-readme.sh
+      - run: bash scripts/audit-example-registration.sh
+      - run: bash scripts/audit-recv-loop-error-handling.sh
+      - run: bash scripts/audit-sysfs-in-lib.sh
+      - run: bash scripts/audit-uapi-constants.sh
+      - run: bash scripts/test-audit-uapi-constants.sh
+      - run: bash scripts/audit-message-accessor-convention.sh
+      - run: bash scripts/audit-recipe-drift.sh
+      - run: bash scripts/audit-bytes-le.sh
+      - run: bash scripts/audit-ignored-tests.sh
+
+  semver:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: nlink
+
+  machete:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-machete --locked && cargo machete
+
+  big-endian-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - run: sudo apt-get update && sudo apt-get install -y gcc-s390x-linux-gnu
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          targets: s390x-unknown-linux-gnu
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: s390x
+      - name: Cross-check on big-endian target
+        run: |
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+          [target.s390x-unknown-linux-gnu]
+          linker = "s390x-linux-gnu-gcc"
+          EOF
+          cargo check --target s390x-unknown-linux-gnu -p nlink

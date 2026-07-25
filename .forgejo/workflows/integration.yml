@@ -1,0 +1,44 @@
+name: Integration
+# Privileged runner lane (label `integration`): tests create network
+# namespaces, mutate rtnetlink state, and rely on kernel modules preloaded
+# on the runner VM (myserver docs/vm-runner.md — /etc/modules-load.d/
+# ci-integration.conf). No modprobe in-container; tests skip missing
+# modules via require_module!().
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: integration
+    container:
+      image: rust:bookworm
+    steps:
+      - name: Install runtime deps and node for actions
+        shell: bash
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends iproute2 conntrack nodejs git
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - name: Guard: kernel modules preloaded on runner VM
+        shell: bash
+        run: |
+          for m in nf_tables sch_htb cls_flower dummy veth vrf wireguard; do
+            test -d "/sys/module/$m" || echo "::warning::module $m not loaded; dependent tests will skip"
+          done
+      - name: Build with lab feature
+        shell: bash
+        run: cargo build -p nlink --features lab,sockdiag,namespace_watcher --tests
+      - name: Integration tests (root in container)
+        shell: bash
+        env:
+          RUST_LOG: nlink=debug
+        run: cargo test -p nlink --features lab,sockdiag,namespace_watcher -- --test-threads=1 --nocapture
+      - name: Library tests
+        shell: bash
+        run: cargo test -p nlink --lib

@@ -1,0 +1,27 @@
+name: Release
+on:
+  push:
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - name: Build release artifacts
+        run: |
+          mkdir -p dist/release
+          name="${GITHUB_REPOSITORY#*/}"
+          git archive --format=tar.gz --prefix="${name}-${GITHUB_REF_NAME}/" \
+            -o "dist/release/${name}-${GITHUB_REF_NAME}.tar.gz" "${GITHUB_REF_NAME}"
+          (cd dist/release && sha256sum * > SHA256SUMS)
+      - uses: https://data.forgejo.org/actions/forgejo-release@v2
+        with:
+          direction: upload
+          # internal URL: the runner zone cannot hairpin to the public vhost
+          url: http://10.10.0.30:3000
+          repo: ${{ github.repository }}
+          tag: ${{ github.ref_name }}
+          sha: ${{ github.sha }}
+          release-dir: dist/release
+          token: ${{ secrets.GITHUB_TOKEN }}
