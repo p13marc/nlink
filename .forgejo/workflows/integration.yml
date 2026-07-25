@@ -25,7 +25,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends iproute2 conntrack nodejs git
       - uses: https://data.forgejo.org/actions/checkout@v6
-      - name: Guard: kernel modules preloaded on runner VM
+      - name: Guard that kernel modules are preloaded on the runner VM
         shell: bash
         run: |
           for m in nf_tables sch_htb cls_flower dummy veth vrf wireguard; do
