@@ -22,7 +22,7 @@ Feature flags: `sockdiag`, `tuntap`, `tuntap-async`, `output`, `namespace_watche
 `NetworkConfig`), `lab` (test harness), `full`. Full list in the
 [docs.rs feature table](https://docs.rs/crate/nlink/latest/features).
 
-MSRV: Rust 1.95, edition 2024.
+MSRV: Rust 1.97, edition 2024.
 
 ## Quick start
 
