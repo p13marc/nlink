@@ -24,7 +24,7 @@ edition = "2024"
 # consumers stay on a recent toolchain in exchange for using
 # modern language features without contortion. Bump in lockstep
 # with stable; called out in CHANGELOG when it advances.
-rust-version = "1.95"
+rust-version = "1.97"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/p13marc/nlink"
 authors = ["Marc Pardo <p13marc@gmail.com>"]
