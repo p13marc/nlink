@@ -10,6 +10,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # shared compiler cache: sccache (mounted from the runner VM) -> garage S3
+  # on vm-runner-01; S3 endpoint+credentials come from the runner's env_file
+  RUSTC_WRAPPER: /srv/cache/bin/sccache
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   # No fmt job on purpose: the tree is not rustfmt-clean and the previous CI
@@ -22,6 +26,8 @@ jobs:
         with:
           components: clippy
       - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
 
   test:
@@ -30,6 +36,8 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
 
@@ -41,6 +49,7 @@ jobs:
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: all-features
+          cache-targets: false
       - run: cargo build --workspace --all-targets --all-features
       # nlink's tests/integration.rs needs root/netns — it runs on the
       # privileged lane (integration.yml); everything else runs here.
@@ -57,6 +66,7 @@ jobs:
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: msrv
+          cache-targets: false
       - run: cargo check --workspace --all-targets --all-features
 
   docs:
@@ -67,6 +77,8 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - run: cargo doc -p nlink --no-deps --all-features
 
   # The 9 repo-convention audit scripts: cheap greps, one job.
@@ -113,6 +125,7 @@ jobs:
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: s390x
+          cache-targets: false
       - name: Cross-check on big-endian target
         run: |
           mkdir -p .cargo
