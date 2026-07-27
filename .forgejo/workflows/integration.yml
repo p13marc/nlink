@@ -5,6 +5,7 @@ name: Integration
 # ci-integration.conf). No modprobe in-container; tests skip missing
 # modules via require_module!().
 on:
+  workflow_dispatch:
   push:
     branches: [master]
   pull_request:
