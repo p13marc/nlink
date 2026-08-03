@@ -7,7 +7,7 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - name: Build release artifacts
         run: |
           mkdir -p dist/release
