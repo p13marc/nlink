@@ -15,8 +15,8 @@ path = "src/main.rs"
 nlink = { workspace = true, features = ["output"] }
 tokio = { workspace = true }
 clap = { workspace = true }
-base64 = "0.22"
-rand = "0.8"
+base64 = "0.23"
+rand = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
