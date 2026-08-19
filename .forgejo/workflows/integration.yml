@@ -24,7 +24,7 @@ jobs:
   integration:
     runs-on: integration
     container:
-      image: rust:bookworm
+      image: rust:1.97-bookworm
     steps:
       - name: Install runtime deps and node for actions
         shell: bash
