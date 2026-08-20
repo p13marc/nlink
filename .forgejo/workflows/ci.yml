@@ -2,7 +2,9 @@ name: CI
 on:
   push:
     branches: [master]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -14,6 +16,9 @@ env:
   # on vm-runner-01; S3 endpoint+credentials come from the runner's env_file
   RUSTC_WRAPPER: /srv/cache/bin/sccache
   CARGO_INCREMENTAL: "0"
+  # Cap build parallelism: cargo otherwise defaults to nproc (6 on
+  # vm-runner-01) per job, against a lane capacity of 2.
+  CARGO_BUILD_JOBS: "2"
 
 jobs:
   # No fmt job on purpose: the tree is not rustfmt-clean and the previous CI
