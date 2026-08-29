@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
         details: cli.details,
         pretty: cli.pretty,
         numeric: false,
-        color: atty::is(atty::Stream::Stdout),
+        color: std::io::IsTerminal::is_terminal(&std::io::stdout()),
     };
 
     // Create netlink connection

@@ -5,6 +5,8 @@ on:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
   pull_request:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
+  # manual re-run path (flaky job, runner was offline, cache experiments)
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -103,6 +105,19 @@ jobs:
       - run: bash scripts/audit-bytes-le.sh
       - run: bash scripts/audit-ignored-tests.sh
 
+  # Supply-chain lint (fleet standard, myserver#33): advisories, licenses,
+  # bans, sources — config in deny.toml.
+  deny:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      # the docker cargo-deny action cannot see deny.toml -> install directly
+      - uses: https://github.com/taiki-e/install-action@v2.85.11
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+
   semver:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
@@ -124,8 +139,12 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - run: sudo apt-get update && sudo apt-get install -y gcc-s390x-linux-gnu
-      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      # @master + explicit toolchain, not @stable: rust-toolchain.toml pins
+      # 1.97, so the s390x target must be installed for 1.97 — installing it
+      # for floating stable leaves cargo (which honors the file) targetless
+      - uses: https://github.com/dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.97"
           targets: s390x-unknown-linux-gnu
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:

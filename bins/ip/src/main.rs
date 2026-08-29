@@ -127,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
     let opts = nlink::output::OutputOptions {
         stats: cli.stats,
         details: cli.details,
-        color: atty::is(atty::Stream::Stdout),
+        color: std::io::IsTerminal::is_terminal(&std::io::stdout()),
         numeric: cli.numeric,
         pretty: cli.pretty,
     };

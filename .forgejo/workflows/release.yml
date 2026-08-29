@@ -2,18 +2,34 @@ name: Release
 on:
   push:
     tags: ['[0-9]+.[0-9]+.[0-9]+']
+  # re-run a failed release without deleting/re-pushing the tag. On dispatch
+  # the run executes on a BRANCH ref (GITHUB_REF_NAME is e.g. "master"), so
+  # every step must use the resolved RELEASE_TAG/RELEASE_SHA env instead.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: existing bare-semver tag to re-release
+        required: true
 
 jobs:
   release:
     runs-on: ubuntu-24.04
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Resolve release tag
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null || true
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "RELEASE_SHA=$(git rev-parse "$tag^{commit}")" >> "$GITHUB_ENV"
       - name: Build release artifacts
         run: |
           mkdir -p dist/release
           name="${GITHUB_REPOSITORY#*/}"
-          git archive --format=tar.gz --prefix="${name}-${GITHUB_REF_NAME}/" \
-            -o "dist/release/${name}-${GITHUB_REF_NAME}.tar.gz" "${GITHUB_REF_NAME}"
+          git archive --format=tar.gz --prefix="${name}-${RELEASE_TAG}/" \
+            -o "dist/release/${name}-${RELEASE_TAG}.tar.gz" "${RELEASE_TAG}"
           (cd dist/release && sha256sum * > SHA256SUMS)
       - uses: https://data.forgejo.org/actions/forgejo-release@v2
         with:
@@ -21,7 +37,7 @@ jobs:
           # internal URL: the runner zone cannot hairpin to the public vhost
           url: http://10.10.0.30:3000
           repo: ${{ github.repository }}
-          tag: ${{ github.ref_name }}
-          sha: ${{ github.sha }}
+          tag: ${{ env.RELEASE_TAG }}
+          sha: ${{ env.RELEASE_SHA }}
           release-dir: dist/release
           token: ${{ secrets.GITHUB_TOKEN }}

@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **CI: fleet-standard rollout (myserver#33).** `workflow_dispatch` re-run
+  path on CI, tag-input dispatch re-run pattern on the release workflow, a
+  `cargo-deny` supply-chain job (new `deny.toml`; advisories, licenses,
+  bans, sources), a dispatch-only `publish-crates.yml` lane with a
+  semver-checks gate, and `rust-toolchain.toml` pinning 1.97. The
+  `nlink-ip`/`nlink-bridge` bins now use `std::io::IsTerminal` instead
+  of the unmaintained `atty` crate (RUSTSEC-2024-0375).
+
 ## [0.25.0] - 2026-07-15
 
 ### Added

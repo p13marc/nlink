@@ -1,0 +1,45 @@
+name: Publish crates
+on:
+  workflow_dispatch:
+    inputs:
+      allow_breaking:
+        description: >-
+          Set to "yes" for a deliberately breaking release. Otherwise the
+          semver gate must pass.
+        required: false
+        default: "no"
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace --locked
+
+      # Compare the public API against what is on crates.io. The marketplace
+      # action is GitHub-only, so this installs the tool directly — a
+      # prebuilt binary, since building it from source takes longer than the
+      # rest of the job. Only `nlink` is gated: cargo-semver-checks cannot
+      # inspect proc-macro crates (nlink-macros), and the bins are
+      # publish = false.
+      - uses: https://github.com/taiki-e/install-action@v2.85.11
+        with:
+          tool: cargo-semver-checks
+      - name: Check for unintended breaking changes
+        run: |
+          if [ "${{ inputs.allow_breaking }}" = "yes" ]; then
+            # A breaking release is a decision, so it is taken by a human at
+            # dispatch time rather than by the absence of a check. Still run
+            # it, to put the inventory of what broke in the log.
+            cargo semver-checks check-release -p nlink --all-features || true
+          else
+            cargo semver-checks check-release -p nlink --all-features
+          fi
+
+      # Virtual workspace: publish the two publishable members explicitly,
+      # in dependency order. nlink-macros MUST go first — nlink's crates.io
+      # dependency on it only resolves once the matching version is live
+      # (cargo publish blocks until the index has it, so no manual wait).
+      - run: cargo publish -p nlink-macros --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - run: cargo publish -p nlink --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
