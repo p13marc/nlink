@@ -31,13 +31,32 @@ jobs:
           git archive --format=tar.gz --prefix="${name}-${RELEASE_TAG}/" \
             -o "dist/release/${name}-${RELEASE_TAG}.tar.gz" "${RELEASE_TAG}"
           (cd dist/release && sha256sum * > SHA256SUMS)
-      - uses: https://data.forgejo.org/actions/forgejo-release@v2
-        with:
-          direction: upload
-          # internal URL: the runner zone cannot hairpin to the public vhost
-          url: http://10.10.0.30:3000
-          repo: ${{ github.repository }}
-          tag: ${{ env.RELEASE_TAG }}
-          sha: ${{ env.RELEASE_SHA }}
-          release-dir: dist/release
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create release if missing
+        # API-driven so a workflow_dispatch re-run of an existing tag is
+        # idempotent: forgejo-release@v2 tries to create and 409s when the
+        # release already exists (proven by the nlink-lab 0.8.0 re-run).
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
+          if ! curl -sf -H "Authorization: token $TOKEN" "$api/releases/tags/${RELEASE_TAG}" >/dev/null; then
+            curl -sf -X POST -H "Authorization: token $TOKEN" -H "Content-Type: application/json" \
+              -d "{\"tag_name\":\"${RELEASE_TAG}\",\"name\":\"${RELEASE_TAG}\",\"target_commitish\":\"${RELEASE_SHA}\"}" \
+              "$api/releases" >/dev/null
+          fi
+      - name: Attach release assets
+        # delete-then-upload keeps re-runs idempotent; never override:true
+        # (it recreates the release and wipes every asset)
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
+          rid=$(curl -sf -H "Authorization: token $TOKEN" "$api/releases/tags/${RELEASE_TAG}" | jq -r .id)
+          for f in dist/release/*; do
+            name=$(basename "$f")
+            for aid in $(curl -sf -H "Authorization: token $TOKEN" "$api/releases/$rid/assets" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id'); do
+              curl -sf -X DELETE -H "Authorization: token $TOKEN" "$api/releases/$rid/assets/$aid" >/dev/null
+            done
+            curl -sf -X POST -H "Authorization: token $TOKEN" -F "attachment=@$f" "$api/releases/$rid/assets?name=$name" >/dev/null
+            echo "attached $name"
+          done
