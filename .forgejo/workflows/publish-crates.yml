@@ -13,7 +13,7 @@ jobs:
   publish:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - run: cargo test --workspace --locked
 

@@ -28,7 +28,7 @@ jobs:
   clippy:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -40,7 +40,7 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
@@ -51,7 +51,7 @@ jobs:
   test-all-features:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
@@ -66,7 +66,7 @@ jobs:
   msrv:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97"
@@ -81,7 +81,7 @@ jobs:
     env:
       RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D rustdoc::redundant_explicit_links
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
@@ -92,7 +92,7 @@ jobs:
   audits:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - run: bash scripts/audit-example-features.sh
       - run: bash scripts/check-readme.sh
       - run: bash scripts/audit-example-registration.sh
@@ -110,7 +110,7 @@ jobs:
   deny:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       # the docker cargo-deny action cannot see deny.toml -> install directly
       - uses: https://github.com/taiki-e/install-action@v2.85.11
@@ -122,7 +122,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/obi1kenobi/cargo-semver-checks-action@v2
         with:
           package: nlink
@@ -130,14 +130,14 @@ jobs:
   machete:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - run: cargo install cargo-machete --locked && cargo machete
 
   big-endian-check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - run: sudo apt-get update && sudo apt-get install -y gcc-s390x-linux-gnu
       # @master + explicit toolchain, not @stable: rust-toolchain.toml pins
       # 1.97, so the s390x target must be installed for 1.97 — installing it
