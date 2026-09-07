@@ -13,7 +13,7 @@ jobs:
   publish:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v6.1.0
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - run: cargo test --workspace --locked
 
@@ -23,7 +23,7 @@ jobs:
       # rest of the job. Only `nlink` is gated: cargo-semver-checks cannot
       # inspect proc-macro crates (nlink-macros), and the bins are
       # publish = false.
-      - uses: https://github.com/taiki-e/install-action@v2.85.11
+      - uses: https://github.com/taiki-e/install-action@v2.87.7
         with:
           tool: cargo-semver-checks
       - name: Check for unintended breaking changes

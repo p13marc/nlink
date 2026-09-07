@@ -1,5 +1,5 @@
 # Fleet-uniformized toolchain (myserver#33): all marcpardo/* repos build
 # with the same rustc; MSRV in Cargo.toml matches.
 [toolchain]
-channel = "1.97"
+channel = "1.98"
 components = ["rustfmt", "clippy"]

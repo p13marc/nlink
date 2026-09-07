@@ -15,7 +15,7 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v6.1.0
         with:
           ref: ${{ inputs.tag || github.ref }}
       - name: Resolve release tag
