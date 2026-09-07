@@ -740,7 +740,9 @@ mod tests {
     /// verdict; an out-of-bounds load drops, as the kernel's does.
     fn run(program: &[u8], frame: &[u8]) -> u32 {
         let insns: Vec<Insn> = program
-            .chunks_exact(SOCK_FILTER_SIZE)
+            .as_chunks::<SOCK_FILTER_SIZE>()
+            .0
+            .iter()
             .map(|c| Insn {
                 code: u16::from_ne_bytes([c[0], c[1]]),
                 jt: c[2],

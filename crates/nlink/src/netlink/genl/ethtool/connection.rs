@@ -1569,8 +1569,10 @@ impl Connection<Ethtool> {
                     // Binary array of u32 (native endian); accept a
                     // trailing partial word defensively (read whole words).
                     rss.indirection_table = payload
-                        .chunks_exact(4)
-                        .map(|c| u32::from_ne_bytes(c.try_into().unwrap()))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| u32::from_ne_bytes(*c))
                         .collect();
                 }
                 t if t == EthtoolRssAttr::Hkey as u16 => {
@@ -2016,8 +2018,10 @@ mod fec_builder_tests {
                 }
                 t if t == EthtoolRssAttr::Indir as u16 => {
                     rss.indirection_table = payload
-                        .chunks_exact(4)
-                        .map(|c| u32::from_ne_bytes(c.try_into().unwrap()))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| u32::from_ne_bytes(*c))
                         .collect();
                 }
                 t if t == EthtoolRssAttr::Hkey as u16 => rss.hash_key = payload.to_vec(),

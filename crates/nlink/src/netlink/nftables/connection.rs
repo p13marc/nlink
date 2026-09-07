@@ -1830,7 +1830,6 @@ mod transaction_tests {
     //! routes every diff op through these methods, so verifying each
     //! method's wire shape catches the bulk of the refactor risk.
 
-    use super::super::*;
     use super::*;
 
     /// Construct a Transaction. The constructor is private; reach

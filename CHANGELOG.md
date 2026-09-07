@@ -131,6 +131,22 @@ All notable changes to this project will be documented in this file.
   `$schema` URI and the `definitions` (not `$defs`) subschema map — the
   assertion whose absence is what would have let this through unnoticed.
 
+- **Dependency batch: `rand` 0.8 → 0.10, `netlink-sys` 0.8 → 0.9, `base64`
+  0.22 → 0.23, `syn` 2 → 3, `x25519-dalek` 2 → 3, toolchain and MSRV 1.97 →
+  1.98 (#243, #246).** Only `rand` needed code changes, and they are in
+  WireGuard key generation: `thread_rng()` is gone in favour of `rng()`, and
+  `fill_bytes` moved from a root `RngCore` onto `Rng`. Both call sites now go
+  through one helper carrying a `CryptoRng` bound — a compile-time assertion
+  that the generator behind these keys is cryptographic, since rand has moved
+  this API twice and a future move to a non-cryptographic default would
+  otherwise produce perfectly plausible-looking keys with nothing to see in
+  the output.
+
+  Rust 1.98 also promoted five `chunks_exact`-with-constant-size sites to
+  errors under `--deny warnings` (new `chunks_exact_to_as_chunks` lint).
+  Converted to `as_chunks::<N>()`, which turns three infallible-but-unproven
+  `try_into().unwrap()` conversions into compile-time facts.
+
 - **CI: fleet-standard rollout (myserver#33).** `workflow_dispatch` re-run
   path on CI, tag-input dispatch re-run pattern on the release workflow, a
   `cargo-deny` supply-chain job (new `deny.toml`; advisories, licenses,

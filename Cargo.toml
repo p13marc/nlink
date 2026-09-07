@@ -24,7 +24,7 @@ edition = "2024"
 # consumers stay on a recent toolchain in exchange for using
 # modern language features without contortion. Bump in lockstep
 # with stable; called out in CHANGELOG when it advances.
-rust-version = "1.97"
+rust-version = "1.98"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/p13marc/nlink"
 authors = ["Marc Pardo <p13marc@gmail.com>"]
@@ -34,7 +34,7 @@ authors = ["Marc Pardo <p13marc@gmail.com>"]
 tokio = { version = "1", features = ["full", "net", "io-util", "sync"] }
 
 # Netlink socket (thin libc wrapper - socket ops only)
-netlink-sys = "0.8"
+netlink-sys = "0.9"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
