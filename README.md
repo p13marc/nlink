@@ -17,7 +17,7 @@ each `nlink-` prefixed so it never shadows the system tool it mirrors.
 nlink = "0.26"
 ```
 
-Feature flags: `sockdiag`, `tuntap`, `tuntap-async`, `output`, `namespace_watcher`,
+Feature flags: `sockdiag`, `tuntap`, `output`, `namespace_watcher`,
 `syscall_batch` (recvmmsg/sendmmsg batching), `serde`, `schemars` (JSON Schema for
 `NetworkConfig`), `lab` (test harness), `full`. Full list in the
 [docs.rs feature table](https://docs.rs/crate/nlink/latest/features).

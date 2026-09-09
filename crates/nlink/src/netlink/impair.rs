@@ -51,7 +51,7 @@
 //!         "172.100.3.18".parse()?,
 //!         NetemConfig::new()
 //!             .delay(Duration::from_millis(15))
-//!             .loss(1.0)
+//!             .loss(Percent::new(1.0))
 //!             .build(),
 //!     )
 //!     .impair_dst_ip(

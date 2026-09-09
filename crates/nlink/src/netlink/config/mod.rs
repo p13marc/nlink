@@ -47,8 +47,13 @@ mod apply;
 mod diff;
 mod types;
 
-pub use apply::{ApplyOptions, ApplyResult};
-pub use diff::{ConfigDiff, DiffOptions};
+// `ApplyError` is a field of `ApplyResult` and `LinkChanges` a field of
+// `ConfigDiff`, so both were visible in public signatures and could not
+// be *named* downstream — no `fn report(errs: &[ApplyError])` (#280).
+// `ApplyResult` is `Serialize` under the `serde` feature, so `ApplyError`
+// was in the JSON ABI while being unnameable in Rust.
+pub use apply::{ApplyError, ApplyOptions, ApplyResult};
+pub use diff::{ConfigDiff, DiffOptions, LinkChanges};
 pub use types::*;
 
 use super::{connection::Connection, error::Result, protocol::Route};

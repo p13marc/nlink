@@ -547,7 +547,6 @@ fn lookup_group(name: &str) -> Result<u32> {
 /// List existing TUN/TAP devices.
 ///
 /// This reads from /sys/class/net to find devices with the tun driver.
-#[allow(dead_code)]
 pub fn list_devices() -> Result<Vec<TunTapInfo>> {
     let mut devices = Vec::new();
 

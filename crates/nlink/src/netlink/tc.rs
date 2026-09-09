@@ -12,8 +12,8 @@
 //! let netem = NetemConfig::new()
 //!     .delay(Duration::from_millis(100))
 //!     .jitter(Duration::from_millis(10))
-//!     .delay_correlation(25.0)
-//!     .loss(1.0)
+//!     .delay_correlation(Percent::new(25.0))
+//!     .loss(Percent::new(1.0))
 //!     .loss_correlation(25.0)
 //!     .build();
 //!
@@ -1494,16 +1494,18 @@ impl QdiscConfig for EtsConfig {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use nlink::netlink::tc::TbfConfig;
-///
+/// ```no_run
+/// use nlink::{Bytes, Rate, netlink::tc::TbfConfig};
+/// # async fn f(conn: &nlink::Connection<nlink::Route>) -> nlink::Result<()> {
 /// let config = TbfConfig::new()
-///     .rate(1_000_000)  // 1 MB/s
-///     .burst(32 * 1024)  // 32 KB burst
-///     .limit(100 * 1024) // 100 KB buffer
+///     .rate(Rate::bytes_per_sec(1_000_000))  // 1 MB/s
+///     .burst(Bytes::kib(32))                 // 32 KiB burst
+///     .limit(Bytes::kib(100))                // 100 KiB buffer
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct TbfConfig {
@@ -5553,12 +5555,19 @@ impl QdiscConfig for CakeConfig {
 ///
 /// conn.add_qdisc("eth0", config).await?;
 ///
-/// // Buffer packets
-/// conn.plug_buffer("eth0").await?;
-///
-/// // Release all buffered packets
-/// conn.plug_release_one("eth0").await?;
+/// // Installing the qdisc starts buffering immediately.
+/// conn.plug_release_one("eth0", TcHandle::ROOT).await?;        // let this epoch out
+/// conn.plug_buffer("eth0", TcHandle::ROOT).await?;             // start a new one
+/// conn.plug_release_indefinite("eth0", TcHandle::ROOT).await?; // stop buffering
 /// ```
+///
+/// Those three methods did not exist. The doc example named
+/// `plug_buffer` and `plug_release_one` and neither appeared anywhere in
+/// the workspace, while `write_options` emitted only `TCQ_PLUG_LIMIT` —
+/// so there was no way to send `BUFFER`, `RELEASE_ONE` or
+/// `RELEASE_INDEFINITE` at all. Since installing a plug qdisc **starts
+/// buffering immediately**, the library let you stall an interface with
+/// no library-side way to unstall it (#276).
 #[derive(Debug, Clone)]
 pub struct PlugConfig {
     /// Initial limit in bytes.
@@ -5624,6 +5633,26 @@ impl PlugConfig {
             }
         }
         Ok(cfg)
+    }
+}
+
+/// A plug action, as a `QdiscConfig` so it can ride the ordinary
+/// `change_qdisc` path. `tc qdisc change ... plug release_one` is the
+/// same request: `RTM_NEWQDISC` on the existing handle with a
+/// `tc_plug_qopt` carrying the action.
+#[derive(Debug, Clone, Copy)]
+struct PlugAction(i32, u32);
+
+impl QdiscConfig for PlugAction {
+    fn kind(&self) -> &'static str {
+        "plug"
+    }
+
+    fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        use super::types::tc::qdisc::plug::TcPlugQopt;
+
+        builder.append(&TcPlugQopt::new(self.0, self.1));
+        Ok(())
     }
 }
 
@@ -7043,7 +7072,7 @@ impl ClassConfig for HtbClassConfig {
 /// // Add root class with link-share curve
 /// conn.add_class("eth0", "1:0", "1:1",
 ///     HfscClassConfig::new()
-///         .ls_rate(1_000_000_000)  // 1 Gbps link-share
+///         .ls_rate(Rate::gbit(1))  // 1 Gbps link-share
 ///         .build()
 /// ).await?;
 ///
@@ -7059,7 +7088,7 @@ impl ClassConfig for HtbClassConfig {
 /// conn.add_class("eth0", "1:1", "1:20",
 ///     HfscClassConfig::new()
 ///         .ls_rate(50_000_000)
-///         .ul_rate(100_000_000)  // Cap at 100 Mbps
+///         .ul_rate(Rate::mbit(100))  // Cap at 100 Mbps
 ///         .build()
 /// ).await?;
 /// ```
@@ -7358,7 +7387,7 @@ impl ClassConfig for DrrClassConfig {
 /// conn.add_class("eth0", "1:0", "1:2",
 ///     QfqClassConfig::new()
 ///         .weight(2)  // 2x bandwidth of class 1:1
-///         .lmax(9000) // Max packet size (for jumbo frames)
+///         .lmax(Bytes::new(9000)) // Max packet size (for jumbo frames)
 ///         .build()
 /// ).await?;
 /// ```
@@ -7476,16 +7505,19 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use nlink::netlink::tc::NetemConfig;
+    /// ```no_run
     /// use std::time::Duration;
     ///
+    /// use nlink::{Percent, netlink::tc::NetemConfig};
+    /// # async fn f(conn: &nlink::Connection<nlink::Route>) -> nlink::Result<()> {
     /// let netem = NetemConfig::new()
     ///     .delay(Duration::from_millis(100))
-    ///     .loss(1.0)
+    ///     .loss(Percent::new(1.0))
     ///     .build();
     ///
     /// conn.add_qdisc("eth0", netem).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_qdisc"))]
     pub async fn add_qdisc(
@@ -7838,18 +7870,79 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use nlink::netlink::tc::NetemConfig;
+    /// ```no_run
     /// use std::time::Duration;
     ///
+    /// use nlink::{Percent, netlink::tc::NetemConfig};
+    /// # async fn f(conn: &nlink::Connection<nlink::Route>) -> nlink::Result<()> {
     /// let netem = NetemConfig::new()
     ///     .delay(Duration::from_millis(100))
     ///     .jitter(Duration::from_millis(10))
-    ///     .loss(1.0)
+    ///     .loss(Percent::new(1.0))
     ///     .build();
     ///
     /// conn.apply_netem("eth0", netem).await?;
+    /// # Ok(())
+    /// # }
     /// ```
+    /// Start buffering on a plug qdisc (`TCQ_PLUG_BUFFER`).
+    ///
+    /// Packets queued from now on are held until a release. Installing
+    /// the qdisc already buffers, so this is for starting a *new* epoch
+    /// after a release.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "plug_buffer"))]
+    pub async fn plug_buffer(&self, dev: impl Into<InterfaceRef>, parent: TcHandle) -> Result<()> {
+        use super::types::tc::qdisc::plug::TCQ_PLUG_BUFFER;
+
+        self.change_qdisc(dev, parent, PlugAction(TCQ_PLUG_BUFFER, 0))
+            .await
+    }
+
+    /// Release the packets buffered so far (`TCQ_PLUG_RELEASE_ONE`),
+    /// and keep buffering what arrives next.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "plug_release_one"))]
+    pub async fn plug_release_one(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        parent: TcHandle,
+    ) -> Result<()> {
+        use super::types::tc::qdisc::plug::TCQ_PLUG_RELEASE_ONE;
+
+        self.change_qdisc(dev, parent, PlugAction(TCQ_PLUG_RELEASE_ONE, 0))
+            .await
+    }
+
+    /// Stop buffering and let everything through
+    /// (`TCQ_PLUG_RELEASE_INDEFINITE`).
+    ///
+    /// The way out of a plug: without it, installing the qdisc stalls
+    /// the interface with nothing in the library to unstall it (#276).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "plug_release_indefinite"))]
+    pub async fn plug_release_indefinite(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        parent: TcHandle,
+    ) -> Result<()> {
+        use super::types::tc::qdisc::plug::TCQ_PLUG_RELEASE_INDEFINITE;
+
+        self.change_qdisc(dev, parent, PlugAction(TCQ_PLUG_RELEASE_INDEFINITE, 0))
+            .await
+    }
+
+    /// Change a plug qdisc's buffer limit in bytes (`TCQ_PLUG_LIMIT`).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "plug_set_limit"))]
+    pub async fn plug_set_limit(
+        &self,
+        dev: impl Into<InterfaceRef>,
+        parent: TcHandle,
+        bytes: u32,
+    ) -> Result<()> {
+        use super::types::tc::qdisc::plug::TCQ_PLUG_LIMIT;
+
+        self.change_qdisc(dev, parent, PlugAction(TCQ_PLUG_LIMIT, bytes))
+            .await
+    }
+
     #[tracing::instrument(level = "debug", skip_all, fields(method = "apply_netem"))]
     pub async fn apply_netem(
         &self,

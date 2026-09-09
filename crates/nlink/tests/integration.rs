@@ -220,3 +220,8 @@ mod tc_shaping;
 #[cfg(feature = "sockdiag")]
 #[path = "integration/dump_termination.rs"]
 mod dump_termination;
+
+// #276, #280 — public API reachability. The integration target is a
+// separate crate, so it sees what a downstream user sees.
+#[path = "integration/api_surface.rs"]
+mod api_surface;

@@ -8,7 +8,9 @@ use super::{
     EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolEeeAttr, EthtoolFeaturesAttr,
     EthtoolFecAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr,
     EthtoolLinkstateAttr, EthtoolModuleEepromAttr, EthtoolPauseAttr, EthtoolRingsAttr,
-    EthtoolRssAttr, EthtoolStatsAttr, EthtoolStatsGrpAttr, EthtoolWolAttr, WOL_MODE_NAMES, bitset::EthtoolBitset,
+    EthtoolRssAttr, EthtoolStatsAttr, EthtoolStatsGrpAttr, EthtoolStringAttr,
+    EthtoolStringSet, EthtoolStringsetAttr, EthtoolStrsetAttr, EthtoolWolAttr, WOL_MODE_NAMES,
+    bitset::EthtoolBitset,
     stats_group, types::*,
 };
 use crate::{
@@ -459,6 +461,115 @@ impl Connection<Ethtool> {
 
         self.parse_features(&response[GENL_HDRLEN..], &mut features)?;
         Ok(features)
+    }
+
+    /// Get a device string set (`ETHTOOL_MSG_STRSET_GET`).
+    ///
+    /// String sets are how the kernel names things it otherwise reports
+    /// by index: statistic names, private-flag names, feature names,
+    /// link-mode names. `EthtoolStringSet` selects which.
+    ///
+    /// This did not exist. `EthtoolCmd::StrsetGet`, `EthtoolStringSet`,
+    /// the three attribute enums and the `StringSet` result struct were
+    /// all defined — and none of the 44 public methods on
+    /// `Connection<Ethtool>` issued the command or returned the type, so
+    /// `EthtoolStringSet` had zero non-test references. The enum's own
+    /// rustdoc describes query behaviour in the present tense while
+    /// explaining the #227 id fix, so a reader concluded the API existed
+    /// and could not find it (#276).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use nlink::netlink::{Connection, Ethtool, genl::ethtool::EthtoolStringSet};
+    /// # async fn f() -> nlink::Result<()> {
+    /// let conn = Connection::<Ethtool>::new_async().await?;
+    /// let names = conn.get_string_set("eth0", EthtoolStringSet::Stats).await?;
+    /// for (i, name) in names.to_vec().iter().enumerate() {
+    ///     println!("{i}: {name}");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_string_set"))]
+    pub async fn get_string_set(
+        &self,
+        iface: impl Into<InterfaceRef>,
+        set: EthtoolStringSet,
+    ) -> Result<StringSet> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        self.get_string_set_by_name(&ifname, set).await
+    }
+
+    /// Get a device string set by interface name.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_string_set_by_name"))]
+    pub async fn get_string_set_by_name(
+        &self,
+        ifname: &str,
+        set: EthtoolStringSet,
+    ) -> Result<StringSet> {
+        let response = self
+            .ethtool_get_with(EthtoolCmd::StrsetGet, ifname, |builder| {
+                // ETHTOOL_A_STRSET_STRINGSETS -> one ETHTOOL_A_STRINGSETS_STRINGSET
+                // -> ETHTOOL_A_STRINGSET_ID. Asking for one set by id;
+                // omitting the nest asks for all of them.
+                let sets = builder.nest_start(EthtoolStrsetAttr::Stringsets as u16 | NLA_F_NESTED);
+                let one = builder.nest_start(1 | NLA_F_NESTED);
+                builder.append_attr_u32(EthtoolStringsetAttr::Id as u16, set as u32);
+                builder.nest_end(one);
+                builder.nest_end(sets);
+            })
+            .await?;
+
+        let mut out = StringSet {
+            id: set as u32,
+            ..StringSet::default()
+        };
+        if response.len() < GENL_HDRLEN {
+            return Ok(out);
+        }
+        self.parse_string_set(&response[GENL_HDRLEN..], &mut out);
+        Ok(out)
+    }
+
+    /// Walk `ETHTOOL_A_STRSET_STRINGSETS` and collect the strings of the
+    /// set whose id matches the one requested.
+    fn parse_string_set(&self, data: &[u8], out: &mut StringSet) {
+        for (attr_type, payload) in AttrIter::new(data) {
+            if attr_type != EthtoolStrsetAttr::Stringsets as u16 {
+                continue;
+            }
+            for (_idx, set_data) in AttrIter::new(payload) {
+                let mut id = None;
+                let mut strings_blob = None;
+                for (t, p) in AttrIter::new(set_data) {
+                    if t == EthtoolStringsetAttr::Id as u16 && p.len() >= 4 {
+                        id = Some(u32::from_ne_bytes(p[..4].try_into().expect("len >= 4")));
+                    } else if t == EthtoolStringsetAttr::Strings as u16 {
+                        strings_blob = Some(p);
+                    }
+                }
+                if id != Some(out.id) {
+                    continue;
+                }
+                let Some(blob) = strings_blob else { continue };
+                for (_i, string_data) in AttrIter::new(blob) {
+                    let mut index = None;
+                    let mut value = None;
+                    for (t, p) in AttrIter::new(string_data) {
+                        if t == EthtoolStringAttr::Index as u16 && p.len() >= 4 {
+                            index = Some(u32::from_ne_bytes(p[..4].try_into().expect("len >= 4")));
+                        } else if t == EthtoolStringAttr::Value as u16 {
+                            let end = p.iter().position(|&b| b == 0).unwrap_or(p.len());
+                            value = Some(String::from_utf8_lossy(&p[..end]).into_owned());
+                        }
+                    }
+                    if let (Some(i), Some(v)) = (index, value) {
+                        out.strings.insert(i, v);
+                    }
+                }
+            }
+        }
     }
 
     /// Set device features (offloads).

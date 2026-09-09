@@ -614,8 +614,8 @@ impl Ipv4Route {
     /// // First, create a nexthop group
     /// conn.add_nexthop_group(
     ///     NexthopGroupBuilder::new(100)
-    ///         .add_member(1, 1)   // nexthop ID 1, weight 1
-    ///         .add_member(2, 1)   // nexthop ID 2, weight 1
+    ///         .member(1, 1)   // nexthop ID 1, weight 1
+    ///         .member(2, 1)   // nexthop ID 2, weight 1
     /// ).await?;
     ///
     /// // Then use it in a route

@@ -214,7 +214,7 @@ impl WireguardConfig {
     ///             .listen_port(51820)
     ///             .peer([0xbb; 32], |p| {
     ///                 p.endpoint("203.0.113.1:51820".parse().unwrap())
-    ///                  .persistent_keepalive(25)
+    ///                  .persistent_keepalive(Duration::from_secs(25))
     ///                  .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
     ///             })
     ///     });

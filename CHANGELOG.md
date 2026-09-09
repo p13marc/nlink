@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`Connection::<Ethtool>::get_string_set` (#276).** String sets are
+  how the kernel names what it otherwise reports by index — statistic
+  names, private-flag names, feature names, link-mode names.
+  `EthtoolCmd::StrsetGet`, `EthtoolStringSet`, the three attribute
+  enums and the `StringSet` result struct were all defined, and **none
+  of the 44 public methods on `Connection<Ethtool>` issued the command
+  or returned the type**, so `EthtoolStringSet` had zero non-test
+  references. The enum's own rustdoc describes query behaviour in the
+  present tense, so a reader concluded the API existed and could not
+  find it.
+
+- **Plug qdisc control: `plug_buffer`, `plug_release_one`,
+  `plug_release_indefinite`, `plug_set_limit` (#276).** The plug
+  qdisc's whole purpose is buffer/release control and installing it
+  **starts buffering immediately**. `PlugConfig::write_options` emitted
+  only `TCQ_PLUG_LIMIT`, and the doc example called `plug_buffer` and
+  `plug_release_one` — neither of which existed anywhere in the
+  workspace. So the library let you stall an interface with no
+  library-side way to unstall it.
+
 - **Kernel-side uevent prefiltering: `UeventFilter` (#251).** A uevent
   monitor interested in one subsystem was woken for every USB, block,
   input and thermal event on the box, copied each into userspace and
@@ -84,6 +104,63 @@ All notable changes to this project will be documented in this file.
   public for sources that maintain the cache themselves.
 
 ### Fixed
+
+- **Public types that could not be named downstream (#280).** Each
+  appears in a public signature or a public field while living in a
+  private module, so a downstream crate could see it and not name it.
+  Sharpest: `Error::validation` takes
+  `impl IntoIterator<Item = ValidationErrorInfo>` and
+  `ValidationErrorInfo` was not exported — **the public constructor was
+  uncallable**. Also now reachable: `config::{ApplyError, LinkChanges}`
+  (`ApplyResult` is `Serialize` under `serde`, so `ApplyError` was in
+  the JSON ABI while unnameable in Rust), `tuntap::{TunTapInfo,
+  list_devices}` (the feature's only enumeration API — both carried
+  `#[allow(dead_code)]`, so the compiler already knew), and
+  `output::{JsonBuilder, format_number, format_rate}`.
+
+- **`with_dispatcher` documented a limitation that does not exist
+  (#276).** It said `dump_stream` and the `*_with_resync` wrappers are
+  "not yet supported" in dispatcher mode and "return a clear
+  `Error::NotSupported`". Both halves were false: `DumpStream::new`
+  handles dispatcher mode explicitly, the crate's own
+  `dispatcher_mode_dump_stream_streams_links` test asserts it end to
+  end, and no streaming path constructs `Error::NotSupported` anywhere.
+  The mirror image of the `try_recv` bug: readers avoided a working
+  feature — opening a second socket per netns, or materialising whole
+  route tables eagerly — and anyone who wrote `if e.is_not_supported()`
+  around it has unreachable code.
+
+- **The `tuntap-async` feature gated zero code (#276).** Declared in
+  `Cargo.toml`, documented in `lib.rs`, included in `full`, and with no
+  `#[cfg(feature = "tuntap-async")]` anywhere in the crate and no
+  `create_async` symbol. The module doc demonstrated
+  `create_async().await` against a crate name (`rip_tuntap`) that does
+  not exist. A user enabling it got no async API and no way to tell
+  whether they had mistyped it. **Removed**, with a note pointing at
+  `AsyncFd` for readiness-driven I/O.
+
+- **Ten doc examples that could not compile (#280).** All inside
+  ```` ```ignore ```` blocks, so nothing checked them — and they are the
+  crate's most-read examples. One taught an **8× wrong unit**
+  (`TbfConfig::new().rate(1_000_000)` where `rate` takes `Rate`, which
+  is bytes/sec, so the "1 MB/s" comment described a value the type no
+  longer accepts). Two called methods that do not exist
+  (`set_link_up_by_name`, `NexthopGroupBuilder::add_member`). Corrected
+  — and the ones on the `Connection` methods are now ```` ```no_run ````
+  so they are compiled by `cargo test --doc` and cannot rot again.
+
+- **`OutputOptions::{color, details, numeric}` documented as library
+  behaviour (#276).** Nothing in `output/` reads them, so `color: true`
+  looked like it would emit ANSI and `numeric: true` like it would stop
+  resolving names. They are *not* dead, though — the `bins/` read them
+  through their own `Printable` impls (`nlink-bridge` for `details`,
+  `nlink-ss` for `numeric`), which is why they are documented rather
+  than deleted as the issue suggested.
+
+- **CLAUDE.md's stale claims.** "Active work" still described 0.24.0 as
+  the open cycle, and the testing section still said `has_module()`
+  checks `/sys/module/<name>` "so it works for both loadable and
+  built-in features" — which is exactly the false premise behind #273.
 
 - **A failed dump reported success with a truncated result (#267).**
   `NLMSG_DONE` carries the dump's result code as an `int` payload, and

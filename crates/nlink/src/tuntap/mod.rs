@@ -37,31 +37,28 @@
 //!     .create()?;
 //! ```
 //!
-//! # Async Support
+//! # No async support
 //!
-//! Enable the `async` feature for async read/write operations:
+//! There is none, and there is no `tuntap-async` feature any more.
+//! It was declared in `Cargo.toml`, documented in `lib.rs`, included in
+//! `full`, and gated **zero** lines: no `#[cfg(feature = "tuntap-async")]`
+//! anywhere in the crate and no `create_async` symbol. The example here
+//! demonstrated `create_async().await` and `tun.read(&mut buf).await`
+//! against a crate name (`rip_tuntap`) that does not exist. A user who
+//! enabled the feature got no async API and no way to tell whether they
+//! had mistyped it (#276).
 //!
-//! ```ignore
-//! use rip_tuntap::{TunTap, Mode};
-//!
-//! let mut tun = TunTap::builder()
-//!     .name("mytun0")
-//!     .mode(Mode::Tun)
-//!     .create_async()
-//!     .await?;
-//!
-//! // Read packets
-//! let mut buf = [0u8; 1500];
-//! let n = tun.read(&mut buf).await?;
-//!
-//! // Write packets
-//! tun.write(&packet).await?;
-//! ```
+//! [`TunTap`] exposes blocking `read_packet` / `write_packet`. Wrap the
+//! fd in `tokio::io::unix::AsyncFd` if you need readiness-driven I/O.
 
 mod device;
 mod error;
 
-pub use device::{Mode, TunTap, TunTapBuilder, TunTapFlags};
+// `list_devices` is the feature's only enumeration API and
+// `TunTapInfo` its return type; neither was re-exported, so both
+// carried `#[allow(dead_code)]` — the compiler already knew they
+// were unreachable (#280).
+pub use device::{Mode, TunTap, TunTapBuilder, TunTapFlags, TunTapInfo, list_devices};
 pub use error::{Error, Result};
 
 /// The path to the TUN device.
