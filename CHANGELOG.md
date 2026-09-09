@@ -105,6 +105,48 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`del_netem`, `apply_netem` and `plug_buffer` could not be called from a
+  small program at all (#310).** A caller got
+
+  ```
+  error: queries overflow the depth limit!
+    = note: query depth increased by 130 when computing layout of
+            `{async block@src/main.rs:...}`
+  ```
+
+  pointing at their own async block, with no mention of nlink — and no
+  attribute nlink could set fixed it, because the limit belongs to the
+  caller's crate.
+
+  Every `async fn` that awaits another embeds the callee's future in its
+  own, so rustc computes the layout by recursing once per level. The
+  request chain already sat close to the default limit of 128, and these
+  three wrappers are one frame deeper than the methods they call
+  (`del_netem` → `del_qdisc` → `del_qdisc_full` → `send_ack` → …).
+  `del_netem_by_index`, which skips the `InterfaceRef`-resolving layer, was
+  fine. So the boundary was arbitrary: the whole API sat one frame under
+  the ceiling. Each of the three now `Box::pin`s its inner await, which
+  ends the recursion there — one allocation on a path that already does a
+  syscall round trip.
+
+  **Why nothing caught it.** Layout queries are cached, so a program that
+  touches nlink anywhere else computes these layouts on a shallow stack
+  first and hits the cache later. nlink's own tests, its binaries and its
+  larger examples all did — including `route_tc_netem`, which calls two of
+  the three. Only a program with nothing else in it hits the deep path
+  first, which is exactly the shape of a small downstream tool. The guard
+  is therefore a deliberately minimal example,
+  `route_tc_minimal_caller`: it calls the three methods and does nothing
+  else, and adding anything to it weakens it.
+
+- **`apply_netem` was undocumented and `plug_buffer` was mislabelled
+  (#311).** One missing blank `///` line joined `apply_netem`'s summary,
+  description and example onto the doc comment of `plug_buffer`, ~50 lines
+  above it. On docs.rs `plug_buffer`'s one-line summary — the line the impl
+  page lists it by — read "Apply a netem configuration to an interface",
+  its only example called a different method, and `apply_netem` itself had
+  no documentation at all. The block moved down to the method it describes.
+
 - **Parser-robustness fuzzing extended past six parsers (#279).** The
   property harness covered `MessageIter`, `AttrIter`, the fixed-size
   struct readers and exactly six typed RTNetlink parsers, out of roughly

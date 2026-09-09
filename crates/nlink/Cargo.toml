@@ -189,6 +189,10 @@ name = "route_tc_netem"
 path = "examples/route/tc/netem.rs"
 
 [[example]]
+name = "route_tc_minimal_caller"
+path = "examples/route/tc/minimal_caller.rs"
+
+[[example]]
 name = "route_tc_htb"
 path = "examples/route/tc/htb.rs"
 
