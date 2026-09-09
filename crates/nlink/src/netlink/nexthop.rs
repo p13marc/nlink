@@ -528,6 +528,12 @@ impl NexthopBuilder {
     }
 }
 
+/// `clock_t` ticks per second on Linux (`USER_HZ`).
+///
+/// Netlink attributes documented as `clock_t` in the UAPI headers are in these
+/// units. It is 100 on every Linux ABI nlink targets.
+const USER_HZ: u32 = 100;
+
 /// Builder for nexthop groups.
 ///
 /// # Example
@@ -617,8 +623,14 @@ impl NexthopGroupBuilder {
     /// Set the idle timer in seconds for resilient groups.
     ///
     /// After this time of inactivity, a bucket can be reassigned.
+    ///
+    /// `NHA_RES_GROUP_IDLE_TIMER` is documented in `nexthop.h` as
+    /// `clock_t as u32` — USER_HZ ticks, not seconds — so the value is
+    /// converted here. Passing seconds straight through made a declared
+    /// 60-second timer arrive as 0.6 s (#265). Same conversion, and same
+    /// reason, as `BridgeLink::ageing_time`.
     pub fn idle_timer(mut self, seconds: u32) -> Self {
-        self.idle_timer = Some(seconds);
+        self.idle_timer = Some(seconds.saturating_mul(USER_HZ));
         self
     }
 
@@ -626,7 +638,7 @@ impl NexthopGroupBuilder {
     ///
     /// Maximum time the group can remain unbalanced before forced rebalancing.
     pub fn unbalanced_timer(mut self, seconds: u32) -> Self {
-        self.unbalanced_timer = Some(seconds);
+        self.unbalanced_timer = Some(seconds.saturating_mul(USER_HZ));
         self
     }
 
@@ -950,7 +962,30 @@ mod tests {
         assert_eq!(grp.members.len(), 2);
         assert_eq!(grp.group_type, NexthopGroupType::Resilient);
         assert_eq!(grp.buckets, Some(128));
-        assert_eq!(grp.idle_timer, Some(120));
+
+        // `NHA_RES_GROUP_IDLE_TIMER` is `clock_t as u32` (USER_HZ ticks), so
+        // 120 seconds is 12000 on the wire. This assertion used to read
+        // `Some(120)`, pinning the unconverted value — which is how the unit
+        // bug survived (#265).
+        assert_eq!(grp.idle_timer, Some(120 * USER_HZ));
+        assert_ne!(
+            grp.idle_timer,
+            Some(120),
+            "regression: seconds passed through as ticks again"
+        );
+    }
+
+    /// The conversion is the whole point, so pin it independently of any one
+    /// caller: a timer set in seconds must arrive as USER_HZ ticks.
+    #[test]
+    fn resilient_group_timers_are_clock_t_ticks_not_seconds() {
+        let grp = NexthopGroupBuilder::new(1)
+            .resilient()
+            .idle_timer(60)
+            .unbalanced_timer(5);
+
+        assert_eq!(grp.idle_timer, Some(6_000));
+        assert_eq!(grp.unbalanced_timer, Some(500));
     }
 
     #[test]

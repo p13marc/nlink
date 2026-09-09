@@ -131,6 +131,19 @@ def parse_kernel_consts() -> dict[str, int]:
             # the enum body. Left in, they break the item split and the walk
             # abandons the rest of the enum — which is how IFLA_LINKINFO and
             # everything after it went missing on the first pass.
+            # Join C line-continuations *before* stripping `#` lines, or a
+            # multi-line `#define` leaves its tail dangling inside the enum
+            # body and everything after it is mis-numbered. devlink.h has
+            # exactly this shape:
+            #
+            #     DEVLINK_CMD_ESWITCH_GET,
+            #     #define DEVLINK_CMD_ESWITCH_MODE_GET /* obsolete */ \
+            #             DEVLINK_CMD_ESWITCH_GET
+            #
+            # Stripping only the `#define` line left `DEVLINK_CMD_ESWITCH_GET`
+            # as a bare enumerator, which truncated the parse at 29 — so every
+            # devlink command above that was silently unchecked by this audit.
+            body = re.sub(r"\\\s*\n", " ", body)
             body = re.sub(r"^\s*#[^\n]*$", "", body, flags=re.M)
             next_value = 0
             for item in body.split(","):

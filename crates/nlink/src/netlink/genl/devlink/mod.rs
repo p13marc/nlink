@@ -38,6 +38,8 @@ pub const DEVLINK_GENL_VERSION: u8 = 1;
 // Commands
 pub const DEVLINK_CMD_GET: u8 = 1;
 pub const DEVLINK_CMD_PORT_GET: u8 = 5;
+/// Set port attributes, including the `DEVLINK_ATTR_PORT_FUNCTION` nest.
+pub const DEVLINK_CMD_PORT_SET: u8 = 6;
 pub const DEVLINK_CMD_PORT_SPLIT: u8 = 9;
 pub const DEVLINK_CMD_PORT_UNSPLIT: u8 = 10;
 pub const DEVLINK_CMD_RELOAD: u8 = 37;
@@ -103,7 +105,6 @@ pub const DEVLINK_CMD_RATE_GET: u8 = 74;
 pub const DEVLINK_CMD_RATE_SET: u8 = 75;
 pub const DEVLINK_CMD_RATE_NEW: u8 = 76;
 pub const DEVLINK_CMD_RATE_DEL: u8 = 77;
-pub const DEVLINK_CMD_PORT_FUNCTION_SET: u8 = 68;
 
 // Device/Port attributes
 pub const DEVLINK_ATTR_BUS_NAME: u16 = 1;

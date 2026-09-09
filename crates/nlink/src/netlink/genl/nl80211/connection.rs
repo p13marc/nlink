@@ -1244,7 +1244,7 @@ impl PhyAcc {
                 NL80211_ATTR_WIPHY_NAME if self.name.is_empty() => {
                     self.name = attr_str(payload).unwrap_or_default();
                 }
-                NL80211_ATTR_MAX_SCAN_SSIDS if !payload.is_empty() => {
+                NL80211_ATTR_MAX_NUM_SCAN_SSIDS if !payload.is_empty() => {
                     self.max_scan_ssids.get_or_insert(payload[0]);
                 }
                 NL80211_ATTR_SUPPORTED_IFTYPES => {

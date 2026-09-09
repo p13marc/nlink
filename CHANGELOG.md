@@ -109,6 +109,53 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **The rest of the UAPI drift, and two more gate blind spots (#263, #264,
+  #265).** Finishing what the widened audit started.
+
+  - **`nha_res_bucket` was off by one.** `NHA_RES_BUCKET_PAD` aliases `UNSPEC`
+    at 0 rather than advancing the counter, so `INDEX`/`IDLE_TIME`/`NH_ID` are
+    1/2/3, not 2/3/4. The sibling `nha_res_group` had it right, which is what
+    made it look like a transcription slip rather than a misreading.
+  - **Resilient nexthop group timers were in the wrong unit.**
+    `nexthop.h` documents `NHA_RES_GROUP_IDLE_TIMER` and `UNBALANCED_TIMER` as
+    `clock_t as u32` — USER_HZ ticks — and nlink passed seconds straight
+    through, so a declared 60-second idle timer arrived as **0.6 s**. Same class
+    as the psched tick bugs; the crate already does this conversion for
+    `BridgeLink::ageing_time`. The unit test asserted the unconverted value, so
+    it is re-derived and a second test pins the conversion independently.
+  - **`DEVLINK_CMD_PORT_FUNCTION_SET` does not exist.** nlink invented it at 68,
+    which is the kernel's `DEVLINK_CMD_TRAP_GROUP_DEL`. Port-function config
+    goes through `DEVLINK_CMD_PORT_SET` carrying a `DEVLINK_ATTR_PORT_FUNCTION`
+    nest, which is now what `set_port_function_state` sends.
+  - **`NL80211_ATTR_MAX_SCAN_SSIDS` was both misnamed and wrong** — the kernel
+    calls it `NL80211_ATTR_MAX_NUM_SCAN_SSIDS` and it is 43, not 11. Renamed to
+    match, which also brings it under the audit.
+  - `seg6_local_action::END_B6_ENCAPS` renamed to `END_B6_ENCAP`, the kernel's
+    spelling. The value was already correct; the name is what kept it out of the
+    audit.
+
+  Two more gate gaps closed, both of which had been silently narrowing its
+  coverage:
+
+  - **Multi-line `#define`s truncated enum parsing.** `devlink.h` contains
+    `#define DEVLINK_CMD_ESWITCH_MODE_GET \` followed by its value on the next
+    line, *inside* the enum body. Stripping only the `#define` line left the
+    continuation dangling, which ended the parse at `DEVLINK_CMD_ESWITCH_GET`
+    — so **56 of devlink's 86 commands were never checked**. Continuations are
+    now joined first; the count went 30 → 86. Everything newly visible turned
+    out to be correct, which is worth knowing rather than assuming.
+  - Mapping the `nexthop` and `srv6` modules brought their abbreviated
+    constants under the audit for the first time.
+
+  Const coverage across the three PRs: 0 → **1759**.
+
+  Not fixed, deliberately: `seg6_local_flv_op`'s bit positions look one low, but
+  only if the `SEG6_LOCAL_FLV_OPERATION` payload is a bitmask of `BIT(ordinal)`
+  — and the macro that would settle that lives in the kernel tree, not the UAPI
+  headers. Changing a wire value on inference risks breaking working code to fix
+  a bug that may not exist, so the module carries a comment saying exactly that
+  instead.
+
 - **MACsec: `GcmAes256` configured GCM-AES-128, and no SA operation worked
   (#260).** `netlink/types/macsec.rs` was mis-transcribed throughout — six of
   its thirteen constant blocks were wrong, including two attributes and three

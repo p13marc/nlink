@@ -110,7 +110,7 @@ pub mod seg6_local_action {
     /// End.B6: insert SRH and forward.
     pub const END_B6: u32 = 9;
     /// End.B6.Encaps: encap with new header and SRH.
-    pub const END_B6_ENCAPS: u32 = 10;
+    pub const END_B6_ENCAP: u32 = 10;
     /// End.BM: forward to binding SID.
     pub const END_BM: u32 = 11;
     /// End.S: source address lookup.
@@ -166,6 +166,23 @@ pub mod seg6_local_flv {
 }
 
 /// SRv6 flavor operations (bitmask).
+// UNVERIFIED — do not "fix" these without reading the kernel source (#265).
+//
+// `seg6_local.h` enumerates the flavor operations as ordinals:
+// UNSPEC=0, PSP=1, USP=2, USD=3, NEXT_CSID=4. The values below are shifted one
+// bit low *if* the `SEG6_LOCAL_FLV_OPERATION` payload is a bitmask of
+// `BIT(ordinal)` — in which case PSP is `1 << 1`, not `1 << 0`, because bit 0
+// belongs to UNSPEC.
+//
+// That premise is strongly implied (nlink stores a bitmask, and the header
+// gives no explicit bit values) but the `SEG6_F_LOCAL_FLV_OP` macro that would
+// settle it lives in the kernel tree, not in the UAPI headers, so it could not
+// be confirmed here. Left as-is deliberately: changing a wire value on
+// inference risks breaking working code to fix a bug that may not exist.
+//
+// The audit gate cannot cover this module either — nlink stores `1 << N` where
+// the kernel stores `N`, so the representations differ by design and a value
+// comparison is meaningless.
 pub mod seg6_local_flv_op {
     /// PSP (Penultimate Segment Pop).
     pub const PSP: u32 = 1 << 0;

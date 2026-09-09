@@ -174,13 +174,13 @@ pub mod nha_res_group {
 pub mod nha_res_bucket {
     pub const UNSPEC: u16 = 0;
     /// Padding.
-    pub const PAD: u16 = 1;
+    pub const PAD: u16 = 0;
     /// Bucket index (u16).
-    pub const INDEX: u16 = 2;
+    pub const INDEX: u16 = 1;
     /// Idle time in seconds (u32).
-    pub const IDLE_TIME: u16 = 3;
+    pub const IDLE_TIME: u16 = 2;
     /// Nexthop ID for this bucket (u32).
-    pub const NH_ID: u16 = 4;
+    pub const NH_ID: u16 = 3;
 }
 
 #[cfg(test)]
