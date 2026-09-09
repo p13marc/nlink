@@ -529,6 +529,15 @@ fn peer_matches(declared: &OvpnPeerConfig, live: &OvpnPeer) -> bool {
     {
         return false;
     }
+    // Local source endpoint. Stored by the builder, encoded on
+    // create, read back on dump — and compared by nothing, so changing
+    // it was a silent no-op that `apply_reconcile` then reported as
+    // successful convergence (#281).
+    if let Some(local) = declared.local
+        && live.local_socket() != Some(local)
+    {
+        return false;
+    }
     // Keepalives
     if let Some(interval) = declared.keepalive_interval
         && live.keepalive_interval != Some(interval)

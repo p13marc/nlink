@@ -536,16 +536,51 @@ impl RateLimiter {
     }
 
     /// Get the IFB device name for this interface.
+    /// Name of the IFB device that carries this interface's ingress
+    /// shaping. Must fit `IFNAMSIZ` (16 bytes including the NUL).
+    ///
+    /// Two bugs lived in the old truncation (#281). `&self.dev[..11]`
+    /// is a **byte** slice on a `String`, so a device name with a
+    /// multi-byte character near the cut **panicked**. And any two
+    /// devices sharing an 11-byte prefix mapped to the same IFB, so
+    /// removing shaping on one tore down the other's — silently, since
+    /// both `RateLimiter`s believe they own it.
+    ///
+    /// Long names now get a hash suffix instead of a bare prefix: the
+    /// collision needs the full name to match, not the first eleven
+    /// bytes, and the slice lands on a char boundary by construction.
     fn ifb_name(&self) -> String {
-        // Truncate to fit in IFNAMSIZ (16 bytes including null)
-        let prefix = "ifb_";
-        let max_dev_len = 15 - prefix.len();
-        let dev_part = if self.dev.len() > max_dev_len {
-            &self.dev[..max_dev_len]
-        } else {
-            &self.dev
+        const IFNAMSIZ: usize = 15; // 16 including the NUL
+        const PREFIX: &str = "ifb_";
+
+        let budget = IFNAMSIZ - PREFIX.len();
+        if self.dev.len() <= budget {
+            return format!("{PREFIX}{}", self.dev);
+        }
+
+        // 4 hex digits of a name hash, so two devices sharing a prefix
+        // get different IFBs.
+        //
+        // FNV-1a rather than `DefaultHasher`: this name has to survive
+        // across process invocations — `remove()` must find what
+        // `apply()` created — and std explicitly reserves the right to
+        // change `DefaultHasher`'s algorithm between releases, which
+        // would strand every IFB built by an older binary.
+        let hash = {
+            let mut h: u32 = 0x811c_9dc5;
+            for b in self.dev.as_bytes() {
+                h ^= *b as u32;
+                h = h.wrapping_mul(0x0100_0193);
+            }
+            (h ^ (h >> 16)) as u16
         };
-        format!("{}{}", prefix, dev_part)
+        let keep = budget - 5; // 4 hex digits + '_'
+        // `floor_char_boundary` is unstable; walk back to one.
+        let mut cut = keep.min(self.dev.len());
+        while cut > 0 && !self.dev.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{PREFIX}{}_{hash:04x}", &self.dev[..cut])
     }
 
     /// Apply egress rate limiting using HTB.
@@ -2096,6 +2131,40 @@ mod tests {
 
         let limiter = RateLimiter::new("verylonginterfacename");
         assert!(limiter.ifb_name().len() <= 15);
+    }
+
+    #[test]
+    fn ifb_names_do_not_collide_on_a_shared_prefix() {
+        // The old truncation took the first 11 bytes, so any two
+        // devices sharing that prefix mapped to the same IFB — and
+        // removing shaping on one tore down the other's (#281).
+        let a = RateLimiter::new("verylongname-aaaa").ifb_name();
+        let b = RateLimiter::new("verylongname-bbbb").ifb_name();
+        assert_ne!(a, b, "distinct devices must get distinct IFBs");
+        assert!(a.len() <= 15 && b.len() <= 15, "{a} / {b}");
+    }
+
+    #[test]
+    fn ifb_name_does_not_panic_on_a_multibyte_name() {
+        // `&self.dev[..11]` is a *byte* slice on a `String`: a
+        // multi-byte character straddling the cut panicked (#281).
+        // Interface names are bytes to the kernel, so a name like this
+        // is unusual but reachable — and a panic is never the answer.
+        for dev in ["ααααααααααααααα", "eth-日本語-interface", "ααα"] {
+            let name = RateLimiter::new(dev).ifb_name();
+            assert!(name.len() <= 15, "{dev} -> {name} ({} bytes)", name.len());
+        }
+    }
+
+    #[test]
+    fn ifb_name_is_stable() {
+        // Same device, same IFB — `remove()` has to find what `apply()`
+        // created, possibly from a differently-compiled binary. The
+        // literal is the point: it pins the hash so a change to it
+        // shows up here rather than as an orphaned IFB in production.
+        let a = RateLimiter::new("verylonginterfacename").ifb_name();
+        assert_eq!(a, RateLimiter::new("verylonginterfacename").ifb_name());
+        assert_eq!(a, "ifb_verylo_32f8");
     }
 
     #[test]

@@ -328,7 +328,26 @@ where
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) => Poll::Ready(None),
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(Some(Err(e))) => {
+                // Drop any half-built snapshot. With a resync window
+                // left open, every subsequent event diverts into
+                // `staging` instead of the store and the cache silently
+                // freezes — it keeps answering, with stale data, and
+                // nothing says so.
+                //
+                // Not reachable through the crate's own `ResyncStream`,
+                // which only emits `ResyncStart` after the snapshot
+                // future succeeds and fuses on any other error. But
+                // `reflect` is blanket-implemented for any
+                // `Stream<Item = Result<ResyncedEvent<V>>>`, so a caller
+                // composing their own is exposed (#281). Defensive.
+                if this.staging.take().is_some() {
+                    tracing::debug!(
+                        "reflect: dropping a partial resync snapshot after a stream error"
+                    );
+                }
+                Poll::Ready(Some(Err(e)))
+            }
             Poll::Ready(Some(Ok(item))) => {
                 match &item {
                     ResyncedEvent::Marker(ResyncMarker::ResyncStart) => {
@@ -512,5 +531,46 @@ mod tests {
         assert!(store.values().is_empty());
         assert!(store.snapshot().is_empty());
         assert_eq!(store.with_read(|m| m.len()), 0);
+    }
+
+    // ====================================================================
+    // #281 — a stream error must not leave a resync window open
+    // ====================================================================
+
+    #[tokio::test]
+    async fn a_stream_error_mid_resync_drops_the_partial_snapshot() {
+        use tokio_stream::StreamExt;
+
+        // `reflect` is blanket-implemented for any
+        // `Stream<Item = Result<ResyncedEvent<V>>>`, so a caller can
+        // compose one that errors between ResyncStart and ResyncEnd.
+        // With `staging` left populated, every later event diverts into
+        // it instead of the store and the cache silently freezes.
+        let items: Vec<crate::Result<ResyncedEvent<u32>>> = vec![
+            Ok(ResyncedEvent::Event(1)),
+            Ok(ResyncedEvent::Marker(ResyncMarker::ResyncStart)),
+            Ok(ResyncedEvent::Resynced(2)),
+            Err(crate::Error::InvalidMessage("boom".into())),
+            // …and the consumer keeps going, as a supervisor loop does.
+            Ok(ResyncedEvent::Event(3)),
+        ];
+        let store: Store<u32, u32> = Store::new();
+        let mut stream = tokio_stream::iter(items).reflect(store.clone(), |v: &u32| StoreOp::Upsert(*v));
+
+        let mut errors = 0;
+        while let Some(item) = stream.next().await {
+            if item.is_err() {
+                errors += 1;
+            }
+        }
+        assert_eq!(errors, 1);
+
+        // The event after the error must have reached the store, not a
+        // stranded staging map.
+        assert!(
+            store.get(&3).is_some(),
+            "events after the error went into a stranded resync window; \
+             the cache is frozen (#281)"
+        );
     }
 }

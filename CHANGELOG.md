@@ -161,6 +161,76 @@ All notable changes to this project will be documented in this file.
   the open cycle, and the testing section still said `has_module()`
   checks `/sys/module/<name>` "so it works for both loadable and
   built-in features" — which is exactly the false premise behind #273.
+- **`ifb_name()` could panic, and collided (#281).** `&self.dev[..11]`
+  is a **byte** slice on a `String`, so a device name with a multi-byte
+  character near the cut panicked — and any two devices sharing an
+  11-byte prefix mapped to the same IFB, so removing shaping on one
+  tore down the other's. Long names now get an FNV-1a suffix (FNV, not
+  `DefaultHasher`, because the name must survive across process
+  invocations and std reserves the right to change its algorithm) and
+  the slice lands on a char boundary by construction.
+
+- **nftables `apply` added flowtables *after* the rules (#281).** A rule
+  carrying `flow add @ft` for a flowtable created in the same diff is
+  validated at commit time, so the whole atomic batch failed. The
+  module docstring stated the same wrong order, so doc and code agreed
+  with each other and not with the dependency.
+
+- **nftables `send_batch` aborted on an unrelated malformed frame
+  (#281).** `msg_result?` ran *before* the seq-window filter, so on a
+  connection also subscribed to nftables multicast, one malformed
+  broadcast frame surfaced as an error out of `commit()` — even though
+  the batch may well have committed. Now skipped, matching the
+  request paths in the same file.
+
+- **`WireguardConfig::diff` was never empty when a private key was
+  declared (#281).** It marked the key dirty on the stated premise that
+  the current value "can never be compared". The premise does not hold:
+  `parse_device_attr_scalar` reads `WGDEVICE_A_PRIVATE_KEY`, the kernel
+  returns it to a `CAP_NET_ADMIN` `GET_DEVICE`, and the all-zeros
+  normalisation already distinguishes "unset". So any supervisor loop
+  treating "diff non-empty" as drift rewrote the private key on every
+  tick, and "the second apply is a no-op" could not be asserted. It is
+  compared now; if the kernel does withhold it, the key is written,
+  which is the old behaviour for exactly the case that justified it.
+
+- **The ovpn peer `local` endpoint was never diffed (#281).**
+  `peer_matches` compared `remote`, `vpn_ipv4`, `vpn_ipv6` and the
+  keepalives — not `local`, which is stored, encoded on create, and read
+  back on dump. Changing it was a silent no-op that `apply_reconcile`
+  then reported as successful convergence. `OvpnPeer::local_socket()` is
+  new, mirroring `remote_socket()`.
+
+- **A declared route out of a not-yet-created interface matched any
+  kernel route (#281).** `name_to_ifindex` is built from the *pre-apply*
+  link dump, so a config declaring both a link and a route out of it
+  resolved `declared_oif` to `None` on the first pass — and the
+  "kernel picked the oif itself" arm then accepted any kernel route at
+  the same `(dst, prefix, table)`. Declaring `vx0` plus
+  `10.0.0.0/8 dev vx0` on a host that already had `10.0.0.0/8 dev eth0`
+  omitted the route entirely; a second apply fixed it. "Declared a dev
+  we cannot resolve yet" is now distinguished from "no dev declared".
+
+- **`predicate_filter` swallowed the first replayed item of a resync
+  (#281).** `last_key` was carried across the `ResyncStart` boundary, so
+  if the last live event before `ENOBUFS` and the redump's first item
+  were for the same object, the replayed copy was deduped away —
+  immediately after the consumer had been told to invalidate its state.
+  `ResyncStart` now clears the dedup memory. The existing test pinned
+  the old behaviour, so this is a deliberate contract change: a resync
+  replay is a fresh snapshot, and nothing before it is a duplicate of
+  anything in it.
+
+- **`ReflectExt` left `staging` populated on a stream error (#281).**
+  With a resync window still open, every later event diverted into
+  staging instead of the store and the cache silently froze — still
+  answering, with stale data. Not reachable through the crate's own
+  `ResyncStream`, but `reflect` is blanket-implemented for any
+  `Stream<Item = Result<ResyncedEvent<V>>>`, so a caller composing their
+  own was exposed.
+
+- Removed a leftover stub in the nftables rule diff and fixed a broken
+  intra-doc link that pointed at a private field (#281).
 
 - **A failed dump reported success with a truncated result (#267).**
   `NLMSG_DONE` carries the dump's result code as an `int` payload, and

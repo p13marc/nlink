@@ -731,12 +731,32 @@ fn diff_routes(
     for declared in &config.routes {
         let table = declared.table.unwrap_or(254);
         let key = (declared.destination, declared.prefix_len, table);
+        // `name_to_ifindex` comes from the *pre-apply* link dump, so a
+        // config that declares both a link and a route out of it
+        // resolves to `None` on the first pass. That mattered: the
+        // `(None, Some(_)) => true` arm below then treated *any* kernel
+        // route at `(dst, prefix, table)` as a match, so declaring
+        // `vx0` plus `10.0.0.0/8 dev vx0` on a host that already had
+        // `10.0.0.0/8 dev eth0` omitted the route entirely and a second
+        // apply was needed to converge (#281).
+        //
+        // Distinguish "no dev declared" from "declared a dev we cannot
+        // resolve yet": the latter is drift, not a match.
+        let declared_dev_unresolved =
+            declared.dev.is_some() && {
+                let d = declared.dev.as_deref().expect("is_some");
+                !name_to_ifindex.contains_key(d)
+            };
         let declared_oif = declared
             .dev
             .as_deref()
             .and_then(|d| name_to_ifindex.get(d).copied());
 
-        let matches_existing = current_by_key.get(&key).is_some_and(|kernel_routes| {
+        // A route out of an interface this apply is about to create
+        // cannot already be right, whatever the kernel currently has at
+        // that destination.
+        let matches_existing = !declared_dev_unresolved
+            && current_by_key.get(&key).is_some_and(|kernel_routes| {
             kernel_routes.iter().any(|r| {
                 // Gateway: compare Option<IpAddr> ↔ Option<&IpAddr>.
                 let gw_match = match (declared.gateway, r.gateway()) {
@@ -759,7 +779,7 @@ fn diff_routes(
                 let metric_match = declared.metric.unwrap_or(0) == r.priority().unwrap_or(0);
                 gw_match && dev_match && metric_match
             })
-        });
+            });
 
         if !matches_existing {
             diff.routes_to_add.push(declared.clone());
