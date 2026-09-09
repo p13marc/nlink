@@ -1707,6 +1707,8 @@ pub struct MatchallFilter {
     chain: Option<u32>,
     /// Goto chain action (jump to another chain on match).
     goto_chain: Option<u32>,
+    /// Actions to run on every packet.
+    actions: Option<ActionList>,
 }
 
 impl MatchallFilter {
@@ -1754,6 +1756,41 @@ impl MatchallFilter {
     /// and organization (Linux 4.1+).
     pub fn chain(mut self, chain: u32) -> Self {
         self.chain = Some(chain);
+        self
+    }
+
+    /// Attach actions to run on every packet.
+    ///
+    /// This is what `cls_matchall` is normally installed for: it carries no
+    /// keys, so the action list is the point. Composes with
+    /// [`Self::goto_chain`] — both live in `TCA_MATCHALL_ACT`, and the goto
+    /// is emitted last, which is the order `tc(8)` uses and the order the
+    /// kernel runs them in.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use nlink::TcHandle;
+    /// use nlink::netlink::action::{ActionList, MirredAction};
+    /// use nlink::netlink::filter::MatchallFilter;
+    ///
+    /// let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// let mirror_to = conn
+    ///     .get_link_by_name("eth1")
+    ///     .await?
+    ///     .expect("eth1 exists")
+    ///     .ifindex();
+    ///
+    /// // Mirror every ingress packet to eth1.
+    /// let filter = MatchallFilter::new()
+    ///     .actions(ActionList::new().with(MirredAction::mirror_by_index(mirror_to)));
+    /// conn.add_filter("eth0", TcHandle::CLSACT_INGRESS, filter).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn actions(mut self, actions: ActionList) -> Self {
+        self.actions = Some(actions);
         self
     }
 
@@ -1872,23 +1909,34 @@ impl FilterConfig for MatchallFilter {
             builder.append_attr_u32(matchall::TCA_MATCHALL_FLAGS, self.flags);
         }
 
-        // Add goto_chain action if set
-        if let Some(chain) = self.goto_chain {
+        // Actions and goto_chain share `TCA_MATCHALL_ACT`, so they share one
+        // nest: writing the attribute twice would leave the kernel to pick
+        // one and silently drop the other.
+        if self.actions.is_some() || self.goto_chain.is_some() {
             use super::{
                 action::{ActionConfig, GactAction},
                 types::tc::action,
             };
 
-            let goto = GactAction::goto_chain(chain);
             let act_token = builder.nest_start(matchall::TCA_MATCHALL_ACT);
 
-            // Action index 1
-            let act1_token = builder.nest_start(1);
-            builder.append_attr_str(action::TCA_ACT_KIND, goto.kind());
-            let opt_token = builder.nest_start(action::TCA_ACT_OPTIONS);
-            goto.write_options(builder)?;
-            builder.nest_end(opt_token);
-            builder.nest_end(act1_token);
+            // `write_to` numbers its entries from 1; the goto continues that
+            // numbering rather than colliding with the first action.
+            let mut next_index = 1u16;
+            if let Some(actions) = &self.actions {
+                actions.write_to(builder)?;
+                next_index += actions.len() as u16;
+            }
+
+            if let Some(chain) = self.goto_chain {
+                let goto = GactAction::goto_chain(chain);
+                let goto_token = builder.nest_start(next_index);
+                builder.append_attr_str(action::TCA_ACT_KIND, goto.kind());
+                let opt_token = builder.nest_start(action::TCA_ACT_OPTIONS);
+                goto.write_options(builder)?;
+                builder.nest_end(opt_token);
+                builder.nest_end(goto_token);
+            }
 
             builder.nest_end(act_token);
         }
@@ -4851,6 +4899,61 @@ mod tests {
         assert_eq!(filter.dst_ipv4, Some((Ipv4Addr::new(10, 0, 0, 0), 8)));
         assert_eq!(filter.dst_port, Some(80));
         assert_eq!(filter.eth_type, Some(0x0800));
+    }
+
+    /// #313 — `cls_matchall` carries no keys, so the action list is the
+    /// only thing it is normally installed for, and `MatchallFilter` had
+    /// no way to set one. Two doc examples showed the `.actions()` call
+    /// that did not exist; both were ```ignore, so nothing compiled them.
+    ///
+    /// Asserted at the byte level because `goto_chain` shares
+    /// `TCA_MATCHALL_ACT` with the action list: emitting the attribute
+    /// twice would leave the kernel to keep one nest and drop the other,
+    /// and no return value would say so.
+    #[test]
+    fn matchall_actions_and_goto_chain_share_one_act_nest() {
+        use crate::netlink::{
+            action::{ActionList, GactAction},
+            test_support::parse_attrs,
+        };
+
+        let encode = |f: &MatchallFilter| {
+            let mut b = MessageBuilder::new(NlMsgType::RTM_NEWTFILTER, 0);
+            f.write_options(&mut b).unwrap();
+            crate::netlink::test_support::builder_attrs(&b)
+        };
+
+        // Actions alone: one nest, one action at index 1.
+        let attrs = encode(&MatchallFilter::new().actions(
+            ActionList::new().with(GactAction::drop()),
+        ));
+        let act = attrs
+            .get(&matchall::TCA_MATCHALL_ACT)
+            .expect("TCA_MATCHALL_ACT missing: the action list was dropped");
+        let inner = parse_attrs(act);
+        assert_eq!(inner.len(), 1, "expected one action, got {inner:?}");
+        assert!(inner.contains_key(&1), "actions are numbered from 1");
+
+        // goto_chain alone keeps working, still at index 1.
+        let attrs = encode(&MatchallFilter::new().goto_chain(3));
+        let inner = parse_attrs(attrs.get(&matchall::TCA_MATCHALL_ACT).unwrap());
+        assert_eq!(inner.len(), 1);
+        assert!(inner.contains_key(&1));
+
+        // Both: one nest, two entries, the goto after the action — the
+        // order tc(8) emits and the kernel runs.
+        let attrs = encode(
+            &MatchallFilter::new()
+                .actions(ActionList::new().with(GactAction::drop()))
+                .goto_chain(3),
+        );
+        let inner = parse_attrs(attrs.get(&matchall::TCA_MATCHALL_ACT).unwrap());
+        assert_eq!(
+            inner.len(),
+            2,
+            "the goto must extend the action list, not collide with it: {inner:?}"
+        );
+        assert!(inner.contains_key(&1) && inner.contains_key(&2));
     }
 
     #[test]

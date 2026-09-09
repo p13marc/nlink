@@ -105,6 +105,23 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`MatchallFilter` could not carry actions (#313).** `cls_matchall` matches
+  every packet and carries no keys, so the action list is essentially the
+  whole point of installing one — "mirror everything to this port", "police
+  everything on ingress", "run this BPF program on every packet". nlink's
+  `MatchallFilter` had no `actions` field and no setter; of the filter types
+  only `FlowFilter` held an `ActionList`. Two doc examples (on `BpfAction`
+  and `SimpleAction`) showed the `.actions()` call anyway. Both were
+  ```` ```ignore ````, so nothing ever compiled them (#304).
+
+  `MatchallFilter::actions(ActionList)` now exists. It composes with
+  `goto_chain` rather than fighting it: both live in `TCA_MATCHALL_ACT`, so
+  they share one nest with the goto emitted last — the order `tc(8)` uses
+  and the order the kernel runs them in. Writing the attribute twice would
+  have left the kernel to keep one nest and silently drop the other, which
+  is why the regression test asserts the emitted bytes rather than a return
+  value.
+
 - **`del_netem`, `apply_netem` and `plug_buffer` could not be called from a
   small program at all (#310).** A caller got
 
