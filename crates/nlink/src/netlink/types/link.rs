@@ -412,9 +412,15 @@ pub mod brport {
     /// Proxy ARP (u8 bool).
     pub const IFLA_BRPORT_PROXYARP: u16 = 10;
     /// Multicast flooding (u8 bool).
-    pub const IFLA_BRPORT_MCAST_FLOOD: u16 = 23;
+    /// Unused by nlink; listed because omitting these two is what shifted
+    /// MCAST_FLOOD and MCAST_TO_UCAST down by four (#259).
+    #[allow(dead_code)]
+    pub const IFLA_BRPORT_MULTICAST_ROUTER: u16 = 25;
+    #[allow(dead_code)]
+    pub const IFLA_BRPORT_PAD: u16 = 26;
+    pub const IFLA_BRPORT_MCAST_FLOOD: u16 = 27;
     /// Multicast-to-unicast (u8 bool).
-    pub const IFLA_BRPORT_MCAST_TO_UCAST: u16 = 24;
+    pub const IFLA_BRPORT_MCAST_TO_UCAST: u16 = 28;
     /// Broadcast flooding (u8 bool).
     pub const IFLA_BRPORT_BCAST_FLOOD: u16 = 30;
     /// Neighbour suppression (u8 bool).

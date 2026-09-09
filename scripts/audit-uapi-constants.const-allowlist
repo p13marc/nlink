@@ -1,0 +1,15 @@
+# Plain `pub const NAME: uN = ...` that deliberately differs from the kernel
+# symbol of the same name.
+#
+# The plain-const pass (#266) checks every constant whose name the kernel also
+# defines verbatim. That is almost always what you want — but a handful of
+# names are legitimately nlink-local and collide with an unrelated kernel
+# symbol, or hold a mask/sentinel rather than the kernel's value.
+#
+# Each entry needs a written reason. "It's fine" is exactly what a drifted
+# constant would also say — the same discipline as
+# audit-uapi-constants.allowlist, for the same reason.
+#
+# Format: one bare constant name per line, `#` comments.
+
+# (empty — every name-matching constant currently agrees with the kernel)

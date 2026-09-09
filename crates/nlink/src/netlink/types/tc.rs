@@ -332,7 +332,10 @@ pub mod qdisc {
         pub const TCA_HTB_DIRECT_QLEN: u16 = 5;
         pub const TCA_HTB_RATE64: u16 = 6;
         pub const TCA_HTB_CEIL64: u16 = 7;
-        pub const TCA_HTB_OFFLOAD: u16 = 8;
+        /// Unused; listed because omitting it is what put OFFLOAD at 8 (#265).
+        #[allow(dead_code)]
+        pub const TCA_HTB_PAD: u16 = 8;
+        pub const TCA_HTB_OFFLOAD: u16 = 9;
 
         /// HTB global parameters (struct tc_htb_glob).
         #[repr(C)]
@@ -438,11 +441,11 @@ pub mod qdisc {
         /// Nested list of per-band quanta.
         pub const TCA_ETS_QUANTA: u16 = 3;
         /// One band's DRR quantum (u32), inside the `QUANTA` nest.
-        pub const TCA_ETS_QUANTA_BAND: u16 = 1;
+        pub const TCA_ETS_QUANTA_BAND: u16 = 4;
         /// Nested priority → band map.
-        pub const TCA_ETS_PRIOMAP: u16 = 4;
+        pub const TCA_ETS_PRIOMAP: u16 = 5;
         /// One priority's band (u8), inside the `PRIOMAP` nest.
-        pub const TCA_ETS_PRIOMAP_BAND: u16 = 1;
+        pub const TCA_ETS_PRIOMAP_BAND: u16 = 6;
     }
 
     /// TBF qdisc-specific attributes.
@@ -1847,14 +1850,14 @@ pub mod filter {
         pub const TCA_FLOWER_KEY_ENC_IP_TOS_MASK: u16 = 81;
         pub const TCA_FLOWER_KEY_ENC_IP_TTL: u16 = 82;
         pub const TCA_FLOWER_KEY_ENC_IP_TTL_MASK: u16 = 83;
-        pub const TCA_FLOWER_KEY_CT_STATE: u16 = 84;
-        pub const TCA_FLOWER_KEY_CT_STATE_MASK: u16 = 85;
-        pub const TCA_FLOWER_KEY_CT_ZONE: u16 = 86;
-        pub const TCA_FLOWER_KEY_CT_ZONE_MASK: u16 = 87;
-        pub const TCA_FLOWER_KEY_CT_MARK: u16 = 88;
-        pub const TCA_FLOWER_KEY_CT_MARK_MASK: u16 = 89;
-        pub const TCA_FLOWER_KEY_CT_LABELS: u16 = 90;
-        pub const TCA_FLOWER_KEY_CT_LABELS_MASK: u16 = 91;
+        pub const TCA_FLOWER_KEY_CT_STATE: u16 = 91;
+        pub const TCA_FLOWER_KEY_CT_STATE_MASK: u16 = 92;
+        pub const TCA_FLOWER_KEY_CT_ZONE: u16 = 93;
+        pub const TCA_FLOWER_KEY_CT_ZONE_MASK: u16 = 94;
+        pub const TCA_FLOWER_KEY_CT_MARK: u16 = 95;
+        pub const TCA_FLOWER_KEY_CT_MARK_MASK: u16 = 96;
+        pub const TCA_FLOWER_KEY_CT_LABELS: u16 = 97;
+        pub const TCA_FLOWER_KEY_CT_LABELS_MASK: u16 = 98;
 
         /// Flower filter flags.
         pub const TCA_CLS_FLAGS_SKIP_HW: u32 = 1 << 0;

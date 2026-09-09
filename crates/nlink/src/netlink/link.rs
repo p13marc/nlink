@@ -2341,11 +2341,15 @@ pub enum NetkitScrub {
 /// Netkit-specific attributes (IFLA_NETKIT_*)
 mod netkit {
     pub const IFLA_NETKIT_PEER_INFO: u16 = 1;
-    pub const IFLA_NETKIT_MODE: u16 = 4;
-    pub const IFLA_NETKIT_POLICY: u16 = 2;
-    pub const IFLA_NETKIT_PEER_POLICY: u16 = 3;
-    pub const IFLA_NETKIT_SCRUB: u16 = 5;
-    pub const IFLA_NETKIT_PEER_SCRUB: u16 = 6;
+    /// Unused by nlink, listed so the enum is contiguous — omitting it is
+    /// what shifted MODE/POLICY/SCRUB by one (#265).
+    #[allow(dead_code)]
+    pub const IFLA_NETKIT_PRIMARY: u16 = 2;
+    pub const IFLA_NETKIT_MODE: u16 = 5;
+    pub const IFLA_NETKIT_POLICY: u16 = 3;
+    pub const IFLA_NETKIT_PEER_POLICY: u16 = 4;
+    pub const IFLA_NETKIT_SCRUB: u16 = 6;
+    pub const IFLA_NETKIT_PEER_SCRUB: u16 = 7;
 }
 
 impl NetkitLink {

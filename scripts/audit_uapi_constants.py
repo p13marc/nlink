@@ -41,6 +41,7 @@ HEADER_DIR = Path(os.environ.get("NLINK_UAPI_HEADER_DIR", "/usr/include/linux"))
 MAP_FILE = REPO / "scripts" / "audit-uapi-constants.map"
 ALLOWLIST_FILE = REPO / "scripts" / "audit-uapi-constants.allowlist"
 NEWER_FILE = REPO / "scripts" / "audit-uapi-constants.newer"
+CONST_ALLOW_FILE = REPO / "scripts" / "audit-uapi-constants.const-allowlist"
 SRC_DIRS = [REPO / "crates" / "nlink" / "src"]
 
 
@@ -175,6 +176,36 @@ def parse_rust_enums() -> dict[str, tuple[Path, dict[str, int]]]:
     return out
 
 
+# A plain `pub const NAME: uN = <literal>;`. This is how most of the crate's
+# wire constants are actually declared — nl80211, devlink, `types/tc.rs`,
+# `types/link.rs` and friends — and until #266 none of them were checked at
+# all. There are ~3x as many of these as there are enum discriminants.
+RUST_CONST_RE = re.compile(
+    r"^[ \t]*pub const ([A-Z][A-Z0-9_]*)\s*:\s*u(?:8|16|32|64)\s*="
+    r"\s*(0x[0-9a-fA-F_]+|[0-9_]+)\s*;",
+    re.M,
+)
+
+
+def parse_rust_consts() -> list[tuple[Path, str, int]]:
+    """Every `pub const NAME: uN = <literal>;` in the tree.
+
+    Deliberately *not* name-mangled. The check below only looks at constants
+    whose name the kernel also defines, verbatim — which makes it
+    zero-false-positive by construction and needs no per-constant mapping.
+    Constants nlink names differently from the kernel are simply not covered
+    by this pass; they need an enum or a map entry.
+    """
+    out: list[tuple[Path, str, int]] = []
+    for src_dir in SRC_DIRS:
+        for path in sorted(src_dir.rglob("*.rs")):
+            text = path.read_text()
+            text = re.sub(r"^\s*//[^\n]*$", "", text, flags=re.M)
+            for name, raw in RUST_CONST_RE.findall(text):
+                out.append((path, name, int(raw.replace("_", ""), 0)))
+    return out
+
+
 def camel_to_upper_snake(name: str) -> str:
     s = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
     s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
@@ -230,6 +261,16 @@ def main() -> int:
         for line in ALLOWLIST_FILE.read_text().splitlines()
         if line.split("#", 1)[0].strip()
     }
+
+    # Plain `pub const`s that deliberately differ from the kernel symbol of
+    # the same name (a mask, a sentinel, an nlink-local alias). Each needs a
+    # written reason — the same discipline as the enum allowlist, for the same
+    # reason: "it's fine" is what a drifted constant also says.
+    const_allowed = {
+        line.split("#", 1)[0].strip()
+        for line in CONST_ALLOW_FILE.read_text().splitlines()
+        if line.split("#", 1)[0].strip()
+    } if CONST_ALLOW_FILE.exists() else set()
 
     # Constants nlink knows about that a given build host's headers may predate.
     # See the file's own header for why this exists and why it is not a hole.
@@ -290,6 +331,24 @@ def main() -> int:
                     f"but {kernel_name} = {expected}"
                 )
 
+    # ---- plain `pub const` pass (#266) -------------------------------------
+    #
+    # Only constants whose name the kernel defines *verbatim* are checked. That
+    # is deliberately narrow: it needs no mapping table, cannot mis-mangle a
+    # name, and produced zero false positives across the 1573 it matches. A
+    # constant nlink spells differently is simply out of scope for this pass —
+    # better uncovered than covered by a guess.
+    checked_consts = 0
+    for path, name, value in parse_rust_consts():
+        if name in const_allowed or name not in kernel:
+            continue
+        checked_consts += 1
+        if value != kernel[name]:
+            failures.append(
+                f"{path.relative_to(REPO)}: {name} = {value}, "
+                f"but the kernel says {kernel[name]}"
+            )
+
     if unclassified:
         print("FAIL: unclassified #[repr(uN)] enums.\n")
         print("Every one must be either mapped to a kernel prefix in")
@@ -321,8 +380,9 @@ def main() -> int:
         )
 
     print(
-        f"OK: {checked_variants} discriminants across {checked_enums} enums match "
-        f"{HEADER_DIR} ({len(allowed)} nlink-only enums allowlisted)"
+        f"OK: {checked_variants} discriminants across {checked_enums} enums, and "
+        f"{checked_consts} plain consts, match {HEADER_DIR} "
+        f"({len(allowed)} nlink-only enums, {len(const_allowed)} consts allowlisted)"
     )
     return 0
 

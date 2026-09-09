@@ -1682,6 +1682,19 @@ mod bss_tests {
     /// in `enum nl80211_bss` (linux/nl80211.h) — the same id-drift guard
     /// added for STA_INFO. (BSS constants were already correct; this
     /// locks them.)
+    /// Hand-pinned copy of the kernel enum.
+    ///
+    /// As of #266 this is a *fast local check*, not the guard — the UAPI audit
+    /// gate now verifies every `pub const` whose name the kernel also defines,
+    /// which covers all of these automatically and cannot go stale the way a
+    /// hand-copied table can. `NL80211_BSS_FREQUENCY_OFFSET` was pinned here at
+    /// 21 (the kernel's `NL80211_BSS_MLO_LINK_ID`) for exactly that reason: the
+    /// table was transcribed from the same wrong source as the constant.
+    ///
+    /// Note the fixtures below (`parse_bss_reads_new_attributes` and the survey
+    /// tests) build frames from these same symbols, so they stay green whatever
+    /// the value is. That is fine *now* — the symbol is checked against the
+    /// header — but it is why they never caught the drift themselves.
     #[test]
     fn bss_constants_match_kernel_enum() {
         assert_eq!(NL80211_BSS_BSSID, 1);
@@ -1696,7 +1709,7 @@ mod bss_tests {
         assert_eq!(NL80211_BSS_SEEN_MS_AGO, 10);
         assert_eq!(NL80211_BSS_BEACON_IES, 11);
         assert_eq!(NL80211_BSS_LAST_SEEN_BOOTTIME, 15);
-        assert_eq!(NL80211_BSS_FREQUENCY_OFFSET, 21);
+        assert_eq!(NL80211_BSS_FREQUENCY_OFFSET, 20);
     }
 
     #[test]

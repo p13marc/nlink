@@ -107,6 +107,52 @@ All notable changes to this project will be documented in this file.
   (`with_rcvbuf` to override). This matters more for uevents than
   elsewhere: it is the one subscriber with no dump to resync from.
 
+### Fixed
+
+- **41 wrong UAPI constants, and the gate that let them through (#266, #259,
+  #263, #264, #265).** `scripts/audit-uapi-constants.sh` checked only
+  `#[repr(uN)]` enums — 642 discriminants. But most of the crate's wire
+  constants are plain `pub const`s (there are **2039** of them, roughly 3x the
+  enum surface), and none were checked at all. Every drift below lived in that
+  blind spot.
+
+  The audit now also verifies every `pub const NAME: uN = <literal>` whose name
+  the kernel defines **verbatim** — 1573 of them. Exact-name-match is
+  deliberately narrow: it needs no mapping table, cannot mis-mangle a name, and
+  produced zero false positives. A constant nlink spells differently is out of
+  scope for this pass rather than covered by a guess.
+
+  Turning it on found 41 mismatches, all of them real:
+
+  - **bridge**: `IFLA_BRPORT_MCAST_FLOOD` (23→27) and `MCAST_TO_UCAST` (24→28).
+    The second was the kernel's `IFLA_BRPORT_FLUSH`, which `br_setport()` acts
+    on by calling `br_fdb_delete_by_port()` — so setting `mcast_to_unicast`
+    **wiped the bridge port's forwarding database** (#259).
+  - **nl80211**: 11 ids, all on live paths — filtered scans emitted
+    `STA_LISTEN_INTERVAL`/`STA_SUPPORTED_RATES` nests, the regulatory alpha2
+    went out under `ATTR_STA_AID`, power-save used `ATTR_FRAME_MATCH`,
+    `set_netns` used `ATTR_TESTDATA`, and the channel-survey dump keyed on
+    `ATTR_4ADDR` so it parsed nothing from a real kernel (#263).
+  - **devlink**: 8 ids — flash-update progress read msg/done/total out of a VF
+    number, a stats blob and a trap name; `PORT_NEW` decoded as `PORT_DEL`
+    (#264).
+  - **netkit** (5), **nftables `log`** prefix/group swapped (2), **ETS** (3),
+    **flower CT keys** (8, all seven too low), **`TCA_HTB_OFFLOAD`** (#265).
+
+  `TCA_HTB_OFFLOAD` is the one worth singling out: it was wrong in *both*
+  `types/tc.rs` and `sys_sizeof.rs` — the module whose stated job is to "lock
+  the kernel-side values so a future edit cannot silently re-introduce
+  off-by-N drift" — and `sys_sizeof.rs` asserted the two wrong values equal each
+  other. The guard was hand-transcribed from the same wrong source it was meant
+  to guard.
+
+  Where an omitted kernel member caused the shift, it is now listed
+  (`IFLA_NETKIT_PRIMARY`, `IFLA_BRPORT_MULTICAST_ROUTER`/`PAD`, `TCA_HTB_PAD`)
+  so the gap that caused the slip is visible in the source.
+
+  The gate's self-test gains two cases: a wrong plain const is caught, and an
+  nlink-local one is ignored rather than guessed at.
+
 ### Changed
 
 - **`schemars` 0.8 → 1.0 (BREAKING for the `schemars` feature; #245).** The

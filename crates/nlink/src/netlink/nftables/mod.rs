@@ -282,8 +282,8 @@ pub const NFT_REJECT_TCP_RST: u32 = 1;
 pub const NFT_REJECT_ICMPX_UNREACH: u32 = 2;
 
 // Log
-pub const NFTA_LOG_PREFIX: u16 = 1;
-pub const NFTA_LOG_GROUP: u16 = 2;
+pub const NFTA_LOG_PREFIX: u16 = 2;
+pub const NFTA_LOG_GROUP: u16 = 1;
 
 // =============================================================================
 // Set Attributes

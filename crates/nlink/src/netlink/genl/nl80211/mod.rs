@@ -73,8 +73,8 @@ pub const NL80211_CMD_DEL_WIPHY: u8 = 4;
 pub const NL80211_CMD_NEW_INTERFACE: u8 = 7;
 pub const NL80211_CMD_DEL_INTERFACE: u8 = 8;
 pub const NL80211_CMD_NEW_STATION: u8 = 19;
-pub const NL80211_CMD_REG_CHANGE: u8 = 86;
-pub const NL80211_CMD_REG_BEACON_HINT: u8 = 87;
+pub const NL80211_CMD_REG_CHANGE: u8 = 36;
+pub const NL80211_CMD_REG_BEACON_HINT: u8 = 42;
 
 // =============================================================================
 // Multicast Group Names
@@ -95,15 +95,15 @@ pub const NL80211_ATTR_IFINDEX: u16 = 3;
 pub const NL80211_ATTR_IFNAME: u16 = 4;
 pub const NL80211_ATTR_IFTYPE: u16 = 5;
 pub const NL80211_ATTR_MAC: u16 = 6;
-pub const NL80211_ATTR_KEY: u16 = 8;
+pub const NL80211_ATTR_KEY: u16 = 80;
 pub const NL80211_ATTR_MAX_SCAN_SSIDS: u16 = 11;
-pub const NL80211_ATTR_REG_ALPHA2: u16 = 16;
-pub const NL80211_ATTR_REG_RULES: u16 = 17;
-pub const NL80211_ATTR_SCAN_FREQUENCIES: u16 = 18;
-pub const NL80211_ATTR_SCAN_SSIDS: u16 = 19;
+pub const NL80211_ATTR_REG_ALPHA2: u16 = 33;
+pub const NL80211_ATTR_REG_RULES: u16 = 34;
+pub const NL80211_ATTR_SCAN_FREQUENCIES: u16 = 44;
+pub const NL80211_ATTR_SCAN_SSIDS: u16 = 45;
 pub const NL80211_ATTR_STA_INFO: u16 = 21;
 pub const NL80211_ATTR_WIPHY_BANDS: u16 = 22;
-pub const NL80211_ATTR_SURVEY_INFO: u16 = 83;
+pub const NL80211_ATTR_SURVEY_INFO: u16 = 84;
 pub const NL80211_ATTR_SUPPORTED_IFTYPES: u16 = 32;
 pub const NL80211_ATTR_WIPHY_FREQ: u16 = 38;
 pub const NL80211_ATTR_WIPHY_CHANNEL_TYPE: u16 = 39;
@@ -112,10 +112,10 @@ pub const NL80211_ATTR_BSS: u16 = 47;
 pub const NL80211_ATTR_SSID: u16 = 52;
 pub const NL80211_ATTR_AUTH_TYPE: u16 = 53;
 pub const NL80211_ATTR_REASON_CODE: u16 = 54;
-pub const NL80211_ATTR_NETNS_FD: u16 = 69;
+pub const NL80211_ATTR_NETNS_FD: u16 = 219;
 pub const NL80211_ATTR_STATUS_CODE: u16 = 72;
 pub const NL80211_ATTR_PID: u16 = 82;
-pub const NL80211_ATTR_PS_STATE: u16 = 91;
+pub const NL80211_ATTR_PS_STATE: u16 = 93;
 /// Supported cipher suites — a flat array of `u32` suite selectors.
 pub const NL80211_ATTR_CIPHER_SUITES: u16 = 57;
 /// Flag attribute requesting a split `GET_WIPHY` dump: the kernel
@@ -159,7 +159,7 @@ pub const NL80211_BSS_STATUS: u16 = 9;
 pub const NL80211_BSS_SEEN_MS_AGO: u16 = 10;
 pub const NL80211_BSS_BEACON_IES: u16 = 11;
 pub const NL80211_BSS_LAST_SEEN_BOOTTIME: u16 = 15;
-pub const NL80211_BSS_FREQUENCY_OFFSET: u16 = 21;
+pub const NL80211_BSS_FREQUENCY_OFFSET: u16 = 20;
 
 // =============================================================================
 // Station Info Nested Attributes
