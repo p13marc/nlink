@@ -16,7 +16,7 @@
 //! conn.add_endpoint(
 //!     MptcpEndpointBuilder::new("192.168.2.1".parse()?)
 //!         .id(1)
-//!         .dev("eth1")
+//!         .ifindex(eth1_ifindex)   // resolve via a Connection<Route> in the same netns
 //!         .subflow()
 //!         .signal()
 //! ).await?;

@@ -500,6 +500,9 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(p) = protocol {
                 config = config.protocol(*p);
             }
+            if let Some(addr) = link.address {
+                config = config.address(addr);
+            }
             conn.add_link(config).await?;
         }
         DeclaredLinkType::Vxlan {
@@ -527,11 +530,20 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(dev) = underlay_dev {
                 config = config.dev(dev);
             }
+            if let Some(mtu) = link.mtu {
+                config = config.mtu(mtu);
+            }
+            if let Some(addr) = link.address {
+                config = config.address(addr);
+            }
             conn.add_link(config).await?;
         }
         DeclaredLinkType::Macvlan { parent, mode } => {
             let mut config = MacvlanLink::new(&link.name, parent);
             config = config.mode(convert_macvlan_mode(*mode));
+            if let Some(mtu) = link.mtu {
+                config = config.mtu(mtu);
+            }
             if let Some(addr) = link.address {
                 config = config.address(addr);
             }
@@ -584,7 +596,13 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             conn.add_link(config).await?;
         }
         DeclaredLinkType::Ifb => {
-            let config = IfbLink::new(&link.name);
+            let mut config = IfbLink::new(&link.name);
+            if let Some(mtu) = link.mtu {
+                config = config.mtu(mtu);
+            }
+            if let Some(addr) = link.address {
+                config = config.address(addr);
+            }
             conn.add_link(config).await?;
         }
         DeclaredLinkType::Vrf { table } => {
@@ -658,6 +676,9 @@ async fn modify_link(conn: &Connection<Route>, name: &str, changes: &LinkChanges
     }
     if let Some(mtu) = changes.set_mtu {
         conn.set_link_mtu(name, mtu).await?;
+    }
+    if let Some(address) = changes.set_address {
+        conn.set_link_address(name, address).await?;
     }
     if let Some(master) = &changes.set_master {
         conn.set_link_master(name, master).await?;

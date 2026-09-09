@@ -370,7 +370,15 @@ impl Connection<Ethtool> {
     }
 
     async fn apply_link_modes(&self, ifname: &str, config: &LinkModesBuilder) -> Result<()> {
-        self.ethtool_set(EthtoolCmd::LinkmodesSet, ifname, |builder| {
+        // Only the named modes are advertised; a mode present in the
+        // bitset with the VALUE flag is "advertise this", which is what
+        // `ethtool -s dev advertise` means.
+        let mut ours = EthtoolBitset::new();
+        for name in &config.advertised {
+            ours.set(name, true);
+        }
+
+        self.ethtool_set(EthtoolCmd::LinkmodesSet, ifname, move |builder| {
             if let Some(autoneg) = config.autoneg {
                 builder.append_attr_u8(EthtoolLinkmodesAttr::Autoneg as u16, autoneg as u8);
             }
@@ -383,12 +391,22 @@ impl Connection<Ethtool> {
             if let Some(lanes) = config.lanes {
                 builder.append_attr_u32(EthtoolLinkmodesAttr::Lanes as u16, lanes);
             }
-            // Advertised-modes bitset is not exposed by `LinkModesBuilder`
-            // today (kernel attr `EthtoolLinkmodesAttr::Ours`). The
-            // bitset encoder lives at `super::bitset::EthtoolBitset::write_to`
-            // and is wired in for `set_features`; expose advertised modes
-            // through a follow-up `LinkModesBuilder::advertise(...)` setter
-            // when a downstream user asks for it.
+            // Advertised modes go in `ETHTOOL_A_LINKMODES_OURS` as a
+            // bit-by-bit bitset — the same encoder `set_features` uses.
+            //
+            // `advertise()` / `advertise_modes()` had shipped and were
+            // stored in `LinkModesBuilder::advertised` with no read site
+            // anywhere; the comment here said to wire them up "when a
+            // downstream user asks for it", by which time the setter was
+            // already public and the rustdoc example already called it.
+            // Pinning advertised modes is the whole point of
+            // `ethtool -s dev advertise ...`, and a caller combining it
+            // with `.autoneg(true)` renegotiated on the *old*
+            // advertisement and concluded the NIC had ignored them
+            // (#275).
+            if !ours.is_empty() {
+                ours.write_to(builder, EthtoolLinkmodesAttr::Ours as u16);
+            }
         })
         .await
     }

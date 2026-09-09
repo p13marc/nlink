@@ -195,3 +195,16 @@ mod uevent_filter;
 // arriving.
 #[path = "integration/ext_ack.rs"]
 mod ext_ack;
+
+// #275 — MPTCP endpoint wiring. `dev(name)` was stored and never
+// resolved, so endpoints had no interface binding; and the port's byte
+// order is only checkable against an independent reader, because nlink
+// writes and reads it symmetrically.
+#[path = "integration/mptcp_pm.rs"]
+mod mptcp_pm;
+
+// #275 — declared values that the writers never read. Each test asserts
+// the *value* landed, not that the call returned Ok; asserting Ok is
+// what let these ship.
+#[path = "integration/declared_input.rs"]
+mod declared_input;

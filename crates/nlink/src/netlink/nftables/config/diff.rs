@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use super::types::{
     DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredSet, DeclaredTable, NftablesConfig,
 };
-use super::super::types::{ChainInfo, Family, Hook, Policy, Priority, SetElement};
+use super::super::types::{ChainInfo, Family, Hook, Policy, Priority, SetElement, SetInfo};
 use crate::netlink::{
     builder::MessageBuilder, connection::Connection, error::Result, protocol::Nftables,
 };
@@ -416,6 +416,25 @@ fn chain_has_drifted(declared: &DeclaredChain, current: &ChainInfo) -> bool {
         || drifted(declared.policy().map(Policy::to_u32), current.policy)
         || drifted(declared.chain_type(), current.chain_type)
         || drifted(declared.device(), current.device.as_deref())
+}
+
+/// Has a declared set's shape drifted from what the kernel holds?
+///
+/// Sets were matched by **name alone**, so changing a set's key type,
+/// or adding `NFT_SET_INTERVAL`/`constant`, produced an empty diff
+/// while every rule matching `@set` silently mismatched (#275). Chains
+/// (#200), tables and flowtables (#208) all got this treatment; sets
+/// were left out of that pass.
+///
+/// Unlike a chain, a set's key type and length cannot be changed in
+/// place — `nf_tables_newset` returns `EEXIST` for an existing name and
+/// there is no "update" — so drift means delete and recreate, which
+/// also discards its elements. They are re-added from the declaration
+/// in the same transaction.
+fn set_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
+    declared.key_type().type_id() != current.key_type
+        || declared.key_type().len() != current.key_len
+        || declared.flags() != current.flags
 }
 
 /// Options controlling [`NftablesConfig::diff_with_options`].
@@ -892,6 +911,32 @@ impl NftablesConfig {
                 current_sets.iter().map(|s| s.name.as_str()).collect();
 
             for s in declared.sets() {
+                let current_set = current_sets.iter().find(|c| c.name == s.name());
+                if let Some(current) = current_set
+                    && set_has_drifted(s, current)
+                {
+                    // Recreate: delete first, then add with the
+                    // declared shape and all of its elements.
+                    diff.sets_to_delete.push((
+                        declared.name().to_string(),
+                        declared.family(),
+                        s.name().to_string(),
+                    ));
+                    diff.sets_to_add.push((
+                        declared.name().to_string(),
+                        declared.family(),
+                        s.clone(),
+                    ));
+                    if !s.elements().is_empty() {
+                        diff.set_elements_to_add.push((
+                            declared.name().to_string(),
+                            declared.family(),
+                            s.name().to_string(),
+                            s.elements().to_vec(),
+                        ));
+                    }
+                    continue;
+                }
                 if current_set_names.contains(s.name()) {
                     // Set exists on both sides → element-level diff.
                     // Read the kernel's current elements and compute
@@ -973,6 +1018,8 @@ impl NftablesConfig {
 #[allow(deprecated)] // Plan 188 §2.6 — test the deprecated `summary()` shape during its window
 mod tests {
     use super::*;
+    use crate::netlink::nftables::SetKeyType;
+    use crate::netlink::nftables::config::types::DeclaredSet;
 
     #[test]
     fn empty_diff_is_empty() {
@@ -1341,5 +1388,74 @@ mod tests {
         let mut d = NftablesDiff::default();
         d.tables_to_delete.push((Family::Inet, "foo".to_string()));
         assert_eq!(format!("{d}"), d.summary());
+    }
+
+    // ====================================================================
+    // #275 — declared sets were matched by name alone
+    // ====================================================================
+
+    fn set_info(key_type: &SetKeyType, flags: u32) -> SetInfo {
+        SetInfo {
+            table: "t".to_string(),
+            name: "s".to_string(),
+            family: Family::Inet,
+            flags,
+            key_type: key_type.type_id(),
+            key_len: key_type.len(),
+            handle: 1,
+        }
+    }
+
+    fn declared_set(key_type: SetKeyType, flags: u32) -> DeclaredSet {
+        DeclaredSet {
+            name: "s".to_string(),
+            key_type,
+            flags,
+            elements: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_set_that_matches_the_kernel_is_not_drift() {
+        let declared = declared_set(SetKeyType::Ipv4Addr, 0);
+        let current = set_info(&SetKeyType::Ipv4Addr, 0);
+        assert!(!set_has_drifted(&declared, &current));
+    }
+
+    #[test]
+    fn a_changed_key_type_is_drift() {
+        // Sets were matched by name only, so this produced an empty
+        // diff while every rule matching `@s` silently mismatched.
+        let declared = declared_set(SetKeyType::InetService, 0);
+        let current = set_info(&SetKeyType::Ipv4Addr, 0);
+        assert!(set_has_drifted(&declared, &current));
+    }
+
+    #[test]
+    fn a_changed_key_length_alone_is_drift() {
+        // Two types can share a `type_id` band but differ in length;
+        // the length is what `nft_lookup_init` validates the `sreg`
+        // against, so it has to be compared in its own right.
+        let declared = declared_set(SetKeyType::Ipv6Addr, 0);
+        let mut current = set_info(&SetKeyType::Ipv6Addr, 0);
+        current.key_len = 4;
+        assert!(set_has_drifted(&declared, &current));
+    }
+
+    #[test]
+    fn changed_flags_are_drift() {
+        let declared = declared_set(SetKeyType::Ipv4Addr, crate::netlink::nftables::NFT_SET_CONSTANT);
+        let current = set_info(&SetKeyType::Ipv4Addr, 0);
+        assert!(set_has_drifted(&declared, &current));
+    }
+
+    #[test]
+    fn a_concat_key_is_compared_by_both_id_and_length() {
+        let concat = SetKeyType::Concat(vec![SetKeyType::Ipv4Addr, SetKeyType::InetService]);
+        let declared = declared_set(concat.clone(), 0);
+        assert!(!set_has_drifted(&declared, &set_info(&concat, 0)));
+        // Same components, different order — a different key entirely.
+        let swapped = SetKeyType::Concat(vec![SetKeyType::InetService, SetKeyType::Ipv4Addr]);
+        assert!(set_has_drifted(&declared, &set_info(&swapped, 0)));
     }
 }

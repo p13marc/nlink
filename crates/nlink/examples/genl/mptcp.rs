@@ -76,7 +76,7 @@ fn print_overview() {
     conn.add_endpoint(
         MptcpEndpointBuilder::new("10.200.0.1".parse()?)
             .id(1)
-            .dev("dummy0")
+            .ifindex(dummy_ifindex)   // resolved via a Connection<Route> in the same netns
             .signal()
             .subflow(),
     ).await?;
@@ -194,13 +194,26 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     // Start clean in case the PM has stale state from an earlier run.
     let _ = mptcp.flush_endpoints().await;
 
+    // Resolve the interface through a connection in *this namespace*.
+    // `MptcpEndpointBuilder` takes an ifindex, not a name: a
+    // `Connection<Mptcp>` cannot resolve a name in its own netns, and
+    // resolving it in the calling process's netns would silently bind
+    // the endpoint to a different interface (#275).
+    let dummy_ifindex = route
+        .get_link_by_name("dummy0")
+        .await?
+        .ok_or_else(|| nlink::Error::InterfaceNotFound {
+            name: "dummy0".to_string(),
+        })?
+        .ifindex();
+
     println!();
     println!("  add_endpoint #1: 10.200.0.1 dev=dummy0 flags=signal,subflow");
     mptcp
         .add_endpoint(
             MptcpEndpointBuilder::new(Ipv4Addr::new(10, 200, 0, 1).into())
                 .id(1)
-                .dev("dummy0")
+                .ifindex(dummy_ifindex)
                 .signal()
                 .subflow(),
         )
@@ -211,7 +224,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
         .add_endpoint(
             MptcpEndpointBuilder::new(Ipv4Addr::new(10, 200, 0, 2).into())
                 .id(2)
-                .dev("dummy0")
+                .ifindex(dummy_ifindex)
                 .signal()
                 .backup(),
         )

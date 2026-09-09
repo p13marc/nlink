@@ -87,8 +87,8 @@ pub async fn run(args: ScanArgs, json: bool, verbose: bool) -> Result<()> {
                         "tx_dropped": iface.stats.tx_dropped(),
                     },
                     "rates": {
-                        "rx_bps": iface.rates.rx_bps,
-                        "tx_bps": iface.rates.tx_bps,
+                        "rx_bps": iface.rates.rx_bps(),
+                        "tx_bps": iface.rates.tx_bps(),
                         "rx_pps": iface.rates.rx_pps,
                         "tx_pps": iface.rates.tx_pps,
                     },

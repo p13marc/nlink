@@ -113,9 +113,28 @@ pub struct MptcpEndpointBuilder {
     pub(crate) address: IpAddr,
     /// Optional port number.
     pub(crate) port: Option<u16>,
-    /// Device name (resolved to ifindex).
-    pub(crate) dev: Option<String>,
-    /// Interface index (direct).
+    /// Interface index.
+    ///
+    /// There used to be a `dev(name)` setter here, documented as "the
+    /// device name will be resolved to an interface index". No
+    /// resolution ever happened — the field had zero read sites and the
+    /// writer emitted `IF_IDX` only from this one — so an endpoint
+    /// built with `.dev(...)` reached the kernel with **no interface
+    /// binding at all** and the path manager chose addresses on
+    /// whatever interface it liked (#275).
+    ///
+    /// It is gone rather than wired up. A `Connection<Mptcp>` lives in
+    /// one netns and cannot resolve a name in it — the only route
+    /// available is a fresh `Connection<Route>` in the *calling
+    /// process's* netns, which is the namespace footgun the crate
+    /// exists to avoid. Resolve through a connection in the right
+    /// namespace and pass the index:
+    ///
+    /// ```ignore
+    /// let ifindex = route_conn.get_link_by_name("eth1").await?
+    ///     .ok_or(/* … */)?.ifindex();
+    /// MptcpEndpointBuilder::new(addr).ifindex(ifindex)
+    /// ```
     pub(crate) ifindex: Option<u32>,
     /// Endpoint flags.
     pub(crate) flags: MptcpFlags,
@@ -140,7 +159,6 @@ impl MptcpEndpointBuilder {
             id: None,
             address,
             port: None,
-            dev: None,
             ifindex: None,
             flags: MptcpFlags::default(),
         }
@@ -157,14 +175,6 @@ impl MptcpEndpointBuilder {
     /// Set the port number.
     pub fn port(mut self, port: u16) -> Self {
         self.port = Some(port);
-        self
-    }
-
-    /// Set the device by name.
-    ///
-    /// The device name will be resolved to an interface index.
-    pub fn dev(mut self, dev: impl Into<String>) -> Self {
-        self.dev = Some(dev.into());
         self
     }
 
@@ -314,7 +324,6 @@ pub struct MptcpSubflowBuilder {
     /// Interface index.
     pub(crate) ifindex: Option<u32>,
     /// Device name (resolved to ifindex).
-    pub(crate) dev: Option<String>,
     /// Backup flag.
     pub(crate) backup: bool,
 }
@@ -332,7 +341,6 @@ impl MptcpSubflowBuilder {
             local_addr: None,
             remote_addr: None,
             ifindex: None,
-            dev: None,
             backup: false,
         }
     }
@@ -374,12 +382,6 @@ impl MptcpSubflowBuilder {
         if let Some(ref mut addr) = self.remote_addr {
             addr.port = Some(port);
         }
-        self
-    }
-
-    /// Set the interface by name.
-    pub fn dev(mut self, dev: impl Into<String>) -> Self {
-        self.dev = Some(dev.into());
         self
     }
 
@@ -597,10 +599,11 @@ mod tests {
     }
 
     #[test]
-    fn test_subflow_builder_with_dev() {
-        let subflow = MptcpSubflowBuilder::new(0xABCDEF00).dev("eth0").ifindex(5);
-
-        assert_eq!(subflow.dev, Some("eth0".to_string()));
+    fn test_subflow_builder_with_ifindex() {
+        // `.dev("eth0")` used to be accepted here and emitted nothing
+        // (#275). The test asserted the field was *stored*, which it
+        // was — that is exactly what made the bug invisible.
+        let subflow = MptcpSubflowBuilder::new(0xABCDEF00).ifindex(5);
         assert_eq!(subflow.ifindex, Some(5));
     }
 

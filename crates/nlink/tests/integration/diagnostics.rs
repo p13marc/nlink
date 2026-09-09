@@ -40,22 +40,26 @@ fn test_issue_category_display() {
 #[test]
 fn test_link_rates() {
     let rates = LinkRates {
-        rx_bps: 1000,
-        tx_bps: 2000,
+        rx_bytes_per_sec: 1000,
+        tx_bytes_per_sec: 2000,
         rx_pps: 10,
         tx_pps: 20,
         sample_duration_ms: 1000,
     };
 
-    assert_eq!(rates.total_bps(), 3000);
+    // The old assertion read `total_bps() == 3000`, which pinned the
+    // bug: the fields are bytes, so bits are eight times that (#274).
+    assert_eq!(rates.total_bytes_per_sec(), 3000);
+    assert_eq!(rates.total_bps(), 24_000);
     assert_eq!(rates.total_pps(), 30);
 }
 
 #[test]
 fn test_link_rates_default() {
     let rates = LinkRates::default();
-    assert_eq!(rates.rx_bps, 0);
-    assert_eq!(rates.tx_bps, 0);
+    assert_eq!(rates.rx_bytes_per_sec, 0);
+    assert_eq!(rates.tx_bytes_per_sec, 0);
+    assert_eq!(rates.rx_bps(), 0);
     assert_eq!(rates.total_bps(), 0);
 }
 
