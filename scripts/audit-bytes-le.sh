@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Plan 223 — block `from_le_bytes` re-entry in the netlink lib.
+# Plan 223 / #278 — block little-endian byte conversions in the netlink lib.
 #
 # NLA headers (`struct nlattr` in include/uapi/linux/netlink.h)
 # and the bulk of attribute payloads the kernel emits are
@@ -8,6 +8,14 @@
 # three other sites (`netfilter.rs`, `action.rs`,
 # `nftables/config/diff.rs`). This script keeps the class
 # closed by failing the build if `from_le_bytes` reappears.
+#
+# #278 — this used to ban only `from_le_bytes`, the *reader*
+# half. That caught the parse side of the bug class and left the
+# writer side wide open: `xfrm.rs` wrote `alg_key_len` with
+# `to_le_bytes`, `nftables/connection.rs` built whole NLA headers
+# that way, and both passed this audit for two releases. The same
+# bug #212 fixed in `normalize_tlv` — reader corrected, writer
+# missed — precisely because the gate only looked one way.
 #
 # The few documented LE-on-the-wire cases belong in ALLOWED
 # with a comment explaining the kernel-side wire contract.
@@ -30,8 +38,8 @@ ALLOWED=(
 # (`#[cfg(test)] mod ...`) are also flipped to `from_ne_bytes`
 # for hygiene, so the audit is uniform across the tree.
 hits=$(
-    grep -rn --include='*.rs' \
-        'from_le_bytes' \
+    grep -rnE --include='*.rs' \
+        '(from|to)_le_bytes' \
         crates/nlink/src/netlink/ || true
 )
 
@@ -68,7 +76,7 @@ if [[ -n "$hits" ]]; then
 fi
 
 if [[ -n "$hits" ]]; then
-    echo "ERROR: from_le_bytes found in netlink lib outside ALLOWED:" >&2
+    echo "ERROR: little-endian byte conversion found in netlink lib outside ALLOWED:" >&2
     echo "$hits" >&2
     echo "" >&2
     echo "NLA headers and attribute payloads are kernel-native" >&2
@@ -79,4 +87,4 @@ if [[ -n "$hits" ]]; then
     exit 1
 fi
 
-echo "audit-bytes-le: no native/little-endian drift in crates/nlink/src/netlink/"
+echo "audit-bytes-le: no little-endian drift (read or write) in crates/nlink/src/netlink/"

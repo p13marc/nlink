@@ -70,7 +70,7 @@ impl FibResultNl {
     /// Create a new FIB lookup request for an IPv4 address.
     pub fn for_addr(addr: Ipv4Addr) -> Self {
         Self {
-            fl_addr: u32::from_be_bytes(addr.octets()),
+            fl_addr: u32::from_ne_bytes(addr.octets()),
             ..Default::default()
         }
     }
@@ -78,7 +78,7 @@ impl FibResultNl {
     /// Create a new FIB lookup request with a specific table.
     pub fn for_addr_in_table(addr: Ipv4Addr, table: u8) -> Self {
         Self {
-            fl_addr: u32::from_be_bytes(addr.octets()),
+            fl_addr: u32::from_ne_bytes(addr.octets()),
             tb_id_in: table,
             ..Default::default()
         }
@@ -87,15 +87,25 @@ impl FibResultNl {
     /// Create a new FIB lookup request with a firewall mark.
     pub fn for_addr_with_mark(addr: Ipv4Addr, mark: u32) -> Self {
         Self {
-            fl_addr: u32::from_be_bytes(addr.octets()),
+            fl_addr: u32::from_ne_bytes(addr.octets()),
             fl_fwmark: mark,
             ..Default::default()
         }
     }
 
     /// Get the looked up address as an IPv4 address.
+    /// The address this request looks up.
+    ///
+    /// `fl_addr` is a `__be32` in a `#[repr(C)]` struct that is serialized
+    /// natively, so the octets are stored in network order and read back the
+    /// same way — `to_ne_bytes`, not `to_be_bytes`.
+    ///
+    /// Before 0.26 both halves used the big-endian form, which byte-reversed
+    /// the address on every little-endian host. The two errors cancelled
+    /// in-process, so a round-trip test passed while every lookup asked the
+    /// kernel about a different address (#261).
     pub fn addr(&self) -> Ipv4Addr {
-        Ipv4Addr::from(self.fl_addr.to_be_bytes())
+        Ipv4Addr::from(self.fl_addr.to_ne_bytes())
     }
 }
 
@@ -345,7 +355,7 @@ impl Connection<FibLookup> {
     ///
     /// let conn = Connection::<FibLookup>::new()?;
     /// let request = FibResultNl {
-    ///     fl_addr: u32::from_be_bytes(Ipv4Addr::new(8, 8, 8, 8).octets()),
+    ///     fl_addr: u32::from_ne_bytes(Ipv4Addr::new(1, 1, 1, 1).octets()),
     ///     fl_tos: 0x10,  // Specific TOS value
     ///     ..Default::default()
     /// };
@@ -429,6 +439,50 @@ impl Connection<FibLookup> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
+    use zerocopy::IntoBytes;
+
+    /// The address must reach the wire in network byte order.
+    ///
+    /// This asserts the *emitted bytes*, not a round-trip, and uses a
+    /// deliberately non-palindromic address — because a round-trip is exactly
+    /// what hid the original bug. `for_addr` used `from_be_bytes` while
+    /// `addr()` used `to_be_bytes`, so the two errors cancelled in-process and
+    /// every in-crate test agreed with itself while the kernel was asked about
+    /// a byte-reversed address (#261).
+    ///
+    /// The old doc example compounded it by using `8.8.8.8`, which reverses to
+    /// itself.
+    #[test]
+    fn lookup_address_reaches_the_wire_in_network_order() {
+        let req = FibResultNl::for_addr(Ipv4Addr::new(10, 0, 0, 1));
+        let bytes = req.as_bytes();
+
+        // `fl_addr` is the first field of the struct.
+        assert_eq!(
+            &bytes[..4],
+            &[10, 0, 0, 1],
+            "fl_addr must be network order on the wire"
+        );
+        assert_ne!(
+            &bytes[..4],
+            &[1, 0, 0, 10],
+            "regression: the address is byte-reversed again"
+        );
+    }
+
+    /// A non-palindromic address must survive the accessor too — the reader
+    /// and the writer have to agree with the *wire*, not merely with each
+    /// other.
+    #[test]
+    fn addr_accessor_agrees_with_the_wire() {
+        for octets in [[10, 0, 0, 1], [192, 168, 1, 254], [1, 2, 3, 4]] {
+            let addr = Ipv4Addr::from(octets);
+            let req = FibResultNl::for_addr(addr);
+            assert_eq!(req.addr(), addr);
+            assert_eq!(&req.as_bytes()[..4], &octets);
+        }
+    }
 
     #[test]
     fn fib_result_nl_size() {

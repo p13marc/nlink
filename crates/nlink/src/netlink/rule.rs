@@ -343,23 +343,25 @@ impl RuleBuilder {
 
         // Add sport
         if let Some((start, end)) = self.sport {
-            let range_bytes = [
-                (start & 0xff) as u8,
-                ((start >> 8) & 0xff) as u8,
-                (end & 0xff) as u8,
-                ((end >> 8) & 0xff) as u8,
-            ];
+            // `struct fib_rule_port_range`'s __u16 fields are kernel-native —
+            // the kernel compares them against `ntohs(fl4->fl4_sport)`. This
+            // was hand-packed little-endian, which is right on x86 by accident
+            // and wrong on any big-endian host (#278).
+            let mut range_bytes = [0u8; 4];
+            range_bytes[..2].copy_from_slice(&start.to_ne_bytes());
+            range_bytes[2..].copy_from_slice(&end.to_ne_bytes());
             builder.append_attr(FraAttr::Sport as u16, &range_bytes);
         }
 
         // Add dport
         if let Some((start, end)) = self.dport {
-            let range_bytes = [
-                (start & 0xff) as u8,
-                ((start >> 8) & 0xff) as u8,
-                (end & 0xff) as u8,
-                ((end >> 8) & 0xff) as u8,
-            ];
+            // `struct fib_rule_port_range`'s __u16 fields are kernel-native —
+            // the kernel compares them against `ntohs(fl4->fl4_sport)`. This
+            // was hand-packed little-endian, which is right on x86 by accident
+            // and wrong on any big-endian host (#278).
+            let mut range_bytes = [0u8; 4];
+            range_bytes[..2].copy_from_slice(&start.to_ne_bytes());
+            range_bytes[2..].copy_from_slice(&end.to_ne_bytes());
             builder.append_attr(FraAttr::Dport as u16, &range_bytes);
         }
 

@@ -1857,10 +1857,23 @@ impl ActionConfig for NatAction {
             0
         };
 
+        // `struct tc_nat`'s old_addr/new_addr/mask are `__be32`, and the
+        // struct is serialized natively — so each field must hold the value
+        // whose *memory image* is network order.
+        //
+        // For the addresses that is `from_ne_bytes(octets())`: octets() is
+        // already network order, so reading them natively stores them
+        // unchanged. `from_be_bytes` (what this used to do) byte-reverses them
+        // on every little-endian host.
+        //
+        // The mask arrives as a host-order integer from `prefix_to_mask`, so it
+        // needs an explicit swap. The old code wrote
+        // `u32::from_be_bytes(mask.to_be_bytes())`, which is the identity — a
+        // /24 reached the kernel as 0.255.255.255 (#262).
         let parms = nat::TcNat::new(
-            u32::from_be_bytes(self.old_addr.octets()),
-            u32::from_be_bytes(self.new_addr.octets()),
-            u32::from_be_bytes(mask.to_be_bytes()),
+            u32::from_ne_bytes(self.old_addr.octets()),
+            u32::from_ne_bytes(self.new_addr.octets()),
+            mask.to_be(),
             flags,
             self.action,
         );
@@ -3951,9 +3964,13 @@ impl PeditAction {
         self.keys.push(PeditKey {
             htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_IP4,
             cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
-            mask: 0x00ff_ffff,
-            val: (tos as u32) << 24,
-            off: 0, // TOS is at offset 1 in u32 at offset 0
+            // Wire byte 1 of the word at offset 0 ([ver_ihl, tos, len_hi,
+            // len_lo]), i.e. bits 16..23 read big-endian. This used to be
+            // `<< 24` with mask 0x00ff_ffff, which addresses byte 0 — the
+            // version/IHL nibble — not the TOS (#262).
+            mask: 0xff00_ffff,
+            val: (tos as u32) << 16,
+            off: 0,
         });
         self
     }
@@ -3963,9 +3980,13 @@ impl PeditAction {
         self.keys.push(PeditKey {
             htype: pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_IP4,
             cmd: pedit::TCA_PEDIT_KEY_EX_CMD_SET,
-            mask: 0xffff_00ff,
-            val: (ttl as u32) << 8,
-            off: 8, // TTL is at offset 8 in IPv4 header
+            // Wire byte 0 of the word at offset 8 ([ttl, proto, csum_hi,
+            // csum_lo]), i.e. bits 24..31 read big-endian. This used to be
+            // `<< 8` with mask 0xffff_00ff, which addresses byte 2 — the high
+            // half of the header checksum (#262).
+            mask: 0x00ff_ffff,
+            val: (ttl as u32) << 24,
+            off: 8,
         });
         self
     }
@@ -4276,9 +4297,17 @@ impl ActionConfig for PeditAction {
         let mut parms_data = Vec::new();
         parms_data.extend_from_slice(sel.as_bytes());
 
-        // Append each key
+        // Append each key.
+        //
+        // `val`/`mask` are authored above as big-endian-read integers — the
+        // header field laid out as you would read it on the wire — and
+        // `struct tc_pedit_key` is serialized natively. So each needs the
+        // swap here, exactly as iproute2's `pack_key32()` ends with `htonl()`.
+        //
+        // Without it every edit landed byte-reversed on little-endian:
+        // `set_ipv4_src(10.0.0.1)` rewrote the address to 1.0.0.10 (#262).
         for key in &self.keys {
-            let k = pedit::TcPeditKey::new(key.mask, key.val, key.off);
+            let k = pedit::TcPeditKey::new(key.mask.to_be(), key.val.to_be(), key.off);
             parms_data.extend_from_slice(k.as_bytes());
         }
 
@@ -5136,6 +5165,169 @@ fn parse_one_action(slot: &[u8]) -> Option<ActionMessage> {
         index,
         options_raw,
     })
+}
+
+/// Wire-byte assertions for the NAT encoder (#262).
+///
+/// `struct tc_nat`'s three address fields are `__be32` in a natively
+/// serialized struct, so each must hold the value whose *memory image* is
+/// network order.
+#[cfg(test)]
+mod nat_wire_tests {
+    use super::*;
+    use crate::netlink::test_support::action_attrs;
+
+    // tc_gen is 5x u32; old_addr, new_addr, mask follow.
+    const OLD_ADDR: usize = 20;
+    const NEW_ADDR: usize = 24;
+    const MASK: usize = 28;
+
+    fn field(cfg: &NatAction, at: usize) -> [u8; 4] {
+        let attrs = action_attrs(cfg);
+        let parms = &attrs[&nat::TCA_NAT_PARMS];
+        assert!(parms.len() >= at + 4, "tc_nat is only {} bytes", parms.len());
+        parms[at..at + 4].try_into().unwrap()
+    }
+
+    /// Both addresses network order, and the mask a real mask.
+    ///
+    /// The mask was previously written as
+    /// `u32::from_be_bytes(mask.to_be_bytes())` — the identity — so a /24
+    /// reached the kernel as `00 FF FF FF`, i.e. 0.255.255.255, matching on
+    /// the wrong three octets.
+    #[test]
+    fn nat_addresses_and_mask_are_network_order() {
+        let cfg = NatAction::snat(Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(192, 168, 5, 0))
+            .prefix(24);
+
+        assert_eq!(field(&cfg, OLD_ADDR), [10, 0, 0, 0]);
+        assert_eq!(field(&cfg, NEW_ADDR), [192, 168, 5, 0]);
+        assert_eq!(field(&cfg, MASK), [0xFF, 0xFF, 0xFF, 0x00], "/24 mask");
+        assert_ne!(
+            field(&cfg, MASK),
+            [0x00, 0xFF, 0xFF, 0xFF],
+            "regression: the mask swap is a no-op again"
+        );
+    }
+
+    /// A non-palindromic address, so a reversal cannot hide.
+    #[test]
+    fn nat_address_is_not_byte_reversed() {
+        let cfg = NatAction::dnat(Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(10, 20, 30, 40));
+        assert_eq!(field(&cfg, OLD_ADDR), [1, 2, 3, 4]);
+        assert_ne!(field(&cfg, OLD_ADDR), [4, 3, 2, 1]);
+        assert_eq!(field(&cfg, MASK), [0xFF, 0xFF, 0xFF, 0xFF], "/32 mask");
+    }
+}
+
+/// Wire-byte assertions for the pedit encoder (#262).
+///
+/// `val` and `mask` are authored as big-endian-read integers and the struct is
+/// serialized natively, so the swap at pack time is what puts them on the wire.
+/// These assert the *bytes*, never a round-trip: the original bug was
+/// symmetric, so anything that went through nlink's own decoder agreed with
+/// itself while the kernel edited the wrong bytes.
+#[cfg(test)]
+mod pedit_wire_tests {
+    use super::*;
+    use crate::netlink::test_support::action_attrs;
+
+    const SEL_SIZE: usize = 24; // tc_pedit_sel: 5x u32 + u8 + u8 + u16
+    const KEY_SIZE: usize = 24; // tc_pedit_key: 6x u32
+
+    /// `(mask, val, off)` of key `n`, as the bytes actually emitted.
+    fn key_bytes(cfg: &PeditAction, n: usize) -> ([u8; 4], [u8; 4], u32) {
+        let attrs = action_attrs(cfg);
+        let parms = &attrs[&pedit::TCA_PEDIT_PARMS_EX];
+        let base = SEL_SIZE + n * KEY_SIZE;
+        assert!(
+            parms.len() >= base + KEY_SIZE,
+            "key {n} beyond TCA_PEDIT_PARMS_EX ({} bytes)",
+            parms.len()
+        );
+        let mask = parms[base..base + 4].try_into().unwrap();
+        let val = parms[base + 4..base + 8].try_into().unwrap();
+        let off = u32::from_ne_bytes(parms[base + 8..base + 12].try_into().unwrap());
+        (mask, val, off)
+    }
+
+    /// The headline case: a rewritten source address must reach the wire in
+    /// network order. Before the fix this emitted `01 00 00 0A`, so
+    /// `set_ipv4_src(10.0.0.1)` rewrote packets to 1.0.0.10.
+    #[test]
+    fn ipv4_src_is_network_order() {
+        let cfg = PeditAction::new().set_ipv4_src(Ipv4Addr::new(10, 0, 0, 1));
+        let (mask, val, off) = key_bytes(&cfg, 0);
+
+        assert_eq!(val, [10, 0, 0, 1], "address must be network order");
+        assert_ne!(val, [1, 0, 0, 10], "regression: byte-reversed again");
+        assert_eq!(mask, [0, 0, 0, 0]);
+        assert_eq!(off, 12);
+    }
+
+    #[test]
+    fn ipv4_dst_is_network_order() {
+        let cfg = PeditAction::new().set_ipv4_dst(Ipv4Addr::new(192, 168, 1, 254));
+        let (_, val, off) = key_bytes(&cfg, 0);
+        assert_eq!(val, [192, 168, 1, 254]);
+        assert_eq!(off, 16);
+    }
+
+    /// TOS is wire byte 1 of the word at offset 0 — `[ver_ihl, tos, len_hi,
+    /// len_lo]`. The old encoding put it in byte 3, the low half of the total
+    /// length, and cleared byte 0's nibbles instead.
+    #[test]
+    fn ipv4_tos_targets_byte_one() {
+        let cfg = PeditAction::new().set_ipv4_tos(0xB8);
+        let (mask, val, off) = key_bytes(&cfg, 0);
+
+        assert_eq!(off, 0);
+        assert_eq!(val, [0x00, 0xB8, 0x00, 0x00], "TOS belongs in byte 1");
+        assert_eq!(mask, [0xFF, 0x00, 0xFF, 0xFF], "mask must clear only byte 1");
+        assert_ne!(val, [0x00, 0x00, 0x00, 0xB8], "regression: total-length byte");
+    }
+
+    /// TTL is wire byte 0 of the word at offset 8 — `[ttl, proto, csum_hi,
+    /// csum_lo]`. The old encoding targeted byte 2, the checksum's high half.
+    #[test]
+    fn ipv4_ttl_targets_byte_zero_of_the_ttl_word() {
+        let cfg = PeditAction::new().set_ipv4_ttl(64);
+        let (mask, val, off) = key_bytes(&cfg, 0);
+
+        assert_eq!(off, 8);
+        assert_eq!(val, [64, 0x00, 0x00, 0x00], "TTL belongs in byte 0");
+        assert_eq!(mask, [0x00, 0xFF, 0xFF, 0xFF], "mask must clear only byte 0");
+        assert_ne!(val, [0x00, 0x00, 64, 0x00], "regression: checksum byte");
+    }
+
+    /// Source port is wire bytes 0-1, destination 2-3, of the same word.
+    #[test]
+    fn l4_ports_land_in_their_own_halves() {
+        let (_, val, off) = key_bytes(&PeditAction::new().set_tcp_sport(8080), 0);
+        assert_eq!(off, 0);
+        assert_eq!(val, [0x1F, 0x90, 0x00, 0x00], "sport is bytes 0-1");
+
+        let (mask, val, _) = key_bytes(&PeditAction::new().set_udp_dport(53), 0);
+        assert_eq!(val, [0x00, 0x00, 0x00, 53], "dport is bytes 2-3");
+        assert_eq!(mask, [0xFF, 0xFF, 0x00, 0x00]);
+    }
+
+    /// A MAC spans two keys: four bytes then two, and both halves have to be
+    /// in order for the address to survive.
+    #[test]
+    fn eth_dst_spans_two_keys_in_order() {
+        let mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let cfg = PeditAction::new().set_eth_dst(mac);
+
+        let (_, val0, off0) = key_bytes(&cfg, 0);
+        assert_eq!(off0, 0);
+        assert_eq!(val0, [0x02, 0x11, 0x22, 0x33]);
+
+        let (mask1, val1, off1) = key_bytes(&cfg, 1);
+        assert_eq!(off1, 4);
+        assert_eq!(val1, [0x44, 0x55, 0x00, 0x00]);
+        assert_eq!(mask1, [0x00, 0x00, 0xFF, 0xFF]);
+    }
 }
 
 /// Wire-byte assertions for the police encoder (#194).
