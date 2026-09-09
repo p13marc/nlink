@@ -492,9 +492,13 @@ async fn test_add_flower_filter() -> Result<()> {
     )
     .await?;
 
-    // Add flower filter
+    // Add flower filter. `.ipv4()` is required, not decorative:
+    // cls_flower silently drops ip_proto unless the request carries
+    // TCA_FLOWER_KEY_ETH_TYPE, and would install this as a match-all
+    // (#288).
     let filter = FlowerFilter::new()
         .classid(TcHandle::new(1, 0x10))
+        .ipv4()
         .ip_proto_tcp()
         .build();
     conn.add_filter("dummy0", TcHandle::major_only(1), filter)

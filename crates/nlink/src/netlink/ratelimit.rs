@@ -59,10 +59,23 @@ use super::{
     tc_handle::{FilterPriority, TcHandle},
     tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject},
     tc_recipe_internals::{
-        LiveTree, dump_live_tree, flower_classid, fq_codel_target_matches, htb_class_rates_match,
-        root_htb_options,
+        DEFAULT_CLASS_MINOR, DEFAULT_LEAF_MAJOR, LiveTree, dump_live_tree, flower_matches,
+        fq_codel_target_matches, htb_class_rates_match, root_htb_options,
     },
 };
+
+/// Minor of the single leaf class `RateLimiter` creates under the HTB root.
+///
+/// The HTB qdisc's `default` and the class it names **must** come from this one
+/// constant. They were previously written independently: the qdisc said
+/// `default_class(0x10)` — 16 — while the class was created at
+/// `TcHandle::new(1, 10)`, decimal 10. So `htb_classify` looked up a class that
+/// did not exist, fell through to `HTB_DIRECT`, and transmitted every packet
+/// unshaped.
+///
+/// `RateLimiter` installs no filters, so this default class is the *only* thing
+/// standing between traffic and the wire (#258).
+const LEAF_CLASS_MINOR: u16 = 10;
 
 // ============================================================================
 // RateLimit
@@ -382,8 +395,8 @@ impl RateLimiter {
         let tree = dump_live_tree(conn, ifindex).await?;
         let root_handle = TcHandle::major_only(1);
         let class_1_1 = TcHandle::new(1, 1);
-        let class_1_10 = TcHandle::new(1, 10);
-        let leaf_handle = TcHandle::major_only(10);
+        let class_1_10 = TcHandle::new(1, LEAF_CLASS_MINOR);
+        let leaf_handle = TcHandle::major_only(LEAF_CLASS_MINOR);
         let rate = limit.rate;
         let ceil = limit.ceil.unwrap_or(limit.rate);
         let rate_bps = rate.as_bytes_per_sec();
@@ -406,10 +419,10 @@ impl RateLimiter {
         };
 
         // Root HTB.
-        match tree.root_qdisc.as_ref() {
+        match tree.configured_root_qdisc() {
             None => {
                 if !opts.dry_run {
-                    let cfg = HtbQdiscConfig::new().default_class(0x10).build();
+                    let cfg = HtbQdiscConfig::new().default_class(LEAF_CLASS_MINOR as u32).build();
                     conn.add_qdisc_by_index_full(ifindex, TcHandle::ROOT, Some(root_handle), cfg)
                         .await
                         .map_err(|e| {
@@ -541,7 +554,7 @@ impl RateLimiter {
         let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
 
         // Add HTB qdisc at root with handle 1:
-        let htb = HtbQdiscConfig::new().default_class(0x10).build();
+        let htb = HtbQdiscConfig::new().default_class(LEAF_CLASS_MINOR as u32).build();
         conn.add_qdisc_full(
             &self.dev,
             TcHandle::ROOT,
@@ -577,7 +590,7 @@ impl RateLimiter {
         conn.add_class(
             &self.dev,
             TcHandle::new(1, 1),
-            TcHandle::new(1, 10),
+            TcHandle::new(1, LEAF_CLASS_MINOR),
             default_config.build(),
         )
         .await?;
@@ -589,8 +602,8 @@ impl RateLimiter {
         }
         conn.add_qdisc_full(
             &self.dev,
-            TcHandle::new(1, 10),
-            Some(TcHandle::major_only(10)),
+            TcHandle::new(1, LEAF_CLASS_MINOR),
+            Some(TcHandle::major_only(LEAF_CLASS_MINOR)),
             fq_codel.build(),
         )
         .await?;
@@ -626,7 +639,7 @@ impl RateLimiter {
         let _ = conn.del_qdisc(&ifb_name, TcHandle::ROOT).await;
 
         // Add HTB qdisc at root of IFB with handle 1:
-        let htb = HtbQdiscConfig::new().default_class(0x10).build();
+        let htb = HtbQdiscConfig::new().default_class(LEAF_CLASS_MINOR as u32).build();
         conn.add_qdisc_full(
             &ifb_name,
             TcHandle::ROOT,
@@ -662,7 +675,7 @@ impl RateLimiter {
         conn.add_class(
             &ifb_name,
             TcHandle::new(1, 1),
-            TcHandle::new(1, 10),
+            TcHandle::new(1, LEAF_CLASS_MINOR),
             default_config.build(),
         )
         .await?;
@@ -674,8 +687,8 @@ impl RateLimiter {
         }
         conn.add_qdisc_full(
             &ifb_name,
-            TcHandle::new(1, 10),
-            Some(TcHandle::major_only(10)),
+            TcHandle::new(1, LEAF_CLASS_MINOR),
+            Some(TcHandle::major_only(LEAF_CLASS_MINOR)),
             fq_codel.build(),
         )
         .await?;
@@ -704,7 +717,7 @@ impl RateLimiter {
         ifb_ifindex: u32,
     ) -> Result<()> {
         use super::{
-            connection::ack_request,
+            connection::create_request,
             message::NlMsgType,
             types::tc::{
                 TcMsg, TcaAttr,
@@ -727,29 +740,36 @@ impl RateLimiter {
             .with_parent(tc_handle::INGRESS)
             .with_filter_info(0x0003, 1); // ETH_P_ALL, priority 1
 
-        let mut builder = ack_request(NlMsgType::RTM_NEWTFILTER);
+        // `create_request`, not `ack_request`: `tc_ctl_tfilter` answers
+        // a filter add that names no existing handle with
+        //
+        //   ENOENT "Need both RTM_NEWTFILTER and NLM_F_CREATE to
+        //           create a new filter"
+        //
+        // so without the flag this call never installed anything and
+        // `RateLimiter::ingress` failed on every interface.
+        let mut builder = create_request(NlMsgType::RTM_NEWTFILTER);
         builder.append(&tcmsg);
         builder.append_attr_str(TcaAttr::Kind as u16, "u32");
 
         // Options
         let opt_token = builder.nest_start(TcaAttr::Options as u16);
 
-        // Match all packets: match u32 0 0 at 0
+        // Match all packets: `match u32 0 0 at 0`.
+        //
+        // Built from the typed structs rather than a byte array. The
+        // array this replaced was 28 bytes — a 12-byte header plus one
+        // key — but `struct tc_u32_sel`'s header is 16 (`offmask` is
+        // `__be16` after a 1-byte pad, then `off`, `offoff`, `hoff`,
+        // and a `__be32 hmask`). `u32_change` rejects anything shorter
+        // than `struct_size(sel, keys, sel->nkeys)`, so the ingress
+        // redirect filter never installed and `RateLimiter::ingress`
+        // silently shaped nothing.
         let sel_token = builder.nest_start(u32_mod::TCA_U32_SEL);
-        // TcU32Sel header + one key (total 28 bytes)
-        // Header: flags=0, offshift=0, nkeys=1, offmask=0, off=0, offoff=0, hoff=0, hmask=0
-        // Key: val=0, mask=0, off=0, offmask=0 (matches everything)
-        let sel_data: [u8; 28] = [
-            0, 0, 1, 0, // flags, offshift, nkeys, offmask
-            0, 0, 0, 0, // off, offoff (16-bit each)
-            0, 0, 0, 0, // hoff, hmask (16-bit each)
-            // Key starts here (16 bytes)
-            0, 0, 0, 0, // val (matches anything when mask is 0)
-            0, 0, 0, 0, // mask (0 = match all)
-            0, 0, 0, 0, // off (offset in packet)
-            0, 0, 0, 0, // offmask
-        ];
-        builder.append_bytes(&sel_data);
+        let mut sel = u32_mod::TcU32Sel::new();
+        sel.set_terminal();
+        sel.add_key(u32_mod::TcU32Key::default());
+        builder.append_bytes(&sel.to_bytes());
         builder.nest_end(sel_token);
 
         // Add mirred action
@@ -944,8 +964,16 @@ impl PerHostLimiter {
         let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
 
         // Add HTB qdisc at root with handle 1:
-        // Default class will be the last one (for unmatched traffic)
-        let default_classid = (self.rules.len() + 1) as u32;
+        //
+        // Rule classes occupy minors 2..=n+1, so the default class is n+2.
+        // This said `n + 1` — the *last rule's* class — so with any rules at
+        // all, unmatched traffic was shaped at the last rule's rate instead of
+        // `default_rate`; with none, it named the inner class 1:1 and
+        // htb_classify fell through to HTB_DIRECT, bypassing the shaper
+        // entirely. `reconcile_inner` always used n+2, so the two verbs
+        // disagreed and apply-then-reconcile was never a no-op (#269).
+        let default_minor = DEFAULT_CLASS_MINOR;
+        let default_classid = default_minor as u32;
         let htb = HtbQdiscConfig::new().default_class(default_classid).build();
         conn.add_qdisc_full(
             &self.dev,
@@ -985,8 +1013,8 @@ impl PerHostLimiter {
         }
 
         // Add default class for unmatched traffic
-        let default_classid = TcHandle::new(1, (self.rules.len() + 2) as u16);
-        let default_handle = TcHandle::major_only((self.rules.len() + 10) as u16);
+        let default_classid = TcHandle::new(1, default_minor);
+        let default_handle = TcHandle::major_only(DEFAULT_LEAF_MAJOR);
         let default_config = HtbClassConfig::new(self.default_rate)
             .ceil(self.default_rate)
             .build();
@@ -1078,18 +1106,17 @@ impl PerHostLimiter {
 
         let tree = dump_live_tree(conn, ifindex).await?;
 
-        let n = self.rules.len();
         let parent_classid = TcHandle::new(1, 1);
         let root_handle = TcHandle::major_only(1);
-        let default_minor = (n + 2) as u16;
+        let default_minor = DEFAULT_CLASS_MINOR;
         let default_classid = TcHandle::new(1, default_minor);
-        let default_leaf_handle = TcHandle::major_only((n + 10) as u16);
+        let default_leaf_handle = TcHandle::major_only(DEFAULT_LEAF_MAJOR);
         let total_rate: crate::util::Rate =
             self.default_rate + self.rules.iter().map(|r| r.rate).sum::<crate::util::Rate>();
         let target_us = self.latency.map(|d| d.as_micros() as u32);
 
         // 1. Root HTB qdisc.
-        match tree.root_qdisc.as_ref() {
+        match tree.configured_root_qdisc() {
             None => {
                 if !opts.dry_run {
                     let cfg = HtbQdiscConfig::new()
@@ -1411,6 +1438,13 @@ impl PerHostLimiter {
         const ETH_P_IP: u16 = 0x0800;
         const ETH_P_IPV6: u16 = 0x86DD;
 
+        // `.ipv4()` on the port filters is load-bearing, not decoration:
+        // cls_flower discards `ip_proto` and the port keys unless the
+        // request carries TCA_FLOWER_KEY_ETH_TYPE, and a port rule
+        // without it installs as a match-all that claims every packet
+        // on the interface (#288). The address setters imply it; the
+        // L4 ones do not.
+
         let priority = (index + 1) as u16;
         let root_handle = TcHandle::major_only(1);
 
@@ -1488,6 +1522,7 @@ impl PerHostLimiter {
                     FlowerFilter::new()
                         .classid(classid)
                         .priority(priority)
+                        .ipv4()
                         .ip_proto_tcp()
                         .dst_port(*port)
                         .build(),
@@ -1498,6 +1533,7 @@ impl PerHostLimiter {
                     FlowerFilter::new()
                         .classid(classid)
                         .priority(priority + 100)
+                        .ipv4()
                         .ip_proto_udp()
                         .dst_port(*port)
                         .build(),
@@ -1514,8 +1550,12 @@ impl PerHostLimiter {
 
         for (proto, prio, filter) in want {
             let live = tree.filter_at_priority(prio);
+            // Compare the match keys, not just kind + classid: both the
+            // priority and the classid come from the rule's *index*, so
+            // an edited rule reused them and reconcile saw no change
+            // (#270).
             let ok = live
-                .map(|f| f.kind() == Some("flower") && flower_classid(f) == Some(classid))
+                .map(|f| flower_matches(&filter, proto, f))
                 .unwrap_or(false);
             if !ok {
                 if !opts.dry_run {
@@ -1543,8 +1583,8 @@ impl PerHostLimiter {
     }
 
     async fn apply_as_reconcile(&self, conn: &Connection<Route>) -> Result<ReconcileReport> {
-        self.apply(conn).await?;
         let n = self.rules.len();
+        self.apply(conn).await?;
         Ok(ReconcileReport {
             // 1 root + 1 parent + 3 per rule (class+leaf+filter, +1 for
             // Port matches' UDP companion) + 1 default class + 1 default
@@ -1568,51 +1608,19 @@ impl PerHostLimiter {
         let n = self.rules.len();
         let parent_classid = TcHandle::new(1, 1);
         let root_handle = TcHandle::major_only(1);
-        let max_minor = (n + 2) as u16;
+        // Rule classes only; the default sits at DEFAULT_CLASS_MINOR.
+        let max_minor = (n + 1) as u16;
 
-        // Stale classes in major 1:.
-        let mut stale_classes: Vec<TcHandle> = Vec::new();
-        for handle in tree.classes.keys() {
-            if handle.major() != 1 {
-                continue;
-            }
-            let minor = handle.minor();
-            if minor == 0 || minor == 1 {
-                continue;
-            }
-            if minor >= 2 && minor <= max_minor {
-                continue;
-            }
-            stale_classes.push(*handle);
-        }
-        for handle in &stale_classes {
-            if let Some(q) = tree.leaf_for(*handle) {
-                let leaf_handle = q.handle();
-                if !opts.dry_run {
-                    let _ = conn
-                        .del_qdisc_by_index_full(ifindex, *handle, Some(leaf_handle))
-                        .await;
-                }
-            }
-            if !opts.dry_run
-                && let Err(e) = conn
-                    .del_class_by_index(ifindex, parent_classid, *handle)
-                    .await
-                && !e.is_not_found()
-            {
-                return Err(e.with_context(format!(
-                    "PerHostLimiter::reconcile: remove stale class {handle}"
-                )));
-            }
-            report.changes_made += 1;
-            report.rules_removed += 1;
-            report.stale_removed.push(StaleObject {
-                kind: "class",
-                handle: *handle,
-                priority: None,
-            });
-        }
-
+        // Filters first, then classes. `htb_delete` refuses a class
+        // any filter still points at:
+        //
+        //   if (cl->children || qdisc_class_in_use(&cl->common)) {
+        //           NL_SET_ERR_MSG(extack, "HTB class in use");
+        //           return -EBUSY;
+        //   }
+        //
+        // so removing a rule used to fail with EBUSY partway through
+        // (#291) — the class went first and its filter was still bound.
         // Stale filters at root parent. PerHostLimiter installs in the
         // operator band (priority i+1, i in 0..n) and recipe-band
         // companions (priority i+1+100 for Port matches). To stay
@@ -1660,6 +1668,49 @@ impl PerHostLimiter {
                 priority: Some(FilterPriority::new(prio)),
             });
         }
+        // Stale classes in major 1:.
+        let mut stale_classes: Vec<TcHandle> = Vec::new();
+        for handle in tree.classes.keys() {
+            if handle.major() != 1 {
+                continue;
+            }
+            let minor = handle.minor();
+            if minor == 0 || minor == 1 {
+                continue;
+            }
+            if (minor >= 2 && minor <= max_minor) || minor == DEFAULT_CLASS_MINOR {
+                continue;
+            }
+            stale_classes.push(*handle);
+        }
+        for handle in &stale_classes {
+            if let Some(q) = tree.leaf_for(*handle) {
+                let leaf_handle = q.handle();
+                if !opts.dry_run {
+                    let _ = conn
+                        .del_qdisc_by_index_full(ifindex, *handle, Some(leaf_handle))
+                        .await;
+                }
+            }
+            if !opts.dry_run
+                && let Err(e) = conn
+                    .del_class_by_index(ifindex, parent_classid, *handle)
+                    .await
+                && !e.is_not_found()
+            {
+                return Err(e.with_context(format!(
+                    "PerHostLimiter::reconcile: remove stale class {handle}"
+                )));
+            }
+            report.changes_made += 1;
+            report.rules_removed += 1;
+            report.stale_removed.push(StaleObject {
+                kind: "class",
+                handle: *handle,
+                priority: None,
+            });
+        }
+
         Ok(())
     }
 
@@ -1779,10 +1830,13 @@ impl PerHostLimiter {
             }
             HostMatch::Port(port) => {
                 // Match both TCP and UDP. L4 port matching at the IP layer
-                // dispatches under ETH_P_IP.
+                // dispatches under ETH_P_IP — and `.ipv4()` must say so
+                // in the flower keys too, or cls_flower drops the port
+                // match and installs a match-all (#288).
                 let tcp_filter = FlowerFilter::new()
                     .classid(classid)
                     .priority(priority)
+                    .ipv4()
                     .ip_proto_tcp()
                     .dst_port(*port)
                     .build();
@@ -1799,6 +1853,7 @@ impl PerHostLimiter {
                 let udp_filter = FlowerFilter::new()
                     .classid(classid)
                     .priority(priority + 100) // Different priority to avoid conflict
+                    .ipv4()
                     .ip_proto_udp()
                     .dst_port(*port)
                     .build();
@@ -1821,6 +1876,7 @@ impl PerHostLimiter {
                         let filter = FlowerFilter::new()
                             .classid(classid)
                             .priority(priority)
+                            .ipv4()
                             .ip_proto_tcp()
                             .dst_port(port)
                             .build();
@@ -1877,6 +1933,113 @@ fn parse_subnet(subnet: &str) -> Result<(IpAddr, u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    // ====================================================================
+    // #258 / #269 — the HTB `default` must name a class that exists
+    // ====================================================================
+    //
+    // Three separate default-class bugs shipped because nothing checked
+    // that `defcls` and the created class agreed. When `htb_classify`
+    // cannot resolve `defcls` it returns HTB_DIRECT and the packet
+    // leaves the interface unshaped — no error, no log, just a rate
+    // limit that silently does nothing.
+
+    /// Read `default` out of an `HtbQdiscConfig`'s serialized options.
+    fn htb_defcls(cfg: &HtbQdiscConfig) -> u32 {
+        use crate::netlink::{tc::QdiscConfig, types::tc::qdisc::htb::TCA_HTB_INIT};
+
+        let mut builder = crate::netlink::builder::MessageBuilder::new(0, 0);
+        let start = builder.len();
+        cfg.write_options(&mut builder).expect("write options");
+        let blob = builder.as_bytes()[start..builder.len()].to_vec();
+
+        // TCA_HTB_INIT payload is `struct tc_htb_glob`:
+        //   version, rate2quantum, defcls, debug, direct_pkts
+        // so `defcls` is the third u32.
+        let mut input = &blob[..];
+        while input.len() >= 4 {
+            let len = u16::from_ne_bytes(input[..2].try_into().unwrap()) as usize;
+            let ty = u16::from_ne_bytes(input[2..4].try_into().unwrap()) & 0x3FFF;
+            assert!(len >= 4 && input.len() >= len, "malformed htb options");
+            if ty == TCA_HTB_INIT {
+                let p = &input[4..len];
+                assert!(p.len() >= 12, "tc_htb_glob truncated");
+                return u32::from_ne_bytes(p[8..12].try_into().unwrap());
+            }
+            let aligned = (len + 3) & !3;
+            if input.len() <= aligned {
+                break;
+            }
+            input = &input[aligned..];
+        }
+        panic!("no TCA_HTB_INIT in HtbQdiscConfig options");
+    }
+
+    #[test]
+    fn ratelimiter_default_class_is_the_class_it_creates() {
+        // `default_class(0x10)` (16) against a class at `1:10` (10) is
+        // exactly the shape of #258. Both now read one constant.
+        let cfg = HtbQdiscConfig::new()
+            .default_class(LEAF_CLASS_MINOR as u32)
+            .build();
+        assert_eq!(htb_defcls(&cfg), LEAF_CLASS_MINOR as u32);
+        assert_eq!(
+            TcHandle::new(1, LEAF_CLASS_MINOR).minor(),
+            htb_defcls(&cfg) as u16,
+            "HTB default names a minor no class is created at"
+        );
+    }
+
+    #[test]
+    fn per_host_default_class_never_collides_with_a_rule_class() {
+        // Rule i takes minor i+2, so n rules occupy 2..=n+1. The default
+        // used to be n+2 in `reconcile` and n+1 in `apply` — the latter
+        // being the *last rule's* class (#269). It is now a constant
+        // outside the rules' range entirely, so no rule count can reach
+        // it and no HTB `default` ever needs rewriting (#291).
+        for n in 0..64usize {
+            let rule_minors: Vec<u16> = (0..n).map(|i| (i + 2) as u16).collect();
+            assert!(
+                !rule_minors.contains(&DEFAULT_CLASS_MINOR),
+                "n={n}: default class collides with a rule class"
+            );
+        }
+        assert_ne!(DEFAULT_CLASS_MINOR, 0, "0 is the qdisc itself");
+        assert_ne!(DEFAULT_CLASS_MINOR, 1, "1:1 is the parent class");
+    }
+
+    #[test]
+    fn per_host_default_class_is_the_class_the_htb_default_names() {
+        // `apply` and `reconcile` both read the same constant, so the
+        // qdisc's `defcls` and the class that gets created cannot drift
+        // apart the way they did in #258 and #269.
+        let cfg = HtbQdiscConfig::new()
+            .default_class(DEFAULT_CLASS_MINOR as u32)
+            .build();
+        assert_eq!(htb_defcls(&cfg), DEFAULT_CLASS_MINOR as u32);
+        assert_eq!(
+            TcHandle::new(1, DEFAULT_CLASS_MINOR).minor(),
+            htb_defcls(&cfg) as u16
+        );
+    }
+
+    // ====================================================================
+    // #268 — ingress/clsact are parent-fixed
+    // ====================================================================
+
+    #[test]
+    fn hook_qdiscs_declare_their_only_legal_parent() {
+        use crate::netlink::tc::{ClsactConfig, FqCodelConfig, IngressConfig, QdiscConfig};
+
+        // `ingress_init`/`clsact_init` answer EOPNOTSUPP for any parent
+        // but TC_H_INGRESS, so `add_qdisc`'s TC_H_ROOT default could
+        // never work for these two.
+        assert_eq!(IngressConfig::new().fixed_parent(), Some(TcHandle::INGRESS));
+        assert_eq!(ClsactConfig::new().fixed_parent(), Some(TcHandle::INGRESS));
+        // Real schedulers keep the root default.
+        assert_eq!(FqCodelConfig::new().build().fixed_parent(), None);
+    }
 
     #[test]
     fn test_rate_limit_new() {

@@ -850,7 +850,7 @@ fn diff_qdiscs(
     }
 
     for declared in &config.qdiscs {
-        let current_map = match declared.parent {
+        let current_map = match declared.effective_parent() {
             QdiscParent::Root => &current_root_qdisc,
             QdiscParent::Ingress => &current_ingress_qdisc,
         };

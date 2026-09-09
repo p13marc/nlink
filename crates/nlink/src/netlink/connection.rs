@@ -2156,10 +2156,94 @@ impl Connection<Route> {
             .collect())
     }
 
+
+    /// Dump TC entities for **one** interface.
+    ///
+    /// `tc_dump_tclass` and `tc_dump_tfilter` both open with
+    ///
+    /// ```c
+    /// dev = dev_get_by_index(net, tcm->tcm_ifindex);
+    /// if (!dev)
+    ///     return 0;
+    /// ```
+    ///
+    /// so a request carrying `tcm_ifindex == 0` — which is what a
+    /// zeroed [`TcMsg`] dump header produces — ends the dump straight
+    /// away with `NLMSG_DONE` and no entries. Not an error: an empty,
+    /// successful dump. Class and filter dumps must name their device
+    /// (#286); qdisc dumps are the exception and work either way.
+    ///
+    /// A **filter** dump additionally needs `tcm_parent`: with it unset
+    /// `tc_dump_tfilter` falls back to `dev->qdisc` and walks the root
+    /// qdisc alone, so filters on the ingress/clsact hooks never appear.
+    #[instrument(level = "debug", skip(self), fields(method = "dump_tc_for_index"))]
+    async fn dump_tc_for_index(
+        &self,
+        msg_type: u16,
+        ifindex: u32,
+        parent: Option<TcHandle>,
+    ) -> Result<Vec<TcMessage>> {
+        let mut builder = dump_request(msg_type);
+        let mut header = crate::netlink::types::tc::TcMsg::new().with_ifindex(ifindex as i32);
+        if let Some(parent) = parent {
+            header = header.with_parent(parent.as_raw());
+        }
+        builder.append_bytes(header.as_bytes());
+
+        let responses = self.send_dump(builder).await?;
+        let mut parsed = Vec::with_capacity(responses.len());
+        for response in responses {
+            if response.len() < NLMSG_HDRLEN {
+                continue;
+            }
+            let Ok(mut msg) = TcMessage::from_bytes(&response[NLMSG_HDRLEN..]) else {
+                continue;
+            };
+            if let Ok(header) = NlMsgHdr::from_bytes(&response[..NLMSG_HDRLEN]) {
+                msg.set_msg_type(header.nlmsg_type);
+            }
+            // A filter dump opens each (parent, priority, protocol)
+            // chain with the `tcf_proto` itself: handle 0, the right
+            // kind, and no `TCA_OPTIONS`. `tc filter show` prints it as
+            // the bare "filter protocol ip pref 1 flower chain 0" line
+            // above the real entries. It is not a filter — it carries
+            // no match criteria and cannot be deleted — so returning it
+            // just doubles every count and hands callers a message with
+            // nothing in it.
+            if msg_type == NlMsgType::RTM_GETTFILTER && msg.handle_raw() == 0 {
+                continue;
+            }
+            parsed.push(msg);
+        }
+        Ok(parsed)
+    }
+
+    /// Every interface index in this connection's namespace.
+    async fn all_ifindexes(&self) -> Result<Vec<u32>> {
+        Ok(self
+            .get_links()
+            .await?
+            .into_iter()
+            .map(|l| l.ifindex())
+            .collect())
+    }
+
     /// Get all TC classes.
+    ///
+    /// The kernel has no "all devices" class dump, so this walks every
+    /// interface and dumps each one (#286). Prefer
+    /// [`get_classes_by_index`](Self::get_classes_by_index) when you
+    /// know the device — it is one dump instead of N+1.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_classes"))]
     pub async fn get_classes(&self) -> Result<Vec<TcMessage>> {
-        self.dump_typed(NlMsgType::RTM_GETTCLASS).await
+        let mut out = Vec::new();
+        for ifindex in self.all_ifindexes().await? {
+            out.extend(
+                self.dump_tc_for_index(NlMsgType::RTM_GETTCLASS, ifindex, None)
+                    .await?,
+            );
+        }
+        Ok(out)
     }
 
     /// Get TC classes for a specific interface.
@@ -2177,17 +2261,23 @@ impl Connection<Route> {
     /// Get TC classes for a specific interface by index.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_classes_by_index"))]
     pub async fn get_classes_by_index(&self, ifindex: u32) -> Result<Vec<TcMessage>> {
-        let classes = self.get_classes().await?;
-        Ok(classes
-            .into_iter()
-            .filter(|c| c.ifindex() == ifindex)
-            .collect())
+        self.dump_tc_for_index(NlMsgType::RTM_GETTCLASS, ifindex, None)
+            .await
     }
 
     /// Get all TC filters.
+    ///
+    /// Like [`get_classes`](Self::get_classes), one dump per interface
+    /// — the kernel refuses to enumerate filters device-lessly (#286).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_filters"))]
     pub async fn get_filters(&self) -> Result<Vec<TcMessage>> {
-        self.dump_typed(NlMsgType::RTM_GETTFILTER).await
+        let mut out = Vec::new();
+        for ifindex in self.all_ifindexes().await? {
+            out.extend(
+                self.dump_filters_everywhere(ifindex).await?,
+            );
+        }
+        Ok(out)
     }
 
     /// Get TC filters for a specific interface.
@@ -2203,13 +2293,45 @@ impl Connection<Route> {
     }
 
     /// Get TC filters for a specific interface by index.
+    ///
+    /// Sweeps the root qdisc **and** the ingress/clsact hooks — a
+    /// parent-less filter dump only sees the root qdisc, which is why
+    /// `list_bpf_programs` (clsact) and the `RateLimiter` ingress
+    /// reconcile (ingress) both read back nothing (#286).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_filters_by_index"))]
     pub async fn get_filters_by_index(&self, ifindex: u32) -> Result<Vec<TcMessage>> {
-        let filters = self.get_filters().await?;
-        Ok(filters
-            .into_iter()
-            .filter(|f| f.ifindex() == ifindex)
-            .collect())
+        self.dump_filters_everywhere(ifindex).await
+    }
+
+    /// Every parent a filter can hang off on one interface.
+    ///
+    /// `None` is the root qdisc; the three hook handles cover classic
+    /// `ingress` and both clsact hooks. `clsact_find` rejects a parent
+    /// whose minor is neither `TC_H_MIN_INGRESS` nor `TC_H_MIN_EGRESS`,
+    /// so the two hooks have to be asked for separately.
+    const FILTER_DUMP_PARENTS: [Option<TcHandle>; 4] = [
+        None,
+        Some(TcHandle::INGRESS),
+        Some(TcHandle::CLSACT_INGRESS),
+        Some(TcHandle::CLSACT_EGRESS),
+    ];
+
+    async fn dump_filters_everywhere(&self, ifindex: u32) -> Result<Vec<TcMessage>> {
+        let mut out = Vec::new();
+        for parent in Self::FILTER_DUMP_PARENTS {
+            match self
+                .dump_tc_for_index(NlMsgType::RTM_GETTFILTER, ifindex, parent)
+                .await
+            {
+                Ok(filters) => out.extend(filters),
+                // No qdisc at that hook: the kernel answers EINVAL
+                // ("Parent Qdisc doesn't exists"), which for a sweep
+                // just means there is nothing there.
+                Err(e) if e.is_invalid_argument() || e.is_not_found() => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
     }
 
     /// Stream a qdisc dump frame-by-frame.
@@ -2297,11 +2419,8 @@ impl Connection<Route> {
         ifindex: u32,
         parent: TcHandle,
     ) -> Result<Vec<TcMessage>> {
-        let filters = self.get_filters_by_index(ifindex).await?;
-        Ok(filters
-            .into_iter()
-            .filter(|f| f.parent() == parent)
-            .collect())
+        self.dump_tc_for_index(NlMsgType::RTM_GETTFILTER, ifindex, Some(parent))
+            .await
     }
 
     /// Get all TC filter chains for an interface.

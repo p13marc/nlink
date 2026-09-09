@@ -50,7 +50,21 @@ impl TcHandle {
     pub const INGRESS: Self = Self(raw::INGRESS);
 
     /// Clsact qdisc handle (kernel constant `TC_H_CLSACT`).
+    ///
+    /// `TC_H_CLSACT` is an alias of `TC_H_INGRESS`, so this equals
+    /// [`INGRESS`](Self::INGRESS). It is the parent a clsact **qdisc**
+    /// is installed under; the parent a *filter* attaches to is
+    /// [`CLSACT_INGRESS`](Self::CLSACT_INGRESS) or
+    /// [`CLSACT_EGRESS`](Self::CLSACT_EGRESS).
     pub const CLSACT: Self = Self(raw::CLSACT);
+
+    /// Parent of a filter on the clsact **ingress** hook
+    /// (`TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_INGRESS)`).
+    pub const CLSACT_INGRESS: Self = Self(raw::CLSACT_INGRESS);
+
+    /// Parent of a filter on the clsact **egress** hook
+    /// (`TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_EGRESS)`).
+    pub const CLSACT_EGRESS: Self = Self(raw::CLSACT_EGRESS);
 
     /// Unspecified handle (`0`).
     pub const UNSPEC: Self = Self(raw::UNSPEC);
@@ -105,9 +119,21 @@ impl TcHandle {
         self.0 == raw::INGRESS
     }
 
+    /// True for the clsact/ingress qdisc parent.
+    ///
+    /// `TC_H_CLSACT == TC_H_INGRESS`, so this is the same predicate as
+    /// [`is_ingress`](Self::is_ingress). Which of the two qdiscs is
+    /// actually installed there is a property of the qdisc kind, not of
+    /// the handle.
     #[inline]
     pub const fn is_clsact(self) -> bool {
         self.0 == raw::CLSACT
+    }
+
+    /// True for either clsact hook's filter parent.
+    #[inline]
+    pub const fn is_clsact_hook(self) -> bool {
+        self.0 == raw::CLSACT_INGRESS || self.0 == raw::CLSACT_EGRESS
     }
 
     #[inline]
@@ -311,13 +337,28 @@ mod tests {
 
     #[test]
     fn tc_handle_constants() {
+        // Values re-derived from `linux/pkt_sched.h`:
+        //   TC_H_ROOT       (0xFFFFFFFFU)
+        //   TC_H_INGRESS    (0xFFFFFFF1U)
+        //   TC_H_CLSACT     TC_H_INGRESS
+        //   TC_H_MIN_INGRESS        0xFFF2U
+        //   TC_H_MIN_EGRESS         0xFFF3U
+        // The old assertion said CLSACT == 0xFFFF_FFF2, pinning the
+        // transcription bug in place: that value is
+        // TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_INGRESS), a *filter* parent.
         assert_eq!(TcHandle::ROOT.as_raw(), 0xFFFF_FFFF);
         assert_eq!(TcHandle::INGRESS.as_raw(), 0xFFFF_FFF1);
-        assert_eq!(TcHandle::CLSACT.as_raw(), 0xFFFF_FFF2);
+        assert_eq!(TcHandle::CLSACT.as_raw(), 0xFFFF_FFF1);
+        assert_eq!(TcHandle::CLSACT, TcHandle::INGRESS);
+        assert_eq!(TcHandle::CLSACT_INGRESS.as_raw(), 0xFFFF_FFF2);
+        assert_eq!(TcHandle::CLSACT_EGRESS.as_raw(), 0xFFFF_FFF3);
         assert_eq!(TcHandle::UNSPEC.as_raw(), 0);
         assert!(TcHandle::ROOT.is_root());
         assert!(TcHandle::INGRESS.is_ingress());
         assert!(TcHandle::CLSACT.is_clsact());
+        assert!(TcHandle::CLSACT_INGRESS.is_clsact_hook());
+        assert!(TcHandle::CLSACT_EGRESS.is_clsact_hook());
+        assert!(!TcHandle::CLSACT.is_clsact_hook());
         assert!(TcHandle::UNSPEC.is_unspec());
     }
 
@@ -327,7 +368,10 @@ mod tests {
         assert_eq!(TcHandle::major_only(1).to_string(), "1:");
         assert_eq!(TcHandle::ROOT.to_string(), "root");
         assert_eq!(TcHandle::INGRESS.to_string(), "ingress");
-        assert_eq!(TcHandle::CLSACT.to_string(), "clsact");
+        // CLSACT *is* INGRESS; `tc(8)` prints this parent as "ingress".
+        assert_eq!(TcHandle::CLSACT.to_string(), "ingress");
+        assert_eq!(TcHandle::CLSACT_INGRESS.to_string(), "clsact-ingress");
+        assert_eq!(TcHandle::CLSACT_EGRESS.to_string(), "clsact-egress");
         assert_eq!(TcHandle::UNSPEC.to_string(), "none");
     }
 
@@ -337,7 +381,17 @@ mod tests {
         assert_eq!("1:".parse::<TcHandle>().unwrap(), TcHandle::major_only(1));
         assert_eq!("root".parse::<TcHandle>().unwrap(), TcHandle::ROOT);
         assert_eq!("ingress".parse::<TcHandle>().unwrap(), TcHandle::INGRESS);
+        // `tc(8)` accepts both spellings for TC_H_INGRESS.
         assert_eq!("clsact".parse::<TcHandle>().unwrap(), TcHandle::CLSACT);
+        assert_eq!("clsact".parse::<TcHandle>().unwrap(), TcHandle::INGRESS);
+        assert_eq!(
+            "clsact-ingress".parse::<TcHandle>().unwrap(),
+            TcHandle::CLSACT_INGRESS
+        );
+        assert_eq!(
+            "clsact-egress".parse::<TcHandle>().unwrap(),
+            TcHandle::CLSACT_EGRESS
+        );
         assert_eq!("none".parse::<TcHandle>().unwrap(), TcHandle::UNSPEC);
     }
 
@@ -355,6 +409,8 @@ mod tests {
             TcHandle::ROOT,
             TcHandle::INGRESS,
             TcHandle::CLSACT,
+            TcHandle::CLSACT_INGRESS,
+            TcHandle::CLSACT_EGRESS,
             TcHandle::UNSPEC,
             TcHandle::new(1, 10),
             TcHandle::new(0xff, 0xff),

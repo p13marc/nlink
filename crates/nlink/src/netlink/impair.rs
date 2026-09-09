@@ -79,7 +79,8 @@ use super::{
     tc_handle::{FilterPriority, TcHandle},
     tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject},
     tc_recipe_internals::{
-        LiveTree, dump_live_tree, flower_classid, htb_class_rates_match, netem_matches,
+        DEFAULT_CLASS_MINOR, DEFAULT_LEAF_MAJOR, LiveTree, dump_live_tree, flower_matches,
+        htb_class_rates_match, netem_matches,
         root_htb_options,
     },
 };
@@ -321,8 +322,7 @@ impl PerPeerImpairer {
     pub async fn apply(&self, conn: &Connection<Route>) -> Result<()> {
         let ifindex = conn.resolve_interface(&self.target).await?;
         let link_rate = self.assumed_link_rate;
-        let n = self.rules.len();
-        let default_classid_minor = (n + 2) as u32;
+        let default_classid_minor = DEFAULT_CLASS_MINOR as u32;
 
         // Clean slate. A missing root qdisc is fine.
         let _ = conn.del_qdisc_by_index(ifindex, TcHandle::ROOT).await;
@@ -371,8 +371,8 @@ impl PerPeerImpairer {
         }
 
         // Default class — receives whatever no filter matched.
-        let default_classid = TcHandle::new(1, (n + 2) as u16);
-        let default_leaf_handle = TcHandle::major_only((n + 10) as u16);
+        let default_classid = TcHandle::new(1, DEFAULT_CLASS_MINOR);
+        let default_leaf_handle = TcHandle::major_only(DEFAULT_LEAF_MAJOR);
         let default_rate = self
             .default_impairment
             .as_ref()
@@ -473,14 +473,13 @@ impl PerPeerImpairer {
 
         let tree = dump_live_tree(conn, ifindex).await?;
 
-        let n = self.rules.len();
         let link_rate = self.assumed_link_rate;
         let total_rate = self.total_rate();
         let parent_classid = TcHandle::new(1, 1);
         let root_handle = TcHandle::major_only(1);
-        let default_minor = (n + 2) as u16;
+        let default_minor = DEFAULT_CLASS_MINOR;
         let default_classid = TcHandle::new(1, default_minor);
-        let default_leaf_handle = TcHandle::major_only((n + 10) as u16);
+        let default_leaf_handle = TcHandle::major_only(DEFAULT_LEAF_MAJOR);
         let default_rate = self
             .default_impairment
             .as_ref()
@@ -488,7 +487,7 @@ impl PerPeerImpairer {
             .unwrap_or(link_rate);
 
         // 1. Root HTB qdisc.
-        match tree.root_qdisc.as_ref() {
+        match tree.configured_root_qdisc() {
             None => {
                 // No root qdisc — full build path. Add it.
                 if !opts.dry_run {
@@ -680,9 +679,15 @@ impl PerPeerImpairer {
             }
 
             // 3c. Flower filter at root parent (1:) priority 100+i.
+            //
+            // Compare the match keys, not just kind + classid: priority
+            // and classid are both derived from the rule's index, so an
+            // edited peer address reused them and reconcile called it
+            // unchanged (#270).
+            let desired_filter = build_flower(classid, priority, &rule.match_);
             let filter_ok = tree
                 .filter_at_priority(priority)
-                .map(|f| f.kind() == Some("flower") && flower_classid(f) == Some(classid))
+                .map(|f| flower_matches(&desired_filter, protocol, f))
                 .unwrap_or(false);
             if !filter_ok {
                 if !opts.dry_run {
@@ -694,7 +699,7 @@ impl PerPeerImpairer {
                             .del_filter_by_index(ifindex, root_handle, stale_proto, priority)
                             .await;
                     }
-                    let filter = build_flower(classid, priority, &rule.match_);
+                    let filter = desired_filter;
                     conn.add_filter_by_index_full(
                         ifindex,
                         root_handle,
@@ -829,8 +834,8 @@ impl PerPeerImpairer {
     /// Run the destructive [`apply()`] but return a [`ReconcileReport`]
     /// summarizing it (used for `fallback_to_apply` reconcile path).
     async fn apply_as_reconcile(&self, conn: &Connection<Route>) -> Result<ReconcileReport> {
-        self.apply(conn).await?;
         let n = self.rules.len();
+        self.apply(conn).await?;
         Ok(ReconcileReport {
             // Count: 1 root + 1 parent + 3 per rule (class+leaf+filter)
             // + 1 default class + (1 if default leaf).
@@ -856,59 +861,20 @@ impl PerPeerImpairer {
         let n = self.rules.len();
         let parent_classid = TcHandle::new(1, 1);
         let root_handle = TcHandle::major_only(1);
-        let default_classid = TcHandle::new(1, (n + 2) as u16);
-        let max_minor = (n + 2) as u16;
+        let default_classid = TcHandle::new(1, DEFAULT_CLASS_MINOR);
+        // Rule classes only; the default sits at DEFAULT_CLASS_MINOR.
+        let max_minor = (n + 1) as u16;
 
-        // Stale classes: `1:M` for M >= 2 outside [2..=max_minor], OR
-        // M == max_minor when we don't want a default class. Also
-        // delete leaf qdiscs first.
-        // Collect stale classes (don't mutate during iteration).
-        let mut stale_classes: Vec<TcHandle> = Vec::new();
-        for handle in tree.classes.keys() {
-            if handle.major() != 1 {
-                continue; // outside our root major
-            }
-            let minor = handle.minor();
-            if minor == 0 || minor == 1 {
-                continue; // 1: and 1:1 are our root + parent
-            }
-            // In our managed range when minor in 2..=max_minor.
-            if minor >= 2 && minor <= max_minor {
-                continue; // wanted
-            }
-            // Otherwise, in major 1 but outside our minor range — stale.
-            stale_classes.push(*handle);
-        }
-        for handle in &stale_classes {
-            // Drop the leaf qdisc first if any (kernel removes leaves
-            // with the class, but explicit del avoids surprises).
-            if let Some(q) = tree.leaf_for(*handle) {
-                let leaf_handle = q.handle();
-                if !opts.dry_run {
-                    let _ = conn
-                        .del_qdisc_by_index_full(ifindex, *handle, Some(leaf_handle))
-                        .await;
-                }
-            }
-            if !opts.dry_run
-                && let Err(e) = conn
-                    .del_class_by_index(ifindex, parent_classid, *handle)
-                    .await
-                && !e.is_not_found()
-            {
-                return Err(e.with_context(format!(
-                    "PerPeerImpairer::reconcile: remove stale class {handle}"
-                )));
-            }
-            report.changes_made += 1;
-            report.rules_removed += 1;
-            report.stale_removed.push(StaleObject {
-                kind: "class",
-                handle: *handle,
-                priority: None,
-            });
-        }
-
+        // Filters first, then classes. `htb_delete` refuses a class
+        // any filter still points at:
+        //
+        //   if (cl->children || qdisc_class_in_use(&cl->common)) {
+        //           NL_SET_ERR_MSG(extack, "HTB class in use");
+        //           return -EBUSY;
+        //   }
+        //
+        // so removing a rule used to fail with EBUSY partway through
+        // (#291) — the class went first and its filter was still bound.
         // Stale filters: filters at root parent priority in our band
         // [100, 100+n) where the desired rule's classid disagrees, OR
         // priorities >= 100+n that are still installed.
@@ -944,6 +910,57 @@ impl PerPeerImpairer {
                 kind: "filter",
                 handle: parent,
                 priority: Some(FilterPriority::new(prio)),
+            });
+        }
+
+        // Stale classes: `1:M` for M >= 2 outside [2..=max_minor], OR
+        // M == max_minor when we don't want a default class. Also
+        // delete leaf qdiscs first.
+        // Collect stale classes (don't mutate during iteration).
+        let mut stale_classes: Vec<TcHandle> = Vec::new();
+        for handle in tree.classes.keys() {
+            if handle.major() != 1 {
+                continue; // outside our root major
+            }
+            let minor = handle.minor();
+            if minor == 0 || minor == 1 {
+                continue; // 1: and 1:1 are our root + parent
+            }
+            // In our managed range when minor in 2..=max_minor,
+            // plus the fixed default class.
+            if (minor >= 2 && minor <= max_minor) || minor == DEFAULT_CLASS_MINOR {
+                continue; // wanted
+            }
+            // Otherwise, in major 1 but outside our minor range — stale.
+            stale_classes.push(*handle);
+        }
+        for handle in &stale_classes {
+            // Drop the leaf qdisc first if any (kernel removes leaves
+            // with the class, but explicit del avoids surprises).
+            if let Some(q) = tree.leaf_for(*handle) {
+                let leaf_handle = q.handle();
+                if !opts.dry_run {
+                    let _ = conn
+                        .del_qdisc_by_index_full(ifindex, *handle, Some(leaf_handle))
+                        .await;
+                }
+            }
+            if !opts.dry_run
+                && let Err(e) = conn
+                    .del_class_by_index(ifindex, parent_classid, *handle)
+                    .await
+                && !e.is_not_found()
+            {
+                return Err(e.with_context(format!(
+                    "PerPeerImpairer::reconcile: remove stale class {handle}"
+                )));
+            }
+            report.changes_made += 1;
+            report.rules_removed += 1;
+            report.stale_removed.push(StaleObject {
+                kind: "class",
+                handle: *handle,
+                priority: None,
             });
         }
 

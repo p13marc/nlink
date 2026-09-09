@@ -165,7 +165,25 @@ pub mod tc_handle {
     /// Ingress qdisc.
     pub const INGRESS: u32 = 0xFFFFFFF1;
     /// Clsact qdisc.
-    pub const CLSACT: u32 = 0xFFFFFFF2;
+    ///
+    /// `pkt_sched.h` defines `TC_H_CLSACT` as a plain alias of
+    /// `TC_H_INGRESS` — clsact occupies the same qdisc slot as ingress
+    /// and simply exposes an egress hook as well. This was transcribed
+    /// as `0xFFFFFFF2`, which is not the qdisc parent at all but
+    /// `TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_INGRESS)` — the parent a
+    /// *filter* on the clsact ingress hook uses. Installing a clsact
+    /// qdisc with it made the kernel answer `EOPNOTSUPP`, every time.
+    pub const CLSACT: u32 = INGRESS;
+    /// Minor of the clsact ingress hook (`TC_H_MIN_INGRESS`).
+    pub const MIN_INGRESS: u16 = 0xFFF2;
+    /// Minor of the clsact egress hook (`TC_H_MIN_EGRESS`).
+    pub const MIN_EGRESS: u16 = 0xFFF3;
+    /// Parent for a filter on the clsact **ingress** hook
+    /// (`TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_INGRESS)`).
+    pub const CLSACT_INGRESS: u32 = make(0xFFFF, MIN_INGRESS);
+    /// Parent for a filter on the clsact **egress** hook
+    /// (`TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_EGRESS)`).
+    pub const CLSACT_EGRESS: u32 = make(0xFFFF, MIN_EGRESS);
     /// Unspecified.
     pub const UNSPEC: u32 = 0;
 
@@ -189,9 +207,13 @@ pub mod tc_handle {
         if handle == ROOT {
             "root".to_string()
         } else if handle == INGRESS {
+            // == CLSACT. `tc(8)` accepts either spelling for this value;
+            // "ingress" is the one it prints.
             "ingress".to_string()
-        } else if handle == CLSACT {
-            "clsact".to_string()
+        } else if handle == CLSACT_INGRESS {
+            "clsact-ingress".to_string()
+        } else if handle == CLSACT_EGRESS {
+            "clsact-egress".to_string()
         } else if handle == UNSPEC {
             "none".to_string()
         } else {
@@ -209,8 +231,11 @@ pub mod tc_handle {
     pub fn parse(s: &str) -> Option<u32> {
         match s {
             "root" => Some(ROOT),
-            "ingress" => Some(INGRESS),
-            "clsact" => Some(CLSACT),
+            // `tc(8)` takes "ingress" and "clsact" as names for the same
+            // parent; both land on TC_H_INGRESS.
+            "ingress" | "clsact" => Some(INGRESS),
+            "clsact-ingress" => Some(CLSACT_INGRESS),
+            "clsact-egress" => Some(CLSACT_EGRESS),
             "none" => Some(UNSPEC),
             _ => {
                 let parts: Vec<&str> = s.split(':').collect();

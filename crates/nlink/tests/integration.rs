@@ -208,3 +208,9 @@ mod mptcp_pm;
 // what let these ship.
 #[path = "integration/declared_input.rs"]
 mod declared_input;
+// #258/#268/#269/#270 — the TC shaping recipes. The HTB `default` and
+// the class it names must agree (three bugs shipped because nothing
+// checked), reconcile must notice an edited match criterion, and
+// declaring a clsact must not delete the root qdisc.
+#[path = "integration/tc_shaping.rs"]
+mod tc_shaping;

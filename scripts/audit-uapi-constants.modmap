@@ -37,3 +37,10 @@ seg6_iptunnel           = SEG6_IPTUNNEL
 seg6_local_action       = SEG6_LOCAL_ACTION
 seg6_local              = SEG6_LOCAL
 seg6_local_flv          = SEG6_LOCAL_FLV
+
+# ---- tc special handles ----------------------------------------------------
+# `mod tc_handle` in types/tc.rs holds the TC_H_* values. Transcribing
+# TC_H_CLSACT as 0xFFFFFFF2 (it is an alias of TC_H_INGRESS) is what made
+# every clsact qdisc install fail; the gate could not see it because the
+# constants carry the kernel suffix only.
+tc_handle               = TC_H
