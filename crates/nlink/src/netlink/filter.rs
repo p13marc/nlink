@@ -1513,6 +1513,40 @@ impl FilterConfig for FlowerFilter {
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        // `fl_set_key` reads every L3/L4 key only inside
+        //
+        //   if (key->basic.n_proto == htons(ETH_P_IP) ||
+        //       key->basic.n_proto == htons(ETH_P_IPV6))
+        //
+        // and `n_proto` comes from TCA_FLOWER_KEY_ETH_TYPE — never from
+        // the filter's `tcm_info` protocol. Emitting an ip_proto or a
+        // port without it makes the kernel ACK the request and install
+        // a classifier that matches *everything*, which is worse than
+        // any error: a rule meant for one port silently claims the
+        // whole interface. Refuse instead (#288).
+        if self.eth_type.is_none() {
+            let unusable = [
+                self.ip_proto.map(|_| "ip_proto"),
+                self.src_port.map(|_| "src_port"),
+                self.dst_port.map(|_| "dst_port"),
+                self.ip_tos.map(|_| "ip_tos"),
+                self.ip_ttl.map(|_| "ip_ttl"),
+                self.tcp_flags.map(|_| "tcp_flags"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            if !unusable.is_empty() {
+                return Err(Error::InvalidMessage(format!(
+                    "flower: {} needs an ethertype — cls_flower discards L3/L4 keys \
+                     unless TCA_FLOWER_KEY_ETH_TYPE says IPv4 or IPv6, and would \
+                     install this as a match-all filter. Call .ipv4() or .ipv6() \
+                     (an address setter such as .dst_ipv4() implies one)",
+                    unusable.join(", ")
+                )));
+            }
+        }
+
         // Add classid
         if let Some(classid) = self.classid {
             builder.append_attr_u32(flower::TCA_FLOWER_CLASSID, classid);
@@ -4420,11 +4454,35 @@ impl Connection<Route> {
         protocol: u16,
         priority: u16,
     ) -> Result<bool> {
-        match self.del_filter(dev, parent, protocol, priority).await {
+        let ifindex = self.resolve_interface(&dev.into()).await?;
+        // "If it exists" has to cover the parent too. With no qdisc at
+        // `parent` there is nowhere for a filter to live, and the kernel
+        // says so with EINVAL ("Parent Qdisc doesn't exists") rather
+        // than ENOENT — so the plain not-found arm let the error
+        // through and the whole point of the `_if_exists` variant was
+        // lost on any interface with no qdisc installed.
+        if !self.qdisc_exists_at(ifindex, parent).await? {
+            return Ok(false);
+        }
+        match self.del_filter_by_index(ifindex, parent, protocol, priority).await {
             Ok(()) => Ok(true),
             Err(e) if e.is_not_found() => Ok(false),
             Err(e) => Err(e),
         }
+    }
+
+    /// Is there a qdisc that could hold filters at `parent`?
+    async fn qdisc_exists_at(&self, ifindex: u32, parent: TcHandle) -> Result<bool> {
+        let qdiscs = self.get_qdiscs_by_index(ifindex).await?;
+        Ok(qdiscs.iter().any(|q| {
+            if parent.is_root() {
+                // A kernel-implicit root qdisc (handle 0) holds no
+                // filters; `qdisc_lookup` cannot find it either.
+                q.parent().is_root() && q.handle_raw() != 0
+            } else {
+                q.handle().major() == parent.major()
+            }
+        }))
     }
 
     /// Delete a filter by interface index.
@@ -4531,11 +4589,12 @@ impl Connection<Route> {
             Err(e) => return Err(e),
         }
 
-        // Clsact filter parent: ingress = TC_H_MAKE(CLSACT, MIN_INGRESS) = 0xFFFFFFF2,
-        // egress = TC_H_MAKE(CLSACT, MIN_EGRESS) = 0xFFFFFFF3.
+        // The *filter* parent is the hook, not the qdisc: TcHandle::CLSACT
+        // is TC_H_INGRESS (where the qdisc lives), so naming it here
+        // worked only while CLSACT was mis-transcribed as 0xFFFFFFF2.
         let parent = match direction {
-            BpfDirection::Ingress => TcHandle::CLSACT,
-            BpfDirection::Egress => TcHandle::from_raw(0xFFFF_FFF3),
+            BpfDirection::Ingress => TcHandle::CLSACT_INGRESS,
+            BpfDirection::Egress => TcHandle::CLSACT_EGRESS,
         };
 
         self.add_filter_by_index(ifindex, parent, filter).await
@@ -4566,11 +4625,12 @@ impl Connection<Route> {
     /// Detach all BPF filters from an interface direction by index.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "detach_bpf_by_index"))]
     pub async fn detach_bpf_by_index(&self, ifindex: u32, direction: BpfDirection) -> Result<()> {
-        // Clsact filter parent: ingress = TC_H_MAKE(CLSACT, MIN_INGRESS) = 0xFFFFFFF2,
-        // egress = TC_H_MAKE(CLSACT, MIN_EGRESS) = 0xFFFFFFF3.
+        // The *filter* parent is the hook, not the qdisc: TcHandle::CLSACT
+        // is TC_H_INGRESS (where the qdisc lives), so naming it here
+        // worked only while CLSACT was mis-transcribed as 0xFFFFFFF2.
         let parent = match direction {
-            BpfDirection::Ingress => TcHandle::CLSACT,
-            BpfDirection::Egress => TcHandle::from_raw(0xFFFF_FFF3),
+            BpfDirection::Ingress => TcHandle::CLSACT_INGRESS,
+            BpfDirection::Egress => TcHandle::CLSACT_EGRESS,
         };
         self.flush_filters_by_index(ifindex, parent).await
     }
@@ -6030,4 +6090,88 @@ mod tests {
         assert!(!msg.contains("u32:"), "error must NOT mention u32: {msg}");
         assert!(msg.contains("unknown IP protocol"), "got: {msg}");
     }
+
+// ========================================================================
+// #288 — an L4 flower key without an ethertype is a match-all
+// ========================================================================
+
+fn flower_option_ids(f: &FlowerFilter) -> crate::Result<Vec<u16>> {
+    let mut builder = MessageBuilder::new(0, 0);
+    let start = builder.len();
+    f.write_options(&mut builder)?;
+    let blob = builder.as_bytes()[start..builder.len()].to_vec();
+    let mut ids = Vec::new();
+    let mut input = &blob[..];
+    while input.len() >= 4 {
+        let len = u16::from_ne_bytes(input[..2].try_into().unwrap()) as usize;
+        let ty = u16::from_ne_bytes(input[2..4].try_into().unwrap()) & 0x3FFF;
+        assert!(len >= 4 && input.len() >= len);
+        ids.push(ty);
+        let aligned = (len + 3) & !3;
+        if input.len() <= aligned {
+            break;
+        }
+        input = &input[aligned..];
+    }
+    Ok(ids)
+}
+
+#[test]
+fn flower_l4_keys_without_an_ethertype_are_refused() {
+    // cls_flower reads ip_proto and the port keys only when
+    // TCA_FLOWER_KEY_ETH_TYPE names IPv4 or IPv6. Emitting them alone
+    // gets a clean ACK and a filter that matches every packet — so the
+    // writer refuses rather than shipping a match-all.
+    for f in [
+        FlowerFilter::new().ip_proto_tcp().dst_port(443).build(),
+        FlowerFilter::new().ip_proto_udp().src_port(53).build(),
+        FlowerFilter::new().ip_proto(6).build(),
+    ] {
+        let err = flower_option_ids(&f).expect_err("must not silently install match-all");
+        let msg = err.to_string();
+        assert!(msg.contains("needs an ethertype"), "unexpected error: {msg}");
+    }
+}
+
+#[test]
+fn flower_l4_keys_with_an_ethertype_are_emitted() {
+    let ids = flower_option_ids(&FlowerFilter::new().ipv4().ip_proto_tcp().dst_port(443).build())
+        .expect("accepted");
+    assert!(ids.contains(&flower::TCA_FLOWER_KEY_ETH_TYPE));
+    assert!(ids.contains(&flower::TCA_FLOWER_KEY_IP_PROTO));
+    assert!(ids.contains(&flower::TCA_FLOWER_KEY_TCP_DST));
+}
+
+#[test]
+fn flower_address_setters_still_imply_the_ethertype() {
+    // The address setters carry their own ethertype, so an address rule
+    // combined with a port stays valid without an explicit `.ipv4()`.
+    let ids = flower_option_ids(
+        &FlowerFilter::new()
+            .dst_ipv4("10.0.0.1".parse().unwrap(), 32)
+            .ip_proto_tcp()
+            .dst_port(443)
+            .build(),
+    )
+    .expect("accepted");
+    assert!(ids.contains(&flower::TCA_FLOWER_KEY_ETH_TYPE));
+    assert!(ids.contains(&flower::TCA_FLOWER_KEY_TCP_DST));
+
+    // A pure address rule needs no L4 gate at all.
+    assert!(
+        flower_option_ids(
+            &FlowerFilter::new()
+                .dst_ipv6("fd00::1".parse().unwrap(), 128)
+                .build()
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn flower_with_no_l4_keys_needs_no_ethertype() {
+    // A classid-only flower filter is a legitimate match-all; the guard
+    // must not turn that into an error.
+    assert!(flower_option_ids(&FlowerFilter::new().classid(TcHandle::new(1, 2)).build()).is_ok());
+}
 }

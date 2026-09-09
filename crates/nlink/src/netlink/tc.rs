@@ -67,6 +67,25 @@ pub trait QdiscConfig: Send + Sync {
     fn default_handle(&self) -> Option<u32> {
         None
     }
+
+    /// The one parent this qdisc kind can live under, if it is
+    /// parent-fixed.
+    ///
+    /// `ingress` and `clsact` are not schedulers — they are the two
+    /// spellings of a fixed hook slot, and `ingress_init`/`clsact_init`
+    /// reject anything but `TC_H_INGRESS` with `EOPNOTSUPP`. The
+    /// convenience constructors [`Connection::add_qdisc`] and
+    /// [`Connection::add_qdisc_by_index`] default the parent to
+    /// `TC_H_ROOT`, so every caller that reached for them — the
+    /// declarative `apply` path and `attach_bpf` among them — sent a
+    /// request the kernel could only refuse. Honouring this makes the
+    /// short form correct instead of merely convenient.
+    ///
+    /// [`Connection::add_qdisc`]: crate::Connection::add_qdisc
+    /// [`Connection::add_qdisc_by_index`]: crate::Connection::add_qdisc_by_index
+    fn fixed_parent(&self) -> Option<TcHandle> {
+        None
+    }
 }
 
 // ============================================================================
@@ -3616,7 +3635,7 @@ impl QdiscConfig for FqPieConfig {
 /// use nlink::netlink::tc::IngressConfig;
 ///
 /// // Add ingress qdisc for filtering incoming traffic
-/// conn.add_qdisc_full("eth0", "ingress", None, IngressConfig::new()).await?;
+/// conn.add_qdisc("eth0", IngressConfig::new()).await?;
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct IngressConfig;
@@ -3645,6 +3664,12 @@ impl QdiscConfig for IngressConfig {
         "ingress"
     }
 
+    /// `TC_H_INGRESS` — the only parent the kernel accepts here.
+    /// `TC_H_CLSACT` is an alias of it.
+    fn fixed_parent(&self) -> Option<TcHandle> {
+        Some(TcHandle::INGRESS)
+    }
+
     fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
         // Ingress qdisc has no options
         Ok(())
@@ -3666,7 +3691,7 @@ impl QdiscConfig for IngressConfig {
 /// use nlink::netlink::tc::ClsactConfig;
 ///
 /// // Add clsact qdisc for BPF program attachment
-/// conn.add_qdisc_full("eth0", "clsact", None, ClsactConfig::new()).await?;
+/// conn.add_qdisc("eth0", ClsactConfig::new()).await?;
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct ClsactConfig;
@@ -3693,6 +3718,12 @@ impl ClsactConfig {
 impl QdiscConfig for ClsactConfig {
     fn kind(&self) -> &'static str {
         "clsact"
+    }
+
+    /// `TC_H_INGRESS` — the only parent the kernel accepts here.
+    /// `TC_H_CLSACT` is an alias of it.
+    fn fixed_parent(&self) -> Option<TcHandle> {
+        Some(TcHandle::INGRESS)
     }
 
     fn write_options(&self, _builder: &mut MessageBuilder) -> Result<()> {
@@ -7462,7 +7493,8 @@ impl Connection<Route> {
         dev: impl Into<InterfaceRef>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        self.add_qdisc_full(dev, TcHandle::ROOT, None, config).await
+        let parent = config.fixed_parent().unwrap_or(TcHandle::ROOT);
+        self.add_qdisc_full(dev, parent, None, config).await
     }
 
     /// Add a qdisc with explicit parent and handle.
@@ -7501,7 +7533,8 @@ impl Connection<Route> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_qdisc_by_index"))]
     pub async fn add_qdisc_by_index(&self, ifindex: u32, config: impl QdiscConfig) -> Result<()> {
-        self.add_qdisc_by_index_full(ifindex, TcHandle::ROOT, None, config)
+        let parent = config.fixed_parent().unwrap_or(TcHandle::ROOT);
+        self.add_qdisc_by_index_full(ifindex, parent, None, config)
             .await
     }
 

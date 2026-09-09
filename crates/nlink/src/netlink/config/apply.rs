@@ -958,7 +958,12 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
         DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact => {
             // Kernel does not accept NLM_F_REPLACE on these
             // pseudo-qdiscs (the kind IS the slot). Use del+add.
-            let parent_handle = match qdisc.parent {
+            // `effective_parent`, not `parent`: a clsact/ingress
+            // declaration left at the `Root` default used to delete the
+            // interface's root qdisc here — and then fail to install
+            // the hook, leaving the interface bare. The hook kinds have
+            // exactly one legal slot.
+            let parent_handle = match qdisc.effective_parent() {
                 QdiscParent::Root => crate::TcHandle::ROOT,
                 QdiscParent::Ingress => crate::TcHandle::INGRESS,
             };

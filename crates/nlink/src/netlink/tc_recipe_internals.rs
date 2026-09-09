@@ -31,6 +31,31 @@ use super::{
     tc_options::{HtbClassOptions, HtbOptions, QdiscOptions, parse_htb_class_options},
 };
 
+/// Minor of the recipe's default class, and of its leaf qdisc's major.
+///
+/// **Deliberately not derived from the rule count.** It used to be
+/// `n + 2`, one past the last rule's class, which meant editing the
+/// rule list moved the default class — and the HTB `default` naming it
+/// had to move with it. `htb` has no `.change` operation at all:
+///
+/// ```text
+/// # tc qdisc change dev d0 root handle 1: htb default 3
+/// Error: Change operation not supported by specified qdisc.
+/// ```
+///
+/// so `reconcile()` could not follow. Adding or removing a rule made it
+/// fail outright with `EINVAL`, which is the one thing reconcile exists
+/// to handle. Pinning the default out of the rules' range means the
+/// `defcls` written at creation stays correct for the tree's whole life
+/// (#269, #291).
+///
+/// Rule classes occupy `1:2 ..= 1:n+1`, so `0xFFFF` cannot collide
+/// unless someone configures 65533 rules.
+pub(crate) const DEFAULT_CLASS_MINOR: u16 = 0xFFFF;
+
+/// Major of the default class's leaf qdisc, on the same principle.
+pub(crate) const DEFAULT_LEAF_MAJOR: u16 = 0xFFFF;
+
 /// Snapshot of one device's TC tree at the moment `reconcile()` ran.
 ///
 /// Populated via [`dump_live_tree()`].
@@ -57,6 +82,19 @@ impl LiveTree {
     /// Look up the leaf qdisc whose parent is `class_handle`.
     pub(crate) fn leaf_for(&self, class_handle: TcHandle) -> Option<&TcMessage> {
         self.leaf_qdiscs.get(&class_handle)
+    }
+
+    /// The root qdisc, if one was *configured* rather than implied.
+    ///
+    /// Every interface always has a root qdisc: the kernel installs
+    /// `noqueue`, `pfifo_fast`, `net.core.default_qdisc` or `mq`
+    /// implicitly. Those carry **handle 0** — `qdisc_create` only calls
+    /// `qdisc_alloc_handle()` for a qdisc someone asked for. Reading
+    /// `root_qdisc` directly made the recipes' "nothing installed yet"
+    /// arm unreachable, so `reconcile()` could never bootstrap and
+    /// always demanded `with_fallback_to_apply(true)` (#287).
+    pub(crate) fn configured_root_qdisc(&self) -> Option<&TcMessage> {
+        self.root_qdisc.as_ref().filter(|q| q.handle_raw() != 0)
     }
 
     /// Look up a filter at the root parent by priority.
@@ -207,43 +245,161 @@ pub(crate) fn fq_codel_target_matches(desired_target_us: Option<u32>, live: &TcM
     match desired_target_us {
         // Recipe didn't set a target: any live value is acceptable.
         None => true,
-        // Recipe set a target: live target_us must match (rounded —
-        // the wire format is microseconds, no precision loss).
-        Some(want) => opts.target_us == want,
+        // Recipe set a target: compare in the kernel's own units.
+        Some(want) => codel_round_trip_us(want) == opts.target_us,
     }
 }
 
-/// Extract the classid attribute (`TCA_FLOWER_CLASSID`) from a parsed
-/// flower filter, if present. Returns the typed [`TcHandle`].
-pub(crate) fn flower_classid(filter: &TcMessage) -> Option<TcHandle> {
-    use super::types::tc::filter::flower::TCA_FLOWER_CLASSID;
+/// Microseconds as they come back out of a `codel` time field.
+///
+/// The wire format is microseconds, but codel stores time in units of
+/// 2^-10 seconds:
+///
+/// ```c
+/// #define CODEL_SHIFT 10
+/// static inline codel_time_t us_to_codel_time(u64 us)
+/// { return (codel_time_t)((us * NSEC_PER_USEC) >> CODEL_SHIFT); }
+/// static inline u32 codel_time_to_us(codel_time_t val)
+/// { u64 valns = ((u64)val << CODEL_SHIFT); do_div(valns, NSEC_PER_USEC); return valns; }
+/// ```
+///
+/// Both conversions truncate, so most values do not survive the round
+/// trip: a 20 ms target is echoed back as 19999 µs. Comparing the
+/// requested value against the echo therefore always disagreed, and
+/// `reconcile()` rewrote every fq_codel leaf on every pass — an
+/// idempotence break of the same shape as the psched-tick one
+/// (#191-#194), and for the same reason: comparing a request against a
+/// kernel-quantised readback.
+pub(crate) fn codel_round_trip_us(us: u32) -> u32 {
+    const CODEL_SHIFT: u32 = 10;
+    const NSEC_PER_USEC: u64 = 1_000;
+    let ticks = (us as u64 * NSEC_PER_USEC) >> CODEL_SHIFT;
+    ((ticks << CODEL_SHIFT) / NSEC_PER_USEC) as u32
+}
 
-    if filter.kind() != Some("flower") {
-        return None;
-    }
-    let mut input = filter.raw_options()?;
-
+/// Split a netlink attribute blob into `(type, payload)` pairs.
+///
+/// Shares the walk guards of the crate's other chain walkers: an entry
+/// shorter than its header, or one that would run past the end, stops
+/// the walk instead of panicking.
+fn split_attrs(mut input: &[u8]) -> BTreeMap<u16, &[u8]> {
+    let mut out = BTreeMap::new();
     while input.len() >= 4 {
-        let len = u16::from_ne_bytes(input[..2].try_into().ok()?) as usize;
-        let attr_type = u16::from_ne_bytes(input[2..4].try_into().ok()?);
-
+        let Ok(len_bytes) = input[..2].try_into() else {
+            break;
+        };
+        let Ok(type_bytes) = input[2..4].try_into() else {
+            break;
+        };
+        let len = u16::from_ne_bytes(len_bytes) as usize;
+        let attr_type = u16::from_ne_bytes(type_bytes) & 0x3FFF;
         if len < 4 || input.len() < len {
             break;
         }
-        let payload = &input[4..len];
-
-        if (attr_type & 0x3FFF) == TCA_FLOWER_CLASSID && payload.len() >= 4 {
-            let raw = u32::from_ne_bytes(payload[..4].try_into().ok()?);
-            return Some(TcHandle::from_raw(raw));
-        }
-
+        out.insert(attr_type, &input[4..len]);
         let aligned = (len + 3) & !3;
         if input.len() <= aligned {
             break;
         }
         input = &input[aligned..];
     }
-    None
+    out
+}
+
+/// The flower match *values* the recipe helpers can select on.
+///
+/// Used to decide whether a live filter matches on something the
+/// desired one does not — i.e. whether a rule was *narrowed*.
+///
+/// Two deliberate exclusions. It is not "all `TCA_FLOWER_KEY_*`",
+/// because the kernel echoes attributes nobody wrote
+/// (`TCA_FLOWER_KEY_ETH_TYPE` derived from the filter's protocol,
+/// `TCA_FLOWER_FLAGS`, `TCA_FLOWER_IN_HW_COUNT`) and treating those as
+/// a mismatch would rewrite the filter on every reconcile pass. And it
+/// carries no `_MASK` ids: `fl_set_key_val` fills an absent mask with
+/// all-ones and dumps it back, so a port rule — where nlink sends the
+/// value and no mask — would otherwise always look narrowed. A mask
+/// never appears without its value here, so checking the values is
+/// enough.
+const RECIPE_FLOWER_VALUE_KEYS: &[u16] = {
+    use super::types::tc::filter::flower::*;
+    &[
+        TCA_FLOWER_KEY_IP_PROTO,
+        TCA_FLOWER_KEY_IPV4_SRC,
+        TCA_FLOWER_KEY_IPV4_DST,
+        TCA_FLOWER_KEY_IPV6_SRC,
+        TCA_FLOWER_KEY_IPV6_DST,
+        TCA_FLOWER_KEY_TCP_SRC,
+        TCA_FLOWER_KEY_TCP_DST,
+        TCA_FLOWER_KEY_UDP_SRC,
+        TCA_FLOWER_KEY_UDP_DST,
+    ]
+};
+
+/// Compare a desired flower filter against a live one, **match keys
+/// included**.
+///
+/// The recipes previously accepted any live filter at the right
+/// priority whose kind was `flower` and whose `TCA_FLOWER_CLASSID`
+/// pointed at the right class. Since both the priority and the classid
+/// are derived from the rule's *index*, editing a rule in place — a
+/// different address, a different port, v4 to v6 — changed neither.
+/// `reconcile()` reported "no changes" and left the old filter
+/// classifying traffic by the old criteria, forever.
+///
+/// Returns `true` only when
+///
+/// * the live filter is a flower filter,
+/// * its ethertype (`tcm_info`'s protocol) is the desired one,
+/// * every attribute the desired filter emits — `TCA_FLOWER_CLASSID`
+///   included — is present with a byte-identical payload, and
+/// * the live filter selects on no *extra* recipe-vocabulary value.
+pub(crate) fn flower_matches(
+    desired: &super::filter::FlowerFilter,
+    desired_protocol: u16,
+    live: &TcMessage,
+) -> bool {
+    use super::filter::FilterConfig;
+
+    if live.kind() != Some("flower") {
+        return false;
+    }
+    if live.protocol() != desired_protocol {
+        return false;
+    }
+
+    let Some(live_raw) = live.raw_options() else {
+        return false;
+    };
+    let live_attrs = split_attrs(live_raw);
+
+    // Serialize the desired filter through the same writer that would
+    // install it, so this comparison cannot drift from what we send.
+    let mut builder = crate::netlink::builder::MessageBuilder::new(0, 0);
+    let start = builder.len();
+    if desired.write_options(&mut builder).is_err() {
+        return false;
+    }
+    let end = builder.len();
+    let desired_blob = builder.as_bytes()[start..end].to_vec();
+    let desired_attrs = split_attrs(&desired_blob);
+
+    // Every attribute we would write must be there, byte for byte.
+    for (id, want) in &desired_attrs {
+        match live_attrs.get(id) {
+            Some(have) if have == want => {}
+            _ => return false,
+        }
+    }
+    // …and the live filter must not match on anything more than we
+    // asked for.
+    for id in RECIPE_FLOWER_VALUE_KEYS {
+        if live_attrs.contains_key(id) && !desired_attrs.contains_key(id) {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Compare desired (rate, ceil) against a live HTB class.
@@ -288,6 +444,47 @@ mod tests {
             options: Some(blob),
             ..TcMessage::default()
         }
+    }
+
+    #[test]
+    fn codel_round_trip_matches_the_kernels_truncation() {
+        // us_to_codel_time(20000) = (20000 * 1000) >> 10 = 19531,
+        // codel_time_to_us(19531) = (19531 << 10) / 1000 = 19999.
+        assert_eq!(codel_round_trip_us(20000), 19999);
+        assert_eq!(codel_round_trip_us(0), 0);
+        // Both conversions truncate, so the echo is never larger than
+        // what was asked for — and, because it is not idempotent, this
+        // must be applied to the *desired* value exactly once, never to
+        // the value already read back.
+        for us in [1u32, 999, 5_000, 20_000, 100_000, 1_000_000] {
+            assert!(codel_round_trip_us(us) <= us, "round trip grew {us}");
+        }
+        assert_eq!(codel_round_trip_us(1_048_576), 1_048_576);
+    }
+
+    #[test]
+    fn fq_codel_target_matches_accepts_the_kernels_echo() {
+        // The leaf `reconcile()` reads back after asking for 20 ms.
+        let live = TcMessage {
+            kind: Some("fq_codel".to_string()),
+            options: Some(fq_codel_options(19999)),
+            ..TcMessage::default()
+        };
+        assert!(fq_codel_target_matches(Some(20_000), &live));
+        // A genuinely different target still registers as drift.
+        assert!(!fq_codel_target_matches(Some(50_000), &live));
+        // No target asked for: anything goes.
+        assert!(fq_codel_target_matches(None, &live));
+    }
+
+    /// A `TCA_FQ_CODEL_TARGET`-only options blob.
+    fn fq_codel_options(target_us: u32) -> Vec<u8> {
+        const TCA_FQ_CODEL_TARGET: u16 = 1;
+        let mut out = Vec::new();
+        out.extend_from_slice(&8u16.to_ne_bytes());
+        out.extend_from_slice(&TCA_FQ_CODEL_TARGET.to_ne_bytes());
+        out.extend_from_slice(&target_us.to_ne_bytes());
+        out
     }
 
     #[test]
@@ -350,4 +547,172 @@ mod tests {
         let live = TcMessage::default();
         assert!(!netem_matches(&desired, &live));
     }
+
+// ========================================================================
+// #270 — flower match-key comparison
+// ========================================================================
+
+/// Render a `FlowerFilter` the way the kernel would echo it back on a
+/// dump: kind `"flower"`, the writer's own option blob, and `tcm_info`
+/// carrying the ethertype in network order.
+fn live_flower(filter: &crate::netlink::filter::FlowerFilter, protocol: u16) -> TcMessage {
+    use crate::netlink::filter::FilterConfig;
+
+    let mut builder = crate::netlink::builder::MessageBuilder::new(0, 0);
+    let start = builder.len();
+    filter.write_options(&mut builder).expect("write options");
+    let end = builder.len();
+    let blob = builder.as_bytes()[start..end].to_vec();
+
+    let mut msg = TcMessage {
+        kind: Some("flower".to_string()),
+        options: Some(blob),
+        ..TcMessage::default()
+    };
+    msg.header.tcm_info = protocol.to_be() as u32;
+    msg
+}
+
+const ETH_P_IP: u16 = 0x0800;
+const ETH_P_IPV6: u16 = 0x86DD;
+
+fn dst_v4(addr: &str, prefix: u8, classid: TcHandle) -> crate::netlink::filter::FlowerFilter {
+    crate::netlink::filter::FlowerFilter::new()
+        .classid(classid)
+        .priority(1)
+        .dst_ipv4(addr.parse().unwrap(), prefix)
+        .build()
+}
+
+#[test]
+fn flower_matches_accepts_an_identical_filter() {
+    let cid = TcHandle::new(1, 2);
+    let f = dst_v4("10.0.0.1", 32, cid);
+    assert!(flower_matches(&f, ETH_P_IP, &live_flower(&f, ETH_P_IP)));
+}
+
+#[test]
+fn flower_matches_rejects_a_different_address() {
+    // The bug: same rule index -> same priority and same classid, so
+    // the old kind+classid check called this "unchanged".
+    let cid = TcHandle::new(1, 2);
+    let live = live_flower(&dst_v4("10.0.0.1", 32, cid), ETH_P_IP);
+    assert!(!flower_matches(&dst_v4("10.0.0.2", 32, cid), ETH_P_IP, &live));
+}
+
+#[test]
+fn flower_matches_rejects_a_different_prefix() {
+    let cid = TcHandle::new(1, 2);
+    let live = live_flower(&dst_v4("10.0.0.0", 24, cid), ETH_P_IP);
+    assert!(!flower_matches(&dst_v4("10.0.0.0", 16, cid), ETH_P_IP, &live));
+}
+
+#[test]
+fn flower_matches_rejects_src_where_dst_was_asked_for() {
+    let cid = TcHandle::new(1, 2);
+    let live = live_flower(
+        &crate::netlink::filter::FlowerFilter::new()
+            .classid(cid)
+            .priority(1)
+            .src_ipv4("10.0.0.1".parse().unwrap(), 32)
+            .build(),
+        ETH_P_IP,
+    );
+    assert!(!flower_matches(&dst_v4("10.0.0.1", 32, cid), ETH_P_IP, &live));
+}
+
+#[test]
+fn flower_matches_rejects_a_v4_rule_turned_v6() {
+    let cid = TcHandle::new(1, 2);
+    let live = live_flower(&dst_v4("10.0.0.1", 32, cid), ETH_P_IP);
+    let want = crate::netlink::filter::FlowerFilter::new()
+        .classid(cid)
+        .priority(1)
+        .dst_ipv6("fd00::1".parse().unwrap(), 128)
+        .build();
+    assert!(!flower_matches(&want, ETH_P_IPV6, &live));
+}
+
+#[test]
+fn flower_matches_rejects_a_different_classid() {
+    let live = live_flower(&dst_v4("10.0.0.1", 32, TcHandle::new(1, 2)), ETH_P_IP);
+    let want = dst_v4("10.0.0.1", 32, TcHandle::new(1, 3));
+    assert!(!flower_matches(&want, ETH_P_IP, &live));
+}
+
+#[test]
+fn flower_matches_rejects_a_live_filter_that_matches_on_more() {
+    // Narrowing: the rule used to be "dst 10.0.0.1 tcp/443", it is now
+    // just "dst 10.0.0.1". Every attribute the desired filter emits is
+    // still present in the live one, so a desired-subset-of-live test
+    // alone would wrongly pass.
+    let cid = TcHandle::new(1, 2);
+    let live = live_flower(
+        &crate::netlink::filter::FlowerFilter::new()
+            .classid(cid)
+            .priority(1)
+            .dst_ipv4("10.0.0.1".parse().unwrap(), 32)
+            .ipv4()
+            .ip_proto_tcp()
+            .dst_port(443)
+            .build(),
+        ETH_P_IP,
+    );
+    assert!(!flower_matches(&dst_v4("10.0.0.1", 32, cid), ETH_P_IP, &live));
+}
+
+#[test]
+fn flower_matches_rejects_a_different_port() {
+    let cid = TcHandle::new(1, 2);
+    let mk = |port: u16| {
+        crate::netlink::filter::FlowerFilter::new()
+            .classid(cid)
+            .priority(1)
+            .ipv4()
+            .ip_proto_tcp()
+            .dst_port(port)
+            .build()
+    };
+    let live = live_flower(&mk(443), ETH_P_IP);
+    assert!(flower_matches(&mk(443), ETH_P_IP, &live));
+    assert!(!flower_matches(&mk(8443), ETH_P_IP, &live));
+}
+
+#[test]
+fn flower_matches_rejects_tcp_where_udp_was_asked_for() {
+    let cid = TcHandle::new(1, 2);
+    let tcp = crate::netlink::filter::FlowerFilter::new()
+        .classid(cid)
+        .priority(1)
+        .ipv4()
+        .ip_proto_tcp()
+        .dst_port(53)
+        .build();
+    let udp = crate::netlink::filter::FlowerFilter::new()
+        .classid(cid)
+        .priority(1)
+        .ipv4()
+        .ip_proto_udp()
+        .dst_port(53)
+        .build();
+    assert!(!flower_matches(&udp, ETH_P_IP, &live_flower(&tcp, ETH_P_IP)));
+}
+
+#[test]
+fn flower_matches_rejects_a_non_flower_filter() {
+    let cid = TcHandle::new(1, 2);
+    let mut live = live_flower(&dst_v4("10.0.0.1", 32, cid), ETH_P_IP);
+    live.kind = Some("u32".to_string());
+    assert!(!flower_matches(&dst_v4("10.0.0.1", 32, cid), ETH_P_IP, &live));
+}
+
+#[test]
+fn split_attrs_stops_on_a_pathological_length() {
+    // Rule 2 of the parser-robustness policy: a zero or sub-header
+    // length must end the walk, not spin or index out of bounds.
+    assert!(split_attrs(&[0, 0, 0, 0]).is_empty());
+    assert!(split_attrs(&[2, 0, 1, 0]).is_empty());
+    // A length past the end of the buffer is not readable.
+    assert!(split_attrs(&[0xFF, 0xFF, 1, 0, 9, 9]).is_empty());
+}
 }

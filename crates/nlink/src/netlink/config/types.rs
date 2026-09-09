@@ -1354,9 +1354,21 @@ impl DeclaredQdisc {
         &self.dev
     }
 
-    /// Get the parent.
+    /// Get the parent as declared.
+    ///
+    /// For `ingress`/`clsact` this can disagree with reality; see
+    /// [`effective_parent`](Self::effective_parent).
     pub fn parent(&self) -> QdiscParent {
         self.parent
+    }
+
+    /// The parent slot this qdisc will actually occupy.
+    ///
+    /// Equal to [`parent`](Self::parent) except for the hook kinds
+    /// (`ingress`, `clsact`), which the kernel only accepts at
+    /// `TC_H_INGRESS` whatever the declaration says.
+    pub fn effective_parent(&self) -> QdiscParent {
+        self.qdisc_type.required_parent().unwrap_or(self.parent)
     }
 
     /// Get the qdisc type.
@@ -1377,6 +1389,24 @@ pub enum QdiscParent {
     Root,
     /// Ingress qdisc.
     Ingress,
+}
+
+impl DeclaredQdiscType {
+    /// The parent slot this kind must occupy, overriding whatever the
+    /// declaration says.
+    ///
+    /// `ingress` and `clsact` are hooks, not schedulers: the kernel
+    /// only accepts them at `TC_H_INGRESS`. A declaration that pairs
+    /// either with `parent: root` is not a request to put them
+    /// somewhere else — there is nowhere else — so `apply` and `diff`
+    /// both resolve the slot from the kind rather than trusting the
+    /// field, which a deserialized document can set freely.
+    pub(crate) fn required_parent(&self) -> Option<QdiscParent> {
+        match self {
+            DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact => Some(QdiscParent::Ingress),
+            _ => None,
+        }
+    }
 }
 
 /// Qdisc type for declared configuration.
@@ -1662,7 +1692,14 @@ impl QdiscBuilder {
     }
 
     /// Configure as clsact qdisc.
+    ///
+    /// Sets the parent to [`QdiscParent::Ingress`] — clsact shares the
+    /// ingress slot (`TC_H_CLSACT` is an alias of `TC_H_INGRESS`).
+    /// Leaving it at the `Root` default meant `apply` deleted the
+    /// interface's *root* qdisc before trying to install the clsact,
+    /// which the kernel then refused.
     pub fn clsact(mut self) -> Self {
+        self.parent = QdiscParent::Ingress;
         self.qdisc_type = Some(DeclaredQdiscType::Clsact);
         self
     }

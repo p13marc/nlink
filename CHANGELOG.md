@@ -210,6 +210,124 @@ All notable changes to this project will be documented in this file.
   not have caught this — they synthesise the capped payload, a shape the
   kernel was not sending — so the regression test is an integration one
   that asks the kernel for a real rejection and demands the message.
+- **TC class and filter dumps were always empty (#286).** `get_classes`
+  and `get_filters` built their request from a zeroed `tcmsg`, so
+  `tcm_ifindex` was 0 — and `tc_dump_tclass`/`tc_dump_tfilter` both open
+  with `dev_get_by_index(); if (!dev) return 0;`. Not an error: an empty,
+  successful dump, every time. `get_classes_by_index` and
+  `get_filters_by_index` filtered that empty list client-side, so they
+  inherited it, and so did `dump_live_tree` — which is why **every
+  `reconcile()` in the crate believed nothing was installed** and re-added
+  every class, leaf and filter on every pass. The requests now name their
+  device, and the device-less forms enumerate links (the kernel has no
+  "all devices" class dump; this is why `tc class show` requires `dev`).
+
+  A filter dump additionally needs `tcm_parent`: without it the kernel
+  walks the root qdisc alone, so ingress and clsact filters never
+  appeared — `list_bpf_programs` returned an empty vec on an interface
+  with BPF attached. `get_filters_by_index` now sweeps the root plus both
+  clsact hooks and the classic ingress slot.
+
+  Filter dumps also stop returning the handle-0 `tcf_proto` skeleton the
+  kernel emits ahead of each chain (the bare
+  `filter protocol ip pref 1 flower` line in `tc filter show`). It has no
+  match criteria and cannot be deleted; returning it doubled every count.
+
+- **`TC_H_CLSACT` was transcribed as `0xFFFFFFF2` (#268).** `pkt_sched.h`
+  defines it as a plain alias of `TC_H_INGRESS` (`0xFFFFFFF1`);
+  `0xFFFFFFF2` is `TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_INGRESS)`, the parent a
+  *filter* on the clsact ingress hook uses. `clsact_init` answers
+  `EOPNOTSUPP` for any qdisc parent but `TC_H_INGRESS`, so **every
+  `attach_bpf` call failed**, and a `clsact` in a `NetworkConfig` was worse
+  than that: `QdiscBuilder::clsact()` left the parent at the `Root`
+  default, so `apply` deleted the interface's real root qdisc and *then*
+  failed to install the hook, leaving it bare.
+
+  `TcHandle::CLSACT` is now `TC_H_INGRESS`, with `CLSACT_INGRESS` and
+  `CLSACT_EGRESS` for the two filter parents. `QdiscConfig` grew
+  `fixed_parent()`, which `add_qdisc`/`add_qdisc_by_index` honour, so the
+  short form can no longer send a hook qdisc to `TC_H_ROOT`. The audit
+  gate now covers `mod tc_handle` (`tc_handle = TC_H` in the modmap), so
+  this particular drift cannot return.
+
+- **`RateLimiter` shaped nothing at all (#258).** The HTB qdisc was created
+  with `default_class(0x10)` — 16 — while the class it names was created at
+  `TcHandle::new(1, 10)`, decimal 10. `htb_classify` could not resolve the
+  `defcls`, fell through to `HTB_DIRECT`, and transmitted every packet
+  unshaped. `RateLimiter` installs no filters, so that default class was
+  the only thing between traffic and the wire.
+
+- **`PerHostLimiter::apply` pointed the HTB default at a rule's class
+  (#269).** It set `default` to `n + 1` — the *last rule's* class — while
+  creating the real default at `n + 2`. Unmatched traffic was shaped at the
+  last rule's rate instead of `default_rate`; with no rules configured it
+  named the inner class `1:1` and fell through to `HTB_DIRECT`.
+  `reconcile` used `n + 2`, so the two verbs built different trees and
+  apply-then-reconcile was never a no-op.
+
+- **`reconcile()` could never bootstrap (#287).** Every interface always
+  has a root qdisc — the kernel installs `noqueue`, `pfifo_fast`,
+  `net.core.default_qdisc` or `mq` implicitly — so the "nothing installed
+  yet" arm was unreachable and all three recipes demanded
+  `with_fallback_to_apply(true)` on a bare interface. An implicit root
+  qdisc carries handle 0 (`qdisc_create` only allocates a handle for one
+  that was asked for); those are now treated as absent. A root qdisc the
+  operator actually configured still trips the guard.
+
+- **`reconcile()` failed whenever the rule count changed (#291).** The
+  default class used to sit one past the last rule, so editing the rule
+  list moved it and the root qdisc's `defcls` had to move with it — via
+  `change_qdisc`, and `htb` has no `.change` operation at all
+  (`EINVAL`, "Change operation not supported by specified qdisc").
+  The default class is now pinned at `1:ffff` with its leaf at `ffff:`,
+  independent of the rules, so the `defcls` written at creation stays
+  correct for the tree's life. Getting past that exposed a second
+  ordering bug: stale classes were deleted before the filters pointing at
+  them, and `htb_delete` refuses a class still in use (`EBUSY`). Filters
+  now go first.
+
+- **`reconcile()` ignored edited match criteria (#270).** The check
+  accepted any live filter at the right priority whose kind was `flower`
+  and whose classid was right — and both the priority and the classid are
+  derived from the rule's *index*. Editing a rule in place (a different
+  address, a different port, v4 to v6) changed neither, so `reconcile`
+  reported no changes and left the old criteria classifying traffic
+  forever. The new `flower_matches` compares the match keys, byte for
+  byte, against what the writer would emit, and rejects a live filter
+  that selects on more than was asked for.
+
+- **Flower filters with only L4 keys installed as match-all (#288).**
+  `cls_flower` reads `ip_proto` and the port keys only inside
+  `if (key->basic.n_proto == htons(ETH_P_IP) || ... ETH_P_IPV6)`, and
+  `n_proto` comes from `TCA_FLOWER_KEY_ETH_TYPE` — never from the filter's
+  `tcm_info` protocol. `FlowerFilter`'s address setters imply the
+  ethertype; the L4 ones did not. So
+  `FlowerFilter::new().ip_proto_tcp().dst_port(443)` got a clean ACK and
+  matched **everything** — which is what `PerHostLimiter::limit_port`
+  built, sending all IPv4 traffic to the first port rule's class.
+  `write_options` now refuses to emit an L4 key with no ethertype, and the
+  recipe's port rules declare `.ipv4()`.
+
+- **`RateLimiter::ingress` never installed its redirect (#289).** Two
+  defects in one function: the request was built with `ack_request`, so it
+  lacked `NLM_F_CREATE` and the kernel answered `ENOENT` ("Need both
+  RTM_NEWTFILTER and NLM_F_CREATE to create a new filter"); and the
+  hand-rolled `tc_u32_sel` payload was 28 bytes where the struct is 32 —
+  it treated `__be32 hmask` as 16-bit — which `u32_change` rejects with
+  `EINVAL`. It now uses `create_request` and the crate's own `TcU32Sel`.
+
+- **`reconcile()` rewrote every fq_codel leaf on every pass (#290).** The
+  target comparison used `==` between the microseconds asked for and the
+  microseconds echoed back, but codel stores time in units of 2^-10 s and
+  both conversions truncate: 20 ms goes in as 20000 and comes back as
+  19999. Comparison now happens in the kernel's own quantisation — the
+  same fix as the psched-tick one (#191-#194), for the same reason.
+
+- **`del_filter_if_exists` errored when there was no qdisc (#291).** With
+  nothing at `parent` there is nowhere for a filter to live, and the
+  kernel says so with `EINVAL` ("Parent Qdisc doesn't exists") rather than
+  `ENOENT` — so the not-found arm let it through and the whole point of
+  the `_if_exists` variant was lost on any interface with no qdisc.
 
 - **`Connection::<KobjectUevent>::try_recv` always failed (#251).** It
   was public, documented as returning `Ok(None)` when no event was
