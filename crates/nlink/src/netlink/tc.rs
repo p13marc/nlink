@@ -7863,39 +7863,27 @@ impl Connection<Route> {
         })
     }
 
-    /// Apply a netem configuration to an interface.
-    ///
-    /// This is a convenience method that replaces any existing root qdisc
-    /// with a netem qdisc. If no root qdisc exists, it creates one.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use std::time::Duration;
-    ///
-    /// use nlink::{Percent, netlink::tc::NetemConfig};
-    /// # async fn f(conn: &nlink::Connection<nlink::Route>) -> nlink::Result<()> {
-    /// let netem = NetemConfig::new()
-    ///     .delay(Duration::from_millis(100))
-    ///     .jitter(Duration::from_millis(10))
-    ///     .loss(Percent::new(1.0))
-    ///     .build();
-    ///
-    /// conn.apply_netem("eth0", netem).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
     /// Start buffering on a plug qdisc (`TCQ_PLUG_BUFFER`).
     ///
     /// Packets queued from now on are held until a release. Installing
     /// the qdisc already buffers, so this is for starting a *new* epoch
     /// after a release.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use nlink::TcHandle;
+    /// # async fn f(conn: &nlink::Connection<nlink::Route>) -> nlink::Result<()> {
+    /// conn.plug_buffer("eth0", TcHandle::ROOT).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "plug_buffer"))]
     pub async fn plug_buffer(&self, dev: impl Into<InterfaceRef>, parent: TcHandle) -> Result<()> {
         use super::types::tc::qdisc::plug::TCQ_PLUG_BUFFER;
 
-        self.change_qdisc(dev, parent, PlugAction(TCQ_PLUG_BUFFER, 0))
-            .await
+        // Boxed for the same reason as `del_netem` — see #310.
+        Box::pin(self.change_qdisc(dev, parent, PlugAction(TCQ_PLUG_BUFFER, 0))).await
     }
 
     /// Release the packets buffered so far (`TCQ_PLUG_RELEASE_ONE`),
@@ -7943,6 +7931,28 @@ impl Connection<Route> {
             .await
     }
 
+    /// Apply a netem configuration to an interface.
+    ///
+    /// This is a convenience method that replaces any existing root qdisc
+    /// with a netem qdisc. If no root qdisc exists, it creates one.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    ///
+    /// use nlink::{Percent, netlink::tc::NetemConfig};
+    /// # async fn f(conn: &nlink::Connection<nlink::Route>) -> nlink::Result<()> {
+    /// let netem = NetemConfig::new()
+    ///     .delay(Duration::from_millis(100))
+    ///     .jitter(Duration::from_millis(10))
+    ///     .loss(Percent::new(1.0))
+    ///     .build();
+    ///
+    /// conn.apply_netem("eth0", netem).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "apply_netem"))]
     pub async fn apply_netem(
         &self,
@@ -7950,9 +7960,10 @@ impl Connection<Route> {
         config: NetemConfig,
     ) -> Result<()> {
         let dev = dev.into();
-        match self.replace_qdisc(dev.clone(), config.clone()).await {
+        // Boxed for the same reason as `del_netem` — see #310.
+        match Box::pin(self.replace_qdisc(dev.clone(), config.clone())).await {
             Ok(()) => Ok(()),
-            Err(e) if e.is_not_found() => self.add_qdisc(dev, config).await,
+            Err(e) if e.is_not_found() => Box::pin(self.add_qdisc(dev, config)).await,
             Err(e) => Err(e),
         }
     }
@@ -7977,12 +7988,19 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn f(conn: &nlink::Connection<nlink::Route>) -> nlink::Result<()> {
     /// conn.del_netem("eth0").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_netem"))]
     pub async fn del_netem(&self, dev: impl Into<InterfaceRef>) -> Result<()> {
-        self.del_qdisc(dev, TcHandle::ROOT).await
+        // `Box::pin` ends the future-layout recursion here. Without it the
+        // caller's async block overflows rustc's default recursion limit:
+        // this wrapper sits one frame deeper than `del_qdisc`, which is
+        // already close to the ceiling (#310).
+        Box::pin(self.del_qdisc(dev, TcHandle::ROOT)).await
     }
 
     /// Remove netem configuration by interface index.
