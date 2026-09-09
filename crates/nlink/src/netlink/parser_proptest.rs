@@ -155,3 +155,226 @@ proptest! {
         let _ = TcMessage::from_bytes(&data);
     }
 }
+
+// =============================================================================
+// #279 — the rest of the kernel-facing parsers
+// =============================================================================
+//
+// The harness above fuzzed the shared walkers and six typed RTNetlink
+// parsers. The crate has roughly 377 parse functions, and the ones that
+// were not covered are the least-exercised code in it: nftables
+// `RuleExpr` decoding (the newest and most intricate), sockdiag, xfrm,
+// conntrack, uevent, connector, and every `parse_events` — the
+// multicast entry points, where one malformed frame from a future
+// kernel would take the whole consumer down.
+//
+// The yield is not expected to come from the walkers. `AttrIter` has
+// the rule-2 guards and is already fuzzed. It comes from what a parser
+// does *after* `AttrIter` hands it a payload: fixed-size struct reads,
+// enum conversions, nested re-walks, arithmetic on attribute values.
+
+use super::{
+    EventSource,
+    netfilter::ConntrackEntry,
+    nftables::{RuleInfo, expr::parse_expressions},
+    protocol::{KobjectUevent, Netfilter, Route, Xfrm},
+    xfrm::{SecurityAssociation, SecurityPolicy},
+};
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// The typed parsers for the non-RTNetlink protocols. Each walks a
+    /// fixed-size header plus an attribute chain, like the six above,
+    /// but none of them was covered.
+    #[test]
+    fn non_rtnetlink_typed_parsers_never_panic(
+        data in proptest::collection::vec(any::<u8>(), 0..1024)
+    ) {
+        let _ = ConntrackEntry::from_bytes(&data);
+        let _ = SecurityAssociation::from_bytes(&data);
+        let _ = SecurityPolicy::from_bytes(&data);
+        let _ = RuleInfo::from_bytes(&data);
+    }
+
+    /// nftables expression decoding — the newest and most intricate
+    /// parser in the crate. It re-walks nested attribute lists and
+    /// interprets register numbers and lengths from the payload, which
+    /// is exactly the shape the walker guards do not protect.
+    #[test]
+    fn nftables_expression_decoding_never_panics(
+        data in proptest::collection::vec(any::<u8>(), 0..2048)
+    ) {
+        let exprs = parse_expressions(&data);
+        // Bounded: one expression cannot come from fewer than a nested
+        // attribute header's worth of bytes.
+        prop_assert!(exprs.len() <= loop_cap(data.len()));
+    }
+
+    /// `EventSource::parse_events` — the multicast entry points. The
+    /// parser-robustness policy is explicit that one malformed frame
+    /// must not kill a long-lived subscriber, and these are where that
+    /// is decided.
+    #[test]
+    fn event_parsers_never_panic(
+        data in proptest::collection::vec(any::<u8>(), 0..2048)
+    ) {
+        let _ = <Route as EventSource>::parse_events(&data);
+        let _ = <Xfrm as EventSource>::parse_events(&data);
+        let _ = <Netfilter as EventSource>::parse_events(&data);
+        let _ = <KobjectUevent as EventSource>::parse_events(&data);
+    }
+
+    /// A uevent is *text*, not TLVs — NUL-separated `KEY=VALUE` after an
+    /// `"<action>@<devpath>"` prefix — so it has a different failure
+    /// surface from everything else here: index arithmetic on separator
+    /// positions rather than length fields.
+    #[test]
+    fn uevent_parsing_never_panics(
+        data in proptest::collection::vec(any::<u8>(), 0..512)
+    ) {
+        let _ = super::uevent::Uevent::parse(&data);
+    }
+
+    /// Arbitrary bytes are the *unlikely* input for a text parser; a
+    /// uevent-shaped one with adversarial separators is the likely one.
+    #[test]
+    fn uevent_parsing_never_panics_on_uevent_shaped_input(
+        action in "[a-z@=\u{0}]{0,16}",
+        devpath in "[a-z/@=\u{0}]{0,32}",
+        rest in proptest::collection::vec("[A-Z=\u{0}]{0,12}", 0..8),
+    ) {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(action.as_bytes());
+        buf.push(b'@');
+        buf.extend_from_slice(devpath.as_bytes());
+        buf.push(0);
+        for kv in &rest {
+            buf.extend_from_slice(kv.as_bytes());
+            buf.push(0);
+        }
+        let _ = super::uevent::Uevent::parse(&buf);
+    }
+}
+
+// -----------------------------------------------------------------------
+// Structurally valid input with adversarial values
+// -----------------------------------------------------------------------
+//
+// Arbitrary bytes almost never look like a well-formed netlink message,
+// so the walkers reject them early and the parser code *after*
+// `AttrIter` is barely reached — which is exactly where #279 predicts
+// the yield. These generators build chains the walkers accept and then
+// make the attribute ids, lengths and payloads adversarial.
+
+/// A well-formed `nlattr` chain: each entry has a correct `nla_len`,
+/// an arbitrary type, an arbitrary payload, and correct 4-byte
+/// alignment padding. This is what the parsers actually see.
+fn valid_attr_chain() -> impl Strategy<Value = Vec<u8>> {
+    proptest::collection::vec(
+        (any::<u16>(), proptest::collection::vec(any::<u8>(), 0..40)),
+        0..24,
+    )
+    .prop_map(|attrs| {
+        let mut buf = Vec::new();
+        for (ty, payload) in attrs {
+            let len = (4 + payload.len()) as u16;
+            buf.extend_from_slice(&len.to_ne_bytes());
+            buf.extend_from_slice(&ty.to_ne_bytes());
+            buf.extend_from_slice(&payload);
+            while buf.len() % 4 != 0 {
+                buf.push(0);
+            }
+        }
+        buf
+    })
+}
+
+/// A fixed-size header of `hdr_len` arbitrary bytes followed by a valid
+/// attribute chain — the shape of every RTNetlink and nfnetlink
+/// message body.
+fn header_plus_attrs(hdr_len: usize) -> impl Strategy<Value = Vec<u8>> {
+    (
+        proptest::collection::vec(any::<u8>(), hdr_len..=hdr_len),
+        valid_attr_chain(),
+    )
+        .prop_map(|(hdr, attrs)| {
+            let mut buf = hdr;
+            buf.extend_from_slice(&attrs);
+            buf
+        })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// Every typed parser, over input the attribute walker accepts.
+    ///
+    /// The header bytes are arbitrary, so enum conversions and family
+    /// dispatch see values the kernel would never send; the attribute
+    /// ids are arbitrary, so every `match attr_type` arm is reachable;
+    /// and the payloads are arbitrary-length, so every fixed-size read
+    /// behind an id gets a payload of the wrong size.
+    #[test]
+    fn typed_parsers_survive_well_formed_but_hostile_input(
+        // 16 covers ifinfomsg/ifaddrmsg/rtmsg/ndmsg/tcmsg/nfgenmsg and
+        // then some; a longer header just means more of the chain is
+        // read as header, which is itself worth exercising.
+        body in header_plus_attrs(16),
+    ) {
+        let _ = LinkMessage::from_bytes(&body);
+        let _ = RouteMessage::from_bytes(&body);
+        let _ = AddressMessage::from_bytes(&body);
+        let _ = NeighborMessage::from_bytes(&body);
+        let _ = RuleMessage::from_bytes(&body);
+        let _ = TcMessage::from_bytes(&body);
+        let _ = ConntrackEntry::from_bytes(&body);
+        let _ = SecurityAssociation::from_bytes(&body);
+        let _ = SecurityPolicy::from_bytes(&body);
+        let _ = RuleInfo::from_bytes(&body);
+    }
+
+    /// The same for expression decoding, where the payload of each
+    /// attribute is itself a nested chain the parser re-walks.
+    #[test]
+    fn expression_decoding_survives_nested_hostile_input(
+        outer in valid_attr_chain(),
+    ) {
+        // One level of real nesting: wrap the chain in an attribute so
+        // the decoder's inner walk is exercised, not just the outer.
+        let mut nested = Vec::new();
+        let len = (4 + outer.len()) as u16;
+        nested.extend_from_slice(&len.to_ne_bytes());
+        nested.extend_from_slice(&(1u16 | 0x8000).to_ne_bytes()); // NLA_F_NESTED
+        nested.extend_from_slice(&outer);
+        while nested.len() % 4 != 0 {
+            nested.push(0);
+        }
+        let exprs = parse_expressions(&nested);
+        prop_assert!(exprs.len() <= loop_cap(nested.len()));
+    }
+
+    /// And the multicast entry points, over a whole well-formed netlink
+    /// message rather than a bare body — `parse_events` walks
+    /// `MessageIter` first.
+    #[test]
+    fn event_parsers_survive_well_formed_messages(
+        msg_type in any::<u16>(),
+        flags in any::<u16>(),
+        body in header_plus_attrs(16),
+    ) {
+        let total = NLMSG_HDRLEN + body.len();
+        let mut frame = Vec::with_capacity(total);
+        frame.extend_from_slice(&(total as u32).to_ne_bytes());
+        frame.extend_from_slice(&msg_type.to_ne_bytes());
+        frame.extend_from_slice(&flags.to_ne_bytes());
+        frame.extend_from_slice(&0u32.to_ne_bytes()); // seq
+        frame.extend_from_slice(&0u32.to_ne_bytes()); // pid
+        frame.extend_from_slice(&body);
+
+        let _ = <Route as EventSource>::parse_events(&frame);
+        let _ = <Xfrm as EventSource>::parse_events(&frame);
+        let _ = <Netfilter as EventSource>::parse_events(&frame);
+        let _ = <KobjectUevent as EventSource>::parse_events(&frame);
+    }
+}
