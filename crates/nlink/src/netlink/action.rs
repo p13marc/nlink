@@ -38,7 +38,7 @@ use super::{
     message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_REQUEST, NlMsgType},
     protocol::Route,
     types::tc::{
-        TCA_ACT_TAB, TcMsg,
+        TCA_ACT_TAB, TcaMsg,
         action::{
             self, TCA_ACT_INDEX, TCA_ACT_KIND, TCA_ACT_OPTIONS, TcGen, connmark, csum, ct, gact,
             mirred, mpls, nat, pedit, police, sample, skbmod, tunnel_key, vlan,
@@ -4813,7 +4813,7 @@ impl Connection<Route> {
             NlMsgType::RTM_NEWACTION,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         );
-        b.append(&TcMsg::default());
+        b.append(&TcaMsg::default());
 
         let tab = b.nest_start(TCA_ACT_TAB);
         let act = b.nest_start(1);
@@ -4835,7 +4835,7 @@ impl Connection<Route> {
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_action", kind = %kind, index))]
     pub async fn del_action(&self, kind: &str, index: u32) -> Result<()> {
         let mut b = MessageBuilder::new(NlMsgType::RTM_DELACTION, NLM_F_REQUEST | NLM_F_ACK);
-        b.append(&TcMsg::default());
+        b.append(&TcaMsg::default());
 
         let tab = b.nest_start(TCA_ACT_TAB);
         let act = b.nest_start(1);
@@ -4856,7 +4856,7 @@ impl Connection<Route> {
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_action", kind = %kind, index))]
     pub async fn get_action(&self, kind: &str, index: u32) -> Result<Option<ActionMessage>> {
         let mut b = MessageBuilder::new(NlMsgType::RTM_GETACTION, NLM_F_REQUEST);
-        b.append(&TcMsg::default());
+        b.append(&TcaMsg::default());
 
         let tab = b.nest_start(TCA_ACT_TAB);
         let act = b.nest_start(1);
@@ -4880,7 +4880,7 @@ impl Connection<Route> {
     #[tracing::instrument(level = "debug", skip_all, fields(method = "dump_actions", kind = %kind))]
     pub async fn dump_actions(&self, kind: &str) -> Result<Vec<ActionMessage>> {
         let mut b = dump_request(NlMsgType::RTM_GETACTION);
-        b.append(&TcMsg::default());
+        b.append(&TcaMsg::default());
 
         let tab = b.nest_start(TCA_ACT_TAB);
         let act = b.nest_start(1);
@@ -4903,11 +4903,14 @@ impl Connection<Route> {
 /// containing the top-level attributes. Returns `None` if the
 /// message is too short.
 fn action_attr_slice(msg: &[u8]) -> Option<&[u8]> {
-    // nlmsghdr (16) + tcmsg (4 bytes minimum). The legacy parser
-    // uses TcMsg::default() which is 20 bytes via #[repr(C)].
+    // nlmsghdr (16) + tcamsg (4). The action API uses `struct tcamsg`,
+    // not `struct tcmsg` — this used to skip `size_of::<TcMsg>()` (20),
+    // landing 16 bytes into the attribute chain, and the writers sent
+    // 20 bytes to match. Both halves were wrong together, so the read
+    // path looked self-consistent while the kernel refused every write
+    // with "Netlink action attributes missing" (#300).
     const NLMSG_HDRLEN: usize = 16;
-    let tcmsg_size = std::mem::size_of::<TcMsg>();
-    let start = NLMSG_HDRLEN + tcmsg_size;
+    let start = NLMSG_HDRLEN + TcaMsg::SIZE;
     if msg.len() < start {
         return None;
     }
@@ -5703,7 +5706,7 @@ mod tests {
             NlMsgType::RTM_NEWACTION,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         );
-        b.append(&TcMsg::default());
+        b.append(&TcaMsg::default());
         let tab = b.nest_start(TCA_ACT_TAB);
         let act = b.nest_start(1);
         b.append_attr(TCA_ACT_KIND, action.kind().as_bytes());
@@ -5765,7 +5768,7 @@ mod tests {
     #[test]
     fn del_action_emits_kind_plus_index_at_slot_level() {
         let mut b = MessageBuilder::new(NlMsgType::RTM_DELACTION, NLM_F_REQUEST | NLM_F_ACK);
-        b.append(&TcMsg::default());
+        b.append(&TcaMsg::default());
         let tab = b.nest_start(TCA_ACT_TAB);
         let act = b.nest_start(1);
         b.append_attr(TCA_ACT_KIND, b"gact");
@@ -5789,7 +5792,7 @@ mod tests {
     #[test]
     fn get_action_request_uses_request_only_flags() {
         let mut b = MessageBuilder::new(NlMsgType::RTM_GETACTION, NLM_F_REQUEST);
-        b.append(&TcMsg::default());
+        b.append(&TcaMsg::default());
         let tab = b.nest_start(TCA_ACT_TAB);
         let act = b.nest_start(1);
         b.append_attr(TCA_ACT_KIND, b"mirred");
@@ -5813,7 +5816,7 @@ mod tests {
     fn parse_action_messages_handles_two_slots() {
         // Build an action table with two slots: gact + mirred.
         let mut b = MessageBuilder::new(NlMsgType::RTM_NEWACTION, 0);
-        b.append(&TcMsg::default());
+        b.append(&TcaMsg::default());
         let tab = b.nest_start(TCA_ACT_TAB);
 
         let act1 = b.nest_start(1);

@@ -126,6 +126,35 @@ All notable changes to this project will be documented in this file.
   parsers hold, and the harness is now what keeps them holding.
   Mutation-verified — an unguarded fixed-size read injected into
   `parse_expressions` is caught.
+- **Standalone TC actions used the wrong fixed header (#300).** The
+  action API is the one TC surface that does not use `struct tcmsg`:
+  `tc_ctl_action` parses attributes from `sizeof(struct tcamsg)` — four
+  bytes — onward. nlink sent a 20-byte `tcmsg`, so the kernel skipped 4
+  and read the remaining 16 as the start of the attribute chain, never
+  found `TCA_ACT_TAB`, and refused **every** `add_action` /
+  `del_action` / `get_action` / `dump_actions`:
+
+  ```text
+  header=20B: errno=-22  "Netlink action attributes missing"
+  header=4B:  errno=-22  (past the check, on to the payload)
+  ```
+
+  `action_attr_slice` skipped 20 on the read side too, so the two halves
+  were wrong together and looked self-consistent — its comment even
+  noted that `tcmsg` is "4 bytes minimum" while the writer sent 20. New
+  `TcaMsg` type, 4 bytes, used by all eight sites.
+
+- **`add_address` failed for every `127.0.0.0/8` address (#293).**
+  `inet_rtm_newaddr` rejects a loopback prefix at any scope but
+  `RT_SCOPE_HOST`, and both constructors hardcoded `Scope::Universe`:
+
+  ```text
+  scope=0   (UNIVERSE): errno=-22  "ipv4: Invalid scope value"
+  scope=254 (HOST):     errno=0    OK
+  ```
+
+  The scope is now derived from the address the way `iproute2` derives
+  it; `.scope()` still overrides.
 
 - **Public types that could not be named downstream (#280).** Each
   appears in a public signature or a public field while living in a

@@ -24,6 +24,53 @@ pub struct TcMsg {
     pub tcm_info: u32,
 }
 
+/// `struct tcamsg` — the fixed header of a **standalone action**
+/// message (`RTM_{NEW,DEL,GET}ACTION`).
+///
+/// Four bytes, not the twenty of [`TcMsg`]. The action API is the one
+/// TC surface that does not use `tcmsg`, and `tc_ctl_action` parses
+/// attributes from `sizeof(struct tcamsg)` onward:
+///
+/// ```c
+/// ret = nlmsg_parse_deprecated(n, sizeof(struct tcamsg), tca, TCA_ROOT_MAX, ...);
+/// if (tca[TCA_ACT_TAB] == NULL) {
+///         NL_SET_ERR_MSG(extack, "Netlink action attributes missing");
+///         return -EINVAL;
+/// }
+/// ```
+///
+/// Sending a 20-byte `tcmsg` meant the kernel skipped 4 and read the
+/// remaining 16 as the start of the attribute chain — so it never found
+/// `TCA_ACT_TAB` and refused every standalone action with exactly that
+/// message. Measured on 6.12.105:
+///
+/// ```text
+/// header=20B: errno=-22  "Netlink action attributes missing"
+/// header=4B:  errno=-22  (gets past the check, fails on the payload)
+/// ```
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct TcaMsg {
+    /// Address family.
+    pub tca_family: u8,
+    pub tca_pad1: u8,
+    pub tca_pad2: u16,
+}
+
+impl TcaMsg {
+    /// Size of this structure — 4 bytes.
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+
+    /// Create a new standalone-action header.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        <Self as IntoBytes>::as_bytes(self)
+    }
+}
+
 impl TcMsg {
     /// Size of this structure.
     pub const SIZE: usize = std::mem::size_of::<Self>();

@@ -564,8 +564,22 @@ async fn test_sit_tunnel() -> Result<()> {
     let ns = TestNamespace::new("sit")?;
     let conn = ns.connection()?;
 
-    // Create SIT (6in4) tunnel
-    conn.add_link(SitLink::new("sit1").ttl(64)).await?;
+    // SIT tunnels are keyed by `(local, remote)`, and loading the
+    // module auto-creates the fallback `sit0` with both unset. Asking
+    // for an unparameterised tunnel therefore asks for a *duplicate of
+    // sit0*, and the kernel answers EEXIST — `ip link add sit1 type
+    // sit` fails the same way. Give it endpoints.
+    //
+    // These tests had never run: they are gated on
+    // `require_modules!("sit")`, and `has_module` only looked at
+    // `/sys/module`, so they skipped and reported `ok` (#273, #300).
+    conn.add_link(
+        SitLink::new("sit1")
+            .local(std::net::Ipv4Addr::new(192, 0, 2, 2))
+            .remote(std::net::Ipv4Addr::new(192, 0, 2, 1))
+            .ttl(64),
+    )
+    .await?;
 
     let link = conn.get_link_by_name("sit1").await?;
     assert!(link.is_some(), "sit1 should exist");
@@ -582,8 +596,14 @@ async fn test_sit_isatap() -> Result<()> {
     let ns = TestNamespace::new("isatap")?;
     let conn = ns.connection()?;
 
-    // Create SIT tunnel with ISATAP mode
-    conn.add_link(SitLink::new("isatap0").isatap()).await?;
+    // Endpoints for the same reason as `test_sit_tunnel` above.
+    conn.add_link(
+        SitLink::new("isatap0")
+            .local(std::net::Ipv4Addr::new(192, 0, 2, 4))
+            .remote(std::net::Ipv4Addr::new(192, 0, 2, 3))
+            .isatap(),
+    )
+    .await?;
 
     let link = conn.get_link_by_name("isatap0").await?;
     assert!(link.is_some(), "isatap0 should exist");
