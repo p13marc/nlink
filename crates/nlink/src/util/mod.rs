@@ -9,6 +9,7 @@ pub mod names;
 pub mod parse;
 pub mod percent;
 pub mod rate;
+pub mod uevent_trigger;
 
 pub use addr::{format_addr, format_prefix, parse_addr, parse_prefix};
 pub use address_family::AddressFamily;

@@ -86,6 +86,14 @@ to the hand-rolled netlink primitives if you want to go deeper.
   + `ResyncMarker` (Plan 151, 0.16+); pairs with the connection
   pool below for the dump connection.
 
+- [**Netdev lifecycle: joining uevents with rtnetlink**](netdev-lifecycle.md)
+  — one typed stream (and one `Store` watch-cache) carrying both a
+  device's rtnetlink attributes and its driver / sysfs context,
+  joined on the `IFINDEX=` that net uevents carry. Covers the
+  ordering rule between the two sockets, ifindex reuse, why the
+  devpath is never resolved, and what a namespace does and doesn't
+  deliver. Uses `NetdevLifecycle` + `UeventFilter` (#253).
+
 - [**Connection pool**](connection-pool.md) — hold a bounded set
   of `Connection<P>` and round-robin requests across tasks.
   Right answer when you'd otherwise hand-roll multiple

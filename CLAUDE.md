@@ -669,6 +669,13 @@ recipe rather than re-synthesizing:
   via resync redump.
 - [`xfrm-ipsec-tunnel`](docs/recipes/xfrm-ipsec-tunnel.md) — IPsec SA/SP
   setup + the `Connection<Xfrm>: EventSource` monitor stream.
+- [`netdev-lifecycle`](docs/recipes/netdev-lifecycle.md) — join
+  rtnetlink + uevents into one typed netdev stream keyed on the
+  `IFINDEX=` net uevents carry, mirrored into a `Store` watch-cache
+  (`NetdevLifecycle`, #253). Pairs with `UeventFilter` (#251) for
+  kernel-side uevent prefiltering and `util::uevent_trigger` (#252)
+  for the re-enumeration that stands in for the dump uevents don't
+  have.
 - [`connection-pool`](docs/recipes/connection-pool.md) — `ConnectionPool<P>`
   for kernel-parallel dump fan-out (one fd per task).
 - [`cgroup-classification`](docs/recipes/cgroup-classification.md) —

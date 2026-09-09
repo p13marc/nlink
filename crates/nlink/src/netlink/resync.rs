@@ -66,6 +66,24 @@
 /// `ResyncEnd` is the cue that the replay is complete — the
 /// consumer's state now reflects current kernel state, and
 /// subsequent `Event(T)`s are real-time deltas again.
+///
+/// # One source where `ResyncEnd` means less than that
+///
+/// The guarantee above rests on the factory running a *dump*, which
+/// every protocol here has — except `NETLINK_KOBJECT_UEVENT`, which
+/// is broadcast-only with no `GETUEVENT` (#252). Its stand-in,
+/// [`crate::util::uevent_trigger::resync_factory`], writes to
+/// `/sys/.../uevent` to ask the kernel to *re-broadcast*, and returns
+/// an empty batch: the re-announcements come back through the live
+/// stream as ordinary `Event(T)`s, racing with genuinely new events
+/// and describing each device as of re-emission rather than as of the
+/// event that was lost.
+///
+/// So on a uevent stream, read `ResyncEnd` as "a re-announcement has
+/// been requested", not "state is rebuilt", and expect no
+/// [`ResyncedEvent::Resynced`] items at all. A consumer needing a
+/// consistent snapshot of network devices should take it from
+/// rtnetlink, which has a real dump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ResyncMarker {

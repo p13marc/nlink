@@ -17,17 +17,39 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
 use super::{
     connection::Connection,
-    error::{Error, Result},
+    error::Result,
     protocol::{KobjectUevent, ProtocolState},
     socket::NetlinkSocket,
+    uevent_filter::{CompiledUeventFilter, UeventFilter},
 };
 
-/// Multicast group for kernel uevents.
-const UEVENT_GROUP: u32 = 1;
+/// Multicast group carrying the kernel's own uevents.
+///
+/// Group 2 exists too, but it belongs to udevd's rebroadcast — a
+/// different wire format (a `libudev` header in front of the
+/// environment block) that this module does not parse.
+pub const UEVENT_GROUP: u32 = 1;
+
+/// Receive-buffer size requested by [`Connection::<KobjectUevent>::new`].
+///
+/// The system default (`net.core.rmem_default`, ~208 KiB on a stock
+/// kernel) is not much for this protocol: a uevent carries the
+/// device's whole environment block, and a coldplug storm, a USB hub
+/// enumerating, or somebody running `udevadm trigger` delivers
+/// hundreds of them in a burst. Overflow costs frames — and unlike
+/// every other subscriber in the crate, a uevent subscriber has no
+/// dump to resync from (#252), so the loss is permanent.
+///
+/// 1 MiB is what udev's own monitor reaches for, scaled down to
+/// something reasonable for a library default. Unprivileged callers
+/// will be capped at `net.core.rmem_max`; see
+/// [`NetlinkSocket::set_rcvbuf`] for how that degrades, and
+/// [`Connection::rcvbuf`] for what was actually granted.
+pub const DEFAULT_UEVENT_RCVBUF: usize = 1 << 20;
 
 /// A kernel object event.
 ///
@@ -162,8 +184,10 @@ impl Uevent {
 impl Connection<KobjectUevent> {
     /// Create a new uevent connection subscribed to kernel events.
     ///
-    /// The connection is automatically subscribed to the kernel uevent
-    /// multicast group.
+    /// The receive buffer is sized up to [`DEFAULT_UEVENT_RCVBUF`]
+    /// before the multicast subscription is taken out, so the socket
+    /// is never briefly subscribed at the small default size. Use
+    /// [`Self::with_rcvbuf`] to pick a different size.
     ///
     /// # Example
     ///
@@ -173,14 +197,143 @@ impl Connection<KobjectUevent> {
     /// let conn = Connection::<KobjectUevent>::new()?;
     /// ```
     pub fn new() -> Result<Self> {
+        Self::with_rcvbuf(DEFAULT_UEVENT_RCVBUF)
+    }
+
+    /// Like [`Self::new`], with an explicit receive-buffer request.
+    ///
+    /// Best-effort: the kernel doubles the request and clamps it to
+    /// `net.core.rmem_max` unless the caller holds `CAP_NET_ADMIN`.
+    /// [`Self::rcvbuf`] reports what was granted.
+    pub fn with_rcvbuf(bytes: usize) -> Result<Self> {
         let socket = NetlinkSocket::new(KobjectUevent::PROTOCOL)?;
+        // Before add_membership: no window where events are arriving
+        // into an undersized buffer.
+        socket.set_rcvbuf(bytes)?;
         socket.add_membership(UEVENT_GROUP)?;
         Ok(Self::from_parts(socket, KobjectUevent))
     }
 
+    /// The granted receive-buffer size — the kernel's `sk_rcvbuf`,
+    /// i.e. twice the accepted request. Compare against
+    /// `2 * DEFAULT_UEVENT_RCVBUF` to see whether the request was
+    /// capped.
+    pub fn rcvbuf(&self) -> Result<usize> {
+        self.socket().rcvbuf()
+    }
+
+    /// Like [`Self::new`], for a network namespace named under
+    /// `/var/run/netns`.
+    ///
+    /// Net-device uevents are delivered to the network namespace of
+    /// the listening socket, so this sees the devices in `name` and
+    /// not the host's. Uevents for every *other* subsystem go only to
+    /// the initial namespace, so a connection built this way is a
+    /// net-device monitor and nothing else — see
+    /// [`crate::netlink::netdev`] for what that means for a lifecycle
+    /// join.
+    pub fn in_namespace(name: &str) -> Result<Self> {
+        Self::in_namespace_path(Path::new(super::namespace::NETNS_RUN_DIR).join(name))
+    }
+
+    /// Like [`Self::in_namespace`], for any namespace file path — a
+    /// named namespace, `/proc/<pid>/ns/net`, or a bind mount the
+    /// application owns.
+    pub fn in_namespace_path<T: AsRef<Path>>(ns_path: T) -> Result<Self> {
+        let socket = NetlinkSocket::new_in_namespace_path(KobjectUevent::PROTOCOL, ns_path)?;
+        socket.set_rcvbuf(DEFAULT_UEVENT_RCVBUF)?;
+        socket.add_membership(UEVENT_GROUP)?;
+        Ok(Self::from_parts(socket, KobjectUevent))
+    }
+
+    /// (Re-)join the kernel uevent multicast group.
+    ///
+    /// Every constructor here subscribes already, and there is no way
+    /// to build an unsubscribed `Connection<KobjectUevent>` — the
+    /// generic namespace helpers need `P: Default`, which this
+    /// protocol deliberately does not implement for exactly that
+    /// reason.
+    ///
+    /// So this pairs with `drop_membership` for pause/resume: a
+    /// monitor about to do a long stretch of work can leave the group
+    /// rather than let events pile up in a buffer it isn't draining,
+    /// then rejoin. Idempotent, so resuming twice is harmless.
+    ///
+    /// Note what pausing costs: uevents missed while unsubscribed are
+    /// gone, and this is the one source with no dump to recover them
+    /// from (#252). Leaving the group is only better than falling
+    /// behind if you did not want those events at all.
+    ///
+    /// ```no_run
+    /// use nlink::netlink::{Connection, KobjectUevent, uevent::UEVENT_GROUP};
+    ///
+    /// let conn = Connection::<KobjectUevent>::new()?;
+    /// conn.socket().drop_membership(UEVENT_GROUP)?;   // pause
+    /// // ... work that must not be interleaved with event handling ...
+    /// conn.subscribe()?;                              // resume
+    /// # Ok::<(), nlink::Error>(())
+    /// ```
+    pub fn subscribe(&self) -> Result<()> {
+        self.socket().add_membership(UEVENT_GROUP)
+    }
+
+    /// Compile `filter` and attach it to the socket, so the kernel
+    /// drops uninteresting events before they are queued.
+    ///
+    /// Returns the compiled program;
+    /// [`CompiledUeventFilter::is_exact`] tells you whether the kernel
+    /// evaluates the whole filter or only part of it. Either way the
+    /// program is an over-approximation — pair this with
+    /// [`Self::recv_matching`], or apply
+    /// [`UeventFilter::matches`] yourself, so the criteria the kernel
+    /// could not lower are still honoured.
+    ///
+    /// A filter with nothing to lower attaches nothing and returns an
+    /// empty program; any previously attached filter is left alone, so
+    /// use [`Self::clear_filter`] to remove one.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nlink::netlink::{Connection, KobjectUevent};
+    /// use nlink::netlink::uevent_filter::UeventFilter;
+    ///
+    /// let conn = Connection::<KobjectUevent>::new()?;
+    /// let filter = UeventFilter::new().subsystem("net").build();
+    /// conn.attach_filter(&filter)?;
+    ///
+    /// loop {
+    ///     let event = conn.recv_matching(&filter).await?;
+    ///     println!("{} {}", event.action, event.devpath);
+    /// }
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "attach_filter"))]
+    pub fn attach_filter(&self, filter: &UeventFilter) -> Result<CompiledUeventFilter> {
+        let compiled = filter.compile();
+        if !compiled.is_empty() {
+            self.socket().attach_filter(compiled.program())?;
+            tracing::debug!(
+                instructions = compiled.len(),
+                exact = compiled.is_exact(),
+                "attached uevent socket filter"
+            );
+        }
+        Ok(compiled)
+    }
+
+    /// Remove any attached socket filter. A no-op when none is
+    /// attached.
+    pub fn clear_filter(&self) -> Result<()> {
+        self.socket().detach_filter()
+    }
+
     /// Receive the next uevent from the kernel.
     ///
-    /// This method blocks until a uevent is available.
+    /// Blocks until an event arrives. Unparseable frames are skipped.
+    ///
+    /// If a filter is attached, this yields the *kernel's* verdict,
+    /// which over-accepts by design — use [`Self::recv_matching`] to
+    /// apply the filter's own criteria too.
     ///
     /// # Example
     ///
@@ -208,13 +361,44 @@ impl Connection<KobjectUevent> {
         }
     }
 
-    /// Try to receive a uevent without blocking.
+    /// Receive the next uevent that `filter` accepts.
     ///
-    /// Returns `Ok(None)` if no event is immediately available.
+    /// The authoritative half of the filtering story: the kernel
+    /// program (if attached) sheds most of the traffic, and this
+    /// applies [`UeventFilter::matches`] to what survives, so the
+    /// caller sees exactly what they asked for regardless of how much
+    /// of the filter could be lowered.
+    ///
+    /// Correct — just less efficient — with no filter attached at all.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "recv_matching"))]
+    pub async fn recv_matching(&self, filter: &UeventFilter) -> Result<Uevent> {
+        loop {
+            let event = self.recv().await?;
+            if filter.matches(&event) {
+                return Ok(event);
+            }
+        }
+    }
+
+    /// Receive a uevent if one is already queued, without waiting.
+    ///
+    /// Returns `Ok(None)` when the socket is empty. Frames that fail
+    /// to parse are skipped, so `Ok(None)` means "nothing readable
+    /// right now", not "nothing arrived".
+    ///
+    /// Prefer [`Self::recv`]; this exists for callers driving their
+    /// own loop that must not block, and for draining a backlog after
+    /// a burst.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "try_recv"))]
     pub fn try_recv(&self) -> Result<Option<Uevent>> {
-        // For now, this is not implemented as it would require non-blocking recv
-        // The async recv() is the primary API
-        Err(Error::not_supported("try_recv not implemented"))
+        loop {
+            let Some(data) = self.socket().try_recv_msg()? else {
+                return Ok(None);
+            };
+            if let Some(event) = Uevent::parse(&data) {
+                return Ok(Some(event));
+            }
+        }
     }
 }
 

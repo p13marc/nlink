@@ -304,25 +304,173 @@ impl NetlinkSocket {
         Self::set_netlink_sockopt(self.as_raw_fd(), libc::NETLINK_EXT_ACK, on)
     }
 
-    /// Shrink/grow the kernel-side receive buffer (`SO_RCVBUF`).
-    /// `SO_RCVBUFFORCE` is used so callers with `CAP_NET_ADMIN`
-    /// can drop below `net.core.rmem_min` — useful for tests
-    /// that need to provoke `ENOBUFS` overflow on multicast
-    /// subscribers without flooding the kernel for minutes.
+    /// Set the kernel-side receive buffer (`SO_RCVBUF`), escalating
+    /// to `SO_RCVBUFFORCE` only when the plain call could not reach
+    /// the requested size.
     ///
-    /// Plan 185 integration test depends on this — shrinking the
-    /// nftables multicast subscriber to a few hundred bytes
-    /// makes a handful of rule mutations overflow it
-    /// deterministically. Outside that test scope this is
-    /// rarely the right knob; prefer the kernel default.
+    /// **Growing is the primary use.** A multicast subscriber runs on
+    /// `net.core.rmem_default` (~208 KiB on a stock kernel) unless it
+    /// says otherwise, and a burst that outruns the buffer is dropped
+    /// with `ENOBUFS` — for most protocols that costs a resync, and
+    /// for `NETLINK_KOBJECT_UEVENT` there is no resync to be had
+    /// (#252). Size up front.
+    ///
+    /// The kernel doubles what you pass (bookkeeping overhead) and
+    /// clamps the plain `SO_RCVBUF` path to `net.core.rmem_max`.
+    /// [`Self::rcvbuf`] reports what was actually granted — the
+    /// *doubled* figure, as `getsockopt` returns it.
+    ///
+    /// Escalation: if the readback comes back below `bytes`, the
+    /// request was capped by `rmem_max`, so this retries with
+    /// `SO_RCVBUFFORCE`, which skips the cap. That needs
+    /// `CAP_NET_ADMIN`; when the caller doesn't have it the `EPERM`
+    /// is swallowed and the best-effort size stands. Uevent
+    /// subscribers are routinely unprivileged, so failing there would
+    /// make the knob unusable for exactly the consumers that need it.
+    /// Check [`Self::rcvbuf`] if the exact size matters.
+    ///
+    /// Shrinking works too — `crates/nlink/tests/integration/`
+    /// shrinks a subscriber to a few hundred bytes so a handful of
+    /// mutations overflow it deterministically. Note the kernel's
+    /// `SOCK_MIN_RCVBUF` floor applies to both paths, so a shrink
+    /// below it lands on the floor rather than erroring.
     pub fn set_rcvbuf(&self, bytes: usize) -> Result<()> {
-        let val = bytes as libc::c_int;
-        // SAFETY: SO_RCVBUFFORCE on a valid fd; size matches int.
+        let fd = self.as_raw_fd();
+        Self::set_sock_int(fd, libc::SO_RCVBUF, bytes as libc::c_int)?;
+
+        // Under the cap? Then the plain path was enough — including
+        // every shrink, which `rmem_max` never limits.
+        if Self::get_sock_int(fd, libc::SO_RCVBUF)? >= bytes as libc::c_int {
+            return Ok(());
+        }
+
+        match Self::set_sock_int(fd, libc::SO_RCVBUFFORCE, bytes as libc::c_int) {
+            Ok(()) => Ok(()),
+            // No CAP_NET_ADMIN: keep the capped size rather than
+            // failing a call the caller can't satisfy anyway.
+            Err(Error::Io(e)) if e.raw_os_error() == Some(libc::EPERM) => {
+                tracing::debug!(
+                    requested = bytes,
+                    "SO_RCVBUF capped by net.core.rmem_max and SO_RCVBUFFORCE \
+                     needs CAP_NET_ADMIN; keeping the granted size"
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Read the granted receive-buffer size (`getsockopt(SO_RCVBUF)`).
+    ///
+    /// This is the kernel's internal `sk_rcvbuf`, i.e. **twice** the
+    /// value handed to [`Self::set_rcvbuf`] (minus any clamping).
+    /// Compare against `2 * requested` to tell a satisfied request
+    /// from a capped one.
+    pub fn rcvbuf(&self) -> Result<usize> {
+        Ok(Self::get_sock_int(self.as_raw_fd(), libc::SO_RCVBUF)? as usize)
+    }
+
+    /// Attach a classic-BPF program as a socket filter
+    /// (`SO_ATTACH_FILTER`), so the kernel drops uninteresting frames
+    /// before they are ever queued to this socket.
+    ///
+    /// `prog` is a flat instruction stream in `struct sock_filter`
+    /// layout — 8 bytes per instruction — as produced by
+    /// [`crate::netlink::uevent_filter::UeventFilter::compile`]. The
+    /// kernel's verifier rejects a malformed program with `EINVAL`.
+    ///
+    /// A filter returning 0 drops the frame; returning `u32::MAX`
+    /// accepts it whole. Returning a smaller non-zero value would
+    /// *truncate* the frame, which no nlink-generated program does —
+    /// a truncated netlink message is worse than a dropped one.
+    ///
+    /// Attaching replaces any previously attached filter.
+    pub fn attach_filter(&self, prog: &[u8]) -> Result<()> {
+        const SOCK_FILTER_SIZE: usize = 8;
+        if prog.is_empty() || !prog.len().is_multiple_of(SOCK_FILTER_SIZE) {
+            return Err(Error::InvalidMessage(format!(
+                "attach_filter: program is {} bytes, expected a non-empty \
+                 multiple of {SOCK_FILTER_SIZE} (struct sock_filter)",
+                prog.len()
+            )));
+        }
+        let len = prog.len() / SOCK_FILTER_SIZE;
+        if len > u16::MAX as usize {
+            return Err(Error::InvalidMessage(format!(
+                "attach_filter: {len} instructions exceeds the u16 \
+                 sock_fprog.len field"
+            )));
+        }
+
+        let fprog = libc::sock_fprog {
+            len: len as u16,
+            filter: prog.as_ptr() as *mut libc::sock_filter,
+        };
+        // SAFETY: SO_ATTACH_FILTER on a valid fd with a sock_fprog
+        // whose `filter` points at `len` well-formed instructions
+        // (length checked above) that outlive the call — the kernel
+        // copies the program in.
         let rc = unsafe {
             libc::setsockopt(
                 self.as_raw_fd(),
                 libc::SOL_SOCKET,
-                libc::SO_RCVBUFFORCE,
+                libc::SO_ATTACH_FILTER,
+                &fprog as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::sock_fprog>() as libc::socklen_t,
+            )
+        };
+        if rc < 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    /// Remove the socket filter (`SO_DETACH_FILTER`).
+    ///
+    /// Returns `Ok(())` when no filter was attached (`ENOENT`), so
+    /// teardown paths can call it unconditionally.
+    pub fn detach_filter(&self) -> Result<()> {
+        let val: libc::c_int = 0;
+        // SAFETY: SO_DETACH_FILTER on a valid fd; the optval is
+        // ignored by the kernel but must be readable.
+        let rc = unsafe {
+            libc::setsockopt(
+                self.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_DETACH_FILTER,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(());
+            }
+            return Err(Error::Io(err));
+        }
+        Ok(())
+    }
+
+    /// Pin the attached filter (`SO_LOCK_FILTER`) so it can no longer
+    /// be detached or replaced on this socket.
+    ///
+    /// One-way: there is no unlock. Only worth it when the fd is
+    /// about to be handed to less-trusted code that must not be able
+    /// to widen what it sees.
+    pub fn lock_filter(&self) -> Result<()> {
+        Self::set_sock_int(self.as_raw_fd(), libc::SO_LOCK_FILTER, 1)
+    }
+
+    /// Internal helper: `setsockopt(SOL_SOCKET, optname, int)`.
+    fn set_sock_int(fd: RawFd, optname: libc::c_int, val: libc::c_int) -> Result<()> {
+        // SAFETY: setsockopt with a valid fd, SOL_SOCKET level, a
+        // pointer to a stack int and the matching size.
+        let rc = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                optname,
                 &val as *const _ as *const libc::c_void,
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
             )
@@ -331,6 +479,28 @@ impl NetlinkSocket {
             return Err(Error::Io(std::io::Error::last_os_error()));
         }
         Ok(())
+    }
+
+    /// Internal helper: `getsockopt(SOL_SOCKET, optname) -> int`.
+    fn get_sock_int(fd: RawFd, optname: libc::c_int) -> Result<libc::c_int> {
+        let mut val: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: getsockopt with a valid fd, SOL_SOCKET level, and a
+        // pointer to a stack int with its size in `len`; the kernel
+        // writes at most `len` bytes and updates it.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                optname,
+                &mut val as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if rc < 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        Ok(val)
     }
 
     /// Enable kernel-side strict checking (`NETLINK_GET_STRICT_CHK`,
@@ -572,6 +742,58 @@ impl NetlinkSocket {
             }
             capacity = next;
             // Loop and re-attempt the recv with the larger buffer.
+        }
+    }
+
+    /// Receive a message if one is already queued, without waiting.
+    ///
+    /// Returns `Ok(None)` when the socket has nothing readable. Unlike
+    /// [`Self::recv_msg`] this issues the `recvmsg` directly with
+    /// `MSG_DONTWAIT` rather than going through the reactor's
+    /// readiness bookkeeping — a "try" that returned `None` merely
+    /// because tokio had not yet observed the fd as readable would be
+    /// useless for draining a backlog. Stale readiness left behind is
+    /// harmless: [`Self::recv_msg`] and [`Self::poll_recv`] already
+    /// treat a `WouldBlock` from `try_io` as "clear and retry".
+    ///
+    /// `MSG_TRUNC` semantics match [`Self::recv_msg`]: on truncation
+    /// the buffer is regrown from the kernel's reported size, up to
+    /// the same 1 MiB cap, and a frame past the cap surfaces as
+    /// [`Error::FrameTruncated`].
+    pub fn try_recv_msg(&self) -> Result<Option<Vec<u8>>> {
+        let mut capacity = RECV_INITIAL_CAPACITY;
+        loop {
+            let mut buf = BytesMut::with_capacity(capacity);
+            let received = match self
+                .fd
+                .get_ref()
+                .recv(&mut buf, libc::MSG_TRUNC | libc::MSG_DONTWAIT)
+            {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+                Err(e) => {
+                    // Same routing as recv_msg: multicast subscribers
+                    // need the resync marker even when the overflow
+                    // surfaces on a non-blocking drain.
+                    if e.raw_os_error() == Some(libc::ENOBUFS) {
+                        self.fan_out_enobufs();
+                    }
+                    return Err(e.into());
+                }
+            };
+
+            if received <= capacity {
+                return Ok(Some(buf.to_vec()));
+            }
+
+            let next = received.next_multiple_of(4096);
+            if next > RECV_MAX_CAPACITY {
+                return Err(Error::FrameTruncated {
+                    received,
+                    buffer_size: capacity,
+                });
+            }
+            capacity = next;
         }
     }
 

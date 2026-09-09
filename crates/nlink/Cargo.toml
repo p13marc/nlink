@@ -311,6 +311,18 @@ path = "examples/uevent/device_monitor.rs"
 name = "uevent_device_monitor_stream"
 path = "examples/uevent/device_monitor_stream.rs"
 
+[[example]]
+name = "uevent_filtered_monitor"
+path = "examples/uevent/filtered_monitor.rs"
+
+[[example]]
+name = "uevent_resync_monitor"
+path = "examples/uevent/resync_monitor.rs"
+
+[[example]]
+name = "uevent_netdev_lifecycle"
+path = "examples/uevent/netdev_lifecycle.rs"
+
 # Connector examples (process events)
 [[example]]
 name = "connector_process_monitor"
