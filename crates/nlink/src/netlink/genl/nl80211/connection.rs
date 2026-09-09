@@ -8,6 +8,7 @@ use crate::netlink::{
     attr::AttrIter,
     builder::MessageBuilder,
     connection::Connection,
+    dump_frame::{Classification, classify},
     error::{Error, Result},
     genl::{GENL_HDRLEN, GenlMsgHdr},
     message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
@@ -796,24 +797,18 @@ impl Connection<Nl80211> {
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
 
-                    if header.nlmsg_seq != seq {
-                        continue;
-                    }
-
-                    if header.is_error() {
-                        let err = NlMsgError::from_bytes(payload)?;
-                        if !err.is_ack() {
-                            return Err(err.into_error(payload));
+                    match classify(header, payload, seq) {
+                        Classification::SkipSeq | Classification::Ack => continue,
+                        Classification::Error(e) => return Err(e),
+                        Classification::Done(result) => {
+                            result?;
+                            done = true;
+                            break;
                         }
-                        continue;
+                        Classification::Data { payload } => {
+                            results.push(payload.to_vec());
+                        }
                     }
-
-                    if header.is_done() {
-                        done = true;
-                        break;
-                    }
-
-                    results.push(payload.to_vec());
                 }
 
                 if done {

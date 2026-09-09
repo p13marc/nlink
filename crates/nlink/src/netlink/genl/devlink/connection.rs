@@ -6,6 +6,7 @@ use crate::netlink::{
     attr::AttrIter,
     builder::MessageBuilder,
     connection::Connection,
+    dump_frame::{Classification, classify},
     error::{Error, Result},
     genl::{GENL_HDRLEN, GenlMsgHdr},
     message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
@@ -557,26 +558,29 @@ impl Connection<Devlink> {
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
 
-                    if header.nlmsg_seq != seq {
-                        continue;
-                    }
-
-                    if header.is_error() {
-                        let err = NlMsgError::from_bytes(payload)?;
-                        if !err.is_ack() {
-                            return Err(err.into_error(payload));
+                    match classify(header, payload, seq) {
+                        Classification::SkipSeq => continue,
+                        // This loop alone treats an ACK as the end of
+                        // the response, because the command it serves
+                        // is sent with NLM_F_ACK and answers with a
+                        // single message followed by one. Preserved
+                        // deliberately: normalising it to "keep reading"
+                        // would hang here until the 30s timeout.
+                        Classification::Ack => {
+                            done = true;
+                            continue;
                         }
-                        done = true;
-                        continue;
-                    }
-
-                    if header.is_done() {
-                        done = true;
-                        break;
-                    }
-
-                    if result_payload.is_none() {
-                        result_payload = Some(payload.to_vec());
+                        Classification::Error(e) => return Err(e),
+                        Classification::Done(result) => {
+                            result?;
+                            done = true;
+                            break;
+                        }
+                        Classification::Data { payload } => {
+                            if result_payload.is_none() {
+                                result_payload = Some(payload.to_vec());
+                            }
+                        }
                     }
                 }
 
@@ -658,24 +662,16 @@ impl Connection<Devlink> {
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
 
-                    if header.nlmsg_seq != seq {
-                        continue;
-                    }
-
-                    if header.is_error() {
-                        let err = NlMsgError::from_bytes(payload)?;
-                        if !err.is_ack() {
-                            return Err(err.into_error(payload));
+                    match classify(header, payload, seq) {
+                        Classification::SkipSeq | Classification::Ack => continue,
+                        Classification::Error(e) => return Err(e),
+                        Classification::Done(result) => {
+                            result?;
+                            done = true;
+                            break;
                         }
-                        continue;
+                        Classification::Data { payload } => results.push(payload.to_vec()),
                     }
-
-                    if header.is_done() {
-                        done = true;
-                        break;
-                    }
-
-                    results.push(payload.to_vec());
                 }
 
                 if done {

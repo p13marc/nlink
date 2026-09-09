@@ -207,6 +207,29 @@ pub type ConnectionFactory<P> =
 /// shape. Closures that produce `'static` futures (the prior
 /// shape) still satisfy `'static: 'a` for any `'a`, so they
 /// keep compiling unchanged.
+/// How many times a post-`ENOBUFS` redump may be retried when the
+/// kernel reports the snapshot was torn (`NLM_F_DUMP_INTR`).
+///
+/// The redump races the mutations that caused the overflow, so a torn
+/// snapshot is expected rather than exceptional. `vishvananda/netlink`
+/// retries a handful of times and Cilium's `safenetlink` wrapper up to
+/// 30. Thirty here too, and for the reason Cilium picked it: the
+/// mutation storm that overflowed the socket is still running while the
+/// redump is trying to land, so a handful of attempts loses the race
+/// outright.
+///
+/// Spread over [`REDUMP_RETRY_DELAY`] rather than spun: retrying a dump
+/// in a tight loop against a mutating kernel is not a retry, it is a
+/// spin that burns the whole budget in microseconds and then reports
+/// failure while the storm is still going. Thirty attempts at 50 ms is
+/// about a second and a half of tolerance, which outlasts an ordinary
+/// burst; a host churning faster than it can be dumped for that long is
+/// telling the caller something, and that is when the error surfaces.
+const MAX_REDUMP_ATTEMPTS: u8 = 30;
+
+/// Pause between redump attempts. See [`MAX_REDUMP_ATTEMPTS`].
+const REDUMP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
 enum ResyncState<'a, T> {
     /// Pulling items from the inner event stream; each item is
     /// yielded as `Event(T)` or — on ENOBUFS — kicks the state
@@ -215,7 +238,18 @@ enum ResyncState<'a, T> {
     /// Snapshot future is being driven. When it resolves, we
     /// flush `Marker(ResyncStart)` + each item as `Resynced(t)` +
     /// `Marker(ResyncEnd)` via the `Replaying` state.
-    RunningSnapshot(Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send + 'a>>),
+    RunningSnapshot {
+        fut: Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send + 'a>>,
+        /// Redump attempts already spent on this recovery.
+        ///
+        /// A redump races the very mutations that caused the
+        /// `ENOBUFS`, so `NLM_F_DUMP_INTR` here is the expected case,
+        /// not an exceptional one. Fusing the stream on it would mean
+        /// a watch-cache gives up precisely when it is busiest. The
+        /// kernel's advice is to retry, so we do — a bounded number of
+        /// times, then surface the error and let the caller decide.
+        attempts: u8,
+    },
     /// Snapshot resolved; draining the queue of yet-to-emit items.
     /// `did_emit_start` flips true after the leading marker is
     /// yielded; the trailing marker is yielded when the queue
@@ -223,6 +257,12 @@ enum ResyncState<'a, T> {
     Replaying {
         items: VecDeque<T>,
         did_emit_start: bool,
+    },
+    /// Waiting out [`REDUMP_RETRY_DELAY`] before the next redump.
+    RetryBackoff {
+        sleep: Pin<Box<tokio::time::Sleep>>,
+        /// Attempts already spent; the next one is `attempts + 1`.
+        attempts: u8,
     },
     /// Stream fused after a non-recoverable error.
     Done,
@@ -296,7 +336,7 @@ where
                         Poll::Ready(Some(Err(e))) if e.is_no_buffer_space() => {
                             // ENOBUFS — kick off snapshot.
                             let fut = (this.resync)();
-                            this.state = ResyncState::RunningSnapshot(fut);
+                            this.state = ResyncState::RunningSnapshot { fut, attempts: 1 };
                             // Loop around to drive the future.
                         }
                         Poll::Ready(Some(Err(e))) => {
@@ -314,7 +354,7 @@ where
                     }
                 }
 
-                ResyncState::RunningSnapshot(mut fut) => {
+                ResyncState::RunningSnapshot { mut fut, attempts } => {
                     match fut.as_mut().poll(cx) {
                         Poll::Ready(Ok(items)) => {
                             // Flush start marker, then drain.
@@ -324,17 +364,51 @@ where
                             };
                             // Loop to emit the start marker.
                         }
+                        // A torn snapshot is the ordinary outcome here:
+                        // the redump is racing the same mutations that
+                        // overflowed the socket. Retry rather than fuse
+                        // — a `Store` rebuilt from a torn dump would
+                        // `replace_all` its map with a partial one.
+                        Poll::Ready(Err(e))
+                            if e.is_dump_interrupted() && attempts < MAX_REDUMP_ATTEMPTS =>
+                        {
+                            tracing::debug!(
+                                attempt = attempts,
+                                "resync redump interrupted by concurrent mutation; retrying"
+                            );
+                            this.state = ResyncState::RetryBackoff {
+                                sleep: Box::pin(tokio::time::sleep(REDUMP_RETRY_DELAY)),
+                                attempts,
+                            };
+                        }
                         Poll::Ready(Err(e)) => {
                             // Snapshot failed — fuse.
                             this.state = ResyncState::Done;
                             return Poll::Ready(Some(Err(e)));
                         }
                         Poll::Pending => {
-                            this.state = ResyncState::RunningSnapshot(fut);
+                            this.state = ResyncState::RunningSnapshot { fut, attempts };
                             return Poll::Pending;
                         }
                     }
                 }
+
+                ResyncState::RetryBackoff {
+                    mut sleep,
+                    attempts,
+                } => match sleep.as_mut().poll(cx) {
+                    Poll::Ready(()) => {
+                        let fut = (this.resync)();
+                        this.state = ResyncState::RunningSnapshot {
+                            fut,
+                            attempts: attempts + 1,
+                        };
+                    }
+                    Poll::Pending => {
+                        this.state = ResyncState::RetryBackoff { sleep, attempts };
+                        return Poll::Pending;
+                    }
+                },
 
                 ResyncState::Replaying {
                     mut items,
@@ -527,6 +601,69 @@ mod tests {
         assert!(matches!(got[4], ResyncedEvent::Resynced(30)));
         assert!(got[5].is_resync_end());
         assert!(matches!(got[6], ResyncedEvent::Event(99)));
+    }
+
+    #[tokio::test]
+    async fn a_torn_redump_is_retried_not_fused() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        // The redump races the mutations that overflowed the socket,
+        // so `NLM_F_DUMP_INTR` is the ordinary outcome. Before the
+        // dump-termination work nftables never even checked the flag;
+        // once it did, the resync integration test — which fires 2000
+        // rule inserts at a 256-byte rcvbuf — started failing with
+        // `DumpInterrupted` (#271).
+        let attempts = std::sync::Arc::new(AtomicU8::new(0));
+        let a = attempts.clone();
+        let s = ScriptedStream {
+            items: vec![Ok(1u32), Err(enobufs())].into(),
+        };
+        let mut stream = events_with_resync(s, move || {
+            let a = a.clone();
+            Box::pin(async move {
+                // Torn twice, then a clean snapshot.
+                if a.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(crate::Error::DumpInterrupted)
+                } else {
+                    Ok::<Vec<u32>, crate::Error>(vec![7])
+                }
+            })
+        });
+        let mut got = Vec::new();
+        while let Some(item) = stream.next().await {
+            got.push(item.unwrap());
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 3, "should have retried twice");
+        assert!(matches!(got[0], ResyncedEvent::Event(1)));
+        assert!(got[1].is_resync_start());
+        assert!(matches!(got[2], ResyncedEvent::Resynced(7)));
+        assert!(got[3].is_resync_end());
+    }
+
+    #[tokio::test]
+    async fn a_redump_that_stays_torn_eventually_surfaces_the_error() {
+        // Retrying forever would hide a host churning faster than it
+        // can be dumped. After MAX_REDUMP_ATTEMPTS the caller hears
+        // about it and picks its own policy.
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        let attempts = std::sync::Arc::new(AtomicU8::new(0));
+        let a = attempts.clone();
+        let s = ScriptedStream {
+            items: vec![Err(enobufs())].into(),
+        };
+        let mut stream = events_with_resync(s, move || {
+            let a = a.clone();
+            Box::pin(async move {
+                a.fetch_add(1, Ordering::SeqCst);
+                Err::<Vec<u32>, crate::Error>(crate::Error::DumpInterrupted)
+            })
+        });
+        let first = stream.next().await.expect("an item");
+        assert!(first.unwrap_err().is_dump_interrupted());
+        assert_eq!(attempts.load(Ordering::SeqCst), MAX_REDUMP_ATTEMPTS);
+        // …and the stream fuses.
+        assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]

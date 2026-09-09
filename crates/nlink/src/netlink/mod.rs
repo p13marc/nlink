@@ -80,6 +80,7 @@ pub mod connection;
 pub mod connector;
 pub mod diagnostics;
 pub mod dispatcher;
+pub(crate) mod dump_frame;
 pub mod dump_stream;
 mod error;
 pub mod events;

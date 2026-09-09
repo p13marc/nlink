@@ -32,6 +32,8 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 use super::{builder::MessageBuilder, connection::Connection, error::Result, protocol::Xfrm};
 
 // Netlink constants
+use super::dump_frame::done_result;
+
 const NLMSG_DONE: u16 = 3;
 const NLMSG_ERROR: u16 = 2;
 const NLM_F_REQUEST: u16 = 0x01;
@@ -1717,7 +1719,13 @@ impl Connection<Xfrm> {
                     }
 
                     match nlmsg_type {
-                        NLMSG_DONE => return Ok(sas),
+                        // The dump's result code is in the DONE
+                        // payload; ignoring it turned a failed dump
+                        // into a short, successful-looking list (#267).
+                        NLMSG_DONE => {
+                            done_result(&data[offset + 16..offset + nlmsg_len])?;
+                            return Ok(sas);
+                        }
                         NLMSG_ERROR => {
                             if nlmsg_len >= 20 {
                                 let errno = i32::from_ne_bytes([
@@ -1818,7 +1826,13 @@ impl Connection<Xfrm> {
                     }
 
                     match nlmsg_type {
-                        NLMSG_DONE => return Ok(policies),
+                        // The dump's result code is in the DONE
+                        // payload; ignoring it turned a failed dump
+                        // into a short, successful-looking list (#267).
+                        NLMSG_DONE => {
+                            done_result(&data[offset + 16..offset + nlmsg_len])?;
+                            return Ok(policies);
+                        }
                         NLMSG_ERROR => {
                             if nlmsg_len >= 20 {
                                 let errno = i32::from_ne_bytes([

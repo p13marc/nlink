@@ -38,6 +38,8 @@ pub use crate::sockdiag::{
 };
 
 // Netlink constants
+use super::dump_frame::done_result;
+
 const NLMSG_DONE: u16 = 3;
 const NLMSG_ERROR: u16 = 2;
 const NLM_F_REQUEST: u16 = 0x01;
@@ -610,7 +612,16 @@ impl Connection<SockDiag> {
                     }
 
                     match nlmsg_type {
-                        NLMSG_DONE => return Ok(sockets),
+                        // The dump's result code lives in the DONE
+                        // payload, and this returned `Ok(sockets)`
+                        // without looking: a `SOCK_DIAG_BY_FAMILY`
+                        // query the kernel refused came back as
+                        // "no sockets found" (#267). Measured: DONE
+                        // with payload -2 (-ENOENT).
+                        NLMSG_DONE => {
+                            done_result(&data[offset + 16..offset + nlmsg_len])?;
+                            return Ok(sockets);
+                        }
                         NLMSG_ERROR if nlmsg_len >= 20 => {
                             let errno = i32::from_ne_bytes([
                                 data[offset + 16],
@@ -723,7 +734,16 @@ impl Connection<SockDiag> {
                     }
 
                     match nlmsg_type {
-                        NLMSG_DONE => return Ok(sockets),
+                        // The dump's result code lives in the DONE
+                        // payload, and this returned `Ok(sockets)`
+                        // without looking: a `SOCK_DIAG_BY_FAMILY`
+                        // query the kernel refused came back as
+                        // "no sockets found" (#267). Measured: DONE
+                        // with payload -2 (-ENOENT).
+                        NLMSG_DONE => {
+                            done_result(&data[offset + 16..offset + nlmsg_len])?;
+                            return Ok(sockets);
+                        }
                         NLMSG_ERROR if nlmsg_len >= 20 => {
                             let errno = i32::from_ne_bytes([
                                 data[offset + 16],
@@ -844,7 +864,16 @@ impl Connection<SockDiag> {
                     }
 
                     match nlmsg_type {
-                        NLMSG_DONE => return Ok(sockets),
+                        // The dump's result code lives in the DONE
+                        // payload, and this returned `Ok(sockets)`
+                        // without looking: a `SOCK_DIAG_BY_FAMILY`
+                        // query the kernel refused came back as
+                        // "no sockets found" (#267). Measured: DONE
+                        // with payload -2 (-ENOENT).
+                        NLMSG_DONE => {
+                            done_result(&data[offset + 16..offset + nlmsg_len])?;
+                            return Ok(sockets);
+                        }
                         NLMSG_ERROR if nlmsg_len >= 20 => {
                             let errno = i32::from_ne_bytes([
                                 data[offset + 16],
@@ -958,7 +987,16 @@ impl Connection<SockDiag> {
                     }
 
                     match nlmsg_type {
-                        NLMSG_DONE => return Ok(sockets),
+                        // The dump's result code lives in the DONE
+                        // payload, and this returned `Ok(sockets)`
+                        // without looking: a `SOCK_DIAG_BY_FAMILY`
+                        // query the kernel refused came back as
+                        // "no sockets found" (#267). Measured: DONE
+                        // with payload -2 (-ENOENT).
+                        NLMSG_DONE => {
+                            done_result(&data[offset + 16..offset + nlmsg_len])?;
+                            return Ok(sockets);
+                        }
                         NLMSG_ERROR if nlmsg_len >= 20 => {
                             let errno = i32::from_ne_bytes([
                                 data[offset + 16],

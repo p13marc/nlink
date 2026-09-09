@@ -47,7 +47,8 @@ use tokio_stream::Stream;
 use super::{
     builder::MessageBuilder,
     connection::Connection,
-    error::Result,
+    dump_frame::done_result,
+    error::{Error, Result},
     message::{MessageIter, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
     parse::FromNetlink,
     protocol::ProtocolState,
@@ -223,6 +224,18 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
                 continue;
             }
 
+            // A torn snapshot. This is the generic streaming dump —
+            // it is what `dump_stream::<T>()` and the `*_with_resync`
+            // wrappers run on, so it feeds the `Store` watch-cache,
+            // which `replace_all`s its whole map from a redump. One
+            // inconsistent snapshot there atomically evicts every entry
+            // missing from it (#271).
+            if header.is_dump_interrupted() {
+                self.pending.push_back(Err(Error::DumpInterrupted));
+                self.errored = true;
+                return;
+            }
+
             if header.is_error() {
                 match NlMsgError::from_bytes(payload) {
                     Ok(err) => {
@@ -255,6 +268,16 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
             }
 
             if header.is_done() {
+                // NLMSG_DONE carries the dump's result code. Ending the
+                // stream without reading it turns a dump that gave up
+                // into a short, successful-looking one — and here that
+                // short result becomes the watch-cache's entire world
+                // (#267).
+                if let Err(e) = done_result(payload) {
+                    self.pending.push_back(Err(e));
+                    self.errored = true;
+                    return;
+                }
                 self.done = true;
                 return;
             }
