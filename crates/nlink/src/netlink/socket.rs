@@ -209,8 +209,11 @@ impl NetlinkSocket {
         socket.get_address(&mut addr)?;
         let pid = addr.port_number();
 
-        // Enable extended ACK for better error messages
+        // Enable extended ACK for better error messages…
         socket.set_ext_ack(true).ok(); // Ignore if not supported
+        // …and cap the echoed request, which is what makes them
+        // readable. See `set_cap_ack`.
+        socket.set_cap_ack(true).ok(); // Ignore if not supported
 
         Ok((socket, pid))
     }
@@ -302,6 +305,45 @@ impl NetlinkSocket {
     /// not supported (`ENOPROTOOPT`) — graceful degradation.
     pub fn set_ext_ack(&self, on: bool) -> Result<()> {
         Self::set_netlink_sockopt(self.as_raw_fd(), libc::NETLINK_EXT_ACK, on)
+    }
+
+    /// `NETLINK_CAP_ACK` value from `linux/netlink.h`. Not in `libc`.
+    const NETLINK_CAP_ACK: libc::c_int = 10;
+
+    /// Ask the kernel to omit the echoed request from ACK and error
+    /// responses (`NETLINK_CAP_ACK`, kernel 4.3+). **Enabled by default
+    /// during socket construction**, and switching it off breaks
+    /// extended-ack parsing.
+    ///
+    /// `netlink_ack()` decides the payload layout on this flag:
+    ///
+    /// ```c
+    /// if (err && !(nlk->flags & NETLINK_F_CAP_ACK))
+    ///         payload += nlmsg_len(nlh);   /* echo the WHOLE request */
+    /// else
+    ///         flags |= NLM_F_CAPPED;
+    /// ```
+    ///
+    /// so uncapped, the extended-ack TLVs sit after a copy of the entire
+    /// request rather than at a fixed offset. `NlMsgError::attrs` reads
+    /// them at `sizeof(errno) + sizeof(nlmsghdr)`, which is only where
+    /// they are in the capped form — so without this, **every
+    /// `ext_ack` came back `None`** and every kernel rejection read as a
+    /// bare errno (#292). Measured on the same request:
+    ///
+    /// ```text
+    /// CAP_ACK off: payload=72B, TLVs at payload[40] -> nlink finds nothing
+    /// CAP_ACK on:  payload=52B, TLVs at payload[20] -> "Parent Qdisc doesn't exists"
+    /// ```
+    ///
+    /// Capping also shrinks every ACK by the size of the request, which
+    /// matters for the batch paths that ACK per operation.
+    ///
+    /// Returns `Ok(())` on pre-4.3 kernels where the sockopt is not
+    /// supported — graceful degradation, at the cost of unparsed
+    /// ext-acks there.
+    pub fn set_cap_ack(&self, on: bool) -> Result<()> {
+        Self::set_netlink_sockopt(self.as_raw_fd(), Self::NETLINK_CAP_ACK, on)
     }
 
     /// Set the kernel-side receive buffer (`SO_RCVBUF`), escalating

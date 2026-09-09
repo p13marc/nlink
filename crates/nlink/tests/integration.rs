@@ -189,3 +189,9 @@ mod netdev_lifecycle;
 // — that these check.
 #[path = "integration/uevent_filter.rs"]
 mod uevent_filter;
+
+// #292 — extended-ack parsing, end to end. The unit tests synthesise the
+// capped payload; only the kernel sends the shape that was actually
+// arriving.
+#[path = "integration/ext_ack.rs"]
+mod ext_ack;

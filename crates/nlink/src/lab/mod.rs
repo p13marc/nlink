@@ -302,25 +302,104 @@ pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// `true` if the named kernel feature is loaded as a module or
-/// compiled into the kernel.
+/// `true` if the named kernel feature is usable — loaded, built into
+/// the kernel, or available for the kernel to load on demand.
 ///
-/// Checks for `/sys/module/<name>`, which sysfs exposes for both
-/// loaded loadable modules (after `modprobe`) and built-in features
-/// — many distros build common bits like `nf_conntrack` directly
-/// into the kernel image, so a `/proc/modules` grep would falsely
-/// report them as missing.
+/// This used to check `/sys/module/<name>` alone, documented as
+/// covering built-ins too. It does not: sysfs only publishes a
+/// directory for a built-in feature that exports parameters or a
+/// version, which most do not. On the box this was measured on, **124
+/// of 150 built-in modules had no `/sys/module` entry** — including
+/// `sch_fq_codel`. Nor does it cover a loadable module that simply has
+/// not been used yet: `sch_htb` appears the moment something asks for
+/// an HTB qdisc, and the kernel autoloads it, but before that the
+/// directory is absent.
 ///
-/// Returns `false` (not an error) when the module is missing, so
-/// the caller can decide whether to skip or fail. Also returns
-/// `false` for any name containing `/` or `\0` (kernel module names
-/// can't legally contain those, and `Path::join` would otherwise
-/// silently resolve outside `/sys/module` for an absolute name).
+/// Both gaps made [`require_module!`](crate::require_module) skip, and
+/// a skipped test reports `ok`. That is not a theoretical risk: it hid
+/// twelve TC bugs for an entire release cycle, because the whole
+/// `ratelimit` and `impair` integration suite skipped on any machine
+/// where `sch_htb` had not happened to be loaded. **A silent skip is
+/// indistinguishable from a pass**, which is why this now asks all
+/// three questions:
+///
+/// 1. `/sys/module/<name>` — loaded, or built-in and publishing attrs.
+/// 2. `modules.builtin` — built in, publishing nothing.
+/// 3. `modules.dep` — loadable; the kernel will bring it in on first
+///    use, which is exactly what the test is about to trigger.
+///
+/// Returns `false` (not an error) when the feature is genuinely
+/// unavailable, so the caller can decide whether to skip or fail. Also
+/// returns `false` for any name containing `/` or `\0` — kernel module
+/// names cannot legally contain those, and `Path::join` would
+/// otherwise resolve outside `/sys/module` for an absolute name.
 pub fn has_module(name: &str) -> bool {
     if name.is_empty() || name.contains('/') || name.contains('\0') {
         return false;
     }
-    std::path::Path::new("/sys/module").join(name).exists()
+    if std::path::Path::new("/sys/module").join(name).exists() {
+        return true;
+    }
+    module_index().contains(name)
+}
+
+/// Names from `modules.builtin` and `modules.dep`, parsed once.
+///
+/// Both index files list paths like `kernel/net/sched/sch_htb.ko`
+/// (`modules.dep` follows each with `:` and its dependencies, and both
+/// may use a compression suffix — `.ko.xz`, `.ko.zst`). The module
+/// name is the file stem.
+fn module_index() -> &'static std::collections::HashSet<String> {
+    use std::sync::OnceLock;
+    static INDEX: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let mut out = std::collections::HashSet::new();
+        let Ok(release) = std::fs::read_to_string("/proc/sys/kernel/osrelease") else {
+            return out;
+        };
+        let dir = format!("/lib/modules/{}", release.trim());
+        for file in ["modules.builtin", "modules.dep"] {
+            let Ok(text) = std::fs::read_to_string(format!("{dir}/{file}")) else {
+                continue;
+            };
+            for line in text.lines() {
+                // `modules.dep` is "<path>: <dep> <dep>"; take the key.
+                let path = line.split(':').next().unwrap_or(line).trim();
+                let Some(base) = path.rsplit('/').next() else {
+                    continue;
+                };
+                // Strip `.ko` plus any compression suffix.
+                let name = base.split(".ko").next().unwrap_or(base);
+                if !name.is_empty() {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+        out
+    })
+}
+
+/// Whether a missing `name` should fail the test rather than skip it.
+///
+/// Set `NLINK_TEST_STRICT_MODULES` to a comma-separated list of modules
+/// the environment is *expected* to provide; a skip for any of them is
+/// then a hard failure. Anything not listed still skips.
+///
+/// A list rather than a flag, because the two cases are different. On a
+/// runner that has verified `sch_htb` is there, a skipped HTB test is a
+/// bug in the gate and should be loud — that is how twelve TC bugs rode
+/// out a release cycle. But `ovpn` needs kernel 6.16 and `wireguard`
+/// may genuinely be absent; failing on those would just teach everyone
+/// to ignore the job.
+///
+/// The privileged CI workflow sets it to the same list its
+/// module-guard step checks. Locally the default is empty, so
+/// everything skips as before.
+pub fn strict_modules(name: &str) -> bool {
+    let Ok(list) = std::env::var("NLINK_TEST_STRICT_MODULES") else {
+        return false;
+    };
+    list.split(',').map(str::trim).any(|m| m == name)
 }
 
 /// Initialize a `tracing-subscriber` for integration tests.
@@ -417,10 +496,13 @@ macro_rules! require_root_void {
 macro_rules! require_module {
     ($name:expr) => {
         if !$crate::lab::has_module($name) {
-            eprintln!(
-                "Skipping test: kernel module '{}' not loaded or built-in",
+            let msg = format!(
+                "kernel module '{}' is not loaded, not built in, and not \
+                 available to load",
                 $name
             );
+            assert!(!$crate::lab::strict_modules($name), "{msg}");
+            eprintln!("Skipping test: {msg}");
             return Ok(());
         }
     };
@@ -432,10 +514,13 @@ macro_rules! require_module {
 macro_rules! require_module_void {
     ($name:expr) => {
         if !$crate::lab::has_module($name) {
-            eprintln!(
-                "Skipping test: kernel module '{}' not loaded or built-in",
+            let msg = format!(
+                "kernel module '{}' is not loaded, not built in, and not \
+                 available to load",
                 $name
             );
+            assert!(!$crate::lab::strict_modules($name), "{msg}");
+            eprintln!("Skipping test: {msg}");
             return;
         }
     };
@@ -513,5 +598,54 @@ mod tests {
         assert!(!has_module("../../etc/passwd"));
         assert!(!has_module("nf_conntrack/foo"));
         assert!(!has_module("nf\0conntrack"));
+    }
+
+    // ====================================================================
+    // #273 — has_module must see built-ins and loadable modules
+    // ====================================================================
+
+    #[test]
+    fn has_module_rejects_names_that_could_escape_sys_module() {
+        assert!(!has_module(""));
+        assert!(!has_module("../../etc"));
+        assert!(!has_module("/etc/passwd"));
+        assert!(!has_module("foo\0bar"));
+    }
+
+    #[test]
+    fn has_module_sees_more_than_sys_module() {
+        // The old implementation was `/sys/module/<name>` alone. sysfs
+        // only publishes a directory for a built-in that exports
+        // parameters or a version, and for a loadable module only once
+        // it is loaded — so that check misses most of what the kernel
+        // can actually provide, and every miss became a silent skip.
+        //
+        // Assert the index is doing work: every name in modules.builtin
+        // must be reported present, whether or not sysfs knows it.
+        let index = module_index();
+        if index.is_empty() {
+            // No /lib/modules for this kernel (some containers); the
+            // sysfs check is all there is and there is nothing to test.
+            return;
+        }
+        let mut checked = 0;
+        let mut invisible_to_sysfs = 0;
+        for name in index.iter().take(200) {
+            assert!(has_module(name), "index knows {name} but has_module says no");
+            if !std::path::Path::new("/sys/module").join(name).exists() {
+                invisible_to_sysfs += 1;
+            }
+            checked += 1;
+        }
+        assert!(checked > 0);
+        // Not an assertion about this machine's config, just a record
+        // of why the sysfs-only check was wrong: on any real kernel
+        // most index entries have no sysfs directory.
+        eprintln!("{invisible_to_sysfs} of {checked} indexed modules have no /sys/module entry");
+    }
+
+    #[test]
+    fn has_module_says_no_to_something_that_does_not_exist() {
+        assert!(!has_module("nlink_definitely_not_a_module_xyzzy"));
     }
 }
