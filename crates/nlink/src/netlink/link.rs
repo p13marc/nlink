@@ -1695,6 +1695,7 @@ impl LinkConfig for IpvlanLink {
 pub struct IfbLink {
     name: String,
     mtu: Option<u32>,
+    address: Option<[u8; 6]>,
 }
 
 impl IfbLink {
@@ -1703,12 +1704,19 @@ impl IfbLink {
         Self {
             name: name.into(),
             mtu: None,
+            address: None,
         }
     }
 
     /// Set the MTU for this interface.
     pub fn mtu(mut self, mtu: u32) -> Self {
         self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the MAC address for this interface.
+    pub fn address(mut self, address: [u8; 6]) -> Self {
+        self.address = Some(address);
         self
     }
 }
@@ -1723,7 +1731,7 @@ impl LinkConfig for IfbLink {
     }
 
     fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
-        write_simple_link(builder, &self.name, "ifb", self.mtu, None);
+        write_simple_link(builder, &self.name, "ifb", self.mtu, self.address.as_ref());
     }
 }
 

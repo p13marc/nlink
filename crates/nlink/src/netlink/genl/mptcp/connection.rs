@@ -71,7 +71,7 @@ impl Connection<Mptcp> {
     /// conn.add_endpoint(
     ///     MptcpEndpointBuilder::new("192.168.2.1".parse()?)
     ///         .id(1)
-    ///         .dev("eth1")
+    ///         .ifindex(eth1_ifindex)   // resolve via a Connection<Route> in the same netns
     ///         .subflow()
     ///         .signal()
     /// ).await?;
@@ -451,9 +451,16 @@ fn append_endpoint_attrs(builder: &mut MessageBuilder, endpoint: &MptcpEndpointB
         builder.append_attr_u8(mptcp_pm_addr_attr::ID, id);
     }
 
-    // Optional port (network byte order)
+    // Optional port.
+    //
+    // `MPTCP_PM_ADDR_ATTR_PORT` is host order: the kernel ingests it
+    // with `addr->port = htons(nla_get_u16(...))`. nlink wrote it big-
+    // endian and read it back big-endian, so it round-tripped through
+    // nlink perfectly while the kernel held the swapped value —
+    // `.port(8080)` installed an endpoint on **36895**, which is what
+    // `ip mptcp endpoint show` reported (#275).
     if let Some(port) = endpoint.port {
-        builder.append_attr(mptcp_pm_addr_attr::PORT, &port.to_be_bytes());
+        builder.append_attr(mptcp_pm_addr_attr::PORT, &port.to_ne_bytes());
     }
 
     // Optional interface index (must be provided as ifindex for namespace safety)
@@ -506,7 +513,7 @@ fn parse_endpoint_attrs(data: &[u8]) -> Result<MptcpEndpoint> {
                 endpoint.address = IpAddr::V6(octets.into());
             }
             t if t == mptcp_pm_addr_attr::PORT && payload.len() >= 2 => {
-                let port = u16::from_be_bytes(payload[..2].try_into().unwrap());
+                let port = u16::from_ne_bytes(payload[..2].try_into().unwrap());
                 if port != 0 {
                     endpoint.port = Some(port);
                 }
@@ -580,7 +587,14 @@ fn append_source_addr(builder: &mut MessageBuilder, addr: &super::types::MptcpAd
         }
     }
 
-    // Source port
+    // Source port — big-endian, and deliberately unlike the endpoint's
+    // `MPTCP_PM_ADDR_ATTR_PORT` above, which is host order.
+    //
+    // These are two different attribute sets. `MPTCP_ATTR_SPORT` is
+    // from `enum mptcp_event_attr`, which the kernel emits with
+    // `nla_put_be16`; `MPTCP_PM_ADDR_ATTR_PORT` is from
+    // `enum mptcp_pm_addr_attr`, ingested with
+    // `htons(nla_get_u16(...))`. Do not "fix" one to match the other.
     if let Some(port) = addr.port {
         builder.append_attr(mptcp_attr::SPORT, &port.to_be_bytes());
     }
@@ -600,7 +614,8 @@ fn append_dest_addr(builder: &mut MessageBuilder, addr: &super::types::MptcpAddr
         }
     }
 
-    // Destination port
+    // Destination port — big-endian; see the note on `SPORT` above for
+    // why this differs from the endpoint's port.
     if let Some(port) = addr.port {
         builder.append_attr(mptcp_attr::DPORT, &port.to_be_bytes());
     }

@@ -289,6 +289,13 @@ pub struct LinkChanges {
     pub set_master: Option<String>,
     /// Remove from master.
     pub unset_master: bool,
+    /// New MAC address.
+    ///
+    /// A declared `address` was stored by the builder and compared by
+    /// nothing, so `.link("eth0", |l| l.address(mac))` on an existing
+    /// interface produced an empty diff forever and `apply()` reported
+    /// zero changes (#275).
+    pub set_address: Option<[u8; 6]>,
 }
 
 impl LinkChanges {
@@ -299,6 +306,7 @@ impl LinkChanges {
             && self.set_mtu.is_none()
             && self.set_master.is_none()
             && !self.unset_master
+            && self.set_address.is_none()
     }
 
     /// Get a summary of the changes.
@@ -322,6 +330,12 @@ impl LinkChanges {
         }
         if self.unset_master {
             parts.push("nomaster".to_string());
+        }
+        if let Some(a) = self.set_address {
+            parts.push(format!(
+                "address={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                a[0], a[1], a[2], a[3], a[4], a[5]
+            ));
         }
         parts.join(", ")
     }
@@ -544,6 +558,17 @@ fn compute_link_changes(
         && existing.mtu != Some(desired_mtu)
     {
         changes.set_mtu = Some(desired_mtu);
+    }
+
+    // Check MAC. `LinkMessage::address` is the raw `IFLA_ADDRESS`
+    // payload, whose length is the link type's `addr_len` — 6 for
+    // Ethernet, 0 for tunnels, 20 for InfiniBand — so compare only when
+    // it is the shape a declared MAC can be.
+    if let Some(desired_mac) = declared.address {
+        let same = existing.address().is_some_and(|have| have == desired_mac);
+        if !same {
+            changes.set_address = Some(desired_mac);
+        }
     }
 
     // Plan 207b H2 — resolve existing.master (ifindex) → name and

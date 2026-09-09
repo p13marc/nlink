@@ -20,7 +20,7 @@
 //!
 //! // Interface diagnostics
 //! let eth0 = diag.scan_interface("eth0").await?;
-//! println!("eth0: {} bps, {} drops", eth0.rates.tx_bps, eth0.stats.tx_dropped());
+//! println!("eth0: {} bit/s, {} drops", eth0.rates.tx_bps(), eth0.stats.tx_dropped());
 //!
 //! // Connectivity check
 //! let report = diag.check_connectivity("8.8.8.8".parse()?).await?;
@@ -138,12 +138,19 @@ impl InterfaceDiag {
 }
 
 /// Link transfer rates calculated from statistics deltas.
+///
+/// The byte fields were called `rx_bps`/`tx_bps` while being documented
+/// and computed as **bytes** per second, and `total_bps()` summed them
+/// and called the result bits — so it read 8× low, and a "saturated at
+/// 1 Gbps" alert built on it did not fire until 8 Gbps (#274). The
+/// fields now say bytes and the `*_bps()` accessors do the conversion,
+/// matching [`crate::netlink::stats::LinkRates`], which had it right.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LinkRates {
     /// Receive bytes per second.
-    pub rx_bps: u64,
+    pub rx_bytes_per_sec: u64,
     /// Transmit bytes per second.
-    pub tx_bps: u64,
+    pub tx_bytes_per_sec: u64,
     /// Receive packets per second.
     pub rx_pps: u64,
     /// Transmit packets per second.
@@ -153,14 +160,30 @@ pub struct LinkRates {
 }
 
 impl LinkRates {
-    /// Total bits per second (rx + tx).
+    /// Total bytes per second (rx + tx).
+    pub fn total_bytes_per_sec(&self) -> u64 {
+        self.rx_bytes_per_sec.saturating_add(self.tx_bytes_per_sec)
+    }
+
+    /// Receive **bits** per second.
+    pub fn rx_bps(&self) -> u64 {
+        self.rx_bytes_per_sec.saturating_mul(8)
+    }
+
+    /// Transmit **bits** per second.
+    pub fn tx_bps(&self) -> u64 {
+        self.tx_bytes_per_sec.saturating_mul(8)
+    }
+
+    /// Total **bits** per second (rx + tx) — comparable against a link
+    /// speed, which is always quoted in bits.
     pub fn total_bps(&self) -> u64 {
-        self.rx_bps + self.tx_bps
+        self.total_bytes_per_sec().saturating_mul(8)
     }
 
     /// Total packets per second (rx + tx).
     pub fn total_pps(&self) -> u64 {
-        self.rx_pps + self.tx_pps
+        self.rx_pps.saturating_add(self.tx_pps)
     }
 }
 
@@ -496,7 +519,14 @@ pub struct DiagnosticsConfig {
     pub skip_loopback: bool,
     /// Whether to skip down interfaces.
     pub skip_down: bool,
-    /// Minimum bytes transferred before calculating loss rate.
+    /// Minimum bytes transferred before calculating loss or error
+    /// rates.
+    ///
+    /// Compared against `rx_bytes + tx_bytes`. It used to be compared
+    /// against a *packet* count, so `1_000_000` — meaning "1 MB" —
+    /// actually waited for a million packets, roughly 1.5 GB at MTU:
+    /// loss detection stayed silent about 1500× longer than asked
+    /// (#274).
     pub min_bytes_for_rate: u64,
 }
 
@@ -614,6 +644,13 @@ impl Diagnostics {
         // Scan each interface
         let mut interfaces = Vec::new();
         let mut prev_stats = self.prev_stats.lock().await;
+        // Everything we sample this pass. Whatever is left in
+        // `prev_stats` afterwards is an interface that has gone away or
+        // is now filtered out; keeping it forever leaked, and a reused
+        // ifindex got diffed against the *previous* interface's
+        // counters — masked into a spuriously-zero rate by the
+        // `saturating_sub` below (#274).
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
         for link in links {
             // Skip loopback if configured
@@ -637,8 +674,12 @@ impl Diagnostics {
                 if elapsed.as_millis() > 0 {
                     let ms = elapsed.as_millis() as u64;
                     LinkRates {
-                        rx_bps: (stats.rx_bytes().saturating_sub(prev.rx_bytes())) * 1000 / ms,
-                        tx_bps: (stats.tx_bytes().saturating_sub(prev.tx_bytes())) * 1000 / ms,
+                        rx_bytes_per_sec: (stats.rx_bytes().saturating_sub(prev.rx_bytes()))
+                            * 1000
+                            / ms,
+                        tx_bytes_per_sec: (stats.tx_bytes().saturating_sub(prev.tx_bytes()))
+                            * 1000
+                            / ms,
                         rx_pps: (stats.rx_packets().saturating_sub(prev.rx_packets())) * 1000 / ms,
                         tx_pps: (stats.tx_packets().saturating_sub(prev.tx_packets())) * 1000 / ms,
                         sample_duration_ms: ms,
@@ -652,6 +693,7 @@ impl Diagnostics {
 
             // Store current stats for next calculation
             prev_stats.insert(ifindex, (Instant::now(), stats));
+            seen.insert(ifindex);
 
             // Detect issues for this interface
             let mut issues = self.detect_link_issues(&link, &stats, &addr_by_ifindex, timestamp);
@@ -685,6 +727,9 @@ impl Diagnostics {
                 issues,
             });
         }
+
+        // Drop samples for anything that was not scanned this pass.
+        prev_stats.retain(|ifindex, _| seen.contains(ifindex));
 
         Ok(DiagnosticReport {
             timestamp,
@@ -724,8 +769,10 @@ impl Diagnostics {
             if elapsed.as_millis() > 0 {
                 let ms = elapsed.as_millis() as u64;
                 LinkRates {
-                    rx_bps: (stats.rx_bytes().saturating_sub(prev.rx_bytes())) * 1000 / ms,
-                    tx_bps: (stats.tx_bytes().saturating_sub(prev.tx_bytes())) * 1000 / ms,
+                    rx_bytes_per_sec: (stats.rx_bytes().saturating_sub(prev.rx_bytes())) * 1000
+                        / ms,
+                    tx_bytes_per_sec: (stats.tx_bytes().saturating_sub(prev.tx_bytes())) * 1000
+                        / ms,
                     rx_pps: (stats.rx_packets().saturating_sub(prev.rx_packets())) * 1000 / ms,
                     tx_pps: (stats.tx_packets().saturating_sub(prev.tx_packets())) * 1000 / ms,
                     sample_duration_ms: ms,
@@ -918,7 +965,14 @@ impl Diagnostics {
         let links = self.conn.get_links().await?;
 
         for link in &links {
-            if link.is_loopback() {
+            // Same filters as `scan()`. These were hardcoded — loopback
+            // always skipped, `skip_down` never consulted — so a caller
+            // who set `skip_loopback = false` to include `lo` got it
+            // from one entry point and not the other (#274).
+            if self.config.skip_loopback && link.is_loopback() {
+                continue;
+            }
+            if self.config.skip_down && !link.is_up() {
                 continue;
             }
 
@@ -926,10 +980,14 @@ impl Diagnostics {
 
             if let Some(stats) = link.stats() {
                 let total_packets = stats.total_packets();
+                let total_bytes = stats.total_bytes();
                 let total_dropped = stats.total_dropped();
                 let total_errors = stats.total_errors();
 
-                if total_packets > 0 {
+                // …and the same sampling gate, rather than a bare
+                // `total_packets > 0`, so the two agree on when there is
+                // enough traffic to divide by.
+                if total_bytes > self.config.min_bytes_for_rate && total_packets > 0 {
                     let drop_rate = total_dropped as f64 / total_packets as f64;
 
                     if drop_rate > self.config.packet_loss_threshold {
@@ -1116,11 +1174,13 @@ impl Diagnostics {
             });
         }
 
-        // Check for packet loss
+        // Check for packet loss. The *rate* is a fraction of packets;
+        // the *gate* is a byte count, as its name says (#274).
         let total_packets = stats.total_packets();
+        let total_bytes = stats.total_bytes();
         let total_dropped = stats.total_dropped();
 
-        if total_packets > self.config.min_bytes_for_rate && total_dropped > 0 {
+        if total_bytes > self.config.min_bytes_for_rate && total_packets > 0 && total_dropped > 0 {
             let drop_rate = total_dropped as f64 / total_packets as f64;
             if drop_rate > self.config.packet_loss_threshold {
                 issues.push(Issue {
@@ -1139,7 +1199,7 @@ impl Diagnostics {
 
         // Check for errors
         let total_errors = stats.total_errors();
-        if total_packets > self.config.min_bytes_for_rate && total_errors > 0 {
+        if total_bytes > self.config.min_bytes_for_rate && total_packets > 0 && total_errors > 0 {
             let error_rate = total_errors as f64 / total_packets as f64;
             if error_rate > self.config.error_rate_threshold {
                 issues.push(Issue {
@@ -1473,15 +1533,40 @@ mod tests {
     #[test]
     fn test_link_rates() {
         let rates = LinkRates {
-            rx_bps: 1000,
-            tx_bps: 2000,
+            rx_bytes_per_sec: 1000,
+            tx_bytes_per_sec: 2000,
             rx_pps: 10,
             tx_pps: 20,
             sample_duration_ms: 1000,
         };
 
-        assert_eq!(rates.total_bps(), 3000);
+        // The old assertion was `total_bps() == 3000`, which pinned the
+        // bug: 3000 is the byte total. Bits are eight times that (#274).
+        assert_eq!(rates.total_bytes_per_sec(), 3000);
+        assert_eq!(rates.total_bps(), 24_000);
+        assert_eq!(rates.rx_bps(), 8_000);
+        assert_eq!(rates.tx_bps(), 16_000);
         assert_eq!(rates.total_pps(), 30);
+    }
+
+    #[test]
+    fn link_rates_agree_with_the_stats_module() {
+        // The crate has two `LinkRates`. They disagreed on what `bps`
+        // meant, and only the wrong one was re-exported at the crate
+        // root, so `nlink::LinkRates` was the broken one (#274). Pin
+        // that they now answer the same question the same way.
+        let diag = LinkRates {
+            rx_bytes_per_sec: 1_250_000,
+            tx_bytes_per_sec: 0,
+            ..LinkRates::default()
+        };
+        let stats = crate::netlink::stats::LinkRates {
+            rx_bytes_per_sec: 1_250_000.0,
+            ..Default::default()
+        };
+        assert_eq!(diag.rx_bps(), 10_000_000, "10 Mbit/s of bytes is 10 Mbit/s");
+        assert_eq!(diag.rx_bps() as f64, stats.rx_bps());
+        assert_eq!(diag.total_bps() as f64, stats.total_bps());
     }
 
     #[test]

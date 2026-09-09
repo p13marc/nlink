@@ -238,7 +238,17 @@ async fn add_endpoint(conn: &Connection<Mptcp>, args: EndpointAddArgs) -> Result
         builder = builder.id(id);
     }
     if let Some(ref dev) = args.dev {
-        builder = builder.dev(dev);
+        // `MptcpEndpointBuilder` takes an ifindex: the builder's old
+        // `dev(name)` setter stored the name and emitted nothing, so
+        // `--dev` was silently ignored (#275). Resolve it here, through
+        // rtnetlink rather than sysfs.
+        let route = Connection::<nlink::Route>::new()?;
+        let ifindex = route
+            .get_link_by_name(dev)
+            .await?
+            .ok_or_else(|| nlink::Error::InterfaceNotFound { name: dev.clone() })?
+            .ifindex();
+        builder = builder.ifindex(ifindex);
     }
     if let Some(port) = args.port {
         builder = builder.port(port);

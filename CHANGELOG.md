@@ -85,6 +85,88 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Five setters that were stored and never read (#275).** Each is the
+  same shape: a fluent setter accepts a value, the writer never looks at
+  it, and the request goes out without it. Nothing errors — `apply()`
+  returns `Ok` and reports changes; the interface simply is not what was
+  declared.
+
+  - **A declared MAC was never diffed.** `LinkBuilder::address(mac)`
+    stored it and `compute_link_changes` compared state, MTU and master
+    — not the address — so `.link("eth0", |l| l.address(mac))` on an
+    existing interface produced an empty diff *forever*. `LinkChanges`
+    gained `set_address` and `modify_link` applies it. On create it was
+    silently dropped for VLAN and VXLAN even though both link types
+    have an `address` setter.
+  - **VXLAN, macvlan and IFB dropped a declared MTU on create.** This
+    one broke the apply→converge contract visibly: `apply()` reported
+    success and the very next `diff()` was non-empty, because
+    `compute_link_changes` caught the MTU on the second pass. `IfbLink`
+    also gained the `address` setter it was missing.
+  - **nftables `DeclaredSet` key type and flags were never diffed.**
+    Sets were matched by name alone, so changing a set's key type, or
+    adding `NFT_SET_INTERVAL`/`constant`, produced an empty diff while
+    every rule matching `@set` silently mismatched. Chains (#200),
+    tables and flowtables (#208) all got this treatment; sets were left
+    out of that pass. A set's key type cannot be changed in place, so
+    drift now deletes and recreates it — with its elements — in the
+    same transaction.
+  - **ethtool `advertise()` emitted nothing.** `LinkModesBuilder`
+    collected advertised modes into a `Vec<String>` with no read site,
+    while a comment in `apply_link_modes` said to wire the setter up
+    "when a downstream user asks for it" — the setter had already
+    shipped and the rustdoc example already called it. They now go out
+    as `ETHTOOL_A_LINKMODES_OURS`. A caller combining `.advertise(...)`
+    with `.autoneg(true)` was renegotiating on the *old* advertisement
+    and concluding the NIC had ignored it.
+  - **MPTCP `dev(name)` resolved nothing.** Documented as "the device
+    name will be resolved to an interface index"; the field had zero
+    reads and the writer emitted `IF_IDX` only from the separate
+    `ifindex`, so an endpoint reached the kernel with **no interface
+    binding at all** and the path manager chose addresses on whatever
+    interface it liked. The setter is **removed** rather than wired up:
+    a `Connection<Mptcp>` cannot resolve a name in its own netns, and
+    the only alternative — a `Connection<Route>` in the calling
+    process's netns — is the namespace footgun the crate exists to
+    avoid. Pass an index resolved through a connection in the right
+    namespace.
+
+- **MPTCP endpoint ports were byte-swapped (#275).**
+  `MPTCP_PM_ADDR_ATTR_PORT` is host order (the kernel ingests it with
+  `htons(nla_get_u16(...))`), and nlink wrote *and read* it big-endian —
+  so it round-tripped through nlink perfectly while the kernel held the
+  swapped value. `.port(8080)` installed an endpoint on **36895**, which
+  is what `ip mptcp endpoint show` reported. Flagged at medium
+  confidence and settled by measurement; the regression test asks
+  iproute2, because a symmetric swap is invisible to nlink alone.
+
+  `MPTCP_ATTR_SPORT`/`DPORT` stay big-endian and now say why: they are
+  from `enum mptcp_event_attr`, which the kernel emits with
+  `nla_put_be16` — a different attribute set with a different
+  convention.
+
+- **`diagnostics::LinkRates::total_bps` was 8x low (#274).** The fields
+  were named `rx_bps`/`tx_bps` while being documented and computed as
+  **bytes** per second, and `total_bps()` summed them and called the
+  result bits. A "saturated at 1 Gbps" alert built on it did not fire
+  until 8 Gbps. Aggravated by the crate having a *second* `LinkRates`
+  (in `netlink::stats`) that had it right, while only the wrong one was
+  re-exported at the crate root — so `nlink::LinkRates` was the broken
+  one. The fields now say `rx_bytes_per_sec`/`tx_bytes_per_sec` and the
+  `*_bps()` accessors convert, matching the other type exactly.
+
+- **`min_bytes_for_rate` gated on a packet count (#274).** Named and
+  documented in bytes, compared against `rx_packets + tx_packets`. A
+  user setting `1_000_000` meaning "1 MB" waited for a million packets
+  — roughly 1.5 GB at MTU — so loss and error detection stayed silent
+  about 1500x longer than intended. It now compares bytes, and
+  `find_bottleneck()` uses the same gate and the same
+  `skip_loopback`/`skip_down` filters as `scan()` rather than a
+  hardcoded loopback skip, so the two entry points no longer sample
+  differently. `scan()`'s `prev_stats` map also evicts interfaces it did
+  not sample, instead of retaining them forever and diffing a reused
+  ifindex against the previous interface's counters.
+
 - **`has_module` reported most of the kernel as missing, and every miss
   was a silent skip (#273).** It checked `/sys/module/<name>` alone,
   documented as covering built-ins too. It does not: sysfs publishes a
