@@ -854,7 +854,22 @@ impl Connection<Nftables> {
                 let data: Vec<u8> = self.socket().recv_msg().await?;
 
                 for msg_result in MessageIter::new(&data) {
-                    let (header, payload) = msg_result?;
+                    // (0) A malformed frame that is not ours is not our
+                    //     problem. This used to be `msg_result?`, which
+                    //     runs *before* the seq filter below — so on a
+                    //     connection also subscribed to nftables
+                    //     multicast, one malformed broadcast frame
+                    //     surfaced as an error out of `commit()`, even
+                    //     though the batch may well have committed. The
+                    //     opposite of the skip-and-continue policy the
+                    //     request paths in this file already use (#281).
+                    let Ok((header, payload)) = msg_result else {
+                        tracing::trace!(
+                            "nftables batch: skipping malformed frame while \
+                             waiting for the batch window"
+                        );
+                        continue;
+                    };
 
                     // (1) Seq filter — an exact window, per CLAUDE.md's
                     //     recv-loop rule 1. The old one-sided `> end_seq`
@@ -1428,7 +1443,13 @@ impl Transaction {
         }
     }
 
-    /// Allocate a batch-local `NFTA_SET_ID`. See [`Self::set_id_counter`].
+    /// Allocate a batch-local `NFTA_SET_ID`.
+    ///
+    /// See the `set_id_counter` field's own docs for why this is not a
+    /// netlink sequence number. (That link used to be an intra-doc
+    /// reference to a *private* field, which rustdoc cannot resolve —
+    /// caught by the `-D rustdoc::broken_intra_doc_links` CI gate only
+    /// because it is a `Self::` path; #281.)
     fn next_set_id(&mut self) -> u32 {
         let id = self.set_id_counter;
         self.set_id_counter += 1;

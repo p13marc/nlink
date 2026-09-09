@@ -557,6 +557,29 @@ impl OvpnPeer {
         }
         None
     }
+
+    /// The peer's **local** source endpoint, decoded from
+    /// `local_ipv4`/`local_ipv6` + `local_port`.
+    ///
+    /// Mirrors [`remote_socket`](Self::remote_socket). It did not
+    /// exist, which is why `peer_matches` could not compare `local`
+    /// even though the config stores it, `apply` encodes it on create,
+    /// and the dump reads it back — so changing it was a silent no-op
+    /// and `apply_reconcile` reported successful convergence (#281).
+    pub fn local_socket(&self) -> Option<std::net::SocketAddr> {
+        let port = self.local_port.as_deref().and_then(Self::decode_port)?;
+        if let Some(v4) = self.local_ipv4.as_deref().and_then(Self::decode_ipv4) {
+            return Some(std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+                v4, port,
+            )));
+        }
+        if let Some(v6) = self.local_ipv6.as_deref().and_then(Self::decode_ipv6) {
+            return Some(std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                v6, port, 0, 0,
+            )));
+        }
+        None
+    }
 }
 
 #[cfg(test)]

@@ -174,7 +174,32 @@ impl NftablesDiff {
             tx = tx.add_chain(build_chain(table_name, *family, declared)?);
         }
 
-        // 7. Rule adds. Wire `handle_key` → `body.comment` so the
+        // 7. Flowtable adds — **before** the rules.
+        //
+        //    A rule carrying `flow add @ft` for a flowtable created in
+        //    the same diff is validated when the batch is committed,
+        //    and the flowtable has to exist by then. Adding them after
+        //    the rules failed the whole atomic batch. The module
+        //    docstring stated the same (wrong) order, so doc and code
+        //    agreed with each other and not with the dependency
+        //    (#281).
+        for ft in &self.flowtables_to_add {
+            let mut runtime =
+                super::super::Flowtable::new(ft.family(), ft.table(), ft.name())
+                    .priority(ft.priority());
+            for dev in ft.devs() {
+                runtime = runtime.device(dev.clone());
+            }
+            if ft.flags() & super::super::NFT_FLOWTABLE_HW_OFFLOAD != 0 {
+                runtime = runtime.hw_offload(true);
+            }
+            if ft.flags() & super::super::NFT_FLOWTABLE_COUNTER != 0 {
+                runtime = runtime.counter(true);
+            }
+            tx = tx.add_flowtable(&runtime);
+        }
+
+        // 8. Rule adds. Wire `handle_key` → `body.comment` so the
         //    kernel round-trips it as `NFTA_RULE_USERDATA`
         //    (Plan 157b v2 — drives per-rule diff identity).
         for rule in &self.rules_to_add {
@@ -199,23 +224,6 @@ impl NftablesDiff {
                 body.comment = Some(key.to_string());
             }
             tx = tx.replace_rule(body, handle.0);
-        }
-
-        // 8. Flowtable adds.
-        for ft in &self.flowtables_to_add {
-            let mut runtime =
-                super::super::Flowtable::new(ft.family(), ft.table(), ft.name())
-                    .priority(ft.priority());
-            for dev in ft.devs() {
-                runtime = runtime.device(dev.clone());
-            }
-            if ft.flags() & super::super::NFT_FLOWTABLE_HW_OFFLOAD != 0 {
-                runtime = runtime.hw_offload(true);
-            }
-            if ft.flags() & super::super::NFT_FLOWTABLE_COUNTER != 0 {
-                runtime = runtime.counter(true);
-            }
-            tx = tx.add_flowtable(&runtime);
         }
 
         tx.commit(conn).await?;

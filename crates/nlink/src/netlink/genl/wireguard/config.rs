@@ -731,10 +731,26 @@ impl DeclaredWgDevice {
     fn diff_against(&self, current: &WgDevice) -> DeviceChanges {
         let mut changes = DeviceChanges::default();
 
-        // private_key — we can never compare; if declared,
-        // mark dirty so apply rewrites it (idempotent at
-        // the WG protocol layer).
-        if self.private_key.is_some() {
+        // private_key — compared, not assumed dirty.
+        //
+        // This used to mark it dirty whenever declared, on the stated
+        // premise that the current value "can never be compared". The
+        // premise does not hold: `parse_device_attr_scalar` reads
+        // `WGDEVICE_A_PRIVATE_KEY`, the kernel returns it to a
+        // `CAP_NET_ADMIN` `GET_DEVICE`, and `parse_key` already
+        // normalises all-zeros to `None` so "unset" is distinguishable.
+        //
+        // The consequence was real: `diff` was **never empty** when a
+        // private key was declared, so any supervisor loop treating
+        // "diff non-empty" as drift rewrote the key on every tick, and
+        // "the second apply is a no-op" could not be asserted (#281).
+        //
+        // If the kernel does withhold it — an unprivileged GET, say —
+        // `current.private_key` is `None` and the key is written, which
+        // is the old behaviour for exactly the case that justified it.
+        if let Some(declared) = self.private_key
+            && current.private_key != Some(declared)
+        {
             changes.private_key_set = true;
         }
         if let Some(p) = self.listen_port

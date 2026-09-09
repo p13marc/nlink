@@ -163,6 +163,26 @@ where
                     // Markers always pass through — they're
                     // state-machine signals, not delta payloads.
                     if matches!(item, ResyncedEvent::Marker(_)) {
+                        // …and `ResyncStart` clears the dedup memory.
+                        //
+                        // `last_key` used to be carried across the
+                        // marker, so if the last live event before
+                        // ENOBUFS and the redump's first item were for
+                        // the same object, the *replayed* copy was
+                        // deduped away — immediately after the consumer
+                        // had been told to invalidate its state, which
+                        // is precisely when it needs that item most
+                        // (#281).
+                        //
+                        // The old test pinned the old behaviour
+                        // ("post-marker — still drops"), so this is a
+                        // deliberate contract change, not an oversight
+                        // being corrected: a resync replay is a fresh
+                        // snapshot and nothing before it is a duplicate
+                        // of anything in it.
+                        if item.is_resync_start() {
+                            this.last_key = None;
+                        }
                         return Poll::Ready(Some(Ok(item)));
                     }
                     let key = (this.key_fn)(&item);
@@ -277,11 +297,20 @@ mod tests {
     async fn predicate_filter_passes_markers_unchanged() {
         // Markers are state-machine signals — never deduped,
         // regardless of the surrounding key sequence.
+        //
+        // And `ResyncStart` *clears* the dedup memory. This test used
+        // to assert the opposite ("same key as first, post-marker —
+        // still drops"), which pinned a real bug: the replayed copy of
+        // an object was swallowed immediately after the consumer had
+        // been told to invalidate its state (#281). A resync replay is
+        // a fresh snapshot; nothing before it is a duplicate of
+        // anything in it.
         let items: Vec<crate::Result<ResyncedEvent<&'static str>>> = vec![
             Ok(ResyncedEvent::Event("a")),
             Ok(ResyncedEvent::Marker(ResyncMarker::ResyncStart)),
             Ok(ResyncedEvent::Marker(ResyncMarker::ResyncStart)), // even adjacent markers stay
-            Ok(ResyncedEvent::Event("a")), // same key as first, post-marker — still drops
+            Ok(ResyncedEvent::Resynced("a")), // the replayed copy — must survive
+            Ok(ResyncedEvent::Resynced("a")), // …but a real repeat still drops
         ];
         let s = synth_stream(items);
         let filtered: Vec<_> = s
@@ -292,9 +321,8 @@ mod tests {
             })
             .collect()
             .await;
-        // First "a" + both markers survive; the trailing "a"
-        // (same key as the most-recently-emitted event) drops.
-        assert_eq!(filtered.len(), 3);
+        // First "a", both markers, and the first replayed "a".
+        assert_eq!(filtered.len(), 4, "got {filtered:?}");
         assert!(matches!(
             filtered[1].as_ref().unwrap(),
             ResyncedEvent::Marker(ResyncMarker::ResyncStart)
@@ -303,6 +331,10 @@ mod tests {
             filtered[2].as_ref().unwrap(),
             ResyncedEvent::Marker(ResyncMarker::ResyncStart)
         ));
+        assert!(
+            matches!(filtered[3].as_ref().unwrap(), ResyncedEvent::Resynced("a")),
+            "the replayed copy must survive the marker"
+        );
     }
 
     #[tokio::test]

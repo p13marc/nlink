@@ -711,7 +711,6 @@ impl NftablesConfig {
             let current_rules = conn
                 .list_rules(declared.name(), declared.family())
                 .await?;
-            let rules_in_chain: Vec<&super::super::types::RuleInfo> = Vec::new();
             // Per-chain: group declared rules by chain, then
             // diff against kernel rules in the same chain.
             use std::collections::HashMap as _HashMap;
@@ -722,7 +721,6 @@ impl NftablesConfig {
                         acc.entry(r.chain.clone()).or_default().push(r);
                         acc
                     });
-            let _ = rules_in_chain; // silence the placeholder
             let declared_in_chain: _HashMap<&str, Vec<&DeclaredRule>> = declared
                 .rules()
                 .iter()
