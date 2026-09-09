@@ -4445,10 +4445,13 @@ impl ActionList {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use nlink::netlink::action::{BpfAction, ActionList};
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use nlink::TcHandle;
+/// use nlink::netlink::action::{ActionList, BpfAction};
 /// use nlink::netlink::filter::MatchallFilter;
 ///
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// // Attach a pinned BPF program as an action on every matched packet.
 /// let bpf = BpfAction::from_pinned("/sys/fs/bpf/my_action")?
 ///     .name("my_action")
@@ -4458,7 +4461,9 @@ impl ActionList {
 /// let filter = MatchallFilter::new()
 ///     .actions(ActionList::new().with(bpf))
 ///     .build();
-/// conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
+/// conn.add_filter("eth0", TcHandle::CLSACT_INGRESS, filter).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -4641,16 +4646,21 @@ impl ActionConfig for BpfAction {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use nlink::netlink::action::{SimpleAction, ActionList};
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use nlink::TcHandle;
+/// use nlink::netlink::action::{ActionList, SimpleAction};
 /// use nlink::netlink::filter::MatchallFilter;
 ///
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// let trace = SimpleAction::new("matched-port-80").build();
 /// let filter = MatchallFilter::new()
 ///     .actions(ActionList::new().with(trace))
 ///     .build();
-/// conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
+/// conn.add_filter("eth0", TcHandle::CLSACT_INGRESS, filter).await?;
 /// // Watch `dmesg` for the tag when traffic hits the filter.
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// The kernel limits `sdata` to a fixed buffer
