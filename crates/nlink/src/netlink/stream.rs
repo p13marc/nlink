@@ -173,7 +173,25 @@ fn poll_event_backend<P: EventSource>(
         let data: Vec<u8> = match backend {
             EventBackend::Direct(_) => match conn.socket().poll_recv(cx) {
                 Poll::Ready(Ok(data)) => data,
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+                // ENOBUFS is recoverable and must NOT fuse: the socket
+                // is fine, its buffer overflowed, and the whole resync
+                // machinery is built on the stream continuing after
+                // one. Anything else is the fd itself going bad —
+                // namespace teardown, EBADF, ENOTCONN — and repeats on
+                // every poll forever.
+                //
+                // This arm never fused, so a consumer that logs and
+                // continues (`if let Err(e) = item { warn!(); continue }`,
+                // or `.filter_map(Result::ok)`) spun at 100% CPU
+                // producing an unbounded error stream. Only a consumer
+                // that broke on the first error escaped. The
+                // `Dispatched` arm below already got this right (#277).
+                Poll::Ready(Err(e)) => {
+                    if !e.is_no_buffer_space() {
+                        *terminated = true;
+                    }
+                    return Poll::Ready(Some(Err(e)));
+                }
                 Poll::Pending => return Poll::Pending,
             },
             EventBackend::Dispatched(guard) => match guard.rx.poll_recv(cx) {

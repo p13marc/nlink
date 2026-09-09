@@ -164,10 +164,39 @@ pub(crate) enum RecvSession {
 }
 
 impl RecvSession {
-    /// Receive the next datagram for this cycle, replacing
-    /// `socket().recv_msg()` in a migrated loop. Mutex mode reads the
-    /// socket directly; dispatcher mode pulls the next driver-routed
-    /// frame (or surfaces the driver's fatal error if it stopped).
+    /// Receive the next datagram for this cycle, **bounded by the
+    /// connection's inactivity timeout**.
+    ///
+    /// This is the `recv_with_timeout` the canonical recv-loop template
+    /// in CLAUDE.md has always named. It did not exist — zero
+    /// occurrences crate-wide — so code written by following the
+    /// documented template did not compile, and the name described
+    /// per-recv semantics the implementation did not have (#272).
+    ///
+    /// The distinction matters. `Connection::with_timeout` wraps the
+    /// *whole* future, which for a multi-message dump is a total
+    /// duration budget: a legitimately large dump — conntrack with
+    /// millions of entries, a full BGP table — failed with
+    /// `Error::Timeout` while the kernel was streaming perfectly well,
+    /// and the caller could not tell "the kernel hung" from "this table
+    /// is big", which is the distinction the timeout exists to draw. A
+    /// per-recv deadline, reset by every frame that arrives, catches a
+    /// genuine stall promptly *and* lets a big dump finish.
+    pub(crate) async fn recv_with_timeout<P: ProtocolState>(
+        &mut self,
+        conn: &Connection<P>,
+    ) -> Result<Vec<u8>> {
+        match conn.timeout {
+            Some(dur) => tokio::time::timeout(dur, self.recv(conn))
+                .await
+                .map_err(|_| Error::Timeout)?,
+            None => self.recv(conn).await,
+        }
+    }
+
+    /// Receive the next datagram for this cycle with no deadline.
+    /// Prefer [`recv_with_timeout`](Self::recv_with_timeout); this is
+    /// for callers that impose their own bound.
     pub(crate) async fn recv<P: ProtocolState>(&mut self, conn: &Connection<P>) -> Result<Vec<u8>> {
         match self {
             RecvSession::Direct(_) => conn.socket().recv_msg().await,
@@ -630,6 +659,13 @@ impl<P: ProtocolState> Connection<P> {
     ///
     /// If no timeout is set, the future runs without time limit.
     /// On timeout, returns [`Error::Timeout`].
+    /// The configured per-operation (and, on dumps, per-frame)
+    /// timeout, or `None` when the caller opted out with
+    /// [`no_timeout`](Self::no_timeout).
+    pub(crate) fn operation_timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
     pub(crate) async fn with_timeout<F, T>(&self, fut: F) -> Result<T>
     where
         F: std::future::Future<Output = Result<T>>,
@@ -682,10 +718,20 @@ impl<P: ProtocolState> Connection<P> {
 
     /// Send a dump request and collect all responses.
     ///
-    /// Respects the configured timeout. This is a low-level method.
-    /// Prefer using typed methods like `get_links()`, `get_routes()`, etc.
+    /// The configured timeout applies **per received frame**, not to
+    /// the dump as a whole. Wrapping the whole future made it a total
+    /// duration budget, so a legitimately large dump — conntrack with
+    /// millions of entries, a full BGP table, a big nftables ruleset —
+    /// failed with `Error::Timeout` while the kernel was streaming
+    /// perfectly well, and the caller could not tell "the kernel hung"
+    /// from "this table is big". Resetting the deadline on every frame
+    /// still catches a genuine stall promptly, which is the failure the
+    /// default was introduced to close (#272).
+    ///
+    /// This is a low-level method. Prefer typed methods like
+    /// `get_links()`, `get_routes()`, etc.
     pub(crate) async fn send_dump(&self, builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
-        self.with_timeout(self.send_dump_inner(builder)).await
+        self.send_dump_inner(builder).await
     }
 
     #[instrument(level = "trace", skip_all, fields(seq))]
@@ -847,16 +893,20 @@ impl<P: ProtocolState> Connection<P> {
         let mut batch: Vec<Vec<u8>> = Vec::with_capacity(crate::netlink::socket::NL_BATCH_SIZE);
 
         'outer: loop {
+            // Per-frame deadline, reset by every batch that arrives —
+            // an inactivity timeout, not a total budget (#272).
             #[cfg(feature = "syscall_batch")]
             {
                 batch.clear();
-                self.socket
-                    .recv_batch(&mut batch, crate::netlink::socket::NL_BATCH_SIZE)
-                    .await?;
+                self.with_timeout(
+                    self.socket
+                        .recv_batch(&mut batch, crate::netlink::socket::NL_BATCH_SIZE),
+                )
+                .await?;
             }
             #[cfg(not(feature = "syscall_batch"))]
             let batch = {
-                let data = self.socket.recv_msg().await?;
+                let data = self.with_timeout(self.socket.recv_msg()).await?;
                 vec![data]
             };
 
@@ -1026,7 +1076,14 @@ impl<P: ProtocolState> Connection<P> {
 
         let mut responses = Vec::new();
         'outer: loop {
-            let Some(buf) = guard.rx.recv().await else {
+            // Per-frame deadline, as in the mutex path above (#272).
+            let next = match self.timeout {
+                Some(dur) => tokio::time::timeout(dur, guard.rx.recv())
+                    .await
+                    .map_err(|_| Error::Timeout)?,
+                None => guard.rx.recv().await,
+            };
+            let Some(buf) = next else {
                 return Err(self.dispatcher.take_fatal_error());
             };
             let data: &[u8] = &buf;
@@ -3300,7 +3357,7 @@ impl Connection<Generic> {
             let msg = builder.finish();
             self.socket.send(&msg).await?;
 
-            let response = session.recv(self).await?;
+            let response = session.recv_with_timeout(self).await?;
             self.process_genl_response(&response, seq)?;
 
             Ok(response)
@@ -3343,7 +3400,7 @@ impl Connection<Generic> {
             let mut responses = Vec::new();
 
             loop {
-                let data = session.recv(self).await?;
+                let data = session.recv_with_timeout(self).await?;
                 let mut done = false;
 
                 for result in MessageIter::new(&data) {

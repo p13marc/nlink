@@ -926,7 +926,7 @@ impl Connection<Netfilter> {
             let mut entries = Vec::new();
 
             loop {
-                let data = session.recv(self).await?;
+                let data = session.recv_with_timeout(self).await?;
 
                 let mut offset = 0;
                 while offset + 16 <= data.len() {

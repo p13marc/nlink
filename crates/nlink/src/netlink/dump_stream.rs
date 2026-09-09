@@ -37,6 +37,7 @@
 
 use std::{
     collections::VecDeque,
+    future::Future,
     marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
@@ -85,6 +86,18 @@ pub struct DumpStream<'a, P: ProtocolState, T: FromNetlink + Unpin> {
     /// on a 2nd in-flight dump), so a streaming dump holds it for its
     /// lifetime just like the eager `send_dump` path. Released on drop.
     _guard: tokio::sync::OwnedMutexGuard<()>,
+    /// Inactivity deadline, reset by every frame that arrives.
+    ///
+    /// The streaming dump had **no timeout at all**: being poll-based
+    /// it simply stayed `Pending` forever on a stalled kernel — the
+    /// precise failure the 30s default exists to prevent, still open
+    /// on the newer of the two dump paths (#272). `None` when the
+    /// connection has `no_timeout()`.
+    ///
+    /// A per-frame deadline rather than a total budget, for the same
+    /// reason as the eager path: a big dump that is streaming steadily
+    /// is not a hang.
+    idle: Option<Pin<Box<tokio::time::Sleep>>>,
     /// #134 — dispatcher mode: per-seq channel the background driver
     /// routes this dump's frames into. `None` in mutex mode (frames come
     /// from `socket().poll_recv`). When `Some`, `poll_next` consumes this
@@ -159,10 +172,37 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
             done: false,
             errored: false,
             skip_malformed: false,
+            idle: conn
+                .operation_timeout()
+                .map(|d| Box::pin(tokio::time::sleep(d))),
             _guard: guard,
             dispatched,
             _marker: PhantomData,
         })
+    }
+
+    /// Restart the inactivity deadline. Called for every frame that
+    /// arrives, so a dump that is streaming steadily never trips it.
+    fn reset_idle(&mut self) {
+        if let Some(timeout) = self.conn.operation_timeout() {
+            self.idle = Some(Box::pin(tokio::time::sleep(timeout)));
+        }
+    }
+
+    /// The source has nothing right now. Return `Pending` unless the
+    /// inactivity deadline has expired, in which case the kernel has
+    /// stalled and the stream fuses with `Error::Timeout`.
+    fn poll_idle(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<T>>> {
+        let Some(idle) = self.idle.as_mut() else {
+            return Poll::Pending;
+        };
+        match idle.as_mut().poll(cx) {
+            Poll::Ready(()) => {
+                self.errored = true;
+                Poll::Ready(Some(Err(crate::Error::Timeout)))
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 
     /// Plan 233 (0.20.1) — continue past malformed frames instead of
@@ -338,6 +378,7 @@ impl<P: ProtocolState, T: FromNetlink + Unpin> Stream for DumpStream<'_, P, T> {
                 let polled = this.dispatched.as_mut().unwrap().rx.poll_recv(cx);
                 match polled {
                     Poll::Ready(Some(frame)) => {
+                        this.reset_idle();
                         this.drain_into_pending(&frame);
                         if let Some(item) = this.pending.pop_front() {
                             return Poll::Ready(Some(item));
@@ -352,7 +393,7 @@ impl<P: ProtocolState, T: FromNetlink + Unpin> Stream for DumpStream<'_, P, T> {
                         this.errored = true;
                         return Poll::Ready(Some(Err(this.conn.dispatcher().take_fatal_error())));
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => return this.poll_idle(cx),
                 }
             }
         }
@@ -373,6 +414,7 @@ impl<P: ProtocolState, T: FromNetlink + Unpin> Stream for DumpStream<'_, P, T> {
                     .poll_recv_batch(cx, crate::netlink::socket::NL_BATCH_SIZE)
                 {
                     Poll::Ready(Ok(frames)) => {
+                        this.reset_idle();
                         for data in &frames {
                             this.drain_into_pending(data);
                         }
@@ -388,13 +430,14 @@ impl<P: ProtocolState, T: FromNetlink + Unpin> Stream for DumpStream<'_, P, T> {
                         this.errored = true;
                         return Poll::Ready(Some(Err(e)));
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => return this.poll_idle(cx),
                 }
             }
             #[cfg(not(feature = "syscall_batch"))]
             {
                 match this.conn.socket().poll_recv(cx) {
                     Poll::Ready(Ok(data)) => {
+                        this.reset_idle();
                         this.drain_into_pending(&data);
                         if let Some(item) = this.pending.pop_front() {
                             return Poll::Ready(Some(item));
@@ -408,7 +451,7 @@ impl<P: ProtocolState, T: FromNetlink + Unpin> Stream for DumpStream<'_, P, T> {
                         this.errored = true;
                         return Poll::Ready(Some(Err(e)));
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => return this.poll_idle(cx),
                 }
             }
         }
@@ -498,6 +541,7 @@ impl<P: ProtocolState> Connection<P> {
 mod tests {
     use super::*;
     use crate::netlink::message::NLMSG_HDRLEN;
+    use std::time::Duration;
 
     // Verify DumpStream's send/done state machine via a tiny synth
     // test exercising drain_into_pending directly. (Full
@@ -523,6 +567,7 @@ mod tests {
             done: false,
             errored: false,
             skip_malformed: false,
+            idle: None,
             _guard: guard,
             dispatched: None,
             _marker: PhantomData,
@@ -608,6 +653,7 @@ mod tests {
             done: false,
             errored: false,
             skip_malformed: false,
+            idle: None,
             _guard: guard,
             dispatched: None,
             _marker: PhantomData,
@@ -686,5 +732,35 @@ mod tests {
         assert!(stream.skip_malformed);
         let stream = stream.with_skip_malformed(false);
         assert!(!stream.skip_malformed);
+    }
+
+    // ====================================================================
+    // #272 — the streaming dump had no timeout at all
+    // ====================================================================
+
+    /// The idle deadline is wired to the connection's timeout.
+    ///
+    /// Not a test that a stall *fires* it — that needs a kernel that
+    /// stops answering mid-dump, which is what the integration suite is
+    /// for. This checks the half that is checkable here: that
+    /// `DumpStream` reads its deadline from the connection, and that
+    /// `no_timeout()` still means no deadline, so a caller who opted
+    /// out keeps the old forever-pending behaviour.
+    #[tokio::test]
+    async fn the_idle_deadline_follows_the_connections_timeout() {
+        // Being poll-based, `DumpStream` simply stayed `Pending`
+        // forever on a kernel that stopped answering — the precise
+        // failure the 30s default exists to prevent, still open on the
+        // newer of the two dump paths (#272).
+        let conn = match Connection::<crate::netlink::Route>::new() {
+            Ok(c) => c.timeout(Duration::from_secs(5)),
+            Err(_) => return, // no netlink here; nothing to check
+        };
+        assert_eq!(conn.operation_timeout(), Some(Duration::from_secs(5)));
+
+        // `no_timeout()` must leave the deadline off, so a caller who
+        // opted out still gets the old forever-pending behaviour.
+        let conn = conn.no_timeout();
+        assert_eq!(conn.operation_timeout(), None);
     }
 }

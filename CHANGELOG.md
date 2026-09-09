@@ -140,6 +140,82 @@ All notable changes to this project will be documented in this file.
   reports failure while the storm is still running. With the delay the
   integration test that fires 2000 rule inserts at a 256-byte rcvbuf
   recovers; without it, no attempt count is enough.
+- **The operation timeout was a total budget on eager dumps and absent
+  entirely on streaming ones (#272).** `with_timeout` wrapped the whole
+  future, so for a multi-message dump the 30s default was a limit on
+  *duration*, not on silence: a legitimately large dump — conntrack with
+  millions of entries, a full BGP table, a big nftables ruleset — failed
+  with `Error::Timeout` while the kernel was streaming perfectly well,
+  and the caller could not tell "the kernel hung" from "this table is
+  big" — which is the distinction the timeout was introduced to draw.
+  Meanwhile `dump_stream` had no timeout at all: being poll-based it
+  stayed `Pending` forever on a stalled kernel, the exact failure the
+  default exists to prevent, still open on the newer of the two paths.
+
+  Both are now per-frame deadlines, reset by every frame that arrives.
+  A stall is caught as promptly as before; a big dump finishes.
+
+  `RecvSession::recv_with_timeout` now exists. CLAUDE.md's canonical
+  recv-loop template — the one every new loop is told to copy — has
+  always named it, and it had **zero occurrences crate-wide**, so code
+  written by following the documented template did not compile. The
+  template is also updated for the dump classifier.
+
+- **`Batch` dropped operations whose encoding failed, misaligning
+  `BatchResults` (#277).** `BatchResults` is documented as "one
+  `Result<()>` per operation in submission order", and `errors()` yields
+  `(index, &Error)` pairs the caller maps back to what it submitted. An
+  op that failed to encode was silently not pushed, so three
+  submissions with a bad one in the middle produced **two** results,
+  `all_ok() == true`, and index 1 describing the third submission. The
+  caller concluded all three were configured. Encode failures now keep
+  their slot.
+
+- **WireGuard `get_device` returned a peer twice when its allowed IPs
+  crossed a dump boundary (#277).** `wg_get_device_dump` re-emits
+  `WGPEER_A_PUBLIC_KEY` on the continuation and sends the scalars —
+  `RX_BYTES`, `TX_BYTES`, `LAST_HANDSHAKE_TIME`, `PERSISTENT_KEEPALIVE`,
+  `ENDPOINT`, `PRESHARED_KEY` — only in the first chunk. nlink pushed
+  every peer unconditionally, so a boundary peer came back once with
+  stats and a partial `allowed_ips` and once with zeroed stats, no
+  endpoint, and the remainder.
+
+  The knock-on was worse than a duplicate row:
+  `WireguardConfig::diff_against` keys the current state by public key,
+  so the second, stats-less entry *overwrote* the full one — the
+  declared peer was compared against a truncated view, `endpoint_set`
+  and `allowed_ips_set` both fired, and `apply()` rewrote that peer on
+  **every run**. `wg(8)` coalesces by public key; so does this now.
+
+- **Event streams hot-spun on a dead fd (#277).** The `Direct` arm of
+  `EventSubscription`/`OwnedEventStream` returned the error without
+  fusing, so once the fd went bad — namespace teardown, `EBADF`,
+  `ENOTCONN` — `poll_recv` returned `Ready(Err)` on every poll forever.
+  A consumer that logged and continued, or used
+  `.filter_map(Result::ok)`, spun at 100% CPU producing an unbounded
+  error stream; only one that broke on the first error escaped. It now
+  fuses — except on `ENOBUFS`, which is recoverable and which the whole
+  resync machinery depends on *not* fusing.
+
+- **`Dispatcher::fail_all` left multicast subscribers hanging (#277).**
+  It cleared `pending` and `event_listeners` — the latter added by #202
+  for exactly this — and never touched the `subscribers` broadcast
+  senders, which stayed alive behind the `Arc`. So after a fatal recv
+  error killed the driver, a consumer awaiting
+  `subscribe_multicast(g).recv()` — the surface the `*_with_resync`
+  wrappers use — parked forever: no error, no `Lagged`, no termination,
+  indistinguishable from an idle network. The same bug #202 fixed, on
+  the other surface.
+
+- **`spawn_*_with_etc` could leave the child with no `/sys` (#282).**
+  The setup detaches `/sys` with `umount2(MNT_DETACH)` and mounts a
+  fresh sysfs for the target netns; the mount's failure was swallowed by
+  an empty `if`, after the detach had already succeeded. A stale `/sys`
+  showing the host's interfaces is bad; **nothing** there is worse,
+  because anything enumerating interfaces through sysfs — `util::ifname`,
+  which is what the `bins/` use — then fails outright instead of reading
+  the wrong thing. The failure now aborts the spawn, as `ip netns exec`
+  does.
 
 - **Five setters that were stored and never read (#275).** Each is the
   same shape: a fluent setter accepts a value, the writer never looks at

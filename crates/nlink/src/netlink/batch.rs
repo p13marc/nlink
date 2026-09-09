@@ -70,6 +70,19 @@ const MAX_BATCH_SIZE: usize = 200 * 1024;
 pub struct Batch<'a> {
     conn: &'a Connection<Route>,
     ops: Vec<BatchOp>,
+    /// Operations whose *encoding* failed, by submission index.
+    ///
+    /// `BatchResults` promises "one `Result<()>` per operation in
+    /// submission order", and `errors()` yields `(index, &Error)` pairs
+    /// the caller maps back to what it submitted. An op that failed to
+    /// encode used to be dropped on the floor: three submissions with a
+    /// bad one in the middle produced two results, `all_ok() == true`,
+    /// and index 1 describing the *third* submission. The caller
+    /// concluded all three were configured (#277).
+    encode_errors: Vec<(usize, Error)>,
+    /// Submissions so far, encoded or not — the index space
+    /// `BatchResults` is indexed by.
+    submitted: usize,
 }
 
 struct BatchOp {
@@ -82,6 +95,8 @@ impl<'a> Batch<'a> {
         Self {
             conn,
             ops: Vec::new(),
+            encode_errors: Vec::new(),
+            submitted: 0,
         }
     }
 
@@ -141,8 +156,9 @@ impl<'a> Batch<'a> {
             NlMsgType::RTM_NEWADDR,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
         );
-        if config.write_add(&mut builder, ifindex).is_ok() {
-            self.push(builder);
+        match config.write_add(&mut builder, ifindex) {
+            Ok(()) => self.push(builder),
+            Err(e) => self.push_encode_error(e),
         }
         self
     }
@@ -150,8 +166,9 @@ impl<'a> Batch<'a> {
     /// Delete an address in the batch.
     pub fn del_address<A: AddressConfig>(mut self, config: A, ifindex: u32) -> Self {
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELADDR, NLM_F_REQUEST | NLM_F_ACK);
-        if config.write_delete(&mut builder, ifindex).is_ok() {
-            self.push(builder);
+        match config.write_delete(&mut builder, ifindex) {
+            Ok(()) => self.push(builder),
+            Err(e) => self.push_encode_error(e),
         }
         self
     }
@@ -164,8 +181,9 @@ impl<'a> Batch<'a> {
             NlMsgType::RTM_NEWNEIGH,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
         );
-        if config.write_add(&mut builder, ifindex).is_ok() {
-            self.push(builder);
+        match config.write_add(&mut builder, ifindex) {
+            Ok(()) => self.push(builder),
+            Err(e) => self.push_encode_error(e),
         }
         self
     }
@@ -173,8 +191,9 @@ impl<'a> Batch<'a> {
     /// Delete a neighbor in the batch.
     pub fn del_neighbor<N: NeighborConfig>(mut self, config: N, ifindex: u32) -> Self {
         let mut builder = MessageBuilder::new(NlMsgType::RTM_DELNEIGH, NLM_F_REQUEST | NLM_F_ACK);
-        if config.write_delete(&mut builder, ifindex).is_ok() {
-            self.push(builder);
+        match config.write_delete(&mut builder, ifindex) {
+            Ok(()) => self.push(builder),
+            Err(e) => self.push_encode_error(e),
         }
         self
     }
@@ -221,9 +240,12 @@ impl<'a> Batch<'a> {
         builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
 
         let options_token = builder.nest_start(TcaAttr::Options as u16);
-        if config.write_options(&mut builder).is_ok() {
-            builder.nest_end(options_token);
-            self.push(builder);
+        match config.write_options(&mut builder) {
+            Ok(()) => {
+                builder.nest_end(options_token);
+                self.push(builder);
+            }
+            Err(e) => self.push_encode_error(e),
         }
         self
     }
@@ -239,22 +261,32 @@ impl<'a> Batch<'a> {
         self
     }
 
+    /// Record an operation that could not be encoded, keeping its slot
+    /// in the result vector.
+    fn push_encode_error(&mut self, e: Error) {
+        self.encode_errors.push((self.submitted, e));
+        self.submitted += 1;
+    }
+
     fn push(&mut self, mut builder: MessageBuilder) {
         let seq = self.conn.socket().next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.conn.socket().pid());
         let msg = builder.finish();
         self.ops.push(BatchOp { seq, msg });
+        self.submitted += 1;
     }
 
     /// Number of buffered operations.
+    /// Number of buffered operations, including any whose encoding
+    /// failed — this is the length `BatchResults` will have.
     pub fn len(&self) -> usize {
-        self.ops.len()
+        self.submitted
     }
 
     /// Whether the batch is empty.
     pub fn is_empty(&self) -> bool {
-        self.ops.is_empty()
+        self.submitted == 0
     }
 
     /// Execute all operations, returning per-operation results.
@@ -263,10 +295,17 @@ impl<'a> Batch<'a> {
     /// Only returns `Err` for transport-level errors (socket failure).
     /// Individual operation failures are captured in `BatchResults`.
     #[tracing::instrument(level = "debug", skip_all, fields(ops = self.ops.len()))]
-    pub async fn execute(self) -> Result<BatchResults> {
-        if self.ops.is_empty() {
+    pub async fn execute(mut self) -> Result<BatchResults> {
+        if self.submitted == 0 {
             return Ok(BatchResults {
                 results: Vec::new(),
+            });
+        }
+        if self.ops.is_empty() {
+            // Nothing to send, but the failed encodings still owe the
+            // caller a result each.
+            return Ok(BatchResults {
+                results: self.take_encode_errors_only(),
             });
         }
 
@@ -291,8 +330,44 @@ impl<'a> Batch<'a> {
         }
 
         Ok(BatchResults {
-            results: all_results,
+            results: self.splice_encode_errors(all_results),
         })
+    }
+
+    /// Result vector for a batch where nothing encoded.
+    fn take_encode_errors_only(&mut self) -> Vec<Result<()>> {
+        self.splice_encode_errors(Vec::new())
+    }
+
+    /// Put the encode failures back at their submission indices.
+    ///
+    /// `wire_results` holds one entry per op that actually went out, in
+    /// order; the failures fill the gaps, so the final vector has one
+    /// entry per submission and index *i* means submission *i* — which
+    /// is what `BatchResults::errors()` tells callers it means.
+    fn splice_encode_errors(&mut self, wire_results: Vec<Result<()>>) -> Vec<Result<()>> {
+        if self.encode_errors.is_empty() {
+            return wire_results;
+        }
+        let mut failures = std::mem::take(&mut self.encode_errors).into_iter().peekable();
+        let mut wire = wire_results.into_iter();
+        let mut out = Vec::with_capacity(self.submitted);
+        for idx in 0..self.submitted {
+            match failures.peek() {
+                Some((at, _)) if *at == idx => {
+                    let (_, e) = failures.next().expect("peeked");
+                    out.push(Err(e));
+                }
+                _ => match wire.next() {
+                    Some(r) => out.push(r),
+                    // The wire produced fewer results than ops (a
+                    // truncated ACK stream); leave the tail out rather
+                    // than inventing successes.
+                    None => break,
+                },
+            }
+        }
+        out
     }
 
     /// Execute all operations, returning the first error encountered.
@@ -485,5 +560,80 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert!(items[0].is_ok());
         assert!(items[1].is_err());
+    }
+
+    // ====================================================================
+    // #277 — an op that fails to encode keeps its slot
+    // ====================================================================
+
+    /// `splice_encode_errors` without a live `Connection`: build the
+    /// state it operates on directly.
+    fn splice(submitted: usize, failures: Vec<(usize, &str)>, wire: usize) -> Vec<&'static str> {
+        // Stand-in for the private method's inputs. Re-implemented via
+        // the same helper by faking a Batch is not possible without a
+        // socket, so this mirrors the merge and asserts the ordering
+        // contract the method must satisfy.
+        let mut failures = failures.into_iter().peekable();
+        let mut wire_left = wire;
+        let mut out = Vec::new();
+        for idx in 0..submitted {
+            match failures.peek() {
+                Some((at, _)) if *at == idx => {
+                    failures.next();
+                    out.push("err");
+                }
+                _ => {
+                    if wire_left == 0 {
+                        break;
+                    }
+                    wire_left -= 1;
+                    out.push("ok");
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_failed_encoding_keeps_its_position() {
+        // Three submissions, the middle one unencodable. Before the
+        // fix this produced two results, `all_ok() == true`, and index
+        // 1 describing the *third* submission.
+        assert_eq!(splice(3, vec![(1, "bad")], 2), vec!["ok", "err", "ok"]);
+    }
+
+    #[test]
+    fn failures_at_the_ends_keep_their_positions() {
+        assert_eq!(splice(3, vec![(0, "bad")], 2), vec!["err", "ok", "ok"]);
+        assert_eq!(splice(3, vec![(2, "bad")], 2), vec!["ok", "ok", "err"]);
+    }
+
+    #[test]
+    fn every_submission_can_fail_to_encode() {
+        assert_eq!(
+            splice(3, vec![(0, "a"), (1, "b"), (2, "c")], 0),
+            vec!["err", "err", "err"]
+        );
+    }
+
+    #[test]
+    fn a_truncated_ack_stream_does_not_invent_successes() {
+        // Fewer wire results than ops: the tail is left out rather than
+        // filled with Ok.
+        assert_eq!(splice(4, vec![(1, "bad")], 1), vec!["ok", "err"]);
+    }
+
+    #[test]
+    fn batch_results_index_means_submission_index() {
+        // The contract `errors()` documents.
+        let r = make_results(vec![
+            Ok(()),
+            Err(Error::InvalidMessage("bad".into())),
+            Ok(()),
+        ]);
+        assert_eq!(r.len(), 3);
+        assert!(!r.all_ok());
+        let errs: Vec<_> = r.errors().map(|(i, _)| i).collect();
+        assert_eq!(errs, vec![1]);
     }
 }

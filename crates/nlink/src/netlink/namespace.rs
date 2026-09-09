@@ -1420,6 +1420,25 @@ pub fn spawn_path_with_etc<P: AsRef<Path>>(
 
             // 5. Remount /sys so sysfs reflects the new network namespace.
             //    Without this, /sys/class/net/ shows the host's interfaces.
+            //
+            //    The mount's failure used to be swallowed by an empty
+            //    `if` — after the detach had already succeeded. So in a
+            //    nested or restricted namespace the child ran on with
+            //    **no /sys at all**. A stale /sys showing the host's
+            //    interfaces is bad; nothing there is worse, because
+            //    anything enumerating interfaces through sysfs
+            //    (`util::ifname`, which is what the bins use) then fails
+            //    outright instead of reading the wrong thing (#282).
+            //
+            //    Detach-then-mount is the order that works — `umount2`
+            //    takes the topmost mount, so mounting the replacement
+            //    first and unmounting after would just remove the
+            //    replacement. That leaves the window between the two
+            //    calls, and the only safe thing to do if the second one
+            //    fails is to refuse to exec: this returns the error,
+            //    which aborts the spawn rather than handing the caller a
+            //    child whose /sys is gone. `ip netns exec` does the
+            //    same.
             libc::umount2(c_sys.as_ptr(), libc::MNT_DETACH);
             if libc::mount(
                 ns_name_c.as_ptr(),
@@ -1429,8 +1448,7 @@ pub fn spawn_path_with_etc<P: AsRef<Path>>(
                 std::ptr::null(),
             ) != 0
             {
-                // Non-fatal: sysfs remount may fail in nested namespaces
-                // or restricted environments. Continue with /etc overlays.
+                return Err(std::io::Error::last_os_error());
             }
 
             // 6. Apply pre-computed /etc bind mounts
