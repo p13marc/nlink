@@ -158,6 +158,39 @@ PY
 expect_pass "#266 an nlink-local plain const is ignored, not guessed at"
 restore
 
+# 4d. #260 — a mapped module (audit-uapi-constants.modmap) supplies the kernel
+# prefix for constants named with the suffix only, and is checked *strictly*:
+# every constant in it must resolve to a real kernel symbol. That strictness is
+# the point. nlink's macsec module carried two attributes the kernel has never
+# defined, and an invented attribute is invisible to a value-only check —
+# there is no wrong number to notice, just a name nobody implements.
+python3 - "$WORK_DIR/crates/nlink/src/netlink/types/macsec.rs" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace("    /// Netlink alignment padding.\n    pub const PAD: u16 = 2;\n}",
+              "    /// Netlink alignment padding.\n    pub const PAD: u16 = 2;\n"
+              "    pub const INVENTED_BY_NOBODY: u16 = 3;\n}", 1)
+open(p, "w").write(s)
+PY
+expect_fail "#260 an invented attribute in a mapped module is caught" "no kernel constant named MACSEC_OFFLOAD_ATTR_INVENTED_BY_NOBODY"
+restore
+
+# 4e. The same module, wrong value rather than invented name — the cipher-suite
+# shape. These are `ULL`-suffixed #defines in the header, which the expression
+# evaluator has to strip; before it did, they parsed as nothing and the whole
+# cipher table was silently unchecked while GcmAes256 sent GCM-AES-128.
+python3 - "$WORK_DIR/crates/nlink/src/netlink/types/macsec.rs" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace("pub const GCM_AES_256: u64 = 0x0080_C200_0100_0002;",
+              "pub const GCM_AES_256: u64 = 0x0080_C200_0100_0001;")
+open(p, "w").write(s)
+PY
+expect_fail "#260 a ULL-suffixed cipher id with the wrong value is caught" "macsec_cipher::GCM_AES_256"
+restore
+
 # 5. A brand-new UAPI enum that nobody mapped or allowlisted. This is the case
 #    that keeps the gate honest as the crate grows: an unclassified enum is an
 #    unchecked enum.

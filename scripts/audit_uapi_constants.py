@@ -42,6 +42,7 @@ MAP_FILE = REPO / "scripts" / "audit-uapi-constants.map"
 ALLOWLIST_FILE = REPO / "scripts" / "audit-uapi-constants.allowlist"
 NEWER_FILE = REPO / "scripts" / "audit-uapi-constants.newer"
 CONST_ALLOW_FILE = REPO / "scripts" / "audit-uapi-constants.const-allowlist"
+MODMAP_FILE = REPO / "scripts" / "audit-uapi-constants.modmap"
 SRC_DIRS = [REPO / "crates" / "nlink" / "src"]
 
 
@@ -71,6 +72,12 @@ def eval_expr(expr: str, consts: dict[str, int]) -> int | None:
     expr = expr.strip()
     if not expr:
         return None
+    # Strip C integer-literal suffixes: `0x0080C20001000001ULL` is a perfectly
+    # ordinary constant that Python cannot parse. Dropping these silently is not
+    # harmless — it is how the MACsec cipher-suite IDs (all `ULL`) stayed
+    # invisible to this audit while one of them silently downgraded GCM-AES-256
+    # to GCM-AES-128.
+    expr = re.sub(r"\b(0[xX][0-9a-fA-F]+|\d+)[uUlL]+\b", r"\1", expr)
     # Only allow a safe character set through to eval().
     if not re.fullmatch(r"[\w\s()<>|&+\-*/^~]+", expr):
         return None
@@ -187,7 +194,49 @@ RUST_CONST_RE = re.compile(
 )
 
 
-def parse_rust_consts() -> list[tuple[Path, str, int]]:
+MOD_RE = re.compile(r"^[ \t]*pub mod (\w+)\s*\{", re.M)
+
+
+def module_spans(text: str) -> list[tuple[str, int, int]]:
+    """`(module_name, body_start, body_end)` for every `pub mod X {` block.
+
+    Brace-counted rather than regexed, so a nested module or a brace inside a
+    string does not truncate the span. Used to attribute a constant to the
+    module it lives in — the abbreviated modules (`macsec_cipher`, `nha`,
+    `seg6_local_flv_op`) name their constants with the kernel *suffix* only,
+    so the module is the only place the prefix can come from.
+    """
+    spans: list[tuple[str, int, int]] = []
+    for mo in MOD_RE.finditer(text):
+        depth, i = 0, mo.end() - 1
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        spans.append((mo.group(1), mo.end(), i))
+    return spans
+
+
+def parse_modmap() -> dict[str, str]:
+    """`rust_module_name -> KERNEL_PREFIX`, for modules whose constants are
+    named with the kernel suffix only."""
+    if not MODMAP_FILE.exists():
+        return {}
+    out: dict[str, str] = {}
+    for raw in MODMAP_FILE.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        mod, _, prefix = line.partition("=")
+        out[mod.strip()] = prefix.strip()
+    return out
+
+
+def parse_rust_consts() -> list[tuple[Path, str, int, "str | None"]]:
     """Every `pub const NAME: uN = <literal>;` in the tree.
 
     Deliberately *not* name-mangled. The check below only looks at constants
@@ -196,13 +245,22 @@ def parse_rust_consts() -> list[tuple[Path, str, int]]:
     Constants nlink names differently from the kernel are simply not covered
     by this pass; they need an enum or a map entry.
     """
-    out: list[tuple[Path, str, int]] = []
+    out: list[tuple[Path, str, int, str | None]] = []
     for src_dir in SRC_DIRS:
         for path in sorted(src_dir.rglob("*.rs")):
             text = path.read_text()
             text = re.sub(r"^\s*//[^\n]*$", "", text, flags=re.M)
-            for name, raw in RUST_CONST_RE.findall(text):
-                out.append((path, name, int(raw.replace("_", ""), 0)))
+            spans = module_spans(text)
+            for mo in RUST_CONST_RE.finditer(text):
+                name = mo.group(1)
+                value = int(mo.group(2).replace("_", ""), 0)
+                # Innermost enclosing `pub mod`, if any.
+                enclosing = None
+                best = -1
+                for mod_name, start, end in spans:
+                    if start <= mo.start() < end and start > best:
+                        best, enclosing = start, mod_name
+                out.append((path, name, value, enclosing))
     return out
 
 
@@ -338,15 +396,31 @@ def main() -> int:
     # name, and produced zero false positives across the 1573 it matches. A
     # constant nlink spells differently is simply out of scope for this pass —
     # better uncovered than covered by a guess.
+    modmap = parse_modmap()
     checked_consts = 0
-    for path, name, value in parse_rust_consts():
-        if name in const_allowed or name not in kernel:
+    for path, name, value, enclosing in parse_rust_consts():
+        if name in const_allowed:
+            continue
+        # A mapped module names its constants with the kernel suffix only, so
+        # the full symbol is PREFIX_NAME. Unmapped modules fall back to the
+        # exact-name rule.
+        prefix = modmap.get(enclosing) if enclosing else None
+        kernel_name = f"{prefix}_{name}" if prefix else name
+        if kernel_name not in kernel:
+            if prefix:
+                failures.append(
+                    f"{path.relative_to(REPO)}: {enclosing}::{name} = {value}\n"
+                    f"    no kernel constant named {kernel_name}\n"
+                    f"    (module mapped to {prefix} in "
+                    f"scripts/audit-uapi-constants.modmap)"
+                )
             continue
         checked_consts += 1
-        if value != kernel[name]:
+        if value != kernel[kernel_name]:
+            where = f"{enclosing}::{name}" if prefix else name
             failures.append(
-                f"{path.relative_to(REPO)}: {name} = {value}, "
-                f"but the kernel says {kernel[name]}"
+                f"{path.relative_to(REPO)}: {where} = {value}, "
+                f"but {kernel_name} = {kernel[kernel_name]}"
             )
 
     if unclassified:

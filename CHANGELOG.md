@@ -109,6 +109,47 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **MACsec: `GcmAes256` configured GCM-AES-128, and no SA operation worked
+  (#260).** `netlink/types/macsec.rs` was mis-transcribed throughout — six of
+  its thirteen constant blocks were wrong, including two attributes and three
+  commands the kernel has never defined.
+
+  The security-relevant one: every cipher-suite id held the *previous* suite's
+  value, so asking for `GCM_AES_256` selected **GCM-AES-128**. Silent — the
+  reverse mapping was wrong in the same direction, so the returned state agreed.
+  The unit test pinned the wrong values too, so the suite stayed green.
+
+  The rest, briefly: `MACSEC_ATTR_SA_CONFIG` was 4 (the kernel's `SECY`), so
+  every `add`/`del`/`upd` TXSA and RXSA failed `EINVAL`; `ADD_RXSA` was the
+  kernel's `UPD_TXSA`, so adding an RX SA performed a TX SA update; three
+  commands were above `MACSEC_CMD_MAX` and returned `EOPNOTSUPP`; the SecY
+  encrypt/protect/replay attributes were three-way rotated; and the RX SC and
+  per-SA statistics tables were in the wrong order, so packet counts were read
+  as octet counts.
+
+  One consequence was worse than a wrong number. RX SC statistics were looked
+  up under a top-level `RXSC_STATS` attribute that does not exist; its invented
+  value, 3, is `SA_LIST` *inside that nest* — so the parser fed the SA list to
+  the statistics decoder and reported SA attributes as counters.
+
+  Also fixed here: `get_device_by_index` folded **every** response of the
+  `GET_TXSC` dump into one `MacsecDevice`, concatenating the SAs and RX SCs of
+  every MACsec device on the host and leaving `ifindex` holding whichever came
+  last. It now returns the requested device, filtering client-side so the
+  answer is right whether or not the kernel honours the request's ifindex.
+
+  The audit gate grew two capabilities to cover this class:
+  `scripts/audit-uapi-constants.modmap` maps a module to a kernel prefix, for
+  constants named with the suffix only — and a mapped module is checked
+  *strictly*, so an invented attribute fails the build. Invented names are
+  invisible to a value-only check: there is no wrong number to notice.
+
+  The header parser also now strips C integer suffixes. The cipher ids are
+  `ULL`-suffixed `#define`s, which it silently failed to parse — so the most
+  dangerous constants in this file were unreachable by the audit that was
+  supposed to protect them. Stripping the suffix made **942 more kernel
+  constants** visible to the gate.
+
 - **41 wrong UAPI constants, and the gate that let them through (#266, #259,
   #263, #264, #265).** `scripts/audit-uapi-constants.sh` checked only
   `#[repr(uN)]` enums — 642 discriminants. But most of the crate's wire

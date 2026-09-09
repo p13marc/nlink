@@ -1,0 +1,27 @@
+# Rust module -> kernel constant prefix.
+#
+# Some modules name their constants with the kernel *suffix* only —
+# `macsec_attr::IFINDEX` is the kernel's `MACSEC_ATTR_IFINDEX`. The exact-name
+# pass (#266) cannot see those, because `IFINDEX` alone is not a kernel symbol.
+# Mapping the module supplies the missing prefix.
+#
+# A mapped module is checked strictly: every constant in it must resolve to a
+# real kernel symbol, so an invented attribute fails the build rather than
+# passing unnoticed. That is the whole point — nlink's macsec module had two
+# attributes the kernel has never defined.
+#
+# Format: one `rust_module = KERNEL_PREFIX` per line, `#` comments.
+
+macsec_cmd              = MACSEC_CMD
+macsec_attr             = MACSEC_ATTR
+macsec_rxsc_attr        = MACSEC_RXSC_ATTR
+macsec_sa_attr          = MACSEC_SA_ATTR
+macsec_secy_attr        = MACSEC_SECY_ATTR
+macsec_secy_stats_attr  = MACSEC_SECY_STATS_ATTR
+macsec_txsc_stats_attr  = MACSEC_TXSC_STATS_ATTR
+macsec_rxsc_stats_attr  = MACSEC_RXSC_STATS_ATTR
+macsec_sa_stats_attr    = MACSEC_SA_STATS_ATTR
+macsec_offload_attr     = MACSEC_OFFLOAD_ATTR
+macsec_offload          = MACSEC_OFFLOAD
+macsec_validate         = MACSEC_VALIDATE
+macsec_cipher           = MACSEC_CIPHER_ID

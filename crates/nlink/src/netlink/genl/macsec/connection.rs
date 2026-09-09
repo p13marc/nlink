@@ -112,9 +112,19 @@ impl Connection<Macsec> {
             });
         }
 
-        let mut device = MacsecDevice::new();
-        device.ifindex = ifindex;
-
+        // One device per response, and only the one that was asked for.
+        //
+        // This used to fold *every* response into a single `MacsecDevice`
+        // (#260). `MACSEC_CMD_GET_TXSC` is a dump, and a dump message carries
+        // its own `MACSEC_ATTR_IFINDEX`, so on a host with more than one
+        // MACsec device the result was every device's SAs and RX SCs
+        // concatenated — with `ifindex` left holding whichever device came
+        // last, since `parse_device_attrs` assigns it from each message.
+        //
+        // Filtering client-side is correct whether or not the kernel honours
+        // the request's ifindex: if it does, this is a no-op; if it does not,
+        // this is the only thing that makes the answer right. Same reasoning
+        // as `Connection::<Nftables>::list_tables_in`.
         for response in &responses {
             // `send_dump` returns full netlink messages — skip the
             // nlmsghdr and the GENL header to reach the attrs.
@@ -122,10 +132,19 @@ impl Connection<Macsec> {
                 continue;
             }
             let attrs_data = &response[NLMSG_HDRLEN + GENL_HDRLEN..];
+
+            let mut device = MacsecDevice::new();
+            device.ifindex = ifindex;
             parse_device_attrs(attrs_data, &mut device)?;
+
+            if device.ifindex == ifindex {
+                return Ok(device);
+            }
         }
 
-        Ok(device)
+        Err(Error::InterfaceNotFound {
+            name: format!("ifindex {}", ifindex),
+        })
     }
 
     /// Add a TX Security Association by interface index.
@@ -486,7 +505,7 @@ fn parse_device_attrs(data: &[u8], device: &mut MacsecDevice) -> Result<()> {
             t if t == macsec_attr::IFINDEX => {
                 device.ifindex = get::u32_ne(payload)?;
             }
-            t if t == macsec_attr::SECY_CONFIG => {
+            t if t == macsec_attr::SECY => {
                 parse_secy_config(payload, device)?;
             }
             t if t == macsec_attr::TXSC_STATS => {
@@ -627,14 +646,16 @@ fn parse_rxsc_attrs(data: &[u8]) -> Result<MacsecRxSc> {
                     });
                 }
             }
+            // Stats live in this nest as MACSEC_RXSC_ATTR_STATS. This used
+            // to be a second pass looking for the top-level
+            // `macsec_attr::RXSC_STATS` — an attribute the kernel has never
+            // defined (#260). Its invented value, 3, is `SA_LIST` in this
+            // nest, so the old code fed the SA list to the stats parser and
+            // read SA attributes as counters.
+            t if t == macsec_rxsc_attr::STATS => {
+                parse_rxsc_stats_attrs(payload, &mut rxsc)?;
+            }
             _ => {}
-        }
-    }
-
-    // Parse stats if present (nested within same attributes)
-    for (attr_type, payload) in AttrIter::new(data) {
-        if attr_type == macsec_attr::RXSC_STATS {
-            parse_rxsc_stats_attrs(payload, &mut rxsc)?;
         }
     }
 
