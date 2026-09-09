@@ -1,3 +1,7 @@
 /target
 /iproute2
 /.claude/
+
+# Python bytecode from the audit scripts
+__pycache__/
+*.pyc

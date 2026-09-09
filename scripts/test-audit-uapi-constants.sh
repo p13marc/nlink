@@ -125,6 +125,39 @@ PY
 expect_fail "#231 BssStatus off-by-one is caught" "BssStatus::Authenticated"
 restore
 
+# 4b. #266 — the plain `pub const` pass. This is the form that carried ~30 wrong
+# ids past the enum-only gate (nl80211, devlink, bridge and tc all declare their
+# constants this way), so it needs its own case. Reproduce the real #259 bug:
+# IFLA_BRPORT_MCAST_TO_UCAST four too low, which is IFLA_BRPORT_FLUSH — the
+# value that made setting one boolean wipe the bridge port's FDB.
+python3 - "$WORK_DIR/crates/nlink/src/netlink/types/link.rs" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace("pub const IFLA_BRPORT_MCAST_TO_UCAST: u16 = 28;",
+              "pub const IFLA_BRPORT_MCAST_TO_UCAST: u16 = 24;")
+open(p, "w").write(s)
+PY
+expect_fail "#266 a wrong plain pub const is caught" "IFLA_BRPORT_MCAST_TO_UCAST"
+restore
+
+# 4c. A plain const whose name the kernel does not define must be ignored, not
+# guessed at. The pass is exact-name-match only; anything looser would need a
+# mapping table and would invent failures on nlink-local constants.
+python3 - "$WORK_DIR/crates/nlink/src/netlink/types/link.rs" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace(
+    "pub const IFLA_BRPORT_MCAST_TO_UCAST: u16 = 28;",
+    "pub const IFLA_BRPORT_MCAST_TO_UCAST: u16 = 28;\n"
+    "    pub const NLINK_LOCAL_NOT_A_KERNEL_SYMBOL: u16 = 4242;",
+)
+open(p, "w").write(s)
+PY
+expect_pass "#266 an nlink-local plain const is ignored, not guessed at"
+restore
+
 # 5. A brand-new UAPI enum that nobody mapped or allowlisted. This is the case
 #    that keeps the gate honest as the crate grows: an unclassified enum is an
 #    unchecked enum.

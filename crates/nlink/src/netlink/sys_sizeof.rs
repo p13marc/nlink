@@ -217,7 +217,10 @@ pub mod tca_htb_attr {
     pub const TCA_HTB_DIRECT_QLEN: u16 = 5;
     pub const TCA_HTB_RATE64: u16 = 6;
     pub const TCA_HTB_CEIL64: u16 = 7;
-    pub const TCA_HTB_OFFLOAD: u16 = 8;
+    /// Omitting this is what put TCA_HTB_OFFLOAD at 8 in both this
+    /// reference table and the in-tree constant (#265).
+    pub const TCA_HTB_PAD: u16 = 8;
+    pub const TCA_HTB_OFFLOAD: u16 = 9;
 }
 
 /// Plan 222.2 — TC flower-classifier KEY attribute IDs.
