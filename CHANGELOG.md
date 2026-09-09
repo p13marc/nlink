@@ -38,6 +38,26 @@ All notable changes to this project will be documented in this file.
   this protocol (`KobjectUevent` deliberately has no `Default`, so a
   connection can't exist unsubscribed); `subscribe()` is now public
   for connections built another way.
+- **Uevent re-enumeration: `util::uevent_trigger` (#252).** Uevents
+  are the crate's only event source that can drop frames with no path
+  back to truth: `events_with_resync` needs a redump factory and
+  `NETLINK_KOBJECT_UEVENT` is broadcast-only — there is no
+  `GETUEVENT`. The kernel's substitute is a write to
+  `/sys/.../uevent`, which is all `udevadm trigger` is.
+  `UeventTrigger` wraps that, and `resync_factory` plugs it into the
+  existing resync machinery.
+
+  It lives in `util` because the sysfs audit gate keeps `/sys` access
+  out of the protocol layer, and it comes with three warnings in its
+  rustdoc rather than a friendly surface: triggering needs root while
+  *reading* uevents does not, so the recovery path is more privileged
+  than the stream it repairs (`can_trigger()` exists to be called at
+  startup, not at overflow time); a write broadcasts to every listener,
+  so udevd re-runs its full rule set for each device touched; and it is
+  best-effort re-announcement, not a snapshot — `ResyncEnd` here means
+  "a re-announcement was requested", not "state is rebuilt".
+  `ResyncMarker`'s docs now carry that caveat.
+
 ### Fixed
 
 - **`Connection::<KobjectUevent>::try_recv` always failed (#251).** It
