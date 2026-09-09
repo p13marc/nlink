@@ -2450,8 +2450,13 @@ impl Connection<Nftables> {
         // null-terminated string, padded to 4 bytes.
         let str_len = table.len() + 1;
         let attr_len = 4 + str_len;
-        body.extend_from_slice(&(attr_len as u16).to_le_bytes());
-        body.extend_from_slice(&NFTA_RULE_TABLE.to_le_bytes());
+        // `struct nlattr`'s nla_len/nla_type are kernel-native. These were
+        // little-endian, which is the same bug #212 fixed in
+        // `normalize_tlv` — the reader half was corrected then, the writer
+        // half here was missed because the audit only banned
+        // `from_le_bytes` (#278).
+        body.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        body.extend_from_slice(&NFTA_RULE_TABLE.to_ne_bytes());
         body.extend_from_slice(table.as_bytes());
         body.push(0); // null terminator
         // Pad to 4 bytes
@@ -2494,8 +2499,8 @@ mod stream_tests {
         body.extend_from_slice(&0u16.to_be_bytes()); // res_id
         let table = b"filter\0";
         let attr_len = 4 + table.len();
-        body.extend_from_slice(&(attr_len as u16).to_le_bytes());
-        body.extend_from_slice(&NFTA_RULE_TABLE.to_le_bytes());
+        body.extend_from_slice(&(attr_len as u16).to_ne_bytes());
+        body.extend_from_slice(&NFTA_RULE_TABLE.to_ne_bytes());
         body.extend_from_slice(table);
         // pad to 4
         let pad = (4 - body.len() % 4) % 4;
@@ -2503,14 +2508,14 @@ mod stream_tests {
         // Add NFTA_RULE_CHAIN
         let chain = b"input\0";
         let attr_len2 = 4 + chain.len();
-        body.extend_from_slice(&(attr_len2 as u16).to_le_bytes());
-        body.extend_from_slice(&NFTA_RULE_CHAIN.to_le_bytes());
+        body.extend_from_slice(&(attr_len2 as u16).to_ne_bytes());
+        body.extend_from_slice(&NFTA_RULE_CHAIN.to_ne_bytes());
         body.extend_from_slice(chain);
         let pad = (4 - body.len() % 4) % 4;
         body.resize(body.len() + pad, 0);
         // Add NFTA_RULE_HANDLE = 7 (8-byte big-endian u64)
-        body.extend_from_slice(&12u16.to_le_bytes()); // len = 4 + 8
-        body.extend_from_slice(&NFTA_RULE_HANDLE.to_le_bytes());
+        body.extend_from_slice(&12u16.to_ne_bytes()); // len = 4 + 8
+        body.extend_from_slice(&NFTA_RULE_HANDLE.to_ne_bytes());
         body.extend_from_slice(&7u64.to_be_bytes());
 
         let rule = <RuleInfo as FromNetlink>::from_bytes(&body).expect("parse");

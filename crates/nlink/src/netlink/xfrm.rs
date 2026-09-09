@@ -1107,7 +1107,11 @@ fn encode_xfrm_algo(name: &str, key: &[u8]) -> Vec<u8> {
     name_field[..n].copy_from_slice(&name.as_bytes()[..n]);
     buf.extend_from_slice(&name_field);
     let key_len_bits = (key.len() * 8) as u32;
-    buf.extend_from_slice(&key_len_bits.to_le_bytes());
+    // `xfrm_algo.alg_key_len` is `unsigned int` — kernel-native, not
+    // little-endian. Writing it LE is correct by accident on x86 and
+    // silently wrong on s390x/ppc64be, which is the platform the
+    // big-endian CI lane exists to protect (#278).
+    buf.extend_from_slice(&key_len_bits.to_ne_bytes());
     buf.extend_from_slice(key);
     buf
 }
@@ -1121,8 +1125,8 @@ fn encode_xfrm_algo_aead(name: &str, key: &[u8], icv_truncbits: u32) -> Vec<u8> 
     name_field[..n].copy_from_slice(&name.as_bytes()[..n]);
     buf.extend_from_slice(&name_field);
     let key_len_bits = (key.len() * 8) as u32;
-    buf.extend_from_slice(&key_len_bits.to_le_bytes());
-    buf.extend_from_slice(&icv_truncbits.to_le_bytes());
+    buf.extend_from_slice(&key_len_bits.to_ne_bytes());
+    buf.extend_from_slice(&icv_truncbits.to_ne_bytes());
     buf.extend_from_slice(key);
     buf
 }

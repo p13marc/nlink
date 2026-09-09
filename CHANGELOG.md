@@ -109,6 +109,45 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Endianness: five encoders wrote kernel fields in the wrong byte order
+  (#261, #262, #278).**
+
+  **Every FIB lookup resolved the wrong address.** `FibResultNl::for_addr` built
+  `fl_addr` — a `__be32` in a natively-serialized struct — with `from_be_bytes`,
+  which byte-reverses on any little-endian host: a lookup for `10.0.0.1` asked
+  the kernel about `1.0.0.10`. It survived because the accessor was wrong in the
+  same direction, so the two errors cancelled in-process and every round-trip
+  test agreed with itself; the doc example compounded it by using `8.8.8.8`,
+  which reverses to itself. The regression test asserts emitted **bytes** with a
+  non-palindromic address.
+
+  **`pedit` edited the wrong bytes of every packet.** `val`/`mask` are authored
+  as big-endian-read integers and `struct tc_pedit_key` is serialized natively,
+  so they need the swap at pack time — exactly as iproute2's `pack_key32()`
+  ends with `htonl()`. Without it `set_ipv4_src(10.0.0.1)` rewrote packets to
+  `1.0.0.10`.
+
+  Two setters were also mis-shifted *within* that convention, independently of
+  endianness: `set_ipv4_tos` addressed the version/IHL nibble instead of the TOS
+  byte, and `set_ipv4_ttl` the high half of the header checksum instead of the
+  TTL. The port and MAC setters were already correct, which is what made the
+  pattern legible. All twelve setters now have wire-byte tests.
+
+  **`tc_nat`'s mask was a no-op.** It was written as
+  `u32::from_be_bytes(mask.to_be_bytes())` — the identity — so a `/24` reached
+  the kernel as `0.255.255.255`, matching on the wrong three octets. The
+  addresses were byte-reversed by the same mechanism as above.
+
+  **Three writers emitted kernel-native fields as little-endian** — `xfrm`
+  algorithm key lengths, hand-built nftables NLA headers, and `fib_rule`
+  port ranges. Correct by accident on x86, wrong on the big-endian targets the
+  `big-endian-check` CI lane exists to protect.
+
+  `scripts/audit-bytes-le.sh` banned only `from_le_bytes` — the **reader** half.
+  That is why the writer half survived: it is the same shape as #212, where
+  `normalize_tlv`'s reader was corrected and its writer missed. The gate now
+  bans both directions.
+
 - **The rest of the UAPI drift, and two more gate blind spots (#263, #264,
   #265).** Finishing what the widened audit started.
 
