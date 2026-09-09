@@ -1686,7 +1686,7 @@ impl Connection<Xfrm> {
             let mut sas = Vec::new();
 
             loop {
-                let data = session.recv(self).await?;
+                let data = session.recv_with_timeout(self).await?;
 
                 let mut offset = 0;
                 while offset + NLMSG_HDRLEN <= data.len() {
@@ -1794,7 +1794,7 @@ impl Connection<Xfrm> {
             let mut policies = Vec::new();
 
             loop {
-                let data = session.recv(self).await?;
+                let data = session.recv_with_timeout(self).await?;
 
                 let mut offset = 0;
                 while offset + NLMSG_HDRLEN <= data.len() {

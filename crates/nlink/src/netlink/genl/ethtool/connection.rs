@@ -1678,7 +1678,7 @@ impl Connection<Ethtool> {
         self.with_timeout(async {
             let mut result_payload: Option<Vec<u8>> = None;
             loop {
-                let data: Vec<u8> = session.recv(self).await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
                 let mut done = false;
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
@@ -1791,7 +1791,7 @@ impl Connection<Ethtool> {
             let mut result_payload: Option<Vec<u8>> = None;
 
             loop {
-                let data: Vec<u8> = session.recv(self).await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
                 let mut done = false;
 
                 for msg_result in MessageIter::new(&data) {
@@ -1858,7 +1858,7 @@ impl Connection<Ethtool> {
 
         self.with_timeout(async {
             loop {
-                let data: Vec<u8> = session.recv(self).await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
                     if header.nlmsg_seq != seq {

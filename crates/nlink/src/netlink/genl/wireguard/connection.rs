@@ -296,11 +296,33 @@ impl Connection<Wireguard> {
         Ok(())
     }
 
-    /// Parse the peers nested attribute.
+    /// Parse the peers nested attribute, coalescing continuations.
+    ///
+    /// `wg_get_device_dump` splits a large peer list across skbs, and a
+    /// peer whose `allowed_ips` do not fit is emitted again in the next
+    /// chunk: its `WGPEER_A_PUBLIC_KEY` repeats, the remaining allowed
+    /// IPs follow, and the scalars — `RX_BYTES`, `TX_BYTES`,
+    /// `LAST_HANDSHAKE_TIME`, `PERSISTENT_KEEPALIVE`, `ENDPOINT`,
+    /// `PRESHARED_KEY` — appear only in the *first* chunk.
+    ///
+    /// This pushed unconditionally, so such a peer came back **twice**:
+    /// once with stats and a partial `allowed_ips`, once with zeroed
+    /// stats, no endpoint, and the rest. `wg(8)` coalesces by public
+    /// key; so does this now (#277).
+    ///
+    /// The knock-on was worse than a duplicate row.
+    /// `WireguardConfig::diff_against` keys the current state by public
+    /// key, so the second, stats-less entry *overwrote* the full one:
+    /// the declared peer was compared against a truncated view,
+    /// `endpoint_set` and `allowed_ips_set` both fired, and `apply()`
+    /// rewrote that peer on every single run.
     fn parse_peers_attr(&self, data: &[u8], peers: &mut Vec<WgPeer>) -> Result<()> {
         for (_idx, peer_data) in AttrIter::new(data) {
             let peer = self.parse_peer_attrs(peer_data)?;
-            peers.push(peer);
+            match peers.iter_mut().find(|p| p.public_key == peer.public_key) {
+                Some(existing) => existing.merge_continuation(peer),
+                None => peers.push(peer),
+            }
         }
         Ok(())
     }

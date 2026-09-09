@@ -477,38 +477,50 @@ Canonical template:
 
 ```rust
 let seq = self.socket().next_seq();
+let mut session = self.recv_session_dump(seq).await;
 // ... build + send request, tracking start/end seqs for batches ...
 
 loop {
-    let data = self.recv_with_timeout().await?;   // Plan 171: 30s default
+    // Per-frame deadline (30s default), reset by every frame — an
+    // inactivity timeout, not a total budget, so a large dump that is
+    // streaming steadily does not trip it (#272).
+    let data = session.recv_with_timeout(self).await?;
     let mut done = false;
     for msg in MessageIter::new(&data) {
         let (header, payload) = msg?;
-        if header.nlmsg_seq != seq {              // (1) seq filter
-            continue;
-        }
-        if header.is_error() {
-            let err = NlMsgError::from_bytes(payload)?;
-            if err.is_ack() {
-                // For batch commits: return only on the
-                // BATCH_END seq's ACK; per-op ACKs continue.
+        // One classifier: seq filter, NLM_F_DUMP_INTR, ACK vs error,
+        // and NLMSG_DONE's *result code* — which a dump that gave up
+        // reports only in that payload (#267, #271).
+        match classify(header, payload, seq) {
+            Classification::SkipSeq | Classification::Ack => continue,
+            Classification::Error(e) => return Err(e),
+            Classification::Done(result) => {
+                result?;
                 done = true;
                 break;
             }
-            return Err(err.into_error(payload));
+            Classification::Data { payload } => { /* ... accumulate ... */ }
         }
-        if header.is_done() {                     // (2) end marker
-            done = true;
-            break;
-        }
-        // ... accumulate payload ...
     }
     if done { break; }
 }
 ```
 
-Plan 172 enforces this template across all 9 recv-loops in the
-lib. The audit table is in Plan 172 §2.1.
+`netlink/dump_frame.rs` owns the classification;
+`scripts/audit-dump-termination.sh` fails the build on a hand-rolled
+`is_done()` outside it. The two `poll_next` drainers and the three
+hand-decoded walkers call `done_result` inline instead — they have no
+await point, or migrating their parse path would change behaviour —
+and the audit's allowlist says so per entry.
+
+**Batch commits are not dumps.** They terminate on the BATCH_END seq's
+ACK, not on the first per-op ACK, and `NLMSG_DONE` there is an error
+(#209).
+
+*(The template used to name a `recv_with_timeout` that did not exist —
+zero occurrences crate-wide — so code written by following it did not
+compile. It exists now, on `RecvSession`, with the per-frame semantics
+the name always implied.)*
 
 ## Parser robustness
 

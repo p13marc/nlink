@@ -140,6 +140,39 @@ pub struct WgPeer {
 }
 
 impl WgPeer {
+    /// Fold a dump continuation for the same public key into this peer.
+    ///
+    /// The kernel re-emits `WGPEER_A_PUBLIC_KEY` on the continuation and
+    /// carries only the remaining `allowed_ips`; the scalars were sent
+    /// with the first chunk. So the allowed IPs accumulate, and every
+    /// other field is taken from the continuation only if it actually
+    /// carries one — a zeroed `rx_bytes` in a continuation means "not
+    /// repeated", not "zero" (#277).
+    pub(crate) fn merge_continuation(&mut self, other: Self) {
+        self.allowed_ips.extend(other.allowed_ips);
+        if other.preshared_key.is_some() {
+            self.preshared_key = other.preshared_key;
+        }
+        if other.endpoint.is_some() {
+            self.endpoint = other.endpoint;
+        }
+        if other.persistent_keepalive.is_some() {
+            self.persistent_keepalive = other.persistent_keepalive;
+        }
+        if other.last_handshake.is_some() {
+            self.last_handshake = other.last_handshake;
+        }
+        if other.protocol_version.is_some() {
+            self.protocol_version = other.protocol_version;
+        }
+        if other.rx_bytes != 0 {
+            self.rx_bytes = other.rx_bytes;
+        }
+        if other.tx_bytes != 0 {
+            self.tx_bytes = other.tx_bytes;
+        }
+    }
+
     /// Create a new peer with the given public key.
     pub fn new(public_key: [u8; WG_KEY_LEN]) -> Self {
         Self {
@@ -521,5 +554,59 @@ mod tests {
             assert_eq!(d.as_secs(), secs as u64);
             assert_eq!(d.subsec_nanos(), nsecs as u32);
         }
+    }
+
+    // ====================================================================
+    // #277 — dump continuations coalesce by public key
+    // ====================================================================
+
+    fn key(b: u8) -> [u8; WG_KEY_LEN] {
+        [b; WG_KEY_LEN]
+    }
+
+    #[test]
+    fn a_continuation_appends_allowed_ips_and_keeps_the_stats() {
+        // What the kernel actually sends when a peer's allowed_ips
+        // straddle an skb boundary: chunk 1 has the scalars and some
+        // IPs, chunk 2 repeats only the public key and the rest.
+        let mut first = WgPeer {
+            public_key: key(1),
+            rx_bytes: 4096,
+            tx_bytes: 8192,
+            endpoint: Some("10.0.0.1:51820".parse().unwrap()),
+            persistent_keepalive: Some(25),
+            allowed_ips: vec![AllowedIp::v4("10.1.0.0".parse().unwrap(), 16)],
+            ..WgPeer::default()
+        };
+        let continuation = WgPeer {
+            public_key: key(1),
+            allowed_ips: vec![AllowedIp::v4("10.2.0.0".parse().unwrap(), 16)],
+            ..WgPeer::default()
+        };
+
+        first.merge_continuation(continuation);
+
+        assert_eq!(first.allowed_ips.len(), 2, "allowed IPs must accumulate");
+        // The continuation's zeros are "not repeated", not "zero".
+        assert_eq!(first.rx_bytes, 4096);
+        assert_eq!(first.tx_bytes, 8192);
+        assert!(first.endpoint.is_some(), "endpoint must survive the merge");
+        assert_eq!(first.persistent_keepalive, Some(25));
+    }
+
+    #[test]
+    fn a_continuation_that_does_carry_values_wins() {
+        let mut first = WgPeer {
+            public_key: key(2),
+            ..WgPeer::default()
+        };
+        first.merge_continuation(WgPeer {
+            public_key: key(2),
+            rx_bytes: 7,
+            endpoint: Some("192.0.2.1:1".parse().unwrap()),
+            ..WgPeer::default()
+        });
+        assert_eq!(first.rx_bytes, 7);
+        assert!(first.endpoint.is_some());
     }
 }

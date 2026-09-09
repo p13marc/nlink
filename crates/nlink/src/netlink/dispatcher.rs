@@ -447,6 +447,19 @@ impl Dispatcher {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+        // …and the typed `DispatcherEvent` broadcast surface, which is
+        // the *other* way to subscribe (`subscribe_multicast`, which is
+        // what the `*_with_resync` wrappers use). #202 fixed exactly
+        // this class for `event_listeners` and left `subscribers`
+        // behind: a consumer awaiting `subscribe_multicast(g).recv()`
+        // after a fatal recv error parked forever — no error, no
+        // `Lagged`, no termination. Dropping the senders closes every
+        // receiver, which surfaces as `RecvError::Closed` (#277).
+        self.inner
+            .subscribers
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
     }
 
     /// Take the stored fatal error (if any) as an [`Error`], or a
@@ -1055,5 +1068,48 @@ mod tests {
             Ok(DispatcherEvent::Resync(ResyncMarker::ResyncStart)) => {}
             other => panic!("expected ResyncStart, got {:?}", other),
         }
+    }
+
+    // ====================================================================
+    // #277 — fail_all must close every subscriber surface
+    // ====================================================================
+
+    #[tokio::test]
+    async fn fail_all_closes_the_multicast_broadcast_surface() {
+        // #202 fixed this for `event_listeners` and left `subscribers`,
+        // the surface `subscribe_multicast` (and so the
+        // `*_with_resync` wrappers) hands out. A consumer awaiting on
+        // it after a fatal recv error parked forever: no error, no
+        // Lagged, no termination — indistinguishable from an idle
+        // network.
+        let d = Dispatcher::new();
+        let mut rx = d.subscribe_multicast(1);
+
+        d.fail_all("simulated fatal recv error".to_string());
+
+        // Bounded: without the fix this awaits forever, and a hanging
+        // test is no better than the hang it is testing for.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect(
+                "subscribe_multicast() never terminated after fail_all — the \
+                 consumer is parked with no error and no Lagged, which is \
+                 indistinguishable from an idle network (#277)",
+            );
+        match got {
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
+            other => panic!("expected the channel to be closed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fail_all_records_the_error_for_the_next_caller() {
+        let d = Dispatcher::new();
+        d.fail_all("boom".to_string());
+        let e = d.take_fatal_error();
+        assert!(
+            e.to_string().contains("boom"),
+            "the recorded cause must reach the caller, got {e}"
+        );
     }
 }
