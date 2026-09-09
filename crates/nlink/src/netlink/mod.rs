@@ -139,6 +139,7 @@ pub(crate) mod tc_recipe_internals;
 pub(crate) mod test_support;
 pub mod types;
 pub mod uevent;
+pub mod uevent_filter;
 pub mod xfrm;
 
 pub use attr::{AttrIter, NlAttr};

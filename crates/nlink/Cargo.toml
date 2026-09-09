@@ -311,6 +311,10 @@ path = "examples/uevent/device_monitor.rs"
 name = "uevent_device_monitor_stream"
 path = "examples/uevent/device_monitor_stream.rs"
 
+[[example]]
+name = "uevent_filtered_monitor"
+path = "examples/uevent/filtered_monitor.rs"
+
 # Connector examples (process events)
 [[example]]
 name = "connector_process_monitor"

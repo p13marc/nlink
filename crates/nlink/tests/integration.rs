@@ -174,3 +174,10 @@ mod psched_ticks;
 // concurrent-request coexistence with dispatcher subscribers.
 #[path = "integration/dispatcher.rs"]
 mod dispatcher;
+
+// #251 — uevent socket hardening. Unprivileged by design: attaching a
+// classic-BPF socket filter and reading uevents both need no
+// capability, and it is the kernel's BPF verifier — not the privilege
+// — that these check.
+#[path = "integration/uevent_filter.rs"]
+mod uevent_filter;

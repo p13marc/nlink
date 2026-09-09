@@ -4,6 +4,64 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Kernel-side uevent prefiltering: `UeventFilter` (#251).** A uevent
+  monitor interested in one subsystem was woken for every USB, block,
+  input and thermal event on the box, copied each into userspace and
+  parsed it into a `HashMap` before discarding it. `UeventFilter`
+  describes what the caller wants and `compile()` lowers it to a
+  classic-BPF program attached with the new
+  `NetlinkSocket::{attach_filter,detach_filter,lock_filter}`.
+
+  `libudev`'s trick — hashing the subsystem and matching against the
+  `udev_monitor_netlink_header` — does not apply here: that header
+  belongs to udevd's group-2 rebroadcast, while nlink subscribes to
+  group 1, the kernel's own uevents, which carry no header. What makes
+  exact filtering possible instead is the kernel's fixed layout.
+  `kobject_uevent_env()` emits `ACTION`, `DEVPATH` and `SUBSYSTEM`
+  first and in that order, behind an `"<action>@<devpath>\0"` prefix,
+  so `action` is a fixed-offset match at 0 and the `SUBSYSTEM=` key
+  sits at exactly `2H + 17` for `H` the first NUL — one unrolled scan
+  and then arithmetic. `DEVTYPE` and arbitrary `KEY=VALUE` land after
+  the fixed three in no guaranteed order and stay in userspace;
+  `CompiledUeventFilter::is_exact` says which case you are in.
+
+  The program is an over-approximation by construction — it accepts
+  whatever it cannot decide — so `UeventFilter::matches` is the
+  authority. `Connection::<KobjectUevent>::recv_matching` applies both
+  halves.
+- **`Connection::<KobjectUevent>::{in_namespace,in_namespace_path}`.**
+  Net-device uevents are delivered to the netns of the listening
+  socket, so a monitor for a namespace's devices needs its socket
+  opened there. The generic `namespace::connection_for` cannot serve
+  this protocol (`KobjectUevent` deliberately has no `Default`, so a
+  connection can't exist unsubscribed); `subscribe()` is now public
+  for connections built another way.
+### Fixed
+
+- **`Connection::<KobjectUevent>::try_recv` always failed (#251).** It
+  was public, documented as returning `Ok(None)` when no event was
+  waiting, and returned `Error::not_supported` on every call since it
+  shipped. It now answers the question it documents, via the new
+  `NetlinkSocket::try_recv_msg` — which issues the `recvmsg` directly
+  with `MSG_DONTWAIT` rather than through the reactor's readiness
+  bookkeeping, since a "try" that returned `None` merely because tokio
+  had not yet observed the fd as readable would be useless for draining
+  a backlog.
+- **Uevent subscribers ran on the ~208 KiB system default receive
+  buffer (#251).** `NetlinkSocket::set_rcvbuf` had zero callers in the
+  library — its only user anywhere was an integration test *shrinking*
+  a socket to provoke `ENOBUFS` — and it went straight to
+  `SO_RCVBUFFORCE`, which needs `CAP_NET_ADMIN` and so was unusable by
+  the unprivileged monitors that most need it. It now tries `SO_RCVBUF`
+  first and escalates only when the readback shows the request was
+  capped by `net.core.rmem_max`, swallowing the `EPERM` and keeping the
+  best-effort size. `NetlinkSocket::rcvbuf` reports what was granted,
+  and `Connection::<KobjectUevent>::new` now asks for 1 MiB
+  (`with_rcvbuf` to override). This matters more for uevents than
+  elsewhere: it is the one subscriber with no dump to resync from.
+
 ### Changed
 
 - **CI: fleet-standard rollout (myserver#33).** `workflow_dispatch` re-run
