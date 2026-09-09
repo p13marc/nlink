@@ -163,6 +163,33 @@ pub struct Ipv4Address {
     metric: Option<u32>,
 }
 
+/// The scope the kernel requires for `addr`, the way `iproute2` derives
+/// it.
+///
+/// `inet_rtm_newaddr` rejects a loopback prefix at any scope but
+/// `RT_SCOPE_HOST` — the kernel's own words, read off a socket that
+/// parses ext_ack:
+///
+/// ```text
+/// scope=0   (RT_SCOPE_UNIVERSE): errno=-22  "ipv4: Invalid scope value"
+/// scope=254 (RT_SCOPE_HOST):     errno=0    OK
+/// ```
+///
+/// Both constructors hardcoded `Scope::Universe`, so **every**
+/// `127.0.0.0/8` address failed with a bare `EINVAL` (bare because
+/// ext_ack was not being parsed either — #292). `ip addr add
+/// 127.0.0.2/8 dev lo` works because iproute2 derives the scope from
+/// the prefix; so does this now (#293).
+///
+/// `.scope()` still overrides, for a caller who means something else.
+fn default_scope(addr: IpAddr) -> Scope {
+    match addr {
+        IpAddr::V4(v4) if v4.is_loopback() => Scope::Host,
+        IpAddr::V6(v6) if v6.is_loopback() => Scope::Host,
+        _ => Scope::Universe,
+    }
+}
+
 impl Ipv4Address {
     /// Create a new IPv4 address configuration.
     ///
@@ -179,7 +206,7 @@ impl Ipv4Address {
             peer: None,
             broadcast: None,
             label: None,
-            scope: Scope::Universe,
+            scope: default_scope(address.into()),
             flags: 0,
             preferred_lft: None,
             valid_lft: None,
@@ -205,7 +232,7 @@ impl Ipv4Address {
             peer: None,
             broadcast: None,
             label: None,
-            scope: Scope::Universe,
+            scope: default_scope(address.into()),
             flags: 0,
             preferred_lft: None,
             valid_lft: None,
@@ -446,7 +473,7 @@ impl Ipv6Address {
             address,
             prefix_len,
             peer: None,
-            scope: Scope::Universe,
+            scope: default_scope(address.into()),
             flags: 0,
             preferred_lft: None,
             valid_lft: None,
@@ -470,7 +497,7 @@ impl Ipv6Address {
             address,
             prefix_len,
             peer: None,
-            scope: Scope::Universe,
+            scope: default_scope(address.into()),
             flags: 0,
             preferred_lft: None,
             valid_lft: None,

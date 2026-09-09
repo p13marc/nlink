@@ -302,19 +302,41 @@ async fn test_replace_address() -> Result<()> {
     conn.add_address(Ipv4Address::new("dummy0", ip, 24).label("dummy0:first"))
         .await?;
 
-    // Replace with different label
+    // Replace, asking for a different label.
     conn.replace_address(Ipv4Address::new("dummy0", ip, 24).label("dummy0:second"))
         .await?;
 
-    // Verify only one address exists with new label
     let addrs = conn.get_addresses().await?;
     let matching: Vec<_> = addrs
         .iter()
         .filter(|a| a.address() == Some(&IpAddr::V4(ip)))
         .collect();
 
+    // Replace is a replace: still exactly one address.
     assert_eq!(matching.len(), 1);
-    assert_eq!(matching[0].label(), Some("dummy0:second"));
+
+    // …but the **label does not change**, and that is the kernel's
+    // behaviour, not an nlink defect. `inet_rtm_newaddr`'s replace path
+    // updates the existing `in_ifaddr`'s lifetimes and flags; the label
+    // is part of the identity established at creation. `iproute2` does
+    // exactly the same:
+    //
+    //   # ip addr add     10.0.0.1/24 dev dummy0 label dummy0:first
+    //   # ip addr replace 10.0.0.1/24 dev dummy0 label dummy0:second   # succeeds
+    //   # ip addr show dev dummy0
+    //       inet 10.0.0.1/24 scope global dummy0:first
+    //
+    // This test asserted `dummy0:second` and had never run — it is
+    // gated on `require_module!("dummy")`, and `has_module` only looked
+    // at `/sys/module`, so it skipped and reported `ok` (#273, #294).
+    //
+    // Do not "fix" this back. Changing a label needs a delete and a
+    // re-add.
+    assert_eq!(
+        matching[0].label(),
+        Some("dummy0:first"),
+        "the kernel does not rewrite an address label on replace"
+    );
 
     Ok(())
 }

@@ -4230,13 +4230,40 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let filter = U32Filter::new()
-    ///     .classid("1:10")
-    ///     .match_dst_port(80)
+    /// ```no_run
+    /// use nlink::{TcHandle, netlink::filter::FlowerFilter};
+    /// # async fn f(conn: &nlink::Connection<nlink::Route>) -> nlink::Result<()> {
+    /// let filter = FlowerFilter::new()
+    ///     .classid(TcHandle::new(1, 0x10))
+    ///     .ipv4()
+    ///     .ip_proto_tcp()
+    ///     .dst_port(80)
+    ///     .priority(200)          // pin it — see below
     ///     .build();
-    /// conn.replace_filter("eth0", "1:", filter).await?;
+    /// conn.replace_filter("eth0", TcHandle::major_only(1), filter).await?;
+    /// # Ok(())
+    /// # }
     /// ```
+    ///
+    /// # Two things that make a replace a replace
+    ///
+    /// **Pin the priority.** The target is identified by
+    /// `(parent, protocol, priority, handle)`. Leave the priority unset
+    /// and the kernel auto-assigns a fresh one, so you get a *second*
+    /// filter rather than a replacement — `tc(8)` does the same:
+    ///
+    /// ```text
+    /// # tc filter add     dev d0 parent 1: protocol all matchall classid 1:10
+    /// filter protocol all pref 49152 matchall ... flowid 1:10
+    /// # tc filter replace dev d0 parent 1: protocol all matchall classid 1:20
+    /// filter protocol all pref 49151 matchall ... flowid 1:20
+    /// filter protocol all pref 49152 matchall ...      <- the original
+    /// ```
+    ///
+    /// **Not every classifier supports it.** `cls_matchall` holds
+    /// exactly one filter per `tcf_proto`, and `mall_change` answers
+    /// `EEXIST` when one is already there — there is no replace path.
+    /// Delete and re-add instead. `flower` and `u32` replace normally.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_filter"))]
     pub async fn replace_filter(
         &self,

@@ -680,9 +680,14 @@ async fn test_delete_filter() -> Result<()> {
 #[tokio::test]
 async fn test_replace_filter() -> Result<()> {
     require_root!();
-    nlink::require_modules!("sch_htb", "cls_matchall");
+    nlink::require_modules!("sch_htb", "cls_flower");
 
     let (_ns, conn) = setup_tc_ns("filterrep").await?;
+    let ifindex = conn
+        .get_link_by_name("dummy0")
+        .await?
+        .expect("dummy0 exists")
+        .ifindex();
 
     // Add HTB qdisc
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
@@ -708,27 +713,62 @@ async fn test_replace_filter() -> Result<()> {
     )
     .await?;
 
-    // Add filter pointing to 1:10
-    let filter = MatchallFilter::new()
-        .classid(TcHandle::new(1, 0x10))
-        .build();
-    conn.add_filter("dummy0", TcHandle::major_only(1), filter)
-        .await?;
+    // Replace needs a filter kind that supports it, and a pinned
+    // priority. Both matter, and neither was true before:
+    //
+    // 1. `cls_matchall` holds exactly one filter per `tcf_proto` and
+    //    `mall_change` returns **EEXIST** when one already exists — it
+    //    has no replace path at all. `tc(8)` fails the same way:
+    //
+    //      # tc filter replace dev d0 parent 1: protocol all pref 100 \
+    //            matchall classid 1:20
+    //      RTNETLINK answers: File exists
+    //
+    // 2. Replace identifies its target by (parent, protocol, priority,
+    //    handle). Leave the priority unset and the kernel auto-assigns
+    //    a different one, so you get a *second* filter — again matching
+    //    `tc(8)`.
+    //
+    // This test used a matchall with no priority, so it was asserting
+    // something the kernel cannot do. It could only ever have passed
+    // while filter dumps returned nothing at all (#286) — and it had
+    // never run anyway, being gated on `require_module!` (#273, #300).
+    let prio = 200;
+    conn.add_filter_full(
+        "dummy0",
+        TcHandle::major_only(1),
+        Some(TcHandle::from_raw(1)),
+        0x0800, // ETH_P_IP
+        prio,
+        FlowerFilter::new()
+            .classid(TcHandle::new(1, 0x10))
+            .dst_ipv4(std::net::Ipv4Addr::new(10, 0, 0, 1), 32)
+            .build(),
+    )
+    .await?;
 
-    // Replace to point to 1:20
-    let filter2 = MatchallFilter::new()
-        .classid(TcHandle::new(1, 0x20))
-        .build();
-    conn.replace_filter("dummy0", TcHandle::major_only(1), filter2)
-        .await?;
+    conn.replace_filter_full(
+        "dummy0",
+        TcHandle::major_only(1),
+        Some(TcHandle::from_raw(1)),
+        0x0800,
+        prio,
+        FlowerFilter::new()
+            .classid(TcHandle::new(1, 0x20))
+            .dst_ipv4(std::net::Ipv4Addr::new(10, 0, 0, 2), 32)
+            .build(),
+    )
+    .await?;
 
-    // Verify there's still just one matchall filter
-    let filters = conn.get_filters_by_name("dummy0").await?;
-    let matchall_count = filters
+    // Replaced, not appended: still exactly one flower filter.
+    let filters = conn
+        .get_filters_by_parent_index(ifindex, TcHandle::major_only(1))
+        .await?;
+    let flower: Vec<_> = filters
         .iter()
-        .filter(|f| f.kind() == Some("matchall"))
-        .count();
-    assert_eq!(matchall_count, 1);
+        .filter(|f| f.kind() == Some("flower") && f.priority() == prio)
+        .collect();
+    assert_eq!(flower.len(), 1, "replace must not append a second filter");
 
     Ok(())
 }
