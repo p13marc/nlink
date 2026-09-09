@@ -12,25 +12,43 @@ pub use formatting::{
     format_bytes, format_duration, format_duration_compact, format_hex, format_ipv4, format_mac,
     format_percent, format_rate_bps, format_rate_bytes, format_tc_handle, format_time_ago,
 };
-pub use json::JsonOutput;
+// `pub` items in a private module: visible in rustdoc, unnameable
+// downstream (#280).
+pub use json::{JsonBuilder, JsonOutput};
 pub use monitor::{
     AddressEvent, IpEvent, LinkEvent, MonitorConfig, MonitorEvent, NeighborEvent, RouteEvent,
     TcEvent, print_event, print_monitor_start, write_timestamp,
 };
-pub use text::TextOutput;
+pub use text::{TextOutput, format_number, format_rate};
 
 /// Output format options.
+///
+/// **Who honours what.** The formatters this module ships read `pretty`
+/// (JSON indentation) and `stats`. The other three are carried for the
+/// *renderer* — `Printable` is implemented downstream, and the `bins/`
+/// read them there: `nlink-bridge` uses `details` to surface raw NUD
+/// state, `nlink-ss` uses `numeric` to skip name resolution, and the
+/// `bins/` set `color` from `IsTerminal`.
+///
+/// The field docs used to read as library behaviour, so `color: true`
+/// looked like it would emit ANSI and `numeric: true` like it would stop
+/// resolving names — neither of which anything in this module does
+/// (#276). They are options a renderer is handed, not options this
+/// module acts on.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OutputOptions {
-    /// Show detailed statistics.
+    /// Show detailed statistics. Read by the shipped TC formatter.
     pub stats: bool,
-    /// Show extra details.
+    /// Show extra details. For the renderer to honour; nothing in this
+    /// module reads it.
     pub details: bool,
-    /// Use colored output.
+    /// Use colored output. For the renderer to honour; nothing in this
+    /// module emits ANSI.
     pub color: bool,
-    /// Don't resolve names (show numeric values).
+    /// Don't resolve names (show numeric values). For the renderer to
+    /// honour; nothing in this module resolves names.
     pub numeric: bool,
-    /// Pretty print (for JSON).
+    /// Pretty print (for JSON). Read by the shipped JSON formatter.
     pub pretty: bool,
 }
 

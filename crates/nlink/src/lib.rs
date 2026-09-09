@@ -8,7 +8,6 @@
 //!
 //! - `sockdiag` - Socket diagnostics via NETLINK_SOCK_DIAG
 //! - `tuntap` - TUN/TAP device management
-//! - `tuntap-async` - Async TUN/TAP support (implies `tuntap`)
 //! - `tc` - Traffic control utilities
 //! - `output` - JSON/text output formatting
 //! - `full` - All features enabled
@@ -227,6 +226,10 @@ pub use netlink::tc_handle::{FilterPriority, TcHandle, TcHandleParseError};
 pub use netlink::tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject};
 pub use netlink::{
     Connection, Error, NamespaceSpec, NetworkEvent, Protocol, Result, RtnetlinkGroup,
+    // `Error::validation` takes `impl IntoIterator<Item = ValidationErrorInfo>`
+    // and this lived in a private module, so the public constructor was
+    // uncallable from outside the crate (#280).
+    ValidationErrorInfo,
 };
 // Default named-netns directory (`/var/run/netns`) — where
 // `NamespaceSpec::Named` / `namespace::connection_for` resolve names

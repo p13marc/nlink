@@ -435,15 +435,26 @@ impl<P: ProtocolState> Connection<P> {
     /// was filed for. (Multicast membership is still added the usual way
     /// via [`subscribe`](Self::subscribe) / `subscribe_all`.)
     ///
-    /// # Remaining limitation
+    /// # What still serializes
     ///
-    /// [`dump_stream`](Self::dump_stream) (and the `*_with_resync`
-    /// wrappers built on the streaming path) are **not yet supported** on
-    /// a dispatcher-mode connection — per-seq dump *streaming* through the
-    /// driver is the tracked #134 follow-on. They return a clear
-    /// `Error::NotSupported`. Use the eager `get_*` dumps (which route
-    /// through the driver) or a default-mode `Connection` for streaming
-    /// dumps.
+    /// **Dumps**, because the kernel serializes them per socket
+    /// (`netlink_dump_start` returns `EBUSY` on a second in-flight
+    /// dump), so a dump holds the dump-serialization lock for its
+    /// lifetime in this mode too. For genuinely parallel dumps use
+    /// [`ConnectionPool`](crate::netlink::pool::ConnectionPool) — one
+    /// fd per task, parallel kernel-side.
+    ///
+    /// This used to claim that [`dump_stream`](Self::dump_stream) and
+    /// the `*_with_resync` wrappers were "not yet supported" here and
+    /// "return a clear `Error::NotSupported`". Both halves were false:
+    /// `DumpStream::new` handles dispatcher mode explicitly, the
+    /// crate's own `dispatcher_mode_dump_stream_streams_links` test
+    /// asserts it end to end, and no streaming path constructs
+    /// `Error::NotSupported` anywhere. The cost was the mirror image of
+    /// the `try_recv` bug: readers avoided a working feature, opening a
+    /// second socket per netns or materialising whole route tables
+    /// eagerly — and anyone who wrote `if e.is_not_supported()` around
+    /// it has unreachable code (#276).
     #[must_use]
     pub fn with_dispatcher(mut self) -> Self {
         self.dispatcher_mode = true;
@@ -1530,15 +1541,18 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use std::time::Duration;
-    /// use nlink::{Connection, Route};
     ///
+    /// use nlink::{Connection, Route};
+    /// # async fn f() -> nlink::Result<()> {
     /// let conn = Connection::<Route>::new()?;
     /// // Bring up the interface, then wait for the operstate to
     /// // reflect it (kernel may take milliseconds).
-    /// conn.set_link_up_by_name("eth0").await?;
+    /// conn.set_link_up("eth0").await?;
     /// conn.wait_link_up("eth0", Duration::from_secs(5)).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "wait_link_up"))]
     pub async fn wait_link_up(

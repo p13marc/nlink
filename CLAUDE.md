@@ -57,10 +57,25 @@ sudo ./target/debug/deps/integration-* --test-threads=1
 For new tests that need root, gate with `nlink::require_root!()`
 (early-returns `Ok(())` when `euid != 0`). For tests that depend
 on a specific kernel module, also gate with
-`nlink::require_module!("nf_conntrack")` — `has_module()` checks
-`/sys/module/<name>` so it works for both loadable and built-in
-features. For new examples, prefer the `--apply` runner pattern
-over assertions.
+`nlink::require_module!("nf_conntrack")`. `has_module()` asks three
+questions — `/sys/module/<name>`, `modules.builtin`, `modules.dep` —
+because the first alone answers "no" for most of what the kernel can
+provide: sysfs publishes a directory for a built-in only if it exports
+parameters, and for a loadable module only once it is loaded. It used
+to check `/sys/module` alone, documented as covering built-ins, and
+**it does not**; every miss became a skip, and a skipped test reports
+`ok`. That is how a dozen TC bugs sat behind a green suite for a
+release cycle (#273).
+
+**A silent skip is indistinguishable from a pass.** Set
+`NLINK_TEST_STRICT_MODULES` to a comma-separated list of modules the
+environment is expected to provide and a skip for any of them fails
+instead; the privileged CI workflow sets it to the same list its guard
+step verifies. A list, not a flag — failing on genuinely optional
+features (`ovpn` needs 6.16) would just teach everyone to ignore the
+job.
+
+For new examples, prefer the `--apply` runner pattern over assertions.
 
 ## Architecture
 
@@ -718,54 +733,36 @@ run it locally before merging a new example.
 
 ## Active work
 
-**0.24.0 shipped 2026-07-03** (`v0.24.0` tagged; both crates on
-crates.io). Headline narrative in `CHANGELOG.md ## [0.24.0]` +
-`docs/migration_guide/0.23.0-to-0.24.0.md`. A sockdiag/events/
-nftables depth release from the 2026 roadmap pass (#170): the #160
-XFRM dump-body fix; #165 Rule/Nexthop/NsId/Mdb `NetworkEvent`
-variants + `#[non_exhaustive]` on
-`ConfigDiff`/`StackDiff`/`WireguardConfigDiff` + `subscribe_all()`
-joining every typed-event group; #162 socket→process/cgroup
-attribution; #164 typed nftables rule-expression decoding
-(`RuleExpr`); #169 ergonomics batch (`del_*_if_exists`, WG device
-bootstrap `ensure_devices`, `NamespaceSpec` facade `_in` variants,
-`RateLimiter::reconcile`); #171 `SocketRateTracker` + the
-`parse_tcp_info` tail-field fix; #163 full INET_DIAG_BC bytecode
-compiler + `CcInfo` structs + the `InetExtension::mask()` off-by-one
-fix.
+**The 0.26.0 cycle is open on `master`** and is a bug-fix release. New
+work lands in `CHANGELOG.md ## [Unreleased]`; the workspace version is
+already 0.26.0. Breaking changes are in scope and there are several —
+see the `## [Unreleased]` entries, which lead with the silent
+behaviour changes.
 
-The **next cycle is open on `master`** — new work lands in
-`CHANGELOG.md ## [Unreleased]` and is promoted to the next
-`## [X.Y.0]` at cut time. (CI runs on every push/PR to master, so
-the old "work on a release branch, don't push to master" note no
-longer applies.) The workspace version stays at the released 0.24.0
-until the cycle's first breaking PR bumps it to 0.25.0 (the
-cargo-semver-checks convention; precedent 041a289).
+The cycle started from a review that filed 25 bugs (#258–#282) and grew
+as fixing them surfaced more (#286–#294, #300). What they have in
+common is worth stating, because it shapes how to work here: almost
+none is a logic error in isolation. They are **places where nothing was
+checking**. Wrong constants because the audit gate only read `#[repr]`
+enums; wrong endianness because the byte-order gate only banned the
+reader half; three HTB default-class bugs because no test asserted that
+traffic was classified; failed dumps reported as success because the
+loop was copy-pasted seven times and the copies disagreed.
+
+So every fix in this cycle lands with the check that was missing, and
+several arrived as new CI gates: `audit-uapi-constants` now reads plain
+`pub const`s too, `audit-bytes-le` bans writers as well as readers, and
+`audit-dump-termination` keeps dump loops on the shared classifier.
+
+**0.24.0 shipped 2026-07-03** (`v0.24.0` tagged; both crates on
+crates.io) — narrative in `CHANGELOG.md ## [0.24.0]` +
+`docs/migration_guide/0.23.0-to-0.24.0.md`.
 
 Cycle-sized roadmap items still open from #170: #166 (modern-kernel
 telemetry families), #167 (spec-first netlink codegen), #168
 (record/replay mock transport).
 
-The 0.23.0 cycle resolved the **#134–#137 follow-on epic**: the
-opt-in dispatcher mode is feature-complete (#134 —
-`Connection::with_dispatcher`, events + streams + mixed subsystems
-coexist on one connection), GENL command unification (#135),
-`Connection::<Ovpn>::attach_socket` + `NetlinkSocket::send_with_fds`
-(#136), and the entire **#137 audit/coverage backlog**: full nl80211
-read audit (PHY/wiphy, scan/BSS, station-info, channel survey) with
-two id-drift wire-bug fixes, XFRM monitor `EventSource`, bridge
-`BRIDGE_VLANDB_ENTRY`/`GOPTS`, net_shaper group shaping, MPLS/SRv6/
-NextHop struct audit, declarative nftables sets (`DeclaredSet`),
-`schemars` JSON Schema, `NetworkConfig` declarative purge (Plan 205),
-the `Store` reflector watch-cache (Plan 195), the newtype `From`/`Into`
-sweep (Plan 201), `TableName` newtype, `LinkStats` accessor convention,
-pedit `munge` DSL, `WireguardConfig::{from_wg_quick,client}`, and
-property-based parser-robustness harnesses. **Only intentionally
-deferred:** `backon`-based `StreamBackoff` (Plan 195 — reconnect
-backoff composes at the spawn-loop level) and `ip vrf exec` (needs
-cgroup2 + eBPF `sock_bind`, untestable under the non-root CI gate).
-
-Open follow-on work is tracked as GitHub issues, not in `plans/`.
+Open follow-on work is tracked as forge issues, not in `plans/`.
 
 Per-release upgrade guides:
 [`docs/migration_guide/`](docs/migration_guide/README.md) — write

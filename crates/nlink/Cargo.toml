@@ -19,7 +19,6 @@ sockdiag = ["dep:serde"]
 # TUN/TAP device management
 tuntap = []
 # TUN/TAP async support
-tuntap-async = ["tuntap"]
 # Output formatting (JSON/text)
 output = ["dep:serde", "dep:serde_json"]
 # Namespace watcher (inotify-based)
@@ -47,7 +46,7 @@ serde = ["dep:serde", "dep:serde_json"]
 # cost when disabled. Use `NetworkConfig::json_schema()`.
 schemars = ["dep:schemars", "serde"]
 # All features
-full = ["sockdiag", "tuntap", "tuntap-async", "output", "namespace_watcher", "lab", "syscall_batch", "serde", "schemars"]
+full = ["sockdiag", "tuntap", "output", "namespace_watcher", "lab", "syscall_batch", "serde", "schemars"]
 # Enable integration tests (require root or network namespace)
 integration = []
 
