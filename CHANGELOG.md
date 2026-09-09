@@ -85,6 +85,50 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`has_module` reported most of the kernel as missing, and every miss
+  was a silent skip (#273).** It checked `/sys/module/<name>` alone,
+  documented as covering built-ins too. It does not: sysfs publishes a
+  directory for a built-in only if it exports parameters or a version.
+  On the box this was measured on, **179 of the first 200 modules the
+  kernel indexes have no `/sys/module` entry**. Nor did it cover a
+  loadable module not yet used — `sch_htb` appears the moment something
+  asks for an HTB qdisc, but not before.
+
+  Both gaps made `require_module!` skip, and **a skipped test reports
+  `ok`**. Not theoretical: the entire `ratelimit` and `impair`
+  integration suite skipped on any machine where `sch_htb` had not
+  happened to be loaded, which is how a dozen TC bugs rode out a release
+  cycle. `has_module` now also consults `modules.builtin` and
+  `modules.dep`. On the same box, module skips drop from 11 to 8 — and
+  all 8 remaining are `ovpn`, which genuinely needs kernel 6.16.
+
+  `NLINK_TEST_STRICT_MODULES` takes a comma-separated list of modules
+  the environment is expected to provide; a skip for any of them becomes
+  a failure. The privileged CI workflow sets it to the same list its
+  guard step verifies, so a skip there is loud. A list rather than a
+  flag, because failing on genuinely-optional features would just teach
+  everyone to ignore the job.
+
+- **`ext_ack` was never actually parsed (#292).** `NlMsgError::attrs`
+  reads the TLVs at `sizeof(errno) + sizeof(nlmsghdr)` — where they are
+  only when the echoed request has been *capped*. `netlink_ack()` caps
+  it only if the socket asked, and nlink set `NETLINK_EXT_ACK` but never
+  `NETLINK_CAP_ACK`. So the kernel echoed the whole request, the parser
+  read request bytes as attributes, and **every kernel rejection reached
+  the caller as a bare errno** despite the crate advertising extended-ack
+  parsing as a headline feature. Measured on one request:
+
+  ```text
+  CAP_ACK off: payload=72B, TLVs at payload[40] -> nothing found
+  CAP_ACK on:  payload=52B, TLVs at payload[20] -> "Parent Qdisc doesn't exists"
+  ```
+
+  Sockets now set `NETLINK_CAP_ACK` (kernel 4.3+, best-effort), which
+  also shrinks every ACK by the size of the request. The unit tests could
+  not have caught this — they synthesise the capped payload, a shape the
+  kernel was not sending — so the regression test is an integration one
+  that asks the kernel for a real rejection and demands the message.
+
 - **`Connection::<KobjectUevent>::try_recv` always failed (#251).** It
   was public, documented as returning `Ok(None)` when no event was
   waiting, and returned `Error::not_supported` on every call since it
