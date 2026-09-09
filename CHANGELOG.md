@@ -105,6 +105,28 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Parser-robustness fuzzing extended past six parsers (#279).** The
+  property harness covered `MessageIter`, `AttrIter`, the fixed-size
+  struct readers and exactly six typed RTNetlink parsers, out of roughly
+  377 parse functions. Unfuzzed: nftables `RuleExpr` decoding (the
+  newest and most intricate), conntrack, xfrm, uevent, and every
+  `EventSource::parse_events` — the multicast entry points, which is
+  where the policy's "one malformed frame must not kill a long-lived
+  subscriber" is actually decided.
+
+  Arbitrary bytes turned out to be a weak generator here: the walkers
+  reject them early, so the parser code *after* `AttrIter` — where the
+  yield was predicted — is barely reached. The harness now also builds
+  **structurally valid** attribute chains with adversarial ids, lengths
+  and payloads, and wraps them in well-formed netlink frames for the
+  event parsers.
+
+  **It found nothing.** 30,000 cases per property across every parser
+  added, clean. Reported as a result rather than a non-event: the
+  parsers hold, and the harness is now what keeps them holding.
+  Mutation-verified — an unguarded fixed-size read injected into
+  `parse_expressions` is caught.
+
 - **Public types that could not be named downstream (#280).** Each
   appears in a public signature or a public field while living in a
   private module, so a downstream crate could see it and not name it.
