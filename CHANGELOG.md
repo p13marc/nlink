@@ -109,6 +109,28 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **`schemars` 0.8 → 1.0 (BREAKING for the `schemars` feature; #245).** The
+  0.8 API this integrated against is gone: `schemars::gen::SchemaGenerator`
+  and `schemars::schema::Schema` moved to the crate root, `RootSchema` was
+  removed, `schema_name()` returns `Cow<'static, str>`, and
+  `is_referenceable()` became its inverse `inline_schema()`.
+
+  `NetworkConfig::json_schema_value()` therefore returns `schemars::Schema`
+  rather than `schemars::schema::RootSchema`. That is the whole of the
+  breaking surface, and it is confined to the opt-in `schemars` feature —
+  `json_schema()` (the `String` form) is unchanged. The workspace version
+  moves to 0.26.0 accordingly, per the mid-cycle-bump convention
+  (precedent 041a289).
+
+  **The emitted schema is byte-for-byte the same dialect as before.**
+  schemars 1.0 changed its *default* draft from 7 to 2020-12, which would
+  have silently invalidated every editor `json.schemas` entry and CI
+  validator pointed at this schema. `json_schema_value` now pins draft 7
+  explicitly via `SchemaSettings::draft07()` rather than inheriting a
+  default that has already moved once, and a new test asserts the
+  `$schema` URI and the `definitions` (not `$defs`) subschema map — the
+  assertion whose absence is what would have let this through unnoticed.
+
 - **CI: fleet-standard rollout (myserver#33).** `workflow_dispatch` re-run
   path on CI, tag-input dispatch re-run pattern on the release workflow, a
   `cargo-deny` supply-chain job (new `deny.toml`; advisories, licenses,
