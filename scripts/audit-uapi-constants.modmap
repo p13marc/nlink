@@ -25,3 +25,15 @@ macsec_offload_attr     = MACSEC_OFFLOAD_ATTR
 macsec_offload          = MACSEC_OFFLOAD
 macsec_validate         = MACSEC_VALIDATE
 macsec_cipher           = MACSEC_CIPHER_ID
+
+# ---- nexthop --------------------------------------------------------------
+nha                     = NHA
+nhg_type                = NEXTHOP_GRP_TYPE
+nha_res_group           = NHA_RES_GROUP
+nha_res_bucket          = NHA_RES_BUCKET
+
+# ---- srv6 -----------------------------------------------------------------
+seg6_iptunnel           = SEG6_IPTUNNEL
+seg6_local_action       = SEG6_LOCAL_ACTION
+seg6_local              = SEG6_LOCAL
+seg6_local_flv          = SEG6_LOCAL_FLV

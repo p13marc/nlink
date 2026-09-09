@@ -176,7 +176,7 @@ impl Srv6Action {
             Self::EndDT6 { .. } => seg6_local_action::END_DT6,
             Self::EndDT46 { .. } => seg6_local_action::END_DT46,
             Self::EndB6 { .. } => seg6_local_action::END_B6,
-            Self::EndB6Encaps { .. } => seg6_local_action::END_B6_ENCAPS,
+            Self::EndB6Encaps { .. } => seg6_local_action::END_B6_ENCAP,
             Self::EndBPF => seg6_local_action::END_BPF,
             Self::Unknown { action_type } => *action_type,
         }
@@ -527,7 +527,7 @@ impl Srv6LocalRoute {
             seg6_local_action::END_B6 => Srv6Action::EndB6 {
                 segments: srh_segments.clone(),
             },
-            seg6_local_action::END_B6_ENCAPS => Srv6Action::EndB6Encaps {
+            seg6_local_action::END_B6_ENCAP => Srv6Action::EndB6Encaps {
                 segments: srh_segments,
             },
             seg6_local_action::END_BPF => Srv6Action::EndBPF,

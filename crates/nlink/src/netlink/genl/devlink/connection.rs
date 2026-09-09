@@ -372,8 +372,11 @@ impl Connection<Devlink> {
         port_index: u32,
         state: super::types::DevlinkPortFunctionState,
     ) -> Result<()> {
-        let mut builder =
-            self.devlink_cmd_builder(DEVLINK_CMD_PORT_FUNCTION_SET, bus, device);
+        // Port-function config goes through DEVLINK_CMD_PORT_SET carrying a
+        // DEVLINK_ATTR_PORT_FUNCTION nest. There is no
+        // DEVLINK_CMD_PORT_FUNCTION_SET — nlink invented one at 68, which is
+        // the kernel's DEVLINK_CMD_TRAP_GROUP_DEL (#264).
+        let mut builder = self.devlink_cmd_builder(DEVLINK_CMD_PORT_SET, bus, device);
         builder.append_attr_u32(DEVLINK_ATTR_PORT_INDEX, port_index);
         // DEVLINK_ATTR_PORT_FUNCTION is a NESTED attribute. The
         // inner attributes live in a SEPARATE namespace defined by
