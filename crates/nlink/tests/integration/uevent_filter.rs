@@ -16,7 +16,10 @@ use std::time::Duration;
 
 use nlink::{
     Result,
-    netlink::{Connection, KobjectUevent, link::DummyLink, uevent_filter::UeventFilter},
+    netlink::{
+        Connection, KobjectUevent, link::DummyLink, uevent::UEVENT_GROUP,
+        uevent_filter::UeventFilter,
+    },
 };
 
 use crate::common::TestNamespace;
@@ -112,6 +115,26 @@ async fn the_receive_buffer_is_sized_up_from_the_default() -> Result<()> {
         );
     }
     assert!(granted > 0);
+    Ok(())
+}
+
+/// `subscribe()` is the only public method here with no constructor
+/// that needs it — everything that builds a `Connection<KobjectUevent>`
+/// subscribes already. Its real use is the pause/resume pair with
+/// `drop_membership`, so exercise that rather than ship an untested
+/// method.
+#[tokio::test]
+async fn a_subscription_can_be_dropped_and_rejoined() -> Result<()> {
+    let conn = Connection::<KobjectUevent>::new()?;
+
+    conn.socket().drop_membership(UEVENT_GROUP)?;
+    conn.subscribe()?;
+    // Idempotent: resuming an already-joined group must not error, or
+    // a resume path would have to track its own state.
+    conn.subscribe()?;
+
+    // The socket still works after the round trip.
+    assert!(conn.try_recv().is_ok());
     Ok(())
 }
 

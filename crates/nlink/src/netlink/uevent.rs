@@ -246,11 +246,33 @@ impl Connection<KobjectUevent> {
         Ok(Self::from_parts(socket, KobjectUevent))
     }
 
-    /// Join the kernel uevent multicast group.
+    /// (Re-)join the kernel uevent multicast group.
     ///
-    /// Every constructor here does this already. It is public for a
-    /// connection built through the generic namespace helpers, which
-    /// create the socket but know nothing about a protocol's groups.
+    /// Every constructor here subscribes already, and there is no way
+    /// to build an unsubscribed `Connection<KobjectUevent>` — the
+    /// generic namespace helpers need `P: Default`, which this
+    /// protocol deliberately does not implement for exactly that
+    /// reason.
+    ///
+    /// So this pairs with `drop_membership` for pause/resume: a
+    /// monitor about to do a long stretch of work can leave the group
+    /// rather than let events pile up in a buffer it isn't draining,
+    /// then rejoin. Idempotent, so resuming twice is harmless.
+    ///
+    /// Note what pausing costs: uevents missed while unsubscribed are
+    /// gone, and this is the one source with no dump to recover them
+    /// from (#252). Leaving the group is only better than falling
+    /// behind if you did not want those events at all.
+    ///
+    /// ```no_run
+    /// use nlink::netlink::{Connection, KobjectUevent, uevent::UEVENT_GROUP};
+    ///
+    /// let conn = Connection::<KobjectUevent>::new()?;
+    /// conn.socket().drop_membership(UEVENT_GROUP)?;   // pause
+    /// // ... work that must not be interleaved with event handling ...
+    /// conn.subscribe()?;                              // resume
+    /// # Ok::<(), nlink::Error>(())
+    /// ```
     pub fn subscribe(&self) -> Result<()> {
         self.socket().add_membership(UEVENT_GROUP)
     }
