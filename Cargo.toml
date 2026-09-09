@@ -17,14 +17,14 @@ members = [
 ]
 
 [workspace.package]
-version = "0.25.0"
+version = "0.26.0"
 edition = "2024"
 # Minimum Supported Rust Version. Tracks current stable: this
 # project is happy to require contributors and downstream
 # consumers stay on a recent toolchain in exchange for using
 # modern language features without contortion. Bump in lockstep
 # with stable; called out in CHANGELOG when it advances.
-rust-version = "1.97"
+rust-version = "1.98"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/p13marc/nlink"
 authors = ["Marc Pardo <p13marc@gmail.com>"]
@@ -34,7 +34,7 @@ authors = ["Marc Pardo <p13marc@gmail.com>"]
 tokio = { version = "1", features = ["full", "net", "io-util", "sync"] }
 
 # Netlink socket (thin libc wrapper - socket ops only)
-netlink-sys = "0.8"
+netlink-sys = "0.9"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -46,7 +46,7 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # JSON Schema generation for the declarative config types (Plan 189 §8)
-schemars = "0.8"
+schemars = "1.0"
 
 # Logging
 tracing = "0.1"
@@ -92,4 +92,4 @@ nlink = { path = "crates/nlink" }
 # crates.io; bump in lockstep with the workspace version at cycle
 # cut. **Publish nlink-macros first** when releasing — nlink's
 # publication will fail until the matching version is live.
-nlink-macros = { path = "crates/nlink-macros", version = "0.25.0" }
+nlink-macros = { path = "crates/nlink-macros", version = "0.26.0" }

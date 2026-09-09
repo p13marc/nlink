@@ -87,19 +87,27 @@ impl NetworkConfig {
     /// ```
     #[cfg(feature = "schemars")]
     pub fn json_schema() -> String {
-        let schema = schemars::schema_for!(NetworkConfig);
-        // `RootSchema` always serializes (no user data, no custom
-        // serializers that can fail), so the unwrap is infallible.
-        serde_json::to_string_pretty(&schema)
-            .expect("RootSchema serialization is infallible")
+        let schema = Self::json_schema_value();
+        // The schema is library-generated — no user data, no custom
+        // serializers that can fail — so the unwrap is infallible.
+        serde_json::to_string_pretty(&schema).expect("schema serialization is infallible")
     }
 
-    /// The JSON Schema as a [`schemars::schema::RootSchema`], for
-    /// callers that want to inspect or merge it rather than emit
-    /// text. Requires the `schemars` feature.
+    /// The JSON Schema as a [`schemars::Schema`], for callers that
+    /// want to inspect or merge it rather than emit text. Requires
+    /// the `schemars` feature.
+    ///
+    /// Draft 7 is pinned explicitly rather than taken from the
+    /// library's default, which is not stable across schemars major
+    /// versions — 0.8 defaulted to draft 7, 1.0 defaults to 2020-12.
+    /// The dialect is part of what this method promises (editors and
+    /// CI validators are configured against it), so it is chosen here
+    /// rather than inherited.
     #[cfg(feature = "schemars")]
-    pub fn json_schema_value() -> schemars::schema::RootSchema {
-        schemars::schema_for!(NetworkConfig)
+    pub fn json_schema_value() -> schemars::Schema {
+        schemars::generate::SchemaSettings::draft07()
+            .into_generator()
+            .into_root_schema_for::<NetworkConfig>()
     }
 
     /// Add a link (interface) configuration.
@@ -815,8 +823,8 @@ impl LinkBuilder {
 #[cfg_attr(feature = "serde", serde(into = "AddressRepr", try_from = "AddressRepr"))]
 // JsonSchema is NOT derived here. The JSON shape goes through
 // `AddressRepr` (a CIDR string), so a *derived* schema would wrongly
-// expose the parsed `address`/`prefix_len` fields. schemars 0.8's
-// `with` is field-level only, so the container override is a no-op —
+// expose the parsed `address`/`prefix_len` fields. schemars'
+// `with` is field-level only, so a container override is a no-op —
 // the manual impl below delegates to `AddressRepr` instead, keeping
 // the schema faithful to the wire.
 #[derive(Debug, Clone)]
@@ -844,17 +852,21 @@ struct AddressRepr {
 // describes the actual `{ dev, address: "<cidr>" }` JSON.
 #[cfg(feature = "schemars")]
 impl schemars::JsonSchema for DeclaredAddress {
-    fn schema_name() -> String {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
         AddressRepr::schema_name()
     }
     fn schema_id() -> std::borrow::Cow<'static, str> {
         AddressRepr::schema_id()
     }
-    fn json_schema(g: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+    fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
         AddressRepr::json_schema(g)
     }
-    fn is_referenceable() -> bool {
-        AddressRepr::is_referenceable()
+    // schemars 1.0 replaced `is_referenceable` with its inverse. Keep
+    // delegating rather than hardcoding: whether the shadow is
+    // inlined or `$ref`-ed is the shadow's business, and this type
+    // must produce the identical schema either way.
+    fn inline_schema() -> bool {
+        AddressRepr::inline_schema()
     }
 }
 
@@ -1008,17 +1020,21 @@ struct RouteRepr {
 // the actual string-destination/gateway JSON, not the parsed fields.
 #[cfg(feature = "schemars")]
 impl schemars::JsonSchema for DeclaredRoute {
-    fn schema_name() -> String {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
         RouteRepr::schema_name()
     }
     fn schema_id() -> std::borrow::Cow<'static, str> {
         RouteRepr::schema_id()
     }
-    fn json_schema(g: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+    fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
         RouteRepr::json_schema(g)
     }
-    fn is_referenceable() -> bool {
-        RouteRepr::is_referenceable()
+    // schemars 1.0 replaced `is_referenceable` with its inverse. Keep
+    // delegating rather than hardcoding: whether the shadow is
+    // inlined or `$ref`-ed is the shadow's business, and this type
+    // must produce the identical schema either way.
+    fn inline_schema() -> bool {
+        RouteRepr::inline_schema()
     }
 }
 
@@ -2364,14 +2380,41 @@ mod schemars_tests {
         serde_json::from_str(&NetworkConfig::json_schema()).expect("schema is valid JSON")
     }
 
-    /// schemars 0.8 emits draft-07 with a `definitions` map; tolerate
-    /// `$defs` in case the default changes.
+    /// Draft-07 puts subschemas under `definitions`; 2020-12 uses
+    /// `$defs`. `json_schema_value` pins draft-07, but accept either
+    /// so these tests assert about content rather than dialect.
     fn defs(schema: &serde_json::Value) -> &serde_json::Map<String, serde_json::Value> {
         schema
             .get("definitions")
             .or_else(|| schema.get("$defs"))
             .and_then(|d| d.as_object())
             .expect("schema exposes a definitions/$defs map")
+    }
+
+    /// The dialect is part of the promise: editors (`json.schemas`,
+    /// `yaml.schemas`) and CI validators are configured against a
+    /// specific draft, and a silent switch invalidates them.
+    ///
+    /// It is also not something the library holds still — schemars
+    /// 0.8 defaulted to draft 7 and 1.0 to 2020-12, so `json_schema`
+    /// pins it rather than inheriting it. Nothing asserted this
+    /// before, which is exactly how the default could have moved
+    /// under the crate during a dependency bump without a test going
+    /// red.
+    #[test]
+    fn schema_declares_draft_07() {
+        let s = schema_value();
+        assert_eq!(
+            s.get("$schema").and_then(|v| v.as_str()),
+            Some("http://json-schema.org/draft-07/schema#"),
+            "json_schema must emit draft-07, as its docs and CLAUDE.md state"
+        );
+        // Draft-07 spells the subschema map `definitions`; 2020-12
+        // uses `$defs`. Pinned together so the pair cannot drift.
+        assert!(
+            s.get("definitions").is_some(),
+            "draft-07 output should carry `definitions`"
+        );
     }
 
     #[test]

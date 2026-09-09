@@ -198,10 +198,10 @@ impl Psched {
         }
 
         let mut table = [0u8; TC_RTAB_SIZE];
-        for (i, entry) in table.chunks_exact_mut(4).enumerate() {
+        for (i, entry) in table.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let size = adjust_size((i as u32 + 1) << cell_log, spec.mpu, linklayer);
             let ticks = self.calc_xmittime(rate_bytes_per_sec, size);
-            entry.copy_from_slice(&ticks.to_ne_bytes());
+            *entry = ticks.to_ne_bytes();
         }
 
         spec.cell_log = cell_log;

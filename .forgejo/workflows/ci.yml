@@ -32,7 +32,7 @@ jobs:
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           cache-targets: false
       - run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           cache-targets: false
       - run: cargo build --workspace --all-targets
@@ -53,7 +53,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: all-features
           cache-targets: false
@@ -69,8 +69,8 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97"
-      - uses: https://github.com/Swatinem/rust-cache@v2
+          toolchain: "1.98"
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: msrv
           cache-targets: false
@@ -83,7 +83,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           cache-targets: false
       - run: cargo doc -p nlink --no-deps --all-features
@@ -113,7 +113,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       # the docker cargo-deny action cannot see deny.toml -> install directly
-      - uses: https://github.com/taiki-e/install-action@v2.85.11
+      - uses: https://github.com/taiki-e/install-action@v2.87.7
         with:
           tool: cargo-deny
       - run: cargo deny check
@@ -123,7 +123,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
-      - uses: https://github.com/obi1kenobi/cargo-semver-checks-action@v2
+      - uses: https://github.com/obi1kenobi/cargo-semver-checks-action@v2.9
         with:
           package: nlink
 
@@ -140,13 +140,15 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - run: sudo apt-get update && sudo apt-get install -y gcc-s390x-linux-gnu
       # @master + explicit toolchain, not @stable: rust-toolchain.toml pins
-      # 1.97, so the s390x target must be installed for 1.97 — installing it
-      # for floating stable leaves cargo (which honors the file) targetless
+      # the version, so the s390x target must be installed for *that*
+      # toolchain — installing it for floating stable leaves cargo (which
+      # honors the file) targetless. Keep this in lockstep with
+      # rust-toolchain.toml's channel.
       - uses: https://github.com/dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97"
+          toolchain: "1.98"
           targets: s390x-unknown-linux-gnu
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
         with:
           key: s390x
           cache-targets: false

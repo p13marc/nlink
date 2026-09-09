@@ -1259,9 +1259,8 @@ impl PhyAcc {
                 }
                 NL80211_ATTR_CIPHER_SUITES => {
                     // Flat array of u32 suite selectors.
-                    for chunk in payload.chunks_exact(4) {
-                        self.cipher_suites
-                            .push(u32::from_ne_bytes(chunk.try_into().unwrap()));
+                    for chunk in payload.as_chunks::<4>().0 {
+                        self.cipher_suites.push(u32::from_ne_bytes(*chunk));
                     }
                 }
                 NL80211_ATTR_WIPHY_BANDS => {

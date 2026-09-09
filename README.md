@@ -14,7 +14,7 @@ each `nlink-` prefixed so it never shadows the system tool it mirrors.
 ## Install
 
 ```toml
-nlink = "0.25"
+nlink = "0.26"
 ```
 
 Feature flags: `sockdiag`, `tuntap`, `tuntap-async`, `output`, `namespace_watcher`,
@@ -22,7 +22,7 @@ Feature flags: `sockdiag`, `tuntap`, `tuntap-async`, `output`, `namespace_watche
 `NetworkConfig`), `lab` (test harness), `full`. Full list in the
 [docs.rs feature table](https://docs.rs/crate/nlink/latest/features).
 
-MSRV: Rust 1.97, edition 2024.
+MSRV: Rust 1.98, edition 2024.
 
 ## Quick start
 
