@@ -175,6 +175,14 @@ mod psched_ticks;
 #[path = "integration/dispatcher.rs"]
 mod dispatcher;
 
+// #253 — the rtnetlink + uevent netdev lifecycle join. Root-gated +
+// `veth` module-gated. The unit tests pin the join's logic with
+// hand-fed streams; this pins the kernel facts underneath it — that a
+// net uevent inside a namespace reaches a socket opened in that
+// namespace, and that its IFINDEX= agrees with rtnetlink's.
+#[path = "integration/netdev_lifecycle.rs"]
+mod netdev_lifecycle;
+
 // #251 — uevent socket hardening. Unprivileged by design: attaching a
 // classic-BPF socket filter and reading uevents both need no
 // capability, and it is the kernel's BPF verifier — not the privilege

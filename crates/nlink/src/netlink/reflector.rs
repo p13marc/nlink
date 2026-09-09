@@ -161,6 +161,33 @@ impl<K: Eq + Hash, V> Store<K, V> {
         self.read(|m| m.values().cloned().collect())
     }
 
+    /// Insert or replace one entry.
+    ///
+    /// The reflector path ([`ReflectExt::reflect`]) drives a store
+    /// from a resync-aware stream, where the redump defines what a
+    /// consistent snapshot is. Not every useful event source has that
+    /// shape — [`NetdevLifecycle`] joins two sockets and owns its own
+    /// notion of when a device exists — so the two write primitives
+    /// are public for sources that maintain the cache themselves.
+    ///
+    /// Mixing a hand-driven writer with a reflector on the same store
+    /// is a mistake: a reflector's `ResyncEnd` atomically replaces the
+    /// whole map and would discard the hand-written entries.
+    ///
+    /// [`NetdevLifecycle`]: crate::netlink::netdev::NetdevLifecycle
+    pub fn upsert(&self, key: K, value: V) {
+        self.write(|m| {
+            m.insert(key, value);
+        });
+    }
+
+    /// Remove one entry, reporting whether it was there.
+    ///
+    /// See [`Self::upsert`] for when to reach for this.
+    pub fn remove(&self, key: &K) -> bool {
+        self.write(|m| m.remove(key).is_some())
+    }
+
     /// Snapshot of every `(key, value)` pair (cloned).
     pub fn snapshot(&self) -> Vec<(K, V)>
     where
@@ -448,6 +475,31 @@ mod tests {
             .await;
         assert_eq!(a.get(&7), Some((7, "x")));
         assert_eq!(b.get(&7), Some((7, "x")), "clones observe same map");
+    }
+
+    /// The write primitives exist for event sources that aren't
+    /// resync streams (`NetdevLifecycle` joins two sockets and owns
+    /// its own notion of when a device exists), so they need coverage
+    /// independent of the `Reflect` adapter.
+    #[test]
+    fn hand_driven_writes_go_through_every_clone() {
+        let store: Store<u32, &str> = Store::new();
+        let reader = store.clone();
+
+        store.upsert(7, "veth0");
+        assert_eq!(reader.get(&7), Some("veth0"));
+        assert_eq!(reader.len(), 1);
+
+        // Upsert replaces rather than duplicating.
+        store.upsert(7, "veth1");
+        assert_eq!(reader.get(&7), Some("veth1"));
+        assert_eq!(reader.len(), 1);
+
+        // Remove reports whether the entry was there, so a caller can
+        // tell an eviction from a no-op.
+        assert!(store.remove(&7));
+        assert!(!store.remove(&7));
+        assert!(reader.is_empty());
     }
 
     #[test]

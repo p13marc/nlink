@@ -57,6 +57,31 @@ All notable changes to this project will be documented in this file.
   best-effort re-announcement, not a snapshot — `ResyncEnd` here means
   "a re-announcement was requested", not "state is rebuilt".
   `ResyncMarker`'s docs now carry that caveat.
+- **Netdev lifecycle join: `netlink::netdev` (#253).** rtnetlink knows
+  a device's ifindex, flags, MTU and kind but nothing about its driver
+  or sysfs path; uevents know the driver and devpath but carry no link
+  attributes, and driver bind/unbind has no rtnetlink counterpart at
+  all. Net uevents carry `IFINDEX=`, so the two share a primary key.
+  `NetdevLifecycle` merges both sockets into one `NetdevEvent` stream
+  and optionally mirrors it into a `Store<u32, NetdevInfo>`.
+
+  Four decisions are recorded in the module docs, the recipe, and the
+  tests. rtnetlink is authoritative for existence and uevents annotate,
+  with a late-arriving annotation surfacing as `Changed` rather than
+  being buffered behind a timeout that may never fire. ifindex reuse is
+  caught by cross-checking the uevent's `INTERFACE=` on the `Added`
+  transition only — enforcing it on every event would discard good
+  annotations mid-rename, which `is_fully_attributed()` reports instead.
+  The devpath is carried as a string and never resolved, because sysfs
+  resolves in the mount namespace while the ifindex resolves in the
+  network namespace. And inside a netns you see net uevents and nothing
+  else, since other subsystems broadcast only to the initial namespace.
+
+  New recipe: [`netdev-lifecycle`](docs/recipes/netdev-lifecycle.md).
+- **`Store::{upsert,remove}`.** The reflector path drives a store from
+  a resync-aware stream; `NetdevLifecycle` joins two sockets and owns
+  its own notion of when a device exists, so the write primitives are
+  public for sources that maintain the cache themselves.
 
 ### Fixed
 

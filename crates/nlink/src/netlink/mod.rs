@@ -138,6 +138,7 @@ pub(crate) mod tc_recipe_internals;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod types;
+pub mod netdev;
 pub mod uevent;
 pub mod uevent_filter;
 pub mod xfrm;
