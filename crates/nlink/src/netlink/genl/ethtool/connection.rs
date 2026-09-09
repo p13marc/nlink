@@ -17,6 +17,7 @@ use crate::{
         attr::{AttrIter, NLA_F_NESTED},
         builder::MessageBuilder,
         connection::Connection,
+        dump_frame::{Classification, classify},
         error::{Error, Result},
         genl::{GENL_HDRLEN, GenlMsgHdr},
         interface_ref::InterfaceRef,
@@ -1681,22 +1682,19 @@ impl Connection<Ethtool> {
                 let mut done = false;
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
-                    if header.nlmsg_seq != seq {
-                        continue;
-                    }
-                    if header.is_error() {
-                        let err = NlMsgError::from_bytes(payload)?;
-                        if !err.is_ack() {
-                            return Err(err.into_error(payload));
+                    match classify(header, payload, seq) {
+                        Classification::SkipSeq | Classification::Ack => continue,
+                        Classification::Error(e) => return Err(e),
+                        Classification::Done(result) => {
+                            result?;
+                            done = true;
+                            break;
                         }
-                        continue;
-                    }
-                    if header.is_done() {
-                        done = true;
-                        break;
-                    }
-                    if result_payload.is_none() {
-                        result_payload = Some(payload.to_vec());
+                        Classification::Data { payload } => {
+                            if result_payload.is_none() {
+                                result_payload = Some(payload.to_vec());
+                            }
+                        }
                     }
                 }
                 if done {
@@ -1799,26 +1797,20 @@ impl Connection<Ethtool> {
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
 
-                    if header.nlmsg_seq != seq {
-                        continue;
-                    }
-
-                    if header.is_error() {
-                        let err = NlMsgError::from_bytes(payload)?;
-                        if !err.is_ack() {
-                            return Err(err.into_error(payload));
+                    match classify(header, payload, seq) {
+                        Classification::SkipSeq | Classification::Ack => continue,
+                        Classification::Error(e) => return Err(e),
+                        Classification::Done(result) => {
+                            result?;
+                            done = true;
+                            break;
                         }
-                        continue;
-                    }
-
-                    if header.is_done() {
-                        done = true;
-                        break;
-                    }
-
-                    // Store the first valid response payload
-                    if result_payload.is_none() {
-                        result_payload = Some(payload.to_vec());
+                        Classification::Data { payload } => {
+                            // Store the first valid response payload
+                            if result_payload.is_none() {
+                                result_payload = Some(payload.to_vec());
+                            }
+                        }
                     }
                 }
 

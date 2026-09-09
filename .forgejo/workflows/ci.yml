@@ -88,7 +88,7 @@ jobs:
           cache-targets: false
       - run: cargo doc -p nlink --no-deps --all-features
 
-  # The 9 repo-convention audit scripts: cheap greps, one job.
+  # The repo-convention audit scripts: cheap greps, one job.
   audits:
     runs-on: ubuntu-24.04
     steps:
@@ -104,6 +104,7 @@ jobs:
       - run: bash scripts/audit-recipe-drift.sh
       - run: bash scripts/audit-bytes-le.sh
       - run: bash scripts/audit-ignored-tests.sh
+      - run: bash scripts/audit-dump-termination.sh
 
   # Supply-chain lint (fleet standard, myserver#33): advisories, licenses,
   # bans, sources — config in deny.toml.

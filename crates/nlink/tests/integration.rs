@@ -214,3 +214,9 @@ mod declared_input;
 // declaring a clsact must not delete the root qdisc.
 #[path = "integration/tc_shaping.rs"]
 mod tc_shaping;
+// #267 — NLMSG_DONE's result code. Unprivileged: sock_diag dumps your
+// own sockets without any capability, and a protocol with no diag
+// handler answers DONE-with-ENOENT, which used to read as an empty list.
+#[cfg(feature = "sockdiag")]
+#[path = "integration/dump_termination.rs"]
+mod dump_termination;

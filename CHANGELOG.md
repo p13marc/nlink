@@ -85,6 +85,62 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A failed dump reported success with a truncated result (#267).**
+  `NLMSG_DONE` carries the dump's result code as an `int` payload, and
+  nothing read it. Measured on this kernel:
+
+  ```text
+  RTM_GETLINK            -> NLMSG_DONE nlmsg_len=20, payload i32 = 0
+  SOCK_DIAG_BY_FAMILY    -> NLMSG_DONE payload i32 = -2   (-ENOENT)
+  (sdiag_protocol = DCCP or SCTP, neither of which has a diag handler here)
+  ```
+
+  Not `NLMSG_ERROR` — `NLMSG_DONE`. The failure is reported *only*
+  there, which is why `sockdiag.rs`'s `NLMSG_DONE => return Ok(sockets)`
+  turned a query the kernel refused into "no sockets found". iproute2
+  reads it in `rtnl_dump_done()` and aborts on a negative value.
+
+  Any dumper that failed partway yielded a partial list indistinguishable
+  from a complete one — worst on the declarative paths, where
+  `NetworkConfig`/`NftablesConfig::diff()` builds a plan from a dump:
+  objects that exist become invisible and the diff proposes creating
+  them, and with purge enabled it proposes deleting what it never saw.
+
+- **`NLM_F_DUMP_INTR` was checked in four dump paths and missing from
+  five (#271).** The crate had already decided this mattered — there is
+  an `Error::DumpInterrupted`, with tests — and then checked it in fewer
+  than half the loops. The unchecked ones were the sharp ones:
+  `dump_stream` (the generic path behind `dump_stream::<T>()` and the
+  `*_with_resync` wrappers, so it feeds the `Store` watch-cache, which
+  `replace_all`s its whole map from a redump) and the nftables dumps
+  that `diff()` turns into a **single atomic** apply.
+
+  Both fixes live in one place: `netlink/dump_frame.rs` classifies a
+  frame — seq filter, torn snapshot, ACK, error, DONE-with-result-code,
+  data — and the loops act on the classification. The pattern behind
+  these two bugs was diagnostic: the two *older* invariants (filter by
+  `nlmsg_seq`, terminate on DONE) were in every copy of the loop and the
+  two newer ones were not, because there were nine copies in three
+  shapes. `scripts/audit-dump-termination.sh` is the new CI gate; a
+  hand-rolled `is_done()` outside the classifier fails the build.
+
+  The `devlink_get` loop, alone among its siblings, treats an ACK as the
+  end of its response. That is preserved deliberately rather than
+  normalised away — it is sent with `NLM_F_ACK` and answers with a
+  single message — and now says so.
+
+- **A torn redump fused the resync stream (#271).** Once nftables
+  actually checked `NLM_F_DUMP_INTR`, the post-`ENOBUFS` redump started
+  failing — correctly: it races the very mutations that overflowed the
+  socket, so a torn snapshot there is the ordinary case. Fusing on it
+  would mean a watch-cache gives up precisely when it is busiest, so the
+  redump now retries — up to thirty times, 50 ms apart. Spread over
+  time rather than spun: retrying a dump in a tight loop against a
+  mutating kernel burns the whole budget in microseconds and then
+  reports failure while the storm is still running. With the delay the
+  integration test that fires 2000 rule inserts at a 256-byte rcvbuf
+  recovers; without it, no attempt count is enough.
+
 - **Five setters that were stored and never read (#275).** Each is the
   same shape: a fluent setter accepts a value, the writer never looks at
   it, and the request goes out without it. Nothing errors — `apply()`

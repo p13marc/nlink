@@ -37,6 +37,7 @@ use crate::{
     netlink::{
         MessageBuilder, ProtocolState,
         connection::Connection,
+        dump_frame::done_result,
         genl::{GENL_HDRLEN, GenlMsgHdr},
         message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
     },
@@ -219,6 +220,9 @@ where
         }
 
         if header.is_done() {
+            // Even here — a `DONE` that carries a negative result code
+            // is the request failing, not an empty reply (#267).
+            done_result(payload)?;
             return Ok(R::default());
         }
 
@@ -296,6 +300,14 @@ where
                 continue;
             }
 
+            // A torn snapshot — this drainer had no check at all
+            // (#271).
+            if header.is_dump_interrupted() {
+                self.pending.push_back(Err(Error::DumpInterrupted));
+                self.errored = true;
+                return;
+            }
+
             if header.is_error() {
                 match NlMsgError::from_bytes(payload) {
                     Ok(err) => {
@@ -315,6 +327,12 @@ where
             }
 
             if header.is_done() {
+                // The dump's result code is in the DONE payload (#267).
+                if let Err(e) = done_result(payload) {
+                    self.pending.push_back(Err(e));
+                    self.errored = true;
+                    return;
+                }
                 self.done = true;
                 return;
             }

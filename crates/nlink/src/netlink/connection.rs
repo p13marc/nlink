@@ -7,6 +7,7 @@ use tracing::{instrument, warn};
 use super::{
     builder::MessageBuilder,
     dispatcher::Dispatcher,
+    dump_frame::{Classification, classify},
     error::{Error, Result},
     interface_ref::InterfaceRef,
     message::{
@@ -877,40 +878,33 @@ impl<P: ProtocolState> Connection<P> {
                     let msg_len = header.nlmsg_len as usize;
                     let aligned = nlmsg_align(msg_len);
 
-                    // Check sequence number
-                    if header.nlmsg_seq != seq {
-                        msg_start = msg_start.saturating_add(aligned);
-                        continue;
-                    }
-
-                    // Plan 193 follow-up — surface NLM_F_DUMP_INTR.
-                    // The kernel sets this when the dump iterator's
-                    // underlying data structure was mutated since the
-                    // dump started; per kernel docs the userspace
-                    // should retry. Pre-0.19 nlink silently used the
-                    // inconsistent snapshot. Caller can retry via
-                    // `Error::is_dump_interrupted()`.
-                    if header.is_dump_interrupted() {
-                        return Err(Error::DumpInterrupted);
-                    }
-
-                    if header.is_error() {
-                        let err = NlMsgError::from_bytes(payload)?;
-                        if !err.is_ack() {
-                            return Err(err.into_error(payload));
+                    // Seq filter, torn-snapshot check, error handling
+                    // and the DONE result code all live in one place
+                    // now — they used to be copy-pasted per loop and
+                    // the copies disagreed (#267, #271).
+                    match classify(header, payload, seq) {
+                        Classification::SkipSeq => {
+                            msg_start = msg_start.saturating_add(aligned);
+                            continue;
+                        }
+                        Classification::Ack => {}
+                        Classification::Error(e) => return Err(e),
+                        // A dump that gave up says so in the DONE
+                        // payload, not with NLMSG_ERROR. Returning the
+                        // frames collected so far would be a truncated
+                        // result indistinguishable from a complete one.
+                        Classification::Done(result) => {
+                            result?;
+                            break 'outer;
+                        }
+                        Classification::Data { .. } => {
+                            // Collect the full message (header + payload).
+                            if msg_start + msg_len <= data.len() {
+                                responses.push(data[msg_start..msg_start + msg_len].to_vec());
+                            }
                         }
                     }
-
-                    if header.is_done() {
-                        break 'outer;
-                    }
-
-                    // Collect the full message (header + payload).
-                    if msg_start + msg_len <= data.len() {
-                        responses.push(data[msg_start..msg_start + msg_len].to_vec());
-                    }
                     msg_start = msg_start.saturating_add(aligned);
-                    let _ = payload; // payload still flagged consumed via header check above
                 }
             }
         }
@@ -1043,24 +1037,22 @@ impl<P: ProtocolState> Connection<P> {
                 };
                 let msg_len = header.nlmsg_len as usize;
                 let aligned = nlmsg_align(msg_len);
-                if header.nlmsg_seq != seq {
-                    msg_start = msg_start.saturating_add(aligned);
-                    continue;
-                }
-                if header.is_dump_interrupted() {
-                    return Err(Error::DumpInterrupted);
-                }
-                if header.is_error() {
-                    let err = NlMsgError::from_bytes(payload)?;
-                    if !err.is_ack() {
-                        return Err(err.into_error(payload));
+                match classify(header, payload, seq) {
+                    Classification::SkipSeq => {
+                        msg_start = msg_start.saturating_add(aligned);
+                        continue;
                     }
-                }
-                if header.is_done() {
-                    break 'outer;
-                }
-                if msg_start + msg_len <= data.len() {
-                    responses.push(data[msg_start..msg_start + msg_len].to_vec());
+                    Classification::Ack => {}
+                    Classification::Error(e) => return Err(e),
+                    Classification::Done(result) => {
+                        result?;
+                        break 'outer;
+                    }
+                    Classification::Data { .. } => {
+                        if msg_start + msg_len <= data.len() {
+                            responses.push(data[msg_start..msg_start + msg_len].to_vec());
+                        }
+                    }
                 }
                 msg_start = msg_start.saturating_add(aligned);
             }
@@ -3357,28 +3349,16 @@ impl Connection<Generic> {
                 for result in MessageIter::new(&data) {
                     let (header, payload) = result?;
 
-                    if header.nlmsg_seq != seq {
-                        continue;
-                    }
-
-                    if header.is_dump_interrupted() {
-                        return Err(Error::DumpInterrupted);
-                    }
-
-                    if header.is_error() {
-                        let err = NlMsgError::from_bytes(payload)?;
-                        if !err.is_ack() {
-                            return Err(err.into_error(payload));
+                    match classify(header, payload, seq) {
+                        Classification::SkipSeq | Classification::Ack => continue,
+                        Classification::Error(e) => return Err(e),
+                        Classification::Done(result) => {
+                            result?;
+                            done = true;
+                            break;
                         }
-                        continue;
+                        Classification::Data { payload } => responses.push(payload.to_vec()),
                     }
-
-                    if header.is_done() {
-                        done = true;
-                        break;
-                    }
-
-                    responses.push(payload.to_vec());
                 }
 
                 if done {
