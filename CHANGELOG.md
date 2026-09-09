@@ -147,6 +147,21 @@ All notable changes to this project will be documented in this file.
   Converted to `as_chunks::<N>()`, which turns three infallible-but-unproven
   `try_into().unwrap()` conversions into compile-time facts.
 
+- **`x25519-dalek` 2 → 3 (#247).** No code change was required: 3.0's breaking
+  changes are edition/MSRV, a removed `Zeroize` impl (secrets are still zeroized
+  on drop), removed deprecated `Secret::new()` constructors, and `rand_core`
+  0.10 — none of which this uses, and none of which touch key derivation.
+
+  `bins/wg/src/keys.rs` previously had **no tests**, so nothing stood between a
+  major bump of the curve implementation and silently wrong keys: a public key
+  derived by a subtly different implementation is still 32 plausible bytes that
+  base64-encode and round-trip fine, and produces a tunnel that simply never
+  handshakes. It now carries RFC 7748 §6.1 known-answer tests, which check the
+  changelog's no-derivation-change claim rather than trusting it, plus coverage
+  that clamping the input doesn't move the derived key (X25519 clamps
+  internally, so `genkey`'s clamped output and an unclamped key from another
+  implementation must agree).
+
 - **CI: fleet-standard rollout (myserver#33).** `workflow_dispatch` re-run
   path on CI, tag-input dispatch re-run pattern on the release workflow, a
   `cargo-deny` supply-chain job (new `deny.toml`; advisories, licenses,
