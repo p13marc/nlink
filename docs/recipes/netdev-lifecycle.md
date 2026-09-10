@@ -38,7 +38,8 @@ neither will arrive at all until something changes.
 
 ## The shape
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{
     Connection, KobjectUevent, Route, RtnetlinkGroup,
     netdev::{NetdevEvent, NetdevInfo, NetdevLifecycle},
@@ -69,6 +70,8 @@ while let Some(event) = lifecycle.next().await {
         _ => {}
     }
 }
+# Ok(())
+# }
 ```
 
 `Store` is cheap to clone and shares its backing map, so hand
@@ -112,7 +115,8 @@ annotations mid-rename. During that window
 `NetdevInfo::is_fully_attributed()` returns `false`, so a strict
 consumer can wait it out:
 
-```rust
+```rust,no_run
+# let info: nlink::netlink::netdev::NetdevInfo = unimplemented!();
 if info.is_fully_attributed() {
     // rtnetlink and the uevent agree on the name; the annotation
     // is describing this device and not its predecessor.
@@ -135,8 +139,13 @@ that way.
 Net-device uevents go to the network namespace of the listening
 socket:
 
-```rust
+```rust,no_run
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::Connection;
+# use nlink::netlink::KobjectUevent;
 let uevents = Connection::<KobjectUevent>::in_namespace("tenant-a")?;
+# Ok(())
+# }
 ```
 
 Uevents for every *other* subsystem go only to the initial

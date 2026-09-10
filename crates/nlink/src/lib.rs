@@ -391,3 +391,7 @@ mod serde_tests {
     }
 }
 
+// #319 — the recipes under `docs/recipes/` are compiled as doctests. See
+// `recipe_doctests.rs`; `cfg(doctest)` keeps it out of every normal build.
+#[cfg(doctest)]
+mod recipe_doctests;

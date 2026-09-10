@@ -291,6 +291,9 @@ while let Some(evt) = events.next().await {
         DpllEvent::PinCreated(pin) => {
             tracing::info!(pin = pin.id, "DPLL pin appeared");
         }
+        // `DpllEvent` is `#[non_exhaustive]` — a kernel newer than your
+        // build can send a variant this match has never heard of.
+        _ => {}
     }
 }
 # Ok(())

@@ -60,7 +60,7 @@ Three operations:
 The full lifecycle in one block. Run inside a `LabNamespace` so the
 host's real conntrack table stays untouched.
 
-```no_run
+```rust,no_run
 # async fn demo() -> nlink::Result<()> {
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -153,7 +153,14 @@ When the orig and reply tuples differ — typical for SNAT/DNAT'd flows
 — supply both. The builder will *not* auto-mirror when `reply` is
 explicitly set:
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::netlink::netfilter::ConntrackBuilder;
+# use nlink::netlink::netfilter::ConntrackStatus;
+# use nlink::netlink::netfilter::ConntrackTuple;
+# use nlink::netlink::netfilter::IpProtocol;
+# use nlink::netlink::netfilter::TcpConntrackState;
+# let nf = nlink::Connection::<nlink::netlink::Netfilter>::new()?;
 use std::net::Ipv4Addr;
 
 // Client 10.0.0.5:50000 → public 1.2.3.4:443, NAT'd to 192.168.1.1.
@@ -179,6 +186,8 @@ nf.add_conntrack(
         )
         .tcp_state(TcpConntrackState::Established),
 ).await?;
+# Ok(())
+# }
 ```
 
 The `SRC_NAT` / `DST_NAT` / `*_DONE` flags tell the kernel which side
@@ -191,13 +200,27 @@ If you're running multi-tenant CT with `nft ... ct zone set 5`, scope
 your operations with `.zone(5)` so they only touch that zone's
 table:
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::netlink::netfilter::ConntrackBuilder;
+# use nlink::netlink::netfilter::ConntrackStatus;
+# use nlink::netlink::netfilter::{ConntrackTuple, IpProtocol};
+# use std::net::Ipv4Addr;
+# let nf = nlink::Connection::<nlink::netlink::Netfilter>::new()?;
 nf.add_conntrack(
     ConntrackBuilder::new_v4(IpProtocol::Tcp)
         .zone(5)
-        .orig(/* … */)
+        .orig(
+            ConntrackTuple::v4(
+                Ipv4Addr::new(10, 0, 0, 1),
+                Ipv4Addr::new(10, 0, 0, 2),
+            )
+            .ports(51234, 80),
+        )
         .status(ConntrackStatus::CONFIRMED),
 ).await?;
+# Ok(())
+# }
 ```
 
 There's no `flush_conntrack_by_zone` helper yet — file an issue
@@ -212,7 +235,7 @@ subscribe and submit mutations at the same time without races between
 multicast deliveries and the ACK reply — open two connections, one
 subscribed and one for actions.
 
-```no_run
+```rust,no_run
 # async fn demo() -> nlink::Result<()> {
 use std::time::Duration;
 
@@ -237,6 +260,9 @@ while tokio::time::Instant::now() < deadline {
         }
         Ok(Some(Err(e))) => return Err(e),
         Ok(None) | Err(_) => break,
+        // `ConntrackEvent` is `#[non_exhaustive]`; `Update` is not
+        // matched above either.
+        Ok(Some(Ok(_))) => {}
     }
 }
 # Ok(())
@@ -276,12 +302,18 @@ be consumed by `send_ack` and confuse the seq-matching. Open two
 connections — one subscribed, one for mutations — and route them
 through the same namespace if needed:
 
-```rust,ignore
+```rust,no_run
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::Connection;
+# use nlink::netlink::Netfilter;
+# use nlink::netlink::netfilter::ConntrackGroup;
 let ns = nlink::lab::LabNamespace::new("ct-watch")?;
 let mut sub: Connection<Netfilter> = ns.connection_for()?;
 sub.subscribe(&[ConntrackGroup::New, ConntrackGroup::Destroy])?;
 let act: Connection<Netfilter> = ns.connection_for()?;
 // ... use sub for events, act for add/del.
+# Ok(())
+# }
 ```
 
 The `examples/netfilter/conntrack_events.rs --apply` runner exercises

@@ -50,7 +50,7 @@ other. In production you'd replace that with real IP reachability.
 Requires the `lab` feature for `nlink::lab::{LabNamespace, LabBridge,
 LabVeth}`.
 
-```no_run
+```rust,no_run
 # async fn demo() -> nlink::Result<()> {
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 
@@ -168,7 +168,11 @@ println!("a -> b handshake: {}", String::from_utf8_lossy(&out.stdout));
 Each peer's `get_device` dump shows the last-handshake timestamp and
 byte counters once traffic flows:
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::Connection;
+# use nlink::Wireguard;
+# let wga: nlink::lab::LabNamespace = unimplemented!();
 let wg: Connection<Wireguard> = wga.connection_for_async().await?;
 let dev = wg.get_device("wg0").await?;
 for peer in &dev.peers {
@@ -180,6 +184,8 @@ for peer in &dev.peers {
         peer.tx_bytes,
     );
 }
+# Ok(())
+# }
 ```
 
 `last_handshake == None` means the peer hasn't handshaken yet

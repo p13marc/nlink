@@ -64,7 +64,7 @@ Two stateful pillars:
 
 ## Code
 
-```no_run
+```rust,no_run
 # async fn demo() -> nlink::Result<()> {
 use std::net::Ipv4Addr;
 
@@ -150,7 +150,7 @@ Sets give you O(1) lookup and let you mutate the membership list without
 rebuilding rules. Add the set in the same transaction (or after — sets
 can be added/extended live):
 
-```no_run
+```rust,no_run
 # async fn demo() -> nlink::Result<()> {
 # use std::net::Ipv4Addr;
 # use nlink::netlink::Connection;
@@ -193,7 +193,7 @@ table — same source the kernel consults for the
 `ct state established,related` match. Useful for asserting that a flow
 landed where you expected it:
 
-```no_run
+```rust,no_run
 # async fn demo() -> nlink::Result<()> {
 use nlink::netlink::{Connection, Netfilter};
 use nlink::netlink::netfilter::IpProtocol;
@@ -227,7 +227,7 @@ To see the firewall actually drop unsolicited traffic, set up three
 namespaces — a WAN side, a router (where the firewall lives), and a
 LAN client — then probe across:
 
-```no_run
+```rust,no_run
 # async fn demo() -> nlink::Result<()> {
 use nlink::lab::{LabNamespace, LabVeth};
 use nlink::netlink::Connection;
@@ -313,7 +313,7 @@ state. The counters are conntrack data, surfaced via the standard
 ctnetlink dump:
 
 ```rust,no_run
-use nlink::{Connection, Netfilter};
+use nlink::netlink::{Connection, Netfilter};
 use nlink::netlink::netfilter::ConntrackStatus;
 use tokio_stream::StreamExt;
 
@@ -323,6 +323,8 @@ let mut stream = conn.stream_conntrack(libc::AF_INET as u8).await?;
 while let Some(entry) = stream.next().await {
     let entry = entry?;
     let Some(status) = entry.status else { continue };
+    // The entry carries raw bits; `from_bits` puts the typed flags back on.
+    let status = ConntrackStatus::from_bits(status);
 
     // IPS_OFFLOAD (sw fastpath) or IPS_HW_OFFLOAD (NIC offload).
     if !status.contains(ConntrackStatus::OFFLOAD)

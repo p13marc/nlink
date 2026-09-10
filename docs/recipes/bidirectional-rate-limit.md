@@ -57,7 +57,7 @@ you need custom filter predicates.
 
 ## Code: symmetric 100 Mbps
 
-```no_run
+```rust,no_run
 # async fn demo() -> nlink::Result<()> {
 use nlink::Rate;
 use nlink::netlink::{Connection, Route};
@@ -78,7 +78,12 @@ RateLimiter::new("eth0")
 
 ## Code: asymmetric 50/10 Mbps (DSL-style)
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::Rate;
+# use nlink::netlink::ratelimit::RateLimiter;
+# use std::time::Duration;
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 RateLimiter::new("eth0")
     .egress(Rate::mbit(10))
     .ingress(Rate::mbit(50))
@@ -86,6 +91,8 @@ RateLimiter::new("eth0")
     .latency(Duration::from_millis(30))
     .apply(&conn)
     .await?;
+# Ok(())
+# }
 ```
 
 `burst_to` sets the HTB `ceil` so the shaper can briefly overshoot the
@@ -94,9 +101,14 @@ slow links.
 
 ## Code: teardown
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::netlink::ratelimit::RateLimiter;
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 // Removes root qdiscs on both eth0 *and* ifb_eth0, and deletes the IFB.
 RateLimiter::new("eth0").remove(&conn).await?;
+# Ok(())
+# }
 ```
 
 ## Combining with per-host limits
@@ -105,7 +117,9 @@ RateLimiter::new("eth0").remove(&conn).await?;
 gets 10 Mbps but the interface overall caps at 1 Gbps", stack
 `PerHostLimiter` on egress + `RateLimiter` on ingress:
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 use nlink::netlink::ratelimit::{PerHostLimiter, RateLimiter};
 use nlink::Rate;
 
@@ -117,6 +131,8 @@ PerHostLimiter::new("eth0", Rate::mbit(10))
 // Device-level ingress cap (not amenable to per-host on download
 // without matching on conntrack; keep it simple).
 RateLimiter::new("eth0").ingress(Rate::mbit(1_000)).apply(&conn).await?;
+# Ok(())
+# }
 ```
 
 Note: `RateLimiter::apply` is destructive on the root qdiscs of the
@@ -128,7 +144,9 @@ filters/classes on top, not the other way round.
 
 Dump the qdisc tree to confirm:
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 use nlink::TcHandle;
 
 let qdiscs = conn.get_qdiscs_by_name("eth0").await?;
@@ -140,6 +158,8 @@ let ifb_qdiscs = conn.get_qdiscs_by_name("ifb_eth0").await?;
 for q in &ifb_qdiscs {
     println!("ifb_eth0: {} handle={}", q.kind().unwrap_or("?"), q.handle_str());
 }
+# Ok(())
+# }
 ```
 
 Expect:
@@ -181,7 +201,9 @@ If you need non-default filters (e.g. "only shape traffic matching a
 specific flow label"), skip `RateLimiter` and construct the pipeline
 manually. Sketch:
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 use nlink::netlink::link::IfbLink;
 use nlink::netlink::tc::{IngressConfig, HtbQdiscConfig, HtbClassConfig, FqCodelConfig};
 use nlink::netlink::filter::MatchallFilter;
@@ -202,18 +224,27 @@ conn.add_class(
     HtbClassConfig::new(Rate::mbit(10)).ceil(Rate::mbit(10)).build(),
 ).await?;
 
-// 3. Ingress qdisc + mirred redirect to IFB.
+// 3. Ingress qdisc + mirred redirect to IFB. Resolve the IFB's index
+//    through the connection — mirred takes an ifindex, and a name would
+//    be read from the caller's namespace rather than the connection's.
+let ifb = conn
+    .get_link_by_name("ifb_eth0")
+    .await?
+    .expect("ifb_eth0 was created above")
+    .ifindex();
 conn.add_qdisc("eth0", IngressConfig::new()).await?;
 conn.add_filter(
     "eth0", TcHandle::INGRESS,
     MatchallFilter::new().actions(
         nlink::netlink::action::ActionList::new()
-            .with(MirredAction::redirect_egress("ifb_eth0")),
+            .with(MirredAction::redirect_by_index(ifb)),
     ).build(),
 ).await?;
 
 // 4. Egress shaping on the IFB — same HTB + fq_codel pattern.
 // ...
+# Ok(())
+# }
 ```
 
 Everything `RateLimiter` does is built from public APIs — look at

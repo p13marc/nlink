@@ -23,7 +23,8 @@ Don't use it when:
 
 ## High-level API
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route, namespace};
 use nlink::netlink::impair::{PerPeerImpairer, PeerImpairment};
 use nlink::netlink::tc::NetemConfig;
@@ -57,6 +58,8 @@ PerPeerImpairer::new("vethA-br")
     // Subnet-level fallback for the rest of the bridge.
     .default_impairment(NetemConfig::new().delay(Duration::from_millis(2)).build())
     .apply(&conn).await?;
+# Ok(())
+# }
 ```
 
 `apply()` is *destructive* on the device's root qdisc — it removes any
@@ -65,8 +68,13 @@ classes added by other tools at the root will be wiped.
 
 To remove the impairment:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::PerPeerImpairer;
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 PerPeerImpairer::new("vethA-br").clear(&conn).await?;
+# Ok(())
+# }
 ```
 
 `clear()` is idempotent.
@@ -110,7 +118,7 @@ parent class lets every peer use its full pipe.
 
 To layer a per-peer rate cap on top of the impairment:
 
-```rust
+```text
 .impair_dst_ip(
     peer_addr,
     PeerImpairment::new(netem).rate_cap(Rate::mbit(50)),
@@ -119,9 +127,11 @@ To layer a per-peer rate cap on top of the impairment:
 
 Override the default via:
 
-```rust
-PerPeerImpairer::new("vethA-br")
-    .assumed_link_rate(Rate::gbit(1000)) // 1 Tbps
+```rust,no_run
+# use nlink::netlink::impair::PerPeerImpairer;
+# use nlink::Rate;
+let impairer = PerPeerImpairer::new("vethA-br")
+    .assumed_link_rate(Rate::gbit(1000)); // 1 Tbps
 ```
 
 ## Symmetric vs. asymmetric
@@ -174,7 +184,16 @@ minimum set of `add_*` / `change_*` / `del_*` operations. When nothing
 has changed, it makes **zero** kernel calls; when only one peer's
 delay changes, it `change_qdisc`'s a single leaf.
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use std::time::Duration;
+# use nlink::netlink::impair::PerPeerImpairer;
+# use tracing::{info, warn};
+# let conn = nlink::Connection::<nlink::Route>::new()?;
+# let latest_config = ();
+# fn build_impairer_from_config(_cfg: &()) -> PerPeerImpairer {
+#     PerPeerImpairer::new("vethA-br")
+# }
 loop {
     let desired = build_impairer_from_config(&latest_config);
     let report = desired.reconcile(&conn).await?;
@@ -196,6 +215,8 @@ loop {
     }
     tokio::time::sleep(Duration::from_secs(10)).await;
 }
+# Ok(())
+# }
 ```
 
 Key contract differences from `apply()`:
@@ -234,7 +255,8 @@ If you need a custom topology — e.g. mixed per-peer rates and shared
 parent rate caps, or BPF dispatching — here's the minimum to do the
 same thing manually with nlink primitives:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::{Percent, Rate, TcHandle};
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::filter::FlowerFilter;
@@ -280,6 +302,8 @@ conn.add_filter(dev, TcHandle::major_only(1),
 ).await?;
 
 // ...repeat for additional peers, then default class 1:ff.
+# Ok(())
+# }
 ```
 
 The helper exists so consumers don't have to repeat this; reach for it

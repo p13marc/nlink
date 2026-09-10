@@ -90,8 +90,14 @@ let pools: Vec<Arc<ConnectionPool<Route>>> = {
 let dumps = pools.iter().enumerate().map(|(i, pool)| {
     let pool = Arc::clone(pool);
     tokio::spawn(async move {
-        let conn = pool.acquire().await?;
-        (i, conn.get_links().await)
+        // The spawned block returns a value, not a `Result`, so the
+        // acquire is matched rather than `?`-ed — a `?` here would need
+        // the whole task to be fallible.
+        let conn = pool.acquire().await;
+        (i, match conn {
+            Ok(conn) => conn.get_links().await,
+            Err(e) => Err(e),
+        })
     })
 });
 // ... await dumps and aggregate ...

@@ -44,6 +44,12 @@
 //! [nlink]: https://docs.rs/nlink
 //! [recipe]: https://github.com/p13marc/nlink/blob/master/docs/recipes/define-your-own-genl-family.md
 //! [example]: https://github.com/p13marc/nlink/blob/master/crates/nlink/examples/macros/define_taskstats.rs
+//!
+//! Doc examples in this crate are ```` ```text ````, not compiled: they show
+//! the derives being *applied*, which needs both this crate and `nlink` in
+//! scope, and `nlink-macros` cannot depend on `nlink` without a cycle. The
+//! compiled versions live in `nlink`'s own documentation and in
+//! `crates/nlink/examples/macros/define_taskstats.rs`.
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -74,7 +80,7 @@ mod netlink_attrs;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// use nlink_macros::GenlCommand;
 ///
 /// #[derive(GenlCommand, Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,7 +130,7 @@ pub fn derive_genl_command(input: TokenStream) -> TokenStream {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// use nlink_macros::GenlAttribute;
 ///
 /// #[derive(GenlAttribute, Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,7 +165,7 @@ pub fn derive_genl_attribute(input: TokenStream) -> TokenStream {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// use nlink_macros::GenlEnum;
 ///
 /// // 1-based (the common kernel convention).
@@ -221,7 +227,7 @@ pub fn derive_genl_enum(input: TokenStream) -> TokenStream {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// use nlink::macros::*;
 ///
 /// #[derive(GenlCommand, Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,7 +278,7 @@ pub fn derive_genl_message(input: TokenStream) -> TokenStream {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// use nlink::macros::*;
 ///
 /// #[derive(NetlinkAttrs, Debug, Default)]
@@ -316,7 +322,7 @@ pub fn derive_netlink_attrs(input: TokenStream) -> TokenStream {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// use nlink::macros::genl_family;
 ///
 /// #[genl_family(name = "my_family", version = 1)]
