@@ -19,12 +19,19 @@
 # doctest cannot call. `compile_fail` and `should_panic` are fine: rustdoc
 # compiles both.
 #
+# Scope is every doc comment the crate ships — `src/`, the examples, the
+# proc-macro crate and the bins — plus `docs/recipes/`, whose markdown is
+# compiled as doctests through `src/recipe_doctests.rs` (#319). An example's
+# module docs are documentation like any other; one `ignore` had already
+# slipped through by living in `examples/` rather than `src/`.
+#
 # What counts as a hit: ```ignore, and ```rust,ignore in any attribute order.
 
 set -euo pipefail
 
 hits=$(grep -rnE '^\s*(///|//!)?\s*```[a-z_,]*\bignore\b' \
-    crates/nlink/src --include='*.rs' 2>/dev/null || true)
+    crates/nlink/src crates/nlink/examples crates/nlink-macros bins \
+    docs/recipes --include='*.rs' --include='*.md' 2>/dev/null || true)
 
 if [ -n "$hits" ]; then
     echo "audit-doc-examples: \`\`\`ignore doc example(s) found."

@@ -34,7 +34,7 @@ installs:
 - One **inbound SP** (ingress policy) — selector matches our
   subnet from their direction.
 
-```
+```text
                 bridge-ipsec
                      │
        ┌─────────────┼─────────────┐
@@ -54,7 +54,7 @@ within a kernel namespace. Pick distinct SPIs per direction.
 
 ## Code: install both ends
 
-```rust
+```rust,no_run
 use std::net::IpAddr;
 
 use nlink::lab::{LabNamespace, with_namespace};
@@ -148,7 +148,10 @@ the namespace and its XFRM tables on the way out.
 
 After the install, dump from inside either namespace:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::Connection;
+# use nlink::netlink::Xfrm;
 let conn = Connection::<Xfrm>::new()?;
 for sa in conn.get_security_associations().await? {
     println!("SA: spi=0x{:08x} reqid={} mode={:?}", sa.spi, sa.reqid, sa.mode);
@@ -156,6 +159,8 @@ for sa in conn.get_security_associations().await? {
 for sp in conn.get_security_policies().await? {
     println!("SP: dir={:?} prio={} action={:?}", sp.direction, sp.priority, sp.action);
 }
+# Ok(())
+# }
 ```
 
 Or under sudo, use `ip xfrm state` / `ip xfrm policy` to see the
@@ -168,13 +173,26 @@ same tables.
 for rotating keys without a delete-then-add gap that would
 leave traffic unprotected:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::netlink::xfrm::IpsecProtocol;
+# use nlink::netlink::xfrm::XfrmMode;
+# use nlink::netlink::xfrm::XfrmSaBuilder;
+# let conn = nlink::Connection::<nlink::netlink::Xfrm>::new()?;
+# let site_addr = std::net::IpAddr::from([192, 0, 2, 1]);
+# let peer_addr = std::net::IpAddr::from([198, 51, 100, 1]);
+# let out_spi = 0x1000u32;
+# let NEW_AUTH_KEY = [0u8; 32];
+# let NEW_ENCR_KEY = [0u8; 32];
+# let REQID = 1u32;
 let rotated = XfrmSaBuilder::new(site_addr, peer_addr, out_spi, IpsecProtocol::Esp)
     .mode(XfrmMode::Tunnel)
     .reqid(REQID)
     .auth_hmac_sha256(&NEW_AUTH_KEY)
     .encr_aes_cbc(&NEW_ENCR_KEY);
 conn.update_sa(rotated).await?;
+# Ok(())
+# }
 ```
 
 For atomic key rotation across both peers, a real deployment
@@ -243,7 +261,8 @@ second connection to the XFRM multicast groups and prints the
 abstraction that dumps tables can stream live notifications —
 the programmatic equivalent of `ip xfrm monitor`:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Xfrm};
 use nlink::netlink::xfrm::{XfrmEvent, XfrmGroup};
 use tokio_stream::StreamExt;
@@ -263,6 +282,8 @@ while let Some(evt) = events.next().await {
         other => println!("{other:?}"),
     }
 }
+# Ok(())
+# }
 ```
 
 `subscribe_all()` joins every `XFRMNLGRP_*` group (SA, policy,

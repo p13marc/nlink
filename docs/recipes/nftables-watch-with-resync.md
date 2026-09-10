@@ -22,7 +22,7 @@ get an ENOBUFS-resilient `Stream<Item = Result<ResyncedEvent<NftablesEvent>>>`.
 
 ## API at a glance
 
-```rust
+```rust,no_run
 use std::sync::Arc;
 use nlink::netlink::{Connection, Nftables};
 use nlink::netlink::nftables::NftablesEvent;
@@ -44,7 +44,7 @@ async fn main() -> nlink::Result<()> {
     while let Some(item) = events.next().await {
         match item? {
             ResyncedEvent::Event(NftablesEvent::NewTable(t)) => {
-                println!("+ table {} ({})", t.name, t.family);
+                println!("+ table {} ({:?})", t.name, t.family);
             }
             ResyncedEvent::Event(NftablesEvent::DelTable(t)) => {
                 println!("- table {}", t.name);
@@ -78,12 +78,20 @@ running, the connection is owned by it. If you need to keep the
 connection around for queries (e.g. running `list_tables` ad-hoc
 from the same task), use the borrowed sibling:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use std::sync::Arc;
+# use nlink::netlink::{Connection, Nftables};
+# use nlink::netlink::resync::ConnectionFactory;
+# let factory: ConnectionFactory<Nftables> =
+#     Arc::new(|| Box::pin(async { Connection::<Nftables>::new() }));
 let mut conn = Connection::<Nftables>::new()?;
-let mut events = conn.subscribe_all_with_resync(factory)?;
+let mut events = conn.subscribe_all_with_resync(factory).await?;
 // `conn` is borrowed by `events` for its lifetime; drop the stream
 // to recover access. The stream is NOT 'static, so it can't be
 // `tokio::spawn`-ed — that's the trade-off.
+# Ok(())
+# }
 ```
 
 ## Namespace-aware factory
@@ -92,7 +100,10 @@ In a multi-tenant manager / CNI plugin, the factory should open
 the new connection inside the same netns as the original
 subscribe socket:
 
-```rust
+```rust,no_run
+# use nlink::ConnectionFactory;
+# use nlink::Nftables;
+# use std::sync::Arc;
 let netns_name = "tenant-a".to_string();
 let factory: ConnectionFactory<Nftables> = Arc::new(move || {
     let ns = netns_name.clone();

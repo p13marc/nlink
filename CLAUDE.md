@@ -633,6 +633,14 @@ Full conventions in `docs/observability.md`.
 
 ## Cookbook
 
+Every recipe under `docs/recipes/` is **compiled**: `src/recipe_doctests.rs`
+pulls each file in with `#[doc = include_str!]` under `#[cfg(doctest)]`, so
+rustdoc builds every fenced Rust block as a doctest (#319). A block that is a
+fragment or a diagram is ```` ```text ````; anything marked `rust` has to
+compile. This replaced `audit-recipe-drift.sh`, a grep for known-stale
+shapes — every pattern it looked for is a compile error now. When you write
+a recipe, add its module to `recipe_doctests.rs`.
+
 When the user asks "how do I X" and X is one of these, link the
 recipe rather than re-synthesizing:
 

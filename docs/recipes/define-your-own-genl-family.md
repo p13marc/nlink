@@ -36,15 +36,27 @@ Once these are in place, the generic
 
 The end shape:
 
-```rust,ignore
+```text
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::Connection;
 let conn = Connection::<MyFamily>::new_async().await?;
 let reply: MyReply = conn.send_typed(MyRequest { id: 7 }).await?;
+# Ok(())
+# }
 ```
 
 No `MessageBuilder`, no `GenlMsgHdr::new(...)`, no `AttrIter`,
 no `family_id()` lookup — the macros emit all of it.
 
 ## Complete walkthrough — taskstats
+
+> The step-by-step blocks below are ```` ```text ````: each is an excerpt of
+> one file being built up, so none compiles on its own, and repeating the
+> earlier declarations in every block would put more elided setup in the
+> recipe than recipe. The finished file is compiled on every build as
+> [`crates/nlink/examples/macros/define_taskstats.rs`](../../crates/nlink/examples/macros/define_taskstats.rs)
+> — read that if you want the version the compiler checks.
+
 
 Working file:
 [`crates/nlink/examples/macros/define_taskstats.rs`](../../crates/nlink/examples/macros/define_taskstats.rs).
@@ -54,7 +66,7 @@ example for the macro stack.
 
 ### 1. Family marker
 
-```rust,ignore
+```rust,no_run
 use nlink::macros::*;
 use nlink::netlink::Connection;
 
@@ -82,7 +94,7 @@ That one attribute expands to:
 
 ### 2. Typed command + attribute enums
 
-```rust,ignore
+```text
 #[derive(GenlCommand, Debug, Clone, Copy, PartialEq, Eq)]
 #[genl_command(repr = "u8")]
 pub enum TaskstatsCmd {
@@ -121,7 +133,7 @@ because that's the GENL header's `cmd` field width.
 
 ### 3. Request body
 
-```rust,ignore
+```text
 #[derive(GenlMessage, Debug, Default)]
 #[genl_message(cmd = TaskstatsCmd::Get)]
 pub struct TaskstatsGet {
@@ -158,7 +170,7 @@ follow-up.
 
 ### 4. Reply body
 
-```rust,ignore
+```text
 #[derive(GenlMessage, Debug, Default)]
 #[genl_message(cmd = TaskstatsCmd::New)]
 pub struct TaskstatsReply {
@@ -181,7 +193,8 @@ parse errors. That matches every other nlink parser's behavior.
 
 ### 5. Drive it
 
-```rust,ignore
+```text
+# use nlink::Connection;
 #[tokio::main]
 async fn main() -> nlink::Result<()> {
     let conn = Connection::<Taskstats>::new_async().await?;
@@ -206,7 +219,9 @@ parses the first non-ACK reply.
 For dump-shape kernels (`*_CMD_GET` + `NLM_F_DUMP` returning many
 frames), use `dump_typed_stream`:
 
-```rust,ignore
+```text
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 use tokio_stream::StreamExt;
 
 let mut stream = conn.dump_typed_stream::<MyDumpReq, MyReply>(req).await?;
@@ -214,6 +229,8 @@ while let Some(item) = stream.next().await {
     let row = item?;
     process(row);
 }
+# Ok(())
+# }
 ```
 
 ## Errors

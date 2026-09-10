@@ -52,7 +52,7 @@ chosen key — here, the namespace name.
 
 ## Code
 
-```no_run
+```rust,no_run
 # async fn demo() -> nlink::Result<()> {
 use nlink::netlink::{
     Connection, NetworkEvent, Route, RtnetlinkGroup, namespace,
@@ -93,7 +93,7 @@ while let Some((ns, result)) = streams.next().await {
             println!("[{ns}] link gone: {}", link.name_or("?"));
         }
         NetworkEvent::NewAddress(addr) => {
-            println!("[{ns}] addr added on ifindex {}: {:?}", addr.ifindex, addr.address);
+            println!("[{ns}] addr added on ifindex {}: {:?}", addr.ifindex(), addr.address());
         }
         NetworkEvent::NewQdisc(tc) => {
             println!("[{ns}] qdisc: {} on ifindex {}", tc.kind().unwrap_or("?"), tc.ifindex());
@@ -123,13 +123,18 @@ unrelated events. The `RtnetlinkGroup` enum covers:
 Address-family rules are split across two groups, so a tool that only
 cares about routing changes can skip `Link` + `Neigh` + `Tc`:
 
-```rust,ignore
+```rust,no_run
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::RtnetlinkGroup;
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 conn.subscribe(&[
     RtnetlinkGroup::Ipv4Route,
     RtnetlinkGroup::Ipv6Route,
     RtnetlinkGroup::Ipv4Rule,
     RtnetlinkGroup::Ipv6Rule,
 ])?;
+# Ok(())
+# }
 ```
 
 ## Adding / removing namespaces at runtime
@@ -143,7 +148,7 @@ appears:
 
 [nswatch]: https://docs.rs/nlink/latest/nlink/netlink/struct.NamespaceWatcher.html
 
-```no_run
+```rust,no_run
 # async fn demo() -> nlink::Result<()> {
 # use nlink::netlink::{Connection, NetworkEvent, Route, namespace, NamespaceEvent, NamespaceWatcher};
 # use tokio_stream::{StreamExt, StreamMap};

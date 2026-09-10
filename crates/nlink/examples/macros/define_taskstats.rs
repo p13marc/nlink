@@ -9,7 +9,7 @@
 //!
 //! The headline shape is:
 //!
-//! ```ignore
+//! ```text
 //! let conn = Connection::<Taskstats>::new_async().await?;
 //! let reply: TaskstatsReply =
 //!     conn.send_typed(TaskstatsGet { pid: std::process::id() }).await?;

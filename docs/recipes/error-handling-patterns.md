@@ -132,15 +132,15 @@ success:
 
 ```rust,no_run
 # async fn run(conn: &nlink::Connection<nlink::Route>) -> nlink::Result<()> {
-match conn.del_link_by_name("test0").await {
-    Ok(()) | Err(_) if conn.del_link_by_name("test0")
-        .await
-        .err()
-        .is_some_and(|e| e.is_not_found()) => Ok(()),
+match conn.del_link("test0").await {
     Ok(()) => Ok(()),
     Err(e) if e.is_not_found() => Ok(()),
     Err(e) => Err(e),
 }?;
+
+// Or let the library do it: `del_link_if_exists` is this match,
+// and returns whether anything was actually removed.
+let existed = conn.del_link_if_exists("test0").await?;
 # Ok(())
 # }
 ```
@@ -158,11 +158,11 @@ spi, proto)` for SAs and `(selector, dir)` for SPs. Two patterns:
 **Replace** when you control the SA and want to rotate keys:
 
 ```rust,no_run
-# async fn run(conn: &nlink::Connection<nlink::netlink::protocol::Xfrm>) -> nlink::Result<()> {
-# let new_sa = unimplemented!();
+# async fn run(conn: &nlink::Connection<nlink::netlink::Xfrm>) -> nlink::Result<()> {
+# let new_sa: nlink::netlink::xfrm::XfrmSaBuilder = unimplemented!();
 // `update_sa` replaces an existing SA in place — no
 // delete-then-add window where traffic would drop.
-conn.update_sa(&new_sa).await?;
+conn.update_sa(new_sa).await?;
 # Ok(())
 # }
 ```
@@ -171,16 +171,22 @@ conn.update_sa(&new_sa).await?;
 another process) and you need to take it over:
 
 ```rust,no_run
-# async fn run(conn: &nlink::Connection<nlink::netlink::protocol::Xfrm>) -> nlink::Result<()> {
-# let dst = unimplemented!();
-# let spi = 0;
-# let proto = 50;
-# let new_sa = unimplemented!();
-// Tolerate "wasn't there" so the routine is idempotent.
-match conn.del_sa(&dst, spi, proto).await {
-    Ok(()) | Err(_) => {}
+# async fn run(conn: &nlink::Connection<nlink::netlink::Xfrm>) -> nlink::Result<()> {
+# use nlink::netlink::xfrm::IpsecProtocol;
+# let src = std::net::IpAddr::from([192, 0, 2, 1]);
+# let dst = std::net::IpAddr::from([198, 51, 100, 1]);
+# let spi = 0x1000u32;
+# let proto = IpsecProtocol::Esp;
+# let new_sa: nlink::netlink::xfrm::XfrmSaBuilder = unimplemented!();
+// Tolerate "wasn't there" so the routine is idempotent — but only
+// that. `Err(_) => {}` would swallow EPERM and a broken socket too,
+// and the add below would then fail with a less useful error.
+match conn.del_sa(src, dst, spi, proto).await {
+    Ok(()) => {}
+    Err(e) if e.is_not_found() => {}
+    Err(e) => return Err(e),
 }
-conn.add_sa(&new_sa).await?;
+conn.add_sa(new_sa).await?;
 # Ok(())
 # }
 ```

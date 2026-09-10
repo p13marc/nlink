@@ -33,7 +33,7 @@ For other classification angles see:
 
 ## High-level approach
 
-```
+```text
 ┌──────────────────────────────────────────────────┐
 │ /sys/fs/cgroup/net_cls/                          │
 │   ├── tenant-gold/                               │
@@ -64,7 +64,7 @@ For other classification angles see:
 
 ## Code
 
-```rust
+```rust,no_run
 use nlink::netlink::action::GactAction;
 use nlink::netlink::filter::CgroupFilter;
 use nlink::netlink::tc::{HtbClassConfig, HtbQdiscConfig};
@@ -181,7 +181,8 @@ gold tenant's HTTP traffic differently from their SSH" — pair
 the cgroup classid with an L4 match using `BasicFilter`'s
 ematch tree:
 
-```rust
+```rust,no_run
+# use nlink::TcHandle;
 use nlink::netlink::filter::{
     BasicFilter, CmpAlign, CmpLayer, CmpOp, Ematch, EmatchCmp,
 };

@@ -79,9 +79,8 @@ nlink ships the types that make this pattern explicit
 ## Canonical loop
 
 ```rust,no_run
-use nlink::{Connection, Route, ResyncedEvent, ResyncMarker};
-use nlink::netlink::messages::LinkMessage;
-use nlink::netlink::stream::EventSubscription;
+use nlink::netlink::EventSubscription;
+use nlink::{Connection, NetworkEvent, ResyncMarker, ResyncedEvent, Route};
 use tokio_stream::StreamExt;
 
 # async fn consume(
@@ -110,7 +109,8 @@ loop {
             // (Plan 159) so we don't have to manage a second
             // socket by hand.
             for link in dump_conn.get_links().await? {
-                apply(&mut state, ResyncedEvent::Resynced(link));
+                let ev = NetworkEvent::NewLink(link);
+                apply(&mut state, ResyncedEvent::Resynced(ev));
             }
 
             apply(&mut state, ResyncedEvent::Marker(ResyncMarker::ResyncEnd));
@@ -125,7 +125,7 @@ loop {
     }
 }
 
-# fn apply(s: &mut std::collections::HashMap<u32, String>, ev: ResyncedEvent<nlink::netlink::link::LinkMessage>) { let _ = (s, ev); }
+# fn apply(s: &mut std::collections::HashMap<u32, String>, ev: ResyncedEvent<NetworkEvent>) { let _ = (s, ev); }
 # }
 ```
 
@@ -145,7 +145,10 @@ machine inside a `Stream` impl so your consumer is a plain
 use std::pin::Pin;
 use std::sync::Arc;
 use nlink::netlink::resync::events_with_resync;
-use nlink::{ConnectionPool, Connection, Route, ResyncedEvent, ResyncMarker};
+use nlink::{
+    Connection, ConnectionPool, NetworkEvent, ResyncMarker, ResyncedEvent, Route,
+    RtnetlinkGroup,
+};
 use nlink::netlink::messages::LinkMessage;
 use tokio_stream::StreamExt;
 
@@ -154,14 +157,20 @@ let events_conn: Connection<Route> = Connection::<Route>::new()?;
 let dump_pool: Arc<ConnectionPool<Route>> =
     Arc::new(ConnectionPool::<Route>::for_namespace("myns", 2).await?);
 
-let live = events_conn.subscribe_links().await?;
+// `subscribe` selects the multicast groups; `events()` hands back the
+// stream. (There is no `subscribe_links()` — the group list is the knob.)
+events_conn.subscribe(&[RtnetlinkGroup::Link])?;
+let live = events_conn.events().await;
 
 let snapshot_pool = Arc::clone(&dump_pool);
 let stream = events_with_resync(live, move || {
     let pool = Arc::clone(&snapshot_pool);
     Box::pin(async move {
         let conn = pool.acquire().await?;
-        conn.get_links().await
+        // The snapshot has to yield what the live stream yields, so the
+        // two halves of `ResyncedEvent` line up.
+        let links = conn.get_links().await?;
+        Ok(links.into_iter().map(NetworkEvent::NewLink).collect())
     }) as Pin<Box<_>>
 });
 tokio::pin!(stream);
@@ -172,6 +181,7 @@ while let Some(item) = stream.next().await {
         ResyncedEvent::Resynced(_) => { /* replayed from snapshot */ }
         ResyncedEvent::Marker(ResyncMarker::ResyncStart) => { /* invalidate state */ }
         ResyncedEvent::Marker(ResyncMarker::ResyncEnd)   => { /* state rebuilt */ }
+        _ => {}
     }
 }
 # Ok(()) }

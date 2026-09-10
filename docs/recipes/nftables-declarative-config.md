@@ -189,7 +189,10 @@ If you genuinely want full-reconcile semantics — every table not
 in the config removed — opt in explicitly, and look at the diff
 before you apply it:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let conn = nlink::Connection::<nlink::netlink::Nftables>::new()?;
+# let cfg = nlink::netlink::nftables::config::NftablesConfig::new();
 use nlink::netlink::nftables::config::NftDiffOptions;
 
 let diff = cfg
@@ -198,6 +201,8 @@ let diff = cfg
 
 println!("{diff}");   // the `-` lines are tables about to be destroyed
 diff.apply(&conn).await?;
+# Ok(())
+# }
 ```
 
 `list_tables()` is unscoped and there is no ownership marker, so
@@ -215,7 +220,7 @@ if removed from the config), and a set present on both sides gets
 a real **element-level diff** — only the missing keys are added
 and the undeclared ones removed:
 
-```rust
+```rust,no_run
 # use nlink::{Connection, Nftables};
 # use nlink::netlink::nftables::config::NftablesConfig;
 # use nlink::netlink::nftables::types::{Family, SetKeyType};
@@ -275,10 +280,11 @@ use std::time::Duration;
 # use nlink::netlink::nftables::config::{NftablesConfig, NftablesDiff};
 # use nlink::{Connection, Nftables};
 # async fn run(diff: NftablesDiff, conn: &Connection<Nftables>) -> nlink::Result<()> {
-let opts = ReconcileOptions {
-    max_retries: 5,
-    backoff: Duration::from_millis(50),
-};
+// `ReconcileOptions` is `#[non_exhaustive]`, so it is built with the
+// `with`-style setters rather than a struct literal.
+let opts = ReconcileOptions::default()
+    .max_retries(5)
+    .backoff(Duration::from_millis(50));
 let report = diff.apply_reconcile(conn, opts).await?;
 if report.attempts > 1 {
     tracing::warn!(
@@ -331,10 +337,13 @@ builders (that's what `parse_ruleset` does). To load from
 TOML/YAML/JSON, define your own schema and map it onto the
 builder:
 
-```rust,ignore
+```rust,no_run
+# use nlink::NftablesConfig;
+# use nlink::netlink::nftables::Family;
 // In your crate, wrap a serde schema that lowers into NftablesConfig.
 #[derive(serde::Deserialize)]
 struct FirewallConfig {
+    table_name: String,
     // ... your own schema fields ...
 }
 
@@ -343,7 +352,7 @@ impl FirewallConfig {
         NftablesConfig::new().table(
             &self.table_name,
             Family::Inet,
-            |t| { /* ... map your schema to the builder ... */ },
+            |t| t, // ... map your schema onto the builder, then return it
         )
     }
 }

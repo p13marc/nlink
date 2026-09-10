@@ -45,7 +45,7 @@ Three pieces:
 
 ## Code
 
-```no_run
+```rust,no_run
 # async fn demo() -> nlink::Result<()> {
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::bridge_vlan::BridgeVlanBuilder;
@@ -90,7 +90,7 @@ for port in ["uplink", "access-10", "access-20", "range"] {
     for v in &vlans {
         println!(
             "  vid={} pvid={} untagged={}",
-            v.vid, v.flags.pvid, v.flags.untagged,
+            v.vid(), v.flags().pvid, v.flags().untagged,
         );
     }
 }
@@ -104,10 +104,14 @@ When you enslave a port, the kernel installs VLAN 1 as `pvid +
 untagged` by default. For a trunk that shouldn't carry VLAN 1, remove
 that default before adding your real VLAN list:
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 conn.del_bridge_vlan("uplink", 1).await?;
 conn.add_bridge_vlan_tagged("uplink", 10).await?;
 conn.add_bridge_vlan_tagged("uplink", 20).await?;
+# Ok(())
+# }
 ```
 
 Otherwise untagged ingress on the trunk gets classified to VLAN 1 and
@@ -118,11 +122,16 @@ quietly forwarded, which is rarely what you want.
 Some devices expect a "native VLAN": one VLAN delivered untagged, the
 rest tagged. Combine pvid/untagged on one VID with tagged on others:
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::BridgeVlanBuilder;
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 // Native VLAN 1 (untagged) + tagged 10 + tagged 20.
 conn.add_bridge_vlan(BridgeVlanBuilder::new(1).dev("uplink").pvid().untagged()).await?;
 conn.add_bridge_vlan_tagged("uplink", 10).await?;
 conn.add_bridge_vlan_tagged("uplink", 20).await?;
+# Ok(())
+# }
 ```
 
 ## VLAN-to-VXLAN tunnel mapping
@@ -132,13 +141,17 @@ If you're bridging into a VXLAN, map VLAN IDs to VNIs via
 
 [tunnel]: https://docs.rs/nlink/latest/nlink/netlink/bridge_vlan/struct.BridgeVlanTunnelBuilder.html
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 use nlink::netlink::bridge_vlan::BridgeVlanTunnelBuilder;
 
 // VLAN 10 <-> VNI 10000 on a VXLAN port.
 conn.add_vlan_tunnel(BridgeVlanTunnelBuilder::new(10, 10000).dev("vxlan0")).await?;
 // Range: VLAN 100-109 <-> VNI 20000-20009
 conn.add_vlan_tunnel(BridgeVlanTunnelBuilder::new(100, 20000).dev("vxlan0").range(109)).await?;
+# Ok(())
+# }
 ```
 
 ## Per-VLAN global options (multicast snooping)
@@ -153,7 +166,9 @@ the MST instance mapping. These ride the newer VLAN-DB netlink API
 
 [gopts]: https://docs.rs/nlink/latest/nlink/netlink/bridge_vlan/struct.BridgeVlanGlobalOptionsBuilder.html
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 use nlink::netlink::bridge_vlan::BridgeVlanGlobalOptionsBuilder;
 
 // Enable per-VLAN multicast snooping on VLAN 10 of br0, IGMPv3.
@@ -172,6 +187,8 @@ conn.set_bridge_vlan_global_options(
 for o in conn.get_bridge_vlan_global_options("br0").await? {
     println!("VLAN {}: snooping={:?}", o.vid(), o.mcast_snooping());
 }
+# Ok(())
+# }
 ```
 
 Only options you set are sent, so a single call can flip one knob
@@ -192,7 +209,9 @@ member of the port.
 
 [entryopts]: https://docs.rs/nlink/latest/nlink/netlink/bridge_vlan/struct.BridgeVlanEntryOptionsBuilder.html
 
-```rust,ignore
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let conn = nlink::Connection::<nlink::Route>::new()?;
 use nlink::netlink::bridge_vlan::{BridgeVlanEntryOptionsBuilder, BridgeVlanState};
 
 // Put VLAN 100 into forwarding state on eth0, with neigh-suppress on.
@@ -206,6 +225,8 @@ conn.set_bridge_vlan_entry_options(
 for o in conn.get_bridge_vlan_entry_options("eth0").await? {
     println!("VLAN {}: state={:?}", o.vid(), o.state());
 }
+# Ok(())
+# }
 ```
 
 This complements (does not replace) the `BridgeVlanBuilder`

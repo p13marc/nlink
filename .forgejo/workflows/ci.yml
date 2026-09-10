@@ -104,7 +104,6 @@ jobs:
       - run: bash scripts/audit-uapi-constants.sh
       - run: bash scripts/test-audit-uapi-constants.sh
       - run: bash scripts/audit-message-accessor-convention.sh
-      - run: bash scripts/audit-recipe-drift.sh
       - run: bash scripts/audit-bytes-le.sh
       - run: bash scripts/audit-ignored-tests.sh
       - run: bash scripts/audit-dump-termination.sh

@@ -10,7 +10,7 @@
 //! kernel encodes as the contents of a single `NLA_F_NESTED`
 //! attribute. The typical DPLL shape is:
 //!
-//! ```ignore
+//! ```text
 //! #[derive(NetlinkAttrs, Debug, Default)]
 //! pub struct ParentDeviceBlock {
 //!     #[genl_attr(1u16)] pub device_id: u32,

@@ -25,7 +25,14 @@ OpenVPN.
 
 Use the typed `Connection<Ovpn>` for direct ops:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let ifindex: u32 = 2;
+# let udp_socket_fd: i32 = 3;
+# let encrypt_key_bytes = [0u8; 32];
+# let encrypt_nonce_tail = [0u8; 8];
+# let decrypt_key_bytes = [0u8; 32];
+# let decrypt_nonce_tail = [0u8; 8];
 use nlink::netlink::{
     Connection,
     genl::ovpn::{Ovpn, OvpnCipherAlg, OvpnKeyconf, OvpnKeydir, OvpnKeySlot, OvpnPeer},
@@ -56,11 +63,21 @@ conn.key_new(ifindex, keyconf).await?;
 
 // 4. Rekey cutover: install secondary, then swap.
 //    The swap is atomic — no packets are dropped.
+let secondary_keyconf = OvpnKeyconf::new(
+    /* peer_id */    42,
+    OvpnKeySlot::Secondary,
+    /* key_id */     2,
+    OvpnCipherAlg::AesGcm,
+    OvpnKeydir::new(encrypt_key_bytes, encrypt_nonce_tail),
+    OvpnKeydir::new(decrypt_key_bytes, decrypt_nonce_tail),
+);
 conn.key_new(ifindex, secondary_keyconf).await?;
 conn.key_swap(ifindex, /* peer_id */ 42).await?;
 
 // 5. Delete the peer when the session ends.
 conn.peer_del(ifindex, 42).await?;
+# Ok(())
+# }
 ```
 
 ## Declarative shape
@@ -69,8 +86,24 @@ For "reconcile to this desired state" semantics, use
 `OvpnConfig` — the same mental model as `NetworkConfig`,
 `NftablesConfig`, and `WireguardConfig`:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let ifindex: u32 = 2;
+# let conn = nlink::Connection::<nlink::netlink::genl::ovpn::Ovpn>::new_async().await?;
 use nlink::netlink::genl::ovpn::{OvpnConfig, OvpnKeyConfig, OvpnKeySlot};
+# use nlink::netlink::genl::ovpn::{OvpnCipherAlg, OvpnKeydir};
+# let primary_key_config = OvpnKeyConfig::new(
+#     1,
+#     OvpnCipherAlg::AesGcm,
+#     OvpnKeydir::new([0u8; 32], [0u8; 8]),
+#     OvpnKeydir::new([0u8; 32], [0u8; 8]),
+# );
+# let other_primary_key_config = OvpnKeyConfig::new(
+#     1,
+#     OvpnCipherAlg::AesGcm,
+#     OvpnKeydir::new([0u8; 32], [0u8; 8]),
+#     OvpnKeydir::new([0u8; 32], [0u8; 8]),
+# );
 
 let cfg = OvpnConfig::new().interface(ifindex, |b| {
     b.peer(42, |p| {
@@ -95,6 +128,8 @@ println!("Plan: {diff}");
 if !diff.is_empty() {
     diff.apply(&conn).await?;
 }
+# Ok(())
+# }
 ```
 
 ### Diff semantics
@@ -127,8 +162,13 @@ is fine.
 If another process may race with your apply, use
 `apply_reconcile`:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let conn = nlink::Connection::<nlink::netlink::genl::ovpn::Ovpn>::new_async().await?;
+# let cfg = nlink::netlink::genl::ovpn::OvpnConfig::new();
 cfg.apply_reconcile(&conn).await?;
+# Ok(())
+# }
 ```
 
 It applies once, re-diffs, and returns an error if the kernel
@@ -140,7 +180,10 @@ mid-apply). The pattern mirrors `NetworkConfig::apply_reconcile`.
 Subscribe to the `peers` group for `peer-del-ntf`, `key-swap-ntf`,
 and `peer-float-ntf`:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::Connection;
+# use nlink::netlink::genl::ovpn::Ovpn;
 use nlink::netlink::genl::ovpn::OvpnEvent;
 use tokio_stream::StreamExt;
 
@@ -175,8 +218,12 @@ while let Some(evt) = events.next().await {
                 peer.remote_socket(),
             );
         }
+        // `OvpnEvent` is `#[non_exhaustive]`.
+        _ => {}
     }
 }
+# Ok(())
+# }
 ```
 
 ## Monitoring a DCO server
@@ -189,7 +236,11 @@ multicast stream above is the push side; `peer_dump` is the pull side.
 VPN-layer and transport-layer byte/packet totals — plus the current
 remote endpoint and keepalive settings:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::Connection;
+# let ifindex: u32 = 2;
+# use nlink::netlink::genl::ovpn::Ovpn;
 let conn = Connection::<Ovpn>::new_async().await?;
 
 for p in conn.peer_dump(ifindex).await? {
@@ -201,6 +252,8 @@ for p in conn.peer_dump(ifindex).await? {
         p.link_rx_bytes, p.link_tx_bytes,
     );
 }
+# Ok(())
+# }
 ```
 
 Poll this on an interval for a traffic / rate view, and run the
@@ -245,7 +298,10 @@ applies to `OvpnKeyConfig` inside `OvpnConfig`.
 
 Detect availability without crashing:
 
-```rust
+```rust,no_run
+# async fn example() -> nlink::Result<()> {
+# use nlink::Connection;
+# use nlink::netlink::genl::ovpn::Ovpn;
 match Connection::<Ovpn>::new_async().await {
     Ok(conn) => { /* use it */ }
     Err(e) if e.is_not_found() => {
@@ -254,6 +310,8 @@ match Connection::<Ovpn>::new_async().await {
     }
     Err(e) => return Err(e),
 }
+# Ok(())
+# }
 ```
 
 ## Reference

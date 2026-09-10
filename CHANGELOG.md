@@ -105,6 +105,50 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **The recipes compile now, and 37 of their 91 Rust blocks did not (#319).**
+  Nothing had ever compiled `docs/recipes/`. The only check was
+  `scripts/audit-recipe-drift.sh`, a grep for known-stale shapes whose own
+  header called it a stop-gap for "a synthetic compile-fixture per recipe
+  block".
+
+  That fixture needs no generator: `src/recipe_doctests.rs` pulls each recipe
+  in with `#[doc = include_str!]` under `#[cfg(doctest)]`, and rustdoc
+  compiles every fenced Rust block in it. What that found, beyond the same
+  missing-context errors #304 turned up:
+
+  - `MirredAction::redirect_egress("ifb_eth0")` — the by-name form has never
+    existed; mirred takes an ifindex.
+  - `conn.del_link_by_name(...)`, `conn.subscribe_links()` — neither method
+    exists. The second recipe was hand-rolling what `del_link_if_exists`
+    does.
+  - `del_sa(&dst, spi, proto)` against a four-argument `del_sa(src, dst, spi,
+    proto)`, and `update_sa(&sa)`/`add_sa(&sa)` where both take the builder
+    by value.
+  - `use nlink::netlink::protocol::Route` and `use nlink::Netfilter` —
+    private module, wrong path.
+  - `v.vid`, `addr.ifindex`, `addr.address` as fields, years after the
+    accessor convention moved them to methods.
+  - `ReconcileOptions { .. }` and `ApplyOptions { .. }` struct literals on
+    `#[non_exhaustive]` types — code no downstream reader could have written.
+  - Two ASCII diagrams fenced as ```` ``` ````, which rustdoc reads as Rust.
+
+  One that is worth its own line: the `bidirectional-rate-limit` recipe
+  called `MatchallFilter::actions(...)`, which did not exist until #313 was
+  fixed in this same release. The recipe had been describing the API the
+  library should have had.
+
+  Blocks that are genuinely fragments — a continuation starting with `.`, a
+  diagram, the step-by-step excerpts in `define-your-own-genl-family.md` —
+  are ```` ```text ````. That last recipe's finished file is compiled
+  already, as `examples/macros/define_taskstats.rs`, and the recipe now says
+  so.
+
+  `audit-recipe-drift.sh` is **removed**: every pattern it grepped for is a
+  compile error now. `audit-doc-examples.sh` widens to cover the examples,
+  the bins, `nlink-macros` and the recipes — a stray ```` ```ignore ```` had
+  already been living in `examples/macros/define_taskstats.rs`, outside the
+  gate's original `crates/nlink/src` scope.
+
 - **508 doc examples were ```` ```ignore ````; they are ```` ```no_run ```` now,
   and 24 of them did not compile (#304).** `ignore` renders a block and never
   compiles it, so an example rots silently against every rename, signature
