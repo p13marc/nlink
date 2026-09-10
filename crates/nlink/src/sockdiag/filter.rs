@@ -305,6 +305,36 @@ impl InetFilterBuilder {
             kind: FilterKind::Inet(self.filter),
         }
     }
+
+    /// Build the bare [`InetFilter`], for the APIs that take one directly.
+    ///
+    /// [`Connection::<SockDiag>::destroy_matching`] does, and until this
+    /// existed there was no way to produce its argument: `build()` wraps the
+    /// filter in a [`SocketFilter`] with no accessor back out, and this
+    /// builder was not re-exported, so the only route was a struct literal
+    /// that happened to work because every field is `pub` (#317).
+    ///
+    /// [`Connection::<SockDiag>::destroy_matching`]:
+    ///     crate::netlink::Connection::destroy_matching
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use nlink::netlink::{Connection, SockDiag};
+    /// use nlink::sockdiag::{SocketFilter, TcpState};
+    ///
+    /// let conn = Connection::<SockDiag>::new()?;
+    /// let filter = SocketFilter::tcp()
+    ///     .states(&[TcpState::TimeWait])
+    ///     .build_inet();
+    /// let result = conn.destroy_matching(&filter).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn build_inet(self) -> InetFilter {
+        self.filter
+    }
 }
 
 /// Filter for Unix domain sockets.

@@ -95,7 +95,13 @@ pub mod types;
 pub use bytecode::{CompiledFilter, compile_filter};
 pub use error::{Error, Result};
 pub use expr::{Comparison, FilterExpr};
-pub use filter::{InetFilter, SocketFilter, UnixFilter};
+// The builders and `FilterKind` are part of the API's construction path, not
+// implementation detail: without them a `SocketFilter` cannot be taken apart
+// and `InetFilter` cannot be built at all (#317).
+pub use filter::{
+    FilterKind, InetFilter, InetFilterBuilder, NetlinkFilter, NetlinkFilterBuilder,
+    PacketFilter, PacketFilterBuilder, SocketFilter, UnixFilter, UnixFilterBuilder,
+};
 pub use procmap::{CgroupPathMap, ProcessRef, SocketOwnerMap};
 pub use rate::{SocketRate, SocketRateTracker};
 pub use socket::{InetSocket, NetlinkSocket, PacketSocket, SocketInfo, UnixSocket};

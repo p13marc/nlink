@@ -105,6 +105,32 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`destroy_matching` took an `InetFilter` no public API could produce
+  (#317).** `Connection::<SockDiag>::destroy_matching` takes `&InetFilter`,
+  and there was no way in: `SocketFilter::tcp()` returns an
+  `InetFilterBuilder` that was not re-exported, its `build()` yields a
+  `SocketFilter` wrapping the filter in a `FilterKind` that was not
+  re-exported either, and nothing gave the inner filter back. A struct
+  literal compiled only because every field happens to be `pub` — not a
+  guarantee anyone had stated, and one `#[non_exhaustive]` would have
+  removed.
+
+  `InetFilterBuilder::build_inet()` is the route in, and `FilterKind` plus
+  the four filter builders are re-exported so a built `SocketFilter` can be
+  taken apart again:
+
+  ```rust
+  let filter = SocketFilter::tcp()
+      .states(&[TcpState::TimeWait])
+      .build_inet();
+  conn.destroy_matching(&filter).await?;
+  ```
+
+  Same class as #280 and #316 — a public signature whose argument the public
+  API could not name or make. Found because `DestroyResult`'s doc example
+  called `destroy_matching(&filter)` with `filter` never bound, so it had
+  never had to name the type (#304).
+
 - **The recipes compile now, and 37 of their 91 Rust blocks did not (#319).**
   Nothing had ever compiled `docs/recipes/`. The only check was
   `scripts/audit-recipe-drift.sh`, a grep for known-stale shapes whose own

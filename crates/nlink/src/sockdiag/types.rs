@@ -916,14 +916,10 @@ impl fmt::Display for SocketSummary {
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let conn = nlink::Connection::<nlink::netlink::SockDiag>::new()?;
-/// # use nlink::sockdiag::{InetFilter, Protocol, SocketState, TcpState};
-/// // `InetFilter` has no public constructor — see #317. Until it does, the
-/// // struct literal is the only way to name this method's argument.
-/// let filter = InetFilter {
-///     protocol: Protocol::Tcp,
-///     states: 1 << TcpState::Established as u32,
-///     ..Default::default()
-/// };
+/// # use nlink::sockdiag::{SocketFilter, TcpState};
+/// let filter = SocketFilter::tcp()
+///     .states(&[TcpState::Established])
+///     .build_inet();
 /// let result = conn.destroy_matching(&filter).await?;
 /// println!("Destroyed {} sockets", result.destroyed);
 /// for err in &result.errors {
