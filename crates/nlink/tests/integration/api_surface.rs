@@ -79,3 +79,32 @@ async fn dump_stream_works_in_dispatcher_mode() -> Result<()> {
     );
     Ok(())
 }
+
+/// #317 — `destroy_matching` takes an `&InetFilter`, and no public API
+/// produced one.
+///
+/// `SocketFilter::tcp()` returns an `InetFilterBuilder` that was not
+/// re-exported, and its `build()` yields a `SocketFilter` wrapping the
+/// filter in a `FilterKind` that was not re-exported either — so there was
+/// no way in and no way back out. A struct literal compiled only because
+/// every field happens to be `pub`, which is not a guarantee anyone stated
+/// and which `#[non_exhaustive]` would have removed.
+///
+/// This test's value is that it compiles, in a crate that is not `nlink`.
+#[cfg(feature = "sockdiag")]
+#[test]
+fn an_inet_filter_can_be_built_without_a_struct_literal() {
+    use nlink::sockdiag::{FilterKind, InetFilterBuilder, Protocol, SocketFilter, TcpState};
+
+    // The direct route, for `destroy_matching`.
+    let filter = SocketFilter::tcp().states(&[TcpState::TimeWait]).build_inet();
+    assert_eq!(filter.protocol, Protocol::Tcp);
+    assert_ne!(filter.states, 0, "the state mask should carry TimeWait");
+
+    // The builder is nameable, so a caller can hold one in a signature.
+    fn _takes(_b: InetFilterBuilder) {}
+
+    // And a built `SocketFilter` can be taken apart again.
+    let wrapped = SocketFilter::tcp().build();
+    assert!(matches!(wrapped.kind, FilterKind::Inet(_)));
+}

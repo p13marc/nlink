@@ -409,14 +409,12 @@ impl Connection<SockDiag> {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # use nlink::Connection;
     /// # use nlink::netlink::SockDiag;
-    /// use nlink::sockdiag::{InetFilter, Protocol, TcpState};
+    /// use nlink::sockdiag::{SocketFilter, TcpState};
     ///
     /// let conn = Connection::<SockDiag>::new()?;
-    /// let filter = InetFilter {
-    ///     protocol: Protocol::Tcp,
-    ///     states: TcpState::TimeWait.mask(),
-    ///     ..Default::default()
-    /// };
+    /// let filter = SocketFilter::tcp()
+    ///     .states(&[TcpState::TimeWait])
+    ///     .build_inet();
     /// let result = conn.destroy_matching(&filter).await?;
     /// println!("Destroyed {} sockets", result.destroyed);
     /// # Ok(())
