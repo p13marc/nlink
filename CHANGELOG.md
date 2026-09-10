@@ -808,8 +808,6 @@ All notable changes to this project will be documented in this file.
   (`with_rcvbuf` to override). This matters more for uevents than
   elsewhere: it is the one subscriber with no dump to resync from.
 
-### Fixed
-
 - **Endianness: five encoders wrote kernel fields in the wrong byte order
   (#261, #262, #278).**
 
