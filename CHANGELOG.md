@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-10
+
 ### Added
 
 - **`Connection::<Ethtool>::get_string_set` (#276).** String sets are

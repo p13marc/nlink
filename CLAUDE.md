@@ -771,15 +771,20 @@ sets are checked: `cargo test -p nlink --doc` in the `test` job and
 
 ## Active work
 
-**The 0.26.0 cycle is open on `master`** and is a bug-fix release. New
-work lands in `CHANGELOG.md ## [Unreleased]`; the workspace version is
-already 0.26.0. Breaking changes are in scope and there are several —
-see the `## [Unreleased]` entries, which lead with the silent
-behaviour changes.
+**0.26.0 shipped 2026-09-10** (`0.26.0` tagged — bare, no `v`; both crates
+on crates.io). Headline narrative in `CHANGELOG.md ## [0.26.0]` +
+`docs/migration_guide/0.25.0-to-0.26.0.md`, which leads with the silent
+behaviour changes because there are eight of them.
 
-The cycle started from a review that filed 25 bugs (#258–#282) and grew
-as fixing them surfaced more (#286–#294, #300, #310–#317). What they have in
-common is worth stating, because it shapes how to work here: almost
+**The next cycle is open on `master`** — new work lands in
+`CHANGELOG.md ## [Unreleased]` and is promoted to the next `## [X.Y.0]` at
+cut time. The workspace version stays at the released 0.26.0 until the
+cycle's first breaking PR bumps it (the cargo-semver-checks convention).
+
+That cycle started from a review that filed 25 bugs (#258–#282) and grew
+as fixing them surfaced more (#286–#294, #300, #304, #310–#319) — 37 in
+all, every one closed. What they have in common is worth stating,
+because it shapes how to work here: almost
 none is a logic error in isolation. They are **places where nothing was
 checking**. Wrong constants because the audit gate only read `#[repr]`
 enums; wrong endianness because the byte-order gate only banned the
