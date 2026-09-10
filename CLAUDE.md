@@ -43,7 +43,7 @@ user, so root-gated tests would **bit-rot silently** if they
 weren't both (a) gated with `nlink::require_root!()` (so they
 skip cleanly as non-root) and (b) run under the privileged-CI
 gate that landed in 0.15.0 (Plan 140 — see
-`.github/workflows/integration-tests.yml`; runs on every push/PR
+`.forgejo/workflows/integration.yml`; runs on every push/PR
 to master under a container with `CAP_NET_ADMIN` + `CAP_SYS_ADMIN`
 + `seccomp=unconfined`). For local validation as a non-root user,
 the `--apply` example runners stay the canonical channel (e.g.,

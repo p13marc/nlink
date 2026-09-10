@@ -13,8 +13,8 @@
 # Exit 1:  one or more mismatches found (script prints the pairs).
 #
 # This script is a diagnostic for contributors. The enforcement layer
-# is the `build-and-test-default-features` CI job in
-# `.github/workflows/rust.yml` — that job runs `cargo test --workspace`
+# is the `test` job in `.forgejo/workflows/ci.yml` — that job runs
+# `cargo build --workspace --all-targets` + `cargo test --workspace`
 # without features and fails loud on the same class of bug.
 
 set -euo pipefail

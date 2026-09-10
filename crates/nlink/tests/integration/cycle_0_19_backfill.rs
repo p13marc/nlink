@@ -8,7 +8,7 @@
 //!
 //! All tests root-gated via `nlink::require_root!()` so they
 //! skip cleanly on non-root developer machines and run for
-//! real under `.github/workflows/integration-tests.yml`.
+//! real under `.forgejo/workflows/integration.yml`.
 
 use std::time::Duration;
 
