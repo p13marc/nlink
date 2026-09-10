@@ -15,7 +15,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route, Generic};
 //!
 //! // Route connection for interface/address/route/TC operations
@@ -25,6 +26,8 @@
 //! // Generic connection for WireGuard/MACsec configuration
 //! let genl = Connection::<Generic>::new()?;
 //! genl.get_family("wireguard").await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{collections::HashMap, sync::RwLock};

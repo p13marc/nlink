@@ -5,7 +5,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::namespace_watcher::{NamespaceWatcher, NamespaceEvent};
 //!
 //! let mut watcher = NamespaceWatcher::new().await?;
@@ -17,6 +18,8 @@
 //!         _ => {}
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::path::Path;

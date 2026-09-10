@@ -60,7 +60,7 @@ where
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use nlink::macros::*;
     /// use nlink::Connection;
     ///
@@ -115,7 +115,8 @@ where
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, genl::dpll::Dpll};
     /// use tokio_stream::StreamExt;
     ///
@@ -125,6 +126,8 @@ where
     /// while let Some(evt) = events.next().await {
     ///     println!("{:?}", evt?);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn subscribe_group(&self, name: &str) -> Result<()> {
         let id = self

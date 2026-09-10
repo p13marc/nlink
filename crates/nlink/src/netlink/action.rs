@@ -5,7 +5,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::action::{GactAction, MirredAction, PoliceAction};
 //! use nlink::netlink::filter::MatchallFilter;
@@ -15,9 +16,12 @@
 //! // Drop all traffic
 //! let drop = GactAction::drop();
 //!
-//! // Mirror traffic to another interface by index (namespace-safe)
-//! // First resolve interface name via route connection:
-//! //   let link = conn.get_link_by_name("eth1").await?.ok_or("not found")?;
+//! // Mirror traffic to another interface by index (namespace-safe):
+//! // resolve the name through the connection, not through sysfs.
+//! let link = conn
+//!     .get_link_by_name("eth1")
+//!     .await?
+//!     .ok_or("eth1 not found")?;
 //! let mirror = MirredAction::mirror_by_index(link.ifindex());
 //!
 //! // Rate limit traffic
@@ -26,6 +30,8 @@
 //!     .burst(32 * 1024)
 //!     .exceed_drop()
 //!     .build();
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::Ipv4Addr;
@@ -69,7 +75,7 @@ pub trait ActionConfig: Send + Sync {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::GactAction;
 ///
 /// // Drop packets
@@ -82,7 +88,7 @@ pub trait ActionConfig: Send + Sync {
 /// let pipe = GactAction::pipe();
 ///
 /// // Random drop with 10% probability
-/// let random_drop = GactAction::new(action::TC_ACT_OK)
+/// let random_drop = GactAction::new(nlink::netlink::types::tc::action::TC_ACT_OK)
 ///     .random_drop(10)
 ///     .build();
 /// ```
@@ -294,7 +300,10 @@ impl ActionConfig for GactAction {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # let eth0_ifindex: u32 = 2;
+/// # let eth1_ifindex: u32 = 3;
+/// # let eth2_ifindex: u32 = 4;
 /// use nlink::netlink::action::MirredAction;
 ///
 /// // Redirect to eth1 by index (namespace-safe)
@@ -491,7 +500,7 @@ impl ActionConfig for MirredAction {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::PoliceAction;
 ///
 /// // Rate limit to 1 MB/s with 32KB burst
@@ -846,7 +855,7 @@ impl ActionConfig for PoliceAction {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::VlanAction;
 ///
 /// // Pop VLAN tag
@@ -1075,7 +1084,7 @@ impl ActionConfig for VlanAction {
 ///
 /// Push, pop, or modify an MPLS shim header, or decrement its TTL.
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::MplsAction;
 ///
 /// // Push label 100 with TTL 64.
@@ -1326,7 +1335,7 @@ impl ActionConfig for MplsAction {
 /// Rewrite a packet's L2 source/destination MAC and/or ethertype, or
 /// swap source and destination MAC.
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::SkbmodAction;
 ///
 /// let a = SkbmodAction::new()
@@ -1501,7 +1510,7 @@ impl ActionConfig for SkbmodAction {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::SkbeditAction;
 ///
 /// // Set priority
@@ -1684,7 +1693,7 @@ impl ActionConfig for SkbeditAction {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::NatAction;
 /// use std::net::Ipv4Addr;
 ///
@@ -1894,7 +1903,7 @@ impl ActionConfig for NatAction {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::TunnelKeyAction;
 /// use std::net::Ipv4Addr;
 ///
@@ -2315,7 +2324,7 @@ impl ActionConfig for TunnelKeyAction {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::ConnmarkAction;
 ///
 /// // Import connmark from default zone
@@ -2430,7 +2439,7 @@ impl ActionConfig for ConnmarkAction {
 /// `skb->mark`. Typically paired with an earlier `ct` action that stored
 /// the values.
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::CtinfoAction;
 ///
 /// // Restore DSCP (top 6 bits) when the conntrack DSCP-set state bit is on,
@@ -2630,7 +2639,7 @@ struct IfeMetaEntry {
 /// Each metadata item is either `allow`ed (carry whatever the skb
 /// currently holds) or `use`d with an explicit override value.
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::{IfeAction, IfeMeta};
 ///
 /// // Encode the skb mark and a fixed priority into an IFE header.
@@ -2880,7 +2889,7 @@ struct GateEntry {
 /// closing the gate for a nanosecond interval, optionally pinning an
 /// internal priority value (IPV) and a per-interval octet budget.
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::GateAction;
 /// use std::time::Duration;
 ///
@@ -3195,7 +3204,7 @@ impl ActionConfig for GateAction {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::CsumAction;
 ///
 /// // Recalculate IP and TCP checksums
@@ -3340,7 +3349,7 @@ impl ActionConfig for CsumAction {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::action::SampleAction;
 ///
 /// // Sample 1 in 100 packets to group 5
@@ -3476,7 +3485,8 @@ impl ActionConfig for SampleAction {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::action::CtAction;
 ///
 /// // Simple connection tracking (restore state)
@@ -3504,6 +3514,8 @@ impl ActionConfig for SampleAction {
 /// let ct = CtAction::commit()
 ///     .zone(1)
 ///     .mark(0x100, 0xffffffff);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct CtAction {
@@ -3867,7 +3879,8 @@ impl ActionConfig for CtAction {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::action::PeditAction;
 ///
 /// // Set IPv4 source address
@@ -3896,6 +3909,8 @@ impl ActionConfig for CtAction {
 ///     .set_ipv4_dst("10.0.0.2".parse()?)
 ///     .set_tcp_dport(8080)
 ///     .build();
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct PeditAction {
@@ -4335,15 +4350,24 @@ impl ActionConfig for PeditAction {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::action::{ActionList, GactAction, MirredAction};
 ///
-/// // First resolve interface name to index via route connection:
-/// //   let link = conn.get_link_by_name("eth1").await?.ok_or("not found")?;
+/// // Resolve the interface name to an index through the connection,
+/// // which is namespace-safe.
+/// let conn = nlink::Connection::<nlink::Route>::new()?;
+/// let link = conn
+///     .get_link_by_name("eth1")
+///     .await?
+///     .ok_or("eth1 not found")?;
+///
 /// let actions = ActionList::new()
-///     .add(MirredAction::mirror_by_index(link.ifindex()))
-///     .add(GactAction::pass())
+///     .with(MirredAction::mirror_by_index(link.ifindex()))
+///     .with(GactAction::pass())
 ///     .build();
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct ActionList {

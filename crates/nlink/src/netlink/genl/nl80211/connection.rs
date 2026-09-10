@@ -56,7 +56,8 @@ impl Connection<Nl80211> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Nl80211};
     /// use tokio_stream::StreamExt;
     ///
@@ -67,6 +68,8 @@ impl Connection<Nl80211> {
     /// while let Some(event) = events.next().await {
     ///     println!("{:?}", event?);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn subscribe(&self) -> Result<()> {
         let mut subscribed = false;
@@ -99,11 +102,15 @@ impl Connection<Nl80211> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::netlink::Nl80211>::new_async().await?;
     /// let ifaces = conn.get_interfaces().await?;
     /// for iface in &ifaces {
     ///     println!("{}: {:?}", iface.name.as_deref().unwrap_or("?"), iface.iftype);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_interfaces"))]
     pub async fn get_interfaces(&self) -> Result<Vec<WirelessInterface>> {
@@ -664,7 +671,8 @@ impl Connection<Nl80211> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Nl80211, namespace};
     ///
     /// let nl = Connection::<Nl80211>::new_async().await?;
@@ -673,6 +681,8 @@ impl Connection<Nl80211> {
     ///
     /// // Move phy0 to the namespace
     /// nl.set_wiphy_netns(phys[0].index, ns_fd.as_raw_fd()).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wiphy_netns"))]
     pub async fn set_wiphy_netns(&self, wiphy: u32, netns_fd: i32) -> Result<()> {

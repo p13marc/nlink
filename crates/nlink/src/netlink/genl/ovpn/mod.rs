@@ -27,19 +27,25 @@
 //!
 //! # Construction
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, genl::ovpn::Ovpn};
 //!
 //! let conn = Connection::<Ovpn>::new_async().await?;
 //! // Family ID resolved against the kernel "ovpn" registration;
 //! // FamilyNotFound on kernels without CONFIG_OVPN.
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Resolution failure is the common case on stock distro kernels
 //! that don't load the `ovpn` module. Handle via
 //! [`Error::is_not_found`](crate::Error::is_not_found):
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> nlink::Result<()> {
+//! # use nlink::Connection;
+//! # use nlink::netlink::genl::ovpn::Ovpn;
 //! match Connection::<Ovpn>::new_async().await {
 //!     Ok(conn) => { /* use it */ }
 //!     Err(e) if e.is_not_found() => {
@@ -47,6 +53,8 @@
 //!     }
 //!     Err(e) => return Err(e),
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Cipher constraints

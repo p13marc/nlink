@@ -98,12 +98,18 @@ impl TcStatsBasic {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let prev = qdisc.stats_basic.unwrap();
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let qdisc = conn.get_root_qdisc_by_name("eth0").await?.unwrap();
+    /// let prev = qdisc.stats_basic().unwrap().clone();
     /// // ... wait some time ...
-    /// let curr = qdisc.stats_basic.unwrap();
+    /// let qdisc = conn.get_root_qdisc_by_name("eth0").await?.unwrap();
+    /// let curr = qdisc.stats_basic().unwrap();
     /// let delta = curr.delta(&prev);
     /// println!("Transferred {} bytes, {} packets", delta.bytes, delta.packets);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn delta(&self, previous: &Self) -> TcStatsBasic {
         TcStatsBasic {
@@ -136,12 +142,18 @@ impl TcStatsQueue {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let prev = qdisc.stats_queue.unwrap();
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let qdisc = conn.get_root_qdisc_by_name("eth0").await?.unwrap();
+    /// let prev = qdisc.stats_queue().unwrap().clone();
     /// // ... wait some time ...
-    /// let curr = qdisc.stats_queue.unwrap();
+    /// let qdisc = conn.get_root_qdisc_by_name("eth0").await?.unwrap();
+    /// let curr = qdisc.stats_queue().unwrap();
     /// let delta = curr.delta(&prev);
     /// println!("New drops: {}, new overlimits: {}", delta.drops, delta.overlimits);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn delta(&self, previous: &Self) -> TcStatsQueue {
         TcStatsQueue {
@@ -306,10 +318,15 @@ impl TcMessage {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let qdiscs = conn.get_qdiscs().await?;
     /// for qdisc in &qdiscs {
     ///     println!("{}: {}", qdisc.name_or("?"), qdisc.kind().unwrap_or("?"));
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn name_or<'a>(&'a self, fallback: &'a str) -> &'a str {
         self.name.as_deref().unwrap_or(fallback)
@@ -387,9 +404,15 @@ impl TcMessage {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let qdisc = conn.get_root_qdisc_by_name("eth0").await?.map(|q| q.resolve_name());
-    /// println!("Interface: {}", qdisc.name_or("?"));
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// if let Some(qdisc) = conn.get_root_qdisc_by_name("eth0").await? {
+    ///     let qdisc = qdisc.resolve_name();
+    ///     println!("Interface: {}", qdisc.name_or("?"));
+    /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn resolve_name(mut self) -> Self {
         if let Ok(name) = crate::util::ifname::index_to_name(self.ifindex()) {
@@ -417,7 +440,9 @@ impl TcMessage {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::tc_options::QdiscOptions;
     ///
     /// let qdiscs = conn.get_qdiscs().await?;
@@ -432,6 +457,8 @@ impl TcMessage {
     ///         _ => {}
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn options(&self) -> Option<crate::netlink::tc_options::QdiscOptions> {
         crate::netlink::tc_options::parse_qdisc_options(self)
@@ -548,10 +575,15 @@ impl TcMessage {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let qdiscs = conn.get_qdiscs().await?;
     /// for qdisc in &qdiscs {
     ///     println!("handle: {}", qdisc.handle_str());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[inline]
     pub fn handle_str(&self) -> String {
@@ -562,10 +594,15 @@ impl TcMessage {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let qdiscs = conn.get_qdiscs().await?;
     /// for qdisc in &qdiscs {
     ///     println!("parent: {}", qdisc.parent_str());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[inline]
     pub fn parent_str(&self) -> String {
@@ -578,14 +615,18 @@ impl TcMessage {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let filters = conn.get_filters_by_name("eth0", "ingress").await?;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// let filters = conn.get_filters_by_name("eth0").await?;
     /// for filter in &filters {
     ///     if let Some(bpf) = filter.bpf_info() {
     ///         println!("BPF: id={:?} name={:?} tag={:?} da={}",
     ///             bpf.id, bpf.name, bpf.tag_hex(), bpf.direct_action);
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn bpf_info(&self) -> Option<BpfInfo> {
         if self.kind() != Some("bpf") {

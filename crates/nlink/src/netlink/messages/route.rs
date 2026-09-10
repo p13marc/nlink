@@ -229,11 +229,15 @@ impl RouteMessage {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let routes = conn.get_routes().await?;
     /// let user_routes: Vec<_> = routes.iter()
     ///     .filter(|r| !r.is_system_generated())
     ///     .collect();
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn is_system_generated(&self) -> bool {
         matches!(
@@ -249,11 +253,15 @@ impl RouteMessage {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let routes = conn.get_routes().await?;
     /// for route in routes.iter().filter(|r| r.is_static()) {
     ///     println!("Static route: {:?}", route.destination());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn is_static(&self) -> bool {
         matches!(self.protocol(), RouteProtocol::Static | RouteProtocol::Boot)
@@ -284,12 +292,16 @@ impl RouteMessage {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let names = conn.get_interface_names().await?;
     /// let routes = conn.get_routes().await?;
     /// for route in &routes {
     ///     println!("{:?} via {}", route.destination(), route.device_name(&names));
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn device_name(&self, names: &std::collections::HashMap<u32, String>) -> String {
         self.oif

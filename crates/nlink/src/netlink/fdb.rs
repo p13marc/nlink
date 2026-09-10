@@ -5,7 +5,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # use std::net::IpAddr;
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::fdb::FdbEntryBuilder;
 //!
@@ -14,7 +16,7 @@
 //! // List FDB entries for a bridge
 //! let entries = conn.get_fdb("br0").await?;
 //! for entry in &entries {
-//!     println!("{} vlan={:?}", entry.mac_str(), entry.vlan);
+//!     println!("{} vlan={:?}", entry.mac_str(), entry.vlan());
 //! }
 //!
 //! // Add a static FDB entry
@@ -31,11 +33,13 @@
 //! conn.add_fdb(
 //!     FdbEntryBuilder::new([0x00; 6])  // all-zeros for BUM traffic
 //!         .dev("vxlan0")
-//!         .dst(Ipv4Addr::new(192, 168, 1, 100).into())
+//!         .dst(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)))
 //! ).await?;
 //!
 //! // Delete an entry
 //! conn.del_fdb("veth0", mac, None).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::IpAddr;
@@ -244,7 +248,8 @@ impl FdbEntry {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # use std::net::IpAddr;
 /// use nlink::netlink::fdb::FdbEntryBuilder;
 /// use std::net::Ipv4Addr;
 ///
@@ -258,7 +263,7 @@ impl FdbEntry {
 /// // VXLAN remote VTEP entry
 /// let vxlan_entry = FdbEntryBuilder::new([0x00; 6])
 ///     .dev("vxlan0")
-///     .dst(Ipv4Addr::new(192, 168, 1, 100).into());
+///     .dst(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)));
 /// ```
 #[derive(Debug, Clone, Default)]
 #[must_use = "builders do nothing unless used"]
@@ -292,8 +297,12 @@ impl FdbEntryBuilder {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::FdbEntryBuilder;
     /// let mac = FdbEntryBuilder::parse_mac("aa:bb:cc:dd:ee:ff")?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn parse_mac(mac_str: &str) -> Result<[u8; 6]> {
         crate::util::addr::parse_mac(mac_str)
@@ -505,12 +514,16 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let entries = conn.get_fdb("br0").await?;
     /// for entry in &entries {
     ///     println!("{} on ifindex {} vlan={:?}",
-    ///         entry.mac_str(), entry.ifindex, entry.vlan);
+    ///         entry.mac_str(), entry.ifindex(), entry.vlan());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_fdb"))]
     pub async fn get_fdb(&self, bridge: impl Into<InterfaceRef>) -> Result<Vec<FdbEntry>> {
@@ -561,8 +574,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let entries = conn.get_fdb_for_port("br0", "veth0").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_fdb_for_port"))]
     pub async fn get_fdb_for_port(
@@ -606,7 +623,9 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::fdb::FdbEntryBuilder;
     ///
     /// let mac = FdbEntryBuilder::parse_mac("aa:bb:cc:dd:ee:ff")?;
@@ -623,6 +642,8 @@ impl Connection<Route> {
     ///         .ifindex(5)
     ///         .master_ifindex(3)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_fdb"))]
     pub async fn add_fdb(&self, entry: FdbEntryBuilder) -> Result<()> {
@@ -657,12 +678,16 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Delete entry without VLAN
     /// conn.del_fdb("veth0", [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], None).await?;
     ///
     /// // Delete entry with specific VLAN
     /// conn.del_fdb("veth0", [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], Some(100)).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_fdb"))]
     pub async fn del_fdb(
@@ -702,8 +727,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.flush_fdb("br0").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_fdb"))]
     pub async fn flush_fdb(&self, bridge: impl Into<InterfaceRef>) -> Result<()> {

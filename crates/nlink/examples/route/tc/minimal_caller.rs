@@ -4,27 +4,25 @@
 //!
 //! This example is deliberately tiny, and that is the point.
 //!
-//! Each `async fn` that awaits another embeds the callee's future in its
-//! own, so rustc computes the caller's layout by recursing once per
-//! level. nlink's request chain already sits close to the default limit
-//! of 128, and `del_netem` / `apply_netem` / `plug_buffer` are one frame
-//! deeper than the methods they call:
+//! Every `async fn` that awaits another embeds the callee's future in its
+//! own, so rustc computes a caller's layout by recursing once per level.
+//! nlink's request chain is deep enough that a program calling one of the
+//! convenience wrappers used to fail to compile with
+//! `error: queries overflow the depth limit!` — pointing at the caller's
+//! own async block, never mentioning nlink, and fixable only by a
+//! `recursion_limit` attribute in the caller's crate.
 //!
-//! ```text
-//! del_netem -> del_qdisc -> del_qdisc_full -> send_ack -> ...
-//! ```
+//! The fix is a single `Box::pin` on `Connection::send_dump`, which ends
+//! the recursion below every caller at once — every mutating helper reaches
+//! the dump path too, resolving an interface name before it sends anything.
+//! This example is what keeps it there: with that box removed it fails to
+//! compile.
 //!
-//! Layout queries are cached, so a program that touches nlink anywhere
-//! else usually computes these futures' layouts on a *shallow* stack
-//! first and hits the cache later. That is why nlink's own tests and its
-//! larger examples never saw this, and why a small downstream tool that
-//! does nothing but call `del_netem` failed to compile with
-//! `error: queries overflow the depth limit!` — pointing at its own
-//! async block, with no mention of nlink and nothing nlink could set to
-//! fix it.
-//!
-//! So the guard has to be a program with nothing else in it. Adding
-//! calls here weakens it.
+//! It has to be *small*. Layout queries are cached, so a program that
+//! touches nlink anywhere else computes these layouts on a shallow stack
+//! first and hits the cache later — which is why nlink's own tests, its
+//! binaries and its larger examples never saw the bug, and why adding
+//! calls here weakens the guard rather than strengthening it.
 
 use nlink::{
     Connection, Route, TcHandle,

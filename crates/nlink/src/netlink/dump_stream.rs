@@ -492,7 +492,7 @@ impl<P: ProtocolState> Connection<P> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use tokio_stream::StreamExt;
     /// use nlink::{Connection, Route};
     /// use nlink::netlink::messages::LinkMessage;

@@ -5,7 +5,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::route::Ipv4Route;
 //!
@@ -17,6 +18,8 @@
 //!     .await?;
 //!
 //! println!("{} succeeded, {} failed", results.success_count(), results.error_count());
+//! # Ok(())
+//! # }
 //! ```
 
 use super::{
@@ -50,7 +53,8 @@ const MAX_BATCH_SIZE: usize = 200 * 1024;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::{Connection, Route};
 /// use nlink::netlink::route::Ipv4Route;
 ///
@@ -66,6 +70,8 @@ const MAX_BATCH_SIZE: usize = 200 * 1024;
 ///         eprintln!("op {i}: {err}");
 ///     }
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub struct Batch<'a> {
     conn: &'a Connection<Route>,

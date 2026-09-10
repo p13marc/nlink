@@ -19,7 +19,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //! use nlink::{Connection, ConnectionPoolBuilder, Route};

@@ -4,7 +4,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::route::{Ipv4Route, Ipv6Route, RouteType, NextHop};
 //! use std::net::{Ipv4Addr, Ipv6Addr};
@@ -46,6 +47,8 @@
 //!
 //! // Delete a route
 //! conn.del_route_v4("192.168.2.0", 24).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -59,8 +62,12 @@ use super::{
     mpls::MplsEncap,
     protocol::Route,
     srv6::Srv6Encap,
-    types::route::{RouteProtocol, RouteScope, RouteType, RtMsg, RtaAttr, rt_table},
+    types::route::{RouteProtocol, RouteScope, RtMsg, RtaAttr, rt_table},
 };
+// Re-exported so the type named by `Ipv4Route::route_type` can be named from
+// the module that defines `Ipv4Route` — every doc example here imported it
+// from this path already (#316).
+pub use super::types::route::RouteType;
 
 /// NLM_F_CREATE flag
 const NLM_F_CREATE: u16 = 0x400;
@@ -400,7 +407,9 @@ impl Default for NextHop {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::route::{Ipv4Route, RouteType, RouteMetrics};
 /// use std::net::Ipv4Addr;
 ///
@@ -423,6 +432,8 @@ impl Default for NextHop {
 ///     .nexthop_group(100);  // Reference nexthop group ID 100
 ///
 /// conn.add_route(route).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Ipv4Route {
@@ -610,7 +621,11 @@ impl Ipv4Route {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::Ipv4Route;
+    /// # use nlink::netlink::nexthop::NexthopGroupBuilder;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // First, create a nexthop group
     /// conn.add_nexthop_group(
     ///     NexthopGroupBuilder::new(100)
@@ -623,6 +638,8 @@ impl Ipv4Route {
     ///     Ipv4Route::new("10.0.0.0", 8)
     ///         .nexthop_group(100)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn nexthop_group(mut self, group_id: u32) -> Self {
         self.nexthop_id = Some(group_id);
@@ -637,7 +654,8 @@ impl Ipv4Route {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::route::Ipv4Route;
     /// use nlink::netlink::mpls::MplsEncap;
     ///
@@ -650,6 +668,8 @@ impl Ipv4Route {
     /// let route = Ipv4Route::new("10.0.0.0", 8)
     ///     .gateway("192.168.1.1".parse()?)
     ///     .mpls_encap(MplsEncap::new().labels(&[100, 200]));
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn mpls_encap(mut self, encap: MplsEncap) -> Self {
         self.mpls_encap = Some(encap);
@@ -662,7 +682,8 @@ impl Ipv4Route {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::route::Ipv4Route;
     /// use nlink::netlink::srv6::Srv6Encap;
     ///
@@ -673,6 +694,8 @@ impl Ipv4Route {
     ///         Srv6Encap::encap()
     ///             .segment("fc00:1::1".parse()?)
     ///     );
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn srv6_encap(mut self, encap: Srv6Encap) -> Self {
         self.srv6_encap = Some(encap);
@@ -1116,7 +1139,8 @@ impl Ipv6Route {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::route::Ipv6Route;
     /// use nlink::netlink::srv6::Srv6Encap;
     ///
@@ -1135,6 +1159,8 @@ impl Ipv6Route {
     ///         Srv6Encap::encap()
     ///             .segments(&["fc00:1::1".parse()?, "fc00:2::1".parse()?])
     ///     );
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn srv6_encap(mut self, encap: Srv6Encap) -> Self {
         self.srv6_encap = Some(encap);
@@ -1453,7 +1479,9 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::route::{Ipv4Route, Ipv6Route};
     /// use std::net::{Ipv4Addr, Ipv6Addr};
     ///
@@ -1474,6 +1502,8 @@ impl Connection<Route> {
     ///     Ipv4Route::new("10.0.0.0", 8)
     ///         .dev_index(5)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn add_route<R: RouteConfig>(&self, config: R) -> Result<()> {
         let interfaces = self.resolve_route_interfaces(&config).await?;
@@ -1508,8 +1538,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.del_route_v4("192.168.2.0", 24).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_route_v4"))]
     pub async fn del_route_v4(&self, destination: &str, prefix_len: u8) -> Result<()> {

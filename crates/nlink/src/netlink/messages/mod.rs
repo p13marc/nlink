@@ -5,14 +5,19 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::messages::AddressMessage;
 //! use nlink::netlink::parse::FromNetlink;
 //!
-//! // Parse from raw netlink data
+//! // Parse from raw netlink data — `data` is one message's payload, as
+//! // handed out by `MessageIter`.
+//! # let data: Vec<u8> = Vec::new();
 //! let msg = AddressMessage::from_bytes(&data)?;
-//! println!("Address: {:?}", msg.address);
-//! println!("Interface: {}", msg.header.ifa_index);
+//! println!("Address: {:?}", msg.address());
+//! println!("Interface: {}", msg.ifindex());
+//! # Ok(())
+//! # }
 //! ```
 
 mod address;

@@ -47,7 +47,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, SockDiag};
 //! use nlink::sockdiag::{SocketOwnerMap, CgroupPathMap};
 //!
@@ -58,12 +59,14 @@
 //! for s in &sockets {
 //!     for p in owners.resolve(s.inode) {
 //!         println!("{}:{} -> {} (pid {}, started {})",
-//!             s.local_addr, s.local_port, p.comm, p.pid, p.start_time);
+//!             s.local.ip(), s.local.port(), p.comm, p.pid, p.start_time);
 //!     }
 //!     if let Some(path) = s.cgroup_id.and_then(|id| cgroups.resolve(id)) {
 //!         println!("  cgroup: {}", path.display());
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{

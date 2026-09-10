@@ -4,7 +4,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::rule::RuleBuilder;
 //!
@@ -31,6 +32,8 @@
 //!     RuleBuilder::v4()
 //!         .priority(100)
 //! ).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};

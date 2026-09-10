@@ -5,7 +5,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Audit};
 //!
 //! let conn = Connection::<Audit>::new()?;
@@ -15,6 +16,8 @@
 //! println!("Audit enabled: {}", status.enabled);
 //! println!("PID: {}", status.pid);
 //! println!("Backlog: {}/{}", status.backlog, status.backlog_limit);
+//! # Ok(())
+//! # }
 //! ```
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -373,10 +376,13 @@ impl Connection<Audit> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Audit};
     ///
     /// let conn = Connection::<Audit>::new()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new() -> Result<Self> {
         let socket = NetlinkSocket::new(Audit::PROTOCOL)?;
@@ -387,7 +393,8 @@ impl Connection<Audit> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Audit};
     ///
     /// let conn = Connection::<Audit>::new()?;
@@ -400,6 +407,8 @@ impl Connection<Audit> {
     /// println!("Rate limit: {} msgs/sec", status.rate_limit);
     /// println!("Backlog: {}/{}", status.backlog, status.backlog_limit);
     /// println!("Lost messages: {}", status.lost);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_status"))]
     pub async fn get_status(&self) -> Result<AuditStatus> {
@@ -554,7 +563,8 @@ impl Connection<Audit> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Audit};
     ///
     /// let conn = Connection::<Audit>::new()?;
@@ -562,6 +572,8 @@ impl Connection<Audit> {
     ///
     /// println!("TTY auditing enabled: {}", tty_status.enabled != 0);
     /// println!("Log passwords: {}", tty_status.log_passwd != 0);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_tty_status"))]
     pub async fn get_tty_status(&self) -> Result<AuditTtyStatus> {
@@ -646,7 +658,8 @@ impl Connection<Audit> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Audit};
     ///
     /// let conn = Connection::<Audit>::new()?;
@@ -655,6 +668,8 @@ impl Connection<Audit> {
     /// println!("Version: {}", features.vers);
     /// println!("Features: 0x{:08x}", features.features);
     /// println!("Mask: 0x{:08x}", features.mask);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_features"))]
     pub async fn get_features(&self) -> Result<AuditFeatures> {

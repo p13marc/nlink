@@ -30,14 +30,14 @@
 //!
 //! # Example loop
 //!
-//! ```ignore
+//! ```no_run
 //! use nlink::netlink::resync::{ResyncedEvent, ResyncMarker};
 //! use tokio_stream::StreamExt;
 //!
 //! # async fn run(
-//! #     mut events: nlink::netlink::stream::EventSubscription<'_, nlink::Route>,
+//! #     mut events: nlink::netlink::EventSubscription<'_, nlink::Route>,
 //! #     dump_conn: &nlink::Connection<nlink::Route>,
-//! #     mut handle: impl FnMut(ResyncedEvent<nlink::netlink::messages::LinkMessage>),
+//! #     mut handle: impl FnMut(ResyncedEvent<nlink::NetworkEvent>),
 //! # ) -> nlink::Result<()> {
 //! while let Some(item) = events.next().await {
 //!     match item {
@@ -45,7 +45,7 @@
 //!         Err(e) if e.is_no_buffer_space() => {
 //!             handle(ResyncedEvent::Marker(ResyncMarker::ResyncStart));
 //!             for link in dump_conn.get_links().await? {
-//!                 handle(ResyncedEvent::Resynced(link));
+//!                 handle(ResyncedEvent::Resynced(nlink::NetworkEvent::NewLink(link)));
 //!             }
 //!             handle(ResyncedEvent::Marker(ResyncMarker::ResyncEnd));
 //!         }
@@ -181,7 +181,7 @@ pub type ConnectionFuture<P> =
 /// `Arc`-wrapped so it's cheap to clone across `poll_next` calls.
 /// Most callers wrap a plain closure in `Arc::new(...)`:
 ///
-/// ```ignore
+/// ```no_run
 /// use std::sync::Arc;
 /// use nlink::netlink::{Connection, Nftables};
 /// use nlink::netlink::resync::ConnectionFactory;
@@ -451,22 +451,27 @@ where
 /// fresh connection). Wrap the async body in `Box::pin(...)` so
 /// the future is `Pin<Box<dyn Future + Send>>`.
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::ResyncMarker;
 /// use nlink::{Connection, Route};
 /// use nlink::netlink::resync::{events_with_resync, ResyncedEvent};
 /// use tokio_stream::StreamExt;
 ///
 /// let mut events_conn = Connection::<Route>::new()?;
-/// events_conn.subscribe(&[/* groups */])?;
+/// events_conn.subscribe_all()?;
 /// let raw_events = events_conn.events().await;
 ///
 /// // dump_conn is a separate connection so the resync dump
 /// // doesn't interleave with the live events on the same socket.
-/// let dump_conn = Connection::<Route>::new()?;
+/// let dump_conn = std::sync::Arc::new(Connection::<Route>::new()?);
 ///
 /// let mut stream = events_with_resync(raw_events, move || {
 ///     let conn = dump_conn.clone();
-///     Box::pin(async move { conn.get_links().await })
+///     Box::pin(async move {
+///         let links = conn.get_links().await?;
+///         Ok(links.into_iter().map(nlink::NetworkEvent::NewLink).collect())
+///     })
 /// });
 ///
 /// while let Some(item) = stream.next().await {
@@ -479,8 +484,11 @@ where
 ///         ResyncedEvent::Marker(ResyncMarker::ResyncEnd) => {
 ///             /* state is fully rebuilt; resume normal processing */
 ///         }
+///         _ => {}
 ///     }
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub fn events_with_resync<'a, S, T, F>(
     events: S,

@@ -36,19 +36,25 @@
 //!
 //! # Construction
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, genl::dpll::Dpll};
 //!
 //! let conn = Connection::<Dpll>::new_async().await?;
 //! // Family ID resolved against the kernel "dpll" registration;
 //! // FamilyNotFound on kernels without CONFIG_DPLL.
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Resolution failure is the common case on stock distro kernels
 //! that haven't loaded the DPLL driver. Handle via
 //! [`Error::is_not_found`](crate::Error::is_not_found):
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> nlink::Result<()> {
+//! # use nlink::Connection;
+//! # use nlink::netlink::Dpll;
 //! match Connection::<Dpll>::new_async().await {
 //!     Ok(conn) => { /* use it */ }
 //!     Err(e) if e.is_not_found() => {
@@ -56,6 +62,8 @@
 //!     }
 //!     Err(e) => return Err(e),
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::macros::genl_family;

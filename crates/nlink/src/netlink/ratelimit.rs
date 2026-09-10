@@ -12,7 +12,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # use nlink::Rate;
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::ratelimit::RateLimiter;
 //! use std::time::Duration;
@@ -21,9 +23,9 @@
 //!
 //! // Simple rate limiting
 //! RateLimiter::new("eth0")
-//!     .egress("100mbit")?
-//!     .ingress("1gbit")?
-//!     .burst_to("150mbit")?
+//!     .egress(Rate::mbit(100))
+//!     .ingress(Rate::gbit(1))
+//!     .burst_to(Rate::mbit(150))
 //!     .latency(Duration::from_millis(20))
 //!     .apply(&conn)
 //!     .await?;
@@ -32,6 +34,8 @@
 //! RateLimiter::new("eth0")
 //!     .remove(&conn)
 //!     .await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Implementation Details
@@ -135,7 +139,9 @@ impl RateLimit {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::Rate;
 /// use nlink::netlink::{Connection, Route};
 /// use nlink::netlink::ratelimit::RateLimiter;
 ///
@@ -143,10 +149,12 @@ impl RateLimit {
 ///
 /// // Limit egress to 100 Mbps, ingress to 1 Gbps
 /// RateLimiter::new("eth0")
-///     .egress("100mbit")?
-///     .ingress("1gbit")?
+///     .egress(Rate::mbit(100))
+///     .ingress(Rate::gbit(1))
 ///     .apply(&conn)
 ///     .await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
@@ -843,18 +851,22 @@ impl RateLimiter {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::Rate;
 /// use nlink::netlink::{Connection, Route};
 /// use nlink::netlink::ratelimit::PerHostLimiter;
 ///
 /// let conn = Connection::<Route>::new()?;
 ///
-/// PerHostLimiter::new("eth0", "10mbit")?
-///     .limit_ip("192.168.1.100".parse()?, "100mbit")?
-///     .limit_subnet("10.0.0.0/8", "50mbit")?
-///     .limit_port(80, "500mbit")?
+/// PerHostLimiter::new("eth0", Rate::mbit(10))
+///     .limit_ip("192.168.1.100".parse()?, Rate::mbit(100))
+///     .limit_subnet("10.0.0.0/8", Rate::mbit(50))?
+///     .limit_port(80, Rate::mbit(500))
 ///     .apply(&conn)
 ///     .await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct PerHostLimiter {

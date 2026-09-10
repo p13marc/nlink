@@ -62,6 +62,9 @@ jobs:
       # privileged lane (integration.yml); everything else runs here.
       - run: cargo test --workspace --all-features --exclude nlink
       - run: cargo test -p nlink --all-features --lib
+      # Doc examples compile under every feature too: the `test` job only
+      # covers the default set, and 40 of these are feature-gated (#304).
+      - run: cargo test -p nlink --all-features --doc
 
   msrv:
     runs-on: ubuntu-24.04
@@ -105,6 +108,7 @@ jobs:
       - run: bash scripts/audit-bytes-le.sh
       - run: bash scripts/audit-ignored-tests.sh
       - run: bash scripts/audit-dump-termination.sh
+      - run: bash scripts/audit-doc-examples.sh
 
   # Supply-chain lint (fleet standard, myserver#33): advisories, licenses,
   # bans, sources — config in deny.toml.

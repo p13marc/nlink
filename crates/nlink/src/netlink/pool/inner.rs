@@ -109,8 +109,17 @@ impl<P: ProtocolState + Default + SyncConstructible + 'static> ConnectionPool<P>
     /// Convenience: build a pool bound to a named network namespace.
     /// Equivalent to:
     ///
-    /// ```ignore
-    /// ConnectionPoolBuilder::new().namespace(ns).size(size).build().await
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::pool::ConnectionPoolBuilder;
+    /// # let (ns, size) = ("myns", 4);
+    /// let pool = ConnectionPoolBuilder::<nlink::Route>::new()
+    ///     .namespace(ns)
+    ///     .size(size)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn for_namespace(
         ns: impl Into<String>,

@@ -815,7 +815,9 @@ impl NatExpr {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::netlink::Nftables>::new()?;
 /// use nlink::netlink::nftables::{Flowtable, Family};
 ///
 /// let ft = Flowtable::new(Family::Inet, "filter", "ft")
@@ -824,6 +826,8 @@ impl NatExpr {
 ///     .priority(0)
 ///     .hw_offload(true);
 /// conn.add_flowtable(&ft).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Flowtable {
@@ -1533,11 +1537,15 @@ impl Rule {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::nftables::Rule;
     /// // Match ICMP traffic
-    /// rule.match_l4proto(1)
+    /// let icmp = Rule::new("filter", "input").match_l4proto(1);
     /// // Match TCP traffic
-    /// rule.match_l4proto(6)
+    /// let tcp = Rule::new("filter", "input").match_l4proto(6);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn match_l4proto(mut self, proto: u8) -> Self {
         self.push_meta_eq(MetaKey::L4Proto, proto);

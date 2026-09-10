@@ -66,7 +66,12 @@
 //!
 //! To change tunnel parameters, delete and recreate the tunnel:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # use nlink::netlink::link::GreLink;
+//! # let conn = nlink::Connection::<nlink::Route>::new()?;
+//! # let new_remote_ip: std::net::Ipv4Addr = "203.0.113.2".parse()?;
+//! # let new_local_ip: std::net::Ipv4Addr = "198.51.100.2".parse()?;
 //! // To change tunnel parameters:
 //! conn.del_link("gre1").await?;
 //! conn.add_link(GreLink::new("gre1")
@@ -74,6 +79,8 @@
 //!     .local(new_local_ip)
 //!     .ttl(64)
 //! ).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Note: This causes a brief network interruption. For zero-downtime changes,
@@ -82,7 +89,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::link::{DummyLink, VethLink, BridgeLink, VlanLink};
 //!
@@ -99,6 +107,8 @@
 //!
 //! // Create a VLAN on eth0
 //! conn.add_link(VlanLink::new("eth0.100", "eth0", 100)).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::Ipv4Addr;
@@ -129,7 +139,9 @@ const NLM_F_EXCL: u16 = 0x200;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::BridgePortConfig;
 ///
 /// // Harden an access port: enable BPDU guard + isolation, stop
@@ -140,6 +152,8 @@ const NLM_F_EXCL: u16 = 0x200;
 ///     .learning(false)
 ///     .mcast_flood(false);
 /// conn.set_bridge_port("swp1", cfg).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct BridgePortConfig {
@@ -368,13 +382,17 @@ pub trait LinkConfig: Send + Sync {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::DummyLink;
 ///
 /// let dummy = DummyLink::new("dummy0")
 ///     .mtu(9000);
 ///
 /// conn.add_link(dummy).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -438,7 +456,9 @@ impl LinkConfig for DummyLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::VethLink;
 ///
 /// // Create a veth pair
@@ -446,6 +466,8 @@ impl LinkConfig for DummyLink {
 /// conn.add_link(veth).await?;
 ///
 /// // Now veth0 and veth1 are connected
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug)]
 #[must_use = "builders do nothing unless used"]
@@ -520,9 +542,14 @@ impl VethLink {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::link::VethLink;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let veth = VethLink::new("veth0", "veth1").peer_netns("my-ns")?;
     /// conn.add_link(veth).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn peer_netns(mut self, ns_name: &str) -> Result<Self> {
         let ns_fd = super::namespace::open(ns_name)?;
@@ -611,7 +638,9 @@ impl LinkConfig for VethLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::BridgeLink;
 ///
 /// let bridge = BridgeLink::new("br0")
@@ -619,6 +648,8 @@ impl LinkConfig for VethLink {
 ///     .vlan_filtering(true);
 ///
 /// conn.add_link(bridge).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -817,12 +848,16 @@ impl LinkConfig for BridgeLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::VlanLink;
 ///
 /// // Create VLAN 100 on eth0
 /// let vlan = VlanLink::new("eth0.100", "eth0", 100);
 /// conn.add_link(vlan).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -1076,7 +1111,9 @@ impl LinkConfig for VlanLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::VxlanLink;
 /// use std::net::Ipv4Addr;
 ///
@@ -1087,6 +1124,8 @@ impl LinkConfig for VlanLink {
 ///     .port(4789);
 ///
 /// conn.add_link(vxlan).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -1409,13 +1448,17 @@ pub enum MacvlanMode {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::{MacvlanLink, MacvlanMode};
 ///
 /// let macvlan = MacvlanLink::new("macvlan0", "eth0")
 ///     .mode(MacvlanMode::Bridge);
 ///
 /// conn.add_link(macvlan).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -1557,13 +1600,17 @@ pub enum IpvlanFlags {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::{IpvlanLink, IpvlanMode};
 ///
 /// let ipvlan = IpvlanLink::new("ipvlan0", "eth0")
 ///     .mode(IpvlanMode::L3);
 ///
 /// conn.add_link(ipvlan).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -1682,13 +1729,17 @@ impl LinkConfig for IpvlanLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::IfbLink;
 ///
 /// let ifb = IfbLink::new("ifb0");
 /// conn.add_link(ifb).await?;
 ///
 /// // Then redirect ingress traffic to ifb0 for shaping
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -1746,13 +1797,17 @@ impl LinkConfig for IfbLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::{MacvtapLink, MacvlanMode};
 ///
 /// let macvtap = MacvtapLink::new("macvtap0", "eth0")
 ///     .mode(MacvlanMode::Bridge);
 ///
 /// conn.add_link(macvtap).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -1866,7 +1921,9 @@ impl LinkConfig for MacvtapLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::GeneveLink;
 /// use std::net::Ipv4Addr;
 ///
@@ -1875,6 +1932,8 @@ impl LinkConfig for MacvtapLink {
 ///     .port(6081);
 ///
 /// conn.add_link(geneve).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -2161,12 +2220,16 @@ impl LinkConfig for GeneveLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::BareudpLink;
 ///
 /// // Create a bareudp tunnel for MPLS
 /// let bareudp = BareudpLink::new("bareudp0", 6635, 0x8847);
 /// conn.add_link(bareudp).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -2285,7 +2348,9 @@ impl LinkConfig for BareudpLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::{NetkitLink, NetkitMode, NetkitPolicy};
 ///
 /// let netkit = NetkitLink::new("nk0", "nk1")
@@ -2293,6 +2358,8 @@ impl LinkConfig for BareudpLink {
 ///     .policy(NetkitPolicy::Forward);
 ///
 /// conn.add_link(netkit).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -2493,7 +2560,9 @@ impl LinkConfig for NetkitLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::NlmonLink;
 ///
 /// let nlmon = NlmonLink::new("nlmon0");
@@ -2501,6 +2570,8 @@ impl LinkConfig for NetkitLink {
 ///
 /// // Now use tcpdump or similar to capture netlink traffic:
 /// // tcpdump -i nlmon0 -w netlink.pcap
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -2541,11 +2612,15 @@ impl LinkConfig for NlmonLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::VirtWifiLink;
 ///
 /// let vwifi = VirtWifiLink::new("vwifi0", "eth0");
 /// conn.add_link(vwifi).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -2623,7 +2698,9 @@ impl LinkConfig for VirtWifiLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::VtiLink;
 /// use std::net::Ipv4Addr;
 ///
@@ -2634,6 +2711,8 @@ impl LinkConfig for VirtWifiLink {
 ///     .okey(100);
 ///
 /// conn.add_link(vti).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -2771,7 +2850,9 @@ impl LinkConfig for VtiLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::Vti6Link;
 /// use std::net::Ipv6Addr;
 ///
@@ -2780,6 +2861,8 @@ impl LinkConfig for VtiLink {
 ///     .remote(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2));
 ///
 /// conn.add_link(vti6).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -2907,7 +2990,9 @@ impl LinkConfig for Vti6Link {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::Ip6GreLink;
 /// use std::net::Ipv6Addr;
 ///
@@ -2917,6 +3002,8 @@ impl LinkConfig for Vti6Link {
 ///     .ttl(64);
 ///
 /// conn.add_link(gre).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -3113,7 +3200,9 @@ impl LinkConfig for Ip6GreLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::Ip6GretapLink;
 /// use std::net::Ipv6Addr;
 ///
@@ -3123,6 +3212,8 @@ impl LinkConfig for Ip6GreLink {
 ///     .ttl(64);
 ///
 /// conn.add_link(gretap).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -3447,7 +3538,11 @@ mod bond_attr {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::netlink::link::ArpValidate;
+/// # use std::net::Ipv4Addr;
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::{BondLink, BondMode, XmitHashPolicy, LacpRate};
 ///
 /// // LACP bond with fast rate and layer3+4 hashing
@@ -3466,6 +3561,8 @@ mod bond_attr {
 ///     .arp_ip_target(Ipv4Addr::new(192, 168, 1, 1))
 ///     .arp_validate(ArpValidate::All);
 /// conn.add_link(bond).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -3859,12 +3956,16 @@ mod vrf_attr {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::VrfLink;
 ///
 /// let vrf = VrfLink::new("vrf-red", 100);
 ///
 /// conn.add_link(vrf).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -3936,11 +4037,15 @@ impl LinkConfig for VrfLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::OvpnLink;
 ///
 /// let link = OvpnLink::new("ovpn0");
 /// conn.add_link(link).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -3987,7 +4092,9 @@ impl LinkConfig for OvpnLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::GreLink;
 /// use std::net::Ipv4Addr;
 ///
@@ -3997,6 +4104,8 @@ impl LinkConfig for OvpnLink {
 ///     .ttl(64);
 ///
 /// conn.add_link(gre).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -4182,7 +4291,9 @@ impl LinkConfig for GreLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::GretapLink;
 /// use std::net::Ipv4Addr;
 ///
@@ -4191,6 +4302,8 @@ impl LinkConfig for GreLink {
 ///     .local(Ipv4Addr::new(192, 168, 1, 2));
 ///
 /// conn.add_link(gretap).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -4365,7 +4478,9 @@ impl LinkConfig for GretapLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::IpipLink;
 /// use std::net::Ipv4Addr;
 ///
@@ -4374,6 +4489,8 @@ impl LinkConfig for GretapLink {
 ///     .local(Ipv4Addr::new(192, 168, 1, 2));
 ///
 /// conn.add_link(ipip).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -4521,7 +4638,9 @@ impl LinkConfig for IpipLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::link::SitLink;
 /// use std::net::Ipv4Addr;
 ///
@@ -4530,6 +4649,8 @@ impl LinkConfig for IpipLink {
 ///     .local(Ipv4Addr::new(192, 168, 1, 2));
 ///
 /// conn.add_link(sit).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -4689,16 +4810,21 @@ impl LinkConfig for SitLink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::{Connection, Wireguard};
 /// use nlink::netlink::link::WireguardLink;
 ///
+/// # let key = [0u8; 32];
 /// let wg = WireguardLink::new("wg0");
 /// conn.add_link(wg).await?;
 ///
 /// // Then configure via Connection<Wireguard>
 /// let wg_conn = Connection::<Wireguard>::new_async().await?;
 /// wg_conn.set_device("wg0", |dev| dev.private_key(key)).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -5026,7 +5152,10 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::link::VlanLink;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::link::{DummyLink, VethLink, BridgeLink};
     ///
     /// // Create a dummy interface
@@ -5040,6 +5169,8 @@ impl Connection<Route> {
     ///
     /// // Create a VLAN with parent by index (namespace-safe)
     /// conn.add_link(VlanLink::with_parent_index("vlan100", 5, 100)).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn add_link<L: LinkConfig>(&self, config: L) -> Result<()> {
         use super::message::{NLM_F_ACK, NLM_F_REQUEST};
@@ -5082,12 +5213,17 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::InterfaceRef;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Add eth0 to bridge br0
     /// conn.set_link_master("eth0", "br0").await?;
     ///
     /// // Or by index
     /// conn.set_link_master(InterfaceRef::Index(5), InterfaceRef::Index(10)).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_master"))]
     pub async fn set_link_master(
@@ -5124,9 +5260,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Enslave eth0 to bond0 (handles down/master/up automatically)
     /// conn.enslave("eth0", "bond0").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "enslave"))]
     pub async fn enslave(
@@ -5159,9 +5299,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Remove eth0 from its bridge/bond
     /// conn.set_link_nomaster("eth0").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_nomaster"))]
     pub async fn set_link_nomaster(&self, iface: impl Into<InterfaceRef>) -> Result<()> {
@@ -5250,8 +5394,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.set_link_name("eth0", "lan0").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_name"))]
     pub async fn set_link_name(
@@ -5288,8 +5436,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.set_link_address("eth0", [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_address"))]
     pub async fn set_link_address(
@@ -5327,9 +5479,14 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let container_pid: u32 = 1;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Move veth1 to namespace by PID
     /// conn.set_link_netns_pid("veth1", container_pid).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_netns_pid"))]
     pub async fn set_link_netns_pid(&self, iface: impl Into<InterfaceRef>, pid: u32) -> Result<()> {
@@ -5393,8 +5550,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.set_link_netns("eth0", "my-ns").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_netns"))]
     pub async fn set_link_netns(

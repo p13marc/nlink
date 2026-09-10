@@ -5,7 +5,8 @@
 //!
 //! # Quick Start
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //!
 //! let conn = Connection::<Route>::new()?;
@@ -18,13 +19,16 @@
 //!
 //! // Build ifindex -> name map for resolving routes/addresses
 //! let names = conn.get_interface_names().await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Event Monitoring
 //!
 //! Subscribe to multicast groups and use the stream API to monitor events:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
 //! use tokio_stream::StreamExt;
 //!
@@ -34,18 +38,24 @@
 //! let mut events = conn.events().await;
 //! while let Some(event) = events.next().await {
 //!     match event? {
-//!         NetworkEvent::NewLink(link) => println!("New link: {:?}", link.name),
-//!         NetworkEvent::NewAddress(addr) => println!("New address: {:?}", addr.address),
+//!         NetworkEvent::NewLink(link) => println!("New link: {:?}", link.name()),
+//!         NetworkEvent::NewAddress(addr) => println!("New address: {:?}", addr.address()),
 //!         _ => {}
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Traffic Control (TC)
 //!
 //! The `tc` module provides typed configuration for qdiscs:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # use nlink::TcHandle;
+//! # use nlink::Percent;
+//! # let conn = nlink::Connection::<nlink::Route>::new()?;
 //! use nlink::netlink::tc::NetemConfig;
 //! use std::time::Duration;
 //!
@@ -62,10 +72,12 @@
 //! let updated = NetemConfig::new()
 //!     .delay(Duration::from_millis(50))
 //!     .build();
-//! conn.change_qdisc("eth0", "root", updated).await?;
+//! conn.change_qdisc("eth0", TcHandle::ROOT, updated).await?;
 //!
 //! // Delete the qdisc
-//! conn.del_qdisc("eth0", "root").await?;
+//! conn.del_qdisc("eth0", TcHandle::ROOT).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod action;

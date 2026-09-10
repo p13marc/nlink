@@ -21,7 +21,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use nlink::{Connection, Nftables, NftablesConfig};
 //! use nlink::netlink::nftables::{Family, Hook, Priority, Policy};
 //!

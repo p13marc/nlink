@@ -45,7 +45,8 @@ use crate::util::AddressFamily;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::{Connection, Route, Generic, Wireguard};
 ///
 /// // Sync construction (Route, Generic, Nftables, SockDiag)
@@ -54,6 +55,8 @@ use crate::util::AddressFamily;
 ///
 /// // Async construction (Wireguard, Macsec, Mptcp, Ethtool, Nl80211, Devlink)
 /// let wg = Connection::<Wireguard>::new_async().await?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Concurrency
@@ -248,11 +251,14 @@ where
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Route, Generic};
     ///
     /// let route = Connection::<Route>::new()?;
     /// let genl = Connection::<Generic>::new()?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>()))]
     pub fn new() -> Result<Self> {
@@ -280,7 +286,8 @@ where
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use std::fs::File;
     /// use std::os::unix::io::AsRawFd;
     /// use nlink::netlink::{Connection, Route};
@@ -290,6 +297,8 @@ where
     ///
     /// // All operations now occur in the "myns" namespace
     /// let links = conn.get_links().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_fd))]
     pub fn new_in_namespace(ns_fd: RawFd) -> Result<Self> {
@@ -311,7 +320,8 @@ where
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Route};
     ///
     /// // For a named namespace (created via `ip netns add myns`)
@@ -322,6 +332,8 @@ where
     ///
     /// // Query interfaces in that namespace
     /// let links = conn.get_links().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_path = %ns_path.as_ref().display()))]
     pub fn new_in_namespace_path<T: AsRef<Path>>(ns_path: T) -> Result<Self> {
@@ -373,10 +385,13 @@ where
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Wireguard};
     ///
     /// let wg = Connection::<Wireguard>::new_async().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>()))]
     pub async fn new_async() -> Result<Self> {
@@ -406,13 +421,18 @@ impl<P: ProtocolState> Connection<P> {
     /// through the mutex, and a long-lived `recv` no longer blocks
     /// unrelated requests.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::Connection;
+    /// # use nlink::Route;
     /// let conn = std::sync::Arc::new(Connection::<Route>::new()?.with_dispatcher());
     /// // Single-message lookups pipeline (not serialized):
     /// let (a, b) = tokio::join!(
     ///     conn.get_link_by_index(1),
     ///     conn.get_link_by_index(2),
     /// );
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Dumps still serialize (kernel constraint)
@@ -490,12 +510,15 @@ impl<P: ProtocolState> Connection<P> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::{Connection, Route};
     /// use std::time::Duration;
     ///
     /// let conn = Connection::<Route>::new()?
     ///     .timeout(Duration::from_secs(5));
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
@@ -529,10 +552,13 @@ impl<P: ProtocolState> Connection<P> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::{Connection, Route};
     /// let conn = Connection::<Route>::new()?;
     /// conn.enable_strict_checking(true)?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "debug", skip(self), fields(method = "enable_strict_checking"))]
     pub fn enable_strict_checking(&self, on: bool) -> Result<()> {
@@ -553,10 +579,13 @@ impl<P: ProtocolState> Connection<P> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::{Connection, Route};
     /// let conn = Connection::<Route>::new()?;
     /// conn.set_ext_ack(false)?;  // disable; rarely useful
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "debug", skip(self), fields(method = "set_ext_ack"))]
     pub fn set_ext_ack(&self, on: bool) -> Result<()> {
@@ -742,7 +771,27 @@ impl<P: ProtocolState> Connection<P> {
     /// This is a low-level method. Prefer typed methods like
     /// `get_links()`, `get_routes()`, etc.
     pub(crate) async fn send_dump(&self, builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
-        self.send_dump_inner(builder).await
+        // `Box::pin` ends the future-layout recursion here, and this is the
+        // one place it has to happen. Every `async fn` that awaits another
+        // embeds the callee's future in its own, so rustc computes a
+        // caller's layout by recursing once per level, and the dump path is
+        // where nlink's depth lives — every mutating helper reaches it too,
+        // resolving an interface name before it sends anything.
+        //
+        // Without this, a *small* program calling a convenience wrapper
+        // (`del_netem`, `RateLimiter::apply`, …) failed to compile with
+        // `error: queries overflow the depth limit!` — pointing at the
+        // caller's own async block, never mentioning nlink, and fixable
+        // only by a `recursion_limit` attribute in the caller's crate
+        // (#310, #315).
+        //
+        // Measured: `send_request` and `send_ack` do not need it (removing
+        // a box there does not overflow), and boxing per-wrapper does not
+        // work — those helpers await several deep chains, so lowering one
+        // sibling leaves the maximum where it was. Guarded by the
+        // `route_tc_minimal_caller` example, which fails to build without
+        // this line. One allocation on a path about to make a syscall.
+        Box::pin(self.send_dump_inner(builder)).await
     }
 
     #[instrument(level = "trace", skip_all, fields(seq))]
@@ -1141,12 +1190,15 @@ impl<P: ProtocolState> Connection<P> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::{Connection, Route, RtnetlinkGroup};
 ///
 /// let conn = Connection::<Route>::new()?;
 /// conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
 /// let mut events = conn.events().await;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -1210,7 +1262,8 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Route};
     /// use nlink::netlink::namespace::NamespaceSpec;
     ///
@@ -1222,6 +1275,8 @@ impl Connection<Route> {
     ///
     /// // For the default namespace
     /// let conn = Connection::<Route>::for_namespace(NamespaceSpec::Default)?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "info", skip_all, fields(protocol = "Route"))]
     pub fn for_namespace(spec: super::namespace::NamespaceSpec<'_>) -> Result<Self> {
@@ -1232,11 +1287,14 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Route, RtnetlinkGroup};
     ///
     /// let conn = Connection::<Route>::new()?;
     /// conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "info", skip(self), fields(groups = ?groups))]
     pub fn subscribe(&self, groups: &[RtnetlinkGroup]) -> Result<()> {
@@ -1260,12 +1318,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Route};
     ///
     /// let conn = Connection::<Route>::new()?;
     /// conn.subscribe_all()?;
     /// let mut events = conn.events().await;
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "info", skip_all)]
     pub fn subscribe_all(&self) -> Result<()> {
@@ -1297,14 +1358,18 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::messages::AddressMessage;
     /// use nlink::netlink::message::NlMsgType;
     ///
     /// let addresses: Vec<AddressMessage> = conn.dump_typed(NlMsgType::RTM_GETADDR).await?;
     /// for addr in addresses {
-    ///     println!("{}: {:?}", addr.ifindex(), addr.address);
+    ///     println!("{}: {:?}", addr.ifindex(), addr.address());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "debug", skip(self), fields(method = "dump_typed", msg_type))]
     pub async fn dump_typed<T: FromNetlink>(&self, msg_type: u16) -> Result<Vec<T>> {
@@ -1387,7 +1452,8 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Route};
     /// use nlink::netlink::route::Ipv4Route;
     ///
@@ -1397,6 +1463,8 @@ impl Connection<Route> {
     ///     .add_route(Ipv4Route::new("10.1.0.0", 16).dev_index(5))
     ///     .execute()
     ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn batch(&self) -> super::batch::Batch<'_> {
         super::batch::Batch::new(self)
@@ -1416,11 +1484,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let links = conn.get_links().await?;
     /// for link in links {
-    ///     println!("{}: {}", link.ifindex(), link.name.as_deref().unwrap_or("?"));
+    ///     println!("{}: {}", link.ifindex(), link.name().as_deref().unwrap_or("?"));
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// **Scale note**: this eager variant collects the full kernel
@@ -1441,13 +1513,17 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use tokio_stream::StreamExt;
     /// let mut s = conn.stream_links().await?;
     /// while let Some(link) = s.next().await {
     ///     let link = link?;
     ///     // process one link with O(1) memory
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "debug", skip_all, fields(method = "stream_links"))]
     pub async fn stream_links(
@@ -1606,12 +1682,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::{Connection, Route};
     ///
     /// let conn = Connection::<Route>::new()?;
     /// let stats = conn.get_link_stats("eth0").await?;
-    /// println!("rx: {} bytes / {} packets", stats.rx_bytes, stats.rx_packets);
+    /// println!("rx: {} bytes / {} packets", stats.rx_bytes(), stats.rx_packets());
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_stats"))]
     pub async fn get_link_stats(
@@ -1650,7 +1729,8 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Route, InterfaceRef};
     ///
     /// let conn = Connection::<Route>::new()?;
@@ -1661,6 +1741,8 @@ impl Connection<Route> {
     /// // Pass-through an index
     /// let ifindex = conn.resolve_interface(&InterfaceRef::index(2)).await?;
     /// assert_eq!(ifindex, 2);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "resolve_interface"))]
     pub async fn resolve_interface(&self, iface: &InterfaceRef) -> Result<u32> {
@@ -1694,13 +1776,17 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let names = conn.get_interface_names().await?;
     /// let addresses = conn.get_addresses().await?;
     /// for addr in addresses {
     ///     let name = names.get(&addr.ifindex()).map(|s| s.as_str()).unwrap_or("?");
-    ///     println!("{}: {:?}", name, addr.address);
+    ///     println!("{}: {:?}", name, addr.address());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_interface_names"))]
     pub async fn get_interface_names(&self) -> Result<std::collections::HashMap<u32, String>> {
@@ -1721,10 +1807,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// if let Some(name) = conn.interface_name(route.oif.unwrap()).await? {
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let route = conn.get_routes().await?.into_iter().next().unwrap();
+    /// if let Some(name) = conn.interface_name(route.oif().unwrap()).await? {
     ///     println!("Route via {}", name);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "interface_name"))]
     pub async fn interface_name(&self, ifindex: u32) -> Result<Option<String>> {
@@ -1739,9 +1830,14 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let dev = conn.interface_name_or(route.oif.unwrap_or(0), "-").await?;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let route = conn.get_routes().await?.into_iter().next().unwrap();
+    /// let dev = conn.interface_name_or(route.oif().unwrap_or(0), "-").await?;
     /// println!("Route via {}", dev);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "interface_name_or"))]
     pub async fn interface_name_or(&self, ifindex: u32, default: &str) -> Result<String> {
@@ -1761,9 +1857,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let info = conn.get_bond_info("bond0").await?;
     /// println!("Mode: {:?}, miimon: {}ms", info.bond_mode(), info.miimon);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_bond_info"))]
     pub async fn get_bond_info(
@@ -1785,12 +1885,16 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let slaves = conn.get_bond_slaves("bond0").await?;
     /// for (link, info) in &slaves {
     ///     println!("{}: state={:?}, mii={:?}",
     ///         link.name_or("?"), info.state, info.mii_status);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_bond_slaves"))]
     pub async fn get_bond_slaves(
@@ -1816,11 +1920,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let addresses = conn.get_addresses().await?;
     /// for addr in addresses {
-    ///     println!("{:?}/{} on idx {}", addr.address, addr.prefix_len(), addr.ifindex());
+    ///     println!("{:?}/{} on idx {}", addr.address(), addr.prefix_len(), addr.ifindex());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_addresses"))]
     pub async fn get_addresses(&self) -> Result<Vec<AddressMessage>> {
@@ -1855,13 +1963,17 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use std::net::IpAddr;
     ///
     /// let ip: IpAddr = "192.168.1.100".parse()?;
     /// if let Some(addr) = conn.get_address_by_ip(ip).await? {
     ///     println!("Found on interface index {}", addr.ifindex());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_address_by_ip"))]
     pub async fn get_address_by_ip(
@@ -1876,11 +1988,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let routes = conn.get_routes().await?;
     /// for route in routes {
     ///     println!("{:?}/{}", route.destination(), route.dst_len());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_routes"))]
     pub async fn get_routes(&self) -> Result<Vec<RouteMessage>> {
@@ -1906,13 +2022,17 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use std::net::Ipv4Addr;
     ///
     /// // Look up route to 10.0.0.0/8
     /// if let Some(route) = conn.get_route_v4(Ipv4Addr::new(10, 0, 0, 0), 8).await? {
-    ///     println!("Gateway: {:?}", route.gateway);
+    ///     println!("Gateway: {:?}", route.gateway());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_route_v4"))]
     pub async fn get_route_v4(
@@ -1957,14 +2077,18 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use std::net::Ipv6Addr;
     ///
     /// // Look up route to 2001:db8::/32
     /// let dest: Ipv6Addr = "2001:db8::".parse()?;
     /// if let Some(route) = conn.get_route_v6(dest, 32).await? {
-    ///     println!("Gateway: {:?}", route.gateway);
+    ///     println!("Gateway: {:?}", route.gateway());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_route_v6"))]
     pub async fn get_route_v6(
@@ -2001,11 +2125,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let neighbors = conn.get_neighbors().await?;
     /// for neigh in neighbors {
-    ///     println!("{:?} -> {:?}", neigh.destination, neigh.lladdr);
+    ///     println!("{:?} -> {:?}", neigh.destination(), neigh.lladdr());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_neighbors"))]
     pub async fn get_neighbors(&self) -> Result<Vec<NeighborMessage>> {
@@ -2030,11 +2158,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let rules = conn.get_rules().await?;
     /// for rule in rules {
     ///     println!("{}: {:?} -> table {}", rule.priority(), rule.source(), rule.table_id());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rules"))]
     pub async fn get_rules(&self) -> Result<Vec<RuleMessage>> {
@@ -2076,16 +2208,20 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::rule::RuleBuilder;
     ///
     /// // Add a rule to lookup table 100 for traffic from 10.0.0.0/8
     /// conn.add_rule(
     ///     RuleBuilder::v4()
     ///         .priority(100)
-    ///         .from("10.0.0.0", 8)
+    ///         .from_v4("10.0.0.0".parse()?, 8)
     ///         .table(100)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_rule"))]
     pub async fn add_rule(&self, rule: super::rule::RuleBuilder) -> Result<()> {
@@ -2099,13 +2235,17 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::rule::RuleBuilder;
     ///
     /// conn.del_rule(
     ///     RuleBuilder::v4()
     ///         .priority(100)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_rule"))]
     pub async fn del_rule(&self, rule: super::rule::RuleBuilder) -> Result<()> {
@@ -2150,11 +2290,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let qdiscs = conn.get_qdiscs().await?;
     /// for qdisc in qdiscs {
     ///     println!("{}: {}", qdisc.ifindex(), qdisc.kind().unwrap_or("?"));
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_qdiscs"))]
     pub async fn get_qdiscs(&self) -> Result<Vec<TcMessage>> {
@@ -2407,13 +2551,17 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use tokio_stream::StreamExt;
     /// let mut s = conn.stream_qdiscs().await?;
     /// while let Some(q) = s.next().await {
     ///     let q = q?;
     ///     // process one qdisc with O(1) memory
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "debug", skip_all, fields(method = "stream_qdiscs"))]
     pub async fn stream_qdiscs(
@@ -2493,11 +2641,16 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let chains = conn.get_tc_chains("eth0", "ingress").await?;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// let chains = conn.get_tc_chains("eth0", TcHandle::INGRESS).await?;
     /// for chain in chains {
     ///     println!("Chain: {}", chain);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_tc_chains"))]
     pub async fn get_tc_chains(
@@ -2546,9 +2699,14 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Create chain 100 on ingress qdisc
-    /// conn.add_tc_chain("eth0", "ingress", 100).await?;
+    /// conn.add_tc_chain("eth0", TcHandle::INGRESS, 100).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_tc_chain"))]
     pub async fn add_tc_chain(
@@ -2590,8 +2748,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// conn.del_tc_chain("eth0", "ingress", 100).await?;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// conn.del_tc_chain("eth0", TcHandle::INGRESS, 100).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_tc_chain"))]
     pub async fn del_tc_chain(
@@ -2635,10 +2798,14 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// if let Some(root) = conn.get_root_qdisc_by_name("eth0").await? {
     ///     println!("Root qdisc: {}", root.kind().unwrap_or("?"));
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_root_qdisc_by_name"))]
     pub async fn get_root_qdisc_by_name(
@@ -2664,11 +2831,16 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Get the qdisc with handle 1:0 on eth0
-    /// if let Some(qdisc) = conn.get_qdisc_by_handle("eth0", "1:").await? {
+    /// if let Some(qdisc) = conn.get_qdisc_by_handle("eth0", TcHandle::major_only(1)).await? {
     ///     println!("Found qdisc: {}", qdisc.kind().unwrap_or("?"));
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_qdisc_by_handle"))]
     pub async fn get_qdisc_by_handle(
@@ -2686,11 +2858,16 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Get the qdisc with handle 1:0 on interface index 2
     /// if let Some(qdisc) = conn.get_qdisc_by_handle_index(2, TcHandle::major_only(1)).await? {
     ///     println!("Found qdisc: {}", qdisc.kind().unwrap_or("?"));
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(
         level = "debug",
@@ -2717,7 +2894,9 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// if let Some(netem) = conn.get_netem_by_name("eth0").await? {
     ///     if let Some(delay) = netem.delay() {
     ///         println!("Delay: {:?}", delay);
@@ -2729,6 +2908,8 @@ impl Connection<Route> {
     ///         println!("Rate limit: {} bytes/sec", rate);
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_netem_by_name"))]
     pub async fn get_netem_by_name(
@@ -2769,9 +2950,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.set_link_up("eth0").await?;
     /// conn.set_link_up(5u32).await?;  // by index
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_up"))]
     pub async fn set_link_up(&self, iface: impl Into<InterfaceRef>) -> Result<()> {
@@ -2791,9 +2976,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.set_link_down("eth0").await?;
     /// conn.set_link_down(5u32).await?;  // by index
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_down"))]
     pub async fn set_link_down(&self, iface: impl Into<InterfaceRef>) -> Result<()> {
@@ -2818,12 +3007,16 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Bring interface up
     /// conn.set_link_state("eth0", true).await?;
     ///
     /// // Bring interface down by index
     /// conn.set_link_state(5u32, false).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_state"))]
     pub async fn set_link_state(&self, iface: impl Into<InterfaceRef>, up: bool) -> Result<()> {
@@ -2865,9 +3058,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.set_link_mtu("eth0", 9000).await?;
     /// conn.set_link_mtu(5u32, 9000).await?;  // by index
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_mtu"))]
     pub async fn set_link_mtu(&self, iface: impl Into<InterfaceRef>, mtu: u32) -> Result<()> {
@@ -2897,9 +3094,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.del_link("veth0").await?;
     /// conn.del_link(5u32).await?;  // by index
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_link"))]
     pub async fn del_link(&self, iface: impl Into<InterfaceRef>) -> Result<()> {
@@ -2946,9 +3147,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.set_link_txqlen("eth0", 1000).await?;
     /// conn.set_link_txqlen(5u32, 1000).await?;  // by index
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_txqlen"))]
     pub async fn set_link_txqlen(&self, iface: impl Into<InterfaceRef>, txqlen: u32) -> Result<()> {
@@ -2994,13 +3199,17 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use std::fs::File;
     /// use std::os::unix::io::AsRawFd;
     ///
     /// let ns_file = File::open("/var/run/netns/myns")?;
     /// let nsid = conn.get_nsid(ns_file.as_raw_fd()).await?;
     /// println!("Namespace ID: {}", nsid);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_nsid"))]
     pub async fn get_nsid(&self, ns_fd: RawFd) -> Result<u32> {
@@ -3038,10 +3247,14 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Get the namespace ID for process 1234
     /// let nsid = conn.get_nsid_for_pid(1234).await?;
     /// println!("Namespace ID for PID 1234: {}", nsid);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_nsid_for_pid"))]
     pub async fn get_nsid_for_pid(&self, pid: u32) -> Result<u32> {
@@ -3119,12 +3332,15 @@ impl Connection<Generic> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Generic};
     ///
     /// let conn = Connection::<Generic>::new()?;
     /// let wg = conn.get_family("wireguard").await?;
     /// println!("WireGuard family ID: {}", wg.id);
+    /// # Ok(())
+    /// # }
     /// ```
     #[instrument(level = "info", skip(self), fields(family = %name, id, cached))]
     pub async fn get_family(&self, name: &str) -> Result<FamilyInfo> {

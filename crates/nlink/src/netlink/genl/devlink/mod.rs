@@ -5,7 +5,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Devlink};
 //!
 //! let conn = Connection::<Devlink>::new_async().await?;
@@ -22,6 +23,8 @@
 //! for v in &info.versions_running {
 //!     println!("  {}: {}", v.name, v.value);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod connection;

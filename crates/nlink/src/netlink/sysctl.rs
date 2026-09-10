@@ -6,7 +6,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::sysctl;
 //!
 //! // Read a sysctl value
@@ -21,6 +22,8 @@
 //!     ("net.ipv4.ip_forward", "1"),
 //!     ("net.ipv6.conf.all.forwarding", "1"),
 //! ])?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::path::PathBuf;
@@ -31,12 +34,13 @@ use super::error::{Error, Result};
 ///
 /// # Example
 ///
-/// ```ignore
-/// assert_eq!(
-///     sysctl_path("net.ipv4.ip_forward")?,
-///     PathBuf::from("/proc/sys/net/ipv4/ip_forward"),
-/// );
+/// ```text
+/// sysctl_path("net.ipv4.ip_forward")
+///     == PathBuf::from("/proc/sys/net/ipv4/ip_forward")
 /// ```
+///
+/// Shown rather than run: this function is private, and a doctest compiles
+/// as a separate crate.
 fn sysctl_path(key: &str) -> Result<PathBuf> {
     validate_key(key)?;
     let relative = key.replace('.', "/");
@@ -64,11 +68,14 @@ fn validate_key(key: &str) -> Result<()> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::sysctl;
 ///
 /// let val = sysctl::get("net.ipv4.ip_forward")?;
 /// assert!(val == "0" || val == "1");
+/// # Ok(())
+/// # }
 /// ```
 pub fn get(key: &str) -> Result<String> {
     let path = sysctl_path(key)?;
@@ -90,10 +97,13 @@ pub fn get(key: &str) -> Result<String> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::sysctl;
 ///
 /// sysctl::set("net.ipv4.ip_forward", "1")?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn set(key: &str, value: &str) -> Result<()> {
     let path = sysctl_path(key)?;
@@ -114,13 +124,16 @@ pub fn set(key: &str, value: &str) -> Result<()> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::sysctl;
 ///
 /// sysctl::set_many(&[
 ///     ("net.ipv4.ip_forward", "1"),
 ///     ("net.ipv6.conf.all.forwarding", "1"),
 /// ])?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn set_many(entries: &[(&str, &str)]) -> Result<()> {
     for &(key, value) in entries {

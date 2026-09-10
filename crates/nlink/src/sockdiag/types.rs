@@ -870,12 +870,15 @@ fn format_timer_expires(msecs: u32) -> String {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::{Connection, SockDiag};
 ///
 /// let conn = Connection::<SockDiag>::new()?;
 /// let summary = conn.socket_summary().await?;
 /// println!("{}", summary);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SocketSummary {
@@ -910,12 +913,24 @@ impl fmt::Display for SocketSummary {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::netlink::SockDiag>::new()?;
+/// # use nlink::sockdiag::{InetFilter, Protocol, SocketState, TcpState};
+/// // `InetFilter` has no public constructor — see #317. Until it does, the
+/// // struct literal is the only way to name this method's argument.
+/// let filter = InetFilter {
+///     protocol: Protocol::Tcp,
+///     states: 1 << TcpState::Established as u32,
+///     ..Default::default()
+/// };
 /// let result = conn.destroy_matching(&filter).await?;
 /// println!("Destroyed {} sockets", result.destroyed);
 /// for err in &result.errors {
 ///     eprintln!("Failed to destroy {:?}: {}", err.socket, err.error);
 /// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug)]
 pub struct DestroyResult {

@@ -99,7 +99,9 @@ pub trait GenlMessage: Sized {
 /// where the macro doesn't fit (e.g. a family marker that needs
 /// extra fields beyond `family_id`). Match the shape:
 ///
-/// ```ignore
+/// ```no_run
+/// # use nlink::macros::GenlFamily;
+/// # struct SomeCache;
 /// pub struct MyFamily { family_id: u16, extra: SomeCache }
 /// impl GenlFamily for MyFamily {
 ///     const VERSION: u8 = 1;

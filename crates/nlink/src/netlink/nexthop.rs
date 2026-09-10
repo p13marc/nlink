@@ -13,7 +13,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::nexthop::{NexthopBuilder, NexthopGroupBuilder};
 //!
@@ -42,13 +43,15 @@
 //! // List nexthops
 //! let nexthops = conn.get_nexthops().await?;
 //! for nh in &nexthops {
-//!     println!("NH {}: {:?} via ifindex {:?}", nh.id, nh.gateway, nh.ifindex);
+//!     println!("NH {}: {:?} via ifindex {:?}", nh.id(), nh.gateway(), nh.ifindex());
 //! }
 //!
 //! // Cleanup
 //! conn.del_nexthop_group(100).await?;
 //! conn.del_nexthop(1).await?;
 //! conn.del_nexthop(2).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::IpAddr;
@@ -368,13 +371,14 @@ impl Nexthop {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # use std::net::IpAddr;
 /// use nlink::netlink::nexthop::NexthopBuilder;
 /// use std::net::Ipv4Addr;
 ///
 /// // Simple gateway nexthop
 /// let nh = NexthopBuilder::new(1)
-///     .gateway(Ipv4Addr::new(192, 168, 1, 1).into())
+///     .gateway(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))
 ///     .dev("eth0");
 ///
 /// // Blackhole nexthop
@@ -383,7 +387,7 @@ impl Nexthop {
 ///
 /// // On-link nexthop (no ARP resolution needed)
 /// let onlink = NexthopBuilder::new(3)
-///     .gateway(Ipv4Addr::new(10, 0, 0, 1).into())
+///     .gateway(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
 ///     .dev("eth0")
 ///     .onlink();
 /// ```
@@ -538,7 +542,7 @@ const USER_HZ: u32 = 100;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::nexthop::NexthopGroupBuilder;
 ///
 /// // Simple ECMP group (equal weights)
@@ -717,15 +721,19 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let nexthops = conn.get_nexthops().await?;
     /// for nh in &nexthops {
     ///     if nh.is_group() {
-    ///         println!("Group {}: {:?}", nh.id, nh.group);
+    ///         println!("Group {}: {:?}", nh.id(), nh.group());
     ///     } else {
-    ///         println!("NH {}: {:?} via {:?}", nh.id, nh.gateway, nh.ifindex);
+    ///         println!("NH {}: {:?} via {:?}", nh.id(), nh.gateway(), nh.ifindex());
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_nexthops"))]
     pub async fn get_nexthops(&self) -> Result<Vec<Nexthop>> {
@@ -778,7 +786,9 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::nexthop::NexthopBuilder;
     ///
     /// conn.add_nexthop(
@@ -786,6 +796,8 @@ impl Connection<Route> {
     ///         .gateway("192.168.1.1".parse()?)
     ///         .dev("eth0")
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_nexthop"))]
     pub async fn add_nexthop(&self, nh_builder: NexthopBuilder) -> Result<()> {
@@ -836,7 +848,9 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::nexthop::NexthopGroupBuilder;
     ///
     /// // ECMP group with equal weights
@@ -862,6 +876,8 @@ impl Connection<Route> {
     ///         .buckets(128)
     ///         .idle_timer(120)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_nexthop_group"))]
     pub async fn add_nexthop_group(&self, builder: NexthopGroupBuilder) -> Result<()> {

@@ -41,10 +41,14 @@ impl NetworkConfig {
     /// error rather than a silently-wrong config. Requires the
     /// `serde` feature.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::config::NetworkConfig;
     /// let cfg = NetworkConfig::from_json_str(r#"{
     ///     "addresses": [{ "dev": "eth0", "address": "10.0.0.1/24" }]
     /// }"#)?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[cfg(feature = "serde")]
     pub fn from_json_str(s: &str) -> crate::netlink::Result<Self> {
@@ -81,9 +85,12 @@ impl NetworkConfig {
     /// addresses/routes as CIDR strings, MACs as `aa:bb:..` strings,
     /// the `default` route keyword — not the in-memory representation.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// std::fs::write("network-config.schema.json",
     ///     nlink::netlink::config::NetworkConfig::json_schema())?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[cfg(feature = "schemars")]
     pub fn json_schema() -> String {
@@ -119,7 +126,8 @@ impl NetworkConfig {
     /// this apply). You can declare the VLAN before its parent
     /// dummy and the apply still works:
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use nlink::netlink::config::NetworkConfig;
     /// // Either order works — the apply sorts before sending.
     /// let cfg = NetworkConfig::new()
     ///     .link("eth0.42", |l| l.vlan("eth0", 42))
@@ -128,7 +136,8 @@ impl NetworkConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use nlink::netlink::config::NetworkConfig;
     /// let config = NetworkConfig::new()
     ///     .link("br0", |l| l.bridge().up())
     ///     .link("dummy0", |l| l.dummy())
@@ -146,10 +155,14 @@ impl NetworkConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::config::NetworkConfig;
     /// let config = NetworkConfig::new()
     ///     .address("eth0", "192.168.1.1/24")?
     ///     .address("eth0", "2001:db8::1/64")?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn address(mut self, dev: &str, addr: &str) -> Result<Self, AddressParseError> {
         let declared = DeclaredAddress::parse(dev, addr)?;
@@ -163,10 +176,14 @@ impl NetworkConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::config::NetworkConfig;
     /// let config = NetworkConfig::new()
     ///     .route("10.0.0.0/8", |r| r.via("192.168.1.1"))?
     ///     .route("0.0.0.0/0", |r| r.via("192.168.1.254").dev("eth0"))?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn route(
         mut self,
@@ -182,7 +199,8 @@ impl NetworkConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use nlink::netlink::config::NetworkConfig;
     /// use nlink::util::Percent;
     /// let config = NetworkConfig::new()
     ///     .qdisc("eth0", |q| q.netem().delay_ms(100).loss_pct(Percent::new(1.0)))
@@ -1224,7 +1242,7 @@ impl RouteBuilder {
     /// (Plan 184) on the declarative side. Pairs with `.via()` to
     /// set the gateway:
     ///
-    /// ```ignore
+    /// ```no_run
     /// use nlink::netlink::config::RouteBuilder;
     /// let r = RouteBuilder::default_v4().via("192.0.2.1");
     /// ```

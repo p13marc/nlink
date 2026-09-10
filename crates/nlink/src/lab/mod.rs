@@ -439,7 +439,7 @@ pub fn init_test_tracing() {
 /// [`crate::lab::init_test_tracing`]) so CI logs surface the spans on every
 /// `Connection` method.
 ///
-/// ```ignore
+/// ```no_run
 /// #[tokio::test]
 /// async fn needs_root() -> nlink::Result<()> {
 ///     nlink::require_root!();
@@ -482,7 +482,7 @@ macro_rules! require_root_void {
 /// module can only be checked once the test is actually trying to
 /// run.
 ///
-/// ```ignore
+/// ```no_run
 /// #[tokio::test]
 /// async fn needs_conntrack() -> nlink::Result<()> {
 ///     nlink::require_root!();
@@ -531,7 +531,7 @@ macro_rules! require_module_void {
 /// loaded or built-in. Convenience for tests that touch several
 /// independent kernel features.
 ///
-/// ```ignore
+/// ```no_run
 /// #[tokio::test]
 /// async fn needs_htb_and_flower() -> nlink::Result<()> {
 ///     nlink::require_root!();
@@ -551,8 +551,11 @@ macro_rules! require_modules {
 /// container configurations mount it read-only). Skips the
 /// test (returning `Ok(())`) if the path is not writable.
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> nlink::Result<()> {
 /// nlink::require_writable_sysctl!("/proc/sys/net/ipv4/ip_forward");
+/// # Ok(())
+/// # }
 /// ```
 #[macro_export]
 macro_rules! require_writable_sysctl {

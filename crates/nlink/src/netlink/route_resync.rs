@@ -11,11 +11,12 @@
 //!
 //! # Example — owned, spawn-friendly
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::sync::Arc;
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::resync::{ConnectionFactory, ResyncedEvent, ResyncMarker};
-//! use nlink::netlink::events::NetworkEvent;
+//! use nlink::NetworkEvent;
 //! use tokio_stream::StreamExt;
 //!
 //! let factory: ConnectionFactory<Route> = Arc::new(|| Box::pin(async {
@@ -23,7 +24,7 @@
 //! }));
 //!
 //! let conn = Connection::<Route>::new()?;
-//! let mut events = conn.into_events_with_resync(factory)?;
+//! let mut events = conn.into_events_with_resync(factory).await?;
 //!
 //! while let Some(item) = events.next().await {
 //!     match item? {
@@ -42,7 +43,8 @@
 //!         _ => {}
 //!     }
 //! }
-//! # Ok::<(), nlink::Error>(())
+//! # Ok(())
+//! # }
 //! ```
 
 use std::pin::Pin;

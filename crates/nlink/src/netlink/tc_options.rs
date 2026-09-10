@@ -5,7 +5,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let conn = nlink::Connection::<nlink::Route>::new()?;
 //! use nlink::netlink::tc_options::{QdiscOptions, parse_qdisc_options};
 //!
 //! let qdiscs = conn.get_qdiscs().await?;
@@ -24,6 +26,8 @@
 //!         }
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use super::{messages::TcMessage, psched};
@@ -610,13 +614,18 @@ impl NetemOptions {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::tc_options::QdiscOptions;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let qdisc = conn.get_root_qdisc_by_name("eth0").await?.unwrap();
     /// if let Some(QdiscOptions::Netem(opts)) = qdisc.options() {
     ///     for param in opts.configured_parameters() {
     ///         println!("Configured: {:?}", param);
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn configured_parameters(&self) -> Vec<NetemParameter> {
         let mut params = Vec::new();
@@ -652,7 +661,11 @@ impl NetemOptions {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let qdisc = conn.get_root_qdisc_by_name("eth0").await?.unwrap();
     /// use nlink::netlink::tc::NetemConfig;
     /// use nlink::netlink::tc_options::QdiscOptions;
     /// use std::time::Duration;
@@ -667,12 +680,14 @@ impl NetemOptions {
     ///
     /// if current.requires_recreation_for(&new_config) {
     ///     // Need to delete and recreate
-    ///     conn.del_qdisc("eth0", "root").await?;
+    ///     conn.del_qdisc("eth0", TcHandle::ROOT).await?;
     ///     conn.add_qdisc("eth0", new_config).await?;
     /// } else {
     ///     // Can use replace
-    ///     conn.replace_qdisc("eth0", "root", new_config).await?;
+    ///     conn.replace_qdisc("eth0", new_config).await?;
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn requires_recreation_for(&self, new_config: &super::tc::NetemConfig) -> bool {
         // Check if any currently-set parameters would be removed by the new config

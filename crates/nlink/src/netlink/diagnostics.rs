@@ -5,7 +5,8 @@
 //!
 //! # Quick Start
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::diagnostics::Diagnostics;
 //!
@@ -36,18 +37,26 @@
 //!     println!("  Drop rate: {:.2}%", bottleneck.drop_rate * 100.0);
 //!     println!("  Recommendation: {}", bottleneck.recommendation);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Real-time Monitoring
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use nlink::netlink::diagnostics::Diagnostics;
 //! use tokio_stream::StreamExt;
 //!
+//! let conn = nlink::Connection::<nlink::Route>::new()?;
+//! let diag = Diagnostics::new(conn);
 //! let mut issues = diag.watch().await?;
 //! while let Some(issue) = issues.next().await {
 //!     let issue = issue?;
 //!     println!("[{:?}] {}", issue.severity, issue.message);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{

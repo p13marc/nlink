@@ -63,11 +63,13 @@ use crate::{Connection, Error, Result, netlink::protocol::Wireguard};
 /// (44 chars, `=`-padded) via [`FromStr`] and [`fmt::Display`],
 /// matching what `wg pubkey` / `wg show` emit.
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::genl::wireguard::PublicKey;
 /// let pk: PublicKey = "fE/wpxQ6/M6OmF5j4dvbY3FbCEXc3KlBL2QqAYjE0WI=".parse()?;
 /// assert_eq!(pk.to_string(), "fE/wpxQ6/M6OmF5j4dvbY3FbCEXc3KlBL2QqAYjE0WI=");
-/// # Ok::<(), nlink::Error>(())
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PublicKey(pub [u8; WG_KEY_LEN]);
@@ -207,7 +209,11 @@ impl WireguardConfig {
     /// Declare a WireGuard device (interface) and its peers
     /// via a builder closure.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use nlink::netlink::genl::wireguard::AllowedIp;
+    /// # use nlink::netlink::genl::wireguard::WireguardConfig;
+    /// # use std::net::Ipv4Addr;
+    /// # use std::time::Duration;
     /// let cfg = WireguardConfig::new()
     ///     .device("wg0", |d| {
     ///         d.private_key([0xaa; 32])
@@ -425,7 +431,13 @@ impl WireguardConfig {
     /// anything richer (multiple peers, fwmark, listen-port) use the
     /// [`device`](Self::device) builder or [`from_wg_quick`](Self::from_wg_quick).
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use nlink::netlink::genl::wireguard::AllowedIp;
+    /// # use nlink::netlink::genl::wireguard::WireguardConfig;
+    /// # use std::net::Ipv4Addr;
+    /// # use std::time::Duration;
+    /// # let my_private_key = [0u8; 32];
+    /// # let server_public_key = [0u8; 32];
     /// let cfg = WireguardConfig::client(
     ///     "wg0",
     ///     my_private_key,                       // [u8; 32]

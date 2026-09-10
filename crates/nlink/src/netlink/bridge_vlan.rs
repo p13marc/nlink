@@ -12,7 +12,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::bridge_vlan::{BridgeVlanBuilder, BridgeVlanTunnelBuilder};
 //!
@@ -37,7 +38,7 @@
 //! let vlans = conn.get_bridge_vlans("eth0").await?;
 //! for vlan in &vlans {
 //!     println!("VLAN {}: pvid={} untagged={}",
-//!         vlan.vid, vlan.flags.pvid, vlan.flags.untagged);
+//!         vlan.vid(), vlan.flags().pvid, vlan.flags().untagged);
 //! }
 //!
 //! // Delete VLAN
@@ -54,6 +55,8 @@
 //! for t in &tunnels {
 //!     println!("VLAN {} -> VNI {}", t.vid, t.tunnel_id);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use super::{
@@ -159,7 +162,7 @@ pub struct BridgeVlanTunnelEntry {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::bridge_vlan::BridgeVlanTunnelBuilder;
 ///
 /// // Map VLAN 100 to VNI 10000
@@ -318,7 +321,7 @@ impl BridgeVlanTunnelBuilder {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::bridge_vlan::BridgeVlanBuilder;
 ///
 /// // Add VLAN 100 as PVID and untagged
@@ -484,7 +487,9 @@ impl BridgeVlanBuilder {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::bridge_vlan::BridgeVlanGlobalOptionsBuilder;
 ///
 /// // Enable multicast snooping on VLAN 100 of bridge br0.
@@ -501,6 +506,8 @@ impl BridgeVlanBuilder {
 ///         .range(210)
 ///         .mcast_snooping(false)
 /// ).await?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Not modelled
@@ -873,7 +880,9 @@ impl BridgeVlanState {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::bridge_vlan::{BridgeVlanEntryOptionsBuilder, BridgeVlanState};
 ///
 /// // Put VLAN 100 into forwarding state on port eth0.
@@ -882,6 +891,8 @@ impl BridgeVlanState {
 ///         .dev("eth0")
 ///         .state(BridgeVlanState::Forwarding)
 /// ).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default)]
 #[must_use = "builders do nothing unless used"]
@@ -1079,12 +1090,16 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let vlans = conn.get_bridge_vlans("eth0").await?;
     /// for vlan in &vlans {
     ///     println!("VLAN {}: pvid={} untagged={}",
-    ///         vlan.vid, vlan.flags.pvid, vlan.flags.untagged);
+    ///         vlan.vid(), vlan.flags().pvid, vlan.flags().untagged);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_bridge_vlans"))]
     pub async fn get_bridge_vlans(
@@ -1123,11 +1138,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let vlans = conn.get_bridge_vlans_all("br0").await?;
     /// for vlan in &vlans {
-    ///     println!("ifindex {}: VLAN {}", vlan.ifindex, vlan.vid);
+    ///     println!("ifindex {}: VLAN {}", vlan.ifindex(), vlan.vid());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_bridge_vlans_all"))]
     pub async fn get_bridge_vlans_all(
@@ -1196,7 +1215,9 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::bridge_vlan::BridgeVlanBuilder;
     ///
     /// // Add VLAN 100 as PVID and untagged (native VLAN)
@@ -1213,6 +1234,8 @@ impl Connection<Route> {
     ///         .dev("eth0")
     ///         .range(210)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_bridge_vlan"))]
     pub async fn add_bridge_vlan(&self, config: BridgeVlanBuilder) -> Result<()> {
@@ -1228,8 +1251,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.del_bridge_vlan("eth0", 100).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_bridge_vlan"))]
     pub async fn del_bridge_vlan(&self, dev: impl Into<InterfaceRef>, vid: u16) -> Result<()> {
@@ -1252,8 +1279,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.del_bridge_vlan_range("eth0", 200, 210).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_bridge_vlan_range"))]
     pub async fn del_bridge_vlan_range(
@@ -1280,8 +1311,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.set_bridge_pvid("eth0", 100).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_bridge_pvid"))]
     pub async fn set_bridge_pvid(&self, dev: impl Into<InterfaceRef>, vid: u16) -> Result<()> {
@@ -1313,8 +1348,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.add_bridge_vlan_tagged("eth0", 200).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_bridge_vlan_tagged"))]
     pub async fn add_bridge_vlan_tagged(
@@ -1331,8 +1370,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.add_bridge_vlan_range("eth0", 200, 210).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_bridge_vlan_range"))]
     pub async fn add_bridge_vlan_range(
@@ -1361,11 +1404,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let tunnels = conn.get_vlan_tunnels("vxlan0").await?;
     /// for t in &tunnels {
     ///     println!("VLAN {} -> VNI {}", t.vid, t.tunnel_id);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_vlan_tunnels"))]
     pub async fn get_vlan_tunnels(
@@ -1408,7 +1455,9 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::bridge_vlan::BridgeVlanTunnelBuilder;
     ///
     /// // Map VLAN 100 to VNI 10000
@@ -1423,6 +1472,8 @@ impl Connection<Route> {
     ///         .dev("vxlan0")
     ///         .range(210)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_vlan_tunnel"))]
     pub async fn add_vlan_tunnel(&self, config: BridgeVlanTunnelBuilder) -> Result<()> {
@@ -1438,8 +1489,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.del_vlan_tunnel("vxlan0", 100).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_vlan_tunnel"))]
     pub async fn del_vlan_tunnel(&self, dev: impl Into<InterfaceRef>, vid: u16) -> Result<()> {
@@ -1462,8 +1517,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.del_vlan_tunnel_range("vxlan0", 200, 210).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_vlan_tunnel_range"))]
     pub async fn del_vlan_tunnel_range(
@@ -1494,7 +1553,9 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::bridge_vlan::BridgeVlanGlobalOptionsBuilder;
     ///
     /// conn.set_bridge_vlan_global_options(
@@ -1502,6 +1563,8 @@ impl Connection<Route> {
     ///         .dev("br0")
     ///         .mcast_snooping(true)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(
         level = "debug",
@@ -1531,11 +1594,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let opts = conn.get_bridge_vlan_global_options("br0").await?;
     /// for o in &opts {
     ///     println!("VLAN {}: snooping={:?}", o.vid(), o.mcast_snooping());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(
         level = "debug",
@@ -1595,7 +1662,9 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::bridge_vlan::{BridgeVlanEntryOptionsBuilder, BridgeVlanState};
     ///
     /// conn.set_bridge_vlan_entry_options(
@@ -1603,6 +1672,8 @@ impl Connection<Route> {
     ///         .dev("eth0")
     ///         .state(BridgeVlanState::Forwarding)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(
         level = "debug",

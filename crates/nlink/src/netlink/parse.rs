@@ -7,14 +7,21 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # use nlink::AddressMessage;
 //! use nlink::netlink::parse::{FromNetlink, parse_nlmsghdr};
 //!
+//! // `data` is one message as handed out by `MessageIter`.
+//! # let data: Vec<u8> = Vec::new();
 //! // Parse a complete netlink message
 //! let msg = AddressMessage::from_bytes(&data)?;
 //!
 //! // Or use low-level combinators
-//! let header = parse_nlmsghdr(&mut data.as_ref())?;
+//! let header = parse_nlmsghdr(&mut data.as_ref())
+//!     .map_err(|e| format!("bad header: {e}"))?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};

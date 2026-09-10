@@ -36,7 +36,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::time::{Duration, Instant};
 //! use nlink::netlink::{Connection, SockDiag};
 //! use nlink::sockdiag::{SocketFilter, SocketRateTracker};
@@ -62,6 +63,8 @@
 //!     }
 //!     tokio::time::sleep(Duration::from_secs(1)).await;
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{collections::HashMap, time::Instant};

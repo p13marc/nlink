@@ -63,11 +63,16 @@ impl Connection<Devlink> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::Devlink;
+    /// # let conn = nlink::Connection::<nlink::netlink::Devlink>::new_async().await?;
     /// let devices = conn.get_devices().await?;
     /// for dev in &devices {
     ///     println!("{}", dev.path());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_devices"))]
     pub async fn get_devices(&self) -> Result<Vec<DevlinkDevice>> {
@@ -90,12 +95,17 @@ impl Connection<Devlink> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::Devlink;
+    /// # let conn = nlink::Connection::<nlink::netlink::Devlink>::new_async().await?;
     /// let info = conn.get_device_info("pci", "0000:03:00.0").await?;
     /// println!("Driver: {}", info.driver);
     /// for v in &info.versions_running {
     ///     println!("  {}: {}", v.name, v.value);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_device_info"))]
     pub async fn get_device_info(&self, bus: &str, device: &str) -> Result<DevlinkInfo> {

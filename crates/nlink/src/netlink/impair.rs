@@ -38,7 +38,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # use nlink::Percent;
 //! use nlink::netlink::{Connection, Route, namespace};
 //! use nlink::netlink::impair::{PerPeerImpairer, PeerImpairment};
 //! use nlink::netlink::tc::NetemConfig;
@@ -59,12 +61,14 @@
 //!         PeerImpairment::new(
 //!             NetemConfig::new()
 //!                 .delay(Duration::from_millis(40))
-//!                 .loss(5.0)
+//!                 .loss(Percent::new(5.0))
 //!                 .build(),
 //!         )
-//!         .rate_cap("100mbit")?,
+//!         .rate_cap(nlink::Rate::mbit(100)),
 //!     )
 //!     .apply(&conn).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::IpAddr;
@@ -1134,8 +1138,8 @@ mod tests {
     #[test]
     fn builder_collects_rules_in_order() {
         let imp = PerPeerImpairer::new("eth0")
-            .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
-            .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 2).into(), netem_50ms())
+            .impair_dst_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), netem_50ms())
+            .impair_dst_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), netem_50ms())
             .impair_dst_mac([1, 2, 3, 4, 5, 6], netem_50ms());
         assert_eq!(imp.rule_count(), 3);
     }
@@ -1187,7 +1191,7 @@ mod tests {
     #[test]
     fn default_impairment_optional() {
         let imp = PerPeerImpairer::new("eth0")
-            .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms());
+            .impair_dst_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), netem_50ms());
         assert!(imp.default_impairment.is_none());
 
         let imp = imp.default_impairment(netem_50ms());
@@ -1223,8 +1227,8 @@ mod tests {
     fn total_rate_uses_link_rate_when_no_caps() {
         let imp = PerPeerImpairer::new("eth0")
             .assumed_link_rate(Rate::bytes_per_sec(1_000))
-            .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
-            .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 2).into(), netem_50ms());
+            .impair_dst_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), netem_50ms())
+            .impair_dst_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), netem_50ms());
         // 2 rules + default => 3 * 1_000
         assert_eq!(imp.total_rate(), Rate::bytes_per_sec(3_000));
     }
@@ -1234,10 +1238,10 @@ mod tests {
         let imp = PerPeerImpairer::new("eth0")
             .assumed_link_rate(Rate::bytes_per_sec(5_000))
             .impair_dst_ip(
-                Ipv4Addr::new(10, 0, 0, 1).into(),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 PeerImpairment::new(netem_50ms()).rate_cap(Rate::bytes_per_sec(100)),
             )
-            .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 2).into(), netem_50ms())
+            .impair_dst_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), netem_50ms())
             .default_impairment(
                 PeerImpairment::new(netem_50ms()).rate_cap(Rate::bytes_per_sec(50)),
             );
@@ -1249,11 +1253,11 @@ mod tests {
     fn total_rate_saturates_on_overflow() {
         let imp = PerPeerImpairer::new("eth0")
             .impair_dst_ip(
-                Ipv4Addr::new(10, 0, 0, 1).into(),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 PeerImpairment::new(netem_50ms()).rate_cap(Rate::MAX),
             )
             .impair_dst_ip(
-                Ipv4Addr::new(10, 0, 0, 2).into(),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                 PeerImpairment::new(netem_50ms()).rate_cap(Rate::MAX),
             );
         assert_eq!(imp.total_rate(), Rate::MAX);
@@ -1262,7 +1266,7 @@ mod tests {
     #[test]
     fn protocol_for_dst_ipv4() {
         assert_eq!(
-            protocol_for(&PeerMatch::DstIp(Ipv4Addr::new(1, 2, 3, 4).into())),
+            protocol_for(&PeerMatch::DstIp(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)))),
             ETH_P_IP
         );
     }
@@ -1340,7 +1344,7 @@ mod tests {
         let f = build_flower(
             TcHandle::new(1, 2),
             100,
-            &PeerMatch::DstIp(Ipv4Addr::new(10, 0, 0, 1).into()),
+            &PeerMatch::DstIp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
         );
         // Smoke test: builder runs without panicking and returns a flower
         // configuration. Detailed wire-format coverage lives in the
@@ -1352,7 +1356,7 @@ mod tests {
     fn clone_roundtrip_preserves_state() {
         let original = PerPeerImpairer::new("eth0")
             .assumed_link_rate(Rate::bytes_per_sec(2_500_000))
-            .impair_dst_ip(Ipv4Addr::new(10, 0, 0, 1).into(), netem_50ms())
+            .impair_dst_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), netem_50ms())
             .impair_dst_subnet("2001:db8::/32", netem_50ms())
             .expect("subnet parses")
             .impair_dst_mac([1, 2, 3, 4, 5, 6], netem_50ms())
@@ -1377,7 +1381,7 @@ mod tests {
         let _ = build_flower(
             TcHandle::new(1, 2),
             100,
-            &PeerMatch::DstSubnet(Ipv4Addr::new(10, 0, 0, 0).into(), 99),
+            &PeerMatch::DstSubnet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)), 99),
         );
     }
 }

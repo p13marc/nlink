@@ -4,7 +4,11 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # use nlink::TcHandle;
+//! # use nlink::Percent;
+//! # let conn = nlink::Connection::<nlink::Route>::new()?;
 //! use nlink::netlink::tc::{NetemConfig, QdiscConfig};
 //! use std::time::Duration;
 //!
@@ -14,7 +18,7 @@
 //!     .jitter(Duration::from_millis(10))
 //!     .delay_correlation(Percent::new(25.0))
 //!     .loss(Percent::new(1.0))
-//!     .loss_correlation(25.0)
+//!     .loss_correlation(Percent::new(25.0))
 //!     .build();
 //!
 //! // Add the qdisc
@@ -24,10 +28,12 @@
 //! let updated = NetemConfig::new()
 //!     .delay(Duration::from_millis(50))
 //!     .build();
-//! conn.change_qdisc("eth0", "root", updated).await?;
+//! conn.change_qdisc("eth0", TcHandle::ROOT, updated).await?;
 //!
 //! // Delete it
-//! conn.del_qdisc("eth0", "root").await?;
+//! conn.del_qdisc("eth0", TcHandle::ROOT).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::time::Duration;
@@ -99,7 +105,10 @@ pub trait QdiscConfig: Send + Sync {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::Percent;
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::NetemConfig;
 /// use std::time::Duration;
 ///
@@ -107,11 +116,13 @@ pub trait QdiscConfig: Send + Sync {
 /// let config = NetemConfig::new()
 ///     .delay(Duration::from_millis(500))
 ///     .jitter(Duration::from_millis(50))
-///     .loss(0.1)  // 0.1% packet loss
+///     .loss(Percent::new(0.1))  // 0.1% packet loss
 ///     .limit(10000)
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct NetemConfig {
@@ -272,13 +283,18 @@ impl NetemConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::tc::NetemConfig;
+    /// # use std::time::Duration;
     /// let cfg = NetemConfig::parse_params(&[
     ///     "delay", "100ms", "10ms",
     ///     "loss", "1%",
     ///     "limit", "5000",
     /// ])?;
     /// assert_eq!(cfg.delay, Some(Duration::from_millis(100)));
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
@@ -580,7 +596,9 @@ impl QdiscConfig for NetemConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::FqCodelConfig;
 /// use std::time::Duration;
 ///
@@ -593,6 +611,8 @@ impl QdiscConfig for NetemConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct FqCodelConfig {
@@ -840,7 +860,7 @@ impl QdiscConfig for FqCodelConfig {
 /// Plain CoDel — a single-queue AQM. For per-flow fairness use
 /// [`FqCodelConfig`] instead.
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::tc::CodelConfig;
 /// use std::time::Duration;
 ///
@@ -1005,7 +1025,7 @@ impl QdiscConfig for CodelConfig {
 /// Fair Queue (fq) qdisc configuration — the pacing-aware scheduler
 /// used with BBR. Distinct from [`FqCodelConfig`] (which is an AQM).
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::tc::FqConfig;
 /// use nlink::Rate;
 ///
@@ -1257,10 +1277,13 @@ impl QdiscConfig for FqConfig {
 /// [`DrrConfig`], this type exists for symmetry so `mq` can be created
 /// through the same typed `add_qdisc` path as every other kind.
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::MqConfig;
-/// use nlink::TcHandle;
-/// conn.add_qdisc("eth0", TcHandle::ROOT, MqConfig::new()).await?;
+/// conn.add_qdisc("eth0", MqConfig::new()).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct MqConfig {}
@@ -1315,7 +1338,7 @@ impl QdiscConfig for MqConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::tc::EtsConfig;
 /// // 4 bands, 1 strict; the 3 DWRR bands get 3000/2000/1000 byte quanta.
 /// let cfg = EtsConfig::new()
@@ -1600,12 +1623,16 @@ impl TbfConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::tc::TbfConfig;
     /// let cfg = TbfConfig::parse_params(&[
     ///     "rate", "1mbit",
     ///     "burst", "32kb",
     ///     "limit", "10kb",
     /// ])?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
@@ -1763,7 +1790,9 @@ impl QdiscConfig for TbfConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::HtbQdiscConfig;
 ///
 /// let config = HtbQdiscConfig::new()
@@ -1772,6 +1801,8 @@ impl QdiscConfig for TbfConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct HtbQdiscConfig {
@@ -1838,9 +1869,13 @@ impl HtbQdiscConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::tc::HtbQdiscConfig;
     /// let cfg = HtbQdiscConfig::parse_params(&["default", "1:10", "r2q", "5"])?;
     /// assert_eq!(cfg.r2q, 5);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
@@ -1934,7 +1969,9 @@ impl QdiscConfig for HtbQdiscConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::PrioConfig;
 ///
 /// let config = PrioConfig::new()
@@ -1942,6 +1979,8 @@ impl QdiscConfig for HtbQdiscConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct PrioConfig {
@@ -2064,7 +2103,9 @@ impl QdiscConfig for PrioConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::SfqConfig;
 ///
 /// let config = SfqConfig::new()
@@ -2073,6 +2114,8 @@ impl QdiscConfig for PrioConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct SfqConfig {
@@ -2225,7 +2268,9 @@ impl QdiscConfig for SfqConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::RedConfig;
 ///
 /// let config = RedConfig::new()
@@ -2236,6 +2281,8 @@ impl QdiscConfig for SfqConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct RedConfig {
@@ -2479,7 +2526,7 @@ impl QdiscConfig for RedConfig {
 /// per-flow state. Parameters mirror RED (it shares
 /// `struct tc_red_qopt`).
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::tc::ChokeConfig;
 ///
 /// let cfg = ChokeConfig::new()
@@ -2702,10 +2749,14 @@ impl QdiscConfig for ChokeConfig {
 /// type. Adding it explicitly is mostly useful for restoring the
 /// default behaviour after replacing the root qdisc.
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::PfifoFastConfig;
 ///
 /// conn.add_qdisc("eth0", PfifoFastConfig::new()).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct PfifoFastConfig;
@@ -2756,10 +2807,14 @@ impl QdiscConfig for PfifoFastConfig {
 /// root atm` simply instantiates the classful qdisc, so this is a unit
 /// config (like [`PfifoFastConfig`] / `MultiqConfig`).
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::AtmConfig;
 ///
 /// conn.add_qdisc("eth0", AtmConfig::new()).await?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # VC binding is out of scope
@@ -2830,7 +2885,9 @@ impl QdiscConfig for AtmConfig {
 ///    probability table (computed from avpkt + bandwidth), which
 ///    `GredConfig` does **not** model — see the note below.
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::GredConfig;
 ///
 /// // 8 virtual queues, VQ 2 is the default, GRIO on.
@@ -2840,6 +2897,8 @@ impl QdiscConfig for AtmConfig {
 ///     .grio(true)
 ///     .build();
 /// conn.add_qdisc("eth0", cfg).await?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Per-VQ parameterization is not modelled
@@ -3037,7 +3096,9 @@ impl QdiscConfig for GredConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::PieConfig;
 /// use std::time::Duration;
 ///
@@ -3048,6 +3109,8 @@ impl QdiscConfig for GredConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct PieConfig {
@@ -3280,7 +3343,9 @@ impl QdiscConfig for PieConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::FqPieConfig;
 /// use nlink::{Bytes, Percent};
 /// use std::time::Duration;
@@ -3295,6 +3360,8 @@ impl QdiscConfig for PieConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct FqPieConfig {
@@ -3633,11 +3700,15 @@ impl QdiscConfig for FqPieConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::IngressConfig;
 ///
 /// // Add ingress qdisc for filtering incoming traffic
 /// conn.add_qdisc("eth0", IngressConfig::new()).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct IngressConfig;
@@ -3689,11 +3760,15 @@ impl QdiscConfig for IngressConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::ClsactConfig;
 ///
 /// // Add clsact qdisc for BPF program attachment
 /// conn.add_qdisc("eth0", ClsactConfig::new()).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct ClsactConfig;
@@ -3744,7 +3819,9 @@ impl QdiscConfig for ClsactConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::PfifoConfig;
 ///
 /// let config = PfifoConfig::new()
@@ -3752,6 +3829,8 @@ impl QdiscConfig for ClsactConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct PfifoConfig {
@@ -3842,7 +3921,9 @@ impl QdiscConfig for PfifoConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::BfifoConfig;
 ///
 /// let config = BfifoConfig::new()
@@ -3850,6 +3931,8 @@ impl QdiscConfig for PfifoConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct BfifoConfig {
@@ -3951,7 +4034,7 @@ impl QdiscConfig for BfifoConfig {
 /// `offload` to hand the shaping to a NIC that implements the Qav
 /// shaper in hardware.
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::tc::CbsConfig;
 ///
 /// // Class A reservation on a 1Gbit link (tc(8) example values).
@@ -4110,7 +4193,7 @@ impl QdiscConfig for CbsConfig {
 /// lowest-priority packets first when the queue is full. The only knob
 /// is the queue-length `limit` (packets).
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::tc::SkbprioConfig;
 ///
 /// let cfg = SkbprioConfig::new().limit(64).build();
@@ -4201,7 +4284,7 @@ impl QdiscConfig for SkbprioConfig {
 /// ("inelastic") flows. All fields map directly to `struct tc_sfb_qopt`;
 /// `rehash`/`db` are durations (sent as milliseconds).
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::tc::SfbConfig;
 ///
 /// let cfg = SfbConfig::new().limit(1000).build();
@@ -4407,7 +4490,7 @@ impl QdiscConfig for SfbConfig {
 /// real tx-queue count, so the config writes a zeroed
 /// `struct tc_multiq_qopt`.
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::tc::MultiqConfig;
 ///
 /// let cfg = MultiqConfig::new().build();
@@ -4464,7 +4547,8 @@ impl QdiscConfig for MultiqConfig {
 /// durations (sent as microseconds, matching the kernel's
 /// `usecs_to_jiffies`).
 ///
-/// ```ignore
+/// ```no_run
+/// # use nlink::Bytes;
 /// use nlink::netlink::tc::HhfConfig;
 ///
 /// let cfg = HhfConfig::new().limit(1000).quantum(Bytes::new(1514)).build();
@@ -4661,7 +4745,7 @@ impl QdiscConfig for HhfConfig {
 /// qdisc-level knobs; the per-index `mask`/`value` are class-level
 /// (`TCA_DSMARK_MASK`/`VALUE`).
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::tc::DsmarkConfig;
 ///
 /// let cfg = DsmarkConfig::new().indices(64).set_tc_index().build();
@@ -4785,15 +4869,20 @@ impl QdiscConfig for DsmarkConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::TcHandle;
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::DrrConfig;
 ///
 /// // Create DRR qdisc
-/// let config = DrrConfig::new()
-///     .handle("1:")
-///     .build();
+/// let config = DrrConfig::new().build();
 ///
-/// conn.add_qdisc("eth0", config).await?;
+/// // DRR carries no options of its own, so the handle goes on the request.
+/// conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), config)
+///     .await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct DrrConfig {}
@@ -4851,15 +4940,20 @@ impl QdiscConfig for DrrConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::TcHandle;
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::QfqConfig;
 ///
 /// // Create QFQ qdisc
-/// let config = QfqConfig::new()
-///     .handle("1:")
-///     .build();
+/// let config = QfqConfig::new().build();
 ///
-/// conn.add_qdisc("eth0", config).await?;
+/// // QFQ carries no options of its own, so the handle goes on the request.
+/// conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), config)
+///     .await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct QfqConfig {}
@@ -4987,7 +5081,9 @@ pub enum CakeAckFilter {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::{CakeConfig, CakeFlowMode, CakeDiffserv};
 /// use nlink::Rate;
 /// use std::time::Duration;
@@ -5001,6 +5097,8 @@ pub enum CakeAckFilter {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct CakeConfig {
@@ -5222,13 +5320,17 @@ impl CakeConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::tc::CakeConfig;
     /// let cfg = CakeConfig::parse_params(&[
     ///     "bandwidth", "100mbit",
     ///     "rtt", "20ms",
     ///     "diffserv4", "triple-isolate",
     ///     "ack-filter", "wash",
     /// ])?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
@@ -5545,7 +5647,10 @@ impl QdiscConfig for CakeConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::TcHandle;
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::PlugConfig;
 ///
 /// // Create plug qdisc with 10000 byte limit
@@ -5559,6 +5664,8 @@ impl QdiscConfig for CakeConfig {
 /// conn.plug_release_one("eth0", TcHandle::ROOT).await?;        // let this epoch out
 /// conn.plug_buffer("eth0", TcHandle::ROOT).await?;             // start a new one
 /// conn.plug_release_indefinite("eth0", TcHandle::ROOT).await?; // stop buffering
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// Those three methods did not exist. The doc example named
@@ -5683,7 +5790,9 @@ impl QdiscConfig for PlugConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::MqprioConfig;
 ///
 /// // Create mqprio with 4 traffic classes and hardware offload
@@ -5694,6 +5803,8 @@ impl QdiscConfig for PlugConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct MqprioConfig {
@@ -5879,7 +5990,9 @@ impl QdiscConfig for MqprioConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::{TaprioConfig, TaprioSchedEntry};
 ///
 /// // Create TAPRIO with a simple schedule
@@ -5895,6 +6008,8 @@ impl QdiscConfig for MqprioConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct TaprioConfig {
@@ -6338,7 +6453,9 @@ impl QdiscConfig for TaprioConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::HfscConfig;
 ///
 /// // Create HFSC qdisc with default class 0x10
@@ -6347,6 +6464,8 @@ impl QdiscConfig for TaprioConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct HfscConfig {
@@ -6442,7 +6561,9 @@ impl QdiscConfig for HfscConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::EtfConfig;
 ///
 /// // Create ETF with CLOCK_TAI and hardware offload
@@ -6454,6 +6575,8 @@ impl QdiscConfig for HfscConfig {
 ///     .build();
 ///
 /// conn.add_qdisc("eth0", config).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct EtfConfig {
@@ -6682,7 +6805,9 @@ pub trait ClassConfig: Send + Sync {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::TcHandle;
 /// use nlink::netlink::{Connection, Route};
 /// use nlink::netlink::tc::{HtbQdiscConfig, HtbClassConfig};
 /// use nlink::Rate;
@@ -6691,22 +6816,24 @@ pub trait ClassConfig: Send + Sync {
 ///
 /// // First add HTB qdisc
 /// let htb = HtbQdiscConfig::new().default_class(0x30).build();
-/// conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
+/// conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb).await?;
 ///
 /// // Add root class (total bandwidth)
-/// conn.add_class("eth0", "1:0", "1:1",
+/// conn.add_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 1),
 ///     HtbClassConfig::new(Rate::gbit(1))
 ///         .ceil(Rate::gbit(1))
 ///         .build()
 /// ).await?;
 ///
 /// // Add child class with guaranteed and ceiling rates
-/// conn.add_class("eth0", "1:1", "1:10",
+/// conn.add_class("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x10),
 ///     HtbClassConfig::new(Rate::mbit(100))
 ///         .ceil(Rate::mbit(500))
 ///         .prio(1)
 ///         .build()
 /// ).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct HtbClassConfig {
@@ -6735,11 +6862,15 @@ impl HtbClassConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::tc::HtbClassConfig;
     /// use nlink::Rate;
     /// let config = HtbClassConfig::new(Rate::mbit(100));
     /// // Or parse a tc-style string:
     /// let config = HtbClassConfig::new("100mbit".parse()?);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(rate: crate::util::Rate) -> Self {
         Self {
@@ -7059,7 +7190,10 @@ impl ClassConfig for HtbClassConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::TcHandle;
+/// # use nlink::Rate;
 /// use nlink::netlink::{Connection, Route};
 /// use nlink::netlink::tc::{HfscConfig, HfscClassConfig, TcServiceCurve};
 ///
@@ -7067,30 +7201,32 @@ impl ClassConfig for HtbClassConfig {
 ///
 /// // First add HFSC qdisc
 /// let hfsc = HfscConfig::new().default_class(0x10).build();
-/// conn.add_qdisc_full("eth0", "root", Some("1:"), hfsc).await?;
+/// conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), hfsc).await?;
 ///
 /// // Add root class with link-share curve
-/// conn.add_class("eth0", "1:0", "1:1",
+/// conn.add_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 1),
 ///     HfscClassConfig::new()
 ///         .ls_rate(Rate::gbit(1))  // 1 Gbps link-share
 ///         .build()
 /// ).await?;
 ///
 /// // Add real-time class with latency guarantee
-/// conn.add_class("eth0", "1:1", "1:10",
+/// conn.add_class("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x10),
 ///     HfscClassConfig::new()
 ///         .rt_curve(TcServiceCurve::two_slope(10_000_000, 5000, 1_000_000))
-///         .ls_rate(100_000_000)
+///         .ls_rate(Rate::mbit(100))
 ///         .build()
 /// ).await?;
 ///
 /// // Add best-effort class with upper limit
-/// conn.add_class("eth0", "1:1", "1:20",
+/// conn.add_class("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x20),
 ///     HfscClassConfig::new()
-///         .ls_rate(50_000_000)
+///         .ls_rate(Rate::mbit(50))
 ///         .ul_rate(Rate::mbit(100))  // Cap at 100 Mbps
 ///         .build()
 /// ).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct HfscClassConfig {
@@ -7255,28 +7391,33 @@ impl ClassConfig for HfscClassConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::Bytes;
+/// # use nlink::TcHandle;
 /// use nlink::netlink::{Connection, Route};
 /// use nlink::netlink::tc::{DrrConfig, DrrClassConfig};
 ///
 /// let conn = Connection::<Route>::new()?;
 ///
 /// // First add DRR qdisc
-/// let drr = DrrConfig::new().handle("1:").build();
-/// conn.add_qdisc_full("eth0", "root", Some("1:"), drr).await?;
+/// let drr = DrrConfig::new().build();
+/// conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), drr).await?;
 ///
 /// // Add classes with different quanta (bandwidth proportions)
-/// conn.add_class("eth0", "1:0", "1:1",
+/// conn.add_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 1),
 ///     DrrClassConfig::new()
-///         .quantum(1500)  // 1 packet worth
+///         .quantum(Bytes::new(1500))  // 1 packet worth
 ///         .build()
 /// ).await?;
 ///
-/// conn.add_class("eth0", "1:0", "1:2",
+/// conn.add_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 2),
 ///     DrrClassConfig::new()
-///         .quantum(3000)  // 2x bandwidth of class 1:1
+///         .quantum(Bytes::new(3000))  // 2x bandwidth of class 1:1
 ///         .build()
 /// ).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct DrrClassConfig {
@@ -7367,29 +7508,34 @@ impl ClassConfig for DrrClassConfig {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::TcHandle;
+/// # use nlink::Bytes;
 /// use nlink::netlink::{Connection, Route};
 /// use nlink::netlink::tc::{QfqConfig, QfqClassConfig};
 ///
 /// let conn = Connection::<Route>::new()?;
 ///
 /// // First add QFQ qdisc
-/// let qfq = QfqConfig::new().handle("1:").build();
-/// conn.add_qdisc_full("eth0", "root", Some("1:"), qfq).await?;
+/// let qfq = QfqConfig::new().build();
+/// conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), qfq).await?;
 ///
 /// // Add classes with different weights
-/// conn.add_class("eth0", "1:0", "1:1",
+/// conn.add_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 1),
 ///     QfqClassConfig::new()
 ///         .weight(1)
 ///         .build()
 /// ).await?;
 ///
-/// conn.add_class("eth0", "1:0", "1:2",
+/// conn.add_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 2),
 ///     QfqClassConfig::new()
 ///         .weight(2)  // 2x bandwidth of class 1:1
 ///         .lmax(Bytes::new(9000)) // Max packet size (for jumbo frames)
 ///         .build()
 /// ).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct QfqClassConfig {
@@ -7550,18 +7696,24 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Route, namespace, tc::NetemConfig};
     /// use std::time::Duration;
     ///
     /// let conn: Connection<Route> = namespace::connection_for("myns")?;
-    /// let link = conn.get_link_by_name("eth0").await?;
+    /// let link = conn
+    ///     .get_link_by_name("eth0")
+    ///     .await?
+    ///     .expect("eth0 exists in this namespace");
     ///
     /// let netem = NetemConfig::new()
     ///     .delay(Duration::from_millis(100))
     ///     .build();
     ///
     /// conn.add_qdisc_by_index(link.ifindex(), netem).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_qdisc_by_index"))]
     pub async fn add_qdisc_by_index(&self, ifindex: u32, config: impl QdiscConfig) -> Result<()> {
@@ -7604,8 +7756,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// conn.del_qdisc("eth0", "root").await?;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// conn.del_qdisc("eth0", TcHandle::ROOT).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_qdisc"))]
     pub async fn del_qdisc(&self, dev: impl Into<InterfaceRef>, parent: TcHandle) -> Result<()> {
@@ -7689,12 +7846,18 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::tc::NetemConfig;
+    /// # use std::time::Duration;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let netem = NetemConfig::new()
     ///     .delay(Duration::from_millis(50))
     ///     .build();
     ///
     /// conn.replace_qdisc("eth0", netem).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_qdisc"))]
     pub async fn replace_qdisc(
@@ -7772,12 +7935,19 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # use nlink::netlink::tc::NetemConfig;
+    /// # use std::time::Duration;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let netem = NetemConfig::new()
     ///     .delay(Duration::from_millis(200))
     ///     .build();
     ///
-    /// conn.change_qdisc("eth0", "root", netem).await?;
+    /// conn.change_qdisc("eth0", TcHandle::ROOT, netem).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "change_qdisc"))]
     pub async fn change_qdisc(
@@ -7882,8 +8052,8 @@ impl Connection<Route> {
     pub async fn plug_buffer(&self, dev: impl Into<InterfaceRef>, parent: TcHandle) -> Result<()> {
         use super::types::tc::qdisc::plug::TCQ_PLUG_BUFFER;
 
-        // Boxed for the same reason as `del_netem` — see #310.
-        Box::pin(self.change_qdisc(dev, parent, PlugAction(TCQ_PLUG_BUFFER, 0))).await
+        self.change_qdisc(dev, parent, PlugAction(TCQ_PLUG_BUFFER, 0))
+            .await
     }
 
     /// Release the packets buffered so far (`TCQ_PLUG_RELEASE_ONE`),
@@ -7960,10 +8130,9 @@ impl Connection<Route> {
         config: NetemConfig,
     ) -> Result<()> {
         let dev = dev.into();
-        // Boxed for the same reason as `del_netem` — see #310.
-        match Box::pin(self.replace_qdisc(dev.clone(), config.clone())).await {
+        match self.replace_qdisc(dev.clone(), config.clone()).await {
             Ok(()) => Ok(()),
-            Err(e) if e.is_not_found() => Box::pin(self.add_qdisc(dev, config)).await,
+            Err(e) if e.is_not_found() => self.add_qdisc(dev, config).await,
             Err(e) => Err(e),
         }
     }
@@ -7996,11 +8165,7 @@ impl Connection<Route> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_netem"))]
     pub async fn del_netem(&self, dev: impl Into<InterfaceRef>) -> Result<()> {
-        // `Box::pin` ends the future-layout recursion here. Without it the
-        // caller's async block overflows rustc's default recursion limit:
-        // this wrapper sits one frame deeper than `del_qdisc`, which is
-        // already close to the ceiling (#310).
-        Box::pin(self.del_qdisc(dev, TcHandle::ROOT)).await
+        self.del_qdisc(dev, TcHandle::ROOT).await
     }
 
     /// Remove netem configuration by interface index.
@@ -8017,8 +8182,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// conn.del_class("eth0", "1:0", "1:10").await?;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// conn.del_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 0x10)).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_class"))]
     pub async fn del_class(
@@ -8064,7 +8234,10 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # use nlink::Rate;
     /// use nlink::netlink::{Connection, Route};
     /// use nlink::netlink::tc::{HtbQdiscConfig, HtbClassConfig};
     ///
@@ -8072,15 +8245,17 @@ impl Connection<Route> {
     ///
     /// // First add HTB qdisc
     /// let htb = HtbQdiscConfig::new().default_class(0x30).build();
-    /// conn.add_qdisc_full("eth0", "root", Some("1:"), htb).await?;
+    /// conn.add_qdisc_full("eth0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb).await?;
     ///
     /// // Add a class with guaranteed 100mbit, ceiling 500mbit
-    /// conn.add_class("eth0", "1:0", "1:10",
+    /// conn.add_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 0x10),
     ///     HtbClassConfig::new(Rate::mbit(100))
     ///         .ceil(Rate::mbit(500))
     ///         .prio(1)
     ///         .build()
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_class", kind = %config.kind()))]
     pub async fn add_class<C: ClassConfig>(
@@ -8132,13 +8307,20 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # use nlink::Rate;
+    /// # use nlink::netlink::tc::HtbClassConfig;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Update an existing class's rate
-    /// conn.change_class("eth0", "1:0", "1:10",
+    /// conn.change_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 0x10),
     ///     HtbClassConfig::new(Rate::mbit(200))
     ///         .ceil(Rate::mbit(800))
     ///         .build()
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "change_class", kind = %config.kind()))]
     pub async fn change_class<C: ClassConfig>(
@@ -8187,13 +8369,20 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # use nlink::Rate;
+    /// # use nlink::netlink::tc::HtbClassConfig;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Create or update a class
-    /// conn.replace_class("eth0", "1:0", "1:10",
+    /// conn.replace_class("eth0", TcHandle::major_only(1), TcHandle::new(1, 0x10),
     ///     HtbClassConfig::new(Rate::mbit(100))
     ///         .ceil(Rate::mbit(500))
     ///         .build()
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_class", kind = %config.kind()))]
     pub async fn replace_class<C: ClassConfig>(

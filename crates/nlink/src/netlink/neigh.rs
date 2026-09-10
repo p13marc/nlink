@@ -4,7 +4,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::neigh::{Neighbor, NeighborState};
 //! use std::net::Ipv4Addr;
@@ -26,13 +27,16 @@
 //!
 //! // Delete a neighbor entry
 //! conn.del_neighbor_v4("eth0", Ipv4Addr::new(192, 168, 1, 100)).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Namespace-Safe Operations
 //!
 //! When working with network namespaces, use the index-based constructors:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route, namespace};
 //! use nlink::netlink::neigh::Neighbor;
 //!
@@ -43,6 +47,8 @@
 //!     Neighbor::with_index_v4(link.ifindex(), "10.0.0.1".parse()?)
 //!         .lladdr([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])
 //! ).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -54,7 +60,7 @@ use super::{
     interface_ref::InterfaceRef,
     message::{NLM_F_ACK, NLM_F_REQUEST, NlMsgType},
     protocol::Route,
-    types::neigh::{NdMsg, NdaAttr, NeighborState, nud},
+    types::neigh::{NdMsg, NdaAttr, nud},
 };
 
 /// NLM_F_CREATE flag
@@ -68,8 +74,11 @@ const NLM_F_REPLACE: u16 = 0x100;
 const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
 
-// Re-export NeighborState for convenience
-pub use super::types::neigh::NeighborState as State;
+// Re-exported so the type named by `Neighbor::state` can be named from the
+// module that defines `Neighbor` — every doc example here imported it from
+// this path already (#316). `State` is the older, shorter alias; both are
+// the same enum.
+pub use super::types::neigh::{NeighborState, NeighborState as State};
 
 /// Neighbor flags (`NTF_*`).
 ///
@@ -110,7 +119,9 @@ pub trait NeighborConfig: Send + Sync {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::neigh::{Neighbor, NeighborState};
 /// use std::net::Ipv4Addr;
 ///
@@ -120,6 +131,8 @@ pub trait NeighborConfig: Send + Sync {
 ///     .state(NeighborState::Permanent);
 ///
 /// conn.add_neighbor(neigh).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Neighbor {
@@ -413,7 +426,9 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::neigh::{Neighbor, NeighborState};
     /// use std::net::Ipv4Addr;
     ///
@@ -423,6 +438,8 @@ impl Connection<Route> {
     ///         .lladdr([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])
     ///         .state(NeighborState::Permanent)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn add_neighbor<N: NeighborConfig>(&self, config: N) -> Result<()> {
         let ifindex = self.resolve_interface(config.interface_ref()).await?;
@@ -482,8 +499,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use std::net::Ipv4Addr;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.del_neighbor_v4("eth0", Ipv4Addr::new(192, 168, 1, 100)).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_neighbor_v4"))]
     pub async fn del_neighbor_v4(
@@ -587,8 +609,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.flush_neighbors("eth0").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_neighbors"))]
     pub async fn flush_neighbors(&self, ifname: impl Into<InterfaceRef>) -> Result<()> {
@@ -625,8 +651,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use std::net::Ipv4Addr;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.add_proxy_arp("eth0", Ipv4Addr::new(192, 168, 1, 100)).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_proxy_arp"))]
     pub async fn add_proxy_arp(

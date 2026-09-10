@@ -245,7 +245,9 @@ impl NftablesDiff {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::netlink::Nftables>::new()?;
     /// use nlink::netlink::nftables::config::{NftablesConfig, ReconcileOptions};
     /// use std::time::Duration;
     ///
@@ -257,6 +259,8 @@ impl NftablesDiff {
     /// if report.attempts > 1 {
     ///     tracing::warn!(retries = report.attempts - 1, "transient conflict");
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn apply_reconcile(
         &self,

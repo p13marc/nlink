@@ -240,7 +240,8 @@ pub fn diff_device_states(
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use std::time::Duration;
 /// use nlink::netlink::{Connection, Wireguard};
 /// use nlink::netlink::genl::wireguard::watch::{
@@ -261,7 +262,8 @@ pub fn diff_device_states(
 ///         println!("{:?}", ev);
 ///     }
 /// }
-/// # Ok::<(), nlink::Error>(())
+/// # Ok(())
+/// # }
 /// ```
 #[must_use = "WireguardWatcher does nothing unless next_events() is called"]
 pub struct WireguardWatcher {

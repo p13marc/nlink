@@ -11,7 +11,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::namespace;
 //! use nlink::netlink::{Connection, Route, Generic};
 //!
@@ -30,6 +31,8 @@
 //!
 //! let spec = NamespaceSpec::Named("myns");
 //! let conn: Connection<Route> = spec.connection()?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{
@@ -56,7 +59,9 @@ use super::{
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use std::path::Path;
 /// use nlink::netlink::{Connection, Route};
 /// use nlink::netlink::namespace::NamespaceSpec;
 ///
@@ -68,6 +73,8 @@ use super::{
 ///
 /// // Create connections (generic over protocol type)
 /// let conn: Connection<Route> = named.connection()?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -87,13 +94,17 @@ impl<'a> NamespaceSpec<'a> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::Connection;
     /// use nlink::netlink::namespace::NamespaceSpec;
-    /// use nlink::netlink::protocol::Route;
+    /// use nlink::netlink::Route;
     ///
     /// let spec = NamespaceSpec::Named("myns");
     /// let conn: Connection<Route> = spec.connection()?;
     /// let links = conn.get_links().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn connection<P: ProtocolState + Default + SyncConstructible>(&self) -> Result<Connection<P>> {
         match self {
@@ -132,13 +143,18 @@ impl<'a> NamespaceSpec<'a> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::namespace::NamespaceSpec;
     /// use std::process::Command;
     ///
     /// let spec = NamespaceSpec::Named("myns");
-    /// let mut child = spec.spawn(Command::new("ip").arg("link"))?;
+    /// let mut cmd = Command::new("ip");
+    /// cmd.arg("link");
+    /// let mut child = spec.spawn(cmd)?;
     /// child.wait()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn spawn(&self, cmd: std::process::Command) -> Result<std::process::Child> {
         match self {
@@ -231,13 +247,17 @@ pub const NETNS_RUN_DIR: &str = "/var/run/netns";
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::Connection;
 /// use nlink::netlink::namespace;
-/// use nlink::netlink::protocol::Route;
+/// use nlink::netlink::Route;
 ///
 /// // Create a connection to work in the "production" namespace
 /// let conn: Connection<Route> = namespace::connection_for("production")?;
 /// let links = conn.get_links().await?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn connection_for<P: ProtocolState + Default + SyncConstructible>(name: &str) -> Result<Connection<P>> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(name);
@@ -253,13 +273,17 @@ pub fn connection_for<P: ProtocolState + Default + SyncConstructible>(name: &str
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::Connection;
 /// use nlink::netlink::namespace;
-/// use nlink::netlink::protocol::Route;
+/// use nlink::netlink::Route;
 ///
 /// // For a container's namespace
 /// let conn: Connection<Route> = namespace::connection_for_path("/proc/1234/ns/net")?;
 /// let links = conn.get_links().await?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn connection_for_path<P: ProtocolState + Default + SyncConstructible, T: AsRef<Path>>(
     path: T,
@@ -271,13 +295,17 @@ pub fn connection_for_path<P: ProtocolState + Default + SyncConstructible, T: As
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::Connection;
 /// use nlink::netlink::namespace;
-/// use nlink::netlink::protocol::Route;
+/// use nlink::netlink::Route;
 ///
 /// // Get interfaces visible to process 1234
 /// let conn: Connection<Route> = namespace::connection_for_pid(1234)?;
 /// let links = conn.get_links().await?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn connection_for_pid<P: ProtocolState + Default + SyncConstructible>(pid: u32) -> Result<Connection<P>> {
     let path = format!("/proc/{}/ns/net", pid);
@@ -292,11 +320,14 @@ pub fn connection_for_pid<P: ProtocolState + Default + SyncConstructible>(pid: u
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::{Connection, Wireguard, namespace};
 ///
 /// let conn: Connection<Wireguard> = namespace::connection_for_async("myns").await?;
 /// let device = conn.get_device("wg0").await?;
+/// # Ok(())
+/// # }
 /// ```
 pub async fn connection_for_async<P: AsyncProtocolInit + AsyncConstructible>(name: &str) -> Result<Connection<P>> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(name);
@@ -329,12 +360,16 @@ pub async fn connection_for_pid_async<P: AsyncProtocolInit + AsyncConstructible>
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
-/// use nlink::netlink::{Connection, Protocol};
+/// use nlink::netlink::{Connection, Route};
+/// use std::os::fd::AsRawFd;
 ///
 /// let ns = namespace::open("myns")?;
-/// let conn = Connection::new_in_namespace(Protocol::Route, ns.as_raw_fd())?;
+/// let conn = Connection::<Route>::new_in_namespace(ns.as_raw_fd())?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn open(name: &str) -> Result<NamespaceFd> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(name);
@@ -420,13 +455,16 @@ impl AsRawFd for NamespaceFd {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 ///
 /// let guard = namespace::enter("myns")?;
 /// // Now in "myns" namespace
 /// // ... do something ...
 /// guard.restore()?;  // Or just drop it
+/// # Ok(())
+/// # }
 /// ```
 pub fn enter(name: &str) -> Result<NamespaceGuard> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(name);
@@ -539,13 +577,16 @@ impl Drop for NamespaceGuard {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::{Connection, Route, namespace};
 ///
 /// if namespace::exists("myns") {
 ///     let conn: Connection<Route> = namespace::connection_for("myns")?;
 ///     // ...
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub fn exists(name: &str) -> bool {
     let path = PathBuf::from(NETNS_RUN_DIR).join(name);
@@ -625,12 +666,15 @@ pub fn is_namespace(name: &str) -> bool {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 ///
 /// namespace::create("myns")?;
 /// // Now "myns" exists and can be used
-/// let conn = namespace::connection_for("myns")?;
+/// let conn: nlink::Connection<nlink::Route> = namespace::connection_for("myns")?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// See also [`create_path`] to persist a netns at an arbitrary path.
@@ -890,10 +934,13 @@ fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> 
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 ///
 /// namespace::delete("myns")?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// See also [`delete_path`] to delete a netns at an arbitrary path.
@@ -969,7 +1016,8 @@ pub fn delete_path<P: AsRef<Path>>(path: P) -> Result<()> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 ///
 /// let result = namespace::execute_in("myns", || {
@@ -977,6 +1025,8 @@ pub fn delete_path<P: AsRef<Path>>(path: P) -> Result<()> {
 ///     std::fs::read_to_string("/proc/net/dev")
 /// })??;
 /// // Back in original namespace
+/// # Ok(())
+/// # }
 /// ```
 pub fn execute_in<F, T>(name: &str, f: F) -> Result<T>
 where
@@ -1007,12 +1057,15 @@ where
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 ///
 /// for ns in namespace::list()? {
 ///     println!("Namespace: {}", ns);
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub fn list() -> Result<Vec<String>> {
     let dir = match std::fs::read_dir(NETNS_RUN_DIR) {
@@ -1084,11 +1137,14 @@ where
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 ///
 /// let val = namespace::get_sysctl("myns", "net.ipv4.ip_forward")?;
 /// assert!(val == "0" || val == "1");
+/// # Ok(())
+/// # }
 /// ```
 pub fn get_sysctl(ns_name: &str, key: &str) -> Result<String> {
     get_sysctl_path(PathBuf::from(NETNS_RUN_DIR).join(ns_name), key)
@@ -1102,10 +1158,13 @@ pub fn get_sysctl(ns_name: &str, key: &str) -> Result<String> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 ///
 /// namespace::set_sysctl("myns", "net.ipv4.ip_forward", "1")?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn set_sysctl(ns_name: &str, key: &str, value: &str) -> Result<()> {
     set_sysctl_path(PathBuf::from(NETNS_RUN_DIR).join(ns_name), key, value)
@@ -1119,13 +1178,16 @@ pub fn set_sysctl(ns_name: &str, key: &str, value: &str) -> Result<()> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 ///
 /// namespace::set_sysctls("myns", &[
 ///     ("net.ipv4.ip_forward", "1"),
 ///     ("net.ipv6.conf.all.forwarding", "1"),
 /// ])?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn set_sysctls(ns_name: &str, entries: &[(&str, &str)]) -> Result<()> {
     set_sysctls_path(PathBuf::from(NETNS_RUN_DIR).join(ns_name), entries)
@@ -1179,12 +1241,17 @@ pub fn set_sysctls_path<P: AsRef<Path>>(path: P, entries: &[(&str, &str)]) -> Re
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 /// use std::process::Command;
 ///
-/// let mut child = namespace::spawn("myns", Command::new("ip").arg("link"))?;
+/// let mut cmd = Command::new("ip");
+/// cmd.arg("link");
+/// let mut child = namespace::spawn("myns", cmd)?;
 /// child.wait()?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn spawn(ns_name: &str, cmd: std::process::Command) -> Result<std::process::Child> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(ns_name);
@@ -1203,12 +1270,17 @@ pub fn spawn(ns_name: &str, cmd: std::process::Command) -> Result<std::process::
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 /// use std::process::Command;
 ///
-/// let output = namespace::spawn_output("myns", Command::new("ip").arg("addr"))?;
+/// let mut cmd = Command::new("ip");
+/// cmd.arg("addr");
+/// let output = namespace::spawn_output("myns", cmd)?;
 /// println!("{}", String::from_utf8_lossy(&output.stdout));
+/// # Ok(())
+/// # }
 /// ```
 pub fn spawn_output(ns_name: &str, mut cmd: std::process::Command) -> Result<std::process::Output> {
     cmd.stdout(std::process::Stdio::piped());
@@ -1223,14 +1295,16 @@ pub fn spawn_output(ns_name: &str, mut cmd: std::process::Command) -> Result<std
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 /// use std::process::Command;
 ///
-/// let child = namespace::spawn_path(
-///     "/proc/1234/ns/net",
-///     Command::new("ip").arg("link"),
-/// )?;
+/// let mut cmd = Command::new("ip");
+/// cmd.arg("link");
+/// let child = namespace::spawn_path("/proc/1234/ns/net", cmd)?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn spawn_path<P: AsRef<Path>>(
     path: P,
@@ -1328,13 +1402,18 @@ fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::namespace;
 /// use std::process::Command;
 ///
 /// // Create /etc/netns/myns/hosts with custom DNS entries, then:
-/// let output = namespace::spawn_output_with_etc("myns", Command::new("cat").arg("/etc/hosts"))?;
+/// let mut cmd = Command::new("cat");
+/// cmd.arg("/etc/hosts");
+/// let output = namespace::spawn_output_with_etc("myns", cmd)?;
 /// // The process sees the custom /etc/hosts, not the host's
+/// # Ok(())
+/// # }
 /// ```
 pub fn spawn_with_etc(ns_name: &str, cmd: std::process::Command) -> Result<std::process::Child> {
     let path = PathBuf::from(NETNS_RUN_DIR).join(ns_name);

@@ -6,7 +6,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # use std::net::IpAddr;
 //! use std::net::Ipv4Addr;
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::mdb::MdbEntryBuilder;
@@ -20,10 +22,12 @@
 //!
 //! // Statically program a group on a port.
 //! conn.add_mdb(
-//!     MdbEntryBuilder::new("br0", "swp1", Ipv4Addr::new(239, 1, 1, 1).into())
+//!     MdbEntryBuilder::new("br0", "swp1", IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1)))
 //!         .vid(10)
 //!         .permanent(),
 //! ).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{

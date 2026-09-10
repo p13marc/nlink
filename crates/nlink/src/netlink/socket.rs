@@ -128,12 +128,17 @@ impl NetlinkSocket {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use std::fs::File;
+    /// use std::os::fd::AsRawFd;
+    ///
     /// use nlink::netlink::{NetlinkSocket, Protocol};
     ///
     /// let ns_file = File::open("/var/run/netns/myns")?;
     /// let socket = NetlinkSocket::new_in_namespace(Protocol::Route, ns_file.as_raw_fd())?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new_in_namespace(protocol: Protocol, ns_fd: RawFd) -> Result<Self> {
         // `ns_fd` stays valid for the worker's lifetime: fds are process-wide
@@ -166,7 +171,8 @@ impl NetlinkSocket {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{NetlinkSocket, Protocol};
     ///
     /// // For a named namespace
@@ -180,6 +186,8 @@ impl NetlinkSocket {
     ///     Protocol::Route,
     ///     "/proc/1234/ns/net"
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new_in_namespace_path<P: AsRef<Path>>(protocol: Protocol, ns_path: P) -> Result<Self> {
         // #184: ENOENT → typed NamespaceNotFound (is_not_found()), other

@@ -97,7 +97,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -109,6 +110,8 @@ impl Connection<Ethtool> {
     /// let state = conn.get_link_state(5u32).await?;
     ///
     /// println!("Link detected: {}", state.link);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_state"))]
     pub async fn get_link_state(&self, iface: impl Into<InterfaceRef>) -> Result<LinkState> {
@@ -168,7 +171,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -181,6 +185,8 @@ impl Connection<Ethtool> {
     ///
     /// println!("Port: {:?}", info.port);
     /// println!("Transceiver: {:?}", info.transceiver);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_info"))]
     pub async fn get_link_info(&self, iface: impl Into<InterfaceRef>) -> Result<LinkInfo> {
@@ -240,7 +246,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -255,6 +262,8 @@ impl Connection<Ethtool> {
     /// println!("Duplex: {:?}", modes.duplex);
     /// println!("Autoneg: {}", modes.autoneg);
     /// println!("Supported modes: {:?}", modes.supported_modes());
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_link_modes"))]
     pub async fn get_link_modes(&self, iface: impl Into<InterfaceRef>) -> Result<LinkModes> {
@@ -283,7 +292,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     /// use nlink::netlink::genl::ethtool::Duplex;
     ///
@@ -302,6 +312,8 @@ impl Connection<Ethtool> {
     ///      .advertise("1000baseT/Full")
     ///      .advertise("100baseT/Full")
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_link_modes"))]
     pub async fn set_link_modes(
@@ -424,7 +436,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -441,6 +454,8 @@ impl Connection<Ethtool> {
     /// for (name, enabled) in features.iter() {
     ///     println!("{}: {}", name, if enabled { "on" } else { "off" });
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_features"))]
     pub async fn get_features(&self, iface: impl Into<InterfaceRef>) -> Result<Features> {
@@ -578,7 +593,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -593,6 +609,8 @@ impl Connection<Ethtool> {
     /// conn.set_features(5u32, |f| {
     ///     f.enable("tx-checksumming")
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_features"))]
     pub async fn set_features(
@@ -671,7 +689,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -684,6 +703,8 @@ impl Connection<Ethtool> {
     ///
     /// println!("RX: {:?} (max {:?})", rings.rx, rings.rx_max);
     /// println!("TX: {:?} (max {:?})", rings.tx, rings.tx_max);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_rings"))]
     pub async fn get_rings(&self, iface: impl Into<InterfaceRef>) -> Result<Rings> {
@@ -712,7 +733,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -726,6 +748,8 @@ impl Connection<Ethtool> {
     /// conn.set_rings(5u32, |r| {
     ///     r.rx(4096).tx(4096)
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_rings"))]
     pub async fn set_rings(
@@ -824,7 +848,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -838,6 +863,8 @@ impl Connection<Ethtool> {
     /// println!("RX: {:?} (max {:?})", channels.rx_count, channels.rx_max);
     /// println!("TX: {:?} (max {:?})", channels.tx_count, channels.tx_max);
     /// println!("Combined: {:?} (max {:?})", channels.combined_count, channels.combined_max);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_channels"))]
     pub async fn get_channels(&self, iface: impl Into<InterfaceRef>) -> Result<Channels> {
@@ -866,7 +893,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -880,6 +908,8 @@ impl Connection<Ethtool> {
     /// conn.set_channels(5u32, |c| {
     ///     c.combined(4)
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_channels"))]
     pub async fn set_channels(
@@ -969,7 +999,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -983,6 +1014,8 @@ impl Connection<Ethtool> {
     /// println!("RX usecs: {:?}", coalesce.rx_usecs);
     /// println!("TX usecs: {:?}", coalesce.tx_usecs);
     /// println!("Adaptive RX: {:?}", coalesce.use_adaptive_rx);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_coalesce"))]
     pub async fn get_coalesce(&self, iface: impl Into<InterfaceRef>) -> Result<Coalesce> {
@@ -1011,7 +1044,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -1027,6 +1061,8 @@ impl Connection<Ethtool> {
     /// conn.set_coalesce(5u32, |c| {
     ///     c.rx_usecs(100)
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_coalesce"))]
     pub async fn set_coalesce(
@@ -1147,7 +1183,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -1161,6 +1198,8 @@ impl Connection<Ethtool> {
     /// println!("Autoneg: {:?}", pause.autoneg);
     /// println!("RX pause: {:?}", pause.rx);
     /// println!("TX pause: {:?}", pause.tx);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_pause"))]
     pub async fn get_pause(&self, iface: impl Into<InterfaceRef>) -> Result<Pause> {
@@ -1189,7 +1228,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -1205,6 +1245,8 @@ impl Connection<Ethtool> {
     /// conn.set_pause(5u32, |p| {
     ///     p.autoneg(true)
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_pause"))]
     pub async fn set_pause(
@@ -1271,12 +1313,15 @@ impl Connection<Ethtool> {
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
     /// let wol = conn.get_wol("eth0").await?;
     /// println!("supported: {:?}, active: {:?}", wol.supported, wol.active);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_wol"))]
     pub async fn get_wol(&self, iface: impl Into<InterfaceRef>) -> Result<Wol> {
@@ -1301,7 +1346,8 @@ impl Connection<Ethtool> {
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
@@ -1309,6 +1355,8 @@ impl Connection<Ethtool> {
     /// conn.set_wol("eth0", |w| w.mode("magic")).await?;
     /// // Disable all WoL.
     /// conn.set_wol("eth0", |w| w).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wol"))]
     pub async fn set_wol(
@@ -1417,11 +1465,14 @@ impl Connection<Ethtool> {
     ///
     /// Accepts either an interface name or index via [`InterfaceRef`].
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     ///
     /// let conn = Connection::<Ethtool>::new_async().await?;
     /// conn.set_eee("eth0", |e| e.enabled(true).tx_lpi_enabled(true)).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_eee"))]
     pub async fn set_eee(
@@ -1544,9 +1595,14 @@ impl Connection<Ethtool> {
     /// same strings [`Fec::modes`] reports for the device. See
     /// [`FecBuilder`] for the normalisation of common spellings.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::Ethtool;
+    /// # let conn = nlink::Connection::<nlink::netlink::Ethtool>::new_async().await?;
     /// // Enable RS FEC and turn auto-negotiation off.
     /// conn.set_fec("eth0", |f| f.mode("rs").auto(false)).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_fec"))]
     pub async fn set_fec(
@@ -1726,7 +1782,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     /// use nlink::netlink::genl::ethtool::stats_index;
     ///
@@ -1735,6 +1792,8 @@ impl Connection<Ethtool> {
     /// if let Some(mac) = &stats.eth_mac {
     ///     println!("rx-packets: {:?}", mac.get(stats_index::ETH_MAC_RX_PKT));
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_eth_stats"))]
     pub async fn get_eth_stats(&self, iface: impl Into<InterfaceRef>) -> Result<EthtoolStats> {
@@ -2032,7 +2091,8 @@ impl Connection<Ethtool> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Ethtool};
     /// use tokio_stream::StreamExt;
     ///
@@ -2043,6 +2103,8 @@ impl Connection<Ethtool> {
     /// while let Some(event) = events.next().await {
     ///     println!("{:?}", event?);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn subscribe(&self) -> Result<()> {
         self.subscribe_group(ETHTOOL_MCGRP_MONITOR)

@@ -2,12 +2,15 @@
 //!
 //! Supports boolean expressions for filtering sockets:
 //!
-//! ```ignore
+//! ```no_run
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::sockdiag::expr::FilterExpr;
 //!
 //! let expr = FilterExpr::parse("sport = :22 or dport = :22")?;
 //! let expr = FilterExpr::parse("dst 192.168.0.0/16 and state established")?;
 //! let expr = FilterExpr::parse("( sport = :80 or sport = :443 ) and state listening")?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::IpAddr;

@@ -15,7 +15,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::namespace_events::{NamespaceEventSubscriber, NamespaceNetlinkEvent};
 //!
 //! let mut subscriber = NamespaceEventSubscriber::new().await?;
@@ -28,8 +29,11 @@
 //!         NamespaceNetlinkEvent::DelNsId { nsid } => {
 //!             println!("Namespace ID {} removed", nsid);
 //!         }
+//!         _ => {}
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use super::{

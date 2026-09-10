@@ -6,7 +6,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, KobjectUevent};
 //!
 //! let conn = Connection::<KobjectUevent>::new()?;
@@ -15,6 +16,8 @@
 //!     let event = conn.recv().await?;
 //!     println!("[{}] {} ({})", event.action, event.devpath, event.subsystem);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{collections::HashMap, path::Path};
@@ -191,10 +194,13 @@ impl Connection<KobjectUevent> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, KobjectUevent};
     ///
     /// let conn = Connection::<KobjectUevent>::new()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new() -> Result<Self> {
         Self::with_rcvbuf(DEFAULT_UEVENT_RCVBUF)
@@ -294,7 +300,8 @@ impl Connection<KobjectUevent> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, KobjectUevent};
     /// use nlink::netlink::uevent_filter::UeventFilter;
     ///
@@ -306,6 +313,8 @@ impl Connection<KobjectUevent> {
     ///     let event = conn.recv_matching(&filter).await?;
     ///     println!("{} {}", event.action, event.devpath);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "attach_filter"))]
     pub fn attach_filter(&self, filter: &UeventFilter) -> Result<CompiledUeventFilter> {
@@ -337,7 +346,8 @@ impl Connection<KobjectUevent> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, KobjectUevent};
     ///
     /// let conn = Connection::<KobjectUevent>::new()?;
@@ -348,6 +358,8 @@ impl Connection<KobjectUevent> {
     ///         println!("USB device added: {:?}", event.devname());
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "recv"))]
     pub async fn recv(&self) -> Result<Uevent> {

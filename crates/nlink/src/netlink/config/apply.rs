@@ -30,7 +30,7 @@ use crate::netlink::{
 /// Construct via `Default::default()` + the `with_*` builder
 /// methods, NOT via struct-literal syntax:
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::config::ApplyOptions;
 /// let opts = ApplyOptions::default()
 ///     .with_dry_run(true)
