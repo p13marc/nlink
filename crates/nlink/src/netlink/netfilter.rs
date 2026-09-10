@@ -5,7 +5,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Netfilter};
 //!
 //! let conn = Connection::<Netfilter>::new()?;
@@ -13,13 +14,15 @@
 //! // List all connection tracking entries
 //! let entries = conn.get_conntrack().await?;
 //! for entry in &entries {
-//!     println!("{:?} {}:{} -> {}:{}",
+//!     println!("{:?} {:?}:{} -> {:?}:{}",
 //!         entry.proto,
 //!         entry.orig.src_ip,
 //!         entry.orig.src_port.unwrap_or(0),
 //!         entry.orig.dst_ip,
 //!         entry.orig.dst_port.unwrap_or(0));
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{
@@ -739,7 +742,8 @@ impl Connection<Netfilter> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Netfilter};
     ///
     /// let conn = Connection::<Netfilter>::new()?;
@@ -751,6 +755,8 @@ impl Connection<Netfilter> {
     ///         entry.orig.src_ip,
     ///         entry.orig.dst_ip);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_conntrack"))]
     pub async fn get_conntrack(&self) -> Result<Vec<ConntrackEntry>> {
@@ -860,17 +866,20 @@ impl Connection<Netfilter> {
     /// See [`ConntrackGroup`] for the available groups.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Netfilter};
     /// use nlink::netlink::netfilter::ConntrackGroup;
     /// use tokio_stream::StreamExt;
     ///
     /// let mut nf = Connection::<Netfilter>::new()?;
     /// nf.subscribe(&[ConntrackGroup::New, ConntrackGroup::Destroy])?;
-    /// let mut events = nf.events();
+    /// let mut events = nf.events().await;
     /// while let Some(evt) = events.next().await {
     ///     println!("{:?}", evt?);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "info", skip(self), fields(groups = ?groups))]
     pub fn subscribe(&self, groups: &[ConntrackGroup]) -> Result<()> {
@@ -1642,7 +1651,10 @@ impl Connection<Netfilter> {
     /// conntrack tables (busy NAT gateways, anycast load-balancers
     /// — millions of entries is routine).
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::Connection;
+    /// # use nlink::netlink::Netfilter;
     /// use tokio_stream::StreamExt;
     /// let conn = Connection::<Netfilter>::new()?;
     /// let mut stream = conn.stream_conntrack(libc::AF_INET as u8).await?;
@@ -1650,6 +1662,8 @@ impl Connection<Netfilter> {
     ///     let entry = entry?;
     ///     println!("{:?}", entry.proto);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn stream_conntrack(
         &self,

@@ -16,7 +16,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let conn = nlink::Connection::<nlink::Route>::new()?;
 //! use nlink::netlink::{Connection, Route, InterfaceRef};
 //! use nlink::netlink::addr::Ipv4Address;
 //!
@@ -26,6 +28,8 @@
 //! // Using interface index (namespace-safe, when you've already resolved the index)
 //! let link = conn.get_link_by_name("eth0").await?.unwrap();
 //! let addr = Ipv4Address::with_index(link.ifindex(), "192.168.1.100".parse()?, 24);
+//! # Ok(())
+//! # }
 //! ```
 
 use std::fmt;
@@ -39,7 +43,7 @@ use std::fmt;
 ///
 /// # Creating an InterfaceRef
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::InterfaceRef;
 ///
 /// // From a name (most common)

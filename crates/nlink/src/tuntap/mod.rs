@@ -15,8 +15,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use rip_tuntap::{TunTap, Mode};
+//! ```no_run
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use nlink::tuntap::{Mode, TunTap};
 //!
 //! // Create a persistent TUN device
 //! let tun = TunTap::builder()
@@ -35,6 +36,8 @@
 //!     .group(1000)  // gid
 //!     .persistent(true)
 //!     .create()?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # No async support

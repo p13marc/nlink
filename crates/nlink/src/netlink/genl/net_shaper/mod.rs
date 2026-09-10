@@ -18,13 +18,16 @@
 //!
 //! # Construction
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, genl::net_shaper::NetShaper};
 //!
 //! let conn = Connection::<NetShaper>::new_async().await?;
 //! // Family ID resolved against the kernel's "net-shaper"
 //! // registration; `Error::is_not_found()` when the family
 //! // isn't loaded (kernel < 6.13 or `CONFIG_NET_SHAPER=n`).
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Capability handshake
@@ -33,15 +36,24 @@
 //! before issuing a `set_shaper` to avoid the round-trip on
 //! unsupported attributes:
 //!
-//! ```ignore
-//! use nlink::netlink::genl::net_shaper::{NetShaper, NetShaperScope};
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let eth0_ifindex: u32 = 2;
+//! # let conn = nlink::Connection::<nlink::netlink::genl::net_shaper::NetShaper>::new_async().await?;
+//! use nlink::netlink::genl::net_shaper::{
+//!     NetShaper, NetShaperHandle, NetShaperScope, NetShaperSetRequest,
+//! };
 //!
 //! let caps = conn.get_caps(eth0_ifindex, NetShaperScope::Queue).await?;
 //! if caps.support_bw_max {
-//!     conn.set_shaper(/* ... */).await?;
+//!     let handle = NetShaperHandle::queue(0);
+//!     conn.set_shaper(NetShaperSetRequest::new(eth0_ifindex, handle).bw_max(1_000_000_000))
+//!         .await?;
 //! } else {
 //!     tracing::warn!("driver doesn't support bw_max on QUEUE scope");
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Permissions

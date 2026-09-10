@@ -11,7 +11,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, KobjectUevent};
 //! use tokio_stream::StreamExt;
 //!
@@ -25,11 +26,14 @@
 //!
 //! // Connection still usable after dropping stream
 //! drop(events);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Combining Multiple Event Sources
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, KobjectUevent, SELinux};
 //! use tokio_stream::StreamExt;
 //! use std::pin::pin;
@@ -50,6 +54,8 @@
 //!         }
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{
@@ -116,7 +122,8 @@ pub trait EventSource: ProtocolState + private::Sealed {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::{Connection, KobjectUevent};
 /// use tokio_stream::StreamExt;
 ///
@@ -126,6 +133,8 @@ pub trait EventSource: ProtocolState + private::Sealed {
 /// while let Some(event) = events.try_next().await? {
 ///     println!("{:?}", event);
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub struct EventSubscription<'a, P: EventSource> {
     conn: &'a Connection<P>,
@@ -249,7 +258,8 @@ impl<P: EventSource> Unpin for EventSubscription<'_, P> {}
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::{Connection, SELinux};
 /// use tokio_stream::StreamExt;
 ///
@@ -262,6 +272,8 @@ impl<P: EventSource> Unpin for EventSubscription<'_, P> {}
 ///
 /// // Recover the connection if needed
 /// let conn = stream.into_connection();
+/// # Ok(())
+/// # }
 /// ```
 pub struct OwnedEventStream<P: EventSource> {
     conn: Connection<P>,
@@ -341,7 +353,8 @@ impl<P: EventSource> Connection<P> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, KobjectUevent};
     /// use tokio_stream::StreamExt;
     ///
@@ -357,6 +370,8 @@ impl<P: EventSource> Connection<P> {
     ///
     /// // Connection still usable
     /// drop(events);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn events(&self) -> EventSubscription<'_, P> {
         EventSubscription::new(self, self.event_backend().await)
@@ -369,7 +384,8 @@ impl<P: EventSource> Connection<P> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, SELinux};
     /// use tokio_stream::StreamExt;
     ///
@@ -382,6 +398,8 @@ impl<P: EventSource> Connection<P> {
     ///
     /// // Recover connection if needed
     /// let conn = stream.into_connection();
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// **0.19 Finding B — now `async`.** Same locking semantics as

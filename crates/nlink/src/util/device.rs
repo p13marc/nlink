@@ -10,8 +10,11 @@ use super::ifname;
 /// Returns the interface index as u32.
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let ifindex = nlink::util::get_ifindex("eth0")?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn get_ifindex(name: &str) -> Result<u32, String> {
     ifname::name_to_index(name).map_err(|e| format!("interface not found: {}", e))
@@ -22,8 +25,11 @@ pub fn get_ifindex(name: &str) -> Result<u32, String> {
 /// Useful for filtering operations where the device is optional.
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let ifindex = nlink::util::get_ifindex_opt(Some("eth0"))?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn get_ifindex_opt(name: Option<&str>) -> Result<Option<u32>, String> {
     match name {
@@ -35,8 +41,11 @@ pub fn get_ifindex_opt(name: Option<&str>) -> Result<Option<u32>, String> {
 /// Get interface name from index.
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let name = nlink::util::get_ifname(1)?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn get_ifname(index: u32) -> Result<String, String> {
     ifname::index_to_name(index).map_err(|e| format!("interface not found: {}", e))
@@ -48,7 +57,7 @@ pub fn get_ifname(index: u32) -> Result<String, String> {
 /// even if the interface lookup fails.
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
 /// let name = nlink::util::get_ifname_or_index(1);
 /// // Returns "eth0" if found, or "if1" if not
 /// ```

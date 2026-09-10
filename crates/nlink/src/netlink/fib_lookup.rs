@@ -5,7 +5,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, FibLookup};
 //! use std::net::Ipv4Addr;
 //!
@@ -15,6 +16,8 @@
 //! let result = conn.lookup(Ipv4Addr::new(8, 8, 8, 8)).await?;
 //! println!("Route type: {:?}, table: {}, prefix_len: {}",
 //!     result.route_type, result.table_id, result.prefix_len);
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::Ipv4Addr;
@@ -274,10 +277,13 @@ impl Connection<FibLookup> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, FibLookup};
     ///
     /// let conn = Connection::<FibLookup>::new()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new() -> Result<Self> {
         let socket = NetlinkSocket::new(FibLookup::PROTOCOL)?;
@@ -288,7 +294,8 @@ impl Connection<FibLookup> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, FibLookup};
     /// use std::net::Ipv4Addr;
     ///
@@ -299,6 +306,8 @@ impl Connection<FibLookup> {
     ///     println!("Route found: type={:?}, table={}, prefix=/{}",
     ///         result.route_type, result.table_id, result.prefix_len);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "lookup"))]
     pub async fn lookup(&self, addr: Ipv4Addr) -> Result<FibLookupResult> {
@@ -309,13 +318,16 @@ impl Connection<FibLookup> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, FibLookup};
     /// use std::net::Ipv4Addr;
     ///
     /// let conn = Connection::<FibLookup>::new()?;
     /// // Look up in table 254 (main)
     /// let result = conn.lookup_in_table(Ipv4Addr::new(10, 0, 0, 1), 254).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "lookup_in_table"))]
     pub async fn lookup_in_table(&self, addr: Ipv4Addr, table: u8) -> Result<FibLookupResult> {
@@ -329,12 +341,15 @@ impl Connection<FibLookup> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, FibLookup};
     /// use std::net::Ipv4Addr;
     ///
     /// let conn = Connection::<FibLookup>::new()?;
     /// let result = conn.lookup_with_mark(Ipv4Addr::new(8, 8, 8, 8), 0x100).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "lookup_with_mark"))]
     pub async fn lookup_with_mark(&self, addr: Ipv4Addr, mark: u32) -> Result<FibLookupResult> {
@@ -348,7 +363,8 @@ impl Connection<FibLookup> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, FibLookup};
     /// use nlink::netlink::fib_lookup::FibResultNl;
     /// use std::net::Ipv4Addr;
@@ -360,6 +376,8 @@ impl Connection<FibLookup> {
     ///     ..Default::default()
     /// };
     /// let result = conn.lookup_with_options(request).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "lookup_with_options"))]
     pub async fn lookup_with_options(&self, request: FibResultNl) -> Result<FibLookupResult> {

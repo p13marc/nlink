@@ -5,7 +5,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::filter::{U32Filter, FlowerFilter, MatchallFilter};
 //! use nlink::TcHandle;
@@ -33,6 +34,8 @@
 //!     .classid(TcHandle::new(1, 0x30))
 //!     .build();
 //! conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -142,7 +145,7 @@ pub const DEFAULT_FILTER_PROTOCOL: u16 = 0x0800;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::filter::U32Filter;
 ///
 /// // Match destination port 80 (HTTP)
@@ -843,7 +846,7 @@ fn parse_port(field: &str, layer: &str, s: &str) -> Result<u16> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::filter::FlowerFilter;
 /// use std::net::Ipv4Addr;
 ///
@@ -1134,12 +1137,16 @@ impl FlowerFilter {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::filter::FlowerFilter;
     /// let f = FlowerFilter::parse_params(&[
     ///     "classid", "1:10",
     ///     "ip_proto", "tcp",
     ///     "dst_port", "80",
     /// ])?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
         use crate::Error;
@@ -1685,7 +1692,7 @@ impl FilterConfig for FlowerFilter {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::filter::MatchallFilter;
 ///
 /// let filter = MatchallFilter::new()
@@ -1955,11 +1962,13 @@ impl FilterConfig for MatchallFilter {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::filter::FwFilter;
 ///
-/// // Match packets with fwmark 10
-/// let filter = FwFilter::new(10)
+/// // Match on the firewall mark. The mark itself is the filter *handle*,
+/// // passed to `add_filter_full`; the builder carries the mask.
+/// let filter = FwFilter::new()
+///     .mask(0xFF)
 ///     .classid(nlink::TcHandle::new(1, 0x10))
 ///     .build();
 /// ```
@@ -2128,7 +2137,7 @@ impl FilterConfig for FwFilter {
 /// or an `skbedit`/`flow` action) through a hash table to a class id.
 /// It is the canonical companion to the `dsmark` qdisc for DiffServ.
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::filter::TcindexFilter;
 /// use nlink::TcHandle;
 ///
@@ -2331,11 +2340,13 @@ impl FilterConfig for TcindexFilter {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::filter::BpfFilter;
 /// use std::os::fd::RawFd;
 ///
-/// // Attach a BPF program by file descriptor
+/// // Attach a BPF program by file descriptor. Loading it is the caller's
+/// // job — `aya` or `libbpf-rs` hand back the fd.
+/// # let bpf_fd: RawFd = 3;
 /// let filter = BpfFilter::new(bpf_fd)
 ///     .name("my_classifier")
 ///     .direct_action()
@@ -2382,12 +2393,17 @@ impl BpfFilter {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::filter::BpfFilter;
     ///
     /// let filter = BpfFilter::from_pinned("/sys/fs/bpf/my_prog")?
     ///     .direct_action();
-    /// conn.add_filter("eth0", "ingress", filter).await?;
+    /// conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_pinned(path: impl AsRef<std::path::Path>) -> crate::netlink::Result<Self> {
         use std::os::unix::io::IntoRawFd;
@@ -2833,7 +2849,9 @@ impl BasicFilter {
     /// at offset 9 of the network header.
     ///
     /// Equivalent to:
-    /// ```ignore
+    /// ```no_run
+    /// # use nlink::netlink::filter::{BasicFilter, CmpAlign, CmpLayer, CmpOp, Ematch, EmatchCmp};
+    /// # fn example(f: BasicFilter, proto: u8) -> BasicFilter {
     /// f.ematch(Ematch::cmp(EmatchCmp {
     ///     layer: CmpLayer::Network,
     ///     align: CmpAlign::U8,
@@ -2843,6 +2861,7 @@ impl BasicFilter {
     ///     op: CmpOp::Eq,
     ///     trans: false,
     /// }))
+    /// # }
     /// ```
     pub fn ip_proto_eq(self, proto: u8) -> Self {
         self.ematch(Ematch::cmp(EmatchCmp {
@@ -3058,7 +3077,7 @@ fn encode_cmp(c: &EmatchCmp) -> ematch::TcfEmCmp {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::filter::CgroupFilter;
 /// use nlink::netlink::action::GactAction;
 ///
@@ -3191,7 +3210,8 @@ impl FilterConfig for CgroupFilter {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # let eth1_ifindex: u32 = 3;
 /// use nlink::netlink::filter::RouteFilter;
 ///
 /// // Match traffic to realm 10
@@ -3437,7 +3457,7 @@ impl FilterConfig for RouteFilter {
 /// session/sender selects the `rsvp6` kernel classifier, IPv4 selects
 /// `rsvp`.
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::filter::RsvpFilter;
 /// use nlink::TcHandle;
 ///
@@ -3707,7 +3727,9 @@ impl FilterConfig for RsvpFilter {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::filter::{FlowFilter, FlowKey};
 ///
 /// // Hash based on source and destination addresses
@@ -3726,6 +3748,8 @@ impl FilterConfig for RsvpFilter {
 ///     .mode_map()
 ///     .baseclass(nlink::TcHandle::major_only(1))
 ///     .build();
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -4166,16 +4190,21 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::filter::FlowerFilter;
     ///
     /// let filter = FlowerFilter::new()
-    ///     .classid("1:10")
+    ///     .classid(TcHandle::new(1, 0x10))
     ///     .ip_proto_tcp()
     ///     .dst_port(80)
     ///     .build();
     ///
-    /// conn.add_filter("eth0", "1:", filter).await?;
+    /// conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// The config's own `protocol` and `priority` are honored. Until 0.25
@@ -4403,12 +4432,18 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # use nlink::netlink::filter::U32Filter;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let filter = U32Filter::new()
-    ///     .classid("1:20")  // Change to different class
+    ///     .classid(TcHandle::new(1, 0x20))  // Change to different class
     ///     .match_dst_port(80)
     ///     .build();
-    /// conn.change_filter("eth0", "1:", 0x0800, 100, filter).await?;
+    /// conn.change_filter("eth0", TcHandle::major_only(1), 0x0800, 100, filter).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "change_filter"))]
     pub async fn change_filter(
@@ -4501,8 +4536,13 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// conn.del_filter("eth0", "1:", 0x0800, 100).await?;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::TcHandle;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// conn.del_filter("eth0", TcHandle::major_only(1), 0x0800, 100).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_filter"))]
     pub async fn del_filter(
@@ -4628,12 +4668,16 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::filter::{BpfFilter, BpfDirection};
     ///
     /// let filter = BpfFilter::from_pinned("/sys/fs/bpf/my_prog")?
     ///     .direct_action();
     /// conn.attach_bpf("eth0", BpfDirection::Ingress, filter).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "attach_bpf"))]
     pub async fn attach_bpf(
@@ -4682,10 +4726,14 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::filter::BpfDirection;
     ///
     /// conn.detach_bpf("eth0", BpfDirection::Ingress).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "detach_bpf"))]
     pub async fn detach_bpf(
@@ -4717,11 +4765,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let programs = conn.list_bpf_programs("eth0").await?;
     /// for prog in &programs {
     ///     println!("BPF: id={:?} name={:?} da={}", prog.id, prog.name, prog.direct_action);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_bpf_programs"))]
     pub async fn list_bpf_programs(

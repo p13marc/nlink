@@ -5,7 +5,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # use nlink::output::OutputFormat;
 //! use nlink::netlink::{Connection, Route, RtnetlinkGroup};
 //! use nlink::output::{MonitorConfig, print_event};
 //! use tokio_stream::StreamExt;
@@ -22,6 +24,8 @@
 //!     let event = result?;
 //!     // Convert and print event...
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{

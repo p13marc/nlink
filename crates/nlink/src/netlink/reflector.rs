@@ -31,16 +31,23 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let conn = nlink::Connection::<nlink::Route>::new()?;
+//! use std::sync::Arc;
+//!
+//! use nlink::NetworkEvent;
 //! use nlink::netlink::reflector::{ReflectExt, Store, StoreOp};
-//! use nlink::netlink::events::NetworkEvent;
+//! use nlink::netlink::resync::ConnectionFactory;
 //! use tokio_stream::StreamExt;
 //!
+//! let factory: ConnectionFactory<nlink::Route> =
+//!     Arc::new(|| Box::pin(async { nlink::Connection::<nlink::Route>::new() }));
 //! let store: Store<u32, NetworkEvent> = Store::new();
 //! let reader = store.clone();
 //!
 //! // Drive the reflector in the background…
-//! let watch = conn.into_events_with_resync(factory)?.reflect(store, |ev| {
+//! let watch = conn.into_events_with_resync(factory).await?.reflect(store, |ev| {
 //!     match ev {
 //!         NetworkEvent::NewLink(l) => StoreOp::Upsert(l.ifindex()),
 //!         NetworkEvent::DelLink(l) => StoreOp::Remove(l.ifindex()),
@@ -56,6 +63,8 @@
 //!
 //! // …and read the cache from elsewhere.
 //! println!("{} links currently tracked", reader.len());
+//! # Ok(())
+//! # }
 //! ```
 
 use std::collections::HashMap;

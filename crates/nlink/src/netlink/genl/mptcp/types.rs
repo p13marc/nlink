@@ -130,10 +130,22 @@ pub struct MptcpEndpointBuilder {
     /// exists to avoid. Resolve through a connection in the right
     /// namespace and pass the index:
     ///
-    /// ```ignore
-    /// let ifindex = route_conn.get_link_by_name("eth1").await?
-    ///     .ok_or(/* … */)?.ifindex();
-    /// MptcpEndpointBuilder::new(addr).ifindex(ifindex)
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use std::net::IpAddr;
+    /// use nlink::netlink::genl::mptcp::MptcpEndpointBuilder;
+    /// use std::net::Ipv4Addr;
+    ///
+    /// let route_conn = nlink::Connection::<nlink::Route>::new()?;
+    /// let ifindex = route_conn
+    ///     .get_link_by_name("eth1")
+    ///     .await?
+    ///     .expect("eth1 exists in this namespace")
+    ///     .ifindex();
+    /// let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    /// let endpoint = MptcpEndpointBuilder::new(addr).ifindex(ifindex);
+    /// # Ok(())
+    /// # }
     /// ```
     pub(crate) ifindex: Option<u32>,
     /// Endpoint flags.
@@ -146,10 +158,11 @@ impl MptcpEndpointBuilder {
     /// # Example
     ///
     /// ```
+    /// # use std::net::IpAddr;
     /// use nlink::netlink::genl::mptcp::MptcpEndpointBuilder;
     /// use std::net::Ipv4Addr;
     ///
-    /// let builder = MptcpEndpointBuilder::new(Ipv4Addr::new(192, 168, 1, 1).into())
+    /// let builder = MptcpEndpointBuilder::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))
     ///     .id(1)
     ///     .subflow()
     ///     .signal();
@@ -297,15 +310,17 @@ impl From<std::net::SocketAddr> for MptcpAddress {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # use std::net::IpAddr;
+/// # let connection_token: u32 = 0;
 /// use nlink::netlink::genl::mptcp::MptcpSubflowBuilder;
 /// use std::net::Ipv4Addr;
 ///
 /// // Create subflow from local address to remote address
 /// let subflow = MptcpSubflowBuilder::new(connection_token)
-///     .local_addr(Ipv4Addr::new(192, 168, 1, 1).into())
+///     .local_addr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))
 ///     .local_id(1)
-///     .remote_addr(Ipv4Addr::new(10, 0, 0, 1).into())
+///     .remote_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
 ///     .remote_port(80);
 /// ```
 #[derive(Debug, Clone)]
@@ -404,14 +419,16 @@ impl MptcpSubflowBuilder {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # use std::net::IpAddr;
+/// # let connection_token: u32 = 0;
 /// use nlink::netlink::genl::mptcp::MptcpAnnounceBuilder;
 /// use std::net::Ipv4Addr;
 ///
 /// // Announce address ID 1 to the peer
 /// let announce = MptcpAnnounceBuilder::new(connection_token)
 ///     .addr_id(1)
-///     .address(Ipv4Addr::new(192, 168, 2, 1).into());
+///     .address(IpAddr::V4(Ipv4Addr::new(192, 168, 2, 1)));
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -497,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_endpoint_builder() {
-        let builder = MptcpEndpointBuilder::new(Ipv4Addr::new(192, 168, 1, 1).into())
+        let builder = MptcpEndpointBuilder::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))
             .id(1)
             .port(8080)
             .subflow()
@@ -538,7 +555,7 @@ mod tests {
     fn test_endpoint_helpers() {
         let ep = MptcpEndpoint {
             id: 1,
-            address: Ipv4Addr::new(10, 0, 0, 1).into(),
+            address: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             port: None,
             ifindex: Some(2),
             flags: MptcpFlags {
@@ -561,14 +578,14 @@ mod tests {
 
     #[test]
     fn test_mptcp_address_new() {
-        let addr = MptcpAddress::new(Ipv4Addr::new(10, 0, 0, 1).into());
+        let addr = MptcpAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(addr.addr, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         assert!(addr.port.is_none());
     }
 
     #[test]
     fn test_mptcp_address_with_port() {
-        let addr = MptcpAddress::with_port(Ipv4Addr::new(10, 0, 0, 1).into(), 8080);
+        let addr = MptcpAddress::with_port(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
         assert_eq!(addr.addr, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(addr.port, Some(8080));
     }
@@ -586,8 +603,8 @@ mod tests {
         let subflow = MptcpSubflowBuilder::new(0x12345678)
             .local_id(1)
             .remote_id(2)
-            .local_addr(MptcpAddress::new(Ipv4Addr::new(192, 168, 1, 1).into()))
-            .remote_addr(MptcpAddress::new(Ipv4Addr::new(10, 0, 0, 1).into()))
+            .local_addr(MptcpAddress::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))))
+            .remote_addr(MptcpAddress::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))))
             .backup();
 
         assert_eq!(subflow.token, 0x12345678);
@@ -611,7 +628,7 @@ mod tests {
     fn test_announce_builder() {
         let announce = MptcpAnnounceBuilder::new(0x11223344)
             .addr_id(3)
-            .address(MptcpAddress::new(Ipv4Addr::new(192, 168, 2, 1).into()))
+            .address(MptcpAddress::new(IpAddr::V4(Ipv4Addr::new(192, 168, 2, 1))))
             .port(8080);
 
         assert_eq!(announce.token, 0x11223344);

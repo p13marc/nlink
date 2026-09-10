@@ -5,7 +5,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let eth1_ifindex: u32 = 3;
 //! use nlink::netlink::{Connection, Mptcp};
 //! use nlink::netlink::genl::mptcp::{MptcpEndpointBuilder, MptcpLimits};
 //!
@@ -32,6 +34,8 @@
 //! for ep in conn.get_endpoints().await? {
 //!     println!("Endpoint {}: {}", ep.id, ep.address);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 mod connection;

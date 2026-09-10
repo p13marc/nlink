@@ -24,10 +24,13 @@ use crate::{Connection, Result};
 
 /// Apply a network config to the host's default namespace.
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::config::NetworkConfig;
 /// let cfg = NetworkConfig::new().link("eth0", |b| b.dummy());
 /// nlink::facade::apply::network(&cfg).await?;
+/// # Ok(())
+/// # }
 /// ```
 pub async fn network(cfg: &NetworkConfig) -> Result<ApplyResult> {
     network_in(NamespaceSpec::Default, cfg).await
@@ -51,10 +54,14 @@ pub async fn network_in(ns: NamespaceSpec<'_>, cfg: &NetworkConfig) -> Result<Ap
 
 /// Apply an nftables config to the host's default namespace.
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::netlink::nftables::Family;
 /// use nlink::netlink::nftables::config::NftablesConfig;
 /// let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| t);
 /// nlink::facade::apply::nftables(&cfg).await?;
+/// # Ok(())
+/// # }
 /// ```
 pub async fn nftables(cfg: &NftablesConfig) -> Result<usize> {
     nftables_in(NamespaceSpec::Default, cfg).await

@@ -2,7 +2,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```no_run
 //! use nlink::prelude::*;
 //! ```
 

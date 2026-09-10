@@ -5,7 +5,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Xfrm};
 //!
 //! let conn = Connection::<Xfrm>::new()?;
@@ -23,6 +24,8 @@
 //!     println!("{:?} dir={:?} action={:?}",
 //!         pol.selector, pol.direction, pol.action);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -909,14 +912,15 @@ impl XfrmSaBuilder {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use std::net::IpAddr;
     /// use std::net::Ipv4Addr;
     /// use nlink::netlink::xfrm::{XfrmSaBuilder, IpsecProtocol, XfrmOffloadFlag};
     ///
     /// let mlx5_ifindex = 3;
     /// let sa = XfrmSaBuilder::new(
-    ///     Ipv4Addr::new(10, 0, 0, 1).into(),
-    ///     Ipv4Addr::new(10, 0, 0, 2).into(),
+    ///     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+    ///     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
     ///     0x12345678,
     ///     IpsecProtocol::Esp,
     /// )
@@ -1635,7 +1639,8 @@ impl Connection<Xfrm> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Xfrm};
     ///
     /// let conn = Connection::<Xfrm>::new()?;
@@ -1645,6 +1650,8 @@ impl Connection<Xfrm> {
     ///     println!("{:?} -> {:?} SPI={:08x} proto={:?}",
     ///         sa.src_addr, sa.dst_addr, sa.spi, sa.protocol);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(
         level = "debug",
@@ -1757,7 +1764,8 @@ impl Connection<Xfrm> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Xfrm};
     ///
     /// let conn = Connection::<Xfrm>::new()?;
@@ -1767,6 +1775,8 @@ impl Connection<Xfrm> {
     ///     println!("dir={:?} action={:?} priority={}",
     ///         pol.direction, pol.action, pol.priority);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_security_policies"))]
     pub async fn get_security_policies(&self) -> Result<Vec<SecurityPolicy>> {
@@ -3066,7 +3076,10 @@ impl Connection<Xfrm> {
     /// on hosts with thousands of SAs (IPsec scale-out gateways,
     /// telco aggregation routers).
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::Connection;
+    /// # use nlink::netlink::Xfrm;
     /// use tokio_stream::StreamExt;
     /// let conn = Connection::<Xfrm>::new()?;
     /// let mut stream = conn.stream_sas().await?;
@@ -3074,6 +3087,8 @@ impl Connection<Xfrm> {
     ///     let sa = sa?;
     ///     println!("SPI {:x} → {:?}", sa.spi, sa.dst_addr);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn stream_sas(&self) -> Result<DumpStream<'_, Xfrm, SecurityAssociation>> {
         self.dump_stream::<SecurityAssociation>(XFRM_MSG_GETSA)

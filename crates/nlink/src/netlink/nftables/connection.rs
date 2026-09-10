@@ -23,8 +23,13 @@ impl Connection<Nftables> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::nftables::Family;
+    /// # let conn = nlink::Connection::<nlink::netlink::Nftables>::new()?;
     /// conn.add_table("filter", Family::Inet).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_table"))]
     pub async fn add_table<N>(&self, name: N, family: Family) -> Result<()>
@@ -45,13 +50,16 @@ impl Connection<Nftables> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::{Connection, Nftables};
     /// use nlink::netlink::nftables::{Family, NFT_TABLE_F_PERSIST};
     ///
     /// let conn = Connection::<Nftables>::new()?;
     /// // Create a table that survives `nft flush ruleset`.
     /// conn.add_table_with_flags("filter", Family::Inet, NFT_TABLE_F_PERSIST).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(
         level = "debug",
@@ -134,11 +142,15 @@ impl Connection<Nftables> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::netlink::Nftables>::new()?;
     /// use nlink::netlink::nftables::{Flowtable, Family};
     /// let ft = Flowtable::new(Family::Inet, "filter", "ft")
     ///     .device("eth0").device("eth1").hw_offload(true);
     /// conn.add_flowtable(&ft).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_flowtable"))]
     pub async fn add_flowtable(&self, ft: &super::types::Flowtable) -> Result<()> {
@@ -301,15 +313,25 @@ impl Connection<Nftables> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::nftables::Chain;
+    /// # use nlink::netlink::nftables::ChainType;
+    /// # use nlink::netlink::nftables::Family;
+    /// # use nlink::netlink::nftables::Hook;
+    /// # use nlink::netlink::nftables::Policy;
+    /// # use nlink::netlink::nftables::Priority;
+    /// # let conn = nlink::Connection::<nlink::netlink::Nftables>::new()?;
     /// conn.add_chain(
-    ///     Chain::new("filter", "input")
+    ///     Chain::new("filter", "input")?
     ///         .family(Family::Inet)
     ///         .hook(Hook::Input)
     ///         .priority(Priority::Filter)
     ///         .policy(Policy::Accept)
     ///         .chain_type(ChainType::Filter)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_chain"))]
     pub async fn add_chain(&self, chain: Chain) -> Result<()> {
@@ -449,13 +471,19 @@ impl Connection<Nftables> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::nftables::Family;
+    /// # use nlink::netlink::nftables::Rule;
+    /// # let conn = nlink::Connection::<nlink::netlink::Nftables>::new()?;
     /// conn.add_rule(
     ///     Rule::new("filter", "input")
     ///         .family(Family::Inet)
     ///         .match_tcp_dport(22)
     ///         .accept()
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_rule"))]
     pub async fn add_rule(&self, rule: Rule) -> Result<()> {
@@ -726,13 +754,26 @@ impl Connection<Nftables> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::nftables::{Chain, ChainType, Family, Hook, Policy, Priority, Rule};
+    /// # let conn = nlink::Connection::<nlink::netlink::Nftables>::new()?;
+    /// let chain = Chain::new("filter", "input")?
+    ///     .family(Family::Inet)
+    ///     .hook(Hook::Input)
+    ///     .priority(Priority::Filter)
+    ///     .chain_type(ChainType::Filter)
+    ///     .policy(Policy::Accept);
+    /// let rule = Rule::new("filter", "input").family(Family::Inet);
+    ///
     /// conn.transaction()
     ///     .add_table("filter", Family::Inet)
     ///     .add_chain(chain)
     ///     .add_rule(rule)
     ///     .commit(&conn)
     ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn transaction(&self) -> Transaction {
         Transaction::new()
@@ -947,14 +988,15 @@ impl Connection<Nftables> {
     /// shape used for conntrack events.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Nftables};
     /// use nlink::netlink::nftables::{NftablesEvent, NftablesGroup};
     /// use tokio_stream::StreamExt;
     ///
     /// let mut nft = Connection::<Nftables>::new()?;
     /// nft.subscribe(&[NftablesGroup::All])?;
-    /// let mut events = nft.events();
+    /// let mut events = nft.events().await;
     /// while let Some(evt) = events.next().await {
     ///     match evt? {
     ///         NftablesEvent::NewTable(t) => println!("+ table {}", t.name),
@@ -962,6 +1004,8 @@ impl Connection<Nftables> {
     ///         _ => {}
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "info", skip(self), fields(groups = ?groups))]
     pub fn subscribe(&self, groups: &[super::events::NftablesGroup]) -> Result<()> {
@@ -2450,7 +2494,10 @@ impl Connection<Nftables> {
     /// hosts (CDN edges, service meshes with thousands of
     /// per-tenant rules).
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::Connection;
+    /// # use nlink::Nftables;
     /// use tokio_stream::StreamExt;
     /// use nlink::netlink::nftables::types::Family;
     /// let conn = Connection::<Nftables>::new()?;
@@ -2459,6 +2506,8 @@ impl Connection<Nftables> {
     ///     let rule = rule?;
     ///     println!("{}/{} handle={}", rule.table, rule.chain, rule.handle);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn stream_rules(
         &self,

@@ -21,7 +21,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::mpls::{MplsEncap, MplsLabel, MplsRouteBuilder};
 //! use nlink::netlink::route::Ipv4Route;
@@ -52,11 +53,13 @@
 //! // Query MPLS routes
 //! let routes = conn.get_mpls_routes().await?;
 //! for route in &routes {
-//!     println!("Label {}: {:?}", route.label.0, route.action);
+//!     println!("Label {}: {:?}", route.label().0, route.action());
 //! }
 //!
 //! // Cleanup
 //! conn.del_mpls_route(100).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::IpAddr;
@@ -172,7 +175,7 @@ impl From<MplsLabel> for u32 {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::mpls::MplsEncap;
 ///
 /// // Single label
@@ -446,7 +449,8 @@ impl MplsRoute {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::mpls::MplsRouteBuilder;
 ///
 /// // Pop route (label -> IP)
@@ -462,6 +466,8 @@ impl MplsRoute {
 /// let route = MplsRouteBuilder::swap_stack(100, &[200, 300])
 ///     .via("192.168.1.1".parse()?)
 ///     .dev("eth0");
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -603,11 +609,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let routes = conn.get_mpls_routes().await?;
     /// for route in &routes {
-    ///     println!("Label {}: {:?}", route.label.0, route.action);
+    ///     println!("Label {}: {:?}", route.label().0, route.action());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_mpls_routes"))]
     pub async fn get_mpls_routes(&self) -> Result<Vec<MplsRoute>> {
@@ -634,7 +644,10 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::mpls::MplsRouteBuilder;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Pop route
     /// conn.add_mpls_route(
     ///     MplsRouteBuilder::pop(100)
@@ -647,6 +660,8 @@ impl Connection<Route> {
     ///         .via("192.168.1.1".parse()?)
     ///         .dev("eth0")
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_mpls_route"))]
     pub async fn add_mpls_route(&self, route_builder: MplsRouteBuilder) -> Result<()> {
@@ -679,8 +694,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.del_mpls_route(100).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_mpls_route"))]
     pub async fn del_mpls_route(&self, label: u32) -> Result<()> {

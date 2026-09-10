@@ -4,9 +4,10 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
-//! use nlink::netlink::addr::{Ipv4Address, Ipv6Address, AddressFlags};
+//! use nlink::netlink::addr::{Ipv4Address, Ipv6Address};
 //! use std::net::{Ipv4Addr, Ipv6Addr};
 //!
 //! let conn = Connection::<Route>::new()?;
@@ -26,7 +27,9 @@
 //! ).await?;
 //!
 //! // Delete an address
-//! conn.del_address("eth0", Ipv4Addr::new(192, 168, 1, 100), 24).await?;
+//! conn.del_address("eth0", Ipv4Addr::new(192, 168, 1, 100).into(), 24).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Namespace-Safe Operations
@@ -34,7 +37,8 @@
 //! When working with network namespaces, use the index-based constructors
 //! to avoid sysfs lookups:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route, namespace};
 //! use nlink::netlink::addr::Ipv4Address;
 //!
@@ -48,6 +52,8 @@
 //! conn.add_address(
 //!     Ipv4Address::with_index(link.ifindex(), "10.0.0.1".parse()?, 24)
 //! ).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -129,7 +135,9 @@ pub const INFINITY_LIFE_TIME: u32 = 0xFFFFFFFF;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::addr::Ipv4Address;
 /// use std::net::Ipv4Addr;
 ///
@@ -139,6 +147,8 @@ pub const INFINITY_LIFE_TIME: u32 = 0xFFFFFFFF;
 ///     .scope(nlink::netlink::types::addr::Scope::Universe);
 ///
 /// conn.add_address(addr).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Ipv4Address {
@@ -429,7 +439,9 @@ impl AddressConfig for Ipv4Address {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::addr::Ipv6Address;
 /// use std::net::Ipv6Addr;
 ///
@@ -439,6 +451,8 @@ impl AddressConfig for Ipv4Address {
 ///     .nodad();
 ///
 /// conn.add_address(addr).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Ipv6Address {
@@ -676,7 +690,9 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// use nlink::netlink::addr::{Ipv4Address, Ipv6Address};
     /// use std::net::{Ipv4Addr, Ipv6Addr};
     ///
@@ -689,6 +705,8 @@ impl Connection<Route> {
     /// conn.add_address(
     ///     Ipv6Address::new("eth0", "2001:db8::1".parse()?, 64)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn add_address<A: AddressConfig>(&self, config: A) -> Result<()> {
         let ifindex = self.resolve_interface(config.interface_ref()).await?;
@@ -708,8 +726,14 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use std::net::IpAddr;
+    /// # use std::net::Ipv4Addr;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.del_address("eth0", IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 24).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_address"))]
     pub async fn del_address(
@@ -772,12 +796,16 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Get interface index via netlink
     /// let link = conn.get_link_by_name("eth0").await?.unwrap();
     ///
     /// // Add address by index
     /// conn.add_address_by_index(link.ifindex(), "192.168.1.100".parse()?, 24).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_address_by_index"))]
     pub async fn add_address_by_index(
@@ -826,8 +854,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.add_address_by_name("eth0", "192.168.1.100".parse()?, 24).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_address_by_name"))]
     pub async fn add_address_by_name(
@@ -848,8 +880,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.replace_address_by_name("eth0", "192.168.1.100".parse()?, 24).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "replace_address_by_name"))]
     pub async fn replace_address_by_name(
@@ -907,13 +943,19 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::Ipv4Address;
+    /// # use std::net::Ipv4Addr;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // Update address properties (lifetimes, etc.)
     /// conn.replace_address(
     ///     Ipv4Address::new("eth0", Ipv4Addr::new(192, 168, 1, 100), 24)
     ///         .preferred_lifetime(3600)
     ///         .valid_lifetime(7200)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn replace_address<A: AddressConfig>(&self, config: A) -> Result<()> {
         let ifindex = self.resolve_interface(config.interface_ref()).await?;
@@ -933,8 +975,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.flush_addresses("eth0").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_addresses"))]
     pub async fn flush_addresses(&self, ifname: impl Into<InterfaceRef>) -> Result<()> {

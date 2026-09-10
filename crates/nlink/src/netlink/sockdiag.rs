@@ -5,7 +5,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, SockDiag};
 //! use nlink::sockdiag::{SocketFilter, TcpState};
 //!
@@ -20,6 +21,8 @@
 //!     .with_tcp_info()
 //!     .build();
 //! let sockets = conn.query(&filter).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::{IpAddr, SocketAddr};
@@ -101,13 +104,16 @@ impl Connection<SockDiag> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, SockDiag};
     /// use nlink::sockdiag::SocketFilter;
     ///
     /// let conn = Connection::<SockDiag>::new()?;
     /// let filter = SocketFilter::tcp().listening().build();
     /// let sockets = conn.query(&filter).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn query(&self, filter: &SocketFilter) -> Result<Vec<SocketInfo>> {
         match &filter.kind {
@@ -122,7 +128,8 @@ impl Connection<SockDiag> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, SockDiag};
     ///
     /// let conn = Connection::<SockDiag>::new()?;
@@ -130,6 +137,8 @@ impl Connection<SockDiag> {
     /// for sock in sockets {
     ///     println!("{} -> {}", sock.local, sock.remote);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn query_tcp(&self) -> Result<Vec<InetSocket>> {
         let filter = InetFilter {
@@ -188,7 +197,8 @@ impl Connection<SockDiag> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, SockDiag};
     ///
     /// let conn = Connection::<SockDiag>::new()?;
@@ -199,6 +209,8 @@ impl Connection<SockDiag> {
     /// // UDP:   12
     /// // RAW:   2
     /// // UNIX:  175
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn socket_summary(&self) -> Result<SocketSummary> {
         use crate::sockdiag::types::{SocketSummary, TcpSummary};
@@ -267,13 +279,17 @@ impl Connection<SockDiag> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::netlink::SockDiag>::new()?;
     /// let sockets = conn.query_tcp().await?;
     /// for sock in &sockets {
     ///     if sock.remote.port() == 8080 {
     ///         conn.destroy_tcp_socket(sock).await?;
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn destroy_tcp_socket(&self, socket: &InetSocket) -> Result<()> {
         // F1 fix — serialize the send + recv-loop pair so concurrent
@@ -389,7 +405,10 @@ impl Connection<SockDiag> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::Connection;
+    /// # use nlink::netlink::SockDiag;
     /// use nlink::sockdiag::{InetFilter, Protocol, TcpState};
     ///
     /// let conn = Connection::<SockDiag>::new()?;
@@ -400,6 +419,8 @@ impl Connection<SockDiag> {
     /// };
     /// let result = conn.destroy_matching(&filter).await?;
     /// println!("Destroyed {} sockets", result.destroyed);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn destroy_matching(
         &self,

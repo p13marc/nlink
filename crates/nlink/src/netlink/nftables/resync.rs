@@ -28,7 +28,8 @@
 //!
 //! # Example — owned, spawn-friendly
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::sync::Arc;
 //! use nlink::netlink::{Connection, Nftables};
 //! use nlink::netlink::resync::{ConnectionFactory, ResyncedEvent, ResyncMarker};
@@ -40,8 +41,7 @@
 //! }));
 //!
 //! let conn = Connection::<Nftables>::new()?;
-//! conn.subscribe_all()?;
-//! let mut events = conn.into_events_with_resync(factory);
+//! let mut events = conn.into_events_with_resync(factory).await?;
 //!
 //! while let Some(item) = events.next().await {
 //!     match item? {
@@ -53,7 +53,8 @@
 //!         _ => {}
 //!     }
 //! }
-//! # Ok::<(), nlink::Error>(())
+//! # Ok(())
+//! # }
 //! ```
 
 use std::pin::Pin;

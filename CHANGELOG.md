@@ -105,6 +105,73 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **508 doc examples were ```` ```ignore ````; they are ```` ```no_run ```` now,
+  and 24 of them did not compile (#304).** `ignore` renders a block and never
+  compiles it, so an example rots silently against every rename, signature
+  change and typed-unit migration. What the conversion turned up, in the
+  library's own documentation:
+
+  - `conn.add_qdisc("eth0", TcHandle::ROOT, cfg)` — three arguments to a
+    two-argument method, left over from before `add_qdisc` took the parent
+    from the config.
+  - `.egress("100mbit")?`, `.loss(0.1)`, `.quantum(1500)` — the tc(8)-string
+    and bare-number forms the 0.15 typed-unit migration replaced with `Rate`,
+    `Percent` and `Bytes`. The `?` is still there from the parsing API that
+    went with them.
+  - `QfqConfig::new().handle(…)` and `DrrConfig::new().handle(…)` — neither
+    config has ever had a `handle` setter; both carry no options at all.
+  - `use nlink::netlink::protocol::Route` — a private module. Also
+    `nlink::netlink::neigh::NeighborState` and `nlink::netlink::route::RouteType`
+    (#316), `nlink::netlink::MptcpEndpointBuilder`, and
+    `Connection::<Connector>::new_proc_events()`, which never existed.
+  - `use rip_tuntap::{TunTap, Mode};` — the crate's name three renames ago.
+  - `events()` and `into_events_with_resync()` called synchronously, five
+    releases after 0.19 made them async.
+  - `apply_netem`'s summary, description and example attached to
+    `plug_buffer` for want of one blank `///` line (#311, fixed in #312).
+
+  Each is a reader following the documentation into a compiler error. None
+  would have survived a single `cargo test`.
+
+  Five of them were not documentation bugs at all — the examples were
+  describing a library that could not do what they said: #310 and #315
+  (methods that overflow rustc's recursion limit in a caller), #313
+  (`MatchallFilter` could not carry actions), #316 and #317 (argument types
+  the public API cannot name or produce).
+
+  **The systemic half.** `scripts/audit-doc-examples.sh` is a new CI gate
+  that fails the build on any ```` ```ignore ````, and the all-features job
+  now runs `cargo test -p nlink --all-features --doc` so feature-gated
+  examples are compiled too — the default-feature `test` job was missing 40
+  of them. `text` remains available for a block that is not Rust.
+
+- **The recursion-limit class is closed at its source, not per method
+  (#315, revising #310's fix).** #310 boxed three netem wrappers. The
+  follow-up found the same failure in `RateLimiter::{apply,remove}`,
+  `PerHostLimiter::{apply,remove}` and `PerPeerImpairer::apply` — so the
+  per-method fix was going to be permanent whack-a-mole, one round per
+  convenience wrapper anyone adds.
+
+  A single `Box::pin` on `Connection::send_dump` closes all of it. That is
+  where nlink's future-layout depth lives, and every mutating helper reaches
+  it too — resolving an interface name before it sends anything. The nine
+  per-method boxes from #310 and the first cut of #315 are gone; the
+  behaviour they bought is now inherited by every caller and every wrapper
+  written from here.
+
+  Measured rather than assumed: removing the box from `send_request` or
+  `send_ack` does *not* overflow, so neither is boxed; boxing per-wrapper
+  does not work at all, because those helpers await several deep chains and
+  lowering one sibling leaves the maximum where it was.
+
+- **`RouteType` and `NeighborState` can be named from the modules whose
+  builders take them (#316).** `Ipv4Route::route_type` and `Neighbor::state`
+  are public methods whose argument types were only reachable through
+  `netlink::types::`, or — for `NeighborState` — under the renamed
+  `neigh::State`. Every doc example in those two modules imported them from
+  the module itself, which did not compile. Both are re-exported there now;
+  the existing paths still work.
+
 - **`MatchallFilter` could not carry actions (#313).** `cls_matchall` matches
   every packet and carries no keys, so the action list is essentially the
   whole point of installing one — "mirror everything to this port", "police
@@ -154,7 +221,8 @@ All notable changes to this project will be documented in this file.
   first, which is exactly the shape of a small downstream tool. The guard
   is therefore a deliberately minimal example,
   `route_tc_minimal_caller`: it calls the three methods and does nothing
-  else, and adding anything to it weakens it.
+  else, and adding anything to it weakens it. (It guards the `send_dump`
+  box that replaced the per-method fix — see #315 above.)
 
 - **`apply_netem` was undocumented and `plug_buffer` was mislabelled
   (#311).** One missing blank `///` line joined `apply_netem`'s summary,

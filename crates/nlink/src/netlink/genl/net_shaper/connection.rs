@@ -36,7 +36,11 @@ impl Connection<NetShaper> {
     /// [`NetShaperReply`] per kernel frame. Empty stream on
     /// interfaces with no shapers; per-element error otherwise.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let eth0_ifindex: u32 = 2;
+    /// # use nlink::Connection;
+    /// # use nlink::netlink::genl::net_shaper::NetShaper;
     /// use tokio_stream::StreamExt;
     /// let conn = Connection::<NetShaper>::new_async().await?;
     /// let mut stream = conn.dump_shapers(eth0_ifindex).await?;
@@ -44,6 +48,8 @@ impl Connection<NetShaper> {
     ///     let s = s?;
     ///     println!("{:?} bw_max={:?}", s.handle, s.bw_max);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn dump_shapers(
         &self,
@@ -89,17 +95,22 @@ impl Connection<NetShaper> {
     /// `support_nesting` at the node scope (check
     /// [`get_caps`](Self::get_caps) first).
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::netlink::genl::net_shaper::NetShaper>::new_async().await?;
     /// use nlink::netlink::genl::net_shaper::{NetShaperGroupRequest, NetShaperLeaf};
     ///
+    /// # let eth0_ifindex: u32 = 2;
     /// // Group TX queues 0..3 under a new node, capped at 1 Gbps.
     /// let node = conn.group_shapers(
-    ///     NetShaperGroupRequest::new(eth0)
+    ///     NetShaperGroupRequest::new(eth0_ifindex)
     ///         .bw_max(1_000_000_000)
     ///         .leaf(NetShaperLeaf::queue(0))
     ///         .leaf(NetShaperLeaf::queue(1))
     ///         .leaf(NetShaperLeaf::queue(2)),
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn group_shapers(&self, req: NetShaperGroupRequest) -> Result<NetShaperHandle> {
         let reply: NetShaperReply = self.send_typed(req).await?;

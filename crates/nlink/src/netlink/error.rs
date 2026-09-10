@@ -32,7 +32,7 @@ pub enum Error {
     /// If you wrap this error in a `#[source]` field on your own
     /// error enum, **prefer carrying it inline**:
     ///
-    /// ```ignore
+    /// ```no_run
     /// #[derive(thiserror::Error, Debug)]
     /// enum MyError {
     ///     #[error("netlink failed: {0}")]
@@ -219,7 +219,8 @@ pub enum Error {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> nlink::Result<()> {
     /// use nlink::{Connection, Route};
     /// use std::time::Duration;
     ///
@@ -231,6 +232,8 @@ pub enum Error {
     ///     Err(e) => return Err(e),
     ///     Ok(links) => { /* ... */ }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[error("operation timed out")]
     Timeout,
@@ -249,13 +252,17 @@ pub enum Error {
     /// nlink surfaces this as a typed error so callers choose their
     /// own retry policy. Recover via [`Self::is_dump_interrupted`]:
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> nlink::Result<Vec<nlink::netlink::messages::LinkMessage>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// for attempt in 0..16 {
     ///     match conn.get_links().await {
     ///         Err(e) if e.is_dump_interrupted() => continue,
     ///         other => return other,
     ///     }
     /// }
+    /// # conn.get_links().await
+    /// # }
     /// ```
     ///
     /// See [`crate::netlink::message::NlMsgHdr::is_dump_interrupted`]
@@ -499,7 +506,7 @@ impl Error {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use nlink::netlink::Error;
     ///
     /// let err = Error::invalid_message("invalid MAC address format");
@@ -634,12 +641,18 @@ impl Error {
     /// `#[non_exhaustive]` and so force a wildcard arm at
     /// every call site. Equivalent to:
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use nlink::Error;
+    /// # fn example(err: Error) -> Option<&'static str> {
+    /// # let ext: Option<&str> =
     /// match &err {
     ///     Error::Kernel { ext_ack, .. }
     ///     | Error::KernelWithContext { ext_ack, .. } => ext_ack.as_deref(),
     ///     _ => None,
     /// }
+    /// # ;
+    /// # None
+    /// # }
     /// ```
     pub fn ext_ack(&self) -> Option<&str> {
         match self {
@@ -706,10 +719,12 @@ impl Error {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use nlink::Error;
+    /// # let outer_err: Box<dyn std::error::Error> =
+    /// #     Box::new(Error::Timeout);
     /// // Find the first kernel ENOBUFS anywhere in the chain.
-    /// let enobufs = Error::chain_walk(&outer_err)
+    /// let enobufs = Error::chain_walk(outer_err.as_ref())
     ///     .find(|e| e.is_no_buffer_space());
     /// ```
     ///
@@ -774,12 +789,12 @@ impl Error {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use nlink::{Connection, Route};
     ///
     /// async fn get_links_with_retry(
     ///     conn: &Connection<Route>,
-    /// ) -> nlink::Result<Vec<nlink::netlink::LinkMessage>> {
+    /// ) -> nlink::Result<Vec<nlink::netlink::messages::LinkMessage>> {
     ///     for _ in 0..16 {
     ///         match conn.get_links().await {
     ///             Err(e) if e.is_dump_interrupted() => continue,

@@ -17,7 +17,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::srv6::{Srv6Encap, Srv6LocalBuilder, Srv6Mode};
 //! use nlink::netlink::route::Ipv4Route;
@@ -55,6 +56,8 @@
 //!
 //! // Cleanup
 //! conn.del_srv6_local("fc00:1::100".parse()?).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -212,7 +215,8 @@ impl Srv6Action {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::srv6::{Srv6Encap, Srv6Mode};
 ///
 /// // Encap mode with single segment
@@ -225,6 +229,8 @@ impl Srv6Action {
 ///         "fc00:1::1".parse()?,
 ///         "fc00:2::1".parse()?,
 ///     ]);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct Srv6Encap {
@@ -553,7 +559,8 @@ impl Srv6LocalRoute {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use nlink::netlink::srv6::Srv6LocalBuilder;
 ///
 /// // End action (simple transit)
@@ -569,6 +576,8 @@ impl Srv6LocalRoute {
 /// // End.DT4 action (decap and lookup IPv4)
 /// let route = Srv6LocalBuilder::end_dt4("fc00:1::100".parse()?, 100)
 ///     .dev("eth0");
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
@@ -865,11 +874,15 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// let routes = conn.get_srv6_local_routes().await?;
     /// for route in &routes {
     ///     println!("SID {:?}: {:?}", route.sid, route.action);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_srv6_local_routes"))]
     pub async fn get_srv6_local_routes(&self) -> Result<Vec<Srv6LocalRoute>> {
@@ -915,7 +928,10 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::srv6::Srv6LocalBuilder;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// // End.DT4 SID
     /// conn.add_srv6_local(
     ///     Srv6LocalBuilder::end_dt4("fc00:1::100".parse()?, 100)
@@ -927,6 +943,8 @@ impl Connection<Route> {
     ///     Srv6LocalBuilder::end_x("fc00:1::1".parse()?, "fe80::1".parse()?)
     ///         .dev("eth0")
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_srv6_local"))]
     pub async fn add_srv6_local(&self, builder: Srv6LocalBuilder) -> Result<()> {
@@ -959,8 +977,12 @@ impl Connection<Route> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// conn.del_srv6_local("fc00:1::100".parse()?).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_srv6_local"))]
     pub async fn del_srv6_local(&self, sid: Ipv6Addr) -> Result<()> {

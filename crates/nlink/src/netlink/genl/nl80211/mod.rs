@@ -6,7 +6,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Nl80211};
 //!
 //! let conn = Connection::<Nl80211>::new_async().await?;
@@ -28,6 +29,8 @@
 //!         bss.ssid.as_deref().unwrap_or("<hidden>"),
 //!         bss.signal_dbm());
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod connection;

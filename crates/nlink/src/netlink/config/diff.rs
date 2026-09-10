@@ -122,10 +122,16 @@ impl ConfigDiff {
     /// shape (Plan 188). Use this in the chain pattern when you
     /// already hold a diff:
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::config::ApplyOptions;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let cfg = nlink::netlink::config::NetworkConfig::new();
     /// let diff = cfg.diff(&conn).await?;
     /// println!("{diff}");                  // inspect before commit
     /// diff.apply(&conn, ApplyOptions::default()).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// More efficient than [`crate::netlink::config::NetworkConfig::apply`] when

@@ -14,7 +14,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use nlink::netlink::{Connection, Route};
 //!
 //! #[tokio::main]
@@ -37,7 +37,8 @@
 //!
 //! # Link State Management
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //!
 //! let conn = Connection::<Route>::new()?;
@@ -50,13 +51,16 @@
 //!
 //! // Set MTU
 //! conn.set_link_mtu("eth0", 9000).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Network Namespace Support
 //!
 //! Operations can be performed in specific network namespaces:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route, Generic};
 //! use nlink::netlink::namespace;
 //!
@@ -66,6 +70,7 @@
 //! let links = conn.get_links().await?;
 //!
 //! // Or connect to a container's namespace
+//! # let container_pid = 1234;
 //! let conn: Connection<Route> = namespace::connection_for_pid(container_pid)?;
 //! let links = conn.get_links().await?;
 //!
@@ -74,6 +79,8 @@
 //!
 //! // Generic connections work too (e.g., for WireGuard in a namespace)
 //! let genl: Connection<Generic> = namespace::connection_for("myns")?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Namespace safety — `_by_index` vs `_by_name`
@@ -91,7 +98,8 @@
 //!
 //! For namespace-aware code, the canonical pattern is:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::{Connection, Route};
 //! let conn = Connection::<Route>::new()?;
 //! // One name resolution at startup, then ifindex everywhere:
@@ -99,6 +107,8 @@
 //!     .ok_or(nlink::Error::InterfaceNotFound { name: "eth0".into() })?
 //!     .ifindex();
 //! conn.set_link_mtu_by_index(eth0_idx, 9000).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! This is a deliberate design choice. `neli` and
@@ -114,7 +124,8 @@
 //!
 //! Use `Connection::subscribe()` to select event types, then `events()` to get a stream:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
 //! use tokio_stream::StreamExt;
 //!
@@ -129,14 +140,17 @@
 //!         _ => {}
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Multi-Namespace Event Monitoring
 //!
 //! Use `tokio_stream::StreamMap` to monitor multiple namespaces:
 //!
-//! ```ignore
-//! use nlink::netlink::{Connection, Route, RtnetlinkGroup};
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use nlink::netlink::{Connection, Route, namespace};
 //! use tokio_stream::{StreamExt, StreamMap};
 //!
 //! let mut streams = StreamMap::new();
@@ -145,13 +159,15 @@
 //! conn1.subscribe_all()?;
 //! streams.insert("default", conn1.into_events().await);
 //!
-//! let conn2 = Connection::<Route>::new_in_namespace("ns1")?;
+//! let conn2: Connection<Route> = namespace::connection_for("ns1")?;
 //! conn2.subscribe_all()?;
 //! streams.insert("ns1", conn2.into_events().await);
 //!
 //! while let Some((ns, event)) = streams.next().await {
 //!     println!("[{}] {:?}", ns, event?);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 // The Plan 154 derive macros generate code referencing

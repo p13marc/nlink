@@ -27,17 +27,36 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let conn = nlink::Connection::<nlink::Route>::new()?;
+//! use std::sync::Arc;
+//!
+//! use nlink::netlink::resync::ResyncedEvent;
 //! use nlink::netlink::resync_ext::ResyncStreamExt;
+//! use nlink::{Connection, Route};
 //! use tokio_stream::StreamExt;
 //!
+//! // Resync needs a second connection to dump from, built on demand.
+//! let factory: nlink::netlink::resync::ConnectionFactory<Route> =
+//!     Arc::new(|| Box::pin(async { Connection::<Route>::new() }));
+//!
+//! // Collapse runs of events that carry the same key — here, the
+//! // interface the event is about.
 //! let mut watch = conn
-//!     .into_events_with_resync(factory)?
-//!     .predicate_filter(|ev| key_of(ev));
+//!     .into_events_with_resync(factory)
+//!     .await?
+//!     .predicate_filter(|ev| match ev {
+//!         ResyncedEvent::Event(e) | ResyncedEvent::Resynced(e) => format!("{e:?}"),
+//!         ResyncedEvent::Marker(m) => format!("{m:?}"),
+//!         _ => String::new(),
+//!     });
 //!
 //! while let Some(ev) = watch.next().await {
-//!     handle(ev?);
+//!     println!("{:?}", ev?);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::pin::Pin;

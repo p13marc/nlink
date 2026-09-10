@@ -14,7 +14,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use nlink::netlink::{Connection, SockDiag};
 //! use nlink::sockdiag::{SocketFilter, TcpState};
 //!
@@ -40,7 +40,8 @@
 //!
 //! Query sockets in other namespaces:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, SockDiag, namespace};
 //!
 //! // Query sockets in a named namespace
@@ -49,6 +50,8 @@
 //!
 //! // Or by PID
 //! let conn: Connection<SockDiag> = namespace::connection_for_pid(1234)?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Socket Types

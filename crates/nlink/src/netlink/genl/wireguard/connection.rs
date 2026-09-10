@@ -70,7 +70,8 @@ impl Connection<Wireguard> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Wireguard};
     ///
     /// let conn = Connection::<Wireguard>::new_async().await?;
@@ -80,6 +81,8 @@ impl Connection<Wireguard> {
     ///
     /// // By index
     /// let device = conn.get_device(5u32).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_device"))]
     pub async fn get_device(&self, iface: impl Into<InterfaceRef>) -> Result<WgDevice> {
@@ -93,11 +96,16 @@ impl Connection<Wireguard> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Wireguard>::new_async().await?;
+    /// # let my_key = [0u8; 32];
     /// conn.set_device("wg0", |dev| {
     ///     dev.private_key(my_key)
     ///        .listen_port(51820)
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_device"))]
     pub async fn set_device(

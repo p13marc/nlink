@@ -11,7 +11,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, SELinux};
 //! use nlink::netlink::selinux::SELinuxEvent;
 //!
@@ -28,8 +29,11 @@
 //!         SELinuxEvent::PolicyLoad { seqno } => {
 //!             println!("Policy loaded, sequence: {}", seqno);
 //!         }
+//!         _ => {}
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -94,10 +98,13 @@ impl Connection<SELinux> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, SELinux};
     ///
     /// let conn = Connection::<SELinux>::new()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new() -> Result<Self> {
         let socket = NetlinkSocket::new(SELinux::PROTOCOL)?;
@@ -114,7 +121,8 @@ impl Connection<SELinux> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, SELinux};
     /// use nlink::netlink::selinux::SELinuxEvent;
     ///
@@ -132,8 +140,11 @@ impl Connection<SELinux> {
     ///         SELinuxEvent::PolicyLoad { seqno } => {
     ///             println!("New policy loaded (seqno: {})", seqno);
     ///         }
+    ///         _ => {}
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "recv"))]
     pub async fn recv(&self) -> Result<SELinuxEvent> {

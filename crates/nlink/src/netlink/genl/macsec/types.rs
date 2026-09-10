@@ -232,7 +232,7 @@ pub struct MacsecRxSa {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::genl::macsec::MacsecSaBuilder;
 ///
 /// // Create a TX SA with a 128-bit key

@@ -8,7 +8,8 @@
 //! Instead of imperatively calling `add_link`, `add_address`, etc., you describe
 //! the desired state and let the library figure out what changes are needed:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::config::NetworkConfig;
 //!
@@ -27,6 +28,8 @@
 //!
 //! // Apply changes
 //! config.apply(&conn).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Benefits
@@ -66,11 +69,16 @@ impl NetworkConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let config = nlink::netlink::config::NetworkConfig::new();
     /// let diff = config.diff(&conn).await?;
     /// if !diff.is_empty() {
     ///     println!("Changes needed:\n{}", diff.summary());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn diff(&self, conn: &Connection<Route>) -> Result<ConfigDiff> {
         diff::compute_diff(self, conn).await
@@ -88,10 +96,16 @@ impl NetworkConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::config::DiffOptions;
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let config = nlink::netlink::config::NetworkConfig::new();
     /// let diff = config.diff_with_options(&conn, DiffOptions::default().purge(true)).await?;
     /// // `diff.summary()` now shows `-` lines for resources that
     /// // would be removed; inspect before calling `diff.apply(&conn)`.
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn diff_with_options(
         &self,
@@ -114,9 +128,14 @@ impl NetworkConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let config = nlink::netlink::config::NetworkConfig::new();
     /// let result = config.apply(&conn).await?;
     /// println!("Made {} changes", result.changes_made);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn apply(&self, conn: &Connection<Route>) -> Result<ApplyResult> {
         self.apply_with_options(conn, ApplyOptions::default()).await
@@ -132,16 +151,23 @@ impl NetworkConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # let config = nlink::netlink::config::NetworkConfig::new();
     /// // Dry run first
-    /// let result = config.apply_with_options(&conn, ApplyOptions {
-    ///     dry_run: true,
-    ///     ..Default::default()
-    /// }).await?;
+    /// # use nlink::netlink::config::ApplyOptions;
+    /// // `ApplyOptions` is `#[non_exhaustive]`, so it is built with the
+    /// // `with_*` setters rather than a struct literal.
+    /// let result = config
+    ///     .apply_with_options(&conn, ApplyOptions::default().with_dry_run(true))
+    ///     .await?;
     /// println!("Would make {} changes", result.changes_made);
     ///
     /// // Then apply for real
     /// config.apply(&conn).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn apply_with_options(
         &self,

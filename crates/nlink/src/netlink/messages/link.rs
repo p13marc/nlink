@@ -263,10 +263,14 @@ impl LinkMessage {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
     /// for link in conn.get_links().await? {
     ///     println!("{}: {}", link.ifindex(), link.name_or("?"));
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn name_or<'a>(&'a self, default: &'a str) -> &'a str {
         self.name.as_deref().unwrap_or(default)
@@ -936,7 +940,9 @@ mod bond_slave_ids {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// let link = conn.get_link_by_name("bond0").await?.unwrap();
 /// if let Some(info) = link.bond_info() {
 ///     println!("Mode: {:?}, miimon: {}ms", info.mode, info.miimon);
@@ -944,6 +950,8 @@ mod bond_slave_ids {
 ///         println!("LACP aggregator: {}", ad.aggregator_id);
 ///     }
 /// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct BondInfo {
@@ -1010,7 +1018,9 @@ pub struct BondAdInfo {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// let links = conn.get_links().await?;
 /// for link in &links {
 ///     if let Some(slave) = link.bond_slave_info() {
@@ -1019,6 +1029,8 @@ pub struct BondAdInfo {
 ///             slave.link_failure_count);
 ///     }
 /// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct BondSlaveInfo {

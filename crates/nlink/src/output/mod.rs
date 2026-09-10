@@ -144,9 +144,18 @@ pub trait PrintableList {
 /// this eliminates the need for separate print functions.
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::LinkMessage;
+/// # use nlink::netlink::NlMsgType;
+/// # use nlink::output::print_all;
+/// # use nlink::output::{OutputFormat, OutputOptions};
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
+/// # let opts = OutputOptions::default();
 /// let links: Vec<LinkMessage> = conn.dump_typed(NlMsgType::RTM_GETLINK).await?;
-/// print_all(&links, format, opts)?;
+/// print_all(&links, OutputFormat::Text, &opts)?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn print_all<T: Printable>(
     items: &[T],
@@ -186,14 +195,21 @@ pub fn print_all<T: Printable>(
 /// * `print_text` - Function to print an item as text
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use std::io::Write;
+/// # use nlink::output::{OutputFormat, OutputOptions, print_items};
+/// # let links: Vec<u32> = Vec::new();
+/// # let opts = OutputOptions::default();
 /// print_items(
 ///     &links,
-///     format,
-///     opts,
-///     link_to_json,
-///     |w, link, opts| print_link_text(w, link, opts),
+///     OutputFormat::Text,
+///     &opts,
+///     |item| serde_json::json!(item),
+///     |w, item, _opts| writeln!(w, "{item}"),
 /// )?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// Note: For types implementing `Printable`, prefer using `print_all()` instead.

@@ -6,12 +6,13 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Connector};
 //! use nlink::netlink::connector::ProcEvent;
 //!
 //! // Requires CAP_NET_ADMIN
-//! let conn = Connection::<Connector>::new_proc_events().await?;
+//! let conn = Connection::<Connector>::new().await?;
 //!
 //! loop {
 //!     match conn.recv().await? {
@@ -27,6 +28,8 @@
 //!         _ => {}
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -395,10 +398,13 @@ impl Connection<Connector> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Connector};
     ///
     /// let conn = Connection::<Connector>::new().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "new"))]
     pub async fn new() -> Result<Self> {
@@ -477,11 +483,12 @@ impl Connection<Connector> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Connector};
     /// use nlink::netlink::connector::ProcEvent;
     ///
-    /// let conn = Connection::<Connector>::new_proc_events().await?;
+    /// let conn = Connection::<Connector>::new().await?;
     ///
     /// loop {
     ///     let event = conn.recv().await?;
@@ -489,6 +496,8 @@ impl Connection<Connector> {
     ///         println!("Event for PID {}: {:?}", pid, event);
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "recv"))]
     pub async fn recv(&self) -> Result<ProcEvent> {

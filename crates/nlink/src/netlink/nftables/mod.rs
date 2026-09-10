@@ -5,7 +5,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, Nftables};
 //! use nlink::netlink::nftables::*;
 //!
@@ -14,7 +15,7 @@
 //! // Create table and chain
 //! conn.add_table("filter", Family::Inet).await?;
 //! conn.add_chain(
-//!     Chain::new("filter", "input")
+//!     Chain::new("filter", "input")?
 //!         .family(Family::Inet)
 //!         .hook(Hook::Input)
 //!         .priority(Priority::Filter)
@@ -29,6 +30,8 @@
 //!         .match_tcp_dport(22)
 //!         .accept()
 //! ).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod config;

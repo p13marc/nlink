@@ -420,7 +420,7 @@ pub enum DevlinkEvent {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use nlink::netlink::genl::devlink::FlashProgress;
 ///
 /// let progress = FlashProgress {

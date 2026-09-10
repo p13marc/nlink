@@ -65,7 +65,8 @@ impl Connection<Macsec> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use nlink::netlink::{Connection, Macsec};
     ///
     /// let conn = Connection::<Macsec>::new_async().await?;
@@ -75,6 +76,8 @@ impl Connection<Macsec> {
     ///
     /// // By index (efficient for repeated operations)
     /// let device = conn.get_device(5u32).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_device"))]
     pub async fn get_device(&self, iface: impl Into<InterfaceRef>) -> Result<MacsecDevice> {
@@ -89,7 +92,11 @@ impl Connection<Macsec> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::Connection;
+    /// # use nlink::Route;
+    /// # use nlink::netlink::Macsec;
     /// // Get ifindex via Route connection first
     /// let route_conn = Connection::<Route>::new()?;
     /// let link = route_conn.get_link_by_name("macsec0").await?.unwrap();
@@ -97,6 +104,8 @@ impl Connection<Macsec> {
     /// let macsec_conn = Connection::<Macsec>::new_async().await?;
     /// let device = macsec_conn.get_device_by_index(link.ifindex()).await?;
     /// println!("SCI: {:016x}", device.sci);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_device_by_index"))]
     pub async fn get_device_by_index(&self, ifindex: u32) -> Result<MacsecDevice> {
@@ -151,13 +160,27 @@ impl Connection<Macsec> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::Macsec;
+    /// # use nlink::netlink::genl::macsec::MacsecSaBuilder;
+    /// # let conn = nlink::Connection::<nlink::netlink::Macsec>::new_async().await?;
     /// let key = [0u8; 16]; // 128-bit key
+    /// // Resolve the index through a route connection in the same netns —
+    /// // never through sysfs, which reads the caller's namespace.
+    /// let route = nlink::Connection::<nlink::Route>::new()?;
+    /// let ifindex = route
+    ///     .get_link_by_name("macsec0")
+    ///     .await?
+    ///     .expect("macsec0 exists")
+    ///     .ifindex();
     /// conn.add_tx_sa_by_index(ifindex,
     ///     MacsecSaBuilder::new(0, &key)
     ///         .packet_number(1)
     ///         .active(true)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_tx_sa_by_index"))]
     pub async fn add_tx_sa_by_index(&self, ifindex: u32, sa: MacsecSaBuilder) -> Result<()> {
@@ -374,9 +397,15 @@ impl Connection<Macsec> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::Macsec;
+    /// # use nlink::netlink::genl::macsec::MacsecSaBuilder;
+    /// # let conn = nlink::Connection::<nlink::netlink::Macsec>::new_async().await?;
     /// let key = [0u8; 16];
-    /// conn.add_tx_sa("macsec0", MacsecSaBuilder::new(0).key(&key).active(true)).await?;
+    /// conn.add_tx_sa("macsec0", MacsecSaBuilder::new(0, &key).active(true)).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_tx_sa"))]
     pub async fn add_tx_sa(

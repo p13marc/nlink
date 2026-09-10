@@ -39,11 +39,16 @@ impl Connection<Mptcp> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::Connection;
+    /// # use nlink::netlink::Mptcp;
     /// let conn = Connection::<Mptcp>::new_async().await?;
     /// for ep in conn.get_endpoints().await? {
     ///     println!("Endpoint {}: {} flags={:?}", ep.id, ep.address, ep.flags);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_endpoints"))]
     pub async fn get_endpoints(&self) -> Result<Vec<MptcpEndpoint>> {
@@ -65,7 +70,11 @@ impl Connection<Mptcp> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let eth1_ifindex: u32 = 3;
+    /// # use nlink::netlink::Mptcp;
+    /// # let conn = nlink::Connection::<nlink::netlink::Mptcp>::new_async().await?;
     /// use nlink::netlink::genl::mptcp::MptcpEndpointBuilder;
     ///
     /// conn.add_endpoint(
@@ -75,6 +84,8 @@ impl Connection<Mptcp> {
     ///         .subflow()
     ///         .signal()
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_endpoint"))]
     pub async fn add_endpoint(&self, endpoint: MptcpEndpointBuilder) -> Result<()> {
@@ -92,8 +103,13 @@ impl Connection<Mptcp> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::Mptcp;
+    /// # let conn = nlink::Connection::<nlink::netlink::Mptcp>::new_async().await?;
     /// conn.del_endpoint(1).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_endpoint"))]
     pub async fn del_endpoint(&self, id: u8) -> Result<()> {
@@ -111,8 +127,13 @@ impl Connection<Mptcp> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::Mptcp;
+    /// # let conn = nlink::Connection::<nlink::netlink::Mptcp>::new_async().await?;
     /// conn.flush_endpoints().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_endpoints"))]
     pub async fn flush_endpoints(&self) -> Result<()> {
@@ -126,10 +147,15 @@ impl Connection<Mptcp> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::Mptcp;
+    /// # let conn = nlink::Connection::<nlink::netlink::Mptcp>::new_async().await?;
     /// let limits = conn.get_limits().await?;
     /// println!("Max subflows: {:?}", limits.subflows);
     /// println!("Max add_addr_accepted: {:?}", limits.add_addr_accepted);
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_limits"))]
     pub async fn get_limits(&self) -> Result<MptcpLimits> {
@@ -148,7 +174,10 @@ impl Connection<Mptcp> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::Mptcp;
+    /// # let conn = nlink::Connection::<nlink::netlink::Mptcp>::new_async().await?;
     /// use nlink::netlink::genl::mptcp::MptcpLimits;
     ///
     /// conn.set_limits(
@@ -156,6 +185,8 @@ impl Connection<Mptcp> {
     ///         .subflows(4)
     ///         .add_addr_accepted(4)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_limits"))]
     pub async fn set_limits(&self, limits: MptcpLimits) -> Result<()> {
@@ -176,11 +207,16 @@ impl Connection<Mptcp> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::netlink::Mptcp;
+    /// # let conn = nlink::Connection::<nlink::netlink::Mptcp>::new_async().await?;
     /// use nlink::netlink::genl::mptcp::MptcpFlags;
     ///
     /// // Mark endpoint 1 as backup
     /// conn.set_endpoint_flags(1, MptcpFlags { backup: true, ..Default::default() }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_endpoint_flags"))]
     pub async fn set_endpoint_flags(&self, id: u8, flags: MptcpFlags) -> Result<()> {
@@ -206,7 +242,12 @@ impl Connection<Mptcp> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use std::net::IpAddr;
+    /// # let connection_token: u32 = 0;
+    /// # use nlink::netlink::Mptcp;
+    /// # let conn = nlink::Connection::<nlink::netlink::Mptcp>::new_async().await?;
     /// use nlink::netlink::genl::mptcp::MptcpSubflowBuilder;
     /// use std::net::Ipv4Addr;
     ///
@@ -214,9 +255,11 @@ impl Connection<Mptcp> {
     /// conn.create_subflow(
     ///     MptcpSubflowBuilder::new(connection_token)
     ///         .local_id(1)
-    ///         .remote_addr(Ipv4Addr::new(10, 0, 0, 1).into())
+    ///         .remote_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
     ///         .remote_port(80)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "create_subflow"))]
     pub async fn create_subflow(&self, subflow: super::types::MptcpSubflowBuilder) -> Result<()> {
@@ -267,18 +310,25 @@ impl Connection<Mptcp> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use std::net::IpAddr;
+    /// # let connection_token: u32 = 0;
+    /// # use nlink::netlink::Mptcp;
+    /// # let conn = nlink::Connection::<nlink::netlink::Mptcp>::new_async().await?;
     /// use nlink::netlink::genl::mptcp::MptcpSubflowBuilder;
     /// use std::net::Ipv4Addr;
     ///
     /// // Destroy the subflow between specific addresses
     /// conn.destroy_subflow(
     ///     MptcpSubflowBuilder::new(connection_token)
-    ///         .local_addr(Ipv4Addr::new(192, 168, 1, 1).into())
+    ///         .local_addr(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))
     ///         .local_port(12345)
-    ///         .remote_addr(Ipv4Addr::new(10, 0, 0, 1).into())
+    ///         .remote_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
     ///         .remote_port(80)
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "destroy_subflow"))]
     pub async fn destroy_subflow(&self, subflow: super::types::MptcpSubflowBuilder) -> Result<()> {
@@ -319,7 +369,12 @@ impl Connection<Mptcp> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use std::net::IpAddr;
+    /// # let connection_token: u32 = 0;
+    /// # use nlink::netlink::Mptcp;
+    /// # let conn = nlink::Connection::<nlink::netlink::Mptcp>::new_async().await?;
     /// use nlink::netlink::genl::mptcp::MptcpAnnounceBuilder;
     /// use std::net::Ipv4Addr;
     ///
@@ -327,8 +382,10 @@ impl Connection<Mptcp> {
     /// conn.announce_addr(
     ///     MptcpAnnounceBuilder::new(connection_token)
     ///         .addr_id(1)
-    ///         .address(Ipv4Addr::new(192, 168, 2, 1).into())
+    ///         .address(IpAddr::V4(Ipv4Addr::new(192, 168, 2, 1)))
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "announce_addr"))]
     pub async fn announce_addr(&self, announce: super::types::MptcpAnnounceBuilder) -> Result<()> {
@@ -359,9 +416,15 @@ impl Connection<Mptcp> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let connection_token: u32 = 0;
+    /// # use nlink::netlink::Mptcp;
+    /// # let conn = nlink::Connection::<nlink::netlink::Mptcp>::new_async().await?;
     /// // Remove address ID 1 from the connection
     /// conn.del_addr(connection_token, 1).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_addr"))]
     pub async fn del_addr(&self, token: u32, addr_id: u8) -> Result<()> {

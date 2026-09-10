@@ -23,7 +23,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use nlink::netlink::{Connection, genl::dpll::{Dpll, DpllEvent}};
 //! use tokio_stream::StreamExt;
 //!
@@ -41,6 +42,8 @@
 //!         _ => {}
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::macros::GenlMessage;

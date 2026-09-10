@@ -5,7 +5,9 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let conn = nlink::Connection::<nlink::Route>::new()?;
 //! use nlink::netlink::stats::{StatsSnapshot, StatsTracker};
 //! use std::time::Duration;
 //!
@@ -36,6 +38,8 @@
 //!     }
 //!     tokio::time::sleep(Duration::from_secs(1)).await;
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{collections::HashMap, time::Duration};
@@ -432,7 +436,11 @@ fn delta_u32(current: u32, previous: u32) -> f64 {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use nlink::netlink::stats::StatsSnapshot;
+/// # use std::time::Duration;
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::stats::StatsTracker;
 ///
 /// let mut tracker = StatsTracker::new();
@@ -455,6 +463,8 @@ fn delta_u32(current: u32, previous: u32) -> f64 {
 ///
 ///     tokio::time::sleep(Duration::from_secs(1)).await;
 /// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct StatsTracker {
@@ -527,7 +537,10 @@ impl StatsTracker {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use nlink::netlink::stats::StatsTracker;
+    /// # let tracker = StatsTracker::new();
+    /// # let ifindex = 2;
     /// if let Some(rate) = tracker.get_link_rate(ifindex) {
     ///     println!("RX: {:.2} Mbps, TX: {:.2} Mbps",
     ///         rate.rx_bps() / 1_000_000.0,

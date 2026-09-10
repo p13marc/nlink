@@ -44,7 +44,10 @@ impl Connection<Dpll> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::Connection;
+    /// # use nlink::netlink::Dpll;
     /// use tokio_stream::StreamExt;
     /// let conn = Connection::<Dpll>::new_async().await?;
     /// let mut stream = conn.dump_devices().await?;
@@ -52,6 +55,8 @@ impl Connection<Dpll> {
     ///     let dev = dev?;
     ///     println!("{}: {:?}", dev.id, dev.lock_status);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn dump_devices(
         &self,
@@ -114,7 +119,10 @@ impl Connection<Dpll> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use nlink::Connection;
+    /// # use nlink::netlink::Dpll;
     /// use tokio_stream::StreamExt;
     /// let conn = Connection::<Dpll>::new_async().await?;
     /// let mut stream = conn.dump_pins().await?;
@@ -127,6 +135,8 @@ impl Connection<Dpll> {
     ///         pin.state,
     ///     );
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn dump_pins(
         &self,
