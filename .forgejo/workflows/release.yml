@@ -1,7 +1,18 @@
 name: Release
 on:
   push:
-    tags: ['[0-9]+.[0-9]+.[0-9]+']
+    # Glob, not regex. GitHub's filter syntax gives `+` its regex meaning
+    # ("one or more of the preceding"); Forgejo compiles these patterns as
+    # plain globs, where `+` is a literal `+`. So `[0-9]+.[0-9]+.[0-9]+`
+    # asked for "digit, plus sign, any char, digit, plus sign…" and matched
+    # no tag anyone would ever push — which is why this workflow had never
+    # fired, in this repo or any other in the fleet (#249). Confirmed by
+    # pushing `0.26.0` against the old pattern: nothing ran.
+    #
+    # `[0-9]*` is one digit then anything, under either reading. It takes
+    # `0.26.0` and `0.26.1-rc1`, and still refuses `v0.26.0` — the v-prefix
+    # is what #249 set out to rule out.
+    tags: ['[0-9]*']
   # re-run a failed release without deleting/re-pushing the tag. On dispatch
   # the run executes on a BRANCH ref (GITHUB_REF_NAME is e.g. "master"), so
   # every step must use the resolved RELEASE_TAG/RELEASE_SHA env instead.
