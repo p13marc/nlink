@@ -731,6 +731,36 @@ the example bit-rots silently against API changes.
 `scripts/audit-example-registration.sh` enforces the convention;
 run it locally before merging a new example.
 
+## Doc examples
+
+**A doc example compiles.** `no_run` when it needs a kernel, which is
+nearly always; plain when it can actually run. `text` is the escape
+hatch, for a block that is not Rust — a wire-format sketch, a `tc(8)`
+command line, an illustration of a private helper a doctest cannot call.
+`compile_fail` and `should_panic` are fine: rustdoc compiles both.
+
+**Never ```` ```ignore ````.** `scripts/audit-doc-examples.sh` fails the
+build on one. 508 had accumulated by 0.26, which is long enough for the
+documentation to describe a library that no longer exists: `add_qdisc`
+called with three arguments, `"100mbit"` where `Rate` is required,
+`rip_tuntap::{TunTap, Mode}` (the crate's name three renames ago),
+`nlink::netlink::protocol::Route` (a private module), `events()` called
+synchronously five releases after it went async. Every one of those is a
+reader following the documentation into a compiler error.
+
+Converting them also found five *library* bugs the examples had been
+documenting around — methods that overflowed rustc's recursion limit in
+a caller (#310, #315), a filter that could not carry actions (#313), and
+two argument types the public API could not name or produce (#316,
+#317). An example that compiles is a test of the API's shape, not just
+of its prose.
+
+Hidden lines (`# `) carry the setup — a connection, an ifindex, a key —
+so the visible body stays the example the reader came for. Both feature
+sets are checked: `cargo test -p nlink --doc` in the `test` job and
+`cargo test -p nlink --all-features --doc` in `test-all-features`, since
+40 examples are feature-gated and the default job never saw them.
+
 ## Active work
 
 **The 0.26.0 cycle is open on `master`** and is a bug-fix release. New
@@ -740,7 +770,7 @@ see the `## [Unreleased]` entries, which lead with the silent
 behaviour changes.
 
 The cycle started from a review that filed 25 bugs (#258–#282) and grew
-as fixing them surfaced more (#286–#294, #300). What they have in
+as fixing them surfaced more (#286–#294, #300, #310–#317). What they have in
 common is worth stating, because it shapes how to work here: almost
 none is a logic error in isolation. They are **places where nothing was
 checking**. Wrong constants because the audit gate only read `#[repr]`
@@ -751,8 +781,16 @@ loop was copy-pasted seven times and the copies disagreed.
 
 So every fix in this cycle lands with the check that was missing, and
 several arrived as new CI gates: `audit-uapi-constants` now reads plain
-`pub const`s too, `audit-bytes-le` bans writers as well as readers, and
-`audit-dump-termination` keeps dump loops on the shared classifier.
+`pub const`s too, `audit-bytes-le` bans writers as well as readers,
+`audit-dump-termination` keeps dump loops on the shared classifier, and
+`audit-doc-examples` compiles the documentation.
+
+The last of those is the clearest case. 508 doc examples were
+```` ```ignore ````, so nothing had compiled them in years; converting them
+found 24 that no longer built **and five library bugs the examples had been
+documenting around** (#310, #313, #315, #316, #317). Documentation nobody
+compiles is not documentation that happens to be stale — it is an unchecked
+assertion about the API's shape.
 
 **0.24.0 shipped 2026-07-03** (`v0.24.0` tagged; both crates on
 crates.io) — narrative in `CHANGELOG.md ## [0.24.0]` +
