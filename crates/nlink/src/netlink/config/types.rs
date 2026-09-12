@@ -1521,6 +1521,12 @@ impl DeclaredQdiscType {
 #[non_exhaustive]
 pub enum DeclaredQdiscType {
     /// Network emulator.
+    ///
+    /// `#[non_exhaustive]` since 0.27: the variant grew five fields for
+    /// #332 and that was a compile break for anyone destructuring it
+    /// field-by-field. With the marker, the next knob is not.
+    /// Construct through [`QdiscBuilder::netem`]; match with `..`.
+    #[non_exhaustive]
     Netem {
         delay_us: Option<u32>,
         jitter_us: Option<u32>,

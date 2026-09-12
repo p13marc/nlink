@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "nlink"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "bitflags",
  "bytes",
@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-bridge"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-config"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-devlink"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "clap",
  "nlink",
@@ -511,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-diag"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "clap",
  "nlink",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-ethtool"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "clap",
  "nlink",
@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-ip"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -550,7 +550,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-macros"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-nft"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "clap",
  "nlink",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-ss"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-tc"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-wg"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "base64",
  "clap",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "nlink-wifi"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "clap",
  "nlink",

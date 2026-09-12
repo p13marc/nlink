@@ -16,6 +16,14 @@ All notable changes to this project will be documented in this file.
   side path outside the `NetworkConfig` diff/idempotency/purge
   treatment its addresses and routes get.
 
+  **This is the cycle's first breaking change, and it bumps the
+  workspace to 0.27.0.** Adding fields to a struct variant breaks any
+  downstream `match` that destructures `DeclaredQdiscType::Netem { .. }`
+  field by field without `..` — cargo-semver-checks flags it, correctly.
+  The variant is `#[non_exhaustive]` from now on, so this is the last
+  time a netem knob costs a major bump; a destructuring match must add
+  `..` once.
+
   New on `QdiscBuilder`: `rate(Rate)`, `delay(Duration)`,
   `jitter(Duration)`, `jitter_us`, `reorder_correlation_pct`,
   `duplicate_correlation_pct`, `corrupt_correlation_pct`, `gap`. The
