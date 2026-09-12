@@ -300,6 +300,27 @@ where
     /// # Ok(())
     /// # }
     /// ```
+    /// [`new_in_namespace`](Self::new_in_namespace) taking an I/O-safe
+    /// borrowed fd (`impl AsFd`: a `NamespaceFd`, a `File`, …), so the
+    /// fd provably outlives the call (#186).
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use nlink::{Connection, Route};
+    /// use nlink::netlink::namespace;
+    ///
+    /// let ns = namespace::open("myns")?;
+    /// let conn = Connection::<Route>::new_in_namespace_fd(&ns)?;
+    /// let links = conn.get_links().await?;
+    /// # let _ = links;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn new_in_namespace_fd(ns_fd: impl std::os::fd::AsFd) -> Result<Self> {
+        use std::os::fd::AsRawFd;
+        Self::new_in_namespace(ns_fd.as_fd().as_raw_fd())
+    }
+
     #[instrument(level = "info", skip_all, fields(protocol = std::any::type_name::<P>(), ns_fd))]
     pub fn new_in_namespace(ns_fd: RawFd) -> Result<Self> {
         let socket = NetlinkSocket::new_in_namespace(P::PROTOCOL, ns_fd)?;

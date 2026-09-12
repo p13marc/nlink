@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`namespace::list_live()`, `impl AsFd for NamespaceFd`,
+  `Connection::new_in_namespace_fd` / `NetlinkSocket::new_in_namespace_fd`
+  (#186).** `list()` returns every entry under `/var/run/netns`,
+  stale marker files included — `ip netns add` creates the file and
+  mounts the namespace over it, and a crash leaves the file. Now that
+  `is_namespace_path` exists (#181), `list_live()` filters through
+  it; `list()`'s doc says what it includes and that names are
+  `to_string_lossy`'d. The fd constructors take `impl AsFd` so the
+  borrow checker keeps the namespace fd alive for the call; the
+  `RawFd` forms stay. `prepare_etc_binds` reuses `path_to_cstring`
+  instead of its own vaguer copy. The one item of #186 that was a
+  design question — remount `/sys` even with nothing to overlay, as
+  `ip netns exec` does — is answered no, in `spawn_with_etc`'s doc:
+  with no overlay a mount namespace buys the child only a sysfs view
+  nlink never reads, at the price of `CAP_SYS_ADMIN` and the container
+  caveats of #334.
+
 ### Fixed
 
 - **`NamespaceSpec::{spawn,spawn_output}_with_etc` silently dropped

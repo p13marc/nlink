@@ -89,3 +89,40 @@ async fn test_is_namespace_path_tracks_lifecycle() -> Result<()> {
 // Root-free cases (already-exists rejection, missing-path not-found,
 // stale-marker → false) live as unit tests in `namespace.rs`; this file
 // covers only the privileged round-trips above.
+
+/// #186 — `list()` reports every entry under the run dir, stale marker
+/// files included; `list_live()` keeps only names with an nsfs mount
+/// behind them.
+#[tokio::test]
+async fn list_live_drops_a_stale_marker_that_list_still_reports() -> Result<()> {
+    require_root!();
+    use nlink::netlink::namespace::{self, NETNS_RUN_DIR};
+
+    let ns = crate::common::TestNamespace::new("list-live")?;
+    let marker_name = "nlink-stale-marker-test";
+    let marker = std::path::PathBuf::from(NETNS_RUN_DIR).join(marker_name);
+    std::fs::write(&marker, b"")?;
+
+    let all = namespace::list();
+    let live = namespace::list_live();
+    let _ = std::fs::remove_file(&marker);
+
+    let all = all?;
+    let live = live?;
+    assert!(all.iter().any(|n| n == marker_name), "list() sees the marker: {all:?}");
+    assert!(all.iter().any(|n| n == ns.name()), "list() sees the live namespace");
+    assert!(
+        !live.iter().any(|n| n == marker_name),
+        "list_live() must drop the unmounted marker: {live:?}"
+    );
+    assert!(
+        live.iter().any(|n| n == ns.name()),
+        "list_live() keeps the live namespace: {live:?}"
+    );
+
+    // And the I/O-safe constructor works on a real namespace fd.
+    let fd = namespace::open(ns.name())?;
+    let conn = nlink::Connection::<nlink::Route>::new_in_namespace_fd(&fd)?;
+    assert!(conn.get_links().await?.iter().any(|l| l.name() == Some("lo")));
+    Ok(())
+}
